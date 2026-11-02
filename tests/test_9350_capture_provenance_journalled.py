@@ -446,6 +446,57 @@ def test_a_later_creation_that_omits_a_provenance_key_keeps_it():
             "it, while the graph fold keeps it (#9350/#330)")
 
 
+def test_a_later_creation_that_omits_the_ref_keys_keeps_them():
+    """#10010 review P2 — the same #330 parity for the extracted-from PAIR.
+
+    `_upsert_point_props` writes `extractedFrom`/`extractedFromAll` from an
+    explicit clause gated on the payload's SHAPE (`_ef_clauses`: a truthy
+    scalar / a non-empty list), so a MERGE'd node KEEPS the stored pair when a
+    later creation states neither — and `_apply_one` replacing the entry
+    outright dropped it, which `check_consistency` reports as a divergence on a
+    faithful graph (its own `action`, "replay the journal", reproduces it).
+
+    Reachable because the #7704 fold is the first writer that puts the pair on
+    an id a HAND-BUILT snapshot later re-emits without them: the capture turn
+    loop's `_turn_snapshot` (`sdk.py`, keys `id`/`content`/`pointKind`/
+    `speaker`/`is_episodic`/…) and `EventAPI.add_point(id=…)` (#8317's seam).
+
+    MUTATION: drop either carry-forward clause in `_apply_one` and the matching
+    arm below reds (measured pre-fix: both keys absent).
+    """
+    alpha, beta = "https://doc.example/alpha", "https://doc.example/beta"
+    folded = {"extractedFrom": alpha, "extractedFromAll": [alpha, beta]}
+
+    # (1) the capture-turn shape: the keys are ABSENT
+    points: dict = {}
+    _add_point(points, id="p1", content="first", **folded)
+    _add_point(points, id="p1", content="second")
+    assert points["p1"]["content"] == "second"
+    for key, want in folded.items():
+        assert points["p1"].get(key) == want, (
+            f"the pure fold dropped {key!r} on a re-emit that did not restate "
+            "it, while the graph fold keeps it (#10010 review P2)")
+
+    # (2) the writer's OTHER no-write shapes: `None` and `[]` write no property
+    # either, so the stored value survives — the rule `_ef_clauses` spells.
+    points = {}
+    _add_point(points, id="p2", content="first", **folded)
+    _add_point(points, id="p2", content="second",
+               extractedFrom=None, extractedFromAll=[])
+    for key, want in folded.items():
+        assert points["p2"].get(key) == want, (
+            f"a payload stating {key!r} as a no-write value CLEARED the stored "
+            "one; the live writer writes no property there either")
+
+    # (3) a STATED value still wins — the carry-forward must not shadow it.
+    points = {}
+    _add_point(points, id="p3", content="first", **folded)
+    _add_point(points, id="p3", content="second",
+               extractedFrom=beta, extractedFromAll=[beta])
+    assert points["p3"]["extractedFrom"] == beta
+    assert points["p3"]["extractedFromAll"] == [beta]
+
+
 def test_a_re_creation_does_not_inherit_a_dead_incarnations_provenance():
     """The carry-forward is gated on the #4042 recreate boundary.
 

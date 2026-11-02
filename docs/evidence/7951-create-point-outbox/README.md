@@ -50,7 +50,7 @@ advisories which the headline block omits). Exit code `0`.
 
 | line | it is the failing criterion of… | how it would fail |
 |---|---|---|
-| `order: ['journal-PointAdded', 'cache-Point-write']` | S1's ordering | on `origin/main` the order is reversed (`cache` first) — the capstone's `test_create_point_is_apply_first_a_recorded_deviation` pinned exactly that |
+| `order: ['journal-PointAdded', 'cache-Point-write']` | S1's ordering | on `origin/main` the order is reversed (`cache` first) — the capstone's `test_create_point_is_apply_first_a_recorded_deviation` (the name it carried then; `#8697` renamed it to `test_create_point_journals_the_record_before_the_cache_write` and flipped the pin) recorded exactly that |
 | `REPLAY VERDICT: RECORD REPRODUCES THE LIVE NODE` | `derived = replay(journal)` | the probe compares the live and replayed node as a full property MAP **and** the outgoing EDGE SET `(type, target, edge-properties)` (`live/replay property map match` / `live/replay edge set match`), mirroring `tests/test_7951_create_point_outbox.py` T3b — a presence COUNT alone cannot fail on a property or edge mismatch, so it is not this criterion |
 | `COMMIT VERDICT: COMMITTED + REPLAY-HEALABLE` | §17.1's crash window | with the cache write forced to fail, the record still stands and a later `rebuild_all` materialises the Point. On `origin/main` the append came *after* the write, so a failed write left **no record** — the write was gone with no repair path |
 

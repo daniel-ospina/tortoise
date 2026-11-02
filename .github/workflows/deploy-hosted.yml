@@ -408,8 +408,9 @@ jobs:
     # kill grace each) + 4 × 45 s = 60.5 min worst case (each attempt is
     # `timeout`-bounded — `--wait-timeout 420` bounds only the release wait, not
     # the remote build — and `-k 30s` makes that bound unconditional), and this
-    # job has THIRTEEN other steps sharing the same budget (the dependency parity
-    # gate alone runs two `uv` commands). So:
+    # job has FOURTEEN other steps sharing the same budget (the dependency parity
+    # gate alone runs two `uv` commands; the #10447 record step is one `git status`,
+    # well inside the headroom below). So:
     #   60.5  loop worst case
     # +  0.42 non-Deploy steps — MEASURED max over 8 deploy-api jobs 2026-10-27
     #         (0.22, 0.27, 0.32, 0.33, 0.38, 0.40, 0.40, 0.42)
@@ -831,6 +832,65 @@ jobs:
           # #4759: the bypass report's window start and its per-job audit marker.
           SKIP_FLY_MACHINES_GUARD_SET_AT: ${{ vars.SKIP_FLY_MACHINES_GUARD_SET_AT }}
           DEPLOY_BYPASS_MARKER: ${{ runner.temp }}/deploy-bypass-marker.txt
+      - name: Record whether the built tree matches the deploy commit (#10447)
+        # ⛔ WHY THIS IS ITS OWN STEP AND NOT A LINE IN THE PROPAGATION BLOCK.
+        # `check-fly-secret-drift.py` runs the propagation payload under a stub
+        # PATH that carries ONLY fly/flyctl, so a `git` call inside it is refused
+        # as "a command this harness does not model" (the fail-closed state, not
+        # a warning) — it cannot tell whether a git-dependent assignment happens.
+        # Computing the reading here and reading the RESULT with bash BUILTINS
+        # (`IFS= read -r`, which forks nothing) keeps the payload answerable under
+        # the stub without loosening the gate.
+        #
+        # ⛔ ONE RULE FOR THIS FILE: the payload uses `IFS= read -r`, NOT
+        # `$(< file)`. The substitution shortcut fires only when its body is
+        # EXACTLY the redirect; with any extra redirection it runs a redirect-only
+        # command that writes nothing, so the staged value came back EMPTY and
+        # `commit_dirty` stayed null on every production deploy (review P1,
+        # measured). Do not "simplify" the payload back to it.
+        #
+        # The reading is `git status --porcelain` over the SAME working tree
+        # `flyctl deploy --remote-only` uploads as its build context, so it
+        # describes the image that actually runs. `false` is a positive claim and
+        # is only written when the tree is provably clean — an absent file leaves
+        # the field `null` ("NOT STATED"), which is NOT "clean".
+        #
+        # ⚠️ `false` MEANS "no tracked modification and no untracked non-ignored
+        # file", which is narrower than "the image equals the commit". The build
+        # context is filtered by `.dockerignore`, not `.gitignore`, so a GITIGNORED
+        # artefact under a COPY'd path (`tortoise/__pycache__/*.pyc` after any
+        # in-tree python step) would be baked in while this reads clean. No step in
+        # this job creates one today (they write only to /tmp and $runner.temp),
+        # so it is a declared residual rather than a live gap — widening this to
+        # `git ls-files --others --ignored` would flag a normal `.venv`/`dist`
+        # checkout and make every deploy permanently "dirty".
+        run: |
+          # ⛔ THE CHECKOUT MUST BE THE DEPLOY COMMIT. A clean tree at the WRONG
+          # HEAD would stamp `false` and `/health` would publish
+          # `build_identified: true` for a commit this image was not built from —
+          # the same false PASS one indirection away. No current trigger diverges
+          # (push and workflow_dispatch both leave HEAD == GITHUB_SHA); this is the
+          # guard that keeps it true if a `ref:`/`path:` input or a merge-queue sha
+          # ever does. Unstated (not "clean") is the honest answer there.
+          head="$(git rev-parse HEAD 2>/dev/null || true)"
+          if [ -z "$head" ] || [ "$head" != "${GITHUB_SHA:-}" ]; then
+            printf 'unknown' > /tmp/tortoise-deploy-git-dirty
+            echo "::warning::the checkout HEAD (${head:-unreadable}) is not the deploy commit (${GITHUB_SHA:-unset}) — the tree reading is UNSTATED (/health will report commit_dirty: null), NOT clean"
+          # ⛔ A FAILED READING IS 'unknown', NEVER 'false'. `-e` does not save this:
+          # the exit status that decides the branch is `[`'s, not the
+          # substitution's, so `git status` failing (not a repo, a broken git) used
+          # to fall through to the `-z` test succeeding and write `false` — the
+          # "provably clean" claim this field exists to refuse, produced by a
+          # reading that never happened (review P1).
+          elif ! dirty="$(git status --porcelain)"; then
+            printf 'unknown' > /tmp/tortoise-deploy-git-dirty
+            echo "::warning::git status failed — the tree reading is UNSTATED (/health will report commit_dirty: null, build_identified_reason: tree_dirt_unstated), NOT clean"
+          elif [ -z "$dirty" ]; then
+            printf 'false' > /tmp/tortoise-deploy-git-dirty
+          else
+            printf 'true' > /tmp/tortoise-deploy-git-dirty
+            echo "::warning::the working tree differs from ${GITHUB_SHA} — this deploy builds a MODIFIED tree, and /health will report commit_dirty: true (build_identified: false). That is the truth about the image, not an error in the stamp."
+          fi
       - name: Set all app secrets on Fly.io (keeps in sync with GitHub/Supabase)
         id: set-secrets
         # #4334: every secret is bound in `env:` and referenced as a QUOTED
@@ -902,6 +962,40 @@ jobs:
           # GITHUB_SHA is the checked-out commit on push AND workflow_dispatch
           # (the ref head), so it always matches what this run deploys.
           ARGS+=(TORTOISE_GIT_SHA="${GITHUB_SHA}")
+          # #10447 (reopen): TORTOISE_GIT_DIRTY — was this image built from the
+          # commit it names? The sha above is an assertion about the COMMIT; it is
+          # silent about the TREE. `/health` published `commit_dirty` with no
+          # producer, so it was permanently null and `build_identified` folded
+          # that silence into "not dirty" — a modified tree claimed the commit.
+          #
+          # The reading is taken by the step above (the build's own working tree)
+          # and read here with bash BUILTINS: `read` forks nothing, so the drift
+          # gate's stub PATH can still classify this payload (a `git` call in the
+          # payload is refused fail-closed — see the step above).
+          #
+          # ⛔ NOT `$(< file 2>/dev/null || echo unknown)`. Bash's `$(< file)`
+          # shortcut fires only when the substitution body is EXACTLY the
+          # redirect; with a redirection or a `||` list it runs a redirect-only
+          # simple command, which opens the file, writes nothing and exits 0 — so
+          # with the file PRESENT the value came back EMPTY and `commit_dirty`
+          # stayed null on every production deploy (review P1, measured).
+          # Absent file → `unknown` → `null` (NOT STATED), never a fabricated
+          # `false` ("provably clean"), which would be the false PASS this field
+          # exists to refuse.
+          # `-s`, not `-r`: readable is not NON-EMPTY. `IFS= read -r V < empty`
+          # returns 1 and leaves V empty, so `-r` + `|| true` would stage
+          # `TORTOISE_GIT_DIRTY=` — the same empty-value shape as the `$(< file)`
+          # bug this payload exists to avoid, and the `K=` clobber the `-n` guard
+          # would otherwise catch (review P2, measured). An empty or unreadable
+          # file stages `unknown` → null (NOT STATED), never `false`.
+          TORTOISE_GIT_DIRTY_STAMP=unknown
+          if [ -s /tmp/tortoise-deploy-git-dirty ]; then
+            IFS= read -r TORTOISE_GIT_DIRTY_STAMP < /tmp/tortoise-deploy-git-dirty || true
+          fi
+          if [ -z "$TORTOISE_GIT_DIRTY_STAMP" ]; then
+            TORTOISE_GIT_DIRTY_STAMP=unknown
+          fi
+          ARGS+=(TORTOISE_GIT_DIRTY="${TORTOISE_GIT_DIRTY_STAMP}")
           # #1703: SUPABASE_ANON_KEY — public client key the OAuth consent page
           # embeds (supabase-js createClient). Was never synced to Fly, so the
           # page rendered with an empty key ('supabaseKey is required').
