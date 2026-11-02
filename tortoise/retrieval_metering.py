@@ -124,6 +124,13 @@ _ACTIVE: ContextVar[RetrievalTally | None] = ContextVar(
 #: section), and the take-and-reset. Never held across the ledger RPC.
 _LOCK = threading.Lock()
 
+#: The daemon lane the DROP REPORTER runs on (``_report_off_loop``). Its own
+#: named lane, not ``telemetry``: the reporter is what runs BECAUSE the
+#: ``telemetry`` lane refused the flush, so queueing the report behind that same
+#: backlog would make the report of a saturation event wait for the saturation
+#: to clear. ``daemon_worker`` is lazy — no thread exists until the first drop.
+_DROP_REPORT_WORKER = "retrieval-drop"
+
 
 @dataclass
 class RetrievalTally:
@@ -386,8 +393,57 @@ def flush(org_id: str | None = None) -> dict | None:
     return flush_tally(take_and_reset(), org_id)
 
 
+def _report_off_loop(*, org_id: str | None, error: BaseException) -> None:
+    """Announce a dropped increment WITHOUT running the reporter on the loop.
+
+    #10602 review P1: ``_report`` is NOT loop-safe, and the refused-flush arm in
+    ``RetrievalMeteringMiddleware.__call__`` is the ONE call site that runs on
+    the event loop (every other ``_report`` here is inside ``flush_tally``,
+    which has always run on a worker).
+
+    It is not merely slow — it is blocking, twice over:
+    ``metering.report_unmetered_increment`` calls ``alert_unmetered_increment``
+    (the alert store on the caller thread) and then ``record_unmetered_increment``,
+    whose LEG 2 is a synchronous PostgREST round trip (``supabase_control``) or a
+    blocking ``MERGE`` plus a second read on the registry lane. That function's
+    own contract says it "is called from handlers whose whole contract is that
+    metering cannot block a request".
+
+    WHY THIS WOULD RE-CREATE #10602. The arm fires on ``exc.refused`` — a FULL
+    ``telemetry`` backlog — i.e. exactly at saturation, and the flush is now the
+    highest-rate submission on that lane (one per read request). A synchronous
+    block on the loop "finishes before the timer callback can run, so it is NOT
+    converted into a refusal" (``WaitBoundMiddleware``'s own note), so it would
+    defeat ``_TRANSPORT_WAIT_BOUND_S`` for every concurrent request — the very
+    defect this PR exists to remove, restored at the moment it is most likely.
+
+    So the reporter is QUEUED on its own daemon lane and never awaited: an
+    operator drop alert is fire-and-forget by nature, and a drop reporter that
+    can stall the read path would be the same defect one layer down. The
+    submission's own refusal (a full backlog) is consumed rather than left
+    unretrieved, so a degraded reporter is silent-but-not-noisy rather than
+    surfacing as an unattributed asyncio warning.
+    """
+    with contextlib.suppress(Exception):
+        from tortoise.monitoring import daemon_worker
+        future = daemon_worker(_DROP_REPORT_WORKER).submit(
+            functools.partial(contextvars.copy_context().run,
+                              _report, org_id=org_id, error=error))
+
+        def _consume(done) -> None:  # never leave a refusal unretrieved
+            with contextlib.suppress(Exception):
+                if not done.cancelled():
+                    done.exception()
+
+        future.add_done_callback(_consume)
+
+
 def _report(*, org_id: str | None, error: BaseException) -> None:
     """Announce a dropped increment on the ``retrieval`` lane. Never raises.
+
+    ⛔ BLOCKING (alert store + the durable LEG 2 write). Call it from a WORKER
+    only — from the loop use :func:`_report_off_loop`; see its docstring for why
+    an on-loop call re-creates #10602.
 
     The ``lane=`` KEYWORD FORM is load-bearing: the swallow-site completeness
     fence censuses literal ``report_unmetered_increment(lane="…")`` calls
@@ -486,4 +542,9 @@ class RetrievalMeteringMiddleware:
                         # (the seam exposes `refused` for exactly this, and the
                         # billing-notify caller escalates on it the same way).
                         if exc.refused:
-                            _report(org_id=org, error=exc)
+                            # ⛔ NOT ``_report`` here: this arm runs on the
+                            # EVENT LOOP (the middleware's ``finally``), and
+                            # the reporter does blocking control-plane I/O.
+                            # Queued, never awaited — see
+                            # ``_report_off_loop`` (#10602 review P1).
+                            _report_off_loop(org_id=org, error=exc)

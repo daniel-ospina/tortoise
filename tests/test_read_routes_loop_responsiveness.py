@@ -2800,9 +2800,10 @@ def test_the_anchored_point_read_serves_on_the_read_lane_in_prefer_mode(client):
     ops: list[str] = []
     real = ha_mod._read_offload
 
-    async def _recorder(fn, *, op, unavailable=None):
+    async def _recorder(fn, *, op, unavailable=None, timeout=None):
         ops.append(op)
-        return await real(fn, op=op, unavailable=unavailable)
+        return await real(fn, op=op, unavailable=unavailable,
+                          timeout=timeout)
 
     def _serve_point(**_kwargs):
         # The real seam's DEFERRED shape: it names the reason and hands the
@@ -2951,9 +2952,10 @@ def test_the_prefer_fallback_opens_the_projection_construction_first(client):
         events.append("attach")
         return real_attach(org)
 
-    async def _read(fn, *, op, unavailable=None):
+    async def _read(fn, *, op, unavailable=None, timeout=None):
         events.append(f"read:{op}")
-        return await real_read(fn, op=op, unavailable=unavailable)
+        return await real_read(fn, op=op, unavailable=unavailable,
+                               timeout=timeout)
 
     async def _record_call(fn, *, op, timeout=None, pool="auth",
                            cancel_on_timeout=True):
@@ -3074,9 +3076,10 @@ def test_the_anchored_point_read_serves_on_the_read_lane_in_off_mode(client):
         events.append("attach")
         return real_attach(org)
 
-    async def _read(fn, *, op, unavailable=None):
+    async def _read(fn, *, op, unavailable=None, timeout=None):
         events.append(f"read:{op}")
-        return await real_read(fn, op=op, unavailable=unavailable)
+        return await real_read(fn, op=op, unavailable=unavailable,
+                               timeout=timeout)
 
     monkeypatch = pytest.MonkeyPatch()
     monkeypatch.delenv("TORTOISE_RECORD_SERVE", raising=False)
@@ -3138,9 +3141,10 @@ def test_the_cold_projection_open_rides_the_construction_lane(
                 "longer rides the construction lane (#10602 cycle-2 P1)")
         return real_attach(org)
 
-    async def _read(fn, *, op):
+    async def _read(fn, *, op, unavailable=None, timeout=None):
         events.append(f"read:{op}")
-        return await real_read(fn, op=op)
+        return await real_read(fn, op=op, unavailable=unavailable,
+                               timeout=timeout)
 
     monkeypatch.setattr(ha_mod, "_data_sdk_with_projection", _attach)
     monkeypatch.setattr(ha_mod, "_read_offload", _read)
@@ -3265,3 +3269,153 @@ def test_the_read_path_answers_while_the_default_executor_is_stalled(client):
     # A sanity bound on the whole family, so a route that "answers" only because
     # it timed out and degraded is not mistaken for a fast read.
     assert timings and max(timings.values()) < READ_ANSWER_BOUND_S, timings
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# #10602 review P2 — the record leg's OWN bound class, and the lenient mode
+# ════════════════════════════════════════════════════════════════════════════
+
+def test_the_record_leg_gets_its_own_bound_not_the_hot_query_bound():
+    """The armed read's callable is a RECORD round trip, not the hot query.
+
+    ``record_serve.RECORD_STATEMENT_TIMEOUT_MS`` (15 s) is the ceiling the record
+    itself declares legitimate, and ``_read_offload``'s default bound is the hot
+    query's 8 s (justified by a 41–80 ms measured graph answer). Judging the
+    record leg by the query's bound refuses a record read that is still INSIDE
+    its own budget — the same "a bound that does not cover its callee" error the
+    cycle-2 review raised for the projection cold open, one arm over.
+
+    The bound can only take what the transport budget allows: the record's 15 s
+    ceiling sits ABOVE ``mcp_auth._TRANSPORT_WAIT_BOUND_S`` (10 s), so the
+    residual is named here rather than asserted away.
+    """
+    from tortoise import mcp_auth, monitoring
+    from tortoise.record_serve import RECORD_STATEMENT_TIMEOUT_MS
+
+    assert monitoring.record_read_timeout_s() > \
+        monitoring.read_offload_timeout_s(), (
+            "the record leg shares the hot-query bound — a record read inside "
+            "its own declared ceiling would be refused (#10602 review P2)")
+    assert monitoring.record_read_timeout_s() < \
+        mcp_auth._TRANSPORT_WAIT_BOUND_S, (
+            "the record leg's bound reached the transport wait bound — the "
+            "transport seam would fire first and describe a submission that "
+            "never ran as work that may still complete (#10602)")
+    # NAMED RESIDUAL, not a claim: the record's own ceiling is above what any
+    # read-lane bound may be. Closing it means moving the record's statement
+    # timeout, which is a `record_serve` decision.
+    assert RECORD_STATEMENT_TIMEOUT_MS / 1000.0 > \
+        mcp_auth._TRANSPORT_WAIT_BOUND_S, (
+            "the record's declared ceiling now fits inside the transport "
+            "budget — the residual in `record_read_timeout_s` can be closed")
+
+
+def test_read_offload_honours_a_per_call_timeout(monkeypatch):
+    """WIRING guard: ``timeout=`` must actually reach the seam.
+
+    Reverting ``_read_offload`` to a hardcoded ``read_offload_timeout_s()``
+    leaves every other read test green while silently judging the record leg by
+    the hot-query bound again (the same class as the pool-wiring guard below).
+    """
+    import tortoise.hosted_api as ha_mod
+
+    seen: dict[str, object] = {}
+
+    async def _recorder(fn, *, op, pool="auth", timeout=None,
+                        cancel_on_timeout=True, best_effort=False,
+                        unavailable=None):
+        seen["timeout"] = timeout
+        return fn()
+
+    monkeypatch.setattr(ha_mod, "run_control_plane_call", _recorder)
+
+    async def _run():
+        return await ha_mod._read_offload(lambda: "rows", op="p", timeout=9.0)
+
+    assert asyncio.run(_run()) == "rows"
+    assert seen["timeout"] == 9.0, (
+        f"_read_offload passed timeout={seen['timeout']!r} — a per-call bound "
+        f"was ignored, so a caller cannot give its callable a bound that "
+        f"covers it (#10602 review P2)")
+
+
+def test_a_prefer_bound_miss_falls_back_to_the_cache(client):
+    """#10602 review P2: in ``prefer`` mode a saturated READ LANE is a
+    MISS-shaped outcome, not a hard refusal.
+
+    ``prefer`` is the LENIENT mode; its contract (the route docstring) is to fall
+    back on "an outage or a miss", and a REFUSED submission never ran — so the
+    cache answer is still a legitimate answer to this read. Answering 503 there
+    makes the lenient mode STRICTER than the strict one under lane saturation.
+
+    RED before the fix: the refusal factory was ``_record_unavailable`` in both
+    modes, so a `prefer` bound miss answered 503 `record_unavailable`.
+    """
+    import tortoise.hosted_api as ha_mod
+    from tortoise import monitoring as mon
+    from tortoise import record_serve
+    from tortoise.hosted_api import app
+
+    _seed_read_surface()
+    real_call = ha_mod.run_control_plane_call
+    ops: list[str] = []
+
+    async def _refuse_only_the_record_leg(fn, *, op, **kwargs):
+        ops.append(op)
+        if op == "get_point.serve":
+            raise mon.ControlPlaneOffloadError(
+                "probe: read lane bound miss", refused=True)
+        return await real_call(fn, op=op, **kwargs)
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(ha_mod, "run_control_plane_call",
+                        _refuse_only_the_record_leg)
+    monkeypatch.setattr(record_serve, "serve_mode",
+                        lambda: record_serve.MODE_PREFER)
+    monkeypatch.setattr(ha_mod, "_resolve_record_tenant",
+                        lambda _org: ("tenant-probe", "graph-probe"))
+    try:
+        async def _run():
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(transport=transport,
+                                         base_url="http://test") as ac:
+                return await ac.get(f"/v1/points/{_SEEDED_POINT}")
+
+        response = asyncio.run(_run())
+    finally:
+        monkeypatch.undo()
+
+    assert "get_point.serve" in ops, (
+        f"the record leg was never submitted (ops: {ops!r}) — this test would "
+        f"pass vacuously")
+    assert "get_point.cache" in ops, (
+        f"a `prefer` bound miss never fell back to the cache (ops: {ops!r}) — "
+        f"the lenient mode answered a refusal instead of a miss "
+        f"(#10602 review P2); got {response.status_code} {response.text[:200]}")
+    assert response.status_code == 200, response.text[:300]
+
+
+def test_the_record_read_refusal_is_not_shadowed_by_the_session_one():
+    """#10602 review P2, the defect a passing suite could not see.
+
+    ``hosted_api`` carried TWO module-level ``_record_unavailable`` definitions:
+    this refusal and #8447's SESSION-detail refusal, defined LATER. The later
+    binding won at import, so the point-read bound miss shipped #8447's copy —
+    "The record could not answer for this session, and no complete copy could be
+    served in its place" — on a POINT read. Both spellings answer
+    ``record_unavailable``, so asserting the error_code alone could not detect
+    the shadowing; the MESSAGE is what distinguishes them.
+    """
+    import tortoise.hosted_api as ha_mod
+
+    refusal = ha_mod._record_read_unavailable()
+    assert refusal.status_code == 503
+    assert refusal.detail["error_code"] == "record_unavailable", refusal.detail
+    message = refusal.detail["message"]
+    assert "absence is NOT established" in message, (
+        f"the point-read refusal lost its own body ({message!r}) — a bound miss "
+        f"must not be reported as a finding of absence (the §17.2 rule)")
+    assert "session" not in message.lower(), (
+        f"the point-read refusal is serving #8447's SESSION-detail copy "
+        f"({message!r}) — the two refusals share a name again, and the last "
+        f"definition wins at import (#10602 review P2)")

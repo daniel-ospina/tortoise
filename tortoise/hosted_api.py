@@ -166,6 +166,7 @@ from tortoise.monitoring import (  # #2850/2953 liveness-readiness decouple
     note_heartbeat_task,
     read_offload_timeout_s,
     record_analytics_outcome,  # #3820 analytics-sink outcome counter
+    record_read_timeout_s,
     record_telemetry_drop,  # #4095 allowlist-drop counter (the /metrics seam)
     run_control_plane_call,
     run_on_daemon_worker,
@@ -9243,8 +9244,17 @@ async def _graph_offload(fn, *, op: str, timeout: float | None = None):
         unavailable=_graph_unavailable)
 
 
-def _record_unavailable() -> HTTPException:
+def _record_read_unavailable() -> HTTPException:
     """#10602 review P2: the fail-closed 503 for an armed read's RECORD phase.
+
+    ⛔ NAMED ``_record_read`` DELIBERATELY. A module-level ``_record_unavailable``
+    already exists — #8447's session-detail refusal, defined LATER in this file —
+    and a second definition with that name was SHADOWED by it (the last binding
+    wins at import). The #10602 refusal then shipped #8447's copy, whose message
+    is about "this session" and "a complete copy" on a POINT read: the intended
+    body was dead code and no test could see it, because both spellings answer
+    ``record_unavailable`` and the pin only asserts the error_code. The two
+    refusals are for different surfaces; they must not share a name.
 
     ``get_point`` submits ``record_serve.serve_point`` — in ``record`` mode that
     callable contains no graph work at all, and in ``prefer`` mode its record
@@ -9272,7 +9282,7 @@ def _record_unavailable() -> HTTPException:
     )
 
 
-async def _read_offload(fn, *, op: str, unavailable=None):
+async def _read_offload(fn, *, op: str, unavailable=None, timeout=None):
     """#10602: run ONE read-path graph ROUND TRIP on the dedicated read lane.
 
     The read handlers used to submit their blocking query with the house
@@ -9328,11 +9338,19 @@ async def _read_offload(fn, *, op: str, unavailable=None):
     which is a record round trip and answers ``record_unavailable`` instead. The
     read lane still owns the bound and the fail-closed shape either way — only
     the name of the dependency that was refused changes.
+
+    ``timeout`` (#10602 review P2) overrides the WAIT BOUND for a caller whose
+    callable is a different RESOURCE CLASS. Default: ``read_offload_timeout_s()``,
+    the hot-query bound, justified by a 41–80 ms measured graph answer. The
+    record leg passes ``record_read_timeout_s()`` instead, because its callee
+    declares a 15 s ceiling — a bound that does not cover its callee refuses
+    work that was inside its own budget. Same override argument the graph lane's
+    ``_graph_offload`` makes for the cold projection open.
     """
     ctx = contextvars.copy_context()
     return await _cp_offload(
         functools.partial(ctx.run, fn), op=op, pool="read",
-        timeout=read_offload_timeout_s(),
+        timeout=read_offload_timeout_s() if timeout is None else timeout,
         unavailable=_graph_unavailable if unavailable is None else unavailable)
 
 
@@ -10568,6 +10586,22 @@ async def get_point(point_id: str, org: dict = Depends(get_current_org_gated)): 
             # this lane's 8 s query bound. `cache_answer=None` is the deferred
             # shape: `serve_point` still decides and NAMES the fallback reason,
             # and raises `CacheAnswerRequired` for it (#10602 review, P2).
+            # #10602 review P2: a lane BOUND MISS on this arm is not graph
+            # capacity — and in `prefer` mode it is a MISS-SHAPED outcome, not a
+            # hard refusal. `prefer` is the LENIENT mode; its contract (the route
+            # docstring) is to fall back on "an outage or a miss", and the
+            # deferred-cache shape exists for exactly that. A refused submission
+            # never ran, so the cache answer is still a legitimate answer to this
+            # read: reporting 503 here would make the lenient mode STRICTER than
+            # the strict one under lane saturation, which is a property no caller
+            # can reason about. `record` mode keeps its refusal — it has no
+            # cache branch to fall back to.
+            def _record_refusal():
+                if mode == record_serve.MODE_PREFER:
+                    return record_serve.CacheAnswerRequired(
+                        record_serve.FALLBACK_RECORD_UNAVAILABLE)
+                return _record_read_unavailable()
+
             try:
                 served = await _read_offload(
                     lambda: record_serve.serve_point(
@@ -10578,7 +10612,11 @@ async def get_point(point_id: str, org: dict = Depends(get_current_org_gated)): 
                     op="get_point.serve",
                     # The callable is the RECORD's round trip, not graph work:
                     # a bound miss here must not be reported as graph capacity.
-                    unavailable=_record_unavailable)
+                    unavailable=_record_refusal,
+                    # …and it is a different RESOURCE CLASS: its callee declares
+                    # a 15 s ceiling, so it must not be judged by the hot
+                    # query's 8 s bound (#10602 review P2).
+                    timeout=record_read_timeout_s())
             except record_serve.CacheAnswerRequired as needed:
                 # `prefer` only: the record missed or could not be asked. The
                 # reason is the SEAM's; the read is the ROUTE's, on the lanes it

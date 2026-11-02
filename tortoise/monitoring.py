@@ -2199,6 +2199,40 @@ def read_offload_timeout_s() -> float:
     """
     return CONTROL_PLANE_READ_TIMEOUT_S
 
+
+#: #10602 review P2: the RECORD leg's bound — a DIFFERENT resource class from
+#: the hot query above, so it gets its own bound rather than sharing one.
+#:
+#: What it must cover: ``get_point``'s armed phase submits
+#: ``record_serve.serve_point``, whose callee is a Postgres round trip bounded by
+#: ``record_serve.RECORD_STATEMENT_TIMEOUT_MS`` (15 s) — the ceiling the record
+#: itself declares legitimate. Reusing the hot-query bound (8 s, justified by a
+#: 41–80 ms measured graph answer) refused a record read that was still INSIDE
+#: its own declared budget; that is the same "a bound that does not cover its
+#: callee" error the cycle-2 review raised for the projection cold open.
+#:
+#: Why 9.0 and not ``15 s + margin``: the record's 15 s ceiling sits ABOVE
+#: ``mcp_auth._TRANSPORT_WAIT_BOUND_S`` (10 s), so no read-lane bound can cover
+#: it without breaching the transport budget and re-introducing the misleading
+#: 504 ("the work may still complete", for a submission that never ran) this
+#: lane exists to replace. So this bound takes everything the transport budget
+#: physically allows — the full 10 s minus a margin, so the lane's LEGIBLE
+#: refusal is still what a saturated caller sees — and the residual (a record
+#: read between 9 s and its 15 s ceiling is refused) is named rather than
+#: papered over. Closing it properly means moving
+#: ``RECORD_STATEMENT_TIMEOUT_MS`` below the transport budget, which is a
+#: ``record_serve`` decision, not this lane's.
+CONTROL_PLANE_RECORD_READ_TIMEOUT_S = 9.0
+
+
+def record_read_timeout_s() -> float:
+    """#10602 review P2: the record leg's bound, resolved at CALL time.
+
+    Same monkeypatch argument as :func:`read_offload_timeout_s` — the bound a
+    lane refuses on must be the bound a test can shrink to prove it.
+    """
+    return CONTROL_PLANE_RECORD_READ_TIMEOUT_S
+
 #: Margin added to the projection cold-start allowance for the DATA-PLANE graph
 #: lane (#3773). The bound is resolved at CALL time (``graph_offload_timeout_s``)
 #: from ``probe_setup_timeout()``, NOT from the frozen import-time default: an
