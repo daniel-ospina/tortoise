@@ -201,6 +201,29 @@ the session window) must exist, and:
     `missing_in_record` — and the displaced path is DISCLOSED in
     `skipped_files` rather than silently narrowing the inspected surface.
 
+    A LOCAL SESSION WHOSE ID APPEARS IN TWO WINDOWS (a re-capture or a resume,
+    or the same day surviving in two of the four surfaces) has no positional
+    place: entry order is the only index the record carries, so a key for it
+    would be a guess. It is HELD BACK into `record.duplicate_window` rather than
+    refusing the whole record — one resumed session must not shut a gate whose
+    only "repair" would be deleting the record lines that clear it (#3870). The
+    verdict still cannot reach CLEAN while the GRAPH holds turn nodes for it:
+    those sessions refuse BY NAME (`duplicate_window` in `refused_for`, never
+    `missing_in_record`, which would send the operator at the graph/backfill)
+    and their nodes are `held_back`, never eligible. A duplicate no graph turn
+    needs placed stays disclosed and non-blocking — a refusal with no repair
+    path is not a guard.
+
+    The POSITIONAL keys are the FILING leg's, not the file's: the consumer
+    windows every conversation before POSTing it
+    (`session_events_drain._window`: the last `MAX_SESSION_TURNS` turns, with
+    blank and non-conforming turns dropped), and the graph numbers what it
+    RECEIVED (`sdk._write_capture_turns`). This leg applies that same window
+    before enumerating (`record.filed_window` names every session it changed),
+    because keying the file's raw list made every over-cap or filtered session
+    report a wall of `field_mismatch text` — a permanent false refusal on
+    exactly the population this gate exists for.
+
 THE PASS CRITERION AND THE EXIT CODES
 =====================================
     0  measured AND parity clean — every session holding in-population graph
@@ -507,8 +530,9 @@ _LOCAL_RECORD_SUFFIXES = (".jsonl", ".jsonl.gz")
 #: DIRECTIONS as well for that reason. A leg that read only `*.jsonl` made every
 #: archived day silently invisible — every graph turn older than the seal window
 #: would report `missing_in_record` (the purge's own pre-cutover population,
-#: i.e. the gate could never open) and the duplicate-window arm would silently
-#: skip a session whose first window had been sealed.
+#: i.e. the gate could never open) and a session whose first window had been
+#: sealed would be placed positionally from half its windows — a guess the
+#: duplicate partition below now holds back instead.
 #:
 #: Reading only `*.jsonl` + `archive/*.jsonl.gz` still left TWO of the four
 #: shape x directory combinations invisible — `archive/*.jsonl` and
