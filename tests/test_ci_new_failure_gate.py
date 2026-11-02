@@ -219,11 +219,10 @@ fi
 [ -n "$prov" ] && printf '%s' "${STUB_PROV:-}" > "$prov"
 # An UNREADABLE run set: the file exists but is not valid UTF-8. The read must refuse
 # with UNMEASURED — never traceback into exit 1 ("introduced by this PR").
-# ⚠️ Written with python, NOT printf: measured, bash's printf re-encodes `\xff` to
-# UTF-8 (`c3 bf`, i.e. a VALID file) in this locale, and a bare `\377` is emitted
-# literally — either way the case would quietly test nothing.
-[ -n "$prov" ] && [ "${STUB_PROV_BAD_UTF8:-0}" = "1" ] && \
-  python3 -c 'import sys; open(sys.argv[1], "wb").write(bytes([97,97,97,58,255,254,10]))' "$prov"
+# ⚠️ `\\x` is escaped in THIS Python source so the stub receives a single
+# backslash and `printf` writes the raw 0xff byte (measured: bash, zsh and sh
+# all agree, and the file is then INVALID UTF-8 — which is the point).
+[ -n "$prov" ] && [ "${STUB_PROV_BAD_UTF8:-0}" = "1" ] && printf 'aaa:\\xff\\xfe\\n' > "$prov"
 [ "${STUB_RC:-0}" = "0" ] || { echo "ci-failure-set: stub failure" >&2; exit "${STUB_RC}"; }
 if [ "$mode" = "rates" ]; then printf '%s' "${STUB_RATES:-}"; else printf '%s' "${STUB_SIGS:-}"; fi
 """
