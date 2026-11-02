@@ -4775,6 +4775,20 @@ def test_the_drain_reports_a_BLOCKED_spool_on_its_own_stderr(tmp_path, monkeypat
 
     monkeypatch.setattr(cli, "_capture_key_presence", lambda: "tt_configured")
 
+    # The SEAM substrate is pinned too (#6388): the drain now also reports a
+    # capture seam that differs from the shipped artifact, so "a quiet spool
+    # prints nothing" was silently an assertion about THIS developer's
+    # `~/.pi/agent/extensions/` — which on a box with an older install made the
+    # line assert the very silence #6388 was filed for. A clean install in a
+    # hermetic HOME is the state this test means by "no noise".
+    seam_home = tmp_path / "seam-home"
+    seam_home.mkdir()
+    monkeypatch.setenv("HOME", str(seam_home))
+    # ...and every OTHER contract root: OpenClaw's resolves through this override.
+    monkeypatch.delenv("OPENCLAW_STATE_DIR", raising=False)
+    from tortoise.capture_install import install_capture
+    assert install_capture("pi", home=seam_home).error == ""
+
     blocked = tmp_path / "blocked"
     write_spool_entry(blocked, _snapshot("drain-blocked"))
     flush_spool(blocked, _Server(PostOutcome(ok=False, status=402, detail="quota")).post,

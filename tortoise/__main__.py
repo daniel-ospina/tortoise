@@ -6161,11 +6161,16 @@ def _print_capture_health() -> None:
     Best-effort by construction: a health read must never break the exit-0
     contract of the drain, and an `OK`/`DRAINING` line on every drain would be
     noise. Only a BLOCKED, SATURATED or an UNREADABLE spool is worth printing.
+    It ALSO emits `_print_seam_divergences()` on BOTH branches — a divergent
+    capture seam is a different substrate from the spool, and it must not be
+    masked by a health read that could not look. See that helper's SCOPE note:
+    this is a read-side surface, NOT a session-start one.
 
     NOTE the surface: this writes to the DRAIN's stderr, which the SessionStart
     hook redirects to /dev/null. It is therefore an operator's line for a drain
     run by hand — NOT the fleet's health surface. The durable answers are
-    `tortoise session health` (explicit, one line), the `tortoise doctor` row,
+    `tortoise session health` (the pinned line on stdout, divergences on stderr),
+    the `tortoise doctor` row,
     and the Pi extension's `capture:` lane-log lines.
     """
     import sys as _sys
@@ -6174,6 +6179,11 @@ def _print_capture_health() -> None:
         from tortoise.capture_spool import capture_health_line, spool_dir
         health = capture_health_line(spool_dir(), api_key=_capture_key_presence())
     except Exception:
+        # The SEAM report is a different substrate and must survive a health
+        # read that could not look — the two surfaces report it identically
+        # (#6388 review), or an unreadable spool would be the one state where a
+        # stale seam also went unmentioned.
+        _print_seam_divergences()
         return
     # BLOCKED, SATURATED and UNREADABLE: a DRAINING spool on a normal
     # SessionStart is usually the live session held back for its own final flush
@@ -6188,6 +6198,53 @@ def _print_capture_health() -> None:
     # run surface that stayed silent about it.
     if health.state in ("blocked", "unreadable", "saturated"):
         print(health.line, file=_sys.stderr)
+    _print_seam_divergences()
+
+
+def _print_seam_divergences() -> None:
+    """Report a capture seam this machine LOADS but does not SHIP (#6388).
+
+    The read-side half of install-time verification: `tortoise install <harness>`
+    grades the bytes IT wrote, so a seam installed by an OLDER CLI — the state
+    measured on the reference box — is invisible to it until the next install.
+    Called from the two read-side surfaces it is wired into: the drain's line
+    (run by the Claude SessionStart hook, which discards its stderr; the Pi leg
+    never runs the drain) and `tortoise session health` (the pinned line on
+    stdout, divergences on stderr).
+    `hooks status` / `doctor` report the same state independently, through
+    `hook_install.detect_artifact_install` — what is new here is that the
+    INSTALLER'S own predicate is asked on the READ side.
+
+    ⚠️ SCOPE, stated so it is not over-read: this is NOT yet the "visible at
+    session START" surface §7/§9 of
+    `docs/architecture/PI-CAPTURE-ARCHITECTURE.md` records as open. The Pi leg's
+    startup is the TypeScript extension, which never runs this command, and the
+    Claude hook discards the drain's stderr — so on those paths the divergence
+    reaches a human through `tortoise session health` / `doctor` / the next
+    install, not through an ambient session-start line. Making it visible THERE
+    needs a surface that survives the redirect (a durable marker inside the ONE
+    pinned health line, which is shared byte-for-byte with the Pi leg, or a lane-
+    log line from the extension) — a larger change than this one, deliberately
+    not taken here.
+
+    The predicate is `capture_install.assert_seam_target`, called through
+    `startup_seam_report` — never re-derived here (#1178: one instrument). It
+    WARNS and never blocks: the decision to fail loud is the owner's (§7/§9 of
+    `docs/architecture/PI-CAPTURE-ARCHITECTURE.md`), and it should not be taken
+    by a health line.  It writes to stderr, because stdout carries the ONE
+    pinned health line both legs must agree on.
+    """
+    import sys as _sys
+
+    try:
+        from tortoise.capture_install import startup_seam_report
+        divergences = startup_seam_report()
+    except Exception as exc:  # a startup report never breaks the exit-0 path
+        print(f"capture: seam not inspected ({exc})",
+              file=_sys.stderr)
+        return
+    for sentence in divergences:
+        print(f"capture: {sentence}", file=_sys.stderr)
 
 
 def _cmd_session_health() -> int:
@@ -6201,6 +6258,10 @@ def _cmd_session_health() -> int:
     Real failures (an unreadable spool root) are REPORTED, never laundered into
     a healthy reading: a health check that says `OK` when it could not look is
     the false-PASS this line exists to prevent.
+
+    It ALSO prints one `capture:` line per DIVERGENT capture seam on stderr (#6388)
+    via `_print_seam_divergences` — a different substrate from the spool, so the
+    pinned one-line answer on stdout stays byte-identical to the Pi leg's.
     """
     import sys as _sys
 
@@ -6210,6 +6271,7 @@ def _cmd_session_health() -> int:
                                  api_key=_capture_key_presence()).line)
     except Exception as exc:
         print(f"capture: UNREADABLE (health read failed: {exc})", file=_sys.stderr)
+    _print_seam_divergences()
     return 0
 
 

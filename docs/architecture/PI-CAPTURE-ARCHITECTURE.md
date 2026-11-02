@@ -348,11 +348,33 @@ bytes (`capture_install` atomic write + byte-equality `status`) so a drift is
 *reported*, not silent. Making it a symlink into `site-packages` would be worse: an
 upgrade that moves the package would dangle the symlink and lose capture entirely.
 
-What remains and is **not** done here: an explicit **startup assert of the resolved
-path** on the *user's* machine (as opposed to the installer's byte check). It is
-recorded in §9 — it needs a decision about fail-loud vs warn on a machine whose
-extension was installed by an older product version, which is a product-policy
-decision, not a mechanism.
+**#6388 (2026-11-01) — the READ side now exists; the visible-at-start half does
+not.** `capture_install.startup_seam_report()` is the READ side of the SAME
+instrument (`assert_seam_target` with `require_present=False`, harnesses from
+`hook_install.ARTIFACT_CONTRACTS` — no second predicate, no literal `"pi"`), wired
+into the two read-side surfaces it adds to: the drain's line
+(`__main__._print_capture_health`) and `tortoise session health`. `hooks status` /
+`session verify` / `doctor` already reach the same state through
+`hook_install.detect_artifact_install`; what is new is that the INSTALLER's own
+predicate — resolved path + sha256, naming BOTH paths — is asked on the read side.
+
+What that closes, stated exactly: the divergence was ALREADY answerable, through a
+version-marker-and-bytes detector; what is new is that the installer's own predicate
+is asked on the read side, so a hand-run drain and `tortoise session health` answer
+it too, with the message an install would give. What it does not close is
+"observable at session start without being asked".
+
+⚠️ **This does NOT close the criterion.** The state the reference box measured (an
+installed seam ONE generation behind, because no install ran since) still reaches a
+human only through an explicit read-side surface — **not through an ambient line at
+session start.** The Pi leg's startup is the TypeScript extension, which never runs
+the Python drain, and the Claude SessionStart hook discards the drain's stderr
+(`>/dev/null 2>&1`). Making it visible THERE needs a surface that survives that
+redirect: a durable marker the ONE pinned `capture:` health line can name (shared
+byte-for-byte with the Pi leg, so it moves both legs and their parity test
+together), or a lane-log line emitted by the extension. That is the remainder, and
+it is larger than the assert. Only such a surface would have to take the owner
+decision recorded in §9; the read-side assert deliberately did not, by warning.
 
 **#10241 (2026-10-29) — success is now VERIFIED, but the measured gap is not
 closed.** The byte check above was the *pre-write* comparison
@@ -388,7 +410,8 @@ installed by an OLDER CLI and **no install ran on it since** — the very condit
 install-time verification cannot observe. Pre-PR, `tortoise install pi` on that
 box wrote generation 15 and printed `installed …`; post-PR it writes generation 15
 and prints the same. The user-visible outcome for the measured state is therefore
-UNCHANGED, and it stays open on **#10241** with the startup surface below.
+UNCHANGED, and it stays open on **#6388** (open) with the startup surface below —
+**#10241 closed 2026-10-30** carrying only its install-time half.
 
 The assertion never raises and never blocks: a non-regular artifact (a FIFO,
 which `open` would block on) gets a sentence rather than a read — the same
@@ -402,8 +425,10 @@ reports a false `missing-artifact` on 3.14 — both inside this repo's
 `symlinked-artifact` / "is a broken symlink", naming a target that exists. That is
 **#10317** (filed, not widened into this PR). What is still open is
 only the STARTUP surface — reporting the same divergence at session start rather
-than at the next `tortoise install pi` — which keeps the fail-loud-vs-warn decision
-above; it stays on **#10241**, not on a closed issue.
+than only from `tortoise session health` / a hand-run drain / `doctor` / the next
+`tortoise install pi` (the read-side assert landed after this paragraph was
+written; see the #6388 block above) — which keeps the fail-loud-vs-warn decision
+above.
 
 ---
 
@@ -489,13 +514,21 @@ below is the one that matters here.
   reader) is not branch-aware. It is a **different invocation** (an explicit
   import), so it does not overwrite live turns; making it call the same contract is
   a follow-up.
-- **Startup resolution assert** on the user's machine — §7. **Now held on
-  #10241**: its install-time assertion landed (`capture_install.assert_seam_target`),
-  which verifies a write THIS install performed and therefore cannot see a seam
-  installed by an older CLI — the state §7 measured — so it does not close this
-  bullet; and the startup half waits on the fail-loud-vs-warn decision §7/§9 record
-  as the owner's. Closing #10241 without it would re-orphan the criterion it was
-  filed for.
+- **OWNER DECISION, NOT YET TAKEN** — fail loud vs warn on a box whose seam an
+  OLDER product version installed. Until it is taken, the READ-side surfaces warn
+  and nothing about them changes; the installer already fails the install it
+  performed itself (`assert_seam_target` with `require_present=True`, so a
+  missing file after its own write is a failure too), so what is undecided is
+  only whether a *session-start* surface may refuse a session.
+- **Startup resolution assert** on the user's machine — §7. **Now held on #6388**
+  (open). #10241's install-time assertion landed in the code
+  (`capture_install.assert_seam_target`, PR #10309, closing #10241); it verifies a
+  write THAT install performed, so it cannot see a seam installed by an older CLI —
+  the state §7 measured — and did not close this bullet. #6388 (2026-11-01) added
+  the READ side (`capture_install.startup_seam_report`, wired into the drain's line
+  and `session health`), so the predicate is available to any read-side surface and
+  two are wired; what is still unbuilt is the surface VISIBLE at session start
+  (§7), which waits on the owner decision above.
 - **Part (ii)'s falsifiers (a)/(b)/(c)** — §6.
 - **A monotone window across a `/compact`** — §4's recorded consequence. The
   deletion path is **narrowed, not closed**: the worker refuses a shrinking window
