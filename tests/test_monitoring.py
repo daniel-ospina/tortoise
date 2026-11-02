@@ -3827,6 +3827,48 @@ class TestStallWatchdog:
             "its paragraph must say what makes it different from the soft "
             "path: it IGNORES the in-flight gauge")
 
+    def test_the_deployment_declares_the_restart_the_ceiling_needs(self):
+        """#10585 review P2: the ceiling's PRECONDITION was unversioned.
+
+        ``TORTOISE_LOOP_STALL_HARD_EXIT_S`` only turns a wedged loop into a
+        self-heal because the machine is restarted after a NON-ZERO EXIT. That
+        policy used to be a MACHINE attribute read once by hand
+        (``fly machine status … --display-config``) and asserted nowhere, while
+        ``fly.toml`` claimed it could not be a file key — which Fly's own docs
+        refute (``[[restart]]`` / ``policy`` / ``retries`` / ``processes``).
+        A recreate was therefore free to drop it silently, and the failure
+        direction is the worst one: the ceiling fires, the exit lands, and the
+        machine goes STOPPED — the silent hang replaced by a silent stop.
+
+        So the policy is declared in ``fly.toml`` and pinned here: deleting the
+        block (or disarming the restart) turns this test red instead of
+        silently disarming the self-heal in production.
+        """
+        import tomllib
+        from pathlib import Path
+
+        cfg = tomllib.loads(
+            (Path(__file__).resolve().parent.parent / "fly.toml")
+            .read_text(encoding="utf-8"))
+
+        blocks = cfg.get("restart") or []
+        assert blocks, (
+            "fly.toml declares no [[restart]] block, so the hard ceiling's "
+            "exit is not versionably a RESTART — a machine recreated without "
+            "the machine-level policy turns it into a STOPPED machine")
+        covering = [b for b in blocks
+                    # a block with no `processes` applies to every machine
+                    if "app" in b.get("processes", ["app"])]
+        assert covering, (
+            f"no [[restart]] block covers the `app` process group: {blocks}")
+        for b in covering:
+            assert b.get("policy") == "on-failure", (
+                "only `on-failure` restarts a NON-ZERO exit (the ceiling's "
+                f"`os._exit(1)`); got policy={b.get('policy')!r}")
+            assert int(b.get("retries", 0)) >= 1, (
+                "a restart policy with zero retries never restarts: "
+                f"{b}")
+
     def test_hard_ceiling_parser_is_fail_closed(self, monkeypatch):
         """Every unusable value must DISABLE the ceiling (fail closed) — a
         parsed-but-unusable ceiling is the restart-loop this file guards."""

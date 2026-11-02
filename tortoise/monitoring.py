@@ -4289,10 +4289,11 @@ LOOP_STALL_HARD_EXIT_S = 0.0       # 0 == hard ceiling DISABLED (the default)
 #: that can no longer tick freezes the heartbeat while the loop is perfectly
 #: healthy, which would make the hard ceiling below ``os._exit`` a HEALTHY
 #: process every ``LOOP_STALL_HARD_EXIT_S`` until the platform's
-#: ``max_retries`` are spent and the machine is left STOPPED (Fly's restart
-#: policy is ``on-fail`` with ``max_retries 10``, verified 2026-11-02 via
-#: ``fly machine status 8654509b634758 --display-config`` — fly.toml:199-204
-#: records why that is a MACHINE attribute and not a file key) — a silent
+#: ``max_retries`` are spent and the machine is left STOPPED (the restart
+#: policy is Fly's ``on-fail`` / 10 retries, and the hosted deployment now
+#: DECLARES it in ``fly.toml``'s ``[[restart]]`` block — versioned, and pinned
+#: by a test, instead of the earlier reading of one machine's
+#: ``fly machine status --display-config``) — a silent
 #: hang replaced by a silent stop. So the ceiling must be able to tell "the
 #: loop is wedged" from "the ticker is gone", and refuse to act in the
 #: second case.
