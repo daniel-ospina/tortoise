@@ -738,9 +738,13 @@ class LifecycleEvent:
     #: here. A caller who wants a live value writes `status='live'`, which IS
     #: carried.
     restatus_status: str | None = None
-    #: Any state op — the `(label, id)` the live fold matches on. The label is
-    #: carried so a state op cannot fold onto the other family's node of the same
-    #: id (ids are per-label, not global).
+    #: A state op **or a creation record** — the `(label, id)` the live fold
+    #: matches on. `EntityMutated` sets it from `state`, and since #9974's BIRTH
+    #: leg an `ObjectRegistered`/`SubjectAdded` sets it from the snapshot's own
+    #: `id` (a creation record is not a state op, which is why this docstring
+    #: names both — review round 8, P2). The label is carried so a state op
+    #: cannot fold onto the other family's node of the same id (ids are
+    #: per-label, not global).
     target_id: str | None = None
     target_label: str | None = None
     #: #9974 — the FOURTH `status` writer: the CREATION record's own payload.
@@ -1400,9 +1404,16 @@ _LIFECYCLE_EVENTS_FOR_ONE_SQL = (
       # two-door split this whole module exists to prevent. Today's producers
       # (`_create_entity`, `_journal_entity_mutation`) are flat, which is why the
       # raw spelling looked right; it is the ACCEPTED nested shape that decides.
-      # `tests/test_cache_projection.py::_ID_CLAUSE_RE` reads the key out of this
-      # statement (now tolerant of the COALESCE), so the fake follows whichever
-      # expression is really here rather than assuming one.
+      # `tests/test_cache_projection.py::_ID_CLAUSE_RE` reads the KEY out of
+      # this statement (`'id'`, tolerant of the COALESCE), so the FAKE follows
+      # whichever key is here rather than assuming one. ⚠️ The KEY is all it
+      # follows: the COALESCE-unwrapped **expression** is pinned separately —
+      # textually — by
+      # `tests/test_cache_projection.py::test_the_narrowing_id_expression_matches_the_selects_node_id`
+      # (review round 8, P2: reverting to the raw `payload ->> 'id'` here leaves
+      # `test_a_nested_creation_record_is_read_by_the_id_narrowing` GREEN, because
+      # the fake compares its own pre-unwrapped `node_id` under whatever key the
+      # regex found). Do not delete that textual pin on the strength of the fake.
       f" OR (event_type IN ('EntityMutated', 'ObjectRegistered', 'SubjectAdded')"
       f" AND ({_PAYLOAD_EVENT} ->> 'id') = %s))"
 )
@@ -1429,7 +1440,8 @@ def _lifecycle_events(cur: Any, *, org_id: str, graph_id: str,
     """The record's lifecycle rows as fold inputs, ordered by `seq`.
 
     `target` narrows by NAME (the connector/pack fold's coordinate), `target_id`
-    by the stable id (the state-op coordinate). Both may be given;
+    by the stable id (the coordinate a state op **and, since #9974's birth leg, a
+    creation record** names). Both may be given;
     they are OR-ed by the SQL, and a caller that holds both must pass both or the
     single-row fold disagrees with the rebuild (#9974 — a `restatus` names its
     target by id only).
