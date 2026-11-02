@@ -873,3 +873,55 @@ class TestAnArmThatServedTheSlotIsNotALostLeg:
         assert truncation_field(sink)[TRUNCATED_FIELD] is True, (
             "with the arm off, nothing read the lexical half — the rows are "
             "unreachable and the read may not claim completeness")
+
+
+# ── #8447 (C2): the four boundary cases on the PAGINATION CONTROL ────────
+#
+# `paginated_query` is the contrast case: a row past the cap is REACHABLE, so it
+# is legitimate pagination and must never be marked `truncated` — but "reachable"
+# is only true if the four boundaries actually hold. Each test asserts the
+# pagination instrument that replaces the marker (`total` / `hasMore`), because
+# "returned 4" alone passes on a walk that cannot reach row 5.
+
+class TestThePaginationControlBoundaries:
+    def test_exactly_at_limit_is_one_page_and_not_more(self, sdk):
+        """Boundary 1 — limit == total: one page, `hasMore` False, unmarked."""
+        _seed(sdk, 4)
+        page = sdk.paginated_query(limit=4, skip=0)
+        assert len(page["results"]) == 4
+        assert page["total"] == 4
+        assert page["hasMore"] is False
+        assert TRUNCATED_FIELD not in page
+
+    def test_limit_plus_one_needs_a_second_page(self, sdk):
+        """Boundary 2 — limit+1: the extra row is a page 2, not a loss."""
+        _seed(sdk, 5)
+        first = sdk.paginated_query(limit=4, skip=0)
+        assert len(first["results"]) == 4
+        assert first["hasMore"] is True
+        second = sdk.paginated_query(limit=4, skip=4)
+        assert len(second["results"]) == 1
+        assert second["hasMore"] is False
+
+    def test_page_two_of_two_is_disjoint_and_the_walk_is_complete(self, sdk):
+        """Boundary 3 — page 2 of 2: reachable, disjoint, and the walk ends."""
+        _seed(sdk, 5)
+        first = sdk.paginated_query(limit=4, skip=0)
+        second = sdk.paginated_query(limit=4, skip=4)
+        ids = [r["id"] for r in first["results"] + second["results"]]
+        assert len(ids) == len(set(ids)) == 5
+        assert second["hasMore"] is False
+
+    def test_offset_exhaustion_is_an_empty_page_that_says_complete(self, sdk):
+        """Boundary 4 — skip == total: empty page, `hasMore` False, total STABLE.
+
+        The instrument is the (`empty`, `hasMore: False`, `total` unchanged)
+        triple; a caller that reads only the row count cannot tell an exhausted
+        cursor from a truncated one, which is the whole contract.
+        """
+        _seed(sdk, 2)
+        page = sdk.paginated_query(limit=2, skip=2)
+        assert page["results"] == []
+        assert page["hasMore"] is False
+        assert page["total"] == 2
+        assert TRUNCATED_FIELD not in page

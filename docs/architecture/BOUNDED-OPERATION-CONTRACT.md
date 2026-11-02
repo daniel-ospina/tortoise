@@ -62,7 +62,7 @@ Measured on this tree:
 | MCP `tortoise_search` (`tool_registry.py:474`) · `GET /search` (selfhost, `selfhost_api.py:365`) | `limit` | **SILENT** | both return a bare list (`response_model=list[PointResponse]` on the route); recorded as a **deliberate limit** on #8447's 2026-11-01 comment (§6) and restated in `config/surface-manifest.yml:139-141` (*"returns a bare list, so it does not carry the field; wrapping a list in an object is a declared return-type change"*), because a marker here IS a return-shape change |
 | `TortoiseSDK.list_batches` (MCP: `tortoise_list_batches`) | `limit=20` | **SILENT** | `tortoise/sdk.py:26725` — `return items[:limit]`; the method's contract is `-> list[dict]` (`:26676`), so there is no field in which to say "there are more" |
 | `TortoiseSDK.suggest_entry_points` (MCP: `tortoise_suggest_entry_points`) | `limit=5` | **SILENT** | `tortoise/sdk.py:33753` — `results = results[:limit]`, returning `results` at `:33801`; declared `-> list[dict]` (`:33699`) |
-| `GET /v1/points` (hosted, `hosted_api.py:10142`) | `limit=50` (`Query(50, ge=1, le=1000)`) | **SILENT** | `return {"points": results, "count": len(results)}` at `hosted_api.py:10201` — `count` is rows delivered; no marker |
+| `GET /v1/points` (hosted, `hosted_api.py:10209`) | `limit=50` (`Query(50, ge=1, le=1000)`) | **MARKS** | `hosted_api.py:10247` asks the store for `limit+1` (an internal probe row, dropped before delivery) and `list_points`' own `mark_truncation`/`truncation_field` calls publish `truncated` via `truncation.py`; `total_available` is deliberately WITHHELD (`exact=False` — a probe proves *more exist*, not *how many*), so a truncated page takes the third state. `count` is still rows **delivered**, and the cap VALUES are unchanged |
 | `GET /points` (selfhost, `selfhost_api.py:315`) | `limit=50` | **SILENT** | `response_model=list[PointResponse]` — a bare list on the route |
 | `GET /v1/events` (hosted, `hosted_api.py:10094-10098`) | `limit=100` (`le=_MAX_EVENT_PAGE`) | **REFUSES at the edge** | `limit: int = Query(100, ge=1, le=_MAX_EVENT_PAGE)` (`:10098`) refuses 0 at the route; the seam below it (`read_after`) refuses both ends — see §3 |
 
@@ -111,8 +111,10 @@ exactly as it rides `/v1/search`: build the body, then `response.update(truncati
 (`:10681`, `:10690`). #10500 recorded that shape as a `response_fields` row in
 `config/surface-manifest.yml` (`:121-143`), **not** as an MCP/SDK surface approval — and its own
 note draws the line there: wrapping a *list* in an object is the return-type change; adding a field
-to an object body is not. So this one is **SILENT and fixable without an approval**: recorded here
-as **not yet done**, never as blocked.
+to an object body is not. So this one was **SILENT and fixable without an approval** — recorded here
+as **not yet done**, never as blocked — and it is **now done**: the §2 row above reads **MARKS**.
+What it never needed was the approval; what it needed was a marker site on a dict body, which is
+exactly the `response.update(truncation_field(…))` shape `/v1/search` already uses.
 
 ⛔ Do not "fix" any of these by adding a sentinel row, a magic string, or a warning log — a sentinel
 is a row the caller asked not to receive, and a log is exactly the *"recorded somewhere the caller
@@ -175,4 +177,11 @@ A marker is only an instrument if a caller can act on it. Therefore:
   not a scope note on that PR. ⚠️ selfhost `GET /points` is the same shape and is **undecided**, not
   deferred.
 - PR #10518 — `read_after` refuses an out-of-domain `limit` instead of rewriting it.
+- PR (this change, C2) — hosted `GET /v1/points` now **MARKS**: an internal `limit+1` probe row
+  proves the cut, the probe is dropped before delivery, and the body carries `truncated`
+  (`total_available` withheld, `exact=False`). The four boundary cases are pinned per surface —
+  hosted `/v1/points`, hosted `/v1/events` (cursor), and `paginated_query` (the control) — with two
+  mutation runs recorded on the issue. Still **SILENT**: the list-shaped surfaces in §2a
+  (`tortoise_search`, selfhost `GET /search`, selfhost `GET /points`, `list_batches`,
+  `suggest_entry_points`) — every one of them needs a return-shape decision, not a marker.
 - `docs/architecture/STORAGE-ARCHITECTURE.md` — the storage seams these bounds sit on.
