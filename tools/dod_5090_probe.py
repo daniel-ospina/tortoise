@@ -271,9 +271,12 @@ WRITER_CENSUS: dict[str, tuple[str, str]] = {
         "`\"error\": \"indexed with embedding=None \"`, not a write clause. "
         "That line sits on the `merge_outcome == \"indexed\"` branch of the "
         "unit-completion path, whose store is DELEGATED to "
-        "`_session_event_write` at :43412; the separate repair-only path "
-        "delegates to `_embedding_repair_attempt` at :43390/:43482. Both "
-        "callees are recognised producers, so this function produces no "
+        "`_session_event_write` at :43412. Its other stores are both "
+        "DELEGATED to `_embedding_repair_attempt`, at TWO distinct sites: the "
+        "repair-only branch at :43390 (`embedding_only_incomplete`), and the "
+        "post-full-write repair site at :43482 — whose own comment at "
+        ":43472-43475 records that the repair-only branch is NOT re-entered. "
+        "Every callee is a recognised producer, so this function produces no "
         "vector of its own"),
     "tortoise.sdk::_journal_event_raw_write": (
         CENSUS_EXEMPT,
