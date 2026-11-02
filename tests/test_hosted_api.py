@@ -13342,6 +13342,17 @@ class TestOverLimitSurfacesOfferTheHumanPath:
         # customer ceiling. Offering the upgrade path here would promise a
         # plan that cannot lift a data fault.
         "unreadable for resource",
+        # #4051 (this lane): the gate builds the SDK whose graph it counts, so a
+        # CONSTRUCTION fault is now a reachable fail-closed arm — the third of the
+        # same category as "quota count failed" and "unreadable for resource"
+        # above (corrupt/unavailable state on our side, never a customer ceiling).
+        # `_check_org_limit` wraps it as "Quota check failed: ...", which IS the
+        # exempted prefix — but this guard reads raise-site LITERALS, and the wrap
+        # happens at the HTTPException site in another module, so the literal here
+        # needs its own entry or the arm reads as an unregistered ceiling refusal.
+        # Registered the same way the previous arm was (#10142, f8970b536): a new
+        # fail-closed arm gets a category entry, not a rewritten message.
+        "quota count sdk unavailable",
         "resolve_org_limits requires a org_id", "cohort is larger than the",
         "cannot bound anything", "cannot be evaluated",
         "an unscoped cap would apply", "Import artifact exceeds the size cap",
