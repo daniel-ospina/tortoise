@@ -97,8 +97,11 @@ read as the strong one.
   * the **HOSTED** leg (`--record-dsn`) reads `public.point` through the
     tenant-scoped door.
   * the **LOCAL** leg (`--local-record-dir`) reads the per-session JSONL under
-    `~/.tortoise/session-events/` (plain day files AND the sealed
-    `archive/<day>.jsonl.gz`), rendered into stored text through the writer's
+    `~/.tortoise/session-events/` — plain `<day>.jsonl` and sealed
+    `<day>.jsonl.gz`, in the root **AND** under `archive/` (all four
+    shape x directory combinations, as `session_events_drain._candidate_files`
+    reads them; a leg that narrowed either axis silently dropped days) —
+    rendered into stored text through the writer's
     own `_capture_turn_window` + `_capture_turn_texts_with_redactions`. **This
     is the AUTHORITY for #10017** (owner ruling 2026-11-01, relayed on the
     issue): the record that must provably hold every turn is the local one,
@@ -120,8 +123,10 @@ the session window) must exist, and:
     embedding (when the graph holds one)  t.embedding    embedding
 
     ⛔ `kind`, `status`, `createdAt` and `embedding` are compared on the
-    HOSTED leg ONLY. The LOCAL record carries NO such columns — the capture
-    line holds `session_id` + `conversation` and nothing else — so on the
+    HOSTED leg ONLY. The LOCAL record carries NO such columns — a capture line
+    holds `session_id`, `conversation`, `metadata` and attribution stamps
+    (`harness`, `machine_id`, `model`), but no per-turn `status`, `kind`,
+    timestamp or vector — so on the
     local leg they are DECLARED ABSENT (`_LOCAL_RECORD_DECLARED_ABSENT`,
     surfaced as the `NOT COMPARED` line and `report["declared_absent"]`)
     rather than fabricated from constants and then counted as compared. A
@@ -423,7 +428,7 @@ _UNDECLINABLE_FIELDS = frozenset({"content", "speaker"})
 #: machine_id, model}` — the transcript and the turn ORDER, nothing else. There
 #: is no per-turn `status` (graph write state), no per-turn `created_at` (only
 #: the session-level `metadata.capturedAt`), and no vector (the embedder runs on
-#: the capture path, not on this file). All three are declared here, by name, so
+#: the capture path, not on this file). All four are declared here, by name, so
 #: the report can never present the weaker comparison as the strong one — a
 #: declared-absent field is printed as NOT COMPARED, never as a pass.
 #:
@@ -994,25 +999,27 @@ def read_local_record_turns(directory, node_keys: Iterable[str] | None = None
             else:
                 raw = path.read_text(encoding="utf-8",
                                      errors="replace").splitlines()
-                # A SETTLED plain day (not the newest) that holds nothing is a
-                # zero-length file where a day of records belongs. The writer
-                # (`reflect-hook`) creates the day file LAZILY, on the first
-                # record (`appendFileSync`) — it is never created eagerly at
-                # boot — so a SETTLED day file that exists cannot legitimately
-                # be empty: its create/first-write was interrupted and the
-                # records it may have held are gone. Refuse.
-                # The newest plain file is exempt: it is the one a live writer
-                # is creating right now, so 0 bytes there is the create/first-
-                # write window, not a settled day.
-                if not any(line.strip() for line in raw) \
-                        and path != newest_plain:
-                    raise CensusError(
-                        f"the plain day {path.name} is EMPTY and it is not the "
-                        "current day file — the day file is created on its "
-                        "first record, so a settled day holds records or does "
-                        "not exist; its create/first write was interrupted and "
-                        "the records it may have held are gone, so an "
-                        "absence is NOT established")
+                # ⛔ An empty day is ONE state, not two — and the SAME file is
+                # in it for its whole life (review P1). The writer
+                # (`reflect-hook.writeFallback`) does `appendFileSync(filePath,
+                # JSON.stringify(record) + "\n")`: create AND write in ONE
+                # call, so a 0-byte day file has never held a record. The seal
+                # then compresses that very file to a 20-byte empty archive
+                # (`eligible()` has no size floor, `seal_one` compresses
+                # whatever it read) and the `.gz` arm above TOLERATES it. If
+                # this arm refused, the identical provenance would flip
+                # REFUSED -> tolerated after `DEFAULT_KEEP_DAYS`, i.e. the
+                # verdict an owner signs would change with the WALL CLOCK.
+                #
+                # So the posture is the same here, and it is safe for the same
+                # reason as the sealed arm: the POPULATION COMES FROM THE
+                # GRAPH. A day that provably holds no records cannot hide a
+                # turn — that turn's id is then absent from the record and the
+                # session is `missing_in_record` -> REFUSED. The tolerance is
+                # non-vacuous, and it is DISCLOSED below rather than silent.
+                if not any(line.strip() for line in raw):
+                    empty_days.append(path.name)
+                    continue
         except CensusError:
             raise
         except Exception as exc:
@@ -1056,7 +1063,18 @@ def read_local_record_turns(directory, node_keys: Iterable[str] | None = None
                     "session can be certified")
             conversation = entry.get("conversation")
             if conversation is None:
-                conversation = []
+                # ⛔ ABSENT is not EMPTY (review P2). The writer always emits
+                # the array, so a line without one is a MALFORMED record — and
+                # coercing it to `[]` made a lost transcript read as
+                # `missing_in_record`, i.e. the artifact pointed the operator at
+                # the graph/backfill for a turn that was present in a line whose
+                # transcript had been dropped. An explicit `[]` is a real
+                # session with no turns and stays tolerated.
+                raise CensusError(
+                    f"the local record's line at {path.name}:{lineno} (session "
+                    f"{sid}) carries NO `conversation` key — the writer always "
+                    "emits it, so its transcript was lost in a malformed line "
+                    "rather than never existing. An absence is NOT established")
             if not isinstance(conversation, list):
                 raise CensusError(
                     f"the local record's session {sid} carries a "

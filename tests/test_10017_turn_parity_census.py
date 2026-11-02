@@ -1440,26 +1440,92 @@ def test_a_ZERO_BYTE_archive_refuses_because_the_write_never_completed(
         tpc.read_local_record_turns(tmp_path)
 
 
-def test_a_zero_byte_PLAIN_day_that_is_not_today_refuses(tmp_path):
-    """The writer creates the day file LAZILY, on its first record
-    (`reflect-hook` → `appendFileSync`), so a settled day file that exists can
-    never be legitimately empty: its create/first write was interrupted."""
+def test_a_zero_byte_PLAIN_day_is_TOLERATED_and_DISCLOSED_like_its_archive(
+        tmp_path):
+    """Review P1: an empty day is ONE state, not two.
+
+    `reflect-hook.writeFallback` does `appendFileSync(filePath, ...)` — create
+    AND write in ONE call — so a 0-byte day file has never held a record. And
+    the seal compresses that very file to a 20-byte empty archive which the
+    `.gz` arm TOLERATES. Refusing here made the identical provenance flip
+    REFUSED -> tolerated after `DEFAULT_KEEP_DAYS`, i.e. the verdict an owner
+    signs changed with the wall clock.
+
+    Tolerated is safe because the POPULATION COMES FROM THE GRAPH (pinned by
+    the non-vacuity test below), and it is DISCLOSED rather than silent.
+
+    Mutation that goes RED here: restoring the `raise CensusError(...EMPTY...)`
+    arm for a settled plain day.
+    """
     _local_record(tmp_path, {"s1": _conversation(("user", "hi"))},
                   name="2026-11-01.jsonl")
     (tmp_path / "2026-10-30.jsonl").write_text("", encoding="utf-8")
-    with pytest.raises(tpc.CensusError, match="EMPTY"):
+    record = tpc.read_local_record_turns(tmp_path)
+    assert list(record["rows_by_key"]) == ["s1_t0"]
+    # DISCLOSED, not a silent skip — this is the half that makes it honest.
+    assert record["empty_days"] == ["2026-10-30.jsonl"]
+
+
+def test_a_tolerated_empty_PLAIN_day_still_cannot_hide_a_graph_turn(tmp_path):
+    """The non-vacuity of the plain-day tolerance: the population comes from
+    the GRAPH, so an empty day whose turn WAS captured cannot certify it —
+    that turn is `missing_in_record` and the census REFUSES."""
+    _local_record(tmp_path, {"s2": _conversation(("user", "other"))},
+                  name="2026-11-01.jsonl")
+    (tmp_path / "2026-10-30.jsonl").write_text("", encoding="utf-8")
+    record = tpc.read_local_record_turns(tmp_path)
+    report = tpc.census({"nodes": {"s1_t0": _graph_node("s1_t0", "s1",
+                                                         content="[user] hi")}},
+                        record, sample=5)
+    assert report["verdict"] == "REFUSED"
+    assert report["parity"]["failed_sessions"][0]["problems"][0]["problem"] \
+        == "missing_in_record"
+    assert report["dry_run"]["would_delete_turn_nodes"] == 0
+
+
+def test_a_line_with_NO_conversation_key_refuses_rather_than_reading_as_empty(
+        tmp_path):
+    """Review P2: ABSENT is not EMPTY. The writer always emits `conversation`,
+    so coercing a missing key to `[]` made a LOST transcript read as
+    `missing_in_record` — pointing the operator at the graph/backfill for a
+    turn that was present in a line whose transcript had been dropped. An
+    explicit `[]` is a real session with no turns and stays tolerated.
+
+    Mutation that goes RED here: restoring `if conversation is None:
+    conversation = []`.
+    """
+    (tmp_path / "2026-11-02.jsonl").write_text(
+        json.dumps({"session_id": "s1"}) + "\n", encoding="utf-8")
+    with pytest.raises(tpc.CensusError, match="NO `conversation` key"):
         tpc.read_local_record_turns(tmp_path)
+
+
+def test_an_explicitly_EMPTY_conversation_is_a_real_session_with_no_turns(
+        tmp_path):
+    """The other half of the same distinction: `[]` is the writer saying this
+    session held no turns, which is data, not loss."""
+    (tmp_path / "2026-11-02.jsonl").write_text(
+        json.dumps({"session_id": "s1", "conversation": []}) + "\n",
+        encoding="utf-8")
+    (tmp_path / "2026-11-01.jsonl").write_text(
+        json.dumps({"session_id": "s2",
+                    "conversation": _conversation(("user", "hi"))}) + "\n",
+        encoding="utf-8")
+    record = tpc.read_local_record_turns(tmp_path)
+    assert record["sessions"] == 2
+    assert list(record["rows_by_key"]) == ["s2_t0"]
 
 
 def test_the_NEWEST_plain_day_may_be_empty_while_a_writer_creates_it(
         tmp_path):
     """The newest file is the one a live writer is in the middle of creating
-    (lazy create → the create/first-write window), not a settled day."""
+    (create → write window), and it is disclosed like any other empty day."""
     _local_record(tmp_path, {"s1": _conversation(("user", "hi"))},
                   name="2026-11-01.jsonl")
     (tmp_path / "2026-11-02.jsonl").write_text("", encoding="utf-8")
     record = tpc.read_local_record_turns(tmp_path)
     assert list(record["rows_by_key"]) == ["s1_t0"]
+    assert record["empty_days"] == ["2026-11-02.jsonl"]
 
 
 def test_an_unlistable_surface_refuses_instead_of_reading_as_empty(
