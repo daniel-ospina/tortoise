@@ -530,6 +530,28 @@ def test_the_e1_e2_record_parses_to_the_numbers_the_table_uses():
     assert [pairing["passed"] for pairing in parsed["pairings"]] == [False, True]
 
 
+def test_the_superseded_log_has_no_reader_left_in_the_probe():
+    """P3: the `e1-e2.log` PARSE PATH is deleted, and the README says so.
+
+    `README.md` states *"the old log's parse path is deleted from
+    `probes/capstone_measure.py`"* (`#9889` item 5). The tree disagreed: after the
+    re-point, `parse_e1e2_log`, `corpus_sha_of_log` and `line_value` all survived
+    with no production caller — a reader kept alive beside the record, which reads
+    to the next lane as "this log is still scored". `parse_e1e2_log`'s only caller
+    was its own test, so nothing but a grep could see it (#10610 P3).
+
+    Non-vacuity: re-add any of the three and this reds, which is the state the PR
+    shipped.
+    """
+    for name in ("parse_e1e2_log", "corpus_sha_of_log", "line_value"):
+        assert not hasattr(measure, name), (
+            f"{name} is back in the probe with no production caller — a second, "
+            "quieter reader of an artifact no row may cite")
+    assert hasattr(measure, "normalise_corpus"), (
+        "normalise_corpus is the LIVE reader (measure_e1_e2 uses it); removing it "
+        "would be the opposite mistake")
+
+
 def test_no_row_cites_the_superseded_e1_e2_log():
     """`#9889` item 5: the hard-coded log name is gone from the row builder."""
     assert measure.E1_E2_SCORES == "docs/evidence/9889/e1-e2-scores.json"
@@ -776,24 +798,6 @@ def test_the_e1_e2_record_refuses_a_corpus_off_the_frozen_pin(tmp_path):
     assert refused.value.code == 2, refused.value
 
 
-def test_the_parse_reads_arms_not_a_fixed_line():
-    """A synthetic log: each arm's share is its own, so the parser cannot be
-    passing by echoing a constant."""
-    text = "\n".join([
-        "sha=abc1234",
-        "arm=before metric=objects total=40 numerator=20 denominator=40 share=0.500000",
-        "arm=after-vet-shipped metric=objects total=40 numerator=10 denominator=40 share=0.250000",
-        "arm=after-vet-shipped metric=real_facts count=90",
-        "e1 before_share=0.500000 after_share=0.250000 verdict=GREEN",
-        "result=SCORED",
-    ])
-    arms = measure.parse_e1e2_log(text)
-    assert arms["before"]["objects"]["share"] == "0.500000"
-    assert arms["after-vet-shipped"]["objects"]["share"] == "0.250000"
-    assert arms["summary"]["e1"]["verdict"] == "GREEN"
-    assert measure.parse_e1e2_log(text)["before"] is not None
-
-
 # ── the table shape, and the two rules that keep a row honest ────────────
 
 def _rows(out_path: str = "docs/evidence/9889/e1-e2-scores.json",
@@ -860,7 +864,7 @@ def test_a_green_row_on_a_missing_artifact_is_refused():
               "run": {"status": "COMPLETED", "steps_observed": list(cvc.STEPS)},
               "rows": rows}
     codes = [code for code, _w, _m in
-             cvc.check(record, repo=_REPO, require_green=False).items]
+             cvc.check(record, repo=_build_gate_repo(), require_green=False).items]
     assert "V4" in codes, codes
 
 
@@ -1091,6 +1095,43 @@ def test_the_durations_map_carries_one_row_per_file():
             f"\n  {row[:90]}" for row in rows))
 
 
+def _build_gate_repo() -> Path:
+    """A throwaway git work tree with NO promisor remote, carrying the real `docs/`.
+
+    `cvc.check` resolves every row / pre-registration sha through
+    `git cat-file -e`, and the pins below stamp SYNTHETIC shas (`"a"*40`,
+    `"c"*40`) that resolve nowhere by design. On a FULL clone that answer comes
+    back `False` instantly; on a PARTIAL clone — `blob:none`, which is how every
+    worktree of this repo is checked out — git treats the missing object as a
+    PROMISOR object and lazy-fetches it from `origin`, one network round trip per
+    sha. The result is not a failing assertion but a hang: measured at this head,
+    `test_a_green_e2_at_thirteen_of_fourteen_is_not_refused_for_its_own_blocker`
+    and `test_a_green_row_on_a_missing_artifact_is_refused` both died at
+    `Failed: Timeout (>300.0s)` inside `tools/capstone_verdict_check.py::_git`
+    (stack: `_resolves` → `_git` → `subprocess.run`), the same environment class
+    the sibling `test_7949_capstone_verdict_check.py` disclosed.
+
+    A throwaway repo has no promisor remote, so an unresolvable sha is the
+    instant `False` CI sees. `docs/` is symlinked in so V4's artifact-existence
+    check still reads the REAL bundle rather than an empty directory.
+
+    Rebuilt per call (no `lru_cache`): this suite reaps its per-test `TMPDIR`
+    after every test, so a cached path would hand the NEXT test a `cwd` that no
+    longer exists (`FileNotFoundError` out of `subprocess.run`).
+    """
+    repo = Path(tempfile.mkdtemp(prefix="capstone-gate-repo-"))
+    (repo / "docs").symlink_to(_REPO / "docs", target_is_directory=True)
+    (repo / "README.md").write_text("throwaway work tree for the gate pins\n")
+    cvc._git(repo, "init", "-q")
+    cvc._git(repo, "add", "README.md")
+    cvc._git(repo, "-c", "user.email=pin@example.invalid",
+             "-c", "user.name=pin", "commit", "-qom", "pin", "README.md")
+    assert cvc._is_git_repo(repo), repo
+    assert not cvc._resolves(repo, "a" * 40), (
+        "the throwaway repo must not be able to resolve a synthetic sha")
+    return repo
+
+
 def _gate_codes(rows: list[dict]) -> list[str]:
     record = {"schema": cvc.SCHEMA, "prereg": {"sha": "a" * 40, "status": "OK"},
               "corpus": {"sha256": "sha256:" + "e" * 64},
@@ -1098,7 +1139,7 @@ def _gate_codes(rows: list[dict]) -> list[str]:
                       "steps_observed": list(cvc.STEPS)},
               "rows": list(rows)}
     return [code for code, _w, _m in
-            cvc.check(record, repo=_REPO, require_green=False).items]
+            cvc.check(record, repo=_build_gate_repo(), require_green=False).items]
 
 
 def test_a_green_e2_at_thirteen_of_fourteen_is_not_refused_for_its_own_blocker():
