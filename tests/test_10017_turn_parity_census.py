@@ -1187,14 +1187,77 @@ def test_an_interior_torn_line_in_the_NEWEST_file_also_refuses(tmp_path):
         tpc.read_local_record_turns(tmp_path)
 
 
-def test_a_duplicated_session_refuses_because_order_is_the_only_index(
+def test_a_duplicated_session_is_HELD_BACK_not_a_whole_record_refusal(
         tmp_path):
+    """Review P2: one resumed session must not gate the WHOLE census.
+
+    Two windows for one session cannot be placed positionally — but that is a
+    RECOGNISED state (`tools/build_window_transcript.py` refuses it by name, and
+    #3870 forbids deleting the record lines that would clear it), so refusing
+    the entire population made the gate unopenable over ONE resumed session with
+    no legitimate exit. It is held back into its own partition instead.
+
+    Mutation that goes RED here: restoring the whole-record `raise` (the leg
+    would never return, so the assertions below cannot run).
+    """
     _local_record(tmp_path, {"s1": _conversation(("user", "a"))},
                   name="2026-11-01.jsonl")
-    _local_record(tmp_path, {"s1": _conversation(("user", "b"))},
+    _local_record(tmp_path, {"s1": _conversation(("user", "b")),
+                            "s2": _conversation(("user", "c"))},
                   name="2026-11-02.jsonl")
-    with pytest.raises(tpc.CensusError, match="MULTIPLE windows"):
-        tpc.read_local_record_turns(tmp_path)
+    record = tpc.read_local_record_turns(tmp_path)
+    # The duplicated session leaves the positional key space…
+    assert sorted(record["rows_by_key"]) == ["s2_t0"]
+    # …and is DISCLOSED, with the window count, rather than silently dropped.
+    assert record["duplicate_window"] == [{"session": "s1", "windows": 2}]
+    assert record["sessions"] == 1
+
+
+def test_a_duplicated_session_the_graph_holds_REFUSES_by_name(tmp_path):
+    """…and when the graph really holds its turns, the cause is the DUPLICATE.
+
+    Reported as `duplicate_window`, never as `missing_in_record`: the latter
+    points the operator at a graph/backfill, which would write the wrong
+    window's turns into the record under keys that do not describe them.
+
+    Mutation that goes RED here: dropping the `held_duplicates` arm (the turns
+    then surface as `missing_in_record`).
+    """
+    _local_record(tmp_path, {"s1": _conversation(("user", "a"))},
+                  name="2026-11-01.jsonl")
+    _local_record(tmp_path, {"s1": _conversation(("user", "a"))},
+                  name="2026-11-02.jsonl")
+    record = tpc.read_local_record_turns(tmp_path)
+    nodes = {"s1_t0": _graph_node("s1_t0", "s1", content="[user] a")}
+    report = tpc.census({"nodes": nodes}, record, sample=5)
+    assert report["verdict"] == "REFUSED"
+    assert report["refused_for"] == ["duplicate_window"]
+    problem = _problems(report, "s1")[0]
+    assert problem["problem"] == "duplicate_window"
+    assert "NOT a graph/backfill gap" in problem["detail"]
+    # The graph's turn is IN the delete set but NOT eligible: a REFUSED run must
+    # never read as "there is nothing to delete".
+    assert report["dry_run"]["would_delete_turn_nodes"] == 0
+    assert report["dry_run"]["held_back_turn_nodes"] == 1
+    assert report["record"]["duplicate_window"] == [
+        {"session": "s1", "windows": 2, "graph_turn_nodes": 1}]
+
+
+def test_a_duplicated_session_with_NO_graph_turn_does_NOT_block_the_census(
+        tmp_path):
+    """A refusal with no repair path is not a guard: a duplicate no graph node
+    needs placed stays disclosed, and the census still reaches CLEAN."""
+    _local_record(tmp_path, {"s_dup": _conversation(("user", "a"))},
+                  name="2026-11-01.jsonl")
+    _local_record(tmp_path, {"s_dup": _conversation(("user", "a")),
+                            "s1": _conversation(("user", "hi"))},
+                  name="2026-11-02.jsonl")
+    record = tpc.read_local_record_turns(tmp_path)
+    nodes = {"s1_t0": _graph_node("s1_t0", "s1", content="[user] hi")}
+    report = tpc.census({"nodes": nodes}, record, sample=5)
+    assert report["verdict"] == "CLEAN"
+    assert report["record"]["duplicate_window"] == [
+        {"session": "s_dup", "windows": 2, "graph_turn_nodes": 0}]
 
 
 def test_an_empty_or_absent_local_record_refuses(tmp_path):
@@ -1202,6 +1265,33 @@ def test_an_empty_or_absent_local_record_refuses(tmp_path):
         tpc.read_local_record_turns(tmp_path)
     with pytest.raises(tpc.CensusError, match="does not exist"):
         tpc.read_local_record_turns(tmp_path / "nope")
+
+
+def test_an_EMPTY_local_record_dir_never_falls_back_to_the_hosted_leg(
+        tmp_path, monkeypatch, capsys):
+    """Review P2: `--local-record-dir "$UNSET_VAR"` is a SET-BUT-EMPTY flag
+    value, not an absent one — the empty-vs-unset distinction every CLI
+    convention (and `os.LookupEnv` / `${VAR-}` vs `${VAR:-}`) exists to keep.
+
+    Truthiness sent it down the hosted branch, so an ambient
+    `TORTOISE_RECORD_DSN` — the store the 2026-11-01 ruling says is NOT the
+    authority — was measured instead, and could exit 0 CLEAN over it.
+
+    Mutation that goes RED here: restoring `if args.local_record_dir:` (the run
+    then reaches the graph guard / the hosted leg and exits 3, not 1).
+    """
+    monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://x/y")
+    monkeypatch.setenv("TORTOISE_RECORD_ORG_ID", "o")
+    monkeypatch.setenv("TORTOISE_RECORD_GRAPH_ID", "g")
+    code = tpc.main(["--db-path", str(tmp_path / "g.db"),
+                     "--local-record-dir", ""])
+    assert code == 1
+    err = capsys.readouterr().err
+    assert "EMPTY" in err
+    assert "NOT the authority" in err
+    # Whitespace-only is the same state: no path is being named.
+    assert tpc.main(["--db-path", str(tmp_path / "g.db"),
+                     "--local-record-dir", "   "]) == 1
 
 
 def test_the_local_leg_reads_only_the_keys_it_was_asked_for(tmp_path):
@@ -1287,10 +1377,11 @@ def test_both_shapes_in_both_directories_are_read_not_just_two(tmp_path):
         "archive/2026-10-30.jsonl.gz", "archive/2026-10-31.jsonl"]
 
 
-def test_a_day_in_both_shapes_with_the_same_session_refuses(tmp_path):
+def test_a_day_in_both_shapes_with_the_same_session_is_HELD_BACK(tmp_path):
     """A sealed `.gz` plus a re-created plain file is read once per shape, as
-    the drain reads it — and where their session ids OVERLAP the leg cannot
-    tell which window is `t0`, so it REFUSES rather than picking one."""
+    the drain reads it — and where their session ids OVERLAP the leg cannot tell
+    which window is `t0`, so the session is held back (never merged, never
+    picked) instead of refusing the whole record (review P2)."""
     import gzip
     archive = tmp_path / "archive"
     archive.mkdir()
@@ -1302,8 +1393,9 @@ def test_a_day_in_both_shapes_with_the_same_session_refuses(tmp_path):
     (archive / "2026-10-01.jsonl.gz").write_bytes(
         gzip.compress((json.dumps(same) + "\n").encode()))
 
-    with pytest.raises(tpc.CensusError, match="MULTIPLE windows"):
-        tpc.read_local_record_turns(tmp_path)
+    record = tpc.read_local_record_turns(tmp_path)
+    assert record["rows_by_key"] == {}
+    assert record["duplicate_window"] == [{"session": "s1", "windows": 2}]
 
 
 def test_a_corrupt_archive_refuses_rather_than_hiding_a_session(tmp_path):
@@ -1337,6 +1429,89 @@ def test_the_cli_reaches_exit_three_when_the_local_record_refuses(tmp_path,
     code = tpc.main(["--db-path", str(tmp_path / "g.db"),
                      "--local-record-dir", str(tmp_path / "no-such-dir")])
     assert code == 3
+
+
+def test_a_turn_past_the_SESSION_cap_uses_the_FILED_window(tmp_path):
+    """Review P2: the graph's `t<i>` are minted over the POSTed list, not the
+    file's — a session past `MAX_SESSION_TURNS` must be keyed through the SAME
+    window the filing leg applies.
+
+    Pre-fix, this record read `t0` = the file's FIRST turn while the graph's
+    `t0` is the window's first turn (the drain drops the oldest past the cap),
+    so every turn of every over-cap session mismatched on TEXT — a permanent
+    false refusal on exactly the population this gate exists for, blaming the
+    record for the filing leg's transform.
+
+    Mutation that goes RED here: rendering `conversation` instead of
+    `_filing_window(conversation)` (every key becomes `field_mismatch text`).
+    """
+    from tortoise.quota import MAX_SESSION_TURNS
+
+    conversation = _conversation(
+        *[("user", f"t{i}") for i in range(MAX_SESSION_TURNS + 1)])
+    _local_record(tmp_path, {"s1": conversation})
+    record = tpc.read_local_record_turns(tmp_path)
+
+    assert len(record["rows_by_key"]) == MAX_SESSION_TURNS
+    # `t0` is the WINDOW's first turn (record entry 1) — the first turn is gone.
+    assert record["rows_by_key"]["s1_t0"]["content"] == "[user] t1"
+    assert record["rows_by_key"][f"s1_t{MAX_SESSION_TURNS - 1}"]["content"] \
+        == f"[user] t{MAX_SESSION_TURNS}"
+    # Disclosed, never silent: the artifact says which keys came from a window.
+    assert record["filed_window"] == [
+        {"session": "s1", "record_turns": MAX_SESSION_TURNS + 1,
+         "filed_turns": MAX_SESSION_TURNS}]
+
+    nodes = {"s1_t0": _graph_node("s1_t0", "s1", content="[user] t1"),
+             "s1_t1": _graph_node("s1_t1", "s1", content="[user] t2")}
+    report = tpc.census({"nodes": nodes}, record, sample=5)
+    assert report["verdict"] == "CLEAN", report["parity"]["failed_sessions"]
+    assert report["record"]["filed_window"] == record["filed_window"]
+
+
+def test_a_BLANK_turn_is_dropped_by_the_filing_leg_and_the_keys_shift(
+        tmp_path):
+    """The other half of the same transform: `_window` DROPS a turn whose
+    content is blank, so the graph's `t1` is the record's THIRD entry."""
+    conversation = [{"role": "user", "content": "a"},
+                    {"role": "user", "content": "   "},
+                    {"role": "user", "content": "b"}]
+    _local_record(tmp_path, {"s1": conversation})
+    record = tpc.read_local_record_turns(tmp_path)
+
+    assert sorted(record["rows_by_key"]) == ["s1_t0", "s1_t1"]
+    assert record["rows_by_key"]["s1_t0"]["content"] == "[user] a"
+    assert record["rows_by_key"]["s1_t1"]["content"] == "[user] b"
+    assert record["filed_window"] == [
+        {"session": "s1", "record_turns": 3, "filed_turns": 2}]
+
+    nodes = {"s1_t0": _graph_node("s1_t0", "s1", content="[user] a"),
+             "s1_t1": _graph_node("s1_t1", "s1", content="[user] b")}
+    report = tpc.census({"nodes": nodes}, record, sample=5)
+    assert report["verdict"] == "CLEAN", report["parity"]["failed_sessions"]
+
+
+def test_the_CLI_prints_the_filed_window_disclosure(tmp_path, capsys,
+                                                    monkeypatch):
+    """The transform must be VISIBLE on stdout, not only in the code path — an
+    undisclosed re-keying reads like a clean positional match.
+
+    Mutation that goes RED here: deleting the `filed window:` print loop.
+    """
+    conversation = [{"role": "user", "content": "a"},
+                    {"role": "user", "content": "  "},
+                    {"role": "user", "content": "b"}]
+    _local_record(tmp_path, {"s1": conversation})
+    monkeypatch.setattr(tpc, "read_graph_turns", lambda *a, **k: {
+        "nodes": {"s1_t0": _graph_node("s1_t0", "s1", content="[user] a"),
+                  "s1_t1": _graph_node("s1_t1", "s1", content="[user] b")},
+        "unidentifiable": []})
+    code = tpc.main(["--uri", "docker://:@127.0.0.1:1/g",
+                     "--local-record-dir", str(tmp_path)])
+    out = capsys.readouterr().out
+    assert code == 0, out
+    assert "filed window: session s1" in out
+    assert "POSTed 2 of the record's 3 turn(s)" in out
 
 
 def test_the_local_leg_redacts_like_the_writer_so_a_secret_is_not_a_mismatch(
@@ -1631,6 +1806,35 @@ def test_a_record_that_parses_ZERO_sessions_refuses(tmp_path):
         tpc.read_local_record_turns(tmp_path)
 
 
+# ── the three thin shape arms (review P3: none of them had a pin) ───────────
+
+def test_a_line_that_is_not_a_JSON_OBJECT_refuses_not_crashes(tmp_path):
+    """`not isinstance(entry, dict)` was unpinned: removing it turns a hygienic
+    exit-3 refusal into an uncaught `AttributeError` from `entry.get`, which
+    escapes `main`'s `except CensusError` as a traceback + exit 1 —
+    indistinguishable from a tool bug."""
+    (tmp_path / "2026-11-02.jsonl").write_text("[1, 2]\n", encoding="utf-8")
+    with pytest.raises(tpc.CensusError, match="not a JSON object"):
+        tpc.read_local_record_turns(tmp_path)
+
+
+def test_a_line_with_NO_session_id_refuses(tmp_path):
+    """A turn's key cannot be derived, so no session can be certified."""
+    (tmp_path / "2026-11-02.jsonl").write_text(
+        json.dumps({"conversation": []}) + "\n", encoding="utf-8")
+    with pytest.raises(tpc.CensusError, match=r"carries no .session_id"):
+        tpc.read_local_record_turns(tmp_path)
+
+
+def test_a_conversation_that_is_not_a_LIST_refuses(tmp_path):
+    """A dict where the array belongs is a malformed record, not a transcript."""
+    (tmp_path / "2026-11-02.jsonl").write_text(
+        json.dumps({"session_id": "s1", "conversation": {"role": "user"}})
+        + "\n", encoding="utf-8")
+    with pytest.raises(tpc.CensusError, match=r"not *a list"):
+        tpc.read_local_record_turns(tmp_path)
+
+
 def test_expect_empty_reaches_a_verdict_when_the_local_record_is_absent(
         tmp_path, monkeypatch):
     """Cycle-5 P2: a drained graph must be confirmable on the local leg too."""
@@ -1654,7 +1858,15 @@ def test_expect_empty_reaches_a_verdict_when_the_local_record_is_absent(
                      "--expect-empty", "--json", str(out)])
     assert code == 0               # the record leg was SKIPPED, not an absence
     import json as _json
-    assert _json.loads(out.read_text())["record"]["leg"] == "local-skipped"
+    report = _json.loads(out.read_text())
+    assert report["record"]["leg"] == "local-skipped"
+    # ⛔ Review P3: a skipped leg compared NOTHING. It used to report all seven
+    # fields compared (`declared_absent` was empty on the skipped dict) and
+    # suppressed the NOT COMPARED line — an artifact claiming a comparison that
+    # never happened, on the shape the branch below it polices.
+    assert report["record"]["skipped"] is True
+    assert report["compared_fields"] == []
+    assert report["declared_absent"] == sorted(tpc._LOCAL_RECORD_DECLARED_ABSENT)
 
 
 def test_expect_empty_does_NOT_skip_the_hosted_leg(tmp_path, monkeypatch):

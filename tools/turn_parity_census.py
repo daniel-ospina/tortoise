@@ -269,6 +269,18 @@ USAGE
                      definition above; `compared_fields` and
                      `declared_absent` are in the artifact, and the
                      `NOT COMPARED` line says it on stdout.
+                     ⛔ The positional keys are the FILING leg's, not the
+                     file's: the consumer windows each conversation first
+                     (`session_events_drain._window` — the last
+                     MAX_SESSION_TURNS turns, with blank/non-conforming turns
+                     dropped), so this leg applies that window before
+                     enumerating and DISCLOSES every session it changed
+                     (`filed window:` line, `record.filed_window`). A session
+                     the record holds TWO windows for cannot be placed
+                     positionally: it is held back into
+                     `record.duplicate_window` and refuses the census only
+                     when the graph really holds its turn nodes
+                     (`duplicate_window` in `refused_for`).
                      ⛔ A local-leg CLEAN does NOT arm the purge yet. The only
                      irreversible consumer, `tools/purge_legacy_turns.py
                      --execute`, has no local leg and keys its approval
@@ -843,10 +855,30 @@ def read_local_record_turns(directory, node_keys: Iterable[str] | None = None
 
         {session_id, conversation: [{role, content}, ...], metadata, ...}
 
-    Order is the only index the file carries, so entry `i` IS turn `i` of that
-    session and its key is `f"{session_id}_t{i}"` — the SAME
-    `<session>_t<digits>` identity `sdk._capture_turn_ids` derives (one rule,
-    both records). The framed text is built with the writer's OWN frame
+    ⛔ IT IS THE **FILED** INDEX SPACE, NOT THE FILE'S (review P2). The graph's
+    `t<i>` are minted by the server over the list the FILING LEG POSTed
+    (`sdk._write_capture_turns` numbers `enumerate(windowed)` at
+    `turn_offset=0`), and that list is NOT the file's list: every capture leg
+    windows it first — `session_events_drain._window` keeps the last
+    `tortoise.quota.MAX_SESSION_TURNS` turns and DROPS any turn that is not a
+    dict, whose `role` is not a non-empty `str`, or whose `content` is blank
+    after `.strip()`, and the transcript leg applies the same rule
+    (`__main__`'s `window_turns`). So for a session over the cap, or with a
+    blank turn anywhere, the graph's `sid_t0` holds the **window's** first turn
+    while the file's entry 0 is a different turn. Reading the raw list
+    positionally therefore emitted a wall of `field_mismatch text` against a
+    record that holds every turn — a permanent false refusal on exactly the
+    population this gate exists for, misattributing a FILING-leg transform to
+    record corruption (and pointing the operator at the graph/backfill, which
+    would write the windowed turns into the record under keys that do not
+    describe them). This leg therefore applies the SAME window before
+    enumerating: `_window(conversation)` → `_capture_turn_window(...)` →
+    `_capture_turn_texts_with_redactions(...)`, and `entry i` of THAT list is
+    turn `i`, key `f"{session_id}_t{i}"` — the SAME `<session>_t<digits>`
+    identity `sdk._capture_turn_ids` derives (one rule, both records). Sessions
+    the window actually changed are DISCLOSED (`record["filed_window"]`), so
+    the artifact says which keys came from a truncated or filtered list. The
+    framed text is built with the writer's OWN frame
     (`sdk._capture_turn_frame`, the single definition #5445/#4897/#5394 all
     route through) and the speaker with the writer's own inverse
     (`sdk._capture_turn_role_text`) — so this leg cannot drift from what the
@@ -855,18 +887,31 @@ def read_local_record_turns(directory, node_keys: Iterable[str] | None = None
     WHY A MISALIGNED RECORD CANNOT CERTIFY. A session captured twice appends a
     second window (a `turn_offset`), so a positional map could in principle
     line up the WRONG entry. Every such case fails CLOSED rather than passing
-    silently: a duplicated session id is refused outright (two windows, one
-    file, no way to tell which is `t0`); a window shorter than the graph's turn
-    ids reads as `missing_in_record`; and a shifted window mismatches on TEXT,
-    which is a refusal. There is no path from a misaligned local record to
-    `CLEAN`.
+    silently: a window shorter than the graph's turn ids reads as
+    `missing_in_record`; and a shifted window mismatches on TEXT, which is a
+    refusal. There is no path from a misaligned local record to `CLEAN`.
+
+    A DUPLICATED session id is HELD BACK, not a whole-record refusal (review
+    P2). Two windows for one session cannot be placed positionally, but the
+    state is a RECOGNISED one (`tools/build_window_transcript.py` refuses it by
+    name, and #3870 forbids discarding the record lines that would clear it) —
+    so refusing the entire census made the gate unopenable over ONE resumed
+    session, with no legitimate exit. Instead the duplicated sessions are
+    excluded from the positional rows and listed in their own
+    `duplicate_window` partition; `census()` refuses only those sessions that
+    the GRAPH actually holds turn nodes for, names the duplicate as the cause
+    (never `missing_in_record`, which would misdirect the operator at a
+    backfill), and keeps its turn nodes `held_back` so a REFUSED run still
+    cannot read as "nothing to delete". Duplicates that no graph node needs
+    stay disclosed and non-blocking — a refusal with no repair path is not a
+    guard.
 
     A day present in BOTH shapes (a sealed `.gz` plus a plain file re-created
     after the seal) is read ONCE PER SHAPE, as the drain reads it, because the
     two can hold DIFFERENT windows of one index space. If their session ids
-    overlap they land on the duplicate arm above and REFUSE — which is correct:
-    the leg cannot tell which window is `t0`. If they do not overlap, both are
-    needed and both are read. Neither case can reach `CLEAN` wrongly.
+    overlap they land on the duplicate-window partition above — which is
+    correct: the leg cannot tell which window is `t0`. If they do not overlap,
+    both are needed and both are read. Neither case can reach `CLEAN` wrongly.
 
     A torn line is CORRUPTION, not a tail to be tolerated — except at the tail.
     An append-only log's newest final line may be mid-write; every other
@@ -934,18 +979,24 @@ def read_local_record_turns(directory, node_keys: Iterable[str] | None = None
             "of parity (it is the shape that would certify deleting every "
             "turn). An absence is NOT established")
 
+    # ⛔ THE FILING LEG'S WINDOW (review P2): the graph's `t<i>` are minted over
+    # the list that leg POSTed, not over the file's raw list, so `_window` is
+    # IMPORTED here — never re-declared. A local copy of "the last 500, drop
+    # blanks" that drifted would produce exactly the misaligned key space this
+    # leg exists to close.
     try:
         from tortoise.sdk import (
             _capture_turn_role_text,
             _capture_turn_texts_with_redactions,
             _capture_turn_window,
         )
+        from tortoise.session_events_drain import _window as _filing_window
     except Exception as exc:  # an unimportable frame is an unreadable side
         raise CensusError(
-            f"the SDK's stored-text definition could not be imported "
-            f"({type(exc).__name__}: {exc}) — the local record cannot be "
-            "rendered into the writer's own stored text, so an absence is NOT "
-            "established") from exc
+            f"the SDK's stored-text definition or the filing leg's window "
+            f"could not be imported ({type(exc).__name__}: {exc}) — the local "
+            "record cannot be rendered into the writer's own stored text, so "
+            "an absence is NOT established") from exc
 
     wanted = None if node_keys is None else {str(k) for k in node_keys}
     conversations: dict[str, list] = {}
@@ -957,6 +1008,15 @@ def read_local_record_turns(directory, node_keys: Iterable[str] | None = None
     #: a tolerance that is not counted is indistinguishable from a day that
     #: went missing.
     empty_days: list[str] = []
+    #: Sessions the record holds TWO OR MORE windows for. Held back from the
+    #: positional rows and DISCLOSED — a whole-record refusal here made one
+    #: resumed session unopenable for the gate (review P2).
+    duplicate_window: list[dict] = []
+    #: Sessions whose FILED window differs from the file's list (dropped blank/
+    #: non-conforming turns, or a tail truncation past MAX_SESSION_TURNS). These
+    #: are the sessions whose keys come from a transformed list, so the artifact
+    #: says so (review P2).
+    filed_window: list[dict] = []
     for path in files:
         try:
             if path.name.endswith(".gz"):
@@ -1083,7 +1143,22 @@ def read_local_record_turns(directory, node_keys: Iterable[str] | None = None
             occurrences[sid] = occurrences.get(sid, 0) + 1
             conversations[sid] = conversation
 
-    if not conversations:
+    # ⛔ A DUPLICATED session id is HELD BACK, not a whole-record refusal
+    # (review P2). `conversations` holds the LAST window per id, and placing it
+    # positionally would be a guess dressed as a measurement — but refusing the
+    # ENTIRE census over one resumed session also made the gate unopenable
+    # (`tools/build_window_transcript.py` refuses the same state by name, and
+    # #3870 forbids deleting the record lines that would clear it: there was no
+    # legitimate exit). So they leave the positional key space and land in their
+    # own partition; `census()` refuses only the ones the GRAPH holds turns
+    # for, names the duplicate as the cause, and holds their nodes back.
+    duplicated = sorted(s for s, n in occurrences.items() if n > 1)
+    for sid in duplicated:
+        conversations.pop(sid, None)
+        duplicate_window.append({"session": sid,
+                                 "windows": occurrences[sid]})
+
+    if not conversations and not duplicate_window:
         # Non-empty files, zero parseable records: the record is empty, which is
         # not evidence of parity (a whitespace-only day used to slip past the
         # file-level guard — review cycle 4, P2).
@@ -1092,20 +1167,32 @@ def read_local_record_turns(directory, node_keys: Iterable[str] | None = None
             f"{len(files)} file(s) — an empty record is not evidence of parity, "
             "so an absence is NOT established")
 
-    duplicated = sorted(s for s, n in occurrences.items() if n > 1)
-    if duplicated:
-        # Two windows for one session: order is the only index the record
-        # carries, so a second capture's window cannot be placed against the
-        # graph's `t<i>` space without guessing. Refuse — never guess.
-        raise CensusError(
-            "the local record holds MULTIPLE windows for "
-            f"{len(duplicated)} session(s) (first: {duplicated[0]}, "
-            f"{occurrences[duplicated[0]]} windows) — entry order is the only "
-            "index this record carries, so a positional key for a re-captured "
-            "session is a guess. An absence is NOT established")
-
     rows_by_key: dict[str, dict] = {}
     for sid, conversation in conversations.items():
+        # ⛔ THE FILED WINDOW, THEN THE STORED TEXT (review P2). Rendering the
+        # RAW conversation made `t0` the file's first entry while the graph's
+        # `t0` is the FILED window's first entry (`session_events_drain._window`
+        # keeps the last MAX_SESSION_TURNS and drops blank/non-conforming
+        # turns), so every over-cap or filtered session reported a wall of
+        # `field_mismatch text` against a record that holds every turn — a
+        # permanent false refusal on exactly the population this gate exists
+        # for, blaming the record for the filing leg's own transform.
+        try:
+            filed = _filing_window(conversation)
+        except Exception as exc:
+            raise CensusError(
+                f"the local record's session {sid} could not be put through "
+                f"the filing leg's window "
+                f"({type(exc).__name__}: {exc}) — without the window the "
+                "graph's positional keys cannot be derived, so an absence is "
+                "NOT established") from exc
+        if len(filed) != len(conversation):
+            # Disclosed, never silent: these keys describe the FILED list, and
+            # an artifact that hid the truncation would misdescribe its own
+            # coverage.
+            filed_window.append({"session": sid,
+                                 "record_turns": len(conversation),
+                                 "filed_turns": len(filed)})
         # ⛔ THE WRITER'S STORED TEXT, NOT A RE-FRAME OF THE RAW TURN (review
         # finding, P1). What the node stores is
         # `_capture_turn_texts_with_redactions(_capture_turn_window(conv))` —
@@ -1120,7 +1207,7 @@ def read_local_record_turns(directory, node_keys: Iterable[str] | None = None
         # this tree can still mismatch — which refuses, and is correct.
         try:
             texts = _capture_turn_texts_with_redactions(
-                _capture_turn_window(conversation))[0]
+                _capture_turn_window(filed))[0]
         except Exception as exc:
             raise CensusError(
                 f"the local record's session {sid} could not be rendered "
@@ -1153,10 +1240,15 @@ def read_local_record_turns(directory, node_keys: Iterable[str] | None = None
         "record_dir": str(root),
         "files": [str(p.relative_to(root)) for p in files],
         "declared_absent": list(_LOCAL_RECORD_DECLARED_ABSENT),
+        # PLACED sessions (the ones the positional key space covers): a
+        # duplicate is counted in `duplicate_window` instead, so the two never
+        # double-count one line.
         "sessions": len(conversations),
         "lines_parsed": parsed,
         "torn_tail": torn_tail,
         "empty_days": empty_days,
+        "duplicate_window": duplicate_window,
+        "filed_window": filed_window,
     }
 
 
@@ -1212,9 +1304,14 @@ def census(graph: dict, record: dict, *, sample: int) -> dict:
             "purge would destroy text nothing here has verified a copy of. The "
             "comparison must be extended before this gate may open: an absence "
             "is NOT established")
-    compared_fields = ["key"] + [rcol for _, rcol, _ in _EXACT_FIELDS
-                                 if rcol not in declared_absent]
-    if "embedding" not in declared_absent:
+    # ⛔ A SKIPPED leg compared NOTHING and must say so (review P3): the field
+    # list is derived from `declared_absent`, so a `local-skipped` dict carrying
+    # none reported all seven fields compared on a leg that was never opened —
+    # the same artifact-honesty failure as naming a skipped leg 'hosted'.
+    skipped = bool(record.get("skipped"))
+    compared_fields = [] if skipped else (["key"] + [
+        rcol for _, rcol, _ in _EXACT_FIELDS if rcol not in declared_absent])
+    if not skipped and "embedding" not in declared_absent:
         compared_fields.append("embedding")
     unidentifiable = graph.get("unidentifiable") or []
 
@@ -1298,7 +1395,36 @@ def census(graph: dict, record: dict, *, sample: int) -> dict:
 
     clean: list[dict] = []
     failed: list[dict] = []
+    # Sessions the RECORD holds two or more windows for. Only the ones the graph
+    # actually holds turn nodes for BLOCK: a duplicate nothing needs placed is
+    # disclosed and non-blocking, because a refusal with no repair path is not a
+    # guard (review P2).
+    held_duplicates = {d["session"]: d
+                       for d in (record.get("duplicate_window") or [])}
     for sid in sorted(sessions):
+        if sid in held_duplicates:
+            # In the graph's population but unplaceable in the record: name the
+            # DUPLICATE as the cause. Falling through would report every turn
+            # `missing_in_record`, i.e. point the operator at a graph/backfill
+            # that would write the wrong window into the record.
+            failed.append({
+                "session": sid,
+                "graph_turn_nodes": len(sessions[sid]["nodes"]),
+                "record_turn_rows": 0,
+                "counts_equal": False,
+                "problems": [{
+                    "node": f"{sid}_t*", "field": "key",
+                    "problem": "duplicate_window",
+                    "detail": (
+                        "the record holds "
+                        f"{held_duplicates[sid]['windows']} windows for this "
+                        "session — entry order is the only index it carries, "
+                        "so a positional key is a guess. This is a RECORD-side "
+                        "duplicate (a re-capture/resume), NOT a graph/backfill "
+                        "gap: do not backfill over it"),
+                }],
+            })
+            continue
         problems: list[dict] = []
         for tid, node in sorted(sessions[sid]["nodes"].items()):
             rec = rows.get(tid)
@@ -1407,12 +1533,26 @@ def census(graph: dict, record: dict, *, sample: int) -> dict:
                        "torn_tail": record.get("torn_tail") or [],
                        # Tolerated AND counted: a sealed day that provably
                        # holds no records. Never a silent skip (review P1).
-                       "empty_days": record.get("empty_days") or []}
+                       "empty_days": record.get("empty_days") or [],
+                       # Held back from the positional key space, with the graph
+                       # population each one needs placed: a duplicate that no
+                       # graph turn needs is disclosed and does not block.
+                       "duplicate_window": [
+                           dict(d, graph_turn_nodes=len(
+                               sessions[d["session"]]["nodes"])
+                               if d["session"] in sessions else 0)
+                           for d in (record.get("duplicate_window") or [])],
+                       # Which keys came from a WINDOWED list (the filing leg
+                       # drops blank turns and keeps the last
+                       # MAX_SESSION_TURNS), so an artifact never claims the
+                       # file's raw positions.
+                       "filed_window": record.get("filed_window") or []}
                       if record.get("leg") == "local" else
                       # Verbatim, never collapsed: a SKIPPED leg named
                       # 'hosted' is an artifact claiming a read that never
                       # happened (review cycle 6, P2).
-                      {"leg": record.get("leg") or "hosted"})},
+                      {"leg": record.get("leg") or "hosted",
+                       **({"skipped": True} if skipped else {})})},
         "parity": {
             "clean_sessions": clean,
             "failed_sessions": failed,
@@ -1434,9 +1574,28 @@ def census(graph: dict, record: dict, *, sample: int) -> dict:
         # sweep would delete a node nothing was compared against: that is a
         # refusal (exit 2), not a footnote on a pass.
         "verdict": ("CLEAN" if not failed and not anomaly_ids else "REFUSED"),
-        "refused_for": (["parity"] if failed else []) +
-                       (["outside_population"] if anomaly_ids else []),
+        # Named per cause: a duplicate-window refusal is a RECORD-side state with
+        # its own repair (a re-capture/resume), so folding it into "parity"
+        # would send the operator at a graph/backfill that cannot fix it.
+        "refused_for": (
+            (["parity"] if any(_problem_is_not(v, "duplicate_window")
+                                for v in failed) else []) +
+            (["duplicate_window"] if any(_problem_is(v, "duplicate_window")
+                                          for v in failed) else []) +
+            (["outside_population"] if anomaly_ids else [])),
     }
+
+
+def _problem_is(verdict: dict, name: str) -> bool:
+    """Does this failed session's FIRST problem carry ``name``?"""
+    problems = verdict.get("problems") or []
+    return bool(problems) and problems[0].get("problem") == name
+
+
+def _problem_is_not(verdict: dict, name: str) -> bool:
+    """Does this failed session carry a problem that is NOT ``name``?"""
+    problems = verdict.get("problems") or []
+    return bool(problems) and problems[0].get("problem") != name
 
 
 class _UsageParser(argparse.ArgumentParser):
@@ -1492,7 +1651,27 @@ def main(argv: list[str] | None = None) -> int:
     if args.sample < 0:
         parser.error("--sample must be >= 0")
 
-    if args.local_record_dir:
+    # ⛔ THE FLAG'S PRESENCE, NOT ITS TRUTHINESS (review P2). `if
+    # args.local_record_dir:` treated a set-but-EMPTY value as "no flag", so
+    # `--local-record-dir "$EVENTS_DIR"` with an unset variable fell into the
+    # hosted branch and measured an ambient `TORTOISE_RECORD_DSN` — the store
+    # the 2026-11-01 ruling says is NOT the authority — and could exit 0 CLEAN
+    # over it. That is precisely the silent authority switch the flag's own
+    # contract forbids. An empty value is neither leg: it refuses by name.
+    local_leg = args.local_record_dir is not None
+    if local_leg and not args.local_record_dir.strip():
+        sys.stderr.write(
+            "turn_parity_census: --local-record-dir was passed but is EMPTY "
+            "(a shell expansion like --local-record-dir \"$UNSET_VAR\" "
+            "yields nothing). An empty flag value is NOT 'no flag': falling "
+            "through would let an ambient TORTOISE_RECORD_DSN silently move "
+            "the census onto the hosted store the 2026-11-01 ruling says is "
+            "NOT the authority, so this refuses instead of reading either "
+            "store. The record cannot be read, so an absence is NOT "
+            "established.\n")
+        return 1
+
+    if local_leg:
         # The local leg is tenant-less, so an AMBIENT `TORTOISE_RECORD_DSN`
         # must not reach it (review P1): only an explicitly passed
         # `--record-dsn` is an ambiguity worth refusing. Refusing on the
@@ -1560,15 +1739,22 @@ def main(argv: list[str] | None = None) -> int:
     # (while the same input certified on the hosted leg, which tolerates zero
     # rows). The empty leg is LABELLED `local-skipped`/`hosted-skipped` so the
     # artifact cannot read as a real read.
-    if graph_is_empty and args.local_record_dir:
+    if graph_is_empty and local_leg:
         # LOCAL ONLY: the hosted read tolerates zero rows by itself, and
         # skipping IT reported a read of a DSN that was never opened (review
         # cycle 6, P1 — an unreachable hosted DSN certified exit 0).
+        #
+        # ⛔ And the skipped leg carries the leg's own DECLARED-ABSENT set plus
+        # `skipped` (review P3): a bare dict made `compared_fields` report all
+        # seven fields compared on a leg that was never opened — the same
+        # artifact-honesty failure this branch's sibling polices.
         record = {"rows_by_key": {}, "non_turn_shaped": 0,
-                  "leg": "local-skipped"}
+                  "leg": "local-skipped", "skipped": True,
+                  "record_dir": args.local_record_dir,
+                  "declared_absent": list(_LOCAL_RECORD_DECLARED_ABSENT)}
     else:
         try:
-            if args.local_record_dir:
+            if local_leg:
                 record = read_local_record_turns(args.local_record_dir)
             else:
                 record = read_record_turns(record_dsn, args.org_id,
@@ -1598,12 +1784,30 @@ def main(argv: list[str] | None = None) -> int:
         print(f"record     : {report['record']['turn_rows_total']} turn rows "
               f"({report['record']['episodic_rows_not_turn_shaped']} episodic "
               f"rows not turn-shaped)")
-    if report.get("declared_absent"):
+    if report["record"].get("skipped"):
+        # Review P3: the artifact must not state a comparison a skipped leg never
+        # performed — say NOTHING was compared, by name.
+        print("NOT COMPARED: NOTHING — the record leg was SKIPPED and never "
+              "opened, so no field was compared (not even the key)")
+    elif report.get("declared_absent"):
         # A narrower comparison must never read as the strong one.
         pronoun = "it" if len(report["declared_absent"]) == 1 else "them"
         print(f"NOT COMPARED: {', '.join(report['declared_absent'])} "
               f"(the record does not carry {pronoun}; compared: "
               f"{', '.join(report['compared_fields'])})")
+    for filed in report["record"].get("filed_window") or []:
+        # Disclosed, never silent: these keys are the FILED list's positions, not
+        # the file's, so the artifact must say the list was transformed.
+        print(f"filed window: session {filed['session']} — the filing leg "
+              f"POSTed {filed['filed_turns']} of the record's "
+              f"{filed['record_turns']} turn(s), so its keys are the FILED "
+              f"list's positions (NOT the file's raw positions)")
+    for dup in report["record"].get("duplicate_window") or []:
+        held = ("REMOVED FROM THE COMPARISON — the graph holds its turns and "
+                "no window can be placed" if dup.get("graph_turn_nodes")
+                else "disclosed only — no graph turn node needs it placed")
+        print(f"duplicate  : session {dup['session']} holds {dup['windows']} "
+              f"windows — {held}")
     if record.get("torn_tail"):
         for torn in record["torn_tail"]:
             print(f"torn tail  : {torn['at']} (mid-write, tolerated, "
