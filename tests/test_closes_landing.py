@@ -317,7 +317,11 @@ def test_a_same_repo_qualified_reference_is_a_claim():
 
 @pytest.mark.parametrize("body,expected", [
     ("Closes #1\n~~~\nCloses #2\n~~~", [1]),
-    ("Closes #1\n\n    Closes #2\n", [1]),
+    # An INDENTED block is no longer stripped: where a 4-space line is code vs a
+    # list item's continuation depends on the enclosing container's content
+    # column, and guessing wrong in the stripping direction loses a REAL claim.
+    # Over-reporting a quoted one is the safe direction here (see strip_code).
+    ("Closes #1\n\n    Closes #2\n", [1, 2]),
     ("Closes #1\n```\nCloses #2\n```", [1]),
 ])
 def test_quoted_keywords_are_not_claims(body, expected):
@@ -375,8 +379,9 @@ def test_sweep_flags_only_the_offending_pr(monkeypatch):
     ("- [x] fix it\n    Closes #10541\n", [10541]),
     ("1. fix it\n    Closes #10541\n", [10541]),
     ("see below\n    Closes #10541\n", [10541]),
-    # …but a block after a BLANK line is code, and a quoted keyword is not a claim.
-    ("note:\n\n    Closes #10541\n", []),
+    # …and an indented block after a blank line is NOT stripped either: the
+    # over-report is deliberate (see strip_code) — losing a real claim is worse.
+    ("note:\n\n    Closes #10541\n", [10541]),
 ])
 def test_indented_lines_that_continue_prose_are_still_claims(body, expected):
     assert cl.parse_closing_refs(body) == expected
@@ -427,3 +432,69 @@ def test_sweep_asks_for_the_OPEN_population(monkeypatch):
     argv = list_calls[0]
     assert argv[argv.index("--state") + 1] == "open"
     assert "--limit" in argv
+
+
+# ── cycle 3: the strip must not lose REAL claims inside list items ───────────
+
+@pytest.mark.parametrize("body,expected", [
+    ("- [x] fix it\n\n    Closes #10541\n", [10541]),
+    ("- fix it\n\n    - Closes #10541\n", [10541]),
+    ("1. step\n\n    - Closes #10541\n", [10541]),
+    ("note:\n\n    Closes #10541\n", [10541]),  # over-report, deliberately (see strip_code)
+])
+def test_a_claim_after_a_blank_line_inside_a_list_is_still_a_claim(body, expected):
+    assert cl.parse_closing_refs(body) == expected
+
+
+def test_a_fence_character_that_does_not_match_does_not_close():
+    """`~~~` does not close a ```-opened block, so #2 is still inside the fence."""
+    assert cl.parse_closing_refs("```\nCloses #1\n~~~\nCloses #2\n```\n") == []
+
+
+# ── cycle 3: a CLOSED subject on a SIBLING base is judged by its carrier ────
+
+def test_a_closed_subject_on_a_sibling_base_is_judged_by_its_carrier():
+    subject = _pr(63, SIBLING, "Closes #100", state="CLOSED")
+    carrier = _pr(64, DEFAULT, "Closes #100", head=SIBLING)
+    (finding,) = cl.classify(subject, _by_head(subject, carrier), DEFAULT)
+    assert finding.verdict == "lands"
+    assert finding.carrier == 64
+
+
+# ── cycle 3: the resolved repo slug is what makes a qualified claim visible ──
+
+def test_main_resolves_the_repo_slug_when_repo_is_omitted(monkeypatch, capsys):
+    import json as _json
+
+    def fake_gh(args):
+        if args[:2] == ["repo", "view"]:
+            return _json.dumps({"defaultBranchRef": {"name": DEFAULT},
+                                "nameWithOwner": "o/r"})
+        if args[:2] == ["pr", "view"]:
+            return _json.dumps({"number": 1, "baseRefName": DEFAULT,
+                                "body": "Closes o/r#100", "headRefName": "h",
+                                "state": "OPEN", "mergedAt": None})
+        return "[]"
+
+    monkeypatch.setattr(cl, "_gh", fake_gh)
+    assert cl.main(["--pr", "1", "--json"]) == 0
+    assert "100" in capsys.readouterr().out
+
+
+def test_main_drops_a_foreign_qualified_claim(monkeypatch, capsys):
+    import json as _json
+
+    def fake_gh(args):
+        if args[:2] == ["repo", "view"]:
+            return _json.dumps({"defaultBranchRef": {"name": DEFAULT},
+                                "nameWithOwner": "o/r"})
+        if args[:2] == ["pr", "view"]:
+            return _json.dumps({"number": 1, "baseRefName": DEFAULT,
+                                "body": "Closes other/r#100", "headRefName": "h",
+                                "state": "OPEN", "mergedAt": None})
+        return "[]"
+
+    monkeypatch.setattr(cl, "_gh", fake_gh)
+    assert cl.main(["--pr", "1", "--json"]) == 0
+    payload = _json.loads(capsys.readouterr().out)
+    assert payload["findings"] == []

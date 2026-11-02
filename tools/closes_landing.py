@@ -154,39 +154,32 @@ def _fence_run(line: str) -> tuple[str, int] | None:
 def strip_code(body: str) -> str:
     """Blank out the parts of a PR body that are CODE, not prose.
 
-    Line-based on purpose. CommonMark's rules that matter here:
+    ONLY fenced blocks are stripped. An INDENTED block is deliberately NOT: where
+    a 4-space line is code and where it is a list item's continuation or a
+    multi-paragraph bullet depends on the enclosing container's content column,
+    and getting that wrong in the stripping direction loses a REAL claim — a
+    false pass, the worst class here (two review cycles found it: first every
+    indented line, then every indented line after a blank line). A warn-only
+    instrument loses nothing by over-reporting a quoted keyword; it loses the
+    reader by under-reporting a real one.
 
-    * a fenced block opens with ``` or `~~~` and closes with the SAME character
-      and at least the same run length — a ```-only matcher with a same-length
-      backreference leaks the content of a ````-closed block;
-    * an INDENTED block cannot interrupt a paragraph or a list item, so a line
-      indented 4 spaces that CONTINUES prose is rendered text, not code.
-      Stripping every indented line (the first version of this) silently
-      swallowed real claims in checklists and nested bullets — a false pass,
-      the worst class here.
+    Fences: a block opens with ``` or `~~~` and closes with the SAME character
+    and a run at least as long.
     """
     out: list[str] = []
     fence: tuple[str, int] | None = None
-    prev_blank = True
     for line in body.splitlines():
         run = _fence_run(line)
         if fence is not None:
             if run and run[0] == fence[0] and run[1] >= fence[1]:
                 fence = None
             out.append("")
-            prev_blank = False
             continue
         if run:
             fence = run
             out.append("")
-            prev_blank = False
-            continue
-        if (line.startswith("    ") or line.startswith("\t")) and prev_blank:
-            out.append("")  # an indented code block: preceded by a blank line
-            prev_blank = False
             continue
         out.append(line)
-        prev_blank = not line.strip()
     return "\n".join(out)
 
 
@@ -265,10 +258,11 @@ def classify(pr: PullRequest, by_head: dict[str, PullRequest],
                         f"`{default_branch}` yet."),
             ))
             continue
-        # A SUBJECT that was CLOSED WITHOUT MERGING never fired the keyword: it
-        # is not on the default branch, nothing was closed, and nothing landed.
-        # Checked BEFORE the `lands` arm, because that arm assumes a merge.
-        if pr.closed_unmerged:
+        # A SUBJECT that was CLOSED WITHOUT MERGING never fired the keyword — but
+        # ONLY when its base IS the default branch: on a sibling base the question
+        # is whether the CARRIER carries the keyword, which the arms below answer,
+        # and claiming the subject "targets main" would be false (review c3-1).
+        if pr.closed_unmerged and pr.base == default_branch:
             findings.append(Finding(
                 issue=issue, pr=pr.number, base=pr.base, verdict="unresolved",
                 carrier=pr.number,
@@ -408,11 +402,13 @@ def fetch_identity(repo: str | None) -> tuple[str, str]:
         raise Unmeasurable(f"the repo identity could not be read: {raw[:200]}") from exc
     if not name:
         raise Unmeasurable("the repo reported an empty default branch name")
+    # An EMPTY slug must not degrade quietly into `None`: that would drop every
+    # same-repo qualified claim as foreign, with no signal — the exact false pass
+    # this read exists to remove, and the module's doctrine is Unmeasurable, never
+    # a quiet pass (review c3-5).
+    if not slug:
+        raise Unmeasurable("the repo reported no nameWithOwner")
     return name, slug
-
-
-def fetch_default_branch(repo: str | None) -> str:
-    return fetch_identity(repo)[0]
 
 
 def fetch_pr(number: int, repo: str | None) -> PullRequest:
