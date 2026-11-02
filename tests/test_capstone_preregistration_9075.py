@@ -2752,6 +2752,24 @@ def test_equal_epochs_on_the_base_are_still_not_before(tmp_path, monkeypatch):
     assert failures, "equal epochs must not pass as 'before'"
     assert "not strictly after" in failures[0], failures[0]
 
+    # ⛔ …and the arm must DISCRIMINATE (review cycle 3, finding 3). The shape above cannot: its two
+    # add-commits are equal in HEAD's history too, so the pre-fix PR-internal predicate refuses it as
+    # well. This second shape can. The base added BOTH artefacts in ONE commit while the
+    # contribution's own history has them ordered, so the pre-fix reading passes it and the base
+    # reading refuses it — the measured difference between the two rules.
+    (tmp_path / "squashed").mkdir()
+    repo = _repo_with_published_base(tmp_path / "squashed", monkeypatch)
+    base = _squashed_base(repo, epoch=1_700_000_100)
+    squashed_prereg = _commit_prereg(repo, epoch=1_700_000_100)
+    squashed_log = _write_and_commit(repo, "capstone.log", epoch=1_700_000_200)
+    # the PRE-FIX predicate is satisfied here, which is what makes the refusal below evidence
+    assert check._added_epochs(squashed_prereg)[0] < check._added_epochs(squashed_log)[0]
+    strict = check.check_ordering(squashed_prereg, [squashed_log], base_ref=base)
+    assert strict, "the base's equal epochs must still refuse an ordered-looking contribution"
+    assert "not strictly after" in strict[0], strict[0]
+    # …and it names the remedy that can actually clear it (finding 1c), not an ordering to fix.
+    assert "WITHDRAWAL" in strict[0], strict[0]
+
 
 def test_the_base_ref_refusal_names_the_cause_that_actually_fired(tmp_path, monkeypatch):
     """BOTH branches of `no_base_ref_message`, because the explicit one is the CI shape.
@@ -2884,7 +2902,7 @@ def _squashed_base(repo: Path, epoch: int, names: tuple[str, ...] = ("capstone.l
     """
     branch = _git_out(repo, "symbolic-ref", "--short", "HEAD")
     _git(repo, "checkout", "-q", "--orphan", "squashed-base")
-    _git(repo, "rm", "-rq", "--cached", "docs")
+    _git(repo, "rm", "-rq", "--cached", "--ignore-unmatch", ".")
     _commit_together(repo, epoch=epoch, names=names)
     sha = _git_out(repo, "rev-parse", "HEAD")
     _git(repo, "checkout", "-qf", branch)
