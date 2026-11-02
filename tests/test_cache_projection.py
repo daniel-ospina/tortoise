@@ -951,10 +951,22 @@ _UNWRAP_MARK = "jsonb_typeof(payload -> 'event') = 'object'"
 #: The `restatus` leg's id predicate, as `_LIFECYCLE_EVENTS_FOR_ONE_SQL` spells it.
 #: The fake parses the KEY out of the statement it is handed (see
 #: `_project_journal_rows`) instead of assuming `id`, so a clause rewritten to a
-#: different column cannot keep passing. ⚠️ It is unambiguous: every other
-#: narrowing clause interpolates `_PAYLOAD_EVENT`, a `COALESCE(...)` expression,
-#: so the ONLY literal `payload ->> '<key>'` in the statement is the id one.
-_ID_CLAUSE_RE = re.compile(r"payload ->> '(\w+)' = %s")
+#: different column cannot keep passing. ⚠️ The spelling became the UNWRAPPED
+#: `(COALESCE(...) ->> 'id') = %s` (review round 2, P2 — a nested creation record
+#: is materialised by the record and must not be excluded by the single-row
+#: door), so the pattern tolerates both the closing paren and its absence and
+#: matches the LAST `->> '<key>' … = %s` in the statement.
+_ID_CLAUSE_RE = re.compile(r"->> '(\w+)'\)? = %s")
+
+#: The event types the id narrowing covers, READ OUT OF THE STATEMENT (review
+#: round 2, P2). It used to be hardcoded here, which made the fake unable to fail
+#: on the exact regression the two-door pin names: MEASURED, narrowing the SQL's
+#: `IN ('EntityMutated', 'ObjectRegistered', 'SubjectAdded')` down to
+#: `IN ('EntityMutated')` left all 75 legs green, because the fake still matched
+#: the birth row. The lesson is this file's own doctrine — the fake emulates the
+#: statement it is handed, never the shape the caller intended.
+_EVENT_TYPE_SET_RE = re.compile(r"event_type IN \(([^)]*)\)")
+_QUOTED_RE = re.compile(r"'([^']*)'")
 
 
 def _project_journal_rows(sql: str, rows, params):
@@ -999,8 +1011,20 @@ def _project_journal_rows(sql: str, rows, params):
     #     `read_node` answered no `status` where the rebuild folded one.
     # The key is now READ OUT OF THE STATEMENT, so an unmodelled rewrite finds
     # nothing here either.
-    _id_clause = _ID_CLAUSE_RE.search(sql)
-    id_key = _id_clause.group(1) if _id_clause else None
+    # The LAST match, not the first: the name clause spells `- >> 'object') = %s`
+    # too, so a first-match read would take the NAME key as the id coordinate and
+    # narrow every row away (measured — five read-door legs red).
+    _id_clauses = list(_ID_CLAUSE_RE.finditer(sql))
+    id_key = _id_clauses[-1].group(1) if _id_clauses else None
+    # The id narrowing's event-TYPE set, also read out of the statement (review
+    # round 2, P2): a hardcoded set let the fake keep matching a birth row whose
+    # type the SQL had stopped selecting. ⚠️ The LAST `event_type IN (...)` in the
+    # statement, not the first — the full statement's WHERE already carries the
+    # birth leg's own `IN ('ObjectRegistered', 'SubjectAdded')`, so a naive first
+    # match would model the narrowing as birth-only and drop every `restatus`.
+    _type_sets = list(_EVENT_TYPE_SET_RE.finditer(sql))
+    id_event_types = (frozenset(_QUOTED_RE.findall(_type_sets[-1].group(1)))
+                      if _type_sets else frozenset())
     out = []
     for row in rows:
         payload = row.get("payload")
@@ -1021,7 +1045,13 @@ def _project_journal_rows(sql: str, rows, params):
             # #9974: the CREATION record's own `status` — the fourth writer.
             # Read from the payload top level, which is where a
             # `NodeSnapshot` (`ObjectRegistered`/`SubjectAdded`) carries it.
-            row["birth_status"] = src.get("status")
+            # ⚠️ STRING ONLY, because Postgres' `->>` returns text for a JSON
+            # number too: the statement wraps this column in
+            # `CASE WHEN jsonb_typeof(...) = 'string'`, so the fake must apply
+            # the same guard or it would report a fold production never makes
+            # (review round 2, P2 — `create_object(name, status=5)`).
+            birth = src.get("status")
+            row["birth_status"] = birth if isinstance(birth, str) else None
         if narrow:
             about = row.get("about_entities") or row.get("about_entities_camel")
             names = [row.get("object_name")]
@@ -1035,9 +1065,7 @@ def _project_journal_rows(sql: str, rows, params):
                 # prevent).
                 or (id_key is not None
                     and id_target is not None
-                    and row.get("event_type") in ("EntityMutated",
-                                                  "ObjectRegistered",
-                                                  "SubjectAdded")
+                    and row.get("event_type") in id_event_types
                     and row.get("node_id") == id_target)
             )
             if not matched:
@@ -2182,11 +2210,87 @@ def test_the_lifecycle_statement_is_parenthesised_as_declared():
         "the birth predicate was hoisted OUTSIDE the tenant scope — it would "
         "fold every tenant's creation records into every graph"
     )
+    # ⛔ ORDER ALONE DOES NOT CATCH A HOIST (review round 2, P2 — measured): the
+    # leaky form `... AND (A OR (B AND C)) OR (D)` is balanced, ordered after the
+    # scope predicates AND ends `))`, so every assertion above passes while the
+    # birth leg reads every tenant's rows. What "inside the tenant group"
+    # actually means is a PAREN DEPTH of exactly 1 at each non-first leg — the
+    # group opened once after the scope predicates and nothing closed it.
+    def depth_before(marker: str) -> int:
+        head = where[:where.index(marker)]
+        return head.count("(") - head.count(")")
+
+    assert depth_before("OR (event_type = 'EntityMutated'") == 1, (
+        "the EntityMutated leg is not at depth 1 inside the tenant group"
+    )
+    assert depth_before("OR (event_type IN ('ObjectRegistered'") == 1, (
+        "the birth leg is not at depth 1 inside the tenant group — a hoist "
+        "(`) OR (…)`) reads every tenant's creation records"
+    )
     # The three legs all sit inside ONE `AND (...)` group: it opens once, after
     # the scope predicates, and closes at the very end.
     assert where.rstrip().endswith("))"), (
         f"the statement does not close its tenant group at the end: "
         f"{where[-60:]!r}"
+    )
+
+
+def test_a_nested_creation_record_is_read_by_the_id_narrowing():
+    """An `event`-nested `ObjectRegistered` must not be excluded by the door.
+
+    Review round 2 (P2) measured it: `record_projection._nested_node_carrier`
+    accepts an `event`-nested carrier for ANY `path=None` snapshot, so the record
+    MATERIALISES such a creation record (verified through `mutations_for`) and the
+    full statement folds it through `_PAYLOAD_EVENT` — while a raw
+    `payload ->> 'id'` is NULL for it, so `read_node` silently answered no
+    `status` where `rebuild_from_record` folded one. That is the two-door split
+    this whole file exists to prevent, on a shape the record accepts.
+    """
+    from tortoise import record_serve as rs
+
+    conn = _FakeConn({
+        "object": [{"id": "o-9", "name": "Nested", "object_kind": "other",
+                    "props": {}}],
+        "journal_event": [{
+            "seq": 1,
+            "payload": {"version": "1.0", "type": "ObjectRegistered",
+                        "event": {"type": "ObjectRegistered", "id": "o-9",
+                                  "name": "Nested", "status": "retracted"}},
+        }],
+    })
+    view = cp.read_record_view(conn, org_id="o", graph_id="g")
+    obj = next(n for n in view.nodes if n.label == "Object")
+    assert obj.props.get("status") == "retracted", (
+        f"the full statement did not fold the nested creation record "
+        f"({obj.props!r})"
+    )
+    read = rs.read_node(conn, org_id="o", graph_id="g", label="Object",
+                        key="o-9")
+    assert read.get("status") == obj.props.get("status"), (
+        f"the single-row door answered {read!r} while the rebuild folded "
+        f"{obj.props.get('status')!r} — a nested creation record the record "
+        f"itself materialises"
+    )
+
+
+def test_the_narrowing_id_expression_matches_the_selects_node_id():
+    """One expression for the coordinate, so the two doors cannot read differently.
+
+    A DB-free pin for the shape review round 2 found: the narrowing must resolve
+    the id through the SAME `_PAYLOAD_EVENT` unwrap the select list uses for
+    `node_id`. Asserting the expression (not its result) is what a suite without
+    Postgres can honestly check.
+    """
+    assert "payload ->> 'id'" not in cp._LIFECYCLE_EVENTS_FOR_ONE_SQL, (
+        "the narrowing compares a RAW `payload ->> 'id'` while the select list "
+        "unwraps — a nested creation record would be excluded by the door and "
+        "folded by the rebuild"
+    )
+    # …and the id clause really is in the statement (a pin that only asserts an
+    # absence would pass if the whole clause were deleted).
+    assert "->> 'id') = %s" in cp._LIFECYCLE_EVENTS_FOR_ONE_SQL, (
+        "the id narrowing clause is gone — the single-row door cannot reach a "
+        "`restatus` or a creation record at all"
     )
 
 
