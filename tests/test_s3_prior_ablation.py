@@ -366,9 +366,14 @@ def _checker():
 
     Loaded for ONE thing: `EVIDENCE_LOG_GLOB`, so the test below globs the same set the ordering
     half globs instead of a private copy of the literal. The glob is deliberately a named constant
-    in the guard (`tools/capstone_preregistration_check.py:134`, *"Widening it is a deliberate
-    act"*), and a second copy here would be exactly the two-copies-that-can-disagree shape this
-    file refuses for the bars.
+    in the guard (`tools/capstone_preregistration_check.py:169`, the comment at `:167-168` says
+    *"Widening it is a deliberate act"*), and a second copy here would be exactly the
+    two-copies-that-can-disagree shape this file refuses for the bars.
+
+    ⛔ The line number is a PIN, and it moved: it read `:134` while this branch's own +59-line
+    module header sat above the constant, which put that citation inside the 3.12 interpreter
+    guard. Re-derived here (review cycle 8, finding 2) — an unasserted line number is silent when
+    it goes stale, so the re-derivation is recorded rather than made quietly.
     """
     spec = importlib.util.spec_from_file_location(
         "_capstone_preregistration_check",

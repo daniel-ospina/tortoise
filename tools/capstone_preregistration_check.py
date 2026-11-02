@@ -1101,9 +1101,20 @@ def _log_declares_no_measurement(log: Path) -> tuple[bool, str]:
     return True, ""
 
 
+#: What the report says when the ordering arm RETURNED BEFORE comparing a single epoch against
+#: the base. The refusal can be perfectly correct and still have measured nothing — an untracked
+#: registration with logs refuses on `_is_tracked`, and a contribution whose registration is not
+#: on the base refuses on an empty base add-set — so `ordering: "verified"` plus a resolved ref
+#: would say a measurement happened when the loop never ran. That is the cycle-7 F2 shape (the
+#: resolved base printed on a tree where nothing was measured) on a path F2 did not close, because
+#: F2 only covered the arm that RAISES; these arms RETURN (#10463 review cycle 8, follow-up 3).
+ORDERING_UNMEASURED = "UNMEASURED"
+
+
 def check_ordering(prereg: Path, logs: list[Path], pins: dict | None = None,
                    exempted: list[str] | None = None,
-                   base_ref: str | None = None) -> list[str]:
+                   base_ref: str | None = None,
+                   unmeasured: list[str] | None = None) -> list[str]:
     """``[]`` when every log is either after the registration ON THE BASE or provably unscored.
 
     **The claim, stated so it can be argued with (#10463):** for every evidence log, the
@@ -1114,6 +1125,9 @@ def check_ordering(prereg: Path, logs: list[Path], pins: dict | None = None,
     read out of — published commits, never the contribution's own siblings, because a squash merge
     rewrites the latter into one (that is the #10468 red: the same tree passed its PR checks and
     failed on `main` minutes later).
+
+    ``unmeasured``, when given, is APPENDED with the reason on every path that RETURNS before the
+    per-log epoch comparison — the caller must not report a base it never used.
 
     ``exempted``, when given, is APPENDED with the name of every log the content arm exempted
     (#9089). It is not decoration: an ordering violation that was WAIVED must be visible, or the
@@ -1152,6 +1166,8 @@ def check_ordering(prereg: Path, logs: list[Path], pins: dict | None = None,
     # tarball, a vendored copy, `git archive`), and it must not be replaced by the more general
     # base-ref error — the remedy is completely different (review cycle 1, finding 1).
     if logs and not _is_tracked(prereg):
+        if unmeasured is not None:
+            unmeasured.append(f"{PREREG_NAME} is not committed, so no add-commit was read")
         failures.append(
             f"{PREREG_NAME} is not committed, but {len(logs)} evidence log(s) exist — "
             "the ordering cannot be proved, and an unprovable ordering is not an ordering"
@@ -1172,16 +1188,26 @@ def check_ordering(prereg: Path, logs: list[Path], pins: dict | None = None,
     prereg_epochs = _added_epochs_on(base, prereg)
     if not prereg_epochs:
         if not logs:
+            # Nothing to order, so nothing was measured — a bundle with no evidence log has not
+            # established an ordering, and the report must not claim it did.
+            if unmeasured is not None:
+                unmeasured.append("no registration on the base and no evidence log to order")
             return failures  # no registration on base, and nothing to be ordered against
         # ⛔ Two DISTINCT refusals, deliberately not one: "it has no add-commit to compare at all"
         # and "it is in THIS history but not on the base" have different remedies, and the second
         # carries both of ITS causes (same-PR, or a stale base) in one message rather than guessing.
         if not _added_epochs(prereg):
+            if unmeasured is not None:
+                unmeasured.append(f"{PREREG_NAME} has no add-commit anywhere to compare")
             failures.append(
                 f"{PREREG_NAME} has no add-commit (git log --diff-filter=A found nothing) — "
                 "cannot establish that it precedes the evidence logs"
             )
             return failures
+        if unmeasured is not None:
+            unmeasured.append(
+                f"{PREREG_NAME} is not on the base, so no pair could be compared"
+            )
         failures.append(
             SAME_PR_REFUSAL.format(prereg=PREREG_NAME, base=base, n=len(logs))
         )
@@ -1671,11 +1697,20 @@ def run(directory: Path, use_git: bool = True, use_corpus: bool = True,
             # DOES resolve, so this is the CI shape that prints a base it never used.
             candidate = resolve_base_ref(base_ref) or UNRESOLVED_BASE
             report["ordering_base_candidate"] = candidate
-            failures += check_ordering(prereg, logs, pins, content_exempt, base_ref=base_ref)
+            unmeasured: list[str] = []
+            failures += check_ordering(prereg, logs, pins, content_exempt, base_ref=base_ref,
+                                       unmeasured=unmeasured)
             report["ordering_exempt"] = sorted(content_exempt)
-            ordering = "verified"
-            # Only NOW is the base a fact about this verdict rather than an intention.
-            report["ordering_base"] = candidate
+            if unmeasured:
+                # ⛔ The arm RETURNED before it compared a single epoch (an untracked
+                # registration, a registration absent from the base, a bundle with no log). The
+                # refusal it produced can be exactly right while nothing was measured, so
+                # "verified" + a resolved base would be the F2 lie on a path F2 did not cover.
+                ordering = f"{ORDERING_UNMEASURED} ({unmeasured[0]})"
+            else:
+                ordering = "verified"
+                # Only NOW is the base a fact about this verdict rather than an intention.
+                report["ordering_base"] = candidate
         except HistoryUnavailable as exc:
             # The THIRD outcome: neither a pass nor an ordering failure. Folding it into either is
             # what reds a correctly ordered tree in every CI test job (#9075 r4 P1). The git-FREE
