@@ -90,19 +90,17 @@ bounds are named here rather than folded into the marker because folding them in
 (the return is already a `dict`, so it is additive and needs no surface approval — the sibling search
 path does exactly this at `sdk.py:34571-34579`), and this document is the census, not the fix.
 
-⚠️ **`tortoise_query`'s structural arm is a different surface, and not ONE surface** — it splits on
-`paginated`, and neither half is uniform. With `offset`/`page` given the result IS bounded at the
-caller's `limit`, and **marked**: the `tag` arm slices at `mcp_server.py:2708` and returns
-`{"results", "total", "hasMore"}` at `:2710-2712`; the default arm pushes `limit=eff_limit` into
-`paginated_query` at `:2726` → `sdk.py:22245`'s `LIMIT $limit` → `:22255` (that method's
-`return {... "hasMore": skip + limit < total}`). Both bound the result by §1's definition — they
-differ in whether the bound is pushed into the query, not in whether one exists. Unpaginated there
-are three returns and two shapes: `tag` returns the bare list at `:2703`, and the default arm —
-which reads through `TortoiseSDK.query` (`:2736-2738` → `sdk.py:22101-22104`) — returns the bare list
-at `:2745` — or, when that list is empty and a `kind` was given,
-`{"results", "suggestion"}` at `:2740-2744`, a dict that still carries no `hasMore`/`total`. None of
-those five has a row in the census above; per the absence rule below, read them from this ⚠️ as
-named-but-not-yet-censused, never as compliant.
+⚠️ **`tortoise_query`'s structural arm (`text=None`) is a different surface, and not ONE surface.**
+With `offset`/`page` given it returns a `hasMore`/`total` dict — the `tag` arm at
+`mcp_server.py:2710-2712`, the default arm at `:2725-2730` → `sdk.py:22255`. Unpaginated it returns a
+bare list on the success path — `tag` at `:2703`, default at `:2745` through `TortoiseSDK.query`
+(`:2736-2738` → `sdk.py:22101-22104`) — except when that list is empty, a `kind` was given, **and**
+`compute_suggestion` has a hint to offer, where `:2740-2744` returns `{"results", "suggestion"}`, a
+dict carrying no `hasMore`/`total`. Boundary refusals (`page < 1`, `offset < 0`, `limit < 1`) and an
+SDK failure surfacing from `_safe` return a structured error dict instead. **This block is not an
+inventory**: none of these branches has a row in the census above, and per the absence rule below
+they read as named-but-not-yet-censused, never as compliant — a complete enumeration is a finding for
+a census row, not a parenthetical here.
 
 ⚠️ **The census is a population, and this table is the part of it that has been measured** — it is
 NOT yet exhaustive. §1 also names *body/log caps* and *ingest chunking*, and no row here covers
