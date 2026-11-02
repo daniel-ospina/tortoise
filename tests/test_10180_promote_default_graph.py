@@ -40,6 +40,13 @@ import tortoise.hosted_api as ha
 from tests._http_fixtures import patched_tortoise_sdk
 from tests.fake_control_plane import FakeControlPlane
 from tests.test_export_delete import _close_seed_sdks, _enable_supabase
+from tortoise import mcp_auth
+
+#: The transport wait bound this FILE runs under (#10452 / #9001). Generous on
+#: purpose: these requests do the promote carry inline, so their duration is a
+#: property of the HOST, and the shipped 10 s user-patience budget must never be
+#: what this file measures. Applied by the ``sb`` fixture; see the note there.
+_TEST_WAIT_BOUND_S = 600.0
 
 TEAM = "team-10180"
 OTHER_TEAM = "team-10180-other"
@@ -122,6 +129,32 @@ def sb(monkeypatch):
     monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
 
     quiesce_testclient_background_work(monkeypatch)
+    # #10452 fix lane / #9001: THIS FILE'S VERDICT MUST NOT BE A LATENCY VERDICT.
+    #
+    # The promote verb carries an org's onboarding record between graphs inside
+    # the request, so its duration is a function of the HOST, and every request
+    # in this file runs under `WaitBoundMiddleware` — the REST arm of the #3834
+    # owner decision (a user-patience budget, ``_TRANSPORT_WAIT_BOUND_S`` = 10 s).
+    # On a loaded box that budget is what the test measures instead of the verb:
+    # measured here 2026-11-02, `test_the_carried_anchor_is_the_orgs_identity_not_
+    # an_id_only_stub` answered **504** (the wait-bound refusal) with the same
+    # tree green on the two runs before it — the cold embedder load retries the
+    # hermetic egress guard forces were what pushed the carry past 10 s.
+    #
+    # ⛔ NOT AN EXEMPTION, and deliberately NOT in `_TRANSPORT_WAIT_BOUND_EXEMPT`:
+    # that set is the recorded decision's own scope, and adding `POST
+    # /v1/graphs/{id}/promote` to it would widen an owner ruling (see the
+    # `OVERRIDES:` line beside the constant — "do not `fix` them by making the
+    # bounds uniform"). The product question the breach raises (can a real
+    # promote outlive a 10 s user-patience budget, and what does the caller do
+    # with a 504 for a verb that keeps running) is OPEN on #9001; this line only
+    # stops a slow host from being read as the verb refusing.
+    #
+    # Raised rather than set to 0.0: 0.0 is this repo's idiom for "breach
+    # NOW" (it forces the refusal, `test_egress_bytes` / the #5049 controls),
+    # not for "disable the bound". Pinned by
+    # `test_the_promote_verdict_is_not_the_transport_budget` below.
+    monkeypatch.setattr(mcp_auth, "_TRANSPORT_WAIT_BOUND_S", _TEST_WAIT_BOUND_S)
     fake = FakeControlPlane({"organizations": [], "api_keys": [],
                              "org_memberships": [], "invitations": [],
                              "graphs": []})
@@ -152,6 +185,36 @@ def _as_key(*, scopes: list[str], org_id: str = TEAM) -> None:
 def _clear_overrides():
     yield
     ha.app.dependency_overrides.pop(ha.get_current_org_session, None)
+
+
+def test_the_promote_verdict_is_not_the_transport_budget(sb):
+    """#10452 fix lane / #9001 — a slow HOST must not be readable as the verb
+    refusing.
+
+    FAIL-ON: drop the ``sb`` fixture's raise and the shipped 10 s
+    user-patience budget (``mcp_auth._TRANSPORT_WAIT_BOUND_S``, the #3834 owner
+    ruling) is what the request is measured against, so a promote whose inline
+    carry outlives it answers 504 and every assertion in this file about the
+    carry becomes a coin-flip on host load. Measured at f2d88a4df+ on
+    2026-11-02: ``test_the_carried_anchor_is_the_orgs_identity_not_an_id_only_
+    stub`` red on ``assert 504 == 200``, green on the two runs either side.
+
+    The pin is STATIC rather than a sleep-past-the-bound arm on purpose: an arm
+    that discriminates has to sleep >10 s, which buys nothing this line does not
+    (the flake it guards is probabilistic, so a green sleep proves nothing a
+    green assertion below does not), and the second assertion is the one that
+    matters — it reds if the raise is ever "fixed" by WIDENING the recorded
+    decision's exemption set instead of by tuning the test.
+    """
+    assert mcp_auth._TRANSPORT_WAIT_BOUND_S == _TEST_WAIT_BOUND_S
+    assert not any(path.endswith("/promote")
+                   for _method, path in ha._TRANSPORT_WAIT_BOUND_EXEMPT), \
+        "the promote verb must stay BOUNDED — #3834's exemption set is a recorded decision"
+    tc, fake, _ = sb
+    _as_session()
+    r = tc.post(f"/v1/graphs/{NEW_ID}/promote?org_id={TEAM}")
+    assert r.status_code == 200, r.text
+    assert fake._live_default_rows(TEAM), "the verb ran"
 
 
 def _defaults(fake: FakeControlPlane, org_id: str = TEAM) -> list[dict]:
