@@ -1141,8 +1141,24 @@ def score_path_bullet() -> Row:
     # sees (review at `adde2763f`, blocking).
     unresolved_writers = {fn: d for fn, d in writers.items()
                           if d["kind"] == "unresolved_write"}
+    # `unknown` is wider than this population by TWO label-keyed groups, and
+    # neither is a census subject: the `duplicate` identities above, and
+    # `gated`/`ungated` writers whose label derivation still failed (`UNKNOWN`,
+    # or the `UNKNOWN(two labels: …)` shape) — those have their ROUTE resolved,
+    # which is what `kind` records, so the three #10541 route classes cannot
+    # apply to them. Because the two populations CAN differ, the note below
+    # names the one it counted (`N of M UNKNOWN-labelled writers`) rather than
+    # claiming "the unresolved set": a total that silently omits a writer this
+    # row listed four notes up is the same defect shape the population fix
+    # above removes.
+    # An out-of-vocabulary class (a typo'd or retired entry) is NOT a class: it
+    # would otherwise fall through BOTH `by_class` (gated on CENSUS_CLASSES) and a
+    # `unclassified` gated only on `is None` — the shape this code had before the
+    # `not in CENSUS_CLASSES` gate below — leaving the writer named nowhere and
+    # every class total reading 0 over a non-empty population. The sibling
+    # falsifier catches the typo in CI; the instrument must not lie meanwhile.
     unclassified = sorted(fn for fn in unresolved_writers
-                          if _census_class(fn) is None)
+                          if _census_class(fn) not in CENSUS_CLASSES)
     by_class: dict[str, list[str]] = {}
     for fn in unresolved_writers:
         cls = _census_class(fn)
@@ -1150,7 +1166,9 @@ def score_path_bullet() -> Row:
             by_class.setdefault(cls, []).append(fn)
     if unresolved_writers:
         notes.append(
-            "#10541 census over the unresolved set: "
+            "#10541 census over the writers labelled UNKNOWN(unresolved "
+            f"producer) — {len(unresolved_writers)} of {len(unknown)} "
+            "UNKNOWN-labelled writers: "
             # A middle dot, not `" | "`: `Row.observed` joins these notes into
             # ONE markdown table cell, and a pipe there used to split a
             # 4-column row into seven. `_table` now escapes the character at
@@ -1158,9 +1176,25 @@ def score_path_bullet() -> Row:
             # which is the point: a per-note rule is only as wide as the last
             # author to remember it.
             + " · ".join(
-                f"{cls}={len(by_class.get(cls, []))}"
-                + (f" ({', '.join(sorted(by_class[cls]))})" if by_class.get(cls) else "")
-                for cls in CENSUS_CLASSES
+                # ⛔ The `unclassified=` segment is what makes the totals RECONCILE
+                # to the `N` in the header. An out-of-vocabulary class is in no
+                # `by_class` bucket, so without this the line could read
+                # "1 of 1 … recognised_producer=0 · exempt=0 · bypass=0" — a
+                # header claiming one writer and three totals summing to zero,
+                # which is the same "silently omits a writer" defect this note
+                # was re-worded to stop. `by_class` covers in-vocabulary classes
+                # and `unclassified` covers the rest, so the segments now sum to
+                # `len(unresolved_writers)` by construction.
+                [
+                    f"{cls}={len(by_class.get(cls, []))}"
+                    + (f" ({', '.join(sorted(by_class[cls]))})"
+                       if by_class.get(cls) else "")
+                    for cls in CENSUS_CLASSES
+                ]
+                + ([
+                    f"unclassified={len(unclassified)}"
+                    f" ({', '.join(unclassified)})"
+                ] if unclassified else [])
             )
         )
     if unclassified:

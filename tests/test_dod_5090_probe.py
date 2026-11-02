@@ -39,6 +39,13 @@ claims:
 | `test_every_real_assignment_shape_still_reads_as_shipped_ON` | the same input, in the other direction | tightening the test makes a REAL shipped ON (compose map/array, `.env`, Dockerfile, `export`) read as a false `False` |
 | `test_searched_is_the_walk_not_the_list_of_mentions` | the documented `searched` contract | `searched` reports the mentions, so "what 'nowhere' covered" is `[]` for the case the function exists for |
 | `test_an_unreadable_surface_is_named_not_silently_excluded` | the `UNMEASURED` rule, applied to the walk | a file the walk could not read is folded into a measured `False` |
+| `test_every_unresolved_writer_carries_a_census_class` | the census and the unresolved set are the SAME SET, in both directions, LIVE | a writer this tree holds is unresolved and nothing says which of the three honest classes it is in — or a census entry outlives its hole, so `exempt` counts an instrument false positive that no longer exists |
+| `test_the_census_guard_has_teeth_on_an_INJECTED_map` | the same guard's teeth, without pinning this head | the guard goes vacuous when #5090's remainder lands and this tree holds no unresolved writer |
+| `test_a_duplicate_identity_paints_no_census_note` | #10541's census population | a `duplicate` identity is counted as a census member, so a census is painted over a population that cannot hold a key for it |
+| `test_the_census_note_names_only_the_unresolved_producers` | the same population, in the other direction | a classed unresolved producer stops being named, or a duplicate is counted alongside it |
+| `test_the_census_note_does_not_break_the_markdown_table` | the row the table emits keeps ONE cell count, header included | a note carries a `|` and `_cell` STOPS escaping it, so GFM splits the 4-column row — ⚠️ this fixture's note carries none today (the note joins with ` · `), so the emitter's escaping is pinned by `test_the_table_escapes_a_pipe_in_every_row_not_only_row_two` instead |
+| `test_an_out_of_vocabulary_census_class_is_unclassified_not_invisible` | an out-of-vocabulary class is NAMED as UNCLASSIFIED, and the census segments still ACCOUNT for the population | a class outside `CENSUS_CLASSES` falls through both `by_class` and `unclassified`, so the writer is named nowhere and the segments sum to `0` against a header claiming `N` |
+| `test_the_census_note_names_the_population_it_counted` | the total does not claim a population wider than it counted | a duplicate is listed as an unresolved writer while the note claims to cover the whole unresolved set and silently omits it |
 | `test_every_census_citation_re_derives_at_this_head` | `WRITER_CENSUS`'s own promise — *"the entries below were READ at their seam"* — which `#5090`/`#10541` quote as evidence | a citation names a symbol that file does not define, or a needle that is no longer inside the symbol it is cited for (the `file:line` form drifted silently when `sdk.py` grew) |
 | `test_the_citation_check_has_teeth_on_an_INJECTED_drift` | the same guard can FAIL | a drifted symbol, a missing needle, an unclassed entry or orphan evidence passes |
 | `test_an_executed_workflow_run_body_is_a_shipped_setting` | bullet 1 reads what the CI EXECUTES | a `run: |` body carrying `export FLAG=1` is counted as documentation, so row 1 reports `set ON in: none` |
@@ -1617,6 +1624,25 @@ def _census_violations(unresolved, census, classes, bypass_cls) -> list[str]:
     if bypasses:
         out.append("a REAL bypass must be fixed or filed, not parked in the "
                    f"census: {bypasses}")
+    # The STALE direction, which `unclassified` above cannot see: a census entry
+    # whose writer is no longer unresolved. A census keyed by writer NAME is
+    # never re-checked against the finding it was recorded for, so an entry can
+    # outlive its hole — the `unused suppression` case Ruff (RUF100) and
+    # ESLint's `reportUnusedDisableDirectives` report explicitly, and the one
+    # Semgrep keeps as an `Ignored` triage state. Left unchecked it inflates the
+    # `exempt` count a reader takes as "these are the instrument's false
+    # positives". EQUALITY on purpose: the missing direction alone is a guard
+    # that is satisfied by never deleting an entry, and the stale direction
+    # alone is satisfied by never adding one.
+    live = set(unresolved)
+    stale = sorted(w for w in census if w not in live)
+    if stale:
+        out.append(
+            "census entries with no unresolved writer behind them — either the "
+            "hole was fixed (re-measure before deleting), the writer was "
+            "re-kinded and is STILL a hole (became `duplicate`, or "
+            "`gated`/`ungated` with an unresolved label), or the key is "
+            f"stale/typo'd: {stale}")
     return out
 
 
@@ -1638,11 +1664,23 @@ def test_every_unresolved_writer_carries_a_census_class() -> None:
     writers reds on a CORRECT change — and its cheapest-looking repair is to
     delete the assertion, which disarms the guard exactly when the epic
     completes (review at `adde2763f`, blocking). The shape this file already
-    refuses at `test_every_embedding_write_path_reaches_the_gate_seam`, and an
-    empty live set here is a GREEN tree, not a proof that nothing is checked:
-    `test_the_census_guard_has_teeth_on_an_INJECTED_map` carries the property
-    on an injected set, so completing `#10541` turns this green without
-    touching it.
+    refuses at `test_every_embedding_write_path_reaches_the_gate_seam`.
+
+    ⛔ NOR does an empty live set ALONE make the tree green. `_census_violations`
+    reports the STALE direction too (`no unresolved writer behind them`), so
+    the census entry must be trimmed in the same change that resolves its
+    writer; until it is, this test is RED over every un-trimmed entry — the
+    `unused suppression` contract Ruff's RUF100 and ESLint's unused-suppression
+    reporting prescribe, reached by `#5090`'s remainder. Read that failure
+    message before touching anything: it names the three reasons an entry can
+    look stale and only ONE of them is a delete.
+
+    Once the entries ARE trimmed the live set and the census are both empty and
+    this test is GREEN — that is the FINISHED state, not a disarmed guard, and
+    it is the state `#5090`'s remainder is aiming at. Nor is the guard vacuous
+    while the set is empty: the injected-map test carries both directions on an
+    injected census, and `test_an_untrimmed_census_over_a_resolved_set_is_red`
+    executes the trim contract this paragraph states.
     """
     census = getattr(probe, "WRITER_CENSUS", {})
     classes = getattr(probe, "CENSUS_CLASSES", ())
@@ -1653,6 +1691,63 @@ def test_every_unresolved_writer_carries_a_census_class() -> None:
     violations = _census_violations(
         unresolved, census, classes, probe.CENSUS_BYPASS)
     assert not violations, "\n".join(violations)
+
+
+def test_an_untrimmed_census_over_a_resolved_set_is_red() -> None:
+    """Resolving every writer does NOT license a stale census entry.
+
+    `#5090`'s remainder reaches a tree with NO unresolved writers, and the trim
+    contract the sibling docstring states is measured here rather than
+    restated: an entry whose writer is no longer a hole makes
+    `_census_violations` report `no unresolved writer behind them`.
+
+    ⛔ The census is INJECTED and the unresolved set is empty ON PURPOSE. An
+    earlier version of this test fed the LIVE `WRITER_CENSUS` into the same
+    assertion with an empty live set, which made the pair UNSATISFIABLE at the
+    very state it named: with the entries trimmed as the sibling docstring
+    demands, `_census_violations([], {}, …)` is `[]` and `assert stale` failed
+    on a CORRECT tree — while leaving the entries in place reddened the live
+    falsifier instead. No tree satisfied both tests (review on this PR, P2).
+    The contract is about an UNTRIMMED census, not about today's literal, so an
+    injected map keeps it executable after the real census is emptied — the
+    same shape `test_the_census_guard_has_teeth_on_an_INJECTED_map` uses.
+
+    ⛔ What is measured here is the HELPER's contract, never another test's
+    PROSE. A previous version also asserted that the live falsifier's docstring
+    did (or did not) contain three given phrases; that was deleted (review on
+    this PR, P3) because a fragment like `is a GREEN tree` is a TRUE sentence in
+    this file's own voice — `a trimmed census over an empty live set is a GREEN
+    tree` is exactly right — so the pin would red the lane that finishes
+    `#5090` on a CORRECT prose edit, and it is vacuous under `-OO`, where
+    `__doc__` is `None`. Do not re-add it: the two assertions below are the
+    contract, and `_census_violations` is what a prose claim is checked against.
+    """
+    resolved = "tortoise.q::_resolved_since"
+    also_resolved = "tortoise.q::_also_resolved"
+    census = {
+        resolved: (probe.CENSUS_RECOGNISED, "injected for this test"),
+        also_resolved: (probe.CENSUS_EXEMPT, "injected for this test"),
+    }
+    violations = _census_violations(
+        [], census, probe.CENSUS_CLASSES, probe.CENSUS_BYPASS)
+    stale = [v for v in violations
+             if "no unresolved writer behind them" in v]
+    assert stale, (
+        "an untrimmed census over a resolved set must NOT read as green: the "
+        f"census outlives its holes, and that is where the trim is demanded — "
+        f"{violations}")
+    unnamed = [w for w in census if w not in stale[0]]
+    assert not unnamed, (
+        "the stale violation names a subset only, so the repair it demands "
+        f"is not derivable from it: {unnamed}")
+    # The TRIMMED census over the same resolved set is the finished state and it
+    # is GREEN. Without this the assertion above would be satisfied by a helper
+    # that redded unconditionally — the "pin the head" failure this file
+    # refuses, and the one that made the previous version unsatisfiable.
+    assert _census_violations(
+        [], {}, probe.CENSUS_CLASSES, probe.CENSUS_BYPASS) == [], (
+        "a trimmed census over a resolved set is the FINISHED state and must "
+        "be green, or the trim contract can never be satisfied")
 
 
 def test_every_census_citation_re_derives_at_this_head() -> None:
@@ -1743,9 +1838,10 @@ def test_the_census_guard_has_teeth_on_an_INJECTED_map() -> None:
     """The `#10541` guard's RED and GREEN directions, both on an injected set.
 
     Durable on purpose: green for one writer carrying a real class, red for one
-    that carries none, red for a class outside the vocabulary, and red for a
-    REAL bypass — measured without depending on whether this head still has
-    unresolved writers (the `assert unresolved` trap at `adde2763f`).
+    that carries none, red for a class outside the vocabulary, red for a
+    REAL bypass, and red for a STALE entry — measured without depending on
+    whether this head still has unresolved writers (the `assert unresolved`
+    trap at `adde2763f`).
     """
     classes = probe.CENSUS_CLASSES
     bypass_cls = probe.CENSUS_BYPASS
@@ -1760,6 +1856,12 @@ def test_the_census_guard_has_teeth_on_an_INJECTED_map() -> None:
         bypass_cls))
     assert "REAL bypass" in str(_census_violations(
         [classed], {classed: (bypass_cls, "injected")}, classes, bypass_cls))
+    # The STALE direction: a census entry with no unresolved writer behind it.
+    assert "no unresolved writer behind them" in str(_census_violations(
+        [classed], {classed: (probe.CENSUS_RECOGNISED, "injected"),
+                    "tortoise.q::_resolved_since": (probe.CENSUS_EXEMPT,
+                                                    "injected")},
+        classes, bypass_cls))
 
 
 def test_a_duplicate_identity_paints_no_census_note(monkeypatch):
@@ -1918,6 +2020,99 @@ def test_the_table_escape_holds_inside_every_inline_span_a_note_carries(span):
     assert len({_cell_count(ln) for ln in lines}) == 1, (
         f"a pipe inside {span!r} split the cell: {lines}")
 
+
+def test_an_out_of_vocabulary_census_class_is_unclassified_not_invisible(
+        monkeypatch):
+    """A class outside `CENSUS_CLASSES` must read as UNCLASSIFIED, not vanish.
+
+    `by_class` is gated on `cls in CENSUS_CLASSES` and `unclassified` was gated
+    on `_census_class(fn) is None`, so an entry whose class string is a typo (or
+    a retired class) matched NEITHER: the writer was named nowhere and every
+    class total read `0` over a population of one — the instrument printing
+    totals that account for nothing it was asked about.
+
+    `test_the_census_guard_has_teeth_on_an_INJECTED_map` already catches the
+    typo in CI (it asserts a class outside the vocabulary is a violation), but
+    that guard reads the DICT. The row the reader actually sees said `0` of
+    everything, and this diff's equality guard makes editing census entries a
+    routine act — so the instrument must not lie while CI is the only one
+    objecting.
+
+    Two properties, because naming the writer is not enough: the writer must be
+    NAMED on the UNCLASSIFIED line, and the census line's segments must still
+    RECONCILE to the `N of M` in its own header. Without the second, the line
+    read `1 of 1 … recognised_producer=0 · exempt=0 · bypass=0` — a header
+    claiming one writer and totals summing to zero, i.e. the same
+    silently-omitted-writer shape the note was re-worded to remove.
+    """
+    writers = {
+        "tortoise.consistency::_compare_views": {
+            "callee": probe.SEAM_CALL, "at": "tortoise/consistency.py:1",
+            "kind": "unresolved_write",
+            "label": "UNKNOWN(unresolved producer)",
+        },
+    }
+    # A class string that is NOT in CENSUS_CLASSES — the typo/retired shape.
+    assert "exmpt" not in probe.CENSUS_CLASSES
+    monkeypatch.setitem(
+        probe.WRITER_CENSUS, "tortoise.consistency::_compare_views",
+        ("exmpt", "MUTATION: an out-of-vocabulary class"))
+    monkeypatch.setattr(probe, "embedding_writers", lambda: writers)
+    row = probe.score_path_bullet()
+    unclassified = [n for n in row.notes if "UNCLASSIFIED" in n]
+    assert unclassified, (
+        "a census entry whose class is outside CENSUS_CLASSES disappeared from "
+        f"the instrument's output entirely: {row.notes}")
+    assert "tortoise.consistency::_compare_views" in unclassified[0], unclassified
+    # ...and the census line still ACCOUNTS for it: the segments reconcile to
+    # the `1 of 1` in the header instead of summing to zero.
+    census = [n for n in row.notes if n.startswith("#10541 census")]
+    assert len(census) == 1, row.notes
+    assert "unclassified=1 (tortoise.consistency::_compare_views)" in census[0], (
+        f"the census segments do not reconcile to its own header: {census[0]}")
+    assert "1 of 1 UNKNOWN-labelled" in census[0], census[0]
+
+
+def test_the_census_note_names_the_population_it_counted(monkeypatch):
+    """The census total must not claim a population wider than it counted.
+
+    The note said "over the unresolved set", but the counted population is
+    `kind == "unresolved_write"` while the note four lines above ("unresolved
+    writers") prints `unknown` — which also carries duplicates. With one of
+    each present a reader saw TWO listed writers and totals summing to ONE,
+    while the note asserted coverage of both. Naming the population, and
+    stating `N of M`, makes any future under-coverage visible instead of
+    plausible.
+
+    ⛔ The noun matters too. An earlier wording was "the unresolved PRODUCERS",
+    which the same line falsifies: `exempt` is defined as "the function is NOT a
+    producer of a stored vector", so `... PRODUCERS ... exempt=8` says "8 of
+    these producers are not producers" in output quoted into `#5090`'s body.
+    The note now names the LABEL the population is keyed on, which no class on
+    the line can contradict.
+    """
+    writers = {
+        "tortoise.consistency::_compare_views": {
+            "callee": probe.SEAM_CALL, "at": "tortoise/consistency.py:1",
+            "kind": "unresolved_write",
+            "label": "UNKNOWN(unresolved producer)",
+        },
+        "tortoise.y::_upsert_point": {
+            "callee": probe.SEAM_CALL, "at": "tortoise/y.py:2",
+            "kind": "duplicate", "label": "UNKNOWN(duplicate writer name)",
+        },
+    }
+    monkeypatch.setattr(probe, "embedding_writers", lambda: writers)
+    row = probe.score_path_bullet()
+    census = [n for n in row.notes if n.startswith("#10541 census")]
+    assert len(census) == 1, row.notes
+    # It states how many of the UNKNOWN-labelled writers it actually counted.
+    assert "1 of 2 UNKNOWN-labelled" in census[0], census[0]
+    # ...and names the population by the LABEL, not by a class it cannot hold.
+    assert "writers labelled UNKNOWN(unresolved producer)" in census[0], census[0]
+    assert "PRODUCERS" not in census[0], (
+        "the note claims a population the same line contradicts: `exempt` is "
+        f"defined as NOT being a producer of a stored vector: {census[0]}")
 
 
 # ── The two verdicts that had no falsifier (fresh-context review, P2-1) ──────
