@@ -224,24 +224,23 @@ kill_timeout = 30
   # this exit turns into a STOPPED machine instead of a self-heal — the block,
   # not a `fly machine status` reading of a machine that may since have been
   # recreated, is the record. Pinned by a test, so its removal turns CI red.
-  # 600s is DERIVED, not asserted (#10585 review P2): the longest BOUNDED
-  # synchronous operation that can run on the loop is the synchronous LLM call,
-  # and there are two bounds — the LARGER one is what 600s has to clear:
-  #   * 60s — `OpenAICompatModel(timeout=60)` (tortoise/models.py:128) issued by
-  #     `urlopen(req, timeout=self.timeout)` at :183, plus `httpx timeout=(10,
-  #     60)` (tortoise/model_adapters.py:159,276). This is the bound
-  #     LOOP_STALE_AFTER's own comment names, and the one the hosted app's
-  #     on-loop calls actually use.
-  #   * 300s — `OllamaModel(timeout=300)` (tortoise/models.py:201) issued by the
-  #     same `urlopen` at :233. Not reachable from the hosted loop (callers are
-  #     ingest.py:799 and session_indexer.py:481, which passes timeout=30), but
-  #     the module default is not hosted-only, so it must clear this too.
-  # So 600s = 10x the 60s bound / 2x the 300s Ollama bound / 3.3x the
-  # enabled-threshold floor (max(120, 2*LOOP_STALE_AFTER) = 180s) /
-  # 6.7x LOOP_STALE_AFTER (where /healthz already reports stale) / 68x the
-  # observed p99 loop lag (8.8s). It is NOT above the ~819s token-scaled model
-  # deadline (extractor_v2.py:11715) — that path is OFF the loop by the #3060
-  # invariant, so it cannot be the tick-blocking bound. `0` disables it.
+  # 600s is DERIVED, not asserted (#10585 review P2), and it is derived from
+  # what is actually ON the loop: graph I/O, bounded by its own socket timeouts
+  # (`projection._socket_timeouts` 2s connect / 10s read, read clamped at
+  # `_DB_TIMEOUT_MAX_S` = 60s; the embedded lane adds one retry) — ~120s worst
+  # case, ~20s at the defaults. No model call runs on the loop here: both
+  # extraction lanes are off it by the #3060 invariant, so the LLM bounds do
+  # not size this ceiling. 600s is then:
+  #   * 5x the worst bounded on-loop operation (120s), 30x the default (20s);
+  #   * 3.3x the enabled-threshold floor (max(120, 2*LOOP_STALE_AFTER) = 180s);
+  #   * 6.7x LOOP_STALE_AFTER, where /healthz already reports stale;
+  #   * 68x the observed p99 loop lag (8.8s).
+  # A SELF-HOSTER that drives the SDK synchronously on its own loop must ALSO
+  # clear the model bounds (`OpenAICompatModel(timeout=60)` / `httpx
+  # timeout=(10, 60)`, and `OllamaModel(timeout=300)`), which 600s does.
+  # It is NOT above the ~819s token-scaled model deadline (`extractor_v2`) —
+  # that path is OFF the loop by the #3060 invariant, so it cannot be the
+  # tick-blocking bound. `0` disables it.
   TORTOISE_LOOP_STALL_HARD_EXIT_S = "600"
   # ⛔ TORTOISE_RECORD_DSN is a Fly SECRET, not an [env] key (#9548, epic #7879
   # R1) — and must never be added here. Its value is a Postgres DSN carrying a
