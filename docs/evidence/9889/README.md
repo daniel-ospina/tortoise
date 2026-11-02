@@ -299,18 +299,34 @@ E1 REFUSED decidable=False (before spread 20.6 pp)
 E2 FAIL — E2a 8/14 (bar >= 13), E2b fused 1/114 = 0.008772
 ```
 
-It measures nothing itself: every number is read out of a record above. It
-**refuses** (exit 2, no record) when an input record is missing, when the E2a
-falsifier does not reach the frozen denominator (an inert counter), when the
-value-gate positive controls are dead, or when the ON run's corpus is not the
-pre-registration's frozen `fixtures_hash` — so a row can never cite a corpus the
-record did not freeze.
+It measures nothing itself: every number is read out of a record above, and every
+BAR out of the pre-registration — `capstone_measure.parse_bars`, the bundle's ONE
+reader, so this record and the row that cites it cannot read two thresholds. It
+**refuses** (exit 2, no record) when an input record is missing, when a threshold
+cannot be parsed out of the frozen record, when the E2a record grades a
+denominator other than the frozen **14** (a `13 of 14` bar printed over an N
+nobody froze), when the E2a falsifier does not reach the frozen denominator (an
+inert counter), when the ON arm and the E2a counts were taken on different
+GRAPHS (the ON log's own `# graph:` line — its `# head:` is equal either way, so
+the head cannot catch it), when the value-gate positive controls are dead, or
+when the ON run's corpus is not the pre-registration's frozen `fixtures_hash` —
+so a row can never cite a corpus the record did not freeze, a denominator the
+record did not freeze, or a population from another run.
 
 **E1's refusal is a measurement, not a gap.** Two independent OFF realizations
 (0.3590, 0.5652) and one ON realization (0.2131) can be paired two ways, and the
 two pairings give different verdicts. At n=1 per arm the verdict would depend on
 which before run is chosen, so the aggregate is `REFUSED` with both pairings
 printed. The next requirement is **n >= 2 per arm**.
+
+**The counts reach the rows.** The capstone's E2 row now carries E2a's count over
+the FROZEN 14 (`8 of 14` today; the bar is `>= 13 of 14`), and E1's carries the
+after arm's bare-definite `:Object` count over its Objects (`13 of 61`). They are
+NOT a sibling pair any more: `tools/capstone_verdict_check.py`'s V8 compares two
+copies of ONE population, and these two rows score two (all Objects vs the 14
+value-bearing units) — naming them siblings is what forced both counts empty, and
+an empty count on the row a `GREEN` would carry is refused by V5, so the first run
+to reach 13/14 produced a table the gate exited 1 on.
 
 
 ⚠️ **Provenance of these records is stated once**, in §"Which probe revision

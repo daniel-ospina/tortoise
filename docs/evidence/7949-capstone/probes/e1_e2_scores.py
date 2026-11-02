@@ -18,9 +18,13 @@ artifact cites a probe run.
 What each number is, and what it is NOT — stated here so a reader does not have
 to find it:
 
-* **E1** is `after_share <= 0.50 x before_share` over ALL `:Object` nodes written
-  by the run, floored at 30 Objects. The before arm exists in TWO independent
-  realizations (two OFF runs, because a single one cannot show whether a
+* **E1** is `after_share <= multiplier x before_share` over ALL `:Object` nodes
+  written by the run, floored at 30 Objects. BOTH numbers come out of the
+  pre-registration by `capstone_measure.parse_bars` — the multiplier (0.50 today)
+  from `criteria[E1].threshold`, the two floors from `denominator_floors` — so
+  this record cannot score against a bar the record did not freeze. The before
+  arm exists in TWO independent realizations (two OFF runs, because a single one
+  cannot show whether a
   difference is the arm or the model) and the after arm in one (the ON run).
   Pairing the single after arm against each before arm gives **two different
   verdicts**, so the honest aggregate is `decidable: false` — the metric is
@@ -43,14 +47,19 @@ Usage::
         --out docs/evidence/9889/e1-e2-scores.json
 
 Exit status: 0 when a scoreable record was written; **2** when any input record
-is missing, when the E2a falsifier did not reach the frozen denominator (an
-inert counter), when the value-gate positive controls are dead, or when a
-before/after share is absent — because a score computed over an unproven counter
-is the exact failure mode this bundle exists to stop.
+is missing, when a threshold cannot be parsed out of the frozen record, when the
+E2a record grades a denominator other than the frozen **14** (a bar printed over
+an unfrozen population), when the E2a falsifier did not reach the frozen
+denominator (an inert counter), when the ON arm and the E2a counts come from
+different graphs (two populations in one record), when the value-gate positive
+controls are dead, or when a before/after share is absent — because a score
+computed over an unproven counter is the exact failure mode this bundle exists
+to stop.
 """
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import re
 import sys
@@ -99,8 +108,41 @@ def _grep(text: str, pattern: str, *, what: str) -> str:
     return match.group(1)
 
 
+#: The bundle's ONE bar reader, loaded from the sibling probe by path.
+#:
+#: E1's multiplier, E1b's 90, E2a's `13 of 14` and E2b's 0.05 are read out of
+#: `preregistration.json` by `capstone_measure.parse_bars`, whose docstring states
+#: the rule this driver obeys: *"a bar typed into this file is a bar nobody froze,
+#: so a lane could move a threshold by editing the probe"*. This driver emits the
+#: artifact BOTH capstone rows cite, so a second reading of the same bars would be
+#: a second place a threshold can move — and two readers of one frozen number can
+#: only disagree; they can never both be right. An amendment ("a NEW linked record,
+#: never an edit to the frozen one") then moves this record with the probe that
+#: scores it. Loaded by FILE PATH because `probes/` is not a package and this module
+#: is executed as a script.
+_BARS_READER: dict = {}
+
+
+def _parse_bars(prereg: dict) -> dict:
+    if not _BARS_READER:
+        path = Path(__file__).with_name("capstone_measure.py")
+        spec = importlib.util.spec_from_file_location(
+            "_capstone_measure_bars", path)
+        if spec is None or spec.loader is None:  # pragma: no cover - absent file
+            raise _refuse(f"cannot load the bar reader at {path}")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        _BARS_READER["module"] = module
+    # An unparseable threshold is a `ValueError` in the reader (G0's refusal
+    # contract); here it is this driver's refusal — exit 2, not a traceback.
+    try:
+        return _BARS_READER["module"].parse_bars(prereg)
+    except ValueError as exc:
+        raise _refuse(f"{PREREG}'s criteria cannot be parsed: {exc}") from exc
+
+
 def frozen_denominators(repo: Path) -> dict:
-    """The frozen floors, read from the pre-registration — never typed here."""
+    """The frozen floors AND bars, read from the pre-registration — never typed."""
     prereg = _read_json(repo / PREREG)
     floors = prereg.get("denominator_floors") or {}
     for key in ("e1_objects", "e1_min_before_share", "e2b_surviving_units"):
@@ -109,12 +151,26 @@ def frozen_denominators(repo: Path) -> dict:
     corpus = prereg.get("corpus") or {}
     if not corpus.get("fixtures_hash"):
         raise _refuse(f"{PREREG} carries no corpus.fixtures_hash")
+    value_bearing = corpus.get("value_bearing_units")
+    if not isinstance(value_bearing, int) or isinstance(value_bearing, bool):
+        raise _refuse(f"{PREREG} carries no integer corpus.value_bearing_units")
+    bars = _parse_bars(prereg)
+    # The record freezes E2a's denominator in TWO places — `corpus.value_bearing_units`
+    # (the population §3.3 derives) and `criteria[E2a]`'s `of` (the bar's denominator).
+    # A run that printed one while scoring the other would be reporting a bar nothing
+    # froze, so their disagreement is a refusal here rather than a number later.
+    if bars["E2a"]["of"] != value_bearing:
+        raise _refuse(f"{PREREG}'s criteria[E2a] bar is 'of "
+                      f"{bars['E2a']['of']}' but corpus.value_bearing_units is "
+                      f"{value_bearing} — two frozen statements about E2a's "
+                      "denominator disagree, so no bar can be printed over it")
     return {
         "e1_objects": floors["e1_objects"],
         "e1_min_before_share": floors["e1_min_before_share"],
         "e2b_surviving_units": floors["e2b_surviving_units"],
         "fixtures_hash": corpus["fixtures_hash"],
-        "criteria": prereg.get("criteria"),
+        "e2a_units": value_bearing,
+        "bars": bars,
     }
 
 
@@ -170,6 +226,7 @@ def read_on_arm(repo: Path) -> dict:
     real_facts = int(_grep(text, r"^e1b outcome=\S+ real_facts=(\d+)",
                            what="e1b real_facts"))
     head = _grep(text, r"^# head: (\S+)", what="# head")
+    graph = _grep(text, r"^# graph: (\S+)", what="# graph")
     corpus = _grep(text, r"^# corpus: \S+ fixtures_hash=sha256:(\S+)",
                    what="# corpus fixtures_hash")
     fused, atomic = _grep(text, r"^e2b outcome=\S+ fused=(\d+/\d+)",
@@ -177,6 +234,7 @@ def read_on_arm(repo: Path) -> dict:
     return {
         "artifact": f"{EVIDENCE / ON_ARM_LOG}",
         "head": head,
+        "graph": graph,
         "corpus_sha256": corpus,
         "objects": objects,
         "bare_definite": bare,
@@ -190,12 +248,14 @@ def read_on_arm(repo: Path) -> dict:
 def e1_pairings(before_arms: list[dict], after: dict, floors: dict) -> dict:
     """E1 scored against EVERY before realization — and the aggregate stated.
 
-    `multiplier` is the frozen `E1.multiplier` (0.50): a pairing PASSES when the
-    after share is at or under half its before share. One after arm paired with
-    two before arms can disagree, and when it does the metric is NOT decided —
-    reporting the passing pairing as "the" result would be picking the answer.
+    `multiplier` is the frozen `E1.multiplier` (0.50 today, PARSED out of
+    `criteria[E1].threshold` by ``parse_bars`` — never typed): a pairing PASSES
+    when the after share is at or under that fraction of its before share. One
+    after arm paired with two before arms can disagree, and when it does the
+    metric is NOT decided — reporting the passing pairing as "the" result would be
+    picking the answer.
     """
-    multiplier = 0.50
+    multiplier = floors["bars"]["E1"]["multiplier"]
     pairings = []
     for arm in before_arms:
         bound = multiplier * arm["share"]
@@ -208,6 +268,7 @@ def e1_pairings(before_arms: list[dict], after: dict, floors: dict) -> dict:
             "before_bare_definite": arm.get("bare_definite"),
             "after_share": after["share"],
             "after_objects": after["objects"],
+            "after_bare_definite": after["bare_definite"],
             "bound": round(bound, 6),
             "ratio": round(after["share"] / arm["share"], 6),
             "passed": passed,
@@ -237,14 +298,21 @@ def e1_pairings(before_arms: list[dict], after: dict, floors: dict) -> dict:
     }
 
 
-def e2_score(repo: Path, floors: dict) -> dict:  # noqa: ARG001 - floors kept
-    # for symmetry with the other readers; the E2a bar is the pre-registration's
-    # own "13 of 14" and is asserted against the record's denominator below.
+def e2_score(repo: Path, floors: dict) -> dict:
     """E2a (frozen 14-unit denominator) + E2b (fused share) — both halves.
 
     The falsifier is a REFUSAL gate, not a second opinion: if injecting every
     lost unit's anchor does not move the counter to the frozen denominator, the
     counter is inert and the low number it reports is not a measurement.
+
+    ⛔ The DENOMINATOR is pinned, not merely read: `value_units` comes off the
+    record, and the record is refused unless it grades exactly the population the
+    pre-registration froze (`corpus.value_bearing_units`, §3.3). The falsifier's
+    agreement (below) cannot stand in for that — its two sides both come from the
+    record's own population, so they move TOGETHER when the denominator drifts. A
+    record grading N ≠ 14 would otherwise be scored `13/N` against a printed bar
+    reading `13 of 14`, and (see the capstone row) would carry that N as its own
+    denominator.
     """
     record = _read_json(repo / EVIDENCE / E2A_RECORD)
     falsifier = _read_json(repo / EVIDENCE / E2A_FALSIFIER)
@@ -254,6 +322,13 @@ def e2_score(repo: Path, floors: dict) -> dict:  # noqa: ARG001 - floors kept
     survived = record.get("value_survived")
     if not units or survived is None:
         raise _refuse(f"{E2A_RECORD} carries no value_units/value_survived")
+    frozen_units = floors["e2a_units"]
+    if units != frozen_units:
+        raise _refuse(f"{E2A_RECORD} grades {units} value-bearing units, but the "
+                      f"pre-registration froze {frozen_units} — a "
+                      f"'{floors['bars']['E2a']['required']} of {frozen_units}' "
+                      "bar printed over a different denominator is a number "
+                      "nothing froze")
 
     with_anchor = (falsifier.get("with_anchor") or falsifier)
     injected_survived = with_anchor.get("value_survived")
@@ -273,16 +348,18 @@ def e2_score(repo: Path, floors: dict) -> dict:  # noqa: ARG001 - floors kept
         raise _refuse("the value-gate positive controls no longer drop — the "
                       "mechanism count measures nothing")
 
-    required = 13
+    required = floors["bars"]["E2a"]["required"]
     passed = survived >= required
     return {
         "criterion": "E2",
-        "bar": f"E2a >= {required} of {units}, E2b fused share <= 0.05",
+        "bar": (f"E2a >= {required} of {frozen_units}, E2b fused share <= "
+                f"{floors['bars']['E2b']['max_fused_share']}"),
         "e2a": {
             "artifact": f"{EVIDENCE / E2A_RECORD}",
             "falsifier_artifact": f"{EVIDENCE / E2A_FALSIFIER}",
             "graph": record.get("graph"),
             "value_units": units,
+            "frozen_units": frozen_units,
             "value_survived": survived,
             "falsifier": {"value_units": injected_units,
                           "value_survived": injected_survived},
@@ -298,6 +375,7 @@ def e2_score(repo: Path, floors: dict) -> dict:  # noqa: ARG001 - floors kept
 
 def score(repo: Path = _ROOT) -> dict:
     floors = frozen_denominators(repo)
+    bars = floors["bars"]
     before_arms = read_off_arms(repo, floors)
     after = read_on_arm(repo)
     # One record, one head: the before, on and E2a graphs must all come from the
@@ -309,6 +387,17 @@ def score(repo: Path = _ROOT) -> dict:
                           f"{arm.get('graph')!r}, which does not name head "
                           f"{after['head'][:9]}")
     e2a_record = _read_json(repo / EVIDENCE / E2A_RECORD)
+    # The AFTER arm's own `# graph:` line, not its head: an ON share from graph A
+    # recorded beside E2a/gate-drops counts from graph B at the same head passes
+    # every head check above (the head IS equal) while mixing two populations —
+    # the exact failure the invariant is stated for, and the half that was only
+    # asserted in the comment because the graph line was never parsed.
+    if after["graph"] != e2a_record.get("graph"):
+        raise _refuse(f"{ON_ARM_LOG} was written on graph {after['graph']!r} but "
+                      f"{E2A_RECORD} counts on {e2a_record.get('graph')!r} — the "
+                      "after share and the E2a counts come from different runs "
+                      "of the corpus, and the head they share cannot tell them "
+                      "apart")
     if e2a_record.get("graph") != _read_json(
             repo / EVIDENCE / GATE_DROPS).get("graph"):
         raise _refuse("the E2a record and the gate-drops record come from "
@@ -332,7 +421,7 @@ def score(repo: Path = _ROOT) -> dict:
         "artifact": after["artifact"],
     }
     e2["outcome"] = ("PASS" if (e2["e2a"]["outcome"] == "PASS"
-                                and e2b_share <= 0.05
+                                and e2b_share <= bars["E2b"]["max_fused_share"]
                                 and not e2["e2b"]["below_floor"])
                      else "FAIL")
     return {
@@ -342,16 +431,23 @@ def score(repo: Path = _ROOT) -> dict:
                               "e1_paired_arm.py refuses to run unless the "
                               "checkout's corpus matches this pin (G1)"),
         "head": after["head"],
+        "graph": after["graph"],
+        "bars_source": (
+            f"{PREREG}#criteria + #denominator_floors, parsed by "
+            "capstone_measure.parse_bars — the same reader the scoring probe "
+            "uses, so this record and that row cannot read two bars"),
         "denominators": {
             "e1_objects": floors["e1_objects"],
             "e1_min_before_share": floors["e1_min_before_share"],
+            "e2a_units": floors["e2a_units"],
             "e2b_surviving_units": floors["e2b_surviving_units"],
         },
         "e1": e1,
         "e1b": {
-            "bar": "90 of 90",
+            "bar": f"{bars['E1b']['required']} of {bars['E1b']['of']}",
             "real_facts": after["real_facts"],
-            "outcome": "PASS" if after["real_facts"] >= 90 else "FAIL",
+            "outcome": ("PASS" if after["real_facts"] >= bars["E1b"]["required"]
+                        else "FAIL"),
             "artifact": after["artifact"],
             "note": "a no-loss CONTROL on both arms, not the frozen metric",
         },

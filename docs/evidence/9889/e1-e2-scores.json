@@ -3,9 +3,12 @@
  "corpus_sha256": "sha256:dd7e85200f4809f701b9e9c11816b541acea63afd0b2472998975e2ebcb035dc",
  "corpus_pin_source": "docs/evidence/7949-capstone/preregistration.json#corpus.fixtures_hash \u2014 e1_paired_arm.py refuses to run unless the checkout's corpus matches this pin (G1)",
  "head": "54922a800f96858935b58ef250da569a4896df44",
+ "graph": "capstone_on_54922a800_1793378318",
+ "bars_source": "docs/evidence/7949-capstone/preregistration.json#criteria + #denominator_floors, parsed by capstone_measure.parse_bars \u2014 the same reader the scoring probe uses, so this record and that row cannot read two bars",
  "denominators": {
   "e1_objects": 30,
   "e1_min_before_share": 0.2,
+  "e2a_units": 14,
   "e2b_surviving_units": 30
  },
  "e1": {
@@ -23,6 +26,7 @@
     "before_bare_definite": 28,
     "after_share": 0.21311475409836064,
     "after_objects": 61,
+    "after_bare_definite": 13,
     "bound": 0.179487,
     "ratio": 0.593677,
     "passed": false
@@ -35,6 +39,7 @@
     "before_bare_definite": 39,
     "after_share": 0.21311475409836064,
     "after_objects": 61,
+    "after_bare_definite": 13,
     "bound": 0.282609,
     "ratio": 0.377049,
     "passed": true
@@ -58,6 +63,7 @@
    "falsifier_artifact": "docs/evidence/9889/e2a-value-units-falsifier.json",
    "graph": "capstone_on_54922a800_1793378318",
    "value_units": 14,
+   "frozen_units": 14,
    "value_survived": 8,
    "falsifier": {
     "value_units": 14,

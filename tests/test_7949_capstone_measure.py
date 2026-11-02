@@ -520,14 +520,15 @@ def test_the_parse_reads_arms_not_a_fixed_line():
 
 # ── the table shape, and the two rules that keep a row honest ────────────
 
-def _rows(out_path: str = "docs/evidence/9889/e1-e2-scores.json") -> list[dict]:
+def _rows(out_path: str = "docs/evidence/9889/e1-e2-scores.json",
+          *, e2_verdict: str = "RED") -> list[dict]:
     return measure.build_rows(
         head="a" * 40, out_path=out_path, log_corpus_sha="sha256:" + "d" * 64,
         e1={"verdict": measure.verdict_word(measure.e1_outcome(**_e1_kwargs())),
             "sha": "c" * 40, "corpus_sha256": "e" * 64,
-            "numerator": None, "denominator": None, "objects_numerator": 28,
+            "numerator": 13, "denominator": 61, "objects_numerator": 28,
             "objects_total": 78, "note": "E1 note"},
-        e2={"verdict": "RED", "sha": "c" * 40, "corpus_sha256": "e" * 64,
+        e2={"verdict": e2_verdict, "sha": "c" * 40, "corpus_sha256": "e" * 64,
             "numerator": 8, "denominator": 14, "note": "E2 note"},
         e3={"verdict": "RED", "numerator": 23, "denominator": 70,
             "note": "E3 note"},
@@ -608,28 +609,150 @@ def test_a_row_measured_on_another_corpus_declares_it(tmp_path):
         assert "artifact_corpus_sha256" not in rows[criterion], criterion
 
 
-def test_the_e1_and_e2_siblings_carry_the_same_denominator():
-    """V8's rule: the composite pair is carried, not restated differently.
+def test_the_e1_and_e2_rows_carry_the_counts_their_criteria_are_written_over():
+    """#10610 review issue 1: the measured count must REACH the row.
 
-    Both rows score SHARES, so both leave the count slots empty and V8's
-    agreement is trivially satisfied. What must hold is the thing V8 protects: a
-    gate run over these rows reports NO V8 finding — and the E2 population is
-    still stated, in the row's note, where a reader will find it.
+    E2a's frozen criterion is a count (`>= 13 of 14` over the 14 value-bearing
+    units), and E2's row used to carry `numerator=None, denominator=None` beside
+    `blocked_by="#10360"` — which `tools/capstone_verdict_check.py` refuses on a
+    GREEN row (V5 requires an integer numerator/denominator, and a blocker and
+    green are mutually exclusive). So the first run to reach 13/14 — the outcome
+    the `#9889` record exists to make reachable — produced a table the gate exited
+    1 on, and no pin noticed because the pin asserted the emptiness.
+
+    The counts are DERIVED from the record here, not typed: a probe that starts
+    reading another population reds this test rather than the table.
     """
+    parsed = measure.measure_e1_e2(_REPO)
     rows = {row["criterion"]: row for row in _rows()}
-    assert rows["E1"]["sibling"] == "E2"
-    assert rows["E2"]["sibling"] == "E1"
-    assert (rows["E1"]["numerator"], rows["E1"]["denominator"]) == (None, None)
-    assert (rows["E2"]["numerator"], rows["E2"]["denominator"]) == (None, None)
+    assert (rows["E2"]["numerator"], rows["E2"]["denominator"]) == (
+        parsed["e2a_survived"], parsed["e2a_units"])
+    assert (rows["E1"]["numerator"], rows["E1"]["denominator"]) == (
+        parsed["after_numerator"], parsed["after_objects"])
+    # The two rows score two DIFFERENT populations (all Objects vs the frozen 14
+    # value-bearing units), so neither may name the other as a `sibling`: V8
+    # compares one population's two copies, and naming this pair siblings is what
+    # forced both counts to None in the first place.
+    assert "sibling" not in rows["E1"] and "sibling" not in rows["E2"]
+    assert parsed["e2a_units"] != parsed["after_objects"], (
+        "the two populations are the same number — re-derive this pin")
+
+
+def _gate_codes(rows: list[dict]) -> list[str]:
     record = {"schema": cvc.SCHEMA, "prereg": {"sha": "a" * 40, "status": "OK"},
               "corpus": {"sha256": "sha256:" + "e" * 64},
               "run": {"status": "COMPLETED",
                       "steps_observed": list(cvc.STEPS)},
-              "rows": list(rows.values())}
-    codes = [code for code, _w, _m in
-             cvc.check(record, repo=_REPO, require_green=False).items]
+              "rows": list(rows)}
+    return [code for code, _w, _m in
+            cvc.check(record, repo=_REPO, require_green=False).items]
+
+
+def test_a_green_e2_at_thirteen_of_fourteen_is_not_refused_for_its_own_blocker():
+    """The success path this record unburies must survive the gate (issue 1).
+
+    Non-vacuity: the SAME row in its pre-fix shape — empty count slots plus the
+    `#10360` blocker it carried while it could not be measured — is refused by V5
+    on this very input, so the assertion below cannot pass on the old builder.
+    """
+    green = {row["criterion"]: row for row in _rows(e2_verdict="GREEN")}
+    green["E2"].update({"numerator": 13, "denominator": 14})
+    codes = _gate_codes(list(green.values()))
+    assert "V5" not in codes, codes
     assert "V8" not in codes, codes
-    # The E2 population itself is pinned by the record-parse test (8 of 14).
+    assert green["E2"]["blocked_by"] is None, green["E2"]
+
+    prefix_shape = dict(green["E2"])
+    prefix_shape.update({"numerator": None, "denominator": None,
+                         "blocked_by": "#10360"})
+    old = {**green, "E2": prefix_shape}
+    old_codes = _gate_codes(list(old.values()))
+    assert "V5" in old_codes, old_codes
+
+
+def _copied_bundle(tmp_path) -> Path:
+    """A throwaway repo carrying ONLY the records the score driver reads.
+
+    The probes refuse an input they cannot find, so a mutation test needs the whole
+    bundle, not one file: mutation is how a "read from the frozen record" claim is
+    proven rather than asserted.
+    """
+    repo = tmp_path / "repo"
+    shutil.copytree(_REPO / "docs/evidence/9889", repo / "docs/evidence/9889")
+    shutil.copytree(_REPO / "docs/evidence/7949-capstone",
+                    repo / "docs/evidence/7949-capstone")
+    return repo
+
+
+def test_the_scores_probe_reads_every_bar_out_of_the_frozen_record(tmp_path):
+    """#10610 review issue 2: one reader of the frozen bars, not two.
+
+    `e1_e2_scores.py` typed `0.50`, `13`, `0.05` and `90` while loading — and never
+    reading — the `criteria` block, so an amendment would move the probe that
+    scores the row and leave the record both rows cite behind: two readers of one
+    frozen bar, which can only disagree. Every bar is now read by
+    `capstone_measure.parse_bars`, the bundle's ONE reader. Non-vacuity: the
+    mutated thresholds below move the OUTCOMES, which a typed bar could not.
+    """
+    repo = _copied_bundle(tmp_path)
+    unchanged = scores_probe.score(repo)
+    assert unchanged["e1"]["outcome"] == "REFUSED"
+    assert unchanged["e2"]["outcome"] == "FAIL"
+
+    # E1's multiplier 0.50 -> 0.20: both pairings now fail, so they AGREE and E1
+    # becomes a decided FAIL instead of a refusal. E2a's bar 13 -> 8: the 8 that
+    # survive now pass. E2b's bar 0.05 -> 0.001: the 1/114 share no longer does.
+    path = repo / "docs/evidence/7949-capstone/preregistration.json"
+    prereg = json.loads(path.read_text())
+    mutated = {"E1": "`after_share <= 0.20 × before_share`",
+               "E2a": "`>= 8 of 14`",
+               "E2b": "`<= 0.001`"}
+    for entry in prereg["criteria"]:
+        if entry["id"] in mutated:
+            entry["threshold"] = mutated[entry["id"]]
+    path.write_text(json.dumps(prereg))
+    moved = scores_probe.score(repo)
+    assert moved["e1"]["outcome"] == "FAIL", moved["e1"]
+    assert moved["e1"]["decidable"] is True, moved["e1"]
+    assert moved["e2"]["e2a"]["outcome"] == "PASS", moved["e2"]["e2a"]
+    assert moved["e2"]["outcome"] == "FAIL", moved["e2"]  # E2b's bar now fails
+
+
+def test_the_scores_probe_refuses_a_denominator_off_the_frozen_fourteen(
+        tmp_path, capsys):
+    """#10610 review issue 3: `13 of 14` may not be printed over an N.
+
+    The only denominator assertion compared the falsifier against the record — both
+    sides of that comparison come from the record's own population, so they move
+    together and pin nothing. The frozen `14` is now asserted.
+    """
+    repo = _copied_bundle(tmp_path)
+    e2a = repo / "docs/evidence/9889/e2a-value-units.json"
+    record = json.loads(e2a.read_text())
+    record["value_units"] = 15
+    e2a.write_text(json.dumps(record))
+    with pytest.raises(SystemExit) as refused:
+        scores_probe.score(repo)
+    assert refused.value.code == 2, refused.value
+    assert "froze 14" in capsys.readouterr().err
+
+
+def test_the_scores_probe_refuses_an_after_arm_on_another_graph(tmp_path, capsys):
+    """#10610 review issue 4: the invariant's other half, actually implemented.
+
+    The module states "one record, one head" and checked only the BEFORE arms and
+    the E2a<->gate-drops pair. The ON run's own `# graph:` line was parsed for
+    nothing, so an after share from graph A beside E2a counts from graph B passed
+    every check: the head is equal, and both before graphs still name it.
+    """
+    repo = _copied_bundle(tmp_path)
+    log = repo / "docs/evidence/9889/on-arm.log"
+    log.write_text(re.sub(r"^# graph: \S+", "# graph: capstone_on_54922a800_other",
+                          log.read_text(), count=1, flags=re.MULTILINE))
+    with pytest.raises(SystemExit) as refused:
+        scores_probe.score(repo)
+    assert refused.value.code == 2, refused.value
+    assert "capstone_on_54922a800_other" in capsys.readouterr().err
 
 
 def test_every_e1_key_the_renderer_reads_is_one_the_measure_returns():

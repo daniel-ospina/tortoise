@@ -738,31 +738,52 @@ def build_rows(*, head: str, out_path: str, log_corpus_sha: str,
             corpus_sha256: str | None, blocked_by: str | None, note: str,
             artifact_corpus_sha256: str | None = None,
             sibling: str | None = None) -> dict:
+        # GREEN and BLOCKED are mutually exclusive in the gate (V5 refuses a green
+        # row that carries a blocker; V6 requires one on every non-green row), so
+        # the pair is resolved ONCE, here. Without this a row that is correctly
+        # measured GREEN arrives still carrying the issue it was blocked on and is
+        # refused for it — the row for the criterion a record unblocks (E2 at
+        # 13 of 14) could never be written green at all.
+        if verdict == "GREEN":
+            blocked_by = None
         built = {
             "criterion": criterion, "verdict": verdict,
             "evidence_kind": "measurement", "evidence": evidence, "sha": sha,
             "numerator": numerator, "denominator": denominator,
-            "corpus_sha256": corpus_sha256, "sibling": sibling,
+            "corpus_sha256": corpus_sha256,
             "blocked_by": blocked_by, "note": note,
         }
+        # `sibling` is emitted only where a row really has one: V8 reads a pair as
+        # two copies of ONE population, and a `"sibling": null` on every row reads
+        # as "the pair is there, the numbers are missing" rather than "no pair".
+        if sibling is not None:
+            built["sibling"] = sibling
         if artifact_corpus_sha256 is not None:
             built["artifact_corpus_sha256"] = artifact_corpus_sha256
         return built
 
     return [
-        # E1/E2 score SHARES, not counts: the numerator/denominator slots stay
-        # empty on both (so V8's sibling agreement is trivially true), and the
-        # populations they were taken over live in the note and in the artifact.
-        # Stating E1's 78 Objects here would put a DIFFERENT denominator on a
-        # sibling row than E2a's 14 units — V8 would read that (correctly) as two
-        # rows disagreeing about one number, which is what V8 exists to stop.
+        # E1 and E2 carry the counts their OWN criteria are written over — E1 the
+        # after arm's bare-definite Objects over all Objects (13/61 on the #9889
+        # record), E2 the E2a count over the FROZEN 14 value-bearing units
+        # (8/14, bar >= 13 of 14).
+        #
+        # ⛔ They are NOT a sibling pair and name no `sibling`. V8 requires a pair
+        # to carry the SAME numerator/denominator, which is right for two readings
+        # of ONE population; these two read two populations (all Objects vs the
+        # 14 planted value-bearing units) that no edit can reconcile. Naming them
+        # siblings forced BOTH counts to None — and an empty count on a GREEN row
+        # is exactly what V5 refuses, so the row for the criterion this record
+        # unburies (E2a >= 13 of 14) could not have been written green. The
+        # populations are stated per row instead: in the note, and in the
+        # numerator/denominator themselves.
         row("E1", verdict=e1["verdict"], evidence=E1_E2_SCORES, sha=e1["sha"],
-            numerator=None, denominator=None,
-            corpus_sha256=e1["corpus_sha256"], sibling="E2",
+            numerator=e1["numerator"], denominator=e1["denominator"],
+            corpus_sha256=e1["corpus_sha256"],
             blocked_by="#5333", note=e1["note"]),
         row("E2", verdict=e2["verdict"], evidence=E1_E2_SCORES, sha=e2["sha"],
-            numerator=None, denominator=None,
-            corpus_sha256=e2["corpus_sha256"], sibling="E1",
+            numerator=e2["numerator"], denominator=e2["denominator"],
+            corpus_sha256=e2["corpus_sha256"],
             blocked_by="#10360", note=e2["note"]),
         row("E3", verdict=e3["verdict"], evidence=out_path, sha=head,
             numerator=e3["numerator"], denominator=e3["denominator"],
@@ -2064,6 +2085,12 @@ def measure_e1_e2(repo: Path = ROOT) -> dict:
         # bundle did not take.
         "objects_numerator": first["before_bare_definite"],
         "after_objects": first["after_objects"],
+        # The AFTER arm's own numerator, for the row's count slots. It is READ
+        # from the record (the ON log's `e1-aux ... bare_definite=` line), never
+        # re-derived as share x objects — the rule the two lines above state, and
+        # which the E1 row needs now that it carries its count instead of
+        # leaving the slots empty.
+        "after_numerator": first.get("after_bare_definite"),
         "real_facts": e1b.get("real_facts") or 0,
         "atomic_points": e2b.get("atomic_points") or 0,
         "fused": e2b.get("fused") or 0,
@@ -2485,6 +2512,12 @@ def main(argv: list[str] | None = None) -> int:
         "verdict": verdict_word(e1_result),
         "sha": e1["sha"],
         "corpus_sha256": e1["corpus_sha256"],
+        # The population E1's own criterion is written over: a share over ALL
+        # `:Object` nodes written by the AFTER arm, so the count slots carry the
+        # after arm's bare-definite Objects / its Objects (13/61 on the #9889
+        # record) — read off the record, never re-derived from share x objects.
+        "numerator": e1["after_numerator"],
+        "denominator": e1["after_objects"],
         "note": (f"E1 is scored from {E1_E2_SCORES} (one invocation over the "
                  f"#9889 probes), whose corpus IS the frozen one "
                  f"({e1['corpus_sha256']}) because e1_paired_arm.py refuses any "
@@ -2496,7 +2529,12 @@ def main(argv: list[str] | None = None) -> int:
                  f"deterministic mechanism check (e1_gate_drops) reports "
                  f"value_gate drops 0 with its positive controls alive, so the "
                  f"selection pass is not the mover — the removal/relocation "
-                 f"ruling is (#5333). n >= 2 per arm is the next requirement"),
+                 f"ruling is (#5333). n >= 2 per arm is the next requirement. "
+                 f"The row's count is the AFTER arm's own population — "
+                 f"bare-definite Objects / all Objects = "
+                 f"{e1['after_numerator']}/{e1['after_objects']} — because E1 is a "
+                 f"share over Objects, not a planted-unit count (E2 carries "
+                 f"those, over the frozen 14)"),
     }
     e2_row = {
         "verdict": verdict_word(e2a_result),
@@ -2513,7 +2551,11 @@ def main(argv: list[str] | None = None) -> int:
                  f"{e2b_result['bar']}. The E2 row is {verdict_word(e2a_result)} "
                  f"because the composite needs BOTH halves and E2a falls short of "
                  f"13 of 14 on the run's own graph; #10360 records that nothing "
-                 f"enforces retention (the render half closed, #9775)"),
+                 f"enforces retention (the render half closed, #9775). The row's "
+                 f"count slots carry the E2a count over the FROZEN denominator "
+                 f"({e1['e2a_survived']}/{e1['e2a_units']}), so a green row here "
+                 f"states the number the bar is written over instead of leaving "
+                 f"it empty"),
     }
 
     # ── E3 ────────────────────────────────────────────────────────────────
