@@ -6949,8 +6949,13 @@ def test_a_capped_row_is_held_in_BOTH_directions(tmp_path: Path) -> None:
         coverage={"test_capped.py": (115, 115)},
         sample_label="ci-timing junit-census+top-15 2026-11-09 (run 41379999999)")
     assert yaml.safe_load(lowered)["durations"]["test_capped.py"] == 355.0
-    assert down["kept_as_lower_bound"] == 1, down
-    assert down["kept_at_declared_cap"] == 0, down
+    # The hold is COUNTED by the declaration, not by the direction: a pinned row
+    # held from below is still a cap-hold, and counting it as a lower-bound hold
+    # made a run's two stats unreadable apart — which is why the split exists
+    # (#10575 review, F1). The wording half is pinned by
+    # `test_a_cap_read_from_BELOW_still_states_the_CAP_rule`.
+    assert down["kept_at_declared_cap"] == 1, down
+    assert down["kept_as_lower_bound"] == 0, down
     # …and the declared value itself is not a hold: nothing was refused.
     same, flat = ci_timing.render_refreshed_manifest(
         text, {"test_capped.py": 355.0}, "2026-11-09T00:00:00Z",
@@ -6966,6 +6971,86 @@ def test_a_capped_row_is_held_in_BOTH_directions(tmp_path: Path) -> None:
     second = _row_inside_the_block(again, "test_capped.py")
     assert second.count("DECLARED CAP") == 1, second
     assert again.count("ci-timing junit-census+top-15") == 1, again
+
+
+def test_a_cap_read_from_BELOW_still_states_the_CAP_rule(tmp_path: Path) -> None:
+    """A CAP is a CAP whichever direction the reading came from (#10575 review, F1).
+
+    The ordinary weekly case for all three committed caps is a reading BELOW the
+    cap, and the hold's sentence/counter used to be chosen by DIRECTION — so a
+    `pinned` row held up from 25.4 stated its weight was a "DECLARED FLOOR … a
+    sweep may RAISE it", the opposite of the #9172 CI-budget decision it is held
+    under, and it overwrote prose the branch had already hand-corrected. The
+    counter was wrong the same way: the cap-hold landed in
+    `kept_as_lower_bound`, so a run's stats said no cap was in play.
+
+    Non-vacuity: pre-fix, `DECLARED CAP` is absent and `may RAISE` is present on
+    the `down` render, and `kept_at_declared_cap` is 0.
+    """
+    path = _bridge_manifest(tmp_path, _CAP_MANIFEST)
+    text = path.read_text()
+    lowered, down = ci_timing.render_refreshed_manifest(
+        text, {"test_capped.py": 25.4}, "2026-11-09T00:00:00Z",
+        coverage={"test_capped.py": (115, 115)},
+        sample_label="ci-timing junit-census+top-15 2026-11-09 (run 41379999999)")
+    assert yaml.safe_load(lowered)["durations"]["test_capped.py"] == 355.0
+    row = _row_inside_the_block(lowered, "test_capped.py")
+    assert "DECLARED CAP (355.0)" in row, row
+    assert "may RAISE" not in row, row
+    assert "DECLARED FLOOR" not in row, row
+    assert "refused as a discount" in row, row
+    assert down["kept_at_declared_cap"] == 1, down
+    assert down["kept_as_lower_bound"] == 0, down
+    assert ci_timing.validate_refreshed_manifest(lowered) == []
+    # …and the COMMITTED map's caps render that sentence too, so the next sweep
+    # reproduces the hand-corrected prose instead of replacing it.
+    committed_text = (REPO_ROOT / "config" / "ci-surfaces.yml").read_text()
+    floors = ci_timing._declared_floors(committed_text)
+    below = {"test_lane_stash.py": 25.4, "test_calibration.py": 23.0}
+    assert set(below) <= set(floors), floors
+    rendered, stats = ci_timing.render_refreshed_manifest(
+        committed_text, below, "2026-11-09T00:00:00Z",
+        coverage={key: (115, 115) for key in below},
+        sample_label="ci-timing junit-census+top-15 2026-11-09 (run 41379999999)")
+    for key in below:
+        committed_row = _row_inside_the_block(rendered, key)
+        assert f"DECLARED CAP ({floors[key].value:.1f})" in committed_row, committed_row
+        assert "DECLARED FLOOR" not in committed_row, committed_row
+    assert stats["kept_at_declared_cap"] == len(below), stats
+    assert stats["kept_as_lower_bound"] == 0, stats
+
+
+def test_the_unmeasured_markers_qualifier_goes_with_the_marker() -> None:
+    """`# unmeasured by CI` loses the WHOLE marker phrase (#10575 review, F2).
+
+    Both marker paths consumed only the word `unmeasured`, so the qualifier was
+    left stranded with nothing to modify: an ADOPTED row shipped
+    `# by CI — #10046: …` and a HELD one shipped
+    `# carried forward (not a full-file CI measurement) — by CI — #10025: …`. Two
+    rows carried that stub in this PR's own diff, and it recurs on every future
+    sweep of any `# unmeasured … CI` row.
+
+    Non-vacuity: pre-fix both assertions see `# by CI — …`.
+    """
+    assert ci_timing._strip_unmeasured_marker(
+        "  # unmeasured by CI — #10046: some rationale") == \
+        "  # #10046: some rationale"
+    assert ci_timing._restate_unmeasured_marker(
+        "  # unmeasured by CI — #10025: some rationale") == \
+        (f"  # {ci_timing._CARRIED_FORWARD} — #10025: some rationale")
+    # the guard's own spelling (`_UNMEASURED_ON_CI_RE`) is the other two prepositions
+    for qualifier in ("on", "in"):
+        assert ci_timing._strip_unmeasured_marker(
+            f"  # unmeasured {qualifier} CI — #1: why") == "  # #1: why"
+    # …and the shapes with NO qualifier keep their established meaning: a bare
+    # marker, and the `— by the refresher —` rationale the restate path documents.
+    assert ci_timing._strip_unmeasured_marker(
+        "  # unmeasured — #7359: added after the sampled run"
+    ) == "  # #7359: added after the sampled run"
+    restated = ci_timing._restate_unmeasured_marker(
+        "  # unmeasured — by the refresher — #2296: x")
+    assert "by the refresher" in restated, restated
+    assert restated.count("—") == 2, restated
 
 
 def _row_inside_the_block(text: str, key: str) -> str:

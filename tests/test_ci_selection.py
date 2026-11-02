@@ -6496,7 +6496,8 @@ def _durations_rows_claiming_the_flat_default(text: str, durations: dict):
 _MEASURED_BASIS_RE = re.compile(
     r"ci-timing (?:junit-census\+top-15|top-15) \d{4}-\d{2}-\d{2} [^—]*?"
     r"(?:;\s*was |;\s*kept |the reading \()")
-_UNMEASURED_ON_CI_RE = re.compile(r"unmeasured\s+(?:on|in)\s+CI\b", re.IGNORECASE)
+_UNMEASURED_ON_CI_RE = re.compile(
+    r"unmeasured\s+(?:on|in|by)\s+CI\b", re.IGNORECASE)
 
 
 def _durations_rows_claiming_unmeasured_on_ci(text: str):
@@ -6547,6 +6548,76 @@ def test_the_unmeasured_on_ci_claim_check_is_not_vacuous():
     assert [k for k, _ in _durations_rows_claiming_unmeasured_on_ci(stale)] == [
         "test_a.py", "test_b.py"]
     assert _durations_rows_claiming_unmeasured_on_ci(legitimate) == []
+
+
+# The refresher's `unmeasured` marker is `unmeasured [on|in|by CI]`, and the marker
+# paths used to consume the single WORD — leaving its qualifier behind with nothing
+# to modify: `# by CI — #10046: …` on an ADOPTED row and `# carried forward (not a
+# full-file CI measurement) — by CI — #10025: …` on a HELD one (#10575 review, F2).
+# The stub is only ever in those two positions — at the note's OPENING, or straight
+# after the carried-forward restatement — so the detector names them and cannot
+# confuse a note that merely mentions CI.
+_ORPHANED_UNMEASURED_QUALIFIER_RE = re.compile(
+    r"(?:^[ \t]*#[ \t]*|—[ \t]*)(?:by|on|in)[ \t]+CI\b", re.IGNORECASE)
+
+
+def test_no_durations_row_note_carries_an_orphaned_unmeasured_qualifier():
+    """#10575 review F2: a marker's qualifier must not outlive the marker.
+
+    The writer half of this repair is pinned in `tests/test_ci_timing.py`
+    (`test_the_unmeasured_markers_qualifier_goes_with_the_marker`); this is the
+    MAP half, because two rows shipped the stub in this PR's own diff and the
+    guard added for the neighbouring class could not see either of them (it looks
+    for the phrase the deletion destroys).
+    """
+    text = cs.MANIFEST.read_text(encoding="utf-8")
+    offenders = [(key, note[:120]) for key, note in _durations_row_comments(text)
+                 if _ORPHANED_UNMEASURED_QUALIFIER_RE.search(note)]
+    assert offenders == [], (
+        "a durations row's note opens with (or is joined to) an `unmeasured`"
+        f" marker's stranded qualifier — restore the marker's subject: {offenders}")
+
+
+def test_the_orphaned_qualifier_check_is_not_vacuous():
+    """The guard above bites on the two shipped shapes and stays quiet beside them."""
+    stale = (
+        "durations:\n"
+        "  test_a.py: 0.1  # by CI — #10046: the record tenant, adopted.\n"
+        "  test_b.py: 3.0  # carried forward (not a full-file CI measurement)"
+        " — by CI — #10025: the graph identity, held.\n")
+    legitimate = (
+        "durations:\n"
+        # the honest marker, with its qualifier consumed by the writer
+        "  test_c.py: 2.0  # unmeasured by CI — a new file takes the flat default.\n"
+        "  test_d.py: 3.0  # carried forward (not a full-file CI measurement)"
+        " — #10025: the marker was restated, not mangled.\n"
+        # prose ABOUT CI that is not a stranded marker qualifier
+        "  test_e.py: 0.4  # the census reads the leg's own junit; CI is the source,"
+        " and by CI timings this file is trivial.\n")
+    assert [key for key, note in _durations_row_comments(stale)
+            if _ORPHANED_UNMEASURED_QUALIFIER_RE.search(note)] == [
+        "test_a.py", "test_b.py"]
+    assert [key for key, note in _durations_row_comments(legitimate)
+            if _ORPHANED_UNMEASURED_QUALIFIER_RE.search(note)] == []
+
+
+def test_a_cut_note_does_not_leave_a_clause_owned_by_no_reading():
+    """#10575 review F3: `test_10017_cache_tier.py`'s re-base orphaned a clause.
+
+    The adopted-note cut removed the sentence that owned `a property of THIS host
+    …` and re-joined the survivor to the unrelated coverage-floor sentence, so the
+    note asserted that a merge-gating coverage check was "a property of THIS host"
+    — and it opened `It still has to EXIST` with the antecedent cut away. The
+    survivors are BALANCED, so `_balance_cut_parens` cannot see the damage.
+    """
+    note = dict(_durations_row_comments(
+        cs.MANIFEST.read_text(encoding="utf-8")))["test_10017_cache_tier.py"]
+    assert "pool's own size; a property of THIS host" not in note, note
+    # the host-property clause keeps the LOCAL READING it describes in front of it
+    assert "136.25s" in note, note
+    assert note.index("136.25s") < note.index("a property of THIS host"), note
+    # …and the antecedent the cut took (what the row is, and when it arrived) is back
+    assert "#10017" in note and "#3400/#4348" in note, note
 
 
 def test_no_durations_row_claims_the_flat_default_at_a_measured_value():

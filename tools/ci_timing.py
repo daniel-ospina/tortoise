@@ -1969,8 +1969,20 @@ def _strip_prior_basis(tail: str) -> str:
 # than deleted, which is what clearing the whole tail did to this marker's
 # long-form rows (#9134 review, P2).
 # groups: 1 = the note's own `# ` prefix, 2 = the marker's separator (if any)
+#
+# The marker's QUALIFIER is part of the marker: authors write `# unmeasured by CI`,
+# `# unmeasured on CI`, `# unmeasured in CI`, and consuming only the single word
+# `unmeasured` left its qualifier behind as a fragment with nothing to modify — the
+# refresh shipped `# by CI — #10046: …` on an ADOPTED row and
+# `# carried forward (not a full-file CI measurement) — by CI — #10025: …` on a HELD
+# one (#10575 review, F2/F1 on 8b3ed173a, unrepaired at ba62e915d). The stranded
+# stub is invisible to the guard added for the class, because the guard looks for the
+# phrase this deletion DESTROYS. `by` is included because that is the shipped shape;
+# `on`/`in` are the two the guard already spells.
 _UNMEASURED_LEAD_RE = re.compile(
-    r"^([ \t]*#[ \t]*)unmeasured\b[ \t]*([—–-])?[ \t]*"
+    r"^([ \t]*#[ \t]*)unmeasured\b"
+    r"(?:[ \t]+(?:on|in|by)[ \t]+CI\b)?"
+    r"[ \t]*([—–-])?[ \t]*"
 )
 _CARRIED_FORWARD = "carried forward (not a full-file CI measurement)"
 
@@ -2427,6 +2439,10 @@ def _strip_unmeasured_marker(tail: str) -> str:
     whole-tail match cleared only the bare shape and left a `# unmeasured` claim
     standing on a row the refresh had measured (#8254 review, P3 — 3 rows went
     stale that way). `\b` keeps a token like `# unmeasuredly` out.
+
+    The marker's QUALIFIER goes with it: `# unmeasured by CI — #10046: …` must become
+    `# #10046: …`, not `# by CI — #10046: …` — the stub modifies nothing and states
+    the row was a CI reading of nothing in particular (#10575 review, F2).
     """
     match = _UNMEASURED_LEAD_RE.match(tail)
     if not match:
@@ -2747,10 +2763,21 @@ def render_refreshed_manifest(manifest_text: str, weights: dict[str, float],
         # stating a CEILING beside the reading its own note says must not become
         # the weight (#10575 delta review, P2).
         above_cap = floor is not None and floor.pinned and measured > floor.value
+        # WHICH DECLARATION held the row decides how the hold is LABELLED and
+        # COUNTED — never which direction the reading came from. A `pinned`
+        # declaration is a CAP in BOTH directions, and the ordinary weekly case for
+        # all three committed caps is a reading BELOW the cap, so choosing by
+        # direction called a cap a "DECLARED FLOOR … a sweep may RAISE it" — the
+        # opposite of the #9172 decision the row is held under, on prose the branch
+        # had already hand-corrected once, and it counted the hold as
+        # `kept_as_lower_bound`, so a run's stats said no cap was in play (#10575
+        # review, F1).
+        at_declared_cap = (
+            floor is not None and floor.pinned and (below_floor or above_cap))
         kept = kept or below_floor or above_cap
         new_value = previous if kept else measured
         if kept:
-            if above_cap:
+            if at_declared_cap:
                 kept_at_declared_cap += 1
             else:
                 kept_as_lower_bound += 1
@@ -2779,17 +2806,22 @@ def render_refreshed_manifest(manifest_text: str, weights: dict[str, float],
             # (`…; was 42.4`) is the surviving value's provenance and stays
             # (#9134 review, P2).
             tail = _strip_prior_held_basis(tail)
-            if below_floor:
-                # The floor is the whole reason here, and it is stated FIRST: the
-                # coverage witness is irrelevant to why the row held, and a note
+            if at_declared_cap:
+                # A CAP states the same rule whichever direction was refused, so the
+                # sentence is chosen by the DECLARATION. It also keeps the committed
+                # prose stable: the hand-corrected `test_lane_stash.py` row already
+                # reads this, and a direction-keyed render replaced it with the
+                # FLOOR sentence on the next sweep (#10575 review, F1).
+                reason = (f"this row's weight is a DECLARED CAP ({floor.value:.1f}), not "
+                          f"a reading; a sweep may neither RAISE nor LOWER it")
+            elif below_floor:
+                # An UNPINNED floor is the whole reason here, and it is stated FIRST:
+                # the coverage witness is irrelevant to why the row held, and a note
                 # that leads with "no declared testcase count" would read as though
                 # a provable reading could have taken the row — which is the exact
                 # false confidence this mechanism removes.
                 reason = (f"this row's weight is a DECLARED FLOOR ({floor.value:.1f}), "
                           f"not a reading; a sweep may RAISE it but never lower it")
-            elif above_cap:
-                reason = (f"this row's weight is a DECLARED CAP ({floor.value:.1f}), not "
-                          f"a reading; a sweep may neither RAISE nor LOWER it")
             elif declared <= 0:
                 reason = ("no declared testcase count for this file (UNKNOWN), so "
                           "the reading cannot prove it saw the whole file")
@@ -2817,14 +2849,18 @@ def render_refreshed_manifest(manifest_text: str, weights: dict[str, float],
             # source. Which sources the sweep took is the LABEL's job
             # (`sample_label`, built by `main` from
             # :func:`collector_file_measurements`' `source`).
-            if below_floor:
+            if at_declared_cap:
+                # The CAP sentence is fixed; only the direction is stated, and it is
+                # read off the comparison (`below_floor`/`above_cap` are each other's
+                # complement, so exactly one holds here).
+                refused = "raise" if above_cap else "discount"
+                basis = (f"{sample_label}: {reason}; the reading "
+                         f"({measured:.1f}s) is carried as evidence and refused "
+                         f"as a {refused}; kept {previous:.1f}")
+            elif below_floor:
                 basis = (f"{sample_label}: {reason}; the reading "
                          f"({measured:.1f}s) is carried as evidence and refused "
                          f"as a discount; kept {previous:.1f}")
-            elif above_cap:
-                basis = (f"{sample_label}: {reason}; the reading "
-                         f"({measured:.1f}s) is carried as evidence and refused "
-                         f"as a raise; kept {previous:.1f}")
             elif reason is None:
                 basis = (f"{sample_label}: the reading saw {observed} of {declared} "
                          f"testcases = {measured:.1f}s in the largest single job "
