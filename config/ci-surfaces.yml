@@ -8431,8 +8431,9 @@ durations:
   test_pages_bindings.py: 30.0  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 7.3 — ci-timing junit-census+top-15 2026-11-02 (run 41375596528): no declared testcase count for this file (UNKNOWN), so the reading cannot prove it saw the whole file; the reading (21.6s) is a LOWER bound; kept 30.0
   test_abuse_integration.py: 17.5  # ci-timing junit-census+top-15 2026-11-02 (run 41375596528); was 13.6
   # #10156: measured locally with `--durations` on the fast lane (58 tests, 7.9s
-  # wall) — a hand entry, NOT a junit re-derivation, because the file is new in
-  # this change (#8544's idiom). Without a row it packed at DEFAULT_FAST_WEIGHT and
+  # wall) when the file was new in this change — a hand entry, NOT a junit
+  # re-derivation (#8544's idiom); the 2026-11-02 census below has since replaced it.
+  # Without a row it packed at DEFAULT_FAST_WEIGHT and
   # its shard's estimate stopped being a lower bound.
   test_10156_alert_registers.py: 2.6  # ci-timing junit-census+top-15 2026-11-02 (run 41375596528); was 7.9
   test_github_index_lifecycle.py: 14.0  # ci-timing junit-census+top-15 2026-11-02 (run 41375596528); was 21.4
@@ -8563,7 +8564,7 @@ durations:
   # REQUIRED, and it carries the flat 2.0 default — a local timing is a
   # shard-layout input that must model CI, not this box. Refresh from the
   # first post-merge run.
-  test_acl_layer_posture_8617.py: 0.1  # new in #8617; unmeasured on CI (flat default, see the entry above) — ci-timing junit-census+top-15 2026-11-02 (run 41375596528); was 2.0
+  test_acl_layer_posture_8617.py: 0.1  # new in #8617 — ci-timing junit-census+top-15 2026-11-02 (run 41375596528); was 2.0
   test_battery_exposure_liveness.py: 6.6  # ci-timing junit-census+top-15 2026-11-02 (run 41375596528); was 12.6
   test_attribution_machine_model.py: 14.1  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 6.5 — ci-timing junit-census+top-15 2026-11-02 (run 41375596528): no declared testcase count for this file (UNKNOWN), so the reading cannot prove it saw the whole file; the reading (11.5s) is a LOWER bound; kept 14.1
   test_battery_real_deadline.py: 5.0  # ci-timing top-15 2026-10-19 (run 39191149586); was 3.0
@@ -8841,7 +8842,9 @@ durations:
   test_8870_version_anchor_write_order.py: 12.5  # ci-timing junit-census+top-15 2026-11-02 (run 41375596528): no declared testcase count for this file (UNKNOWN), so the reading cannot prove it saw the whole file; the reading (0.1s) is a LOWER bound; kept 12.5
   # #8870: measured on this host, not a junit sweep — 17 tests, 8.4 s wall
   # (`HF_HUB_OFFLINE=1`, embedded carve-out lane, loaded box; the 3.7 s row this
-  # replaced was the 14-test reading before the three `SET`-clause pins).
+  # replaced was the 14-test reading before the three `SET`-clause pins). A hand
+  # entry at the file's introduction; the 2026-11-02 census below has since
+  # replaced it.
   # Under the #3400 rule a new test file MUST carry a row: without one it packs
   # at the flat 2.0 s default and drags the durations coverage floor below 90%
   # (measured: 815/906 = 89.96%, which reds `manifest-integrity` for every lane
