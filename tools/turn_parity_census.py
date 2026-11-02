@@ -819,7 +819,8 @@ def read_local_record_turns(directory, node_keys: Iterable[str] | None = None
 
     try:
         from tortoise.sdk import (
-            _capture_turn_role_text, _capture_turn_texts_with_redactions,
+            _capture_turn_role_text,
+            _capture_turn_texts_with_redactions,
             _capture_turn_window,
         )
     except Exception as exc:  # an unimportable frame is an unreadable side
