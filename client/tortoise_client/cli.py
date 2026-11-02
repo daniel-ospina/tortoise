@@ -158,11 +158,20 @@ def _cmd_call(args: argparse.Namespace) -> int:
     # (`{"result": …}`) while `content[0]` is the tool's own answer — preferring
     # the former would silently change this command's output shape for 12 read
     # tools that never receive a disclosure block at all.
-    text = getattr((getattr(result, "content", None) or [None])[0], "text", "")
+    blocks = list(getattr(result, "content", None) or [])
+    text = getattr(blocks[0], "text", "") if blocks else ""
     try:
         print(json.dumps(json.loads(text), indent=2))
     except json.JSONDecodeError:
         print(text)
+    # Every block AFTER the payload is a disclosure the caller must not lose —
+    # a retired-name warning (#3883), the #10084 graph resolution. stdout stays
+    # payload-only so `| jq` keeps working; the rest goes to stderr, which is
+    # what a human reads and what a pipeline can still capture with 2>&1.
+    for extra in blocks[1:]:
+        tail = getattr(extra, "text", "")
+        if tail:
+            print(tail, file=sys.stderr)
     return _EXIT_OK
 
 

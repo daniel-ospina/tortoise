@@ -244,8 +244,13 @@ def _point_id(result) -> tuple[str | None, str | None]:
         if getattr(result, "is_error", False):
             return None, "engine_error"
         if hasattr(result, "content"):
-            for block in result.content:
-                text = getattr(block, "text", None)
+            # The PAYLOAD is `content[0]`; later blocks are appended LAST by the
+            # dispatch seam (the #10084 graph disclosure, a retired-name
+            # warning). Iterating past it parsed disclosure prose as the answer —
+            # `unparseable_result` for any non-dict payload.
+            blocks = list(result.content or [])
+            if blocks:
+                text = getattr(blocks[0], "text", None)
                 if text:
                     parsed = _json.loads(text)
                     if isinstance(parsed, dict):

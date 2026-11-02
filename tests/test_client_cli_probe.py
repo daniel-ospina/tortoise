@@ -148,11 +148,11 @@ def test_call_prints_the_payload_even_with_a_trailing_block(monkeypatch, capsys)
     assert out == payload, out
 
 
-def test_call_falls_back_to_the_first_block_when_there_is_no_structured_payload(
-        monkeypatch, capsys):
-    """No `structured_content` (a tool with no output schema) → `content[0]`.
+def test_call_prints_the_trailing_block_on_stderr_not_stdout(monkeypatch, capsys):
+    """The appended blocks are DISCLOSURES — dropping them is the silence #10084
+    refuses, and merging them into stdout breaks `| jq`.
 
-    The trailing block stays out of it: the same join bug, one layer down.
+    So: payload on stdout, every later block on stderr.
     """
     from types import SimpleNamespace
 
@@ -168,4 +168,7 @@ def test_call_falls_back_to_the_first_block_when_there_is_no_structured_payload(
 
     monkeypatch.setattr(cli, "call_tool", fake_call_tool)
     assert cli.main(["call", "tortoise_create_point"]) == 0
-    assert json.loads(capsys.readouterr().out) == payload
+    captured = capsys.readouterr()
+    assert json.loads(captured.out) == payload
+    assert "trailing disclosure" in captured.err, (
+        "the appended disclosure was dropped instead of surfaced on stderr")

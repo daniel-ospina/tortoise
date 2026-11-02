@@ -1735,6 +1735,14 @@ def _disclose_graph_resolution(result: Any, name: str,
     info = _graph_disclosure(graph_ref, preview=_is_preview(name, arguments, result))
     if info is None:
         return result
+    if not getattr(result, "content", None):
+        # No payload block to keep at `content[0]`: appending here would make the
+        # DISCLOSURE the payload slot, and every consumer that reads `content[0]`
+        # (the CLI, `test_mcp_client.py`, the HTTP/self-host helpers, the CRM
+        # bridge) would parse prose as the answer. No served write handler
+        # returns an empty payload today — this is the guard that keeps that
+        # true when one does.
+        return result
     from mcp.types import TextContent
 
     meta = dict(getattr(result, "meta", None) or {})

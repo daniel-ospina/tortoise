@@ -204,13 +204,18 @@ def test_a_refusal_result_carries_no_disclosure():
     for a reason that has nothing to do with the `is_error` guard.
     """
     from fastmcp.tools import ToolResult
+    from mcp.types import TextContent
 
-    refusal = ToolResult(content=[], structured_content=None, is_error=True)
+    refusal = ToolResult(
+        content=[TextContent(type="text", text='{"error": "nope"}')],
+        structured_content=None, is_error=True)
     assert ms._disclose_graph_resolution(
         refusal, "tortoise_create_point", "g_other") is refusal
     # ...and the same result DOES get one when it is not an error, so the guard
     # above is the discriminating half.
-    ok = ToolResult(content=[], structured_content=None, is_error=False)
+    ok = ToolResult(
+        content=[TextContent(type="text", text='{"id": "pt_1"}')],
+        structured_content=None, is_error=False)
     with _workspace():
         disclosed = ms._disclose_graph_resolution(
             ok, "tortoise_create_point", "g_other")
