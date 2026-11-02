@@ -1355,10 +1355,6 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         graph = read_graph_turns(args.uri, args.db_path, args.graph_name)
-        if args.local_record_dir:
-            record = read_local_record_turns(args.local_record_dir)
-        else:
-            record = read_record_turns(record_dsn, args.org_id, args.graph_id)
     except CensusError as exc:
         sys.stderr.write(f"turn_parity_census: {exc}\n")
         return 3
@@ -1375,14 +1371,37 @@ def main(argv: list[str] | None = None) -> int:
     # wrong about the target. Those nodes are `non_string_id` anomalies, which
     # REFUSE the census below (exit 2) — the accurate verdict, and a message
     # the operator can act on.
-    if (not graph["nodes"] and not graph.get("unidentifiable")
-            and not args.expect_empty):
+    graph_is_empty = (not graph["nodes"] and not graph.get("unidentifiable"))
+    if graph_is_empty and not args.expect_empty:
         sys.stderr.write(
             "turn_parity_census: the graph holds ZERO is_episodic nodes — an "
             "absence is NOT established (a wrong --graph-name / --db-path is "
             "indistinguishable from a drained graph). Pass --expect-empty if "
             "the graph is known to hold no turn nodes.\n")
         return 3
+
+    # ⛔ THE RECORD LEG IS OPENED ONLY WHEN THERE IS SOMETHING TO COMPARE
+    # AGAINST IT (review cycle 5, P2). With `--expect-empty` and a graph that
+    # really holds zero episodic nodes, the record has nothing to be in parity
+    # WITH — and a box that never captured locally has no capture log at all, so
+    # reading it first made the flag unreachable on the leg this tool adds
+    # (while the same input certified on the hosted leg, which tolerates zero
+    # rows). The empty leg is LABELLED `local-skipped`/`hosted-skipped` so the
+    # artifact cannot read as a real read.
+    if graph_is_empty:
+        record = {"rows_by_key": {}, "non_turn_shaped": 0,
+                  "leg": ("local-skipped" if args.local_record_dir
+                          else "hosted-skipped")}
+    else:
+        try:
+            if args.local_record_dir:
+                record = read_local_record_turns(args.local_record_dir)
+            else:
+                record = read_record_turns(record_dsn, args.org_id,
+                                           args.graph_id)
+        except CensusError as exc:
+            sys.stderr.write(f"turn_parity_census: {exc}\n")
+            return 3
 
     try:
         report = census(graph, record, sample=args.sample)

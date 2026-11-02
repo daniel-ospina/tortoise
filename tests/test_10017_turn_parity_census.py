@@ -1442,3 +1442,29 @@ def test_a_record_that_parses_ZERO_sessions_refuses(tmp_path):
     (tmp_path / "2026-11-02.jsonl").write_text("\n\n", encoding="utf-8")
     with pytest.raises(tpc.CensusError, match="ZERO sessions"):
         tpc.read_local_record_turns(tmp_path)
+
+
+def test_expect_empty_reaches_a_verdict_when_the_local_record_is_absent(
+        tmp_path, monkeypatch):
+    """Cycle-5 P2: a drained graph must be confirmable on the local leg too."""
+    from tortoise.projection import FalkorProjection
+
+    class _Empty:
+        def __init__(self, inner=None):
+            self.g = _G()
+
+    class _G:
+        def query(self, cypher, params=None):
+            class R:
+                result_set = ([[0]] if "count(t)" in cypher else [])
+            return R()
+
+    monkeypatch.setattr(FalkorProjection, "from_uri",
+                        classmethod(lambda cls, *a, **k: _Empty()))
+    code = tpc.main(["--uri", "docker://x", "--graph-name", "g",
+                     "--local-record-dir", str(tmp_path / "absent"),
+                     "--expect-empty"])
+    assert code == 0               # the record leg was SKIPPED, not an absence
+    # …and without the flag the same empty graph still refuses.
+    assert tpc.main(["--uri", "docker://x", "--graph-name", "g",
+                     "--local-record-dir", str(tmp_path / "absent")]) == 3
