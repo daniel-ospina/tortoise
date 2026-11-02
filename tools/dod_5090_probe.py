@@ -572,6 +572,62 @@ CONFIG_SURFACES: tuple[str, ...] = (
 #: OPEN (review round 10, P3). `flag_in_shipped_configs` imports it per call.
 
 
+#: A YAML block-scalar HEADER: `|` or `>` plus the optional chomping/indent
+#: indicators, introduced as a mapping value (`note: >-`) or a sequence entry
+#: (`- |`) — YAML 1.2.2 §8.1, <https://yaml.org/spec/1.2.2/#81-block-scalar-styles>.
+#: The indicator must introduce the node, so `run: echo hi |` does not match.
+_BLOCK_SCALAR_HEADER = re.compile(
+    r"(?:^|[:\-]\s)?\s*[|>](?:[+-]?[1-9]?|[1-9][+-]?)?\s*(?:#.*)?$")
+
+
+def _yaml_block_scalar_lines(text: str) -> frozenset[int]:
+    """The 1-based line numbers that are the BODY of a YAML block scalar.
+
+    ⛔ A line inside a `>-` / `|` body is **documentation prose**, never a
+    mapping entry: YAML 1.2.2 models block scalars as a *scalar node style*
+    (§8.1) structurally separate from *block mappings* (§8.2.2), so inside the
+    body every line is scalar content — the reference page states it plainly,
+    *"Block scalar formats … all express strings"*. `_assigned_value` scans per
+    LINE and has no notion of YAML structure, so a body line shaped like
+    `TORTOISE_EMBED_GATE: 1` read as a shipped ON.
+
+    **Wrong outcome named:** `score_rule_bullet` computes `on_by_default =
+    ambient or shipped["on"]`, which is the clause separating bullet 1's
+    `PARTIAL` from `MET` once `#5090`'s remaining writers are resolved. The
+    round-8 fix's own comment promises *"a prose edit must not be able to move
+    it"*, and this repo's documentation of THIS flag already lives in a `>-`
+    block (`config/v4-mechanisms.yml:426-433`) — so the natural edit (a usage
+    line added inside that block) was the one shape that tripped it. That is the
+    only shape in this file whose error direction is toward `MET` (this tool's
+    own review, P3).
+
+    Only called for `.yml`/`.yaml` surfaces: `.env`, Dockerfile and shell files
+    have no block scalars, and applying it there could only drop real
+    assignments.
+    """
+    body: set[int] = set()
+    in_block = False
+    header_indent = 0
+    body_indent: int | None = None
+    for number, line in enumerate(text.splitlines(), 1):
+        indent = len(line) - len(line.lstrip())
+        if in_block:
+            if not line.strip():
+                # A blank line inside the block is still scalar content.
+                body.add(number)
+                continue
+            if body_indent is None:
+                body_indent = indent
+            if indent > header_indent and indent >= body_indent:
+                body.add(number)
+                continue
+            # Dedented: the scalar ends, and THIS line may be a new header.
+            in_block = False
+        if _BLOCK_SCALAR_HEADER.search(line):
+            in_block, header_indent, body_indent = True, indent, None
+    return frozenset(body)
+
+
 def _assigned_value(line: str, flag: str) -> str | None:
     """The value ``line`` ASSIGNS to ``flag``, or `None` when it is a mention.
 
@@ -653,6 +709,7 @@ def flag_in_shipped_configs(flag: str) -> dict:
     searched: list[str] = []
     mentions: list[str] = []
     unreadable: list[str] = []
+    documented_only = 0
     for rel in CONFIG_SURFACES:
         target = REPO_ROOT / rel
         candidates = ([target] if target.is_file()
@@ -673,12 +730,24 @@ def flag_in_shipped_configs(flag: str) -> dict:
             if flag not in text:
                 continue
             mentions.append(posix)
-            for line in text.splitlines():
+            # ⛔ A YAML block scalar's body is PROSE, not a mapping (§8.1 vs
+            # §8.2.2), so an assignment-shaped line there cannot swear the flag
+            # ships ON — the one input that moves bullet 1 toward `MET`.
+            prose = (_yaml_block_scalar_lines(text)
+                     if posix.endswith((".yml", ".yaml")) else frozenset())
+            for number, line in enumerate(text.splitlines(), 1):
+                if number in prose:
+                    if _assigned_value(line, flag) is not None:
+                        documented_only += 1
+                    continue
                 value = _assigned_value(line, flag)
                 if value is not None and is_truthy(value):
                     hits.append(f"{posix}: {line.strip()[:90]}")
     return {"on": bool(hits), "files": hits, "searched": searched,
             "mentions": mentions, "unreadable": unreadable,
+            # Reported, never silently dropped: how many assignment-shaped lines
+            # were documentation inside a block scalar rather than a setting.
+            "documented_only": documented_only,
             "surfaces": list(CONFIG_SURFACES)}
 
 
@@ -1158,9 +1227,51 @@ V1_SURFACES = (
 )
 
 
+def _plain_words(text: str) -> str:
+    """The words of ``text``, with markdown and punctuation removed.
+
+    Only for comparing a documentation line against the DoD bullet it may be
+    quoting: emphasis (`**V1 is decided**`), a checklist box (`- [x] …`),
+    backticks and sentence punctuation all differ between a quotation and the
+    bullet it quotes, while the WORDS do not.
+    """
+    return " ".join(re.findall(r"[a-z0-9]+", text.lower()))
+
+
+def _restates_the_dod_bullet(line: str, bullet: str) -> bool:
+    """True when ``line`` QUOTES the bullet instead of recording a ruling.
+
+    ⛔ `V1_DECIDED_MARKERS` are matched as SUBSTRINGS, and one marker is a
+    substring of the requirement it is checking: `BULLETS[3]` is `"V1 is
+    decided and implemented."` and `"v1 is decided" in "v1 is decided and
+    implemented."` is `True`. So any doc that **restates the bullet** — the
+    single most likely edit to `V1_SURFACES`, and the editing style this PR
+    uses everywhere — registered as a record that the ruling exists and flipped
+    row 4 from `NOT MET` to `PARTIAL`: publishing "a V1 ruling exists" when the
+    owner has not ruled. Row 4 IS the epic's owner gate, so that direction
+    fabricates a decision (this tool's own review, P3).
+
+    Containment is checked BOTH ways against the bullet's own words, because a
+    wrapped quotation defeats a same-line substring test: `V1 is decided and` /
+    `implemented.` on two lines raises the marker on the first, and that line is
+    a PREFIX of the bullet. A line whose words are inside the bullet, or that
+    contains the bullet's words, is a quotation.
+
+    The safe direction here is a false `NOT MET`: the row is capped at `PARTIAL`
+    by construction (`MET` is unreachable — a record cannot prove what shipped),
+    so excluding a quotation costs nothing, while admitting one invents the
+    ruling the epic stays open for.
+    """
+    norm_line, norm_bullet = _plain_words(line), _plain_words(bullet)
+    if not norm_bullet or not norm_line:
+        return False
+    return norm_bullet in norm_line or norm_line in norm_bullet
+
+
 def score_v1_bullet() -> Row:
     """Bullet 4 — a V1 ruling exists and the code implements it."""
     decided: list[str] = []
+    quoted: list[str] = []
     open_lines: list[str] = []
     for rel in V1_SURFACES:
         path = REPO_ROOT / rel
@@ -1170,6 +1281,12 @@ def score_v1_bullet() -> Row:
             if not re.search(r"\bV1\b", line):
                 continue
             if any(m in line.lower() for m in V1_DECIDED_MARKERS):
+                # ⛔ A quotation of the bullet is NOT a record: see
+                # `_restates_the_dod_bullet`. Reported, never silently dropped,
+                # so the read says what it dismissed.
+                if _restates_the_dod_bullet(line, BULLETS[3]):
+                    quoted.append(f"{rel}:{i}: {line.strip()}")
+                    continue
                 decided.append(f"{rel}:{i}: {line.strip()}")
             elif re.search(r"\bOPEN\b|\bopen decision\b|human gate|owner decision",
                            line) or "never spends that decision" in line:
@@ -1179,6 +1296,8 @@ def score_v1_bullet() -> Row:
         "implemented: UNMEASURED(not what a decision record proves — a ruling "
         "creates the follow-up work; this row can only see the record)",
     ]
+    notes += [f"restates the DoD bullet, not a ruling (excluded): {ln}"
+              for ln in quoted[:3]]
     notes += [f"open: {ln}" for ln in open_lines[:3]]
     # The bullet is "decided AND implemented", and the implementation half is
     # unmeasurable here (nothing a decision RECORD contains proves what shipped),
@@ -1345,13 +1464,46 @@ def _embed_path_modules(root: Path) -> frozenset[str]:
     return frozenset(seen)
 
 
+def _walk_module_scope(node: ast.AST):
+    """Yield every descendant of ``node`` that is NOT inside a function body.
+
+    The population this is used for is "patterns OWNED AT IMPORT TIME": module
+    statements, and class bodies (executed at import). A `re.compile` inside a
+    `def`/method/lambda **body** is not owned then — it runs when it is called,
+    in that call — so descending into it counts a helper's local pattern as a
+    second rule set.
+    """
+    for child in ast.iter_child_nodes(node):
+        if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            continue
+        yield child
+        yield from _walk_module_scope(child)
+
+
 def count_embed_predicates() -> dict:
     """Count the distinct predicates that can answer `NO-EMBED` (target: 1).
 
     A predicate is a module in `predicate_population()` that **owns identifier
-    patterns** (`re.compile` at module scope) — that is, the modules the gate
-    imports PLUS the seam modules that decide whether the gate is consulted,
-    scanned for ownership without their imports being followed.
+    patterns** — an assignment executed at MODULE SCOPE (a `re.compile` at
+    module level, or in a class body, since both run at import) — that is, the
+    modules the gate imports PLUS the seam modules that decide whether the gate
+    is consulted, scanned for ownership without their imports being followed.
+
+    ⛔ A pattern compiled **inside a function body** is NOT module scope and is
+    NOT counted. The docstring above said "`re.compile` at module scope" while
+    the code ran `ast.walk()` over each top-level statement, which descends into
+    `FunctionDef.body` — so one ordinary helper-local `pat = re.compile(...)` in
+    any module of the population recorded `count: 2`, `verdict: "DRIFT"`, and
+    reddened `test_the_embed_decision_has_exactly_one_predicate` (a required
+    `core` leg) on a change that is not drift: asserting today's tree reds a
+    required check on a CORRECT change, whose cheapest-looking repair is to
+    delete the guard (this tool's own review, P3).
+
+    Class bodies are deliberately still scanned (`_walk_module_scope` prunes
+    only function/lambda bodies): a class-level pattern LIST is owned at import
+    and would be a real second rule set, and a false `MET` is the failure this
+    instrument exists to remove — and nothing in the population is a class
+    attribute today, so this widens no live count.
 
     `embed_gate.embedding_verdict` is the ASK, not a predicate: it must call the
     shared one and report the shared rule id, which is checked separately
@@ -1382,17 +1534,18 @@ def count_embed_predicates() -> dict:
             # can name the hole it could not read.
             unparseable.append(rel)
             continue
-        # ANY module-scope expression that calls `.compile(` owns a pattern —
+        # ANY import-time expression that calls `.compile(` owns a pattern —
         # a single assignment AND a collection (`_PATS = [re.compile(…), …]`),
         # which is the most natural shape for "a second pattern LIST" and read
         # `count: 1 / MET` when only the single-assignment form was matched.
-        # ⚠️ Deliberate asymmetry, documented: an unrelated pattern-owning
-        # helper imported by the gate also counts as an owner (a false DRIFT).
-        # Over-reporting drift is the safe direction here; a false `MET` is the
-        # failure this whole instrument exists to remove.
-        module_level = [n for n in tree.body]
-        for node in (m for top in module_level for m in ast.walk(top)
-                     if top is not None):
+        # ⛔ Module scope, as the docstring says: `_walk_module_scope` prunes
+        # function/lambda bodies, so a helper's LOCAL `re.compile` is not a
+        # second predicate owner (review, P3).
+        # ⚠️ Deliberate asymmetry, documented: an unrelated import-time
+        # pattern-owning module imported by the gate also counts as an owner (a
+        # false DRIFT). Over-reporting drift is the safe direction here; a false
+        # `MET` is the failure this whole instrument exists to remove.
+        for node in _walk_module_scope(tree):
             if isinstance(node, (ast.Assign, ast.AnnAssign)) and any(
                 isinstance(c, ast.Call) and isinstance(c.func, ast.Attribute)
                 and c.func.attr == "compile"

@@ -31,6 +31,11 @@ claims:
 | `test_a_duplicate_writer_identity_holds_bullet_two_at_partial` | bullet 2's honesty | a writer whose label could not be resolved stops holding the row, while bullet 1 still reports the same hole |
 | `test_the_tool_parses_under_the_floor` | the `#5128` guard is PROTECTIVE, not documentary | 3.12-only syntax (PEP 701) creeps back in, so the file dies in the tokenizer before its own guard can refuse |
 | `test_a_line_that_merely_mentions_the_flag_is_not_a_shipped_default` | bullet 1's `on_by_default` input | a line that *documents* the flag (prose, a workflow step name, a commented list item) is scored as a shipped ON |
+| `test_an_assignment_shaped_line_inside_a_block_scalar_is_not_a_shipped_default` | the same input, on the one shape whose error direction is toward `MET` | a `>-` body line shaped like `KEY: 1` (documentation) reads as a shipped ON |
+| `test_a_real_mapping_after_a_block_scalar_still_reads_as_shipped_ON` | the block-scalar fix, in the other direction | ending the scalar drops the assignments that follow it from the walk |
+| `test_a_function_local_pattern_is_not_a_second_predicate_owner` | §12.2a's count is "module scope", as its docstring says | a helper's LOCAL `re.compile` in the population reads `count: 2 / DRIFT`, redding a required check on a correct change |
+| `test_a_class_level_pattern_still_counts_as_an_owner` | the same pruning must not become a false `MET` | a pattern list owned at IMPORT time (class body) is skipped by the module-scope walk |
+| `test_a_surface_that_quotes_the_dod_bullet_does_not_publish_a_ruling` | bullet 4 is the OWNER GATE — nothing may publish a ruling the owner did not make | a doc that restates `BULLETS[3]` (which contains the marker itself) scores `PARTIAL` |
 | `test_every_real_assignment_shape_still_reads_as_shipped_ON` | the same input, in the other direction | tightening the test makes a REAL shipped ON (compose map/array, `.env`, Dockerfile, `export`) read as a false `False` |
 | `test_searched_is_the_walk_not_the_list_of_mentions` | the documented `searched` contract | `searched` reports the mentions, so "what 'nowhere' covered" is `[]` for the case the function exists for |
 | `test_an_unreadable_surface_is_named_not_silently_excluded` | the `UNMEASURED` rule, applied to the walk | a file the walk could not read is folded into a measured `False` |
@@ -170,6 +175,78 @@ def test_the_seam_module_is_scanned_for_its_own_patterns():
     )
     # …and the widening must NOT drag in the imports it was excluded for:
     assert "tortoise/api.py" not in population, population
+
+
+def test_a_function_local_pattern_is_not_a_second_predicate_owner(tmp_path, monkeypatch):
+    """A helper's LOCAL `re.compile` is not a second rule set — module scope is.
+
+    `count_embed_predicates`'s docstring has always said *`re.compile` at module
+    scope*, while the code ran `ast.walk()` over each top-level statement — which
+    descends into `FunctionDef.body`. One ordinary helper-local pattern in any
+    module of the population therefore read `count: 2 / verdict: DRIFT` and
+    reddened `test_the_embed_decision_has_exactly_one_predicate`, a required
+    `core` leg, on a change that is NOT drift: a guard that refutes a correct
+    tree, whose cheapest-looking repair is to delete it (review, P3).
+    """
+    (tmp_path / "tortoise").mkdir()
+    (tmp_path / "tortoise" / "value_gate.py").write_text(
+        "import re\n_A = re.compile(r'#\\d+')\nRULES = ('r',)\n"
+        "def identifier_only(t):\n    return None\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "tortoise" / "embed_gate.py").write_text(
+        "from . import value_gate\nRULE_SET = value_gate.RULES\n"
+        "def embedding_verdict(t):\n    return None\n",
+        encoding="utf-8",
+    )
+    # The shape a helper grows: compiled when CALLED, not when imported.
+    (tmp_path / "tortoise" / "embeddings.py").write_text(
+        "from . import embed_gate\n"
+        "def _is_precomputed(text):\n"
+        "    import re\n"
+        "    pat = re.compile(r'^sha256:[0-9a-f]{64}$')\n"
+        "    return bool(pat.match(text))\n"
+        "def encode_for_row(t, d):\n    return embed_gate.embedding_verdict(t)\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(probe, "PREDICATE_MODULE", "tortoise/value_gate.py")
+    counted = probe.count_embed_predicates()
+    assert counted["count"] == 1, (
+        f"a function-LOCAL pattern is not a module-scope predicate owner: {counted}")
+    assert counted["verdict"] == "MET", counted
+
+
+def test_a_class_level_pattern_still_counts_as_an_owner(tmp_path, monkeypatch):
+    """The module-scope prune must not become the false `MET` it guards against.
+
+    A class body executes at IMPORT time, so a pattern list there IS owned then
+    and is a real second rule set. Pruning function bodies must not take the
+    class with it — over-reporting drift is this file's stated safe direction,
+    and a false `MET` is the failure the whole instrument exists to remove.
+    """
+    (tmp_path / "tortoise").mkdir()
+    (tmp_path / "tortoise" / "value_gate.py").write_text(
+        "import re\n_A = re.compile(r'#\\d+')\nRULES = ('r',)\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "tortoise" / "embed_gate.py").write_text(
+        "from . import value_gate\nRULE_SET = value_gate.RULES\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "tortoise" / "embeddings.py").write_text(
+        "from . import embed_gate\n"
+        "class _Skip:\n"
+        "    import re\n"
+        "    _PATS = [re.compile(r'^sha256:')]\n"
+        "def encode_for_row(t, d):\n    return embed_gate.embedding_verdict(t)\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(probe, "PREDICATE_MODULE", "tortoise/value_gate.py")
+    counted = probe.count_embed_predicates()
+    assert counted["count"] == 2, counted
+    assert counted["verdict"] == "DRIFT", counted
 
 
 def test_a_pattern_list_in_the_seam_module_reads_as_drift(tmp_path, monkeypatch):
@@ -1100,6 +1177,62 @@ def test_every_real_assignment_shape_still_reads_as_shipped_ON(
     assert shipped["files"], shipped
 
 
+def test_an_assignment_shaped_line_inside_a_block_scalar_is_not_a_shipped_default(
+        tmp_path, monkeypatch):
+    """A `>-` body is SCALAR CONTENT, so `KEY: 1` there is prose, not a setting.
+
+    YAML 1.2.2 models block scalars as a *scalar node style* (§8.1), separate
+    from *block mappings* (§8.2.2) — *"Block scalar formats … all express
+    strings"* — so nothing inside the body is a mapping entry. The line scan had
+    no notion of structure and read it as a shipped ON, and `on_by_default` is
+    the clause that separates bullet 1's `PARTIAL` from `MET`.
+
+    This is the one shape in the file whose error direction is toward `MET`, and
+    the natural edit is the one that trips it: this repo already documents THIS
+    flag inside a `>-` block (`config/v4-mechanisms.yml:426-433`), so adding a
+    usage line there must not complete a DoD row (review, P3).
+    """
+    (tmp_path / "config").mkdir()
+    (tmp_path / "config" / "x.yml").write_text(
+        "meta:\n"
+        "  note: >-\n"
+        "    TORTOISE_EMBED_GATE: 1\n"
+        "    A usage line here is documentation, not a shipped default.\n"
+        "  off_by_default: true\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["on"] is False, shipped
+    # …and the exclusion is REPORTED, because it is a decision about a line that
+    # looks exactly like a setting. A silent skip would be a new hole.
+    assert shipped["documented_only"] == 1, shipped
+
+
+def test_a_real_mapping_after_a_block_scalar_still_reads_as_shipped_ON(
+        tmp_path, monkeypatch):
+    """The block predicate must END where the scalar does.
+
+    Skipping a body is only correct if the walk resumes at the next real
+    mapping key; a scanner that never ends the block would drop genuine
+    assignments and report `off by default` for a flag that ships ON.
+    """
+    (tmp_path / "docker-compose.yml").write_text(
+        "services:\n"
+        "  app:\n"
+        "    note: >-\n"
+        "      TORTOISE_EMBED_GATE is documented here, not set.\n"
+        "    environment:\n"
+        "      TORTOISE_EMBED_GATE: \"true\"\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["on"] is True, shipped
+    assert shipped["files"] == [
+        'docker-compose.yml: TORTOISE_EMBED_GATE: "true"'], shipped
+
+
 def test_searched_is_the_walk_not_the_list_of_mentions(tmp_path, monkeypatch):
     """`searched` must answer "what did 'nowhere' cover?" — the documented contract.
 
@@ -1604,6 +1737,44 @@ def test_row_four_never_reaches_MET_even_with_a_decided_marker(tmp_path, monkeyp
     row = probe.score_v1_bullet()
     assert row.verdict == "PARTIAL", row.verdict
     assert "decided markers found: 2" in row.observed, row.observed
+
+
+def test_a_surface_that_quotes_the_dod_bullet_does_not_publish_a_ruling(
+        tmp_path, monkeypatch):
+    """Quoting the bullet is NOT a record — row 4 is the epic's owner gate.
+
+    One marker (`v1 is decided`) is a substring of the requirement being checked
+    (`BULLETS[3]` = "V1 is decided and implemented."), so a doc that **restates
+    the bullet** — the most likely edit to `V1_SURFACES`, and the style this PR
+    uses everywhere — registered as a ruling and flipped row 4 from `NOT MET` to
+    `PARTIAL`: publishing "a V1 ruling exists, implementation unproven" when the
+    owner has not ruled. The code comment at the marker anticipated only the
+    harmless direction; this one fabricates a decision (review, P3).
+
+    Four quotation SHAPES, because each defeats a different naive test: the
+    bullet verbatim, an emphasised/checklisted copy, a backticked copy, and a
+    WRAPPED copy whose first line is a PREFIX of the bullet (a same-line
+    substring test cannot see that one).
+    """
+    shapes = [
+        probe.BULLETS[3],
+        f"- [x] **{probe.BULLETS[3]}**",
+        f"`{probe.BULLETS[3].rstrip('.')}` (the epic's fourth bullet)",
+        "V1 is decided and\n   implemented.",
+    ]
+    for shape in shapes:
+        for rel in probe.V1_SURFACES:
+            path = tmp_path / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(f"# DoD\n{shape}\n", encoding="utf-8")
+        monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+        row = probe.score_v1_bullet()
+        assert row.verdict == "NOT MET", (
+            f"a doc QUOTING the bullet published a V1 ruling: {row.verdict!r} "
+            f"for shape {shape!r} ({row.observed})")
+        assert "decided markers found: 0" in row.observed, row.observed
+        # Reported, not silently dropped — the read says what it dismissed.
+        assert "restates the DoD bullet" in row.observed, row.observed
 
 
 def _fake_rule_tree(tmp_path) -> None:
