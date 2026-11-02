@@ -1555,7 +1555,22 @@ def run(directory: Path, use_git: bool = True, use_corpus: bool = True,
             # made NO_BASE_REF INERT: the CLI exited 0 and printed the shallow-clone reason for a
             # checkout that is not shallow (#10547 review P1, measured before this fix).
             if exc.fatal:
-                raise
+                # The findings already accumulated are NOT forfeited by a reason with no fallback:
+                # `main` prints only `str(exc)`, so a bare re-raise would drop (a) this run's own
+                # completeness / E4-denominator / single-measured-log findings and (b) the git-FREE
+                # findings the exception carries — the #9075 r6 P2 invariant restated four lines
+                # below, and the class docstring's own promise. Measured before this: a bundle whose
+                # record disagreed with its document exited 2 naming only the base ref, with the
+                # sha256 disagreement (the class this gate exists for) discarded.
+                found = failures + exc.failures
+                if not found:
+                    raise
+                raise CheckError(
+                    str(exc)
+                    + "\nALREADY FOUND by the checks that need no history (the base ref does not "
+                      "affect them, and they still stand):"
+                    + "".join(f"\n  - {finding}" for finding in found)
+                ) from exc
             # The THIRD outcome: neither a pass nor an ordering failure. Folding it into either is
             # what reds a correctly ordered tree in every CI test job (#9075 r4 P1). The git-FREE
             # findings it carries are kept — an unprovable history must not clear a laundering

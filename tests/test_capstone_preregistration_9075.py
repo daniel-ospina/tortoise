@@ -2680,11 +2680,16 @@ def test_a_registration_added_by_the_same_change_is_refused(tmp_path, monkeypatc
 
 
 def test_the_refusal_is_not_a_no_op_when_the_base_is_missing(tmp_path, monkeypatch):
-    """A checkout WITH a remote but NO resolvable base fails closed (UNPROVABLE), never green.
+    """A checkout WITH a remote but NO resolvable base is REFUSED — a fatal `HistoryUnavailable`.
 
-    Losing this arm would let an environment change silently downgrade the check to the
-    PR-internal rule this change exists to remove — a gate that passes because it could not read its
-    subject. Reported as `HistoryUnavailable` (the documented third outcome), not as a violation.
+    `main` reports it as exit 2 ("could not check this subject"), never green. Losing this arm would
+    let an environment change silently downgrade the check to the PR-internal rule this change
+    exists to remove — a gate that passes because it could not read its subject.
+
+    The shallow-clone reason is the ONLY one that stays the declared-green third outcome: a
+    truncated history is the state every CI test job is in (#9075 r4 P1), whereas a base ref that
+    cannot be resolved has no such excuse. Folding this arm in with the shallow one is what made it
+    INERT — it never changed an exit code (#10547 review P1).
     """
     repo = _repo(tmp_path, monkeypatch)
     # Force a branch name that is NOT `main`, so the only reason the base is unresolvable is the
@@ -2721,6 +2726,19 @@ def test_the_cli_fails_closed_when_the_base_ref_cannot_be_resolved(tmp_path, mon
     bundle = repo / "docs" / "evidence" / "7949-capstone"
     bundle.mkdir(parents=True)
     (bundle / check.PREREG_NAME).write_text(PREREG.read_text())
+    # The matching machine record too: WITHOUT it the pre-fix tree exited 1 (the record check runs
+    # after the ordering half), so the pre-fix signal would be 1 rather than the 0 this docstring
+    # claims. With it, everything git-free is green and the ONLY thing standing between the tree and
+    # a certified entry is the base ref — which is what makes the 0 -> 2 delta attributable.
+    record = PREREG_DIR / "preregistration.json"
+    if record.is_file():
+        (bundle / record.name).write_text(record.read_text())
+    # ...and the log the pins exempt, declaring itself unscored. WITHOUT it the pre-fix tree exits 1
+    # (`pre_existing_unscored_logs exempts 'e1-e2.log', which is not in this directory`), so the
+    # pre-fix signal would be 1, not the 0 this test claims to have measured. With it, every
+    # git-free arm is green and the base ref is the ONLY thing between the tree and a certified
+    # entry — which is what makes the 0 -> 2 delta attributable to this arm alone.
+    (bundle / "e1-e2.log").write_text(UNSCORED_LOG)
     _git(repo, "add", str(bundle.relative_to(repo)))
     _git(repo, "commit", "-q", "-m", "add prereg", epoch=1_700_000_100)
 
@@ -2737,6 +2755,40 @@ def test_the_cli_fails_closed_when_the_base_ref_cannot_be_resolved(tmp_path, mon
         f"state. Found: {output}"
     )
     assert "the ordering holds" not in output, output
+
+
+def test_a_fatal_unprovable_ordering_still_reports_the_findings_it_holds(tmp_path, monkeypatch,
+                                                                        capsys):
+    """A reason with no fallback must not FORFEIT what was already proven without history.
+
+    `main` prints only `str(exc)`, so re-raising the fatal exception bare cleared every finding
+    accumulated before it: this run's own completeness / E4 / single-measured-log findings, and the
+    git-FREE ones the exception carries (#9075 r6 P2: "an unprovable history must not clear a
+    laundering finding that needed no history to prove"). Measured on the pre-fix tree, this bundle
+    exited 1 and LISTED the two-scored-logs finding; with the fatal arm re-raising bare it exited 2
+    naming only the base ref, and the finding vanished from the output.
+    """
+    repo = _repo(tmp_path, monkeypatch)
+    _git(repo, "symbolic-ref", "HEAD", "refs/heads/contrib")
+    _git(repo, "remote", "add", "upstream", "https://example.invalid/x.git")
+    bundle = repo / "docs" / "evidence" / "7949-capstone"
+    bundle.mkdir(parents=True)
+    (bundle / check.PREREG_NAME).write_text(PREREG.read_text())
+    # A git-free finding by construction: two logs claim to be THE measurement.
+    (bundle / "capstone-measured-aaaa1111.log").write_text("x\n")
+    (bundle / "capstone-measured-bbbb2222.log").write_text("x\n")
+    _git(repo, "add", str(bundle.relative_to(repo)))
+    _git(repo, "commit", "-q", "-m", "add bundle", epoch=1_700_000_100)
+
+    code = check.main(["--dir", str(bundle), "--no-corpus"])
+    printed = capsys.readouterr()
+    output = printed.out + printed.err
+    assert code == 2, output                      # still the refused-check exit
+    assert "no base ref" in output, output        # ... and still names the reason
+    assert "scored measurement logs claim to be THE measurement" in output, (
+        "the fatal arm must carry the findings it already proved — an exit 2 that names only the "
+        f"base ref clears a laundering/duplication finding by omission. Found: {output}"
+    )
 
 
 def test_an_unprovable_ordering_reports_its_own_reason_not_a_constant(monkeypatch):
