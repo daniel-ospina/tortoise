@@ -503,7 +503,7 @@ def test_a_version_pinned_hosted_label_is_dropped_never_made_permanent(tmp_path:
     """⛔ THE UNION'S NAMED CARVE-OUT (a): `ubuntu-<version>` is DROPPED, not carried forward.
 
     A literal union makes every out-of-band version pin PERMANENT, and that reverses a recorded
-    decision (not just a style choice): `docs/ops/ci-runner-x64.md:92-96` —
+    decision (not just a style choice): `docs/ops/ci-runner-x64.md:95-99` —
     "`_preserve_labels` DROPS the whole class on re-registration … so an attachment survives a
     repair that re-applies it (`--repair-labels` keeps only the box's own label, and only where
     **this run's resolution** claims it — `on`, or `auto` on a host whose `/etc/os-release` reports
@@ -548,9 +548,9 @@ def test_a_foreign_arch_marker_is_dropped_so_the_repair_still_heals(tmp_path: Pa
 
     `is_host_label` deliberately excludes `self-hosted-x64`/`self-hosted-arm64` (they are CUSTOM
     labels GitHub lets you remove), so a literal union leaves `self-hosted-arm64` on an x86 box —
-    the measured pre-#2327 stamp (`docs/ops/ci-runner-x64.md:590-592`) — and the runbook still sells
+    the measured pre-#2327 stamp (`docs/ops/ci-runner-x64.md:593-595`) — and the runbook still sells
     `--repair-labels` as the manual heal that "re-applies this arch's marker"
-    (`docs/ops/ci-runner-x64.md:746-747`). Keeping
+    (`docs/ops/ci-runner-x64.md:749-750`). Keeping
     the alien marker makes an arm64-specific job routable to an x86 box and produce a wrong
     artifact: a false PASS, not a queue delay (this file's own header).
     `tools/runner_autoscale.py::_preserve_labels` re-derives the arch marker rather than preserving
@@ -3393,12 +3393,12 @@ def test_every_runbook_citation_in_this_file_lands_on_what_it_names():
 
     # cited start line -> a regex the CITED RANGE must match, i.e. the sentence quoted here
     anchors: dict[int, str] = {
-        92: r"DROPS the whole class on re-registration",
-        590: r"A foreign arch marker",
-        746: r"install-ci-runner-x64\.sh --repair-labels` re-applies\s+this arch's marker",
+        95: r"DROPS the whole class on re-registration",
+        593: r"A foreign arch marker",
+        749: r"install-ci-runner-x64\.sh --repair-labels` re-applies\s+this arch's marker",
         # 8g's docstring quotes the phantom-test-name relay; anchored on the TEST NAME it names,
         # so a future shift of that sentence reds here instead of leaving the quotation adrift.
-        866: r"test_the_changes_job_carries_no_job_scope_env",
+        869: r"test_the_changes_job_carries_no_job_scope_env",
         # 8h-bis quotes the label-contract table for the pre-mitigation absolute it pins: the two
         # rows a comment about what the pool CLAIMS must land on (the pair, and `:26` alone).
         25: r"\*\*GitHub-hosted, plus — as a temporary mitigation",
@@ -3450,7 +3450,7 @@ _RUNBOOK_TEST_REF = re.compile(r"(tests/[A-Za-z0-9_/]+\.py)::(test_[A-Za-z0-9_]+
 def test_every_test_name_the_runbook_names_exists():
     """⛔ A RUNBOOK REFERENCE TO A TEST THAT DOES NOT EXIST READS AS CONFIRMATION.
 
-    `docs/ops/ci-runner-x64.md:866` told the operator the job-scope lever is a red check
+    `docs/ops/ci-runner-x64.md:869` told the operator the job-scope lever is a red check
     "`tests/test_ci_selection.py::test_the_changes_job_carries_no_job_scope_env`" — and no test of
     that name existed in the tree (the guard was
     `test_the_opt_in_is_step_scoped_so_no_env_sits_above_the_capstone_gate`). Nothing redded: the
@@ -3510,8 +3510,8 @@ _TOOLS_RUNBOOK_ANCHORS: dict[int, str] = {
     13: r"^# x86_64 CI runners",
     25: r"\*\*GitHub-hosted, plus — as a temporary mitigation",
     26: r"^\| `ubuntu-24\.04` \| 9 \| \*\*GitHub-hosted, plus — as a temporary mitigation",
-    87: r"still does \*\*not\*\* claim any",
-    92: r"DROPS the whole class on re-registration",
+    90: r"still does \*\*not\*\* claim any",
+    95: r"DROPS the whole class on re-registration",
 }
 
 
@@ -3997,8 +3997,8 @@ def test_the_runbook_inventory_matches_the_tree_and_says_the_read_refuses(tmp_pa
     `runs-on: ${{ fromJSON(matrix.runner) }}` in `python-ci.yml`. Two consequences, neither
     re-derived against the tree the merge produced:
 
-      1. the inventory is **76** `ubuntu-latest` jobs, not the 77 the page states (a number this PR
-         added itself);
+      1. the inventory was **76** `ubuntu-latest` jobs at that head, not the 77 the page stated then
+         (a number this PR added itself);
       2. that one non-static block makes `--status`' `label-coverage` read refuse with `exit 4`
          BEFORE it verdicts any label — so the page's *Verify it* section told the operator to
          confirm the mitigation with a read that prints the header, the refusal, and ZERO
@@ -4044,7 +4044,7 @@ def test_the_runbook_inventory_matches_the_tree_and_says_the_read_refuses(tmp_pa
         "the `ubuntu-24.04` job count moved — re-derive the runbook's table with this pin: "
         f"{counts}"
     )
-    assert counts["ubuntu-latest"] == 76, (
+    assert counts["ubuntu-latest"] == 75, (
         "the `ubuntu-latest` job count moved (the runbook states it as a dated measurement, and "
         "this arm is what makes 'dated' honest) — re-derive the table and this number together, do "
         f"not assume {counts['ubuntu-latest']} is right: {counts}"
@@ -4598,17 +4598,23 @@ def test_the_relays_a_sibling_test_file_makes_land_on_what_they_name():
         ("tests/test_website_docs_consistency.py", 56):
             r"from tortoise\.commit_schema import Point, point_content_id",
         # the reference-surface relay that drifted: the runbook sentence naming the test
-        ("docs/ops/ci-runner-x64.md", 866): r"test_the_changes_job_carries_no_job_scope_env",
+        ("docs/ops/ci-runner-x64.md", 869): r"test_the_changes_job_carries_no_job_scope_env",
         # the capstone pin's re-cut history, which names it too (re-derived at #10468's head: the
         # re-cut comments this PR added to that file pushed it 1590 → 1596, and the record↔bars
         # tests added above at the same head pushed it 1596 → 1673, then 1682 when the disagreement
         # case was widened from the two log-invisible bars to all seven — the pin landing rather
-        # than drifting, because a plausible offset is what it exists to refuse)
-        ("tests/test_capstone_preregistration_9075.py", 1682):
+        # than drifting, because a plausible offset is what it exists to refuse). #10536's
+        # comparable-identity tests insert above it (at `:749`), pushing 1682 → 1768 → 1822, once
+        # per commit of that lane; re-derived from the head each time rather than nudged. The B905
+        # `strict=` fix is the same class of insert (3 lines, at `:777`), pushing 1822 → 1825.
+        ("tests/test_capstone_preregistration_9075.py", 1825):
             r"test_the_changes_job_carries_no_job_scope_env",
         # the four fleet observers' prose (`:25-26`): the inventory row it contrasts — the
         # moving alias the observers must NOT pin to, which the version pin below it replaces
         ("docs/ops/ci-runner-x64.md", 25): r"^\| `ubuntu-latest` \|",
+        # the POOL-ONLY class rule: the vocabulary `tests/test_runner_tool_contract.py`'s new
+        # `_POOL_ONLY_LABEL` arm is written against (#10511 review)
+        ("docs/ops/ci-runner-x64.md", 62): r"not a spelling but a CLASS",
     }
 
     ref = re.compile(r"((?:tests/[A-Za-z0-9_/]+\.py)|(?:docs/ops/ci-runner-x64\.md)):(\d+)")

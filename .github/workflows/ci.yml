@@ -1495,10 +1495,118 @@ jobs:
     # cap bounds a hung harness without failing a slow-runner run.
     timeout-minutes: 15
     if: ${{ !cancelled() }}
-    runs-on: ubuntu-latest
+    # #10237 CANARY — the pool answer, for a job that is allowed to have one.
+    #
+    # WHY THIS JOB AND NOT A REQUIRED ONE. `ubuntu-latest` is answered by ZERO of
+    # the pool's 12 runners (measured 2026-11-01T16:41Z: every `pi-runner-*`
+    # carries `self-hosted-x64` or `self-hosted-arm64`, none carries
+    # `ubuntu-latest`), so every `runs-on: ubuntu-latest` job is served ONLY by
+    # GitHub-hosted — measured job queue wait in run 41320964047: 15.3, 17.8,
+    # 19.0, 25.5, 33.7, 34.5, 37.6 and 39.0 MINUTES — while 10 of 12 pool runners
+    # sat idle. The required legs CANNOT be routed here: `python-ci.yml:1891`
+    # and `docs/ops/ci-runner-x64.md:65` REFUSE a `self-hosted` pin for them,
+    # because such a pin removes the GitHub-hosted half of the race and a
+    # hosted outage then leaves the required aggregate pending forever.
+    #
+    # That refusal does NOT reach a job with no branch-protection context. This
+    # job is not in `.mergify.yml`'s `queue_conditions` (pricing-artifact, docs,
+    # test-isolation, license-surface, legal-e2e, ai-review-gate) nor in
+    # `merge_conditions` (python-ci-gate), so a wait here can never hold a merge
+    # — which is exactly the cost the pin exists to avoid. It is the canary the
+    # issue asks for first (`#10237` ask 1: "canary on one non-required job
+    # first"): if the pool cannot carry it, the loss is one slow non-required
+    # check, not a blocked PR.
+    #
+    # THE LABEL SET IS THE RUNNERS' OWN, VERBATIM. Every x64 runner carries
+    # `self-hosted,Linux,X64,self-hosted-x64`; `runs-on` is AND semantics, so
+    # `[self-hosted, self-hosted-x64]` selects every x64 runner and no ARM64 VM.
+    # The HARNESSES need no network, no docker, no secrets and no architecture (stubbed
+    # curl/gh/flyctl/aws/date), so the arch sensitivity that put `test-slow` on
+    # `ubuntu-24.04` does not apply. But a label is a scheduling decision, NOT an image
+    # (#9018): `python3` is provisioned below and `jq` ASSERTED, and the provisioners
+    # FETCH (a toolchain, the guard checkout), so a bare pool box needs EGRESS.
+    #
+    # ⚠️ NAMED RESIDUAL (deliberate): while the pool is unreachable this job
+    # waits instead of falling back, because `runs-on` has no OR semantics — an
+    # OR between hosted and the pool is what `scripts/ci_runner_gate.sh`'s label
+    # attachment provides, and this job bypasses it. Accepted here because the
+    # job is non-required; it must NOT be copied onto a required leg.
+    runs-on: [self-hosted, self-hosted-x64]
+    # ⚠️ THE RESIDUAL HAS TWO FAILURE MODES, NOT ONE — both measured on this job.
+    # A label set no runner carries leaves the job QUEUED (the 24h limit, no red,
+    # nothing to look at), which is the mode named above. A runner that CLAIMED the
+    # job and then dropped it does not wait — it REDS. Measured at `99e899f3b`, run
+    # `41367201398` / job `125030350732`: `repo-harnesses` on `pi-runner-cmux-x64-8`
+    # — the same runner that carried this job green (15 steps, 1m38s) in run
+    # `41343233944` — started 00:29:10Z, ended 00:40:10Z, reported ZERO steps, and
+    # annotated "The self-hosted runner lost communication with the server". Zero
+    # steps is the discriminator: no step of this job ran, so no step of it caused
+    # that. Re-run before investigating a harness. It costs no merge (this job is
+    # in no `needs:` of the required aggregate — `python-ci.yml:4411`), but a red
+    # carrying no steps READS as a job defect, which is the #9018 misdiagnosis one
+    # layer up — the same class this job's tool contract exists to prevent.
+    # ⚠️ WHAT THIS CANARY PROVES — READ IT NARROWLY (#10237 ask 1).
+    # The ask is two-part: a non-required canary, AND a proof list on it ("docker
+    # available, the FalkorDB image pullable, `uv sync --extra embeddings --extra
+    # parity` working, and a representative test file green"). This job runs
+    # STUBBED shell harnesses — no docker, no `uv`, no pytest, no DB, no network
+    # (see above) — so its green discharges SCHEDULING plus the minimal-`PATH`
+    # shell contract, and does NOT discharge that proof list. Ask 2 ("Only then
+    # the five python-ci-gate legs") rests on ask 1, so its precondition is
+    # deliberately UNMET by this change; that is why the required legs stay on
+    # `ubuntu-latest` here.
     steps:
       - uses: actions/checkout@v4
+      # ── THE RUNNER TOOL CONTRACT (#9018) ──────────────────────────────────
+      # `runs-on: [self-hosted, self-hosted-x64]` names a BARE agent, not the
+      # `ubuntu-latest` image this job was written against. Three of its
+      # harnesses shell out to bare `python3` (`registry-cron.test.sh`,
+      # `ai-review-gate.test.sh`, `orphan-bound.test.sh`). The hosted image ships
+      # it; a pool box need not. Without the steps below the failure is
+      # `exit 127: command not found` that READS as a test failure (#9018),
+      # reddening the SIGPIPE / ai-review-evidence / backup guards for a reason
+      # unrelated to the diff. Same shape as `ci-timing.yml:56-62`.
+      #
+      # ⚠️ `jq` RESOLVES ON THE ONE x64 RUNNER THIS CANARY HAS LANDED ON — read
+      # that as narrow, because it is. The measurement is
+      # `pi-runner-cmux-x64-8` (run 41328630369, at a head carrying an
+      # UNCONDITIONAL `ensure jq`; an unsatisfied assertion exits 1 and reds the
+      # job), so the green proves jq resolves THERE and nowhere else. The pin
+      # selects ~10 x64 agents across more than one host family
+      # (`runner-tools.sh:10`), and `tools/install-ci-runner-x64.sh` installs no
+      # `jq` — it only calls `gh api --jq` — so NOTHING in the tree makes jq's
+      # presence pool-wide by construction. This step is therefore an
+      # ASSERTION, not an install: `runner-tools.sh ensure_one` (`:197-213`)
+      # installs `gh` and nothing else, so `ensure jq` can never repair an absent
+      # jq — it fails CLOSED with `reason=absent-not-provisionable` on any box
+      # that lacks it. That is the contract's own intent (name the tool, never
+      # inherit the machine); do not read "ensure" as "provisioned" when
+      # copying this onto another leg.
+      #
+      # ⚠️ AND IT IS GATED THE WAY ITS CONSUMER IS. The real jq surface is
+      # `registry-cron.test.sh:280` PLUS every call in the driver it EXECUTES (`:572`
+      # runs the real `registry-cron.sh`; `grep -c bin/jq` on the harness is 0), all
+      # under `driver_scripts`; `ai-review-gate.test.sh` only greps STUBBED `gh` argv.
+      # Ungated, an absent jq redded EVERY PR — including the large majority
+      # whose diff cannot touch the driver — naming a tool nothing would have
+      # used, which is the #9018 misdiagnosis one layer up.
+      - name: Runner tool contract — assert jq is present (#9018)
+        if: ${{ !cancelled() && needs.changes.outputs.driver_scripts == 'true' }}  # #2149: driver surface only
+        run: bash .github/scripts/runner-tools.sh ensure jq
+      # `!cancelled()` on BOTH provisioners rather than the implicit default.
+      # Every harness step below runs under `!cancelled()`, which is TRUE after a
+      # failure — so with the default `success()` one red upstream (the jq
+      # assert, the SIGPIPE guard) SKIPPED `setup-python` and the agent-infra
+      # checkout and then still ran the harnesses, against no `python3` and no
+      # `.agent-infra-guard`: one named failure became 2-4 that read as real
+      # defects (a missing interpreter, a missing guard tree). Provision first,
+      # then let the harnesses report.
+      - uses: actions/setup-python@v5
+        if: ${{ !cancelled() }}
+        with:
+          python-version: '3.12'
       - uses: actions/checkout@v4
+        if: ${{ !cancelled() }}
         with:
           repository: daniel-ospina/agent-infra
           path: .agent-infra-guard
