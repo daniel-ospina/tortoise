@@ -4606,11 +4606,14 @@ def test_the_relays_a_sibling_test_file_makes_land_on_what_they_name():
         # ordering-arm split plus the ancestry/late-touch tests, then 2375 by its cycle-15
         # disclosure rules (a `squash_merge` may not cite itself, and must be able to carry the
         # pair) with the `_real_squash` fixture that verifies them, and by its cycle-15 settlement
-        # of the #10544 collision (the withdrawn bundle carries no disclosure) — the pin landing
+        # of the #10544 collision (the withdrawn bundle carries no disclosure), then 2391 by its
+        # cycle-16 fix of the one test that assumed FULL history (`test_the_cli_prints_the_declared_
+        # atomic_add_and_its_commits` now names HEAD, which resolves in a depth-1 clone, so the
+        # `test` shards stop red-ing on a shallow checkout) — the pin landing
         # rather than drifting, because a plausible offset is what it exists to refuse. ⛔
         # Re-derive this number, never delete the entry: the whole point is that a citation which
         # names a line that does not say it is a dead pointer.
-        ("tests/test_capstone_preregistration_9075.py", 2375):
+        ("tests/test_capstone_preregistration_9075.py", 2391):
             r"test_the_changes_job_carries_no_job_scope_env",
         # the four fleet observers' prose (`:25-26`): the inventory row it contrasts — the
         # moving alias the observers must NOT pin to, which the version pin below it replaces

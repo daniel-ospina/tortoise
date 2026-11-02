@@ -952,7 +952,23 @@ def test_the_cli_prints_the_declared_atomic_add_and_its_commits(monkeypatch, cap
     `test_the_withdrawn_bundle_no_longer_carries_an_atomic_disclosure`. Printing the block is
     therefore exercised on a report built here: the human path is what this test is about, and it
     must not depend on a bundle's history to be covered.
+
+    ⛔ AND IT MUST NOT DEPEND ON FULL HISTORY EITHER (#10546 review cycle 16, IS-2). The fixture's
+    `branch_commits` used to be the REAL bundle's shas (`a1075dfc2`, `325f2a1a5`), and the
+    "nothing to disclaim" half then asserted `"NOT checked here" not in out`. Those commits exist
+    only in a FULL clone: the `test` shards check out at `fetch-depth: 1`
+    (`.github/workflows/python-ci.yml` — the only `fetch-depth: 0` checkout is `changes`), so
+    `_unverified_history_note` printed the disclaimer and the assertion failed on the shard that
+    runs this file. `main()` never consults `history_unavailable()` and `check.run` is
+    monkeypatched here, so nothing short-circuited it — the test would have red-ed `python-ci-gate`
+    in the very run that landed it. It now names HEAD, which exists in EVERY clone however shallow,
+    so the "resolves, so there is nothing to disclaim" half is depth-1-safe by construction — no
+    `@requires_history` skip, which would have dropped this coverage from CI entirely.
     """
+    head = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=str(check.REPO_ROOT),
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
     report = {
         "document": "docs/evidence/7949-capstone/PRE-REGISTRATION.md",
         "rows": [{"id": "E1", "line": 1}],
@@ -966,10 +982,7 @@ def test_the_cli_prints_the_declared_atomic_add_and_its_commits(monkeypatch, cap
         "ordering_atomic_add_commits": {
             "e1-e2.log": {
                 "squash_merge": "cfa3de857 measure(10463): … ratio 0.870 (#10468)",
-                "branch_commits": [
-                    "a1075dfc2 prereg(10463): the bars do not move",
-                    "325f2a1a5 measure(10463): the hypothesis is FALSE",
-                ],
+                "branch_commits": [f"{head[:9]} prereg(10463): the bars do not move"],
             }
         },
     }
@@ -978,19 +991,22 @@ def test_the_cli_prints_the_declared_atomic_add_and_its_commits(monkeypatch, cap
     out = capsys.readouterr().out
     assert "ATOMIC-ADD declared" in out, out
     assert "squashed by cfa3de857" in out, out
-    assert "a1075dfc2" in out and "325f2a1a5" in out, out
+    assert head[:9] in out, out
     # The CLAIM line is qualified — a consumer of `machine record run-order claim` must not read a
     # disclosed ordering as one the gate compared.
     assert "verified (atomic-add DECLARED" in out, out
-    # These two shas exist in THIS repository, so the block has nothing to disclaim.
+    # This commit DOES exist in this checkout — it is HEAD, so it resolves in a depth-1 clone too —
+    # so the block has nothing to disclaim.
     assert "NOT checked here" not in out, out
-    # …and when they do NOT, the block says so instead of letting silence read as verification
+    # …and when it does NOT, the block says so instead of letting silence read as verification
     # (#10529 review cycle 15, P1).
     report["ordering_atomic_add_commits"]["e1-e2.log"]["branch_commits"] = [
         "deadbeef1 the branch commit a squash left unreachable",
     ]
     assert check.main(["--dir", "docs/evidence/7949-capstone"]) == 0
-    assert "NOT checked here" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "deadbeef1" in out, out
+    assert "NOT checked here" in out, out
 
 
 def test_the_withdrawn_bundle_no_longer_carries_an_atomic_disclosure():
