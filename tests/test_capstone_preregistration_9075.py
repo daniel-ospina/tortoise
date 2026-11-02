@@ -2571,6 +2571,33 @@ def test_run_defaults_to_the_ruled_verdict_not_the_proposal():
             .parameters["allow_atomic_disclosure"].default is False)
 
 
+def test_the_armed_rule_reports_its_own_base_and_never_the_ruled_one():
+    """`run()` under the PROPOSED rule says which base it did NOT consult (#10546 merge).
+
+    The two rules in `check_ordering` read DIFFERENT histories: the ruled one measures the pair on
+    the base ref, the proposal orders it inside this contribution. Reporting the resolved candidate
+    on the armed path would be the silent-green `ordering_base` exists to remove — a green line
+    saying a measurement was made against a ref the armed rule never opened — so the armed path
+    reports its own marker instead.
+
+    Measured on the REAL 5087 bundle (its log's add-commit is a descendant of the registration's, so
+    the armed rule proves the order), which is also the only end-to-end exercise of `run(...,
+    allow_atomic_disclosure=True)`: the disarm is pinned at the signature and the call boundary
+    above, but nothing ran the armed report wiring before the merge.
+    """
+    directory = PREREG_DIR.parent / "5087-hypothesis"
+    if check.history_unavailable():
+        pytest.skip("the ordering half needs full history (CI test jobs check out at fetch-depth:1)")
+    ruled = check.run(directory, use_corpus=False)
+    assert ruled["ordering"] == "verified", ruled
+    assert ruled["ordering_base"] != check.PROPOSED_ORDERING_BASE
+    armed = check.run(directory, use_corpus=False, allow_atomic_disclosure=True)
+    assert armed["ok"] is True, armed["failures"]
+    assert armed["ordering"] == "verified", armed["ordering"]
+    assert armed["ordering_base"] == check.PROPOSED_ORDERING_BASE, armed["ordering_base"]
+    assert armed["ordering_atomic_add"] == [], armed["ordering_atomic_add"]
+
+
 # ── round-5: shallow CI, glued markers, unreadable status, wrong-typed inputs ──
 
 
