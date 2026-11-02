@@ -1016,25 +1016,32 @@ def _project_journal_rows(sql: str, rows, params):
     # narrow every row away (measured — five read-door legs red).
     _id_clauses = list(_ID_CLAUSE_RE.finditer(sql))
     id_key = _id_clauses[-1].group(1) if _id_clauses else None
-    # TWO different event-type predicates live in this text, and modelling them
-    # as ONE was a measurable bug twice over (review rounds 2 and 4): the BASE
-    # statement's SELECTION (`event_type = '...'` and `event_type IN (...)`) and
-    # the id NARROWING's own `IN (...)`, which is appended after the `@>`
-    # containment clause. The split point is that clause.
+    # TWO different event-type predicates live in this text: the BASE statement's
+    # SELECTION (`event_type = '...'` and `event_type IN (...)`) and the id
+    # NARROWING's own `IN (...)`, appended after the `@>` containment clause. They
+    # are modelled separately, split at that clause.
     #
-    # * base sets → what the SELECTION can return. Round 4 (P2) measured the
-    #   superset bug: unioning the narrowing set in meant the fake kept a
-    #   `SubjectAdded` row on the NARROWED statement that the base WHERE excludes
-    #   and Postgres drops — the same "models a selection the statement does not
-    #   make" class, surviving on the `read_node` door this file exists to keep in
-    #   step.
-    # * the narrowing set → the types the ID leg matches.
+    # ⚠️ HONEST HISTORY (review round 5, P2 — this comment previously claimed a
+    # measurement that cannot occur): the split was introduced because unioning
+    # the two LOOKED like it let the fake keep a `SubjectAdded` row on the narrowed
+    # statement. On every statement this PR has ever committed it does NOT: the
+    # narrowing set is a strict SUBSET of the base selection
+    # (`{EventRecorded, EntityMutated} ∪ ('ObjectRegistered','SubjectAdded')` ⊇
+    # `('EntityMutated','ObjectRegistered','SubjectAdded')`), so the union and the
+    # split filter IDENTICALLY and nothing pins the difference. Reintroducing the
+    # union leaves the suite green (measured). The split is kept because it is the
+    # modelling that stays correct if the base set is ever narrowed — NOT because
+    # it fixes an observed failure, and a future lane should not read this as
+    # evidence that the `read_node` door is protected against base-set shrinkage
+    # (it is not: no `read_node(label="Subject")` leg exists).
     #
-    # Round 3 (P2) measured the original defect: with no base modelling at all,
-    # shrinking `IN ('ObjectRegistered', 'SubjectAdded')` to `IN
-    # ('ObjectRegistered')` left every leg green while Postgres drops every
+    # The defect that IS measured, and pinned, is the one round 3 found: with NO
+    # base modelling at all, shrinking `IN ('ObjectRegistered', 'SubjectAdded')`
+    # to `IN ('ObjectRegistered')` left every leg green while Postgres drops every
     # `SubjectAdded` row (a Subject born terminal rebuilds with no status and
-    # reads LIVE — #9974's harm one label over).
+    # reads LIVE — #9974's harm one label over); the shrink now reds
+    # `test_a_born_terminal_object_rebuilds_terminal_not_live` on its Subject
+    # assertion.
     _type_sets = list(_EVENT_TYPE_SET_RE.finditer(sql))
     _narrow_at = sql.index("to_jsonb(") if "to_jsonb(" in sql else len(sql)
     _base_sets = [m for m in _type_sets if m.start() < _narrow_at]
