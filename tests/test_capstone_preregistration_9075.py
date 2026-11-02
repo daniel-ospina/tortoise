@@ -2826,6 +2826,72 @@ def test_a_directory_that_is_not_a_git_checkout_gets_its_OWN_reason(tmp_path, mo
     assert "git fetch origin main" not in output, output
 
 
+def test_the_reason_distinguishes_git_that_could_not_answer(monkeypatch):
+    """#10547 review 4 P2: `_git_stdout` collapses "git absent" and "git said no" to `(1, "")`.
+
+    `_git_stdout` is fine where only the answer matters, but as a DIAGNOSTIC it is not: a git binary
+    that cannot be executed and git's own refusal (e.g. `detected dubious ownership`, the state a CI
+    container checked out by another uid hits) are different states with different remedies, and
+    calling either "not a git checkout" is the same false-reason defect this branch removes. The old
+    message compounded it: its remedy (`--no-git`) turns the exit-2 refusal into exit 0.
+    """
+    monkeypatch.setattr(check, "_git_answer", lambda _args: None)
+    assert check.no_base_ref_reason() == check.NO_GIT_BINARY
+
+    monkeypatch.setattr(
+        check, "_git_answer",
+        lambda _args: (128, "", "fatal: detected dubious ownership in repository at '/x'\n"),
+    )
+    reason = check.no_base_ref_reason()
+    assert reason.startswith("UNPROVABLE — git could not answer"), reason
+    assert "dubious ownership" in reason, reason
+    assert "not a git checkout" not in reason, reason
+
+    monkeypatch.setattr(
+        check, "_git_answer",
+        lambda _args: (128, "", "fatal: not a git repository (or any of the parent directories)\n"),
+    )
+    assert check.no_base_ref_reason() == check.NO_GIT_CHECKOUT
+
+    monkeypatch.setattr(check, "_git_answer", lambda _args: (0, "false\n", ""))
+    assert check.no_base_ref_reason() == check.NO_GIT_CHECKOUT
+
+    monkeypatch.setattr(check, "_git_answer", lambda _args: (0, "true\n", ""))
+    assert check.no_base_ref_reason() == check.NO_BASE_REF
+
+
+def test_a_corpus_refusal_still_names_the_base_ref_refusal(tmp_path, monkeypatch, capsys):
+    """#10547 review 4 P2: a raise from a history-free half bypassed the deferral.
+
+    `check_machine_record` and the corpus pins run AFTER the ordering half, so a bare raise from
+    either REPLACED the base-ref refusal and every finding already proved — the same forfeiture one
+    site further along. Measured: a wrong-typed `corpus` block printed only its own message.
+    """
+    repo = _repo(tmp_path, monkeypatch)
+    _git(repo, "symbolic-ref", "HEAD", "refs/heads/contrib")
+    _git(repo, "remote", "add", "upstream", "https://example.invalid/x.git")
+    bundle = repo / "docs" / "evidence" / "7949-capstone"
+    bundle.mkdir(parents=True)
+    (bundle / check.PREREG_NAME).write_text(PREREG.read_text())
+    (bundle / "e1-e2.log").write_text(UNSCORED_LOG)
+    _git(repo, "add", str(bundle.relative_to(repo)))
+    _git(repo, "commit", "-q", "-m", "add bundle", epoch=1_700_000_100)
+
+    def cannot_read(_pins):
+        raise check.CheckError("cannot re-derive the corpus pins from the tree: synthetic")
+
+    monkeypatch.setattr(check, "derive_corpus_facts", cannot_read)
+    code = check.main(["--dir", str(bundle)])          # the corpus half RUNS here
+    printed = capsys.readouterr()
+    output = printed.out + printed.err
+    assert code == 2, output
+    assert "cannot re-derive" in output, output
+    assert "no base ref" in output, (
+        "a corpus refusal must not erase the base-ref refusal: both are 'could not check this "
+        f"subject', and the reader needs both. Found: {output}"
+    )
+
+
 def test_an_unprovable_ordering_reports_its_own_reason_not_a_constant(monkeypatch):
     """The report's `ordering` is the exception's message, never a hardcoded HISTORY_UNAVAILABLE.
 
