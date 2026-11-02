@@ -701,8 +701,9 @@ def evaluate(args: argparse.Namespace) -> int:
                 " baseline window executed the leg: in every failing run this window"
                 " read, its job concluded something other than "
                 + ", ".join(sorted(_EXECUTED_CONCLUSIONS))
-                + " (skipped, cancelled, neutral, stale, action_required — or no such"
-                " job at all) — the rate is measured over the WINDOW, not over this"
+                + " (e.g. skipped, cancelled, neutral, stale, startup_failure,"
+                " action_required — or no such job at all; the list is ILLUSTRATIVE,"
+                " not exhaustive) — the rate is measured over the WINDOW, not over this"
                 " leg, so the failure cannot be certified as introduced here")
 
         blocked_path = outdir / "blocked.txt"

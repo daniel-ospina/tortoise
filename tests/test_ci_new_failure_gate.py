@@ -70,12 +70,17 @@ EXEMPTION_PY = REPO / "scripts" / "ci_exemption.py"
 #:   #10289 — re-cut: the LEG dimension of measuredness (`main_leg_coverage`) — a leg main
 #:            never EXECUTED is UNMEASURED, never clean. Nothing in the decision changed.
 #:   #10564 — re-cut at review: the leg-coverage claim is scoped to the runs the probe
-#:            actually READ (`no EXAMINED run executed this leg`), its case list covers
-#:            the COMPLEMENT of `_EXECUTED_CONCLUSIONS` (skipped, cancelled, neutral,
-#:            stale, absent), and the counter shortcut is documented as
-#:            sufficient-not-necessary for a green run. No logic change: no new branch,
-#:            no exit-code change, no polarity change.
-_GATE_MODULE_SHA256 = "886f4c544995fbfadab3bdac49480a9c8bc6811eb61299abc0f73b21a73c5509"
+#:            actually READ (`no EXAMINED run executed this leg`), and the counter
+#:            shortcut is documented as sufficient-not-necessary for a green run.
+#:   #10564 (cfbd25685) — re-cut again: the refusal NAMES the executed set, generated
+#:            from `_EXECUTED_CONCLUSIONS` (`", ".join(sorted(...))`) so the words cannot
+#:            drift from the constant, and lists non-executing states with `e.g.` as
+#:            ILLUSTRATIVE (`startup_failure` included — it is the module's own
+#:            `_UNCERTIFIABLE_CONCLUSIONS` member and the shape the probe most often
+#:            reads). No completeness claim: `absent` is not a conclusion. No logic
+#:            change in either re-cut: no new branch, no exit-code change, no polarity
+#:            change.
+_GATE_MODULE_SHA256 = "f4108e2e3d4db724a2b046f4ccd18e060a8652f21676d838b4c6f1889cb1886b"
 
 #: The shared decision, reached through the machine-local `scripts/` pointer
 #: (`$AGENT_INFRA_PATH`, gitignored, NOT tracked — #9475). Missing off a developer box
@@ -961,10 +966,11 @@ _MAIN_WINDOW_LEG_SKIPPED = {
     for run_id in ("1001", "1002", "1003")
 }
 
-#: The same window with the leg `neutral` on main — the fifth non-executing
-#: conclusion. It exists so the refusal's own CASE LIST is pinned to
-#: `_EXECUTED_CONCLUSIONS`' complement: a message that names three of the five states
-#: states a fact narrower than what the code did (#10564 review).
+#: The same window with the leg `neutral` on main — one of the non-executing
+#: conclusions. It exists so the refusal's own wording is pinned to the code: the EXECUTED
+#: set it names is generated from `_EXECUTED_CONCLUSIONS`, and the non-executing states it
+#: lists are ILLUSTRATIVE. A message that enumerates a few states as if that were the
+#: complement states a fact narrower than what the code did (#10564 review).
 _MAIN_WINDOW_LEG_NEUTRAL = {
     run_id: _jobs((1, "changes", "success"), (2, "test-slow (d)", "neutral"))
     for run_id in ("1001", "1002", "1003")
@@ -1029,12 +1035,13 @@ def test_a_leg_main_never_executed_is_Unmeasured_not_introduced(tmp_path):
 
 
 def test_the_refusal_names_the_conclusions_it_actually_treats_as_not_executed(tmp_path):
-    """The parenthetical must cover `_EXECUTED_CONCLUSIONS`' COMPLEMENT, not three of it.
+    """The refusal names the EXECUTED set (generated), and marks its examples as examples.
 
-    A `neutral` (or `stale`) leg on main is `NOT EXECUTED` — the set the code uses is
-    `{success, failure, timed_out}` — so a refusal that enumerates only `skipped,
-    cancelled, absent` describes a narrower thing than it did. Same class as the
-    run-set overstatement this commit fixes, one level down.
+    A `neutral` (or `stale`, `startup_failure`) leg on main is `NOT EXECUTED` — the set
+    the code uses is `{success, failure, timed_out}` — so a refusal that enumerates only
+    some of the others describes a narrower thing than it did. The generated clause is
+    the fix for drift; the `e.g.`-marked list is illustrative on purpose, because
+    GitHub can add a conclusion and that must not make the message wrong.
     """
     import importlib.util
 
@@ -1055,7 +1062,8 @@ def test_the_refusal_names_the_conclusions_it_actually_treats_as_not_executed(tm
     # asserting them cannot certify a list as exhaustive the way the previous wording
     # did (#10564 review, F1). `action_required` is a real conclusion in this repo
     # (`tools/ci_verdict.py:NEGATIVE_CONCLUSIONS`).
-    for state in ("skipped", "cancelled", "neutral", "stale", "action_required"):
+    for state in ("skipped", "cancelled", "neutral", "stale", "startup_failure",
+                  "action_required"):
         assert state in proc.stdout, f"{state!r} missing from the refusal: {proc.stdout!r}"
     assert "the complement of" not in proc.stdout, (
         "the message must not CERTIFY its example list as complete: the gate reads only "
