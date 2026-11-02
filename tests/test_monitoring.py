@@ -3980,6 +3980,64 @@ class TestStallWatchdog:
                 "a restart policy with zero retries never restarts: "
                 f"{b}")
 
+    def test_the_armed_knob_is_declared_fly_toml_env_so_a_gate_can_see_it(self):
+        """#10585 review P2: nothing could see whether PRODUCTION carried the knob.
+
+        ``fly.toml`` ``[env]`` arms ``TORTOISE_LOOP_STALL_HARD_EXIT_S = "600"``,
+        but the name was not declared in
+        ``.github/scripts/fly-managed-secrets.txt``, and
+        ``check-fly-machine-env.py`` — the post-deploy gate — iterates ONLY the
+        names that manifest declares ``fly-toml-env``. So "production was
+        deployed and the RUNNING MACHINE does not carry the ceiling" was GREEN
+        everywhere, and the only signal was ``_loop_stall_hard_exit_s()``
+        returning ``0.0`` inside the process.
+
+        That is the #4568 class (measured there: a product flag off for ~5 h
+        with every gate green), and here the thing silently lost is the wedge
+        ceiling itself, which is this PR's whole subject. A stale machine, or a
+        recreate that drops the ``[env]`` value, disarms the self-heal with no
+        gate, no warning and no red.
+
+        The manifest's own three ``fly-toml-env`` conditions are checked against
+        the gate's inputs rather than restated: the name must be an ASSIGNED key
+        in ``fly.toml [env]``, and the deploy must not stamp it (a stamped value
+        becomes a Fly secret that shadows the versioned one).
+        """
+        import tomllib
+        from pathlib import Path
+
+        root = Path(__file__).resolve().parent.parent
+
+        declared = {}
+        for line in (root / ".github" / "scripts" / "fly-managed-secrets.txt"
+                     ).read_text(encoding="utf-8").splitlines():
+            line = line.split("#", 1)[0].strip()
+            if not line:
+                continue
+            name, _, source = line.partition(" ")
+            declared[name] = source.split()[0] if source.split() else ""
+
+        assert declared.get("TORTOISE_LOOP_STALL_HARD_EXIT_S") == "fly-toml-env", (
+            "the knob this PR ARMS is not declared `fly-toml-env` in "
+            "fly-managed-secrets.txt, so `check-fly-machine-env.py` never "
+            "asserts it against the running machine and the armed ceiling can "
+            "silently disappear from production with every gate green "
+            f"(declared: {declared.get('TORTOISE_LOOP_STALL_HARD_EXIT_S')!r})")
+
+        env = tomllib.loads((root / "fly.toml").read_text(encoding="utf-8"))
+        assert "TORTOISE_LOOP_STALL_HARD_EXIT_S" in (env.get("env") or {}), (
+            "the manifest's `fly-toml-env` arm requires the name to be an "
+            "ASSIGNED key in fly.toml's `[env]` table — otherwise the "
+            "declaration asserts nothing")
+
+        deploy = (root / ".github" / "workflows" / "deploy-hosted.yml"
+                  ).read_text(encoding="utf-8")
+        assert "TORTOISE_LOOP_STALL_HARD_EXIT_S" not in deploy, (
+            "the deploy stages this name, which creates a Fly SECRET that "
+            "shadows the versioned `[env]` value — the manifest's "
+            "`fly-toml-env` arm fails on exactly that, and the app would no "
+            "longer read the ceiling this PR ships")
+
     def test_the_derivation_names_an_operation_that_is_actually_on_the_loop(
             self):
         """#10585 review P2: the 600s derivation was sized against a premise the
