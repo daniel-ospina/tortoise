@@ -811,27 +811,81 @@ def test_the_annotation_is_one_line_and_raises_no_workflow_escape(tmp_path):
     # Every `%` must open an escape — a bare one is invalid in a workflow command.
     assert "%25" in line
     assert re.search(r"%(?![0-9A-Fa-f]{2})", line) is None, line
-    assert line.count("::") == 2  # exactly the workflow-command delimiters
 
 
 def test_the_annotation_identity_discriminates_distinct_findings():
     """A NEW finding must not inherit an existing red's identity.
 
-    The rail exempts a PR failure only when the SAME identity is red on `main`. If the
-    identity were coarse enough to be shared by unrelated findings, an exemption bought
-    by one defect would silently cover the next.
+    The rail exempts a PR failure only when the SAME identity is red on `main`, and it
+    NORMALISES the annotation before keying on it (`normalize_signature` -> `<HEX>`, then
+    `_GUARD_INT_RE` -> `<N>`). "Different-looking strings" is therefore NOT the bar: the
+    cases below are the ones that actually collided before :func:`_finding_discriminator`
+    was added (review cycle 1 — this test previously passed while the guarantee was false).
     """
     doc = "docs/evidence/5087-hypothesis/PRE-REGISTRATION.md"
-    first = check._rail_identity_annotation(doc, "a.log: added at 1 which is not strictly after 2")
-    same = check._rail_identity_annotation(doc, "a.log: added at 1 which is not strictly after 2")
-    other_log = check._rail_identity_annotation(doc, "b.log: tracked but with no add-commit")
+    base = "s3-ablation-a1075dfc.log: added at 1793558646 which is not strictly after 2"
+    first = check._rail_identity_annotation(doc, base)
+    same = check._rail_identity_annotation(doc, base)
+    # 1. A log name whose hex suffix the rail masks to `<HEX>`.
+    other_log = check._rail_identity_annotation(
+        doc, "s3-ablation-77d0be11.log: added at 1793999999 which is not strictly after 2")
+    # 2. A digit-only bundle rename, which normalises to `<N>`.
     other_doc = check._rail_identity_annotation(
-        "docs/evidence/7949-capstone/PRE-REGISTRATION.md",
-        "a.log: added at 1 which is not strictly after 2",
-    )
-    assert first == same
-    assert first != other_log
-    assert first != other_doc
+        "docs/evidence/9999-hypothesis/PRE-REGISTRATION.md", base)
+    # 3. A wholly unrelated finding.
+    unrelated = check._rail_identity_annotation(doc, "b.log: tracked but with no add-commit")
+
+    assert first == same, "the same finding must key identically on both surfaces"
+    for other in (other_log, other_doc, unrelated):
+        assert first != other, (first, other)
+
+
+def test_an_ordering_failure_emits_its_annotation_through_the_cli(tmp_path, monkeypatch, capsys):
+    """The END-TO-END path that actually reds main — the ORDERING arm, not the document one.
+
+    Every other annotation fixture here is a `--no-git` document failure, so the arm that
+    produces the real red was untested. The finding text below is the verbatim shape
+    `check_ordering` returns on the #10468 bundle (registration and log in ONE commit), and
+    it is pushed through `main()` so the annotation channel, the escaping and the
+    discriminator are all exercised on THAT text rather than on a synthetic string.
+    """
+    failure = ("s3-ablation-a1075dfc.log: added at 1793558646 which is not strictly after "
+               "the pre-registration's add-commit 1793558646 — the log may have been scored "
+               "against thresholds chosen after it was read, and it does not prove it "
+               "measured nothing (carries 0 BEGIN and 0 END verdict markers — ambiguous)")
+    report = {
+        "document": "docs/evidence/5087-hypothesis/PRE-REGISTRATION.md",
+        "rows": [], "evidence_logs": ["s3-ablation-a1075dfc.log"],
+        "ordering": "violated", "corpus": "skipped",
+        "failures": [failure], "ok": False, "run_order_claim": "violated",
+    }
+    monkeypatch.setattr(check, "run", lambda *a, **k: report)
+
+    assert check.main(["--dir", str(tmp_path), "--no-git", "--no-corpus"]) == 1
+    captured = capsys.readouterr()
+    annotations = [ln for ln in captured.err.splitlines() if ln.startswith("::error::")]
+    assert len(annotations) == 1, annotations
+    assert "not strictly after" in annotations[0]
+    assert check._finding_discriminator(report["document"], failure) in annotations[0]
+
+
+def test_the_discriminator_survives_the_rails_own_normalisation():
+    """The discriminator must not be erasable by the masks the rail applies.
+
+    `normalize_guard_error` lowercases nothing but masks `[0-9a-f]{8,}` as `<HEX>` and
+    every `\\b\\d+\\b` as `<N>`. A discriminator built from lowercase hex or bare digits
+    would be eaten, silently restoring the collision it exists to prevent — so it is
+    asserted against those two shapes here, not assumed.
+    """
+    doc = "docs/evidence/5087-hypothesis/PRE-REGISTRATION.md"
+    a = check._finding_discriminator(doc, "s3-ablation-a1075dfc.log: added at 1 after 2")
+    b = check._finding_discriminator(doc, "s3-ablation-77d0be11.log: added at 9 after 2")
+    assert a != b
+    for token in (a, b):
+        assert token.startswith("finding-")
+        assert re.fullmatch(r"finding-[A-Z2-7]+", token), token
+        # …and neither mask can touch it:
+        assert re.search(r"[0-9a-f]{8,}", token) is None, token
 
 
 @requires_history

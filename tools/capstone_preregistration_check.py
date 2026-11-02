@@ -116,6 +116,7 @@ if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
     raise SystemExit(2)
 
 import argparse
+import base64
 import hashlib
 import importlib
 import json
@@ -1418,6 +1419,35 @@ def run(directory: Path, use_git: bool = True, use_corpus: bool = True) -> dict:
     return report
 
 
+def _finding_discriminator(document: str, failure: str) -> str:
+    """A mask-proof discriminator for ONE finding (review cycle 1, #10536).
+
+    ⛔ WHY THIS EXISTS — the fail-open it closes. The rail does not key on the annotation
+    text; it NORMALISES it first (`normalize_signature` masks `[0-9a-f]{8,}` as `<HEX>`,
+    then `_GUARD_INT_RE` masks every `\\b\\d+\\b` as `<N>`). Written without this
+    discriminator, two DIFFERENT ordering violations reduced to ONE identity — measured
+    against the rail's own functions:
+
+        s3-ablation-a1075dfc.log added at 1793558646  ->  …s3-ablation-<HEX>.log-added-at-<HEX>-…
+        s3-ablation-77d0be11.log added at 1793999999  ->  …s3-ablation-<HEX>.log-added-at-<HEX>-…
+        collide: True
+
+    and the bundle directory collided the same way (`5087-hypothesis` -> `<N>-hypothesis`).
+    A NEW finding would then have inherited main's red and been exempted by the rail —
+    the exact measurement-laundering shape this gate exists to refuse, and a fail-OPEN
+    that did not exist before the annotation was added (with no annotation at all the
+    rail refused outright, which is why "uncomparable" was the safe failure).
+
+    Base32 because the rail's masks cannot eat it: the alphabet is `A-Z2-7`, so it is
+    never a lowercase-hex run, and the `finding-` prefix means an all-digit tail can never
+    present as a bare `\\b\\d+\\b` integer run. The digest is over the UNMASKED inputs, so
+    the same tree yields the same discriminator on both surfaces, while a different log,
+    epoch or bundle yields a different one.
+    """
+    digest = hashlib.sha256(f"{document}\x00{failure}".encode("utf-8")).digest()
+    return "finding-" + base64.b32encode(digest).decode("ascii").rstrip("=")[:20]
+
+
 def _rail_identity_annotation(document: str, failure: str) -> str:
     """A one-line ``::error::`` naming ONE finding, for the merge rail (#10536).
 
@@ -1445,14 +1475,16 @@ def _rail_identity_annotation(document: str, failure: str) -> str:
     making a refusal legible is not.
 
     Whitespace is collapsed because an annotation is one line and the rail's parser reads
-    one line. Digits are deliberately left in place: the rail masks integer runs itself
-    (`_GUARD_INT_RE`), so the same finding on the same tree reduces to the same identity
-    on both surfaces.
+    one line. Digits are deliberately left in place — the rail masks integer runs itself
+    (`_GUARD_INT_RE`), so the same finding on the same tree reduces to the same identity on
+    both surfaces. That masking is ALSO why the discriminator is appended: numbers alone do
+    not survive normalisation, and without it distinct findings collided (see
+    :func:`_finding_discriminator`).
     """
     payload = " ".join(f"{document}: {failure}".split())
     # GitHub workflow-command escaping: `%` opens an escape sequence.
     payload = payload.replace("%", "%25")
-    return f"::error::capstone preregistration {payload}"
+    return f"::error::capstone preregistration {payload} {_finding_discriminator(document, failure)}"
 
 
 def main(argv: list[str] | None = None) -> int:
