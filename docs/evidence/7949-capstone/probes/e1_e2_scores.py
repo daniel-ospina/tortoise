@@ -311,7 +311,8 @@ def e2_score(repo: Path, floors: dict) -> dict:  # noqa: ARG001 - floors kept
             "value_units": units,
             "value_survived": survived,
             "falsifier": {"value_units": injected_units,
-                          "value_survived": injected_survived},
+                          "value_survived": injected_survived,
+                          "graph": with_anchor.get("graph")},
             "required": required,
             "outcome": "PASS" if passed else "FAIL",
             "denominator_rule": "pre-registration §3.3 — a digit in the "
@@ -337,17 +338,27 @@ def score(repo: Path = _ROOT) -> dict:
     e2a_record = _read_json(repo / EVIDENCE / E2A_RECORD)
     falsifier_record = _read_json(repo / EVIDENCE / E2A_FALSIFIER)
     gates_record = _read_json(repo / EVIDENCE / GATE_DROPS)
-    for name, record in ((E2A_RECORD, e2a_record),
-                         (E2A_FALSIFIER, falsifier_record),
-                         (GATE_DROPS, gates_record)):
-        # A falsifier record nests its graph under each of its two blocks; either
-        # one names the run it graded.
-        graph = str(record.get("graph")
-                    or (record.get("with_anchor") or {}).get("graph")
-                    or (record.get("as_written") or {}).get("graph") or "")
+    for name, record in ((E2A_RECORD, e2a_record), (GATE_DROPS, gates_record)):
+        graph = str(record.get("graph") or "")
         if after["head"][:9] not in graph:
             raise _refuse(f"{name} was taken on graph {graph!r}, which does not "
                           f"name head {after['head'][:9]}")
+    # The falsifier's number comes from `with_anchor` ONLY, so that is the block
+    # whose graph must be checked — a record whose other block names the head
+    # proves nothing about the run it was scored on.
+    falsifier_scored = falsifier_record.get("with_anchor") or falsifier_record
+    falsifier_graph = str(falsifier_scored.get("graph") or "")
+    if after["head"][:9] not in falsifier_graph:
+        raise _refuse(f"{E2A_FALSIFIER}'s scored block was taken on graph "
+                      f"{falsifier_graph!r}, which does not name head "
+                      f"{after['head'][:9]}")
+    as_written_graph = str((falsifier_record.get("as_written") or {}).get(
+        "graph") or falsifier_graph)
+    if as_written_graph != str(e2a_record.get("graph") or ""):
+        raise _refuse(f"{E2A_FALSIFIER}'s as-written block is on graph "
+                      f"{as_written_graph!r} but {E2A_RECORD} is on "
+                      f"{e2a_record.get('graph')!r} — they are the same "
+                      "measurement and cannot come from different runs")
     if e2a_record.get("graph") != gates_record.get("graph"):
         raise _refuse("the E2a record and the gate-drops record come from "
                       "different graphs — one record cannot mix them")

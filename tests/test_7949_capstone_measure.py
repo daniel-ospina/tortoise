@@ -494,31 +494,64 @@ def test_the_e1_e2_record_refuses_a_denominator_the_record_did_not_freeze(tmp_pa
 def test_the_e2_row_is_the_composite_and_not_e2a_alone():
     """P1: a record whose fused half fails must not render a GREEN row.
 
-    E2 is `E2a AND E2b`. Deriving the row from E2a alone would let a failing
-    proxy through — the row and the record it cites would disagree.
+    The counterexample the composite exists for: E2a PASSES (13/14) and E2b's
+    fused share FAILS. Deriving the row from E2a alone renders GREEN there — so
+    this pins the SHIPPED function `e2_composite`, which `main()` calls, not a
+    re-implementation beside it.
     """
-    parsed = measure.measure_e1_e2(_REPO)
     bars = measure.parse_bars(json.loads(PREREG.read_text()))
-    e2a = measure.e2a_outcome(parsed, bars)
+    e2a_pass = measure.outcome(measured=True, below_floor=False, passed=True,
+                               bar="13 of 14", value="value_units 13/14")
     e2b_bad = measure.outcome(measured=True, below_floor=False, passed=False,
                               bar="fused share <= 0.05", value="fused=7/114")
-    composite = measure.outcome(
-        measured=True, below_floor=False,
-        passed=(e2a["outcome"] == "PASS" and e2b_bad["outcome"] == "PASS"),
-        bar="composite", value="x")
-    assert composite["outcome"] != "PASS"
-    # and the record itself states which half decided it
+    composite = measure.e2_composite(e2a_pass, e2b_bad, bars)
+    assert measure.verdict_word(composite) == "RED", composite
+    assert composite["outcome"] != "PASS", composite
+    # …and the honest pair still passes, so the pin is not just "always RED".
+    e2b_ok = measure.outcome(measured=True, below_floor=False, passed=True,
+                             bar="fused share <= 0.05", value="fused=1/114")
+    assert measure.e2_composite(e2a_pass, e2b_ok, bars)["outcome"] == "PASS"
+    # the record itself states which half decided it
     record = json.loads(SCORES.read_text())
     assert record["e2"]["outcome"] == "FAIL"
-    assert record["e2"]["decided_by"] in {"E2a", "E2b", "both"}
+    assert record["e2"]["decided_by"] == "E2a"
 
 
-def test_the_e1_e2_record_refuses_a_denominator_the_record_did_not_freeze_meta():
-    """Guard: the frozen denominator and the E2a threshold agree in the record."""
-    floors = scores_probe.frozen_denominators(_REPO)
-    assert floors["value_bearing_units"] == 14
-    assert floors["e2a_of"] == 14
-    assert floors["e2a_required"] == 13
+def test_the_e1_e2_record_refuses_a_record_from_another_run(tmp_path):
+    """P1: one record, one run — a graph off the ON head must refuse."""
+    for name in ("e2a-value-units.json", "e1-gate-drops.json"):
+        repo = tmp_path / name.replace(".", "_")
+        shutil.copytree(_REPO / "docs/evidence/9889", repo / "docs/evidence/9889")
+        shutil.copytree(_REPO / "docs/evidence/7949-capstone",
+                        repo / "docs/evidence/7949-capstone")
+        path = repo / "docs/evidence/9889" / name
+        record = json.loads(path.read_text())
+        record["graph"] = "capstone_on_deadbeef0_1790000000"
+        path.write_text(json.dumps(record))
+        with pytest.raises(SystemExit) as refused:
+            scores_probe.score(repo)
+        assert refused.value.code == 2, (name, refused.value)
+
+
+def test_the_e2a_bar_is_parsed_from_the_record_not_typed(tmp_path):
+    """P1: amend the frozen threshold and the bar must MOVE.
+
+    A typed `required = 13` survives every pin over the shipped record — the
+    shipped value is 13 either way. Only an amended copy can tell them apart.
+    """
+    repo = tmp_path / "repo"
+    shutil.copytree(_REPO / "docs/evidence/9889", repo / "docs/evidence/9889")
+    shutil.copytree(_REPO / "docs/evidence/7949-capstone",
+                    repo / "docs/evidence/7949-capstone")
+    prereg_path = repo / "docs/evidence/7949-capstone/preregistration.json"
+    prereg = json.loads(prereg_path.read_text())
+    for entry in prereg["criteria"]:
+        if entry.get("id") == "E2a":
+            entry["threshold"] = ">= 5 of 14"
+    prereg_path.write_text(json.dumps(prereg))
+    record = scores_probe.score(repo)
+    assert record["e2"]["e2a"]["required"] == 5, record["e2"]["e2a"]
+    assert record["e2"]["e2a"]["outcome"] == "PASS", record["e2"]["e2a"]
 
 
 def test_the_e1_e2_record_refuses_when_the_falsifier_is_inert(tmp_path):

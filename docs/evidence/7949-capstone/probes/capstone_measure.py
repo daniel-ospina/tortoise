@@ -2079,6 +2079,23 @@ def measure_e1_e2(repo: Path = ROOT) -> dict:
     }
 
 
+def e2_composite(e2a_result: dict, e2b_result: dict, bars: dict) -> dict:
+    """E2 is `E2a AND E2b` — the row's verdict, derived, never E2a alone.
+
+    A row derived from E2a alone renders GREEN for a record whose fused half
+    failed, i.e. the row and the artifact it cites disagreeing in the direction
+    that hides a failure. Extracted as a function so a test can pin the
+    counterexample against the SHIPPED arithmetic rather than rebuild it.
+    """
+    return outcome(
+        measured=True, below_floor=e2b_result["below_floor"],
+        passed=(e2a_result["outcome"] == "PASS"
+                and e2b_result["outcome"] == "PASS"),
+        bar=f"E2a {bars['E2a']['required']} of {bars['E2a']['of']} AND E2b "
+            f"fused <= {bars['E2b']['max_fused_share']}",
+        value=f"E2a {e2a_result['value']}; E2b {e2b_result['value']}")
+
+
 # ── log rendering ─────────────────────────────────────────────────────────
 
 def render_log(*, head: str, prereg_sha: str, bars: dict, corpus_sha: str,
@@ -2482,13 +2499,25 @@ def main(argv: list[str] | None = None) -> int:
                              f"(floor {e2b_floor} surviving units)",
                          value=f"fused={e1['fused']}/{e1['atomic_points']} = "
                                f"{e2b_share:.6f}")
-    e2_result = outcome(
-        measured=True, below_floor=e2b_result["below_floor"],
-        passed=(e2a_result["outcome"] == "PASS"
-                and e2b_result["outcome"] == "PASS"),
-        bar=f"E2a {bars['E2a']['required']} of {bars['E2a']['of']} AND E2b "
-            f"fused <= {bars['E2b']['max_fused_share']}",
-        value=f"E2a {e2a_result['value']}; E2b {e2b_result['value']}")
+    e2_result = e2_composite(e2a_result, e2b_result, bars)
+    # The prose must say what the numbers say. A note that narrates a direction
+    # the measurement does not have is the "row and evidence disagreeing"
+    # defect in prose instead of in a field.
+    e2_short = ("E2a" if e2a_result["outcome"] != "PASS" else
+                "E2b" if e2b_result["outcome"] != "PASS" else "both")
+    e1_clause = (
+        "the pairings do not agree, so the row is REFUSED — not RED and not "
+        "GREEN: at n=1 per arm the verdict would depend on which before run is "
+        "chosen" if not e1["decidable"] else
+        f"every before realization agrees, so the row is "
+        f"{verdict_word(e1_result)}")
+    e2_clause = (
+        f"E2a falls short of {e1['e2a_required']} of {e1['e2a_units']} on the "
+        f"run's own graph" if e2_short == "E2a" else
+        f"E2b's fused share exceeds "
+        f"{bars['E2b']['max_fused_share']} on the run's own graph"
+        if e2_short == "E2b" else
+        "both halves fail on the run's own graph")
 
     e1_row = {
         "verdict": verdict_word(e1_result),
@@ -2498,10 +2527,8 @@ def main(argv: list[str] | None = None) -> int:
                  f"#9889 probes), whose corpus IS the frozen one "
                  f"({e1['corpus_sha256']}) because e1_paired_arm.py refuses any "
                  f"other. {e1_result['value']} vs bar {e1_result['bar']}. "
-                 f"The two before realizations are {e1['before_spread_pp']} pp "
-                 f"apart and the pairings do not agree, so the row is "
-                 f"{e1_result['outcome']} — not RED and not GREEN: at n=1 per arm "
-                 f"the verdict would depend on which before run is chosen. The "
+                 f"{e1_clause}. The two before realizations are "
+                 f"{e1['before_spread_pp']} pp apart. The "
                  f"deterministic mechanism check (e1_gate_drops) reports "
                  f"value_gate drops {e1['gate_drops_total']} of "
                  f"{e1['gate_drops_objects']} Objects with its positive controls "
@@ -2525,11 +2552,10 @@ def main(argv: list[str] | None = None) -> int:
                  f"{e2b_result['outcome']} — {e2b_result['value']} vs bar "
                  f"{e2b_result['bar']}. The E2 row is "
                  f"{verdict_word(e2_result)} on the COMPOSITE "
-                 f"({e2_result['bar']}): E2a falls short of "
-                 f"{e1['e2a_required']} of {e1['e2a_units']} on the run's own "
-                 f"graph, and E2b's fused count is a proxy over atomic POINTS "
-                 f"rather than surviving planted units. #10360 records that "
-                 f"nothing enforces retention (the render half closed, #9775)"),
+                 f"({e2_result['bar']}): {e2_clause}, and E2b's fused count is "
+                 f"a proxy over atomic POINTS rather than surviving planted "
+                 f"units. #10360 records that nothing enforces retention (the "
+                 f"render half closed, #9775)"),
     }
 
     # ── E3 ────────────────────────────────────────────────────────────────
