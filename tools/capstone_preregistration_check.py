@@ -765,9 +765,10 @@ SQUASH_COLLAPSE_REMEDY = (
     "fabrication this guard exists to prevent. The path forward is a WITHDRAWAL plus a NEW "
     "artefact at a NEW path: withdraw this log from the checked directory (move it under "
     "`withdrawn/` with a one-line note of why — do not delete it, and do not edit its contents) so "
-    "this directory stops claiming a measurement whose ordering cannot be shown — the withdrawal "
-    "alone does not clear THIS refusal — then take a fresh registration and a fresh evidence log "
-    "at new paths, whose add-commits {base} can tell apart."
+    "this directory stops claiming a measurement whose ordering cannot be shown. Withdrawing it "
+    "DOES clear THIS refusal — the gate then has no log to order at all — but it does not restore "
+    "this log's ordering, so it must not come back as evidence; then take a fresh registration and "
+    "a fresh evidence log at new paths, whose add-commits {base} can tell apart."
 )
 SAME_PR_REFUSAL = (
     "{prereg} is not on the merge base ({base}): this change adds {n} evidence log(s) against a "
