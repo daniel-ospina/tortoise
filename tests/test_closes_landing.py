@@ -498,3 +498,30 @@ def test_main_drops_a_foreign_qualified_claim(monkeypatch, capsys):
     assert cl.main(["--pr", "1", "--json"]) == 0
     payload = _json.loads(capsys.readouterr().out)
     assert payload["findings"] == []
+
+
+# ── cycle 4: the CARRIER side is parsed strictly, so a quotation cannot buy a pass ─
+
+def test_a_carrier_that_only_QUOTES_the_keyword_does_not_carry_it():
+    """Leniency is asymmetric: on the subject it costs a false finding (safe), on
+    the carrier it would buy a `lands` (a pass — forbidden). So the carrier is
+    parsed strictly (#10597 review c4-5)."""
+    subject = _pr(100, SIBLING, "Closes #100")
+    quoted_indented = _pr(101, DEFAULT, "Old shape, for context:\n\n    Closes #100\n",
+                          head=SIBLING)
+    (finding,) = cl.classify(subject, _by_head(subject, quoted_indented), DEFAULT)
+    assert finding.verdict == "inert"
+
+
+def test_a_carrier_that_only_QUOTES_the_keyword_in_a_blockquote_fence_does_not_carry_it():
+    subject = _pr(102, SIBLING, "Closes #100")
+    quoted = _pr(103, DEFAULT, "> ```\n> Closes #100\n> ```\n", head=SIBLING)
+    (finding,) = cl.classify(subject, _by_head(subject, quoted), DEFAULT)
+    assert finding.verdict == "inert"
+
+
+def test_a_carrier_that_really_states_the_keyword_still_lands():
+    subject = _pr(104, SIBLING, "Closes #100")
+    real = _pr(105, DEFAULT, "fix: the thing\n\nCloses #100\n", head=SIBLING)
+    (finding,) = cl.classify(subject, _by_head(subject, real), DEFAULT)
+    assert finding.verdict == "lands"

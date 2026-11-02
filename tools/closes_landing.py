@@ -61,10 +61,10 @@ surface.
 
 Usage
 -----
-    python3 tools/closes_landing.py --pr 10568                # one PR
-    python3 tools/closes_landing.py --sweep                   # every open PR on a non-default base
-    python3 tools/closes_landing.py --pr 10568 --annotate     # ::warning:: lines
-    python3 tools/closes_landing.py --body-file body.md --base act-10465 \
+    uv run python tools/closes_landing.py --pr 10568                # one PR
+    uv run python tools/closes_landing.py --sweep                   # every open PR on a non-default base
+    uv run python tools/closes_landing.py --pr 10568 --annotate     # ::warning:: lines
+    uv run python tools/closes_landing.py --body-file body.md --base act-10465 \
         --carrier-body-file carrier.md          # offline: no network at all
 
 Exit codes: 0 = nothing inert · 3 = at least one inert OR unresolved closing
@@ -73,11 +73,22 @@ ref · 2 = the question could not be measured at all (gh/API failed).
 
 from __future__ import annotations
 
+import sys
+
+# #5128: refuse a <3.12 interpreter BEFORE the imports below — a module-level
+# 3.12-only construct would fail first, with an error that blames the import
+# rather than the interpreter (the D9 shape).
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        f"tools/closes_landing.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python tools/closes_landing.py`"
+    )
+
 import argparse
 import json
 import re
 import subprocess
-import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -145,13 +156,22 @@ class Finding:
                 f"#{self.issue}::{msg}")
 
 
+_CONTAINER_PREFIX_RE = re.compile(r"^(?:\s*>\s?)*")
+
+
 def _fence_run(line: str) -> tuple[str, int] | None:
-    """The (character, length) of a leading ```/`~~~` fence run, if any."""
-    m = re.match(r"(`{3,}|~{3,})", line.lstrip())
+    """The (character, length) of a leading ```/`~~~` fence run, if any.
+
+    Blockquote prefixes (`> `, `> > `) are seen through: a fenced block inside a
+    quote is still a fence, and `_fence_run` not seeing it made the block's
+    contents look like prose (review c4-5, second shape).
+    """
+    body = _CONTAINER_PREFIX_RE.sub("", line)
+    m = re.match(r"(`{3,}|~{3,})", body.lstrip())
     return (m.group(1)[0], len(m.group(1))) if m else None
 
 
-def strip_code(body: str) -> str:
+def strip_code(body: str, strict: bool = False) -> str:
     """Blank out the parts of a PR body that are CODE, not prose.
 
     ONLY fenced blocks are stripped. An INDENTED block is deliberately NOT: where
@@ -165,11 +185,21 @@ def strip_code(body: str) -> str:
 
     Fences: a block opens with ``` or `~~~` and closes with the SAME character
     and a run at least as long.
+
+    `strict` is for the CARRIER side only. There the cost of leniency is
+    asymmetric: a quoted keyword in the carrier's body makes this tool report
+    `lands`, i.e. a PASS, which is the one outcome its doctrine forbids. So the
+    carrier is parsed strictly — indented blocks and blockquote containers are
+    stripped too — because under-reporting on the carrier merely costs an extra
+    `inert` warning, never a pass (review c4-5).
     """
     out: list[str] = []
     fence: tuple[str, int] | None = None
     for line in body.splitlines():
         run = _fence_run(line)
+        if strict and (line.startswith("    ") or line.startswith("\t")):
+            out.append("")
+            continue
         if fence is not None:
             if run and run[0] == fence[0] and run[1] >= fence[1]:
                 fence = None
@@ -183,13 +213,17 @@ def strip_code(body: str) -> str:
     return "\n".join(out)
 
 
-def parse_closing_refs(body: str, repo: str | None = None) -> list[int]:
+def parse_closing_refs(body: str, repo: str | None = None,
+                       strict: bool = False) -> list[int]:
     """Issue numbers this body claims to close, in body order, deduped.
 
-    Code spans, fenced blocks (``` and `~~~`) and indented blocks are stripped
-    first, because a keyword inside one is a *quotation* of a keyword, not a
-    claim (GitHub does not act on it either, so treating it as a claim would
-    manufacture a finding).
+    Code spans and fenced blocks (``` and `~~~`) are stripped first, because a
+    keyword inside one is a *quotation* of a keyword, not a claim (GitHub does
+    not act on it either, so treating it as a claim would manufacture a finding).
+    Indented blocks are stripped ONLY when `strict` — see `strip_code`: the
+    lenient direction (used for the PR under test) deliberately over-reports a
+    quoted indented keyword rather than risk losing a real claim, while the
+    carrier side is parsed strictly so a quotation there cannot buy a `lands`.
 
     `repo` (``owner/name``) decides what an `owner/repo#N` reference means. A
     slug naming a DIFFERENT repo is a closure elsewhere, not a claim about an
@@ -198,7 +232,7 @@ def parse_closing_refs(body: str, repo: str | None = None) -> list[int]:
     (#10597 review P2-3). With no `repo`, a slug is treated as foreign: the
     function cannot tell, and inventing a finding is worse than missing one.
     """
-    text = _INLINE_CODE_RE.sub(" ", strip_code(body or ""))
+    text = _INLINE_CODE_RE.sub(" ", strip_code(body or "", strict))
     seen: list[int] = []
     for m in _CLOSING_RE.finditer(text):
         slug = m.group("slug")
@@ -302,7 +336,7 @@ def classify(pr: PullRequest, by_head: dict[str, PullRequest],
                         f"`{default_branch}` for this work."),
             ))
             continue
-        carried = issue in parse_closing_refs(carrier.body, repo)
+        carried = issue in parse_closing_refs(carrier.body, repo, strict=True)
         if carried:
             findings.append(Finding(
                 issue=issue, pr=pr.number, base=pr.base, verdict="lands",
