@@ -2365,6 +2365,52 @@ _TEXT_SCAN = (
     + " OR ".join(f"n.{prop} CONTAINS $needle" for prop in _TEXT_PROPERTIES)
     + " RETURN labels(n)[0], coalesce(n.id, '')")
 
+#: Every property `_TURN_WRITE_CYPHER` fills FROM the turn row, and the turn-row
+#: field it is filled from. `_turn_text_properties` compares against THIS map as
+#: an EQUALITY, so a new or renamed turn-sourced assignment has to be classified
+#: here (does it carry the turn's text?) before it can land. Without that, the
+#: classification below is a hardcoded allow-list a new text carrier slips past.
+_TURN_WRITE_FIELDS = {
+    "content": "c",         # the turn's transcript
+    "embeddingText": "et",  # the enriched text the vector describes
+    "pointKind": "k",
+    "speaker": "speaker",
+    "content_hash": "ch",
+}
+
+#: The turn-row fields that carry TEXT — the others are kind/speaker/bookkeeping,
+#: so theirs are not properties the text scan owes coverage for.
+_TURN_TEXT_SOURCES = frozenset({"c", "et"})
+
+
+def _turn_text_properties(cypher: str) -> set[str]:
+    """The graph properties `cypher` fills from a turn-row field that carries TEXT.
+
+    ⛔ THE EQUALITY IS THE GUARD, NOT THE SUBSET. `set() <= anything` is `True`,
+    so a subset check over a REGEX-EXTRACTED population passes whenever the
+    regex stops matching — and that is not hypothetical, it is measured: with
+    `_TURN_WRITE_CYPHER`'s `SET t.content=turn.c` respaced to `t.content =
+    turn.c` the pre-equality guard went GREEN (`1 passed`), i.e. the scan's tie
+    to the writer was gone and nothing said so. The same holds for a `SET t +=
+    $row` rebuild, for the SET list moving behind a helper, or for a text
+    carrier named `t.rawText=turn.raw` (filtered out by the source allow-list
+    before the comparison). A guard that reads as coverage and cannot fire is
+    the defect this one exists to catch, one level up — so the extracted pairs
+    must equal `_TURN_WRITE_FIELDS` EXACTLY: an empty extraction reddens, and so
+    does a turn-sourced property the map does not name.
+    """
+    pairs = set(re.findall(r"t\.(\w+)=turn\.(\w+)", cypher))
+    classified = set(_TURN_WRITE_FIELDS.items())
+    assert pairs == classified, (
+        "`_TURN_WRITE_CYPHER`'s turn-sourced SET list no longer matches the "
+        "classification this guard is built on, so it can no longer say which "
+        "of its properties carry the turn's TEXT: extracted "
+        f"{sorted(pairs)}, classified {sorted(classified)}. Re-read the "
+        "statement and classify the new/renamed assignment — if it carries "
+        "text, add its property to `_TEXT_PROPERTIES` (and to "
+        "`tests/test_10017_record_carrier.py::_TEXT_SCAN`, the second copy).")
+    return {prop for prop, src in pairs if src in _TURN_TEXT_SOURCES}
+
 
 def _graph_text_hits(proj, needle: str) -> list[tuple[str, str]]:
     """Every node whose stored text contains `needle`, with its label and id.
@@ -2562,15 +2608,45 @@ def test_an_unarmed_capture_puts_the_turn_text_in_the_graph(sdk, monkeypatch):
     # a rewrite that fails) `turn.et` IS the turn's raw stored text, so a
     # five-name population was blind to the transcript in the one statement
     # this test exists to watch.
-    text_from_turn = {
-        prop for prop, src in re.findall(
-            r"t\.(\w+)=turn\.(\w+)", sdk_mod._TURN_WRITE_CYPHER)
-        if src in {"c", "et"}}
+    text_from_turn = _turn_text_properties(sdk_mod._TURN_WRITE_CYPHER)
     assert text_from_turn <= set(_TEXT_PROPERTIES), (
         "`_TURN_WRITE_CYPHER` writes the turn's text into a property this scan "
         f"does not search: {sorted(text_from_turn - set(_TEXT_PROPERTIES))}")
     _assert_the_text_is_in_exactly_one_store(
         sdk._get_proj(), needle, in_graph=True)
+
+
+def test_the_population_guard_reddens_when_the_writer_changes_shape():
+    """The guard above is coverage only if it CAN fire — pin that it does.
+
+    The guard extracts the writer's turn-sourced properties by regex over its
+    Cypher, so its natural failure mode is going SILENT rather than loud: it
+    observes nothing, `set() <= set(...)` is `True`, and a green run reads as
+    "the scan still covers the writer" when it says nothing at all. Measured on
+    the pre-equality version of the guard: respacing `SET t.content=turn.c` to
+    `t.content = turn.c` in `tortoise/sdk.py` left this file's unarmed test
+    GREEN (`1 passed`) with the scan's tie to the writer gone.
+
+    Both shapes are pinned here against synthetic statements, which states them
+    without mutating `sdk.py` — an empty (`[]`) extraction and a turn-sourced
+    property the classification does not name.
+    """
+    real = sdk_mod._TURN_WRITE_CYPHER
+    assert _turn_text_properties(real) == {"content", "embeddingText"}, (
+        "the classification no longer finds the two text carriers in the real "
+        "statement — every assertion below would then be about a synthetic "
+        "string, not about the writer")
+
+    respaced = real.replace("t.content=turn.c", "t.content = turn.c")
+    assert respaced != real, "the respacing this case pins no longer applies"
+    with pytest.raises(AssertionError, match="turn-sourced SET list"):
+        _turn_text_properties(respaced)
+
+    unclassified = real.replace(
+        "t.content=turn.c,", "t.content=turn.c, t.rawText=turn.raw,")
+    assert unclassified != real
+    with pytest.raises(AssertionError, match="turn-sourced SET list"):
+        _turn_text_properties(unclassified)
 
 
 def test_a_refused_record_write_puts_the_turn_text_in_the_graph_not_in_neither(
