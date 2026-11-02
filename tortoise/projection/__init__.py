@@ -20130,6 +20130,12 @@ class FalkorProjection(
         # || EXCLUDED.props` makes an OMITTED key preserve a stale text, which is
         # why the carrier's own clause is unconditional (`SET n.embeddingText=$et`),
         # not conditional.
+        # ⚠️ Residual, stated rather than implied: this fold closes the TEXT half
+        # only. The caller's vector itself is still not replayed on this door (the
+        # clause set is built from `new_content`, and a caller vector arrives with
+        # `new_content=None`), so a rebuild after `update_point(embedding=[…])`
+        # leaves live and rebuilt agreeing on "no text" and disagreeing on WHICH
+        # vector — the declared #5046 gap acknowledged above, not a new one.
         if (not skip_embedding and not reencode_cleared_embedding_text
                 and "embeddingText" in ev
                 and (ev["embeddingText"] is None
