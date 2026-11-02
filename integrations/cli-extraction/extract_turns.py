@@ -280,16 +280,17 @@ def build_transcripts(turns_path: Path):
     Two keyings, one per source shape. A `session://<id>` source (what `dump`
     emits from the capture lanes) keys by the **capture session id**, so
     `--transcript <session-id>` works — in EITHER spelling, `session://<id>` or
-    the canonical single-colon `session:<id>`. A `codex://threads/<id>` source keys by
-    the FULL thread id and raises on any other `codex://` shape. Any other src
-    (a hand-built turns file) keeps its full tail id with the fragment stripped.
+    the canonical single-colon `session:<id>`. A `codex://threads/<id>` source
+    keys by the FULL thread id and raises on any other `codex://` shape. Any
+    other src (a hand-built turns file) keeps its full tail id with the
+    fragment stripped.
 
-    Keys are the FULL thread id (a truncated key would merge distinct
-    threads: the fixtures are UUIDv7, whose first hex characters encode a
-    ~65-second timestamp window, so parallel runs collide — measured risk,
-    not theoretical). `resolve_transcript` accepts unambiguous prefixes.
-    A src that starts with codex:// but does not name a thread is a schema
-    surprise: raise rather than silently mis-group.
+    For the `codex://` and hand-built shapes the key is the FULL thread id (a
+    truncated key would merge distinct threads: the fixtures are UUIDv7, whose
+    first hex characters encode a ~65-second timestamp window, so parallel runs
+    collide — measured risk, not theoretical). `resolve_transcript` accepts
+    unambiguous prefixes. A src that starts with `codex://` but does not name a
+    thread is a schema surprise: raise rather than silently mis-group.
     """
     groups = {}
     with turns_path.open() as fh:
