@@ -130,14 +130,29 @@ def state_dir() -> Path:
 #: id the operator passed to `capture_session`. `build_transcripts` keys a
 #: `session://` source by the WHOLE remainder (never a tail split, which would
 #: merge `teamA/run-7` and `teamB/run-7`).
+#:
+#: `s.turn_count` / `s.turn_max_index` ride the SAME query because the row set
+#: alone cannot say whether it is the WHOLE run: on a record-armed deployment
+#: (`TORTOISE_RECORD_DSN`, #10000) the writer decides PER TURN which store takes
+#: it, while those two `:Session` counters are set from the entire window — so
+#: a graph holding only the record-refused subset is indistinguishable from a
+#: complete session unless the session's own declaration is read beside it
+#: (`_partial_reason`). They are the LAST two columns, so every consumer of the
+#: leading six (`_is_turn_of`, `_turn_record`) is unaffected by appending.
 _DUMP_QUERY = (
     "MATCH (s:Session)-[:CONTAINS]->(t:Point) "
     "WHERE t.is_episodic = true AND t.pointKind = 'event' "
     # No ORDER BY: the graph's order is discarded — `dump` re-sorts by the
     # integer turn index (`_turn_order`), because the server's lexicographic
     # order puts `t10` before `t2`.
-    "RETURN 'session://' + s.id, t.pointKind, t.speaker, t.content, t.createdAt, t.id"
+    "RETURN 'session://' + s.id, t.pointKind, t.speaker, t.content, t.createdAt, t.id, "
+    "s.turn_count, s.turn_max_index"
 )
+
+
+def _session_key(row) -> str:
+    """The capture session id a row belongs to — `session://<id>` -> `<id>`."""
+    return str(row[0]).split("://", 1)[-1]
 
 
 def _is_turn_of(row) -> bool:
@@ -153,7 +168,7 @@ def _is_turn_of(row) -> bool:
     such an id — `_capture_turn_id` emits a plain running index — so this is a
     documented edge rather than a reachable state.
     """
-    sid = str(row[0]).split("://", 1)[-1]
+    sid = _session_key(row)
     tail = str(row[5])[len(sid) + 2:]
     return (str(row[5]).startswith(f"{sid}_t") and tail.isdecimal())
 
@@ -167,6 +182,23 @@ def _is_turn_of(row) -> bool:
 _FRAME_RE = re.compile(r"^\[([^\]]*)\]\s*")
 
 
+def _turn_index(row) -> int:
+    """The INTEGER turn index carried by a turn id (`_capture_turn_id` -> `{session}_t{i}`).
+
+    Parsed as an integer (not compared as a string) because a lexicographic
+    sort puts `t10` before `t2`.
+    """
+    m = re.search(r"_t(\d+)$", str(row[5]))
+    if m is None:
+        # An id that carries no turn index is not a turn: it cannot be
+        # ordered, and defaulting to 0 would splice it in front of turn 0.
+        raise ValueError(f"turn id carries no index: {row[5]!r}")
+    try:
+        return int(m.group(1))
+    except (TypeError, ValueError) as exc:      # >4300 digits: not an index
+        raise ValueError(f"turn id index is not an integer: {row[5]!r}") from exc
+
+
 def _turn_order(row) -> tuple:
     """Sort key: (session, turn index).
 
@@ -174,21 +206,111 @@ def _turn_order(row) -> tuple:
     batch with one `$now` (`coalesce(t.createdAt,$now)`), so every turn in a
     capture carries the SAME timestamp and the graph returns them in arbitrary
     order — a scrambled transcript that reds nothing. The turn index in the
-    deterministic id (`_capture_turn_id` -> `{session}_t{i}`) is the order, and
-    it is parsed as an INTEGER because a lexicographic sort puts `t10` before
-    `t2`.
+    deterministic id (`_capture_turn_id` -> `{session}_t{i}`) is the order.
     """
-    sid = str(row[0])
-    m = re.search(r"_t(\d+)$", str(row[5]))
-    if m is None:
-        # An id that carries no turn index is not a turn: it cannot be
-        # ordered, and defaulting to 0 would splice it in front of turn 0.
-        raise ValueError(f"turn id carries no index: {row[5]!r}")
-    try:
-        index = int(m.group(1))
-    except (TypeError, ValueError) as exc:      # >4300 digits: not an index
-        raise ValueError(f"turn id index is not an integer: {row[5]!r}") from exc
-    return (sid, index)
+    return (str(row[0]), _turn_index(row))
+
+
+def _declared(row) -> tuple:
+    """`(turn_count, turn_max_index)` the `:Session` declares, `None` where absent.
+
+    ⛔ THE TWO ARE NOT INTERCHANGEABLE (#10021, `sdk._prior_mark_index`):
+    `turn_count` is a WINDOW LENGTH (`len(turns)`) and `turn_max_index` is the
+    ID SPACE's live end (`turn_offset + count - 1`). Both ride the SAME
+    `:Session` write (`_write_capture_turns`), so they describe the whole
+    captured window regardless of which STORE took each turn — which is the
+    fact the completeness check below rests on.
+
+    Absent means UNDECLARED (a pre-#10000 `:Session`, or a deployment that
+    never set them): the check degrades to "cannot be shown", never to a
+    refusal, because an undeclared session must keep dumping.
+    """
+    def _int(v):
+        return v if isinstance(v, int) and not isinstance(v, bool) else None
+    return (_int(row[6]) if len(row) > 6 else None,
+            _int(row[7]) if len(row) > 7 else None)
+
+
+def _partial_reason(held, turn_count, turn_max_index):
+    """WHY these graph rows are not the session's whole run — or `None`.
+
+    This is the SAME reconciliation the SDK's own turn read applies, mirrored
+    rather than reinvented (`tortoise/record_read.py::_shortfall`, whose three
+    decidable facts are reproduced here in the same order — one definition of
+    "a partial transcript", not a second opinion):
+
+    * SHORTER than the window the session declares (`len(held) < turn_count`) —
+      the shape a mid-capture record refusal leaves standing;
+    * does not cover index `0 .. max(held)` — the `turn_offset` append shape
+      (`_t2`/`_t3` here, `_t0`/`_t1` in the other store), where the window
+      LENGTH cannot see the gap, and an interior hole left by one refused
+      write between two that landed;
+    * stops BELOW the id space's end (`max(held) < turn_max_index`) — a refused
+      HIGHEST turn, which is invisible to both facts above (#10000 review P2).
+
+    Rows ABOVE the declared end are NOT a shortfall here: that is residue from
+    a shorter re-capture, a LONGER transcript rather than a truncated one, and
+    the SDK read's surplus rule (not this lane's `write` phase) is where it is
+    decided.
+    """
+    if turn_count is not None and len(held) < turn_count:
+        return (f"the graph holds {len(held)} turn(s) while the session "
+                f"declares a window of {turn_count}")
+    if not held:
+        return None
+    highest = max(held)
+    # ⛔ ARITHMETIC, never a walk of the id space (`record_read._shortfall`
+    # records the CWE-407 lesson: the index is a STORED integer — a legacy or
+    # copied row at index 10**9 made that walk cost minutes and tens of GB).
+    # Whether a gap exists is a subtraction; naming WHICH indices are missing
+    # walks only the rows already returned.
+    missing_count = (highest + 1) - len(held)
+    if missing_count:
+        gaps: list[int] = []
+        expected = 0
+        for index in sorted(held):
+            while expected < index and len(gaps) < _PARTIAL_GAPS_NAMED:
+                gaps.append(expected)
+                expected += 1
+            if len(gaps) >= _PARTIAL_GAPS_NAMED:
+                break
+            expected = index + 1
+        shown = ", ".join(str(i) for i in gaps)
+        if missing_count > len(gaps):
+            shown += f" (+{missing_count - len(gaps)} more)"
+        return f"the graph returned no turn for index {shown}"
+    if turn_max_index is not None and highest < turn_max_index:
+        return (f"the graph's turns stop at index {highest} while the session's "
+                f"turn ids reach {turn_max_index} — the tail is missing")
+    return None
+
+
+#: How many missing indices a refusal names before summarising the rest.
+_PARTIAL_GAPS_NAMED = 5
+
+
+def _partial_sessions(rows, turns) -> list:
+    """`[(session_id, reason)]` for every session whose dumped turns are partial.
+
+    Only sessions the graph returned turn rows for can be judged: a session
+    whose turns are ALL in the record contributes no row at all, and is
+    reported by `dump`'s zero-row message instead (the fully-migrated #10000
+    state). The SPLIT state is exactly the one this function catches, because
+    there the graph holds a non-empty subset that used to look complete.
+    """
+    held: dict[str, set] = {}
+    for row in turns:
+        held.setdefault(_session_key(row), set()).add(_turn_index(row))
+    declared: dict[str, tuple] = {}
+    for row in rows:
+        declared.setdefault(_session_key(row), _declared(row))
+    partial = []
+    for sid, indices in held.items():
+        turn_count, turn_max_index = declared.get(sid, (None, None))
+        reason = _partial_reason(indices, turn_count, turn_max_index)
+        if reason:
+            partial.append((sid, reason))
+    return partial
 
 
 #: One graph row -> one turns-file record. `by` carries the turn ROLE
@@ -206,7 +328,7 @@ def _turn_record(row) -> dict:
             "content": text, "at": str(row[4])}
 
 
-def dump(out: Path, allow_empty: bool = False):
+def dump(out: Path, allow_empty: bool = False, allow_partial: bool = False):
     """Pull the captured session turns out of the container.
 
     This is the integration's ONE private graph read. A public session-id route
@@ -216,11 +338,24 @@ def dump(out: Path, allow_empty: bool = False):
     graph arm serves turns `ORDER BY t.id`, i.e. lexicographically (`t10`
     before `t2`). The `CONTAINS` read is chosen for completeness and one round
     trip, not because no public route exists. Everything else goes through
-    public SDK doors. Fails loudly on zero rows unless --allow-empty: an empty
-    capture usually means capture is off, the schema moved, or — on a
-    deployment with the Postgres record armed (`TORTOISE_RECORD_DSN`) — the
-    turns live in the RECORD and this lane's graph-only read finds none
-    (#10000; `sdk.get_session()` serves those).
+    public SDK doors.
+
+    Fails loudly on zero rows unless --allow-empty: an empty capture means
+    capture was off, the schema moved, or — on a deployment with the Postgres
+    record armed (`TORTOISE_RECORD_DSN`) — the turns live in the RECORD and
+    this lane's graph-only read finds none (#10000; `sdk.get_session()` serves
+    those).
+
+    Fails loudly on a PARTIAL run unless --allow-partial, which is a different
+    state and a different cause: with the record armed the writer decides PER
+    TURN which store takes it (`_write_capture_turns`), so a record write
+    refused mid-capture leaves those turns in Postgres while the session's own
+    `turn_count`/`turn_max_index` still describe the WHOLE window. A non-empty
+    row set that stops short of that declaration is therefore not a complete
+    session — writing it would let `run` and `write` land claims extracted
+    from a TRUNCATED transcript as the session's durable output, which is
+    silent and downstream-invisible. `_partial_reason` is the same
+    reconciliation the SDK's own turn read applies (`record_read._shortfall`).
     """
     ns = _cfg("TORTOISE_NAMESPACE", "selfhost")
     log = _cfg("TORTOISE_EVENT_LOG", f"/data/events/{ns}.jsonl")
@@ -230,8 +365,13 @@ def dump(out: Path, allow_empty: bool = False):
         f"sdk = TortoiseSDK(namespace={ns!r}, event_log_path={log!r})\n"
         "g = sdk._get_proj().g\n"
         f"rows = g.query({_DUMP_QUERY!r}).result_set\n"
+        # the two declaration columns are emitted as INT-OR-NULL: a graph type
+        # that is not an int must read as UNDECLARED (the completeness check
+        # degrades to "cannot be shown"), never as a number to compare.
+        "def _i(v):\n"
+        "    return v if isinstance(v, int) and not isinstance(v, bool) else None\n"
         "for r in rows:\n"
-        "    print(json.dumps([r[0], r[1], r[2], r[3], str(r[4]), str(r[5])]))\n"
+        "    print(json.dumps([r[0], r[1], r[2], r[3], str(r[4]), str(r[5]), _i(r[6]), _i(r[7])]))\n"
         "sdk.close()\n"
     )
     try:
@@ -244,11 +384,7 @@ def dump(out: Path, allow_empty: bool = False):
     rows = [json.loads(ln) for ln in r.stdout.splitlines() if ln.strip()]
     turns = [row for row in rows if _is_turn_of(row)]
     rejected = len(rows) - len(turns)
-    out.write_text("".join(json.dumps(_turn_record(row)) + "\n"
-                           for row in sorted(turns, key=_turn_order)))
-    with out.open() as fh:
-        n = sum(1 for _ in fh)
-    if n == 0 and not allow_empty:
+    if not turns and not allow_empty:
         # The two empty cases have DIFFERENT causes and the old one-line
         # message named neither of them: it sent every operator to their
         # capture setting (#9932), which is the wrong cause in both. NEITHER
@@ -296,6 +432,29 @@ def dump(out: Path, allow_empty: bool = False):
             "it, and its scope covers exactly `(s:Session)-[:CONTAINS]->(:Point)`), "
             "and a writer that has moved past these property names matches nothing "
             "either. (pass --allow-empty to accept an empty dump)")
+    # The completeness check runs BEFORE the file is written, so a refusal never
+    # leaves a partial `turns_raw.jsonl` behind for a later `run` (or a re-run
+    # of `run` without `dump`) to consume as if it were the whole session.
+    partial = _partial_sessions(rows, turns)
+    if partial and not allow_partial:
+        shown = "; ".join(f"session {sid!r}: {reason}" for sid, reason in partial[:5])
+        more = f" (and {len(partial) - 5} more)" if len(partial) > 5 else ""
+        raise SystemExit(
+            f"dump: PARTIAL transcript REFUSED — the graph does not hold the whole "
+            f"run it declares, for {len(partial)} session(s): {shown}{more}. "
+            "This is the SPLIT STORE (#10000): with TORTOISE_RECORD_DSN armed the "
+            "writer decides PER TURN which store takes it (`_write_capture_turns`), "
+            "while `s.turn_count`/`s.turn_max_index` describe the whole window "
+            "regardless — so a record write refused mid-capture leaves those "
+            "turns in Postgres and this graph-only read sees a short run. "
+            "Extracting from it would land claims from a TRUNCATED session as the "
+            "session's durable output. Read the record as well "
+            "(`sdk.get_session(<id>)` merges both stores), or pass "
+            "--allow-partial to write the graph's subset anyway.")
+    out.write_text("".join(json.dumps(_turn_record(row)) + "\n"
+                           for row in sorted(turns, key=_turn_order)))
+    with out.open() as fh:
+        n = sum(1 for _ in fh)
     keys = ", ".join(build_transcripts(out)) or "(none)"
     print(f"dumped {n} turns -> {out}")
     print(f"transcripts: {keys}")
@@ -824,7 +983,13 @@ def main():
     d = sub.add_parser("dump", help="pull captured turns from the container")
     d.add_argument("--out", default=str(state_dir() / "turns_raw.jsonl"))
     d.add_argument("--allow-empty", action="store_true",
-                   help="exit 0 on an empty dump (default: fail — usually capture is off)")
+                   help="exit 0 on an empty dump (default: fail and name the "
+                        "causes — capture off, the Postgres record holding the "
+                        "turns, or a pre-#947 graph with no is_episodic flag)")
+    d.add_argument("--allow-partial", action="store_true",
+                   help="write a PARTIAL run anyway (default: fail when the graph's "
+                        "rows stop short of the window the :Session declares — on "
+                        "a record-armed deployment (#10000) the rest is in Postgres)")
     r = sub.add_parser("run", help="extract claims with one CLI engine")
     r.add_argument("--engine", default="claude", choices=["claude", "glm", "codex"])
     r.add_argument("--model", default="claude-haiku-5-5")
@@ -839,7 +1004,7 @@ def main():
     w.add_argument("--source", required=True, help="extractedFrom URL for the new points")
     w.add_argument("--domain", required=True)
     args = ap.parse_args()
-    {"dump": lambda: dump(Path(args.out), args.allow_empty),
+    {"dump": lambda: dump(Path(args.out), args.allow_empty, args.allow_partial),
      "run": lambda: run(args),
      "write": lambda: write(args)}[args.phase]()
 
