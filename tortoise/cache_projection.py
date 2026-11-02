@@ -478,17 +478,31 @@ FOLD_ON_CREATE_DEFAULTS: dict[str, dict[str, Any]] = {
 #:   `SubjectAdded` are now selected from the SAME stream (their `payload ->
 #:   'status'`) and replayed in `seq` order, ON CREATE, so a record-sourced
 #:   rebuild reproduces the value `rebuild_all` (which reads the JSONL payload)
-#:   writes instead of materializing NO status → LIVE.
+#:   writes instead of materializing NO status → LIVE. ⚠️ That is the STATED
+#:   value; see residue (i) for the one place the two rebuild routes still
+#:   differ on the property set.
 #:   ⚠️ TWO STATED BOUNDS ride that leg, both deliberate:
 #:   (i) the live fold's `coalesce($st, 'live')` DEFAULT is NOT reproduced —
 #:   where the creation record states no status the replay writes NONE, because
 #:   an absent status already reads LIVE (`live._terminal_excluded`) and
 #:   materializing `'live'` would assert a lifecycle fact the record never stated
-#:   (pinned: `test_a_silent_birth_record_derives_no_status_rather_than_live`);
+#:   (pinned: `test_a_silent_birth_record_derives_no_status_rather_than_live`).
+#:   ⚠️ THE PRICE, stated rather than hidden: for such a record the TWO rebuild
+#:   routes now differ on the PROPERTY SET — `rebuild_all` reads the JSONL
+#:   payload through `_upsert_object`'s ON CREATE `coalesce($st, 'live')` and
+#:   writes `'live'` (measured on the embedded engine: a status-less
+#:   `ObjectRegistered` leaves the node `status='live'`), while this leg writes
+#:   nothing. The difference is not a wrong ANSWER (both read LIVE), but it is a
+#:   real difference in what the two routes materialise, and it is the price of
+#:   not fabricating a lifecycle claim the record never made. Any future
+#:   `rebuild_all`-vs-`rebuild_from_record` equality probe must treat
+#:   `absent ≡ 'live'` for this property on a silent creation record.
 #:   (ii) "the EARLIEST creation record speaks" is exact only where that record
 #:   is the write that CREATED the node. `_upsert_object`/`_upsert_subject` MERGE
 #:   on `id` and write `status` ON CREATE only, so for an id that already existed
-#:   (a stub/mention path, `create_object(..., id=…)`, a pre-#3590 graph) the
+#:   (a stub/mention path, `create_object(..., id=…)`, a pre-#3590 graph, or a
+#:   delete-then-re-create under an EXPLICIT id — the SDK mints a fresh id on its
+#:   own delete+re-create path, so that one is not reachable) the
 #:   live node took the ON MATCH arm and kept its own status while this replay
 #:   still writes the record's — possibly a TERMINAL value the graph never held.
 #:   The record carries no create-vs-match signal, so the reader cannot tell;
@@ -653,8 +667,10 @@ class LifecycleEvent:
     """One record-sourced lifecycle record, reduced to what the status fold reads.
 
     THREE record types ride this shape, because the live fold's `status` writes
-    come from three places and a rebuild that read fewer reproduced part of the
-    field:
+    come from FOUR places — the CREATION record, a supersession's CARRIERS (read
+    by :data:`DERIVED_FROM_RECORD`, a COLUMN derivation, not a stream leg), a
+    connector/pack fold, and a state op. This shape carries the three that are
+    not columns; a rebuild that read fewer reproduced part of the field:
 
     * `EventRecorded` history — an event whose `eventKind` a
       connector or pack fold maps onto ``Object.status`` (#10198). Joined to the
@@ -1339,17 +1355,21 @@ _LIFECYCLE_EVENTS_FOR_ONE_SQL = (
       # exists to read, and the read door would answer a status the rebuild
       # does not (the two-door disagreement #10198's own leg pins).
       # ⚠️ The CREATION records join the same id coordinate (#9974's birth leg).
-      # ⛔ `payload ->> 'id'` — the RAW top level, NOT `_PAYLOAD_EVENT ->> 'id'`,
-      # and that is deliberate rather than an oversight (review, #9974): the two
-      # record types this clause covers are FLAT (`_journal_entity_mutation` and
-      # `_create_entity` journal the record itself), so raw and unwrapped are the
-      # same expression for both. Only a `ConversationMiner` `EventRecorded`
-      # nests its event, and that type is reached here by NAME, never by this
-      # clause. Making the spelling `_PAYLOAD_EVENT` would also silently disarm
-      # `tests/test_cache_projection.py::_ID_CLAUSE_RE`, whose `id_key` read IS
-      # what keeps the read-door legs narrowing instead of passing vacuously.
+      # ⛔ THE UNWRAPPED EXPRESSION — `({_PAYLOAD_EVENT} ->> 'id')`, the SAME
+      # expression the select list uses for `node_id`. Review round 2 (P2)
+      # measured the reason: `record_projection._nested_node_carrier` accepts an
+      # `event`-nested carrier for ANY `path=None` snapshot, so an
+      # `event`-nested `ObjectRegistered` IS materialised by the record and IS
+      # folded by the full statement — while a raw `payload ->> 'id'` (NULL for a
+      # nested payload) silently EXCLUDED it from the single-row narrowing, the
+      # two-door split this whole module exists to prevent. Today's producers
+      # (`_create_entity`, `_journal_entity_mutation`) are flat, which is why the
+      # raw spelling looked right; it is the ACCEPTED nested shape that decides.
+      # `tests/test_cache_projection.py::_ID_CLAUSE_RE` reads the key out of this
+      # statement (now tolerant of the COALESCE), so the fake follows whichever
+      # expression is really here rather than assuming one.
       f" OR (event_type IN ('EntityMutated', 'ObjectRegistered', 'SubjectAdded')"
-      f" AND payload ->> 'id' = %s))"
+      f" AND ({_PAYLOAD_EVENT} ->> 'id') = %s))"
 )
 
 
