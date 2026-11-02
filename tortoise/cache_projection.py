@@ -1707,11 +1707,14 @@ def apply_event_stream_folds(
                 # speak: #3590 journals another `ObjectRegistered` on EVERY
                 # create, and a re-mention must not rewrite a stored status.
                 # ⛔ THE ASSIGNMENT IS UNCONDITIONAL, and that is the round-6
-                # (P2) fix: any fold this replay applied BEFORE the creation
-                # record folded NOTHING in the live graph, because the node did
-                # not exist yet (`entity_identity.resolve_fold_name` never
-                # mints, and an `about_entities` miss is the exempt
-                # `unfolded-mention`, so the event is legal and journaled).
+                # (P2) fix — for the NORMAL case, where this record is the write
+                # that CREATED the node (see the stated bound below for the
+                # cases where it is not). There, any fold this replay applied
+                # BEFORE the creation record folded NOTHING in the live graph,
+                # because the node did not exist yet
+                # (`entity_identity.resolve_fold_name` never mints, and an
+                # `about_entities` miss is the exempt `unfolded-mention`, so the
+                # event is legal and journaled).
                 # MEASURED before it: `venture:disbursement` naming `T1` at
                 # seq 1 (no node), then `create_object("T1",
                 # objectKind="venture:tranche", status="archived")` at seq 2 →
@@ -1720,24 +1723,36 @@ def apply_event_stream_folds(
                 # `status is None` — the old gate — refused the birth value
                 # because the pre-birth fold had already made it non-None. So the
                 # rebuilt Object read as CURRENT and its name resolved: #9974's
-                # own harm, one ordering case over. Discarding the pre-birth fold
-                # also handles `birth_status is None` correctly (a silent birth
-                # CLEARS what preceded it, which is what "the node did not exist"
-                # means).
+                # own harm, one ordering case over.
                 # ⚠️ The live fold's `coalesce($st, 'live')` DEFAULT is NOT
                 # reproduced: a creation record that states no status leaves the
                 # property ABSENT, because absent already reads LIVE and
                 # materializing `'live'` would fabricate a lifecycle claim the
                 # record never made (pinned: `test_a_silent_birth_record_
                 # derives_no_status_rather_than_live`).
-                # ⚠️ STATED BOUND: "the earliest creation record" is exact only
-                # where that record is the write that CREATED the node. The MERGE
-                # is on `id` and the fold's `status` write is ON CREATE, so an id
-                # that ALREADY existed (a stub/mention path, an explicit `id=`,
-                # a pre-#3590 graph) took the ON MATCH arm and kept its own
-                # status while this replay writes the record's. The record
-                # carries no create-vs-match signal, so this cannot be closed
-                # here — same class of named residue as the ordering bounds.
+                # ⚠️ STATED BOUND (round 7, P2 — the rule above holds for the
+                # CREATED case only, and the record carries NO create-vs-match
+                # signal, so it cannot be tightened here): "the earliest creation
+                # record" is exact only where that record is the write that
+                # CREATED the node. Where the id ALREADY existed (a stub/mention
+                # path, an explicit `id=`, a pre-#3590 graph, or a
+                # delete-then-re-create) the live fold took a DIFFERENT arm than
+                # this replay assumes, and the divergence runs in BOTH directions:
+                #   (ii-a) the node existed at that earlier event, so a pre-birth
+                #   `restatus`/pack fold the live graph DID apply is DISCARDED by
+                #   this arm — MEASURED: `[restatus(seq 1, 'archived'),
+                #   birth(seq 2, None)]` rebuilds with NO status (reads LIVE) while
+                #   the graph holds `archived` (terminal), and
+                #   `[birth(None), …, birth('archived')]` (delete-then-re-create)
+                #   rebuilds absent while the graph holds `archived`. The v1 of
+                #   this comment named only the opposite direction ("possibly a
+                #   TERMINAL value the graph never held"), which is the rarer
+                #   half;
+                #   (ii-b) the ON MATCH arm keeps the node's own status while this
+                #   replay writes the record's — note that a re-CREATE under an
+                #   explicit id takes ON CREATE, so there the graph holds the
+                #   LATER record's value and this arm answers from the FIRST
+                #   incarnation.
                 if not birth_seen:
                     birth_seen = True
                     status = event.birth_status
