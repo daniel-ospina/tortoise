@@ -155,9 +155,9 @@ from tortoise.mcp_server import create_http_app
 from tortoise.monitoring import (  # #2850/2953 liveness-readiness decouple
     HEALTH_PROBE_REFRESH_S,  # noqa: F401 — re-exported (tests import it here)
     PROBE_HARD_TIMEOUT,
-    ContextConfinementError,  # #10612: the offload could not carry the context
     ControlPlaneOffloadError,
     HealthProbe,
+    _ContextNotReproduced,  # #10612: …and the callable provably did not run
     confine_context,  # #10612: re-entry-proof contextvar confinement
     event_retention_interval,
     graph_offload_timeout_s,
@@ -8942,8 +8942,8 @@ class _OffloadRefused:
     ``_cp_offload(..., best_effort=True)`` returns THIS instead of ``None``
     when the offload never ran the callable — the pool refused the submission
     (backlog full), the bound cancelled it before any worker picked it up, or
-    the offload could not carry the request's context (#10612,
-    ``ContextConfinementError``): the work did NOT happen. A
+    the context wrapper could not build the invocation's context before
+    running it (#10612, ``_ContextNotReproduced``): the work did NOT happen. A
     plain bound miss still returns ``None``, because the worker that picked
     the submission up runs it to completion (the seam abandons only the
     await). Callers that ignore the return value are unaffected; a
@@ -9007,9 +9007,9 @@ async def _cp_offload(fn, *, op: str, best_effort: bool = False,
 
     Thin hosted-side wrapper over ``monitoring.run_control_plane_call``. For
     an AUTH-CRITICAL call it owns the FAIL-CLOSED ERROR MAPPING: an offload
-    that misses its wait bound, a saturated worker pool, or a submission whose
-    request CONTEXT could not be carried into the worker (#10612,
-    ``ContextConfinementError`` — the callable never ran) becomes the
+    that misses its wait bound, a saturated worker pool, or a context wrapper
+    that could not build the invocation's context BEFORE running the callable
+    (#10612, ``_ContextNotReproduced`` — so no work was done) becomes the
     repo-standard 503 ``control_plane_unavailable`` the client already renders,
     never a hang and never a silent pass-through. Domain errors raised by the
     helper itself propagate UNCHANGED, so each caller's existing error mapping
@@ -9079,18 +9079,25 @@ async def _cp_offload(fn, *, op: str, best_effort: bool = False,
         if unavailable is not None:
             raise unavailable() from None
         raise _control_plane_unavailable() from None
-    except ContextConfinementError as exc:
-        # #10612 P1: the offload could not carry THIS request's context into
-        # the worker, so the callable NEVER RAN — the same "no work was done"
-        # outcome a refused submission has, and the same honest, retryable
-        # 503. Without this arm a ``ContextConfinementError`` (a RuntimeError,
-        # not a ``ControlPlaneOffloadError``) escapes to each route's blanket
-        # ``except Exception`` and becomes a bare 500 with no ``error_code``:
-        # the exact unretryable status this closes. It is never swallowed into
-        # a plausible answer — running the callable under the worker's AMBIENT
-        # context would answer another request's tenant.
+    except _ContextNotReproduced as exc:
+        # #10612 P1: the wrapper could not build THIS invocation's context, so
+        # the callable NEVER RAN — the same "no work was done" outcome a
+        # refused submission has, and the same honest, retryable 503. Without
+        # this arm the error (a RuntimeError, not a ``ControlPlaneOffloadError``)
+        # escapes to each route's blanket ``except Exception`` and becomes a
+        # bare 500 with no ``error_code``: the exact unretryable status this
+        # closes. It is never swallowed into a plausible answer — running the
+        # callable under the worker's AMBIENT context would answer another
+        # tenant.
+        #
+        # ⚠️ Deliberately the PRIVATE subclass, not ``ContextConfinementError``:
+        # only the wrapper's pre-run arm proves "nothing happened". The same
+        # type raised from INSIDE the callable (a nested ``confine_context``, or
+        # any helper that uses one) is a DOMAIN error and keeps propagating
+        # unchanged — claiming "no work was done" about a half-executed write
+        # would hand the client a retry that duplicates it.
         logging.getLogger("tortoise.api").warning(
-            "control-plane offload %r could not carry the request context: %s",
+            "control-plane offload %r could not build the request context: %s",
             op, exc)
         if best_effort:
             return OFFLOAD_REFUSED

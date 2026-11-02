@@ -126,10 +126,12 @@ def _submit_index_off_loop(fn, /, *args, **kwargs):
     longer does — ``_submit_off_loop`` now goes through
     ``monitoring.confine_context`` (#10612), which re-copies the submitting
     context per INVOCATION. This one builds its ``Context`` per call and runs it
-    once, so it cannot re-enter either — but a caller that starts RETRYING it
-    must move to ``confine_context``, or the second submission raises
-    ``RuntimeError: cannot enter context ... already entered``. Do not copy this
-    body into anything that may run its callable twice.
+    once, so RE-CALLING it is safe: every call copies a fresh context. The trap
+    is the opposite shape — building the ``Context``/partial ONCE and
+    re-submitting that same stored callable, where the second run raises
+    ``RuntimeError: cannot enter context ... already entered``. A caller that
+    needs a re-submittable callable must use ``monitoring.confine_context``
+    rather than this per-call helper.
 
     The layering note stands: the generic pair wants a shared leaf module —
     ``monitoring`` is one and is already off this module's dependency path, so

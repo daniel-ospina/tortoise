@@ -247,6 +247,30 @@ def test_unreproducible_context_fails_closed_and_named(monkeypatch) -> None:
     assert ran == [], "a refused context must never produce an answer"
 
 
+def test_a_context_error_from_inside_the_callable_is_a_domain_error() -> None:
+    """The seam's 503 arm is wrapper-owned — a NESTED failure must propagate.
+
+    ``_cp_offload`` maps ``_ContextNotReproduced``, which only the wrapper raises
+    BEFORE running the callable. The base class raised from inside ``fn`` (a
+    nested ``confine_context``, or any helper using one) means the work may have
+    STARTED, so it must not become "no work was done" — a mutating caller would
+    retry and duplicate it. The seam's own contract already says domain errors
+    propagate unchanged; this pins that this type is no exception.
+    """
+    def fn():
+        raise ContextConfinementError("raised by a NESTED confine_context")
+
+    async def _seam() -> None:
+        await ha._cp_offload(fn, op="ctxvar-nested", pool="graph",
+                             unavailable=ha._graph_unavailable)
+
+    with pytest.raises(ContextConfinementError) as excinfo:
+        asyncio.run(_seam())
+    assert not isinstance(excinfo.value, HTTPException), (
+        "a nested failure must NOT be converted into the retryable 503")
+    assert "NESTED" in str(excinfo.value)
+
+
 # ── (d) the two call sites this diff actually changes ──────────────────────
 
 

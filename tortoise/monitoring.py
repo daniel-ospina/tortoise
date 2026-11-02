@@ -2352,6 +2352,23 @@ class ContextConfinementError(RuntimeError):
     ``_fresh_context`` can degrade into the one answer that is worse than a
     refusal: running the callable under the worker's ambient context. Do not
     read a log line from here as an incident class.
+
+    The seam maps :class:`_ContextNotReproduced` — the PRIVATE subclass
+    ``confine_context`` raises BEFORE running the callable — not this base
+    class. That distinction is the whole point: a ``ContextConfinementError``
+    raised from INSIDE the callable (a nested ``confine_context``, or a helper
+    that uses one) is a DOMAIN error and must propagate unchanged, or a caller
+    would be told "no work was done" about work that had already started.
+    """
+
+
+class _ContextNotReproduced(ContextConfinementError):
+    """``confine_context`` could not build the invocation's context — ``fn`` did not run.
+
+    Private on purpose (see the base class): only the pre-run arm inside
+    ``confine_context`` raises it, which is what lets the hosted seam treat it as
+    "nothing happened, safe to retry" without making the same claim about a
+    ``ContextConfinementError`` raised later, from inside the callable.
     """
 
 
@@ -2440,7 +2457,7 @@ def confine_context(fn: Callable[..., object]) -> Callable[..., object]:
         try:
             ctx = _fresh_context(snapshot)
         except Exception as exc:
-            raise ContextConfinementError(
+            raise _ContextNotReproduced(
                 f"could not reproduce the submitting context for {name!r}: "
                 f"{type(exc).__name__}: {exc}") from exc
         return ctx.run(fn, *args, **kwargs)

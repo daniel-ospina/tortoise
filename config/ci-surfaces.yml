@@ -8585,7 +8585,7 @@ durations:
   test_run_reaper.py: 3.4  # new file (#6868) — ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 2.0
   test_engine_probe.py: 4.6  # new file (#7017) — ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 2.0
   test_control_plane_offload_3498.py: 1.4
-  test_context_confinement.py: 5.0  # #10612: measured 4.1-4.9s on a cell (7 tests, real threads + pool submissions + a retry loop)
+  test_context_confinement.py: 5.5  # #10612: measured 4.1-4.9s on a cell (8 tests, real threads + pool submissions + a retry loop)
   test_analytics_offloop_4015.py: 1.2  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 0.6
   test_free_team_entitlement.py: 5.9  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 4.8
   test_integration_search.py: 2.8
