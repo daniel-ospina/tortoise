@@ -2424,6 +2424,60 @@ def test_a_born_terminal_object_rebuilds_terminal_not_live():
     # The single-row door answers the same status, so the two doors cannot split.
     assert rs.read_node(conn, org_id="o", graph_id="g", label="Object",
                         key="o-1").get("status") == "superseded"
+    # ⛔ AND THE SUBJECT HALF AT THE SAME DOOR (review round 3, P2). The
+    # narrowing set this door reads is
+    # `event_type IN ('EntityMutated', 'ObjectRegistered', 'SubjectAdded')`
+    # (`cache_projection._LIFECYCLE_EVENTS_FOR_ONE_SQL`), and until this leg the
+    # file's EVERY read-door assertion was `label="Object"` — so dropping
+    # `'SubjectAdded'` from that set left the whole suite GREEN while a
+    # born-archived Subject folded at the rebuild door (`read_record_view`,
+    # asserted above) and answered NO status here. That is the two-door split on
+    # exactly the label this change adds: `live._terminal_excluded` reads the
+    # absent status as LIVE, so the Subject's name resolves again after a
+    # record-sourced rebuild taken through `read_node`. Measured, not assumed:
+    # the shrink leaves 79/79 green without this assertion.
+    assert rs.read_node(conn, org_id="o", graph_id="g", label="Subject",
+                        key="s-1").get("status") == "archived", (
+        "the Subject half of the birth leg did not reach the single-row door — "
+        "its status reads absent, which is LIVE "
+    )
+
+
+def test_the_birth_event_labels_are_the_one_home_creation_map():
+    """#9974 round 3 P2 — the birth label table is a COPY, so it needs a pin.
+
+    `_BIRTH_EVENT_LABELS` restates `projection._ENTITY_CREATION_EVENT_LABEL` for
+    the two labels that carry a §2.6 projection-owned `status`
+    (`EVENT_STREAM_FOLDS`: `Object`, `Subject`). `EventRecorded` is out by
+    construction — `public.event`'s CHECK refuses only `confidence`, so `:Event`
+    has no projection-owned `status` a creation record could carry.
+
+    FAILS IF: a creation event type is added, renamed, or re-pointed in the ONE
+    HOME and this copy is not updated. The birth leg selects by the event type,
+    so the new type would select NOTHING, the node would rebuild with NO status,
+    and `live._terminal_excluded` would read it LIVE — #9974's harm returning
+    silently, with every other pin green. This is the same one-home discipline
+    the sibling copy uses (`tests/test_rebuild_parity_fail_loud_3585.py::
+    TestReferenceFoldEntityLabelSetHasOneHome`), and the reason the comment above
+    the table says it is a copy rather than claiming to be the one home.
+    """
+    from tortoise.projection import _ENTITY_CREATION_EVENT_LABEL as one_home
+
+    status_bearing = set(cp.EVENT_STREAM_FOLDS)
+    assert status_bearing == {"Object", "Subject"}, (
+        "`EVENT_STREAM_FOLDS` no longer names exactly the two status-bearing "
+        f"labels this pin was written for ({status_bearing!r}) — re-read the "
+        "EventRecorded exclusion above before widening it"
+    )
+    assert cp._BIRTH_EVENT_LABELS == {
+        k: v for k, v in one_home.items() if v in status_bearing
+    }, (
+        "the birth label table drifted from the one home "
+        f"(projection._ENTITY_CREATION_EVENT_LABEL={one_home!r}, "
+        f"cache_projection._BIRTH_EVENT_LABELS={cp._BIRTH_EVENT_LABELS!r}) — a "
+        "creation type the one home names would select no birth record, so that "
+        "node rebuilds with no status and reads LIVE"
+    )
 
 
 def test_a_silent_birth_record_derives_no_status_rather_than_live():
