@@ -246,8 +246,11 @@ def test_spread_caps_any_single_date_session():
 
 
 def test_leg_requires_a_matched_anchor():
-    # no anchors → inert (a spread-only promotion of arbitrary deep pool
-    # items is measurably harmful; see the module docstring)
+    # No anchors → inert when NO date_window is supplied (a spread-only
+    # promotion of arbitrary deep pool items is measurably harmful; see the
+    # module docstring). #10538 widens the gate for the DATE-RANGE class only:
+    # anchors OR (a window AND session-clustered visible slots). This test
+    # passes no window, so it pins the no-window half of that rule.
     candidates = [
         _hit("a", "2025-01-01", "sA", "alpha"),
         _hit("b", "2025-02-01", "sB", "beta"),

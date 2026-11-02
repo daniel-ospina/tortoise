@@ -502,8 +502,11 @@ def _extract_anchors(t: str) -> tuple[str, ...]:
     single content token and are DROPPED — a one-token anchor is claimed by
     any candidate carrying that word (noise). A phrase whose tokens are ALL
     stopwords (deictics like "today") is dropped for the same reason.
-    Returns ``()`` when nothing usable remains — the leg then stays inert
-    (it requires a matched anchor; it never promotes on date-spread alone).
+    Returns ``()`` when nothing usable remains. With no anchors the leg is
+    inert UNLESS the caller also supplies a ``date_window`` AND the visible
+    slots are session-clustered (#10538) — a date-range question promotes on
+    that widened gate. Anchors alone, with no window, never promote on
+    date-spread alone (the #2976 no-harm property).
     """
     from tortoise.temporal_leg import content_tokens
 

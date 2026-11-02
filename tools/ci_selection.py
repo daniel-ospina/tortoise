@@ -1012,7 +1012,29 @@ SOURCE_PATTERNS = {
             # shape-rate-only PR into tier-1 smoke and the ask-lane tests
             # would not run where the measurement changed.
             "tools/ask_shape_rate.py",
-            "tortoise/projection/edges.py"),
+            # #10549 review cycle 9 (F1): the temporal retrieval leg. The ONLY
+            # tests that pin it are `tests/test_temporal_leg_2976.py` (#2976's
+            # no-harm anchor property) and
+            # `tests/test_temporal_leg_date_window_10538.py` (#10538's date-window
+            # arm), both registered on THIS surface -- and before this entry the
+            # module matched no SOURCE_PATTERNS tuple and is not in SHARED_MODULES,
+            # so a temporal_leg-only diff fell to the `tortoise/` -> `core`
+            # fallback, where NEITHER file is registered: measured on the pre-fix
+            # tree, `select(["tortoise/temporal_leg.py"])` returned
+            # `surfaces=['core']`, `full=False`, both files ABSENT. A change to
+            # `_session_clustered` or to the `held_buckets` slice could therefore
+            # re-break the #10538 arm with every gate green -- and the diff that
+            # makes the module load-bearing is this very PR. Same
+            # #1349/#3332/#3616 silent-drop class as the entries above; same
+            # `tortoise/quadrature.py` remedy, including the CORE_ALSO pairing
+            # (a named-surface match REPLACES the `core` fallback, #2938) because
+            # `tests/test_rrf_tie_rank_7704.py` consumes the module from `core`:
+            # measured, this path selected `['core']` / 721 files before the fix
+            # and selects `['core','eval','sdk']` / 788 after it (dated anchors).
+            # The `eval` half of the fix is one tuple down (the replay proxy).
+            # Pinned by tests/test_ci_selection.py::
+            # test_temporal_leg_change_runs_its_pins_and_keeps_the_core_pool.
+            "tortoise/temporal_leg.py"),
     "api": ("tortoise/hosted_api.py", "tortoise/hosted_backup.py",
             "tortoise/acl_graph_users.py", "tortoise/__main__.py", "tortoise/mcp_auth.py",
             # #3154: hosted_api.py imports hosted_backup.py at module level (the
@@ -1259,7 +1281,25 @@ SOURCE_PATTERNS = {
              # scope or a sealed-gold check could be rewritten with the gate
              # green. Pinned by
              # tests/test_ci_selection.py::test_ask_sealed_corpus_source_edit_selects_eval.
-             "tests/eval/ask/"),
+             "tests/eval/ask/",
+             # #10549 review cycle 9 (F1): `tortoise/temporal_leg.py` is the module
+             # this surface's offline replay proxy delegates to
+             # (`tools/longmem_eval/temporal_leg_replay.py` calls
+             # `temporal_leg_order`, and its own docstring promises "the exact
+             # wiring formula from `retrieve.py`"), and
+             # `longmem_eval/test_temporal_leg_replay_wiring_10538.py` -- registered
+             # HERE -- is the pin that the proxy still reproduces the shipped
+             # wiring. Before this entry, `temporal_leg.py` matched no
+             # SOURCE_PATTERNS tuple and is not in SHARED_MODULES, so a
+             # temporal_leg-only diff took the `tortoise/` -> `core` fallback:
+             # measured `select(["tortoise/temporal_leg.py"])` -> `surfaces=['core']`,
+             # `full=False`, replay wiring pin ABSENT. An arm added to the leg (or a
+             # kwarg removed) could then desynchronise the proxy on every gate green.
+             # Same #1349/#3332/#3616 silent-drop class as the entries above.
+             # Paired with CORE_ALSO below (a named-surface match REPLACES the `core`
+             # fallback, #2938) and pinned by
+             # tests/test_ci_selection.py::test_temporal_leg_change_runs_its_pins_and_keeps_the_core_pool.
+             "tortoise/temporal_leg.py"),
     # core is the fallback for any other python-relevant path
 }
 
@@ -1322,6 +1362,20 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # tests/test_ci_selection.py::
              # test_commit_schema_change_keeps_the_core_pool_and_runs_the_docs_guard.
              "tortoise/commit_schema.py",
+             # #10549 review cycle 9 (F1): `tortoise/temporal_leg.py` is now
+             # registered in `sdk` (its two behavioural pins) and `eval` (the
+             # offline replay proxy), and a named-surface match REPLACES the
+             # `core` fallback -- so without this entry the very PR that
+             # registers it would STOP running the 721-file core pool a
+             # temporal_leg-only diff selects today (measured before the entry:
+             # `select(["tortoise/temporal_leg.py"])` -> `surfaces=['core']`,
+             # 721 test files; with the entry, 788), including
+             # `tests/test_rrf_tie_rank_7704.py`,
+             # which imports the module from `core`. The pool's size is a DATED
+             # ANCHOR, not a live count -- it grows with the suite. Pinned by
+             # tests/test_ci_selection.py::
+             # test_temporal_leg_change_runs_its_pins_and_keeps_the_core_pool.
+             "tortoise/temporal_leg.py",
              # #7947 review P1: `tests/eval/write_path/` is a SOURCE_PATTERNS
              # entry of `eval` (the measurement sources), and a named-surface
              # match REPLACES the `tests/` -> core fallback — but `core`

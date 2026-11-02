@@ -2960,6 +2960,69 @@ def test_commit_schema_change_keeps_the_core_pool_and_runs_the_docs_guard():
         r["surfaces"])
 
 
+def test_temporal_leg_change_runs_its_pins_and_keeps_the_core_pool():
+    # #10549 review cycle 9 (F1). `tortoise/temporal_leg.py` carried the whole
+    # #10538 arm and the #2976 no-harm property, and it matched NO
+    # `SOURCE_PATTERNS` tuple and is not in `SHARED_MODULES` — so a
+    # temporal_leg-only diff took the `tortoise/` -> `core` fallback: measured
+    # before the fix, `select(["tortoise/temporal_leg.py"])` returned
+    # `surfaces=['core']`, `full=False`, and the two files below were ABSENT from
+    # `test_files`. A change to `_session_clustered`'s sample or to the
+    # `held_buckets` slice could therefore re-break the arm with every gate
+    # green, because the only tests that pin it sat in a pool that diff does not
+    # enter (the #1349/#3332/#3616 silent-drop class).
+    #
+    # Three halves, each named by a file registered in exactly the surface it
+    # adds, so none can mask another:
+    #   * `test_temporal_leg_date_window_10538.py` + `test_temporal_leg_2976.py`
+    #     are `sdk`-registered — the `SOURCE_PATTERNS["sdk"]` half;
+    #   * `test_temporal_leg_replay_wiring_10538.py` is `eval`-registered and pins
+    #     the offline proxy to the SHIPPED wiring — the `eval` half;
+    #   * `test_rrf_tie_rank_7704.py` is `core`-registered and imports the module
+    #     — the `CORE_ALSO` half, because a named-surface match REPLACES the
+    #     `core` fallback (#2938).
+    #
+    # Mutation check, all measured: removing the `sdk` entry drops both sdk
+    # files (surfaces become `['core','eval']`, 739 files); removing the `eval`
+    # entry drops the replay pin (`['core','sdk']`, 771); removing the module
+    # from `CORE_ALSO` drops the core pool (`['eval','sdk']`, 204 — with it,
+    # 788). The PRE-FIX state, with all three absent, is `['core']` / 721 with
+    # all three pin files ABSENT — which is the silent drop this pin forbids.
+    # Every pool size here is a DATED ANCHOR, not a live count: the suite grows.
+    # `test_files` is the STRING "ALL" under the FULL matrix, so the coverage
+    # asserts go through `runs()` rather than a bare `in` — promoting the module
+    # to `SHARED_MODULES` is a strictly WIDER selection and must not red this pin
+    # (the treatment `test_quadrature_change_keeps_the_core_pool_and_runs_the_
+    # formula_guard` established).
+    r = _sel(["tortoise/temporal_leg.py"])
+
+    def runs(name: str) -> bool:
+        return r["full"] is True or name in r["test_files"]
+
+    assert runs("test_temporal_leg_date_window_10538.py"), (
+        "a temporal_leg-only diff does not run the #10538 date-window arm it "
+        "carries (SOURCE_PATTERNS['sdk'] entry missing?)", r)
+    assert "sdk" in r["surfaces"], (
+        "a temporal_leg-only diff must select `sdk`, where its behavioural pins "
+        "are registered", r["surfaces"])
+    assert runs("test_temporal_leg_2976.py"), (
+        "a temporal_leg-only diff does not run the #2976 no-harm pin "
+        "(SOURCE_PATTERNS['sdk'] entry missing?)", r)
+    assert runs("test_temporal_leg_replay_wiring_10538.py"), (
+        "a temporal_leg-only diff does not run the replay-proxy wiring pin, which "
+        "asserts the proxy still matches what this module ships "
+        "(SOURCE_PATTERNS['eval'] entry missing?)", r)
+    assert "eval" in r["surfaces"], (
+        "a temporal_leg-only diff must select `eval`, where the replay wiring pin "
+        "is registered", r["surfaces"])
+    assert runs("test_rrf_tie_rank_7704.py"), (
+        "the core-registered pool is missing from a temporal_leg-only selection "
+        "(CORE_ALSO entry removed?)", r)
+    assert "core" in r["surfaces"], (
+        "a temporal_leg-only diff dropped the core pool (CORE_ALSO entry removed?)",
+        r["surfaces"])
+
+
 def test_supabase_control_change_selects_the_org_purge_rpc_guard():
     # #7968 / PR #8179 review P1: `purge_org_control_plane` lives in
     # `tortoise/supabase_control.py`, which IS a SOURCE_PATTERNS["api"] entry —
