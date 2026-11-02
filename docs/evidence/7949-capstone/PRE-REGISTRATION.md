@@ -561,7 +561,7 @@ steps:
     - step: S2.3
       condition: >-
         the S2 map left at least one candidate's kind missing or `unclassified`, so
-        `_collect_classify_items` (tortoise/extractor_v2.py:8666, `def _collect_classify_items`) had an item to hand the classifier;
+        `_collect_classify_items` (tortoise/extractor_v2.py:9767, `def _collect_classify_items`) had an item to hand the classifier;
         when the map types every candidate the pass has no work and neither classify pass runs
       idle_evidence: >-
         the run's own classify surface reads enabled=true with empty s2/union, the receipt's
@@ -641,7 +641,7 @@ stops being true is visible as a log that does not carry `UNPREREGISTERED`.
 | 90 of 90 m2 baseline | `tests/eval/write_path/baselines/m2.json` at this `fixtures_hash` |
 | 53/37, 7/8, 5/9, 21/8 split counts | the per-session sums above, partitioned by §2.1 |
 | 9 of 15 shape coverage (60%) | §1.3, `is_positively_bare_definite_description` |
-| 7 unconditional / 1 conditional step (§10) | `tortoise/extractor_v2.py:8666-8690` (`_collect_classify_items`, the collector's item set), `:9209` and `:9341` (the two `if items:` gates, one per classify pass) |
+| 7 unconditional / 1 conditional step (§10) | `tortoise/extractor_v2.py:9767-9789` (`_collect_classify_items`, the collector's item set), `:10310` and `:10442` (the two `if items:` gates, one per classify pass) |
 
 ## 10. The step set V5 gates over — seven unconditional, one conditional (`#10215`)
 
@@ -653,9 +653,9 @@ the condition; the gate reads the declaration below instead of asserting eight.
 
 ### 10.1 The finding, and what it is not
 
-`_collect_classify_items` (`tortoise/extractor_v2.py:8666-8690`) collects only candidates whose kind
+`_collect_classify_items` (`tortoise/extractor_v2.py:9767-9789`) collects only candidates whose kind
 is **missing or the `unclassified` sentinel**. Both classify passes are gated on that list being
-non-empty — `if items:` at `:9209` (the S2 pass) and `:9341` (the post-S4 pass). So S2.3 has work **iff the S2 map left
+non-empty — `if items:` at `:10310` (the S2 pass) and `:10442` (the post-S4 pass). So S2.3 has work **iff the S2 map left
 something untyped** — and that is a property of the candidate set, not of the pipeline's health. A
 corpus whose map assigns a concrete kind to every candidate legitimately idles the pass.
 
@@ -729,8 +729,8 @@ itself the entry below.
   be either observed or witnessed **idle** with a basis. The conditional set is read from this record
   at the pre-registration commit; a run log may not declare it.
 - **Why it is not a relaxation**: `S2.3` structurally cannot run on a corpus whose S2 map types every
-  candidate — `_collect_classify_items` (`tortoise/extractor_v2.py:8666-8690`) collects only
-  kind-missing/`unclassified` candidates and both passes sit behind `if items:` (`:9209`, `:9341`).
+  candidate — `_collect_classify_items` (`tortoise/extractor_v2.py:9767-9789`) collects only
+  kind-missing/`unclassified` candidates and both passes sit behind `if items:` (`:10310`, `:10442`).
   The old rule therefore could not be satisfied by **any** legitimate run of the registered corpus,
   so the gate could not return a verdict at all (§10.2's four ordered refusals). Every one of the
   eight still has to be accounted for, and an idle claim needs the run's own four facts — flag ON,
