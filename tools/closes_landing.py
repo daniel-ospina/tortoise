@@ -159,34 +159,51 @@ class Finding:
 _CONTAINER_PREFIX_RE = re.compile(r"^(?:\s*>\s?)*")
 
 
-def _quote_depth(line: str) -> int:
-    """How many blockquote markers (`>`) the line carries."""
-    return _CONTAINER_PREFIX_RE.match(line).group(0).count(">")
+def _quote_depth(prefix: str) -> int:
+    """How many blockquote markers (`>`) a CONTAINER PREFIX carries."""
+    return prefix.count(">")
 
 
-def _fence_run(line: str) -> tuple[str, int, int, int] | None:
-    """(character, run length, blockquote depth, indent) of a leading fence.
+def _split_prefix(line: str) -> tuple[str, str]:
+    """(blockquote prefix, the rest of the line)."""
+    m = _CONTAINER_PREFIX_RE.match(line)
+    return m.group(0), line[m.end():]
 
-    Blockquote prefixes (`> `, `> > `) are seen through: a fenced block inside a
-    quote is still a fence, and `_fence_run` not seeing it made the block's
-    contents look like prose (review c4-5, second shape).
 
-    The DEPTH is carried out because a fence belongs to its quote: a line after
-    it that carries NO `>` is not inside that blockquote any more (a fenced block
-    has no lazy continuation), so it is top-level prose and its keywords are real
-    claims. Blanking it was a silent PASS over the inert shape (review c7-2).
+_MAX_FENCE_INDENT = 3  # a 4+ column ``` is an INDENTED CODE BLOCK, not a fence
+
+
+def _fence_open(rest: str) -> tuple[str, int] | None:
+    """(character, run length) if `rest` opens a fence — else None.
+
+    CommonMark, and each clause below is a shape a review cycle found:
+
+    * an opener indented 4+ columns is not a fence at all (a tab is 4 columns,
+      hence `expandtabs`);
+    * a backtick opener whose info string CONTAINS a backtick is not a fence.
     """
-    body = _CONTAINER_PREFIX_RE.sub("", line)
-    stripped = body.lstrip()
-    m = re.match(r"(`{3,}|~{3,})", stripped)
+    body = rest.expandtabs(4)
+    if len(body) - len(body.lstrip(" ")) > _MAX_FENCE_INDENT:
+        return None
+    s = body.lstrip(" ")
+    m = re.match(r"(`{3,}|~{3,})", s)
     if not m:
         return None
-    # The INDENT is carried out for the same reason as the depth: a 4-space
-    # indented ``` is not a fence at all (CommonMark renders it as an indented
-    # code block whose content is the literal ```` ``` ````), so the column-0
-    # prose after it is prose — blanking it swallowed a real claim (review c8-2).
-    indent = len(body) - len(stripped)
-    return (m.group(1)[0], len(m.group(1)), _quote_depth(line), indent)
+    ch, n = m.group(1)[0], len(m.group(1))
+    if ch == "`" and "`" in s[n:]:
+        return None
+    return (ch, n)
+
+
+def _is_closer(rest: str, opener: tuple[str, int]) -> bool:
+    """A closer carries the same character, a run at least as long, and NOTHING
+    but whitespace after it (an "info string" on a closing fence is content)."""
+    ch, n = opener
+    body = rest.expandtabs(4)
+    if len(body) - len(body.lstrip(" ")) > _MAX_FENCE_INDENT:
+        return False
+    m = re.match(r"(`{3,}|~{3,})\s*$", body.lstrip(" "))
+    return bool(m) and m.group(1)[0] == ch and len(m.group(1)) >= n
 
 
 def strip_code(body: str, strict: bool = False) -> str:
@@ -201,54 +218,44 @@ def strip_code(body: str, strict: bool = False) -> str:
     instrument loses nothing by over-reporting a quoted keyword; it loses the
     reader by under-reporting a real one.
 
-    Fences: a block opens with ``` or `~~~` and closes with the SAME character
-    and a run at least as long.
+    A fence belongs to its CONTAINER, and ends when that container ends:
 
-    `strict` is for the CARRIER side, and for the arm that would otherwise report
-    `lands`. There the cost of leniency is asymmetric: a keyword that appears
-    only inside an indented block would buy a PASS, which is the one outcome this
-    module's doctrine forbids. Strict mode therefore also blanks INDENTED lines
-    and sees through blockquote prefixes when looking for a fence.
+    * a depth-0 fence has no container, so nothing but a matching closer (or EOF)
+      ends it — a `> ``` ` line inside it is CONTENT, and treating it as a closer
+      blanked the prose after the block (review c9-2(i));
+    * a QUOTED fence ends as soon as a line drops below its depth — including on a
+      blank line, which ends the blockquote (review c8-1);
+    * `strict` (the CARRIER body, and the subject's own `lands` arm) additionally
+      blanks indented lines, because there a lenient-only match would be a PASS.
 
     What it does NOT do, deliberately: a keyword in blockquote PROSE (`> Closes
     #N`) stays a claim. GitHub acts on a closing keyword in a quoted paragraph —
     only CODE is ignored — so blanking it would be the under-reporting direction
     that loses real closures.
-
-    The concrete cost of strict mode: a carrier that restates the keyword in a
-    4-space bullet (`This PR:\n\n    - Closes #N`) reads `inert`. That is the
-    safe direction (an extra warning, never a pass) and is accepted.
     """
     out: list[str] = []
-    fence: tuple[str, int, int, int] | None = None
+    fence: tuple[tuple[str, int], str] | None = None  # (opener, its prefix)
     for line in body.splitlines():
-        run = _fence_run(line)
+        prefix, rest = _split_prefix(line)
         if strict and (line.startswith("    ") or line.startswith("\t")):
             out.append("")
             continue
-        if fence is not None:
-            # A line that leaves the CONTAINER ends the block — a fenced block has
-            # no lazy continuation. It leaves when it drops out of the quote
-            # (INCLUDING on a blank line: a blank line ends a blockquote, and the
-            # block ends with it) or when its indent falls below an indented
-            # opener's. Such a line is prose again, so its keywords stay claims —
-            # blanking them was a silent PASS (review c8-1, c8-2).
-            if _quote_depth(line) < fence[2] or (
-                    line.strip() and not run
-                    and len(line) - len(line.lstrip()) < fence[3]):
-                fence = None
-                out.append(line)
-                continue
-            if run and run[0] == fence[0] and run[1] >= fence[1] \
-                    and run[2] >= fence[2]:
-                fence = None
-            out.append("")
+        if fence is None:
+            opener = _fence_open(rest)
+            if opener:
+                fence = (opener, prefix)
+                out.append("")
+            else:
+                out.append(line)   # prose: keep it, keywords and all
             continue
-        if run:
-            fence = run
-            out.append("")
+        opener, fprefix = fence
+        if _quote_depth(fprefix) > 0 and _quote_depth(prefix) < _quote_depth(fprefix):
+            fence = None            # the blockquote ended, so the block ended
+            out.append(line)        # …and this line is prose again
             continue
-        out.append(line)
+        if prefix == fprefix and _is_closer(rest, opener):
+            fence = None
+        out.append("")
     return "\n".join(out)
 
 

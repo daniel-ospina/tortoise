@@ -795,3 +795,26 @@ if __name__ == "__main__":  # the standalone form the docstring advertises
 def test_the_container_ends_the_fence(body, expected):
     assert cl.parse_closing_refs(body) == expected
     assert cl.parse_closing_refs(body, None, strict=True) == expected
+
+
+# ── cycle 9: fence shape truth, cross-checked against CommonMark ────────────
+
+@pytest.mark.parametrize("body,expected,why", [
+    # CODE per CommonMark, so the keyword is a quotation and must NOT be a finding
+    # — and must never be a `lands`. A 3-space opener IS a fence.
+    ("   ```\nCloses #10541\n   ```\n", [], "3-space opener is a fence"),
+    (">  ```\n> Closes #10541\n>  ```\n", [], "quoted fence, 1-space indent"),
+    # A depth-0 fence has no container: `> ``` ` inside it is CONTENT, not a
+    # closer. Treating it as one blanked the prose after the block (c9-2(i)).
+    ("```\n> ```\n```\nCloses #10541\n", [10541], "quoted fence inside a fence"),
+    # A closing fence may not carry an info string (c9-2(ii)).
+    ("```\na\n``` x\n```\nCloses #10541\n", [10541], "closer with info string"),
+    # A backtick opener whose info string contains a backtick is not a fence (c9-2(iii)).
+    ("``` `x`\nCloses #10541\n```\n", [10541], "backtick in info string"),
+    # A tab is 4 columns: an INDENTED CODE BLOCK, so the prose after it is prose.
+    ("\t```\n  Closes #10541\n", [10541], "tab-indented opener"),
+    ("    ```\nCloses #10541\n", [10541], "4-space indented opener"),
+])
+def test_fence_shapes_match_commonmark(body, expected, why):
+    assert cl.parse_closing_refs(body) == expected, why
+    assert cl.parse_closing_refs(body, None, strict=True) == expected, why
