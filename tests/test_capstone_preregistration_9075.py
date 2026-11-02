@@ -376,6 +376,16 @@ def _atomic_pins(name: str, **overrides) -> dict:
     against a passing fixture at all. The default is now HEAD of whichever repo `_repo()` installed,
     so a passing default is a disclosure a reader could actually follow; a test that wants an
     unaddressable value passes `squash_merge=` explicitly.
+
+    ⛔ AND THE BRANCH COMMIT IS NOT HEAD (#10529 review cycle 15, P1). It used to be HEAD, i.e. the
+    SAME commit as `squash_merge` — which is the one shape a disclosure can never mean (a squash is
+    a new commit, not one of the commits it collapsed) and is exactly what a single laundering
+    commit writes when it cites itself as its own provenance. A hermetic repo whose pair landed in
+    ONE commit genuinely has no collapsed branch behind it, so the default names a commit a squash
+    left unreachable — the shape the disclosure field EXPRESSLY allows not to resolve (see
+    `test_branch_commits_need_not_resolve_because_a_squash_hides_them`). The faithful shape, whose
+    branch commits really do exist, is built by `_real_squash` and checked end to end in
+    `test_a_real_squash_disclosure_is_verified_and_a_forged_squash_is_refused`.
     """
     head = subprocess.run(
         ["git", "rev-parse", "HEAD"], cwd=str(check.REPO_ROOT),
@@ -383,7 +393,7 @@ def _atomic_pins(name: str, **overrides) -> dict:
     ).stdout.strip()
     entry = {
         "reason": "the bars were committed before any arm ran",
-        "branch_commits": [f"{head[:9]} the branch commit the pair was collapsed from"],
+        "branch_commits": ["deadbeef1 the branch commit a squash left unreachable"],
         "squash_merge": f"{head[:9]} the merged commit",
     }
     entry.update(overrides)
@@ -795,6 +805,142 @@ def test_branch_commits_need_not_resolve_because_a_squash_hides_them(tmp_path, m
         log.name, branch_commits=["deadbeef1 the branch commit a squash made unreachable"]
     )
     assert check.check_ordering(prereg, [log], None, None, None, pins) == []
+
+
+def _rev(repo: Path, ref: str) -> str:
+    return subprocess.run(
+        ["git", "rev-parse", ref], cwd=str(repo), capture_output=True, text=True, check=True,
+    ).stdout.strip()
+
+
+def _real_squash(repo: Path, epoch: int = 1_700_000_000) -> tuple[Path, Path, str, list[str]]:
+    """A FAITHFUL squash: two branch commits, then ONE commit on main carrying both files.
+
+    `_both_in_one_commit` reproduces the git OBJECT a squash leaves behind, but not the history it
+    replaced — in a one-commit repo the "branch commits" a disclosure names cannot exist at all,
+    so the field could only ever be exercised in its unreachable form. This builds the real shape
+    (the bars frozen in one commit, the log added in a later one, both collapsed onto main), so the
+    disclosure's claim is one the tool CAN verify and a test can make it fail on.
+    """
+    (repo / "README").write_text("root\n")
+    _git(repo, "add", "README")
+    _git(repo, "commit", "-q", "-m", "root", epoch=epoch)
+    base = _rev(repo, "HEAD")
+    _git(repo, "checkout", "-q", "-b", "feat")
+    prereg = repo / "docs" / "evidence" / "7949-capstone" / check.PREREG_NAME
+    log = repo / "docs" / "evidence" / "7949-capstone" / "e1-e2.log"
+    prereg.parent.mkdir(parents=True, exist_ok=True)
+    prereg.write_text("x\n")
+    _git(repo, "add", str(prereg.relative_to(repo)))
+    _git(repo, "commit", "-q", "-m", "freeze the bars", epoch=epoch)
+    log.write_text("x\n")
+    _git(repo, "add", str(log.relative_to(repo)))
+    _git(repo, "commit", "-q", "-m", "add the log", epoch=epoch + 1)
+    branch = [line for line in subprocess.run(
+        ["git", "rev-list", "--reverse", "feat", "--not", base],
+        cwd=str(repo), capture_output=True, text=True, check=True,
+    ).stdout.split() if line]
+    _git(repo, "checkout", "-q", "-")
+    _git(repo, "merge", "-q", "--squash", "feat")
+    _git(repo, "commit", "-q", "-m", "both at once", epoch=epoch + 2)
+    return prereg, log, _rev(repo, "HEAD"), branch
+
+
+def test_a_real_squash_disclosure_is_verified_and_a_forged_squash_is_refused(tmp_path, monkeypatch):
+    """The disclosure's claim is CHECKED when the history it names is still in the repo.
+
+    REGRESSION (#10529 review cycle 15, P1). The passing fixture used to cite HEAD as BOTH its
+    branch commit and its squash — a commit citing itself as its own provenance, which is the shape
+    a single laundering commit has. Here the honest disclosure (two real branch commits, the real
+    squash commit that collapsed them) passes, and a disclosure that names a commit which PREDATES
+    the pair as its squash is refused: that pointer resolves, so the addressability rule alone could
+    not tell it from an honest one. Non-vacuous — the pre-fix tool accepted both.
+    """
+    repo = _repo(tmp_path, monkeypatch)
+    prereg, log, squash, branch = _real_squash(repo)
+    assert len(branch) == 2, branch
+    honest = _atomic_pins(
+        log.name,
+        branch_commits=[f"{sha[:9]} a branch commit the squash collapsed" for sha in branch],
+        squash_merge=f"{squash[:9]} the merged commit",
+    )
+    assert check.check_ordering(prereg, [log], None, None, None, honest) == []
+    # The commits it names are really here, so the CLI has nothing to disclaim.
+    assert check._unverified_history_note(honest[log.name]) == ""
+
+    forged = _atomic_pins(
+        log.name,
+        branch_commits=[f"{sha[:9]} a branch commit the squash collapsed" for sha in branch],
+        squash_merge=f"{_rev(repo, 'HEAD~1')[:9]} the commit main sat at BEFORE the landing",
+    )
+    failures = check.check_ordering(prereg, [log], None, None, None, forged)
+    assert len(failures) == 1, failures
+    assert "not a usable disclosure" in failures[0], failures
+    assert "nor a descendant of it" in failures[0], failures
+
+
+def test_a_squash_merge_cannot_be_one_of_its_own_branch_commits(tmp_path, monkeypatch):
+    """REGRESSION (#10529 review cycle 15, P1): a commit cannot collapse ITSELF.
+
+    The two halves of a disclosure assert different things — `branch_commits` is where the ordering
+    DID exist, `squash_merge` is the new commit that collapsed them — so naming one commit in both
+    is self-referential, and it is exactly what one laundering commit writes. Non-vacuous: the
+    pre-fix tool accepted this pair and passed it as a disclosed atomic add; it was the DEFAULT of
+    its own passing fixture.
+    """
+    repo = _repo(tmp_path, monkeypatch)
+    prereg, log = _both_in_one_commit(repo)
+    head = _rev(repo, "HEAD")
+    pins = _atomic_pins(log.name, branch_commits=[f"{head[:9]} the branch commit it collapsed"])
+    failures = check.check_ordering(prereg, [log], None, None, None, pins)
+    assert len(failures) == 1, failures
+    assert "not a usable disclosure" in failures[0], failures
+    assert "ALSO one of its branch_commits" in failures[0], failures
+    # A DIFFERENT, aborted-length spelling of the same commit is the same commit (#10529 c15 P1).
+    assert check._sha_prefix_agrees("cfa3de857", "cfa3de857ef2c") is True
+    assert check._sha_prefix_agrees("cfa3de857", "cfa3de858") is False
+
+
+def test_a_squash_merge_that_predates_the_pair_is_refused(tmp_path, monkeypatch):
+    """REGRESSION (#10529 review cycle 15, P1): the squash pointer must be able to carry the pair.
+
+    `squash_merge` is printed as the pointer ON MAIN a reader resolves, so an ancestor of the pair's
+    add-commit — the commit main sat at BEFORE the landing — describes a history in which the pair
+    is not in the tree. It resolves, so format and addressability both pass it; only ancestry can
+    tell. Non-vacuous: the pre-fix tool accepted this.
+    """
+    repo = _repo(tmp_path, monkeypatch)
+    (repo / "README").write_text("root\n")
+    _git(repo, "add", "README")
+    _git(repo, "commit", "-q", "-m", "root", epoch=1_700_000_000)
+    root = _rev(repo, "HEAD")
+    prereg, log = _both_in_one_commit(repo, epoch=1_700_000_100)
+    pins = _atomic_pins(log.name, squash_merge=f"{root[:9]} the commit before the landing")
+    failures = check.check_ordering(prereg, [log], None, None, None, pins)
+    assert len(failures) == 1, failures
+    assert "nor a descendant of it" in failures[0], failures
+
+
+def test_the_cli_says_when_a_disclosure_history_was_not_checked_here():
+    """A claim this tool could not check may not read as one it did (#10529 review cycle 15, P1).
+
+    `branch_commits` may legitimately not resolve — a squash leaves them unreachable from main —
+    so their absence is not a failure. Silence was: the block printed the commits and nothing said
+    none of them had been read. Where at least one DOES resolve the check ran, so there is nothing
+    to disclaim.
+    """
+    absent = check._unverified_history_note(
+        {"squash_merge": "cfa3de857 x", "branch_commits": ["deadbeef1 y"]}
+    )
+    assert "NOT checked here" in absent, absent
+    head = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=str(check.REPO_ROOT),
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    assert check._unverified_history_note(
+        {"squash_merge": "cfa3de857 x", "branch_commits": [f"{head[:9]} y"]}
+    ) == ""
+    assert check._unverified_history_note({"squash_merge": "x", "branch_commits": []}) == ""
 
 
 def test_the_cli_prints_the_declared_atomic_add_and_its_commits(capsys):

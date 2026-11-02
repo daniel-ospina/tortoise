@@ -1083,6 +1083,40 @@ ATOMIC_ADD_KEY = "atomic_add_ordering"
 COMMIT_SHA_TOKEN = re.compile(r"^[0-9a-f]{7,40}$")
 
 
+def _sha_prefix_agrees(left: str, right: str) -> bool:
+    """Do two ABBREVIATED commit shas name the same commit? Compared by prefix, either length.
+
+    The real bundle writes nine characters (`a1075dfc2`), a reader may write seven or forty, and
+    `git rev-parse` accepts every length in between — so an equality test on the raw strings would
+    let the same commit be written twice in two lengths and pass a "these are different" rule
+    (#10529 review cycle 15, P1).
+    """
+    shorter = min(len(left), len(right))
+    return shorter > 0 and left[:shorter] == right[:shorter]
+
+
+def _unverified_history_note(detail: dict) -> str:
+    """The line printed when NONE of a disclosure's ``branch_commits`` is in this checkout.
+
+    ⛔ A CLAIM THIS TOOL COULD NOT CHECK MAY NOT READ AS ONE IT DID (#10529 review cycle 15, P1).
+    The disclosure records where the ordering DID exist; a squash leaves those commits unreachable
+    from `main`, so in a clone taken after the landing they may simply not be here — which is why
+    their ABSENCE is not a failure (requiring the object would re-create the stuck light this change
+    removes). But silence about it made the printed block look verified when nothing in it had been
+    resolved. Where the objects ARE present the check does verify them (see `_atomic_add_failure`);
+    where they are not, it says so on the same line a reader would otherwise read as evidence.
+    """
+    commits = [str(entry).split()[0] for entry in detail.get("branch_commits") or []
+               if str(entry).strip()]
+    if not commits or any(_resolves_to_commit(commit) for commit in commits):
+        return ""
+    return (
+        "none of these commits is in this checkout, so the branch history this rests on was NOT "
+        "checked here — a squash leaves them unreachable from main; the disclosure records where "
+        "the ordering DID exist, it does not prove it"
+    )
+
+
 def _record_atomic_add(directory: Path) -> dict:
     """The ``atomic_add_ordering`` block from the bundle's machine record.
 
@@ -1100,7 +1134,8 @@ def _record_atomic_add(directory: Path) -> dict:
     return _mapping(record, ATOMIC_ADD_KEY, MACHINE_RECORD)
 
 
-def _atomic_add_failure(declared: object, prereg_epoch: int) -> str | None:
+def _atomic_add_failure(declared: object, prereg_epoch: int,
+                        prereg_sha: str = "") -> str | None:
     """``None`` when the disclosure is complete, else the one reason it is not.
 
     Fail-closed on TYPE, not merely on emptiness (#10531 review P2): ``str({})`` is truthy, so a
@@ -1165,6 +1200,31 @@ def _atomic_add_failure(declared: object, prereg_epoch: int) -> str | None:
             "merged commit is the one pointer a reader can resolve, so a value that addresses "
             "nothing cannot be told from a fabricated one; name the commit that actually landed "
             "the pair"
+        )
+    # ⛔ A SQUASH IS NOT ONE OF THE COMMITS IT COLLAPSED (#10529 review cycle 15, P1). The two
+    # halves of this disclosure make DIFFERENT claims: `branch_commits` is where the ordering DID
+    # exist, `squash_merge` is the new commit that collapsed them. Naming one commit in both
+    # asserts that a commit collapsed itself — and that is precisely the shape a single laundering
+    # commit takes when it cites itself as its own provenance. This is the one constraint every
+    # legitimate shape satisfies for free: a squash is a NEW commit, never one of its own inputs.
+    for entry in commits:
+        if _sha_prefix_agrees(entry.split()[0], squash_token):
+            return (
+                f"its squash_merge {squash!r} is ALSO one of its branch_commits — a squash commit "
+                "is a new commit and cannot be one of the commits it collapsed; a disclosure that "
+                "cites itself as its own provenance asserts nothing a reader can check"
+            )
+    # ⛔ AND IT MUST HAVE BEEN ABLE TO LAND THE PAIR (#10529 review cycle 15, P1). `squash_merge` is
+    # printed as the pointer ON MAIN that a reader resolves, so it must be a commit at or after the
+    # pair's add-commit. An ANCESTOR of it — the commit main sat at BEFORE the landing — describes a
+    # history in which the pair is not in the tree at all, and resolves, so the format and
+    # addressability rules both pass it. Ancestry, not the epoch: `%ct` is attacker-controlled
+    # everywhere in this module.
+    if prereg_sha and not _is_ancestor(prereg_sha, squash_token):
+        return (
+            f"its squash_merge {squash!r} is not {PREREG_NAME}'s add-commit {prereg_sha[:9]} nor a "
+            "descendant of it — a commit that predates the pair cannot be the commit that landed "
+            "it, so the pointer resolves to a history in which the pair is not in the tree"
         )
     return None
 
@@ -1258,7 +1318,7 @@ def check_ordering(prereg: Path, logs: list[Path], pins: dict | None = None,
     # applied to whichever arm happened to run first rather than to the disclosure itself.
     disclosure_failed: set[str] = set()
     for name in sorted(set(atomic) & present):
-        problem = _atomic_add_failure(atomic.get(name), prereg_epoch)
+        problem = _atomic_add_failure(atomic.get(name), prereg_epoch, prereg_sha)
         if problem:
             disclosure_failed.add(name)
             failures.append(
@@ -2140,6 +2200,9 @@ def main(argv: list[str] | None = None) -> int:
                     print(f"  {name}: squashed by {detail['squash_merge']}")
                 for commit in detail.get("branch_commits") or []:
                     print(f"  {name}: {commit}")
+                unverified = _unverified_history_note(detail)
+                if unverified:
+                    print(f"  {name}: {unverified}")
     return exit_code
 
 
