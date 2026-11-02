@@ -1078,6 +1078,35 @@ def test_an_atomic_and_unscored_log_may_be_disclosed(tmp_path, monkeypatch):
     assert _armed(prereg, [log], None, None, None, _atomic_pins(log.name)) == []
 
 
+def test_an_atomic_and_unscored_log_is_exempted_on_the_ruled_path_too(tmp_path, monkeypatch):
+    """The CONTENT exemption runs before the atomic refusal on BOTH rules (#10546 review, P3).
+
+    ``_check_ordering_proposed`` now asserts this in-place (its atomic arm re-asks
+    ``_log_declares_no_measurement`` instead of inheriting ``why`` from another arm's guard), and an
+    assertion is only a claim until something measures the tree it describes. This is that tree: the
+    pair is ATOMIC — the registration and the log land in ONE commit — and the log PROVES it measured
+    nothing (the bundle's own documented re-run: ``run.status`` not COMPLETED, every number null), so
+    it must be exempted by its CONTENT rather than refused for want of a disclosure. Measured with
+    real log content, not a stubbed predicate: `_capstone_body(prereg_status="OK")`.
+
+    It guards the arm ORDER on the ruled path too, which has no such assert: swap the atomic refusal
+    ahead of the content exemption and this tree goes red on a log that measured nothing — the
+    over-block #9089 review cycle 4 closed.
+    """
+    repo = _repo(tmp_path, monkeypatch)
+    prereg = repo / "docs" / "evidence" / "7949-capstone" / check.PREREG_NAME
+    log = repo / "docs" / "evidence" / "7949-capstone" / "capstone.log"
+    prereg.parent.mkdir(parents=True, exist_ok=True)
+    prereg.write_text("x\n")
+    log.write_text(_capstone_body(prereg_status="OK"))
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-q", "-m", "both at once", epoch=1_700_000_000)
+
+    ruling = check.check_ordering(prereg, [log])
+    assert ruling == [], ruling
+    assert _armed(prereg, [log]) == []
+
+
 def test_a_typed_shrug_is_not_a_disclosure(tmp_path, monkeypatch):
     """REGRESSION (#10529 review P2): `str({})` is truthy, so a truthiness test let a shrug pass."""
     repo = _repo(tmp_path, monkeypatch)

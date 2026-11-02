@@ -2980,6 +2980,21 @@ def _check_ordering_proposed(prereg: Path, logs: list[Path], pins: dict | None =
             # shown is not an ordering". The disclosure below is then inert by construction; the
             # record is still VALIDATED (its diagnosis is what tells an author what is wrong) but it
             # is never a ground for a pass.
+            # ⛔ `why` IS ASKED HERE, NOT INHERITED FROM ANOTHER ARM (#10546 review, P3). It used
+            # to be read out of the `log_epoch <= prereg_epoch` arm above, which is sound only
+            # because `atomic_pair` proves one of the log's add-commits IS the registration's, so
+            # `min(log_epochs) <= prereg_epoch` and that arm always ran first. That is a proof no
+            # line states, and a verdict resting on it is one refactor away from an
+            # UnboundLocalError on the arm that carries the recorded ruling — this module has
+            # already paid for exactly that class. The predicate is a pure read of the log, so
+            # re-asking it costs one read on one path and makes the binding local and visible;
+            # carrying a variable bound under a DIFFERENT arm's guard is a coupling a reader cannot
+            # see, and initialising it to "" would print "()" as if it were an answer.
+            _atomic_ok, why = _log_declares_no_measurement(log)
+            assert not _atomic_ok, (
+                "the content arm above must have exempted this log — if it did not, this "
+                "disclosure requirement is being reported for a log that measured nothing"
+            )
             refusal = (
                 f"{log.name}: added at {log_epoch} which is not strictly after the "
                 f"pre-registration's add-commit {prereg_epoch} — the registration and this log "
@@ -3079,7 +3094,9 @@ def _check_ordering_proposed(prereg: Path, logs: list[Path], pins: dict | None =
     # gated on `allow_atomic_disclosure`, on the theory that disarming makes `atomic_seen` empty for
     # an atomic log and the loop would then emit the FALSE "discloses X as an atomic add, but it is
     # not one". That concern is answered INSIDE the loop by `atomic_no_matter`, which is populated
-    # for EVERY atomic log before any arm runs (:1394) — so the gate protected against nothing it
+    # (search `atomic_no_matter.add` — a LINE NUMBER here went stale the moment this file grew, which
+    # is the same decay class as a rotted citation in a doc; cite the reader, never the address)
+    # for EVERY atomic log before any arm runs — so the gate protected against nothing it
     # was not already guarded against. What it DID do is disable the rule in every invocation CI
     # performs: a disclosure naming an ORDINARILY ordered log was accepted SILENTLY on the default
     # path, so the anti-rot rule was only ever enforced on the one path nothing calls, and a tree
