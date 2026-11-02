@@ -467,7 +467,7 @@ E1 REFUSED decidable=False (before spread 20.6 pp)
 E2 FAIL — E2a 8/14 (bar >= 13), E2b fused 1/114 = 0.008772
 ```
 
-* **E1 = REFUSED, and the refusal is now a MEASUREMENT.** Both before arms clear
+- **E1 = REFUSED, and the refusal is now a MEASUREMENT.** Both before arms clear
   E1's own floors (30 Objects; `e1_min_before_share` 0.20 — measured 78 and 69
   Objects, 0.3590 and 0.5652), so the shares are real. What they cannot do is
   decide the bar: one after realization paired against two independent before
@@ -475,7 +475,7 @@ E2 FAIL — E2a 8/14 (bar >= 13), E2b fused 1/114 = 0.008772
   depend on which before run is chosen. The two OFF runs of the same arm differ
   by **20.6 pp** — wider than the 14.6 pp the ON arm moved away from OFF 1. The
   next requirement is **n >= 2 per arm**, not a second arm.
-* **E2 = RED, and the denominator that was missing for eleven days is carried.**
+- **E2 = RED, and the denominator that was missing for eleven days is carried.**
   E2a is **8 of 14** value-bearing planted units strictly surviving on the run's
   own graph, against `>= 13 of 14`. The denominator is §3.3's rule read off the
   pre-registration and computed from the gold by `probes/e2a_value_units.py`; the

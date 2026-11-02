@@ -285,10 +285,8 @@ def e1_pairings(before_arms: list[dict], after: dict, floors: dict) -> dict:
     verdicts = {pairing["passed"] for pairing in pairings}
     decidable = len(verdicts) == 1
     below_floor = after["objects"] < floors["e1_objects"]
-    if below_floor or not decidable:
-        outcome = "REFUSED"
-    else:
-        outcome = "PASS" if verdicts.pop() else "FAIL"
+    outcome = ("REFUSED" if below_floor or not decidable
+               else "PASS" if verdicts.pop() else "FAIL")
     return {
         "criterion": "E1",
         "bar": (f"after_share <= {multiplier} x before_share "

@@ -332,7 +332,6 @@ value-bearing units) — naming them siblings is what forced both counts empty, 
 an empty count on the row a `GREEN` would carry is refused by V5, so the first run
 to reach 13/14 produced a table the gate exited 1 on.
 
-
 ⚠️ **Provenance of these records is stated once**, in §"Which probe revision
 produced each artifact" above: the probe revision that produced the two OFF
 records, the four pin fields that postdate them, the same caveat for the
