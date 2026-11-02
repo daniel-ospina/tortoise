@@ -3568,3 +3568,109 @@ class TestTheReadLaneExemptsARequestOwnedColdSetup:
             f"the cold-setup exemption re-armed {len(calls) - 1} time(s) — it "
             f"must re-arm AT MOST ONCE, or a genuinely slow read is forgiven "
             f"indefinitely and the bound stops being a bound")
+
+    def test_the_re_arm_does_not_re_enter_the_first_attempts_context(
+            self, monkeypatch):
+        """#10602 review P1 — RED before the fix, with the real seam.
+
+        A bound miss abandons the AWAIT, never the thread (CPython cannot cancel
+        a started thread), and ``_drain_cold_setup`` returns as soon as the
+        load's in-flight flag clears — while the worker is still inside the
+        encode and the search legs. So the re-arm is submitted while the FIRST
+        attempt is still INSIDE its ``ctx.run``: a Context reused for the retry
+        raises ``RuntimeError: cannot enter context: … is already entered``.
+        That is not a ``ControlPlaneOffloadError``, so it escapes
+        ``_read_offload`` and the routes' blanket ``except Exception`` answers
+        **500** ("Search failed", no ``error_code``, not retryable) — a worse
+        answer than the 503 the bound would have given.
+
+        ⛔ The sibling tests in this class cannot see it: their
+        ``_refuses_then_succeeds`` raises BEFORE invoking ``fn``, so no first
+        submission is ever genuinely in flight. This one drives the REAL
+        ``run_control_plane_call`` against a callable that blocks.
+        """
+        import tortoise.hosted_api as ha_mod
+        from tortoise import mcp_auth
+
+        started = threading.Event()
+        release = threading.Event()
+        calls: list[int] = []
+
+        def _fn():
+            calls.append(1)
+            if len(calls) == 1:
+                started.set()
+                # Hold the first attempt INSIDE ``ctx.run`` until the retry has
+                # been submitted and returned: that is the collision window.
+                release.wait(30)
+                return "first-done"
+            return "second-done"
+
+        async def _drain():
+            # The REAL helper returns while the load is still in flight; the
+            # premise here is only that it does not wait for the callable.
+            assert started.wait(10), (
+                "the first submission never started — the bound fired while it "
+                "was still QUEUED, so this test's premise (a bound miss that "
+                "left the callable RUNNING) was never established")
+
+        async def _warm():
+            # Dequeue the read pool's worker up front so the first submission
+            # starts in microseconds and cannot be cancelled while queued.
+            from tortoise.monitoring import run_control_plane_call
+            await run_control_plane_call(
+                lambda: None, op="warm", pool="read", timeout=10)
+
+        monkeypatch.setattr(ha_mod, "read_offload_timeout_s", lambda: 0.2)
+        monkeypatch.setattr(mcp_auth, "_cold_setup_ran_during",
+                            lambda *a, **k: True)
+        monkeypatch.setattr(mcp_auth, "_drain_cold_setup", _drain)
+
+        async def _run():
+            await _warm()
+            return await ha_mod._read_offload(_fn, op="search")
+
+        try:
+            assert asyncio.run(_run()) == "second-done", (
+                "the re-armed read did not answer — a retry that reuses the "
+                "first attempt's context raises RuntimeError (a 500 on "
+                "/v1/search), and one that re-runs the query in a second "
+                "worker answers this callable's SECOND result instead")
+        finally:
+            release.set()
+        assert len(calls) == 2, (
+            f"the callable ran {len(calls)} time(s) — the exemption re-arms "
+            f"AT MOST ONCE, so exactly one retry is expected")
+
+    def test_a_missing_owner_probe_fails_closed_not_500(self, monkeypatch):
+        """The identity probe is GUARDED, like the helpers it pairs with.
+
+        ``mcp_auth._cold_setup_ran_during`` / ``_drain_cold_setup`` both wrap
+        their ``tortoise.embeddings`` import in ``except Exception`` ("the
+        embedder is optional … a wait-bound seam must not fail because a probe
+        did"). ``_read_offload``'s own ``current_load_owner`` import is the
+        same probe, so an unimportable embedder must degrade to ``owner=None``
+        — which NEVER exempts — and the read must answer its legible 503. RED
+        before the guard: the ImportError escapes and the read 500s.
+        """
+        import sys
+        import types
+
+        from fastapi import HTTPException
+
+        # A ``tortoise.embeddings`` module without ``current_load_owner`` makes
+        # the ``from … import …`` fail the way a missing/partial install does.
+        monkeypatch.setitem(sys.modules, "tortoise.embeddings",
+                            types.ModuleType("tortoise.embeddings"))
+
+        _run, calls, drained = self._drive(monkeypatch, cold_setup=False)
+        with pytest.raises(HTTPException) as excinfo:
+            asyncio.run(_run())
+        assert excinfo.value.status_code == 503, (
+            f"the read answered {excinfo.value.status_code} — a probe import "
+            f"failure must fail CLOSED (503), never as a 500")
+        assert excinfo.value.detail["error_code"] == "graph_unavailable"
+        assert len(calls) == 1, (
+            f"the read re-submitted {len(calls)} times with no owner identity "
+            f"available — an unreadable probe never exempts")
+        assert drained == [], "a cold drain ran with no owner identity to check"

@@ -9366,19 +9366,45 @@ async def _read_offload(fn, *, op: str, unavailable=None, timeout=None):
     load this request did not OWN (a background pre-warm, a concurrent
     request's) is never exempted, because then the read really is waiting on
     init it did not trigger.
+
+    ⛔ #10602 review P1 — THE CONTEXT COPY IS TAKEN PER ATTEMPT, NOT ONCE.
+    ``Context.run`` refuses RE-ENTRY (``RuntimeError: cannot enter context: …
+    is already entered``), and the re-arm above is exactly the case where the
+    first attempt may still be INSIDE its copy: a bound miss abandons the
+    await, never the thread (CPython cannot cancel a started thread), and
+    ``_drain_cold_setup`` returns as soon as the load's in-flight flag clears —
+    while the worker is still running the encode and the search legs. A single
+    copy shared by the retry therefore raised a bare ``RuntimeError``, which is
+    NOT a ``ControlPlaneOffloadError``: it escaped this seam and the routes'
+    blanket ``except Exception`` answered **500** ("Search failed", no
+    ``error_code``, not retryable) in precisely the cold-embedder window this
+    exemption exists for — a worse answer than the 503 the bound would have
+    given, and it re-ran the query in a second worker besides. A fresh copy per
+    submission keeps the property ``ctx`` exists for (no ContextVar leaks into
+    the next request the process-lifetime worker serves) AND cannot collide
+    with the attempt it replaces.
     """
-    ctx = contextvars.copy_context()
     bound = read_offload_timeout_s() if timeout is None else timeout
     refuse = _graph_unavailable if unavailable is None else unavailable
-    submitted = functools.partial(ctx.run, fn)
     # #4055: the identity + clock the exemption compares against. ``owner`` is
     # whatever this request bound as its one-time-load owner (``None`` unarmed,
     # which never exempts — ``_cold_setup_ran_during`` enforces that).
-    from tortoise.embeddings import current_load_owner
+    #
+    # The probe is GUARDED, matching ``mcp_auth._cold_setup_ran_during`` /
+    # ``_drain_cold_setup``: the embedder is optional, and a wait-bound seam
+    # must not fail the read because a probe's import did. An unavailable probe
+    # yields ``owner=None``, which never exempts — fail-closed, never fail-open.
+    try:
+        from tortoise.embeddings import current_load_owner
+    except Exception:  # noqa: BLE001, RUF100 — optional embedder; no bound may depend on it
+        owner = None
+    else:
+        owner = current_load_owner()
     reference = time.monotonic()
-    owner = current_load_owner()
     exempted = False
     while True:
+        # A FRESH copy per ATTEMPT (see the docstring's #10602 review P1 note).
+        submitted = functools.partial(contextvars.copy_context().run, fn)
         try:
             return await run_control_plane_call(
                 submitted, op=op, pool="read", timeout=bound)
