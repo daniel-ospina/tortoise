@@ -2794,13 +2794,22 @@ def test_the_measured_base_is_printed_for_a_human_not_only_for_json(capsys):
 
     `ordering_base` was added so a green line could not read the same whether it measured the
     published base or this branch's own `HEAD` fallback — which IS the PR-internal rule #10463
-    removes. It lived only in `--json`, so the CI log still could not tell them apart. Deleting the
-    print, or the `setdefault`, restored that silent-green with the whole suite green (measured by a
-    reviewer: two mutants, no test moved). This is the test that makes both deletions red.
+    removes. It lived only in `--json`, so the CI log still could not tell them apart, and deleting
+    the print restored that silent-green with the whole suite green (measured by a reviewer: a
+    mutant, no test moved). THIS test is what makes deleting the PRINT red; the `setdefault` is
+    guarded one test below (`test_a_skipped_git_half_says_the_base_was_never_measured`) — on every
+    `use_git=True` path the key is assigned in the `try` before this print is reached, so it is
+    legitimately a no-op here (review cycle 6, finding 2).
+
+    The expectation is read from the REPORT, not from a second `resolve_base_ref()` call (review
+    cycle 6, finding 1): re-resolving renders the literal `None` in a checkout with no resolvable
+    base — the depth-1 shape the sibling test below commits as LEGITIMATE — and the tool prints
+    `(unresolved)` there, so a second resolve reds a correctly-ordered tree.
     """
     assert check.main(["--dir", str(PREREG_DIR), "--no-corpus"]) == 0
     out = capsys.readouterr().out
-    assert f"ordering measured against: {check.resolve_base_ref()}" in out, out
+    report = check.run(PREREG_DIR, use_git=True, use_corpus=False)
+    assert f"ordering measured against: {report['ordering_base']}" in out, out
 
 
 def test_a_skipped_git_half_says_the_base_was_never_measured(capsys):
