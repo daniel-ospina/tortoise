@@ -1080,11 +1080,13 @@ def test_every_unresolved_writer_carries_a_census_class() -> None:
     # The class string comes from the tool's OWN constant, never a local mirror:
     # a hardcoded "bypass" here would stop firing the day the constant is
     # renamed, and nothing else guards it (measured: this module refuses the
-    # same mirror-duplication elsewhere). The getattr fallback is NOT what makes
-    # the RED run red — the RED fires at the `unclassified` assertion above,
-    # before this line is reached. It is what keeps a FULLY-CLASSED pre-fix tree
-    # from raising `AttributeError` here instead of asserting.
-    bypass_cls = getattr(probe, "CENSUS_BYPASS", "bypass")
+    # same mirror-duplication elsewhere). ⛔ NO `getattr` FALLBACK: a tree that
+    # reaches this line is already FULLY CLASSED (the `unclassified` assertion
+    # above fires otherwise), so a census with no bypass constant means the
+    # census and its class vocabulary disagree — that must raise, never resolve
+    # to a mirror literal that matches no entry and so silently disarms the one
+    # guard that must always fire for a REAL bypass.
+    bypass_cls = probe.CENSUS_BYPASS
     bypasses = [w for w in unresolved if census[w][0] == bypass_cls]
     assert not bypasses, (
         "a REAL bypass must be fixed or filed, not parked in the census: "

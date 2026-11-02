@@ -268,9 +268,13 @@ WRITER_CENSUS: dict[str, tuple[str, str]] = {
     "tortoise.sdk::_index_process_unit": (
         CENSUS_EXEMPT,
         "tortoise/sdk.py:43533 — the instrument's match is the DIAGNOSTIC STRING "
-        "`\"error\": \"indexed with embedding=None \"`, not a write clause; the "
-        "store is DELEGATED to `_embedding_repair_attempt` at :43390/:43482, so "
-        "this function produces no vector of its own"),
+        "`\"error\": \"indexed with embedding=None \"`, not a write clause. "
+        "That line sits on the `merge_outcome == \"indexed\"` branch of the "
+        "unit-completion path, whose store is DELEGATED to "
+        "`_session_event_write` at :43412; the separate repair-only path "
+        "delegates to `_embedding_repair_attempt` at :43390/:43482. Both "
+        "callees are recognised producers, so this function produces no "
+        "vector of its own"),
     "tortoise.sdk::_journal_event_raw_write": (
         CENSUS_EXEMPT,
         "the instrument matches the SIGNATURE DEFAULT at sdk.py:11090 "
