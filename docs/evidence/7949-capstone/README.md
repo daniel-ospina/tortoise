@@ -228,15 +228,18 @@ retrieved (`git show 6020cbd5f:docs/evidence/7949-capstone/capstone-measured-8a8
 superseding DELETES the tree entry, not the history — what it does cost is citability as a row's
 `evidence`, which V4 resolves against the tree.
 
-⛔ **One correction THIS log carries, and it is a different kind: two cells and a note tail are
-this lane's DECISION, not the run's output.** `capstone-measured-9152448d.log` was produced at
+⛔ **One correction THIS log carries, and it is a different kind: two cells, a note tail and the
+E4 note's `#8503` pointer are this lane's DECISION, not the run's output.** `capstone-measured-9152448d.log` was produced at
 `9152448d7`, where `probes/capstone_measure.py` still emitted `#8503` (E4) and `#9738` (E5) as the
 rows' `blocked_by` and its E5 note stopped at *"…before either number is called final"*. After the
 run, this lane re-pointed those two attributions (`#8503 → #9596`, `#9738 → #5087`, both verified
 **OPEN** in `blocker-states.json` at `2026-11-02T14:22:24Z`) and appended the E5 note sentence that
 explains the move. **No numerator, denominator or verdict was touched — the numbers are the run's.**
-The log's own `POST-RUN CORRECTION` block states this, the committed probe now EMITS both cells and
-that sentence so a re-run reproduces the file instead of contradicting it, and two pins in
+The third is prose in the same class: the E4 note said the mechanism *is* `#8503`, which CLOSED
+2026-10-24 — so the note now states that the closure records E4's DISPROOF (the row's measurement
+record, not a live blocker) and names `#9596` as the residual owner. The log's own
+`POST-RUN CORRECTION` block states all three, the committed probe now EMITS both cells, the E4
+note sentence and the E5 tail so a re-run reproduces the file instead of contradicting it, and two pins in
 `tests/test_7949_capstone_measure.py` (`…blocker_cells_are_the_emitters_own`,
 `…discloses_what_the_run_did_not_emit`) RED if the artifact and its emitter diverge again or if the
 disclosure disappears. This was found in review and is recorded rather than absorbed: a cell edited

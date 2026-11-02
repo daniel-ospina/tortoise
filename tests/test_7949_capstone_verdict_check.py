@@ -1354,7 +1354,7 @@ def test_a_degraded_search_is_not_s3():
     degraded=True) is exactly the shape of a search that failed. Scoring that
     attempt as resolved let V5, the epic's ONLY closing gate, pass on a step
     that never resolved, and every E-row measured on the run was then published
-    as valid. `README.md:204` records the rule ("a degraded search is not S3")
+    as valid. `README.md:281` records the rule ("a degraded search is not S3")
     and the sibling probe already implements it
     (`capstone_measure.py::observe_steps`, the arm that writes that sentence into
     the step's own note).
@@ -2086,8 +2086,9 @@ def test_the_readmes_line_citations_resolve_to_the_symbols_they_name():
     # reader reproduces from — was the ONLY cite in the bundle that nothing
     # re-checked. It rotted exactly as rule (a)'s README twin did: the
     # re-derivation moved the `def` half and left the `called at` half
-    # untouched, so `capstone_run.py:19` and `README.md:615` stated two
-    # different, both-wrong call sites for one fact, and both pin files stayed
+    # untouched, so the probe and the README each stated a different, both-wrong
+    # call site for one fact (the numbers are not repeated here — see the preamble
+    # above), and both pin files stayed
     # green. Two documents stating one fact is a claim that can only be pinned
     # where each one states it. (The numbers are deliberately NOT quoted here:
     # this paragraph outlived two heads, and a quoted line number is the very

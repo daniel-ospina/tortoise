@@ -1610,9 +1610,9 @@ def test_the_shipped_log_discloses_what_the_run_did_not_emit():
 
     The failure mode is not the edit — it is an edit that reads as emitter
     output, which is the whole class of stale evidence `#10537` exists to gate.
-    The E4/E5 cells and the E5 note tail were updated after the run at
-    `9152448d7`, so the log must name them, name the reason, and say that the
-    NUMBERS were not touched.
+    Three things were updated after the run at `9152448d7` — the E4/E5 `blocked_by`
+    cells, the E5 note tail, and the E4 note's `#8503` pointer — so the log must
+    name all three, name the reason, and say that the NUMBERS were not touched.
 
     ⛔ AND IT STANDS DOWN WHEN THERE IS NOTHING TO DISCLOSE (#10601 review round
     3). The first version of this pin REQUIRED the block unconditionally, which
