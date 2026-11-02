@@ -308,7 +308,14 @@ denominator other than the frozen **14** (a `13 of 14` bar printed over an N
 nobody froze), when the E2a falsifier does not reach the frozen denominator (an
 inert counter), when the ON arm and the E2a counts were taken on different
 GRAPHS (the ON log's own `# graph:` line — its `# head:` is equal either way, so
-the head cannot catch it), when the value-gate positive controls are dead, or
+the head cannot catch it), when the falsifier's SCORED `with_anchor` block is
+not the run the E2a record was taken on (a graph is `capstone_on_<head>_<stamp>`,
+so a SIBLING run of the same head is a different run, and naming the head is not
+enough), when a `with_anchor` block is present but EMPTY (a record that never
+wrote its counter is not the flat shape that has no block), when its `as_written`
+block carries no graph — an absent provenance is not an inherited one — sits on another run, or reads counts other than the E2a
+record's (that block IS the E2a reading), when the value-gate positive controls
+are dead, or
 when the ON run's corpus is not the pre-registration's frozen `fixtures_hash` —
 so a row can never cite a corpus the record did not freeze, a denominator the
 record did not freeze, or a population from another run.

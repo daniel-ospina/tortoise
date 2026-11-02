@@ -67,7 +67,8 @@
    "value_survived": 8,
    "falsifier": {
     "value_units": 14,
-    "value_survived": 14
+    "value_survived": 14,
+    "graph": "capstone_on_54922a800_1793378318"
    },
    "required": 13,
    "outcome": "FAIL",

@@ -51,10 +51,17 @@ is missing, when a threshold cannot be parsed out of the frozen record, when the
 E2a record grades a denominator other than the frozen **14** (a bar printed over
 an unfrozen population), when the E2a falsifier did not reach the frozen
 denominator (an inert counter), when the ON arm and the E2a counts come from
-different graphs (two populations in one record), when the value-gate positive
-controls are dead, or when a before/after share is absent — because a score
-computed over an unproven counter is the exact failure mode this bundle exists
-to stop.
+different graphs (two populations in one record), when the falsifier's SCORED
+`with_anchor` block is not the very run the E2a record was taken on — the same
+head is not the same run, because a graph is `capstone_on_<head>_<stamp>`, and
+naming the head is not enough — when a `with_anchor` block is PRESENT but EMPTY
+(a record that never wrote its counter is not the flat shape), when its
+`as_written` block carries no graph (an
+absent provenance is not an inherited one), sits on another run, or reads counts
+that are not the E2a record's (that block IS the E2a reading), when the
+value-gate positive controls are dead, or when a before/after share is absent —
+because a score computed over an unproven counter is the exact failure mode this
+bundle exists to stop.
 """
 from __future__ import annotations
 
@@ -351,6 +358,31 @@ def e2_score(repo: Path, floors: dict) -> dict:
                       f"{floors['bars']['E2a']['of']}') — a bar printed over a "
                       "different denominator is a number nothing froze")
 
+    # …and the as-written block IS this record's reading (the bundle's README
+    # reads it as `as_written 8/14 -> injected 14/14`), so its COUNTS must equal
+    # the E2a record's. Checked here, AFTER the frozen-denominator refusal, so a
+    # denominator defect in that block still gets the message that names the
+    # pre-registered number — the more specific finding.
+    falsifier_as_written = falsifier.get("as_written") or {}
+    if "as_written" in falsifier and (
+            falsifier_as_written.get("value_units"),
+            falsifier_as_written.get("value_survived")) != (units, survived):
+        raise _refuse(f"{E2A_FALSIFIER}'s as-written block reads "
+                      f"{falsifier_as_written.get('value_survived')} of "
+                      f"{falsifier_as_written.get('value_units')} but "
+                      f"{E2A_RECORD} reads {survived} of {units} — the "
+                      "as-written block IS the E2a reading, so the two cannot "
+                      "disagree")
+
+    # "Absent" and "present but empty" are different records: the fallback below
+    # is for a flat record that declares no block at all. An EMPTY block is a
+    # record that did not write its counter, and inheriting the top-level numbers
+    # there would attribute the injected 14/14 to a provenance it does not carry.
+    if "with_anchor" in falsifier and not (falsifier.get("with_anchor") or {}):
+        raise _refuse(f"{E2A_FALSIFIER}'s with-anchor block is present but "
+                      "empty — the injected reading is the block this score is "
+                      "taken over, so an empty one is not the flat shape "
+                      "(e2_score)")
     with_anchor = (falsifier.get("with_anchor") or falsifier)
     injected_survived = with_anchor.get("value_survived")
     injected_units = with_anchor.get("value_units")
@@ -383,7 +415,8 @@ def e2_score(repo: Path, floors: dict) -> dict:
             "frozen_units": frozen_units,
             "value_survived": survived,
             "falsifier": {"value_units": injected_units,
-                          "value_survived": injected_survived},
+                          "value_survived": injected_survived,
+                          "graph": with_anchor.get("graph")},
             "required": required,
             "outcome": "PASS" if passed else "FAIL",
             "denominator_rule": "pre-registration §3.3 — a digit in the "
@@ -410,14 +443,22 @@ def score(repo: Path = _ROOT) -> dict:
     e2a_record = _read_json(repo / EVIDENCE / E2A_RECORD)
     falsifier_record = _read_json(repo / EVIDENCE / E2A_FALSIFIER)
     gates_record = _read_json(repo / EVIDENCE / GATE_DROPS)
+    # The falsifier's TOP LEVEL is checked here like every other record (it is the
+    # field a reader sees first), and BELOW its scored block is checked against
+    # the E2a record's own run — removing it from this loop in favour of the block
+    # check alone would let a record assert two runs with its headline unchecked.
     for name, record in ((E2A_RECORD, e2a_record),
                          (E2A_FALSIFIER, falsifier_record),
                          (GATE_DROPS, gates_record)):
-        # A falsifier record nests its graph under each of its two blocks; either
-        # one names the run it graded.
+        # The falsifier may declare its run at the top level or on either of its
+        # two blocks; whichever it declares is checked, and a record that
+        # declares TWO runs is caught by the headline (the field a reader sees
+        # first) or, if the blocks disagree, by the scored-block arms below.
         graph = str(record.get("graph")
-                    or (record.get("with_anchor") or {}).get("graph")
-                    or (record.get("as_written") or {}).get("graph") or "")
+                    or ((record.get("with_anchor") or {}).get("graph")
+                        if name == E2A_FALSIFIER else "")
+                    or ((record.get("as_written") or {}).get("graph")
+                        if name == E2A_FALSIFIER else "") or "")
         if after["head"][:9] not in graph:
             raise _refuse(f"{name} was taken on graph {graph!r}, which does not "
                           f"name head {after['head'][:9]}")
@@ -432,6 +473,60 @@ def score(repo: Path = _ROOT) -> dict:
                       "after share and the E2a counts come from different runs "
                       "of the corpus, and the head they share cannot tell them "
                       "apart")
+    # The falsifier's number is read from `with_anchor` (falling back to the
+    # record itself when that block is absent, exactly as `e2_score` reads it),
+    # so that is the block whose graph must be checked — a record whose other
+    # block names the head proves nothing about the run it was scored on.
+    if "with_anchor" in falsifier_record and not (
+            falsifier_record.get("with_anchor") or {}):
+        raise _refuse(f"{E2A_FALSIFIER}'s with-anchor block is present but "
+                      "empty — the injected reading is the block this score is "
+                      "taken over, so an empty one is not the flat shape "
+                      "(score)")
+    falsifier_scored = falsifier_record.get("with_anchor") or falsifier_record
+    falsifier_graph = str(falsifier_scored.get("graph") or "")
+    if after["head"][:9] not in falsifier_graph:
+        raise _refuse(f"{E2A_FALSIFIER}'s scored block was taken on graph "
+                      f"{falsifier_graph!r}, which does not name head "
+                      f"{after['head'][:9]}")
+    # …and naming the head is not enough. A graph name is
+    # `capstone_on_<head>_<stamp>`, so TWO runs of the same head are two
+    # different graphs: a scored block from the sibling run would certify the
+    # E2a counter from a corpus invocation the E2a record was not taken on. The
+    # scored block must therefore be the E2a record's OWN graph.
+    if falsifier_graph != str(e2a_record.get("graph") or ""):
+        raise _refuse(f"{E2A_FALSIFIER}'s scored block is on graph "
+                      f"{falsifier_graph!r}, but {E2A_RECORD} was taken on "
+                      f"{e2a_record.get('graph')!r} — the same head is not the "
+                      "same run, and the falsifier must prove the counter on "
+                      "the run it is credited to")
+    # …and the HEADLINE too (the field a reader sees first). The head loop above
+    # can only refuse a graph that does not NAME the head, so a top level
+    # declaring a SIBLING run of the same head would otherwise go unchecked
+    # while both blocks were required to be the E2a run.
+    headline = str(falsifier_record.get("graph") or "")
+    if headline and headline != str(e2a_record.get("graph") or ""):
+        raise _refuse(f"{E2A_FALSIFIER}'s top-level graph is {headline!r}, but "
+                      f"{E2A_RECORD} was taken on "
+                      f"{e2a_record.get('graph')!r} — the record would assert "
+                      "two runs, and the same head is not the same run")
+    # `as_written` is the reading the E2a record was taken on: same measurement,
+    # so the same graph. An ABSENT graph there is not a licence to inherit the
+    # scored block's — that would assume the provenance this check exists to
+    # prove, and report it as proven.
+    as_written_block = falsifier_record.get("as_written")
+    as_written_present = "as_written" in falsifier_record
+    as_written_graph = str((as_written_block or {}).get("graph") or "")
+    if as_written_present and not as_written_graph:
+        raise _refuse(f"{E2A_FALSIFIER}'s as-written block carries no graph, so "
+                      f"it cannot be shown to be the run {E2A_RECORD} was "
+                      "taken on — they are the same measurement")
+    if as_written_graph and as_written_graph != str(
+            e2a_record.get("graph") or ""):
+        raise _refuse(f"{E2A_FALSIFIER}'s as-written block is on graph "
+                      f"{as_written_graph!r} but {E2A_RECORD} is on "
+                      f"{e2a_record.get('graph')!r} — they are the same "
+                      "measurement and cannot come from different runs")
     if e2a_record.get("graph") != gates_record.get("graph"):
         raise _refuse("the E2a record and the gate-drops record come from "
                       "different graphs — one record cannot mix them")

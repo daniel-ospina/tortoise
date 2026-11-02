@@ -592,7 +592,7 @@ def test_the_e2_row_is_the_composite_and_not_e2a_alone():
     # and the record itself states which half decided it
     record = json.loads(SCORES.read_text())
     assert record["e2"]["outcome"] == "FAIL"
-    assert record["e2"]["decided_by"] in {"E2a", "E2b", "both"}
+    assert record["e2"]["decided_by"] == "E2a"
 
 
 def test_the_e2_composite_is_blocked_when_a_half_was_never_measured():
@@ -3921,3 +3921,308 @@ def test_the_import_claim_is_what_importing_actually_does():
         assert "refuted" in doc or "earlier" in doc, (
             "the stale claim is restated as current fact — if it is kept at all it must be "
             "marked as the wording that was refuted")
+
+
+def test_the_e1_e2_record_refuses_a_record_from_another_run(tmp_path):
+    """One record, one run — a graph off the ON head must refuse.
+
+    Each of the two record classes the score reads is moved to a graph the ON arm
+    never ran, one at a time, so a guard that only covers the class it was
+    written for cannot pass the other by accident.
+    """
+    for name in ("e2a-value-units.json", "e1-gate-drops.json"):
+        repo = tmp_path / name.replace(".", "_")
+        shutil.copytree(_REPO / "docs/evidence/9889", repo / "docs/evidence/9889")
+        shutil.copytree(_REPO / "docs/evidence/7949-capstone",
+                        repo / "docs/evidence/7949-capstone")
+        path = repo / "docs/evidence/9889" / name
+        record = json.loads(path.read_text())
+        record["graph"] = "capstone_on_deadbeef0_1790000000"
+        path.write_text(json.dumps(record))
+        with pytest.raises(SystemExit) as refused:
+            scores_probe.score(repo)
+        assert refused.value.code == 2, (name, refused.value)
+
+
+def test_the_falsifier_is_provenanced_on_the_block_its_number_is_read_from(
+        tmp_path, capsys):
+    """F2: the SCORED block (`with_anchor`) is the one whose graph is checked.
+
+    The falsifier's 14/14 is read from `with_anchor` alone. A record whose
+    TOP-LEVEL `graph` names the ON head while that block names a different run
+    was accepted by the head-or-with_anchor-or-as_written loop — a provenance
+    claim about the run the number came from that the code did not enforce.
+
+    Non-vacuity: the pre-fix guard reads `record.get("graph") or …`, so this
+    exact record scores and the `pytest.raises` arm reds.
+    """
+    repo = tmp_path / "repo"
+    shutil.copytree(_REPO / "docs/evidence/9889", repo / "docs/evidence/9889")
+    shutil.copytree(_REPO / "docs/evidence/7949-capstone",
+                    repo / "docs/evidence/7949-capstone")
+    path = repo / "docs/evidence/9889" / "e2a-value-units-falsifier.json"
+    record = json.loads(path.read_text())
+    scores = json.loads(
+        (repo / "docs/evidence/9889/e1-e2-scores.json").read_text())
+    head, graph = scores["head"], scores["graph"]
+    record["graph"] = graph                                # top level names the head
+    assert head[:9] in graph, (head, graph)
+    record["with_anchor"]["graph"] = "capstone_on_deadbeef0_1790000000"
+    path.write_text(json.dumps(record))
+    with pytest.raises(SystemExit) as refused:
+        scores_probe.score(repo)
+    assert refused.value.code == 2, refused.value
+    err = capsys.readouterr().err
+    assert "scored block" in err, err
+    assert "capstone_on_deadbeef0_1790000000" in err, err
+
+    # …and NAMING THE HEAD is not enough: a graph is `capstone_on_<head>_<stamp>`,
+    # so a SIBLING RUN of the same head is a different graph and must refuse too —
+    # otherwise the falsifier certifies its counter on a corpus invocation the E2a
+    # record was never taken on. Non-vacuity: the head-only guard scores this.
+    sibling = json.loads(path.read_text())
+    sibling["with_anchor"]["graph"] = f"capstone_on_{head[:9]}_9999999999"
+    assert head[:9] in sibling["with_anchor"]["graph"]      # the head check passes
+    assert sibling["with_anchor"]["graph"] != graph          # the run differs
+    path.write_text(json.dumps(sibling))
+    with pytest.raises(SystemExit) as sibling_refused:
+        scores_probe.score(repo)
+    assert sibling_refused.value.code == 2, sibling_refused.value
+    err = capsys.readouterr().err
+    assert "the same head is not the same run" in err, err
+
+
+def test_the_falsifiers_as_written_block_must_be_the_e2a_records_run(
+        tmp_path, capsys):
+    """F2's second arm: `as_written` names the run the E2a record was taken on.
+
+    The head loop refuses a foreign graph on the top level and on `with_anchor`
+    before this arm can fire, so a record that moves ALL of them proves nothing
+    about `as_written`. Here the top level and the scored block keep the head and
+    ONLY `as_written` moves — same head, different run — and the refusal must name
+    that block.
+
+    Non-vacuity: delete the `as_written` arm and this record scores.
+    """
+    repo = tmp_path / "repo"
+    shutil.copytree(_REPO / "docs/evidence/9889", repo / "docs/evidence/9889")
+    shutil.copytree(_REPO / "docs/evidence/7949-capstone",
+                    repo / "docs/evidence/7949-capstone")
+    path = repo / "docs/evidence/9889" / "e2a-value-units-falsifier.json"
+    record = json.loads(path.read_text())
+    scores = json.loads(
+        (repo / "docs/evidence/9889/e1-e2-scores.json").read_text())
+    for block in (record, record["with_anchor"]):
+        block["graph"] = scores["graph"]          # the head, on both checked blocks
+    record["as_written"]["graph"] = "capstone_on_54922a800_other"
+    path.write_text(json.dumps(record))
+    with pytest.raises(SystemExit) as refused:
+        scores_probe.score(repo)
+    assert refused.value.code == 2, refused.value
+    err = capsys.readouterr().err
+    assert "as-written block is on graph" in err, err
+    assert "capstone_on_54922a800_other" in err, err
+
+
+def test_the_falsifiers_as_written_block_must_carry_its_own_graph(tmp_path, capsys):
+    """F2's third arm: an `as_written` block with no graph is not inherited from.
+
+    The block is the reading the E2a record was taken on, so an absent graph there
+    is precisely the provenance this guard exists to prove — defaulting it to the
+    scored block's would assume the claim and then report it as proven.
+
+    Non-vacuity: delete the `carries no graph` arm and this record scores (it
+    inherits `falsifier_graph` at the equality check).
+    """
+    repo = tmp_path / "repo"
+    shutil.copytree(_REPO / "docs/evidence/9889", repo / "docs/evidence/9889")
+    shutil.copytree(_REPO / "docs/evidence/7949-capstone",
+                    repo / "docs/evidence/7949-capstone")
+    path = repo / "docs/evidence/9889" / "e2a-value-units-falsifier.json"
+    record = json.loads(path.read_text())
+    record["as_written"].pop("graph")
+    path.write_text(json.dumps(record))
+    with pytest.raises(SystemExit) as refused:
+        scores_probe.score(repo)
+    assert refused.value.code == 2, refused.value
+    err = capsys.readouterr().err
+    assert "carries no graph" in err, err
+    assert "e2a-value-units.json" in err, err
+
+    # …and an EMPTY block is PRESENT, not absent: testing truthiness read it as
+    # "no block at all" and scored the record, which is the fail-open this arm
+    # exists to refuse.
+    empty = json.loads(
+        (_REPO / "docs/evidence/9889/e2a-value-units-falsifier.json").read_text())
+    empty["as_written"] = {}
+    path.write_text(json.dumps(empty))
+    with pytest.raises(SystemExit) as empty_refused:
+        scores_probe.score(repo)
+    assert empty_refused.value.code == 2, empty_refused.value
+    assert "carries no graph" in capsys.readouterr().err
+
+
+def test_the_falsifiers_as_written_numbers_are_the_e2a_reading(tmp_path, capsys):
+    """F2's fourth arm: "the same measurement" is a claim about the NUMBERS.
+
+    The bundle's README reads `as_written` as the E2a reading before injection
+    (`as_written 8/14 -> injected 14/14`). A block carrying different counts is a
+    SECOND reading passed off as the same one, and the graph check alone cannot
+    see it.
+
+    Non-vacuity: delete the counts arm and this record scores.
+    """
+    repo = tmp_path / "repo"
+    shutil.copytree(_REPO / "docs/evidence/9889", repo / "docs/evidence/9889")
+    shutil.copytree(_REPO / "docs/evidence/7949-capstone",
+                    repo / "docs/evidence/7949-capstone")
+    path = repo / "docs/evidence/9889" / "e2a-value-units-falsifier.json"
+    record = json.loads(path.read_text())
+    record["as_written"]["value_survived"] = 14
+    path.write_text(json.dumps(record))
+    with pytest.raises(SystemExit) as refused:
+        scores_probe.score(repo)
+    assert refused.value.code == 2, refused.value
+    err = capsys.readouterr().err
+    assert "the as-written block IS the E2a reading" in err, err
+
+    # …and the DENOMINATOR half: a block reading `8 of 12` is a second population
+    # passed off as the same measurement. (The frozen-fourteen refusal names the
+    # pre-registered number for the E2a record, so this arm must be the one that
+    # catches the falsifier's own denominator.)
+    shrunk = json.loads(path.read_text())
+    shrunk["as_written"]["value_survived"] = 8
+    shrunk["as_written"]["value_units"] = 12
+    path.write_text(json.dumps(shrunk))
+    with pytest.raises(SystemExit) as denom_refused:
+        scores_probe.score(repo)
+    assert denom_refused.value.code == 2, denom_refused.value
+    err = capsys.readouterr().err
+    assert "reads 8 of 12 but" in err, err
+    assert "the as-written block IS the E2a reading" in err, err
+
+
+def test_the_falsifiers_top_level_names_the_run_too(tmp_path, capsys):
+    """F2's headline arm: the field a reader sees FIRST is checked like the rest.
+
+    Both blocks name the E2a run while the TOP-LEVEL `graph` names another one —
+    the record then asserts two runs. Checking only the scored block let this
+    through, so a pin that moves ALL the graphs (and is refused on the E2a record
+    first) cannot see it.
+
+    Non-vacuity: drop the falsifier from the one-head loop and this record scores.
+    """
+    repo = tmp_path / "repo"
+    shutil.copytree(_REPO / "docs/evidence/9889", repo / "docs/evidence/9889")
+    shutil.copytree(_REPO / "docs/evidence/7949-capstone",
+                    repo / "docs/evidence/7949-capstone")
+    path = repo / "docs/evidence/9889" / "e2a-value-units-falsifier.json"
+    record = json.loads(path.read_text())
+    scores = json.loads(
+        (repo / "docs/evidence/9889/e1-e2-scores.json").read_text())
+    head, graph = scores["head"], scores["graph"]
+    for block in (record["with_anchor"], record["as_written"]):
+        block["graph"] = graph                           # both blocks on the run
+    record["graph"] = "capstone_on_cafebabe0_1791111111"  # the headline is not
+    path.write_text(json.dumps(record))
+    with pytest.raises(SystemExit) as refused:
+        scores_probe.score(repo)
+    assert refused.value.code == 2, refused.value
+    err = capsys.readouterr().err
+    assert "e2a-value-units-falsifier.json was taken on graph" in err, err
+    assert "which does not name head" in err, err
+
+    # …and NAMING the head is not enough here either: a headline declaring a
+    # SIBLING run of the same head passes the loop and would otherwise go
+    # unchecked, while both blocks are required to be the E2a run.
+    sibling = json.loads(path.read_text())
+    sibling["graph"] = f"capstone_on_{head[:9]}_9999999999"
+    assert head[:9] in sibling["graph"]           # the head loop passes
+    sibling["with_anchor"]["graph"] = graph
+    sibling["as_written"]["graph"] = graph
+    path.write_text(json.dumps(sibling))
+    with pytest.raises(SystemExit) as sibling_refused:
+        scores_probe.score(repo)
+    assert sibling_refused.value.code == 2, sibling_refused.value
+    err = capsys.readouterr().err
+    assert "top-level graph is" in err, err
+    assert "would assert two runs" in err, err
+
+
+def test_the_falsifiers_with_anchor_block_is_present_or_absent_never_empty(
+        tmp_path, capsys):
+    """A PRESENT-BUT-EMPTY `with_anchor` is refused; an ABSENT one still scores.
+
+    The flat fallback is for a record that declares no block at all. An empty one
+    is a record that never wrote its counter, so inheriting the top-level numbers
+    would attribute the injected 14/14 to a provenance the block does not carry —
+    the same fail-open the `as_written` arm closes, one function up.
+
+    The guard exists at TWO sites with neither reachable through the other in a
+    test: `score()` refuses before it delegates to `e2_score()`, so each message
+    carries its own token and each is pinned here — a lane that deletes either as
+    dead code would otherwise be served green by the other's identical text.
+
+    Non-vacuity: delete BOTH arms and this record scores, reporting the top-level
+    14/14 as the `with_anchor` reading.
+    """
+    repo = tmp_path / "repo"
+    shutil.copytree(_REPO / "docs/evidence/9889", repo / "docs/evidence/9889")
+    shutil.copytree(_REPO / "docs/evidence/7949-capstone",
+                    repo / "docs/evidence/7949-capstone")
+    path = repo / "docs/evidence/9889" / "e2a-value-units-falsifier.json"
+    record = json.loads(path.read_text())
+    scores = json.loads(
+        (repo / "docs/evidence/9889/e1-e2-scores.json").read_text())
+    injected = dict(record["with_anchor"])
+    record["with_anchor"] = {}
+    record.update(injected)                  # the 14/14 parked at the top level
+    record["graph"] = scores["graph"]
+    path.write_text(json.dumps(record))
+    with pytest.raises(SystemExit) as refused:
+        scores_probe.score(repo)
+    assert refused.value.code == 2, refused.value
+    score_err = capsys.readouterr().err
+    assert "with-anchor block is present but empty" in score_err, score_err
+    assert "(score)" in score_err, score_err
+
+    # …and `e2_score`'s own arm has its ONLY witness here: called directly (the
+    # route a future caller takes), with the same record, it must refuse too and
+    # say so with its own token.
+    with pytest.raises(SystemExit) as direct:
+        scores_probe.e2_score(repo, scores_probe.frozen_denominators(repo))
+    assert direct.value.code == 2, direct.value
+    direct_err = capsys.readouterr().err
+    assert "with-anchor block is present but empty" in direct_err, direct_err
+    assert "(e2_score)" in direct_err, direct_err
+
+    # …and the flat record WITHOUT the key is the documented shape and still
+    # scores, so the arm discriminates "empty" from "absent" rather than
+    # refusing the whole flat form.
+    flat = json.loads(path.read_text())
+    flat.pop("with_anchor")
+    path.write_text(json.dumps(flat))
+    assert scores_probe.score(repo)["e2"]["outcome"] == "FAIL"
+
+
+def test_the_e2a_bar_is_parsed_from_the_record_not_typed(tmp_path):
+    """F3: amend the frozen threshold and the bar must MOVE.
+
+    A typed `required = 13` survives every pin over the shipped record — the
+    shipped value says 13 either way. Only an amended copy can tell a parsed 13
+    from a typed one, so this asserts BOTH the moved number and the flipped
+    outcome.
+    """
+    repo = tmp_path / "repo"
+    shutil.copytree(_REPO / "docs/evidence/9889", repo / "docs/evidence/9889")
+    shutil.copytree(_REPO / "docs/evidence/7949-capstone",
+                    repo / "docs/evidence/7949-capstone")
+    prereg_path = repo / "docs/evidence/7949-capstone/preregistration.json"
+    prereg = json.loads(prereg_path.read_text())
+    for entry in prereg["criteria"]:
+        if entry.get("id") == "E2a":
+            entry["threshold"] = ">= 5 of 14"
+    prereg_path.write_text(json.dumps(prereg))
+    record = scores_probe.score(repo)
+    assert record["e2"]["e2a"]["required"] == 5, record["e2"]["e2a"]
+    assert record["e2"]["e2a"]["outcome"] == "PASS", record["e2"]["e2a"]
