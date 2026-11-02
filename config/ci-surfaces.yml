@@ -580,6 +580,15 @@ surfaces:
   # through a P0. DB-free (pepper env + a stubbed DB probe, no FalkorDB, no
   # Postgres, no network).
   - test_9548_record_arming_health.py
+  # #10620: the record stopped dropping every point that carried search keys
+  # (`point.search_keys` was `jsonb`, the producer emits the graph's flat string),
+  # and `/health` stopped answering `ok` while rows were dropped. DUAL-REGISTERED
+  # (`api` + `core`) for the same reason the /health guards above are: the file it
+  # pins is `tortoise/hosted_api.py`, which selects `api`, while the attribution half
+  # is `record_projection`/`record_writer` — a diff in either must run it. Its two
+  # Postgres legs skip without `TEST_RECORD_DB_URI` (armed by the
+  # `test-record-postgres` job, which names this file explicitly).
+  - test_record_searchkeys_10620.py
   # #10447: `/health` published no build identity, so "is this deployed?" was
   # unanswerable from the endpoint every watchdog and census probes — a stale
   # build served `status: ok` and every other block happily. DUAL-REGISTERED
@@ -3492,6 +3501,11 @@ surfaces:
   # `record_writer.py`-only diff (the `dsn_fingerprint` single definition this
   # file also pins) falls through to `core`.
   - test_9548_record_arming_health.py
+  # #10620: same dual registration as the guards above — the record's row-loss
+  # verdict (`record.degraded`) lives on `/health`, while the attribution half
+  # (`RecordStatementError`, and the `search_keys` flatten/refusal rule) lives in
+  # `tortoise/record_projection.py`, which selects `core`.
+  - test_record_searchkeys_10620.py
   # #10447: `/health` published no build identity, so "is this deployed?" was
   # unanswerable from the endpoint every watchdog and census probes — a stale
   # build served `status: ok` and every other block happily. DB-free; the
@@ -9946,6 +9960,9 @@ durations:
   test_9231_record_migrations_trigger.py: 0.1
   test_9350_capture_provenance_journalled.py: 17.6
   test_9548_record_arming_health.py: 0.1
+  # #10620 — the DB-free legs are sub-second; the two Postgres legs pay the
+  # connect + replay. Measured on a throwaway container: 12 legs in ~4 s.
+  test_record_searchkeys_10620.py: 4.5
   test_9555_narrative_carrier.py: 3.4
   test_backfill_references_5141.py: 0.1
   test_bm25_lexical_8488.py: 9.4

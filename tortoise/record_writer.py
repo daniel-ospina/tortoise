@@ -1075,7 +1075,7 @@ class RecordWriter:
             raise RecordWriteError(
                 f"the record write failed after {len(records)} journal "
                 f"record(s) were materialized from position {first_seq} "
-                f"({type(exc).__name__})"
+                f"({type(exc).__name__}: {_bounded_cause(exc)})"
             ) from exc
 
         return RecordWrite(
@@ -1142,6 +1142,56 @@ def _close_live_breaker() -> None:
 #: "stored NOWHERE" ERROR into a WARNING. The tuple below is built from this
 #: name, so a rename lands on every consumer at once.
 NON_DURABLE_JOURNAL_REFUSAL = "no_durable_journal"
+
+
+def _bounded_cause(exc: BaseException, limit: int = 400) -> str:
+    """The CAUSE's own message, bounded — the half a class name never carried.
+
+    `RecordWriter.write` used to name only ``type(exc).__name__``, so every
+    wrap of a driver error read ``(InvalidTextRepresentation)`` and nothing
+    else. `record_projection.replay` now raises a
+    :class:`record_projection.RecordStatementError` whose message already names
+    the statement, its table and columns, and the driver's own text; this keeps
+    that whole message attached to the failure a caller logs, while staying
+    short enough for one log line.
+    """
+    text = str(exc).replace("\n", "\\n")
+    return text if len(text) <= limit else f"{text[:limit]}…({len(text)} chars)"
+
+
+#: The payload fields a record's identity can live in, most specific first.
+#: ``eventId`` is the fold's MERGE key for a Point/Event row, so it wins over a
+#: generic ``id``; a Session keys on ``session_id``.
+_RECORD_IDENTITY_KEYS: tuple[str, ...] = (
+    "eventId", "node_key", "session_id", "event_id", "id", "name",
+)
+
+
+def _record_identity(record: Mapping[str, Any], limit: int = 3) -> str:
+    """Name the entity/point id a failed record carried, for the log line.
+
+    Never for a row, and never inventing a value: it reports the FIRST identity
+    field the record actually holds, in each of its snapshot sub-dicts (a
+    ``PointAdded`` keeps its payload under ``point``). Absence is stated as
+    absence rather than left blank, because "the record had no id field" and
+    "this code could not find it" are different facts and only one of them is
+    worth chasing.
+    """
+    found: list[str] = []
+    for field_name, value in record.items():
+        if not isinstance(value, Mapping):
+            continue
+        for key in _RECORD_IDENTITY_KEYS:
+            candidate = value.get(key)
+            if isinstance(candidate, str) and candidate:
+                found.append(f"{field_name}.{key}={candidate}")
+                break
+    for key in _RECORD_IDENTITY_KEYS:
+        candidate = record.get(key)
+        if isinstance(candidate, str) and candidate:
+            found.append(f"{key}={candidate}")
+            break
+    return " ".join(found[:limit]) if found else "(record carries no identity field)"
 
 
 def _count_write_failure(reason: str) -> None:
@@ -1636,7 +1686,8 @@ def write_live_record(record: Mapping[str, Any], *,
         _count_write_failure("write_failed")
         _logger.warning(
             "the record write did not happen (write_failed) — the journal has "
-            "the record and a replay heals the record: %s", exc,
+            "the record and a replay heals the record: record=%s %s: %s",
+            record.get("type"), _record_identity(record), exc,
         )
         return _refused("write_failed", seq)
     finally:

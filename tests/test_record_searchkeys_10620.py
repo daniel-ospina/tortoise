@@ -1,0 +1,500 @@
+"""#10620 — the record dropped every point carrying `search_keys`, silently.
+
+Two defects, one lane:
+
+**Attribution (fixed here, no decision).** `record_projection.replay()` let the
+driver's exception escape unadorned and `record_writer.RecordWriter.write()`
+formatted `type(exc).__name__` — and nothing else — into the message. So the
+hosted deployment's log said:
+
+    the record write failed after 1 journal record(s) were materialized from
+    position 3412 (InvalidTextRepresentation)
+
+A 302-write failure had no attributable cause on the deployment's own log. It
+now names the STATEMENT, its TABLE and COLUMNS with their values, and the
+entity/point id, on top of the driver's own `str(exc)`. `/health` also stopped
+answering `ok` while rows were being dropped (`record.degraded`).
+
+**Reconciliation (the `search_keys` refusal itself).** `public.point.search_keys`
+was `jsonb`; every producer emits the graph's FLAT SPACE-JOINED STRING
+(`projection/entities.py::flatten_search_keys_prop`), so Postgres refused every
+record that carried one with `22P02 invalid input syntax for type json` and the
+row was dropped. Nothing reads the record's copy as a JSON structure, so the
+column narrows to `text` (`20261102000002_record_point_search_keys_text.sql`) —
+one representation, the graph's, exactly as #9264 narrowed
+`session.capture_redactions`.
+
+The DB-free legs run everywhere. The Postgres legs skip without
+`TEST_RECORD_DB_URI` (the record's own driver extra is `[postgres]`).
+"""
+from __future__ import annotations
+
+import logging
+import os
+import uuid
+
+import pytest
+
+from tortoise import record_projection, record_writer
+
+RECORD_DB_ENV = "TEST_RECORD_DB_URI"
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# 1. Attribution — a failed write names WHAT failed
+# ════════════════════════════════════════════════════════════════════════════
+
+
+class _BoomCursor:
+    """A cursor that refuses the statement this test targets, like the driver.
+
+    The message is the one Postgres actually produced for this defect, measured
+    on a throwaway `postgres:16` through the repo's own `_split_properties` +
+    `_upsert_statement` (#10620's reproduction). Postgres does NOT name the
+    column in this error — which is precisely why the attribution has to come
+    from the statement, not from the driver.
+
+    Only the `point` upsert refuses: on the real path `node_identity` is written
+    first and succeeds, and a stub that fails the FIRST statement instead would
+    assert the attribution of a failure that never happens.
+    """
+
+    def __init__(self, message: str, refuse_on: str = "INSERT INTO public.point") -> None:
+        self.message = message
+        self.refuse_on = refuse_on
+        self.executed: list[tuple[str, object]] = []
+
+    def execute(self, sql, params=()) -> None:
+        self.executed.append((sql, params))
+        if self.refuse_on not in sql:
+            return
+        raise RuntimeError(self.message)
+
+
+_JSON_REFUSAL = (
+    'invalid input syntax for type json\nDETAIL:  Token "err4032" is invalid.\n'
+    "CONTEXT:  JSON data, line 1: err4032 release"
+)
+
+
+def _point_record(key: str, search_keys: object) -> dict:
+    return {"type": "PointAdded",
+            "point": {"eventId": key, "id": key, "content": "a claim",
+                      "point_kind": "statement", "search_keys": search_keys}}
+
+
+def _replay_refusal(record: dict, monkeypatch) -> str:
+    """The message `replay()` raises, with a cursor that refuses the statement."""
+    cursor = _BoomCursor(_JSON_REFUSAL)
+    monkeypatch.setattr(record_projection, "scope_connection",
+                        lambda conn, org_id: cursor)
+    with pytest.raises(record_projection.RecordStatementError) as caught:
+        record_projection.replay([record], object(), org_id="org-t",
+                                 graph_id="graph-t", position=False)
+    return str(caught.value)
+
+
+def test_a_failed_write_names_the_statement_table_and_columns(monkeypatch):
+    """The message an operator reads names WHICH statement refused WHICH column."""
+    message = _replay_refusal(_point_record("pt-err4032", "err4032 release"),
+                              monkeypatch)
+
+    assert "INSERT INTO public.point" in message, message
+    assert "search_keys=err4032 release" in message, (
+        "the failing COLUMN and its value must be named — the driver's own "
+        f"message does not contain them: {message}"
+    )
+    assert "node_key=pt-err4032" in message, (
+        f"the entity/point id must be named: {message}"
+    )
+    assert "invalid input syntax for type json" in message, (
+        f"the driver's own str(exc) must survive verbatim: {message}"
+    )
+
+
+def test_the_attribution_never_mispairs_a_column_with_a_value(monkeypatch):
+    """A shifted parameter list names NO values rather than the WRONG ones.
+
+    The upsert's key may be a database-computed `_SqlExpr` (a scalar subquery
+    carrying its own parameters, #9956), which shifts every later pairing by one
+    INSIDE a `VALUES` list whose placeholder count is unchanged. A line reporting
+    `node_key=<the url>` would point the operator at the wrong datum, so the
+    builder declines to state the pairing at all.
+    """
+    node = record_projection.Node("source", "Source", "node_key")
+    computed_key = record_projection._SqlExpr(
+        "(SELECT node_key FROM public.source WHERE canonical_url = %s)",
+        ("https://a.example",))
+    statement = record_projection._upsert_statement(
+        "o", "g", node, computed_key, {"url": "https://a.example"},
+        {"kind": "web"})
+    text = record_projection._statement_attribution(statement, 2, 5)
+
+    assert statement.columns is None, (
+        "a `_SqlExpr` key makes the positional pairing wrong by one, and the "
+        "count is unchanged — the builder must refuse to state it"
+    )
+    assert "record statement 2/5" in text
+    assert "INSERT INTO public.source" in text
+    assert "params=" in text
+    assert "url=https://a.example" not in text, (
+        f"a paired line here names the wrong column's value: {text}"
+    )
+
+
+def test_the_attribution_pairs_columns_when_the_builder_declared_them():
+    """The control: an ordinary point upsert DOES name each column's value."""
+    node = record_projection.Node("point", "Point", "node_key")
+    statement = record_projection._upsert_statement(
+        "o", "g", node, "pt-1", {"search_keys": "err4032 release"}, {})
+    text = record_projection._statement_attribution(statement, 1, 2)
+
+    assert "node_key=pt-1" in text and "search_keys=err4032 release" in text, text
+
+
+def test_a_failed_live_write_names_the_record_and_its_id(monkeypatch, caplog):
+    """The LIVE door's warning carries the record type, the id, and the cause."""
+    monkeypatch.setenv(record_writer.RECORD_DSN_ENV,
+                       "postgresql://u:p@db.example.com:5432/postgres")
+    monkeypatch.setenv(record_writer.RECORD_SINGLE_TENANT_ENV, "1")
+    monkeypatch.setenv(record_writer.RECORD_ORG_ENV, "org-t")
+    monkeypatch.setenv(record_writer.RECORD_GRAPH_ENV, "graph-t")
+
+    def _explode(*args, **kwargs):
+        raise record_writer.RecordWriteError(
+            "the record write failed after 1 journal record(s) were materialized "
+            "from position 7 (RecordStatementError: record statement 1/3: INSERT "
+            "INTO public.point columns(node_key=pt-err4032, "
+            "search_keys=err4032 release) params=9: invalid input syntax for "
+            "type json)")
+
+    monkeypatch.setattr(record_writer, "write_records", _explode)
+
+    with caplog.at_level(logging.WARNING, logger=record_writer.__name__):
+        result = record_writer.write_live_record(
+            _point_record("pt-err4032", "err4032 release"), durable=True)
+
+    assert result is not None and result.outcome == record_writer.RecordWriteOutcome.REFUSED
+    line = "\n".join(record.getMessage() for record in caplog.records)
+    assert "the record write did not happen (write_failed)" in line, (
+        "the phrase the runbook's recipe greps must survive — a log line an "
+        f"operator cannot find is not an attribution: {line}"
+    )
+    assert "record=PointAdded" in line and "pt-err4032" in line, (
+        f"the log line must name the record and its point id: {line}"
+    )
+    assert "search_keys=err4032 release" in line, (
+        f"the log line must name the failing column: {line}"
+    )
+
+
+def test_the_identity_reader_never_invents_a_value():
+    """Absence is STATED, never a blank an operator reads as 'no problem'."""
+    assert "no identity field" in record_writer._record_identity({"type": "X"})
+    assert record_writer._record_identity(
+        {"type": "PointAdded", "point": {"eventId": "p1", "id": "p2"}}
+    ) == "point.eventId=p1"
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# 2. Health honesty — a dropped row is not a healthy deployment
+# ════════════════════════════════════════════════════════════════════════════
+
+
+def _health(monkeypatch, failures: dict[str, int]) -> dict:
+    from tortoise import hosted_api, monitoring
+
+    monkeypatch.setattr(monitoring, "record_write_failure_counts",
+                        lambda: dict(failures))
+    monkeypatch.setattr(hosted_api, "_WATCHER", None)
+    monkeypatch.setattr(hosted_api, "_WATCHER_START_ERROR", None)
+    monkeypatch.setattr(hosted_api, "_WATCHER_EXPECTED", False)
+    probe = {"ok": True, "latency_ms": 0.1, "error": None}
+    health_probe = getattr(hosted_api, "_HEALTH_PROBE", None)
+    if health_probe is not None:
+        monkeypatch.setattr(health_probe, "snapshot", lambda: dict(probe))
+    return hosted_api._record_health()
+
+
+def test_a_dropped_row_makes_the_record_block_not_ok(monkeypatch):
+    """`write_failed` = 302 with `ok: true` IS the defect — the surface that lies."""
+    record = _health(monkeypatch, {"write_failed": 302})
+
+    assert record["ok"] is False, "a surface dropping rows must not read healthy"
+    assert record["degraded"] is True
+    assert record["degraded_reasons"] == {"write_failed": 302}
+    assert record["record_write_failures"] == {"write_failed": 302}, (
+        "the number is still mirrored verbatim — the verdict is ADDED, not a "
+        "second opinion about the counter"
+    )
+
+
+def test_zero_failures_stays_ok(monkeypatch):
+    """The control: `off` and `healthy` must not be reddened into each other."""
+    record = _health(monkeypatch, {})
+
+    assert record["ok"] is True
+    assert record["degraded"] is False
+    assert record["degraded_reasons"] == {}
+
+
+def test_status_itself_degrades_not_only_the_sub_block(monkeypatch):
+    """/health's top-level `status` is what an operator (and a monitor) reads."""
+    import asyncio
+
+    from tortoise import hosted_api, monitoring
+
+    monkeypatch.setattr(monitoring, "record_write_failure_counts",
+                        lambda: {"no_tenant": 3})
+    monkeypatch.setattr(hosted_api, "_WATCHER", None)
+    monkeypatch.setattr(hosted_api, "_WATCHER_START_ERROR", None)
+    monkeypatch.setattr(hosted_api, "_WATCHER_EXPECTED", False)
+    probe = {"ok": True, "latency_ms": 0.1, "error": None}
+    health_probe = getattr(hosted_api, "_HEALTH_PROBE", None)
+    if health_probe is not None:
+        monkeypatch.setattr(health_probe, "snapshot", lambda: dict(probe))
+
+    body = asyncio.run(hosted_api.health())
+
+    assert body["status"] == "degraded", body["record"]
+    assert body["record"]["degraded_reasons"] == {"no_tenant": 3}
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# 3. One flattener, one representation
+# ════════════════════════════════════════════════════════════════════════════
+
+
+def test_the_record_flattener_agrees_with_the_graph_flattener():
+    """The record boundary's copy of the rule must equal the graph's ONE home.
+
+    `record_projection` restates the rule instead of importing
+    `projection/entities.py` because it deliberately loads with no imports beyond
+    the standard library (it must be importable without the graph stack). That
+    duplication is only safe while the two agree, so this pins them together over
+    the shapes a journal snapshot can carry.
+    """
+    from tortoise.projection.entities import flatten_search_keys_prop
+
+    cases = [
+        ["err4032", "release"],
+        ["  padded  ", "keys"],
+        [],
+        ["only"],
+        ("tuple", "form"),
+    ]
+    for case in cases:
+        props = {"search_keys": list(case)}
+        flatten_search_keys_prop(props)
+        graph_kept = "search_keys" in props
+        actual = record_projection._record_column_value("point", "search_keys", case)
+        record_kept = actual is not record_projection._OMIT
+        assert record_kept == graph_kept, (
+            f"{case!r}: the graph {'keeps' if graph_kept else 'POPS'} the key but "
+            f"the record {'writes' if record_kept else 'omits'} the column — a "
+            "blank list must never clear a value the graph preserves"
+        )
+        if graph_kept:
+            assert actual == props["search_keys"], (
+                f"{case!r}: record={actual!r} graph={props['search_keys']!r}")
+
+
+def test_content_columns_are_named_but_never_quoted():
+    """A failure line names the column, not the user's conversation (#10620 P2).
+
+    The DSN on this same seam is fingerprinted, never printed; a captured turn is
+    the same class of value. `content` and `props` are the two a point insert
+    carries, and they are exactly what an 80-character value cap would still leak.
+    """
+    node = record_projection.Node("point", "Point", "node_key")
+    statement = record_projection._upsert_statement(
+        "o", "g", node, "pt-1",
+        {"content": "my bank PIN is 1234 and my address is 5 Example St",
+         "search_keys": "err4032 release"},
+        {"long": "x" * 500})
+    text = record_projection._statement_attribution(statement, 1, 2)
+
+    assert "content=<" in text and "props=<" in text, text
+    assert "bank PIN" not in text, f"a captured turn reached the log: {text}"
+    assert "x" * 20 not in text, f"the props tail reached the log: {text}"
+    assert "search_keys=err4032 release" in text, (
+        "a SHORT identifying value must still be printed, or the line stops "
+        f"being diagnosable: {text}"
+    )
+
+
+def test_content_columns_are_real_record_columns():
+    """The withhold list may not rot into names no table has (#10620 cycle 3).
+
+    A name that is not a column never matches, so a stale entry silently stops
+    protecting anything — and a NEW content column missing from the set leaks the
+    value it holds. Both directions are checked against the schema the projection
+    itself reads.
+    """
+    columns = set()
+    for table_columns in record_projection.table_columns().values():
+        columns |= set(table_columns)
+
+    unknown = sorted(record_projection._CONTENT_COLUMNS - columns)
+    assert not unknown, (
+        f"withheld name(s) that are not a column of any record table: {unknown} — "
+        "a stale entry protects nothing")
+    for required in ("content", "quote", "props", "_search_text", "title",
+                     "topics"):
+        assert required in record_projection._CONTENT_COLUMNS, (
+            f"{required!r} carries the user's own text and must be withheld")
+
+
+def test_a_mapping_valued_search_keys_is_refused_not_serialized():
+    """A dict is neither the graph's form nor a list — never JSON into `text`."""
+    with pytest.raises(record_projection.RecordProjectionError) as caught:
+        record_projection._record_column_value(
+            "point", "search_keys", {"k": "v"})
+    assert "second representation" in str(caught.value)
+    # The divergence is STATED: the graph leaves a dict as-is, the record refuses.
+    assert "leaves a dict as-is" in str(caught.value)
+
+
+def test_a_string_passes_through_unchanged():
+    """The canonical form is NEVER re-flattened — a string is already the answer."""
+    assert record_projection._record_column_value(
+        "point", "search_keys", "err4032 release") == "err4032 release"
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# 4. The Postgres proof — the row LANDS (skips without a database)
+# ════════════════════════════════════════════════════════════════════════════
+
+
+def _tenant() -> tuple[str, str]:
+    """A tenant pair no other test in this PROCESS has used (see #9307 F2)."""
+    suffix = uuid.uuid4().hex[:12]
+    return f"org-{suffix}", f"graph-{suffix}"
+
+
+def _record_schema_conn():
+    """A superuser connection carrying the record migrations, or skip.
+
+    The record's write path may NOT use it: `replay()` refuses a connection that
+    can bypass RLS (#9554). It is the seeding/assertion half only.
+    """
+    dsn = os.environ.get(RECORD_DB_ENV)
+    if not dsn:
+        pytest.skip(f"{RECORD_DB_ENV} not set — no Postgres for the row proof")
+    psycopg2 = pytest.importorskip("psycopg2",
+                                   reason="psycopg2-binary is the record's driver")
+    from tests.test_9078_record_written_by_production_path import (
+        _ensure_record_schema,
+    )
+
+    conn = psycopg2.connect(dsn)
+    conn.autocommit = True
+    _ensure_record_schema(conn)
+    return conn
+
+
+def _app_role_conn():
+    from tests.test_9078_record_written_by_production_path import (
+        _record_replay_db,
+    )
+
+    return _record_replay_db()
+
+
+def _seed(conn, tenant: tuple[str, str], keys: list[str]) -> None:
+    org, graph = tenant
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO public.organizations (id, name) VALUES (%s, %s) "
+            "ON CONFLICT (id) DO NOTHING", (org, org))
+        cur.execute(
+            "INSERT INTO public.graphs (id, org_id, name) VALUES (%s, %s, %s) "
+            "ON CONFLICT (id) DO NOTHING", (graph, org, graph))
+        for key in keys:
+            cur.execute(
+                "INSERT INTO public.node_identity "
+                "(org_id, graph_id, node_label, node_key) "
+                "VALUES (%s, %s, 'Point', %s) ON CONFLICT DO NOTHING",
+                (org, graph, key))
+        cur.execute("DELETE FROM public.point WHERE org_id=%s AND graph_id=%s",
+                    (org, graph))
+
+
+def _search_keys_row(conn, tenant: tuple[str, str], key: str):
+    org, graph = tenant
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT search_keys, pg_typeof(search_keys)::text FROM public.point "
+            "WHERE org_id=%s AND graph_id=%s AND node_key=%s",
+            (org, graph, key))
+        return cur.fetchone()
+
+
+def test_the_record_column_is_text_and_a_point_with_search_keys_lands():
+    """THE regression `main` fails: the row is REFUSED there, and lands here.
+
+    Measured on the pre-fix tree (#10620): the same record raised
+    `invalid input syntax for type json` and the row was absent. The assertion is
+    on the ROW, not on the absence of an exception — a projection that reported
+    success while dropping the row is the failure being fixed.
+    """
+    conn = _record_schema_conn()
+    tenant = _tenant()
+    key = f"pt-{uuid.uuid4().hex[:10]}"
+    _seed(conn, tenant, [key])
+    org, graph = tenant
+    try:
+        row = _search_keys_row(conn, tenant, key)
+        assert row is None
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT data_type FROM information_schema.columns "
+                "WHERE table_schema='public' AND table_name='point' "
+                "AND column_name='search_keys'")
+            assert cur.fetchone()[0] == "text", (
+                "point.search_keys is not TEXT — the 22P02 refusal is back, and "
+                "every point carrying search keys will be dropped again")
+
+        replay_conn = _app_role_conn()
+        try:
+            record_projection.replay(
+                [_point_record(key, "err4032 release")], replay_conn,
+                org_id=org, graph_id=graph, position=False)
+            replay_conn.commit()
+        finally:
+            replay_conn.close()
+
+        row = _search_keys_row(conn, tenant, key)
+        assert row is not None, (
+            "the point carrying search_keys did not reach the record — this is "
+            "the 302-row drop (#10620)")
+        assert row[0] == "err4032 release", row
+    finally:
+        conn.close()
+
+
+def test_a_list_valued_snapshot_lands_flattened_not_as_json():
+    """A raw graph value may still be an ARRAY (`sparse.py`) — and must land as
+    the SAME flat string, never as `["a", "b"]` serialized into a text column."""
+    conn = _record_schema_conn()
+    tenant = _tenant()
+    key = f"pt-{uuid.uuid4().hex[:10]}"
+    _seed(conn, tenant, [key])
+    org, graph = tenant
+    try:
+        replay_conn = _app_role_conn()
+        try:
+            record_projection.replay(
+                [_point_record(key, ["err4032", "release"])], replay_conn,
+                org_id=org, graph_id=graph, position=False)
+            replay_conn.commit()
+        finally:
+            replay_conn.close()
+
+        row = _search_keys_row(conn, tenant, key)
+        assert row is not None, "the list-valued point did not reach the record"
+        assert row[0] == "err4032 release", (
+            f"the record stored a SECOND representation of the same datum: {row!r}"
+        )
+    finally:
+        conn.close()

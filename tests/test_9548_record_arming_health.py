@@ -32,6 +32,7 @@ the old payload fails here rather than in production:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import json
 import os
@@ -68,6 +69,28 @@ def _isolate_env(monkeypatch):
         record_writer.RECORD_GRAPH_ENV,
     ):
         monkeypatch.delenv(name, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _start_from_zero_write_failures():
+    """Isolate the PROCESS-GLOBAL write-failure counter (#10620).
+
+    `/health` now folds a non-zero `record_write_failures` into `record.ok` — a
+    record that is dropping rows must not read healthy, which is the whole point
+    — so a leg that arms the record and asserts `ok is True` would otherwise be
+    asserting "no OTHER test in this process tripped the seam": an ordering
+    dependency between test files, not a property of the block. The counter is
+    process-lifetime in PRODUCTION by design (it clears on restart, which is what
+    makes it actionable); each leg here starts from zero.
+
+    Removal goes through the public `remove(reason)` for every reason the
+    snapshot currently reports, so a future reason is cleared too rather than
+    silently re-introducing the bleed.
+    """
+    for reason in monitoring.record_write_failure_counts():
+        with contextlib.suppress(KeyError):  # already gone — nothing to do
+            monitoring.RECORD_WRITE_FAILURE_COUNT.remove(reason)
+    yield
 
 
 def _stub_health_dependencies(monkeypatch) -> None:

@@ -6311,8 +6311,10 @@ def _record_health() -> dict:
         serves several.
 
     ``ok`` is False when the value was SET and refused, when the counters could
-    not be read, and when the tenancy resolution could not be read — a
-    monitoring surface that cannot read its own state must not report healthy,
+    not be read, when the tenancy resolution could not be read, and when a record
+    write FAILED (``degraded``, #10620) — a monitoring surface that cannot read
+    its own state must not report healthy, and one that reads "rows were
+    dropped" and still says ``ok`` is worse than one that cannot read at all.
     that being fail-open on the monitoring path itself. All three fold into
     ``status`` (the ``backup_watcher`` rule: off-by-policy stays ``ok``,
     "wanted but broken" degrades). A refused DSN is exactly the silent-arming
@@ -6339,6 +6341,7 @@ def _record_health() -> dict:
                 "record_write_failures": None,
                 "record_non_journal_skips": None,
                 "record_position_unproven": None,
+                "degraded": None, "degraded_reasons": None,
                 "counters_error": reason, "tenancy_error": reason,
                 "fetched_at": datetime.now(UTC).isoformat(),
                 "error": reason}
@@ -6354,6 +6357,18 @@ def _record_health() -> dict:
         "record_write_failures": None,
         "record_non_journal_skips": None,
         "record_position_unproven": None,
+        # ⛔ WHETHER THE RECORD IS LOSING ROWS RIGHT NOW (#10620). ``None`` is
+        # "not evaluated" (the counter snapshot could not be read); ``False`` is
+        # "every armed write this process attempted landed"; ``True`` is "rows
+        # were DROPPED", and it makes ``ok`` False — so it folds into
+        # ``status`` too. Before this field the block mirrored the counters and
+        # stopped there, which left the exact failure this surface exists to
+        # report reading as ``ok: true``: 302 point records were dropped on the
+        # hosted app (one ``jsonb`` column refusing every point that carried
+        # search keys) while ``/health`` answered `ok` for five hours. A counter
+        # with no verdict is a counter nobody reads.
+        "degraded": None,
+        "degraded_reasons": None,
         "counters_error": None,
         "tenancy_error": None,
         "error": None,
@@ -6377,6 +6392,34 @@ def _record_health() -> dict:
     except Exception as exc:  # liveness must answer, always
         block["counters_error"] = str(exc)[:200]
         block["ok"] = False
+    # ⛔ THE VERDICT, not just the number (#10620). Every reason this counter
+    # carries is an ARMED WRITE THAT DID NOT HAPPEN (`monitoring`'s vocabulary):
+    # ``write_failed``, ``no_tenant``, ``malformed_dsn``, ``circuit_open``. A
+    # non-zero count therefore means the
+    # record is MISSING rows the journal holds — the derived cache is behind the
+    # graph and a replay is owed — which is not a healthy deployment by any
+    # reading. So it degrades, exactly like a refused DSN: the `backup_watcher`
+    # rule (off-by-policy stays ok, wanted-but-broken degrades), and a counter
+    # left as a number nobody reads is the "gate that lies" shape this fixes.
+    #
+    # It is process-lifetime and therefore does NOT clear on a successful replay;
+    # that is deliberate — the rows are still missing until someone replays, and
+    # a flag that clears itself would report the gap as over. It clears on
+    # restart, which is what makes it actionable rather than permanent.
+    #
+    # ⛔ THE SKIP COUNTERS ARE DELIBERATELY EXCLUDED, and this is the line that
+    # keeps `/health` from reddening on a healthy deployment: a
+    # `no_durable_journal` decline (the M2 scratch-journal lane) and a
+    # `position_unproven` append are NOT lost rows — the first has no journal to
+    # lose one from, the second is healed by a later replay (#9231/#9307). Folding
+    # either in here would make every `capture_session` read as a broken record.
+    failures = block["record_write_failures"]
+    if isinstance(failures, dict):
+        lost = {reason: count for reason, count in failures.items() if count > 0}
+        block["degraded"] = bool(lost)
+        block["degraded_reasons"] = lost
+        if lost:
+            block["ok"] = False
     try:
         block["single_tenant_declared"] = record_writer.single_tenant_declared()
     except Exception as exc:
@@ -6469,7 +6512,9 @@ async def health():
     the process can resolve) and the same class as ``backup_watcher`` (a
     durability seam whose "off" state must be distinguishable from "on"). See
     ``_record_health``; it collects no I/O, and only a REFUSED DSN, an unread
-    counter snapshot, or an unread tenancy resolution degrades ``status``.
+    counter snapshot, an unread tenancy resolution, or a NON-ZERO record
+    write-failure count (``record.degraded``, #10620 — the record is dropping
+    rows the journal holds) degrades ``status``.
 
     Build check (#10447): ``build`` names the build that is SERVING — commit,
     whether the tree was dirty at build time (stamped by the deploy; `null` means
