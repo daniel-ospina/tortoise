@@ -455,7 +455,10 @@ def test_the_ordering_half_reads_this_log_and_not_the_withdrawn_one(
 #: refuses, reintroduced one file over, where nothing read it (#10548 r15 F1).
 _UNSCOPED_NO_LOG_CLAIMS = (
     re.compile(r"no longer holds (?:a|any|some) log\b", re.I),
-    re.compile(r"holds no log\b", re.I),
+    # ⛔ …but "holds no log OF the recorded run" IS scoped, so the bare form is the one refused.
+    # Without the lookahead this would red a note that named its subject properly, which is the
+    # opposite of what it is for.
+    re.compile(r"holds no log\b(?!\s+of\b)", re.I),
     re.compile(r"\bno log to order\b", re.I),
 )
 
