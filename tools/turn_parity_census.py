@@ -244,12 +244,15 @@ USAGE
                      an embedded graph). Read-only queries only.
     --local-record-dir   the per-session capture log directory (env fallback
                      TORTOISE_FALLBACK_DIR; default ~/.tortoise/session-events).
-                     THE AUTHORITY for #10017. Reads BOTH surfaces: plain
-                     `<day>.jsonl` day files and the sealed
-                     `archive/<day>.jsonl.gz` the seal writes for days older
-                     than the keep window — a census that saw only the plain
+                     THE AUTHORITY for #10017. Reads BOTH SHAPES in BOTH
+                     directories — plain `<day>.jsonl` and sealed
+                     `<day>.jsonl.gz`, under the root and under `archive/` —
+                     exactly as `session_events_drain._candidate_files` does.
+                     Both halves matter: a census that saw only the plain
                      files would call every pre-cutover turn
-                     `missing_in_record`. An explicit flag WINS over an
+                     `missing_in_record`, and one that narrowed each directory
+                     to one shape silently dropped the other two
+                     combinations (review P2). An explicit flag WINS over an
                      ambient TORTOISE_RECORD_DSN (an ambient DSN silently
                      changing the authority would measure the wrong store).
                      Compares key/text/speaker and DECLARES ABSENT
@@ -426,16 +429,34 @@ _LOCAL_RECORD_DECLARED_ABSENT = ("status", "created_at", "point_kind",
 _DECLARABLE_FIELDS = frozenset(
     {rcol for _, rcol, _ in _EXACT_FIELDS} | {"embedding"})
 
-#: The surfaces the local record is made of. ⛔ TWO, not one (review P1):
-#: the seal (`tools/seal_session_events.py`, `DEFAULT_KEEP_DAYS = 7`) MOVES
-#: every day older than the window to `archive/<day>.jsonl.gz` and unlinks the
-#: plain file, and `tortoise/session_events_drain.py` reads both for that
-#: reason. A leg that read only `*.jsonl` made every archived day silently
-#: invisible — every graph turn older than the seal window would report
-#: `missing_in_record` (the purge's own pre-cutover population, i.e. the gate
-#: could never open) and the duplicate-window arm would silently skip a session
-#: whose first window had been sealed.
-_LOCAL_RECORD_GLOBS = ("*.jsonl", "archive/*.jsonl.gz")
+#: The SHAPES a local record day file can have. The seal
+#: (`tools/seal_session_events.py`, `DEFAULT_KEEP_DAYS = 7`) only ever WRITES
+#: `.gz` (into `archive/`), but `tortoise/session_events_drain.py` READS both
+#: shapes in BOTH directories (`_candidate_files`: `for directory in (root /
+#: "archive", root)`), because a plain file under `archive/` and a `.gz` left in
+#: `root` are both readable substrates it must not skip.
+_LOCAL_RECORD_SUFFIXES = (".jsonl", ".jsonl.gz")
+
+#: The surfaces the local record is made of. ⛔ FOUR, not two (review P2):
+#: the seal MOVES every day older than the window to `archive/<day>.jsonl.gz`
+#: and unlinks the plain file, and `tortoise/session_events_drain.py` reads both
+#: DIRECTIONS as well for that reason. A leg that read only `*.jsonl` made every
+#: archived day silently invisible — every graph turn older than the seal window
+#: would report `missing_in_record` (the purge's own pre-cutover population,
+#: i.e. the gate could never open) and the duplicate-window arm would silently
+#: skip a session whose first window had been sealed.
+#:
+#: Reading only `*.jsonl` + `archive/*.jsonl.gz` still left TWO of the four
+#: shape x directory combinations invisible — `archive/*.jsonl` and
+#: `*.jsonl.gz` — while `record["files"]` reported itself as the record's
+#: coverage. The consequence is fail-CLOSED (those sessions' graph turns become
+#: `missing_in_record`, exit 3), so never a wrong PASS; but the refusal pointed
+#: the operator at the graph/backfill instead of at the unread file, and the
+#: artifact understated what was inspected. Enumerated from the suffix list, so
+#: a shape cannot be dropped again by editing one tuple.
+_LOCAL_RECORD_GLOBS = tuple(
+    [f"*{s}" for s in _LOCAL_RECORD_SUFFIXES]
+    + [f"archive/*{s}" for s in _LOCAL_RECORD_SUFFIXES])
 
 
 class CensusError(Exception):
@@ -821,6 +842,13 @@ def read_local_record_turns(directory, node_keys: Iterable[str] | None = None
     which is a refusal. There is no path from a misaligned local record to
     `CLEAN`.
 
+    A day present in BOTH shapes (a sealed `.gz` plus a plain file re-created
+    after the seal) is read ONCE PER SHAPE, as the drain reads it, because the
+    two can hold DIFFERENT windows of one index space. If their session ids
+    overlap they land on the duplicate arm above and REFUSE — which is correct:
+    the leg cannot tell which window is `t0`. If they do not overlap, both are
+    needed and both are read. Neither case can reach `CLEAN` wrongly.
+
     A torn line is CORRUPTION, not a tail to be tolerated — except at the tail.
     An append-only log's newest final line may be mid-write; every other
     unparsable line is unreadable data, so it REFUSES (exit 3, the leg's own
@@ -846,31 +874,36 @@ def read_local_record_turns(directory, node_keys: Iterable[str] | None = None
     # unreadable directory would be indistinguishable from an empty one and the
     # leg would report a complete read over the surfaces it could see. Enumerate
     # explicitly instead, and refuse.
-    files: list[Path] = []
-    for directory, suffix in ((root, ".jsonl"),
-                              (root / "archive", ".jsonl.gz")):
-        if directory is root:
-            candidates = [directory]
-        elif not directory.exists():
+    # Mirror the substrate's own enumerator (`session_events_drain
+    # ._candidate_files`): BOTH shapes in BOTH directories, ONE path per
+    # (day, shape) queue key, `root` scanned SECOND so the writer's own file
+    # wins over an unusual copy under `archive/` — the seal only ever writes
+    # `.gz` there, but it can still read a plain one.
+    found: dict[tuple[str, str], Path] = {}
+    for directory in (root / "archive", root):
+        if not directory.exists():
             continue
-        else:
-            candidates = [directory]
-        for where in candidates:
-            try:
-                entries = list(where.iterdir())
-            except OSError as exc:
-                raise CensusError(
-                    f"the local record directory {where} could not be LISTED "
-                    f"({type(exc).__name__}: {exc}) — an unreadable surface is "
-                    "not an empty one, so an absence is NOT established") from exc
-            for entry in entries:
-                if entry.name.endswith(suffix) and entry.is_file():
-                    files.append(entry)
-    files.sort()
-    # The tail is only tolerance-able on the newest PLAIN day file: a `.gz`
-    # archive is written whole and verified by the seal, so a torn archive is
-    # corruption, never an in-flight append.
-    plain = [f for f in files if not f.name.endswith(".gz")]
+        try:
+            entries = list(directory.iterdir())
+        except OSError as exc:
+            raise CensusError(
+                f"the local record directory {directory} could not be LISTED "
+                f"({type(exc).__name__}: {exc}) — an unreadable surface is "
+                "not an empty one, so an absence is NOT established") from exc
+        for entry in entries:
+            if not entry.is_file():
+                continue
+            for suffix in _LOCAL_RECORD_SUFFIXES:
+                if entry.name.endswith(suffix):
+                    found[(entry.name[: -len(suffix)], suffix)] = entry
+                    break
+    files = sorted(found.values())
+    # The tail is only tolerance-able on the newest PLAIN day file in the LIVE
+    # directory: a `.gz` is written whole and verified by the seal, and a plain
+    # file under `archive/` is not an in-flight append either — a torn line in
+    # either is corruption.
+    plain = [f for f in files
+             if f.parent == root and not f.name.endswith(".gz")]
     newest_plain = plain[-1] if plain else None
     if not files:
         raise CensusError(
