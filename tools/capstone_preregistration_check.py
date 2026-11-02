@@ -819,7 +819,7 @@ def resolve_base_ref(explicit: str | None = None) -> str | None:
     return None
 
 
-def _with_refusal(head: str, fatal: "HistoryUnavailable | None",
+def _with_refusal(head: str, fatal: HistoryUnavailable | None,
                   failures: list[str]) -> str:
     """``head``, annotated with the refusal that stands behind it and the findings already proved.
 
