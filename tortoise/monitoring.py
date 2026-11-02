@@ -2354,21 +2354,26 @@ class ContextConfinementError(RuntimeError):
     read a log line from here as an incident class.
 
     The seam maps :class:`_ContextNotReproduced` — the PRIVATE subclass
-    ``confine_context`` raises BEFORE running the callable — not this base
-    class. That distinction is the whole point: a ``ContextConfinementError``
-    raised from INSIDE the callable (a nested ``confine_context``, or a helper
-    that uses one) is a DOMAIN error and must propagate unchanged, or a caller
-    would be told "no work was done" about work that had already started.
+    ``confine_context`` raises BEFORE running its callable — and it maps it by
+    OWNERSHIP (``error.origin is`` the submitted wrapper), not by type. Both
+    halves matter: a ``ContextConfinementError`` raised from inside the callable
+    is a DOMAIN error and must propagate unchanged, or a caller would be told
+    "no work was done" about work that had already started. The type alone is
+    not enough to establish that — a NESTED ``confine_context`` that fails while
+    an OUTER confined callable is already executing raises the same subclass,
+    after the outer callable has done work.
     """
 
 
 class _ContextNotReproduced(ContextConfinementError):
-    """``confine_context`` could not build the invocation's context — ``fn`` did not run.
+    """``confine_context`` could not build the invocation's context — it did not run.
 
-    Private on purpose (see the base class): only the pre-run arm inside
-    ``confine_context`` raises it, which is what lets the hosted seam treat it as
-    "nothing happened, safe to retry" without making the same claim about a
-    ``ContextConfinementError`` raised later, from inside the callable.
+    Private on purpose (see the base class). Only the pre-run arm inside
+    ``confine_context`` raises it, and it stamps ``origin`` with the wrapper that
+    raised it, so the hosted seam can tell "MY submission never ran" (safe to
+    retry) from a same-typed failure nested inside a callable that DID run. The
+    claim it carries is per INVOCATION of the wrapper that raised it, never
+    "nothing in this submission happened".
     """
 
 
@@ -2457,9 +2462,15 @@ def confine_context(fn: Callable[..., object]) -> Callable[..., object]:
         try:
             ctx = _fresh_context(snapshot)
         except Exception as exc:
-            raise _ContextNotReproduced(
+            err = _ContextNotReproduced(
                 f"could not reproduce the submitting context for {name!r}: "
-                f"{type(exc).__name__}: {exc}") from exc
+                f"{type(exc).__name__}: {exc}")
+            # OWNERSHIP, not type: the seam may only treat this as "my
+            # submission never ran" when the wrapper that raised it IS the one
+            # it submitted. A nested wrapper's identical failure happens with
+            # an outer callable already part-way through its work.
+            err.origin = _confined
+            raise err from exc
         return ctx.run(fn, *args, **kwargs)
 
     return _confined

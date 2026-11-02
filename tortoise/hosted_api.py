@@ -9007,9 +9007,9 @@ async def _cp_offload(fn, *, op: str, best_effort: bool = False,
 
     Thin hosted-side wrapper over ``monitoring.run_control_plane_call``. For
     an AUTH-CRITICAL call it owns the FAIL-CLOSED ERROR MAPPING: an offload
-    that misses its wait bound, a saturated worker pool, or a context wrapper
-    that could not build the invocation's context BEFORE running the callable
-    (#10612, ``_ContextNotReproduced`` — so no work was done) becomes the
+    that misses its wait bound, a saturated worker pool, or the SUBMITTED
+    wrapper failing before it ran its callable (#10612, ``_ContextNotReproduced``
+    whose ``origin`` is that wrapper — so no work was done) becomes the
     repo-standard 503 ``control_plane_unavailable`` the client already renders,
     never a hang and never a silent pass-through. Domain errors raised by the
     helper itself propagate UNCHANGED, so each caller's existing error mapping
@@ -9080,6 +9080,14 @@ async def _cp_offload(fn, *, op: str, best_effort: bool = False,
             raise unavailable() from None
         raise _control_plane_unavailable() from None
     except _ContextNotReproduced as exc:
+        # ⚠️ Ownership, not type: map it only when the wrapper that raised it IS
+        # the one this call submitted. A NESTED confine_context that fails while
+        # an OUTER confined callable is already executing raises the same
+        # subclass — after that outer callable has done work — and must
+        # propagate as a domain error, not become a retryable "nothing
+        # happened" 503 a mutating client would replay.
+        if getattr(exc, "origin", None) is not fn:
+            raise
         # #10612 P1: the wrapper could not build THIS invocation's context, so
         # the callable NEVER RAN — the same "no work was done" outcome a
         # refused submission has, and the same honest, retryable 503. Without

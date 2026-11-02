@@ -271,6 +271,47 @@ def test_a_context_error_from_inside_the_callable_is_a_domain_error() -> None:
     assert "NESTED" in str(excinfo.value)
 
 
+def test_a_NESTED_wrapper_failure_keeps_propagating(monkeypatch) -> None:
+    """Ownership, not type: a nested wrapper's failure happens AFTER work began.
+
+    Two confined wrappers, the SECOND one's context failing: the outer callable
+    has already executed a step, so the submission must surface the error rather
+    than the retryable "no work was done" 503 a mutating caller would replay.
+    The first test above raises the bare class by hand; this one produces the
+    real nesting the arm's comment names.
+    """
+    real_fresh = monitoring._fresh_context
+    calls = {"n": 0}
+
+    def _flaky(snapshot):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return real_fresh(snapshot)
+        raise MemoryError("simulated: nested allocation failure")
+
+    monkeypatch.setattr(monitoring, "_fresh_context", _flaky)
+    steps: list[str] = []
+    nested = confine_context(lambda: steps.append("inner"))
+
+    def outer():
+        steps.append("outer-executed-a-step")
+        return nested()
+
+    confined_outer = confine_context(outer)
+
+    async def _seam() -> None:
+        await ha._cp_offload(confined_outer, op="ctxvar-nested", pool="graph",
+                             unavailable=ha._graph_unavailable)
+
+    with pytest.raises(ContextConfinementError) as excinfo:
+        asyncio.run(_seam())
+    assert not isinstance(excinfo.value, HTTPException), (
+        "a NESTED wrapper's failure must not become the retryable 503")
+    assert "nested allocation failure" in str(excinfo.value)
+    assert steps == ["outer-executed-a-step"], (
+        f"the outer callable HAD run before the nested failure; saw {steps}")
+
+
 # ── (d) the two call sites this diff actually changes ──────────────────────
 
 
