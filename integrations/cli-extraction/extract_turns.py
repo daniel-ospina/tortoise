@@ -136,13 +136,27 @@ _DUMP_QUERY = (
     "ORDER BY t.id"
 )
 
-#: The capture store's own frame (`_capture_turn_text`, ``"[role] body"``).
+
+def _is_turn_of(row) -> bool:
+    """`{session}_t{i}` — the id shape the one turn store derives.
+
+    A bare `is_episodic`/`pointKind='event'` filter is not enough: any other
+    episodic Point wired to the Session would be spliced into the transcript.
+    Checked host-side because `t.id STARTS WITH (s.id + '_t')` does not parse
+    in the deployed FalkorDB (measured: `ResponseError: Type mismatch: expected
+    Boolean but was String`).
+    """
+    sid = str(row[0]).split("://", 1)[-1]
+    return str(row[5]).startswith(f"{sid}_t")
+
+#: The capture store's own frame (`_capture_turn_frame`, ``"[role] body"``).
 #: The turn's `content` property holds the FRAMED text and `speaker` holds the
 #: un-bracketed role, so a transcript line built verbatim from `content` says
-#: the speaker twice. `_capture_turn_role_text` is the reader's inverse — this
-#: is a local copy of it because `dump` maps rows on the HOST, where `tortoise`
-#: is not necessarily importable (the whole lane talks to the container).
-_FRAME_RE = re.compile(r"^\[([^\]\n]+)\]\s?(.*)$", re.S)
+#: the speaker twice. This mirrors `_capture_turn_role_text` EXACTLY (including
+#: `*` rather than `+` for the role, so an EMPTY role still unframes) — a local
+#: copy because `dump` maps rows on the HOST, where `tortoise` is not
+#: necessarily importable (the whole lane talks to the container).
+_FRAME_RE = re.compile(r"^\[([^\]]*)\]\s*", re.S)
 
 
 def _turn_order(row) -> tuple:
@@ -158,7 +172,11 @@ def _turn_order(row) -> tuple:
     """
     sid = str(row[0])
     m = re.search(r"_t(\d+)$", str(row[5]))
-    return (sid, int(m.group(1)) if m else 0)
+    if m is None:
+        # An id that carries no turn index is not a turn: it cannot be
+        # ordered, and defaulting to 0 would splice it in front of turn 0.
+        raise ValueError(f"turn id carries no index: {row[5]!r}")
+    return (sid, int(m.group(1)))
 
 
 #: One graph row -> one turns-file record. The `by` key carries the turn ROLE
@@ -170,7 +188,7 @@ def _turn_record(row) -> dict:
     framed = _FRAME_RE.match(text)
     if framed:
         role = role or framed.group(1)
-        text = framed.group(2)
+        text = text[framed.end():]
     return {"src": row[0], "kind": row[1], "by": role,
             "content": text, "at": str(row[4])}
 
@@ -195,7 +213,7 @@ def dump(out: Path, allow_empty: bool = False):
         "g = sdk._get_proj().g\n"
         f"rows = g.query({_DUMP_QUERY!r}).result_set\n"
         "for r in rows:\n"
-        "    print(json.dumps([r[0], r[1], r[2], r[3], str(r[4])]))\n"
+        "    print(json.dumps([r[0], r[1], r[2], r[3], str(r[4]), str(r[5])]))\n"
         "sdk.close()\n"
     )
     try:
@@ -206,8 +224,9 @@ def dump(out: Path, allow_empty: bool = False):
         raise SystemExit(f"dump: docker exec timed out after {DOCKER_TIMEOUT}s "
                          "— is the container healthy?") from exc
     rows = [json.loads(ln) for ln in r.stdout.splitlines() if ln.strip()]
+    turns = [row for row in rows if _is_turn_of(row)]
     out.write_text("".join(json.dumps(_turn_record(row)) + "\n"
-                           for row in sorted(rows, key=_turn_order)))
+                           for row in sorted(turns, key=_turn_order)))
     with out.open() as fh:
         n = sum(1 for _ in fh)
     if n == 0 and not allow_empty:
@@ -220,7 +239,13 @@ def dump(out: Path, allow_empty: bool = False):
 
 
 def build_transcripts(turns_path: Path):
-    """Group turns by codex thread -> {full_thread_id: transcript}.
+    """Group turns into transcripts: `{key: transcript}`.
+
+    Two keyings, one per source shape. A `session://<id>` source (what `dump`
+    emits from the capture lanes) keys by the **capture session id**, so
+    `--transcript <session-id>` works. A `codex://threads/<id>` source keys by
+    the FULL thread id and raises on any other `codex://` shape. Any other src
+    (a hand-built turns file) keeps its full tail id with the fragment stripped.
 
     Keys are the FULL thread id (a truncated key would merge distinct
     threads: the fixtures are UUIDv7, whose first hex characters encode a
@@ -243,15 +268,11 @@ def build_transcripts(turns_path: Path):
             elif t["src"].startswith("session:"):
                 # A CAPTURE-turn source (what `dump` emits): the key is the
                 # session id itself, so `--transcript <session-id>` works.
-                # A remainder carrying `/` or `#` would silently merge two
-                # sessions into one key — the failure this function raises on
-                # for the codex shape — so refuse it here too.
-                sm = re.fullmatch(r"session:(?://)?([^/#]+)(?:#message=[^/]*)?",
-                                  t["src"])
-                if sm is None:
-                    raise ValueError(
-                        f"unexpected session source shape: {t['src']!r}")
-                key = sm.group(1)
+                # Take the ENTIRE remainder (minus the writer's own
+                # `#message=` fragment) — never a tail split: truncating would
+                # collapse `teamA/run-7` and `teamB/run-7` into one transcript.
+                raw = t["src"].split("://", 1)[-1]
+                key = raw.split("#message=", 1)[0]
             else:
                 # hand-built turns files: full tail id, fragment stripped —
                 # no truncation (a length cut would silently re-introduce the

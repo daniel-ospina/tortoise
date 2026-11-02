@@ -11,9 +11,8 @@ No SDK or MCP surface changes: this is a client-side integration. Its writes
 go through public SDK doors (`create_point`, `set_source_tier`,
 `get_source_reliability`, `compute_confidence`, `query`); `dump` uses one
 private read (`sdk._get_proj().g`) because no public API offers a
-`(s:Session)-[:CONTAINS]->(t:Point)` walk — no public API offers it — that is
-the only private surface, it is read-only, and it is documented here rather
-than glossed.
+`(s:Session)-[:CONTAINS]->(t:Point)` walk — that is the only private surface,
+it is read-only, and it is documented here rather than glossed.
 
 `dump` reads the turns the capture lane actually writes (the ONE turn store,
 `tortoise/sdk.py`'s `_TURN_WRITE_CYPHER`, used by both the SDK and the hosted

@@ -34,11 +34,13 @@ from extract_turns import (
     _DUMP_QUERY,
     _parse_json_block,
     _sum_usage,
+    _is_turn_of,
     _turn_order,
     _turn_record,
     _wrap_transcript,
     build_transcripts,
     call_engine,
+    dump,
     resolve_transcript,
 )
 
@@ -350,20 +352,48 @@ class TestDumpReadsTheCaptureShape(unittest.TestCase):
         rec = _turn_record(["session://s1", "event", "user", "[user] hello", None])
         self.assertEqual(rec["by"], "user")
         self.assertEqual(rec["content"], "hello")
+        # an EMPTY role still unframes (the SDK inverse uses `*`, not `+`)
+        empty = _turn_record(["session://s1", "event", "", "[] hi", None])
+        self.assertEqual(empty["content"], "hi")
         # an unframed / hand-built record is passed through unchanged
         plain = _turn_record(["session://s1", "event", None, "hello", None])
         self.assertEqual(plain["content"], "hello")
 
-    def test_ambiguous_session_source_is_refused_not_merged(self):
-        # two sessions whose ids share a tail must never collapse into one
-        # transcript key (the mis-grouping `build_transcripts` raises on).
-        for src in ("session://teamA/run-7", "session://x#frag"):
-            with tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False) as f:
+    def test_two_sessions_with_a_shared_tail_never_merge(self):
+        # a tail split would collapse these into one transcript; the key is the
+        # WHOLE session id (minus only the writer's own `#message=` fragment).
+        with tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False) as f:
+            for src in ("session://teamA/run-7", "session://teamB/run-7",
+                        "session://x#message=1"):
                 f.write(json.dumps({"src": src, "kind": "event", "by": "user",
                                     "content": "x", "at": None}) + "\n")
-            self.addCleanup(os.unlink, f.name)
-            with self.assertRaises(ValueError, msg=src):
-                build_transcripts(Path(f.name))
+        self.addCleanup(os.unlink, f.name)
+        self.assertEqual(list(build_transcripts(Path(f.name))),
+                         ["teamA/run-7", "teamB/run-7", "x"])
+
+    def test_dump_payload_round_trips_six_columns(self):
+        # the container emitter and `_DUMP_QUERY`'s RETURN arity must agree;
+        # a short row is an IndexError inside the sort, not a red test, unless
+        # this drives `dump()` itself with the subprocess mocked.
+        emitted = json.dumps(["session://s1", "event", "user",
+                              "[user] hello", "2026-11-02T00:00:00Z", "s1_t0"])
+        with tempfile.TemporaryDirectory() as td:
+            out = Path(td) / "turns.jsonl"
+            with mock.patch("extract_turns.subprocess.run") as run:
+                run.return_value = types.SimpleNamespace(stdout=emitted + "\n", stderr="")
+                dump(out)
+            self.assertEqual(build_transcripts(out), {"s1": "[2026-11-02] user: hello"})
+
+    def test_turn_order_refuses_a_turn_id_with_no_index(self):
+        with self.assertRaises(ValueError):
+            _turn_order(["session://s1", "event", "r", "[r] x", None, "no-index"])
+
+    def test_a_non_turn_point_is_not_spliced_into_the_transcript(self):
+        # `is_episodic` + `pointKind='event'` is not enough: only the derived
+        # `{session}_t{i}` id is a turn.
+        self.assertTrue(_is_turn_of(["session://s1", "event", "r", "x", None, "s1_t0"]))
+        self.assertFalse(_is_turn_of(["session://s1", "event", "r", "x", None, "s1_note"]))
+        self.assertFalse(_is_turn_of(["session://s10", "event", "r", "x", None, "s1_t0"]))
 
     def test_turn_record_carries_speaker_as_the_role(self):
         rec = _turn_record(["session://s1", "event", "user", "hello", None])
