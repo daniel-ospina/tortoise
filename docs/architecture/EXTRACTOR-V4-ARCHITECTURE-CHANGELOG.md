@@ -1497,17 +1497,28 @@ that never reaches the graph). ⛔ And judging one span while the write HARD-cut
 the mirror hole (review cycle 14: the value split at the cap was STORED as its truncated prefix
 `… hit 4.` with no warning, so the graph held a number the model never wrote). Both are corrected
 rather than disclosed: `_write_span` is now BOTH the cut the judge sees and the cut the point is
-built from, the quote is stripped before that cut, and a split token is dropped whole only when what
-would be lost carries an alphanumeric character (a punctuation-only tail keeps the token, so the
-census does not lose a judgeable point to a full stop). The refused point's `supersedes` ref leaves through
+built from, and the quote is stripped before that cut. ⛔ AND THE SPAN MOVES ONLY WHERE THE RULE IS AT
+STAKE (review cycle 18: two `core` tests green on `main` and red here): a split token is dropped whole
+only when the part the cut would KEEP carries a DIGIT — the numeral that could be read short — because
+`_MAX_CONTENT` is also the IDENTITY key (`_endpoint_keys`, `_merge_verdict_keys`,
+`classify_consolidation`, the write's own dedup) and every point already in the graph carries its hard
+`x[:1000]` spelling. Measured on the unconditional word-boundary drop this entry first shipped: a
+1639-char content stored 999 chars instead of 1000, a VET-authorised MERGE was refused and a duplicate
+Point minted (`stats["merges"] == 0`), and `_mint_endpoint` stored 550 of a 1054-char ref's 1000. A
+punctuation-only tail still keeps the token (the census does not lose a judgeable point to a full
+stop), and the residual the narrowing buys — a legacy hard-clipped row whose cut split a NUMERAL keys
+apart from a re-extraction of the same claim — is stated as row (n) rather than absorbed. The refused point's `supersedes` ref leaves through
 the shared drop report (`_carry_fold_supersede` with no survivor), so it is named, not lost — `#9906`'s
 no-silent-drop rule. `_mint_endpoint` (`#2552`'s mint-before-wire path) reads the recorded refusals and
 will not re-mint one, because building the endpoint Point from the model's text undid the refusal one
 step later — and it cuts with `_write_span` for the same reason (review cycle 15, measured: a HARD
 `[:cap]` there stored `… p95 hit 4` out of `… p95 hit 4.0 seconds` as a quote-less endpoint Point, a
-value the model never wrote, and — the stored content being the token-safe span — made a byte-identical
-operator ref miss the `n in point_ids` dedup and mint a DUPLICATE beside the point it named). One
-truncation helper for both halves, so the two strings cannot disagree.
+value the model never wrote, and — the stored content being a different cut from the write's — made a
+byte-identical operator ref miss the `n in point_ids` dedup and mint a DUPLICATE beside the point it
+named). One truncation helper for both halves, so the two strings cannot disagree — and, since cycle
+18, one SPAN: the mint stores the ref's own `ref[:_MAX_CONTENT]` window (the key `_endpoint_keys`
+compares, and the shape the closure/removal arms re-read) except where the cut would truncate a
+numeral.
 
 **What it does NOT enforce — and the row, not this page, is the list.** The engine is the production
 one (`_value_slots` reads `_value_bindings`, the E5/E7 contradiction engine; no second value
