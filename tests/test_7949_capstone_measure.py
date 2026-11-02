@@ -2134,23 +2134,47 @@ def test_no_document_quotes_the_superseded_runs_e1_aux_numbers_as_current():
     readme = (_REPO / "docs/evidence/7949-capstone/README.md").read_text(encoding="utf-8")
     index = (_REPO / "docs/00_index.md").read_text(encoding="utf-8")
 
+    # ⛔ THE NUMBERS COME FROM THE LOG, NEVER FROM THIS TEST. A constant here turns the
+    #    REQUIRED half of this pin into a false-red trap on the very operation the
+    #    bundle exists to support: the next re-measurement would have to edit the pin
+    #    to agree with the artifact the pin is supposed to be checking, and until
+    #    somebody did, a CORRECT document would red (measured defect, review round 5).
+    #    The BAN list below is the opposite case and stays literal: it names one
+    #    specific HISTORICAL triple, and "a superseded run produced this" does not stop
+    #    being true when a third run supersedes this one.
+    shipped = _newest_log(_scored_logs())
+    aux = re.search(
+        r"^e1-aux objects_in_graph=(\d+) bare_definite=(\d+) share=([0-9.]+)",
+        shipped.read_text(encoding="utf-8"), re.M,
+    )
+    assert aux, (
+        f"{shipped.name} carries no `e1-aux` line, so neither the shipped E1 share nor "
+        "this pin's REQUIRED half can be stated — re-derive the prose from a log that "
+        "does measure it, not by editing this pin")
+    objects, bare, share = aux.group(1), aux.group(2), aux.group(3)
+
     for name, text in (("README.md", readme), ("docs/00_index.md", index)):
         flat = _flat(text)
         for phrase in _SUPERSEDED_E1_AUX:
             assert _flat(phrase) not in flat, (
                 f"{name} quotes the SUPERSEDED run's e1-aux numbers as current "
-                f"({phrase!r}) — the shipped log measures 64 Objects at 14/64 = "
-                "0.21875; say what THIS run measured, and keep the superseded triple "
-                "only where it is labelled as the superseded stamp's history")
+                f"({phrase!r}) — {shipped.name} measures {objects} Objects at "
+                f"{bare}/{objects} = {share}. Say what THIS run measured. This pin "
+                "bans the superseded triple in these two documents OUTRIGHT: it does "
+                "not implement a labelled-history exemption (an earlier version of "
+                "this message promised one, which no lane could satisfy) — the "
+                "labelled form belongs in the sentence that carries its own "
+                "retrieval route, which is not these two documents' E1 headline")
 
-    assert "64 `:Object` nodes" in readme and "14/64 = 0.21875" in readme, (
-        "README.md no longer states the shipped run's E1-aux numbers (64 `:Object` "
-        "nodes / 14/64 = 0.21875) — the ban above would pass vacuously on a bundle "
-        "that dropped the measurement")
-    assert "64 Objects at a 14/64 = 0.21875" in index, (
+    assert f"{objects} `:Object` nodes" in readme and f"{bare}/{objects} = {share}" in readme, (
+        f"README.md no longer states the shipped run's E1-aux numbers ({objects} "
+        f"`:Object` nodes / {bare}/{objects} = {share}, from {shipped.name}) — the ban "
+        "above would pass vacuously on a bundle that dropped the measurement")
+    assert f"{objects} Objects at a {bare}/{objects} = {share}" in index, (
         "docs/00_index.md's capstone row no longer states the shipped run's E1-aux "
-        "numbers — re-derive them from capstone-measured-9152448d.log's `e1-aux` "
-        "line rather than dropping the claim")
+        f"numbers ({objects} Objects at a {bare}/{objects} = {share}, from "
+        f"{shipped.name}) — re-derive them from that log's `e1-aux` line rather than "
+        "dropping the claim")
 
 
 # ── the bundle's OWN `file:line` cites must RESOLVE (not merely be spelled) ──
