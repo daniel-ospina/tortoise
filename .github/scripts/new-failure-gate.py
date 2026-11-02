@@ -698,11 +698,12 @@ def evaluate(args: argparse.Namespace) -> int:
             raise Unmeasured(
                 "leg(s) " + ", ".join(repr(leg) for leg in never_ran)
                 + " produced this run's failure(s), but no EXAMINED run of main's"
-                " baseline window executed the leg (every failing run this window read"
-                " had it skipped, cancelled, neutral, stale or absent — the complement of"
-                " _EXECUTED_CONCLUSIONS) — the rate is measured over the"
-                " WINDOW, not over this leg, so the failure cannot be certified as"
-                " introduced here")
+                " baseline window executed the leg: in every failing run this window"
+                " read, its job concluded something other than "
+                + ", ".join(sorted(_EXECUTED_CONCLUSIONS))
+                + " (skipped, cancelled, neutral, stale, action_required — or no such"
+                " job at all) — the rate is measured over the WINDOW, not over this"
+                " leg, so the failure cannot be certified as introduced here")
 
         blocked_path = outdir / "blocked.txt"
         verdict_path = outdir / "verdict.txt"

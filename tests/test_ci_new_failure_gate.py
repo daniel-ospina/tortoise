@@ -75,7 +75,7 @@ EXEMPTION_PY = REPO / "scripts" / "ci_exemption.py"
 #:            stale, absent), and the counter shortcut is documented as
 #:            sufficient-not-necessary for a green run. No logic change: no new branch,
 #:            no exit-code change, no polarity change.
-_GATE_MODULE_SHA256 = "fb209788cb9fa7218453e2de168bb750c7e7d5a3acb4725ca32f023e2f975e34"
+_GATE_MODULE_SHA256 = "886f4c544995fbfadab3bdac49480a9c8bc6811eb61299abc0f73b21a73c5509"
 
 #: The shared decision, reached through the machine-local `scripts/` pointer
 #: (`$AGENT_INFRA_PATH`, gitignored, NOT tracked — #9475). Missing off a developer box
@@ -1036,12 +1036,30 @@ def test_the_refusal_names_the_conclusions_it_actually_treats_as_not_executed(tm
     cancelled, absent` describes a narrower thing than it did. Same class as the
     run-set overstatement this commit fixes, one level down.
     """
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("new_failure_gate", GATE)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
     proc = _leg_case(tmp_path, main_jobs=_MAIN_WINDOW_LEG_NEUTRAL)
     assert proc.returncode == 2, proc.stdout + proc.stderr
     assert "leg coverage: test-slow=NOT EXECUTED" in proc.stdout
-    assert "neutral" in proc.stdout, (
-        "the refusal's case list must name every non-executing state it acted on; "
-        f"`neutral` is missing from: {proc.stdout!r}")
+    # The EXECUTED set is GENERATED from the constant, so the words cannot drift from
+    # the code: a message naming a stale subset fails here the moment the constant moves.
+    executed = ", ".join(sorted(module._EXECUTED_CONCLUSIONS))
+    assert f"something other than {executed}" in proc.stdout, (
+        "the refusal must name the conclusions that DO count as executed, generated "
+        f"from `_EXECUTED_CONCLUSIONS` ({executed}); got: {proc.stdout!r}")
+    # The named states are EXAMPLES of that complement, not a completeness claim — so
+    # asserting them cannot certify a list as exhaustive the way the previous wording
+    # did (#10564 review, F1). `action_required` is a real conclusion in this repo
+    # (`tools/ci_verdict.py:NEGATIVE_CONCLUSIONS`).
+    for state in ("skipped", "cancelled", "neutral", "stale", "action_required"):
+        assert state in proc.stdout, f"{state!r} missing from the refusal: {proc.stdout!r}"
+    assert "the complement of" not in proc.stdout, (
+        "the message must not CERTIFY its example list as complete: the gate reads only "
+        "the conclusions it observes, and `absent` is not a conclusion at all")
 
 
 def test_a_leg_main_did_execute_still_blocks_a_genuinely_new_failure(tmp_path):
