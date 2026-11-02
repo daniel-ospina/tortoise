@@ -443,6 +443,11 @@ def test_floor_term_evicts_the_lowest_ranked_duplicate_not_the_first():
     ids = [h["id"] for h in order[:5]]
     assert "a1" in ids, "the session's best-ranked hit is never the one evicted"
     assert "b2" not in ids, "the lowest-ranked duplicate is the one that goes"
+    # ONLY an unrepresented session may trigger an eviction (``n == 0``). If a
+    # REPRESENTED session could trigger one, the unconditional count reset
+    # would under-count it and the window would exceed ``per_session_cap``.
+    assert [h["session_id"] for h in order[:5]].count("A") <= 2
+    assert [h["session_id"] for h in order[:5]].count("B") <= 2
 
 
 def test_floor_term_is_bounded_by_the_window_and_spends_the_duplicate_slot():
@@ -507,8 +512,11 @@ def test_floor_term_keeps_the_deferred_tail_in_original_rank_order():
     invert and ``dedup_pool`` (which keeps the first ``max_chunks_per_session``
     RAW chunks in POOL order) keeps the worse chunk and drops the better one —
     a reordering artifact charged to the diversity policy. Session E holds
-    ranks 1, 2 and 6 with cap 3, so the re-cap is what exposes the order; both
-    survivors must be E's best-ranked chunks."""
+    ranks 1, 2 and 6 with cap 3. Session B holds ranks 3-5 and is the session
+    the floor term evicts twice (when C and D arrive), so B is the one whose
+    tail order the re-cap exposes: it must keep its best-ranked chunks (b1,
+    b2), never the evicted b3. Pinned as the whole output, because asserting
+    only on E passes with the tail sort deleted (E is never evicted here)."""
     def raw(hid, session):
         return {"id": hid, "session_id": session,
                 "point_kind": _SESSION_TRANSCRIPT_KIND}
@@ -518,8 +526,9 @@ def test_floor_term_keeps_the_deferred_tail_in_original_rank_order():
     out = _guard_and_recap_pool()(items, guard=True, window=5,
                                   per_session_cap=3, floor_term=True,
                                   max_chunks_per_session=2)
-    assert [h["id"] for h in out if h["session_id"] == "E"] == ["e1", "e2"], (
-        "the re-cap must keep E's best-ranked chunks, never its rank-6 one")
+    assert [h["id"] for h in out] == ["e1", "e2", "b1", "c1", "d1", "b2"], (
+        "the evicted duplicate must keep rank order, so the re-cap keeps the "
+        "better chunk (b2) and not the evicted b3")
 
 
 def test_guard_and_recap_pool_forwards_the_floor_term():
@@ -533,3 +542,22 @@ def test_guard_and_recap_pool_forwards_the_floor_term():
                                floor_term=False, max_chunks_per_session=99)
     assert "d1" in [h["id"] for h in on[:5]]
     assert "d1" not in [h["id"] for h in off[:5]]
+
+
+def test_a_represented_session_never_evicts_a_duplicate():
+    """Only an UNREPRESENTED session may take a slot back. A session that
+    already holds a window slot must not evict another session's duplicate —
+    the floor term is a lower bound on representation, not a licence for a
+    represented session to outrank the diversity discipline."""
+    # A holds 2 (cap), B holds 1; a THIRD A arrives at a full window.
+    items = [_hit("a1", "A"), _hit("a2", "A"), _hit("b1", "B"),
+             _hit("c1", "C"), _hit("d1", "D"), _hit("a3", "A"),
+             _hit("b2", "B"), _hit("e1", "E")]
+    order = session_diverse_order(items, window=5, per_session_cap=2,
+                                  floor_term=True)
+    top5 = [h["session_id"] for h in order[:5]]
+    assert top5.count("A") <= 2, (
+        "a represented session must not evict its way back into the window")
+    assert "a3" not in [h["id"] for h in order[:5]]
+    assert "e1" in [h["id"] for h in order[:5]], (
+        "the arriving UNREPRESENTED session E is the one that gets the slot")
