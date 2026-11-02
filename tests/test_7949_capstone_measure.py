@@ -3797,12 +3797,12 @@ def test_every_readme_line_cite_carries_the_sentence_it_quotes():
 
     ⛔ WHY (#10601 review round 2). `E1-E5-PROOFS.md` cited a line RANGE for the
     sentence *"printed, and NOT used to green the row, because the artifact
-    counts atomic Points, not surviving planted units"* — but by this head that
-    range was the E5 re-score SHELL TRANSCRIPT and the quoted sentence had moved
-    down again (the numbers are not repeated here: a quoted line number is the
-    very drift this pin exists to catch, and the cite now lives in the document
-    that carries it, re-derived from the file). It was already stale at the base and every added line
-    pushed it further, and nothing could see it: `_BUNDLE_CITE` resolves only
+    counts atomic Points, not surviving planted units"*, and that range stopped
+    carrying the sentence as soon as lines were inserted above it — it went
+    stale at the base, and every edit pushed the quote further from the number
+    that named it. NO numbers are repeated here on purpose: a quoted line number
+    is the very drift this pin exists to catch, and the LIVE cite lives in the
+    document that carries it, re-derived from the file. Nothing could see it: `_BUNDLE_CITE` resolves only
     `sdk|edges|extractor_v2`, `_BUNDLE_CITE_PREFIX` requires the file to be one
     of those three, and the bundle's own docs are not sources. A document whose
     thesis is "a claim nothing re-checks can rot silently" leaves its
@@ -3818,8 +3818,10 @@ def test_every_readme_line_cite_carries_the_sentence_it_quotes():
     is that unwatched claims rot. The guard is now `checked == len(found)`, so a
     dropped quote reds instead of silently shrinking coverage.
 
-    Non-vacuity: at the pre-fix head it reds on `README.md:430-435`, where the
-    quote is absent; re-pointing the surviving cites at the wrong range reds too.
+    Non-vacuity: at the pre-fix head this pin reds, because the cited range no
+    longer carries the quote it names; re-pointing any surviving cite at the
+    wrong range reds too. (The failing range is not re-quoted here for the same
+    reason as above — it is the drift, not the spec.)
     """
     import re as _re
 
@@ -3839,7 +3841,7 @@ def test_every_readme_line_cite_carries_the_sentence_it_quotes():
         start = int(match.group(1))
         end = int(match.group(2) or match.group(1))
         # ⛔ THE WINDOW STOPS AT THE NEXT CITE. A fixed-length lookahead reached
-        # past the following `README.md:554-555` and attributed ITS quote to this
+        # past the FOLLOWING cite in the document and attributed ITS quote to this
         # cite, which would have made the pin pass on a cite pointing at nothing.
         nxt = found[index + 1].start() if index + 1 < len(found) else len(doc)
         tail = doc[match.end():min(nxt, match.end() + 600)]
