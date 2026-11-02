@@ -220,7 +220,8 @@ not establish:** its arm headers name fresh graphs (`s3ablate_a1075dfc_179349222
 same epoch-second suffix on both) and its `created=` counts are per-session deltas — that is
 *consistent with* a fresh baseline, and it is **not evidence of one**, because the pre-fix probe
 never printed the baseline and this log therefore contains no `graph baseline` line to check
-(`grep -c 'graph baseline' docs/evidence/5087-hypothesis/s3-ablation-a1075dfc.log` → `0`). The
+(`grep -c 'graph baseline' docs/evidence/5087-hypothesis/withdrawn/s3-ablation-a1075dfc.log` → `0`;
+the log is under `withdrawn/` — see `withdrawn/WITHDRAWN.md` for why, and #10463 for the ruling). The
 guard is enforced for future runs only. **No number moves** — the assertion can only REFUSE a run;
 it touches no count, no denominator and no bar.
 
@@ -262,7 +263,12 @@ it touches no count, no denominator and no bar.
     not an ancestor of `HEAD` — the plan must *precede* the run it arbitrates. ⚠️ **What this does
     not establish about the measured run:** it was taken *before* either guard existed, so the only
     evidence that its bars came from a document that preceded it is the one it already carried — its
-    `prereg=` line and the ordering the gate checks. **No number moves**; the guards can only refuse a
+    `prereg=` line and, on the contribution branch, the commit ordering. ⛔ **That ordering is not
+    readable from merged history** (the squash merge collapsed both add-commits into one), so the
+    ordering half of `capstone_preregistration_check.py` now examines **no** log for this bundle — the
+    log is under `withdrawn/`, outside its non-recursive glob — and the provenance is withdrawn (see
+    `withdrawn/WITHDRAWN.md`; #10463 records it PROVISIONAL). **No number moves**; the guards can only
+    refuse a
     run.
 
 No bar, denominator, corpus or metric definition was touched by any of this, and the run was **not**
@@ -386,17 +392,15 @@ survive because they are parsed out of the **commit**, never this file.
    changes only definitions and floors". There is no pre-amendment version in the history: the
    amendment commit `a1075dfc2` is also the document's only add-commit
    (`git log --diff-filter=A -- docs/evidence/5087-hypothesis/PRE-REGISTRATION.md`), so it *adds* all
-   236 lines and changes nothing. The anti-tuning property the sentence reaches for still holds, by
-   a different mechanism: the add-commit (`a1075dfc2`, `00:12:17Z`) strictly precedes the measured
-   log's add-commit (`325f2a1a5`, `00:26:01Z`) — and the bars are read out of that commit rather
-   than the worktree. ⚠️ On `main` those two epochs no longer EXIST: `#10468` was merged as a
-   squash (`cfa3de857`), which collapsed both commits into one, so `git log --diff-filter=A`
-   reports the same epoch for the document and for its log and no epoch comparison can order them.
-   The ordering is therefore carried by `atomic_add_ordering` in `preregistration.json` (deliberately NOT in the
-   pre-registration's pins block: that block is inside `document_sha256`, and re-cutting the digest
-   would make the record describe a document that post-dates the run) — and it
-   is still checkable, by CONTENT rather than by position: `git diff --stat a1075dfc2 325f2a1a5 --
-   docs/evidence/5087-hypothesis/` lists only `README.md` and the log, so the pre-registration is
-   byte-identical at the commit that froze the bars and at the commit that added the measurement. **No
+   236 lines and changes nothing. The anti-tuning property the sentence reaches for held **on the contribution
+   branch**: there the add-commit (`00:12:17Z`) strictly precedes the measured log's
+   add-commit (`325f2a1a5`, `00:26:01Z`), and the bars are read out of that commit rather than the
+   worktree. ⛔ That ordering is **not readable from merged history** — the squash merge collapsed
+   both add-commits into one commit, so *at the squash* `capstone_preregistration_check.py`'s
+   ordering half read the *same* epoch for the two paths, and at this head it reads **no** log for
+   this bundle at all (the log is under `withdrawn/`, outside the non-recursive glob). The
+   provenance is therefore **withdrawn** (see
+   `withdrawn/WITHDRAWN.md`; #10463 records the ordering claim as PROVISIONAL). This sentence keeps
+   the history, not the assurance. **No
    bar, floor, denominator or number moves**; the defect is a process claim, and it is withdrawn
    here.

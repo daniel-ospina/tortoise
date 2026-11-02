@@ -4603,13 +4603,14 @@ def test_the_relays_a_sibling_test_file_makes_land_on_what_they_name():
         # re-cut comments this PR added to that file pushed it 1590 → 1596, and the record↔bars
         # tests added above at the same head pushed it 1596 → 1673, then 1682 when the disagreement
         # case was widened from the two log-invisible bars to all seven, then 2180 by #10546's
-        # ordering-arm split plus the ancestry/late-touch tests, then 2326 by its cycle-15
+        # ordering-arm split plus the ancestry/late-touch tests, then 2375 by its cycle-15
         # disclosure rules (a `squash_merge` may not cite itself, and must be able to carry the
-        # pair) with the `_real_squash` fixture that verifies them — the pin landing rather than
-        # drifting, because a plausible offset is what it exists to refuse. ⛔ Re-derive this
-        # number, never delete the entry: the whole point is that a citation which names a line
-        # that does not say it is a dead pointer.
-        ("tests/test_capstone_preregistration_9075.py", 2326):
+        # pair) with the `_real_squash` fixture that verifies them, and by its cycle-15 settlement
+        # of the #10544 collision (the withdrawn bundle carries no disclosure) — the pin landing
+        # rather than drifting, because a plausible offset is what it exists to refuse. ⛔
+        # Re-derive this number, never delete the entry: the whole point is that a citation which
+        # names a line that does not say it is a dead pointer.
+        ("tests/test_capstone_preregistration_9075.py", 2375):
             r"test_the_changes_job_carries_no_job_scope_env",
         # the four fleet observers' prose (`:25-26`): the inventory row it contrasts — the
         # moving alias the observers must NOT pin to, which the version pin below it replaces

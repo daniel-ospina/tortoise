@@ -943,31 +943,80 @@ def test_the_cli_says_when_a_disclosure_history_was_not_checked_here():
     assert check._unverified_history_note({"squash_merge": "x", "branch_commits": []}) == ""
 
 
-def test_the_cli_prints_the_declared_atomic_add_and_its_commits(capsys):
-    """A declared atomic add must reach the human path, and name the commits it rests on (#10531)."""
-    if check.history_unavailable():
-        pytest.skip("needs full history — CI test jobs check out at fetch-depth:1")
-    assert check.main(["--dir", "docs/evidence/5087-hypothesis"]) == 0
+def test_the_cli_prints_the_declared_atomic_add_and_its_commits(monkeypatch, capsys):
+    """A declared atomic add must reach the human path, and name the commits it rests on.
+
+    ⛔ NO LONGER DRIVEN BY THE 5087 BUNDLE (#10544). That bundle's log was WITHDRAWN on `main`
+    (`108cec779`, ruling item 3) before this PR could land, so the directory it is checked against
+    now holds ZERO evidence logs and the atomic arm cannot fire there — see
+    `test_the_withdrawn_bundle_no_longer_carries_an_atomic_disclosure`. Printing the block is
+    therefore exercised on a report built here: the human path is what this test is about, and it
+    must not depend on a bundle's history to be covered.
+    """
+    report = {
+        "document": "docs/evidence/7949-capstone/PRE-REGISTRATION.md",
+        "rows": [{"id": "E1", "line": 1}],
+        "evidence_logs": ["e1-e2.log"],
+        "ok": True,
+        "failures": [],
+        "ordering": "verified (atomic-add DECLARED: e1-e2.log)",
+        "run_order_claim": "verified (atomic-add DECLARED: e1-e2.log)",
+        "ordering_exempt": [],
+        "ordering_atomic_add": ["e1-e2.log"],
+        "ordering_atomic_add_commits": {
+            "e1-e2.log": {
+                "squash_merge": "cfa3de857 measure(10463): … ratio 0.870 (#10468)",
+                "branch_commits": [
+                    "a1075dfc2 prereg(10463): the bars do not move",
+                    "325f2a1a5 measure(10463): the hypothesis is FALSE",
+                ],
+            }
+        },
+    }
+    monkeypatch.setattr(check, "run", lambda *a, **k: report)
+    assert check.main(["--dir", "docs/evidence/7949-capstone"]) == 0
     out = capsys.readouterr().out
     assert "ATOMIC-ADD declared" in out, out
+    assert "squashed by cfa3de857" in out, out
     assert "a1075dfc2" in out and "325f2a1a5" in out, out
     # The CLAIM line is qualified — a consumer of `machine record run-order claim` must not read a
     # disclosed ordering as one the gate compared.
     assert "verified (atomic-add DECLARED" in out, out
+    # These two shas exist in THIS repository, so the block has nothing to disclaim.
+    assert "NOT checked here" not in out, out
+    # …and when they do NOT, the block says so instead of letting silence read as verification
+    # (#10529 review cycle 15, P1).
+    report["ordering_atomic_add_commits"]["e1-e2.log"]["branch_commits"] = [
+        "deadbeef1 the branch commit a squash left unreachable",
+    ]
+    assert check.main(["--dir", "docs/evidence/7949-capstone"]) == 0
+    assert "NOT checked here" in capsys.readouterr().out
 
 
-def test_the_run_report_carries_the_qualified_ordering_and_the_commits():
+def test_the_withdrawn_bundle_no_longer_carries_an_atomic_disclosure():
+    """The withdrawal (#10544) left the 5087 bundle with no log, so no disclosure may name one.
+
+    ⛔ THIS IS THE `#10544` INTERACTION, PINNED (#10546 review cycle 14, P2 named it; cycle 15 saw
+    it land). `main` took the ruling's item 3 — the log moved under `withdrawn/`, outside the
+    guard's NON-RECURSIVE glob — so `evidence logs: 0` and an `atomic_add_ordering` entry naming it
+    would be a STALE WAIVER: the stale rule reports "discloses '…', which is not in this directory"
+    and `changes` goes red again on landing. The disclosure was removed WITH the log; this test is
+    what stops it being restored by someone re-reading this PR's earlier body, which described a
+    bundle state that no longer exists.
+    """
     if check.history_unavailable():
         pytest.skip("needs full history — CI test jobs check out at fetch-depth:1")
-    report = check.run(PREREG_DIR.parent / "5087-hypothesis", use_corpus=False)
+    directory = PREREG_DIR.parent / "5087-hypothesis"
+    assert not sorted(directory.glob(check.EVIDENCE_LOG_GLOB)), (
+        "the measured log is back in the directory the ordering half reads — see #10544"
+    )
+    report = check.run(directory, use_corpus=False)
     assert report["ok"] is True, report["failures"]
-    assert report["ordering_atomic_add"] == ["s3-ablation-a1075dfc.log"]
-    assert report["ordering"].startswith("verified (atomic-add DECLARED")
-    assert report["run_order_claim"] == report["ordering"]
-    detail = report["ordering_atomic_add_commits"]["s3-ablation-a1075dfc.log"]
-    assert any(c.startswith("a1075dfc2") for c in detail["branch_commits"]), detail
-    # The squash commit is the one pointer a reader can resolve, and it must be carried.
-    assert detail["squash_merge"].startswith("cfa3de857"), detail
+    assert report["ordering_atomic_add"] == [], report["ordering_atomic_add"]
+    assert "ordering_atomic_add_commits" not in report, report.get("ordering_atomic_add_commits")
+    # A bare "verified" — the ordering half compared no log at all for this bundle.
+    assert report["ordering"] == "verified"
+    assert check._record_atomic_add(directory) == {}
 
 
 def test_an_undisclosed_atomic_add_is_not_excused_by_an_empty_reason(tmp_path, monkeypatch):

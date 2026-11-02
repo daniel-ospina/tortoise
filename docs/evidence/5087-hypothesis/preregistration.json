@@ -5,18 +5,8 @@
   "document": "docs/evidence/5087-hypothesis/PRE-REGISTRATION.md",
   "document_sha256": "sha256:70264efe738d5ee8d1721735f92077f0cae18e813e2b1102deecc4bd3c560156",
   "written_before_any_scored_run": true,
-  "written_before_any_scored_run_basis": "No SCORED run existed when this record was written: at a1075dfc2, the commit it was authored at, docs/evidence/5087-hypothesis/ carried no log at all. The one log now beside this record (s3-ablation-a1075dfc.log) was ADDED at 325f2a1a5, AFTER the bars were frozen, and it is the disclosed atomic add: squash merge cfa3de857 collapsed a1075dfc2 and 325f2a1a5 into one commit, so the logged ordering is carried by atomic_add_ordering in THIS record (a top-level key, deliberately NOT the pins block: the pins live inside the document document_sha256 freezes, and re-cutting that digest would make this record describe a document that post-dates the run) and by the fact that PRE-REGISTRATION.md is byte-identical at both branch commits. The only log in the tree's evidence bundles that predates this record is docs/evidence/7949-capstone/e1-e2.log, which is UNPREREGISTERED by its own lines (prereg=UNPREREGISTERED, every verdict=UNPREREGISTERED, result=UNPREREGISTERED, exit=3) and scores a DIFFERENT criterion set on this same corpus. No arm of this experiment had been run when these bars were frozen; the author had seen no created-node count for either arm.",
+  "written_before_any_scored_run_basis": "No SCORED run exists at this commit: docs/evidence/5087-hypothesis/ carries no log at all. The only log in the tree's evidence bundles that predates this record is docs/evidence/7949-capstone/e1-e2.log, which is UNPREREGISTERED by its own lines (prereg=UNPREREGISTERED, every verdict=UNPREREGISTERED, result=UNPREREGISTERED, exit=3) and scores a DIFFERENT criterion set on this same corpus. No arm of this experiment had been run when these bars were frozen; the author had seen no created-node count for either arm.",
   "unscored_runs_before_this_registration": [],
-  "atomic_add_ordering": {
-    "s3-ablation-a1075dfc.log": {
-      "reason": "The bars were committed BEFORE any arm ran, and the log says so itself: it names `prereg=a1075dfc2` \u2014 the commit its thresholds were read from, not the worktree \u2014 and states `changed files (3, all evidence/tooling)` between `source_sha` and that head. The ordering existed as two branch commits (a1075dfc2 wrote the bars at 00:12:17Z; 325f2a1a5 added this log at 00:26:01Z) and the SQUASH merge cfa3de857 collapsed both into one commit, so `git log --diff-filter=A` reports the same epoch for the document and the log and no epoch comparison can order them. The squash could not touch the CONTENT, and the content is what carries the claim here: PRE-REGISTRATION.md is byte-identical at a1075dfc2 and at 325f2a1a5 (`git diff --name-only a1075dfc2 325f2a1a5 -- docs/evidence/5087-hypothesis/` lists only README.md and this log), so no bar moved between the commit that froze them and the commit that added the measurement.",
-      "branch_commits": [
-        "a1075dfc2 prereg(10463): amend definitions before any run \u2014 the bars do not move (adds PRE-REGISTRATION.md; 00:12:17Z)",
-        "325f2a1a5 measure(10463): the S3 prior-injection hypothesis is measured and FALSE (adds s3-ablation-a1075dfc.log; 00:26:01Z)"
-      ],
-      "squash_merge": "cfa3de857 measure(10463): ... ratio 0.870 (#10468) \u2014 both branch commits, collapsed"
-    }
-  },
   "source_sha": "718ee3b497539540ea10269e7ccfe9b0867d010f",
   "corpus": {
     "fixtures_hash": "sha256:dd7e85200f4809f701b9e9c11816b541acea63afd0b2472998975e2ebcb035dc",
