@@ -108,6 +108,42 @@ def test_the_proxy_uses_the_question_date_as_the_recency_clock(monkeypatch):
     assert seen.get("date_window") == ("2023-04-14", "2023-04-21"), seen
 
 
+def test_the_proxy_resolves_the_month_name_year_from_the_question_date(monkeypatch):
+    """Review cycle 11 (#10549): the mirror was only half taken.
+
+    ``retrieve.py`` calls ``detect_time_constraint(question, default_year=year)``
+    where ``year`` comes from ``question_date`` (``:1891-1896``), because
+    ``detect_time_constraint``'s month-name interval branch resolves its year
+    from ``default_year`` with a ``2026`` fallback. The proxy omitted the
+    kwarg, so ``"between April 10 and April 20"`` on a 2023 question built
+    ``interval(2026-04-10, 2026-04-20)`` here and ``interval(2023-04-10,
+    2023-04-20)`` on the shipped path — the window arm was INERT on this class
+    while the shipped arm promoted, so an ON/OFF reading through the proxy
+    attributed nothing to it (the same defect cycle 5 fixed for the ISO
+    class, one branch over).
+
+    Both halves fail pre-fix: the spy sees ``2026-04-1x``, and the leg fires
+    zero times even though a session owns the visible slots and the gold turn
+    sits in-window — which is what makes this discriminate rather than
+    re-assert the happy path."""
+    seen: dict = {}
+    real = replay_mod.temporal_leg_fusion_order
+
+    def spy(candidates, **kwargs):
+        seen.update(kwargs)
+        return real(candidates, **kwargs)
+
+    monkeypatch.setattr(replay_mod, "temporal_leg_fusion_order", spy)
+    q = _question("What did I do between April 10 and April 20 for the puppy?")
+    assert detect_time_constraint(q["question"]).kind == "interval", (
+        "premise: the month-name interval class is what this pins")
+    # The year is unresolvable WITHOUT the caller's ``default_year``: the
+    # resolver's own fallback is 2026, a window that matches no 2023 session.
+    out = replay_mod.replay([q], window=12)
+    assert seen.get("date_window") == ("2023-04-10", "2023-04-20"), seen
+    assert out["leg_fired"] == 1, out
+
+
 @pytest.mark.parametrize("question", [
     "How many days ago did I buy a smoker?",
     "Which did I get first, the leash or the kennel?",
