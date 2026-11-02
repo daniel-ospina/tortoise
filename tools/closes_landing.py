@@ -99,14 +99,95 @@ from pathlib import Path
 #   resolve/resolves/resolved
 # The optional `:`, one space, and the optional `owner/repo` prefix are GitHub's
 # own accepted forms.
-_CLOSING_RE = re.compile(
-    r"(?i)\b(?P<keyword>close[sd]?|fix(?:es|ed)?|resolve[sd]?)"
-    r"\s*:?\s*"
-    r"(?:(?P<slug>[A-Za-z0-9._-]+/[A-Za-z0-9._-]+))?"
-    r"#(?P<number>\d+)\b"
-)
+#
+# ⚠️ TWO separator spellings, because the two parses ask DIFFERENT questions
+# (#10634 review P3):
+#
+# * LENIENT (`\s*`) backs the FINDING arms, where a missed claim is a closure
+#   that silently does not fire — the defect this tool exists to catch — so a
+#   keyword one paragraph away from its reference is still worth reporting.
+# * STRICT (`[ \t]*`) backs every PASS (`lands`). `\s` matches a BLANK LINE, so
+#   `"Closes\n\n#100"` used to be a claim there and the `lands` arm passed on a
+#   keyword whose reference is a SEPARATE PARAGRAPH — a shape no GitHub doc
+#   shows and this tool cannot demonstrate fires. Same rule as the indented
+#   case (cycle 5): a pass may not rest on a shape the tool cannot show GitHub
+#   acts on. A blank-line-separated claim is still REPORTED (lenient arm), it
+#   just cannot buy a pass, so nothing real is dropped by the narrowing. ONE
+#   line break is allowed — that is not a paragraph break, and only the BLANK
+#   line is the undemonstrable shape (`\n?`, never `\n\n`).
+_CLOSING_SEPARATORS = {
+    "lenient": r"\s*:?\s*",
+    "strict": r"[ \t]*:?[ \t]*\n?[ \t]*",
+}
 
-_INLINE_CODE_RE = re.compile(r"`[^`\n]*`")
+
+def _closing_re(sep: str) -> re.Pattern[str]:
+    """The keyword pattern with ONE separator spelling (`lenient`/`strict`)."""
+    return re.compile(
+        r"(?i)\b(?P<keyword>close[sd]?|fix(?:es|ed)?|resolve[sd]?)"
+        + sep
+        + r"(?:(?P<slug>[A-Za-z0-9._-]+/[A-Za-z0-9._-]+))?"
+        r"#(?P<number>\d+)\b"
+    )
+
+
+_CLOSING_RE = _closing_re(_CLOSING_SEPARATORS["lenient"])
+_CLOSING_RE_ONELINE = _closing_re(_CLOSING_SEPARATORS["strict"])
+
+
+def _strip_inline_code(text: str) -> str:
+    """Blank every INLINE code span, whatever the delimiter's run length.
+
+    CommonMark opens a code span with a run of N backticks and closes it with a
+    run of exactly N, so a two-backtick delimited keyword is code exactly as a
+    one-backtick delimited keyword is. A single-backtick pattern left the wider
+    delimiters intact, so a QUOTED `Closes #N` written between two backticks on
+    each side counted as a claim — and on the CARRIER side that buys a `lands`
+    (#10634 review P3-2).
+
+    An unmatched run is literal text (CommonMark, not a span), and a span may
+    not reach past the END OF ITS LINE: a run in an indented code block (which
+    the lenient strip deliberately keeps) would otherwise pair with a run on a
+    later line and blank the real prose between them — the direction that loses
+    a closure. Over-reporting a keyword inside a long span is the safe one.
+    """
+    out: list[str] = []
+    i, n = 0, len(text)
+    while i < n:
+        if text[i] != "`":
+            out.append(text[i])
+            i += 1
+            continue
+        opener = i
+        while i < n and text[i] == "`":
+            i += 1
+        run = i - opener
+        line_end = text.find("\n", i)
+        limit = n if line_end < 0 else line_end
+        closer = -1
+        j = i
+        while j < limit:
+            if text[j] != "`":
+                j += 1
+                continue
+            k = j
+            while k < limit and text[k] == "`":
+                k += 1
+            if k - j == run:
+                closer = j
+                break
+            j = k
+        if closer < 0:
+            out.append(text[opener:i])  # unmatched: a literal run, not a span
+            continue
+        # Replace the span with spaces, keeping NEWLINES so the line structure
+        # the strict parse reasons about is untouched.
+        out.append("".join(
+            ch if ch == "\n" else " "
+            for ch in text[opener:closer + run]
+        ))
+        i = closer + run
+    return "".join(out)
 
 MAX_STACK_DEPTH = 20
 
@@ -321,9 +402,13 @@ def parse_closing_refs(body: str, repo: str | None = None,
     (#10597 review P2-3). With no `repo`, a slug is treated as foreign: the
     function cannot tell, and inventing a finding is worse than missing one.
     """
-    text = _INLINE_CODE_RE.sub(" ", strip_code(body or "", strict))
+    text = _strip_inline_code(strip_code(body or "", strict))
     seen: list[int] = []
-    for m in _CLOSING_RE.finditer(text):
+    # The separator spelling follows the QUESTION: a pass (strict) refuses a
+    # keyword whose reference sits across a blank line; a finding (lenient)
+    # still reports it (see `_CLOSING_SEPARATORS`).
+    pattern = _CLOSING_RE_ONELINE if strict else _CLOSING_RE
+    for m in pattern.finditer(text):
         slug = m.group("slug")
         if slug and (repo is None or slug.lower() != repo.lower()):
             continue
@@ -408,22 +493,30 @@ def classify(pr: PullRequest, by_head: dict[str, PullRequest],
             # same body parsed strictly, so a claim at column 0 passes and an
             # ambiguous one downgrades to a warning (review c5-2).
             if issue not in strict_refs:
-                # The message must not assert WHAT GitHub thinks: the strict parse
-                # differs from the lenient one only by ignoring four-space-indented
-                # lines, and such a line is a CODE BLOCK in one context and a list
-                # item's continuation — where GitHub DOES fire — in another (see
-                # `strip_code`, and the list-item cases pinned below). So the
-                # finding states what THIS tool can show, not a fact it cannot.
+                # The message must not assert WHAT GitHub thinks, and it must not
+                # name a CAUSE it cannot distinguish: the strict parse refuses TWO
+                # shapes — a keyword on a four-space-indented line, and a keyword
+                # separated from its `#N` by a blank line (#10634 review) — and
+                # only the first is about indentation. Prescribing "at the start of
+                # a line" for the SECOND leaves a body that already satisfies the
+                # remedy unresolved, so the requirement is stated in a form BOTH
+                # shapes can act on. The indented case is still a CODE BLOCK in one
+                # context and a list item's continuation — where GitHub DOES fire —
+                # in another (see `strip_code`, and the list-item cases pinned
+                # below), so this states what THIS tool can show, not a fact it
+                # cannot.
                 findings.append(Finding(
                     issue=issue, pr=pr.number, base=pr.base, verdict="unresolved",
                     carrier=pr.number,
                     detail=(f"PR #{pr.number} targets `{default_branch}`, but its "
-                            f"`Closes #{issue}` survives only the LENIENT parse: a "
-                            f"four-space-indented line is a code block in one "
-                            f"context and a list item's continuation in another, "
-                            f"so a key word on one cannot be shown to fire and is "
-                            f"never counted as a pass. State `Closes #{issue}` at "
-                            f"the start of a line, in plain prose."),
+                            f"`Closes #{issue}` survives only the LENIENT parse: "
+                            f"the keyword and its `#{issue}` are separated by a "
+                            f"BLANK LINE, or sit on a four-space-indented line "
+                            f"that is a code block in one context and a list "
+                            f"item's continuation in another. Neither can be "
+                            f"shown to fire, so neither is counted as a pass. "
+                            f"State `Closes #{issue}` on one line, in plain "
+                            f"prose, at column 0."),
                 ))
                 continue
             findings.append(Finding(
@@ -465,6 +558,30 @@ def classify(pr: PullRequest, by_head: dict[str, PullRequest],
             # finding alone: an OPEN carrier can still be amended, a MERGED one
             # cannot — telling a lane to "re-state the keyword on" an already
             # merged PR prescribes an impossible action and hides the real one.
+            #
+            # ⚠️ "the work did land" is a claim about the SUBJECT, and a merged
+            # CARRIER does not establish it (#10634 review P1). A carrier merges
+            # the branch it was opened from, so a subject that is still OPEN has
+            # no work in it — and one that merged into its sibling base AFTER the
+            # carrier landed is stranded there. Telling that reader to "Close #N
+            # by hand" marks an issue done whose work is nowhere near the default
+            # branch: the exact silent-stranding this tool exists to surface.
+            subject_landed = _subject_landed(pr, carrier)
+            if carrier.merged and not subject_landed:
+                findings.append(Finding(
+                    issue=issue, pr=pr.number, base=pr.base,
+                    verdict="unresolved", carrier=carrier.number,
+                    detail=(f"PR #{pr.number} says `Closes #{issue}` with base "
+                            f"`{pr.base}`; PR #{carrier.number} targets "
+                            f"`{default_branch}` and has ALREADY merged, but "
+                            f"{_not_landed_why(pr, carrier)} — so #{issue}'s work "
+                            f"is NOT on `{default_branch}`. The keyword cannot "
+                            f"fire any more: re-open PR #{pr.number} retargeted "
+                            f"at `{default_branch}`, or open a PR that targets "
+                            f"`{default_branch}` for this work, and state "
+                            f"`Closes #{issue}` on it."),
+                ))
+                continue
             if carrier.merged:
                 remedy = (f"PR #{carrier.number} has ALREADY merged, so the "
                           f"work did land — only the closure did not fire. "
@@ -482,9 +599,47 @@ def classify(pr: PullRequest, by_head: dict[str, PullRequest],
                 detail=(f"PR #{pr.number} says `Closes #{issue}` but its base is "
                         f"`{pr.base}`, NOT `{default_branch}` — GitHub will NOT "
                         f"close #{issue}, and {lands}, which carries no `Closes "
-                        f"#{issue}`. {remedy}"),
+                        f"#{issue}` this tool can show fires. {remedy}"),
             ))
     return findings
+
+
+def _subject_landed(pr: PullRequest, carrier: PullRequest) -> bool:
+    """Whether the SUBJECT's own work rode `carrier` to the default branch.
+
+    Neither fact needed here is ancestry, so this is deliberately conservative:
+    `pr.merged` says the subject merged into ITS OWN base, and the two
+    `merged_at` stamps say in which ORDER. A subject still open (or closed
+    unmerged) when the carrier landed cannot be inside it; a subject that merged
+    into the sibling base AFTER the carrier landed is stranded on the sibling.
+    Both are "not landed", and "merged, and no later than the carrier" is the
+    only shape this tool can defend (#10634 review P1). With no stamps (offline
+    records) the merged state is all there is.
+    """
+    if not (carrier.merged and pr.merged):
+        return False
+    if pr.merged_at and carrier.merged_at:
+        return pr.merged_at <= carrier.merged_at
+    return True
+
+
+def _not_landed_why(pr: PullRequest, carrier: PullRequest) -> str:
+    """The subject's own state, in the words the reader can check.
+
+    A closed-unmerged subject is reported in the module's OWN wording for that
+    state ("CLOSED WITHOUT MERGING", see the carrier arm above): "still CLOSED"
+    describes a transient state when it is a final one, and it hides that
+    re-opening is an option (#10634 review).
+    """
+    if not pr.merged:
+        if pr.closed_unmerged:
+            return (f"PR #{pr.number} itself was CLOSED WITHOUT MERGING, so its "
+                    f"commits were not in the branch PR #{carrier.number} merged")
+        return (f"PR #{pr.number} itself is still {pr.state.upper()}, so its "
+                f"commits were not in the branch PR #{carrier.number} merged")
+    return (f"PR #{pr.number} merged into `{pr.base}` at {pr.merged_at}, AFTER "
+            f"PR #{carrier.number} merged at {carrier.merged_at}, so its "
+            f"commits landed on the sibling branch too late to ride it")
 
 
 def worst_verdict(findings: list[Finding]) -> str:
@@ -503,13 +658,27 @@ class Unmeasurable(RuntimeError):
 
 _GH_FIELDS = "number,baseRefName,body,headRefName,state,mergedAt"
 
+#: A `gh` call that never returns must not hang the run (#10634 review P2). This
+#: tool runs inside an always-on drift-guard job, and a job-level timeout kills
+#: the WHOLE job — `continue-on-error: true` covers a step's exit status, not a
+#: step that never finishes — so an unreachable API would take the rest of the
+#: drift guard down with it instead of reporting UNMEASURED. Bounded here, at the
+#: one place every live call goes through.
+_GH_TIMEOUT_SECONDS = 60
+
 
 def _gh(args: list[str]) -> str:
     try:
         out = subprocess.run(["gh", *args], capture_output=True, text=True,
-                             check=False)
+                             check=False, timeout=_GH_TIMEOUT_SECONDS)
     except FileNotFoundError as exc:
         raise Unmeasurable(f"`gh` is not installed: {exc}") from exc
+    except subprocess.TimeoutExpired as exc:
+        # UNMEASURED, never a pass and never a hang: the caller's exit 2 is the
+        # contract the workflow's dead-man reads.
+        raise Unmeasurable(
+            f"`gh {' '.join(args)}` did not answer within "
+            f"{_GH_TIMEOUT_SECONDS}s") from exc
     if out.returncode != 0:
         raise Unmeasurable(
             f"`gh {' '.join(args)}` exited {out.returncode}: "

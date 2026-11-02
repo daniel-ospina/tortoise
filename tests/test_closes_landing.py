@@ -293,7 +293,10 @@ def test_pick_carrier_ranks_open_before_merged_before_closed():
 # ── a MERGED carrier with no keyword: the work landed, only the closure did not ─
 
 def test_a_merged_carrier_without_the_keyword_prescribes_the_achievable_remedy():
-    stacked = _pr(70, SIBLING, "Closes #100")
+    """The subject merged into its sibling base BEFORE the carrier landed, so its
+    commits rode the merge and only the closure failed to fire."""
+    stacked = _pr(70, SIBLING, "Closes #100", state="MERGED",
+                  merged_at="2026-11-02T10:00:00Z")
     carrier = _pr(71, DEFAULT, "", head=SIBLING, state="MERGED",
                   merged_at="2026-11-02T14:07:51Z")
     (finding,) = cl.classify(stacked, _by_head(stacked, carrier), DEFAULT)
@@ -301,6 +304,67 @@ def test_a_merged_carrier_without_the_keyword_prescribes_the_achievable_remedy()
     assert "ALREADY merged" in finding.detail
     assert "Close #100 by hand" in finding.detail
     assert "Re-state the keyword" not in finding.detail
+
+
+def test_a_merged_carrier_does_NOT_claim_the_work_landed_when_the_subject_is_open():
+    """#10634 review P1. A carrier merges the branch it was OPENED FROM, so a
+    subject that is still open has nothing in it. The pre-fix arm read
+    `carrier.merged` alone and told the reader "the work did land … Close #100 by
+    hand" — marking an issue done whose work is stranded on the sibling branch.
+
+    Pinned on the CLAIM, not just the verdict: the wrong remedy is the harm.
+    """
+    stacked = _pr(100, SIBLING, "Closes #100")          # still OPEN
+    carrier = _pr(101, DEFAULT, "", head=SIBLING, state="MERGED",
+                  merged_at="2026-11-02T14:07:51Z")
+    (finding,) = cl.classify(stacked, _by_head(stacked, carrier), DEFAULT)
+    assert finding.verdict == "unresolved", finding
+    assert finding.carrier == 101
+    assert "did land" not in finding.detail
+    assert "Close #100 by hand" not in finding.detail
+    assert "still OPEN" in finding.detail
+    assert "NOT on `main`" in finding.detail
+
+
+def test_a_subject_that_merged_into_the_sibling_AFTER_the_carrier_is_stranded():
+    """The same harm by TIMING rather than by state (#10634 review P1): the
+    sibling branch had already landed, so a later merge into it is on a branch no
+    PR will carry to the default branch."""
+    stacked = _pr(102, SIBLING, "Closes #100", state="MERGED",
+                  merged_at="2026-11-02T15:00:00Z")
+    carrier = _pr(103, DEFAULT, "", head=SIBLING, state="MERGED",
+                  merged_at="2026-11-02T14:07:51Z")
+    (finding,) = cl.classify(stacked, _by_head(stacked, carrier), DEFAULT)
+    assert finding.verdict == "unresolved", finding
+    assert "did land" not in finding.detail
+    assert "Close #100 by hand" not in finding.detail
+    assert "AFTER" in finding.detail
+
+
+def test_a_closed_unmerged_subject_under_a_merged_carrier_says_SO_and_offers_reopen():
+    """Same arm, third subject state (#10634 review of the fix): "still CLOSED"
+    describes a transient state where this is a final one, and it hid the one
+    cheap remedy — re-opening the PR with the right base."""
+    stacked = _pr(106, SIBLING, "Closes #100", state="CLOSED")
+    carrier = _pr(107, DEFAULT, "", head=SIBLING, state="MERGED",
+                  merged_at="2026-11-02T14:07:51Z")
+    (finding,) = cl.classify(stacked, _by_head(stacked, carrier), DEFAULT)
+    assert finding.verdict == "unresolved", finding
+    assert "CLOSED WITHOUT MERGING" in finding.detail, finding.detail
+    assert "still CLOSED" not in finding.detail, finding.detail
+    assert "re-open PR #106" in finding.detail, finding.detail
+    assert "did land" not in finding.detail
+
+
+def test_a_merged_carrier_with_no_time_stamps_still_claims_landed_when_the_subject_merged():
+    """Offline records carry no `merged_at`; `state: MERGED` on both is all the
+    evidence there is, and it is the shape the live path cannot produce (it
+    always asks for `mergedAt`) — so it stays a `lands`-side claim."""
+    stacked = _pr(104, SIBLING, "Closes #100", state="MERGED")
+    carrier = _pr(105, DEFAULT, "", head=SIBLING, state="MERGED")
+    (finding,) = cl.classify(stacked, _by_head(stacked, carrier), DEFAULT)
+    assert finding.verdict == "inert"
+    assert "Close #100 by hand" in finding.detail
 
 
 # ── a qualified reference to THIS repo is a claim, not a foreign reference ────
@@ -326,6 +390,56 @@ def test_a_same_repo_qualified_reference_is_a_claim():
 ])
 def test_quoted_keywords_are_not_claims(body, expected):
     assert cl.parse_closing_refs(body) == expected
+
+
+def test_a_keyword_separated_from_its_reference_by_a_BLANK_LINE_cannot_buy_a_pass():
+    r"""#10634 review P3-1: `\s*` matches a BLANK LINE, so `Closes\n\n#100` was a
+    claim in the STRICT parse — and the strict parse is what backs every PASS. A
+    reference in a SEPARATE PARAGRAPH is a shape no GitHub doc shows and this
+    tool cannot demonstrate fires, so it may not pass (the same rule as the
+    indented case, cycle 5). It is still REPORTED: the lenient finding arms keep
+    the claim, so the narrowing drops no real closure.
+    """
+    assert cl.parse_closing_refs("Closes\n\n#100") == [100]
+    assert cl.parse_closing_refs("Closes\n\n#100", strict=True) == []
+    # A SINGLE newline is not a paragraph break and stays a claim in both.
+    assert cl.parse_closing_refs("Closes\n#100", strict=True) == [100]
+
+    pr = _pr(120, DEFAULT, "fix: the thing\n\nCloses\n\n#100\n")
+    (finding,) = cl.classify(pr, _by_head(pr), DEFAULT)
+    assert finding.verdict == "unresolved", finding
+    assert "LENIENT parse" in finding.detail
+    # The REMEDY must be achievable for THIS cause (#10634 review of the fix):
+    # the arm used to name indentation as the cause and prescribe "at the start of
+    # a line", which this body ALREADY satisfies — a reader who complies stays
+    # unresolved and the issue stays open. Both causes and one actionable form.
+    assert "BLANK LINE" in finding.detail, finding.detail
+    assert "on one line" in finding.detail, finding.detail
+    assert "at the start of a line" not in finding.detail, finding.detail
+    # …and a same-line claim on the same shape still lands (the guard is the
+    # blank line, not the multi-paragraph body).
+    ok = _pr(121, DEFAULT, "fix: the thing\n\nCloses #100\n")
+    (landed,) = cl.classify(ok, _by_head(ok), DEFAULT)
+    assert landed.verdict == "lands"
+
+
+def test_a_keyword_inside_a_WIDER_backtick_span_is_a_quotation_not_a_claim():
+    """#10634 review P3-2: the inline strip knew ONE-backtick spans only, so a
+    two-backtick delimited `Closes #100` (CommonMark: same code span, run of 2)
+    counted as a claim — and on the CARRIER side that buys a `lands`.
+    """
+    assert cl.parse_closing_refs("A ``Closes #100`` in a wide span") == []
+    assert cl.parse_closing_refs("A ```Closes #100``` in a wider span") == []
+    # A span's own inner backtick run does not close it…
+    assert cl.parse_closing_refs("```a`b``` then Closes #100") == [100]
+    # …and an UNMATCHED run is literal text, not a span opened at EOF.
+    assert cl.parse_closing_refs("stray ``` then Closes #100") == [100]
+
+    subject = _pr(130, SIBLING, "Closes #100")
+    quoting = _pr(131, DEFAULT, "Old body: ``Closes #100``\n", head=SIBLING)
+    (finding,) = cl.classify(subject, _by_head(subject, quoting), DEFAULT)
+    assert finding.verdict == "inert", finding
+    assert "Re-state the keyword" in finding.detail
 
 
 # ── the UNMEASURED arm the workflow's dead-man keys on ───────────────────────
@@ -540,16 +654,17 @@ def test_a_default_base_pr_whose_keyword_is_only_in_a_code_block_is_unresolved()
 
 
 def test_the_c5_detail_does_not_claim_github_ignores_a_list_continuation():
-    """The strict/lenient difference is INDENTATION, and an indented line is a
-    list item's continuation — where GitHub DOES fire — as often as it is code
-    (see `test_indented_lines_that_continue_prose_are_still_claims`). So the
-    finding may not assert what GitHub does with it: that is a fact this tool
-    cannot see. Pre-fix wording did ("which GitHub does not act on")."""
+    """The strict parse refuses TWO shapes — an indented line, and a keyword whose
+    reference sits across a blank line — and ONE of them is indentation. An
+    indented line is a list item's continuation (where GitHub DOES fire) as often
+    as it is code (see `test_indented_lines_that_continue_prose_are_still_claims`),
+    so the finding may not assert what GitHub does with it — that is a fact this
+    tool cannot see. Pre-fix wording did ("which GitHub does not act on")."""
     pr = _pr(114, DEFAULT, "- fix it\n    - Closes #10541\n")
     (finding,) = cl.classify(pr, _by_head(pr), DEFAULT)
     assert finding.verdict == "unresolved"
     assert "GitHub does not act on" not in finding.detail
-    assert "at the start of a line" in finding.detail
+    assert "at column 0" in finding.detail
 
 
 def test_a_default_base_pr_with_a_plain_claim_still_lands():
@@ -597,6 +712,29 @@ def test_gh_maps_a_missing_binary_to_unmeasurable(monkeypatch):
     with pytest.raises(cl.Unmeasurable) as exc:
         cl._gh(["pr", "view", "1"])
     assert "not installed" in str(exc.value)
+
+
+def test_gh_is_BOUNDED_so_a_stalled_call_cannot_hang_the_guard(monkeypatch):
+    """#10634 review P2: `subprocess.run` carried no `timeout=`, so a stalled
+    `gh` hung the run until the JOB-level timeout killed the always-on
+    drift-guard job — `continue-on-error` covers a step's exit status, never a
+    step that does not finish. The bound must be PASSED to the call (not just
+    handled) and an expiry must be a VERDICT, never a hang and never a pass.
+    """
+    seen: dict = {}
+
+    def stalled(cmd, **kwargs):
+        seen.update(kwargs)
+        raise subprocess.TimeoutExpired(cmd, kwargs.get("timeout") or 0)
+
+    monkeypatch.setattr(cl.subprocess, "run", stalled)
+    with pytest.raises(cl.Unmeasurable) as exc:
+        cl._gh(["pr", "view", "1"])
+    bound = seen.get("timeout")
+    assert isinstance(bound, int) and 0 < bound <= 300, (
+        f"the gh call must carry a bounded positive timeout, got {bound!r}"
+    )
+    assert "did not answer within" in str(exc.value)
 
 
 @pytest.mark.parametrize("payload,expected", [
