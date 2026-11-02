@@ -632,6 +632,69 @@ def test_the_shipped_measurement_log_is_structurally_clean():
     assert codes == ["V9"], codes
 
 
+def test_the_shipped_logs_blocker_cells_are_the_emitters_own():
+    """The scored log must carry the `blocked_by` cells its OWN probe emits.
+
+    ⛔ WHY THIS EXISTS (#10537 review P1). The shipped log's E4/E5 cells named
+    `#9596`/`#5087`, but the probe at the head the log NAMES (`9152448d7`) still
+    emitted `#8503`/`#9738` — the two cells had been edited after the run, and
+    the log's E5 note carried a sentence no committed revision of the probe ever
+    wrote (`git grep` for it at `9152448d7` finds nothing; `git log --all -S`
+    finds only this lane's own commits). The consequence is not cosmetic: a copy
+    of the shipped log with those cells set back to what the stamped probe emits
+    is REFUSED by this PR's own V12 — so the shipped table passed only because
+    of the edit, and nothing pinned artifact to emitter.
+
+    This pin closes that: the cells must be the emitter's values, in row order,
+    and the note sentence must exist in the emitter too. At the pre-fix head it
+    reds on BOTH legs.
+    """
+    source = PROBE.read_text()
+    emitted = re.findall(r'blocked_by="(#[0-9]+)"', source)
+    assert len(emitted) == 5, (
+        f"expected the probe to emit five `blocked_by=` cells (E1-E5), found "
+        f"{emitted} — this pin reads them in ROW ORDER, so a reordered literal "
+        f"list is a pin failure, not a formatting choice")
+    log = _newest_log(_scored_logs())
+    record = cvc.extract_block(log.read_text())
+    shipped = [row["blocked_by"] for row in record["rows"]]
+    assert shipped == emitted, (
+        f"{log.name} carries blocked_by {shipped} but its own probe emits "
+        f"{emitted} — the log names this emitter, so a cell that does not match "
+        f"it was edited after the run. Either re-run the probe (the supersede "
+        f"path) or disclose the edit in the log's POST-RUN CORRECTION block")
+    # the E5 attribution sentence is the emitter's words, not a hand-typed tail.
+    # The probe wraps it across adjacent f-string literals, so join those first:
+    # a pin that demanded one physical source line would be testing the FORMATTING.
+    source_joined = re.sub(r'"\s*\n\s*f?"', "", source)
+    sentence = "The row's blocker moved on 2026-11-02 from #9738 to #5087"
+    assert sentence in source_joined, (
+        "the E5 blocker-move sentence is NOT in the committed probe, so the log "
+        "carries words no run wrote — move it into the probe's E5 note template")
+    assert sentence in record["rows"][4]["note"], record["rows"][4]["note"]
+
+
+def test_the_shipped_log_discloses_what_the_run_did_not_emit():
+    """A post-run edit is allowed only when the artifact SAYS it happened.
+
+    The failure mode is not the edit — it is an edit that reads as emitter output,
+    which is the whole class of stale evidence `#10537` exists to gate. Both the
+    E4/E5 cells and the E5 note tail were updated after the run at `9152448d7`,
+    so the log must name them, name the reason, and say that the NUMBERS were not
+    touched. Non-vacuity: at the pre-fix head this marker is absent (reds).
+    """
+    log = _newest_log(_scored_logs())
+    text = log.read_text()
+    assert "POST-RUN CORRECTION" in text, (
+        f"{log.name} carries cells the run did not emit, with no disclosure — "
+        f"an edit indistinguishable from emitter output is the stale-pointer "
+        f"class V12 refuses")
+    for named in ("#8503 -> #9596", "#9738 -> #5087", "E5 note"):
+        assert named in text, f"the correction block does not name {named!r}"
+    assert "THE NUMBERS ARE THE RUN'S AND WERE NOT TOUCHED" in text, (
+        "the disclosure must state the scope of the edit: numbers untouched")
+
+
 def test_the_durations_row_quotes_the_case_count_it_weights():
     """The shard weight's provenance must describe the file that SHIPS.
 
@@ -2695,11 +2758,11 @@ def test_the_bare_continuation_cites_name_what_they_say():
         # are pinned here instead. The sentence wraps over three lines and a row
         # scopes to ONE line, so the claim takes three rows.
         ("E1-E5-PROOFS.md", 'declares `STEPS = ("S0"', (
-            ("131", 'STEPS = ("S0", "S1", "S2.1", "S2.2", "S2.3", "S3", '
+            ("132", 'STEPS = ("S0", "S1", "S2.1", "S2.2", "S2.3", "S3", '
                     '"S5", "S6")'),
         ), "capstone_verdict_check"),
-        ("E1-E5-PROOFS.md", "_step_accounting` (`:473`) refuses a GREEN row whose", (
-            ("473", "def _step_accounting("),
+        ("E1-E5-PROOFS.md", "_step_accounting` (`:504`) refuses a GREEN row whose", (
+            ("504", "def _step_accounting("),
         ), "capstone_verdict_check"),
     )
     # The SAME document states two of its claims as the RULE's own text rather than a

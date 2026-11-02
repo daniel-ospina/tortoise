@@ -6,6 +6,23 @@
 # corpus: tests/eval/write_path fixtures_hash=sha256:dd7e85200f4809f701b9e9c11816b541acea63afd0b2472998975e2ebcb035dc (7 sessions) — G1 compared it with the frozen pin
 # graph: capstone_measure_9152448d_1793621251 (fresh, disposable; every node in it was written by this run)
 # arm: TORTOISE_VET=1 TORTOISE_CLASSIFY_LATER=1 TORTOISE_VALUE_GATE=<unset> TORTOISE_S2_DECISION_SEAM=<unset> (set/pinned IN-PROCESS for this pass and read back from os.environ after setting; the deployed config leaves both passes OFF)
+# ⚠️ POST-RUN CORRECTION (2026-11-02) — DISCLOSED, NOT SILENT. Two things in this
+#    file were UPDATED after the run and are NOT this head's emitter output:
+#      * the E4 and E5 `blocked_by` cells — #8503 -> #9596 and #9738 -> #5087.
+#        The probe at the head this log names (`9152448d7`) still emitted the OLD
+#        two; the attributions are this lane's decision, not a re-measurement, and
+#        both new blockers were verified OPEN in `blocker-states.json` at
+#        2026-11-02T14:22:24Z;
+#      * the tail of the E5 note (from "The row's blocker moved").
+#    THE NUMBERS ARE THE RUN'S AND WERE NOT TOUCHED — no numerator, denominator or
+#    verdict was edited, and re-deriving them still needs a re-run. The committed
+#    probe now EMITS both cells and that sentence, so a re-run reproduces this
+#    file's content instead of contradicting it; `tests/test_7949_capstone_measure.py`
+#    pins this log's cells and note to the emitter so the next divergence REDS.
+#    Why it is disclosure and not a defect left open: the alternative reading — a
+#    reader (or this gate) taking the old cells as the run's output — is exactly
+#    the stale-pointer failure V12 exists to refuse. See README
+#    "One correction THIS log carries".
 
 ## the run — one pass over the pre-registered corpus
 session wp01_quarry_debug ok=True extraction_mode=llm:deepseek-direct extracted=25 errors=[] turns=26 edus=26 chunks=1 entities=15 events=5 points=25 operators=4 search_queries=15 search_degraded=False operator_endpoints_minted=0 elapsed_s=42.7
