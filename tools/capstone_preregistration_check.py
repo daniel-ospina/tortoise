@@ -1933,8 +1933,25 @@ def _record_atomic_add(directory: Path) -> dict:
     return _mapping(record, ATOMIC_ADD_KEY, MACHINE_RECORD)
 
 
+def _path_present_at(rev: str, rel: str) -> bool:
+    """Is ``rel`` in the tree of commit ``rev``? Never raises.
+
+    ``rev`` may carry a ``^`` suffix; an unresolvable rev (a root commit's parent) is answered
+    ``False``, which is the fail-closed direction for the one caller below.
+    """
+    try:
+        out = subprocess.run(
+            ["git", "cat-file", "-e", f"{rev}:{rel}"],
+            cwd=str(REPO_ROOT), capture_output=True, text=True, check=False,
+        )
+    except OSError:  # pragma: no cover - git absent
+        return False
+    return out.returncode == 0
+
+
 def _atomic_add_failure(declared: object, prereg_epoch: int,
-                        prereg_sha: str = "") -> str | None:
+                        prereg_sha: str = "", log_rel: str = "",
+                        pair_is_atomic: bool = False) -> str | None:
     """``None`` when the disclosure is complete, else the one reason it is not.
 
     Fail-closed on TYPE, not merely on emptiness (#10529 review P2): ``str({})`` is truthy, so a
@@ -2013,18 +2030,43 @@ def _atomic_add_failure(declared: object, prereg_epoch: int,
                 "is a new commit and cannot be one of the commits it collapsed; a disclosure that "
                 "cites itself as its own provenance asserts nothing a reader can check"
             )
-    # ⛔ AND IT MUST HAVE BEEN ABLE TO LAND THE PAIR (#10529 review cycle 15, P1). `squash_merge` is
-    # printed as the pointer ON MAIN that a reader resolves, so it must be a commit at or after the
-    # pair's add-commit. An ANCESTOR of it — the commit main sat at BEFORE the landing — describes a
-    # history in which the pair is not in the tree at all, and resolves, so the format and
-    # addressability rules both pass it. Ancestry, not the epoch: `%ct` is attacker-controlled
-    # everywhere in this module.
-    if prereg_sha and not _is_ancestor(prereg_sha, squash_token):
-        return (
-            f"its squash_merge {squash!r} is not {PREREG_NAME}'s add-commit {prereg_sha[:9]} nor a "
-            "descendant of it — a commit that predates the pair cannot be the commit that landed "
-            "it, so the pointer resolves to a history in which the pair is not in the tree"
-        )
+    # ⛔ IT MUST BE THE COMMIT THAT **INTRODUCED** THE PAIR (#10546 review cycle 21, P2). This arm
+    # used to require only `_is_ancestor(prereg_sha, squash_token)` — a LOWER BOUND — so every later
+    # commit on `main` satisfied it. MEASURED: a disclosure naming an unrelated commit made after
+    # the landing was accepted, and the CLI printed "e1-e2.log: squashed by <that commit>" — a
+    # landing the tool never checked, on the very line justified as "the ONE pointer a reader can
+    # resolve".
+    #
+    # ⛔ WHY NOT SIMPLY "IT MUST BE `prereg_sha`". Because the fleet's own rail lands with
+    # `--merge`, not `--squash` (`test_a_merge_landing_the_pair_unchanged_is_not_a_late_edit`): the
+    # commit that lands an atomic pair is the SQUASH COMMIT for a squash and the MERGE COMMIT for a
+    # `--no-ff` — the latter a genuine DESCENDANT of the pair's add-commit. An equality arm was
+    # tried first and broke exactly that shape, which is why the test exists.
+    #
+    # ⛔ WHY NOT CONTENT EQUALITY EITHER. A later commit that never touches the log carries the
+    # identical blob, so blob comparison admits it — the false landing survives.
+    #
+    # The claim "this commit landed the pair" IS decidable, and it is a statement about ONE step of
+    # first-parent history: the pair is ABSENT in that commit's parent and PRESENT in the commit. A
+    # squash adds them (absent in its parent); a `--no-ff` merge lands them from its second parent
+    # (absent in its first). An unrelated later commit already HAS them in its parent, so it is
+    # refused — which is the whole finding. An ancestor of the landing has the pair absent in the
+    # commit itself, so it is refused too, subsuming the older bound rather than being added to it.
+    # ⛔ AND ONLY AN ATOMIC PAIR IS JUDGED THIS WAY. For any other shape the disclosure is refused
+    # outright by the "not an atomic add" arm, so asking it to prove a landing would replace that
+    # accurate diagnosis with a claim about an atomicity the pair does not have — and a disclosure
+    # can never waive a predating add regardless of what it names.
+    if prereg_sha and pair_is_atomic and log_rel and _resolves_to_commit(squash_token):
+        introduced = (not _path_present_at(f"{squash_token}^", log_rel)
+                      and _path_present_at(squash_token, log_rel))
+        if not introduced:
+            return (
+                f"its squash_merge {squash!r} is not the commit that LANDED the pair — it does not "
+                f"introduce {log_rel}: either that path is already present in its parent (so an "
+                f"earlier commit landed it, and this one is merely later), or it is absent from the "
+                f"commit itself (so it predates the landing). A disclosure that names a commit which "
+                f"cannot be the landing asserts a history a reader cannot confirm"
+            )
     return None
 
 
@@ -2139,8 +2181,22 @@ def check_ordering(prereg: Path, logs: list[Path], pins: dict | None = None,
     # atomic-and-unscored log was never checked (`reason: {a: 1}` was accepted), and the field rules
     # applied to whichever arm happened to run first rather than to the disclosure itself.
     disclosure_failed: set[str] = set()
+    by_name = {path.name: path for path in logs}
+
+    def _rel_of(path: Path) -> str:
+        try:
+            return str(path.resolve().relative_to(REPO_ROOT))
+        except ValueError:
+            return ""
+
     for name in sorted(set(atomic) & present):
-        problem = _atomic_add_failure(atomic.get(name), prereg_epoch, prereg_sha)
+        declared_path = by_name.get(name)
+        pair_is_atomic = bool(declared_path) and prereg_sha in {
+            sha for _, sha in _added_commits(declared_path)
+        }
+        problem = _atomic_add_failure(atomic.get(name), prereg_epoch, prereg_sha,
+                                      log_rel=_rel_of(declared_path) if declared_path else "",
+                                      pair_is_atomic=pair_is_atomic)
         if problem:
             disclosure_failed.add(name)
             failures.append(
@@ -2172,7 +2228,9 @@ def check_ordering(prereg: Path, logs: list[Path], pins: dict | None = None,
             (sha for sha in sorted(add_shas) if sha != prereg_sha and _is_ancestor(sha, prereg_sha)),
             "",
         )
-        # For MESSAGES only. The verdict never keys on this choice.
+        # For MESSAGES only. The verdict never keys on this choice — and that is now enforced by
+        # the pass below reading `add_shas` DIRECTLY rather than this representative
+        # (#10546 review cycle 21, P0).
         log_sha = predating_sha or (prereg_sha if atomic_pair else sorted(add_shas)[0])
         sha_known.add(log.name)
         if atomic_pair:
@@ -2269,7 +2327,24 @@ def check_ordering(prereg: Path, logs: list[Path], pins: dict | None = None,
         # "(exempt by CONTENT, measured nothing: X)" — a waiver reported where none was granted, the
         # mirror of the misdescription cycle 3 fixed in the verdict line, and it teaches readers that
         # waivers are routine. A proven order returns here, before any arm that records a waiver.
-        if not atomic_pair and _is_ancestor(prereg_sha, log_sha):
+        #
+        # ⛔ THE PASS IS DECIDED OVER EVERY ADD-COMMIT, NOT OVER `log_sha` (#10546 review cycle 21,
+        # P0). This was the fail-open the comment above `log_sha` already claimed did not exist: a
+        # delete-and-re-add leaves TWO add-commits, `predating_sha` is empty when neither is an
+        # ancestor of the registration, so `log_sha` fell back to `sorted(add_shas)[0]` — a HEX
+        # sort, i.e. topology decided by the first byte of a hash. Whenever the RE-ADD sorted first
+        # and was a descendant of the registration, this `continue` returned BEFORE `_late_touches`
+        # and BEFORE the epoch comparison, so a log whose OLDEST add-commit is a strict ANCESTOR of
+        # the registration — the hard fail the docstring says no disclosure can waive — passed
+        # green, with no flag and no disclosure. MEASURED: on a tree with add-commits
+        # `1700000000@3a2a40976` (not an ancestor of the prereg) and `1700000400@36c054210`
+        # (a descendant), `check_ordering` returned `[]` here while `origin/main`'s own tool REFUSED
+        # it ("added at 1700000000 which is not strictly after … 1700000100"). A ~50/50 coin — and
+        # an author can re-commit until it lands — is not a guard. Every add-commit must be a
+        # DESCENDANT of the registration for the order to be proven; anything else falls through to
+        # the topology and epoch arms below, fail-closed.
+        if (not atomic_pair and prereg_sha and add_shas
+                and all(_is_ancestor(prereg_sha, sha) for sha in add_shas)):
             continue
         # A log that provably produced NO number cannot have been scored against thresholds
         # chosen after it was read. Re-asked of the content on every run, so the moment it gains a

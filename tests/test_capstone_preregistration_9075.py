@@ -512,6 +512,78 @@ def test_a_future_dated_log_that_is_a_true_ancestor_still_hard_fails(tmp_path, m
     assert any("is an ANCESTOR of the pre-registration's add-commit" in f for f in failures), failures
 
 
+def test_a_delete_and_readd_log_cannot_pass_on_whichever_sha_sorts_first(tmp_path, monkeypatch):
+    """REGRESSION (#10546 review cycle 21, P0): the proven-order pass keyed on ONE add-commit.
+
+    ⛔ THE FAIL-OPEN THIS PINS. A delete-and-re-add leaves a log with TWO add-commits. When
+    neither was an ancestor of the registration, `predating_sha` was empty and the representative
+    fell back to `sorted(add_shas)[0]` — a HEX sort, so topologically arbitrary — and the
+    "proven order" arm asked ancestry about THAT one commit. Whenever the RE-ADD sorted first and
+    was a descendant of the registration, the arm returned before `_late_touches` AND before the
+    epoch comparison, so a log whose OLDEST add-commit is a strict ANCESTOR of the registration —
+    the hard fail the module docstring says no disclosure can waive — passed with no flag and no
+    disclosure. `origin/main`'s own tool REFUSES the identical tree.
+
+    ⛔ WHY THE LOOP. The defect is a coin-flip on the first byte of a constructed hash, so a
+    single hand-built repo picks one side of it and would pass against the buggy code half the
+    time — a vacuous test. The loop therefore re-commits the re-add under a nonce until the
+    RE-ADD's sha sorts BEFORE the early add's, which is precisely the state the old code passed,
+    and asserts the refusal there. Every nonce must refuse, so the assertion is independent of
+    the ordering it happened to find; the loop only guarantees the discriminating case is reached
+    rather than left to luck.
+    """
+    seen_discriminating = False
+    for nonce in range(40):
+        case = tmp_path / f"n{nonce}"
+        case.mkdir()
+        repo = _repo(case, monkeypatch)
+        _git(repo, "commit", "-q", "--allow-empty", "-m", "root", epoch=1_700_000_000)
+
+        # The log is added on a SIDE branch, at an EARLIER epoch, and never becomes an ancestor of
+        # the registration — the "entered the tree before the thresholds" shape.
+        _git(repo, "checkout", "-q", "-b", "side")
+        log = repo / "docs" / "evidence" / "7949-capstone" / "e1-e2.log"
+        log.parent.mkdir(parents=True, exist_ok=True)
+        log.write_text("measured 1\n")
+        _git(repo, "add", str(log.relative_to(repo)))
+        _git(repo, "commit", "-q", "-m", "log added early", epoch=1_700_000_000)
+        early = _rev(repo, "HEAD")
+
+        _git(repo, "checkout", "-q", "-")
+        prereg = _write_and_commit(repo, check.PREREG_NAME, epoch=1_700_000_100)
+        prereg_sha = _rev(repo, "HEAD")
+        _git(repo, "merge", "-q", "--no-ff", "side", epoch=1_700_000_200)
+
+        # Delete, then re-add AFTER the registration: the second add-commit is a descendant of it.
+        _git(repo, "rm", "-q", str(log.relative_to(repo)))
+        _git(repo, "commit", "-q", "-m", "drop the log", epoch=1_700_000_300)
+        log.parent.mkdir(parents=True, exist_ok=True)
+        log.write_text(f"measured again {nonce}\n")
+        _git(repo, "add", str(log.relative_to(repo)))
+        _git(repo, "commit", "-q", "-m", "re-add after the registration", epoch=1_700_000_400)
+        readd = _rev(repo, "HEAD")
+
+        # The shape is only discriminating when the re-add sorts first; the old code passed only
+        # then. Assert the refusal on EVERY nonce regardless — that is the rule, not the accident.
+        if readd < early:
+            seen_discriminating = True
+
+        assert not check._is_ancestor(early, prereg_sha), "the early add must NOT precede the bars"
+        assert check._is_ancestor(prereg_sha, readd), "the re-add must be a descendant of the bars"
+        failures = check.check_ordering(prereg, [log])
+        assert failures, (
+            f"nonce {nonce}: a log with an EARLIER non-ancestor add-commit ({early[:9]}, "
+            f"1700000000) and a later re-add ({readd[:9]}, 1700000400) was accepted — the "
+            "delete-and-re-add route the docstring calls a hard fail"
+        )
+        if seen_discriminating:
+            return
+    raise AssertionError(
+        "no nonce produced the discriminating ordering (re-add sha sorting before the early add) "
+        "in 40 tries — the test did not reach the state the old code accepted"
+    )
+
+
 def test_a_malformed_disclosure_on_an_unscored_log_is_reported_not_a_crash(tmp_path, monkeypatch):
     """REGRESSION (#10529 cycle-5 P2): the print path re-read UNVALIDATED JSON and raised.
 
@@ -953,7 +1025,7 @@ def test_a_real_squash_disclosure_is_verified_and_a_forged_squash_is_refused(tmp
     failures = check.check_ordering(prereg, [log], None, None, None, forged)
     assert len(failures) == 1, failures
     assert "not a usable disclosure" in failures[0], failures
-    assert "nor a descendant of it" in failures[0], failures
+    assert "is not the commit that LANDED the pair" in failures[0], failures
 
 
 def test_a_squash_merge_cannot_be_one_of_its_own_branch_commits(tmp_path, monkeypatch):
@@ -978,6 +1050,45 @@ def test_a_squash_merge_cannot_be_one_of_its_own_branch_commits(tmp_path, monkey
     assert check._sha_prefix_agrees("cfa3de857", "cfa3de858") is False
 
 
+def test_a_squash_merge_naming_a_later_unrelated_commit_is_refused(tmp_path, monkeypatch):
+    """REGRESSION (#10546 review cycle 21, P2): a lower bound admits every later commit.
+
+    ⛔ THE FALSE LANDING THIS PINS. The arm asked only whether the pair's add-commit was an
+    ANCESTOR of `squash_merge`, so any commit made afterwards satisfied it — and the CLI then
+    printed `<log>: squashed by <that commit>` on the one line justified as "the ONE pointer a
+    reader can resolve", asserting a landing the tool never checked. Measured on a real history:
+    an unrelated commit made after the landing was accepted with zero failures.
+
+    ⛔ WHY THE FIX IS NOT "MUST EQUAL THE ADD-COMMIT". The fleet's rail lands with `--merge`, so
+    the commit that lands an atomic pair can be a genuine DESCENDANT
+    (`test_a_merge_landing_the_pair_unchanged_is_not_a_late_edit`). The decidable claim is that the
+    named commit INTRODUCES the pair — absent in its parent, present in it — which a squash and a
+    `--no-ff` merge both satisfy and a later unrelated commit does not.
+    """
+    repo = _repo(tmp_path, monkeypatch)
+    prereg, log, squash, branch = _real_squash(repo)
+    # The arm is DISARMED by default, so a valid disclosure still refuses there; the proposal's
+    # own semantics are only reachable armed (`_armed`), which is where this rule lives.
+    honest = _armed(prereg, [log], None, None, None, _atomic_pins(log.name))
+    assert honest == [], honest
+    # A commit AFTER the landing that has nothing to do with the pair.
+    (repo / "unrelated.txt").write_text("later\n")
+    _git(repo, "add", "unrelated.txt")
+    _git(repo, "commit", "-q", "-m", "an unrelated commit made after the landing",
+         epoch=1_700_000_900)
+    later = _rev(repo, "HEAD")
+    assert later != squash
+    forged = _atomic_pins(
+        log.name,
+        branch_commits=[f"{sha[:9]} a branch commit the squash collapsed" for sha in branch],
+        squash_merge=f"{later[:9]} a commit made AFTER the landing",
+    )
+    failures = _armed(prereg, [log], None, None, None, forged)
+    assert len(failures) == 1, failures
+    assert "is not a usable disclosure" in failures[0], failures
+    assert "is not the commit that LANDED the pair" in failures[0], failures
+
+
 def test_a_squash_merge_that_predates_the_pair_is_refused(tmp_path, monkeypatch):
     """REGRESSION (#10529 review cycle 15, P1): the squash pointer must be able to carry the pair.
 
@@ -995,7 +1106,7 @@ def test_a_squash_merge_that_predates_the_pair_is_refused(tmp_path, monkeypatch)
     pins = _atomic_pins(log.name, squash_merge=f"{root[:9]} the commit before the landing")
     failures = check.check_ordering(prereg, [log], None, None, None, pins)
     assert len(failures) == 1, failures
-    assert "nor a descendant of it" in failures[0], failures
+    assert "is not the commit that LANDED the pair" in failures[0], failures
 
 
 def test_the_cli_says_when_a_disclosure_history_was_not_checked_here():
