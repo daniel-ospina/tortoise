@@ -1970,6 +1970,13 @@ _BUNDLE_STALE_STEP_PREDICTION = (
     "so a re-run there still reports S2.3",
     "S2.3 does not flip",
     "S2.3 does not move on this corpus",
+    # Measured at `7caace29c`: the bundle's own dependency table said `S2.3` was
+    # "IDLE on this corpus" while the log this PR ships carries
+    # `step S2.3 WITNESSED … assigned_llm: 7`. The seven spellings above were
+    # blindness-by-paraphrase: this one named a DIFFERENT failure (idle, not
+    # "cannot move") and so survived the guard written for the class of
+    # "the bundle states a step prediction its own artifact refutes".
+    "S2.3` is IDLE on this corpus",
     "Until such a re-run is committed",
     "What still has to land is a **committed post-seam re-run**",
     "The two unwitnessed steps stay unwitnessed for THIS run",
@@ -2042,6 +2049,55 @@ def test_no_document_states_the_step_prediction_its_own_artifact_refutes():
                 "reading that sentence concludes a re-run cannot move S2.3 and "
                 "never runs one — say what the SHIPPED log measured, and keep the "
                 "6-of-8 count as the SUPERSEDED run's history")
+
+
+#: The `e1-aux` triple of the SUPERSEDED run — `capstone-measured-e0fc940b.log`
+#: measured 50 objects / 6 bare-definite / 0.12 share. The run this bundle now ships
+#: (`capstone-measured-9152448d.log`) measures 64 / 14 / 0.21875.
+#:
+#: Measured at `7caace29c`: the bundle's E1 summary row already said "**64 Objects** …
+#: 14/64", while its own E1 narrative (`**50 `:Object` nodes** … 6/50 = 0.12`, and
+#: `6/50 in the shipped log`) and the `00_index` row (`50 Objects at a 6/50 = 0.12`)
+#: still quoted the superseded triple as THIS run's — the row's stamp had moved to
+#: `9152448d7` without the number moving with it, which is the "a row moves only by
+#: re-running the probe" rule failing in the one direction a re-measure cannot fix:
+#: the prose was never re-derived. Two documents, one class, no pin.
+_SUPERSEDED_E1_AUX = (
+    "**50 `:Object` nodes**",
+    "6/50 = 0.12",
+    "50 Objects at a 6/50",
+    "6/50 in the shipped log",
+)
+
+
+def test_no_document_quotes_the_superseded_runs_e1_aux_numbers_as_current():
+    """The bundle may not present the deleted run's E1-aux numbers as this run's.
+
+    Non-vacuity, and it is the point of the test: the SHIPPED triple must be present
+    where the superseded one was banned. A pin that only forbids would pass on a
+    document that dropped the measurement altogether — which is the "no number" form
+    of the same defect.
+    """
+    readme = (_REPO / "docs/evidence/7949-capstone/README.md").read_text(encoding="utf-8")
+    index = (_REPO / "docs/00_index.md").read_text(encoding="utf-8")
+
+    for name, text in (("README.md", readme), ("docs/00_index.md", index)):
+        flat = _flat(text)
+        for phrase in _SUPERSEDED_E1_AUX:
+            assert _flat(phrase) not in flat, (
+                f"{name} quotes the SUPERSEDED run's e1-aux numbers as current "
+                f"({phrase!r}) — the shipped log measures 64 Objects at 14/64 = "
+                "0.21875; say what THIS run measured, and keep the superseded triple "
+                "only where it is labelled as the superseded stamp's history")
+
+    assert "64 `:Object` nodes" in readme and "14/64 = 0.21875" in readme, (
+        "README.md no longer states the shipped run's E1-aux numbers (64 `:Object` "
+        "nodes / 14/64 = 0.21875) — the ban above would pass vacuously on a bundle "
+        "that dropped the measurement")
+    assert "64 Objects at a 14/64 = 0.21875" in index, (
+        "docs/00_index.md's capstone row no longer states the shipped run's E1-aux "
+        "numbers — re-derive them from capstone-measured-9152448d.log's `e1-aux` "
+        "line rather than dropping the claim")
 
 
 # ── the bundle's OWN `file:line` cites must RESOLVE (not merely be spelled) ──
@@ -3058,6 +3114,67 @@ def test_the_bundle_names_the_live_e2_blocker_and_no_closed_render_absence():
             "an index row still routes a reader to `#9775` as E2's blocker — "
             "#9775's render half is CLOSED (PR #10382), so the live blocker is "
             f"`#10360`: {row[:400]}")
+
+
+# ── the bundle's dependency table must agree with the COMMITTED blocker record ──────
+#
+# V12 makes this a GATE for the verdict table's own `blocked_by` pointers. The bundle's
+# "Dependency state" table is the SAME claim one file over — a row reading `**OPEN**`
+# about an issue the committed `blocker-states.json` records CLOSED is stale evidence by
+# construction, which is the exact defect #10537 exists to stop.
+#
+# Measured at `7caace29c` (this repo, before the fix in the commit that added this pin):
+# the table still said `#8503` was `**OPEN** — E4's blocker` and `#9738` was
+# `**OPEN — owner-gated**`, while the record the SAME PR added records both CLOSED
+# (`2026-10-24T20:50:13Z` / `2026-11-02T08:53:06Z`). No pin covered it: the E2 test above
+# reads E2's row by name, so it cannot see a stale blocker on E4 or E5. The class is
+# mechanical, so the pin is too — it reads EVERY row of the table against the record
+# rather than the spellings this one commit happened to leave behind.
+
+#: `| `#NNNN` <title> | <state cell> |` — the dependency table's own shape.
+_BUNDLE_DEP_ROW = re.compile(r"^\|\s*`#(?P<issue>\d+)`[^|]*\|\s*(?P<state>[^|]*)\|")
+
+
+def test_the_bundle_dependency_table_never_reports_a_recorded_closed_issue_as_open():
+    """A dependency row may not call an issue OPEN when the record says CLOSED.
+
+    Non-vacuity: the test asserts it actually PARSED rows, that at least one of them
+    claims OPEN (so the comparison has something to bite on), and that the record it
+    reads carries the schema V12 reads — a pin that finds no rows, or compares against
+    an unreadable record, must fail rather than pass silently.
+
+    Measured red on the pre-fix text: rows `#8503` and `#9738` both claimed OPEN
+    against `CLOSED` states in the same tree.
+    """
+    record_path = _REPO / "docs/evidence/7949-capstone/blocker-states.json"
+    record = json.loads(record_path.read_text(encoding="utf-8"))
+    assert record.get("schema") == "capstone-blocker-states-v1", (
+        f"{record_path} carries schema {record.get('schema')!r}; this pin reads the "
+        "same record V12 does and cannot compare against another shape")
+    blockers = record.get("blockers") or {}
+    assert blockers, f"{record_path} lists no blockers — nothing to compare against"
+
+    readme = (_REPO / "docs/evidence/7949-capstone/README.md").read_text(encoding="utf-8")
+    rows = [m for m in (_BUNDLE_DEP_ROW.match(line) for line in readme.splitlines()) if m]
+    assert len(rows) >= 5, (
+        f"parsed only {len(rows)} dependency row(s) from the bundle README — this pin is "
+        "vacuous on a README whose table was renamed or removed")
+
+    claims_open = [m for m in rows if m.group("state").strip().lstrip("*").upper().startswith("OPEN")]
+    assert claims_open, (
+        "no dependency row claims OPEN — this pin cannot see the claim it exists to "
+        "check, so it would pass on a table that stopped carrying states at all")
+
+    stale = [(m.group("issue"), m.group("state").strip())
+             for m in claims_open
+             if blockers.get(f"#{m.group('issue')}", {}).get("state") == "CLOSED"]
+    assert not stale, (
+        "the bundle's dependency table calls an issue OPEN that the committed "
+        f"blocker record says is CLOSED: {stale} — a row routing a lane to finished "
+        "work is stale evidence by construction (this is what V12 refuses inside the "
+        "verdict table, one file over). Re-attribute the row to the issue that owns "
+        "the residual, as E4 `#8503`->`#9596` and E5 `#9738`->`#5087` did, or refresh "
+        f"{record_path.name} from the tracker if the tracker truly re-opened one")
 
 
 # ── the header's import claim, MEASURED (#10525 review P3) ───────────────────────────────────
