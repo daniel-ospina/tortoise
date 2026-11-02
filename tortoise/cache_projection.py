@@ -506,9 +506,54 @@ FOLD_ON_CREATE_DEFAULTS: dict[str, dict[str, Any]] = {
 #:   delete-then-re-create under an EXPLICIT id — the SDK mints a fresh id on its
 #:   own delete+re-create path, so that one is not reachable) the
 #:   live node took the ON MATCH arm and kept its own status while this replay
-#:   still writes the record's — possibly a TERMINAL value the graph never held.
-#:   The record carries no create-vs-match signal, so the reader cannot tell;
-#:   this is the same class of named residue as the ordering bounds below.
+#:   would otherwise write the record's.
+#:   ⛔ THE DIVERGENCE RUNS IN BOTH DIRECTIONS, and only ONE of them is closed.
+#:   (ii-a) THE HARM DIRECTION — a TERMINAL the graph really DID hold, discarded by
+#:   the birth arm, so the rebuild answers CURRENT: `[restatus(seq 1,'archived'),
+#:   birth(seq 2,'live')]` rebuilt `live` while the graph holds `archived`, and
+#:   `live._terminal_excluded` then admits a superseded entity whose name still
+#:   resolves. Reachability is not exotic: `sdk._entity_door_props` seeds
+#:   `status='live'` on every create, and the first journaled creation record is a
+#:   RE-MENTION whenever the node pre-existed (stub, explicit `id=`, pre-#3590
+#:   graph, partial replay from `start_seq`) — so the failure does not degrade to
+#:   the benign "absent reads LIVE" flavour, it actively asserts CURRENT.
+#:   ⛔ ONE of its two orderings is CLOSED, and the other is NOT — do not read this
+#:   as "the harm direction is fixed":
+#:   (ii-a-1) the OVERWRITE ordering (above) is CLOSED. The birth arm now honours
+#:   the terminal latch (`_is_terminal_status`) every other in-stream fold here
+#:   honours, so it can no longer overwrite a terminal the REPLAY ALREADY HOLDS.
+#:   (ii-a-2) the DELETE-THEN-RE-CREATE ordering is STILL OPEN, and the latch
+#:   cannot reach it: it is the `birth_seen` earliest-only rule that discards the
+#:   value, not the (now-guarded) assignment. `_upsert_object` writes
+#:   `coalesce($st, 'live')` ON CREATE, so a re-create under an EXPLICIT id puts
+#:   the LATER record's terminal in the graph while this replay answers from the
+#:   FIRST incarnation — `[birth(seq 1, None), birth(seq 2, 'archived')]` and
+#:   `[birth(seq 1, 'live'), birth(seq 2, 'archived')]` both rebuilt absent/`live`
+#:   against a graph holding `archived` (MEASURED; exhaustive sweep over
+#:   `{restatus, birth, delete}` × length ≤ 4 finds 52 harm orderings, every one of
+#:   them containing a delete). The SDK mints a FRESH id on its own delete+re-create
+#:   path, so this needs an explicit `id=` — narrower, not closed. See the birth
+#:   arm's own STATED BOUND in :func:`apply_event_stream_folds`.
+#:   (ii-b) THE FAIL-SAFE DIRECTION — still open, and the reason the latch is not
+#:   the whole bound: where the id pre-existed holding a NON-terminal status, the
+#:   ON MATCH arm keeps it live while this replay writes the record's, i.e. a
+#:   TERMINAL value the graph never held (`[restatus(seq 1,'live'),
+#:   birth(seq 2,'archived')]`). That direction is conservative — it makes the
+#:   rebuild claim LESS life, never more — so it cannot produce #9974's harm.
+#:   (ii-c) THE THIRD ORDERING, NAMED (review P2): the latch also refuses a TERMINAL
+#:   **pre-birth fold** in the CREATED case — an id that did NOT pre-exist, where
+#:   that fold matched no node and wrote NOTHING live, and the creation record then
+#:   really is the write that made the node (`[pack-fold(seq 1,'archived'),
+#:   birth(seq 2,'live')]` → replay `archived`, graph `live`; same for
+#:   `deprecated`/`retracted`). Pre-latch this returned the birth value (round 6's
+#:   fix). ⚠️ This is pack-declaration-conditional — no pack in `packs/` declares a
+#:   terminal fold target today — and it lands in the FAIL-SAFE direction (the
+#:   rebuild claims less life, never more), which is the deliberate trade: the
+#:   replay cannot distinguish "the fold matched nothing" from "the graph held
+#:   it", and preferring the terminal never re-opens #9974's harm.
+#:   The record carries no create-vs-match signal, so the reader cannot tell (ii-a-1),
+#:   (ii-a-2), (ii-b) and (ii-c) apart; this is the same class of named residue as
+#:   the ordering bounds below.
 #:   ⚠️ Also STATED BOUND — a null-valued `state.status` (`update_entity(obj,
 #:   status=None)`) is NOT modelled: the graph applies `SET n += {status: null}`,
 #:   which REMOVES the property, while this reader skips a non-string value and
@@ -1742,12 +1787,12 @@ def apply_event_stream_folds(
                 # MATCH, so only the EARLIEST creation record for this id may
                 # speak: #3590 journals another `ObjectRegistered` on EVERY
                 # create, and a re-mention must not rewrite a stored status.
-                # ⛔ THE ASSIGNMENT IS UNCONDITIONAL, and that is the round-6
-                # (P2) fix — for the NORMAL case, where this record is the write
-                # that CREATED the node (see the stated bound below for the
-                # cases where it is not). There, any fold this replay applied
-                # BEFORE the creation record folded NOTHING in the live graph,
-                # because the node did not exist yet
+                # ⛔ THE ASSIGNMENT IS UNCONDITIONAL *EXCEPT FOR THE TERMINAL
+                # LATCH*, and that is the round-6 (P2) fix — for the NORMAL case,
+                # where this record is the write that CREATED the node (see the
+                # stated bound below for the cases where it is not). There, any
+                # fold this replay applied BEFORE the creation record folded
+                # NOTHING in the live graph, because the node did not exist yet
                 # (`entity_identity.resolve_fold_name` never mints, and an
                 # `about_entities` miss is the exempt `unfolded-mention`, so the
                 # event is legal and journaled).
@@ -1789,9 +1834,46 @@ def apply_event_stream_folds(
                 #   explicit id takes ON CREATE, so there the graph holds the
                 #   LATER record's value and this arm answers from the FIRST
                 #   incarnation.
+                # ⛔ THE TERMINAL LATCH (review P1, rounds 6-7): a creation record
+                # is a RE-MENTION as soon as the id pre-existed (a name stub, an
+                # explicit `id=`, a pre-#3590 graph, a partial/segment replay from
+                # `start_seq`), and then the live fold takes ON MATCH, which writes
+                # NO status — so a TERMINAL value an earlier `restatus` put on the
+                # node SURVIVES in the graph. Writing the birth value here
+                # instead RESURRECTS the node: the replay answers `live`, which
+                # `live._terminal_excluded` admits as CURRENT, and
+                # `entity_identity.resolve_entity_id` resolves its name. That is
+                # #9974's own harm, re-opened by the leg added to close it — and
+                # measured on this very tree:
+                #     [restatus(seq 5, 'archived'), birth(seq 9, 'live')]
+                #       → rebuilt `live`; the graph holds `archived`.
+                # So the birth arm honours the SAME latch every other in-stream
+                # fold in this function honours (`_is_terminal_status`): a terminal
+                # the replay already holds is not overwritten by a later birth.
+                # ⚠️ The non-terminal case is NOT affected — the round-6 fix
+                # above still applies there, because a non-terminal pre-birth fold
+                # (`released`) genuinely folded nothing in the live graph (the node
+                # did not exist), and the creation record is the write that made
+                # it. `birth_seen` is still set by the EARLIEST creation record
+                # whether or not it was allowed to speak, so a later re-mention can
+                # never overwrite either.
+                # ⛔ BUT A **TERMINAL** PRE-BIRTH FOLD IS NOW REFUSED, and that is a
+                # deliberate trade, not an oversight (review P2): for an id that did
+                # NOT pre-exist, such a fold matched no node and wrote nothing live,
+                # so round 6's rule says the creation record must win — yet the
+                # replay cannot tell that case from "the graph already held this
+                # terminal" (the record carries no create-vs-match signal). Given
+                # the choice, it prefers the TERMINAL, because that lands in the
+                # fail-safe direction (the rebuild claims LESS life) while the
+                # alternative re-opens #9974's harm (the rebuild asserts CURRENT).
+                # MEASURED: `[pack-fold(seq 1,'archived'), birth(seq 2,'live')]`
+                # → replay `archived`, graph `live`. Pack-declaration-conditional
+                # today (no pack in `packs/` declares a terminal fold target);
+                # named as residue (ii-c) at the top of this module.
                 if not birth_seen:
                     birth_seen = True
-                    status = event.birth_status
+                    if not _is_terminal_status(status):
+                        status = event.birth_status
                 continue
             # #9974: a `restatus` is the caller's explicit write, applied the way
             # the live fold applies it — `SET n += $state`, unguarded, so it can
