@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import concurrent.futures
 import contextlib
+import contextvars
 import json
 import logging
 import math
@@ -2325,6 +2326,113 @@ class ControlPlaneOffloadError(RuntimeError):
     def __init__(self, message: str, *, refused: bool = False) -> None:
         super().__init__(message)
         self.refused = refused
+
+
+class ContextConfinementError(RuntimeError):
+    """The submitting context could not be reproduced in the worker.
+
+    Raised by :func:`confine_context` when the caller's ``Context`` cannot be
+    re-materialised for an invocation. Deliberately a NAMED error and not a
+    fallback: the only "recovery" available at that point would be to run the
+    callable under the WORKER'S AMBIENT context, which on a process-lifetime
+    pool thread still carries whatever the previous request set (the exact
+    cross-request leak ``copy_context`` exists to prevent — `_graph_offload`'s
+    "Context isolation" note). A wrong-tenant graph read is a far worse answer
+    than a refusal, so this fails CLOSED.
+
+    It is NOT a :class:`ControlPlaneOffloadError`: that one is the pool telling
+    the caller the wait bound or the backlog refused the submission. This one
+    says the offload could not carry the request's context, so the callable
+    NEVER RAN either — the hosted seam maps it onto the same retryable 503
+    (see ``hosted_api._cp_offload``), because both are "no work was done".
+
+    Reachability: this is a DEFENSIVE arm, not an observed mode. Today the only
+    way to get here is for ``contextvars.Context()`` / ``Context.items()`` to
+    fail, which does not happen on a working interpreter — the seam test drives
+    it by monkeypatching ``_fresh_context``. It exists so that no FUTURE
+    implementation of ``_fresh_context`` can degrade into the one answer that is
+    worse than a refusal: running the callable under the worker's ambient
+    context. Do not read a log line from here as an incident class.
+    """
+
+
+def _fresh_context(snapshot: contextvars.Context) -> contextvars.Context:
+    """Reproduce ``snapshot``'s values in a NEW, never-entered ``Context``.
+
+    A ``Context`` object is SINGLE-ENTRY, not re-entrant: ``Context.run`` raises
+    ``RuntimeError: cannot enter context: <...> is already entered`` while any
+    other ``run`` on the SAME object is still on a stack — this thread's or
+    another's (PEP 567; https://docs.python.org/3/library/contextvars.html:
+    *"A Context cannot be entered while already entered, including from another
+    thread"*). A stored ``Context`` is therefore unusable for anything that may
+    execute MORE THAN ONCE — a retry, a second submission, an overlap — and a
+    bounded offload produces exactly that overlap: ``_await_future``'s bound
+    cancels the AWAIT and never the thread (CPython #87185), so the first
+    callable is still inside its ``ctx.run`` when a retry arrives (#10612 P1,
+    measured: ``RuntimeError: cannot enter context ... already entered``).
+
+    ``copy_context()`` cannot be reused and the supported CPython versions have
+    no ``Context.copy()``, so the values are re-materialised here — the same
+    shallow-copy semantics as ``copy_context`` (the VALUES are shared; only the
+    mapping is new).
+    """
+    fresh = contextvars.Context()
+    for var, value in snapshot.items():
+        fresh.run(var.set, value)
+    return fresh
+
+
+def confine_context(fn: Callable[..., object]) -> Callable[..., object]:
+    """Wrap ``fn`` so EVERY invocation runs in a FRESH copy of the caller's context.
+
+    This is the re-entry-proof replacement for the hand-rolled offload idiom
+    ``functools.partial(contextvars.copy_context().run, fn)``, which is correct
+    exactly ONCE per submission and silently a trap the moment anything may run
+    the wrapped callable twice: the ``Context`` captured at wrap time is already
+    entered by the first run, so the second raises ``RuntimeError: cannot enter
+    context: ... is already entered`` — inside a worker, i.e. NOT a
+    ``ControlPlaneOffloadError``, so it escapes the offload seam's fail-closed
+    mapping and lands on a route's blanket ``except Exception`` as an \u200bunlabelled
+    **500** the client cannot act on (#10612 P1: ``/v1/search`` and
+    ``/v1/topics/{t}/summary``).
+
+    Two properties are preserved from the idiom it replaces, so this is a
+    drop-in:
+
+    * **isolation** — the snapshot is taken in the SUBMITTING thread, so a var
+      the callable sets is confined to that invocation and cannot survive into
+      the NEXT request a process-lifetime pool thread serves;
+    * **freshness** — each invocation gets its own ``Context``, so retries,
+      re-submissions and overlapping workers cannot collide.
+
+    The snapshot is taken HERE (at wrap time), not inside the wrapper: a copy
+    taken in the worker would capture the worker's ambient context instead of
+    the request's — the leak this exists to prevent.
+
+    Cost: one dict-ish iteration over the vars the request set (a handful) per
+    invocation, against a call whose budget is measured in tens of milliseconds.
+
+    Two other in-repo sites still carry the plain idiom —
+    ``tortoise/selfhost.py`` and ``tortoise/indexer/github_indexer.py`` — and are
+    deliberately NOT migrated here: each builds its ``Context`` per call and
+    submits it once, so neither can re-enter, and neither is on the hosted
+    request path this change is about. A caller that may run its wrapped
+    callable MORE than once (a retry, a re-submission, an overlap) belongs here
+    instead.
+    """
+    snapshot = contextvars.copy_context()
+    name = getattr(fn, "__name__", None) or repr(fn)
+
+    def _confined(*args, **kwargs):
+        try:
+            ctx = _fresh_context(snapshot)
+        except Exception as exc:
+            raise ContextConfinementError(
+                f"could not reproduce the submitting context for {name!r}: "
+                f"{type(exc).__name__}: {exc}") from exc
+        return ctx.run(fn, *args, **kwargs)
+
+    return _confined
 
 
 def control_plane_worker(pool: str = "auth") -> _SingleSlotWorker:
