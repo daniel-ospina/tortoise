@@ -3064,6 +3064,90 @@ def _readable_registration(directory: Path) -> Path:
     return target
 
 
+def _bundles_that_poison_the_base(base: str) -> list[str]:
+    """Committed bundles whose registration is UNPUBLISHED while a CLAIMING log lands WITH it.
+
+    This is the shape that is poison on the base, stated discriminatorily (#10547 review 5 P1). The
+    predicate is NOT "the registration is absent from the base": that also describes the shape
+    :data:`check.SAME_PR_REFUSAL` explicitly PRESCRIBES as the remedy — *"Land the registration
+    alone, then add the log in a follow-up"* — so the whole-population form redded the one change
+    the tool's own refusal tells contributors to open. What is actually unrecoverable is narrower:
+    the registration is unpublished **and** a log that makes an ordering claim arrives in the same
+    change, because the squash that lands it collapses both add-epochs into one and nothing ever
+    withdraws the pair.
+
+    A log NEITHER exemption covers makes no ordering claim (the same predicate the refusal arm uses
+    via :func:`check._logs_making_an_ordering_claim`), so a registration landing beside an unscored
+    or pins-exempt log is not poison either — on the base that log is still exempt, by content.
+    """
+    poison: list[str] = []
+    for directory in check.discover_bundles():
+        if check._added_epochs_on(base, directory / check.PREREG_NAME):
+            continue                      # published on the base: a squash here cannot touch it
+        try:
+            pins = check.parse_pins((directory / check.PREREG_NAME).read_text())
+            exempt = check._pins_mapping(pins, "pre_existing_unscored_logs")
+        except (check.CheckError, OSError, UnicodeDecodeError):
+            exempt = {}                   # unreadable registration: the tool exits 2 on it already
+        logs = sorted(directory.glob(check.EVIDENCE_LOG_GLOB))
+        claiming = check._logs_making_an_ordering_claim(logs, exempt, None)
+        if any(not check._added_epochs_on(base, log) for log in claiming):
+            poison.append(str(directory.relative_to(check.REPO_ROOT)))
+    return poison
+
+
+def test_the_tree_pin_flags_a_poisoned_bundle_and_spares_a_registration_only_one(tmp_path,
+                                                                                 monkeypatch):
+    """#10547 review 5 P1: the tree-wide pin over-blocked the remedy its own refusal prescribes.
+
+    Measured, in the throwaway repo this test builds: the PRE-FIX rule ("every discovered
+    registration must have an add-epoch on the base") reds all three bundles below — including
+    `5088-registration-only`, which is exactly what `SAME_PR_REFUSAL` tells a contributor to do, and
+    `5089-unscored`, whose log makes no ordering claim at all. The two arms shipped by this PR then
+    disagreed about the same tree, and the natural workaround was to hand-edit the base or skip the
+    gate. The fixed predicate is the discriminating one: only the bundle whose registration is
+    unpublished WHILE a claiming log lands with it.
+    """
+    repo = _repo_with_published_base(tmp_path, monkeypatch)
+
+    poisoned = _bundle(repo, "9999-poison")
+    _readable_registration(poisoned)
+    (poisoned / "s3-ablation.log").write_text(
+        _capstone_body(run_status="COMPLETED", numerator=284, denominator=247))
+    _commit_files(repo, [poisoned / check.PREREG_NAME, poisoned / "s3-ablation.log"],
+                  epoch=1_700_000_300, message="a registration and a SCORED log in one commit")
+
+    registration_only = _bundle(repo, "5088-registration-only")
+    _readable_registration(registration_only)
+    _commit_files(repo, [registration_only / check.PREREG_NAME], epoch=1_700_000_400,
+                  message="the registration alone — the shape the refusal prescribes")
+
+    unscored = _bundle(repo, "5089-unscored")
+    _readable_registration(unscored)
+    (unscored / "capstone.log").write_text(_capstone_body())   # declares no measurement
+    _commit_files(repo, [unscored / check.PREREG_NAME, unscored / "capstone.log"],
+                  epoch=1_700_000_500,
+                  message="a registration beside a log that declares no measurement")
+
+    assert _bundles_that_poison_the_base("origin/main") == ["docs/evidence/9999-poison"], (
+        "only a registration landing BESIDE a claiming log is unconditional poison on the base; "
+        "the registration-only change is the remedy the refusal itself prescribes, and an unscored "
+        "log makes no ordering claim to squash"
+    )
+    # The PRE-FIX predicate, computed here on the same tree: it is what over-blocked (all three).
+    # Kept as the measurement, so a revert to the whole-population form is visible as a red.
+    pre_fix = [
+        str(directory.relative_to(check.REPO_ROOT))
+        for directory in check.discover_bundles()
+        if not check._added_epochs_on("origin/main", directory / check.PREREG_NAME)
+    ]
+    assert pre_fix == [
+        "docs/evidence/5088-registration-only",
+        "docs/evidence/5089-unscored",
+        "docs/evidence/9999-poison",
+    ], f"the pre-fix rule over-blocked these: {pre_fix}"
+
+
 def test_no_committed_bundle_registers_itself_only_in_the_change_that_carries_its_log():
     """#10547 review P1: a bundle may not be committed while its registration is UNPUBLISHED.
 
@@ -3074,26 +3158,28 @@ def test_no_committed_bundle_registers_itself_only_in_the_change_that_carries_it
     on the base, so the same bundle is refused on `main` FOREVER — with nothing to withdraw it. That
     is #10468's outage shape reproduced on purpose.
 
-    So the invariant is about the TREE, not about this PR's prose: every bundle the checker
-    discovers here must already have its registration published on the base. A throwaway bundle used
-    to prove the refusal in CI reds `main` the moment any merge lands it, which is why the proof in
-    this suite is a TEMP repo (``test_all_bundles_refuses_a_registration_added_beside_its_own_log``)
-    and not a committed directory.
+    ⛔ THE INVARIANT IS THE DISCRIMINATING ONE (#10547 review 5 P1). It used to require an add-epoch
+    on the base for EVERY discovered registration, which reds the registration-only change that
+    :data:`check.SAME_PR_REFUSAL` itself prescribes as the remedy — the two arms disagreed about the
+    same tree, and only outside a shallow clone (CI test jobs are `fetch-depth: 1`, so they skip).
+    :func:`_bundles_that_poison_the_base` states the narrow rule that is genuinely unrecoverable and
+    its own test proves it flags the poison shape while sparing the legitimate one.
+
+    Which is also why the proof of the refusal is a TEMP repo
+    (``test_all_bundles_refuses_a_registration_added_beside_its_own_log``), not a committed
+    directory.
     """
     if check.history_unavailable():
         pytest.skip("shallow clone: the base's add-epochs are unavailable here")
     base = check.resolve_base_ref()
     if base is None:
         pytest.skip("no resolvable base ref in this checkout: nothing to measure the tree against")
-    unpublishable = [
-        str(directory.relative_to(REPO_ROOT))
-        for directory in check.discover_bundles()
-        if not check._added_epochs_on(base, directory / check.PREREG_NAME)
-    ]
-    assert not unpublishable, (
-        f"bundle(s) {unpublishable} carry a registration that is NOT on {base}: such a bundle is "
-        "refused at PR time (correct) and, once squash-merged, refused on the base forever (a "
-        "permanent red with no withdrawal). Prove the same-PR refusal in a temp repo instead"
+    poison = _bundles_that_poison_the_base(base)
+    assert not poison, (
+        f"bundle(s) {poison} carry a registration that is NOT on {base} BESIDE an evidence log that "
+        "makes an ordering claim: such a bundle is refused at PR time (correct) and, once "
+        "squash-merged, refused on the base forever (a permanent red with no withdrawal). Land the "
+        "registration in its own PR — or prove the same-PR refusal in a temp repo"
     )
 
 
