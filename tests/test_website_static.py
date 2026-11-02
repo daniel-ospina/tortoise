@@ -1201,11 +1201,13 @@ class TestInvestorsProgressCopy:
 
     # Rendered left/right order of the two cells: what exists, then the demand.
     EXPECTED_CELL_ORDER = ("Product & distribution", "Early demand")
-    # The owner's sanctioned line, verbatim — entities decoded, so the curly
-    # quotation marks are pinned too (ASCII quotes are NOT this copy).
-    # Updated 2026-11-02 with the owner's wording from the submitted a16z
-    # Speedrun application video ("over 40 calls"); the earlier 32/34 pass rate
-    # is superseded by the owner's later figure.
+    # Pinned verbatim — entities decoded, so the curly quotation marks are
+    # pinned too (ASCII quotes are NOT this copy). The "when can I use it"
+    # wording is the owner's (#9283); the figure is the founder's, from the
+    # submitted a16z Speedrun application video ("over 40 calls"). The earlier
+    # `32 of 34` pass rate came from call records and that video supersedes it.
+    # Rendering the spoken figure into this line is the page's job (PR #10603),
+    # so the constant pins what ships — it is not an owner-authored string.
     EXPECTED_DEMAND_HEADLINE = "40+ calls: \u201cwhen can I use it\u201d"
     # What an earlier revision carried. It must not come back: "prospective"
     # disclaims the noun it modifies.
@@ -1249,8 +1251,8 @@ class TestInvestorsProgressCopy:
         section_text = _beat_text(_investors_progress_section())
         assert self.RETIRED_LINE not in section_text, (
             f"{self.RETIRED_LINE!r} is back in #progress. 'prospective' "
-            "disclaims the noun it modifies; it was replaced by the owner's own "
-            "figures (PR #9283)")
+            "disclaims the noun it modifies; it was replaced by the Progress "
+            "headline the section now carries (PR #9283)")
 
 
 #: Directories under the website scan roots that hold BUILD OUTPUT or vendored code,
