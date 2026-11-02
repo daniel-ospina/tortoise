@@ -23,7 +23,7 @@ Configuration (env vars; all optional):
 
 Example:
   python3 extract_turns.py dump
-  python3 extract_turns.py run --transcript 01a1102f --out ex.json   # defaults: claude-haiku-5-5 @ high
+  python3 extract_turns.py run --transcript <session-id> --out ex.json  # defaults: claude-haiku-5-5 @ high
   python3 extract_turns.py write --extraction ex.json \
       --source session://extraction-2026-10-24-haiku-high-thread-01a1102f --domain my-project
 
@@ -142,12 +142,14 @@ def _is_turn_of(row) -> bool:
 
     A bare `is_episodic`/`pointKind='event'` filter is not enough: any other
     episodic Point wired to the Session would be spliced into the transcript.
-    Checked host-side because `t.id STARTS WITH (s.id + '_t')` does not parse
-    in the deployed FalkorDB (measured: `ResponseError: Type mismatch: expected
-    Boolean but was String`).
+    The suffix must be DECIMAL, mirroring `sdk._capture_turn_ids`' own
+    `isdecimal()` guard, so this filter and `_turn_order` can never disagree
+    about what a turn is (an id `_is_turn_of` admitted but `_turn_order` could
+    not index would abort the whole dump).
     """
     sid = str(row[0]).split("://", 1)[-1]
-    return str(row[5]).startswith(f"{sid}_t")
+    tail = str(row[5])[len(sid) + 2:]
+    return (str(row[5]).startswith(f"{sid}_t") and tail.isdecimal())
 
 #: The capture store's own frame (`_capture_turn_frame`, ``"[role] body"``).
 #: The turn's `content` property holds the FRAMED text and `speaker` holds the
@@ -268,9 +270,11 @@ def build_transcripts(turns_path: Path):
             elif t["src"].startswith("session:"):
                 # A CAPTURE-turn source (what `dump` emits): the key is the
                 # session id itself, so `--transcript <session-id>` works.
-                # Take the ENTIRE remainder (minus the writer's own
-                # `#message=` fragment) — never a tail split: truncating would
-                # collapse `teamA/run-7` and `teamB/run-7` into one transcript.
+                # Never a tail split — truncating would collapse
+                # `teamA/run-7` and `teamB/run-7` into one transcript. The
+                # `#message=` fragment is the HAND-BUILT file form and is
+                # stripped (one session, many message fragments) — the capture
+                # writer never appends one.
                 raw = t["src"].split("://", 1)[-1]
                 key = raw.split("#message=", 1)[0]
             else:
@@ -754,7 +758,8 @@ def main():
     r.add_argument("--effort", default="high")
     r.add_argument("--turns-file", default=str(state_dir() / "turns_raw.jsonl"))
     r.add_argument("--transcript", required=True,
-                   help="full thread id or an unambiguous prefix")
+                   help="capture session id (or a codex thread id from a "
+                        "hand-built turns file) — exact or unambiguous prefix")
     r.add_argument("--out", required=True)
     w = sub.add_parser("write", help="write an extraction into the graph")
     w.add_argument("--extraction", required=True)

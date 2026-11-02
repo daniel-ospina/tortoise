@@ -383,6 +383,18 @@ class TestDumpReadsTheCaptureShape(unittest.TestCase):
                 run.return_value = types.SimpleNamespace(stdout=emitted + "\n", stderr="")
                 dump(out)
             self.assertEqual(build_transcripts(out), {"s1": "[2026-11-02] user: hello"})
+            # the emitter and the query's RETURN arity must agree: a column
+            # added to (or dropped from) either side is the cycle-2 P0
+            # (`IndexError` inside the sort), so assert the two counts here
+            # rather than trusting the mocked payload.
+            script = run.call_args[0][0][-1]
+            ret = _DUMP_QUERY.split("RETURN ", 1)[1].split(" ORDER BY ", 1)[0]
+            cols = len([c for c in ret.split(",")])
+            self.assertEqual(cols, 6)
+            self.assertIn("r[5]", script)
+            for i in range(cols):
+                self.assertIn(f"r[{i}]", script,
+                              f"the emitter must print column {i}")
 
     def test_turn_order_refuses_a_turn_id_with_no_index(self):
         with self.assertRaises(ValueError):
