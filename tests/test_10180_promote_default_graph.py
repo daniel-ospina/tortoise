@@ -1154,6 +1154,12 @@ def test_the_provisioning_reason_names_the_door_the_code_opens():
     name-only door back in the reason WITHOUT marking it rejected (the pre-fix
     wording: "it now opens the resolved name with `_org_sdk_from_name`") → the
     reason half reds.
+
+    The door is pinned where it now IS: the open moved into the module-level
+    `_prior_org_onboarding_fork`, which the org-create lane submits to
+    `_graph_offload` (#10452 CI — reading the fork on the loop is the #4625
+    class). The eager init must still reach it THROUGH that one helper, so a
+    later lane cannot open the prior org on its own again.
     """
     import ast
     import re
@@ -1177,15 +1183,31 @@ def test_the_provisioning_reason_names_the_door_the_code_opens():
 
     hosted = ast.parse((Path(__file__).resolve().parent.parent / "tortoise"
                         / "hosted_api.py").read_text(encoding="utf-8"))
-    fn = next(n for n in ast.walk(hosted)
-              if isinstance(n, ast.FunctionDef)
-              and n.name == "_eager_provision_org_graph")
-    called = {getattr(c.func, "id", None) or getattr(c.func, "attr", None)
-              for c in ast.walk(fn) if isinstance(c, ast.Call)}
-    assert "_open_org_graph_sdk" in called, (
-        "`_eager_provision_org_graph` no longer opens the prior org through "
-        f"`_open_org_graph_sdk` (calls: {sorted(c for c in called if c)})")
-    assert "_org_sdk_from_name" not in called, (
+
+    def _fn(name: str):
+        return next(n for n in ast.walk(hosted)
+                    if isinstance(n, ast.FunctionDef) and n.name == name)
+
+    def _called(node) -> set[str]:
+        return {getattr(c.func, "id", None) or getattr(c.func, "attr", None)
+                for c in ast.walk(node) if isinstance(c, ast.Call)}
+
+    prior_open = _called(_fn("_prior_org_onboarding_fork"))
+    assert "_open_org_graph_sdk" in prior_open, (
+        "`_prior_org_onboarding_fork` — the ONE prior-org door the eager init "
+        "goes through — no longer opens with `_open_org_graph_sdk` "
+        f"(calls: {sorted(c for c in prior_open if c)})")
+    assert "_org_sdk_from_name" not in prior_open, (
+        "the prior-org door opens with the name-only `_org_sdk_from_name` "
+        "again — that is #10510: no listing gate, so an absent or pre-#3543 "
+        "prior graph is opened, and so MINTED, and the fork read comes back "
+        "empty")
+
+    eager_called = _called(_fn("_eager_provision_org_graph"))
+    assert "_prior_org_onboarding_fork" in eager_called, (
+        "`_eager_provision_org_graph` no longer reaches the prior org through "
+        f"the one gated door: {sorted(c for c in eager_called if c)}")
+    assert "_org_sdk_from_name" not in eager_called, (
         "`_eager_provision_org_graph` opens with the name-only "
         "`_org_sdk_from_name` again — that is #10510: no listing gate, so an "
         "absent or pre-#3543 prior graph is opened, and so MINTED, and the fork "
@@ -2808,6 +2830,77 @@ def test_the_org_create_lane_resolves_the_prior_default_off_the_loop(sb, monkeyp
     assert prior_opens[0][3] == (moved, None), (
         "the eager init opened the prior org somewhere other than the resolved "
         f"default: {prior_opens[0][3]}")
+
+
+def test_the_prior_org_fork_read_is_submitted_to_the_graph_worker(sb, monkeypatch):
+    """#4625 / #10452 CI: the fork `MATCH` is graph I/O too — it belongs in the
+    graph worker, not on the org-create request's loop.
+
+    The round that fixed the LISTING (#10510) still READ the fork inline from
+    the sync `_eager_provision_org_graph`: `_open_org_graph_sdk` and
+    `read_prior_org_fork` both ran on the loop of the slowest write lane in
+    this file, which is the class the #4625 guard in
+    `tests/test_health_ready_nonblocking.py` fails on and the reason that guard
+    is a whole-file scan rather than a per-call-site allowance.
+
+    FAIL-ON: resolve the fork back inside `_eager_provision_org_graph` (drop
+    the caller's `_graph_offload` submission and let the sentinel arm run) —
+    every read recorded here then sees a running loop and the second assertion
+    reds. The first assertion reds if the read is dropped altogether, so
+    "no reads, no problem" cannot pass.
+
+    Loop-presence is the CALL's own view (a worker thread has no running
+    loop), not a source grep for `to_thread`, so a differently-spelled
+    refactor that puts the read back on the loop fails here too.
+
+    ⚠️ THIS TEST IS THE ONLY PIN ON THAT ARM, and the #4625 guard cannot be
+    it: `_prior_org_onboarding_fork` is handed to `_graph_offload` BY NAME
+    from the async lane, which puts it in that guard's off-loaded-callable set
+    and closes its body out of the on-loop closure — so a caller that resolves
+    the fork inline through it (i.e. passes the sentinel) is invisible there.
+    Measured: with the caller's submission removed the guard stays GREEN while
+    this test reds. Do not delete it as "already covered"."""
+    import asyncio
+
+    tc, fake, _ = sb
+    _as_session()
+    assert tc.post(f"/v1/graphs/{NEW_ID}/promote?org_id={TEAM}").status_code == 200
+    moved = f"org_{TEAM}_{NEW_ID}"
+
+    def _on_loop() -> bool:
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return False
+        return True
+
+    # A REAL listing naming the promoted default, so the gated open proceeds
+    # and the fork read is reached at all (the embedded lane's physical graph
+    # name is rewritten per test, so a fresh probe would not list `moved`).
+    monkeypatch.setattr(ha, "_registry_existing_graphs", lambda *_a, **_k: {moved})
+
+    reads: list[bool] = []
+    _os = _onboarding_state()
+    real_read = _os.read_prior_org_fork
+
+    def _record_read(proj, prior_org_id):
+        reads.append(_on_loop())
+        return real_read(proj, prior_org_id)
+
+    monkeypatch.setattr(_os, "read_prior_org_fork", _record_read)
+
+    out = asyncio.run(ha._create_org_supabase_lane(
+        fake, "Third Org", {"user_id": MEMBER}))
+
+    assert out["name"] == "Third Org"
+    assert reads, (
+        "the prior-org fork was never read — with no read this test proves "
+        "nothing about WHERE it runs")
+    assert not any(reads), (
+        "the prior-org fork read ran ON THE EVENT LOOP (loop-presence per "
+        f"read: {reads}) — the sync eager init is called directly from "
+        "`_create_org_supabase_lane`, so it belongs in that caller's "
+        "`_graph_offload` submission (`_prior_org_onboarding_fork`)")
 
 
 def _store_graphs() -> set[str]:

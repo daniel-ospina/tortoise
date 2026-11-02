@@ -22396,7 +22396,7 @@ def _eager_provision_org_graph(cp, org_id: str, name: str, user_id: str,
                                = _NAMESPACE_NOT_RESOLVED,
                                prior_listed: set[str] | _ProbeNotSampled | None
                                = _PROBE_NOT_SAMPLED,
-                               prior_fork: str | None | _ForkNotResolved
+                               prior_fork: str | _ForkNotResolved | None
                                = _FORK_NOT_RESOLVED) -> str:
     """Effect the eager default-graph TeamMeta + OnboardingState init for an
     org that is about to be provisioned; return its graph name.
