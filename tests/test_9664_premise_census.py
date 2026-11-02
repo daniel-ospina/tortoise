@@ -693,21 +693,17 @@ def test_the_seeding_stand_in_refuses_a_changed_seed_write(probe) -> None:
 
 
 def _run_recipe(env: dict[str, str]) -> subprocess.CompletedProcess[str]:
-    """Run the README's recipe as a SCRIPT, so `returncode` IS the census verdict."""
-    script = (
-        "import importlib.util\n"
-        "import sys\n"
-        f"spec = importlib.util.spec_from_file_location('census', {str(PROBE_PATH)!r})\n"
-        "module = importlib.util.module_from_spec(spec)\n"
-        "spec.loader.exec_module(module)\n"
-        "rc = module.main()\n"
-        "for _step, premise, measured in module.rows:\n"
-        "    print(f'ROW\\t{premise}\\t{measured}')\n"
-        "print('RC', rc, 'UNMEASURED', len(module.unmeasured))\n"
-        "sys.exit(rc)\n"
-    )
+    """Run the README's recipe EXACTLY as documented — the probe as `__main__`.
+
+    Importing the probe and calling `main()` would leave
+    `if __name__ == "__main__": sys.exit(main())` unexecuted, so the fail-closed
+    exit-code contract the reader relies on would be verified by a hand-copy
+    instead of by the command in the README. Measured: mutating that tail to a
+    bare `main()` keeps every in-process pin green while the documented command
+    prints `UNMEASURED SECTIONS (fail closed …)` and exits **0**.
+    """
     return subprocess.run(
-        [sys.executable, "-c", script], cwd=str(ROOT), env=env,
+        [sys.executable, str(PROBE_PATH)], cwd=str(ROOT), env=env,
         capture_output=True, text=True, timeout=120,
     )
 
@@ -727,10 +723,11 @@ def test_the_onboarding_section_measures_on_a_box_that_exports_the_hosted_key() 
     not — so this one reproduces the recipe, in a fresh process.
 
     Two arms, because either alone is a gate that lies: the exported arm proves
-    the section measures at all, and the unexported arm proves the fix does not
-    CHANGE a measured row (identical row blocks). The probe's other refusal knobs
-    are stripped too, so a red pin can only mean the hosted-key regression — not
-    a stray `TORTOISE_STARTER_PACKS` in the ambient env.
+    the section measures at all and that the documented command's verdict is the
+    published one, and the unexported arm proves the fix does not CHANGE the
+    output (both arms' full stdout is compared). The probe's other refusal knobs
+    are stripped too, so a red pin cannot be an ambient-env artifact — it means
+    the hosted-key regression, or a real change in what a section can measure.
     """
     base = {k: v for k, v in os.environ.items()
             if k not in ("TORTOISE_API_KEY", "TORTOISE_SECRET_PEPPER",
@@ -745,20 +742,30 @@ def test_the_onboarding_section_measures_on_a_box_that_exports_the_hosted_key() 
         "the census verdict (fail-closed 3 = a section unmeasured): "
         f"{exported.stdout[-1600:]} / {exported.stderr[-800:]}"
     )
-    assert "RC 0 UNMEASURED 0" in exported.stdout, (
-        f"the recipe's own verdict must be reproducible: {exported.stdout[-1600:]}")
-    rows_with_key = [
-        ln for ln in exported.stdout.splitlines() if ln.startswith("ROW\t")]
+    assert "MEASURED: 25 premises, 0 unmeasured sections." in exported.stdout, (
+        f"the recipe's own verdict must be the published one: {exported.stdout[-1600:]}")
+    assert "UNMEASURED SECTIONS" not in exported.stdout, (
+        f"a section went unmeasured on a box with only the hosted key set: "
+        f"{exported.stdout[-1600:]}")
     for needle in ("`team-named` is auto-satisfied",
                    "`connection-written` is in NO completion gate"):
-        assert any(needle in ln for ln in rows_with_key), (
+        assert needle in exported.stdout, (
             f"row never printed: {needle!r} in {exported.stdout[-1600:]}")
 
     unexported = _run_recipe(dict(base))
     assert unexported.returncode == 0, (
         f"the recipe must exit 0 with no key either: {unexported.stdout[-1600:]}")
-    rows_without_key = [
-        ln for ln in unexported.stdout.splitlines() if ln.startswith("ROW\t")]
-    assert rows_without_key == rows_with_key, (
-        "clearing the key for the import must not change ONE measured row — "
-        "otherwise the fix is distorting the census rather than unblocking it")
+    assert unexported.stdout == exported.stdout, (
+        "clearing the key for the import must not change the census output — "
+        "otherwise the fix is distorting the measurement rather than unblocking it")
+
+    # The documented command's FAIL-CLOSED contract, through the same `__main__`
+    # the recipe uses. `TORTOISE_STARTER_PACKS` is a deliberate refusal
+    # (`step_premise_census.py` census_packs), so `main()` returns 3 and the tail
+    # must turn that into the process's exit code — a bare `main()` there would
+    # print `UNMEASURED SECTIONS` and exit 0, the fail-open the contract forbids.
+    refused = _run_recipe(dict(base, TORTOISE_STARTER_PACKS="dev"))
+    assert refused.returncode == 3, (
+        "the recipe must exit 3 when a section cannot be measured — exit 0 here is "
+        f"exactly the fail-open the census forbids: {refused.stdout[-1200:]}")
+    assert "UNMEASURED SECTIONS" in refused.stdout, refused.stdout[-1200:]

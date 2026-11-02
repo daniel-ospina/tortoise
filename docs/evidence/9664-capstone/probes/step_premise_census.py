@@ -20,8 +20,9 @@ Sections
                 server can OBSERVE (vs. what only a client can record).
                 Imports `hosted_api` with the hosted `TORTOISE_API_KEY`
                 cleared (`_hosted_startup_guard_cleared`): that key is a
-                server-STARTUP precondition, and leaving it set made this
-                section unmeasurable on every cell that exports it
+                server-STARTUP precondition, and leaving it set (without a
+                `TORTOISE_SECRET_PEPPER`) made this section unmeasurable on
+                every box that exports it
   packs       — step 2's "the default is catalog union + core": the THREE
                 resolution arms of `pack_state.resolved_pack_set` (driven
                 through the real function), the starter-set/catalog relation,
