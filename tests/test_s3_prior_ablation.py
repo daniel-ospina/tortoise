@@ -366,11 +366,16 @@ def _checker():
 
     Loaded for ONE thing: `EVIDENCE_LOG_GLOB`, so the test below globs the same set the ordering
     half globs instead of a private copy of the literal. The glob is deliberately a named constant
-    in the guard (constant `EVIDENCE_LOG_GLOB`, *"Widening it is a deliberate act"*), and a second
-    copy here would be exactly the two-copies-that-can-disagree shape this file refuses for the bars.
-    ⛔ Cited by SYMBOL, not by `file:line` — an earlier version spelled `:134`, which was true on
-    `origin/main` and was silently falsified by this branch's own import hunk (the constant is at
-    `:169` here). A line ref into a file this branch edits is a citation that this branch invalidates.
+    in the guard — constant `EVIDENCE_LOG_GLOB`, whose comment says *"Widening it is a deliberate
+    act"* — and a second copy here would be exactly the two-copies-that-can-disagree shape this file
+    refuses for the bars.
+
+    ⛔ Cited by SYMBOL, not by `file:line`, and the history is the reason. The citation once spelled
+    `:134`, which was true on `origin/main` and was silently falsified by this branch's own module
+    header: the constant is at `:169` here, and `:134` is inside the 3.12 interpreter guard. Two
+    lanes re-derived that line independently (review cycles 8 and 11) — the third re-derivation is
+    the argument: a bare line number into a file this branch edits is asserted by nothing, so it goes
+    stale silently. The symbol does not. If you need to grep for it, `:169` is where it is today.
     """
     spec = importlib.util.spec_from_file_location(
         "_capstone_preregistration_check",

@@ -3111,6 +3111,46 @@ def test_a_depth_one_clone_of_main_reports_no_measured_base_even_though_one_reso
     assert "ordering measured against: origin/main" not in out, out
 
 
+def test_an_uncommitted_registration_reports_no_measured_base(tmp_path, monkeypatch, capsys):
+    """Follow-up 3 (review cycle 8): the RETURN arms measured nothing either, and said otherwise.
+
+    The cycle-7 F2 fix closed the arm that RAISES (`HistoryUnavailable`): the base was no longer
+    named as measured. It did not close the arms that RETURN early — `check_ordering` leaves before
+    the per-log loop when the registration is not committed (`_is_tracked`) or when it is absent
+    from the base, and `run()` then set `ordering = "verified"` plus `ordering_base = <resolved>`
+    unconditionally. So the log printed `machine record run-order claim: verified` and
+    `ordering measured against: origin/main` for a run that compared zero epochs — the same
+    silent-green the field exists to remove, one polarity over.
+
+    ⛔ The refusal below is CORRECT and stays: an unprovable ordering is not an ordering. What is
+    asserted is only that the report does not claim to have measured one.
+    """
+    repo = _repo_with_published_base(tmp_path, monkeypatch)
+    _write_and_commit(repo, "s3-ablation.log", epoch=1_700_000_200)
+    bundle = repo / "docs" / "evidence" / "7949-capstone"
+    # The real document, so completeness/E4 pass and the ONLY finding is the uncommitted one.
+    (bundle / check.PREREG_NAME).write_text((PREREG_DIR / check.PREREG_NAME).read_text())
+    prereg = bundle / check.PREREG_NAME
+    assert check.history_unavailable() is False, "the fixture must carry real history"
+    assert check._is_tracked(prereg) is False, "the fixture's registration must be uncommitted"
+    assert check.resolve_base_ref() == "origin/main", "a base DOES resolve here — that is the trap"
+
+    report = check.run(bundle, use_git=True, use_corpus=False)
+    assert any("not committed" in f for f in report["failures"]), report["failures"]
+    assert report["ok"] is False, report
+    # ⛔ The pre-fix values, verbatim: a base named and a claim verified for a run that read no epoch.
+    assert report["ordering"].startswith(check.ORDERING_UNMEASURED), report["ordering"]
+    assert report["ordering_base"] == "(not measured)", report["ordering_base"]
+    assert report["ordering_base_candidate"] == "origin/main", report["ordering_base_candidate"]
+
+    assert check.main(["--dir", str(bundle), "--no-corpus"]) == 1
+    out = capsys.readouterr().out
+    assert "ordering measured against: (not measured)" in out, out
+    assert "ordering measured against: origin/main" not in out, out
+    assert f"machine record run-order claim: {check.ORDERING_UNMEASURED}" in out, out
+    assert "would be measured against: origin/main" in out, out
+
+
 def test_a_squash_collapsed_base_refuses_even_when_the_contribution_is_ordered(tmp_path, monkeypatch):
     """THE LOG-SIDE HALF of the squash-invariance rule (#10463 review cycle 7, finding 1).
 
