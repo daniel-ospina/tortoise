@@ -384,6 +384,79 @@ def plausibility_issues(manifest: dict) -> list[str]:
 # ── the composed contract ────────────────────────────────────────────────
 
 
+def floor_issues(manifest: dict) -> list[str]:
+    """``durations_floors`` must name a row that EXISTS and that carries the floor.
+
+    Some weights in this map are not what the file cost, they are what the pack
+    SHALL assume — deliberately high, because understating a weight "can red
+    ``python-ci-gate`` with zero test failures" (#3395). ``test_lane_stash.py``
+    states that in prose directly above its own row (""⛔ 355.0 IS A DELIBERATE CAP,
+    NOT A READING … a CI-budget decision recorded on #9172"");
+    ``test_calibration.py`` and ``eval/write_path/test_write_path_operator_lane.py``
+    hold the same cap. ``ci_timing._declared_floors`` makes such a declaration
+    binding on the writer, and this is the read side that keeps it HONEST.
+
+    Two ways a floor can be declared and mean nothing, both silent without this:
+
+    * a key with no ``durations`` row — the floor guards a weight the map does not
+      carry, so the file packs at the flat default and the floor never applies.
+      That is the #3400/#4348 trap (""a row must EXIST, not merely default"") applied
+      to the mechanism meant to make a declared cap binding;
+    * a row BELOW its own floor — the map then says ""this weight is a declared
+      minimum"" and writes a smaller number, which is the state that makes a reader
+      distrust both halves. The writer keeps a row at or above its floor, so
+      reaching it means someone hand-edited one of the two and left the other.
+
+    Composed in :func:`map_issues` rather than at a call site: both enforcing
+    entry points (``ci_selection --integrity`` and ``ci_timing.integrity_problems``)
+    reach it there, so it cannot be half-wired — and the writer's pre-write gate
+    refuses a map whose floor it could not honour instead of shipping it.
+    """
+    floors = manifest.get("durations_floors")
+    if not isinstance(floors, dict):
+        return []
+    durations = _durations(manifest)
+    if not durations:
+        # An ABSENT (or empty) map is `check()`'s UNKNOWN, not this check's red:
+        # there is no map here for a floor to be inconsistent WITH, and reporting
+        # one red per declared floor would turn that UNKNOWN into a wall of reds
+        # (the module's own "red outranks unknown" rule is about a red this check
+        # can actually observe). A malformed `durations` value is a red already,
+        # named by `duration_issues`.
+        return []
+    issues: list[str] = []
+    for name, floor in sorted(floors.items(), key=lambda kv: str(kv[0])):
+        if isinstance(floor, bool) or not isinstance(floor, (int, float)) \
+                or not math.isfinite(floor):
+            issues.append(
+                f"``durations_floors`` declares {floor!r} for {name} — not a "
+                f"number. A floor the writer cannot compare against is a floor "
+                f"the writer would silently ignore, which is the state this "
+                f"declaration exists to end"
+            )
+            continue
+        if name not in durations:
+            issues.append(
+                f"``durations_floors`` declares a floor of {float(floor):.1f} for "
+                f"{name}, which has no ``durations`` row — a floor can only guard "
+                f"a weight the map actually carries (#3400/#4348: a row must "
+                f"EXIST, not merely default)"
+            )
+            continue
+        value = durations[name]
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            continue  # the wrong TYPE is `duration_issues`' diagnostic, not this one
+        if float(value) < float(floor):
+            issues.append(
+                f"{name} is declared with a ``durations_floors`` FLOOR of "
+                f"{float(floor):.1f} but its row carries {value!r} — the writer "
+                f"keeps a row at or above its floor, so this map states both that "
+                f"the value is a declared minimum and that it is below it; raise "
+                f"the row, or lower the declared floor"
+            )
+    return issues
+
+
 def map_issues(manifest: dict) -> list[str]:
     """The manifest checks that already exist, composed in the #3407 order.
 
@@ -408,6 +481,7 @@ def map_issues(manifest: dict) -> list[str]:
             + cs.duration_issues(manifest)
             + cs.leg_coverage_issues(manifest)
             + cs.duration_coverage_issues(manifest)
+            + floor_issues(manifest)
             + cs.duplicate_entries(manifest))
 
 

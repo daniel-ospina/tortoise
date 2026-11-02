@@ -6800,10 +6800,16 @@ def test_the_cap_block_is_not_read_as_the_row_aboves_note():
 
     text = cs.MANIFEST.read_text(encoding="utf-8")
     lines = text.splitlines()
+    # Scoped to the `durations:` BLOCK, not the whole file: the block carries the
+    # same keys once more in `durations_floors` above it (a row can be declared a
+    # floor), so a whole-file scan finds the DECLARATION rather than the row and
+    # this pin went red on a `durations_floors` line instead of measuring anything
+    # (#10575 review).
+    block_start = lines.index("durations:")
     above = next(i for i, ln in enumerate(lines)
-                 if ln.startswith("  test_work_claim.py:"))
+                 if i > block_start and ln.startswith("  test_work_claim.py:"))
     below = next(i for i, ln in enumerate(lines)
-                 if ln.startswith("  test_lane_stash.py:"))
+                 if i > block_start and ln.startswith("  test_lane_stash.py:"))
     assert above < below, (above, below)
     block = lines[above + 1:below]
     assert any("355.0 IS A DELIBERATE CAP" in ln for ln in block), block[:2]

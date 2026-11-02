@@ -2433,6 +2433,57 @@ def _strip_unmeasured_marker(tail: str) -> str:
     return f"  # {rest}" if rest else ""
 
 
+def _declared_floors(manifest_text: str) -> dict[str, float]:
+    """`durations_floors` — rows whose weight is a DECLARED FLOOR, not a reading.
+
+    Some rows in this map do not record what the file cost; they record what the
+    pack SHALL assume, deliberately high, because the spread is fleet load and
+    understating a weight "can red `python-ci-gate` with zero test failures"
+    (#3395). `test_lane_stash.py` states that in prose directly above its own row
+    (`⛔ 355.0 IS A DELIBERATE CAP, NOT A READING … a CI-budget decision recorded
+    on #9172`), and `test_calibration.py` / `eval/write_path/
+    test_write_path_operator_lane.py` hold the same cap.
+
+    WHY THIS IS A MECHANISM AND NOT THE PROSE. Before it existed, the decision was
+    unenforceable: the writer is this map's only automatic re-writer, the cap lived
+    in a comment block it cannot attribute to a row (the block sits ABOVE the row
+    and OPENS a note, so `_row_continuation_lines` correctly refuses it), and the
+    reader that decides HELD only knows partial coverage. Measured on the
+    2026-11-02 sweep: `test_lane_stash.py` went `355.0 -> 25.4` — 6.8x below the
+    lowest reading this file has ever recorded, on a row whose full 115-test
+    denominator happened to make the reading look provable — while the cap block
+    above it stayed byte-identical (#10575 review, P1). A decision the writer
+    cannot honour is a decision the next sweep re-decides.
+
+    A floor is a MINIMUM: a reading may raise the row above it and never lower it
+    below. Absent or unreadable → no floors, so every caller and fixture that
+    carries no such key keeps its output.
+    """
+    import yaml
+    try:
+        data = yaml.safe_load(manifest_text) or {}
+    except yaml.YAMLError:
+        return {}
+    floors = data.get("durations_floors") if isinstance(data, dict) else None
+    if not isinstance(floors, dict):
+        return {}
+    out: dict[str, float] = {}
+    for row, floor in floors.items():
+        if not isinstance(row, str):
+            continue
+        try:
+            out[row] = float(floor)
+        except (TypeError, ValueError):
+            # Fail CLOSED on a floor nobody can read: a typo must not silently
+            # become "no floor", which is the state this mechanism exists to end.
+            raise DurationsBridgeError(
+                f"`durations_floors` declares {floor!r} for {row!r}, which is not "
+                "a number — a floor the writer cannot compare against is a floor "
+                "the writer would silently ignore"
+            ) from None
+    return out
+
+
 def _held_equal_pins(manifest_text: str) -> dict[str, str]:
     """`durations_held_equal` — rows that BORROW a sibling's reading (#3400).
 
@@ -2557,6 +2608,7 @@ def render_refreshed_manifest(manifest_text: str, weights: dict[str, float],
     if coverage:
         _resolve_to_manifest_keys({path: 0.0 for path in coverage}, classified_keys)
         coverage_by_key = dict(coverage)
+    floors = _declared_floors(manifest_text)
     kept_as_lower_bound = 0
     drop: set[int] = set()
     for key in sorted(resolved):
@@ -2613,6 +2665,16 @@ def render_refreshed_manifest(manifest_text: str, weights: dict[str, float],
         # every existing caller and test keeps its output.
         provable = coverage is not None and declared > 1 and observed >= declared
         kept = coverage is not None and not provable and measured < previous
+        # A DECLARED FLOOR outranks the coverage witness: a row that records what
+        # the pack SHALL assume is not a reading, so no reading can discount it —
+        # including one that provably saw every testcase, which is exactly how
+        # `test_lane_stash.py` lost its 355.0 cap to a 25.4 reading on 2026-11-02
+        # (#10575 review, P1). The floor can only RAISE the comparison: a reading
+        # above it is adopted normally, so the row still tracks a genuinely more
+        # expensive file.
+        floor = floors.get(key)
+        below_floor = floor is not None and measured < floor
+        kept = kept or below_floor
         new_value = previous if kept else measured
         if kept:
             kept_as_lower_bound += 1
@@ -2641,7 +2703,15 @@ def render_refreshed_manifest(manifest_text: str, weights: dict[str, float],
             # (`…; was 42.4`) is the surviving value's provenance and stays
             # (#9134 review, P2).
             tail = _strip_prior_held_basis(tail)
-            if declared <= 0:
+            if below_floor:
+                # The floor is the whole reason here, and it is stated FIRST: the
+                # coverage witness is irrelevant to why the row held, and a note
+                # that leads with "no declared testcase count" would read as though
+                # a provable reading could have taken the row — which is the exact
+                # false confidence this mechanism removes.
+                reason = (f"this row's weight is a DECLARED FLOOR ({floor:.1f}), not "
+                          f"a reading; a sweep may RAISE it but never lower it")
+            elif declared <= 0:
                 reason = ("no declared testcase count for this file (UNKNOWN), so "
                           "the reading cannot prove it saw the whole file")
             elif declared == 1:
@@ -2668,13 +2738,18 @@ def render_refreshed_manifest(manifest_text: str, weights: dict[str, float],
             # source. Which sources the sweep took is the LABEL's job
             # (`sample_label`, built by `main` from
             # :func:`collector_file_measurements`' `source`).
-            basis = (
-                f"{sample_label}: the reading saw {observed} of {declared} "
-                f"testcases = {measured:.1f}s in the largest single job "
-                f"(not summed across legs), a LOWER bound; kept {previous:.1f}"
-                if reason is None else
-                f"{sample_label}: {reason}; the reading ({measured:.1f}s) is "
-                f"a LOWER bound; kept {previous:.1f}")
+            if below_floor:
+                basis = (f"{sample_label}: {reason}; the reading "
+                         f"({measured:.1f}s) is carried as evidence and refused "
+                         f"as a discount; kept {previous:.1f}")
+            elif reason is None:
+                basis = (f"{sample_label}: the reading saw {observed} of {declared} "
+                         f"testcases = {measured:.1f}s in the largest single job "
+                         f"(not summed across legs), a LOWER bound; kept "
+                         f"{previous:.1f}")
+            else:
+                basis = (f"{sample_label}: {reason}; the reading "
+                         f"({measured:.1f}s) is a LOWER bound; kept {previous:.1f}")
             tail = f"{tail} — {basis}" if tail.strip() else f"  # {basis}"
         elif sample_label and new_value != previous:
             # RE-BASE ONLY WHAT THIS RENDER ACTUALLY CHANGED. The map's rule is "a
