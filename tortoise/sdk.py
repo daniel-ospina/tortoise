@@ -33859,7 +33859,14 @@ class TortoiseSDK:
         # a silent subset from a negative cap. Parity, not a new bound: the REST
         # route already validates `Query(2, ge=1, le=20)` and the sibling verb
         # `tortoise_fts_query` refuses `limit must be 1-10000` the same way.
-        if not isinstance(limit, int) or limit < 1:
+        # `bool` is an `int` SUBCLASS, so `isinstance(True, int)` is True and a
+        # bool ask would otherwise be served as `limit=1` — a re-interpreted
+        # caller input, which is the defect this guard exists to refuse, and a
+        # parity break with the REST mirror (`GET /v1/issue-insight?limit=true`
+        # → 422 from `Query(2, ge=1, le=20)`). Same explicit bool test the
+        # #8447 page-size seam uses (`bool` is checked FIRST: the sibling
+        # comparisons are value tests and a bool passes them).
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
             raise ValueError(
                 f"issue_insight: limit must be a positive int, got {limit!r}")
         proj = self._get_proj()

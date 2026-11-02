@@ -190,6 +190,28 @@ class TestIssueInsightTruncation:
             with pytest.raises(ValueError, match="positive int"):
                 sdk.issue_insight(QUERY, limit=bad)
 
+    def test_a_bool_limit_is_refused_not_reinterpreted(self, sdk):
+        """`bool` is an `int` SUBCLASS, so the value test alone serves `True` as
+        `limit=1` — a caller input RE-INTERPRETED, which is exactly what the
+        guard exists to refuse (#10570 review at `b6be898182`, P3 finding 2).
+
+        The REST mirror of this read already refuses it: `GET
+        /v1/issue-insight?limit=true` is validated by `Query(2, ge=1, le=20)`,
+        which answers 422 because pydantic does not coerce a bool into an int.
+        The SDK verb must agree with its mirror rather than quietly pick 1 row.
+
+        Non-vacuity: on the pre-fix guard (`if not isinstance(limit, int) or
+        limit < 1`) `True` passes — `isinstance(True, int)` is True and
+        `True < 1` is False — so `issue_insight(limit=True)` is SERVED and this
+        leg reds with DID NOT RAISE. The sibling page-size seam (#8447) uses the
+        same explicit `isinstance(x, bool)` test for the same reason.
+        """
+        _seed(sdk, 6)
+
+        for bad in (True, False):
+            with pytest.raises(ValueError, match="positive int"):
+                sdk.issue_insight(QUERY, limit=bad)
+
     def test_the_docstring_names_the_one_refusal_the_guard_raises(self, sdk):
         """The public docstring said "never raises" while the guard 20 lines
         below it raised `ValueError` (#10570 review, P3 finding 2).
