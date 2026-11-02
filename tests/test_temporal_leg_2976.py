@@ -246,8 +246,11 @@ def test_spread_caps_any_single_date_session():
 
 
 def test_leg_requires_a_matched_anchor():
-    # no anchors → inert (a spread-only promotion of arbitrary deep pool
-    # items is measurably harmful; see the module docstring)
+    # No anchors → inert when NO date_window is supplied (a spread-only
+    # promotion of arbitrary deep pool items is measurably harmful; see the
+    # module docstring). #10538 widens the gate for the DATE-RANGE class only:
+    # anchors OR (a window AND session-clustered visible slots). This test
+    # passes no window, so it pins the no-window half of that rule.
     candidates = [
         _hit("a", "2025-01-01", "sA", "alpha"),
         _hit("b", "2025-02-01", "sB", "beta"),
@@ -520,6 +523,22 @@ def test_empty_reason_taxonomy_is_exhaustive():
         assert temporal_leg_empty_reason(
             dated=dated, anchors=anchors, weight=weight,
             budget=budget) == expected
+
+
+def test_empty_reason_window_and_weight_precedence():
+    """#10538 (review cycle 2): a windowed, anchor-less miss must NOT launder
+    itself as ``no_anchors``, and a weight-disabled arm must NOT launder itself
+    as a window miss — the ON/OFF reconstruction surface reads this string."""
+    assert temporal_leg_empty_reason(
+        dated=5, anchors=0, weight=1.0, budget=2,
+        date_window=True) == "no_window_candidates"
+    # weight-0 wins over the window branch (the arm ran and dropped its picks)
+    assert temporal_leg_empty_reason(
+        dated=5, anchors=0, weight=0.0, budget=2,
+        date_window=True) == "weight_disabled"
+    # no window supplied → the pre-#10538 reason is unchanged
+    assert temporal_leg_empty_reason(
+        dated=5, anchors=0, weight=1.0, budget=2) == "no_anchors"
 
 
 def test_effective_promotion_budget_is_clamped():

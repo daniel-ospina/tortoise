@@ -4242,7 +4242,8 @@ def test_the_merged_tree_guard_check_accepts_presentation_only_edits() -> None:
 # nine runners advertised `ubuntu-latest` and none advertised `ubuntu-24.04`
 # (with the fallback disengaged, none carries either). The installer emits it only under
 # `CI_RUNNER_OS_LABEL=on|auto` — the shipped default is `off`, which is what
-# `tests/test_ci_runner_x64_install.py:230` pins — and the re-registration path
+# `tests/test_ci_runner_x64_install.py::test_the_os_label_is_opt_in_and_no_fallback_arm_can_drop_it`
+# pins — and the re-registration path
 # strips it (`tools/runner_autoscale.py::_preserve_labels`, pinned by
 # `tests/test_runner_autoscale.py`), but NO test here reads the LIVE label set,
 # and the pool HAS served this very label: 2026-10-24's `finding-provenance`
@@ -4393,8 +4394,8 @@ def test_a_workflow_edit_keeps_its_steps() -> None:
     — a step-count floor, the payload step by name, and the keys all four
     observers carry (job-level ``timeout-minutes`` is required of "python-ci.yml"'s
     jobs and of jobs emitting a required merge context
-    (``tests/test_ci_selection.py:6561``), NOT repo-wide: 35 of the tree's 88 jobs
-    have none).
+    (``tests/test_ci_selection.py::test_every_required_merge_check_carries_an_outer_cap``), NOT
+    repo-wide: 35 of the tree's 88 jobs have none).
     """
     required_job_keys = {"runs-on", "timeout-minutes", "steps"}
     for name, job_id in FLEET_OBSERVER_WORKFLOWS.items():
