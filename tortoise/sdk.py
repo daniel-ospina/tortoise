@@ -41376,6 +41376,26 @@ class TortoiseSDK:
                         point_props["embedding_verbatim"] = (
                             True if point_props.get("embedding") is not None
                             else None)
+                        # #10523 review (P1): the SAME #4194 rule, through THIS
+                        # door. The block above replaced (or cleared) the vector,
+                        # so the node must not keep the writer-minted
+                        # `embeddingText` it was never computed from —
+                        # `update_point` clears it in exactly this position
+                        # (`sdk.py:16584`), and round 3 closed that door without
+                        # reaching this one. Tenant-reachable as
+                        # `tortoise_update_entity(id, props={"embedding": […]})`,
+                        # and SILENT afterwards: `embedding_text_hash` is
+                        # payload-only (`consistency.py:179`) and
+                        # `_record_embedding_identity` returns early when the
+                        # journal carries none. `None` REMOVES the property
+                        # (matching `update_point`), and it is GATED ON THE KEY,
+                        # so an unrelated `update_entity` leaves a writer-minted
+                        # value alone. NOTE what this does NOT do: it journals
+                        # nothing, so it does not widen the #4094 exemption
+                        # declared below — which is why the clear is live-only
+                        # and a rebuild falls back to the snapshot's COHERENT
+                        # (text, vector) pair rather than leaving a lie live.
+                        point_props["embeddingText"] = None
                     else:
                         point_props = props
                     for match_prop in id_keys:

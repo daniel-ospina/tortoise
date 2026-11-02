@@ -18,6 +18,9 @@ What this file pins, and why each test exists:
   failure — a capture must never store a half-enriched batch;
 * the ON→OFF re-capture: a stale enriched text must not survive a re-capture
   whose flag is off (the #4194 lie a vector no longer describes);
+* the same rule on EVERY door that replaces or clears the vector —
+  `update_point(content=…)`, `update_point(embedding=…)` / `embedding=None`,
+  and the sibling `:Point` update door `update_entity` (#10523 review, P1);
 * raw retrieval unchanged: ``content`` stays in the fulltext field set, so a
   query that matched before still matches with enrichment on.
 
@@ -668,6 +671,55 @@ def test_a_caller_supplied_vector_clears_the_enriched_text(
     sdk.update_point(t0b[0], status="live")
     assert _turn_rows(sdk, "sess-vec2")[0][2] == t0b[2], (
         "an update with no vector changed the writer-minted embeddingText")
+
+
+def test_a_caller_supplied_vector_through_update_entity_clears_the_enriched_text(
+        sdk, embedder, enrichment_on):
+    """#10523 review (P1): the SIBLING `:Point` update door into the same rule.
+
+    `update_point` clears `embeddingText` when the vector is replaced or cleared
+    (`sdk.py:16584`); `_update_entity` — `sdk.py:40627` calls it *"the SECOND
+    documented UPDATE door onto a `:Point`"* — applies caller props with a bare
+    `SET n += $p`, and its `if "embedding" in props:` block touched only
+    `embedding_verbatim`. So a caller vector landed BESIDE the enriched text it
+    was never computed from: the #4194 lie through the door the round-3 fix did
+    not reach. Tenant-reachable via
+    `tortoise_update_entity(id, props={"embedding": […]})`, and silent
+    afterwards (the identity hash is payload-only; `_record_embedding_identity`
+    returns early when the journal carries none).
+    """
+    sdk.capture_session(CONV, session_id="sess-ue")
+    t0 = _turn_rows(sdk, "sess-ue")[0]
+    assert t0[2] == "[user] the auth flow is blocked", t0
+    assert t0[3] is not None, t0
+
+    # A caller vector: the node must not keep the text the OLD vector described.
+    sdk.update_entity(t0[0], embedding=[1.0, 0.0, 0.0, 0.0])
+    after = _turn_rows(sdk, "sess-ue")[0]
+    assert after[2] is None, (
+        "a caller-supplied vector replaced the vector an embeddingText was "
+        "computed from through the sibling `_update_entity` door, and the "
+        "text survived (#4194)")
+    assert np.allclose(after[3], [1.0, 0.0, 0.0, 0.0], atol=1e-6), after
+
+    # …and an unrelated `update_entity` must NOT disturb a writer-minted value:
+    # the gate is the KEY, so this cannot be satisfied by clearing always.
+    sdk.capture_session(CONV, session_id="sess-ue2")
+    t0b = _turn_rows(sdk, "sess-ue2")[0]
+    assert t0b[2] == "[user] the auth flow is blocked", t0b
+    sdk.update_entity(t0b[0], status="live")
+    assert _turn_rows(sdk, "sess-ue2")[0][2] == t0b[2], (
+        "an update_entity with no vector changed the writer-minted "
+        "embeddingText")
+
+    # The CLEAR arm (`embedding=None`) replaces the vector too, so it clears
+    # the text as well (the same two arms `update_point` guards).
+    sdk.update_entity(t0b[0], embedding=None)
+    cleared = _turn_rows(sdk, "sess-ue2")[0]
+    assert cleared[2] is None, (
+        "a caller CLEAR of the vector left the embeddingText it described "
+        "behind (#4194)")
+    assert cleared[3] is None, cleared
 
 
 # ── 10. `embeddingText` is WRITER-minted at every intake door ──────────────
