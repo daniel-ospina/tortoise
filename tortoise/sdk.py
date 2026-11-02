@@ -33818,6 +33818,17 @@ class TortoiseSDK:
         `max(limit*5, 20)` rows is still exact. A caller that must not reason
         over a subset reads `truncated` before `data_points`.
         """
+        # #8447: `limit` is a CALLER INPUT, so an out-of-domain ask is REFUSED
+        # before any work — never silently re-interpreted. Measured before this
+        # guard: `limit=0` delivered no rows and answered "No graph matches"
+        # beside `total_available: 6` (prose contradicting the field next to
+        # it), and `limit=-1` sliced the tail off the list and served 5 of 6 —
+        # a silent subset from a negative cap. Parity, not a new bound: the REST
+        # route already validates `Query(2, ge=1, le=20)` and the sibling verb
+        # `tortoise_fts_query` refuses `limit must be 1-10000` the same way.
+        if not isinstance(limit, int) or limit < 1:
+            raise ValueError(
+                f"issue_insight: limit must be a positive int, got {limit!r}")
         proj = self._get_proj()
         count_rows = proj.g.query(
             "MATCH (n:Point) WHERE (n.is_operator IS NULL OR n.is_operator = false) "
@@ -33829,7 +33840,8 @@ class TortoiseSDK:
         # so every return below is a POSITIVE claim rather than an un-marked
         # body the caller must guess about, and then handed to the retrieval
         # call so the marker's own proof (a lost leg, a saturated pool) is MADE
-        # ONCE, by the code that drops the rows — never re-derived here.
+        # ONCE, by the code that drops the rows. Exactness is RELAYED from that
+        # proof; only the "was the pool itself cut" gate is added here.
         from .truncation import EXACT_KEY as _EXACT_KEY
         from .truncation import mark_truncation as _mark_truncation
         from .truncation import truncation_field as _truncation_field
@@ -33852,9 +33864,14 @@ class TortoiseSDK:
         #: `insight` sentence reports (post-cut it under-reported: a 17-hit
         #: read at the shipped `limit=2` said "2 graph hit(s) relate").
         relevant_hits = 0
-        #: does the pool prove it saw EVERY match? False unless the pool came
-        #: back short of its own bound AND the retrieval path reported nothing
-        #: dropped — a saturated pool is a floor, never a total.
+        #: Is the count EXACT? RELAYED from the marker's own recorded proof
+        #: (``truncation.EXACT_KEY``) AND gated on the pool not having been cut —
+        #: ⛔ never re-derived from the pool's LENGTH. A local
+        #: ``len(pool) >= pool_limit`` test marks a pool that returned exactly
+        #: its bound as cut (the retrieval path keeps every row there and says
+        #: COMPLETE), which withholds an exact total and trains callers to ignore
+        #: the marker — the round-2 defect, and what this variable must not
+        #: reintroduce (#8447 review round 5, P3).
         _exact = False
         if text:
             # Fetch a wider candidate pool than `limit` (review P3): the gate

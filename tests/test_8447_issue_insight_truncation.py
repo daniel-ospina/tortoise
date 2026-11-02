@@ -175,6 +175,21 @@ class TestIssueInsightTruncation:
         # bug, not "complete" (`truncation.truncation_field` refuses to guess).
         assert resp[TRUNCATED_FIELD] is False
 
+    def test_an_out_of_domain_limit_is_refused(self, sdk):
+        """`limit` is a caller input: refuse it, never re-interpret it.
+
+        Measured before the guard: `limit=0` delivered no rows and answered
+        "No graph matches" beside `total_available: 6` — prose contradicting the
+        field next to it — and `limit=-1` sliced the tail off and served 5 of 6,
+        a silent subset from a negative cap. Parity with the REST route's
+        `ge=1` and with `tortoise_fts_query`'s own refusal.
+        """
+        _seed(sdk, 6)
+
+        for bad in (0, -1):
+            with pytest.raises(ValueError, match="positive int"):
+                sdk.issue_insight(QUERY, limit=bad)
+
     def test_the_absence_prose_never_contradicts_the_marker(self, sdk):
         """A non-truncated read must NOT be told "the read was TRUNCATED".
 
