@@ -494,3 +494,54 @@ def test_the_clustering_guard_can_fire_at_a_small_window():
         f"new session must be promoted: {picks}")
     assert order != base, "the windowed pick moved nothing"
     assert order.index("b1") < base.index("b1"), order
+
+
+def test_absent_session_ids_are_not_a_session_for_the_clustering_guard():
+    """A hit with NO ``session_id`` is not a session, so a window full of them
+    is not CLUSTERED — and the arm must stay inert there.
+
+    The guard groups by ``str(c.get("session_id") or "")``, so before this pin
+    every unattributed hit collapsed into ONE bucket and "most hits carry no
+    session at all" satisfied "one session owns half the visible slots". The
+    wired path is exactly where that is reachable: ``_annotate_hits`` defaults
+    ``session_id`` to ``""``, so a pool whose hits lose attribution reads as
+    maximally clustered. Spending the budget there displaces an in-window pick
+    for a spread the evidence does not support — the over-fire shape review
+    cycles 5/7/8 kept removing from this arm.
+
+    Pre-fix this returns ``picks == ['b1', 'c1']`` (measured, mutant run);
+    post-fix the pick set is empty and the order is untouched, because the only
+    real sessions (``sB``, ``sC`` — one slot each) are nowhere near a majority.
+    """
+    pool = (
+        [{"id": f"x{i}", "session_id": "", "session_date": "2023-04-11",
+          "content": "alpha"} for i in range(6)]
+        + [{"id": f"y{i}", "session_id": "", "session_date": "2023-04-12",
+            "content": "alpha"} for i in range(3)]
+        + [{"id": "b1", "session_id": "sB", "session_date": "2023-04-13",
+            "content": "alpha"},
+           {"id": "c1", "session_id": "sC", "session_date": "2023-04-14",
+            "content": "alpha"},
+           {"id": "d1", "session_id": "", "session_date": "2023-04-15",
+            "content": "alpha"}]
+    )
+    base = [c["id"] for c in pool]
+    order, picks = temporal_leg_fusion_order(
+        pool, anchors=(), window=8, limit=2,
+        date_window=("2023-04-10", "2023-04-20"))
+    assert picks == [], (
+        f"unattributed hits were counted as one 'session' and the arm fired on "
+        f"a window with no real clustering: {picks}")
+    assert order == base, "the arm reordered a window it should have declined"
+
+    # Positive control: the SAME pool with real attribution IS clustered, and
+    # the arm fires — the guard was narrowed, not disabled.
+    attributed = [
+        {**c, "session_id": ("sA" if c["session_id"] == "" else c["session_id"])}
+        for c in pool
+    ]
+    order2, picks2 = temporal_leg_fusion_order(
+        attributed, anchors=(), window=8, limit=2,
+        date_window=("2023-04-10", "2023-04-20"))
+    assert picks2, "the guard no longer fires on a genuinely clustered window"
+    assert order2 != base, "the windowed pick moved nothing on the control pool"

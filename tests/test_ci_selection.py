@@ -2977,10 +2977,15 @@ def test_temporal_leg_change_runs_its_pins_and_keeps_the_core_pool():
     #   * `test_temporal_leg_date_window_10538.py` + `test_temporal_leg_2976.py`
     #     are `sdk`-registered — the `SOURCE_PATTERNS["sdk"]` half;
     #   * `test_temporal_leg_replay_wiring_10538.py` is `eval`-registered and pins
-    #     the offline proxy to the SHIPPED wiring — the `eval` half;
-    #   * `test_rrf_tie_rank_7704.py` is `core`-registered and imports the module
-    #     — the `CORE_ALSO` half, because a named-surface match REPLACES the
-    #     `core` fallback (#2938).
+    #     the offline proxy to the SHIPPED wiring (importing
+    #     `temporal_leg_fusion_order` / `temporal_leg_empty_reason` directly, so it
+    #     is a behavioural pin as well) — the `eval` half;
+    #   * the 721-file `core` pool — the `CORE_ALSO` half, because a named-surface
+    #     match REPLACES the `core` fallback (#2938). NO core-registered test pins
+    #     this module (cycle-10 review: `test_rrf_tie_rank_7704.py` only names it
+    #     in prose), so that entry buys COVERAGE PRESERVATION rather than a lost
+    #     guard — which is why the assert below names the pool size, not a file
+    #     that could not be justified.
     #
     # Mutation check, all measured: removing the `sdk` entry drops both sdk
     # files (surfaces become `['core','eval']`, 739 files); removing the `eval`
@@ -3017,7 +3022,8 @@ def test_temporal_leg_change_runs_its_pins_and_keeps_the_core_pool():
         "is registered", r["surfaces"])
     assert runs("test_rrf_tie_rank_7704.py"), (
         "the core-registered pool is missing from a temporal_leg-only selection "
-        "(CORE_ALSO entry removed?)", r)
+        "(CORE_ALSO entry removed?) — the pool is COVERAGE-PRESERVATION only, so "
+        "this names one of its members rather than a pin of the module", r)
     assert "core" in r["surfaces"], (
         "a temporal_leg-only diff dropped the core pool (CORE_ALSO entry removed?)",
         r["surfaces"])

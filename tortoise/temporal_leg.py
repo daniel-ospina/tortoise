@@ -214,6 +214,14 @@ def _session_clustered(candidates: list[dict], head: int, limit: int,
     2-slot sample makes ``max(counts) * 2 >= len(visible)`` vacuously true,
     which is what let a four-distinct-session pool promote before the guard
     existed (review cycles 2-3, #10549).
+
+    A hit with no ``session_id`` is NOT a session and never counts toward
+    the majority (it also never adds to the denominator it is already in):
+    collapsing every absent id into one group would let "most hits carry no
+    session at all" read as "one session owns the window", which is an
+    over-fire — the budget spent displacing an in-window pick on evidence
+    that does not exist. With no real session in the sample the answer is
+    ``False``, i.e. the arm stays inert (review cycle 10, #10549).
     """
     if head > 0 or window > 0:
         visible = candidates[:max(head, window)]
@@ -225,8 +233,18 @@ def _session_clustered(candidates: list[dict], head: int, limit: int,
         return False
     counts: dict[str, int] = {}
     for c in visible:
+        # A hit with NO session id is not a session. Counting them together
+        # under one "" key would let "most hits carry no session at all"
+        # satisfy "one session owns half the window" -- an OVER-fire that
+        # spends the budget displacing an in-window pick for a spread there
+        # is no evidence for (review cycle 10, #10549). Fail closed: if no
+        # real session survives, the window arm stays inert.
         key = str(c.get("session_id") or "")
+        if not key:
+            continue
         counts[key] = counts.get(key, 0) + 1
+    if not counts:
+        return False
     return max(counts.values()) * 2 >= len(visible)
 
 
@@ -256,8 +274,9 @@ def temporal_leg_order(
        the head of the leg. Both halves of a comparison therefore reach the
        fusion together, which is the deterministic stand-in for a state_key
        co-retrieval (research §1/§2).
-    2. **Date/session spread**: the anchor-relevant candidates (those sharing
-       at least one content token with any anchor) are bucketed by
+    2. **Date/session spread**: the TARGETED candidates -- anchor-relevant (those
+       sharing at least one content token with any anchor) or, on the #10538
+       window path, in-window (no anchor needed) -- are bucketed by
        ``(session_date, session_id)``; buckets are visited in the order their
        best member appears in the semantic ranking, and round-robin over
        rounds up to ``bucket_cap``. Coverage is spread across the temporal
@@ -279,12 +298,14 @@ anchor-less, window-less ordering questions
 behavior. The residual is documented on the arm (see the PR body).
 
 **Bounded promotion (``head``).** ``head`` excludes the first ``head``
-candidates (the reader-visible head) from BOTH phases: those candidates
-need no temporal lift, so promoting them would only double-count them
-against the fused head slice the caller builds (see
-:func:`temporal_leg_fusion_order`, which always passes the ceiling).
-``head=0`` is the unguarded mode — used by the unit tests to exercise the
-phases in isolation, never by the fused caller for a window ≥ 2.
+candidates from BOTH phases. It is the caller's PROMOTION boundary, NOT its
+reader window: :func:`temporal_leg_fusion_order` passes ``ceiling = window −
+limit`` (where its picks START), which reaches ``limit − 1`` slots INTO the
+window. That is deliberate and measured for phase 1 (the anchor path is
+measured AS-IS, #2976); the window branch does not rely on it — its own
+:data:`held_buckets` exclusion is what keeps a pick off an id the reader
+already sees. ``head=0`` is the unguarded mode — used by the unit tests to
+exercise the phases in isolation, never by the fused caller for a window ≥ 2.
 
 **Budget clamping.** :func:`temporal_leg_fusion_order` clamps the budget
 via :func:`effective_promotion_budget` to ``max(1, min(limit,
