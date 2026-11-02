@@ -332,9 +332,19 @@ def test_llmreader_answer_with_evidence_passes_the_question_to_the_prompt():
     plain_system = plain_model.systems[-1]
     assert _AGGREGATION_FRAGMENT not in plain_system, \
         "a non-aggregative question must get no counting discipline"
-    # ...and the two differ ONLY because of the question: same evidence shape,
-    # same resolved type (None), so a stub that ignored `question` would make
-    # these equal.
+    # ...and the two differ ONLY because of the question. NOTE the premise, which
+    # is easy to misread: `answer_with_evidence` is called here WITHOUT
+    # `question_type`, so it composes from `None` and never calls
+    # `detect_question_type` — even though that classifier WOULD resolve the
+    # counting question to `temporal-reasoning`. Both arms therefore carry the
+    # same base prompt (generic + the universal A1 clause, no type fragment),
+    # and the clause is the whole delta. Pinned as assertions rather than left
+    # in this comment, so the claim cannot rot into a false one: the clause must
+    # be appended LAST, on top of exactly that base.
+    assert plain_system == system_prompt_for(None), \
+        "the control must be the plain (type-less) prompt, or the delta is not the clause"
+    assert agg_system == system_prompt_for(None) + _AGGREGATION_FRAGMENT, \
+        "the counting clause must be the ONLY difference, appended after the base prompt"
     assert agg_system != plain_system
 
 
