@@ -72,8 +72,13 @@ _PROVIDERS = {
     # venice.ai — the #1549 3-provider rotation lane, OpenAI-compatible at
     # ``/v1`` (``models.OpenAICompatModel`` appends ``/chat/completions``).
     # Registered on main by ``model_adapters.resolve_extractor_provider``, whose
-    # ``if vz_key:`` branch returns venice as a STANDALONE PRIMARY. ⚠️ That is
-    # PRECEDENT, not a recorded decision: #8133 records the product question
+    # ``if _keys.get("venice"):`` branch returns venice as a STANDALONE
+    # PRIMARY. (Before #8133 that branch read ``if vz_key:``; the resolver now
+    # derives key presence from ``model_adapters._PROVIDER_KEY_ENV``, so the
+    # citation names the derived form. ``vz_key`` no longer exists there — and
+    # the ask lane, which used to have one, is now registry-derived too.)
+    # ⚠️ That is PRECEDENT, not a recorded decision: #8133 records the product
+    # question
     # (is venice a supported standalone primary, or intentionally fallback-only?)
     # as OPEN and no owner ruling answers it. This entry is justified by #8133's
     # OBJECTIVE — the lane gate and the v2 resolver must agree on what "a

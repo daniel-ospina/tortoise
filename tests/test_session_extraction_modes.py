@@ -291,8 +291,19 @@ def test_the_lane_gate_registry_covers_the_v2_extractor_registry():
     ``test_resolve_extractor_provider_reads_no_inline_provider_keys`` fails if
     an ``*_API_KEY`` name reappears inside it, while
     ``test_the_v2_resolver_honours_exactly_the_provider_key_map`` pins the
-    map → behaviour direction. So the map is now the single registration site
-    for the key axis, in both directions.
+    map → behaviour direction. So within ``tortoise.model_adapters`` the map is
+    the single registration site for the routing lanes' key axis, in both
+    directions — and for BOTH lanes: since review cycle 7 the ask lane's
+    ``keyed`` is derived from it too
+    (``test_resolve_reader_provider_derives_its_keys_from_the_registry``).
+
+    ⚠️ NOT claimed: that this map is the only place a provider KEY NAME is
+    registered anywhere in the repo. ``tortoise.ingest._PROVIDERS`` carries the
+    same env-var names for the LANE GATE, and a hosted deployment must register
+    there too — the ``missing`` assertion below is what pins agreement, and
+    ``test_the_lane_gate_registry_covers_the_v2_extractor_registry`` is the
+    guard that fails when it is skipped. "Single site" here is scoped to this
+    module's two resolvers, which is what the registry note claims.
 
     ``test_sdk_priority_covers_all_registry_providers`` guards the other
     direction (ingest -> priority/hosted); this guards the key map -> lane gate.
@@ -442,11 +453,16 @@ def test_the_v2_resolver_honours_exactly_the_provider_key_map(no_provider_keys):
     assert not stray_routing, (
         f"resolve_extractor_provider() routes provider(s) "
         f"{sorted(stray_routing)} that _PROVIDER_KEY_ENV does not register — the "
-        f"resolver HONOURS a provider the registry does not name, so the "
-        f"registry-derived consumers (the capture lane gate's key set, "
-        f"_providers_can_serve) disagree with what it can serve: the #8133 "
-        f"divergence on the resolver side. Register the provider (and its key "
-        f"env var) in _PROVIDER_KEY_ENV, or remove it from the routing order."
+        f"resolver HONOURS a provider the registry does not name, so the key "
+        f"presence the routing lanes derive (`_provider_keys_present`, consumed "
+        f"by BOTH resolvers) and the capture lane gate's key set disagree with "
+        f"what this function can serve: the #8133 divergence on the resolver "
+        f"side. Register the provider (and its key env var) in "
+        f"_PROVIDER_KEY_ENV, or remove it from the routing order. (A provider "
+        f"routed here but absent from the CAPABILITY map "
+        f"`_SPEC_FAMILY_PROVIDERS` is a different, non-key divergence — that map "
+        f"carries model FAMILIES, never reads this registry, and is not what "
+        f"this assertion is about.)"
     )
 
     # The explicit-selector enum is a POLICY set, not the registry; it may only
@@ -524,6 +540,178 @@ def test_resolve_extractor_provider_reads_no_inline_provider_keys():
         "the AST scan found no TORTOISE_EXTRACTOR_PROVIDER literal in "
         "resolve_extractor_provider, so this guard is vacuous — the function "
         "reads that selector and the scan must see it"
+    )
+
+
+def test_no_routing_lane_names_a_provider_key_literal():
+    """#8133 (review cycle 1, P2 — the finding's own remedy shape): EVERY
+    module-level function in ``tortoise.model_adapters`` that reads
+    ``os.environ`` must derive provider key presence from ``_PROVIDER_KEY_ENV``
+    and never name a ``*_API_KEY`` var itself.
+
+    Why the scan is MODULE-WIDE rather than pinned to one symbol: when this
+    guard named only ``resolve_extractor_provider``, ``resolve_reader_provider``
+    — the ASK lane, in the SAME module — still carried all three inline reads
+    plus a hand-written ``keyed`` dict restating them, and the guard stayed
+    green. That is the #8133 shape one lane over, under a comment claiming the
+    class was closed (measured at review cycle 6: three inline
+    ``os.environ.get("…_API_KEY")`` reads at the ask-lane resolver, single-symbol
+    guard green). Auto-discovery means the NEXT function to read a provider key
+    inline is caught without editing this test.
+
+    Non-vacuity is asserted, not assumed: the walk must have SEEN both routing
+    lanes, so an import-time refactor that renames them cannot silently shrink
+    the scan to nothing.
+
+    ⛔ RESIDUAL, stated rather than claimed closed: a key NAME that never appears
+    as a literal in the function is still invisible — a module-level constant
+    (``os.environ.get(_FOO_KEY_ENV)``) or a subscript of another mapping. This
+    scan reads literals; closing that needs operand resolution.
+    """
+    import ast
+    import inspect
+    import textwrap
+
+    from tortoise import model_adapters
+
+    scanned: list[str] = []
+    offenders: dict[str, list[str]] = {}
+    for name, obj in vars(model_adapters).items():
+        if not inspect.isfunction(obj):
+            continue
+        # Only functions DEFINED here — not imported helpers (``os.getenv``
+        # aliases, re-exports) whose source belongs to another module.
+        if getattr(obj, "__module__", None) != model_adapters.__name__:
+            continue
+        try:
+            src = textwrap.dedent(inspect.getsource(obj))
+        except (OSError, TypeError):  # pragma: no cover — dynamic defs
+            continue
+        if "os.environ" not in src:
+            continue
+        scanned.append(name)
+        literals = sorted({
+            node.value
+            for node in ast.walk(ast.parse(src))
+            if isinstance(node, ast.Constant)
+            and isinstance(node.value, str)
+            and node.value.endswith("_API_KEY")
+        })
+        if literals:
+            offenders[name] = literals
+
+    assert not offenders, (
+        f"function(s) in tortoise.model_adapters read a provider key env var "
+        f"INLINE instead of deriving it from _PROVIDER_KEY_ENV: "
+        f"{ {k: v for k, v in sorted(offenders.items())} }. Derive it via "
+        f"_provider_keys_present() instead — a provider added to the registry "
+        f"is otherwise invisible here and the two lists drift again, which is "
+        f"the exact #8133 root (two hand-maintained lists in one module)."
+    )
+
+    for lane in ("resolve_extractor_provider", "resolve_reader_provider"):
+        assert lane in scanned, (
+            f"the module-wide scan did not see {lane}() among the "
+            f"os.environ-reading functions ({sorted(scanned)}), so the guard "
+            f"does not actually cover that lane — it would read green over "
+            f"precisely the inline read it exists to catch"
+        )
+
+
+def test_resolve_reader_provider_derives_its_keys_from_the_registry(
+        monkeypatch, no_provider_keys):
+    """#8133 (review cycle 7): the ASK lane's key presence comes from
+    ``_PROVIDER_KEY_ENV`` — the same registry the capture lane reads — not from
+    three inline literals in ``resolve_reader_provider``.
+
+    Behavioural, and NON-VACUOUS by construction: it re-points one provider's
+    entry at an env var name that appears NOWHERE in ``model_adapters`` as a
+    literal and sets only that. A resolver still reading its own
+    ``DEEPSEEK_API_KEY`` literal cannot see it, so the keyed pool comes back
+    empty. Measured on the pre-fix code: ``(None, ['openrouter'])`` — the
+    lenient no-key default — where the registry-derived resolver returns
+    ``('deepseek-direct', ['deepseek-direct'])``. That delta is the whole point:
+    before this, adding a provider to the registry left the ask lane unable to
+    key it, which is the #8133 divergence surviving on the other lane.
+
+    ⚠️ Deliberately NOT asserted: that ``keyed`` takes the registry WHOLESALE.
+    It is scoped to ``_ASK_PROVIDERS``, because that enum is the ask lane's
+    POLICY set — a provider registered in the map but not yet routable on this
+    lane must not flip the ``not any(keyed.values())`` lenient-default branch.
+    """
+    import inspect
+
+    from tortoise import model_adapters
+
+    key_var = "TORTOISE_REVIEW_8133_DEEPSEEK_TOKEN"
+    assert key_var not in inspect.getsource(model_adapters), (
+        f"{key_var} already appears in tortoise/model_adapters.py, so a "
+        f"resolver reading it inline would pass this test for the wrong "
+        f"reason — pick a name no literal in the module uses"
+    )
+
+    monkeypatch.setitem(
+        model_adapters._PROVIDER_KEY_ENV, "deepseek-direct", key_var)
+    monkeypatch.setenv(key_var, "sk-test-8133")
+    monkeypatch.delenv("TORTOISE_ASK_PROVIDER", raising=False)
+
+    primary, pool = model_adapters.resolve_reader_provider(
+        "deepseek/deepseek-v4-flash")
+    assert primary == "deepseek-direct", (
+        f"with only the REGISTRY-renamed key var {key_var} set, "
+        f"resolve_reader_provider() returned primary {primary!r} and pool "
+        f"{pool!r}. The ask lane is not deriving key presence from "
+        f"_PROVIDER_KEY_ENV — it has its own inline list again, which is the "
+        f"#8133 divergence (a provider registered in the map is invisible to "
+        f"this lane)."
+    )
+    assert pool == ["deepseek-direct"], (
+        f"expected the pool to hold exactly the keyed provider, got {pool!r}"
+    )
+
+
+def test_dropping_a_provider_from_the_registry_is_a_routing_change_not_a_crash(
+        monkeypatch, no_provider_keys):
+    """#8133 (review cycle 4, P3): the resolver must not read the registry with
+    `_keys[...]` indexing at its branch points.
+
+    Before #8133 the resolver's key reads were ``os.environ.get(...)`` calls that
+    did not involve ``_PROVIDER_KEY_ENV`` at all, so removing a provider from the
+    map changed NOTHING about the resolver. The refactor made the map
+    load-bearing, and a direct ``_keys["venice"]`` read turned that same edit
+    into a ``KeyError`` raised inside capture — from a change the guard's own
+    message recommends ("…or remove it from the registry"). ``.get(p, False)``
+    restores the pre-#8133 semantics: the provider simply stops being routable.
+
+    This is fail-LOUD vs fail-OPEN bookkeeping, not a safety fix (M1 — removing
+    ``venice`` from the map — still reds
+    ``test_a_venice_only_deployment_extracts``). It pins that the failure mode is
+    a routing answer, never an uncaught ``KeyError`` nobody expects at build
+    time.
+    """
+    from tortoise import model_adapters
+
+    monkeypatch.delitem(model_adapters._PROVIDER_KEY_ENV, "venice")
+    monkeypatch.delenv("TORTOISE_EXTRACTOR_PROVIDER", raising=False)
+    monkeypatch.setenv("VENICE_API_KEY", "sk-test-8133")
+
+    # A venice-only deployment whose provider left the registry: no crash, and
+    # no provider — the pre-#8133 answer for a provider the resolver does not
+    # know about.
+    assert model_adapters.resolve_extractor_provider() == (None, None), (
+        "a provider dropped from _PROVIDER_KEY_ENV must fall out of the routing "
+        "pool (the pre-#8133 behaviour), not raise a KeyError inside capture"
+    )
+    # …and the deepseek path still resolves, so the `.get` default does not
+    # blanket-disarm the resolver.
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test-8133")
+    primary, avail = model_adapters.resolve_extractor_provider()
+    assert primary == "deepseek-direct", (
+        f"expected deepseek-direct to still resolve with venice unregistered, "
+        f"got {primary!r}"
+    )
+    assert "venice" not in avail, (
+        f"an unregistered provider must not appear in the pool, got {avail!r}"
     )
 
 
