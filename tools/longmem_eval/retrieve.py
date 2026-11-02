@@ -1934,7 +1934,10 @@ def retrieve_for_question(
     #
     # Fail-safe OFF: explicit flag > env ``TORTOISE_LME_TEMPORAL_LEG`` >
     # OFF; a question with no temporal constraint, a non-TR question, or a
-    # pool with no dated/anchor-relevant candidates leaves the fused order
+    # pool with no dated candidates (or no anchor-relevant candidates AND no
+    # date window -- #10538's window arm promotes anchor-less pools whose
+    # visible slots are session-clustered, see
+    # tests/test_temporal_leg_date_window_10538.py) leaves the fused order
     # byte-identical. ──
     if temporal_leg is not None:
         temporal_leg_on = temporal_leg

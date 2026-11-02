@@ -545,3 +545,56 @@ def test_absent_session_ids_are_not_a_session_for_the_clustering_guard():
         date_window=("2023-04-10", "2023-04-20"))
     assert picks2, "the guard no longer fires on a genuinely clustered window"
     assert order2 != base, "the windowed pick moved nothing on the control pool"
+
+
+def test_unattributed_slots_count_against_the_majority_they_are_not_excluded_from():
+    """The guard's DENOMINATOR is the whole visible window, not just the slots
+    that happen to carry a session id.
+
+    The empty-id fix above skips unattributed hits when COUNTING a session's
+    share; if it also shrank the denominator, "5 of 12 visible slots" would
+    become "5 of 5 attributed slots" and read as a session that owns the
+    window. That is the over-fire the guard exists to prevent, one level
+    down, and it is invisible to the pin above (whose sample has zero real
+    sessions, so it returns early, and whose positive control is fully
+    attributed, so both denominators coincide).
+
+    Measured mutant (`return max(counts.values()) * 2 >= sum(counts.values())`)
+    promotes the net-new session here; the shipped guard declines and the
+    order is untouched.
+    """
+    pool = (
+        [{"id": f"a{i}", "session_id": "sA", "session_date": "2023-04-11",
+          "content": "alpha"} for i in range(5)]
+        + [{"id": f"u{i}", "session_id": "", "session_date": "2023-04-12",
+            "content": "alpha"} for i in range(6)]
+        + [{"id": "z1", "session_id": "sZ", "session_date": "2023-04-13",
+            "content": "alpha"},
+           {"id": "y1", "session_id": "sY", "session_date": "2023-04-14",
+            "content": "alpha"}]
+    )
+    # 12-wide reader window = 5 x sA + 6 unattributed + 1 x sZ; the net-new
+    # session sits at index 12, i.e. below the window, where a pick would go.
+    base = [c["id"] for c in pool]
+    order, picks = temporal_leg_fusion_order(
+        pool, anchors=(), window=12, limit=2,
+        date_window=("2023-04-10", "2023-04-20"))
+    assert picks == [], (
+        f"5 attributed slots of a 12-wide window is not a majority "
+        f"(5*2 < 12); the unattributed slots must count against it: {picks}")
+    assert order == base, "the arm reordered a window it should have declined"
+
+    # Positive control at the same geometry: give the majority REAL session
+    # ids (7 x sA of the 12) and the arm fires — so the assertion above pins
+    # the denominator, not an arm that never fires.
+    clustered = [
+        {**c, "session_id": ("sA" if c["session_id"] == "" and i < 7 else c["session_id"])}
+        for i, c in enumerate(pool)
+    ]
+    order2, picks2 = temporal_leg_fusion_order(
+        clustered, anchors=(), window=12, limit=2,
+        date_window=("2023-04-10", "2023-04-20"))
+    assert picks2 == ["y1"], (
+        f"7 of 12 slots in one session is a majority and the net-new session "
+        f"must be promoted: {picks2}")
+    assert order2 != base, "the windowed pick moved nothing on the control pool"

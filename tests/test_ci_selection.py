@@ -2984,8 +2984,9 @@ def test_temporal_leg_change_runs_its_pins_and_keeps_the_core_pool():
     #     match REPLACES the `core` fallback (#2938). NO core-registered test pins
     #     this module (cycle-10 review: `test_rrf_tie_rank_7704.py` only names it
     #     in prose), so that entry buys COVERAGE PRESERVATION rather than a lost
-    #     guard — which is why the assert below names the pool size, not a file
-    #     that could not be justified.
+    #     guard. The assert below therefore names ONE MEMBER of that pool, and its
+    #     message says so — it is a membership probe, not a claim that the file
+    #     pins the module.
     #
     # Mutation check, all measured: removing the `sdk` entry drops both sdk
     # files (surfaces become `['core','eval']`, 739 files); removing the `eval`

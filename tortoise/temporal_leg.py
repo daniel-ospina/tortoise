@@ -384,7 +384,7 @@ no candidate is dated, which the caller treats as "leg inert".
     dated = [c for c in candidates if c.get("session_date")]
     if not dated:
         return []
-    # the reader-visible head needs no promotion — never disturb it. The
+    # the head slice needs no promotion — never disturb it. The
     # boundary is the CANDIDATE index (matching this function's ``head``
     # contract), not the index within the date-filtered list: an undated
     # candidate sitting in the head must not shift the boundary downward
