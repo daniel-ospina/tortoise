@@ -22,6 +22,9 @@ claims:
 | `test_every_embedded_label_has_a_query_path` | bullet 2 | an embedding write path serves a label `run_vector_query` cannot query |
 | `test_all_three_mechanisms_are_visible_to_the_caller` | bullet 3 (`#4999`) | the fallback stops announcing itself, or two paths report the same mechanism |
 | `test_the_census_refuses_to_report_zero_for_an_unreadable_store` | the 2026-09-24 error (`stored`-only / silent 0) | a store that could not be read is reported as `0` anything |
+| `test_the_census_reads_through_the_READ_ONLY_verb` | "the census stores nothing", enforced by the ENGINE | a census read goes back to the write-capable `graph.query` |
+| `test_a_backtick_in_a_graph_label_cannot_re_purpose_the_census_query` | a graph-controlled label is QUOTED, not concatenated | a label carrying a backtick closes the identifier and appends Cypher |
+| `test_the_TEXT_path_PRINTS_an_unreadable_catalogue_row` | the text path renders what `--json` renders | the printer raises `TypeError` on the `(label, why)` tuples and a measured census exits 2 |
 | `test_an_unmeasurable_run_exits_two` | the documented exit-code contract | a run that could not measure exits 0 or 1, so a caller reads "could not measure" as "a row was NOT MET" |
 | `test_the_instrument_is_selected_by_its_own_subjects` | the pins above actually RUN in CI | a subject diff stops selecting this file — a falsifier that never executes |
 | `test_two_package_inits_keep_distinct_writer_identities` | the writer map's exhaustiveness | two writers in one package collapse into one key, so a label bullet 2 compares vanishes |
@@ -322,6 +325,59 @@ def test_all_three_mechanisms_are_visible_to_the_caller():
     assert probe.score_fallback_bullet().verdict == "MET"
 
 
+def test_the_fallback_probe_reads_a_HEALTHY_scan():
+    """Each probe must take its HEALTHY branch — not a failed read that reports `ok`.
+
+    The fake rows are `(id, score)` pairs and that is load-bearing: the
+    brute-force scan reads `row[1]`, so a one-element row raises
+    `IndexError: tuple index out of range` — a message containing "index" — and
+    the leg records `degraded=True, reason="index_missing"`, returns `[]`, and
+    STILL reports `mechanism="scan"`. The probe therefore looked healthy while
+    measuring a failure (`scan: degraded=True reason='index_missing' count=0`,
+    measured pre-fix), which is why `#5090` row 3's `degraded` clause could not
+    be scored from the row's own command (review round 13, P3).
+    """
+    degraded: dict = {}
+    observed = probe.fallback_probe(degraded=degraded)
+    assert set(degraded) == set(observed), (sorted(degraded), sorted(observed))
+    for name, d in degraded.items():
+        assert d["degraded"] is False, (
+            f"the {name!r} probe took a DEGRADED path, so it measured a failed "
+            f"read rather than the mechanism it reports: {d}")
+        assert d["reason"] == "ok", (name, d)
+        assert d["declared"] is None, (name, d)
+
+
+def test_bullet_three_SCORES_the_2952_clause_its_evidence_cites(monkeypatch):
+    """`degraded` keeping `#2952`'s meaning is part of row 3's claim, so it is read.
+
+    `#5090` row 3's evidence cell asserts "`degraded` keeps `#2952`'s meaning"
+    while the row's own command read only the mechanism key — half the cell was
+    unscored, the defect class `#10465` exists to remove (review round 13, P3).
+    This pins the SCORING: the same three mechanisms, with a `degraded` reading
+    injected as True, must NOT be `MET`.
+    """
+    clean: dict = {}
+    probe.fallback_probe(degraded=clean)
+    assert probe.score_fallback_bullet().verdict == "MET", clean
+
+    def _degraded_probe(degraded=None):
+        out = {"index": "index", "scan": "scan",
+               "scan_fallback": "scan_fallback"}
+        if degraded is not None:
+            degraded.update({k: {"degraded": False, "reason": "ok",
+                                 "declared": None} for k in out})
+            # ONE mechanism declares a degraded read (#2952).
+            degraded["scan_fallback"]["degraded"] = True
+        return out
+
+    monkeypatch.setattr(probe, "fallback_probe", _degraded_probe)
+    row = probe.score_fallback_bullet()
+    assert row.verdict == "NOT MET", row.observed
+    assert any("#2952 untouched on every mechanism: False" in n
+               for n in row.notes), row.notes
+
+
 # ── The census ─────────────────────────────────────────────────────────────
 
 
@@ -330,6 +386,73 @@ class _UnreadableGraph:
 
     def query(self, cypher, params=None, timeout=None):
         raise RuntimeError("Timeout reading from socket")
+
+    # The census reads through the read-only verb (`GRAPH.RO_QUERY`); a fake that
+    # implements only `query` would let the tool quietly keep the write-capable
+    # one, so both verbs answer the same way here.
+    def ro_query(self, cypher, params=None, timeout=None):
+        raise RuntimeError("Timeout reading from socket")
+
+
+class _SpyDB:
+    """A handle whose only job is to let `main` reach the census."""
+
+    def select_graph(self, name):
+        return object()
+
+
+def test_a_pathless_uri_does_not_put_its_userinfo_in_the_census(
+        monkeypatch, capsys):
+    """`docker://:SECRET@host:6379` names NO graph, and its password is not a name.
+
+    The pre-fix derivation was the last `/`-segment of the RAW URI, so for a
+    path-less URI that segment is the URI's userinfo — carried into
+    `report["census"]["graph"]` and printed (twice on the text path). Reachable
+    with NO flag at all, because `--uri` defaults to `$TORTOISE_DB_URI`: the
+    same credential class as #3039 and `tests/_embedded.py`'s warning (review
+    round 13, P2).
+    """
+    monkeypatch.setattr(probe, "_connect", lambda uri: (_SpyDB(), ["g1"]))
+    rc = probe.main(["--census", "--uri", "docker://:s3cr3t@127.0.0.1:6399",
+                     "--json"])
+    out = capsys.readouterr().out
+    assert "s3cr3t" not in out, (
+        f"the census echoed the URI's userinfo: {out[-2000:]}")
+    assert "no graph name" in out, out[-2000:]
+    assert rc == 2, "an unmeasurable census must not exit 0"
+
+
+def test_the_uri_path_graph_is_the_PATH_not_the_authority(monkeypatch, capsys):
+    """With `--graph`, the recorded `uri_path_graph` is the path — or None.
+
+    `''` would itself be a lie (`the URI names an empty graph`), so a path-less
+    URI records None; the pre-fix code recorded the userinfo here too.
+    """
+    seen: dict = {}
+
+    def _census(graph, name, graph_names=None, uri_graph_name=None):
+        seen["name"] = name
+        seen["uri_path_graph"] = uri_graph_name
+        return {"graph": name, "at": "t", "labels": {},
+                "catalogue": "UNMEASURED(spy)"}
+
+    monkeypatch.setattr(probe, "_connect", lambda uri: (_SpyDB(), ["g1"]))
+    monkeypatch.setattr(probe, "vector_census", _census)
+    rc = probe.main(["--census", "--uri", "docker://:s3cr3t@127.0.0.1:6399",
+                     "--graph", "safe_graph", "--json"])
+    out = capsys.readouterr().out
+    assert seen["name"] == "safe_graph", seen
+    assert seen["uri_path_graph"] is None, seen
+    assert "s3cr3t" not in out, out[-2000:]
+    assert rc == 2, rc
+
+    # ...and a URI that DOES carry a path still records it.
+    rc = probe.main(["--census", "--uri", "docker://:s3cr3t@127.0.0.1:6399/real",
+                     "--json"])
+    capsys.readouterr()
+    assert seen["name"] == "real", seen
+    assert seen["uri_path_graph"] == "real", seen
+    assert rc == 2, rc
 
 
 def test_the_census_refuses_to_report_zero_for_an_unreadable_store():
@@ -347,6 +470,12 @@ class _MaterialisingGraph:
     a catalogue read on a missing graph name materialises an empty graph)."""
 
     def query(self, cypher, params=None, timeout=None):
+        raise AssertionError(
+            "a catalogue read was issued for a graph that does not exist — that "
+            "CREATES it server-side, and the census is read-only by doctrine"
+        )
+
+    def ro_query(self, cypher, params=None, timeout=None):
         raise AssertionError(
             "a catalogue read was issued for a graph that does not exist — that "
             "CREATES it server-side, and the census is read-only by doctrine"
@@ -504,7 +633,17 @@ class _CensusGraph:
         self._vectors = vectors  # {label: (count, [1.0]*width | None)}
         self._dim = dim
 
+    # ⛔ BOTH verbs answer through `_answer`, because the census must issue its
+    # reads through `ro_query` (the engine's read-only verb) and a fake that
+    # implemented only the write-capable `query` would make a revert invisible.
+    # Subclasses override `_answer`, never one verb, so neither can go untested.
     def query(self, cypher, params=None, timeout=None):
+        return self._answer(cypher)
+
+    def ro_query(self, cypher, params=None, timeout=None):
+        return self._answer(cypher)
+
+    def _answer(self, cypher):
         if "db.indexes()" in cypher:
             rows = self._catalogue
         elif "db.labels()" in cypher:
@@ -592,10 +731,10 @@ def test_the_census_does_not_claim_coverage_it_could_not_measure():
 
     # (b) the width probe RAISED — the same branch via the swallowed exception
     class _RaisingWidth(_CensusGraph):
-        def query(self, cypher, params=None, timeout=None):
+        def _answer(self, cypher):
             if "RETURN n.embedding" in cypher:
                 raise RuntimeError("Timeout reading from socket")
-            return super().query(cypher, params, timeout)
+            return super()._answer(cypher)
 
     graph = _RaisingWidth([_index_row("Point", "embedding", 384)], ["Point"],
                           {"Point": (5, [0.0] * 384)})
@@ -719,10 +858,10 @@ def test_a_failed_population_read_is_unmeasured_not_a_narrowed_population():
     """`CALL db.labels()` failing must not fall back to `indexed | served`."""
 
     class _NoLabels(_CensusGraph):
-        def query(self, cypher, params=None, timeout=None):
+        def _answer(self, cypher):
             if "db.labels()" in cypher:
                 raise RuntimeError("Timeout reading from socket")
-            return super().query(cypher, params, timeout)
+            return super()._answer(cypher)
 
     graph = _NoLabels([_index_row("Point", "embedding", 384)], ["Point"],
                       {"Point": (1, [0.0] * 384)})
@@ -743,6 +882,102 @@ def test_an_unreadable_catalogue_row_is_not_an_unindexed_label():
     row = census["labels"]["Point"]
     assert isinstance(row["indexed"], str) and row["indexed"].startswith("UNMEASURED"), row
     assert str(row["unindexed"]).startswith("UNMEASURED"), row
+
+
+def test_a_backtick_in_a_graph_label_cannot_re_purpose_the_census_query():
+    """A label is QUOTED by the repo's identifier rule, never concatenated raw.
+
+    `label` comes from `CALL db.labels()` / the index catalogue — the graph's own
+    schema, i.e. graph-controlled input reaching Cypher by interpolation (a label
+    cannot be a query parameter). The pre-fix `f"MATCH (n:`{label}`) …"` let a
+    label carrying a backtick close the quoted identifier and append Cypher of
+    its own. The repo's one rule for this shape is
+    `graph_key_restore._quote_identifier` (bare when bare, else backtick-quoted
+    with interior backticks DOUBLED) — round 15 review, P3.
+
+    The payload is EXECUTED through the census rather than read off a source
+    line, so a later rewrite that stops quoting reds here instead of shipping.
+    """
+    hostile = "x`) DETACH DELETE n //"
+    emitted: list[str] = []
+
+    class _Hostile(_CensusGraph):
+        def _answer(self, cypher):
+            emitted.append(cypher)
+            return super()._answer(cypher)
+
+    probe.vector_census(_Hostile([], [hostile], {}), "g", at="t",
+                        graph_names=["g"])
+    counts = [q for q in emitted if "RETURN count(n)" in q]
+    target = [q for q in counts if "x" in q]
+    assert target, counts
+    quoted = "`" + hostile.replace("`", "``") + "`"
+    assert quoted in target[0], (
+        f"the label reached Cypher unquoted — the payload's backtick closes the "
+        f"identifier: {target[0]}")
+    # ⛔ The RAW form is what closed the identifier, and it is emitted nowhere:
+    # the payload's backtick exists only inside a doubled pair.
+    assert f"`{hostile}`" not in " ".join(counts), counts
+    # …and the payload's own backtick is the ONLY doubled one, so the doubling is
+    # the escape and not an artefact of the payload happening to contain it.
+    assert target[0].count("``") == 1, target[0]
+
+
+def test_the_census_reads_through_the_READ_ONLY_verb():
+    """The census reads through `GRAPH.RO_QUERY`, not the write-capable verb.
+
+    "This module stores nothing" was a convention held only by writing
+    read-shaped statements through `graph.query` — the verb that CAN write.
+    `ro_query` is rejected server-side for a write, so the doctrine becomes the
+    engine's to enforce (round 15 review, P3). A fake that implemented only
+    `query` could never show this: the handle below REFUSES `query` and the
+    census must still measure it.
+    """
+
+    class _WriteVerbForbidden(_CensusGraph):
+        def query(self, cypher, params=None, timeout=None):
+            raise AssertionError(
+                f"the census read through the write-capable verb: {cypher}")
+
+    row = probe.vector_census(
+        _WriteVerbForbidden(catalogue=[_index_row("Point", "embedding", 384)],
+                            labels=["Point"],
+                            vectors={"Point": (3, [0.0] * 384)}),
+        "g", at="2026-11-01T00:00:00Z", graph_names=["g"],
+    )["labels"]["Point"]
+    assert row["stored"] == 3, row
+    assert row["indexed"] is True, row
+    assert row["payload"]["derived_payload_B"] == 3 * 384 * 4, row
+
+
+def test_the_TEXT_path_PRINTS_an_unreadable_catalogue_row(monkeypatch, capsys):
+    """A census that MEASURED fine must not exit 2 on its own print statement.
+
+    Measured failure this pins (round 15 review, P2):
+    `unreadable_catalogue_rows` holds `(label-or-None, why)` TUPLES and the text
+    printer joined them as if they were strings, so `TypeError: sequence item 0:
+    expected str instance, tuple found` unwound into `cli()`'s blanket handler —
+    a catalogue that was read perfectly reported `UNMEASURED(TypeError: …)` and
+    exit 2, the instrument's "could not measure" code. `--json` renders tuples
+    fine, and `test_an_unreadable_catalogue_row_is_not_an_unindexed_label` calls
+    `vector_census()` directly, which is why nothing caught it: the defect lives
+    on the PRINT path.
+    """
+
+    class _Db:
+        def select_graph(self, name):
+            return _CensusGraph(
+                catalogue=[["Point", ["embedding"], "not-a-dict"]],
+                labels=["Point"], vectors={"Point": (7, [0.0] * 384)},
+            )
+
+    monkeypatch.setattr(probe, "_connect", lambda uri: (_Db(), ["g"]))
+    rc = probe.cli(["--census", "--uri", "docker://:@127.0.0.1:1/g",
+                    "--graph", "g"])
+    out, err = capsys.readouterr()
+    assert "UNMEASURED(TypeError" not in err, err
+    assert "types cell is str" in out, out[-2000:]
+    assert rc == 0, (rc, err)
 
 
 def test_the_predicate_walk_follows_plain_import_and_multiline_from(
@@ -1512,3 +1747,242 @@ def test_the_census_note_names_the_population_it_counted(monkeypatch):
     assert "PRODUCERS" not in census[0], (
         "the note claims a population the same line contradicts: `exempt` is "
         f"defined as NOT being a producer of a stored vector: {census[0]}")
+
+
+# ── The two verdicts that had no falsifier (fresh-context review, P2-1) ──────
+#
+# `grep -c score_v1_bullet` in this file was 0 and row 1's mapping was asserted
+# only as "the map SEES the ungated writer", never as "the row HOLDS". The
+# measured mutation — `score_v1_bullet`'s `verdict` forced to `"MET"` — left the
+# suite green at 65 passed / 1 skipped, i.e. an instrument that publishes
+# "V1 is decided and implemented" (fabricating the owner ruling the epic stays
+# open for) could ship green. These two tests are that hole closed.
+
+
+def test_row_four_is_NOT_MET_while_no_decided_marker_exists(tmp_path, monkeypatch):
+    """Bullet 4's verdict, asserted rather than membership-checked.
+
+    Two surfaces, zero V1-decided markers, one marker that still says the
+    decision is OPEN — the epic's own state. `PARTIAL` or `MET` here would
+    publish a ruling nobody made, so this reds on the exact mutation the
+    reviewer showed surviving.
+    """
+    (tmp_path / "docs" / "architecture").mkdir(parents=True)
+    (tmp_path / "tortoise").mkdir()
+    (tmp_path / "tortoise" / "projection").mkdir()
+    for rel in probe.V1_SURFACES:
+        (tmp_path / rel).write_text(
+            "the VECTOR index on `Point.embedding` ONLY — see the owner's "
+            "OPEN decision V1 below\n",
+            encoding="utf-8",
+        )
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    row = probe.score_v1_bullet()
+    assert row.verdict == "NOT MET", (
+        f"0 decided markers must not publish a V1 ruling: {row.verdict!r} "
+        f"({row.observed})")
+
+
+def test_row_four_never_reaches_MET_even_with_a_decided_marker(tmp_path, monkeypatch):
+    """A decision RECORD cannot prove what shipped — so PARTIAL is the ceiling.
+
+    Without this, "add one decided marker and it goes MET" reads as progress on
+    the one bullet the epic is open for, when the implementation half is
+    precisely what a record cannot measure.
+    """
+    (tmp_path / "docs" / "architecture").mkdir(parents=True)
+    (tmp_path / "tortoise").mkdir()
+    (tmp_path / "tortoise" / "projection").mkdir()
+    for rel in probe.V1_SURFACES:
+        (tmp_path / rel).write_text(
+            "V1 decided: the vector index carries embeddings (see the ruling)\n",
+            encoding="utf-8",
+        )
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    row = probe.score_v1_bullet()
+    assert row.verdict == "PARTIAL", row.verdict
+    assert "decided markers found: 2" in row.observed, row.observed
+
+
+def _fake_rule_tree(tmp_path) -> None:
+    """A tree where the rule is stated AND wired, so only the row's own
+    enforcement clauses decide the verdict."""
+    (tmp_path / "tortoise").mkdir()
+    (tmp_path / "tortoise" / "embed_gate.py").write_text(
+        "ENV_FLAG = 'TORTOISE_EMBED_GATE'\n"
+        "def embedding_verdict(t):\n    return None\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "tortoise" / "embeddings.py").write_text(
+        "import tortoise.embed_gate as embed_gate\n"
+        "def encode_for_row(content):\n"
+        "    verdict = embed_gate.embedding_verdict(content)\n"
+        "    return verdict\n",
+        encoding="utf-8",
+    )
+
+
+def _fake_shipped(on: bool) -> dict:
+    return {"on": on, "surfaces": ["Dockerfile"], "searched": ["Dockerfile"],
+            "unreadable": [], "mentions": [], "files": ["Dockerfile"] if on else []}
+
+
+def _gated_writer(name: str) -> dict:
+    return {name: {"callee": "embed_text", "at": f"{name.split('::')[0].replace('.', '/')}.py:1",
+                   "kind": "gated", "label": "Point"}}
+
+
+def test_row_one_is_PARTIAL_when_the_gate_is_off_although_every_writer_is_gated(
+        tmp_path, monkeypatch):
+    """The flag is the operator's; a fully-gated population with the gate OFF is
+    still not the write path's operative rule. `MET` here would publish
+    enforcement the shipped config does not set."""
+    _fake_rule_tree(tmp_path)
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(probe, "embedding_writers", lambda: _gated_writer("tortoise.a::_w"))
+    monkeypatch.setattr(probe, "flag_in_shipped_configs", lambda flag: _fake_shipped(False))
+    monkeypatch.delenv("TORTOISE_EMBED_GATE", raising=False)
+    row = probe.score_rule_bullet()
+    assert row.verdict == "PARTIAL", row.verdict
+    assert "gate enabled by default: False" in row.observed, row.observed
+
+
+def test_row_one_reaches_MET_only_when_every_clause_holds(tmp_path, monkeypatch):
+    """The positive pole: without it, a probe that can only print `PARTIAL` is
+    machinery, not measurement — the same objection, mirrored."""
+    _fake_rule_tree(tmp_path)
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(probe, "embedding_writers", lambda: _gated_writer("tortoise.a::_w"))
+    monkeypatch.setattr(probe, "flag_in_shipped_configs", lambda flag: _fake_shipped(True))
+    monkeypatch.delenv("TORTOISE_EMBED_GATE", raising=False)
+    row = probe.score_rule_bullet()
+    assert row.verdict == "MET", f"{row.verdict}: {row.observed}"
+
+
+def test_row_one_is_NOT_MET_when_no_writer_reaches_the_gated_seam(
+        tmp_path, monkeypatch):
+    """A stated rule with no gated writer is a comment, not enforcement."""
+    _fake_rule_tree(tmp_path)
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(probe, "embedding_writers", lambda: {})
+    monkeypatch.setattr(probe, "flag_in_shipped_configs", lambda flag: _fake_shipped(True))
+    monkeypatch.delenv("TORTOISE_EMBED_GATE", raising=False)
+    row = probe.score_rule_bullet()
+    assert row.verdict == "NOT MET", f"{row.verdict}: {row.observed}"
+
+
+def _writer(name: str, kind: str) -> dict:
+    return {"callee": "embed_text", "at": f"{name.replace('::', '.py:')}", "kind": kind, "label": "Point"}
+
+
+def test_row_one_is_PARTIAL_because_ONE_writer_embeds_outside_the_gate(
+        tmp_path, monkeypatch):
+    """The epic body's load-bearing sentence: *"Either fact alone holds this row
+    at `PARTIAL`"*. Re-review (P2) measured that dropping `ungated or` from the
+    verdict left the suite GREEN (70 passed, 1 skipped) — so the clause the epic
+    cites as the reason for row 1's PARTIAL had no falsifier at all. A gate that
+    is ON and a population that is fully gated must still not publish `MET`
+    while one writer embeds outside it: that writer is a path the rule never
+    sees, and turning the flag on does not fix it.
+    """
+    _fake_rule_tree(tmp_path)
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(probe, "embedding_writers", lambda: {
+        "tortoise.a::_gated": _writer("tortoise.a::_gated", "gated"),
+        "tortoise.session_indexer::main": _writer(
+            "tortoise.session_indexer::main", "ungated"),
+    })
+    monkeypatch.setattr(probe, "flag_in_shipped_configs", lambda flag: _fake_shipped(True))
+    monkeypatch.delenv("TORTOISE_EMBED_GATE", raising=False)
+    row = probe.score_rule_bullet()
+    assert row.verdict == "PARTIAL", (
+        f"gate ON + one ungated writer must not publish MET: {row.verdict!r}")
+    assert "embed OUTSIDE the gate: 1" in row.observed, row.observed
+
+
+def test_row_one_is_PARTIAL_because_ONE_writer_has_no_resolved_producer(
+        tmp_path, monkeypatch):
+    """The same argument for the other clause the epic names: an unresolved
+    writer's label cannot be resolved, so the row cannot claim a complete
+    measurement. Dropping `unresolved_writes or` measured GREEN (70 passed)
+    before this test existed."""
+    _fake_rule_tree(tmp_path)
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(probe, "embedding_writers", lambda: {
+        "tortoise.a::_gated": _writer("tortoise.a::_gated", "gated"),
+        "tortoise.z::_store": _writer("tortoise.z::_store", "unresolved_write"),
+    })
+    monkeypatch.setattr(probe, "flag_in_shipped_configs", lambda flag: _fake_shipped(True))
+    monkeypatch.delenv("TORTOISE_EMBED_GATE", raising=False)
+    row = probe.score_rule_bullet()
+    assert row.verdict == "PARTIAL", (
+        f"an unresolved writer must hold the row at PARTIAL: {row.verdict!r}")
+
+
+def test_row_one_is_NOT_MET_when_the_rule_is_not_STATED(tmp_path, monkeypatch):
+    """`not stated` is the `NOT MET` pole's first clause. Re-review measured that
+    dropping it leaves 72 passed / 1 skipped GREEN — row 1 then publishes `MET`
+    ("the rule is stated and wired") for a tree where no predicate exists."""
+    (tmp_path / "tortoise").mkdir()
+    # The predicate is ABSENT from the gate module.
+    (tmp_path / "tortoise" / "embed_gate.py").write_text(
+        "ENV_FLAG = 'TORTOISE_EMBED_GATE'\n", encoding="utf-8")
+    (tmp_path / "tortoise" / "embeddings.py").write_text(
+        "import tortoise.embed_gate as embed_gate\n"
+        "def encode_for_row(content):\n    return None\n", encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(probe, "embedding_writers", lambda: _gated_writer("tortoise.a::_w"))
+    monkeypatch.setattr(probe, "flag_in_shipped_configs", lambda flag: _fake_shipped(True))
+    monkeypatch.delenv("TORTOISE_EMBED_GATE", raising=False)
+    row = probe.score_rule_bullet()
+    assert row.verdict == "NOT MET", f"no stated predicate must not publish {row.verdict!r}"
+    assert "stated: False" in row.observed, row.observed
+
+
+def test_row_one_is_NOT_MET_when_the_rule_set_is_a_COPY(tmp_path, monkeypatch):
+    """`not shared` — the identity check §12.2a exists for. A COPY of the rule
+    set is the drift; dropping this clause measured GREEN (72 passed)."""
+    import tortoise.embed_gate as embed_gate
+
+    _fake_rule_tree(tmp_path)
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(probe, "embedding_writers", lambda: _gated_writer("tortoise.a::_w"))
+    monkeypatch.setattr(probe, "flag_in_shipped_configs", lambda flag: _fake_shipped(True))
+    monkeypatch.setattr(embed_gate, "RULE_SET", (*tuple(embed_gate.RULE_SET), "x"))
+    monkeypatch.delenv("TORTOISE_EMBED_GATE", raising=False)
+    row = probe.score_rule_bullet()
+    assert row.verdict == "NOT MET", f"a copied rule set must not publish {row.verdict!r}"
+    assert "one rule set: False" in row.observed, row.observed
+
+
+def test_row_one_is_PARTIAL_when_an_unparseable_module_holds_the_row(
+        tmp_path, monkeypatch):
+    """`unparsed` — "a module that will not parse is a HOLE in the measurement,
+    not a zero". Dropping this clause measured GREEN (72 passed)."""
+    _fake_rule_tree(tmp_path)
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(probe, "embedding_writers", lambda: {
+        **_gated_writer("tortoise.a::_w"),
+        "tortoise.broken": _writer("tortoise.broken::", "unparsed"),
+    })
+    monkeypatch.setattr(probe, "flag_in_shipped_configs", lambda flag: _fake_shipped(True))
+    monkeypatch.delenv("TORTOISE_EMBED_GATE", raising=False)
+    row = probe.score_rule_bullet()
+    assert row.verdict == "PARTIAL", f"an unparseable module must hold: {row.verdict!r}"
+
+
+def test_row_one_is_PARTIAL_when_a_duplicate_identity_collided(
+        tmp_path, monkeypatch):
+    """`duplicates` — a collided writer name means the later definition
+    overwrote the earlier one's label, so the population is not fully known.
+    Dropping this clause measured GREEN (72 passed)."""
+    _fake_rule_tree(tmp_path)
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(probe, "embedding_writers", lambda: {
+        **_gated_writer("tortoise.a::_w"),
+        "tortoise.__init__::": _writer("tortoise.__init__::", "duplicate"),
+    })
+    monkeypatch.setattr(probe, "flag_in_shipped_configs", lambda flag: _fake_shipped(True))
+    monkeypatch.delenv("TORTOISE_EMBED_GATE", raising=False)
+    row = probe.score_rule_bullet()
+    assert row.verdict == "PARTIAL", f"a duplicate identity must hold: {row.verdict!r}"

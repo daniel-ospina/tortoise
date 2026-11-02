@@ -80,6 +80,13 @@ stated, or the label is `UNMEASURED`. Never `0`: an unreachable store and an
 empty one are different facts, and `#5090` is a measurement issue whose whole
 failure mode is a body that reads as measured without being measured.
 
+⛔ **The reads go through `GRAPH.RO_QUERY` and the labels are quoted.** A label
+cannot be a query parameter and its value comes from the graph's own schema, so
+it is quoted with the repo's one identifier rule
+(`graph_key_restore._quote_identifier`) rather than concatenated raw; and the
+read-only verb makes "this module stores nothing" the engine's rule instead of
+this file's memory.
+
 Usage::
 
     uv run python tools/dod_5090_probe.py                     # the four rows
@@ -999,13 +1006,18 @@ class _Catalogue:
 VEC = [0.1] * 384
 
 
-def fallback_probe() -> dict[str, str]:
+def fallback_probe(degraded: dict | None = None) -> dict[str, str]:
     """Force each of the three vector mechanisms and read the caller's trace.
 
     Returns ``{mechanism: verdict-from-the-trace}`` where each value is the
     trace entry's own ``mechanism`` (or a readable failure). Bullet 3 is MET
     only when a caller can tell a full scan from an indexed read WITHOUT
     reading `search_engine.py` — which is `#4999`'s contract.
+
+    ``degraded``, when passed, is FILLED with the same three probes' `#2952`
+    reading (``{mechanism: {"degraded", "reason", "declared"}}``). It is an
+    out-parameter rather than a second return value so every existing caller
+    keeps the mechanisms dict it already reads.
     """
     # The breakers are module state: snapshot and restore them, because a
     # "read-only" instrument must not un-trip the vector breaker in whatever
@@ -1018,6 +1030,7 @@ def fallback_probe() -> dict[str, str]:
     import tortoise.search_engine as _se
     from tortoise.search_engine import (
         VECTOR_MECHANISM_KEY,
+        declared_degraded_read,
         reset_circuit_breakers,
         run_vector_query,
     )
@@ -1053,26 +1066,64 @@ def fallback_probe() -> dict[str, str]:
 
     try:
         return _probe_mechanisms(out, _entry, run_vector_query,
-                                 VECTOR_MECHANISM_KEY, reset_circuit_breakers)
+                                 VECTOR_MECHANISM_KEY, reset_circuit_breakers,
+                                 declared_degraded_read, degraded)
     finally:
         _restore()
 
 
 def _probe_mechanisms(out, _entry, run_vector_query, VECTOR_MECHANISM_KEY,
-                      reset_circuit_breakers) -> dict[str, str]:
+                      reset_circuit_breakers,
+                      declared_degraded_read=None,
+                      degraded_out: dict | None = None) -> dict[str, str]:
+    def _note_degraded(name: str, trace) -> None:
+        """`#2952`'s meaning, MEASURED — not asserted in prose in an epic body.
+
+        `#4999` reports the mechanism ADDITIVELY and deliberately leaves
+        `degraded` alone (`search_engine.py`: per `#2952` it means "the vector
+        leg contributed no semantic results", and a brute-force scan DOES
+        return semantic rows — flipping it "would make
+        `require_hybrid_read` refuse a valid semantic read"). `#5090` row 3
+        cited that as HALF of its evidence cell while the row's own command
+        read only the mechanism key, so that half was unscored — the exact
+        defect `#10465` exists to remove (review round 13, P3).
+        """
+        if degraded_out is None:
+            return
+        entry = _entry(trace)
+        degraded_out[name] = {
+            "degraded": entry.get("degraded"),
+            "reason": entry.get("reason"),
+            # The marker `#2952`'s consumer derives from the trace: `None`
+            # means "this read is not declared degraded".
+            "declared": (declared_degraded_read(trace)
+                         if declared_degraded_read else "UNMEASURED"),
+        }
+
     reset_circuit_breakers()
+    # ⛔ The fake ROWS are `(id, score)` PAIRS, and that is load-bearing: the
+    # brute-force scan reads `row[1]` as its score, so a one-element row raises
+    # `IndexError: tuple index out of range` — whose message contains "index",
+    # so the leg records `degraded=True, reason="index_missing"` and returns
+    # `[]` while the MECHANISM key still reads `scan`. The probe then reported a
+    # healthy `scan` from a read that FAILED (measured at `268512824`: `scan:
+    # degraded=True reason='index_missing' count=0`). That is why `#5090` row
+    # 3's `degraded` clause could never have been scored from its own command —
+    # the probe never took the healthy scan branch at all (review round 13, P3).
     # (a) the index path: signature A answers with rows.
     trace: list = []
-    run_vector_query(_Catalogue([([("a",), ("b",)], None)]), VEC,
+    run_vector_query(_Catalogue([([("a", 0.9), ("b", 0.8)], None)]), VEC,
                      entity_type="point", is_embedded=False, leg_trace=trace)
     out["index"] = str(_entry(trace).get(VECTOR_MECHANISM_KEY, "<key absent>"))
+    _note_degraded("index", trace)
 
     # (b) an engine with no index API: the deliberate full scan.
     reset_circuit_breakers()
     trace = []
-    run_vector_query(_Catalogue([([("a",)], None)]), VEC,
+    run_vector_query(_Catalogue([([("a", 0.9)], None)]), VEC,
                      entity_type="point", is_embedded=True, leg_trace=trace)
     out["scan"] = str(_entry(trace).get(VECTOR_MECHANISM_KEY, "<key absent>"))
+    _note_degraded("scan", trace)
 
     # (c) an index was EXPECTED and the query failed: the fallback that must
     #     announce itself — #4999's whole subject.
@@ -1082,25 +1133,43 @@ def _probe_mechanisms(out, _entry, run_vector_query, VECTOR_MECHANISM_KEY,
         _Catalogue([
             ([], RuntimeError("Invalid arguments for procedure")),
             ([], RuntimeError("Invalid arguments for procedure")),
-            ([("a",)], None),
+            ([("a", 0.9)], None),
         ]),
         VEC, entity_type="point", is_embedded=False, leg_trace=trace,
     )
     out["scan_fallback"] = str(_entry(trace).get(VECTOR_MECHANISM_KEY, "<key absent>"))
+    _note_degraded("scan_fallback", trace)
     return out
 
 
 def score_fallback_bullet() -> Row:
     """Bullet 3 — the three mechanisms are distinguishable in the caller's trace."""
-    observed = fallback_probe()
+    degraded: dict = {}
+    observed = fallback_probe(degraded=degraded)
     distinguishable = len(set(observed.values())) == len(observed)
     named = all(v.startswith("<key absent>") is False for v in observed.values())
+    # ⛔ `#2952`'s meaning is HALF of what `#5090` row 3 claims ("`degraded` keeps
+    # `#2952`'s meaning"), so this row's own command reads it: the mechanism is
+    # reported ADDITIVELY, `degraded` stays ``False`` on all three, and no
+    # `declared_degraded_read` marker is derived from the trace. A read that
+    # did not happen is `UNMEASURED` (`untouched` False), never a silent pass.
+    untouched = bool(degraded) and all(
+        d["degraded"] is False and d["declared"] is None
+        for d in degraded.values())
     notes = [f"{k}: {v}" for k, v in observed.items()]
+    for k, d in degraded.items():
+        marker = d["declared"]
+        notes.append(
+            f"{k}: degraded={d['degraded']!r} reason={d['reason']!r} "
+            f"declared_degraded_read={marker if marker is not None else 'None'}")
+    notes.append(f"#2952 untouched on every mechanism: {untouched} "
+                 f"({len(degraded)}/{len(observed)} mechanisms read)")
     notes.append(f"distinguishable: {distinguishable}; every path reports: {named}")
     return Row(
         bullet=3,
         text=BULLETS[2],
-        verdict="MET" if distinguishable and named else "NOT MET",
+        verdict=("MET" if distinguishable and named and untouched
+                 else "NOT MET"),
         command="uv run python tools/dod_5090_probe.py --json",
         observed="; ".join(notes),
         notes=notes,
@@ -1385,6 +1454,44 @@ def count_embed_predicates() -> dict:
 # ── The census ─────────────────────────────────────────────────────────────
 
 
+def _read(graph, cypher: str):
+    """Issue a census READ through the engine's read-only verb.
+
+    "Stores nothing" was this module's doctrine and only a convention in the
+    code: `graph.query` is the write-CAPABLE verb, so the doctrine rested on
+    every statement written here happening to be read-shaped (review round 15,
+    P3). `GRAPH.RO_QUERY` is rejected server-side for a write, which makes the
+    doctrine the engine's to enforce instead of this file's to remember.
+    Measured on falkordb-server 4.20.6: `CALL db.indexes()`, `CALL db.labels()`,
+    the per-label `count(n)` and the width probe answer identically through
+    `ro_query`.
+    """
+    return graph.ro_query(cypher)
+
+
+def _cypher_label(label: str) -> str:
+    """``label`` as a Cypher node label, quoted by the product's OWN rule.
+
+    ⛔ A label cannot be a query parameter, so it reaches Cypher by
+    interpolation — and its value comes from the graph's own schema
+    (`CALL db.labels()`, the index catalogue), i.e. from whatever a customer
+    wrote there. Interpolating it raw is the shape `tortoise/graph_key_restore.py`
+    already names (*"a label/property name reaches Cypher by interpolation and
+    comes from the graph's own schema"*) and `tortoise/security.py` answers with
+    an allowlist for the query runners. The census cannot allowlist (it reports
+    labels it has never seen — that is its job), so it uses the repo's one
+    identifier-quoting rule, `graph_key_restore._quote_identifier` (#7846):
+    bare when bare, else backtick-quoted with interior backticks DOUBLED.
+    IMPORTED, never copied — a second quoting rule would drift from the first.
+    Measured on falkordb-server 4.20.6: a doubled interior backtick is REJECTED
+    at parse time, so a backtick-bearing label fails closed into
+    `stored=UNMEASURED(...)` rather than forming a re-purposed query.
+    """
+    from tortoise.graph_key_restore import _quote_identifier
+
+    return _quote_identifier(str(label))
+
+
 def vector_census(graph, graph_name: str, at: str | None = None,
                   graph_names: list[str] | None = None,
                   uri_graph_name: str | None = None) -> dict:
@@ -1420,7 +1527,7 @@ def vector_census(graph, graph_name: str, at: str | None = None,
                              f"this engine: {sorted(graph_names)})",
                 "command": CENSUS_COMMAND}
     try:
-        rows = graph.query("CALL db.indexes()").result_set
+        rows = _read(graph, "CALL db.indexes()").result_set
     except Exception as e:
         return {"graph": graph_name, "at": at, "labels": {},
                 "catalogue": f"UNMEASURED({type(e).__name__}: {e})",
@@ -1474,7 +1581,7 @@ def vector_census(graph, graph_name: str, at: str | None = None,
                 })
 
     try:
-        graph_labels = [r[0] for r in (graph.query("CALL db.labels()").result_set or [])]
+        graph_labels = [r[0] for r in (_read(graph, "CALL db.labels()").result_set or [])]
         population_source = "CALL db.labels()"
     except Exception as e:
         # ⛔ NOT a narrowed fallback to `indexed | served`: that is the very
@@ -1492,8 +1599,10 @@ def vector_census(graph, graph_name: str, at: str | None = None,
     labels: dict[str, dict] = {}
     for label in sorted(set(graph_labels) | set(indexed) | served_labels()):
         try:
-            res = graph.query(
-                f"MATCH (n:`{label}`) WHERE n.embedding IS NOT NULL RETURN count(n)"
+            res = _read(
+                graph,
+                f"MATCH (n:{_cypher_label(label)}) "
+                f"WHERE n.embedding IS NOT NULL RETURN count(n)",
             ).result_set
             stored = int(res[0][0])
         except Exception as e:
@@ -1518,9 +1627,10 @@ def vector_census(graph, graph_name: str, at: str | None = None,
                 # `size(n.embedding)` is REJECTED on a vecf32 column, so the
                 # vector is fetched and measured here (measured: every payload
                 # read UNMEASURED before this).
-                probe = graph.query(
-                    f"MATCH (n:`{label}`) WHERE n.embedding IS NOT NULL "
-                    f"RETURN n.embedding LIMIT 1"
+                probe = _read(
+                    graph,
+                    f"MATCH (n:{_cypher_label(label)}) "
+                    f"WHERE n.embedding IS NOT NULL RETURN n.embedding LIMIT 1",
                 ).result_set
                 if probe and probe[0] and probe[0][0] is not None:
                     width = len(probe[0][0])
@@ -1616,7 +1726,20 @@ def _connect(uri: str):
         raise SystemExit(2)
     from falkordb import FalkorDB
 
-    db = FalkorDB(host=u.hostname, port=u.port or 6379, password=u.password or "")
+    from tortoise.projection import _bounded_server_socket_kwargs
+
+    # #8118: the read bound comes from the product's ONE resolver, never from
+    # this call site. ``falkordb.FalkorDB`` defaults ``socket_timeout=None``
+    # and hands it to redis-py explicitly, so an unbounded client parks a
+    # "read, change nothing" census in ``recv()`` forever against a stalled
+    # engine (#2969's defrag loop, #2838's MERGE lock) — alive, 0% CPU, no
+    # error, which is the one outcome this instrument cannot tolerate.
+    db = FalkorDB(
+        host=u.hostname,
+        port=u.port or 6379,
+        password=u.password or "",
+        **_bounded_server_socket_kwargs(),
+    )
     try:
         names = list(db.list_graphs() or [])
     except Exception:
@@ -1710,20 +1833,43 @@ def main(argv: list[str] | None = None) -> int:
             report["census"] = {"error": "UNMEASURED(no --uri and no TORTOISE_DB_URI)"}
             unmeasured = True
         else:
-            graph_name = args.graph or (args.uri.rstrip("/").rsplit("/", 1)[-1])
-            db, names = _connect(args.uri)
-            uri_name = args.uri.rstrip("/").rsplit("/", 1)[-1]
-            # ⛔ The handle is selected by the NAME the report will carry. Using
-            # the URI path while LABELLING the row `--graph` attributes one
-            # graph's numbers to another (this tool's own review, P1: it printed
-            # `Point stored=0` for a graph holding 50 vectors).
-            graph = db.select_graph(graph_name)
-            report["census"] = vector_census(
-                graph, graph_name, graph_names=names,
-                uri_graph_name=uri_name)
-            census = report["census"]
-            unmeasured = unmeasured or str(census.get("catalogue", "")).startswith(
-                "UNMEASURED") or "error" in census
+            # ⛔ The graph NAME comes from the URI's PATH, parsed the way
+            # `_connect` parses it — never from the last `/`-segment of the raw
+            # URI. For `docker://:SECRET@host:6379` the path is EMPTY and that
+            # segment is `:SECRET@host:6379`, i.e. the URI's USERINFO: the old
+            # derivation carried the password into `report["census"]["graph"]`
+            # (and, on the text path, into a line printed twice), reachable with
+            # NO FLAG AT ALL because `--uri` defaults to `$TORTOISE_DB_URI`.
+            # Same credential class as `tests/_embedded.py`'s warning and #3039
+            # (review round 13, P2). A path-less URI names NO graph, so the
+            # census cannot be taken — which is stated, never substituted with
+            # the authority.
+            from urllib.parse import urlsplit
+
+            uri_path_name = urlsplit(args.uri).path.strip("/").rsplit("/", 1)[-1]
+            graph_name = args.graph or uri_path_name
+            if not graph_name:
+                report["census"] = {
+                    "error": "UNMEASURED(no graph name: the URI path names "
+                             "none and --graph is absent — a URI's authority "
+                             "is not a graph name)"}
+                unmeasured = True
+            else:
+                db, names = _connect(args.uri)
+                # ⛔ The handle is selected by the NAME the report will carry.
+                # Using the URI path while LABELLING the row `--graph`
+                # attributes one graph's numbers to another (this tool's own
+                # review, P1: it printed `Point stored=0` for a graph holding
+                # 50 vectors). `uri_path_name` is recorded so a reader can see
+                # both — and `None`, not `''`, when the URI carries no path.
+                graph = db.select_graph(graph_name)
+                report["census"] = vector_census(
+                    graph, graph_name, graph_names=names,
+                    uri_graph_name=uri_path_name or None)
+                census = report["census"]
+                unmeasured = unmeasured or str(
+                    census.get("catalogue", "")).startswith(
+                        "UNMEASURED") or "error" in census
 
     if args.json:
         print(json.dumps(report, indent=2, default=str))
@@ -1742,12 +1888,13 @@ def main(argv: list[str] | None = None) -> int:
               f"{p['unparseable']}")
     if "census" in report:
         c = report["census"]
-        print(f"\nCensus — graph `{c.get('graph')}` at {c.get('at')} "
-              f"({c.get('catalogue', '')}):")
-        # A figure quoted into an epic body must carry the way it was produced
-        # (`#10465` target 1) — the docstring says so, and the text path was
-        # the one place that did not.
-        print(f"  command: {c.get('command', CENSUS_COMMAND)}")
+        if "error" not in c:
+            print(f"\nCensus — graph `{c.get('graph')}` at {c.get('at')} "
+                  f"({c.get('catalogue', '')}):")
+            # A figure quoted into an epic body must carry the way it was
+            # produced (`#10465` target 1) — the docstring says so, and the text
+            # path was the one place that did not.
+            print(f"  command: {c.get('command', CENSUS_COMMAND)}")
         for label, d in (c.get("labels") or {}).items():
             print(f"  {label:10s} stored={d['stored']!s:12s} "
                   f"indexed={d['indexed']!s:6s} unindexed={d['unindexed']!s:12s} "
@@ -1757,8 +1904,13 @@ def main(argv: list[str] | None = None) -> int:
         if c.get("population"):
             print(f"  population: {c['population']}")
         if c.get("unreadable_catalogue_rows"):
-            print("  unreadable catalogue rows: "
-                  + "; ".join(c["unreadable_catalogue_rows"][:3]))
+            # ⛔ The rows are `(label-or-None, why)` TUPLES (the per-label filter
+            # unpacks them), so joining them as strings raised `TypeError` and
+            # sent the whole run to `UNMEASURED(...)` with exit 2 — for a
+            # census that measured fine. The `--json` path hid it (`default=str`).
+            print("  unreadable catalogue rows: " + "; ".join(
+                f"{lab}: {why}" if lab is not None else why
+                for lab, why in c["unreadable_catalogue_rows"][:3]))
     return 2 if unmeasured else 0
 
 
