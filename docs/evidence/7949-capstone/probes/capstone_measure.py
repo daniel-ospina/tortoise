@@ -2073,6 +2073,8 @@ def measure_e1_e2(repo: Path = ROOT) -> dict:
         "e2a_outcome": e2a.get("outcome"),
         "e2a_falsifier_survived": (e2a.get("falsifier") or {}).get(
             "value_survived"),
+        "gate_drops_total": (record.get("gate_drops") or {}).get("drops_total"),
+        "gate_drops_objects": (record.get("gate_drops") or {}).get("objects"),
         "corpus_sha256": normalise_corpus(record.get("corpus_sha256")),
     }
 
@@ -2480,6 +2482,13 @@ def main(argv: list[str] | None = None) -> int:
                              f"(floor {e2b_floor} surviving units)",
                          value=f"fused={e1['fused']}/{e1['atomic_points']} = "
                                f"{e2b_share:.6f}")
+    e2_result = outcome(
+        measured=True, below_floor=e2b_result["below_floor"],
+        passed=(e2a_result["outcome"] == "PASS"
+                and e2b_result["outcome"] == "PASS"),
+        bar=f"E2a {bars['E2a']['required']} of {bars['E2a']['of']} AND E2b "
+            f"fused <= {bars['E2b']['max_fused_share']}",
+        value=f"E2a {e2a_result['value']}; E2b {e2b_result['value']}")
 
     e1_row = {
         "verdict": verdict_word(e1_result),
@@ -2494,12 +2503,14 @@ def main(argv: list[str] | None = None) -> int:
                  f"{e1_result['outcome']} — not RED and not GREEN: at n=1 per arm "
                  f"the verdict would depend on which before run is chosen. The "
                  f"deterministic mechanism check (e1_gate_drops) reports "
-                 f"value_gate drops 0 with its positive controls alive, so the "
-                 f"selection pass is not the mover — the removal/relocation "
-                 f"ruling is (#5333). n >= 2 per arm is the next requirement"),
+                 f"value_gate drops {e1['gate_drops_total']} of "
+                 f"{e1['gate_drops_objects']} Objects with its positive controls "
+                 f"alive, so the selection pass is not the mover — the "
+                 f"removal/relocation ruling is (#5333). n >= 2 per arm is the "
+                 f"next requirement"),
     }
     e2_row = {
-        "verdict": verdict_word(e2a_result),
+        "verdict": verdict_word(e2_result),
         "sha": e1["sha"],
         "corpus_sha256": e1["corpus_sha256"],
         "numerator": e1["e2a_survived"],
@@ -2508,12 +2519,17 @@ def main(argv: list[str] | None = None) -> int:
                  f"{e2a_result['bar']} (denominator = pre-registration §3.3's "
                  f"value-bearing planted units, read from "
                  f"docs/evidence/9889/e2a-value-units.json, and PROVEN live by the "
-                 f"anchor-injection falsifier reaching 14/14). E2b: "
+                 f"anchor-injection falsifier reaching "
+                 f"{e1['e2a_falsifier_survived']}/{e1['e2a_units']} over the same "
+                 f"population). E2b: "
                  f"{e2b_result['outcome']} — {e2b_result['value']} vs bar "
-                 f"{e2b_result['bar']}. The E2 row is {verdict_word(e2a_result)} "
-                 f"because the composite needs BOTH halves and E2a falls short of "
-                 f"13 of 14 on the run's own graph; #10360 records that nothing "
-                 f"enforces retention (the render half closed, #9775)"),
+                 f"{e2b_result['bar']}. The E2 row is "
+                 f"{verdict_word(e2_result)} on the COMPOSITE "
+                 f"({e2_result['bar']}): E2a falls short of "
+                 f"{e1['e2a_required']} of {e1['e2a_units']} on the run's own "
+                 f"graph, and E2b's fused count is a proxy over atomic POINTS "
+                 f"rather than surviving planted units. #10360 records that "
+                 f"nothing enforces retention (the render half closed, #9775)"),
     }
 
     # ── E3 ────────────────────────────────────────────────────────────────

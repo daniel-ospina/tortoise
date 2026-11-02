@@ -100,7 +100,13 @@ def _grep(text: str, pattern: str, *, what: str) -> str:
 
 
 def frozen_denominators(repo: Path) -> dict:
-    """The frozen floors, read from the pre-registration — never typed here."""
+    """The frozen floors, the frozen denominator AND the frozen bars.
+
+    Every one is READ from the pre-registration. A bar typed into this file would
+    be a bar nobody froze: amend E2a's threshold in the record and the ROW would
+    move while the artifact the row cites kept the old one — the row and its
+    evidence disagreeing is the exact class this bundle exists to refuse.
+    """
     prereg = _read_json(repo / PREREG)
     floors = prereg.get("denominator_floors") or {}
     for key in ("e1_objects", "e1_min_before_share", "e2b_surviving_units"):
@@ -109,12 +115,23 @@ def frozen_denominators(repo: Path) -> dict:
     corpus = prereg.get("corpus") or {}
     if not corpus.get("fixtures_hash"):
         raise _refuse(f"{PREREG} carries no corpus.fixtures_hash")
+    if not isinstance(corpus.get("value_bearing_units"), int):
+        raise _refuse(f"{PREREG} carries no corpus.value_bearing_units — E2a's "
+                      "denominator cannot be checked against the record")
+    crit = {entry.get("id"): entry for entry in prereg.get("criteria") or []}
+    threshold = (crit.get("E2a") or {}).get("threshold") or ""
+    match = re.search(r">=\s*(\d+)\s*of\s*(\d+)", threshold)
+    if not match:
+        raise _refuse(f"{PREREG} carries no parseable E2a threshold: "
+                      f"{threshold!r}")
     return {
         "e1_objects": floors["e1_objects"],
         "e1_min_before_share": floors["e1_min_before_share"],
         "e2b_surviving_units": floors["e2b_surviving_units"],
         "fixtures_hash": corpus["fixtures_hash"],
-        "criteria": prereg.get("criteria"),
+        "e2a_required": int(match.group(1)),
+        "e2a_of": int(match.group(2)),
+        "value_bearing_units": corpus["value_bearing_units"],
     }
 
 
@@ -254,6 +271,15 @@ def e2_score(repo: Path, floors: dict) -> dict:  # noqa: ARG001 - floors kept
     survived = record.get("value_survived")
     if not units or survived is None:
         raise _refuse(f"{E2A_RECORD} carries no value_units/value_survived")
+    # The denominator must BE the frozen one. A record that grades 20 units while
+    # the pre-registration froze 14 would otherwise score GREEN on a population
+    # nobody registered — the false green this bundle exists to refuse.
+    if units != floors["value_bearing_units"] or \
+            floors["e2a_of"] != floors["value_bearing_units"]:
+        raise _refuse(f"{E2A_RECORD} grades {units} units; the pre-registration "
+                      f"froze {floors['value_bearing_units']} "
+                      f"(threshold '>= {floors['e2a_required']} of "
+                      f"{floors['e2a_of']}')")
 
     with_anchor = (falsifier.get("with_anchor") or falsifier)
     injected_survived = with_anchor.get("value_survived")
@@ -273,7 +299,7 @@ def e2_score(repo: Path, floors: dict) -> dict:  # noqa: ARG001 - floors kept
         raise _refuse("the value-gate positive controls no longer drop — the "
                       "mechanism count measures nothing")
 
-    required = 13
+    required = floors["e2a_required"]
     passed = survived >= required
     return {
         "criterion": "E2",
@@ -300,17 +326,29 @@ def score(repo: Path = _ROOT) -> dict:
     floors = frozen_denominators(repo)
     before_arms = read_off_arms(repo, floors)
     after = read_on_arm(repo)
-    # One record, one head: the before, on and E2a graphs must all come from the
-    # same run of the corpus, or "the two before realizations differ by X pp"
-    # could be measuring the commits rather than the model.
+    # One record, one run: the before, ON, E2a, falsifier and gate-drops records
+    # must ALL name the same head (and the E2a / gate-drops pair the same graph),
+    # or a number from one run is being reported under another run's corpus.
     for arm in before_arms:
         if after["head"][:9] not in str(arm.get("graph") or ""):
             raise _refuse(f"{arm['artifact']} was taken on graph "
                           f"{arm.get('graph')!r}, which does not name head "
                           f"{after['head'][:9]}")
     e2a_record = _read_json(repo / EVIDENCE / E2A_RECORD)
-    if e2a_record.get("graph") != _read_json(
-            repo / EVIDENCE / GATE_DROPS).get("graph"):
+    falsifier_record = _read_json(repo / EVIDENCE / E2A_FALSIFIER)
+    gates_record = _read_json(repo / EVIDENCE / GATE_DROPS)
+    for name, record in ((E2A_RECORD, e2a_record),
+                         (E2A_FALSIFIER, falsifier_record),
+                         (GATE_DROPS, gates_record)):
+        # A falsifier record nests its graph under each of its two blocks; either
+        # one names the run it graded.
+        graph = str(record.get("graph")
+                    or (record.get("with_anchor") or {}).get("graph")
+                    or (record.get("as_written") or {}).get("graph") or "")
+        if after["head"][:9] not in graph:
+            raise _refuse(f"{name} was taken on graph {graph!r}, which does not "
+                          f"name head {after['head'][:9]}")
+    if e2a_record.get("graph") != gates_record.get("graph"):
         raise _refuse("the E2a record and the gate-drops record come from "
                       "different graphs — one record cannot mix them")
     e1 = e1_pairings(before_arms, after, floors)
@@ -335,6 +373,9 @@ def score(repo: Path = _ROOT) -> dict:
                                 and e2b_share <= 0.05
                                 and not e2["e2b"]["below_floor"])
                      else "FAIL")
+    e2["decided_by"] = ("E2a" if e2["e2a"]["outcome"] != "PASS" else
+                        "E2b" if (e2b_share > 0.05
+                                  or e2["e2b"]["below_floor"]) else "both")
     return {
         "schema": "e1-e2-scores/1",
         "corpus_sha256": floors["fixtures_hash"],
