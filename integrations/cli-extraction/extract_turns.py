@@ -513,29 +513,38 @@ def dump(out: Path, allow_empty: bool = False, allow_partial: bool = False):
             # session's own `turn_max_index`; a session carrying no mark (a
             # pre-#10000 capture) cannot have hit it, so naming it there would
             # send the operator to `TORTOISE_RECORD_DSN` / `get_session()` for a
-            # cause that cannot apply — and `get_session()` cannot arbitrate
-            # either, because it reconciles against the SAME marks and reports
-            # the same shortfall (`record_read.served_turn_count`).
+            # cause that cannot apply — #9932's defect in the message that
+            # reports #9932's fix. The CONVERSE is charged too: a mark being
+            # READ is not proof the store split, so the marked branch names BOTH
+            # reachable causes and says the read door cannot separate them.
             if split_witness:
                 cause = (
-                    "The cause is the SPLIT STORE, not the capture setting — "
-                    "with TORTOISE_RECORD_DSN armed the writer's store "
-                    "decision is PER TURN (`sdk._write_capture_turns` writes a "
-                    "refused turn to the GRAPH) while this read's is PER "
-                    "SESSION, so a mid-capture refusal leaves part of the "
-                    "transcript in each store (#10000); `sdk.get_session()` "
-                    "serves the UNION of both.")
+                    "Two causes produce this shape and neither is measurable "
+                    "from the rows. (a) The SPLIT STORE: with "
+                    "TORTOISE_RECORD_DSN armed the writer's store decision is "
+                    "PER TURN (`sdk._write_capture_turns` writes a refused "
+                    "turn to the GRAPH) while this read's is PER SESSION, so a "
+                    "mid-capture refusal leaves part of the transcript in each "
+                    "store (#10000) — and `sdk.get_session()` serves the UNION "
+                    "of both. (b) A capture whose TURN write failed AFTER the "
+                    "`:Session` MERGE on a deployment with NO record: "
+                    "`sdk._write_session_and_turns` MERGEs the Session first, "
+                    "so the marks declare a window the graph never received — "
+                    "and `get_session()` cannot separate this one either, "
+                    "because with no record it serves this same graph copy.")
             else:
                 cause = (
                     "This session carries NO `turn_max_index` (a pre-#10000 "
                     "capture), so the split-store witness does not exist for "
-                    "it — there was no record to split with, and "
-                    "`sdk.get_session()` reconciles against the same marks, so "
-                    "it reports this same shortfall rather than settling it. "
-                    "The causes this measurement admits are a turn the graph "
-                    "never stored (a capture whose turn write failed after the "
+                    "it — there was no record to split with. "
+                    "`sdk.get_session()` reconciles against the SAME marks, so "
+                    "it cannot settle this either: with no record armed it "
+                    "serves these same graph rows, and with a record that "
+                    "never held them it reports the same shortfall. The causes "
+                    "this measurement admits are a turn the graph never "
+                    "stored (a capture whose turn write failed after the "
                     "`:Session` MERGE — the MERGE precedes the turn write, "
-                    "`sdk._write_session_and_turns`), or a row a purge, a "
+                    "`sdk._write_session_and_turns`) or a row a purge, a "
                     "backfill copy or a hand edit removed.")
             message = (
                 f"dump: the transcript is PARTIAL — {why}. "

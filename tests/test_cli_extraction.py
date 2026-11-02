@@ -681,6 +681,43 @@ class TestDumpReadsTheCaptureShape(unittest.TestCase):
             self.assertIn(fragment, refused,
                           "the operator needs the cause and the remedy, not only "
                           "the verdict")
+        # ⛔ A MARK BEING READ IS NOT PROOF THE STORE SPLIT. The same short shape
+        # comes from a capture whose TURN write failed after the `:Session`
+        # MERGE (the MERGE precedes the turn write, `sdk._write_session_and_
+        # turns`) on a deployment with NO record — and there `get_session()`
+        # cannot separate the two, because with no record it serves this same
+        # graph copy. So the marked branch names BOTH causes; naming only the
+        # split store sends that operator to a remedy that republishes the
+        # truncation as complete.
+        for fragment in ("SPLIT STORE", "TURN write failed AFTER", "cannot separate"):
+            self.assertIn(fragment, refused,
+                          "a mark was READ here, which admits two causes, not one")
+
+    def test_the_gap_arm_carries_no_split_witness_without_a_mark(self):
+        # The gap arm is decidable from the rows ALONE, so it fires for sessions
+        # that declare nothing — and the witness it reports must therefore be
+        # `False` there. Nothing pinned that: forcing the gap arm's witness to
+        # `True` kept the suite green and reinstated, in the one arm nothing
+        # guarded, exactly the F1 defect round 2 removed (a mark-less session
+        # sent to `TORTOISE_RECORD_DSN`/`get_session()`).
+        rows = [_mark("s1", i, None, None) for i in (0, 2)]
+        payload = "\n".join(json.dumps(r) for r in rows)
+        with tempfile.TemporaryDirectory() as td:
+            out = Path(td) / "turns.jsonl"
+            with mock.patch("extract_turns.subprocess.run") as run:
+                run.return_value = types.SimpleNamespace(stdout=payload + "\n", stderr="")
+                with self.assertRaises(SystemExit) as cm:
+                    dump(out)
+            self.assertFalse(out.exists())
+        gap = str(cm.exception)
+        self.assertIn("no turn for index 1", gap, "the gap arm, not a count arm")
+        self.assertNotIn("SPLIT STORE", gap,
+                         "no mark was read, so the split store is not a cause "
+                         "this measurement admits")
+        self.assertIn("NO `turn_max_index`", gap)
+        self.assertIn("cannot settle this either", gap,
+                      "a graph-only deployment's `get_session()` serves these "
+                      "same rows — it does not report the shortfall")
 
     def test_a_short_contiguous_session_without_a_mark_still_refuses(self):
         # The COUNT arm is the only arm that can catch a session which is short
