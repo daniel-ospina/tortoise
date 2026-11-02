@@ -6118,8 +6118,8 @@ def test_a_stripped_basis_clause_does_not_orphan_a_parenthesis() -> None:
 # ── a WRAPPED note is ONE note (the 2026-11-02 refresh's half-parenthesis) ────
 #
 # A row's note is not the tail on its row line: a note CAN wrap across indented `#`
-# continuation lines (measured at the 2026-11-02 head: 1 row of 1220 — the block's
-# dominant shape is the PREAMBLE for the row below, 73 of its 74 indented blocks),
+# continuation lines (measured at this head: 1 row of 1222 — the block's
+# dominant shape is the PREAMBLE for the row below, 72 of its 73 indented blocks),
 # and the guard that judges a written map joins them before judging
 # (`tests/test_ci_selection.py`
 # `_durations_row_comments`). The renderer used to reason about the row-line
@@ -6283,7 +6283,7 @@ def test_a_registered_row_is_appended_after_the_last_rows_wrapped_note() -> None
 # ── …and the OTHER convention: a block that OPENS a note is not the row above's ──
 #
 # This map's dominant convention is the block that PRECEDES the row it documents
-# (73 of the 74 blocks beside a row at the 2026-11-02 head open a note of their own),
+# (72 of the 73 blocks beside a row at this head open a note of their own),
 # and nothing in YAML says which row a comment belongs to — §3.2.3.3 of the spec:
 # comments are “a presentation detail … not associated with a particular node”.
 #
