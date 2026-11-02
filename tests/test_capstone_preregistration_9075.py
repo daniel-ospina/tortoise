@@ -2943,20 +2943,64 @@ def test_an_explicit_base_ref_that_does_not_resolve_is_refused_not_replaced(tmp_
     )
 
 
-def test_the_cli_refuses_a_named_base_ref_it_cannot_resolve(capsys):
+def test_the_cli_refuses_a_named_base_ref_it_cannot_resolve(tmp_path, monkeypatch, capsys):
     """...and the CLI answers exit 2 for it, on a bundle whose ordering would otherwise pass.
 
-    `7949-capstone` is green against `origin/main` in this checkout, so an exit of 0 here is
-    exactly the wrong-subject green the arm above is about: the run measured `main` while the
-    caller asked about `origin/not-fetched`.
+    ⛔ BUILT IN A THROWAWAY REPO, NOT ON THE REAL CHECKOUT (#10547 review 6 P1). The first form of
+    this test ran the CLI against this checkout and asserted exit 2 — which is a SAMPLE OF THE
+    ENVIRONMENT, not of the arm: the `test` job checks out at `fetch-depth: 1`
+    (`.github/workflows/python-ci.yml:878`, a bare `actions/checkout@v4`; only the `changes` job is
+    full-depth), and in a depth-1 clone `check_ordering`'s shallow guard raises the NON-fatal
+    :data:`check.HISTORY_UNAVAILABLE` *before* :func:`check.resolve_base_ref`, so :func:`check.run`
+    takes the declared-green third outcome and the CLI exits 0. Measured here with the guard forced
+    shallow (which is all a depth-1 clone changes for this arm): `assert 0 == 2`.
+    `tests/test_capstone_preregistration_9075.py`'s own header (:38) records why that matters — and
+    the arm then had NO proof anywhere in CI, because the whole suite could only skip it.
+
+    So the shape is built where every checkout can see it: a repo with a PUBLISHED base
+    (`refs/remotes/origin/main`), the registration landed and published on its own, and an unscored
+    log after it — a bundle that passes against that base. Naming a ref that does not resolve must
+    be `2` (could not check this subject), never the fallback's green; pre-fix it was the fallback's
+    green, which is the wrong-subject answer this arm was added to end.
     """
-    code = check.main(["--dir", str(PREREG_DIR), "--no-corpus",
+    repo = _repo_with_published_base(tmp_path, monkeypatch)
+    _git(repo, "remote", "add", "upstream", "https://example.invalid/x.git")
+    bundle = repo / "docs" / "evidence" / "7949-capstone"
+    bundle.mkdir(parents=True)
+    # The bundle's PRE-EXISTING unscored log comes first, so its pin exemption is a necessary one
+    # (a log added after the registration is refused as "the exemption is unnecessary here").
+    (bundle / "e1-e2.log").write_text(UNSCORED_LOG)
+    _git(repo, "add", str((bundle / "e1-e2.log").relative_to(repo)))
+    _git(repo, "commit", "-q", "-m", "old unscored log", epoch=1_700_000_050)
+    (bundle / check.PREREG_NAME).write_text(PREREG.read_text())
+    # The machine record travels with the document (the record half is history-free, so it runs
+    # under --no-corpus): without it the premise run is red for a reason that is not the base ref.
+    (bundle / "preregistration.json").write_text((PREREG_DIR / "preregistration.json").read_text())
+    _git(repo, "add", str(bundle.relative_to(repo)))
+    _git(repo, "commit", "-q", "-m", "add prereg", epoch=1_700_000_100)
+    _publish_base(repo)                      # the registration's own PR merged
+    (bundle / "s3-ablation.log").write_text("x\n")
+    _git(repo, "add", str((bundle / "s3-ablation.log").relative_to(repo)))
+    _git(repo, "commit", "-q", "-m", "add log", epoch=1_700_000_200)
+
+    # The premise: against the base this tree really has, the run is GREEN — so an exit of 2 below
+    # can only come from refusing the ref that was named, never from a bundle that was already red.
+    assert check.main(["--dir", str(bundle), "--no-corpus"]) == 0
+    premise = capsys.readouterr()
+    assert "ordering measured against: origin/main" in premise.out, premise.out
+
+    # ...and the second run's output is read ALONE (capsys accumulates): the refusal must not print
+    # a verdict about the base it refused to substitute.
+    code = check.main(["--dir", str(bundle), "--no-corpus",
                        "--base-ref", "origin/not-fetched"])
     printed = capsys.readouterr()
     output = printed.out + printed.err
     assert code == 2, f"a named ref that cannot be resolved is 'could not check', not green: {output}"
     assert "origin/not-fetched" in output, output
     assert "does not resolve" in output, output
+    assert "ordering measured against: origin/main" not in output, (
+        "the refusal must not report a verdict about the ref it refused to substitute: " + output
+    )
 
 
 def test_a_corpus_refusal_still_names_the_base_ref_refusal(tmp_path, monkeypatch, capsys):
