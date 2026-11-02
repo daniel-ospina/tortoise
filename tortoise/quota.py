@@ -328,10 +328,42 @@ _RESOURCE_LIMIT_KEYS = {
 #: the key-mint path.
 REGISTRY_SCOPED_RESOURCES = frozenset({"api_keys", "users", "graphs"})
 
+#: The resources whose cap is DERIVED from another limit rather than read
+#: through a `_RESOURCE_LIMIT_KEYS` entry — gate-able, but deliberately absent
+#: from that map so no pricing.json field is implied (a `max_documents` field
+#: would ripple through `tier_limits` / `_REQUIRED_LIMIT_KEYS` and every tier's
+#: resolved limits, #1726). `enforce_org_limit` handles each of these in its own
+#: branch BEFORE the pricing-keyed generic path.
+#:
+#: ⛔ THE DECLARATION IS THE DISPATCH, and `enforce_org_limit`'s allow-list
+#: guard reads it: a derived branch for a resource that is NOT named here is
+#: refused as `unknown quota resource` before it can run. Do not add a derived
+#: branch without adding its resource here — the guard turns that omission into a
+#: loud fail-closed 500 rather than a silent regression of #4051 (see
+#: `GATEABLE_RESOURCES` for why silence is the failure mode).
+DERIVED_CAP_RESOURCES = frozenset({"documents"})
+
+#: EVERY resource this module will gate: the pricing-keyed ones plus the derived
+#: caps. `enforce_org_limit` refuses anything outside it (allow-list, deny by
+#: default) BEFORE any branch can accept it.
+#:
+#: That guard is what keeps the two halves below honest. Before it, the universe
+#: was a pair of hand-written literals — this derivation's trailing `{"documents"}`
+#: and the `resource == "documents"` test in the branch that handles it — so a
+#: SECOND derived cap could be added to `enforce_org_limit` and be fully
+#: gate-able while never joining the declaration. It would then fall out of
+#: `TENANT_GRAPH_RESOURCES`, `hosted_api._gate_sdk_for` would return `None` for
+#: it, `_count_resource` would count the org's DEFAULT graph, and a graph-bound
+#: key would again be gated on a graph it does not write — #4051's own defect,
+#: re-armed with nothing red (measured on the round-3 review: a `vectors` cap
+#: derived from `max_points` gated through the default graph and all four new
+#: tests passed).
+GATEABLE_RESOURCES = frozenset(_RESOURCE_LIMIT_KEYS) | DERIVED_CAP_RESOURCES
+
 #: The resources whose count reads the TENANT GRAPH — i.e. `_count_resource`'s
 #: catch-all branch. **DERIVED, never enumerated**: the truthful set is "every
-#: resource that has a limit key, plus the derived `documents` cap, minus the
-#: registry-scoped ones", so a resource added to `_RESOURCE_LIMIT_KEYS` enters it
+#: gate-able resource, minus the registry-scoped ones", so a resource added to
+#: either `_RESOURCE_LIMIT_KEYS` or `DERIVED_CAP_RESOURCES` enters it
 #: automatically.
 #:
 #: This exists so no caller can hand-copy the set and silently return to the
@@ -341,9 +373,7 @@ REGISTRY_SCOPED_RESOURCES = frozenset({"api_keys", "users", "graphs"})
 #: `hosted_api` equalled this set only on the day it was written — the drift
 #: class this constant removes (the same "constant living in hosted_api" shape
 #: that hid the shared #5425 gate, see the note above).
-TENANT_GRAPH_RESOURCES = (
-    frozenset(_RESOURCE_LIMIT_KEYS) | {"documents"}
-) - REGISTRY_SCOPED_RESOURCES
+TENANT_GRAPH_RESOURCES = GATEABLE_RESOURCES - REGISTRY_SCOPED_RESOURCES
 
 
 # #4614: the machine-readable CATEGORY of a quota refusal — the one value a
@@ -1165,11 +1195,23 @@ def enforce_org_limit(limits: dict | None, resource: str, sdk=None, *,
     org_id = limits.get("org_id")
     if not org_id:
         return
+    # ── the declared universe, enforced — allow-list, deny by default. The
+    # guard sits ABOVE the derived branches ON PURPOSE: a derived branch that
+    # accepts a resource absent from `DERIVED_CAP_RESOURCES` would keep working
+    # here while its resource had silently dropped out of
+    # `TENANT_GRAPH_RESOURCES`, so the graph it is counted on would be the
+    # default one — #4051's defect, invisible to every test. With the guard, an
+    # undeclared derived cap is a classified refusal instead. Message is the
+    # existing #5425-registered category, unchanged.
+    if resource not in GATEABLE_RESOURCES:
+        raise QuotaCheckError(f"unknown quota resource: {resource!r}")
     # ── documents: DERIVED-CONSTANT cap (T2-P2a, #1726) — handled BEFORE the
     # pricing-keyed generic path. Deliberately NOT in _RESOURCE_LIMIT_KEYS: a
     # pricing.json max_documents field would ripple through tier_limits /
     # _REQUIRED_LIMIT_KEYS / every tier's resolved limits (the KeyError
-    # surface the plan pins against). max_documents = max_points ×
+    # surface the plan pins against) — it is declared in
+    # `DERIVED_CAP_RESOURCES` instead, which is what lets the allow-list guard
+    # above admit it. max_documents = max_points ×
     # _DOCUMENTS_FROM_POINTS_FACTOR; an explicitly-None max_points is
     # UNLIMITED (Team tier) — skip. The documents gate fires on the
     # /v1/index/docs job ONLY (cycle-3 P2: never an unpinned tenant-global

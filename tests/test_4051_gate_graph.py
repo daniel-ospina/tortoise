@@ -20,7 +20,10 @@ graph count, the cache-eviction class that aborts in-flight fleet writes.
 
 from __future__ import annotations
 
+import ast
+import inspect
 import os
+import textwrap
 
 import pytest
 from fastapi import HTTPException
@@ -218,42 +221,124 @@ def test_the_gate_set_is_DERIVED_from_quota_not_hand_copied():
     to hold a hand-copied literal that equalled it only on the day it was
     written.
 
-    The failure that made this gate-able: add one gate-able resource to
-    `quota._RESOURCE_LIMIT_KEYS` and a literal set returns `None` here, so
-    `_count_resource` falls back to the org's DEFAULT graph and a graph-bound key
-    is again gated on a graph it does not write — the #4051 defect exactly —
-    with nothing red, because the new test pins three names and no test ties the
-    set to `quota`. This is that test.
+    ⛔ THIS TEST MUST NOT HAND-COPY THE UNIVERSE. Its first revision derived the
+    expected set as `frozenset(_RESOURCE_LIMIT_KEYS) | {"documents"}` — a
+    hand-written `{"documents"}`, which is the very drift it exists to catch,
+    one level up. A second derived cap added to `enforce_org_limit` (measured on
+    the round-3 review with a `vectors` cap derived from `max_points`) is fully
+    gate-able, is in neither declared half, and passed all four of these tests
+    while `_gate_sdk_for` returned `None` and the count fell to the DEFAULT
+    graph. The universe now comes from `quota.GATEABLE_RESOURCES`, which
+    `enforce_org_limit`'s allow-list guard also enforces, so the three cannot
+    disagree: the guard, the derivation and this assertion read one object.
     """
-    gateable = frozenset(quota_mod._RESOURCE_LIMIT_KEYS) | {"documents"}
+    gateable = quota_mod.GATEABLE_RESOURCES
     expected = gateable - quota_mod.REGISTRY_SCOPED_RESOURCES
 
     # 1. the declaration IS the derivation (not a literal that happens to match)
     assert expected == quota_mod.TENANT_GRAPH_RESOURCES
 
-    # 2. exhaustive and disjoint: every gate-able resource is classified ONCE, so
-    #    a new resource cannot land in neither half (silently unscoped) or both.
+    # 2. exhaustive and disjoint: every gate-able resource is classified ONCE,
+    #    so a new resource cannot land in neither half (silently unscoped) or both.
     classified = quota_mod.TENANT_GRAPH_RESOURCES | quota_mod.REGISTRY_SCOPED_RESOURCES
     assert classified == gateable
     assert not (quota_mod.TENANT_GRAPH_RESOURCES & quota_mod.REGISTRY_SCOPED_RESOURCES)
 
-    # 3. the gate holds THAT object — identity, not a copy. A copy is the drift.
+    # 3. the derived caps are inside the universe the guard admits, and the
+    #    registry half cannot name a resource the guard would then refuse (a
+    #    registry resource that is not gate-able is a contradiction: its count
+    #    would be refused as `unknown quota resource`).
+    assert quota_mod.DERIVED_CAP_RESOURCES <= gateable
+    assert quota_mod.REGISTRY_SCOPED_RESOURCES <= gateable
+
+    # 4. the gate holds THAT object — identity, not a copy. A copy is the drift.
     assert ha._GRAPH_SCOPED_QUOTA_RESOURCES is quota_mod.TENANT_GRAPH_RESOURCES
 
 
-@pytest.mark.parametrize("resource", sorted(quota_mod.TENANT_GRAPH_RESOURCES))
-def test_every_declared_graph_resource_is_counted_through_a_graph_sdk(
-        monkeypatch, resource):
-    """`_count_resource` branches on the SAME declaration the gate reads.
+def _resource_string_literals(node: ast.AST) -> set[str]:
+    """The string literals in a comparison operand (`"x"`, `("x", "y")`, …)."""
+    if isinstance(node, ast.Constant):
+        return {node.value} if isinstance(node.value, str) else set()
+    if isinstance(node, ast.Tuple | ast.List | ast.Set):
+        return {s for elt in node.elts for s in _resource_string_literals(elt)}
+    return set()
 
-    For every resource the declaration calls graph-scoped, the count must build
-    the tenant-graph SDK and take the graph branch. A fake SDK (returning 0) is
-    enough: the claim under test is WHICH branch ran, not what it returned. If
-    `_count_resource` went back to its own hardcoded tuple, a resource that this
-    declaration calls graph-scoped would take the control-plane branch instead
-    and no graph SDK would be built — red here.
+
+def _resources_enforce_org_limit_SPECIAL_CASES() -> frozenset[str]:
+    """Every resource `enforce_org_limit` names in a literal comparison.
+
+    Derived from the function's own AST, never from a list kept here: a list
+    would be the hand-copy this guards against. Comments are invisible to the
+    AST, so the historical `if resource == "sessions"` sentence in the code's
+    prose cannot be mistaken for a live branch.
     """
-    built = []
+    src = textwrap.dedent(inspect.getsource(quota_mod.enforce_org_limit))
+    found: set[str] = set()
+    for node in ast.walk(ast.parse(src)):
+        if not isinstance(node, ast.Compare):
+            continue
+        if not (isinstance(node.left, ast.Name) and node.left.id == "resource"):
+            continue
+        for op, comparator in zip(node.ops, node.comparators, strict=True):
+            # `==` is a derived-cap branch; `in` a hand-written alternative set.
+            # `not in GATEABLE_RESOURCES` is the allow-list guard itself and
+            # carries no literal, so it contributes nothing (by design).
+            if isinstance(op, (ast.Eq, ast.In)):
+                found |= _resource_string_literals(comparator)
+    return frozenset(found)
+
+
+def test_a_resource_enforce_org_limit_SPECIAL_CASES_is_DECLARED_and_admitted():
+    """DRIFT GUARD (round-3 P2, second half): the BRANCHES read the declaration.
+
+    The failure this pins, measured by the round-3 reviewer: add a
+    `documents`-style derived cap for a NEW resource (they used `vectors`,
+    derived from `max_points`) to `enforce_org_limit`. The function then gates
+    it, but the resource is in neither `_RESOURCE_LIMIT_KEYS` nor
+    `DERIVED_CAP_RESOURCES`, so it is in neither half of the classification:
+    `_gate_sdk_for` returns `None`, `_count_resource` builds
+    `_make_sdk(namespace=org_id)` — the org's DEFAULT graph while a graph-bound
+    write opens its own — and BOTH gate-set tests passed. That is #4051's
+    defect, re-armed, with nothing red.
+
+    Now the branch itself reds this file (assertion 1) and the allow-list guard
+    in `enforce_org_limit` refuses the resource in production (assertion 3), so
+    the omission is loud at review time AND fail-closed at runtime.
+    """
+    branches = _resources_enforce_org_limit_SPECIAL_CASES()
+
+    # 1. every resource the function special-cases must be DECLARED. A new
+    #    derived branch whose resource is absent here is the reviewer's
+    #    mutation, and it cannot be silently unclassified any more.
+    assert branches <= quota_mod.GATEABLE_RESOURCES, (
+        f"enforce_org_limit gates {sorted(branches - quota_mod.GATEABLE_RESOURCES)} "
+        f"without declaring it — that resource is unclassified, so the gate "
+        f"would count the org's DEFAULT graph for it (#4051)"
+    )
+
+    # 2. a DECLARED derived cap must actually be handled, or the declaration is
+    #    a promise nothing keeps (it would be admitted by the guard and then hit
+    #    the `limit_key is None` arm as `unknown quota resource`).
+    assert quota_mod.DERIVED_CAP_RESOURCES <= branches
+
+    # 3. and the runtime half of the same invariant: an undeclared resource is
+    #    REFUSED, classified, before any branch can accept it.
+    for undeclared in ("vectors", "entities", "webhooks"):
+        with pytest.raises(quota_mod.QuotaCheckError) as ei:
+            quota_mod.enforce_org_limit(
+                {"org_id": "test_4051_undeclared", "max_points": 10}, undeclared)
+        assert "unknown quota resource" in str(ei.value), ei.value
+
+
+def _counting_sdks(monkeypatch) -> list[dict]:
+    """Replace `quota._make_sdk` with a fake that RECORDS how it was built.
+
+    Both `_count_resource` branches construct through `_make_sdk` — the tenant
+    branch with `namespace=org_id`, the registry branch with
+    `namespace="registry"` — so the recorded kwargs are what identify WHICH
+    branch ran, independently of what it returned.
+    """
+    built: list[dict] = []
 
     class _Result:
         def __init__(self):
@@ -267,6 +352,10 @@ def test_every_declared_graph_resource_is_counted_through_a_graph_sdk(
         def __init__(self):
             self.g = _Graph()
 
+    class _Registry:
+        def query(self, *a, **k):
+            return _Result()
+
     class _FakeSDK:
         def __init__(self, **kwargs):
             built.append(kwargs)
@@ -274,11 +363,67 @@ def test_every_declared_graph_resource_is_counted_through_a_graph_sdk(
         def _get_proj(self):
             return _Proj()
 
+        def _get_registry(self):
+            return _Registry()
+
     monkeypatch.setattr(quota_mod, "_make_sdk", lambda **kw: _FakeSDK(**kw))
+    return built
+
+
+@pytest.mark.parametrize("resource", sorted(quota_mod.TENANT_GRAPH_RESOURCES))
+def test_every_declared_graph_resource_is_counted_through_a_graph_sdk(
+        monkeypatch, resource):
+    """`_count_resource` counts every TENANT-declared resource in a tenant graph.
+
+    For every resource the declaration calls graph-scoped, the count must build
+    the tenant-graph SDK and take the graph branch. A fake SDK is enough: the
+    claim under test is WHICH branch ran, not what it returned.
+
+    ⛔ HONEST SCOPE (corrected — the first revision overclaimed). The docstring
+    here used to say that reverting the branch to its old hardcoded tuple
+    `("api_keys", "users", "graphs")` would "take the control-plane branch
+    instead and no graph SDK would be built — red here". **It would not red, and
+    it cannot**: that tuple is value-identical to `REGISTRY_SCOPED_RESOURCES`,
+    and no member of `TENANT_GRAPH_RESOURCES` is inside it, so the reversion is
+    behaviourally invisible for every case below (measured: 18/18 pass). That is
+    not a hole in the branch — it is the point of the declaration: a literal
+    that EQUALS the truth cannot be distinguished from it, and the constant is
+    what lets the two be edited as one thing.
+
+    The direction that IS falsifiable, and went uncovered until now, is a branch
+    that DIVERGES — a tuple that disagrees with the declaration. Its twin below
+    covers it from the registry side; this half covers the tenant side.
+    """
+    built = _counting_sdks(monkeypatch)
     assert quota_mod._count_resource("org_test_4051", resource) == 0
     assert built == [{"namespace": "org_test_4051"}], (
         f"{resource} is declared graph-scoped but was not counted in a tenant "
         f"graph — `_count_resource` branched away from the declaration"
+    )
+
+
+@pytest.mark.parametrize("resource", sorted(quota_mod.REGISTRY_SCOPED_RESOURCES))
+def test_every_declared_REGISTRY_resource_is_NOT_counted_through_a_graph_sdk(
+        monkeypatch, resource):
+    """The OTHER half: a registry-declared resource never builds a TENANT SDK.
+
+    THIS is the direction that makes "the branch and the declaration cannot
+    disagree" a measured fact instead of an assertion. Diverging the branch's
+    tuple — e.g. `if resource in ("api_keys", "users"):` — drops `graphs` into
+    the tenant catch-all, so a control-plane count would be taken against a
+    tenant graph. MEASURED on the pre-fix file: that mutation left
+    **18/18 passing**; with this case it reds on `graphs`, which is the case
+    whose absence made the claimed mutation inert.
+
+    `{"namespace": "registry"}` is the control-plane handle both
+    `_count_resource` and the gate build for these, so it is explicitly allowed;
+    what must never appear is the TENANT handle.
+    """
+    built = _counting_sdks(monkeypatch)
+    assert quota_mod._count_resource("org_test_4051", resource) == 0
+    assert {"namespace": "org_test_4051"} not in built, (
+        f"{resource} is declared REGISTRY-scoped but was counted in a tenant "
+        f"graph — `_count_resource` branched away from the declaration: {built}"
     )
 
 
