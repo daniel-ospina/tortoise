@@ -74,7 +74,7 @@ _HAVE_PROC = os.path.exists("/proc/self/cmdline")
 
 
 def _server_cmdline(pid: int) -> str | None:
-    """The ``pid``'s command line, or ``None`` when that pid is gone.
+    """The ``pid``'s command line, or ``None`` when no argv could be read.
 
     ``/proc`` is preferred — one read, no fork, asked up to ~120 times by the
     poll below — and ``ps`` is the fallback for a host that has no ``/proc``
@@ -82,12 +82,26 @@ def _server_cmdline(pid: int) -> str | None:
     pid still there?" and "is it still the redislite server we started?"
     (the second guards pid recycling).
 
-    The two arms are deliberately NOT interchangeable: on a host WITH
-    ``/proc``, an ``OSError`` means the pid is gone and ``None`` is the right
-    answer (falling through to ``ps`` would fork per poll to re-learn it);
-    on a host WITHOUT ``/proc``, ``None`` from the ``/proc`` arm would be a
-    claim about the host, not about the pid. ``tests/test_fork_slot_wedge_3845.py``'s
-    ``_ps_command`` keeps the same fallback for the same reason.
+    * ``/proc/<pid>/cmdline`` (NUL-separated argv) on Linux — one read, no
+      fork, asked up to ~120 times by the poll below;
+    * ``ps -ww -o command= -p <pid>`` (space-joined argv) where ``/proc`` does
+      not exist — macOS/BSD, a platform this suite supports
+      (``tortoise/embedded_reaper.py``: *"macOS has no /proc"*) and on which
+      the ``/proc``-only form made a LIVE server invisible. That is the same
+      failure class this probe was rewritten to remove, moved from "shared
+      runner" to "the developer's machine": the main test then passed
+      vacuously and its positive control reddened after a full 30 s.
+      ``tests/test_fork_slot_wedge_3845.py``'s ``_ps_command`` keeps the same
+      fallback for the same reason.
+
+    ``None`` from the ``ps`` arm means "no argv available" — the pid is gone
+    (``ps`` rc 1) or ``ps`` itself could not answer. A host with neither
+    procfs NOR ``ps`` therefore has no attribution capability, and the
+    positive control below reds loudly on it — deliberately, rather than
+    collapsing "cannot read" into "gone" and letting the main test pass for
+    the wrong reason (#5049 rule 4: an under-specified substrate is a harness
+    defect, which is a FAIL; a silent pass is not). ``ps`` is POSIX-mandated,
+    so that arm is unreachable on any host this suite runs on.
     """
     if _HAVE_PROC:
         try:
