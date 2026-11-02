@@ -91,9 +91,13 @@ EXEMPTION_PY = REPO / "scripts" / "ci_exemption.py"
 #:            means "NEW FAILURE — introduced by this PR". This is the ONE re-cut that
 #:            changes control flow (a `try/except` around an existing read); it adds no
 #:            branch on a verdict, no exit code, and no polarity change.
+#:   #10564 (usage seam inventory) — re-cut IN THE SAME COMMIT: the module's USAGE
+#:            block now lists `--main-jobs-dir` as the third test seam and says it is
+#:            not optional for a no-network run (without it the leg dimension calls
+#:            `gh`). Docstring only — no executable line moved.
 #:            No logic change in any other re-cut: no new branch, no exit-code change,
 #:            no polarity change.
-_GATE_MODULE_SHA256 = "2f40f7dd1d630fb9969c0445e00fd13f5b45c3c856bf6a9b0db6fdb9c9b55965"
+_GATE_MODULE_SHA256 = "3f4575d95a72600dd6d7da0ffd117fcacf3671db10fe192b4c1c86ecfa74cecf"
 
 #: The shared decision, reached through the machine-local `scripts/` pointer
 #: (`$AGENT_INFRA_PATH`, gitignored, NOT tracked — #9475). Missing off a developer box

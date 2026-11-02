@@ -73,7 +73,13 @@ USAGE (the workflow's only invocation)
       --agent-infra .ci-predicate
 
   Test injection (no network, no `gh`): `--jobs-json FILE` (the jobs listing, JSON or
-  JSONL) and `--logs-dir DIR` holding `<job_id>.log` files.
+  JSONL), `--logs-dir DIR` holding `<job_id>.log` files, and `--main-jobs-dir DIR`
+  holding `<run_id>.jsonl` listings of main's window — the leg dimension's only input.
+  ⛔ The third one is NOT optional for a no-network run: `main_leg_coverage` probes the
+  examined runs through `Runner.jobs(run_id, main_jobs_dir)`, so without it the leg
+  dimension calls `gh api …/runs/<id>/jobs` for every examined run. A caller that injects
+  only the first two gets live API traffic on exactly the shape this check exists for
+  (a window whose runs never executed the leg), or a fail-closed exit 2 on CI.
 """
 
 from __future__ import annotations
