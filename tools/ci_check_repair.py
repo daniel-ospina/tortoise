@@ -239,6 +239,15 @@ _READ_CACHE: dict[tuple, object] = {}
 #: Patched in tests so a rate-limit test never actually sleeps.
 _sleep = time.sleep
 
+#: How long to wait for a CANCELLED run to settle before re-running it. A
+#: non-completed run cannot be re-run in place (see `_cancel_rerun`), so the repair
+#: is cancel-then-rerun and the API needs a moment to mark the run completed.
+#: MEASURED 2026-11-02 on run 41523739094: `POST /cancel` → `completed/cancelled` at
+#: once, and `POST /rerun` accepted 8 s later. The bound is seconds on purpose — the
+#: consumer workflow's own `timeout-minutes` is 15, so this can never approach it.
+_CANCEL_SETTLE_POLLS = 4
+_CANCEL_SETTLE_SLEEP_S = 3.0
+
 
 @dataclass
 class Run:
@@ -250,6 +259,13 @@ class Run:
     run_attempt: int
     event: str
     created_at: str = ""
+    #: When the run's CURRENT ATTEMPT started (GitHub's `run_started_at`), null while
+    #: the attempt is still queued. `created_at` is the RUN's creation and does NOT
+    #: move on a rerun — MEASURED 2026-11-02 on run 41523739094, whose attempt 2 began
+    #: at 21:41:43Z while `created_at` still read 20:56:13Z (the attempt-1 time). The
+    #: job count describes the LATEST attempt, so the AGE must too, or every rerun
+    #: inherits the first attempt's age and its floor becomes 0 (see `_zero_job_stalled`).
+    started_at: str = ""
     #: Jobs the run's CURRENT attempt has created, or None when that read ABSTAINED.
     #: `0` and `None` are deliberately different: only a MEASURED zero makes a run
     #: "no verdict will arrive", because an unreadable jobs surface says nothing and
@@ -465,12 +481,19 @@ def _zero_job_stalled(run: Run, min_age_s: float, now: float | None = None) -> b
     and an unreadable count is an abstention, not a zero. A run parked for manual
     approval is excluded from the class entirely: its remedy is a human, and a
     rerun cannot obtain one.
+
+    ⛔ BOTH HALVES MUST DESCRIBE THE SAME ATTEMPT. `job_count` is measured on the
+    run's LATEST attempt, so the age is the ATTEMPT's (`attempt_age_seconds`), never
+    the run's creation: ageing a fresh attempt from the run's creation gives it a
+    floor of 0, so a re-run that has not materialised its jobs yet is declared "no
+    verdict will arrive" the instant it exists, re-run again, and escalated
+    EXHAUSTED for a run that was progressing normally.
     """
     if run.status == "completed" or run.status in _APPROVAL_PARKED_STATUSES:
         return False
     if run.job_count != 0:
         return False
-    age = age_seconds(run.created_at, now)
+    age = attempt_age_seconds(run, now)
     return age is not None and age >= min_age_s
 
 
@@ -480,7 +503,8 @@ def runs_at_head(repo: str, sha: str) -> list[Run]:
         runs = [Run(id=r["id"], name=r.get("name") or "", path=r.get("path") or "",
                     status=r.get("status") or "", conclusion=r.get("conclusion"),
                     run_attempt=int(r.get("run_attempt") or 1),
-                    event=r.get("event") or "", created_at=r.get("created_at") or "")
+                    event=r.get("event") or "", created_at=r.get("created_at") or "",
+                    started_at=r.get("run_started_at") or "")
                 for r in raw]
         # Job counts are read ONLY where they can change a verdict: a run that has
         # not completed and is still QUEUED. A completed run's jobs are settled and an
@@ -504,6 +528,24 @@ def age_seconds(created_at: str, now: float | None = None) -> float | None:
         return None
     now = now if now is not None else time.time()
     return max(0.0, now - when.timestamp())
+
+
+def attempt_age_seconds(run: Run, now: float | None = None) -> float | None:
+    """Seconds since the run's CURRENT ATTEMPT started, or None when unreadable.
+
+    A rerun reuses the run object and does NOT move its `created_at` (measured live:
+    attempt 2 of run 41523739094 created 21:41Z still reported `created_at` 20:56Z),
+    while `run_started_at` IS attempt-scoped and read 21:41Z for that attempt. Since
+    `job_count` describes the latest attempt, the age that decides the stall class
+    has to come from here.
+
+    `run_started_at` is null while an attempt is still QUEUED, so the fallback to
+    `created_at` is exact for attempt 1 (where the two are the same event) and
+    conservative for a rerun before GitHub stamps the new attempt — the fallback
+    keeps the OLDER time, so a queue-starved attempt is never given extra grace it
+    has not earned.
+    """
+    return age_seconds(run.started_at or run.created_at, now)
 
 
 def resolve_required(repo: str, record_path: Path, live: bool = True) -> list[str]:
@@ -665,7 +707,7 @@ def classify(pr: dict, checks: list[dict], all_runs: list[Run], required: list[s
                     plan.no_verdict.append(
                         {"run": r.id, "workflow": r.name or r.path, "status": r.status,
                          "jobs": r.job_count,
-                         "age_seconds": round(age_seconds(r.created_at) or 0)})
+                         "age_seconds": round(attempt_age_seconds(r) or 0)})
                 # ⛔ A STARVED CONTEXT IS STILL NOT REPAIRED (#9115). This is decided
                 # BEFORE the rerun below and it is load-bearing: under a measured
                 # flood EVERY queued run is a zero-job run, so naming them must not
@@ -764,15 +806,57 @@ def _timeline_reopen_state(repo: str, number: int, cooldown_min: int,
     return recent, total
 
 
+def _cancel(repo: str, run: Run) -> bool:
+    """Cancel a run we have MEASURED to have zero jobs, and wait for it to settle.
+
+    ⛔ THE SAFETY PROPERTY IS THE CALLER'S MEASUREMENT, NOT THIS FUNCTION. This is
+    reached only from the zero-job stall class, where `job_count == 0` was MEASURED:
+    the run has created no job, so there is no work to destroy and freeing its queue/
+    concurrency slot cannot lose a verdict. Cancelling a run that HAS jobs would be a
+    different act entirely, which is why the guard lives in the class, not here.
+
+    Returns True only when the run is OBSERVED `completed` — a rerun issued against a
+    run the API still considers live is refused (`403 This workflow is already
+    running`), and issuing it anyway would spend the attempt budget on a call that
+    cannot succeed.
+    """
+    try:
+        if _run([GH_BIN, "api", "-X", "POST",
+                 f"repos/{repo}/actions/runs/{run.id}/cancel"]).returncode != 0:
+            return False
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    for poll in range(_CANCEL_SETTLE_POLLS):
+        try:
+            data = gh_json(["api", f"repos/{repo}/actions/runs/{run.id}"])
+        except (MeasureError, subprocess.TimeoutExpired):
+            return False
+        if isinstance(data, dict) and data.get("status") == "completed":
+            return True
+        if poll + 1 < _CANCEL_SETTLE_POLLS:
+            _sleep(_CANCEL_SETTLE_SLEEP_S)
+    return False
+
+
 def _rerun(repo: str, run: Run, number: int, expected_head: str = "") -> str:
     """Re-run an EXISTING workflow run at the head it was measured at.
 
-    Returns 'rerun'|'head_moved'|'failed'. The head is re-read immediately before
-    acting, the SAME load-bearing precondition `_reopen` documents: a repair pass
-    over many PRs takes minutes, so a run whose head has already been replaced
-    would be re-run on a superseded sha and burn a CI cycle. If the head cannot be
-    re-read the action is SKIPPED, never guessed. 'head_moved' is a skip, not a
-    failure — the new head's own CI is the repair (mirrors `_reopen`).
+    Returns 'rerun'|'cancelled_rerun'|'head_moved'|'failed'. The head is re-read
+    immediately before acting, the SAME load-bearing precondition `_reopen`
+    documents: a repair pass over many PRs takes minutes, so a run whose head has
+    already been replaced would be re-run on a superseded sha and burn a CI cycle.
+    If the head cannot be re-read the action is SKIPPED, never guessed.
+    'head_moved' is a skip, not a failure — the new head's own CI is the repair
+    (mirrors `_reopen`).
+
+    ⛔ A NON-COMPLETED RUN CANNOT BE RE-RUN IN PLACE. MEASURED 2026-11-02 against run
+    41523739094 while it was `pending` with zero jobs:
+    `POST /actions/runs/<id>/rerun` → `403 {"message": "This workflow is already
+    running"}`. So the stall class — which is by construction a NON-completed run —
+    needs CANCEL THEN RERUN; issuing the rerun alone would return 'failed' every
+    window and escalate a PR that this tool is supposed to repair. The primitive is
+    the one that actually cleared this shape: cancel → `completed/cancelled` → rerun
+    accepted → attempt 2 with an attempt-scoped `run_started_at`.
     """
     if expected_head:
         try:
@@ -782,12 +866,19 @@ def _rerun(repo: str, run: Run, number: int, expected_head: str = "") -> str:
             return "failed"
         if not isinstance(now, dict) or (now.get("headRefOid") or "") != expected_head:
             return "head_moved"
+    state = "rerun"
+    if run.status != "completed":
+        # The cancel must be OBSERVED to have settled first: a rerun of a still-live
+        # run is refused, and the refusal is indistinguishable from a real failure.
+        if not _cancel(repo, run):
+            return "failed"
+        state = "cancelled_rerun"
     try:
         ok = _run([GH_BIN, "api", "-X", "POST",
                    f"repos/{repo}/actions/runs/{run.id}/rerun"]).returncode == 0
     except (OSError, subprocess.TimeoutExpired):
         return "failed"
-    return "rerun" if ok else "failed"
+    return state if ok else "failed"
 
 
 def _reopen(repo: str, number: int, expected_head: str = "") -> str:
@@ -1045,7 +1136,10 @@ def report(plans: list[PrPlan], apply: bool, trigger_ok: bool, repo: str,
                     # failure, so it does not escalate below (mirrors `_reopen`).
                     state = _rerun(repo, run, p.number, expected_head=p.head)
                     rec["rerun"].append({"run": run.id, "attempt": run.run_attempt,
-                                         "workflow": run.name, "ok": state == "rerun",
+                                         "workflow": run.name,
+                                         "ok": state in ("rerun", "cancelled_rerun"),
+                                         **({"cancelled_first": True}
+                                            if state == "cancelled_rerun" else {}),
                                          **({"head_moved": True}
                                             if state == "head_moved" else {})})
                 else:

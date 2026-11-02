@@ -1973,3 +1973,178 @@ def test_approval_parked_runs_are_not_probed_at_all(monkeypatch):
     runs = R.runs_at_head("o/r", "a" * 40)
     assert probed == [2], "only the queued run can change a verdict"
     assert [r.job_count for r in runs] == [None] * 2
+
+
+# ── 14. the age and the job count must describe the SAME ATTEMPT ─────────────
+#
+# MEASURED 2026-11-02 on run 41523739094: `POST /actions/runs/<id>/rerun` reuses the
+# run object, so attempt 2 began at 21:41:43Z (`run_started_at`) while `created_at`
+# still read 20:56:13Z (the attempt-1 time). `job_count` and the `/jobs` read that
+# feeds it both describe the LATEST attempt, so ageing the attempt from the run's
+# creation gives every rerun a floor of 0: a fresh attempt that has not materialised
+# its jobs yet is declared "no verdict will arrive" the instant it exists, re-run
+# again, and escalated EXHAUSTED for a run that was progressing normally. Both
+# directions are pinned here so neither half can drift back.
+
+def test_a_fresh_rerun_attempt_is_not_aged_by_the_runs_creation():
+    """Attempt 2 at 60s old must NOT inherit attempt 1's 1800s age."""
+    from datetime import UTC, datetime
+    run_ = aged_run(41480218593, jobs=0, age_s=1800.0, attempt=2)
+    run_.started_at = datetime.fromtimestamp(
+        R.time.time() - 60.0, UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    plan = R.classify(pr(), [], [run_], ["python-ci-gate"], EMITTERS, max_attempts=3)
+    assert plan.no_verdict == [], (
+        "a fresh attempt is ordinary progressive-job lag, not a dead run — the "
+        "run's creation time says nothing about the attempt that has zero jobs")
+    assert plan.rerun == [], "and it must not be re-run (and re-burned) again"
+    assert "python-ci-gate" in plan.pending
+
+
+def test_a_rerun_attempt_past_its_OWN_floor_is_still_named():
+    """The other direction: attempt 2 that really is old is still named."""
+    from datetime import UTC, datetime
+    run_ = aged_run(41480218593, jobs=0, age_s=60.0, attempt=2)
+    run_.started_at = datetime.fromtimestamp(
+        R.time.time() - 1800.0, UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    plan = R.classify(pr(), [], [run_], ["python-ci-gate"], EMITTERS, max_attempts=3)
+    assert [d["run"] for d in plan.no_verdict] == [41480218593]
+    assert plan.no_verdict[0]["age_seconds"] >= 1200, (
+        "the reported age must be the ATTEMPT's, not the run's creation")
+    assert [r.id for r in plan.rerun] == [41480218593]
+
+
+def test_runs_at_head_reads_the_attempt_scoped_start(monkeypatch):
+    """`run_started_at` is what makes the age attempt-scoped; it must be carried."""
+    monkeypatch.setattr(R, "_READ_CACHE", {})
+    monkeypatch.setattr(R, "job_count", lambda repo, rid, attempt=0: 0)
+    monkeypatch.setattr(R, "_paginate", lambda path, key: [
+        {"id": 7, "name": "Python CI", "path": ".github/workflows/python-ci.yml",
+         "status": "pending", "conclusion": None, "run_attempt": 2,
+         "event": "pull_request", "created_at": "2026-11-02T20:56:13Z",
+         "run_started_at": "2026-11-02T21:41:43Z"}])
+    runs = R.runs_at_head("o/r", "a" * 40)
+    assert runs[0].created_at == "2026-11-02T20:56:13Z"
+    assert runs[0].started_at == "2026-11-02T21:41:43Z", (
+        "dropping run_started_at silently restores the attempt-1 age for every rerun")
+
+
+# ── 15. a NON-COMPLETED run is CANCELLED before it is re-run ─────────────────
+#
+# MEASURED 2026-11-02 against run 41523739094 while it was `pending` with zero jobs:
+# `POST /actions/runs/<id>/rerun` → `403 {"message": "This workflow is already
+# running"}`. The stall class is BY CONSTRUCTION a non-completed run, so a rerun
+# without a preceding cancel returns 'failed' every window and escalates the very PR
+# this tool exists to repair. Cancel → `completed/cancelled` → rerun was accepted
+# (attempt 2). Cancelling is safe HERE and only here because the class is reached
+# only for a run with a MEASURED zero jobs — there is no job to destroy.
+
+class _Done:
+    def __init__(self, returncode=0):
+        self.returncode = returncode
+
+
+def test_a_queued_zero_job_run_is_cancelled_before_it_is_rerun(monkeypatch):
+    monkeypatch.setattr(R, "gh_json", lambda *a, **k: {"headRefOid": "a" * 40})
+    monkeypatch.setattr(R, "_sleep", lambda s: None)
+    verbs: list[str] = []
+
+    def fake(argv, **_kw):
+        verbs.append(argv[-1].rsplit("/", 1)[-1])
+        return _Done()
+    monkeypatch.setattr(R, "_run", fake)
+    # The settle wait polls the run; report it completed on the first poll.
+    monkeypatch.setattr(R, "gh_json",
+                        lambda a, **k: ({"headRefOid": "a" * 40} if a[:1] == ["pr"]
+                                        else {"status": "completed"}))
+    state = R._rerun("o/r", run(41523739094, "python-ci.yml", "pending"), 1,
+                     expected_head="a" * 40)
+    assert state == "cancelled_rerun"
+    assert verbs == ["cancel", "rerun"], (
+        "the cancel must precede the rerun — a rerun of a still-running run is "
+        f"refused by the API with 'This workflow is already running'; got {verbs}")
+
+
+def test_a_refused_cancel_does_not_spend_the_rerun(monkeypatch):
+    """A cancel the API refuses must not be followed by a rerun it will refuse too."""
+    monkeypatch.setattr(R, "gh_json", lambda *a, **k: {"headRefOid": "a" * 40})
+    verbs: list[str] = []
+
+    def fake(argv, **_kw):
+        verbs.append(argv[-1].rsplit("/", 1)[-1])
+        return _Done(returncode=0 if argv[-1].endswith("/cancel") else 1)
+    monkeypatch.setattr(R, "_run", fake)
+    assert R._rerun("o/r", run(1, "ci.yml", "pending"), 1,
+                    expected_head="a" * 40) == "failed"
+    assert verbs == ["cancel"], "no rerun may be issued after a refused cancel"
+
+
+def test_a_cancel_that_never_settles_is_not_followed_by_a_rerun(monkeypatch):
+    """The settle wait is bounded, and an unsettled run is a failure, not a guess."""
+    monkeypatch.setattr(R, "_sleep", lambda s: None)
+    verbs: list[str] = []
+
+    def fake(argv, **_kw):
+        verbs.append(argv[-1].rsplit("/", 1)[-1])
+        return _Done()
+    monkeypatch.setattr(R, "_run", fake)
+
+    def fake_json(a, **k):
+        return ({"headRefOid": "a" * 40} if a[:1] == ["pr"]
+                else {"status": "in_progress"})
+    monkeypatch.setattr(R, "gh_json", fake_json)
+    assert R._rerun("o/r", run(1, "ci.yml", "pending"), 1,
+                    expected_head="a" * 40) == "failed"
+    assert verbs == ["cancel"], "an unsettled run must not be re-run blindly"
+
+
+def test_a_cancelled_rerun_reports_success_and_does_not_escalate(monkeypatch):
+    """The report half: 'cancelled_rerun' is a SUCCESS, not a failure to escalate."""
+    monkeypatch.setattr(R, "_rerun", lambda *a, **k: "cancelled_rerun")
+    plan = _plan(absent=["python-ci-gate"],
+                 rerun=[run(41523739094, "python-ci.yml", "pending")])
+    code, recs = R.report([plan], apply=True, trigger_ok=True, repo="o/r", cooldown_min=60)
+    assert recs[0]["rerun"][0]["ok"] is True
+    assert recs[0]["rerun"][0]["cancelled_first"] is True
+    assert code == 0, "a completed repair must not escalate"
+
+
+# ── 16. the two per-pass resets and the `no_verdict` record key are load-bearing ──
+#
+# MUTATION-MEASURED: deleting `_READ_CACHE.clear()`, deleting `_JOB_READ_FAILURES = 0`,
+# or replacing `"no_verdict": list(p.no_verdict)` with `[]` each left the suite's
+# failure set BYTE-IDENTICAL. Both resets are the scope that stops a verdict about a
+# head that has moved (and a leaked failure count would abstain on EVERY job count for
+# every later pass, silently disabling the whole class), and the record key is the
+# machine-readable half of a notice deliberately sent to stderr.
+
+def test_every_pass_clears_the_read_cache_and_the_job_read_failure_count(monkeypatch):
+    monkeypatch.setattr(R, "open_prs", lambda repo, include_drafts: [])
+    monkeypatch.setattr(R, "_READ_CACHE", {("checks", "o/r", "a" * 40): [{"stale": True}]})
+    monkeypatch.setattr(R, "_JOB_READ_FAILURES", R.JOB_READ_FAILURE_LIMIT)
+    R.build_plans("o/r", ["python-ci-gate"], EMITTERS, False, 3)
+    assert R._READ_CACHE == {}, (
+        "a cached read that survives a pass describes a head that may have moved")
+    assert R._JOB_READ_FAILURES == 0, (
+        "a leaked count makes EVERY later pass abstain on EVERY job count")
+
+
+def test_the_json_record_carries_no_verdict_for_machine_readers(monkeypatch, capsys, tmp_path):
+    """The stderr notice is for a human; `--json` consumers get THIS key or nothing."""
+    monkeypatch.setattr(R, "open_prs", lambda repo, include_drafts: [pr(1)])
+    monkeypatch.setattr(R, "check_runs_at", lambda repo, head: [])
+    monkeypatch.setattr(R, "runs_at_head",
+                        lambda repo, head: [aged_run(41480218593, jobs=0, age_s=1800.0)])
+    rec = tmp_path / "required-contexts.json"
+    rec.write_text(json.dumps({
+        "required_contexts": ["python-ci-gate"],
+        "emitters": {"python-ci-gate": [["python-ci.yml", "python-ci-gate"]]},
+    }))
+    assert R.main(["--repo", "o/r", "--no-live", "--no-queue-health", "--json",
+                   "--record", str(rec)]) == 0
+    captured = capsys.readouterr()
+    summary = json.loads(captured.out)
+    assert summary["prs"][0]["no_verdict"][0]["run"] == 41480218593
+    assert "NO-VERDICT-WILL-ARRIVE" in captured.err
+    assert "NO-VERDICT-WILL-ARRIVE" not in captured.out, (
+        "the notice must never enter the --json stream (it would break json.load in "
+        "tools/ci-check-repair-local.sh and the workflow's step summary)")
