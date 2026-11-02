@@ -3120,6 +3120,96 @@ def test_the_records_e3_rule_states_the_rule_the_gate_implements():
     )
 
 
+def test_a_source_spelled_e3_row_declares_the_probe_cannot_see_it():
+    """The gate accepts `Source` and must SAY that it does not check the instrument (#10525 P2).
+
+    Either spelling of the document-derivation class passes (`RETIRED_SPELLING_LABELS`, #9736 is
+    owner-gated), but nothing in the tool reads `probes/capstone_measure.py`: the probe's
+    `DERIVED_LABELS` is derived from the writer's constant, so no sentence in the record can move
+    it and a `Source` registration registers a node class the probe never enumerates. Enforcing it
+    would settle #9736 (a red check on the owner's open alternative); saying nothing would let a
+    registration and its instrument part company with no trace. So it is DECLARED — and this test
+    is the trace.
+
+    Non-vacuity: on the pre-fix gate `scopes` stayed `[]` for the `Source` row, because no arm
+    compared the spelling with anything — so the `assert scopes` below reds on it.
+    """
+    text = PREREG.read_text()
+    pins = check.parse_pins(text)
+    rows = [r for r in check.parse_criteria_rows(text) if r["id"] != "E3"]
+    rows.append({
+        "id": "E3",
+        "metric": "derived nodes written by the run (`Point` + `Event` + `:Source`) carrying a "
+                  "version anchor",
+        "denominator": "**all** derived nodes written by the run — `Point` + `Event` + `:Source` "
+                       "(floor ≥ 30 nodes)",
+        "threshold": "`= 1.000` (zero unanchored)",
+        "line": "269",
+    })
+    scopes: list[str] = []
+    failures = check.check_registry_contradictions(PREREG_DIR, rows, pins, scopes)
+    assert failures == [], failures
+    assert len(scopes) == 1, scopes
+    note = scopes[0]
+    assert "probes/capstone_measure.py" in note, note
+    assert "Source" in note, note
+    assert "DERIVED_LABELS" in note, note
+
+    # …and the SHIPPED row (the writer's `Document` spelling) declares nothing, because the
+    # registration and the probe agree by construction: a note here would be the false red.
+    shipped: list[str] = []
+    assert check.check_registry_contradictions(
+        PREREG_DIR, check.parse_criteria_rows(text), pins, shipped) == []
+    assert shipped == [], shipped
+
+
+def test_the_records_e3_rule_claims_no_enforcement_over_the_probe():
+    """§7 item 6 must not promise a check on the INSTRUMENT that the gate cannot perform.
+
+    #10525 review P2: the paragraph said a `Source` registration "also moves the probe's
+    `DERIVED_LABELS` with it (§10.1) — otherwise the registration and the measurement part
+    company, which is the very divergence this rule exists to refuse." Two clauses that cannot both
+    hold: the gate accepts either spelling and never reads the probe, and the probe's set is derived
+    from the writer's constant, so the RECORD cannot move it. §7 is the section whose whole job is
+    to be the checkable statement of what is enforced, so a promise of enforcement it does not have
+    is the defect class this bundle exists to remove — and it sat in the sentence a lane reads when
+    it is deciding how to spell the class.
+
+    What must be there instead: the obligation stated as an obligation ON THE AMENDMENT, and the
+    disclosure that the gate DECLARES the divergence rather than refusing it.
+
+    Non-vacuity: at the pre-fix head the paragraph carried "the very divergence this rule exists to
+    refuse" and never named the probe's path or the declared note, so this reds on it.
+    """
+    text = PREREG.read_text()
+    start = text.index("**E3's class set is re-derived")
+    paragraph = text[start:].split("\n\n", 1)[0]
+    assert "the very divergence this rule exists to refuse" not in paragraph, (
+        "§7 item 6 claims the rule REFUSES a registration/instrument divergence; the gate accepts "
+        "either spelling and never reads `probes/capstone_measure.py`, so the claim is false"
+    )
+    assert "probes/capstone_measure.py" in paragraph, (
+        "§7 item 6 must name the instrument it cannot check, or a lane reads the sentence as a "
+        "check that exists"
+    )
+    assert "obligation" in paragraph and "amendment" in paragraph, (
+        "moving the probe with the spelling is the AMENDMENT's obligation — §7 must say so rather "
+        "than attribute it to the rule"
+    )
+    assert "declare" in paragraph, (
+        "the gate declares a `Source` row's divergence (`_note_unchecked_probe_spelling`); §7 must "
+        "state that instead of claiming a refusal"
+    )
+    # The gate really is what §7 now describes: the declared-note helper exists and is reachable
+    # from the class-set arm, so the prose is checked against the code, not against itself.
+    assert callable(check._note_unchecked_probe_spelling)
+    source = (REPO_ROOT / "tools" / "capstone_preregistration_check.py").read_text()
+    assert "_note_unchecked_probe_spelling(scopes, directory, row, cells)" in source, (
+        "the helper must be CALLED by the class-set arm, or §7 describes a declaration that is "
+        "never emitted"
+    )
+
+
 def test_the_routing_index_carries_both_e3_readings():
     """A reader arrives through `docs/00_index.md`, so the amendment has to reach that row too.
 

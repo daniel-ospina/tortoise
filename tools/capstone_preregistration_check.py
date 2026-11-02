@@ -876,7 +876,11 @@ def check_registry_contradictions(directory: Path, rows: list[dict[str, str]],
        ``0`` nodes in the shipped census — or ``Source``, the label it is stored on post-D10) is the
        owner's #9736 ruling, NOT this gate's: both are accepted, see ``RETIRED_SPELLING_LABELS``.
        The gate settles nothing here; it refuses a cell that names NEITHER, and a cell that names an
-       unanchored class.
+       unanchored class. ⛔ What it ALSO cannot do is check the INSTRUMENT: it never reads
+       ``probes/capstone_measure.py``, whose class set is derived from the writer's constant and so
+       cannot be moved by anything written in the record. A row taking the ``Source`` spelling is
+       therefore DECLARED in ``scopes`` rather than passed quietly or failed — see
+       ``_note_unchecked_probe_spelling``.
 
     ``[]`` when the record cannot be read at all: ``check_machine_record`` owns that failure, and
     reporting it twice would make one defect look like two.
@@ -1048,6 +1052,7 @@ def check_registry_contradictions(directory: Path, rows: list[dict[str, str]],
         if groups is None:
             groups = e3_required_class_groups()
         failures += _e3_class_set_failures(row, cells, groups)
+        _note_unchecked_probe_spelling(scopes, directory, row, cells)
     return failures
 
 
@@ -1137,8 +1142,44 @@ def _e3_class_set_failures(row: dict[str, str], cells: dict[str, set[str]],
     return failures
 
 
+def _note_unchecked_probe_spelling(scopes: list[str] | None, directory: Path,
+                                   row: dict[str, str], cells: dict[str, set[str]]) -> None:
+    """Declare the ONE thing this rule cannot check: the INSTRUMENT's own class set (#10525 P2).
+
+    The gate accepts either spelling of the document-derivation class
+    (``RETIRED_SPELLING_LABELS``), because which one is honest is #9736's owner-gated ruling. But
+    nothing in this tool reads ``probes/capstone_measure.py``: the probe derives its
+    ``DERIVED_LABELS`` from the WRITER's constant (``("Point", *sorted(
+    _derivation_label_classes()))``), so no sentence in the record can move it. A registration that
+    takes the ``Source`` spelling therefore registers a node class the probe never enumerates —
+    ``Document`` is the writer's own spelling and is ``0`` nodes in the shipped census, ``Source`` is
+    counted nowhere — so the derivations that spelling names contribute ``0`` to E3 by construction.
+
+    ⛔ DECLARED, NOT ENFORCED AND NOT SILENT (#9736 IS OWNER-GATED). Failing the row would turn the
+    owner's open alternative into a red check — the gate settling the ruling it must not settle; and
+    saying nothing would let a registration and the instrument that scores it part company with no
+    trace anywhere, which is the divergence §7 item 6 is about.
+    """
+    drifted = sorted((cells["metric"] | cells["denominator"])
+                     & set(RETIRED_SPELLING_LABELS.values()))
+    if not drifted:
+        return
+    _note(scopes, f"{directory.name}: E3 (line {row['line']}) spells the document-derivation "
+                  f"class {drifted}, which this rule ACCEPTS (#9736's spelling is owner-gated) and "
+                  "which it does NOT check against the instrument — probes/capstone_measure.py "
+                  f"derives DERIVED_LABELS from {DERIVATION_LABELS_NAME} alone "
+                  f"({sorted(derivation_label_classes())}), so it enumerates no `Source` and the "
+                  "derivations this spelling names count 0 in E3; moving the probe with the "
+                  "spelling is the amendment's obligation, not this gate's check")
+
+
 def _note(scopes: list[str] | None, message: str) -> None:
-    """Declare an arm this bundle is NOT asked — never a silent skip (see the caller's docstring)."""
+    """Declare something this gate did NOT enforce — never a silent skip, never a silent pass.
+
+    Two kinds are declared here, both because an undeclared one is a false green: an ARM this bundle
+    is not asked (see the caller's docstring), and a RESIDUAL the rule can see but must not fail on
+    because the decision behind it is owner-gated (``_note_unchecked_probe_spelling``).
+    """
     if scopes is not None:
         scopes.append(message)
 

@@ -530,9 +530,22 @@ Exit 0 only when **all** of these hold:
    retained relation spelling) **or** `Source` (the node label the document is stored on once the
    `Document` label retires), and accepting both is deliberate: **which spelling is honest is
    #9736's owner-gated question, not this rule's**, so the rule refuses a cell that names NEITHER
-   and settles nothing. A registration that spells it `Source` also moves the probe's
-   `DERIVED_LABELS` with it (§10.1) — otherwise the registration and the measurement part company,
-   which is the very divergence this rule exists to refuse.
+   and settles nothing. ⛔ **What this rule cannot do is check the instrument.** Nothing in
+   `tools/capstone_preregistration_check.py` reads `probes/capstone_measure.py`, and the probe's set
+   is derived from the same writer constant (`("Point", *sorted(_derivation_label_classes()))`), so
+   it tracks the **writer**, not this record: no sentence written here can move it. Spelling the
+   class `Source` is therefore an obligation **on the amendment** — move the probe in the same
+   change — and not something §7 item 6 enforces, so reading it as enforcement would be reading a
+   check that does not exist. The writer's `Document` spelling is what the record uses today (§10.1),
+   so the registration and the probe agree by construction right now. What the gate *does* do is
+   **declare** the divergence it can see: a row spelled `Source` carries a `registry arm NOT
+   applied`-class declaration naming the probe, so a registration and its instrument can never part
+   company silently.
+   Today's cost of the gap is zero nodes, and it is disclosed rather than hidden: the third class
+   contributes **0 to E3 in either spelling** — no `Document` label is written (post-D10 a document
+   is a `:Source`, §10.1), and the probe enumerates no `Source` — so a run that wrote
+   `(Source)-[:references]->(Source)` would have its document derivations counted **nowhere** in
+   E3. Closing that is part of #9736's ruling; this record does not pre-empt it.
    A denominator naming a class the model
    leaves unanchored by design (`:Object`, #5199 option A) **fails** — that is an unreachable
    `= 1.000`, and it would report the decision as a defect (§10.1) — and a denominator that *omits*
