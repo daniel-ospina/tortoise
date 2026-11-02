@@ -39,7 +39,7 @@ justify (the bundle prefix `docs/evidence/7949-capstone/`, landed by #9076, alre
 `core` for a PROBE-ONLY diff — measured, not assumed), and **add** one for the gate source
 (`tools/capstone_verdict_check.py`), because a GATE-ONLY diff selected no surface at all while
 the bundle prefix covers only the probe/evidence paths (pinned by
-`tests/test_ci_selection.py::test_the_capstone_change_selects_core_not_tier1`) — and add a pin
+`tests/test_ci_selection.py::test_the_capstone_gate_change_selects_core_not_tier1`) — and add a pin
 that no `CORE_ALSO` row is shadowed by a parent prefix; the surface re-cut the new caller forces
 (`config/surface-manifest.yml`, `docs/product/mcp-sdk-surface.md`); and two test-side edits —
 `tests/test_ci_check_repair.py` (the `gh` launcher stub) and
@@ -209,8 +209,8 @@ though the receipt cannot witness them.
 | S0 READ | ✅ | `stats.edus=159`, `stats.chunks=7` across the seven sessions |
 | S1 NARRATE | ✅ | `stats.llm.by_stage.s1` calls = 7 |
 | S2.1 EXTRACT | ✅ | `stats.llm.by_stage.s2` calls = 7; `entities=77 events=38 points=141` |
-| S2.2 VET | ❌ **#9116** | measured at `e0fc940b5`, BEFORE the seam: the pass was ENABLED (`TORTOISE_VET=1`, forced in-process and read back), and its surface **exists** — `extract_session_v2` emits `result["vet"]` UNCONDITIONALLY at `tortoise/extractor_v2.py:10586-10590` — but the meta fold then forwarded `stats` alone, so whether it DID any work was not observable through the receipt (measured: 142 stats keys and 18 receipt keys inspected, `vet` in neither). The fold now COPIES the stage's own counts as `stats["step_witness"]["vet"]` (`tortoise/sdk.py:15287`), so this ❌ is the frozen run's answer, not the seam's reachability |
-| S2.3 CLASSIFY | ❌ **#9116** | same layer, same run: `result["classify_later"]` is built at `extractor_v2.py:10576-10582` and was dropped at the same fold, which now copies it as `stats["step_witness"]["classify_later"]` (`tortoise/sdk.py:15287`) |
+| S2.2 VET | ❌ **#9116** | measured at `e0fc940b5`, BEFORE the seam: the pass was ENABLED (`TORTOISE_VET=1`, forced in-process and read back), and its surface **exists** — `extract_session_v2` emits `result["vet"]` UNCONDITIONALLY at `tortoise/extractor_v2.py:10586-10590` — but the meta fold then forwarded `stats` alone, so whether it DID any work was not observable through the receipt (measured: 142 stats keys and 18 receipt keys inspected, `vet` in neither). The fold now COPIES the stage's own counts as `stats["step_witness"]["vet"]` (`tortoise/sdk.py:15470`), so this ❌ is the frozen run's answer, not the seam's reachability |
+| S2.3 CLASSIFY | ❌ **#9116** | same layer, same run: `result["classify_later"]` is built at `extractor_v2.py:10576-10582` and was dropped at the same fold, which now copies it as `stats["step_witness"]["classify_later"]` (`tortoise/sdk.py:15470`) |
 | S3 RESOLVE | ✅ | `stats.search_queries=105 > 0` and `stats.search_degraded=false` on every session (a degraded search is not S3) |
 | S5 CONNECT | ✅ | the graph write: 433 derived nodes (`Point` 338, `Object` 50, `Event` 45); `stats.operator_endpoints_minted=0`; operator-shaped relationships `IMPL=57 INPUT=58 NAND=10` |
 | S6 COMMIT | ✅ | 338 `:Point` nodes persisted, 170 carrying the commit's `eventId` stamp, 358 `:GraphEvent`s |
@@ -292,7 +292,7 @@ list, no classify items, or a fail-open `except`) while doing nothing, and that 
 indistinguishable through a surface that is missing. The cause now says the pass was **ENABLED** and
 that whether it did work is not observable here; the `#9116` attribution — the surface is emitted
 unconditionally at `:10576`/`:10586` and now reaches the receipt through the seam at the meta fold
-`sdk.py:15287` (`"stats": _capture_stats_with_step_witness(out, len(extracted))`) — is updated
+`sdk.py:15470` (`"stats": _capture_stats_with_step_witness(out, len(extracted))`) — is updated
 accordingly, and the "where the fix must target" line with it.
 
 Pinned by `test_a_witnessed_vet_surface_makes_s2_2_observed` (8/8 witnessed when the surface is
@@ -317,7 +317,7 @@ derivation target labels are `_DERIVATION_REFERENCES_LABELS` (`edges.py:747`: `E
 got one of them backwards: `extractedFrom` points FROM the derived node
 (`(Point)-[:extractedFrom]->(GraphEvent|Event)`), while `references` points AT it
 (`(Source)-[:references]->(Event|Document)` — `link_source_to_event`, `edges.py:2832-2857`,
-reached from the capture path at `sdk.py:15568` (`proj.link_source_to_event(source_key,
+reached from the capture path at `sdk.py:15751` (`proj.link_source_to_event(source_key,
 event_id)`)). So the rule now applied — printed in the log,
 applied by one Cypher query per label — is:
 
@@ -365,7 +365,7 @@ does not re-emit the pre-amendment figure as if it were this run's — and it sa
 
 ⛔ **E3's Point denominator mixes classes that CANNOT derive, and the figure is taken over the
 writer class — not over the link.** Of the 338 `Point` nodes: **159 mechanical turn rows**
-(`_write_capture_turns`, `_TURN_WRITE_CYPHER` at `sdk.py:2418`, wired only by `CONTAINS`),
+(`_write_capture_turns`, `_TURN_WRITE_CYPHER` at `sdk.py:2451`, wired only by `CONTAINS`),
 **141 extraction claims**, **29 operator Points** and **9 other Points** — each class read off the
 property its **writer** stamps (`is_episodic`, `is_operator`, an `extractedFrom` edge), none
 hand-typed, and each printed with its own anchored count.
@@ -547,6 +547,48 @@ the file's OLDEST add-commit and that never moves. The new name is a new path, a
 record, and it passes. (Verified: `tools/capstone_preregistration_check.py --dir
 docs/evidence/7949-capstone` → `OK — … the ordering holds`, three evidence logs.)
 
+### The ordering rule this bundle's registration states is SUPERSEDED
+
+`PRE-REGISTRATION.md`'s exit list, item 2, tells an author that the commit that **adds** the
+registration must be **strictly older** than the commit that adds each `*.log` in this directory
+(`git log --diff-filter=A --format=%ct`) — a comparison of two sibling commits **inside one
+contribution**. That predicate is what the gate no longer enforces, for the reason `#10463` shows:
+a squash merge collapses the pair into ONE commit, so the same tree passed its PR checks and redded
+`main` minutes later (`#10468`). The ruled repair (`#10463` comment 6564634454, item 4) is **base
+ancestry**: the registration's earliest add-commit reachable from the **merge base** must strictly
+precede the log's add-commit, which means a change that lands the registration and its log **in one
+PR** is refused (`SAME_PR_REFUSAL` in the gate: *"it must land FIRST, in its own PR"*). The gate
+prints the ref it actually compared on its `ordering measured against:` line — read that line, not
+this note and not the registration's item 2.
+
+⛔ **The registration is NOT edited to say this, and its own terms are why.** `preregistration.json`
+pins the document by BYTES (`document_sha256`), asserted for **this** bundle by
+`tests/test_capstone_preregistration_9075.py::test_the_real_record_pins_the_real_document` (its
+`PREREG_DIR` is `docs/evidence/7949-capstone`, so an edited registration reds there at any checkout
+depth — the test reads no history), and enforced in the required CI step by the gate's own
+`DOCUMENT_SHA_PIN` arm in `tools/capstone_preregistration_check.py::check_machine_record`. An
+amendment is a NEW linked record — never an edit to the frozen one, which is the `#10463` ruling and the reason a
+silent edit is the failure the gate exists to catch in the first place. Leaving item 2 as the only
+statement of the rule is the other failure: a lane that reads the authoritative protocol, orders its
+two commits inside one PR exactly as criterion 2 asks, and lands is refused by a requirement the
+registration never states. **This section is the changes record that closes that gap** — item 2 is
+what the registering author wrote, base ancestry is what the gate enforces today, and
+`tests/test_capstone_preregistration_9075.py::test_the_bundle_records_the_superseded_ordering_rule_its_registration_states`
+keeps this record here (and the registration unedited).
+
+⚠️ **This sentence must cite a test that pins THIS bundle's bytes, not merely a test that exists.**
+An earlier revision of it cited
+`tests/test_s3_prior_ablation.py`'s `test_the_frozen_pre_registration_is_still_the_document_its_record_pins`
+(named, not addressed — it is a historical mention, not a command to run)
+— a real name in a real file, which pins the **5087** document (`tools/s3_prior_ablation.py`'s
+`PREREG_REL`) and therefore stays GREEN on an edited 7949 registration. That is worse than citing
+nothing: it turns "unchecked" into "checked and green" for exactly the lane this paragraph is
+warning. `test_every_test_name_the_evidence_bundles_cite_exists` resolves a citation's *existence*
+and structurally cannot see its *subject*, so this one is held by
+`tests/test_capstone_preregistration_9075.py::test_the_supersession_record_cites_the_pin_that_guards_this_bundles_bytes`
+instead — and reproduce it by hand by appending a byte to `PRE-REGISTRATION.md` and running the cited
+test (it must FAIL) before changing this line.
+
 ## The gate: two questions, two exits
 
 ```bash
@@ -671,7 +713,7 @@ way: a table whose rows carry the literal string `HEAD` is red by this repo's ow
 ## The entry point the run drives (and the receipt the #9116 seam opened)
 
 The pipeline's OWN path is `TortoiseSDK.capture_session` →
-`sdk._extract_session_v2` (`sdk.py:14459`; called at `:13496`) →
+`sdk._extract_session_v2` (`sdk.py:14642`; called at `:13679`) →
 `extractor_v2.extract_session_v2` (`extractor_v2.py:10085`), which calls, in one pass.
 
 📌 **Cite convention for this bundle's own cites.** Every `file:line` THIS bundle adds is
@@ -700,7 +742,7 @@ the same lesson (cite the symbol, not the line).
 | S0 READ | `_edus_from_conversation` `:10203` | `stats["edus"]`, `stats["chunks"]` | ✅ |
 | S1 NARRATE | `run_s1` `:10243` | `stats["llm"]["by_stage"]["s1"]`, `story_arc` | ✅ (`story_arc` is off-receipt; `by_stage` carries it) |
 | S2.1 EXTRACT | `run_s2` `:10267` | `by_stage["s2"]`, item counts | ✅ (`embed_list` is off-receipt; `by_stage` carries it) |
-| S2.2 VET | `_run_vet_pass` `:10296` | `result["vet"]` — built at `extractor_v2.py:10586-10590`, copied onto the receipt at the meta fold `sdk.py:15287` as `stats["step_witness"]["vet"]` | ✅ reachable (#9116 seam) — the shipped log predates it |
+| S2.2 VET | `_run_vet_pass` `:10296` | `result["vet"]` — built at `extractor_v2.py:10586-10590`, copied onto the receipt at the meta fold `sdk.py:15470` as `stats["step_witness"]["vet"]` | ✅ reachable (#9116 seam) — the shipped log predates it |
 | S2.3 CLASSIFY | `_apply_classify_kinds` `:10312` | `result["classify_later"]` — built at `extractor_v2.py:10576-10582`, copied at the same fold as `stats["step_witness"]["classify_later"]` | ✅ reachable (#9116 seam) — ⚠️ and on the measured corpus the pass is IDLE (`enabled: true`, empty `s2`/`union`), so it is honestly NOT witnessed |
 | S3 RESOLVE | `search_graph` `:10328` | `result["search"]`, copied as `stats["step_witness"]["search"]` (mode/degraded/queries_run/hits); `stats["search_queries"]`/`stats["search_degraded"]` were already on the receipt | ✅ |
 | S5 CONNECT | `execute_embed` `:10548` (+ `run_s4` `:10349` gap filler) | `stats["s4_merge"]` | ✅ (gap-filler counters) — `capstone_measure.py` uses the graph write + `stats["operator_endpoints_minted"]` |
@@ -713,7 +755,7 @@ steps unobserved and refused at G5 for EVERY input. That was a property of the c
 not of §4.4 or of the pipeline: the steps' surfaces are BUILT unconditionally, and the surface the
 probe was handed did not say so. The drop was one layer ABOVE the extractor — it builds
 `result["vet"]` and `result["classify_later"]`, and the SDK's meta fold
-(`tortoise/sdk.py:15287`, `"stats": _capture_stats_with_step_witness(out, len(extracted))` inside
+(`tortoise/sdk.py:15470`, `"stats": _capture_stats_with_step_witness(out, len(extracted))` inside
 `_extract_session_v2`) forwarded `stats` and `error_census` only.
 
 **#9116 LANDED that seam** — `_capture_step_witness` (``tortoise/sdk.py``) copies each stage's own
