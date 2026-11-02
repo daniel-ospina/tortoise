@@ -67,8 +67,8 @@ Usage
     python3 tools/closes_landing.py --body-file body.md --base act-10465 \
         --carrier-body-file carrier.md          # offline: no network at all
 
-Exit codes: 0 = nothing inert · 3 = at least one inert closing ref · 2 = the
-question could not be measured (gh failed, or a base branch has no PR).
+Exit codes: 0 = nothing inert · 3 = at least one inert OR unresolved closing
+ref · 2 = the question could not be measured at all (gh/API failed).
 """
 
 from __future__ import annotations
@@ -95,11 +95,7 @@ _CLOSING_RE = re.compile(
     r"#(?P<number>\d+)\b"
 )
 
-_FENCE_RE = re.compile(r"(?P<fence>`{3,}|~{3,}).*?(?P=fence)", re.DOTALL)
 _INLINE_CODE_RE = re.compile(r"`[^`\n]*`")
-# A 4-space/tab indented block is code too. Stripped line-wise, before the
-# keyword scan, so a body that quotes an example cannot manufacture a warning.
-_INDENTED_CODE_RE = re.compile(r"^(?: {4}|\t).*$", re.MULTILINE)
 
 MAX_STACK_DEPTH = 20
 
@@ -142,7 +138,56 @@ class Finding:
         """A GitHub Actions `::warning` line. Newlines are percent-escaped
         because an annotation is ONE line — a raw newline truncates it."""
         msg = self.detail.replace("%", "%25").replace("\r", "").replace("\n", "%0A")
-        return f"::warning title=Inert Closes #{self.issue}::{msg}"
+        # The TITLE states the actual verdict: `unresolved` is not `inert` (it is
+        # "could not be measured"), and the title is the only text a reader sees
+        # before opening the log.
+        return (f"::warning title={self.verdict.capitalize()} Closes "
+                f"#{self.issue}::{msg}")
+
+
+def _fence_run(line: str) -> tuple[str, int] | None:
+    """The (character, length) of a leading ```/`~~~` fence run, if any."""
+    m = re.match(r"(`{3,}|~{3,})", line.lstrip())
+    return (m.group(1)[0], len(m.group(1))) if m else None
+
+
+def strip_code(body: str) -> str:
+    """Blank out the parts of a PR body that are CODE, not prose.
+
+    Line-based on purpose. CommonMark's rules that matter here:
+
+    * a fenced block opens with ``` or `~~~` and closes with the SAME character
+      and at least the same run length — a ```-only matcher with a same-length
+      backreference leaks the content of a ````-closed block;
+    * an INDENTED block cannot interrupt a paragraph or a list item, so a line
+      indented 4 spaces that CONTINUES prose is rendered text, not code.
+      Stripping every indented line (the first version of this) silently
+      swallowed real claims in checklists and nested bullets — a false pass,
+      the worst class here.
+    """
+    out: list[str] = []
+    fence: tuple[str, int] | None = None
+    prev_blank = True
+    for line in body.splitlines():
+        run = _fence_run(line)
+        if fence is not None:
+            if run and run[0] == fence[0] and run[1] >= fence[1]:
+                fence = None
+            out.append("")
+            prev_blank = False
+            continue
+        if run:
+            fence = run
+            out.append("")
+            prev_blank = False
+            continue
+        if (line.startswith("    ") or line.startswith("\t")) and prev_blank:
+            out.append("")  # an indented code block: preceded by a blank line
+            prev_blank = False
+            continue
+        out.append(line)
+        prev_blank = not line.strip()
+    return "\n".join(out)
 
 
 def parse_closing_refs(body: str, repo: str | None = None) -> list[int]:
@@ -160,9 +205,7 @@ def parse_closing_refs(body: str, repo: str | None = None) -> list[int]:
     (#10597 review P2-3). With no `repo`, a slug is treated as foreign: the
     function cannot tell, and inventing a finding is worse than missing one.
     """
-    text = _FENCE_RE.sub(" ", body or "")
-    text = _INLINE_CODE_RE.sub(" ", text)
-    text = _INDENTED_CODE_RE.sub("", text)
+    text = _INLINE_CODE_RE.sub(" ", strip_code(body or ""))
     seen: list[int] = []
     for m in _CLOSING_RE.finditer(text):
         slug = m.group("slug")
@@ -222,6 +265,21 @@ def classify(pr: PullRequest, by_head: dict[str, PullRequest],
                         f"`{default_branch}` yet."),
             ))
             continue
+        # A SUBJECT that was CLOSED WITHOUT MERGING never fired the keyword: it
+        # is not on the default branch, nothing was closed, and nothing landed.
+        # Checked BEFORE the `lands` arm, because that arm assumes a merge.
+        if pr.closed_unmerged:
+            findings.append(Finding(
+                issue=issue, pr=pr.number, base=pr.base, verdict="unresolved",
+                carrier=pr.number,
+                detail=(f"PR #{pr.number} says `Closes #{issue}` and targets "
+                        f"`{default_branch}`, but it was CLOSED WITHOUT "
+                        f"MERGING — GitHub never fired the keyword, so "
+                        f"#{issue} stays open and its work is not on "
+                        f"`{default_branch}`. Re-open it, or carry the change "
+                        f"(and the keyword) on the PR that does land."),
+            ))
+            continue
         # IDENTITY, not the PR number: the offline mode has no numbers, and a
         # number comparison would make 0 == 0 read as "this PR lands" — a false
         # pass on exactly the shape this tool exists to catch.
@@ -233,7 +291,7 @@ def classify(pr: PullRequest, by_head: dict[str, PullRequest],
                         f"`{default_branch}` — GitHub fires the keyword on merge."),
             ))
             continue
-        # A carrier that was CLOSED WITHOUT MERGING can never carry anything.
+        # A CARRIER that was CLOSED WITHOUT MERGING can never carry anything.
         # Reporting `lands` here would be the worst failure this tool has: the
         # remedy it itself printed ("re-state the keyword on PR #X") produces
         # exactly this state when #X is later closed or superseded, so the tool
@@ -328,19 +386,33 @@ def _to_pr(raw: dict) -> PullRequest:
     )
 
 
-def fetch_default_branch(repo: str | None) -> str:
-    # `gh repo view` takes the repo POSITIONALLY (it has no `--repo` flag); the
-    # positional form is also what keeps this read from answering for an ambient
-    # selector it was not asked about.
+def fetch_identity(repo: str | None) -> tuple[str, str]:
+    """(default branch, ``owner/name``) in ONE read.
+
+    The second half is not decoration: when `--repo` is omitted the caller has no
+    repo string, and `parse_closing_refs` treats every `owner/repo#N` as foreign
+    without one — so a same-repo QUALIFIED claim was silently dropped and the
+    sweep reported "nothing to report" over a real offender (review cycle 2,
+    finding 5). `gh repo view` already knows the name; this keeps it.
+
+    `gh repo view` takes the repo POSITIONALLY (it has no `--repo` flag), which
+    also stops the read answering for a selector it was not asked about.
+    """
     raw = _gh(["repo", "view", *([repo] if repo else []), "--json",
-               "defaultBranchRef"])
+               "defaultBranchRef,nameWithOwner"])
     try:
-        name = json.loads(raw)["defaultBranchRef"]["name"]
+        payload = json.loads(raw)
+        name = payload["defaultBranchRef"]["name"]
+        slug = payload.get("nameWithOwner") or ""
     except (KeyError, TypeError, ValueError) as exc:
-        raise Unmeasurable(f"the default branch could not be read: {raw[:200]}") from exc
+        raise Unmeasurable(f"the repo identity could not be read: {raw[:200]}") from exc
     if not name:
         raise Unmeasurable("the repo reported an empty default branch name")
-    return name
+    return name, slug
+
+
+def fetch_default_branch(repo: str | None) -> str:
+    return fetch_identity(repo)[0]
 
 
 def fetch_pr(number: int, repo: str | None) -> PullRequest:
@@ -477,13 +549,18 @@ def main(argv: list[str] | None = None) -> int:
                 by_head[args.base] = carrier
             findings = classify(pr, by_head, default_branch, args.repo)
         else:
-            default_branch = args.default_branch or fetch_default_branch(args.repo)
+            measured_default, slug = fetch_identity(args.repo)
+            default_branch = args.default_branch or measured_default
+            # Fall back to the repo gh just named: with no `--repo` the caller had
+            # no string, and a same-repo `owner/repo#N` claim would be dropped as
+            # foreign — a false pass by non-detection (review cycle 2, finding 5).
+            classify_repo = args.repo or slug or None
             if args.sweep:
-                findings = sweep(args.repo, default_branch)
+                findings = sweep(classify_repo, default_branch)
             else:
                 pr = fetch_pr(args.pr, args.repo)
                 by_head = collect_stack([pr], args.repo, default_branch)
-                findings = classify(pr, by_head, default_branch, args.repo)
+                findings = classify(pr, by_head, default_branch, classify_repo)
     except Unmeasurable as exc:
         print(f"closes_landing: UNMEASURED — {exc}", file=sys.stderr)
         return 2

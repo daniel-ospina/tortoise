@@ -271,10 +271,13 @@ def test_a_closed_unmerged_carrier_is_unresolved_never_lands():
     assert "CLOSED WITHOUT MERGING" in finding.detail
 
 
-def test_a_subject_pr_on_the_default_branch_lands_even_when_closed():
+def test_a_subject_pr_closed_without_merging_is_unresolved_never_lands():
+    """A PR closed WITHOUT merging never fired the keyword: nothing was closed
+    and nothing landed. The `lands` arm assumes a merge (#10597 review c2-2)."""
     pr = _pr(62, DEFAULT, "Closes #100", state="CLOSED")
     (finding,) = cl.classify(pr, _by_head(pr), DEFAULT)
-    assert finding.verdict == "lands"
+    assert finding.verdict == "unresolved"
+    assert "CLOSED WITHOUT MERGING" in finding.detail
 
 
 def test_pick_carrier_ranks_open_before_merged_before_closed():
@@ -361,3 +364,66 @@ def test_sweep_flags_only_the_offending_pr(monkeypatch):
     monkeypatch.setattr(cl, "_gh", fake_gh)
     findings = cl.sweep("owner/name", DEFAULT)
     assert [(f.pr, f.issue, f.verdict) for f in findings] == [(80, 100, "inert")]
+
+
+# ── cycle 2: the indented strip must not swallow REAL claims ────────────────
+
+@pytest.mark.parametrize("body,expected", [
+    # An indented block cannot interrupt a paragraph or a list item: these are
+    # rendered TEXT, so the keyword is a real claim and must survive the strip.
+    ("- fix it\n    - Closes #10541\n", [10541]),
+    ("- [x] fix it\n    Closes #10541\n", [10541]),
+    ("1. fix it\n    Closes #10541\n", [10541]),
+    ("see below\n    Closes #10541\n", [10541]),
+    # …but a block after a BLANK line is code, and a quoted keyword is not a claim.
+    ("note:\n\n    Closes #10541\n", []),
+])
+def test_indented_lines_that_continue_prose_are_still_claims(body, expected):
+    assert cl.parse_closing_refs(body) == expected
+
+
+@pytest.mark.parametrize("body,expected", [
+    # A closing fence may be LONGER than its opener (CommonMark), and a ```-only
+    # backreference leaked the content of the shorter-closed block.
+    ("````\nCloses #1\n`````\nCloses #2\n", [2]),
+    ("~~~\nCloses #1\n~~~~\nCloses #2\n", [2]),
+    ("```\nCloses #1\n```\nCloses #2\n", [2]),
+])
+def test_a_shorter_or_longer_closing_fence_is_honoured(body, expected):
+    assert cl.parse_closing_refs(body) == expected
+
+
+# ── cycle 2: the annotation title states the ACTUAL verdict ──────────────────
+
+def test_an_annotation_title_names_the_verdict_not_a_constant():
+    inert = cl.Finding(9, 1, SIBLING, "inert", 2, "x")
+    unresolved = cl.Finding(9, 1, SIBLING, "unresolved", None, "x")
+    assert "title=Inert Closes #9" in inert.annotation()
+    assert "title=Unresolved Closes #9" in unresolved.annotation()
+
+
+# ── cycle 2: sweep()'s POPULATION QUERY, not just its output ─────────────────
+
+def test_sweep_asks_for_the_OPEN_population(monkeypatch):
+    """A mutant that asks for `--state closed` returns the same stub population,
+    so the *argv* has to be pinned or the mutation survives (#10597 review c2-3)."""
+    import json as _json
+
+    calls = []
+
+    def fake_gh(args):
+        calls.append(list(args))
+        if "--head" in args:
+            return "[]"
+        return _json.dumps([
+            {"number": 90, "baseRefName": SIBLING, "body": "Closes #100",
+             "headRefName": "stacked", "state": "OPEN", "mergedAt": None},
+        ])
+
+    monkeypatch.setattr(cl, "_gh", fake_gh)
+    cl.sweep("owner/name", DEFAULT)
+    list_calls = [c for c in calls if "list" in c and "--head" not in c]
+    assert list_calls, "sweep() never asked for the open-PR population"
+    argv = list_calls[0]
+    assert argv[argv.index("--state") + 1] == "open"
+    assert "--limit" in argv
