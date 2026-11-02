@@ -1591,3 +1591,26 @@ def test_the_docstring_states_the_local_legs_DECLARED_ABSENT_fields():
     # must be in the contract, not only in the code.
     assert "HOSTED leg ONLY" in doc, (
         "the contract must qualify which leg compares kind/status/createdAt")
+
+
+def test_the_CLI_prints_the_tolerated_empty_days(tmp_path, capsys, monkeypatch):
+    """The tolerance must be VISIBLE on stdout, not just in the code path: an
+    undisclosed skip reads exactly like a day that went missing.
+
+    Mutation that goes RED here: deleting the `empty day  :` print loop.
+    """
+    import gzip
+    archive = tmp_path / "session-events" / "archive"
+    archive.mkdir(parents=True)
+    (archive / "2026-10-01.jsonl.gz").write_bytes(gzip.compress(b""))
+    _local_record(tmp_path / "session-events",
+                  {"s1": _conversation(("user", "hi"))})
+    monkeypatch.setattr(tpc, "read_graph_turns", lambda *a, **k: {
+        "nodes": {"s1_t0": _graph_node("s1_t0", "s1", content="[user] hi"),
+                  }, "unidentifiable": []})
+    code = tpc.main(["--uri", "docker://:@127.0.0.1:1/g",
+                     "--local-record-dir", str(tmp_path / "session-events")])
+    out = capsys.readouterr().out
+    assert code == 0, out
+    assert "empty day  : 2026-10-01.jsonl.gz" in out
+    assert "NOT a parity pass" in out
