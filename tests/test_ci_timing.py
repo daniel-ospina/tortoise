@@ -917,10 +917,10 @@ carve_out: []
 push_extra: []
 durations:
   test_surface_manifest.py: 199.1  # #9017 CI-junit 2026-10-18 (run 39165691659); was 180.7
+  test_6211_ep_scale.py: 19.0
   # #6211: locally measured on this host, docker lane, whole-file wall time over
   # several runs (shape: 23 tests / 12-19 s; scale: 4 tests / 10-19 s incl. the
   # 3,353-claim fixture build).
-  test_6211_ep_scale.py: 19.0
   test_raised.py: 87.4
   test_unchanged.py: 12.0  # #9017 CI-junit 2026-10-18 (run 39165691659); was 11.0
 """
@@ -6113,3 +6113,105 @@ def test_a_stripped_basis_clause_does_not_orphan_a_parenthesis() -> None:
         "(measured on the private lane); required for the durations coverage half")
     assert _balanced(stripped), stripped
     assert "required for the durations coverage half" in stripped, stripped
+
+
+# ── a WRAPPED note is ONE note (the 2026-11-02 refresh's half-parenthesis) ────
+#
+# A row's note is not the tail on its row line: the map wraps long notes across
+# indented `#` continuation lines (76 rows), and the guard that judges a written
+# map joins them before judging (`tests/test_ci_selection.py`
+# `_durations_row_comments`). The renderer used to reason about the row-line
+# FRAGMENT only, so a cut on the fragment dropped half a sentence and
+# `_balance_cut_parens` — seeing an unclosed `(` whose `)` sat on a continuation —
+# deleted the OPENER. The real casualty, at the 2026-11-02 head:
+#
+#   test_ci_catch_history.py: 3.1  # ci-timing junit-census+top-15 … ; was 9.5
+#     # never ran cannot appear in an artifact), so this is the LOCAL wall of …
+#
+# which reddened `test_no_durations_row_keeps_half_a_parenthesis` on the required
+# legs (run 41395489623, job 125131177056).
+_WRAPPED_NOTE_MANIFEST = """\
+surfaces:
+  core:
+    - test_wrapped_cut.py
+    - test_wrapped_append.py
+tier1: []
+slow_files: []
+carve_out: []
+push_extra: []
+durations_held_equal: {}
+surfaces_x: []
+durations:
+  test_wrapped_cut.py: 9.5  # #10131: a file has no CI junit measurement (a file that
+  # never ran cannot appear in an artifact), so this is the LOCAL wall: 69 of them
+  # — the count is re-derived, not trusted. Keep this sentence.
+# ⛔ COLUMN-0 PROSE inside the block: it is the map's own header, never a row's
+# note (199 such lines at the 2026-11-02 head), and a rewrite must not touch it.
+  test_wrapped_append.py: 6.8  # #9524: what it costs is a parse of three lockfiles
+  # plus, on a shallow clone, one `git ls-files` population read.
+"""
+
+
+def test_a_cut_on_a_wrapped_note_does_not_orphan_a_parenthesis() -> None:
+    """The renderer joins the span before cutting it, and re-emits the survivor.
+
+    Non-vacuity (measured against the pre-fix renderer at this commit's parent): the
+    cut ran on the row-line fragment, `_balance_cut_parens` deleted the `(` whose
+    `)` was on a continuation, and the emitted row was
+    `test_wrapped_cut.py: 3.1  # ci-timing … ; was 9.5` followed by the orphaned
+    `# never ran cannot appear in an artifact), …` lines — an unbalanced note and
+    a dangling clause, which is exactly what this test fails on.
+    """
+    text, _ = ci_timing.render_refreshed_manifest(
+        _WRAPPED_NOTE_MANIFEST, {"test_wrapped_cut.py": 3.1},
+        "2026-11-02T00:00:00Z",
+        sample_label="ci-timing junit-census+top-15 2026-11-02 (run 41375596528)")
+    note = _rendered_note(text, "test_wrapped_cut.py")
+    assert _balanced(note), f"a wrapped-note cut orphaned a parenthesis: {note}"
+    # The falsified claim goes with its clause; the record that survives stays, and
+    # it is not left dangling behind the row line as a stray continuation.
+    assert "no CI junit measurement" not in note, note
+    assert "never ran cannot appear in an artifact)" not in note, (
+        f"the continuation half of the cut clause survived as a fragment: {note}")
+    assert "Keep this sentence" in note, f"a surviving clause was lost: {note}"
+    assert "#10131" in note, f"the note lost its issue anchor: {note}"
+    assert note.strip().endswith("was 9.5"), note
+    # Nothing of the row is left as a continuation comment: the survivor is whole.
+    lines = text.splitlines()
+    at = lines.index(note)
+    assert not lines[at + 1].startswith("  # "), (
+        f"the cut note left an orphaned continuation line: {lines[at + 1]}")
+    # …and the block's COLUMN-0 prose is not a note, so the cut never touched it.
+    assert "\n# ⛔ COLUMN-0 PROSE inside the block" in text
+
+
+def test_an_appended_basis_lands_at_the_end_of_a_wrapped_note() -> None:
+    """An APPEND keeps the writer's line breaks and adds the basis at the end.
+
+    A re-base of `test_wrapped_append.py` leaves its rationale intact, so the note
+    must not be re-flowed and the added clause must not be spliced into the middle
+    of a sentence — the row line is mid-thought by construction when the note wraps.
+
+    Non-vacuity: pre-fix the basis was written onto the row-line fragment, giving
+    `… three lockfiles — ci-timing junit-census+top-15 …` with the note's second
+    sentence stranded after it.
+    """
+    text, _ = ci_timing.render_refreshed_manifest(
+        _WRAPPED_NOTE_MANIFEST, {"test_wrapped_append.py": 4.4},
+        "2026-11-02T00:00:00Z",
+        sample_label="ci-timing junit-census+top-15 2026-11-02 (run 41375596528)")
+    lines = text.splitlines()
+    row = _rendered_note(text, "test_wrapped_append.py")
+    assert row == (
+        "  test_wrapped_append.py: 4.4  # #9524: what it costs is a parse of "
+        "three lockfiles"), row
+    continuation = next(
+        ln for ln in lines if ln.startswith("  # plus, on a shallow clone"))
+    assert continuation.endswith("population read. — ci-timing junit-census+top-15 "
+                                "2026-11-02 (run 41375596528); was 6.8"), continuation
+    # One appended clause, not two: a second render at the same reading is a no-op
+    # on the note (a duplicated basis is how a note grows a sentence per refresh).
+    again, _ = ci_timing.render_refreshed_manifest(
+        text, {"test_wrapped_append.py": 4.4}, "2026-11-02T00:00:00Z",
+        sample_label="ci-timing junit-census+top-15 2026-11-02 (run 41375596528)")
+    assert again == text, "a second render at the same reading rewrote the note"
