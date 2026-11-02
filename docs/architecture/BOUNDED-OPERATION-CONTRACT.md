@@ -91,15 +91,18 @@ bounds are named here rather than folded into the marker because folding them in
 path does exactly this at `sdk.py:34571-34579`), and this document is the census, not the fix.
 
 ⚠️ **`tortoise_query`'s structural arm is a different surface, and not ONE surface** — it splits on
-`paginated`, and each half has two returns. With `offset`/`page` given it returns a `hasMore`/`total`
-dict: the `tag` arm at `mcp_server.py:2710-2712`, the default arm at `:2721-2730` → `sdk.py:22255`
-(that method's `return {... "hasMore": skip + limit < total}`). Only the default arm passes
-`limit=eff_limit` on to `paginated_query`, so only that one is *bounded* in §1's sense; the `tag` arm
-slices in Python after a full read, which is also why it can report `total` — but both carry the §2
-end-of-collection signal. Unpaginated it is a bare `list[dict]`: `tag` at `:2701-2703`, default at
-`:2736-2738` → `sdk.py:22101-22104` (`TortoiseSDK.query`) — neither passes a `limit`, so neither is
-bounded. None of those four has a row in the census above; per the absence rule below, read them
-from this ⚠️ as named-but-not-yet-censused, never as compliant.
+`paginated`, and neither half is uniform. With `offset`/`page` given the result IS bounded at the
+caller's `limit`, and **marked**: the `tag` arm slices at `mcp_server.py:2708` and returns
+`{"results", "total", "hasMore"}` at `:2710-2712`; the default arm pushes `limit=eff_limit` into
+`paginated_query` at `:2726` → `sdk.py:22245`'s `LIMIT $limit` → `:22255` (that method's
+`return {... "hasMore": skip + limit < total}`). Both bound the result by §1's definition — they
+differ in whether the bound is pushed into the query, not in whether one exists. Unpaginated there
+are three returns and two shapes: `tag` returns the bare list at `:2703`, and the default arm —
+which reads through `TortoiseSDK.query` (`:2736-2738` → `sdk.py:22101-22104`) — returns the bare list
+at `:2745` — or, when that list is empty and a `kind` was given,
+`{"results", "suggestion"}` at `:2740-2744`, a dict that still carries no `hasMore`/`total`. None of
+those five has a row in the census above; per the absence rule below, read them from this ⚠️ as
+named-but-not-yet-censused, never as compliant.
 
 ⚠️ **The census is a population, and this table is the part of it that has been measured** — it is
 NOT yet exhaustive. §1 also names *body/log caps* and *ingest chunking*, and no row here covers
