@@ -3046,9 +3046,11 @@ def test_a_base_where_the_log_predates_the_registration_refuses_an_ordered_contr
     published when the registration was not.
 
     Measured by the reviewer as the counterexample to a `_squashed_base`-only claim (review cycle 8,
-    finding 1). Kept because it exercises the log-side base read through a path the squash test does
-    not: no orphan branch, no equal epochs, no shared add-commit — so a future change that special-
-    cases the squash shape cannot pass both.
+    finding 1). Kept because it exercises the log-side base read through axes the squash test does
+    not: the epochs on the base are NOT equal, and there is NO shared add-commit (the log lands
+    first, in its own commit, before the registration). ⛔ It does NOT differ by "no orphan branch" —
+    an earlier version of this line said so and was false; both witnesses build their base on an
+    orphan branch. A future change that special-cases the squash shape cannot pass both.
     """
     repo = _repo(tmp_path, monkeypatch)
     _git(repo, "remote", "add", "origin", "https://example.invalid/x.git")
