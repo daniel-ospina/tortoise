@@ -1500,8 +1500,12 @@ def test_every_hosted_auth_seam_stamps_the_same_field():
     root = Path(__file__).resolve().parent.parent / "tortoise"
     seams = {
         "supabase_control.py": '"graph_namespace": graph_namespace',
-        "hosted_api.py": '"graph_namespace": row.get("graph_name")',
-        "oauth.py": 'org["graph_namespace"] = _default_ns',
+        # ⛔ THE STAMP MOVED OUT OF THE DICT LITERAL (#10452 review F2): the
+        # session lane now takes BOTH fields from one `default_graph_for_credential`
+        # read, so the assignment is what has to exist — not a `row.get("graph_name")`
+        # key in the literal, which is exactly the half that straddled a promotion.
+        "hosted_api.py": 'org["graph_namespace"] = (',
+        "oauth.py": 'org["graph_namespace"] = _pair_ns or _default_ns',
     }
     for rel, needle in seams.items():
         src = (root / rel).read_text(encoding="utf-8")
@@ -1993,6 +1997,121 @@ def test_every_default_graph_lane_resolves_both_answers_once():
         assert any(k.arg == "default_graph_id" for k in binds[0].keywords), (
             f"{lane} binds without handing over the tenant it just read — the "
             "bind then READS again, which is the split")
+
+
+# ── 14b. …and the CREDENTIAL lanes take the same pair from one read ────────
+# §14's argument, applied to the three resolvers that build the DICT every
+# request lane consumes. They carried the namespace from the `organizations`
+# row and the id from a later `public.graphs` read — two statements, two
+# snapshots — so a promotion committing between them handed the credential the
+# DEMOTED namespace with the PROMOTED id (#10452 review F2).
+_CREDENTIAL_PAIR_LANES = (
+    ("supabase_control.py", "resolve_api_key"),
+    ("hosted_api.py", "_session_user_org"),
+    ("oauth.py", "resolve_oauth_access_token"),
+)
+
+
+def test_the_credential_pair_describes_one_graph(monkeypatch):
+    """An org-wide API KEY's `(graph_namespace, default_graph_id)` name ONE row.
+
+    The race is driven deterministically: the fake fires a real
+    `promote_default_graph` immediately after answering the FIRST
+    `organizations`/`graphs` read, i.e. exactly between read #1 (the namespace,
+    off the org row) and read #2 (the id, off `public.graphs`) of the pre-fix
+    shape.
+
+    FAIL-ON: with the pair resolved by two reads this credential opens the
+    DEMOTED graph (`org_{TEAM}`) while `record_tenant_for` files every row under
+    the PROMOTED graph (`NEW_ID`) — the graph/data split #10025 exists to
+    remove, on the credential class with the most production instances. The
+    non-vacuity half below measures that split on this very fixture.
+    """
+    from tortoise.auth import lookup_hash
+    from tortoise.supabase_control import default_graph_id_for, resolve_api_key
+
+    key = "tt_10180pair0123456789"
+
+    def _key_row() -> dict:
+        return {"id": "key-10180", "org_id": TEAM,
+                "lookup_hash": lookup_hash(key), "key_prefix": key[:10],
+                "created_via": "bootstrap", "created_by": "user-1",
+                "expires_at": None, "revoked_at": None}
+
+    fake = _fake_org_row(monkeypatch, f"org_{TEAM}")   # org row: NEVER promoted
+    fake.seed("api_keys", [_key_row()])
+    orig_query = fake.query
+    fired: list[bool] = []
+
+    def _query(table, **kw):
+        rows = orig_query(table, **kw)
+        if table in ("organizations", "graphs") and not fired:
+            fired.append(True)
+            # The promotion commits NOW — after this read answered and before
+            # the next could be asked.
+            fake.rpc("promote_default_graph",
+                     {"p_org_id": TEAM, "p_graph_id": NEW_ID},
+                     representation=True)
+        return rows
+
+    monkeypatch.setattr(fake, "query", _query)
+    cred = resolve_api_key(fake, key)
+    assert fired, "the fake never served an organizations/graphs read — nothing was raced"
+    assert (cred["graph_namespace"], cred["default_graph_id"]) in (
+        (f"org_{TEAM}", OLD_ID), (f"org_{TEAM}_{NEW_ID}", NEW_ID)), (
+        "the namespace this credential OPENS and the tenant it FILES UNDER must "
+        "describe the same default row: got "
+        f"{(cred['graph_namespace'], cred['default_graph_id'])!r} — that pair "
+        "is a graph/data split (#10025)")
+
+    # ── NON-VACUITY: the PRE-FIX two-read shape still splits on this fixture,
+    # so the assertion above is discriminating rather than descriptive. Rebuilt
+    # on a fresh control plane because the promotion above already moved it.
+    two = _fake_org_row(monkeypatch, f"org_{TEAM}")
+    name_before = f"org_{TEAM}"                      # read #1: the org row
+    two.rpc("promote_default_graph",
+            {"p_org_id": TEAM, "p_graph_id": NEW_ID},
+            representation=True)                     # the commit
+    tenant_after = default_graph_id_for(two, TEAM)   # read #2: public.graphs
+    assert (name_before, tenant_after) == (f"org_{TEAM}", NEW_ID), (
+        "the fixture no longer reproduces the split — the test above would be "
+        f"vacuous. got {(name_before, tenant_after)!r}")
+
+
+def test_every_credential_resolver_takes_the_default_pair_from_one_read():
+    """Source pin for the CLASS: all THREE credential resolvers, AST-based.
+
+    The API-key, SESSION/JWT and OAuth resolvers are three copies of one
+    question, and the pair they stamp is the pair a request's data plane and its
+    record both consume — so none of them may take half the answer from the org
+    row and half from `public.graphs`.
+
+    FAIL-ON: revert any of them to `default_graph_id_for_credential` (or a bare
+    `default_graph_id_for` / `default_graph_row_for`) and that lane reds here
+    even if its own behaviour test is out of scope for the shard that ran it.
+    """
+    import ast
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent / "tortoise"
+    halves = {"default_graph_id_for_credential", "default_graph_id_for",
+              "default_graph_row_for"}
+    for rel, fn_name in _CREDENTIAL_PAIR_LANES:
+        tree = ast.parse((root / rel).read_text(encoding="utf-8"))
+        fns = {n.name: n for n in ast.walk(tree)
+               if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+        assert fn_name in fns, f"{rel}::{fn_name} is gone — update this pin"
+        callees = {getattr(c.func, "id", None) or getattr(c.func, "attr", None)
+                   for c in ast.walk(fns[fn_name]) if isinstance(c, ast.Call)}
+        assert "default_graph_for_credential" in callees, (
+            f"{rel}::{fn_name} no longer takes the default graph's namespace AND "
+            "id from one read (`default_graph_for_credential`) — two reads "
+            "straddle a promotion and split the graph it opens from the rows "
+            "it files")
+        assert not (callees & halves), (
+            f"{rel}::{fn_name} reads half the pair on its own "
+            f"({sorted(callees & halves)}) — that is a SECOND read of a "
+            "fact the pair already answers in one")
 
 
 # ── 15. No SDK is constructed inside a CONTROL-PLANE worker pool (#7500) ────

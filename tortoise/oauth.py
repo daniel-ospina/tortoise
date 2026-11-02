@@ -2136,15 +2136,23 @@ def resolve_oauth_access_token(cp, token: str) -> dict | None:
     # default-graph row id on the dict and `record_tenant_for` (the one
     # declaration both transports call) refused every armed write `no_tenant`
     # for the whole `oat_` class. The row is resolved through the SAME home the
-    # API-key lane uses (`default_graph_id_for_credential`), so the three
+    # API-key lane uses (`default_graph_for_credential`), so the three
     # credential classes cannot name different defaults; a `None` here stays a
     # NAMED refusal counted `no_tenant`, never a guess, and the lookup/mint is
     # contract-bound never to fail this caller.
-    from tortoise.supabase_control import default_graph_id_for_credential
+    #
+    # ⛔ ONE READ FOR BOTH FIELDS (#10452 review F2): the namespace above comes
+    # from the `organizations` row while the id used to come from a SEPARATE
+    # `public.graphs` read, and a `promote_default_graph` committing between the
+    # two handed this credential the DEMOTED namespace with the PROMOTED id —
+    # the MCP lane then opened one graph and filed every record under the other.
+    # The pair is one row, so it is asked once.
+    from tortoise.supabase_control import default_graph_for_credential
 
-    org["default_graph_id"] = default_graph_id_for_credential(
-        cp, row["org_id"], context="oauth auth self-heal")
-    org["graph_namespace"] = _default_ns
+    _pair_ns, _pair_id = default_graph_for_credential(
+        cp, row["org_id"], _default_ns, context="oauth auth self-heal")
+    org["default_graph_id"] = _pair_id
+    org["graph_namespace"] = _pair_ns or _default_ns
     # #2600: the resolved dict carries the RAW actor fields (the token row's
     # user_id/client_id) so consuming seams (mcp_auth middleware / REST DI)
     # can alias the canonical `actor_user_id` — additive, transport-agnostic

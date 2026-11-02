@@ -7274,7 +7274,7 @@ async def _session_user_org(request: Request, user: dict) -> dict:
         _ORG_ADDITIVE_IMPORT_TIER,
         _QUOTA_SELECT,
         _orgs_row_fail_soft,
-        default_graph_id_for_credential,
+        default_graph_for_credential,
     )
     row = await _cp_offload(
         lambda: _orgs_row_fail_soft(
@@ -7348,11 +7348,14 @@ async def _session_user_org(request: Request, user: dict) -> dict:
         # #10180: the org's DEFAULT graph namespace, carried on the credential so
         # this lane resolves the same default `resolve_api_key` gives a
         # key-auth request (`graph_namespace`) — including after the default has
-        # been PROMOTED into another namespace. `graph_name` rides
-        # `_QUOTA_SELECT` (base 0006), so this costs no extra read; None on a
-        # pre-graph_name row, which `_default_graph_name` reads as "fall back to
-        # the historical namespace=org_id open" rather than as a graph name.
-        "graph_namespace": row.get("graph_name"),
+        # been PROMOTED into another namespace. It is stamped BELOW, from the
+        # same single read that yields `default_graph_id` (#10452 review F2):
+        # taken off the `organizations` row (`row["graph_name"]`) while the id
+        # came from a later `public.graphs` read, a promotion committing between
+        # the two opened the DEMOTED graph and filed the record rows under the
+        # PROMOTED one. `graph_name` stays the FALLBACK value on the arm where
+        # that read is refused.
+        #
         # #2475: dashboard_key_login doubles as the UI state the dashboard
         # switch renders (website/apps/dashboard main.jsx: aria-checked /
         # data-on = org.dashboard_key_login !== false) — carry the REAL
@@ -7372,9 +7375,16 @@ async def _session_user_org(request: Request, user: dict) -> dict:
     # refused `no_tenant` while the data lands in the default graph
     # (`_data_sdk` opens `namespace=org_id`): a whole credential class invisible
     # to the record, silently. Resolved through the SAME home the API-key lane
-    # uses — `default_graph_id_for_credential`, which is
-    # `default_graph_id_for` plus the on-miss mint — never a second notion of
-    # "which graph is this".
+    # uses — `default_graph_for_credential`, which is the pair plus the on-miss
+    # mint — never a second notion of "which graph is this".
+    #
+    # ⛔ BOTH FIELDS COME FROM THAT ONE READ (#10452 review F2, and the reason
+    # this lane no longer stamps `graph_namespace` in the dict literal above):
+    # the namespace used to come off the `organizations` row while the id came
+    # from a later `public.graphs` read, so a promotion committing between them
+    # left this credential opening the DEMOTED graph and filing the record under
+    # the PROMOTED one. `row["graph_name"]` remains the FALLBACK namespace, for
+    # the arm where the read is refused (fail-soft, otherwise unchanged).
     #
     # Fail-soft and never gating the request (#5148's rule, and the resolver's
     # own contract): a `None` here is a NAMED refusal counted `no_tenant`, not
@@ -7387,17 +7397,26 @@ async def _session_user_org(request: Request, user: dict) -> dict:
     # `OFFLOAD_REFUSED` sentinel rather than `None` (see `_cp_offload`).
     # `record_tenant_for` type-checks `str`, so the refusal direction is already
     # fail-closed — but the sentinel must not sit in a field NAMED
-    # `default_graph_id`, so it is normalised here and a later consumer cannot
-    # inherit it.
-    _resolved_default_graph_id = await _cp_offload(
-        lambda: default_graph_id_for_credential(
+    # `default_graph_id`, so the pair is normalised here and a later consumer
+    # cannot inherit it.
+    _resolved_default_pair = await _cp_offload(
+        lambda: default_graph_for_credential(
             cp, org_id, row.get("graph_name"),
             context="session auth self-heal"),
         op="default_graph_row", best_effort=True)
+    _pair_namespace, _pair_row_id = (
+        _resolved_default_pair
+        if isinstance(_resolved_default_pair, tuple)
+        and len(_resolved_default_pair) == 2
+        else (None, None))
     org["default_graph_id"] = (
-        _resolved_default_graph_id
-        if isinstance(_resolved_default_graph_id, str) and _resolved_default_graph_id
+        _pair_row_id
+        if isinstance(_pair_row_id, str) and _pair_row_id
         else None)
+    org["graph_namespace"] = (
+        _pair_namespace
+        if isinstance(_pair_namespace, str) and _pair_namespace
+        else row.get("graph_name"))
     # #1913: post-auth abuse evaluation — the session-JWT lane was the
     # abuse-blind hole (key lanes call _abuse_post_auth in get_current_org /
     # _get_current_org_supabase; session-driven REST calls never recorded an
