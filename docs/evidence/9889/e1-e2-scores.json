@@ -81,7 +81,8 @@
    "share": 0.008772,
    "below_floor": false,
    "artifact": "docs/evidence/9889/on-arm.log"
-  }
+  },
+  "decided_by": "E2a"
  },
  "gate_drops": {
   "artifact": "docs/evidence/9889/e1-gate-drops.json",

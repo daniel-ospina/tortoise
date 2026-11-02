@@ -470,6 +470,79 @@ def test_no_row_cites_the_superseded_e1_e2_log():
         assert rows[criterion]["evidence"] == measure.E1_E2_SCORES, criterion
 
 
+def test_the_e1_e2_record_refuses_a_denominator_the_record_did_not_freeze(tmp_path):
+    """P1: a drifted E2a denominator must not score. 20 units scored 14/20 would
+    PASS a bar the pre-registration wrote over 14 — a false green on the one row
+    this bundle exists to certify."""
+    repo = tmp_path / "repo"
+    shutil.copytree(_REPO / "docs/evidence/9889", repo / "docs/evidence/9889")
+    shutil.copytree(_REPO / "docs/evidence/7949-capstone",
+                    repo / "docs/evidence/7949-capstone")
+    for name in ("e2a-value-units.json", "e2a-value-units-falsifier.json"):
+        path = repo / "docs/evidence/9889" / name
+        record = json.loads(path.read_text())
+        for block in (record, record.get("with_anchor") or {}):
+            if block.get("value_units") == 14:
+                block["value_units"] = 20
+                block["value_survived"] = 14
+        path.write_text(json.dumps(record))
+    with pytest.raises(SystemExit) as refused:
+        scores_probe.score(repo)
+    assert refused.value.code == 2, refused.value
+
+
+def test_the_e2_row_is_the_composite_and_not_e2a_alone():
+    """P1: a record whose fused half fails must not render a GREEN row.
+
+    E2 is `E2a AND E2b`. Deriving the row from E2a alone would let a failing
+    proxy through — the row and the record it cites would disagree.
+    """
+    parsed = measure.measure_e1_e2(_REPO)
+    bars = measure.parse_bars(json.loads(PREREG.read_text()))
+    e2a = measure.e2a_outcome(parsed, bars)
+    e2b_bad = measure.outcome(measured=True, below_floor=False, passed=False,
+                              bar="fused share <= 0.05", value="fused=7/114")
+    composite = measure.outcome(
+        measured=True, below_floor=False,
+        passed=(e2a["outcome"] == "PASS" and e2b_bad["outcome"] == "PASS"),
+        bar="composite", value="x")
+    assert composite["outcome"] != "PASS"
+    # and the record itself states which half decided it
+    record = json.loads(SCORES.read_text())
+    assert record["e2"]["outcome"] == "FAIL"
+    assert record["e2"]["decided_by"] in {"E2a", "E2b", "both"}
+
+
+def test_the_e1_e2_record_refuses_a_denominator_the_record_did_not_freeze_meta(
+        tmp_path, capsys):
+    """Guard: the frozen denominator and the E2a threshold agree in the record.
+
+    They are asserted through the bar reader rather than against a second copy of
+    the numbers: `corpus.value_bearing_units` and `criteria[E2a]`'s `of` are two
+    frozen statements about ONE denominator, so a record where they disagree is a
+    refusal (below) rather than a bar printed over whichever one the code read
+    first.
+    """
+    floors = scores_probe.frozen_denominators(_REPO)
+    assert floors["e2a_units"] == 14
+    assert floors["bars"]["E2a"] == {"required": 13, "of": 14}
+
+    repo = tmp_path / "repo"
+    shutil.copytree(_REPO / "docs/evidence/9889", repo / "docs/evidence/9889")
+    shutil.copytree(_REPO / "docs/evidence/7949-capstone",
+                    repo / "docs/evidence/7949-capstone")
+    path = repo / "docs/evidence/7949-capstone/preregistration.json"
+    prereg = json.loads(path.read_text())
+    for entry in prereg["criteria"]:
+        if entry["id"] == "E2a":
+            entry["threshold"] = "`>= 13 of 20`"   # disagrees with corpus \u2192 14
+    path.write_text(json.dumps(prereg))
+    with pytest.raises(SystemExit) as refused:
+        scores_probe.score(repo)
+    assert refused.value.code == 2, refused.value
+    assert "denominator disagree" in capsys.readouterr().err
+
+
 def test_the_e1_e2_record_refuses_when_the_falsifier_is_inert(tmp_path):
     """A counter nothing moves is not a measurement — the record must refuse."""
     repo = tmp_path / "repo"
