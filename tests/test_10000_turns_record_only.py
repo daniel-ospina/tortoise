@@ -2490,12 +2490,14 @@ def test_an_unarmed_capture_puts_the_turn_text_in_the_graph(sdk, monkeypatch):
     `APPLIED`, so `_landed` is True and the `#10000` outcome fallback never
     reaches `_TURN_WRITE_CYPHER`.
 
-    ⛔ Keep that dependency in view when editing this test. Before the stub was
-    added, the forced-arm mutation left it GREEN, because an UNSTUBBED unarmed
-    seam returns `None`, `_landed(None)` is False, and the outcome fallback then
-    wrote the graph. So the same mutation has two different effects across this
-    test's own history, and a docstring that states one of them as the invariant
-    will be wrong on one side of that edit.
+    ⛔ Keep the stub in view when editing this test: it is what gives the carrier
+    guard in the body below its population on the forced arm. Unstubbed, the seam
+    on this DSN-less arm is the REAL `write_live_record`, which returns `None`;
+    `_landed` reads `None` as unrecorded, so the `#10000` outcome fallback writes
+    the graph and the forced-arm run reaches `assert graph_hits` satisfied — while
+    the carrier guard observes nothing, because no carrier ever reaches this
+    test's `seam`. Delete the stub and the test passes under the mutation it
+    exists to catch.
 
     ⛔ THE RECORD HALF **IS** ASSERTED, and only the ROW half is unassertable.
     With no DSN there are no record rows to inspect, but the JOURNAL is readable
