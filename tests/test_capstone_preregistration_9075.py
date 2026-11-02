@@ -2761,12 +2761,14 @@ def test_a_fatal_unprovable_ordering_still_reports_the_findings_it_holds(tmp_pat
                                                                         capsys):
     """A reason with no fallback must not FORFEIT what was already proven without history.
 
-    `main` prints only `str(exc)`, so re-raising the fatal exception bare cleared every finding
-    accumulated before it: this run's own completeness / E4 / single-measured-log findings, and the
-    git-FREE ones the exception carries (#9075 r6 P2: "an unprovable history must not clear a
-    laundering finding that needed no history to prove"). Measured on the pre-fix tree, this bundle
-    exited 1 and LISTED the two-scored-logs finding; with the fatal arm re-raising bare it exited 2
-    naming only the base ref, and the finding vanished from the output.
+    `main` prints only `str(exc)`, so a refusal raised at the catch site clears every finding
+    accumulated before it — and the history-free halves that run AFTER the ordering check
+    (`check_machine_record`, the corpus pins) never run at all. Measured with the raise at the
+    catch site: a bundle with two `capstone-measured-*.log` files exited 2 naming only the base
+    ref, and the duplication finding vanished. #9075 r6 P2 states the invariant: "an unprovable
+    history must not clear a laundering finding that needed no history to prove." The refusal is
+    therefore DEFERRED to the end of `run()`, and this test asserts findings from BOTH sides of
+    that deferral.
     """
     repo = _repo(tmp_path, monkeypatch)
     _git(repo, "symbolic-ref", "HEAD", "refs/heads/contrib")
@@ -2789,6 +2791,39 @@ def test_a_fatal_unprovable_ordering_still_reports_the_findings_it_holds(tmp_pat
         "the fatal arm must carry the findings it already proved — an exit 2 that names only the "
         f"base ref clears a laundering/duplication finding by omission. Found: {output}"
     )
+    # The half that runs AFTER the ordering check. A catch-site raise forfeited it even after the
+    # first attempt at carrying findings, so it is pinned separately: no `preregistration.json` was
+    # written into this bundle, and its absence is history-free.
+    assert "preregistration.json" in output, (
+        "the deferral exists so the history-free halves AFTER the ordering check still report: the "
+        f"missing machine record must appear in the refusal. Found: {output}"
+    )
+
+
+def test_a_directory_that_is_not_a_git_checkout_gets_its_OWN_reason(tmp_path, monkeypatch, capsys):
+    """#10547 review 3 P2: NO_BASE_REF asserted "has a remote" where no repository exists at all.
+
+    `resolve_base_ref` collapses three states to `None`: a remote with no resolvable base, git
+    failing to report the remotes, and a directory that is not a working tree. One message for all
+    three is a false statement in two of them — and now that this refusal is PRINTED, its remedy
+    ("git fetch origin main") is advice that cannot work where there is no repository to fetch in.
+    """
+    plain = tmp_path / "plain"
+    bundle = plain / "docs" / "evidence" / "7949-capstone"
+    bundle.mkdir(parents=True)
+    (bundle / check.PREREG_NAME).write_text(PREREG.read_text())
+    monkeypatch.setattr(check, "REPO_ROOT", plain.resolve())
+
+    code = check.main(["--dir", str(bundle), "--no-corpus"])
+    printed = capsys.readouterr()
+    output = printed.out + printed.err
+    assert code == 2, output                          # still refused, still "could not check"
+    assert "not a git checkout" in output, output
+    assert "has a remote" not in output, (
+        "the diagnostic must not assert a remote this directory does not have — the same false-"
+        f"reason class this branch exists to remove. Found: {output}"
+    )
+    assert "git fetch origin main" not in output, output
 
 
 def test_an_unprovable_ordering_reports_its_own_reason_not_a_constant(monkeypatch):

@@ -714,6 +714,20 @@ NO_BASE_REF = (
     "green one: fetch the base (git fetch origin main) or name it with --base-ref"
 )
 
+#: The other two states that resolve to "no base ref", kept DISTINCT because their remedies are
+#: different and the diagnostic above would be a false statement in both (#10547 review 3 P2):
+#: that message asserts "this checkout has a remote", which is not established when `git remote`
+#: itself failed, and it is false in a directory that is not a checkout at all.
+NO_GIT_CHECKOUT = (
+    "UNPROVABLE — not a git checkout: this directory is not inside a git working tree, so no "
+    "history can be read here and the pre-registration ordering cannot be measured at all. Run the "
+    "check from a clone, or pass --no-git when the ordering is deliberately out of scope"
+)
+NO_GIT_ANSWER = (
+    "UNPROVABLE — git could not report this checkout's remotes (exit {code}), so no base ref can "
+    "be resolved and the ordering claim — which is against the PUBLISHED base — cannot be checked"
+)
+
 SAME_PR_REFUSAL = (
     "{prereg} is not on the merge base ({base}): this change adds {n} evidence log(s) against a "
     "pre-registration that is NOT yet published there. A pre-registration must land FIRST, in its "
@@ -753,6 +767,24 @@ def resolve_base_ref(explicit: str | None = None) -> str | None:
     if code == 0 and not out.strip():
         return "HEAD"
     return None
+
+
+def no_base_ref_reason() -> str:
+    """WHY :func:`resolve_base_ref` answered ``None`` — three states, three remedies.
+
+    ``resolve_base_ref`` collapses them to one ``None``, which was fine while the reason was never
+    printed. Now that the refusal is user-visible, one message for all three is a false statement in
+    two of them: "this checkout has a remote" is not established when ``git remote`` returned
+    non-zero, and it is false in a directory that is not a checkout at all — where the remedy it
+    names (``git fetch origin main``) cannot succeed either (#10547 review 3 P2).
+    """
+    code, out = _git_stdout(["rev-parse", "--is-inside-work-tree"])
+    if code != 0 or out.strip() != "true":
+        return NO_GIT_CHECKOUT
+    code, out = _git_stdout(["remote"])
+    if code != 0:
+        return NO_GIT_ANSWER.format(code=code)
+    return NO_BASE_REF
 
 
 def _added_epochs_on(ref: str, path: Path) -> list[int]:
@@ -1043,7 +1075,7 @@ def check_ordering(prereg: Path, logs: list[Path], pins: dict | None = None,
 
     base = resolve_base_ref(base_ref)
     if base is None:
-        raise HistoryUnavailable(NO_BASE_REF, failures, fatal=True)
+        raise HistoryUnavailable(no_base_ref_reason(), failures, fatal=True)
 
     # The registration's appearance ON THE BASE — the only side a squash merge cannot rewrite.
     prereg_epochs = _added_epochs_on(base, prereg)
@@ -1533,6 +1565,12 @@ def run(directory: Path, use_git: bool = True, use_corpus: bool = True,
     failures: list[str] = []
     failures += check_completeness(rows)
     failures += check_e4_denominator(rows, text, pins)
+    #: Set when the ordering half refuses with a reason that has NO fallback. It is raised at the
+    #: END of this function, not at the catch site: `check_machine_record` and the corpus half run
+    #: AFTER the ordering half and are both history-FREE, so raising early forfeited their findings
+    #: — the #9075 r6 P2 invariant, one step further out (#10547 review 3 P1, measured: a stale
+    #: `document_sha256` in the record was discarded by exactly this).
+    fatal_exc: HistoryUnavailable | None = None
 
     logs = sorted(directory.glob(EVIDENCE_LOG_GLOB))
     report["evidence_logs"] = [p.name for p in logs]
@@ -1550,31 +1588,15 @@ def run(directory: Path, use_git: bool = True, use_corpus: bool = True,
             ordering = "verified"
         except HistoryUnavailable as exc:
             # A reason with NO fallback is not the third outcome — it is a check that could not be
-            # performed, which `main` must report as exit 2. Re-raising hands it to the CheckError
-            # arm with its OWN message; folding it in (as every HistoryUnavailable used to be)
-            # made NO_BASE_REF INERT: the CLI exited 0 and printed the shallow-clone reason for a
-            # checkout that is not shallow (#10547 review P1, measured before this fix).
-            if exc.fatal:
-                # The findings already accumulated are NOT forfeited by a reason with no fallback:
-                # `main` prints only `str(exc)`, so a bare re-raise would drop (a) this run's own
-                # completeness / E4-denominator / single-measured-log findings and (b) the git-FREE
-                # findings the exception carries — the #9075 r6 P2 invariant restated four lines
-                # below, and the class docstring's own promise. Measured before this: a bundle whose
-                # record disagreed with its document exited 2 naming only the base ref, with the
-                # sha256 disagreement (the class this gate exists for) discarded.
-                found = failures + exc.failures
-                if not found:
-                    raise
-                raise CheckError(
-                    str(exc)
-                    + "\nALREADY FOUND by the checks that need no history (the base ref does not "
-                      "affect them, and they still stand):"
-                    + "".join(f"\n  - {finding}" for finding in found)
-                ) from exc
-            # The THIRD outcome: neither a pass nor an ordering failure. Folding it into either is
-            # what reds a correctly ordered tree in every CI test job (#9075 r4 P1). The git-FREE
-            # findings it carries are kept — an unprovable history must not clear a laundering
-            # finding that needed no history to prove.
+            # performed, which `main` must report as exit 2. Folding it in (as every
+            # HistoryUnavailable used to be) made NO_BASE_REF INERT: the CLI exited 0 and printed
+            # the shallow-clone reason for a checkout that is not shallow (#10547 review P1).
+            #
+            # It is NOT raised HERE: the halves below are history-free, so the refusal is deferred
+            # to the end of the function and carries every finding they produce. The THIRD outcome
+            # (the shallow-clone reason, `fatal=False`) is unaffected: folding THAT into a failure
+            # or a pass is what reds a correctly ordered tree in every CI test job (#9075 r4 P1).
+            fatal_exc = exc if exc.fatal else None
             failures += exc.failures
             # The REASON is the exception's own message, never a constant: a hardcoded
             # HISTORY_UNAVAILABLE here reported "shallow clone" for every unprovable checkout.
@@ -1626,6 +1648,21 @@ def run(directory: Path, use_git: bool = True, use_corpus: bool = True,
     # report rather than letting a skip flag silently turn an assertion into a green (#9075 review
     # P2-4). CI and the §7 acceptance command run the full check.
     report["run_order_claim"] = report["ordering"]
+
+    if fatal_exc is not None:
+        # Deferred to here on purpose: everything above except the git ordering half is history-free,
+        # so `failures` now holds the completeness, E4-denominator, single-measured-log, pins-exempt,
+        # laundering, machine-record and corpus findings. An exit 2 that named only the base ref
+        # would clear all of them by omission (#9075 r6 P2 / #10547 review 3 P1).
+        if not failures:
+            raise fatal_exc
+        raise CheckError(
+            str(fatal_exc)
+            + "\nALREADY FOUND by the checks that need no history (the base ref does not affect "
+              "them, and they still stand):"
+            + "".join(f"\n  - {finding}" for finding in failures)
+        ) from fatal_exc
+
     return report
 
 
