@@ -99,6 +99,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import contextvars
 import functools
 import logging
 import threading
@@ -446,4 +447,34 @@ class RetrievalMeteringMiddleware:
                     # Awaited on a worker thread (never fire-and-forget): the
                     # ledger write is blocking, so it must not run on the loop,
                     # and the row is committed before the wrap-up completes.
-                    await asyncio.to_thread(flush_tally, pending, org)
+                    #
+                    # #10602: the worker is the BEST-EFFORT lane (``telemetry``),
+                    # not the loop's shared default executor. The flush sits on
+                    # every read request's wrap-up, and ``asyncio.to_thread``
+                    # queues on a pool whose wait is UNBOUNDED and which ~180
+                    # other sites share — so a query the store answered in 40 ms
+                    # could still keep its request task parked behind an
+                    # unrelated tenant's stall, and the read surface that
+                    # exists to measure work became a reason a read could not
+                    # finish.
+                    #
+                    # ⚠️ ``cancel_on_timeout=False`` is NOT a detail. The tally
+                    # was already DETACHED by ``take_and_reset`` above, so a
+                    # bound that cancels a QUEUED submission would DROP the row
+                    # silently — the delivery-preserving arm still runs it, and
+                    # the bound abandons only the await (the #4456 semantics).
+                    # A refusal that leaves no row is REPORTED on this module's
+                    # own drop lane, so the loss is attributable rather than
+                    # invisible: under the old unbounded ``to_thread`` the flush
+                    # always eventually ran, and a refused flush must not be the
+                    # one drop this module cannot name.
+                    from tortoise.monitoring import (
+                        ControlPlaneOffloadError, run_control_plane_call)
+                    try:
+                        await run_control_plane_call(
+                            functools.partial(contextvars.copy_context().run,
+                                              flush_tally, pending, org),
+                            op="retrieval.flush", pool="telemetry",
+                            cancel_on_timeout=False)
+                    except ControlPlaneOffloadError as exc:
+                        _report(org_id=org, error=exc)

@@ -2129,6 +2129,67 @@ CONTROL_PLANE_GRAPH_WORKER_NAME = "tortoise-graph"
 CONTROL_PLANE_GRAPH_WORKERS = 8
 CONTROL_PLANE_GRAPH_BACKLOG = 128
 
+#: #10602: a SIXTH pool — the READ path's own blocking round trip.
+#:
+#: The measured defect (comment 6582118507 on #10602): the app answered a search
+#: in 3.7–14.6 s while a DIRECT ``GRAPH.QUERY`` on the same graph, same second,
+#: answered in 41–80 ms — and a single-id point read moved with it. The store was
+#: never the queue; the request was WAITING FOR A WORKER SLOT on the loop's
+#: SHARED default executor (``min(32, cpu+4)`` — 6 on prod's 2 vCPU), where the
+#: module's ~180 other ``asyncio.to_thread`` sites run under an UNBOUNDED wait.
+#: #3060 gave long/stallable WORK dedicated pools and #3498/#3773 gave the graph
+#: HELPERS one, but the read path's own round trip kept riding the shared pool,
+#: so it paid every other tenant's stall and every other tenant paid its.
+#:
+#: Why a pool of its OWN and not the ``graph`` lane: the graph lane's occupancy
+#: is a PINNED contract — exactly ONE submission per read request, its SDK
+#: construction (``test_read_routes_submit_one_graph_pool_submission``) — and a
+#: read slot is a different resource class from a construction slot: a
+#: construction is a cold ~28-round-trip open, a read is the hot query. Sharing
+#: one pool would make a burst of cold opens and a burst of searches bid for the
+#: same 8 workers, which is the isolation argument #3498 review P1 used to split
+#: ``telemetry`` out, applied one layer down.
+#:
+#: Width 8 mirrors ``CONTROL_PLANE_GRAPH_WORKERS`` — the same I/O-bound class on
+#: the same production box — so the read lane can never become a NARROWER
+#: bottleneck than the lane that already carries every read request's SDK
+#: construction. The widened default executor is deliberately NOT the fix: a
+#: bigger shared pool is the same defect with a longer fuse (it still has no
+#: bound and still shares its queue with ~180 sites).
+CONTROL_PLANE_READ_WORKER_NAME = "tortoise-read"
+CONTROL_PLANE_READ_WORKERS = 8
+CONTROL_PLANE_READ_BACKLOG = 128
+
+#: #10602: the read lane's WAIT BOUND — the whole point of owning the lane.
+#:
+#: A submitted read spends its bound QUEUED OR RUNNING (``_await_future`` starts
+#: the clock at submission), so a stranded slot fails the ONE request legibly
+#: (503 ``graph_unavailable``, retryable) instead of queueing forever and
+#: breaching the TRANSPORT budget later with "the work may still complete" —
+#: which for a submission that never ran is a false statement, and which is what
+#: the ticket measured as a 504 ``-32009`` after 10–15 s.
+#:
+#: 8.0 s, not the graph lane's derived bound: a read is a HOT round trip (the
+#: measured store answer is 41–80 ms), so its bound is a saturation gate, not a
+#: cold-start allowance. It sits BELOW ``mcp_auth._TRANSPORT_WAIT_BOUND_S``
+#: (10 s) deliberately, so the lane's legible refusal is what the caller sees
+#: when the pool is the reason — not a transport timeout that mis-describes
+#: queued work as in-flight. The ordering is pinned by
+#: ``test_read_bound_sits_below_the_transport_wait_bound`` (the same shape as
+#: ``test_fetch_deadline_sits_below_the_offload_bound``).
+CONTROL_PLANE_READ_TIMEOUT_S = 8.0
+
+
+def read_offload_timeout_s() -> float:
+    """#10602: the read lane's wait bound, resolved at CALL time.
+
+    A function, not a frozen default argument, for the same reason
+    ``graph_offload_timeout_s`` / ``probe_setup_timeout`` are: a module-global
+    read at import time cannot be monkeypatched, and the bound a lane refuses
+    on must be the bound a test can shrink to prove the refusal path.
+    """
+    return CONTROL_PLANE_READ_TIMEOUT_S
+
 #: Margin added to the projection cold-start allowance for the DATA-PLANE graph
 #: lane (#3773). The bound is resolved at CALL time (``graph_offload_timeout_s``)
 #: from ``probe_setup_timeout()``, NOT from the frozen import-time default: an
@@ -2336,7 +2397,10 @@ def control_plane_worker(pool: str = "auth") -> _SingleSlotWorker:
     for the attacker-reachable OAuth client-resolution lane, so a CIMD fetch
     flood cannot park the auth slots either; ``pool="graph"`` (#3773) is the
     graph-lane pool — FalkorDB work, data-plane AND registry reads (#3718) —
-    kept off auth capacity for the same isolation reason; ``pool="org"`` (#7678) keeps the
+    kept off auth capacity for the same isolation reason; ``pool="read"``
+    (#10602) is the READ path's own lane, so a search/window read can never
+    queue behind the shared default executor's other tenants (and they can
+    never queue behind it); ``pool="org"`` (#7678) keeps the
     org-create lane's SEQUENTIAL gate reads off auth capacity so a create-org
     request is not the sum of its queue waits behind authentication work. The graph pool's callables SET
     ContextVars (the #2600 actor bind), so it must be reached ONLY through the
@@ -2358,6 +2422,10 @@ def control_plane_worker(pool: str = "auth") -> _SingleSlotWorker:
         return daemon_worker(CONTROL_PLANE_GRAPH_WORKER_NAME,
                              workers=CONTROL_PLANE_GRAPH_WORKERS,
                              max_backlog=CONTROL_PLANE_GRAPH_BACKLOG)
+    if pool == "read":
+        return daemon_worker(CONTROL_PLANE_READ_WORKER_NAME,
+                             workers=CONTROL_PLANE_READ_WORKERS,
+                             max_backlog=CONTROL_PLANE_READ_BACKLOG)
     if pool == "oauth":
         return daemon_worker(CONTROL_PLANE_OAUTH_WORKER_NAME,
                              workers=CONTROL_PLANE_OAUTH_WORKERS,

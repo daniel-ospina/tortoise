@@ -356,17 +356,25 @@ class TestMiddleware:
         assert calls[0]["queries"] == 1
 
     def test_an_empty_tally_pays_no_thread_hop(self, monkeypatch):
-        # Mutation: dropping the is_empty() guard → the to_thread hop runs (and
-        # is spent) before flush_tally discovers there is nothing to write.
+        # Mutation: dropping the is_empty() guard → the offload hop runs (and is
+        # spent) before flush_tally discovers there is nothing to write.
+        #
+        # #10602: the spied seam is the one the middleware ACTUALLY uses —
+        # ``monitoring.run_control_plane_call`` on the best-effort lane. It used
+        # to be ``asyncio.to_thread``; spying on that after the flush moved made
+        # this test VACUOUS (measured by review: removing the is_empty() guard
+        # still passed, because an empty tally's ``flush_tally`` writes nothing
+        # either way, so ``calls == []`` held regardless).
         calls = _capture_writer(monkeypatch)
         hops: list = []
-        real = asyncio.to_thread
+        import tortoise.monitoring as _monitoring
+        real = _monitoring.run_control_plane_call
 
-        async def _spy(fn, *a, **kw):
+        async def _spy(fn, **kw):
             hops.append(fn)
-            return await real(fn, *a, **kw)
+            return await real(fn, **kw)
 
-        monkeypatch.setattr(asyncio, "to_thread", _spy)
+        monkeypatch.setattr(_monitoring, "run_control_plane_call", _spy)
         self._run({"type": "http", "method": "POST",
                    "state": {"org_id": ORG}}, note=False)
         assert calls == []

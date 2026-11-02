@@ -1418,6 +1418,105 @@ def test_heartbeat_task_records_lag_each_tick():
     monitoring._reset_heartbeat()
 
 
+# ── #10602: the READ path's own lane ────────────────────────────────────────
+
+
+def test_read_pool_is_separate_from_all_other_pools():
+    """#10602: a read burst must not park an auth/graph/telemetry slot — and
+    they must not park it.
+
+    Same isolation argument #3498 review P1 used to split ``telemetry`` out and
+    #3773 used for ``graph``, applied to the hot READ round trip: the measured
+    defect was a 40–80 ms store behind a 3.7–14.6 s answer because the read
+    queued on the SHARED default executor behind other tenants. A shared pool
+    with any of these lanes re-creates it one lane down."""
+    pools = {
+        name: monitoring.control_plane_worker(name)
+        for name in ("auth", "graph", "telemetry", "oauth", "org", "read")
+    }
+    assert len(set(pools.values())) == len(pools), (
+        "a read submission shared a pool with another lane")
+    assert pools["read"].workers == monitoring.CONTROL_PLANE_READ_WORKERS
+
+
+def test_read_bound_sits_below_the_transport_wait_bound():
+    """#10602: the read lane's wait bound must sit BELOW the transport budget.
+
+    The lane exists to fail a stranded read LEGIBLY. If its bound lands above
+    ``mcp_auth._TRANSPORT_WAIT_BOUND_S`` the transport seam always fires first,
+    and its 504 spells "the work may still complete" for a submission that was
+    never dequeued — the misleading refusal #10602 measured. The ordering is the
+    contract; the numbers are free to move together (mirrors
+    ``test_fetch_deadline_sits_below_the_offload_bound``).
+    """
+    from tortoise import mcp_auth
+
+    assert monitoring.read_offload_timeout_s() < \
+        mcp_auth._TRANSPORT_WAIT_BOUND_S, (
+            "the read lane's bound reached/exceeded the transport wait bound — a "
+            "stranded read would be refused as in-flight work it never ran "
+            "(#10602)")
+
+
+def test_read_offload_routes_to_the_read_pool(monkeypatch):
+    """WIRING guard (the #3773 re-review gap, same shape): reverting
+    ``_read_offload``'s ``pool="read"`` back to the default ``auth`` pool kept
+    every read test green — silently re-parking the auth slots the lane exists
+    to protect. Record what the seam actually passes."""
+    seen: list[tuple[str, str]] = []
+
+    async def _recorder(fn, *, op, pool="auth", timeout=None,
+                        cancel_on_timeout=True, best_effort=False,
+                        unavailable=None):
+        seen.append((pool, op))
+        return fn()
+
+    monkeypatch.setattr(ha, "run_control_plane_call", _recorder)
+
+    async def _run():
+        return await ha._read_offload(lambda: "rows", op="search")
+
+    assert asyncio.run(_run()) == "rows"
+    assert [p for p, _ in seen] == ["read"], (
+        f"_read_offload used pools {seen} — the read path must use the "
+        "dedicated `read` lane (#10602)")
+
+
+def test_read_offload_maps_failure_to_the_graph_503(monkeypatch):
+    """#10602: a saturated / bound-missed read is a retryable 503
+    ``graph_unavailable`` — never a silent empty (the #3892 shape #3718's
+    disclosure forbids) and never the sign-in ``control_plane_unavailable``
+    copy, which would mislead a client retrying a read."""
+    # Patch the name ``hosted_api`` actually resolved (it imports the resolver
+    # into its own namespace, the same reason the graph sibling patches ``ha``).
+    monkeypatch.setattr(ha, "read_offload_timeout_s", lambda: 0.05)
+
+    async def _run():
+        await ha._read_offload(lambda: time.sleep(0.4), op="read-slow")
+
+    with pytest.raises(HTTPException) as excinfo:
+        asyncio.run(_run())
+    assert excinfo.value.status_code == 503
+    assert excinfo.value.detail["error_code"] == "graph_unavailable"
+
+
+def test_read_offload_isolates_the_caller_context():
+    """#10602: the read callable runs under a CONTEXT COPY, like every other
+    offload seam — a pool thread is process-lifetime, so a ContextVar written at
+    its top level would leak into the NEXT request the worker serves."""
+    import contextvars
+
+    probe: contextvars.ContextVar[str] = contextvars.ContextVar("probe")
+
+    async def _run():
+        probe.set("request-a")
+        return await ha._read_offload(lambda: probe.get("missing"), op="ctx")
+
+    assert asyncio.run(_run()) == "request-a"
+    probe.set("request-b")
+    assert probe.get() == "request-b"
+
+
 # ── premise guard ───────────────────────────────────────────────────────────
 
 

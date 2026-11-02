@@ -160,6 +160,7 @@ from tortoise.monitoring import (  # #2850/2953 liveness-readiness decouple
     HealthProbe,
     event_retention_interval,
     graph_offload_timeout_s,
+    read_offload_timeout_s,
     heartbeat_record,
     loop_heartbeat_info,
     loop_heartbeat_task,
@@ -9197,6 +9198,63 @@ async def _graph_offload(fn, *, op: str, timeout: float | None = None):
         unavailable=_graph_unavailable)
 
 
+async def _read_offload(fn, *, op: str):
+    """#10602: run ONE read-path graph ROUND TRIP on the dedicated read lane.
+
+    The read handlers used to submit their blocking query with the house
+    ``asyncio.to_thread(...)``. That submits to the loop's SHARED default
+    executor (``min(32, cpu+4)`` — 6 on prod's 2 vCPU), whose queue is
+    UNBOUNDED and which ~180 other ``to_thread`` sites share. The measured
+    consequence (#10602, comment 6582118507): a 40–80 ms store behind a
+    3.7–14.6 s answer, with a single-id point read degrading in the same 32 s
+    step — the request was waiting for a WORKER SLOT, not for the store.
+
+    #3060 answered this class for long/stallable WORK (``_CAPTURE_EXECUTOR``,
+    ``_DREAM_EXECUTOR``, …) and #3498/#3773 for the graph HELPERS
+    (``_graph_offload``); the read path is the tenant that was left on the
+    shared pool. This is the same seam for it: the ``read`` pool
+    (``monitoring.CONTROL_PLANE_READ_*``), a BOUNDED wait
+    (``read_offload_timeout_s()``, deliberately below the transport bound), and
+    the graph lane's fail-closed 503 (``_graph_unavailable``) so a stranded slot
+    fails LEGIBLY rather than queueing forever.
+
+    Preserved, deliberately — these are the four properties a concurrency change
+    here is most likely to break:
+
+    * **contextvars** — the callable runs under a COPY of the caller's context
+      (``ctx.run``), exactly as ``_submit_off_loop`` and ``_graph_offload`` do,
+      because a pool thread is process-lifetime: a ContextVar set at its top
+      level would leak into the NEXT request the worker serves. That copy is
+      also what carries the loop-side ``_bind_actor_context`` / ``_bind_record_tenant``
+      binds into the worker.
+    * **``bind_metering_context``** — unchanged in meaning: the retrieval legs
+      inside ``search_engine`` still bind the two metering vars explicitly for
+      THEIR sub-threads, and the copied context carries a capture's ``_ACTIVE``
+      counter (a mutable object shared by reference) exactly as the
+      ``asyncio.to_thread`` copy did. No rebinding happens here.
+    * **``_submit_off_loop``'s contract** — untouched. That helper exists for the
+      capture/dream pools and its callers depend on receiving the CONCURRENT
+      future; this seam needs a bounded await instead, which is
+      ``run_control_plane_call``'s job — the same pairing ``_graph_offload``
+      already uses rather than a second helper.
+    * **graceful shutdown** — the ``read`` pool is a ``daemon_worker`` (daemon
+      threads, bounded backlog, process-lifetime), so a read wedged on a
+      black-holed socket cannot make uvicorn/Fly shutdown join it — the #2850
+      reason the offload seams are daemon pools and not a second
+      ``ThreadPoolExecutor``.
+
+    Only WHERE the round trip runs changes: the callable and its result are the
+    same objects the route returned before, so every route's own error mapping
+    (its 500 arm, its ``status: degraded`` arm) is preserved. A lane refusal is a
+    503 ``graph_unavailable`` — retryable, and NOT the empty-shape refusal #3892
+    forbids.
+    """
+    ctx = contextvars.copy_context()
+    return await _cp_offload(
+        functools.partial(ctx.run, fn), op=op, pool="read",
+        timeout=read_offload_timeout_s(), unavailable=_graph_unavailable)
+
+
 async def _capture_session_probe_off_loop(org: dict, session_id: str):
     """#4625 leg 62: the capture's SDK open + projection attach + session probe.
 
@@ -10254,10 +10312,12 @@ async def list_points(
     # socket client) — `_get_proj()` opens/attaches it and `g.query` is the
     # round trip — so BOTH ride one worker hand-off. Nothing between the two
     # touches thread-unsafe state, and the query string/params were already
-    # built on the loop. Same `asyncio.to_thread` pattern the write handlers
-    # and /v1/search use.
-    rows = await asyncio.to_thread(
-        lambda: sdk._get_proj().g.query(query, params=params).result_set)
+    # built on the loop. #10602: on the dedicated, BOUNDED read lane rather
+    # than the shared default executor (the write handlers keep their own
+    # lanes; this one is the read path's).
+    rows = await _read_offload(
+        lambda: sdk._get_proj().g.query(query, params=params).result_set,
+        op="list_points")
     results = []
     for r in rows:
         d = r[0]
@@ -10417,7 +10477,8 @@ async def get_point(point_id: str, org: dict = Depends(get_current_org_gated)): 
             # is the most-travelled counting path in `prefer` mode: it is taken
             # for every request whose org has no nameable default row).
             reason = record_serve.FALLBACK_RECORD_TENANT_UNRESOLVED
-            props_from_cache = await asyncio.to_thread(_cache_props)
+            props_from_cache = await _read_offload(_cache_props,
+                                                  op="get_point.cache")
             record_serve.note_fallback(reason)
             served = record_serve.ServedAnswer(
                 read=record_serve.READ_POINT_BY_ID,
@@ -10426,9 +10487,18 @@ async def get_point(point_id: str, org: dict = Depends(get_current_org_gated)): 
                 fallback_reason=reason)
         else:
             try:
-                served = await asyncio.to_thread(
-                    record_serve.serve_point, tenant=tenant, point_id=point_id,
-                    cache_answer=_cache_props, mode=mode)
+                # #10602 review P2: this arm carries the SAME graph round trip
+                # (``cache_answer=_cache_props`` is invoked by the record
+                # reader), so in ``prefer``/``record`` mode the single-id read
+                # would otherwise still queue on the shared default executor —
+                # the measured #10602 shape, reachable in the two modes this
+                # route's own docstring calls the anchored read. Same callable,
+                # same keyword arguments; only WHERE it runs changes.
+                served = await _read_offload(
+                    lambda: record_serve.serve_point(
+                        tenant=tenant, point_id=point_id,
+                        cache_answer=_cache_props, mode=mode),
+                    op="get_point.serve")
             except record_serve.RecordUnavailable as e:
                 # 'record' mode has no cache branch. Answering 404 here would
                 # turn an IMPAIRED read into a finding of absence — the exact
@@ -10464,7 +10534,11 @@ async def get_point(point_id: str, org: dict = Depends(get_current_org_gated)): 
                 raise
 
     if served is None:
-        props = await asyncio.to_thread(_cache_props)
+        # #10602: the single-id point read's graph round trip rides the same
+        # dedicated read lane as the listing/search reads — the ticket's own
+        # evidence is that a point read degraded in the SAME 32 s step as
+        # search, because both waited for a shared-executor slot.
+        props = await _read_offload(_cache_props, op="get_point.cache")
     else:
         props = served.props
     if not props:
@@ -10724,11 +10798,26 @@ async def search(q: str, limit: int = Query(10, ge=1, le=100), org: dict = Depen
         # query encode (sdk.py model.encode, ~10-50ms for bge-small) runs
         # inline plus the 3 search legs. In a single-worker async server this
         # serializes ALL requests on the event loop. Offload to a worker
-        # thread so concurrent searches overlap their encode/DB work (same
-        # asyncio.to_thread pattern used throughout this file).
-        results = await asyncio.to_thread(
-            sdk.tortoise_fts_query, q, limit=limit,
-            read_status_out=status_out, _truncation_out=trunc_out)
+        # thread so concurrent searches overlap their encode/DB work — on the
+        # dedicated, BOUNDED read lane (#10602), never the shared default
+        # executor, where this 40–80 ms round trip sat behind other tenants'
+        # stalls and became a 3.7–14.6 s answer. Same callable, same result;
+        # only WHERE it runs changes.
+        results = await _read_offload(
+            lambda: sdk.tortoise_fts_query(
+                q, limit=limit, read_status_out=status_out,
+                _truncation_out=trunc_out),
+            op="search")
+    except HTTPException:
+        # #10602 review P1: the read lane's capacity refusal is an
+        # ``HTTPException`` (503 ``graph_unavailable``) and it is raised INSIDE
+        # the ``try`` below — so this blanket arm would repaint the ONE legible,
+        # retryable refusal this change exists to deliver as a non-retryable 500
+        # "Search failed" (with no ``error_code``), plus a full ``exception()``
+        # traceback per refused request at the saturation moment. The construction
+        # refusal always sat OUTSIDE this ``try``, which is why the 503 copy was
+        # previously unreachable here.
+        raise
     except Exception:
         import logging
         logging.getLogger("tortoise.api").exception("search failed")
@@ -10799,13 +10888,20 @@ async def topic_summary(
     try:
         # #1676 (launch capacity): topic_summarize is CPU-blocking (EP
         # classification + neighborhood traversal) — offload to a worker
-        # thread so the event loop stays free (same as the /v1/search fix).
-        result = await asyncio.to_thread(
-            sdk.topic_summarize, topic,
-            max_seeds=max_seeds, max_hops=max_hops,
-            include_relationships=include_relationships,
-        )
+        # thread so the event loop stays free. #10602: on the dedicated,
+        # BOUNDED read lane (same as /v1/search), not the shared pool.
+        result = await _read_offload(
+            lambda: sdk.topic_summarize(
+                topic,
+                max_seeds=max_seeds, max_hops=max_hops,
+                include_relationships=include_relationships,
+            ),
+            op="topic_summary")
         return result
+    except HTTPException:
+        # #10602 review P1: same arm as /v1/search — a read-lane refusal keeps
+        # its 503 ``graph_unavailable`` body instead of a 500.
+        raise
     except Exception:
         import logging
         logging.getLogger("tortoise.api").exception("topic summary failed")

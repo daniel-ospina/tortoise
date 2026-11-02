@@ -117,6 +117,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import os
 import threading
 import time
 from pathlib import Path
@@ -778,12 +779,15 @@ def test_read_routes_submit_one_graph_pool_submission(
     The pool's occupancy disclosure (``tortoise/monitoring.py``,
     ``CONTROL_PLANE_GRAPH_*`` — the #3669 "not hidden" rule) now states that
     each read request in this set submits here exactly ONCE, for its SDK
-    construction, and that its graph READS do not come here at all (they ride
-    the house ``asyncio.to_thread`` default executor, ``dream_health``'s pass on
-    ``_DREAM_EXECUTOR``). The count is ``len(_CONSTRUCTION_CASES)``, derived
+    construction, and that its graph READS do not come here at all — since
+    #10602 they ride the dedicated ``read`` lane (``CONTROL_PLANE_READ_*``,
+    through ``hosted_api._read_offload``), and ``dream_health``'s pass rides
+    ``_DREAM_EXECUTOR``. The count is ``len(_CONSTRUCTION_CASES)``, derived
     rather than restated. That number is the rule's content, so it is pinned
     here rather than left to prose: a second submission per read changes the
     pool's read pressure, and a ZERO means the construction went back inline.
+    (The #10602 read lane is a SEPARATE pool on purpose — a construction is a
+    cold open, a read is the hot round trip; see the occupancy block there.)
 
     RED on the pre-#3718 shape — the inline construction submitted nothing to
     this pool, which is why the disclosure block had no read-plane line at all.
@@ -1404,6 +1408,13 @@ _OFFLOAD_BOUNDARY_CALLEES = frozenset({
     # UNBOUNDED semantics as ``_run_off_loop``, but a dedicated pool instead
     # of the loop's shared default executor.
     "_run_index_off_loop",
+    # #10602: the READ path's own bounded offload (`hosted_api._read_offload`,
+    # the ``read`` pool). Without this member the AST pin cannot see the read
+    # routes' round trip at all and reports the CORRECT shape as a violation
+    # (measured: ``list_points`` "declared OFF-LOADED but still run sync FalkorDB
+    # GRAPH I/O inline") — the same blindness ``_graph_offload`` was added for
+    # in #4660.
+    "_read_offload",
     "_cp_offload", "_oauth_offload", "run_control_plane_call",
     "run_on_daemon_worker", "_graph_offload",
     # #3718: the per-MODE lane alias in ``list_my_orgs``
@@ -2620,3 +2631,192 @@ def test_capture_session_probe_attaches_off_the_loop(monkeypatch):
         assert row is not None
     finally:
         sdk.close()
+
+
+# ── #10602: the read path must not queue on the SHARED default executor ─────
+#
+# The measured defect (comment 6582118507 on #10602): the app answered a search
+# in 3.7–14.6 s while a DIRECT_STORE query on the same graph, same second,
+# answered in 41–80 ms — and a single-id point read moved with it. The store was
+# never the queue: the request was WAITING FOR A WORKER SLOT. `asyncio.to_thread`
+# submits to the loop's SHARED default executor (`min(32, cpu+4)` — 6 on prod's
+# 2 vCPU), where the module's ~180 other `to_thread` sites run, and its wait is
+# UNBOUNDED, so a read whose round trip is 40 ms can still be answered 14 s late
+# or not at all.
+#
+# #3060 gave long/stallable work dedicated pools (`_CAPTURE_EXECUTOR`,
+# `_DREAM_EXECUTOR`, …) and #3498/#3773 gave the graph helpers one
+# (`CONTROL_PLANE_GRAPH_*`), but the READ PATH's own round trip kept riding the
+# shared pool. These tests are the executable claim that it no longer does.
+
+#: How long a read must answer INSIDE while every default-executor slot is
+#: occupied. The stall below is 4× this, so the assertion cannot be satisfied by
+#: a queue that is merely slow — only by a read that does not queue there.
+READ_ANSWER_BOUND_S = 3.0
+#: How long the blockers hold their slots (released explicitly; this is the
+#: backstop that keeps a leaked blocker from hanging the suite).
+DEFAULT_EXECUTOR_STALL_S = 12.0
+
+#: The read routes whose blocking round trip rides the dedicated `read` lane.
+#: Derived names, so a renamed route in `_READ_CASES` cannot leave a stale
+#: duplicate assertion here.
+_READ_LANE_CASES = frozenset({
+    "points-list", "point-get", "search", "topic-summary"})
+
+
+def _default_executor_width() -> int:
+    """The width CPython gives ``loop.run_in_executor(None, …)``.
+
+    ``concurrent.futures`` sizes the default executor at ``min(32, cpu + 4)`` —
+    the very ``min(32, cpu+4) — 6 on prod's 2 vCPU`` the #3060 note derives.
+    Computed, never hardcoded: the test must occupy EVERY slot to be
+    deterministic, and on a 2-vCPU box that is 6, not 32.
+    """
+    return min(32, (os.cpu_count() or 1) + 4)
+
+
+def _stall_the_default_executor(loop, width: int):
+    """Occupy EVERY default-executor slot with one blocked callable.
+
+    Returns ``(blockers, occupied, release)``: ``blockers`` are the concurrent
+    futures, ``occupied`` is a ``threading.Event`` the LAST blocker sets once all
+    ``width`` slots are provably running, and ``release`` unblocks them.
+
+    Occupancy is proven by the workers themselves (each increments under a lock
+    and the last one sets the event) rather than by sleeping: a test that merely
+    QUEUED the blockers would pass on the defect, because the read's own
+    submission could be dequeued ahead of them.
+    """
+    release = threading.Event()
+    occupied = threading.Event()
+    lock = threading.Lock()
+    state = {"running": 0}
+
+    def _block() -> None:
+        with lock:
+            state["running"] += 1
+            if state["running"] >= width:
+                occupied.set()
+        release.wait(DEFAULT_EXECUTOR_STALL_S)
+
+    blockers = [loop.run_in_executor(None, _block) for _ in range(width)]
+    return blockers, occupied, release
+
+
+def test_a_read_lane_refusal_keeps_its_503_on_the_read_routes(client):
+    """#10602 review P1: a saturated read lane must not be repainted as a 500.
+
+    ``/v1/search`` and ``/v1/topics/{t}/summary`` wrap their read in a blanket
+    ``except Exception -> 500``. The lane's refusal is an ``HTTPException``
+    (503 ``graph_unavailable``, retryable) raised INSIDE that ``try``, so without
+    an ``except HTTPException: raise`` ahead of it the ONE legible refusal this
+    change exists to deliver reaches the client as a non-retryable 500 with no
+    ``error_code`` — and logs a full traceback per refused request at exactly
+    the saturation moment.
+
+    RED on the shape that shipped the conversion without the arm (measured by
+    review: 500 ``{"detail": "Search failed"}`` / ``"Topic summary failed"``
+    against 503 for ``list_points``, which has no blanket arm).
+    """
+    from fastapi import HTTPException
+
+    import tortoise.hosted_api as ha_mod
+    from tortoise.hosted_api import app
+
+    _seed_read_surface()
+
+    async def _refuse(*_a, **_kw):
+        raise ha_mod._graph_unavailable()
+
+    monkeypatch_refuse = pytest.MonkeyPatch()
+    monkeypatch_refuse.setattr(ha_mod, "_read_offload", _refuse)
+    try:
+        async def _run():
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(transport=transport,
+                                         base_url="http://test") as ac:
+                return [await ac.get(url) for url in
+                        ("/v1/search?q=seed", "/v1/topics/release/summary")]
+
+        responses = asyncio.run(_run())
+    finally:
+        monkeypatch_refuse.undo()
+
+    for response in responses:
+        assert response.status_code == 503, (
+            f"{response.request.url.path} repainted a read-lane capacity "
+            f"refusal as {response.status_code}: {response.text[:200]} — the "
+            f"refusal must stay the retryable 503 `graph_unavailable` (#10602)")
+        assert response.json()["detail"]["error_code"] == "graph_unavailable"
+
+
+def test_the_read_path_answers_while_the_default_executor_is_stalled(client):
+    """#10602: a read answers inside its bound while the shared pool is full.
+
+    RED on the pre-#10602 shape, and the RED is a TIMEOUT rather than a wrong
+    number: each read route's ``await asyncio.to_thread(...)`` is submitted to
+    the shared default executor, whose queue is unbounded, so with every slot
+    occupied it never gets one and the read never answers — which is exactly
+    what the ticket measured (a 40–80 ms store behind a 3.7–14.6 s answer).
+
+    GREEN only if the read's round trip runs on its OWN bounded lane. A raised
+    pool size does not pass: ``_default_executor_width()`` derives the size the
+    loop actually builds, so a bigger shared pool is occupied too (a bigger
+    shared pool is the same defect with a longer fuse).
+    """
+    from tortoise.hosted_api import app
+
+    _seed_read_surface()
+
+    cases = [c for c in _READ_CASES if c[0] in _READ_LANE_CASES]
+    assert len(cases) == len(_READ_LANE_CASES), (
+        "a label in `_READ_LANE_CASES` has no `_READ_CASES` row — the read-lane "
+        f"case was renamed or dropped: "
+        f"{sorted(_READ_LANE_CASES - {c[0] for c in _READ_CASES})}")
+
+    width = _default_executor_width()
+    timings: dict[str, float] = {}
+    failures: list[str] = []
+
+    async def _run() -> None:
+        loop = asyncio.get_running_loop()
+        blockers, occupied, release = _stall_the_default_executor(loop, width)
+        try:
+            while not occupied.is_set():
+                await asyncio.sleep(0.01)
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(transport=transport,
+                                         base_url="http://test") as ac:
+                for label, handler, request_kwargs in cases:
+                    started = time.monotonic()
+                    try:
+                        response = await asyncio.wait_for(
+                            ac.request(**request_kwargs()),
+                            timeout=READ_ANSWER_BOUND_S)
+                    except TimeoutError:
+                        failures.append(
+                            f"[{label}] {handler} did not answer within "
+                            f"{READ_ANSWER_BOUND_S}s while all {width} default-"
+                            f"executor slots were occupied — its blocking round "
+                            f"trip is still queued on the SHARED pool (#10602)")
+                        continue
+                    timings[label] = time.monotonic() - started
+                    if response.status_code != 200:
+                        failures.append(
+                            f"[{label}] {handler} answered "
+                            f"{response.status_code}: {response.text[:200]}")
+        finally:
+            release.set()
+            await asyncio.gather(*blockers, return_exceptions=True)
+
+    asyncio.run(_run())
+    assert not failures, (
+        "\n".join(failures)
+        + "\n\nThe read path must run its blocking round trip on its own bounded "
+          "lane (`monitoring.CONTROL_PLANE_READ_*`, reached only through "
+          "`hosted_api._read_offload`), never on the loop's shared default "
+          "executor — otherwise a stalled tenant of that pool is a stalled read "
+          "(#10602, #3060).")
+    # A sanity bound on the whole family, so a route that "answers" only because
+    # it timed out and degraded is not mistaken for a fast read.
+    assert timings and max(timings.values()) < READ_ANSWER_BOUND_S, timings
