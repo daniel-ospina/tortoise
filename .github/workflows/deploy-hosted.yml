@@ -831,6 +831,37 @@ jobs:
           # #4759: the bypass report's window start and its per-job audit marker.
           SKIP_FLY_MACHINES_GUARD_SET_AT: ${{ vars.SKIP_FLY_MACHINES_GUARD_SET_AT }}
           DEPLOY_BYPASS_MARKER: ${{ runner.temp }}/deploy-bypass-marker.txt
+      - name: Record whether the built tree matches the deploy commit (#10447)
+        # ⛔ WHY THIS IS ITS OWN STEP AND NOT A LINE IN THE PROPAGATION BLOCK.
+        # `check-fly-secret-drift.py` runs the propagation payload under a stub
+        # PATH that carries ONLY fly/flyctl, so a `git` call inside it is refused
+        # as "a command this harness does not model" (the fail-closed state, not
+        # a warning) — it cannot tell whether a git-dependent assignment happens.
+        # Computing the reading here and reading the RESULT with a bash builtin
+        # (`$(< file)`) keeps the payload answerable under the stub without
+        # loosening the gate.
+        #
+        # The reading is `git status --porcelain` over the SAME working tree
+        # `flyctl deploy --remote-only` uploads as its build context, so it
+        # describes the image that actually runs. `false` is a positive claim and
+        # is only written when the tree is provably clean — an absent file leaves
+        # the field `null` ("NOT STATED"), which is NOT "clean".
+        run: |
+          # ⛔ A FAILED READING IS 'unknown', NEVER 'false'. `-e` does not save this:
+          # the exit status that decides the branch is `[`'s, not the
+          # substitution's, so `git status` failing (not a repo, a broken git) used
+          # to fall through to the `-z` test succeeding and write `false` — the
+          # "provably clean" claim this field exists to refuse, produced by a
+          # reading that never happened (review P1).
+          if ! dirty="$(git status --porcelain)"; then
+            printf 'unknown' > /tmp/tortoise-deploy-git-dirty
+            echo "::warning::git status failed — the tree reading is UNSTATED (/health will report commit_dirty: null, build_identified_reason: tree_dirt_unstated), NOT clean"
+          elif [ -z "$dirty" ]; then
+            printf 'false' > /tmp/tortoise-deploy-git-dirty
+          else
+            printf 'true' > /tmp/tortoise-deploy-git-dirty
+            echo "::warning::the working tree differs from ${GITHUB_SHA} — this deploy builds a MODIFIED tree, and /health will report commit_dirty: true (build_identified: false). That is the truth about the image, not an error in the stamp."
+          fi
       - name: Set all app secrets on Fly.io (keeps in sync with GitHub/Supabase)
         id: set-secrets
         # #4334: every secret is bound in `env:` and referenced as a QUOTED
@@ -902,6 +933,31 @@ jobs:
           # GITHUB_SHA is the checked-out commit on push AND workflow_dispatch
           # (the ref head), so it always matches what this run deploys.
           ARGS+=(TORTOISE_GIT_SHA="${GITHUB_SHA}")
+          # #10447 (reopen): TORTOISE_GIT_DIRTY — was this image built from the
+          # commit it names? The sha above is an assertion about the COMMIT; it is
+          # silent about the TREE. `/health` published `commit_dirty` with no
+          # producer, so it was permanently null and `build_identified` folded
+          # that silence into "not dirty" — a modified tree claimed the commit.
+          #
+          # The reading is taken by the step above (the build's own working tree)
+          # and read here with bash BUILTINS: `read` forks nothing, so the drift
+          # gate's stub PATH can still classify this payload (a `git` call in the
+          # payload is refused fail-closed — see the step above).
+          #
+          # ⛔ NOT `$(< file 2>/dev/null || echo unknown)`. Bash's `$(< file)`
+          # shortcut fires only when the substitution body is EXACTLY the
+          # redirect; with a redirection or a `||` list it runs a redirect-only
+          # simple command, which opens the file, writes nothing and exits 0 — so
+          # with the file PRESENT the value came back EMPTY and `commit_dirty`
+          # stayed null on every production deploy (review P1, measured).
+          # Absent file → `unknown` → `null` (NOT STATED), never a fabricated
+          # `false` ("provably clean"), which would be the false PASS this field
+          # exists to refuse.
+          TORTOISE_GIT_DIRTY_STAMP=unknown
+          if [ -r /tmp/tortoise-deploy-git-dirty ]; then
+            IFS= read -r TORTOISE_GIT_DIRTY_STAMP < /tmp/tortoise-deploy-git-dirty || true
+          fi
+          ARGS+=(TORTOISE_GIT_DIRTY="${TORTOISE_GIT_DIRTY_STAMP}")
           # #1703: SUPABASE_ANON_KEY — public client key the OAuth consent page
           # embeds (supabase-js createClient). Was never synced to Fly, so the
           # page rendered with an empty key ('supabaseKey is required').

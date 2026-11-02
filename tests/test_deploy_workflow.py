@@ -73,7 +73,12 @@ _ARRAY_PAIR = re.compile(r'([A-Z0-9_]+)="\$\{?([A-Z0-9_]+)\}?"')
 # The one argv pair whose value is a GitHub BUILT-IN, not an env-bound secret.
 # Exempted by name, so the parser can accept the brace spelling without the
 # exemption depending on a regex that misses it.
-_NON_SECRET_PAIRS = {("TORTOISE_GIT_SHA", "GITHUB_SHA")}
+_NON_SECRET_PAIRS = {("TORTOISE_GIT_SHA", "GITHUB_SHA"),
+                     # #10447: workflow-COMPUTED from the build's own tree, never an
+                     # env-bound secret, and never empty — an unreadable tree stages
+                     # `unknown` (which /health reads as null), so an `-n` guard would
+                     # buy nothing and the guard exists to stop a SECRET clobber.
+                     ("TORTOISE_GIT_DIRTY", "TORTOISE_GIT_DIRTY_STAMP")}
 # The only argv keys whose FLY-side name deliberately differs from the env var
 # it reads. Every other key must equal the variable it reads — the app resolves
 # its config by the env NAME, so a fly-side typo ships the secret under a name
@@ -3966,10 +3971,15 @@ def test_the_health_build_block_is_documented_for_operators():
         "reading needs no shell, no key and no database"
     )
     for field in ("version", "commit_sha", "commit_dirty", "build_identified",
+                  "build_identified_reason", "image",
                   "started_at", "migrations_head", "migrations_source"):
-        assert field in section, (
-            f"the field table omits `{field}` — a reader who has the field but no "
-            "meaning reads it wrong (a `null` `commit_dirty` as clean, an "
+        # A ROW, not a token (review P2): `field in section` is satisfied by prose
+        # that happens to say "image" (the `migrations_head` row does), so deleting
+        # the row the operator actually reads left the pin green. Anchored to a
+        # table row so a reflow cannot satisfy it by accident.
+        assert re.search(rf"^\|\s*`{re.escape(field)}`\s*\|", section, re.M), (
+            f"the field TABLE has no `{field}` row — a reader who has the field but "
+            "no meaning reads it wrong (a `null` `commit_dirty` as clean, an "
             "`unknown` `migrations_source` as the checkout)"
         )
     assert re.search(r"does NOT fold into `status`", flat), (
@@ -3977,9 +3987,11 @@ def test_the_health_build_block_is_documented_for_operators():
         "who reads `status: ok` as 'current' restarts a healthy machine, and a "
         "future change that DID fold staleness in would look documented-ok"
     )
-    assert re.search(r"`null` means \*\*NOT STAMPED\*\*", flat), (
-        "the entry does not say `commit_dirty: null` means NOT STAMPED — nothing "
-        "stamps `TORTOISE_GIT_DIRTY` yet, so `null` is silence, never 'clean'"
+    assert re.search(r"`null` means \*\*NOT STATED\*\*", flat), (
+        "the entry does not say `commit_dirty: null` means NOT STATED — an "
+        "unstamped deployment now reports `build_identified: false` with "
+        "`build_identified_reason: tree_dirt_unstated`, so `null` is silence, "
+        "never 'clean'"
     )
     assert re.search(r"NOT \"which migration has been APPLIED", flat), (
         "the entry does not refuse the applied reading — `migrations_head` is the "
