@@ -2143,8 +2143,11 @@ PROPOSED_ORDERING_BASE = "(this contribution — the proposed rule; no base is c
 #: being the ancestor is correctly ordered; the SAME commit is ATOMIC and carries NO information — a
 #: squash merge of an ordered branch and one commit written after the numbers produce the IDENTICAL
 #: git object — so it requires a disclosure instead of a violation it cannot prove. Route B (re-add the log in
-#: a fresh commit) was refused: it is the fabrication the guard prevents, and ``min(add_epochs)``
-#: takes the OLDEST add, so it would not even work (``#9075 review r3 P3``).
+#: a fresh commit) was refused: it is the fabrication the guard prevents, and it does not work on
+#: EITHER path — the ruled path takes ``min(add_epochs)``, the OLDEST add, and the armed path
+#: refuses any add-commit git cannot order against the registration (#10546 review cycle 26,
+#: ISSUE 1) — so a re-add can never replace the entry that was actually made (``#9075 review r3
+#: P3``).
 #:
 #: ⛔ WHERE THE DISCLOSURE LIVES (#10529 review cycle 2, P1). NOT in the pre-registration's pins
 #: block: that block is inside the document `document_sha256` freezes, so adding to it re-cuts the
@@ -2917,8 +2920,12 @@ def _check_ordering_proposed(prereg: Path, logs: list[Path], pins: dict | None =
         # numbers out of a predating log flipped the guard's central hard fail into green ("exempt by
         # CONTENT, measured nothing") — the content read was no longer the content that entered with
         # the tree. Computed once here; the arms that claim content entered at/before the
-        # registration consult it. The proven-order pass (a descendant add-commit) does NOT: there
-        # the registration predates the whole log, so later touches are beside the point.
+        # registration consult it. The proven-order pass does NOT: it requires EVERY add-commit to
+        # be a DESCENDANT of the registration (#10546 review cycle 26, ISSUE 1 — one descendant is
+        # not the proof), so the registration precedes every entry point of that log and a later
+        # touch is still after the thresholds; the pass is exactly where a log with more than one
+        # add-commit made that "beside the point" claim FALSE, and an add-commit git cannot order at
+        # all is now REFUSED below instead of being dropped by it.
         late = _late_touches(log, prereg_sha)
         if predating_sha:
             if late:
@@ -2959,7 +2966,47 @@ def _check_ordering_proposed(prereg: Path, logs: list[Path], pins: dict | None =
         # topologically identical trees, two verdicts, and the refused one was a false red on a pair
         # git does prove. The predating arm above has already taken every add-commit that is an
         # ANCESTOR of the registration, so by here a descendant add-commit is the whole proof.
-        if not atomic_pair and any(_is_ancestor(prereg_sha, sha) for sha in add_shas):
+        # ⛔ AND THE PROOF IS OVER EVERY ENTRY POINT, NOT ONE OF THEM (#10546 review cycle 26,
+        # ISSUE 1). `any(...)` closed the hex-representative defect and opened a fail-open in the
+        # direction this pass exists to guard: the arm `continue`d as soon as ONE add-commit was a
+        # descendant, so an add-commit git cannot order at all — a log committed on a lineage that
+        # diverged BEFORE the registration and merged in later — was silently dropped. Measured on
+        # the reviewer's fixture (side add 1700000100 → registration 1700000200 → merge → `git rm`
+        # → re-add 1700000500), the tree was REFUSED without the re-add and `[]` with it: the re-add
+        # was the ONLY difference, i.e. exactly Route B — the fabrication `ATOMIC_ADD_KEY` says this
+        # guard prevents. The cycle-25 justification for not consulting `late` ("the registration
+        # predates the whole log, so later touches are beside the point") is true per ENTRY POINT
+        # and false for the log as a whole, which is the case a delete-and-re-add creates by
+        # construction. What this arm may pass on is therefore every add-commit being a descendant.
+        if not atomic_pair and add_shas and all(_is_ancestor(prereg_sha, sha) for sha in add_shas):
+            continue
+        # ⛔ AN ADD-COMMIT GIT CANNOT ORDER IS A REFUSAL, NOT A HOLE (#10546 review cycle 26,
+        # ISSUE 1). The predating arm above has taken every strict ANCESTOR of the registration, so
+        # an add-commit that is still not a descendant here is UNORDERED with it: a lineage that
+        # diverged before the registration and was merged in later. Ordering that entry is not
+        # something a LATER re-add can supply — the oldest entry keeps its own unorderable relation
+        # to the registration — and this arm is the one place a re-add laundered it into a PASS.
+        # Refusing it BY CAUSE also closes the date-shaped hole the fall-through left open: the epoch
+        # comparison below is `%ct`, which this module has ruled attacker-controlled everywhere, so
+        # an unordered add dated after the registration fell through with NOTHING printed.
+        unordered = [sha for sha in sorted(add_shas) if not _is_ancestor(prereg_sha, sha)]
+        if unordered:
+            named = ", ".join(sha[:9] for sha in unordered)
+            # ⛔ AND NO CONTENT EXEMPTION HERE (#10546 review cycle 26, ISSUE 1). The predating arm
+            # above grants one, gated on `late`: a log that is in the registration's OWN lineage has
+            # a snapshot AT the registration (`_blob_at(prereg_sha, …)`), so "unchanged since entry"
+            # is checkable and an unscored read is the content that entered. A log outside that
+            # lineage has no such snapshot — its every touch commit is outside the registration's
+            # ancestry, `late` cannot separate the entry from a later edit, and an ungated "measured
+            # nothing" read would be the strip-the-number-after-green hole the bound exists to
+            # close. Unproven content cannot carry an exemption, so this refusal is unconditional.
+            failures.append(
+                f"{log.name}: its add-commit {named} is UNORDERED with {PREREG_NAME}'s add-commit "
+                f"{prereg_sha[:9]} — neither is an ancestor of the other — so the log entered the "
+                "tree off a lineage that diverged before the thresholds were written, git cannot "
+                "show it came after them, and a LATER re-add cannot supply that proof; an "
+                "unprovable ordering is not an ordering"
+            )
             continue
         # A log that provably produced NO number cannot have been scored against thresholds
         # chosen after it was read. Re-asked of the content on every run, so the moment it gains a
