@@ -40,6 +40,7 @@ import contextlib
 import pytest
 from fastmcp.exceptions import ToolError
 from fastmcp.tools import FunctionTool
+from mcp.types import TextContent
 
 from tortoise import mcp_auth
 from tortoise import mcp_server as ms
@@ -204,7 +205,6 @@ def test_a_refusal_result_carries_no_disclosure():
     for a reason that has nothing to do with the `is_error` guard.
     """
     from fastmcp.tools import ToolResult
-    from mcp.types import TextContent
 
     refusal = ToolResult(
         content=[TextContent(type="text", text='{"error": "nope"}')],
@@ -338,7 +338,8 @@ def test_every_served_excluded_writer_is_skipped_by_name():
     assert writers, "the overlap this guard exists for went empty — re-derive it"
     from fastmcp.tools import ToolResult
 
-    ok = ToolResult(content=[], structured_content=None, is_error=False)
+    ok = ToolResult(content=[TextContent(type="text", text='{"id": "pt_1"}')],
+               structured_content=None, is_error=False)
     for name in sorted(writers):
         assert ms._disclose_graph_resolution(ok, name, None) is ok, name
 
@@ -623,7 +624,8 @@ def test_the_excluded_writer_with_its_own_selector_is_skipped():
     authority for that set."""
     from fastmcp.tools import ToolResult
 
-    ok = ToolResult(content=[], structured_content=None, is_error=False)
+    ok = ToolResult(content=[TextContent(type="text", text='{"id": "pt_1"}')],
+               structured_content=None, is_error=False)
     assert "tortoise_graph_set_recording" in mcp_auth.GRAPH_ARGUMENT_EXCLUDED
     assert ms._disclose_graph_resolution(
         ok, "tortoise_graph_set_recording", None) is ok
@@ -663,5 +665,6 @@ def test_no_disclosed_write_tool_carries_its_own_graph_selector():
 def test_an_error_result_is_not_disclosed():
     from fastmcp.tools import ToolResult
 
-    err = ToolResult(content=[], structured_content=None, is_error=True)
+    err = ToolResult(content=[TextContent(type="text", text='{"error": "nope"}')],
+               structured_content=None, is_error=True)
     assert ms._disclose_graph_resolution(err, "tortoise_create_point", None) is err
