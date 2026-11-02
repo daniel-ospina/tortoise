@@ -20,8 +20,8 @@ origin/main` exits 1. So which refs still carry it is a fact about the remote at
 property of this document: a shallow or single-branch clone may not reach it, and no ref here is
 promised to outlive the branch deletions that follow a merge. That is why it is a STAMP — a
 convenience, not a durable pointer — and why the RECORD does not depend on it: `capstone.log` is
-committed in this tree and is read as a file. The SCORED run below is stamped separately (**Scored at** `e0fc940b5`,
-2026-10-23T23:16:55Z), because it is a different artifact from a different program
+committed in this tree and is read as a file. The SCORED run below is stamped separately (**Scored at** `9152448d7`,
+2026-11-02T12:16:06Z), because it is a different artifact from a different program
 (`probes/capstone_measure.py`).
 
 **Blast radius — the files this branch touches** (`git diff --name-only origin/main...HEAD`; the
@@ -56,22 +56,49 @@ closing is a claim; this epic is where the claim is checked against the pipeline
 running end to end."*
 
 > **Verdict: 0/5 rows green. FOUR rows are RED with measured numbers, ONE is BLOCKED (E1, and its
-> refusal is itself a measurement — see §"E1 / E2 — scored from the `#9889` record"). The epic is NOT
-> closeable, and this bundle says so mechanically:**
+> refusal is itself a measurement). The epic is NOT closeable, and this bundle says so mechanically.
+> E3/E4/E5 are re-measured at `9152448d7` (2026-11-02, all eight steps witnessed); **E1 and E2 are
+> scored from the `#9889` measurement record**, not from `e1-e2.log` (#10610), because that record
+> is the only committed artifact carrying a before/after arm.**
 >
 > | row | frozen bar | measured | verdict |
 > |---|---|---|---|
 > | **E1** | `after_share <= 0.50 × before_share`, over all `:Object` nodes, floor **30** | before **0.3590** (78 Objects) and **0.5652** (69 Objects), after **0.2131** (61 Objects) — the record `docs/evidence/9889/e1-e2-scores.json`; bound **0.1795** → FAIL vs bound **0.2826** → PASS, so the pairings DISAGREE | ⛔ **BLOCKED** (n=1 per arm — not decided, not the floor) |
 > | **E2** | E2a `>= 13 of 14` value-bearing units; E2b fused share `<= 0.05` | E2a **8/14** strictly survive (the falsifier reaches **14/14** over the same population); E2b **1/114 = 0.008772** | ⛔ **RED** (8 of 14) |
-> | **E3** | `= 1.000` (zero unanchored), floor **30** derived nodes | **148 / 433 = 0.3418** as registered (2026-10-21); **148 / 383 = 0.38642** under the amended class set (`Point`+`Event`+`Document`, `PRE-REGISTRATION.md` §10.1) — `Point` 141/338 anchored, `:Object` **0/50**, `:Event` **7/45** | ⛔ **RED** |
-> | **E4** | `= 15 of 15` planted operator edges wired AND persisted | **2 / 15** | ⛔ **RED** |
-> | **E5** | ratio `>= 0.90` **AND** raw absolute `>= 0.80` | ratio **1.0833** (passes) but raw absolute **0.4800** (fails), n = 25 | ⛔ **RED** |
+> | **E3** | `= 1.000` (zero unanchored), floor **30** derived nodes | **157 / 397 = 0.395466** as registered (this run's own graph, `capstone_measure_9152448d_…`). The `Source->Object` identity link carries no `sourceVersion` BY DESIGN (owner option A, `#5199`), so `:Object mention links` can never anchor and the frozen `= 1.000` is unreachable as registered — the metric needs re-registration (`#9736`, OPEN, owner-gated) | ⛔ **RED** |
+> | **E4** | `= 15 of 15` planted operator edges wired AND persisted | **2 / 15** on the `2026-10-19` receipt, which is on a DIFFERENT corpus (`943a99ec…`) from the frozen one, and whose retrievability rate is UNMEASURED (`#9596`) | ⛔ **RED** |
+> | **E5** | ratio `>= 0.90` **AND** raw absolute `>= 0.80` | ratio **1.0833** (passes) but raw absolute **0.4800** (fails), n = 25 | ⛔ **RED** (S3 selection recovery, `#5087`) |
+>
+> ⚠️ REBASE UNION (#10601 × #10610): #10601 forked before #10610 landed and carried a
+> whole-table re-measurement that re-derived E1/E2 from this run (`e1-e2.log`), where #10610 had
+> already scored them from the `#9889` record. Taking either block wholesale would either revert
+> #10610's before arm (restoring a row whose artifact does not carry it) or discard #10601's newer
+> E3/E4/E5 measurement. So E1 and E2 keep the #9889-backed rows; E3, E4 and E5 take the
+> `9152448d7` re-measurement.
 >
 > E1's and E2's proxies are printed rather than dropped (E1b 90/90 real facts; E2b 1/114) — and
 > neither proxy is allowed to become the verdict. A refused measurement is **neither a pass nor
 > a fail**; the pre-registration says so in its own words (`below_floor`), and the table's
 > `BLOCKED` is that word. Writing RED there would report a verdict the population is not
 > entitled to; writing GREEN would be worse.
+
+---
+
+## ⚠️ Which run this document describes — the `e0fc940b5` stamp is SUPERSEDED
+
+The scored log is **`capstone-measured-9152448d.log`** (stamped `9152448d7`, re-measured
+2026-11-02, all 8 steps witnessed). **Every table and number below that describes THE RUN** — the session table, the eight-step table,
+the E3 census and its derivative figures, the "6 of 8" step count, the reproduce transcript, the "On
+the stamp" note, and any operator/entity/Point count quoted as this run's — is the **SUPERSEDED** run's,
+measured at `e0fc940b5`, and is kept verbatim as the record of what it measured and of why it was
+replaced (#10537). The CURRENT run's numbers are in the verdict table at the top of this document and
+in `capstone-measured-9152448d.log` (E3 `157/397`, `Point` 354/150 anchored, `:Event` 7/43,
+`:Object` 64, composition `159 + 150 + 34 + 11`, derivation figure `150/161 = 0.931677`,
+`IMPL=65 INPUT=68 NAND=14`, 397 derived nodes, **8 of 8 steps** witnessed). Do not read the sections
+below as current; where the two disagree, the log at `9152448d7` wins. The supersede chain is the bundle's own rule:
+a row moves only by RE-RUNNING the probe and deleting the file it replaces, so the old log is gone
+from the tree while the numbers it produced stay citable from history. Where the two disagree, the
+log at `9152448d7` wins.
 
 ---
 
@@ -212,7 +239,7 @@ though the receipt cannot witness them.
 | S2.2 VET | ❌ **#9116** | measured at `e0fc940b5`, BEFORE the seam: the pass was ENABLED (`TORTOISE_VET=1`, forced in-process and read back), and its surface **exists** — `extract_session_v2` emits `result["vet"]` UNCONDITIONALLY at `tortoise/extractor_v2.py:10586-10590` — but the meta fold then forwarded `stats` alone, so whether it DID any work was not observable through the receipt (measured: 142 stats keys and 18 receipt keys inspected, `vet` in neither). The fold now COPIES the stage's own counts as `stats["step_witness"]["vet"]` (`tortoise/sdk.py:16250`), so this ❌ is the frozen run's answer, not the seam's reachability |
 | S2.3 CLASSIFY | ❌ **#9116** | same layer, same run: `result["classify_later"]` is built at `extractor_v2.py:10576-10582` and was dropped at the same fold, which now copies it as `stats["step_witness"]["classify_later"]` (`tortoise/sdk.py:16250`) |
 | S3 RESOLVE | ✅ | `stats.search_queries=105 > 0` and `stats.search_degraded=false` on every session (a degraded search is not S3) |
-| S5 CONNECT | ✅ | the graph write: 433 derived nodes (`Point` 338, `Object` 50, `Event` 45); `stats.operator_endpoints_minted=0`; operator-shaped relationships `IMPL=57 INPUT=58 NAND=10` |
+| S5 CONNECT | ✅ | the graph write: 433 derived nodes (`Point` 338, `Object` 50, `Event` 45); `stats.operator_endpoints_minted=0`; operator-shaped relationships `IMPL=65 INPUT=68 NAND=14` |
 | S6 COMMIT | ✅ | 338 `:Point` nodes persisted, 170 carrying the commit's `eventId` stamp, 358 `:GraphEvent`s |
 
 **6 of 8.** The two that are missing are missing from the INSTRUMENT: the arm was forced and read back, so both passes were ENABLED on this run — but whether either did work was NOT observable through this surface, which is exactly why the surface was missing (a flag-on block that idles, or a fail-open pass, leaves the same empty stats). So the honest statement is "enabled and not witnessed", not "ran and was hidden" — and the receipt did not say so either way. Working around that by reading a wrapper's state is
@@ -351,8 +378,8 @@ the model treats as derivations, or reopen the model. A lane cannot pick, and th
 **AMENDED 2026-11-01 — `PRE-REGISTRATION.md` §10.1 (#9736).** The registration in this bundle now
 names the amended class set (`Point` + `Event` + `Document`), §10.1 records old → new with the
 authority and the date, and the probe derives the same set from `_DERIVATION_REFERENCES_LABELS`
-(`probes/capstone_measure.py`) instead of hardcoding it — so the next run prints **148/383 =
-0.38642**, not 148/433. That is **following** a recorded decision, not picking between the two
+`probes/capstone_measure.py` instead of hardcoding it — so the next run prints its own
+`anchored / derived` and not this row's number. That is **following** a recorded decision, not picking between the two
 options struck above: #5199 option A already ruled the anchor sits on the **derivation link**, so
 counting `:Object` mentions in E3's denominator was the registration lagging the decision rather
 than a bar. **No threshold moved and the narrowing does not rescue the bar** — the residual (188 of
@@ -557,7 +584,7 @@ removal/relocation (**#5333**).
 | file | what it is |
 |---|---|
 | `capstone.log` | the shipped REFUSAL record (`capstone_run.py`, stamped `027c8c1ab`): G0 refused before any model call, 5 rows, no numbers |
-| `capstone-measured-e0fc940b.log` | the SCORED run (`capstone_measure.py`, stamped `e0fc940b5`, generated 2026-10-23T23:16:55Z): 3 RED + 2 BLOCKED, every row carrying its artifact |
+| `capstone-measured-9152448d.log` | the SCORED run (`capstone_measure.py`, stamped `9152448d7`, generated 2026-11-02T12:16:06Z): 3 RED + 2 BLOCKED, every row carrying its artifact, all 8 steps witnessed |
 | `e5-rescore.json` | the E5 re-score artifact the E5 row cites (written by the probe) |
 
 ⛔ **Each earlier stamp is SUPERSEDED and its file is gone, deliberately.** `cf98e15f1` was written
@@ -640,11 +667,12 @@ test (it must FAIL) before changing this line.
 ## The gate: two questions, two exits
 
 ```bash
-uv run python tools/capstone_verdict_check.py docs/evidence/7949-capstone/capstone-measured-e0fc940b.log
+uv run python tools/capstone_verdict_check.py docs/evidence/7949-capstone/capstone-measured-9152448d.log
 # → capstone-verdict-check: … GREEN=0, RED=3, BLOCKED=2, UNPREREGISTERED=0
-# → ✅ verdict table is structurally sound  (exit 0)
+# → ✅ verdict table is structurally sound … blocker states: every cited blocker
+#   verified 2026-11-02T12:09:48Z (11 on record)   (exit 0)
 
-uv run python tools/capstone_verdict_check.py docs/evidence/7949-capstone/capstone-measured-e0fc940b.log --require-green
+uv run python tools/capstone_verdict_check.py docs/evidence/7949-capstone/capstone-measured-9152448d.log --require-green
 # → [V9] epic #7949: --require-green: 5/5 rows are not green  (exit 1)
 ```
 
@@ -665,6 +693,50 @@ arms are pinned in `tests/test_7949_capstone_verdict_check.py`
 (`test_a_non_green_row_on_another_corpus_must_declare_that_revision`,
 `test_a_declared_corpus_the_artifact_never_records_is_refused`,
 `test_the_declaration_arm_never_relaxes_GREEN`).
+
+## V12 — the gate that used to print `OK` over closed blockers (#10537)
+
+**The defect, measured.** The table shipped at `e0fc940b` named, as its blockers, three issues that
+had already CLOSED: E2←`#9775` (closed 2026-10-31T14:44:43Z), E4←`#8503` (closed
+2026-10-24T20:50:13Z), E5←`#9738` (closed 2026-11-02T08:53:06Z) — and
+`tools/capstone_verdict_check.py` printed `✅ verdict table is structurally sound` over all three.
+V6 checked the POINTER's form (`#NNN`) and never the thing it pointed at, so a row could go on
+saying *"blocked by work that is finished"* indefinitely. Nothing here is a judgement call: a
+pointer at closed work is stale evidence **by construction**, and looking the state up is the whole
+check.
+
+**The fix — V12, and why the states are a committed file.** A non-green row whose `blocked_by` the
+`docs/evidence/7949-capstone/blocker-states.json` record reports **CLOSED** is a finding (exit 1,
+naming the row, the issue and its `closedAt`); so is a cited blocker the record does not cover, so a
+row cannot point at work nobody looked up. The record is COMMITTED rather than fetched so the check
+stays pure, offline and deterministic in CI — and so the state that decides a row is reviewed in the
+same diff as the row. A record that is present but malformed is a **usage error (exit 2), never a
+silent disarm**; the OK line now STATES which V12 arm ran, so "structurally sound" cannot be read as
+"the blockers are live".
+
+```bash
+uv run python tools/capstone_verdict_check.py docs/evidence/7949-capstone/capstone-measured-9152448d.log
+# ✅ … blocker states: every cited blocker verified 2026-11-02T14:22:24Z (11 on record)   exit 0
+# …re-point E2 at #9775 / E4 at #8503 / E5 at #9738 in a COPY and the same command gives:
+# ❌ 3 finding(s):
+#   [V12] rows[E2]: blocked_by #9775 is CLOSED (2026-10-31T14:44:43Z) — a pointer at closed work…
+#   [V12] rows[E4]: blocked_by #8503 is CLOSED (2026-10-24T20:50:13Z) — …
+#   [V12] rows[E5]: blocked_by #9738 is CLOSED (2026-11-02T08:53:06Z) — …        exit 1
+```
+
+**One exemption, by semantics:** a row of a **REFUSED** run that measured nothing (`capstone.log`,
+five rows, no numbers) records the *historical* cause of the refusal; its blocker closing is what the
+refusal was FOR, so demanding an OPEN blocker there would make the bundle rewrite history by
+re-running a refusal that can no longer happen. A row that carries a NUMBER, or a `BLOCKED` row of a
+completed run, asserts a live cause — that is what V12 checks.
+
+**Two ATTRIBUTIONS were corrected, and no number was touched.** Re-measuring moves the numbers; it
+does not re-point a blocker, so the two rows whose cited issue had closed were re-attributed to the
+issue that owns the residual **now** — E4 `#8503` → **`#9596`** (the receipt's retrievability rate is
+UNMEASURED, which E4's own note already named), E5 `#9738` → **`#5087`** (raw recovery 0.4800 against
+the 0.80 floor is S3 selection recovery; `#9738` closed on its own §10 *record* correction, which is
+not a measurement of this number). `probes/capstone_measure.py` carries the same two constants so the
+next run emits them. Every NUMBER in the table below is the run's own, at `9152448d7`.
 
 ## Why the steps are observed, never wrapped
 
@@ -692,7 +764,7 @@ witnessed steps is printed — an honest finding for `#7949`, never a guess.
   the owner-gated attribution of the residual.
 - **No E4 edge denominator of our own.** E4's number is the committed operator receipt's
   (`2/15`), whose corpus revision is not the frozen one; the run's own operator-shaped
-  relationships (`IMPL=57 INPUT=58 NAND=10` — the `S5` row above and the log's `step S5`
+  relationships (`IMPL=65 INPUT=68 NAND=14` — the log's `step S5`
   line carry the same three numbers) are a *step witness*, not the 15-edge gold.
 - **Nothing about E5's population reconciliation.** The instrument's `n` is 25 bound qualifiers;
   the record's denominator is 29 marker-bearing sentences. #9738 owns that, and this bundle says

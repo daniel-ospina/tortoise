@@ -1539,12 +1539,13 @@ def test_the_shipped_measurement_log_is_structurally_clean():
     assert verdicts["E4"] == "RED", verdicts
     assert verdicts["E5"] == "RED", verdicts
     assert verdicts["E1"] == "BLOCKED" and verdicts["E2"] == "BLOCKED", verdicts
-    # the run completed; two of eight steps are unwitnessed, and the log says
-    # which and why (#9116) rather than leaving the count to be inferred
+    # the run completed and #9116's seam is in: ALL EIGHT steps are witnessed
+    # (#10537 re-measure, 2026-11-02 — the superseded `e0fc940b` run could see six
+    # because the meta fold forwarded `stats` alone)
     assert record["run"]["status"] == "COMPLETED"
     assert sorted(record["run"]["steps_observed"]) == sorted(
-        ["S0", "S1", "S2.1", "S3", "S5", "S6"])
-    assert set(record["run"]["steps_unobserved"]) == {"S2.2", "S2.3"}
+        ["S0", "S1", "S2.1", "S2.2", "S2.3", "S3", "S5", "S6"])
+    assert not record["run"].get("steps_unobserved"), record["run"]
     # and the epic stays uncloseable
     codes = [code for code, _w, _m in cvc.check(
         record, repo=_REPO, require_green=True).items]
@@ -1690,11 +1691,11 @@ def test_the_e3_census_counts_references_inbound_and_extractedfrom_outbound():
 # ── the census's per-label set is NOT the E3 row selector (#10525 review P1) ──
 
 #: The shipped log's own per-label block, re-used as canned Cypher rows
-#: (`capstone-measured-e0fc940b.log:32-34` + `:Point` composition).
+#: (`capstone-measured-9152448d.log:32-34` + `:Point` composition).
 _CENSUS_ROWS = {
-    "Point": (338, 141, 141, 0),
-    "Object": (50, 0, 0, 0),
-    "Event": (45, 7, 0, 7),
+    "Point": (354, 150, 150, 0),
+    "Object": (64, 0, 0, 0),
+    "Event": (43, 7, 0, 7),
     "Document": (0, 0, 0, 0),
 }
 
@@ -1704,38 +1705,38 @@ class _CannedQuery:
 
     def __init__(self, cypher: str) -> None:
         if "UNWIND labels(n)" in cypher:
-            rows = [["Point", 338], ["Object", 50], ["Event", 45]]
+            rows = [["Point", 354], ["Object", 64], ["Event", 43]]
         elif "RETURN n.name" in cypher:                                    # object_names
             rows = [["the quarry"]]
         elif "eventId IS NOT NULL" in cypher:                              # event_stamped
-            rows = [[159]]
+            rows = [[184]]
         elif "type(r) AS t" in cypher:                                     # relationships
             # The log's own `e3_census.relationship_counts` / `.relationship_anchored`
-            # (`capstone-measured-e0fc940b.log:250-260`): `extractedFrom` carries **141**
-            # links, all 141 anchored — the same 141 claims, one link each. A 150 here
-            # was the writer-class size (`extraction_claims` + `other`) written into the
-            # LINK slot, and the 9 `other` Points are defined by `deriv = 0`, i.e. by
+            # (`capstone-measured-9152448d.log`, `e3_census.relationship_counts`):
+            # `extractedFrom` carries **150** links, all 150 anchored — the same 150
+            # claims, one link each. A count equal to the writer-class size
+            # (`extraction_claims` + `other` = 161) written into the LINK slot would be
+            # wrong, and the 11 `other` Points are defined by `deriv = 0`, i.e. by
             # carrying no link at all, so 150 links is not a shape that graph can have.
             # `test_the_canned_census_transcribes_the_committed_log_it_cites` checks
             # every one of these numbers against the artifact.
-            rows = [["extractedFrom", 141, 141], ["references", 7, 7],
-                    ["aboutObject", 211, 0]]
+            rows = [["extractedFrom", 150, 150], ["references", 7, 7],
+                    ["aboutObject", 248, 0]]
         elif "AS points" in cypher:                                        # composition
             # Columns, in `census()`'s own unpack order (#10525 review):
             #   points=turn_rows=operator_points=extraction_claims=other_points=
             #   extraction_claims_anchored=turn_rows_anchored=
             #   operator_points_anchored=other_points_anchored
             # The shipped log's own composition line
-            # (`capstone-measured-e0fc940b.log:37`) is
-            # `turn_rows=159 (anchored 0) extraction_claims=141 (anchored 141)
-            #  operator_points=29 (anchored 0) other=9 (anchored 0) (total=338)`,
-            # and it PARTITIONS 338 (159 + 29 + 141 + 9). The 150 that sits one
-            # column to the left here is the `extractedFrom` LINK count
-            # (`["extractedFrom", 150, 141]` above: 141 claims + 9 `other`, one
-            # each) — not a claim count. Transcribing it into the claim slot made
-            # the fixture's own partition impossible (347 ≠ 338) and pinned a
-            # value the artifact it cites cannot produce.
-            rows = [[338, 159, 29, 141, 9, 141, 0, 0, 0]]
+            # (`capstone-measured-9152448d.log`, `point_composition`) is
+            # `turn_rows=159 (anchored 0) extraction_claims=150 (anchored 150)
+            #  operator_points=34 (anchored 0) other=11 (anchored 0) (total=354)`,
+            # and it PARTITIONS 354 (159 + 34 + 150 + 11). The `extractedFrom`
+            # LINK count is 150 — one link per extraction claim — so the link
+            # count and the claim count coincide here; they did NOT at the
+            # superseded stamp (141 claims + 9 `other`), which is why the slot is
+            # pinned from the artifact instead of from the coincidence.
+            rows = [[354, 159, 34, 150, 11, 150, 0, 0, 0]]
         else:                                                             # anchor census
             label = re.match(r"MATCH \(n:(\w+)\)", cypher).group(1)
             rows = [list(_CENSUS_ROWS[label])]
@@ -1830,7 +1831,7 @@ def test_the_canned_census_transcribes_the_committed_log_it_cites(monkeypatch):
     be the log's.
     """
     text = (_REPO / "docs/evidence/7949-capstone"
-            / "capstone-measured-e0fc940b.log").read_text()
+            / "capstone-measured-9152448d.log").read_text()
     begin, end = "=== CAPSTONE-VERDICT-BEGIN ===", "=== CAPSTONE-VERDICT-END ==="
     assert begin in text and end in text, "the shipped log lost its verdict block"
     record = json.loads(text.split(begin, 1)[1].split(end, 1)[0])
