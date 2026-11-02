@@ -6427,6 +6427,70 @@ def _durations_rows_claiming_the_flat_default(text: str, durations: dict):
     return out
 
 
+# A row that carries a ci-timing BASIS was measured, so a note that still says it is
+# unmeasured ON CI is falsified by its own tail. The flat-default guard above cannot
+# see this shape, because the claim need not mention the default's VALUE:
+# `test_acl_layer_posture_8617.py` said `unmeasured on CI (flat default, see the entry
+# above)` beside an adopted `2.0 -> 0.1` reading at the 2026-11-02 head — the phrase
+# never says `2.0s`, so `_FLAT_DEFAULT_CLAIM_RE` had nothing to match (#10575 review,
+# P3). `_strip_unmeasured_marker` handles the row-LEADING `# unmeasured` marker only,
+# so a mid-note claim of this shape survives every refresh by design.
+_MEASURED_BASIS_RE = re.compile(
+    r"ci-timing (?:junit-census\+top-15|top-15) \d{4}-\d{2}-\d{2} [^—]*?"
+    r"(?:;\s*was |;\s*kept |the reading \()")
+_UNMEASURED_ON_CI_RE = re.compile(r"unmeasured\s+(?:on|in)\s+CI\b", re.IGNORECASE)
+
+
+def _durations_rows_claiming_unmeasured_on_ci(text: str):
+    """Rows whose note says they are unmeasured on CI AND cites a CI reading."""
+    out = []
+    for line in text.splitlines():
+        m = _DURATIONS_ROW_RE.match(line)
+        if m is None:
+            continue
+        tail = m.group("tail")
+        if _UNMEASURED_ON_CI_RE.search(tail) and _MEASURED_BASIS_RE.search(tail):
+            out.append((m.group("key"), tail))
+    return out
+
+
+def test_no_durations_row_claims_it_is_unmeasured_on_ci_beside_a_ci_reading():
+    """#10575 review P3: a falsified claim must go with its clause.
+
+    This is the PR's own thesis one clause over — the refresh ADOPTED the row from a
+    CI census, so "unmeasured on CI" is false, and the note stated both facts in one
+    sentence. Corrected by hand because the writer cannot attribute a mid-note claim
+    to the adoption; this pin is what stops the next one from shipping quietly.
+    """
+    text = cs.MANIFEST.read_text(encoding="utf-8")
+    offenders = _durations_rows_claiming_unmeasured_on_ci(text)
+    assert offenders == [], (
+        "a durations row cites a CI reading AND still claims it is unmeasured on CI "
+        f"— drop the falsified claim: {[(k, t[:90]) for k, t in offenders]}"
+    )
+
+
+def test_the_unmeasured_on_ci_claim_check_is_not_vacuous():
+    """The guard above must bite on the shipped shape and stay quiet on its siblings."""
+    stale = (
+        "  test_a.py: 0.1  # new in #1; unmeasured on CI (flat default, see the entry"
+        " above) — ci-timing junit-census+top-15 2026-11-02 (run 1); was 2.0\n"
+        "  test_b.py: 0.1  # unmeasured on CI — ci-timing junit-census+top-15"
+        " 2026-11-02 (run 1): no declared testcase count for this file (UNKNOWN), so"
+        " the reading cannot prove it saw the whole file; the reading (0.1s) is a"
+        " LOWER bound; kept 0.1\n")
+    legitimate = (
+        # an unmeasured claim with NO CI basis at all is the honest state
+        "  test_c.py: 2.0  # unmeasured on CI — a new file takes the flat default.\n"
+        # a CI basis with no unmeasured claim
+        "  test_d.py: 3.7  # ci-timing junit-census+top-15 2026-11-02 (run 1); was 2.0\n"
+        # prose about the MARKER, not a claim about this row's measurement
+        "  test_e.py: 140.3  # the tail must LEAD with `# unmeasured`\n")
+    assert [k for k, _ in _durations_rows_claiming_unmeasured_on_ci(stale)] == [
+        "test_a.py", "test_b.py"]
+    assert _durations_rows_claiming_unmeasured_on_ci(legitimate) == []
+
+
 def test_no_durations_row_claims_the_flat_default_at_a_measured_value():
     """#2876/#8254 (P3): a re-derived value must not keep its old basis note."""
     from tools.ci_selection import load_manifest
@@ -6481,7 +6545,7 @@ def _durations_row_comments(text: str):
     row does this block document" — §3.2.3.3 of the YAML spec says comments are "a
     presentation detail … not associated with a particular node" — and this map's
     dominant convention is the OPPOSITE of "the block continues the row above": the
-    block PRECEDES the row it documents (72 of the 73 such blocks at this head open
+    block PRECEDES the row it documents (73 of the 74 such blocks at this head open
     a new note). Joining anyway attributes a neighbour's prose to the wrong key,
     which matters because these guards read CLAIMS off the joined text — a stale
     case count or a `WATCHDOG_FLOOR_MIN` claim from the block below then lands on a
