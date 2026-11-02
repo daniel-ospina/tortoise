@@ -161,8 +161,8 @@ itself.
 ⚠️ **A later probe delta DOES render, and the log is not edited for it.** #9553's insertion into
 `tortoise/sdk.py` (+86 lines) moved the symbols this bundle cites, so the `file:line` numbers in the
 probe's `E3_RULE` and in the S2.2/S2.3 cause strings were re-derived — and those strings RENDER into
-a log. The frozen `capstone-measured-e0fc940b.log` therefore still carries the cites **as-of its own
-stamp**, and those are the numbers listed here — the ones the log itself renders, exactly as it
+a log. The **SUPERSEDED** `capstone-measured-e0fc940b.log` carried the cites **as-of its own
+stamp**, and those are the numbers listed here — the ones that log rendered, exactly as it
 renders them: `sdk.py:12401` (the meta fold), `sdk.py:12682` (the
 references-edge writer), `sdk.py:2367` (`_TURN_WRITE_CYPHER`), `edges.py:467`
 (`_DERIVATION_REFERENCES_LABELS`), `edges.py:494-503` (`_anchor_on_create` / `_DERIVATION_ANCHOR_SET`,
@@ -246,14 +246,17 @@ though the receipt cannot witness them.
 exactly the instrumentation E4's row forbids, so the honest output is `UNOBSERVED` with its cause
 and file:line — and any table the probe emits records `steps_observed` **and**
 `steps_unobserved` so the count cannot be read as 8. ⚠️ **This is the `e0fc940b5` run's count.**
-`#9116`'s seam has since landed, so a re-run at a post-seam head can witness **S2.2**; **S2.3**
-moves only once its classify pass carries a non-empty `s2`/`union` — on the measured corpus that
-pass is IDLE (`enabled: true`, both counters empty), so a re-run there still reports S2.3
-**unobserved** — and since `#10215` that is a **witnessed idle**, not a refusal: `observe_idle`
-accounts it from the receipt's own facts, this probe emits that accounting itself
-(`run.steps_required` / `run.steps_conditional`, read from the SAME frozen record G5 reads), and
-G5/V5 accept it because the pre-registration declares the step conditional. The two scored rows
-above keep the count the run measured.
+`#9116`'s seam has since landed, so a re-run at a post-seam head can witness **S2.2**; a re-run also
+witnesses **S2.3** once its classify pass carries a non-empty `s2`/`union` — and on this corpus it
+does: the committed re-run at `9152448d7` reports `enabled: true` with
+`s2 = {"adjudication_calls": 1, "assigned_llm": 7, …}` (session `wp06_quarry_rollout`), so the
+scored log observes **all eight** and its `steps_unobserved` is empty. (On the SUPERSEDED
+`e0fc940b5` run that pass was idle, which is why the row above reads 6 of 8 — that count is the
+history, not this bundle's current state.) Had it stayed idle, `#10215` makes that a **witnessed
+idle**, not a refusal: `observe_idle` accounts it from the receipt's own facts, this probe emits
+that accounting itself (`run.steps_required` / `run.steps_conditional`, read from the SAME frozen
+record G5 reads), and G5/V5 accept it because the pre-registration declares the step conditional.
+The two scored rows above keep the count the run measured.
 
 ⛔ **The count is a measurement, not a constant.** `observe_steps` looks for a `vet` /
 `classify_later` surface in what the run actually holds (the receipt's top-level keys and its
@@ -773,16 +776,20 @@ witnessed steps is printed — an honest finding for `#7949`, never a guess.
   closes *inference* (green rows with no artifact), not forgery.
 - **Nothing about the five dependencies beyond their state** — the states above are a fresh read
   (2026-10-23), but *why* each is open is the issue body's decomposition, not re-derived.
-- **The two unwitnessed steps stay unwitnessed for THIS run.** The scored log was measured before
-  `#9116`'s seam, when `capture_session`'s receipt carried no step surface, so S2.2/S2.3 are
-  `UNOBSERVED` there for every input. The seam has since LANDED — `stats["step_witness"]` names
-  every stage's own facts — and the probe's `observe_steps` was rewritten to read it (the observer
-  is part of this change, not something a re-run gets for free). A re-run at a post-seam head moves
-  **S2.2**; **S2.3 does not flip**, because its classify pass is IDLE on this corpus and the witness
-  says so (`enabled: true`, empty `s2`/`union`) — since `#10215` that is accounted as a **witnessed
-  idle** (flag ON, no activity, no fail-open marker, a positive candidate count) rather than refused,
-  and the probe emits that split itself (`run.steps_required` / `run.steps_conditional`, read from
-  the frozen record) so G5/V5 accept it where the record declares the step conditional.
+- **The two unwitnessed steps stay unwitnessed for the SUPERSEDED run — not for this bundle's.**
+  The 6-of-8 count belongs to `capstone-measured-e0fc940b.log`, measured before `#9116`'s seam,
+  when `capture_session`'s receipt carried no step surface, so S2.2/S2.3 are `UNOBSERVED` there for
+  every input. The seam has since LANDED — `stats["step_witness"]` names every stage's own facts —
+  and the probe's `observe_steps` was rewritten to read it (the observer is part of this change,
+  not something a re-run gets for free). **The post-seam re-run is committed in this bundle**, and
+  it moves BOTH rows: `capstone-measured-9152448d.log` (`9152448d7`) observes all eight, and S2.3's
+  witness is non-empty (`enabled: true`, `s2 = {"adjudication_calls": 1, "assigned_llm": 7, …}`,
+  session `wp06_quarry_rollout`) — so the classify pass was NOT idle on this corpus after all, and
+  this bundle's recorded prediction that S2.3 stays idle is falsified by its own artifact. `#10215`
+  still matters for the general rule: an idle classify pass is accounted as a **witnessed idle**
+  (flag ON, no activity, no fail-open marker, a positive candidate count) rather than refused, and
+  the probe emits that split itself (`run.steps_required` / `run.steps_conditional`, read from the
+  frozen record) so G5/V5 accept it where the record declares the step conditional.
 
 ## Reproduce
 
@@ -892,12 +899,15 @@ already carried, so no new receipt key and no change to the SDK/MCP surface. Bot
 barred from four of them, and the run's own witness values decide each row — and
 `capstone_measure.py` looks for
 `vet`/`classify_later` in `stats['step_witness']` after the extractor's own top-level keys. The
-SCORED log in this bundle stays what it is — `capstone-measured-e0fc940b.log` was measured at
-`e0fc940b`, BEFORE the seam, and reports 6/8 with S2.2/S2.3 unobserved. A re-run at a post-seam
-head moves **S2.2**; **S2.3 does not move on this corpus** — its classify pass is IDLE
-(`enabled: true`, empty counters, and the map typed every candidate), so `observe_steps` still
-refuses to count it as OBSERVED. Since `#10215` that is a **witnessed idle**, not a refusal:
-`observe_idle` accounts S2.3 from the receipt's own facts (flag ON, empty counters, NO fail-open
+SUPERSEDED log (`capstone-measured-e0fc940b.log`) was measured at `e0fc940b`, BEFORE the seam, and
+reports 6/8 with S2.2/S2.3 unobserved — that is history, and the supersede chain deleted it from
+the tree while keeping its numbers citable. **This bundle's scored log is the post-seam one**:
+`capstone-measured-9152448d.log` (`9152448d7`) observes all eight, so a re-run at a post-seam
+head moves **S2.2** — and on this corpus **S2.3 moved too**, because its classify pass was not
+idle after all (`enabled: true`, `s2 = {"adjudication_calls": 1, "assigned_llm": 7, …}`, session
+`wp06_quarry_rollout`), which falsifies this bundle's recorded prediction that it stays IDLE. Had
+it been idle, `#10215` makes that a **witnessed idle**, not a refusal: `observe_idle` accounts S2.3
+from the receipt's own facts (flag ON, empty counters, NO fail-open
 marker, a positive candidate count), this probe writes that accounting into its own log
 (`run.steps_required` / `run.steps_conditional`, from the frozen record — the split the gate reads
 and cannot infer), and G5/V5 accept it because the pre-registration declares the step conditional.
