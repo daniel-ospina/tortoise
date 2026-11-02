@@ -387,9 +387,23 @@ _FALKORDB_VERSION_CACHE: dict[tuple, tuple[int, int, int] | None] = {}
 # it while the client reports an error and retries). After #2850 no health
 # check waits on the DB at all, so the read timeout no longer sits in the
 # liveness budget; it is now configurable for operators who need a tighter
-# loop-stall ceiling (pair a lower value with a lower
-# TORTOISE_LOOP_STALL_EXIT_S, see monitoring.start_stall_watchdog — note that
-# self-kill is OPT-IN and disabled by default).
+# loop-stall ceiling.
+#
+# The knob that SIZES that ceiling — and the only one the HOSTED deployment
+# arms (``TORTOISE_LOOP_STALL_HARD_EXIT_S = "600"`` in ``fly.toml`` ``[env]``)
+# — is ``TORTOISE_LOOP_STALL_HARD_EXIT_S``: it fires on the first poll and
+# deliberately BYPASSES the in-flight gauge and the hysteresis, because an
+# open ``GET /mcp`` SSE stream is an in-flight request, so an idle-gated exit
+# could never fire on the wedge it guards. A request in flight does not stop
+# the loop ticking, so a MISSING TICK is the evidence of a wedge.
+# ``TORTOISE_LOOP_STALL_EXIT_S`` is its SOFT, idle-gated sibling and is
+# deliberately UNSET on the hosted deployment (see
+# ``hosted_api._start_liveness``); pointing an operator at it would hand them
+# the knob production does not run (#10585 review P2 — the sixth copy of this
+# stale belief). Both are DISABLED BY DEFAULT (``0``) in the PRODUCT, so a
+# self-hoster opts in; "disabled by default" is the shipped default, not a
+# description of what the hosted deployment runs. See
+# ``monitoring.start_stall_watchdog``.
 _DB_CONNECT_TIMEOUT_DEFAULT = 2.0
 _DB_SOCKET_TIMEOUT_DEFAULT = 10.0
 #: Sanity ceiling on a configured DB socket timeout (round-3 review P2).
