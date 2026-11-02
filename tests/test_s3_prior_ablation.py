@@ -368,12 +368,22 @@ def test_ci_checks_this_bundle_not_only_the_capstone_one(probe):
         "CI must run the gate over EVERY discovered bundle: a bundle named by hand is a bundle the "
         "next contribution can add without being read. Found: "
         f"{invocations}")
-    assert any(
-        "--dir docs/evidence/5087-hypothesis" in line or "--all-bundles" in line
-        for line in invocations
-    ), (
+    # NOT `or "--all-bundles" in line`: the assertion above already established that flag, so that
+    # `or` branch was satisfied by the very line the discovery reads — a tautology, not an
+    # independent claim (flagged at #10547 review, "worth fixing"). The claim that is NOT
+    # satisfiable by construction is that discovery actually REACHES this bundle.
+    spec = importlib.util.spec_from_file_location(
+        "_capstone_preregistration_check_for_ci_assert",
+        ROOT / "tools/capstone_preregistration_check.py",
+    )
+    checker = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(checker)
+    discovered = {path.resolve() for path in checker.discover_bundles()}
+    assert probe.EVIDENCE_DIR.resolve() in discovered, (
         "CI must run the gate on THIS bundle: an ordering rule that no job executes is a rule that "
-        f"does not exist. Found: {invocations}")
+        f"does not exist. discovery found: {sorted(str(p) for p in discovered)}"
+    )
 
 
 def test_a_missing_pins_block_refuses(probe):

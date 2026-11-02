@@ -534,11 +534,20 @@ class HistoryUnavailable(CheckError):
 
     Carries the failures the GIT-FREE half already found, so an unprovable history cannot swallow a
     laundering finding that needed no history at all (#9075 review r6 P2).
+
+    ``fatal`` marks the reasons that have NO fallback, as opposed to the shallow-clone reason: a
+    truncated history is a state every CI test job is in and the caller deliberately reports it as a
+    declared-green third outcome (#9075 r4 P1), whereas a base ref that cannot be resolved has no
+    such excuse — degrading to the branch's own history is exactly the PR-internal rule #10463
+    removes, so that answer is "I could not check this subject" (exit 2) and must never be folded
+    into a pass (#10547 review P1: folded in, the arm was INERT — exit 0 with the wrong reason).
     """
 
-    def __init__(self, message: str, failures: list[str] | None = None) -> None:
+    def __init__(self, message: str, failures: list[str] | None = None, *,
+                 fatal: bool = False) -> None:
         super().__init__(message)
         self.failures = list(failures or [])
+        self.fatal = fatal
 
 
 def history_unavailable() -> bool:
@@ -698,10 +707,11 @@ BASE_REF_ENV = "PREREG_ORDERING_BASE_REF"
 BASE_REF_CANDIDATES = ("origin/main", "main")
 
 NO_BASE_REF = (
-    "UNPROVABLE — no base ref: this checkout has "
-    f"{'/'.join(BASE_REF_CANDIDATES)} to measure the ordering against, and it has a remote, so a "
-    "provisional base of HEAD would answer a question this checkout cannot answer (the ordering "
-    "claim is against the PUBLISHED base, not against this branch's own history)"
+    "UNPROVABLE — no base ref: this checkout has a remote but neither "
+    f"{' nor '.join(BASE_REF_CANDIDATES)} to measure the ordering against, and a provisional base "
+    "of HEAD would answer a question this checkout cannot answer (the ordering claim is against "
+    "the PUBLISHED base, not against this branch's own history). This is a REFUSED check, not a "
+    "green one: fetch the base (git fetch origin main) or name it with --base-ref"
 )
 
 SAME_PR_REFUSAL = (
@@ -1033,7 +1043,7 @@ def check_ordering(prereg: Path, logs: list[Path], pins: dict | None = None,
 
     base = resolve_base_ref(base_ref)
     if base is None:
-        raise HistoryUnavailable(NO_BASE_REF, failures)
+        raise HistoryUnavailable(NO_BASE_REF, failures, fatal=True)
 
     # The registration's appearance ON THE BASE — the only side a squash merge cannot rewrite.
     prereg_epochs = _added_epochs_on(base, prereg)
@@ -1539,12 +1549,21 @@ def run(directory: Path, use_git: bool = True, use_corpus: bool = True,
             report["ordering_exempt"] = sorted(content_exempt)
             ordering = "verified"
         except HistoryUnavailable as exc:
+            # A reason with NO fallback is not the third outcome — it is a check that could not be
+            # performed, which `main` must report as exit 2. Re-raising hands it to the CheckError
+            # arm with its OWN message; folding it in (as every HistoryUnavailable used to be)
+            # made NO_BASE_REF INERT: the CLI exited 0 and printed the shallow-clone reason for a
+            # checkout that is not shallow (#10547 review P1, measured before this fix).
+            if exc.fatal:
+                raise
             # The THIRD outcome: neither a pass nor an ordering failure. Folding it into either is
             # what reds a correctly ordered tree in every CI test job (#9075 r4 P1). The git-FREE
             # findings it carries are kept — an unprovable history must not clear a laundering
             # finding that needed no history to prove.
             failures += exc.failures
-            ordering = HISTORY_UNAVAILABLE
+            # The REASON is the exception's own message, never a constant: a hardcoded
+            # HISTORY_UNAVAILABLE here reported "shallow clone" for every unprovable checkout.
+            ordering = str(exc)
     else:
         ordering = "UNVERIFIED (--no-git)"
     report["ordering"] = ordering

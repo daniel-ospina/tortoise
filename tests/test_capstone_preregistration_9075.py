@@ -2590,8 +2590,8 @@ def test_a_multi_bundle_json_error_names_the_bundle_it_came_from(tmp_path, capsy
 
     The human path prints `ERROR: {directory}: {message}`; the JSON branch emitted bare strings,
     so a consumer of a two-bundle run could see *that* one failed and not *which*. Not cosmetic —
-    the only CI invocation of this tool now passes `--dir` twice (`#10468` r6 F1), and exit 2
-    ("could not check this subject") deliberately outranks the readable bundle's green.
+    CI runs this tool over every discovered bundle (`--all-bundles`, #10547), so its exit 2
+    ("could not check this subject") deliberately outranks the readable bundles' green.
     """
     empty = tmp_path / "not-a-bundle"
     empty.mkdir()
@@ -2700,6 +2700,62 @@ def test_the_refusal_is_not_a_no_op_when_the_base_is_missing(tmp_path, monkeypat
     with pytest.raises(check.HistoryUnavailable) as exc:
         check.check_ordering(prereg, [log])
     assert "no base ref" in str(exc.value), str(exc.value)
+
+
+def test_the_cli_fails_closed_when_the_base_ref_cannot_be_resolved(tmp_path, monkeypatch, capsys):
+    """#10547 review P1: the NO_BASE_REF arm was INERT — the CLI exited 0 and blamed a shallow clone.
+
+    `check_ordering` did raise, and that is all the test above ever pinned. But `run()` caught every
+    `HistoryUnavailable` and folded it into the declared-green third outcome, so the only consumer
+    that decides an EXIT CODE never saw it: measured on the pre-fix tree in a repo with a remote and
+    no resolvable base, `main([...])` returned **0**, and the report's `ordering` field carried
+    `HISTORY_UNAVAILABLE` ("shallow clone") — a reason this checkout does not have. An arm that
+    cannot change a verdict, and misnames its own reason, is the fail-open this test pins shut.
+    """
+    repo = _repo(tmp_path, monkeypatch)
+    # A remote, but no `origin/main`/`main`: the exact state NO_BASE_REF exists to describe.
+    _git(repo, "symbolic-ref", "HEAD", "refs/heads/contrib")
+    _git(repo, "remote", "add", "upstream", "https://example.invalid/x.git")
+    # The REAL document, so the pins/completeness arms pass and the run actually REACHES the
+    # ordering half — a placeholder document would exit 2 for an unrelated reason and prove nothing.
+    bundle = repo / "docs" / "evidence" / "7949-capstone"
+    bundle.mkdir(parents=True)
+    (bundle / check.PREREG_NAME).write_text(PREREG.read_text())
+    _git(repo, "add", str(bundle.relative_to(repo)))
+    _git(repo, "commit", "-q", "-m", "add prereg", epoch=1_700_000_100)
+
+    code = check.main(["--dir", str(bundle), "--no-corpus"])
+    printed = capsys.readouterr()
+    output = printed.out + printed.err
+    assert code == 2, (
+        "a checkout that cannot resolve a base ref must be refused as 'could not check this "
+        f"subject', not certified: exit {code}"
+    )
+    assert "no base ref" in output, output
+    assert "shallow clone" not in output, (
+        "the reason must be the checkout's OWN reason — the shallow-clone message is a different "
+        f"state. Found: {output}"
+    )
+    assert "the ordering holds" not in output, output
+
+
+def test_an_unprovable_ordering_reports_its_own_reason_not_a_constant(monkeypatch):
+    """The report's `ordering` is the exception's message, never a hardcoded HISTORY_UNAVAILABLE.
+
+    The hardcoded constant is the *mechanism* behind the P1 above: every unprovable checkout got the
+    shallow-clone text, so a reader could not tell which state they were in. The shallow message is
+    still produced for the shallow state — by identity, not by substitution.
+    """
+    a_distinct_reason = "UNPROVABLE — a reason that is not the shallow-clone one"
+
+    def raise_distinct(*_args, **_kwargs):
+        raise check.HistoryUnavailable(a_distinct_reason, [])
+
+    monkeypatch.setattr(check, "check_ordering", raise_distinct)
+    report = check.run(PREREG_DIR, use_git=True, use_corpus=False)
+    assert report["ordering"] == a_distinct_reason, report["ordering"]
+    assert report["run_order_claim"] == a_distinct_reason
+    assert report["ok"] is True, "a NON-fatal unprovable history stays the declared-green outcome"
 
 
 def test_equal_epochs_on_the_base_are_still_not_before(tmp_path, monkeypatch):
