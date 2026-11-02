@@ -369,3 +369,92 @@ def test_the_read_surface_sweep_cites_resolve_at_this_head():
             assert "active.status IS NULL" in audit_lines[line_no - 1], (
                 f"the changelog cites `audit.py:{line_no}` for the spelled-out "
                 f"NULL arm, but that line reads {audit_lines[line_no - 1].strip()!r}")
+
+
+# --- `tortoise/log.py`'s disclosed-exception cites (review at `3a37fb34e`, ISSUE 1 P3) ---
+#
+# `log.py`'s "ONE DISCLOSED EXCEPTION, AND ITS BOUNDARY" block is the load-bearing
+# text that tells a durability reader WHY a torn ``PointAdded``/``OperatorAdded`` is
+# tolerated at all. It evidenced that exception with three cites into
+# `projection/entities.py` — `:2525`, `:2515`, `:2627` — and NONE of them landed on
+# the clause the sentence names: at this head those lines are comment prose ("# #5008:
+# through the EMBED gate — an identifier-only text earns no vector.", "# express a
+# clear; only an explicit arm can (see $embedding_clear", "# An un-sourced Point, or
+# one whose Source has no recorded hash, carries"). They were not right at the merge
+# base either (2555 / 2559 / 2661), so this is the same rot `docs/00_index.md`'s own
+# cell names — *"a bare `sdk.py:<line>` here drifted by +152 lines … a symbol cannot
+# re-stale"* — in the one place in this PR where that rule was applied and not
+# verified. The next reader is a durability auditor deciding whether a resurrection
+# risk is REAL, so a cite that lands on unrelated prose is not a nit.
+#
+# Fix: cite the SYMBOL (`_upsert_point_props`), and hold both forms here the way the
+# sweep pin above does — a symbol must resolve to a body that CARRIES the clause, a
+# line cite must LAND on it.
+#
+# Non-vacuity, against the pre-fix block (both legs red on it, independently):
+#   * the symbol leg — pre-fix named no `_upsert_point_props` at all, so the
+#     "the block cites the fold in some resolvable form" assertion reds;
+#   * the line leg — pre-fix's `:2525` normalises to comment prose containing none of
+#     the three clauses, so the "every cite lands on the code it names" assertion reds.
+
+_LOG = Path(__file__).resolve().parent.parent / "tortoise" / "log.py"
+
+_LOG_BLOCK_START = "ONE DISCLOSED EXCEPTION, AND ITS BOUNDARY"
+_LOG_BLOCK_END = "WHY THE FOUR REMAIN"
+
+#: The three clauses the block names, in the spelling `entities.py` writes them. The
+#: block itself spaces the SET assignment (`n.status = coalesce(...)`), so the
+#: comparison is whitespace-insensitive rather than text-identical — a pin that reds
+#: on spacing teaches the next editor to weaken it.
+_LOG_CLAUSES = (
+    "n.status=coalesce($st, n.status, 'live')",
+    "n.content=$content",
+    "n.direction=$dir",
+)
+
+
+def _normalised(text: str) -> str:
+    """Whitespace-free form, for the one spacing difference between prose and code."""
+    return re.sub(r"\s+", "", text)
+
+
+def _log_exception_block() -> str:
+    """The disclosed-exception passage of `tortoise/log.py`."""
+    text = _LOG.read_text(encoding="utf-8")
+    start = text.index(_LOG_BLOCK_START)
+    return text[start:text.index(_LOG_BLOCK_END, start)]
+
+
+def test_the_disclosed_exception_cites_resolve_at_this_head():
+    """Every cite behind the torn-tail exception must LAND on what it claims."""
+    window = _log_exception_block()
+    source = _PROJECTION_ENTITIES.read_text(encoding="utf-8")
+    lines = source.splitlines()
+
+    symbol_cites = re.findall(r"`(_upsert_point_props)`", window)
+    line_cites = [int(m.group(1)) for m in re.finditer(r"entities\.py:(\d+)", window)]
+    line_cites += [int(m.group(1)) for m in re.finditer(r",\s*:(\d+)", window)]
+    assert symbol_cites or line_cites, (
+        "the torn-tail exception cites no `projection/entities.py` fold at all, so "
+        "the claim that its folds write an authoritative value STRAIGHT from the "
+        f"payload is unverifiable: {window[:240]!r}")
+
+    for name in symbol_cites:
+        body = _normalised(_def_body(source, name))
+        for clause in _LOG_CLAUSES:
+            assert _normalised(clause) in body, (
+                f"the exception block cites `projection/entities.{name}` for "
+                f"`{clause}`, but that function's body does not carry it — the "
+                "symbol resolves and the claim does not (#10524 review ISSUE 1)")
+
+    for line_no in line_cites:
+        assert 1 <= line_no <= len(lines), (
+            f"`log.py` cites `entities.py:{line_no}`, but the file has "
+            f"{len(lines)} lines")
+        cited = _normalised(lines[line_no - 1])
+        assert any(_normalised(c) in cited for c in _LOG_CLAUSES), (
+            f"`log.py`'s torn-tail exception cites `entities.py:{line_no}`, but that "
+            f"line reads {lines[line_no - 1].strip()!r} — none of the three clauses "
+            f"it names ({', '.join(_LOG_CLAUSES)}) is there. A bare line cite cannot "
+            "survive this file growing above it; cite the symbol "
+            "(`_upsert_point_props`) instead (#10524 review ISSUE 1)")

@@ -103,13 +103,17 @@ except ImportError:       # pragma: no cover - import-time platform branch
 # cannot prove that payload absent.
 #   * ``PointAdded`` / ``OperatorAdded`` are members, but their fold reaches
 #     ``n.status = coalesce($st, n.status, 'live')`` with ``$st`` taken from the
-#     payload (projection/entities.py:2525) and ``create_point`` accepts
+#     payload (``projection/entities._upsert_point_props``'s fixed SET list —
+#     cited by SYMBOL, not by line. The three line cites that stood here
+#     (``:2525``, ``:2515``, ``:2627``) never resolved: each was ~40 lines off
+#     when written, and a symbol cannot re-stale) and ``create_point`` accepts
 #     every value in ``POINT_STATUS_VALUES`` — a BORN-TERMINAL
 #     create (``_born_terminal``, a first-class case: see #2422)
 #     journals ``status`` in its ``PointAdded`` point snapshot. A
 #     torn born-terminal ``PointAdded`` for an id an EARLIER record left live is
 #     therefore a resurrection this classifier tolerates. ``n.content=$content``
-#     and the operator ``n.direction=$dir`` (entities.py:2515, :2627) are the same
+#     and the operator ``n.direction=$dir`` (the same ``_upsert_point_props`` SET
+#     list, and its operator-scoped ``set_clauses`` arm) are the same
 #     family on the same re-create composition, and so is an owned-null
 #     ``embedding`` (re-capture of a deterministic turn id — the
 #     ``f"{session_id}_t{i}"`` form ``sdk._capture_turn_id`` mints — with
