@@ -1685,6 +1685,12 @@ def _build_fingerprint(*, reader_model: str, judge_model: str,
     _temporal_leg_on = (
         (os.environ.get("TORTOISE_LME_TEMPORAL_LEG") or "").strip().lower()
         in _TRUTHY)
+    #: #10538: the leg's PLACEMENT arm, resolved from the SAME env the shipped
+    #: call resolves (one resolver, one answer) — a fingerprint that read a
+    #: different value than the run used would certify the wrong arm.
+    from .retrieve import resolve_temporal_leg_placement as _resolve_tl_place
+    _tl_placement_env = _resolve_tl_place(
+        None, os.environ.get("TORTOISE_LME_TEMPORAL_LEG_PLACEMENT"))
     # #2976: the TR session-admission / completion arms are env-only from the
     # harness (the sibling #2976 temporal-leg precedent), so the fingerprint
     # reads the env. CONDITIONAL presence: OFF leaves both keys ABSENT, so the
@@ -1812,6 +1818,18 @@ def _build_fingerprint(*, reader_model: str, judge_model: str,
              _env_float("TORTOISE_LME_TEMPORAL_LEG_WEIGHT",
                         DEFAULT_TEMPORAL_LEG_WEIGHT) if _temporal_leg_on
              else None),
+            # #10538: the PLACEMENT arm — stamped for the same reason as the
+            # budget and weight above, and more violently so: it moves the
+            # picks from fused ranks 10-11 to 0-1, i.e. into or out of the
+            # graded top-5. Without this key the ordinary way to run the A/B
+            # (flip the env, re-run the SAME --checkpoint) reuses every
+            # completed question from the other arm and reports a two-arm
+            # mixture as one arm. CONDITIONAL presence: absent at the shipped
+            # ``tail`` default, so every existing arm-ON checkpoint still
+            # resumes byte-identically (the ``tr_top_k`` precedent above).
+            ("temporal_leg_placement",
+             _tl_placement_env
+             if (_temporal_leg_on and _tl_placement_env != "tail") else None),
             # #2976: the TR session-admission arm — conditional presence ONLY
             # when it resolves ON (the default fingerprint stays
             # byte-identical), and the FOUR completion budgets are stamped with
