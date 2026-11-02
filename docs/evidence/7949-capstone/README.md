@@ -489,8 +489,10 @@ smoothed over: the FILE postdates the pre-registration (added 2026-10-22) but th
 does not (`date=2026-10-19T01:39:26Z`), and its `corpus_hash` is **not** the frozen
 `fixtures_hash`. The row is therefore a non-green measurement on **its own** corpus revision,
 and the gate (V7) requires that digest to appear in the cited artifact — a declaration the
-artifact does not record is a finding. The mechanism is #8503 (the planted edges are not formed
-at all); the receipt's retrievability rate is unmeasured (#9596).
+artifact does not record is a finding. The mechanism is #8503 — **CLOSED 2026-10-24**, and that closure
+records the *disproof*, so `#8503` is this row's **measurement record, not a live blocker** —
+and the residual owner is **`#9596`**: the planted edges are not formed at all, and the
+receipt's retrievability rate is unmeasured.
 
 ## E5 — the falsifier, re-scored against this commit's gold
 
