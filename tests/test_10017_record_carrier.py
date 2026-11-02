@@ -41,6 +41,7 @@ is the file that reads the carrier off an armed capture directly.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -574,3 +575,96 @@ def test_a_shorter_recapture_removes_the_turn_on_both_routes(
     # The graph half: the rebuild does not resurrect it either.
     ids = _replay_both(tmp_path, monkeypatch, journal)
     assert stale not in ids
+
+
+# ── §2b the ENRICHED branch is inside the declaration too (#8488) ──────────
+
+
+#: One numbered entry of the rewrite prompt's window: `[n] <turn text>` up to the
+#: next entry or the block's own END boundary.
+_WINDOW_ENTRY = re.compile(
+    r"(?ms)^\[(\d+)\] (.*?)(?=^\[\d+\] |^<<<END-UNTRUSTED)")
+
+
+def _target_of(prompt: str) -> str:
+    """The TARGET turn's stored text, resolved from the rendered prompt.
+
+    The window is ONE numbered untrusted block and the target is named by an
+    INDEX in a trailing clause outside it (that is the shape that makes the
+    request prefix cacheable), so this resolves it the way the model is asked
+    to: read the numbered window, then apply the clause.
+
+    ⛔ NOT by splitting on a marker string. The round-2 fixture here split on
+    `"TARGET turn (rewrite this one):\n"`, which the cacheable re-shape deleted
+    (`8dee06c33`) — so `split(...)[1]` raised `IndexError` on every turn,
+    `_rewrite_one`'s fail-soft arm swallowed it and returned the RAW text, and
+    the leg went green on a completely broken enrichment (#10523 review round
+    4, P2).
+    """
+    want = re.search(r"TARGET TURN: \[(\d+)\]", prompt)
+    assert want is not None, (
+        f"no TARGET clause in the rendered prompt: {prompt[-300:]!r}")
+    entries = dict(_WINDOW_ENTRY.findall(prompt))
+    assert want.group(1) in entries, (
+        f"no turn [{want.group(1)}] in the window: {sorted(entries)}")
+    return entries[want.group(1)].strip("\n")
+
+
+def test_an_enriched_capture_journals_no_UNDECLARED_snapshot_key(sdk, monkeypatch):
+    """#8488 (review round 2, P1): the enriched turn snapshot is DECLARED.
+
+    When `TORTOISE_CONTEXT_ENRICH` is ON the writer puts the enriched text on
+    the SAME per-turn snapshot as the vector it describes. `TURNS_SNAPSHOT_KEYS`
+    and `TURNS_SNAPSHOT_OPTIONAL_KEYS` are the contract step 7 inherits, and the
+    failure mode of a key outside both is silent rather than loud: it lands in
+    the props JSON tail on the record-armed lane instead of a declared field.
+
+    Nothing in the existing suite could see that: the key only appears when the
+    gate is ON, and every other capture leg runs with it unset — so the drift
+    was dormant, not absent. This leg reads the ON writer's own journal.
+    """
+    from tortoise import model_adapters
+    from tortoise.context_enrich import ENRICH_ENV
+
+    class _Rewriter:
+        def complete(self, *, system, user):
+            return "ENRICHED " + _target_of(user)
+
+    from tortoise.sdk import _capture_enriched_texts
+
+    monkeypatch.setenv(ENRICH_ENV, "1")
+    monkeypatch.setattr(model_adapters, "build_extractor_model",
+                        lambda *a, **kw: _Rewriter())
+    # The REAL chain: the gate reads `TORTOISE_CONTEXT_ENRICH`, the model seam
+    # is patched (no network), and `_write_capture_turns` is where the snapshot
+    # is built — the same `enrich_fn` `capture_session` passes (`sdk.py:13349`).
+    _capture(sdk[0], TURNS, enrich_fn=_capture_enriched_texts)
+
+    snaps = _turn_snapshots(sdk[1])
+    assert len(snaps) == len(TURNS), snaps
+    declared = rp.TURNS_SNAPSHOT_KEYS | rp.TURNS_SNAPSHOT_OPTIONAL_KEYS
+    for snap in snaps:
+        # Non-vacuous: the leg is about the ENRICHED payload, so the enriched
+        # key must actually be there.
+        assert "embeddingText" in snap, (
+            "the gate was ON but the snapshot carried no embeddingText — this "
+            "leg would then assert nothing about the key it exists for")
+        undeclared = sorted(set(snap) - declared)
+        assert not undeclared, (
+            f"the ENRICHED capture journalled {undeclared}, which is in neither "
+            "TURNS_SNAPSHOT_KEYS nor TURNS_SNAPSHOT_OPTIONAL_KEYS — on the "
+            "record-armed lane that key rides the props JSON tail instead of a "
+            "declared field (#8488)")
+        # …and the rest of the branch contract still holds for the enriched
+        # snapshot (its text is attested, so the identity stamps ride with it).
+        _assert_snapshot_contract(snap, optional={"embeddingText"},
+                                 context="an ENRICHED capture")
+        # ⛔ AND THE ENRICHMENT REALLY HAPPENED (#10523 review round 4, P2). A
+        # fixture whose rewrite RAISES is swallowed by the fail-soft arm, which
+        # journals the RAW text under the same key — so "embeddingText is
+        # present" alone passes on an enrichment that never worked, which is the
+        # one failure this leg is positioned to notice.
+        assert snap["embeddingText"] != snap["content"], (
+            "the fixture's rewrite degraded to the raw text (the fail-soft arm "
+            "swallowed it), so this leg asserts nothing about enrichment")
+        assert snap["embeddingText"].startswith("ENRICHED "), snap

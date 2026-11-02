@@ -143,6 +143,15 @@ _EP_DIMENSIONS = ("bias", "precision", "consistency", "directness")
 _PLUMBING_KEYS = frozenset({
     "embedding", "embedding_verbatim", "embedding_model",
     "embedding_revision", "embedding_text_hash", "content_hash",
+    # #8488 scope 1: the enriched text the vector describes. PLUMBING, not news:
+    # it is derived from `content` + the enrichment pass, which is exactly the
+    # same-delta engineering the keys above already report — so leaving it out
+    # made every `update_point(content=…)` announce `embeddingText: null` as a
+    # claim change (and `_observed_before` then carried it into the NEXT delta's
+    # `before`, growing the window's vocabulary with a value nobody edited).
+    # Raised by the #10523 review and caught by `tests/test_change_feed_2353.py`,
+    # which the PR body's suite list did not name.
+    "embeddingText",
 })
 
 #: The write-path precondition a transition IMPLIES — a property of the event
