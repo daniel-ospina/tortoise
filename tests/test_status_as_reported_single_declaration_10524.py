@@ -234,3 +234,138 @@ def test_the_point_idiom_pointer_line_number_lands_on_the_idiom():
         f"the changelog cites `ONTOLOGY.md:{line_no}` for the Point idiom, but "
         f"that line reads {lines[line_no - 1].strip()!r} — the landmark moved "
         "and the pointer was not updated with it")
+
+
+# --- the changelog's READ-SURFACE SWEEP cites (review at `85c7b0198`, ISSUE 1 P3) ---
+#
+# The same v3.31 block closes the consumer trap with the sweep claim: "it is why
+# every in-repo read surface was swept before this landed", evidenced by THREE
+# cites — the Object leg's NULL-tolerant predicate, `projection/entities.py`'s
+# `WITH o, (o.status IS NULL OR NOT …) AS live`, and `audit.py`'s spelled-out arm.
+# That paragraph is the only place telling a consumer where to verify the sweep
+# after `ONTOLOGY.md`'s cells were reverted, so a cite that does not resolve sends
+# a lane to unrelated code — and the plausible next step for that lane is to
+# "fix" a read surface that is already correct.
+#
+# Measured drift, inside THIS PR: the Object-leg cite read `sdk.py:20346` when it
+# was written (`22a448f3d`, where `grep -n "_terminal_excluded('o.status')"` gave
+# 20346) and the later merge of `origin/main` (`a7485da75`) inserted 55 lines
+# above it, leaving `:20346` in a docstring and the leg at `:20401`. That is the
+# failure `docs/00_index.md`'s edited cell already names — *"a bare `sdk.py:<line>`
+# here drifted by +152 lines … a symbol cannot re-stale"* — so the fix cites the
+# SYMBOL and this pin accepts either form while holding each to its own currency.
+#
+# Non-vacuity, against the pre-fix text (`85c7b0198` + the merge):
+#   * the line leg — pre-fix carried `sdk.py:20346`, whose line is docstring prose
+#     ("natural key: under #3590 D2 two live Objects may hold it, so the read"), so
+#     `_terminal_excluded('o.status') in lines[20346-1]` reds;
+#   * the symbol leg — pre-fix named no `TortoiseSDK.<method>` at all, so the
+#     assertion "the paragraph cites the Object leg in some resolvable form" reds
+#     on the combination of the two legs even if a future edit keeps only a line.
+
+_SDK = Path(__file__).resolve().parent.parent / "tortoise" / "sdk.py"
+_PROJECTION_ENTITIES = Path(__file__).resolve().parent.parent / "tortoise" / "projection" / "entities.py"
+_AUDIT = Path(__file__).resolve().parent.parent / "tortoise" / "audit.py"
+
+#: The leg's own code, in the one spelling the sweep paragraph quotes it by.
+_OBJECT_LEG = "_terminal_excluded('o.status')"
+
+_SWEEP_START = "every in-repo read surface was swept"
+_SWEEP_END = "relies on the literal"
+
+
+def _sweep_text() -> str:
+    """The changelog passage that evidences the read-surface sweep."""
+    text = _CHANGELOG.read_text(encoding="utf-8")
+    start = text.index(_SWEEP_START)
+    return text[start:text.index(_SWEEP_END, start)]
+
+
+def _def_body(source: str, name: str) -> str:
+    """The source of `def <name>`, up to the next def/class at the same or lower depth.
+
+    Deliberately not `ast`: this is a citation check on TEXT (the shape the
+    changelog's other cite pins already use), and the two files it reads are
+    already read as text by them.
+    """
+    lines = source.splitlines()
+    for i, line in enumerate(lines):
+        m = re.match(rf"^(\s*)(?:async )?def {re.escape(name)}\(", line)
+        if not m:
+            continue
+        depth = len(m.group(1))
+        end = len(lines)
+        for j in range(i + 1, len(lines)):
+            nxt = re.match(r"^(\s*)(?:async )?def |^(\s*)class ", lines[j])
+            if nxt and len(nxt.group(1)) <= depth:
+                end = j
+                break
+        return "\n".join(lines[i:end])
+    raise AssertionError(
+        f"the changelog cites `{name}`, but neither file defines a "
+        f"`def {name}(` — the symbol moved or was renamed")
+
+
+def test_the_read_surface_sweep_cites_resolve_at_this_head():
+    """Every cite evidencing the sweep must LAND on what it claims.
+
+    A line cite is checked because it CAN re-stale (that is the defect this pin
+    was filed for); a symbol cite is checked because it is the fix, and a symbol
+    that resolves to a method which no longer carries the leg is just as wrong.
+    """
+    window = _sweep_text()
+    source = _SDK.read_text(encoding="utf-8")
+    lines = source.splitlines()
+
+    symbol_cites = re.findall(r"TortoiseSDK\.(\w+)", window)
+    line_cites = [int(m.group(1)) for m in re.finditer(r"(?<![\w/.])sdk\.py:(\d+)", window)]
+    assert symbol_cites or line_cites, (
+        "the sweep paragraph cites no `sdk.py` Object leg at all — the claim "
+        f"'every in-repo read surface was swept' is then unverifiable: {window[:240]!r}")
+
+    for name in symbol_cites:
+        body = _def_body(source, name)
+        assert _OBJECT_LEG in body, (
+            f"the sweep paragraph cites `TortoiseSDK.{name}` for the Object leg, "
+            f"but that method's body carries no `{_OBJECT_LEG}` — the symbol "
+            "resolves and the claim does not (#10524 review ISSUE 1)")
+
+    for line_no in line_cites:
+        assert 1 <= line_no <= len(lines), (
+            f"the changelog cites `sdk.py:{line_no}`, but the file has {len(lines)} lines")
+        assert _OBJECT_LEG in lines[line_no - 1], (
+            f"the changelog cites `sdk.py:{line_no}` for the Object NULL-tolerant "
+            f"leg, but that line reads {lines[line_no - 1].strip()!r}. A bare line "
+            "cite cannot survive this file growing above it — cite the symbol "
+            "(`TortoiseSDK.<method>`) instead (#10524 review ISSUE 1)")
+
+    # The two sibling cites in the same sentence carry the rest of the evidence.
+    # Same rule, same two currencies: whichever form the paragraph names must
+    # resolve — a line range is checked against its span, a `_fold_object_superseded`
+    # symbol against that method's body. (This leg is not hypothetical either: at
+    # the head this review read, the range was `:4746-4748`; the merged tree moved
+    # it to `:4800-4802`, and the pre-merge range lands in a docstring.)
+    entities_source = _PROJECTION_ENTITIES.read_text(encoding="utf-8")
+    entity_spans = [m for m in re.finditer(r"projection/entities\.py:(\d+)-(\d+)", window)]
+    entity_symbols = re.findall(r"`(_fold_object_superseded)`", window)
+    assert entity_spans or entity_symbols, (
+        "the sweep paragraph cites no `projection/entities.py` fold at all — the "
+        f"NULL-tolerant-folding half of the evidence is unverifiable: {window[:240]!r}")
+    for m in entity_spans:
+        first, last = int(m.group(1)), int(m.group(2))
+        block = "\n".join(entities_source.splitlines()[first - 1:last])
+        assert "o.status IS NULL" in block, (
+            f"the changelog cites `projection/entities.py:{first}-{last}` for the "
+            f"NULL-tolerant fold, but that span reads {block.strip()!r}")
+    for name in entity_symbols:
+        assert "o.status IS NULL" in _def_body(entities_source, name), (
+            f"the changelog cites `projection/entities.py`'s `{name}` for the "
+            "NULL-tolerant fold, but that method's body does not carry "
+            "`o.status IS NULL`")
+
+    for m in re.finditer(r"audit\.py:(\d+),(\d+)", window):
+        audit_lines = _AUDIT.read_text(encoding="utf-8").splitlines()
+        for line_no in (int(m.group(1)), int(m.group(2))):
+            assert "active.status IS NULL" in audit_lines[line_no - 1], (
+                f"the changelog cites `audit.py:{line_no}` for the spelled-out "
+                f"NULL arm, but that line reads {audit_lines[line_no - 1].strip()!r}")

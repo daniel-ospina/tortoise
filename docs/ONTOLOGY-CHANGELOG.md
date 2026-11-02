@@ -87,9 +87,9 @@ aboutObjects: ONTOLOGY.md, canonical ontology, model versions
 > clause, anything that is not true is interpreted as being false"* (Cypher manual, *Working with null*). So
 > `MATCH (o:Object) WHERE o.status = 'live'` **silently drops the very Objects that are live** — the sharpest
 > form of the regression this change could have created, and it is why every in-repo read surface was swept
-> before this landed: the Object legs go through the NULL-tolerant predicate (`sdk.py:20346`'s `o.status`
-> leg; `projection/entities.py:4746-4748`'s `WITH o, (o.status IS NULL OR NOT (o.status IN $excluded)) AS
-> live`), `audit.py:528,539` spells the arm out (`active.status IS NULL OR active.status = 'live'`), and the
+> before this landed: the Object legs go through the NULL-tolerant predicate (`TortoiseSDK.belief_timeline`'s
+> `_terminal_excluded('o.status')` arm; `projection/entities.py`'s `_fold_object_superseded`
+> computes `WITH o, (o.status IS NULL OR NOT (o.status IN $excluded)) AS live`), `audit.py:528,539` spells the arm out (`active.status IS NULL OR active.status = 'live'`), and the
 > retrieval legs take their family vocabulary from `search_engine._status_vocab_for(label)`. None of them
 > relies on the literal. **Filter on the
 > predicate, never on the literal:** `live._terminal_excluded` (whose composition is
