@@ -1598,3 +1598,72 @@ def test_row_one_is_PARTIAL_because_ONE_writer_has_no_resolved_producer(
     row = probe.score_rule_bullet()
     assert row.verdict == "PARTIAL", (
         f"an unresolved writer must hold the row at PARTIAL: {row.verdict!r}")
+
+
+def test_row_one_is_NOT_MET_when_the_rule_is_not_STATED(tmp_path, monkeypatch):
+    """`not stated` is the `NOT MET` pole's first clause. Re-review measured that
+    dropping it leaves 72 passed / 1 skipped GREEN — row 1 then publishes `MET`
+    ("the rule is stated and wired") for a tree where no predicate exists."""
+    (tmp_path / "tortoise").mkdir()
+    # The predicate is ABSENT from the gate module.
+    (tmp_path / "tortoise" / "embed_gate.py").write_text(
+        "ENV_FLAG = 'TORTOISE_EMBED_GATE'\n", encoding="utf-8")
+    (tmp_path / "tortoise" / "embeddings.py").write_text(
+        "import tortoise.embed_gate as embed_gate\n"
+        "def encode_for_row(content):\n    return None\n", encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(probe, "embedding_writers", lambda: _gated_writer("tortoise.a::_w"))
+    monkeypatch.setattr(probe, "flag_in_shipped_configs", lambda flag: _fake_shipped(True))
+    monkeypatch.delenv("TORTOISE_EMBED_GATE", raising=False)
+    row = probe.score_rule_bullet()
+    assert row.verdict == "NOT MET", f"no stated predicate must not publish {row.verdict!r}"
+    assert "stated: False" in row.observed, row.observed
+
+
+def test_row_one_is_NOT_MET_when_the_rule_set_is_a_COPY(tmp_path, monkeypatch):
+    """`not shared` — the identity check §12.2a exists for. A COPY of the rule
+    set is the drift; dropping this clause measured GREEN (72 passed)."""
+    import tortoise.embed_gate as embed_gate
+
+    _fake_rule_tree(tmp_path)
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(probe, "embedding_writers", lambda: _gated_writer("tortoise.a::_w"))
+    monkeypatch.setattr(probe, "flag_in_shipped_configs", lambda flag: _fake_shipped(True))
+    monkeypatch.setattr(embed_gate, "RULE_SET", (*tuple(embed_gate.RULE_SET), "x"))
+    monkeypatch.delenv("TORTOISE_EMBED_GATE", raising=False)
+    row = probe.score_rule_bullet()
+    assert row.verdict == "NOT MET", f"a copied rule set must not publish {row.verdict!r}"
+    assert "one rule set: False" in row.observed, row.observed
+
+
+def test_row_one_is_PARTIAL_when_an_unparseable_module_holds_the_row(
+        tmp_path, monkeypatch):
+    """`unparsed` — "a module that will not parse is a HOLE in the measurement,
+    not a zero". Dropping this clause measured GREEN (72 passed)."""
+    _fake_rule_tree(tmp_path)
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(probe, "embedding_writers", lambda: {
+        **_gated_writer("tortoise.a::_w"),
+        "tortoise.broken": _writer("tortoise.broken::", "unparsed"),
+    })
+    monkeypatch.setattr(probe, "flag_in_shipped_configs", lambda flag: _fake_shipped(True))
+    monkeypatch.delenv("TORTOISE_EMBED_GATE", raising=False)
+    row = probe.score_rule_bullet()
+    assert row.verdict == "PARTIAL", f"an unparseable module must hold: {row.verdict!r}"
+
+
+def test_row_one_is_PARTIAL_when_a_duplicate_identity_collided(
+        tmp_path, monkeypatch):
+    """`duplicates` — a collided writer name means the later definition
+    overwrote the earlier one's label, so the population is not fully known.
+    Dropping this clause measured GREEN (72 passed)."""
+    _fake_rule_tree(tmp_path)
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(probe, "embedding_writers", lambda: {
+        **_gated_writer("tortoise.a::_w"),
+        "tortoise.__init__::": _writer("tortoise.__init__::", "duplicate"),
+    })
+    monkeypatch.setattr(probe, "flag_in_shipped_configs", lambda flag: _fake_shipped(True))
+    monkeypatch.delenv("TORTOISE_EMBED_GATE", raising=False)
+    row = probe.score_rule_bullet()
+    assert row.verdict == "PARTIAL", f"a duplicate identity must hold: {row.verdict!r}"
