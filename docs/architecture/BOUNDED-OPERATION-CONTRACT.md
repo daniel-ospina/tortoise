@@ -73,7 +73,7 @@ a reader who finds the number has drifted should search the quoted fragment: tha
 | MCP `tortoise_search` (`tool_registry.py:474`) · `GET /search` (selfhost, `selfhost_api.py:365`) | `limit` | **SILENT** | both return a bare list (`response_model=list[PointResponse]` on the route); recorded as a **deliberate limit** on #8447's 2026-11-01 comment (§6) and restated in `config/surface-manifest.yml:139-141` (*"returns a bare list, so it does not carry the field; wrapping a list in an object is a declared return-type change"*), because a marker here IS a return-shape change |
 | `TortoiseSDK.list_batches` (MCP: `tortoise_list_batches`) | `limit=20` | **SILENT** | `tortoise/sdk.py:27008` — `return items[:limit]`; the method's contract is `-> list[dict]` (`:26959`), so there is no field in which to say "there are more" |
 | `TortoiseSDK.suggest_entry_points` (MCP: `tortoise_suggest_entry_points`) | `limit=5` | **SILENT** | `tortoise/sdk.py:34378` — `results = results[:limit]`, returning `results` at `:34426`; declared `-> list[dict]` (`:34326`) |
-| `tortoise_query(text=…)` (MCP, `tool_registry.py:290`; the `text=` arm only) | `limit` (100 on that arm) | **SILENT** | `tortoise/mcp_server.py:2717-2720` calls `tortoise_fts_query(…, limit=eff_limit)` **without** the private marker sink, and the SDK method is declared `-> list[dict]` (`sdk.py:35172`) — so even though `tortoise_fts_query` CAN compute the marker (`_truncation_out`, `:35171`), a bare list has nowhere to carry it. Its structural arm (`text=None`) is a different surface — three branches, only one of them marked, see ⚠️ below |
+| `tortoise_query(text=…)` (MCP, `tool_registry.py:290`; the `text=` arm only) | `limit` (100 on that arm) | **SILENT** | `tortoise/mcp_server.py:2717-2720` calls `tortoise_fts_query(…, limit=eff_limit)` **without** the private marker sink, and the SDK method is declared `-> list[dict]` (`sdk.py:35172`) — so even though `tortoise_fts_query` CAN compute the marker (`_truncation_out`, `:35171`), a bare list has nowhere to carry it. Its structural arm (`text=None`) is a different surface, and not all of its branches are marked, see ⚠️ below |
 | `GET /v1/points` (hosted, `hosted_api.py:10208`) | `limit=50` (`Query(50, ge=1, le=1000)`) | **SILENT** | `return {"points": results, "count": len(results)}` at `hosted_api.py:10267` — `count` is rows delivered; no marker |
 | `GET /points` (selfhost, `selfhost_api.py:315`) | `limit=50` | **SILENT** | `response_model=list[PointResponse]` — a bare list on the route |
 | `GET /v1/events` (hosted, `hosted_api.py:10160-10164`) | `limit=100` (`le=_MAX_EVENT_PAGE`) | **REFUSES at the edge** | `limit: int = Query(100, ge=1, le=_MAX_EVENT_PAGE)` (`:10164`) refuses 0 at the route; the seam below it (`read_after`) refuses both ends — see §3 |
@@ -90,15 +90,16 @@ bounds are named here rather than folded into the marker because folding them in
 (the return is already a `dict`, so it is additive and needs no surface approval — the sibling search
 path does exactly this at `sdk.py:34571-34579`), and this document is the census, not the fix.
 
-⚠️ **`tortoise_query`'s structural arm is a different surface, and not ONE surface.** Only its
-**paginated** branch (`offset`/`page` given) returns a dict carrying `hasMore`/`total`
-(`mcp_server.py:2721-2730` → `sdk.py:22255`, that method's
-`return {... "hasMore": skip + limit < total}`), so that branch is a **marked** surface. Its default
-branch is a bare `list[dict]` (`mcp_server.py:2736-2738` → `sdk.py:22101-22104`,
-`TortoiseSDK.query`), as is the `tag` arm's unpaginated return (`mcp_server.py:2701-2703`) — and
-neither of those two passes a `limit` to the SDK at all, so neither is a *bounded* operation and
-neither belongs in the table above. Read the structural arm as a marked surface **only** when the
-caller paginates it.
+⚠️ **`tortoise_query`'s structural arm is a different surface, and not ONE surface** — it splits on
+`paginated`, and each half has two returns. With `offset`/`page` given it returns a `hasMore`/`total`
+dict: the `tag` arm at `mcp_server.py:2710-2712`, the default arm at `:2721-2730` → `sdk.py:22255`
+(that method's `return {... "hasMore": skip + limit < total}`). Only the default arm passes
+`limit=eff_limit` on to `paginated_query`, so only that one is *bounded* in §1's sense; the `tag` arm
+slices in Python after a full read, which is also why it can report `total` — but both carry the §2
+end-of-collection signal. Unpaginated it is a bare `list[dict]`: `tag` at `:2701-2703`, default at
+`:2736-2738` → `sdk.py:22101-22104` (`TortoiseSDK.query`) — neither passes a `limit`, so neither is
+bounded. None of those four has a row in the census above; per the absence rule below, read them
+from this ⚠️ as named-but-not-yet-censused, never as compliant.
 
 ⚠️ **The census is a population, and this table is the part of it that has been measured** — it is
 NOT yet exhaustive. §1 also names *body/log caps* and *ingest chunking*, and no row here covers
