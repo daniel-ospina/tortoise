@@ -243,7 +243,7 @@ def test_aggregation_seam_failure_keeps_the_pre_10539_prompt_and_warns_once(
                         raising=False)
     q = "How many clothing items did I buy last month?"
     qtype = detect_question_type(q)
-    compose = getattr(_reader_mod, "_system_prompt_for_question")
+    compose = _reader_mod._system_prompt_for_question
     with caplog.at_level(_logging.WARNING):
         first = compose(qtype, q)
         second = compose(qtype, q)
@@ -388,7 +388,7 @@ def test_composition_is_additive_and_leaves_the_type_prompt_untouched():
     RED mutation: append the fragment unconditionally -> the second assertion
     fails and the #4107/#4837 pins go red with it.
     """
-    compose = getattr(_reader_mod, "_system_prompt_for_question")
+    compose = _reader_mod._system_prompt_for_question
 
     agg_q = "How many clothing items did I buy last month?"
     agg_type = detect_question_type(agg_q)

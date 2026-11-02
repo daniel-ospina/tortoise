@@ -60,7 +60,6 @@ from tortoise.models import OpenAICompatModel
 from tortoise.reader import (
     _ABSTRACTION_FRAGMENT,
     _AGGREGATION_FRAGMENT,
-    _system_prompt_for_question,
     _KNOWLEDGE_UPDATE_FRAGMENT,
     _MULTI_SESSION_FRAGMENT,
     _SYSTEM_PROMPT,
@@ -69,6 +68,7 @@ from tortoise.reader import (
     PROBE_SYSTEM,
     LLMReader,
     Reader,
+    _system_prompt_for_question,
     reader_prompt_constants,
     system_prompt_for,
 )
@@ -80,7 +80,6 @@ __all__ = [
     "READER_MODEL",
     "_ABSTRACTION_FRAGMENT",
     "_AGGREGATION_FRAGMENT",
-    "_system_prompt_for_question",
     "_KNOWLEDGE_UPDATE_FRAGMENT",
     "_MULTI_SESSION_FRAGMENT",
     "_SYSTEM_PROMPT",
@@ -90,6 +89,7 @@ __all__ = [
     "Reader",
     "_parse_model_spec",
     "_resolve_provider",
+    "_system_prompt_for_question",
     "build_reader",
     "reader_prompt_constants",
     "system_prompt_for",

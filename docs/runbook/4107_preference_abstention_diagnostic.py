@@ -82,8 +82,10 @@ GOLD_TURN_HEAD = (
 #: are the two
 #: hypotheses #4107 names: route to the preference fragment, or add a
 #: targeted advice sentence (the option (b) candidate).
-from tortoise.reader import system_prompt_for  # noqa: E402
-from tortoise.reader import _system_prompt_for_question  # noqa: E402
+from tortoise.reader import (  # noqa: E402
+    _system_prompt_for_question,
+    system_prompt_for,
+)
 
 #: The advice/opinion sentence. Deliberately NOT in the shipped prompt — this
 #: diagnostic measures whether the gap is reachable, not whether it should be

@@ -903,9 +903,9 @@ def run_ask_assembled(sdk: TortoiseSDK, question: str, *,
     from tortoise.reader import (
         NO_EVIDENCE_TEXT,
         _looks_abstained,
+        _system_prompt_for_question,
         build_reader_user_message,
         detect_question_type,
-        _system_prompt_for_question,
     )
     from tortoise.retrieval import (
         estimate_tokens_ask,
