@@ -339,6 +339,50 @@ def test_a_missing_or_unreadable_share_floor_refuses():
         raise AssertionError(f"{shape} e1_min_before_share did not refuse")
 
 
+def test_the_bar_map_refuses_before_the_paid_step(monkeypatch):
+    """`parse_bars` refusing is only HALF the guarantee (#10610 issue 1).
+
+    The defect was not merely that a key went missing — it is that the run pays
+    for seven sessions and THEN discovers the record cannot be scored. A bar map
+    that refuses is worth nothing if `main()` reaches `run_corpus` first: the
+    refusal itself would then arrive after the LLM budget is spent.
+
+    No pin in this file drove `main()` before this one — `measure.main(...)` is
+    called once, in this case — so the pins that touch the bar map exercise its
+    OUTPUT, and none of them asserted the ORDER in which `main()` builds it. That
+    is the same "the reader is right, the wiring is wrong" shape that let the
+    KeyError ship.
+    This drives the REAL `main()` with a record whose `denominator_floors` omits
+    `e1_min_before_share` and requires the named refusal BEFORE the paid call.
+
+    ⛔ The paid step is STUBBED and fails loudly if reached — no DB, no model, no
+    network, and no LLM budget is spent by this test. The only tree reads on this
+    path are the committed pre-registration and, through `read_conditional`'s
+    sibling load, `capstone_run.py`'s own source — reads, not connections.
+    """
+    record = _prereg()
+    del record["denominator_floors"]["e1_min_before_share"]
+    monkeypatch.setattr(measure, "read_preregistration", lambda sha: record)
+    monkeypatch.setattr(measure, "resolve_head", lambda: "0" * 40)
+    monkeypatch.setattr(measure, "backend_ready", lambda: (True, "stub"))
+    paid: list[str] = []
+
+    def _paid(*args, **kwargs):
+        paid.append("run_corpus")
+        raise AssertionError("the paid 7-session step ran before the bar map "
+                             "refused — that is the #10610 defect")
+
+    monkeypatch.setattr(measure, "run_corpus", _paid)
+    with pytest.raises(SystemExit) as raised:
+        measure.main([])
+    message = str(raised.value)
+    # Named and honest: the operator is told WHICH input was missing, never a
+    # bare KeyError and never a default that would fabricate a measurement.
+    assert "REFUSED" in message, message
+    assert "e1_min_before_share" in message, message
+    assert paid == [], f"the paid step was reached before the refusal: {paid}"
+
+
 def test_a_boolean_floor_is_not_a_count():
     record = _prereg()
     record["denominator_floors"]["e1_objects"] = True
