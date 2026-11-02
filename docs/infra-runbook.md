@@ -176,11 +176,13 @@ the ruling for the first):
 `fly-only:<issue>` names are out-of-band **by recorded decision** —
 `REGISTRY_STREAM_KEY` (`fly-only:#661`) must never be present in GitHub;
 `fly-toml-env` names are applied from the versioned `fly.toml [env]`; and
-`workflow` names have no GitHub secret *as their declared source*. Two of them
+`workflow` names have no GitHub secret *as their declared source*. Three of them
 are re-staged on **every** run — `TORTOISE_GIT_SHA` from non-secret context
-(`${GITHUB_SHA}`) and `TORTOISE_SESSION_LLM_MODEL` from its GitHub secret when
-one is present, else the versioned default (§4.6) — so a Fly-only value for
-either is reverted by the next deploy exactly like a `gh-secret:` one.
+(`${GITHUB_SHA}`), `TORTOISE_GIT_DIRTY` from the build's own working tree
+(`git status --porcelain`, #10447), and `TORTOISE_SESSION_LLM_MODEL` from its
+GitHub secret when one is present, else the versioned default (§4.6) — so a
+Fly-only value for any of them is reverted by the next deploy exactly like a
+`gh-secret:` one.
 `BACKUP_SWEEP_ENABLED` is the exception: it is staged to `true` **only when**
 the whole backup/R2/DR secret set is present, and otherwise the assignment is
 skipped and any Fly-side value is left as it was (the fail-closed default —
@@ -1015,8 +1017,10 @@ curl -s https://tortoise-y4mjjq.fly.dev/health | python3 -m json.tool | sed -n '
 |---|---|
 | `version` | `tortoise.__version__` — the package version, mirrors `pyproject.toml`. Same value `/v1/version` publishes, from the same resolver |
 | `commit_sha` | the commit the **deploy** was told to build (`TORTOISE_GIT_SHA`, stamped by `deploy-hosted.yml` from `GITHUB_SHA`) — never a hand-edited constant. `null` = nothing stamped it (selfhost / local dev / a stripped deploy), which is an absence that says so, not a value that looks current. Identical to `/v1/version`'s `commit_sha`; the two surfaces cannot disagree |
-| `commit_dirty` | `true` / `false` / **`null`**. ⚠️ `null` means **NOT STAMPED** — nothing sets `TORTOISE_GIT_DIRTY` on this deployment today (declared in #10467's `## PARTIAL`: the stamp needs its own gated deploy change). Read it as "clean" and you have read a fact nobody published. `tortoise/env_truthy.py` is the vocabulary: `1`/`true`/`yes`/`on` → `true`, `0`/`false`/`no`/`off` → `false`, anything else (including unset and blank) → `null`, never `false` |
-| `build_identified` | `true` only for a well-formed 7-40 lowercase-hex `commit_sha` **that is not known-dirty**. `false` is the "cannot check" refusal — `unknown`, `main`, a literally unexpanded `${GITHUB_SHA}`, or a dirty tree. Key a staleness probe on THIS, not on `commit_sha != null` |
+| `commit_dirty` | `true` / `false` / **`null`**. `true` = the image was built from a working tree that DIFFERED from `commit_sha` (the deploy stamps `TORTOISE_GIT_DIRTY` from `git status --porcelain` over the same tree `flyctl deploy` uploads as its build context, declared `workflow` in `.github/scripts/fly-managed-secrets.txt`). `false` is a positive claim — staged only when the tree is provably clean, meaning **no tracked modification and no untracked non-ignored file** (⚠️ narrower than "the image equals the commit": the build context is filtered by `.dockerignore`, not `.gitignore`, so a *gitignored* artefact under a `COPY`'d path is not seen — no step in the deploy job creates one, so it is a declared residual). ⚠️ `null` means **NOT STATED** (selfhost / local dev, or an image built before #10447's reopen): read it as "clean" and you have read a fact nobody published. `tortoise/env_truthy.py` is the vocabulary: `1`/`true`/`yes`/`on` → `true`, `0`/`false`/`no`/`off` → `false`, anything else (including unset and blank) → `null`, never `false` |
+| `build_identified` | `true` only for a well-formed 7-40 lowercase-hex `commit_sha` **with an explicitly clean tree stamp** (`commit_dirty: false`). `false` is the "cannot check" refusal — an unstamped deployment, `unknown`, `main`, a literally unexpanded `${GITHUB_SHA}`, a dirty tree, or a tree whose dirtiness was never stated. Key a staleness probe on THIS, not on `commit_sha != null` |
+| `build_identified_reason` | WHY `build_identified` is `false` — `null` when it is `true`, otherwise one of `no_commit_stamp` (nothing deployed a sha: selfhost/local dev), `commit_stamp_not_a_sha` (a stamp that cannot be compared to `origin/main`), `tree_dirty` (real dirty build), `tree_dirt_unstated` (the deploy never said). Four different worlds, four answers: without this a reader has to guess whether "false" means "we do not know" or "we know it is not clean" |
+| `image` | the image (build artefact) this process was **started from** — Fly injects `FLY_IMAGE_REF` into every Machine, so the runtime names the artefact that created it (`registry.fly.io/tortoise-y4mjjq:deployment-…`). `TORTOISE_IMAGE_REF` is the non-Fly spelling and is read first. ⛔ It is the **artefact**, not the commit: `commit_sha` says which commit was built, `image` says which build is running — for a source-built deploy they correspond, but only this field names the thing that would be rolled back. `null` = nothing stated one (a local run), never a placeholder |
 | `started_at` | ISO-8601 UTC timestamp of process start — restart-loop detection (a value that keeps moving means the machine is being recycled, cf. §6) |
 | `migrations_head` | the highest numeric-prefixed `supabase/migrations/*.sql` file **this IMAGE CARRIES**, ordered numerically (`999_b` < `1000_a`), so a stray `seed.sql` cannot publish itself as the head. ⛔ **It is NOT "which migration has been APPLIED to the database".** This process applies no schema migrations (`entrypoint.sh` has no migration step; `supabase-deploy.yml` applies them) and the deploy gate classes index-only drift as WARN (exit 0, `.github/scripts/check-migration-drift:25-26`), so the image can carry a migration prod has not applied. The applied set is a database fact — read `supabase_migrations.schema_migrations`, not this endpoint. `null` has **two** causes and `migrations_source` names which: no migration-shaped file was found in the image (`null`), or the resolver RAISED (`error` — the image may carry everything and the reading is broken) |
 | `migrations_source` | which population `migrations_head` was read from: `checkout` = the schema tree was chosen (what the deployed image COPYs) or `package` = only the record lineage a wheel ships. The packaged answer is plausible and wrong for the inventory question, and without this field the two are indistinguishable. `error` = the resolver raised, so the head above is a failed reading and **not** an empty image. `null` = the two paths could not be compared. ⚠️ `checkout` means *the checkout tree was selected*, not *all 77 files were present in it* — neither answers "were they applied" |
@@ -1029,10 +1033,7 @@ degrading `status` over it would make Fly restart a healthy process forever
 is liveness-healthy", **never** "this is the build I expected"; §4.1's client
 contract is unchanged and `deploy-health-gate.sh` still reads `db.ok` by value.
 
-⛔ **The operator misread this section exists to prevent:** a stale deploy with
-`build_identified: true` and `commit_dirty: null` is **stale and unstamped**,
-not clean. Read `commit_sha` against the expected commit, then read
-`commit_dirty` only as far as it goes (`null` ≠ clean).
+⛔ **The operator misread this section exists to prevent:** `build_identified: false` with `build_identified_reason: tree_dirt_unstated` is **unstamped**, not clean; and `commit_dirty: null` on any deployment still answers nothing about the tree. Read `commit_sha` against the expected commit, then read `commit_dirty` only as far as it goes (`null` ≠ clean).
 
 ## 4.5 Local Development — Local Stays Local
 
