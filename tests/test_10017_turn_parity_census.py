@@ -1313,3 +1313,87 @@ def test_a_declared_field_that_is_not_compared_refuses():
     with pytest.raises(tpc.CensusError, match="not a field this census"):
         tpc.census({"nodes": {"s1_t0": _graph_node("s1_t0", "s1")}}, record,
                    sample=5)
+
+
+def test_an_EMPTY_sealed_day_refuses_rather_than_reading_as_no_sessions(
+        tmp_path):
+    """`gzip.decompress(b"")` is b"" without raising — a 20-byte empty archive
+    would otherwise vanish a day's sessions from the record silently."""
+    import gzip
+    archive = tmp_path / "archive"
+    archive.mkdir()
+    (archive / "2026-10-01.jsonl.gz").write_bytes(gzip.compress(b""))
+    _local_record(tmp_path, {"s1": _conversation(("user", "hi"))})
+    with pytest.raises(tpc.CensusError, match="EMPTY"):
+        tpc.read_local_record_turns(tmp_path)
+
+
+def test_a_zero_byte_PLAIN_day_that_is_not_today_refuses(tmp_path):
+    """An old day file emptied is data loss; today's may be created-but-unwritten."""
+    _local_record(tmp_path, {"s1": _conversation(("user", "hi"))},
+                  name="2026-11-01.jsonl")
+    (tmp_path / "2026-10-30.jsonl").write_text("", encoding="utf-8")
+    with pytest.raises(tpc.CensusError, match="EMPTY"):
+        tpc.read_local_record_turns(tmp_path)
+
+
+def test_the_NEWEST_plain_day_may_be_empty_because_it_is_created_at_boot(
+        tmp_path):
+    _local_record(tmp_path, {"s1": _conversation(("user", "hi"))},
+                  name="2026-11-01.jsonl")
+    (tmp_path / "2026-11-02.jsonl").write_text("", encoding="utf-8")
+    record = tpc.read_local_record_turns(tmp_path)
+    assert list(record["rows_by_key"]) == ["s1_t0"]
+
+
+def test_an_unlistable_surface_refuses_instead_of_reading_as_empty(
+        tmp_path, monkeypatch):
+    """`Path.glob` swallows scandir OSError; the leg must not."""
+    _local_record(tmp_path, {"s1": _conversation(("user", "hi"))})
+    archive = tmp_path / "archive"
+    archive.mkdir()
+    real_iterdir = Path.iterdir
+
+    def boom(self):
+        if self.name == "archive":
+            raise PermissionError(13, "Permission denied")
+        return real_iterdir(self)
+
+    monkeypatch.setattr(Path, "iterdir", boom)
+    with pytest.raises(tpc.CensusError, match="could not be LISTED"):
+        tpc.read_local_record_turns(tmp_path)
+
+
+def test_a_torn_line_is_tolerated_ONLY_in_the_newest_plain_file(tmp_path):
+    """The tail exception is the append-only tip, not every settled day."""
+    old = tmp_path / "2026-11-01.jsonl"
+    old.write_text(json.dumps({"session_id": "s1",
+                               "conversation": _conversation(("user", "a"))})
+                   + '\n{"session_id": "s2", "conversa', encoding="utf-8")
+    _local_record(tmp_path, {"s3": _conversation(("user", "c"))})
+    with pytest.raises(tpc.CensusError, match="UNPARSABLE line at"):
+        tpc.read_local_record_turns(tmp_path)
+
+
+def test_a_torn_line_inside_a_sealed_archive_always_refuses(tmp_path):
+    """A `.gz` day is written whole and verified by the seal: never a tail."""
+    import gzip
+    archive = tmp_path / "archive"
+    archive.mkdir()
+    body = (json.dumps({"session_id": "s1",
+                        "conversation": _conversation(("user", "a"))})
+            + '\n{"session_id": "s2", "conversa')
+    (archive / "2026-10-01.jsonl.gz").write_bytes(gzip.compress(body.encode()))
+    _local_record(tmp_path, {"s3": _conversation(("user", "c"))})
+    with pytest.raises(tpc.CensusError, match="UNPARSABLE line at"):
+        tpc.read_local_record_turns(tmp_path)
+
+
+def test_an_enriched_turn_refuses_because_no_record_can_restore_it(tmp_path):
+    """#8488: `embeddingText` is an LLM rewrite the conversation cannot rebuild."""
+    _local_record(tmp_path, {"s1": _conversation(("user", "hi"))})
+    record = tpc.read_local_record_turns(tmp_path)
+    nodes = {"s1_t0": _graph_node("s1_t0", "s1", content="[user] hi",
+                                  embeddingText="ctx: hi (rewritten)")}
+    with pytest.raises(tpc.CensusError, match="embeddingText"):
+        tpc.census({"nodes": nodes}, record, sample=5)

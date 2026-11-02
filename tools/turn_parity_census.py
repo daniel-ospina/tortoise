@@ -261,7 +261,8 @@ _GRAPH_EPISODIC_CYPHER = (
     "  AND t.is_episodic = true "
     "OPTIONAL MATCH (s:Session)-[:CONTAINS]->(t) "
     "RETURN id(t), t.id, t.content, t.speaker, t.status, t.createdAt, "
-    "       t.pointKind, t.embedding, t.is_operator, collect(DISTINCT s.id) "
+    "       t.pointKind, t.embedding, t.is_operator, collect(DISTINCT s.id), "
+    "       t.embeddingText "
     "ORDER BY id(t) LIMIT $batch"
 )
 
@@ -288,7 +289,8 @@ _GRAPH_EPISODIC_IDS_CYPHER = (
     "MATCH (t:Point) WHERE t.id IN $ids AND t.is_episodic = true "
     "OPTIONAL MATCH (s:Session)-[:CONTAINS]->(t) "
     "RETURN id(t), t.id, t.content, t.speaker, t.status, t.createdAt, "
-    "       t.pointKind, t.embedding, t.is_operator, collect(DISTINCT s.id) "
+    "       t.pointKind, t.embedding, t.is_operator, collect(DISTINCT s.id), "
+    "       t.embeddingText "
     "ORDER BY id(t)"
 )
 _GRAPH_EPISODIC_IDS_COUNT_CYPHER = (
@@ -588,6 +590,11 @@ def _classify_graph_rows(rows) -> tuple[dict, list[dict]]:
         try:
             (_inner_id, tid, content, speaker, status, created_at, point_kind,
              embedding, is_operator, session_ids) = row[:10]
+            # #8488 scope 1: `embeddingText` is the LLM rewrite the vector
+            # describes when context enrichment is ON. It is NOT reconstructible
+            # from the conversation, so it is carried and checked, never assumed
+            # away (review cycle 3, P1).
+            embedding_text = row[10] if len(row) > 10 else None
         except (TypeError, ValueError) as exc:
             raise CensusError(
                 f"the graph returned a row of unexpected shape ({exc}) — "
@@ -607,6 +614,7 @@ def _classify_graph_rows(rows) -> tuple[dict, list[dict]]:
             "status": status, "createdAt": created_at,
             "pointKind": point_kind, "is_operator": is_operator,
             "embedding": vec,
+            "embeddingText": embedding_text,
             "sessions": set(),
         }
         for sid in session_ids or ():
@@ -771,9 +779,31 @@ def read_local_record_turns(directory, node_keys: Iterable[str] | None = None
         raise CensusError(
             f"the local record directory does not exist ({root}) — the record "
             "cannot be read, so an absence is NOT established")
+    # ⛔ `Path.glob` SWALLOWS every scandir OSError (the seal names this class
+    # one surface over, `seal_session_events._unreadable_archives`), so an
+    # unreadable directory would be indistinguishable from an empty one and the
+    # leg would report a complete read over the surfaces it could see. Enumerate
+    # explicitly instead, and refuse.
     files: list[Path] = []
-    for pattern in _LOCAL_RECORD_GLOBS:
-        files.extend(root.glob(pattern))
+    for directory, suffix in ((root, ".jsonl"),
+                              (root / "archive", ".jsonl.gz")):
+        if directory is root:
+            candidates = [directory]
+        elif not directory.exists():
+            continue
+        else:
+            candidates = [directory]
+        for where in candidates:
+            try:
+                entries = list(where.iterdir())
+            except OSError as exc:
+                raise CensusError(
+                    f"the local record directory {where} could not be LISTED "
+                    f"({type(exc).__name__}: {exc}) — an unreadable surface is "
+                    "not an empty one, so an absence is NOT established") from exc
+            for entry in entries:
+                if entry.name.endswith(suffix) and entry.is_file():
+                    files.append(entry)
     files.sort()
     # The tail is only tolerance-able on the newest PLAIN day file: a `.gz`
     # archive is written whole and verified by the seal, so a torn archive is
@@ -809,9 +839,34 @@ def read_local_record_turns(directory, node_keys: Iterable[str] | None = None
             if path.name.endswith(".gz"):
                 raw = gzip.decompress(path.read_bytes()).decode(
                     "utf-8", "replace").splitlines()
+                # `gzip.decompress(b"")` returns b"" WITHOUT raising, and
+                # `gzip.compress(b"")` is a valid 20-byte archive — so a killed
+                # seal and a seal-of-a-0-byte-day both read as "this day held no
+                # sessions" while their records are gone. The seal refuses to
+                # create either (`_read_archive`: "an EMPTY file is not a sealed
+                # day"), so the census refuses to read one.
+                if not raw:
+                    raise CensusError(
+                        f"the sealed day {path.name} is EMPTY — an empty "
+                        "archive is not a day that held no sessions (the seal "
+                        "never writes one); its records are unreadable, so an "
+                        "absence is NOT established")
             else:
                 raw = path.read_text(encoding="utf-8",
                                      errors="replace").splitlines()
+                # A SETTLED plain day (not the newest) that holds nothing is a
+                # zero-length file where a day of records belongs: the seal only
+                # removes a source once it is provably archived, so this is loss,
+                # not an empty day. The newest plain file is exempt — it is
+                # created at boot and may simply not have been written yet.
+                if not raw and path != newest_plain:
+                    raise CensusError(
+                        f"the plain day {path.name} is EMPTY and it is not the "
+                        "current day file — a settled day holds records or does "
+                        "not exist, so its records are unreadable and an "
+                        "absence is NOT established")
+        except CensusError:
+            raise
         except Exception as exc:
             # A sealed day that cannot be decompressed is an unreadable side —
             # `session_events_drain` treats it the same way. Absence is NOT
@@ -949,6 +1004,23 @@ def census(graph: dict, record: dict, *, sample: int) -> dict:
             f"the record declared {', '.join(invented)} ABSENT, which is not a "
             "field this census compares — an artifact must not carry a "
             "narrowing claim about a field that was never on the table")
+    # ⛔ #8488 scope 1 (review cycle 3, P1): when context enrichment is ON the
+    # node's vector describes `t.embeddingText` — an LLM rewrite of a neighbour
+    # window that is NOT reconstructible from the conversation, and that NEITHER
+    # record leg carries (`public.point` has no such column; the local JSONL is
+    # `{session_id, conversation, ...}`). Comparing `content`/`speaker` and
+    # waiving `embedding` would then report CLEAN over a node whose enriched
+    # text and vector the purge would destroy — the false PASS this gate exists
+    # to refuse. Fail closed, once, by name.
+    enriched = sorted(tid for tid, node in nodes.items()
+                      if node.get("embeddingText"))
+    if enriched and record.get("carries_embedding_text") is not True:
+        raise CensusError(
+            f"{len(enriched)} in-population turn node(s) carry an "
+            f"`embeddingText` (context enrichment, #8488) that this record leg "
+            f"cannot hold or compare (first: {enriched[0]}). Deleting them "
+            "would destroy text no record can restore, so an absence is NOT "
+            "established")
     compared_fields = ["key"] + [rcol for _, rcol, _ in _EXACT_FIELDS
                                  if rcol not in declared_absent]
     if "embedding" not in declared_absent:
