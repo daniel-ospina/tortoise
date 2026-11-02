@@ -8,8 +8,19 @@ graph — cannot run here, so this module pins the half that CAN: the bar arithm
 measurement is not a RED row), the table shape the gate parses, and the two rules
 that stop a row from claiming a number its artifact does not carry.
 
-Every assertion is DB-free, network-free and LLM-free: the module imports no
-``tortoise`` symbol at import time, and the files it reads are the shipped
+Every assertion is DB-free, network-free and LLM-free — and that is MEASURED, not
+asserted from memory (#10525 review P3). ⛔ Importing this module DOES pull in
+``tortoise.projection.edges`` (27 ``tortoise.*`` modules, measured): ``measure =
+_load()`` at the bottom of the header executes the probe, which derives its class
+set from the writer's own constant at ITS import time (``DERIVED_LABELS``, #9736).
+What it pulls in NOTHING of is a driver, client or model SDK — no ``falkordb``, no
+``redis``, no ``psycopg2``, no ``httpx``, no ``openai``, no ``anthropic`` (all
+measured absent), so the slice is DB/network/LLM-free on the axis that matters to
+how this file is selected and weighted. The earlier wording claimed "the module
+imports no ``tortoise`` symbol at import time", which the tree refuted while no
+test could see it; ``test_the_import_claim_is_what_importing_actually_does`` now
+measures BOTH halves in a subprocess and requires this docstring to agree with the
+measurement, so the claim cannot re-stale silently. The files it reads are the shipped
 pre-registration, the landed E1/E2 log, the log the probe itself wrote, and —
 for the cite-resolution legs — the documents that print the bundle's
 ``file:line`` cites (`README.md`, both probes, the `docs/00_index.md` row) plus
@@ -23,6 +34,7 @@ import importlib.util as _ilu
 import json
 import os
 import re
+import subprocess
 import sys
 import tempfile
 import types
@@ -736,6 +748,178 @@ def test_the_e3_census_counts_references_inbound_and_extractedfrom_outbound():
     assert "SOURCE of at least one extractedFrom" in measure.E3_RULE
 
 
+# ── the census's per-label set is NOT the E3 row selector (#10525 review P1) ──
+
+#: The shipped log's own per-label block, re-used as canned Cypher rows
+#: (`capstone-measured-e0fc940b.log:32-34` + `:Point` composition).
+_CENSUS_ROWS = {
+    "Point": (338, 141, 141, 0),
+    "Object": (50, 0, 0, 0),
+    "Event": (45, 7, 0, 7),
+    "Document": (0, 0, 0, 0),
+}
+
+
+class _CannedQuery:
+    """A census-shaped fake: the REAL statements, answered per statement."""
+
+    def __init__(self, cypher: str) -> None:
+        if "UNWIND labels(n)" in cypher:
+            rows = [["Point", 338], ["Object", 50], ["Event", 45]]
+        elif "RETURN n.name" in cypher:                                    # object_names
+            rows = [["the quarry"]]
+        elif "eventId IS NOT NULL" in cypher:                              # event_stamped
+            rows = [[159]]
+        elif "type(r) AS t" in cypher:                                     # relationships
+            # The log's own `e3_census.relationship_counts` / `.relationship_anchored`
+            # (`capstone-measured-e0fc940b.log:250-260`): `extractedFrom` carries **141**
+            # links, all 141 anchored — the same 141 claims, one link each. A 150 here
+            # was the writer-class size (`extraction_claims` + `other`) written into the
+            # LINK slot, and the 9 `other` Points are defined by `deriv = 0`, i.e. by
+            # carrying no link at all, so 150 links is not a shape that graph can have.
+            # `test_the_canned_census_transcribes_the_committed_log_it_cites` checks
+            # every one of these numbers against the artifact.
+            rows = [["extractedFrom", 141, 141], ["references", 7, 7],
+                    ["aboutObject", 211, 0]]
+        elif "AS points" in cypher:                                        # composition
+            # Columns, in `census()`'s own unpack order (#10525 review):
+            #   points=turn_rows=operator_points=extraction_claims=other_points=
+            #   extraction_claims_anchored=turn_rows_anchored=
+            #   operator_points_anchored=other_points_anchored
+            # The shipped log's own composition line
+            # (`capstone-measured-e0fc940b.log:37`) is
+            # `turn_rows=159 (anchored 0) extraction_claims=141 (anchored 141)
+            #  operator_points=29 (anchored 0) other=9 (anchored 0) (total=338)`,
+            # and it PARTITIONS 338 (159 + 29 + 141 + 9). The 150 that sits one
+            # column to the left here is the `extractedFrom` LINK count
+            # (`["extractedFrom", 150, 141]` above: 141 claims + 9 `other`, one
+            # each) — not a claim count. Transcribing it into the claim slot made
+            # the fixture's own partition impossible (347 ≠ 338) and pinned a
+            # value the artifact it cites cannot produce.
+            rows = [[338, 159, 29, 141, 9, 141, 0, 0, 0]]
+        else:                                                             # anchor census
+            label = re.match(r"MATCH \(n:(\w+)\)", cypher).group(1)
+            rows = [list(_CENSUS_ROWS[label])]
+        self.result_set = rows
+
+
+class _CannedGraph:
+    def query(self, cypher: str) -> _CannedQuery:
+        return _CannedQuery(cypher)
+
+
+def _canned_census(monkeypatch) -> dict:
+    """Run the REAL `census()` against canned rows, with no database anywhere."""
+    projection = types.ModuleType("tortoise.projection")
+    projection.FalkorProjection = type(
+        "FalkorProjection", (),
+        {"from_uri": staticmethod(lambda uri: types.SimpleNamespace(g=_CannedGraph()))},
+    )
+    monkeypatch.setitem(sys.modules, "tortoise", types.ModuleType("tortoise"))
+    monkeypatch.setitem(sys.modules, "tortoise.projection", projection)
+    return measure.census("fake://canned")
+
+
+def test_the_census_enumerates_object_even_though_e3_no_longer_does(monkeypatch):
+    """#10525 review P1 — a SILENT ZERO on a sibling instrument, from an E3-only change.
+
+    `tools/s3_prior_ablation.py`'s `created_counts` reads `per_label["Object"]["nodes"]` as the
+    `objects` numerator of `extraction_nodes = claims + objects + events` (#10463), on live data
+    three times per run. Enumerating `per_label` with `DERIVED_LABELS` deleted that key when #9736
+    narrowed E3 to the anchored classes, so every future ablation run printed `objects=0` while the
+    graph held Objects — and `git grep` found no test anywhere that could see it.
+
+    Non-vacuity: at the pre-fix head `per_label` carries Point/Document/Event only, so the first
+    assertion reds (and `created_counts` in the sibling test returns 0 objects).
+    """
+    data = _canned_census(monkeypatch)
+    assert "Object" in data["per_label"], sorted(data["per_label"])
+    assert data["per_label"]["Object"]["nodes"] == 50, data["per_label"]["Object"]
+    # The row SELECTOR is unchanged and still names what #9736 registered: `:Object` is not in it.
+    assert "Object" not in measure.DERIVED_LABELS, measure.DERIVED_LABELS
+    assert set(measure.DERIVED_LABELS) <= set(measure.CENSUS_LABELS)
+    # …and E3's totals stay on the ROW's classes: 338 + 45 + 0, never 433.
+    assert data["derived_total"] == 383, data["derived_total"]
+    assert data["anchored_total"] == 148, data["anchored_total"]
+
+
+def test_the_sibling_ablation_instrument_still_counts_objects(monkeypatch):
+    """The consumer of the census, called as it calls itself (`created_counts`).
+
+    This is the end the P1 was measured from: the census's shape is only worth pinning because
+    `extraction_nodes` — #10463's primary denominator/numerator, published as `ratio=0.870` — is
+    `extraction_claims + objects + events`. A census that drops `Object` narrows a published ratio
+    with no error, no refusal and no log line.
+    """
+    spec = _ilu.spec_from_file_location("s3_prior_ablation_pure",
+                                        str(_REPO / "tools/s3_prior_ablation.py"))
+    assert spec and spec.loader
+    s3 = _ilu.module_from_spec(spec)
+    spec.loader.exec_module(s3)
+    counts = s3.created_counts(_canned_census(monkeypatch))
+    assert counts["objects"] == 50, counts
+    # Read off the log's own composition line, never off the link count:
+    # `extraction_claims=141 (anchored 141)` (`capstone-measured-e0fc940b.log:37`).
+    assert counts["extraction_claims"] == 141, counts
+    assert counts["events"] == 45, counts
+    # 141 + 50 + 45, which is what #10463's committed log can produce; the 245
+    # this pin used to assert came from the mis-transcription above.
+    assert counts["extraction_nodes"] == 236, counts
+    # The partition the fixture must satisfy to be a transcription at all: the
+    # composition's classes sum to the `Point` total the census reports.
+    composition = _canned_census(monkeypatch)["point_composition"]
+    assert (composition["turn_rows"] + composition["operator_points"]
+            + composition["extraction_claims"]
+            + composition["other_points"]) == composition["points"], composition
+
+
+def test_the_canned_census_transcribes_the_committed_log_it_cites(monkeypatch):
+    """The fixture SAYS it is the shipped log's block; check that against the artifact.
+
+    Round 4 of this PR found the claim unchecked in three columns at once — the
+    composition row carried the `extractedFrom` LINK count in the extraction-CLAIM
+    slot (so its own classes summed to 347, not the 338 the census reports), and the
+    relationship row carried the writer-class total in the link slot. A fixture whose
+    provenance is asserted in a comment rather than read from the file it cites can
+    pin any number at all — which is the defect class this whole PR is about, turned
+    on the very test that was supposed to catch it.
+
+    So: parse the committed log's own machine record (`=== CAPSTONE-VERDICT-BEGIN/END
+    ===`, the same block `capstone_verdict_check.extract_block` reads) and require the
+    fixture to match it field for field. The fake is a REDUCED census — it answers the
+    statements these tests exercise, not every one — so each field it DOES answer must
+    be the log's.
+    """
+    text = (_REPO / "docs/evidence/7949-capstone"
+            / "capstone-measured-e0fc940b.log").read_text()
+    begin, end = "=== CAPSTONE-VERDICT-BEGIN ===", "=== CAPSTONE-VERDICT-END ==="
+    assert begin in text and end in text, "the shipped log lost its verdict block"
+    record = json.loads(text.split(begin, 1)[1].split(end, 1)[0])
+    block = record["run"]["e3_census"]
+
+    data = _canned_census(monkeypatch)
+
+    # 1. The composition row, column for column (`census()`'s own unpack order).
+    assert data["point_composition"] == block["point_composition"], (
+        data["point_composition"], block["point_composition"])
+
+    # 2. The per-label block — and `Document` is a real 0, not a dropped key.
+    for label, expected in block["per_label"].items():
+        got = data["per_label"][label]
+        assert (got["nodes"], got["anchored"], got["anchored_out"],
+                got["anchored_in"]) == (
+                    expected["nodes"], expected["anchored"],
+                    expected["anchored_out"], expected["anchored_in"]), (label, got)
+    assert "Document" not in block["per_label"], block["per_label"]
+    assert data["per_label"]["Document"]["nodes"] == 0, data["per_label"]
+
+    # 3. Every relationship the fake answers carries the log's count AND anchor count.
+    for name, count in data["relationship_counts"].items():
+        assert count == block["relationship_counts"][name], (name, count)
+        assert (data["relationship_anchored"][name]
+                == block["relationship_anchored"][name]), (name, count)
+
+
 # ── the eight steps: measured, derived, never assigned (#9089 round 5 F3) ─
 
 _FULL_STATS = {
@@ -746,9 +930,15 @@ _FULL_STATS = {
                           "s2": {"p": {"m": {"calls": 1}}}}},
 }
 
+#: A census with the REAL key shape: `per_label` is the WIDER instrument census (it
+#: carries `:Object` for `s3_prior_ablation`, see `CENSUS_LABELS`), while `derived_total`
+#: is E3's row — `Point` + the link-anchored classes. So the blocks sum to 12 and the
+#: total is 11 (#10525 review P2). A fixture whose two halves agree cannot catch a
+#: witness that renders one beside the other.
 _FULL_CENSUS = {
-    "derived_total": 12,
+    "derived_total": 11,
     "per_label": {"Point": {"nodes": 10, "anchored": 8},
+                  "Document": {"nodes": 0, "anchored": 0},
                   "Object": {"nodes": 1, "anchored": 0},
                   "Event": {"nodes": 1, "anchored": 1}},
     "operator_relationships": {"IMPL": 1},
@@ -783,6 +973,53 @@ def test_a_witnessed_vet_surface_makes_s2_2_observed():
     assert "S2.3" in observed and "S2.3" not in unobserved, observed
     assert list(observed) == list(measure.STEPS), observed
     assert not unobserved, unobserved
+
+
+def test_the_s5_bracket_sums_to_the_total_the_line_names():
+    """A witness whose parts sum to a different total than its own is not a witness.
+
+    `derived_total` is E3's row (`Point` + the link-anchored classes). `per_label` is the
+    wider instrument census — it carries `:Object` for `tools/s3_prior_ablation.py`'s
+    `created_counts` (see `CENSUS_LABELS`) — so rendering EVERY block beside the narrower
+    total prints two irreconcilable numbers on one line. That is what this PR's own
+    narrowing left behind: the shipped log's S5 line is
+    `… 433 … [Point 338, Object 50, Event 45]` (`capstone-measured-e0fc940b.log:26`), and
+    after the E3 re-registration the same graph emits
+    `… 383 … [Document 0, Event 45, Object 50, Point 338]` — parts summing to 433 beside a
+    total of 383, in the bundle whose entire subject is that a number must be carried by
+    what backs it.
+
+    Non-vacuity: at the pre-fix head the census below renders
+    `11 derived node(s) … [Point 10 (8 anchored), Object 1 (0 anchored), Event 1 (1
+    anchored)]` — three labels where E3's set has three but a different one, and parts
+    summing to 12 beside a total of 11 — so both the label-set assertion and the sum
+    assertion fail there.
+    """
+    observed, _unobserved = measure.observe_steps([_run()], _FULL_CENSUS)
+    line = observed["S5"]
+    total = int(re.match(r"the graph write landed: (\d+) derived", line).group(1))
+    bracket = re.search(r"\[([^\]]*)\]", line).group(1)
+    counts = {label: int(n) for label, n in
+              re.findall(r"(\w+) (\d+) \(\d+ anchored\)", bracket)}
+    assert set(counts) == set(measure.DERIVED_LABELS), (counts, line)
+    assert sum(counts.values()) == total, (
+        f"the S5 bracket sums to {sum(counts.values())} beside a total of {total}: {line}")
+    # and the class the row excludes is NAMED as excluded, not silently dropped: a reader
+    # not told `:Object` is outside the total reads its absence as "the graph held none".
+    assert "outside E3's row" in line, line
+    outside = line.split("outside E3's row", 1)[1]
+    assert "Object 1 (0 anchored)" in outside, line
+    assert "Object" not in counts, counts
+
+
+def test_the_unobserved_s5_names_the_current_class_set():
+    """The negative arm carried the RETIRED set long after the positive one moved."""
+    empty = {"derived_total": 0, "per_label": {}, "operator_relationships": {},
+             "points": 0, "event_stamped_points": 0, "graph_events": 0}
+    _observed, unobserved = measure.observe_steps([_run()], empty)
+    cause = unobserved["S5"]
+    assert "/".join(measure.DERIVED_LABELS) in cause, cause
+    assert "Point/Object/Event" not in cause, cause
 
 
 def test_a_stats_home_for_the_classify_surface_also_counts():
@@ -1277,6 +1514,66 @@ def test_the_e3_note_never_splices_this_runs_counts_into_a_historical_ratio():
     assert "7 extraction claims (3 anchored)" in custom, custom
     assert "4 other (0 anchored)" in custom, custom
     assert "3/11 = 0.272727" in custom, custom
+
+
+def test_the_e3_narration_never_claims_the_amended_denominator_counts_object():
+    """#10525 review P2, MEASURED: the instrument kept printing the claim this PR falsifies.
+
+    §10.1 re-registered E3's class set to `Point` + `Event` + `Document`, so the frozen denominator
+    NO LONGER counts `:Object`. The SET was moved (`DERIVED_LABELS` follows
+    `_DERIVATION_REFERENCES_LABELS`); the NARRATION of the set was not, and it is EMITTED —
+    `e3_row_note` into both copies of the log's E3 row, `point_composition_line` into the
+    `e3 point composition:` line. So every future scored run would have written, beside the amended
+    total, prose asserting the denominator counts `:Object` and that no choice had been made.
+
+    Three sentences carried it:
+
+    * ``the frozen denominator counts them anyway … a lane cannot pick`` (`e3_row_note`)
+    * ``#9736 must choose between re-registering the metric and reopening the model``
+      (`e3_row_note`) — the choice §10.1 makes, under #9736's own ruling
+    * ``The frozen 'all derived nodes' reading above is unchanged`` (`point_composition_line`) —
+      the reading MOVED, which is the whole point of the amendment
+
+    Non-vacuity: on the pre-fix probe every fragment in `falsified` is PRESENT in both rendered
+    strings, so each `not in` below reds; and ``grep`` over the two test files returned NOTHING for
+    any of them, which is why no pin caught it (the existing E3-note pins hold the SPLICE defect
+    and the two log copies, both orthogonal to these sentences).
+    """
+    graph, corpus_sha = "capstone_measure_test_1", "sha256:" + "e" * 64
+    note = measure.e3_row_note(composition=_shipped_composition(),
+                               e3_result=_e3_result(), graph=graph, corpus_sha=corpus_sha)
+    line = measure.point_composition_line(_shipped_composition())
+    falsified = ("counts them anyway", "a lane cannot pick", "must choose between",
+                 "frozen 'all derived nodes' reading")
+    for where, rendered in (("e3_row_note", note), ("point_composition_line", line)):
+        for fragment in falsified:
+            assert fragment not in rendered, (where, fragment, rendered)
+
+    # Both readings are still reported — that part of the narration was right and must survive —
+    # and the amendment is named where a reader can follow it, rather than asserted as a fact the
+    # owner has not ruled on.
+    assert "BOTH readings" in note, note
+    assert "§10.1" in note, note
+    assert "no longer count" in note, note
+    assert "PRE-AMENDMENT" in line, line
+    assert "§10.1" in line, line
+    assert "no longer counts" in line, line
+    # and the splice guard this note has always had stays green on the rewritten text
+    assert not re.search(r"\d+/\d+ = 1\.000000", note), note
+
+    # ⛔ #10525 review ROUND 2, P1 — MEASURED: two of these sentences asserted their own arithmetic
+    # falsely. The 'all derived nodes' figure had been called "the PRE-AMENDMENT reading" and said to
+    # be WIDER than "the figure above", while after the amendment that figure IS the registered one
+    # (383 = Point 338 + Event 45 + Document 0) — so the line called 383 pre-amendment and then said
+    # the registered reading is narrower than 383. And the row claimed to report "BOTH readings"
+    # while its value carries only `148/383` (`"433" in note` is False). Both are now stated where
+    # the pre-amendment figure actually lives — §10.1's table — and the claims are pinned as the
+    # true ones, not as fragments that merely rhyme with them.
+    assert "narrower than the figure above" not in line, line
+    assert "PRE-AMENDMENT reading and is retained" not in line, line
+    assert "this row reports BOTH readings" not in note, note
+    assert "which §9's provenance table states" in line, line
+    assert "§10.1 reports BOTH readings" in note, note
 
 
 def test_the_shipped_log_states_the_e3_note_the_same_way_in_both_copies():
@@ -1875,32 +2172,36 @@ def test_the_bare_continuation_cites_name_what_they_say():
     rows = (
         # `each VET pass is gated on the LIST` — the gate AND its call, twice.
         ("docs/00_index.md", "each VET pass is gated on the LIST", (
-            ("9194", "if vet_enabled and embed_list:"),
-            ("9195", "vet_s2_stats, _w, vet_s2_pool = _run_vet_pass("),
-            ("9316", "if vet_enabled and complete_list:"),
-            ("9317", "vet_union_stats, _w, _ = _run_vet_pass("),
+            ("10295", "if vet_enabled and embed_list:"),
+            ("10296", "vet_s2_stats, _w, vet_s2_pool = _run_vet_pass("),
+            ("10417", "if vet_enabled and complete_list:"),
+            ("10418", "vet_union_stats, _w, _ = _run_vet_pass("),
         )),
-        # the VET block's start; its three lines of keys close on line 9446
+        # the VET block's start; its three lines of keys close on line 10547
+        # (every number below is +1101: #10360 inserted 1101 lines into
+        # `extractor_v2.py` above all of them, and main's own head carries the
+        # pre-insertion numbers — this pin verifies each one by CONTENT, so a
+        # wrong number reds here rather than passing as a typed constant.)
         ("docs/00_index.md", "emitted unconditionally at", (
-            ("9475", 'result["classify_later"] = {'),
-            ("9485", 'result["vet"] = {'),
+            ("10576", 'result["classify_later"] = {'),
+            ("10586", 'result["vet"] = {'),
         )),
         # `_IDLE_CITES["vet"]`: the early return and the surface it emits
         ("probes/capstone_measure.py", "its vet surface", (
-            ("9103", "if not edus:"),
-            ("9119", '"vet": {"enabled": vet_enabled, "s2": {}, "union": {}},'),
+            ("10204", "if not edus:"),
+            ("10220", '"vet": {"enabled": vet_enabled, "s2": {}, "union": {}},'),
         )),
         # ...and the same claim in the rule's own docstring
         ("probes/capstone_measure.py", "with the flag ON", (
-            ("9119", '"vet": {"enabled": vet_enabled, "s2": {}, "union": {}},'),
+            ("10220", '"vet": {"enabled": vet_enabled, "s2": {}, "union": {}},'),
         )),
         ("probes/capstone_measure.py", "follows at", (
-            ("9102", "edus = _edus_from_conversation(conversation)"),
+            ("10203", "edus = _edus_from_conversation(conversation)"),
         )),
         # the S2.2/S2.3 block this probe names as the #9116 seam's subject
         ("probes/capstone_measure.py", 'result["vet"]`` at', (
-            ("9485", 'result["vet"] = {'),
-            ("9489", ("exact", "}")),
+            ("10586", 'result["vet"] = {'),
+            ("10590", ("exact", "}")),
         )),
     )
     docs = dict(_BUNDLE_DOCS)
@@ -2261,3 +2562,78 @@ def test_the_bundle_names_the_live_e2_blocker_and_no_closed_render_absence():
             "an index row still routes a reader to `#9775` as E2's blocker — "
             "#9775's render half is CLOSED (PR #10382), so the live blocker is "
             f"`#10360`: {row[:400]}")
+
+
+# ── the header's import claim, MEASURED (#10525 review P3) ───────────────────────────────────
+
+#: Modules a DB/network/LLM-free slice must never pull in. A driver, client or model SDK at import
+#: time is what would make this file's selection and shard weight a lie; the pure-Python `tortoise`
+#: package the probe derives its class set FROM is not (it opens no connection and calls no model).
+_FORBIDDEN_IMPORTS = ("falkordb", "redis", "psycopg2", "psycopg", "httpx", "requests",
+                      "openai", "anthropic")
+
+
+def _import_this_module_in_a_subprocess() -> dict:
+    """Import THIS module in a fresh interpreter and report what it pulled in.
+
+    A subprocess is the only honest instrument here: `sys.modules` in the running session already
+    carries whatever the other ~59 pin functions loaded, so an in-process read cannot tell this
+    module's own imports from its neighbours'.
+    """
+    code = (
+        "import importlib.util as ilu, json, sys\n"
+        f"spec = ilu.spec_from_file_location('t10525_import_probe', {str(Path(__file__).resolve())!r})\n"
+        "module = ilu.module_from_spec(spec)\n"
+        "sys.modules['t10525_import_probe'] = module\n"
+        "spec.loader.exec_module(module)\n"
+        "print(json.dumps({\n"
+        "  'tortoise': sorted(k for k in sys.modules if k.split('.')[0] == 'tortoise'),\n"
+        f"  'forbidden': [d for d in {list(_FORBIDDEN_IMPORTS)!r} if d in sys.modules],\n"
+        "}))\n"
+    )
+    proc = subprocess.run([sys.executable, "-c", code], cwd=str(_REPO),
+                          capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr[-2000:]
+    return json.loads(proc.stdout)
+
+
+def test_the_import_claim_is_what_importing_actually_does():
+    """The header's import claim must agree with an executed import (#10525 review P3, MEASURED).
+
+    The docstring used to say *"the module imports no ``tortoise`` symbol at import time"* — the
+    file's whole justification for sitting in a DB-free slice. This module executes
+    ``measure = _load()`` in its own header, and the probe derives ``DERIVED_LABELS`` from
+    ``tortoise.projection.edges`` at import (``_derivation_label_classes``, #9736), so the claim
+    had been false since that amendment landed and nothing referenced it
+    (``grep "imports no"`` returned only the sentence itself).
+
+    This is the class the bundle exists to refuse — a committed claim the tree refutes, with no
+    number moving and no test revealing it. Both halves are measured rather than restated: what
+    DOES arrive (27 ``tortoise.*`` modules, ``projection.edges`` among them) and what does NOT
+    (every driver/client/model SDK), so the wording is pinned to the tree, not to memory.
+
+    Non-vacuity: at the pre-fix head the docstring names none of ``tortoise.projection.edges``,
+    ``falkordb`` or ``#10525``, and carries the bare stale sentence with nothing signalling it
+    is refuted, so all three assertions red.
+    """
+    payload = _import_this_module_in_a_subprocess()
+    assert "tortoise.projection.edges" in payload["tortoise"], (
+        "the probe's class set no longer comes from `tortoise.projection.edges` "
+        f"(#9736) — the docstring states it does, so one of the two moved: {payload['tortoise']}")
+    assert payload["forbidden"] == [], (
+        "importing this module now pulls in a DB/network/LLM dependency, which the slice's "
+        f"selection and shard weight assume it does not: {payload['forbidden']}")
+
+    doc = sys.modules[__name__].__doc__ or ""
+    assert "tortoise.projection.edges" in doc, (
+        "the docstring must state the import this module ACTUALLY performs, or a reader (and "
+        "the next lane) is told a DB-free slice imports nothing at all")
+    assert "falkordb" in doc and "redis" in doc, (
+        "the driver-free half is the load-bearing half now that a `tortoise` import is real — "
+        "the docstring must name what it checked for")
+    assert "#10525" in doc, "the corrected claim must name the finding that corrected it"
+    stale = "imports no ``tortoise`` symbol at import time"
+    if stale in doc:
+        assert "refuted" in doc or "earlier" in doc, (
+            "the stale claim is restated as current fact — if it is kept at all it must be "
+            "marked as the wording that was refuted")
