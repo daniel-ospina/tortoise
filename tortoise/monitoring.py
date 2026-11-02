@@ -2180,6 +2180,32 @@ CONTROL_PLANE_READ_BACKLOG = 128
 #: answer is 41–80 ms, so 8 s is a saturation gate with ~100x headroom, not a
 #: per-query timeout.
 #:
+#: ⚠️ NAMED RESIDUALS — the measurement above covers TWO of the four converted
+#: round trips (``list_points``, ``get_point``). The other two are NOT hot
+#: queries, and this bound is knowingly applied to them anyway (#10602 review
+#: P2; the reviewer's ask was a per-call bound OR a residual named here):
+#:
+#: * ``/v1/search`` (``sdk.tortoise_fts_query``) — its COLD phase IS covered now
+#:   (``hosted_api._read_offload`` re-arms once for a request-owned one-time
+#:   embedder load, #4055), but its CPU legs (query encode + the three search
+#:   legs) are still measured against this clock, and the 500 ms cap they intend
+#:   is not enforceable because ``search_engine``'s ``shutdown(wait=True)``
+#:   joins running legs — filed as #10613, not fixed here.
+#: * ``/v1/topics/{t}/summary`` (``sdk.topic_summarize``) — EP classification +
+#:   neighborhood traversal whose cost is CALLER-controlled (``max_seeds`` up to
+#:   200, ``max_hops`` up to 3). No measurement of its legitimate p99 exists in
+#:   the tracker, which is why it has no bound of its own yet rather than a
+#:   guessed one: inventing a number here would refuse work that is inside its
+#:   own budget — the exact defect the paragraphs above were written to stop.
+#:   If it bites, give it its own ``topic_summary_read_timeout_s()`` the way the
+#:   record leg got ``record_read_timeout_s()``.
+#:
+#: A bound miss on either is a 503 ``graph_unavailable`` for work that may be
+#: merely slow (retryable, and the abandoned callable keeps its slot — CPython
+#: cannot cancel a started thread), so a handful of max-parameter summaries can
+#: hold all 8 slots. That is the accepted saturation policy, not a surprise;
+#: what would be wrong is claiming this number measured them.
+#:
 #: It sits BELOW ``mcp_auth._TRANSPORT_WAIT_BOUND_S``
 #: (10 s) deliberately, so the lane's legible refusal is what the caller sees
 #: when the pool is the reason — not a transport timeout that mis-describes
