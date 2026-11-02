@@ -56,8 +56,10 @@ jobs:
         with:
           python-version: '3.12'
       # The #9018 contract step: the `Closes-coherence` step below reaches `gh` for
-      # every measurement, and a pool runner without it would make that step a
-      # permanent UNMEASURED warning (see tests/test_runner_tool_contract.py).
+      # every measurement. `runner-tools.sh ensure gh` fails CLOSED, so on a pool
+      # runner without it THIS step reds the job (it has no `continue-on-error`),
+      # before the advisory step could run — the same contract 17 other jobs carry
+      # (see tests/test_runner_tool_contract.py).
       - name: Ensure gh
         run: bash .github/scripts/runner-tools.sh ensure gh
       - name: Run drift-guard

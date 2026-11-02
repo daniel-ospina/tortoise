@@ -59,6 +59,27 @@ for anything that wants to reason instead of read prose.
 It never writes: no comments, no labels, no closures. Reading is the whole
 surface.
 
+Why a regex, when this repo already ruled to prefer the source
+--------------------------------------------------------------
+`tools/collision_preflight.py` records this repo's ruling on exactly this
+grammar (#3504): **"prefer the source over the regex"** — it reads GitHub's own
+`closingIssuesReferences` rather than re-deriving which issues a PR closes.
+This tool deliberately does NOT, and the reason is the question it asks. That
+field is GitHub's answer to *"what WILL this PR close"*, and for the shape this
+tool exists for it is **empty**: `#10568` (base `act-10465`, body `Closes
+#10541`) reports `closingIssuesReferences: []`, because GitHub has already
+decided the keyword will not fire. What is needed here is the opposite query —
+*what does this PR CLAIM to close* — and no API surface answers it, so the
+grammar is parsed. That is a second copy of a grammar GitHub owns, which is
+exactly the drift #3504 predicts, and it drifted: review finding P1 was a fence
+shape (a fence opened on a list-marker line) this copy read as prose, which
+manufactured a `lands`. The mitigation is that this copy is checked against a
+SOURCE too — a real CommonMark renderer (`markdown_it`, a test dependency),
+shape by shape, in `tests/test_closes_landing.py` — so a divergence between
+what this tool calls code and what a renderer calls code reds a test rather
+than a reader. Do not "simplify" it back to `closingIssuesReferences`: for
+this question the source is empty precisely when it matters.
+
 Usage
 -----
     uv run python tools/closes_landing.py --pr 10568                # one PR
@@ -89,6 +110,7 @@ import argparse
 import json
 import re
 import subprocess
+import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -281,15 +303,77 @@ def _fence_open(rest: str) -> tuple[str, int] | None:
     return (ch, n)
 
 
-def _is_closer(rest: str, opener: tuple[str, int]) -> bool:
+def _is_closer(rest: str, opener: tuple[str, int], base: int = 0) -> bool:
     """A closer carries the same character, a run at least as long, and NOTHING
-    but whitespace after it (an "info string" on a closing fence is content)."""
+    but whitespace after it (an "info string" on a closing fence is content).
+
+    `base` is the column the block's CONTENT starts at inside `rest` — the run's
+    own indent for a fence opened in prose, the list item's content column for
+    one opened on a marker line. CommonMark allows a closer up to three columns
+    past that column, so `10. ``` ` (content column 4, past the absolute limit a
+    fence opener may have) still closes on a four-space-indented run; measuring
+    the closer from column 0 instead left that fence open and blanked the real
+    prose after it — the under-report direction this module forbids.
+    """
     ch, n = opener
     body = rest.expandtabs(4)
-    if len(body) - len(body.lstrip(" ")) > _MAX_FENCE_INDENT:
+    if len(body) - len(body.lstrip(" ")) - base > _MAX_FENCE_INDENT:
         return False
     m = re.match(r"(`{3,}|~{3,})\s*$", body.lstrip(" "))
     return bool(m) and m.group(1)[0] == ch and len(m.group(1)) >= n
+
+
+@dataclass(frozen=True)
+class _Fence:
+    """An OPEN fenced block: the four things its container needs to end it.
+
+    * `prefix` — the blockquote prefix it opened under (the quote ending ends it);
+    * `col` — its content column in LINE coordinates, compared against a later
+      line's indent to end a fence opened inside a list item;
+    * `base` — the column its run sits at WITHIN `rest`, which is what a closing
+      fence is measured from (a closer may sit up to three columns past it);
+    * `in_list` — whether a list item was open, so a dedent can end the block.
+    """
+
+    opener: tuple[str, int]
+    prefix: str
+    col: int
+    base: int
+    in_list: bool
+
+
+def _fence_candidate(prefix: str, rest: str, indent: int,
+                     in_list: bool) -> _Fence | None:
+    """The fence `(prefix, rest)` opens, or None if the line is prose.
+
+    A fence may open ON a list-marker line itself (`- ``` `, `1. ``` `):
+    CommonMark puts the code block at the item's CONTENT column and the marker
+    is not part of it. Emitting such a line as prose made every line of the
+    block prose too, so a QUOTED `Closes #N` inside it became a claim — and on a
+    default base a `lands`, the one outcome this module forbids (#10634 review
+    P1: `- ```\n  Closes #100\n  ``` ` reported `lands` for a block the renderer
+    shows as `<pre><code>`).
+
+    The content column is CommonMark's: the marker's width plus the spaces after
+    it — or ONE column when that gap is wider than four, because such a line
+    starts an INDENTED code block rather than a fence, which `_fence_open` then
+    refuses on its own (a 4+ column `` ``` `` is not a fence).
+    """
+    item = _LIST_MARKER_RE.match(rest) if rest.strip() else None
+    if item:
+        m_indent = len(item.group("indent"))
+        gap = len(item.group("gap"))
+        marker_w = len(item.group(0)) - m_indent - gap
+        base = m_indent + marker_w + (gap if gap <= 4 else 1)
+        opener = _fence_open(rest[base:])
+        if opener is None:
+            return None
+        return _Fence(opener, prefix, len(prefix) + base, base, True)
+    opener = _fence_open(rest)
+    if opener is None:
+        return None
+    return _Fence(opener, prefix, indent,
+                  len(rest) - len(rest.lstrip(" ")), in_list)
 
 
 def strip_code(body: str, strict: bool = False) -> str:
@@ -314,7 +398,9 @@ def strip_code(body: str, strict: bool = False) -> str:
       it is re-examined as a fresh line, because it may itself open a fence
       (review c10-2);
     * a fence opened inside a LIST ITEM ends when the item's content ends, i.e. a
-      non-blank line dedents below the opener (review c10-3);
+      non-blank line dedents below the opener (review c10-3) — and a fence may
+      open ON the marker line itself, at the item's content column (#10634
+      review P1);
     * containers are compared by DEPTH, never by the raw prefix string: `>`, `> `,
       `  > ` are one container to CommonMark, and comparing strings meant a legal
       closer was never recognised (review c10-1);
@@ -327,8 +413,7 @@ def strip_code(body: str, strict: bool = False) -> str:
     that loses real closures.
     """
     out: list[str] = []
-    # (opener, its prefix, the indent it opened at, whether a list item was open)
-    fence: tuple[tuple[str, int], str, int, bool] | None = None
+    fence: _Fence | None = None
     list_cols: list[int] = []
     for raw in body.splitlines():
         line = raw.expandtabs(4)
@@ -336,10 +421,7 @@ def strip_code(body: str, strict: bool = False) -> str:
         prefix, rest = _split_prefix(line)
         marker = _LIST_MARKER_RE.match(line)
         if marker and line.strip():
-            col = len(marker.group("indent")) + len(marker.group(0)) \
-                - len(marker.group("indent")) - len(marker.group("gap")) \
-                + len(marker.group("gap"))
-            list_cols.append(col)
+            list_cols.append(len(marker.group(0)))
         elif line.strip() and list_cols and indent < list_cols[-1]:
             while list_cols and indent < list_cols[-1]:
                 list_cols.pop()
@@ -347,26 +429,22 @@ def strip_code(body: str, strict: bool = False) -> str:
             out.append("")
             continue
         if fence is None:
-            opener = _fence_open(rest)
-            if opener:
-                fence = (opener, prefix, indent, bool(list_cols))
+            fence = _fence_candidate(prefix, rest, indent, bool(list_cols))
+            if fence:
                 out.append("")
             else:
                 out.append(raw)   # prose: keep it, keywords and all
             continue
-        opener, fprefix, findent, in_list = fence
         # The container can END the block: the quote it lived in closed, or (for a
         # fence opened inside a list item) the item did. Either way the line that
         # ends it is a FRESH line — it may itself open a new fence (review c10-2).
-        ended = (_quote_depth(fprefix) > 0
-                 and _quote_depth(prefix) < _quote_depth(fprefix))
-        if not ended and in_list and line.strip() and indent < findent:
+        ended = (_quote_depth(fence.prefix) > 0
+                 and _quote_depth(prefix) < _quote_depth(fence.prefix))
+        if not ended and fence.in_list and line.strip() and indent < fence.col:
             ended = True
         if ended:
-            fence = None
-            fresh = _fence_open(rest)
-            if fresh:
-                fence = (fresh, prefix, indent, bool(list_cols))
+            fence = _fence_candidate(prefix, rest, indent, bool(list_cols))
+            if fence:
                 out.append("")
             else:
                 out.append(raw)   # prose again: keep it, keywords and all
@@ -375,7 +453,8 @@ def strip_code(body: str, strict: bool = False) -> str:
         # blockquote container to CommonMark, and comparing the raw strings meant
         # a legal closer was never recognised and the rest of the body was
         # blanked — a silent MISS (review c10-1).
-        if _quote_depth(prefix) == _quote_depth(fprefix) and _is_closer(rest, opener):
+        if _quote_depth(prefix) == _quote_depth(fence.prefix) and _is_closer(
+                rest, fence.opener, fence.base):
             fence = None
         out.append("")
     return "\n".join(out)
@@ -576,10 +655,8 @@ def classify(pr: PullRequest, by_head: dict[str, PullRequest],
                             f"`{default_branch}` and has ALREADY merged, but "
                             f"{_not_landed_why(pr, carrier)} — so #{issue}'s work "
                             f"is NOT on `{default_branch}`. The keyword cannot "
-                            f"fire any more: re-open PR #{pr.number} retargeted "
-                            f"at `{default_branch}`, or open a PR that targets "
-                            f"`{default_branch}` for this work, and state "
-                            f"`Closes #{issue}` on it."),
+                            f"fire any more: "
+                            f"{_stranded_remedy(pr, issue, default_branch)}"),
                 ))
                 continue
             if carrier.merged:
@@ -621,6 +698,31 @@ def _subject_landed(pr: PullRequest, carrier: PullRequest) -> bool:
     if pr.merged_at and carrier.merged_at:
         return pr.merged_at <= carrier.merged_at
     return True
+
+
+def _stranded_remedy(pr: PullRequest, issue: int, default_branch: str) -> str:
+    """What the reader can ACTUALLY do, given the subject's OWN state.
+
+    "re-open PR #N retargeted at `<default>`" was printed for all three states,
+    and it is an action that exists in exactly one of them (#10634 review P2):
+    an OPEN PR has nothing to re-open (its BASE must be retargeted), and a
+    MERGED one can be neither re-opened nor retargeted — for that reader the
+    only route is new work off the default branch. Prescribing an impossible
+    action is how an instrument teaches the reader to ignore it, and it hides
+    the achievable one; same defect class as the `inert` arm's P2-4.
+    """
+    if pr.closed_unmerged:
+        return (f"re-open PR #{pr.number} with base `{default_branch}` and state "
+                f"`Closes #{issue}` on it, or open a PR from this head with "
+                f"base `{default_branch}`.")
+    if pr.merged:
+        return (f"PR #{pr.number} has already merged, so it can be neither "
+                f"re-opened nor retargeted — take its commits onto a branch off "
+                f"`{default_branch}` (cherry-pick), open a PR for that branch, "
+                f"and state `Closes #{issue}` on it.")
+    return (f"retarget PR #{pr.number} at `{default_branch}` (GitHub's 'Change "
+            f"base' on the PR), or open a PR from this head with base "
+            f"`{default_branch}`, and state `Closes #{issue}` on it.")
 
 
 def _not_landed_why(pr: PullRequest, carrier: PullRequest) -> str:
@@ -666,19 +768,55 @@ _GH_FIELDS = "number,baseRefName,body,headRefName,state,mergedAt"
 #: one place every live call goes through.
 _GH_TIMEOUT_SECONDS = 60
 
+#: …and the bound is PER CALL, which is not enough for the run (#10634 review P2):
+#: one `--pr` run issues `2 + L` sequential calls (identity, the PR, one per base
+#: branch up the stack) and `collect_stack` follows the stack as far as it goes,
+#: so `L` is not capped by `MAX_STACK_DEPTH` — thirteen calls at the per-call cap
+#: already reach the job's `timeout-minutes: 15`. So there is also an aggregate
+#: budget: once it is gone the run reports UNMEASURED instead of spending the
+#: job, which is the same contract the per-call bound has (exit 2, never a pass,
+#: never a red the advisory step cannot cover).
+_GH_RUN_BUDGET_SECONDS = 300
+
+_run_budget_started: float | None = None
+
+
+def _reset_run_budget() -> None:
+    """Start a fresh aggregate deadline (called by `main`, and by tests)."""
+    global _run_budget_started
+    _run_budget_started = None
+
+
+def _budget_remaining() -> float:
+    """Seconds left in the run's budget; the first call starts the clock."""
+    global _run_budget_started
+    now = time.monotonic()
+    if _run_budget_started is None:
+        _run_budget_started = now
+    return _GH_RUN_BUDGET_SECONDS - (now - _run_budget_started)
+
 
 def _gh(args: list[str]) -> str:
+    budget = _budget_remaining()
+    if budget <= 0:
+        # The run has already spent its whole budget: no further call can
+        # change the answer, and making one would spend the job instead.
+        raise Unmeasurable(
+            f"the run exceeded its {_GH_RUN_BUDGET_SECONDS}s budget before "
+            f"`gh {' '.join(args)}` could be asked")
+    timeout = min(_GH_TIMEOUT_SECONDS, budget)
     try:
         out = subprocess.run(["gh", *args], capture_output=True, text=True,
-                             check=False, timeout=_GH_TIMEOUT_SECONDS)
+                             check=False, timeout=timeout)
     except FileNotFoundError as exc:
         raise Unmeasurable(f"`gh` is not installed: {exc}") from exc
     except subprocess.TimeoutExpired as exc:
         # UNMEASURED, never a pass and never a hang: the caller's exit 2 is the
         # contract the workflow's dead-man reads.
         raise Unmeasurable(
-            f"`gh {' '.join(args)}` did not answer within "
-            f"{_GH_TIMEOUT_SECONDS}s") from exc
+            f"`gh {' '.join(args)}` did not answer within {timeout:.0f}s"
+            f"{' (the run\'s remaining budget)' if timeout < _GH_TIMEOUT_SECONDS else ''}"
+        ) from exc
     if out.returncode != 0:
         raise Unmeasurable(
             f"`gh {' '.join(args)}` exited {out.returncode}: "
@@ -842,6 +980,7 @@ def main(argv: list[str] | None = None) -> int:
                     help="emit GitHub Actions ::warning lines instead of prose")
     ap.add_argument("--json", action="store_true", help="emit JSON")
     args = ap.parse_args(argv)
+    _reset_run_budget()
 
     try:
         if args.body_file is not None:

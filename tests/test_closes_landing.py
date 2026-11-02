@@ -35,6 +35,7 @@ from __future__ import annotations
 import importlib.util
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -58,6 +59,19 @@ def _load_module():
 
 
 cl = _load_module()
+
+
+@pytest.fixture(autouse=True)
+def _fresh_run_budget():
+    """Every test starts with the aggregate `gh` budget UNSPENT.
+
+    It is module state, so without this a test that deliberately spends it (the
+    budget tests below) would make every later test's measurement depend on test
+    ORDER — and the order a full run happens to use is not a contract.
+    """
+    cl._run_budget_started = None
+    yield
+    cl._run_budget_started = None
 
 
 def _pr(n, base, body="", head=None, state="OPEN", merged_at=None):
@@ -354,6 +368,35 @@ def test_a_closed_unmerged_subject_under_a_merged_carrier_says_SO_and_offers_reo
     assert "still CLOSED" not in finding.detail, finding.detail
     assert "re-open PR #106" in finding.detail, finding.detail
     assert "did land" not in finding.detail
+
+
+@pytest.mark.parametrize("state,subject_merged_at,expected,forbidden,why", [
+    ("OPEN", None,
+     "retarget PR #110 at `main`", "re-open PR #110",
+     "an OPEN PR has nothing to re-open — the BASE is what must move"),
+    ("MERGED", "2026-11-02T15:00:00Z",
+     "can be neither re-opened nor retargeted", "re-open PR #110",
+     "a MERGED PR can be neither re-opened nor retargeted"),
+    ("CLOSED", None,
+     "re-open PR #110 with base `main`", "can be neither re-opened",
+     "a CLOSED-unmerged PR CAN be re-opened, and that is the cheap route"),
+])
+def test_the_stranded_remedy_names_an_action_that_EXISTS_in_that_subject_state(
+        state, subject_merged_at, expected, forbidden, why):
+    """#10634 review P2. The stranded arm printed one sentence — "re-open PR #N
+    retargeted at `<default>`" — for all three subject states, and it is an
+    action that exists in exactly ONE of them. A reader told to re-open an OPEN
+    PR, or to re-open a MERGED one, has no move; the achievable remedy is what
+    the finding is for.
+    """
+    stacked = _pr(110, SIBLING, "Closes #100", state=state,
+                  merged_at=subject_merged_at)
+    carrier = _pr(111, DEFAULT, "", head=SIBLING, state="MERGED",
+                  merged_at="2026-11-02T14:07:51Z")
+    (finding,) = cl.classify(stacked, _by_head(stacked, carrier), DEFAULT)
+    assert finding.verdict == "unresolved", finding
+    assert expected in finding.detail, (why, finding.detail)
+    assert forbidden not in finding.detail, (why, finding.detail)
 
 
 def test_a_merged_carrier_with_no_time_stamps_still_claims_landed_when_the_subject_merged():
@@ -737,6 +780,55 @@ def test_gh_is_BOUNDED_so_a_stalled_call_cannot_hang_the_guard(monkeypatch):
     assert "did not answer within" in str(exc.value)
 
 
+# ── the per-call bound is not enough: the RUN needs a deadline too ──────────
+
+def test_gh_refuses_to_spend_the_run_budget_rather_than_the_whole_job(monkeypatch):
+    """#10634 review P2. The per-call bound leaves the RUN unbounded: one `--pr`
+    run issues `2 + L` sequential calls (identity, the PR, one per base branch up
+    the stack) and `collect_stack` follows the stack as far as it goes, so a
+    stalled API can consume the drift-guard job's whole `timeout-minutes: 15` —
+    and a JOB-level timeout is a red that `continue-on-error: true` cannot cover.
+
+    Once the run's aggregate budget is spent, NO further call is made: the answer
+    is UNMEASURED (exit 2), which is the same verdict the per-call bound gives.
+    """
+    monkeypatch.setattr(cl, "_run_budget_started",
+                        time.monotonic() - (cl._GH_RUN_BUDGET_SECONDS + 1))
+    calls: list = []
+    monkeypatch.setattr(cl.subprocess, "run", lambda *a, **k: calls.append(a))
+    with pytest.raises(cl.Unmeasurable) as exc:
+        cl._gh(["pr", "view", "1"])
+    assert calls == [], "an exhausted budget must not spend another call"
+    assert "budget" in str(exc.value)
+
+
+def test_gh_clamps_each_call_to_the_runs_REMAINING_budget(monkeypatch):
+    """The last call must inherit what is LEFT of the run, not the full per-call
+    cap — otherwise one call can overrun the budget by a whole minute."""
+    monkeypatch.setattr(cl, "_run_budget_started",
+                        time.monotonic() - (cl._GH_RUN_BUDGET_SECONDS - 5))
+    seen: dict = {}
+
+    def ok(cmd, **kwargs):
+        seen.update(kwargs)
+        return _Completed(0, "{}")
+
+    monkeypatch.setattr(cl.subprocess, "run", ok)
+    assert cl._gh(["x"]) == "{}"
+    assert 0 < seen["timeout"] <= 6, seen
+    assert seen["timeout"] < cl._GH_TIMEOUT_SECONDS, seen
+
+
+def test_main_starts_a_FRESH_run_budget(monkeypatch, tmp_path):
+    """A CLI process asks one question; two invocations in one process (the
+    offline tests here do exactly that) must not share a deadline."""
+    monkeypatch.setattr(cl, "_run_budget_started", time.monotonic() - 10_000)
+    body = tmp_path / "b.md"
+    body.write_text("Closes #1\n", encoding="utf-8")
+    assert cl.main(["--body-file", str(body), "--base", "main"]) == 0
+    assert cl._run_budget_started is None
+
+
 @pytest.mark.parametrize("payload,expected", [
     ("not json", "repo identity could not be read"),
     ('{"defaultBranchRef": {"name": ""}, "nameWithOwner": "o/r"}',
@@ -952,10 +1044,54 @@ def test_the_container_ends_the_fence(body, expected):
     # A tab is 4 columns: an INDENTED CODE BLOCK, so the prose after it is prose.
     ("\t```\n  Closes #10541\n", [10541], "tab-indented opener"),
     ("    ```\nCloses #10541\n", [10541], "4-space indented opener"),
+    # A fence may open ON the LIST-MARKER line itself (review finding P1):
+    # CommonMark puts the block at the item's CONTENT column, and `- ``` ` is a
+    # fenced block, not prose. Reading that line as prose made the whole block
+    # prose, so a QUOTED `Closes #N` inside it was a claim — and `lands`, the one
+    # outcome this tool forbids. Each `expected` below was checked against a real
+    # CommonMark renderer (`markdown_it`), never reasoned about.
+    ("- ```\n  Closes #100\n  ```\n", [], "fence opened on a dash-marker line"),
+    ("- ```bash\n  echo Closes #100\n  ```\n", [], "marker-line fence with an info string"),
+    ("* ```\n  Closes #100\n  ```\n", [], "fence opened on a star-marker line"),
+    ("1. ```\n   Closes #100\n   ```\n", [], "fence opened on an ordered-marker line"),
+    # Content column 4 (`10. `), past the absolute limit a fence opener may have:
+    # the block is still a fence, and its four-space closer still closes it.
+    ("10. ```\n    Closes #100\n    ```\n", [], "marker-line fence, content column 4"),
+    ("-  ```\n   Closes #100\n   ```\n", [], "marker-line fence, 2-space gap"),
+    # A gap wider than four columns starts an INDENTED code block instead, so the
+    # column-0 line after it is genuine prose — the over-report side, pinned
+    # because guessing the other way would DROP a real claim.
+    ("-     ```\nCloses #100\n", [100], "gap > 4 is an indented code block"),
+    # A fence opened on the marker line ends with its ITEM, exactly as one opened
+    # on the next line does.
+    ("- ```\n  a\n- Closes #100\n", [100], "a new item ends a marker-line fence"),
+    ("- ```\nCloses #100\n", [100], "a column-0 line ends the item and the fence"),
+    # A closer may sit up to three columns past the content column (c10-3's rule,
+    # applied to the marker-line form).
+    ("- item\n  ```\n  Closes #40\n    ```\nCloses #999\n", [999],
+     "a closer 2 columns past the content column still closes"),
 ])
 def test_fence_shapes_match_commonmark(body, expected, why):
     assert cl.parse_closing_refs(body) == expected, why
     assert cl.parse_closing_refs(body, None, strict=True) == expected, why
+
+
+def test_a_carrier_that_quotes_the_keyword_in_a_marker_line_fence_does_not_carry_it():
+    """The `lands` direction of the P1 above, which is the one that must never
+    fire: the CARRIER only QUOTES `Closes #N` inside a `- ``` ` block, so nothing
+    will close the issue. The pre-fix tool returned `lands` — a pass manufactured
+    by a code block."""
+    stacked = _pr(70, SIBLING, "Closes #100")
+    carrier = _pr(71, DEFAULT, "- ```\n  Closes #100\n  ```\n", head=SIBLING)
+    (finding,) = cl.classify(stacked, _by_head(stacked, carrier), DEFAULT)
+    assert finding.verdict == "inert", finding
+    assert finding.carrier == 71
+    assert "Re-state the keyword on PR #71" in finding.detail
+
+
+def test_a_code_block_on_a_marker_line_cannot_buy_a_lands_on_the_default_base():
+    pr = _pr(72, DEFAULT, "- ```bash\n  echo Closes #100\n  ```\n")
+    assert cl.classify(pr, _by_head(pr), DEFAULT) == []
 
 
 # ── cycle 10: containers by DEPTH, the ending line is fresh, list items end ──

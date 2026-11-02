@@ -94,9 +94,10 @@ GH_JOBS = {
     # #10597: the warn-only `Closes-coherence` step runs
     # `tools/closes_landing.py`, which reads the PR body and the base branch's PR
     # through `gh` for EVERY measurement. The job has a checkout, so the contract
-    # step can run — this is coverage, not a declared gap. Without it every PR on
-    # a pool runner without `gh` would get an UNMEASURED warning from a step that
-    # can never measure, which is how a warn-only instrument gets turned off.
+    # step can run — this is coverage, not a declared gap. Without `gh` present
+    # the `Ensure gh` step reds the JOB (it fails closed and has no
+    # `continue-on-error`), so the advisory step never gets to report UNMEASURED —
+    # which is exactly why the contract step is required here.
     "drift-guard.yml": ["drift-guard"],
 }
 
