@@ -548,6 +548,74 @@ def test_attestation_prefers_embedding_text_when_present():
     assert q["embedding_text_hash"] == content_hash("raw")
 
 
+def _attestable(point: dict) -> bool:
+    """Whether ``_record_embedding_identity`` can REACH its text comparison.
+
+    ONE predicate, used by EVERY derivation in the mismatch test below, so the
+    populations they compare cannot SKEW (review cycle 3, P3). It mirrors that
+    function's early returns **in order**, because a record that returns before
+    ``j_text != cur_text_hash`` can never warn — counting it would demand a
+    contract production never makes and would false-red on a legitimate record:
+
+      1. no RESTORED vector — the identity/text check is only reached on the
+         branch that writes the journalled vector
+         (``projection/entities.py:2508-2509``);
+      2. no identity **and** no revision (``:937-946``) — "stay silent": the
+         record cannot attest its origin, which is exactly the shape
+         ``stamp_journal_embedding(creating=False)`` emits;
+      3. no string ``embedding_text_hash``, or no string text to hash
+         (``:963-968``), where the text is ``embeddingText or content``.
+
+    The identity clause is BELT-AND-BRACES for every journal the seam can
+    produce: ``stamp_journal_embedding`` stamps the hash and the identity inside
+    the SAME ``creating`` branch, so a hash never travels without one. A
+    hand-edited record could carry a hash alone; such a record is genuinely
+    unattestable and must not be counted.
+    """
+    if point.get("embedding") is None:
+        return False
+    if (point.get("embedding_model") is None
+            and point.get("embedding_revision") is None):
+        return False
+    if not isinstance(point.get("embedding_text_hash"), str):
+        return False
+    return isinstance(point.get("embeddingText") or point.get("content"), str)
+
+
+def test_the_attestable_predicate_mirrors_the_replay_early_returns():
+    """The mismatch test's derivations must not be a SUPERSET of what the
+    replay attests (review cycle 3, P3 — measured there as ``warnings = 2`` vs
+    ``pairs = 3``).
+
+    Each clause of `_attestable` mirrors an early return in
+    `_record_embedding_identity`; dropping one makes the test's derived
+    expectations unreachable in production, so this pins the parity directly
+    rather than only through a journal that happens to carry every field.
+    The identity clause is the one no seam-produced journal exercises — the
+    hash and the identity are stamped in the same `creating` branch — so it is
+    pinned HERE instead of through a synthetic replay record.
+    """
+    base = {"id": "p", "content": "raw", "embedding": [1.0],
+            "embeddingText": "enriched", "embedding_text_hash": "h",
+            "embedding_model": "bge-small-en-v1.5",
+            "embedding_revision": "rev"}
+    assert _attestable(base), base
+    # 1. the field is journalled but carries NO usable vector → never restored.
+    assert not _attestable(dict(base, embedding=None))
+    # 2. no identity at all → the replay stays silent; either half alone is
+    #    enough for it to compare.
+    assert not _attestable(dict(base, embedding_model=None,
+                                embedding_revision=None))
+    assert _attestable(dict(base, embedding_model=None))
+    assert _attestable(dict(base, embedding_revision=None))
+    # 3. no string hash → nothing to compare against.
+    assert not _attestable(dict(base, embedding_text_hash=None))
+    assert not _attestable(dict(base, embedding_text_hash=123))
+    # 4. the text is `embeddingText or content`, and it must be a string.
+    assert _attestable(dict(base, embeddingText=None))
+    assert not _attestable(dict(base, embeddingText=None, content=None))
+
+
 def test_a_mismatched_enriched_pair_is_DETECTED_on_replay(
         embedder, enrichment_on, tmp_path, caplog):
     """#8932 §2 / #4194 — the attestation is CHECKABLE, and a mismatched pair
@@ -613,20 +681,15 @@ def test_a_mismatched_enriched_pair_is_DETECTED_on_replay(
               Path(log_path).read_text().splitlines() if line.strip()]
     points = [ev.get("point") or {} for ev in events]
 
-    # ⛔ ONE predicate, used by EVERY derivation below so they cannot SKEW
-    # (review cycle 3, P3). A record is attestable only if
-    # `_record_embedding_identity` can actually reach its text comparison: it
-    # returns EARLY when `embedding_text_hash` is not a string
-    # (`projection/entities.py:963-968`) and when no model identity is recorded
-    # (`:937-946`, ahead of the text check). A re-emitted snapshot —
+    # ⛔ ONE predicate (`_attestable`, module level) used by EVERY derivation
+    # below so they cannot SKEW (review cycle 3, P3). It mirrors
+    # `_record_embedding_identity`'s early returns in order — no restored
+    # vector, no identity (`projection/entities.py:937-946`), no string hash
+    # (`:963-968`). A re-emitted snapshot —
     # `stamp_journal_embedding(creating=False)` — deliberately carries NEITHER a
     # hash nor an identity (its own docstring says so), so counting it here
     # would demand a contract production never makes and would false-red on a
     # legitimate record.
-    def _attestable(point):
-        return (isinstance(point.get("embedding_text_hash"), str)
-                and point.get("embedding") is not None
-                and bool(point.get("embeddingText")))
 
     # PREMISE for leg 1 (review cycle 1, P2): the ABSENCE of a divergence is
     # only discriminating if some attestable record's vector describes text that
