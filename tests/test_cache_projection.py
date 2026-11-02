@@ -2460,6 +2460,63 @@ def test_a_silent_birth_record_derives_no_status_rather_than_live():
                                         label="Object", key="o-2")
 
 
+def test_a_pre_birth_fold_cannot_survive_the_creation_record():
+    """A fold that lands BEFORE the node exists must not outlive the birth value.
+
+    Review round 6 (P2), MEASURED on this head's parent: a pack/connector event
+    naming a target that does not exist yet folds NOTHING in the live graph
+    (`entity_identity.resolve_fold_name` never mints, and an `about_entities` miss
+    is the exempt `unfolded-mention`, so the event is legal and journaled) — but
+    this replay is NAME-keyed, so it folded the value anyway and then refused the
+    CREATION record's status because `status` was no longer `None`.
+
+    Measured scenario: `venture:disbursement` naming `T1` at seq 1 (no node),
+    then `create_object("T1", objectKind="venture:tranche", status="archived")`
+    at seq 2. The live graph holds `archived` (TERMINAL); the replay answered
+    `released` (the pack fold) — a NON-terminal status for a node the graph reads
+    as terminal, so the rebuilt Object is recalled and its name resolves: #9974's
+    own harm, one ordering case over, and NOT one of the declared residues (the id
+    was created BY the birth record, so this is not the ON MATCH bound).
+    """
+    obj = cp.node_from_row("Object", {"id": "o-1", "name": "T1",
+                                      "object_kind": "venture:tranche"})
+    pre_birth = cp.LifecycleEvent(seq=1, event_kind="venture:disbursement",
+                                  object_name="T1")
+    birth = cp.LifecycleEvent(seq=2, event_kind="", is_birth=True,
+                              birth_status="archived", target_id="o-1",
+                              target_label="Object")
+    folded = cp.apply_event_stream_folds([obj], [pre_birth, birth])[0]
+    assert folded.props.get("status") == "archived", (
+        f"a pre-birth fold outlived the creation record ({folded.props!r}) — the "
+        "rebuild answers a non-terminal status for a node the graph holds "
+        "terminal, so its name resolves after a record-sourced rebuild"
+    )
+    assert cp._is_terminal_status(folded.props.get("status"))
+    # …and a fold AFTER the creation still applies (birth `pending`, later
+    # disbursement → `released`), so the fix is not "ignore every other leg".
+    later = cp.apply_event_stream_folds([obj], [
+        cp.LifecycleEvent(seq=2, event_kind="", is_birth=True,
+                          birth_status="pending", target_id="o-1",
+                          target_label="Object"),
+        cp.LifecycleEvent(seq=3, event_kind="venture:disbursement",
+                          object_name="T1"),
+    ])[0]
+    assert later.props.get("status") == "released", (
+        f"a post-creation fold stopped applying ({later.props!r})"
+    )
+    # …and a SILENT birth clears whatever preceded it, deriving nothing.
+    silent = cp.apply_event_stream_folds([obj], [
+        pre_birth,
+        cp.LifecycleEvent(seq=2, event_kind="", is_birth=True,
+                          birth_status=None, target_id="o-1",
+                          target_label="Object"),
+    ])[0]
+    assert "status" not in silent.props, (
+        f"a silent creation record left a pre-birth fold in place "
+        f"({silent.props!r})"
+    )
+
+
 def test_the_birth_status_is_on_create_only_like_the_live_fold():
     """A re-mention journals ANOTHER creation record; it must not overwrite.
 
