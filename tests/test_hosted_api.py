@@ -5506,6 +5506,15 @@ class TestIssueInsightAPI:
         `tests/test_8447_issue_insight_truncation.py::
         test_a_pool_at_exactly_its_bound_is_not_marked_cut` pins); its qualified
         sibling is the test below.
+
+        ⛔ GREEN on the pre-fix tree — a RELAY guard, not a red→green leg
+        (#10570 review P3-1). Measured: both `-k route_relays` arms pass against
+        base `origin/main` = `6b8793351` (`2 passed, 479 deselected`), because
+        the route already returns the SDK dict verbatim, so a fake SDK that
+        carries the marker itself needs nothing from this diff. What it pins is
+        that the route does not WHITELIST or re-shape the body. The red→green
+        arm on this route is the marker assertion block at the end of
+        `test_authed_call_returns_fail_closed_shape`, which reads the real SDK.
         """
         import tortoise.hosted_api as hosted_api
 
@@ -5543,6 +5552,10 @@ class TestIssueInsightAPI:
         route that dropped `truncated`, or that filled a missing
         `total_available` with the floor it was handed, would pass the exact arm
         above and fail here.
+
+        ⛔ Also GREEN on the pre-fix tree, for the same reason as its sibling:
+        a relay guard, not a red→green leg (measured with it, `-k route_relays`
+        → `2 passed` at base `6b8793351`).
         """
         import tortoise.hosted_api as hosted_api
 

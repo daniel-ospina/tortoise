@@ -252,8 +252,17 @@ class TestIssueInsightTruncation:
         wrong) behaviour, so this leg reds if a `try/except` is ever added
         without the docstring moving with it.
 
-        Non-vacuity: the pre-fix sentence is what a `try/except`-to-dict would
-        have made true; this leg is false on exactly that implementation.
+        ⛔ GREEN on the pre-fix tree, so it is NOT one of this file's red→green
+        legs — it is a REGRESSION GUARD, and the evidence table must not count
+        it among them (#10570 review P3-1). Measured, not argued: this file at
+        this head run against base `origin/main` = `6b8793351` gives
+        `-k service_fault` → **1 passed, 13 deselected**, because main's
+        `issue_insight` has zero `try` and zero `except` and its first
+        executable statement is already `proj = self._get_proj()`, so the
+        RuntimeError propagates there too. The 13 red→green legs are the ones
+        that assert the marker #8447 ADDS; this one asserts the ABSENCE of a
+        conversion that never existed, which is why an error-dict
+        implementation — and only that — reds it.
         """
         def _unreachable():
             raise RuntimeError("graph service unreachable")
