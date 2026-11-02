@@ -9429,6 +9429,29 @@ def _apply_one(points: dict[str, dict], ev: dict,
                         # dispatch (#7369), which REMOVES the property. Folding
                         # the raw value would keep it.
                         _dropped.add(_pk)
+                # #10010 review P2: the SAME omitted-key carry-forward for the
+                # extracted-from PAIR, and it is the same class for the same
+                # reason. `_upsert_point_props` writes them from an explicit
+                # clause gated on the payload's own SHAPE (`_ef_clauses`: a
+                # TRUTHY scalar for `extractedFrom`, a non-empty list/tuple for
+                # `extractedFromAll`), so a MERGE'd node keeps the stored value
+                # when a later creation states neither — and replacing the
+                # entry outright below dropped them from the journal view only,
+                # which `check_consistency` then reports as a divergence whose
+                # own `action` ("replay the journal") reproduces it. Reachable
+                # because the #7704 fold is the first writer that puts the pair
+                # on an id a HAND-BUILT snapshot later re-emits without them
+                # (`sdk._write_capture_turns`' turn snapshots, which carry no
+                # `extractedFrom`; `EventAPI.add_point(id=…)`, #8317's seam).
+                # Each key is gated on the writer's rule for THAT key, not on
+                # `key not in p`: an explicit `None`/`""`/`[]` writes no
+                # property either, so the stored value survives there too.
+                if not p.get("extractedFrom") and "extractedFrom" in _prev:
+                    _carried["extractedFrom"] = _prev["extractedFrom"]
+                _ef_all = p.get("extractedFromAll")
+                if (not (isinstance(_ef_all, (list, tuple)) and _ef_all)
+                        and "extractedFromAll" in _prev):
+                    _carried["extractedFromAll"] = _prev["extractedFromAll"]
                 if _carried or _dropped:
                     p = {**{_k: _v for _k, _v in p.items() if _k not in _dropped},
                          **_carried}

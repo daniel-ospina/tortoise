@@ -1447,6 +1447,14 @@ def search_points(
     model = None if force_sparse else EmbeddingModel.get()
     if model is not None:
         try:
+            # #10010 review P3: the re-assert belongs at EVERY encode site, not
+            # only the three that got it — this one is reached through the
+            # production read path (`search_engine.fallback_tfidf`), and the
+            # count follows the CALLING thread's own context, so a caller
+            # thread that never ran `pin_embed_threads` would run this forward
+            # pass at torch's default `nproc` (#10296's 100x+ case). One env
+            # read plus two C calls when the count already matches.
+            ensure_embed_threads()
             vecs = np.asarray(model.encode([query] + texts, show_progress_bar=False),  # noqa: RUF005
                               dtype=np.float64)
             query_vec, doc_vecs = vecs[0], vecs[1:]

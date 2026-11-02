@@ -1072,3 +1072,61 @@ def test_consistency_gate_compares_the_folded_set(prov):
     }
     assert "extractedFromAll" in named, tampered
     assert "extractedFromAll" not in tampered.get("excluded_fields", {}), tampered
+
+
+def test_a_capture_style_re_emit_keeps_the_folded_set_green(prov):
+    """#10010 review P2 — the omitted-key shape, end to end through the gate.
+
+    The fold puts `extractedFrom`/`extractedFromAll` on an id that a LATER,
+    HAND-BUILT creation snapshot re-emits without them — the capture turn
+    loop's `_turn_snapshot` (`id`/`content`/`pointKind`/`speaker`/`is_episodic`,
+    no ref keys) is that snapshot in production, and `EventAPI.add_point(id=…)`
+    is the other seam. The graph writer is presence-gated (`_ef_clauses` emits a
+    clause only for a stated truthy scalar / non-empty list), so the MERGE'd
+    node KEEPS the pair; the pure fold replaced the entry outright and DROPPED
+    it, so `derived = replay(journal)` went false on a REPORTED surface with an
+    `action` ("replay the journal") that reproduces the same graph — the
+    unclearable false-red class #8317/#9350 fixed for `tags` and the four
+    capture props.
+
+    FAILS IF the fold's carry-forward loses either key: pre-fix the gate reports
+    `divergent_points[].fields` naming `extractedFromAll` (and `extractedFrom`)
+    on a graph the rebuild just produced correctly.
+    """
+    from tortoise.consistency import check_consistency
+
+    sdk, events, log_path = prov
+    alpha, beta = ("https://doc.example/alpha", "https://doc.example/beta")
+    sdk.create_source(alpha, "document")
+    sdk.create_source(beta, "document")
+    content = "one claim, two sources — re-emitted without the ref keys"
+    pid = sdk.create_point("statement", content, extractedFrom=alpha,
+                           dedup=True)["id"]
+    sdk.create_point("statement", content, extractedFrom=beta, dedup=True)
+    proj = _proj(sdk)
+    before = proj.g.query(
+        "MATCH (p:Point {id:$id}) RETURN p.extractedFromAll",
+        params={"id": pid}).result_set
+    assert before and sorted(before[0][0]) == sorted([alpha, beta]), \
+        f"guard: the fold must have stored the set first, got {before}"
+
+    # The capture-turn shape: a creation snapshot that states NO ref key at all.
+    # Journalled through the SDK's own seam, so the record is server-shaped.
+    sdk._emit_event("PointAdded", point={
+        "id": pid, "content": content, "pointKind": "statement",
+        "status": "live"})
+
+    proj = _rebuilt(sdk, events)
+    kept = proj.g.query(
+        "MATCH (p:Point {id:$id}) RETURN p.extractedFrom, p.extractedFromAll",
+        params={"id": pid}).result_set
+    assert kept and kept[0][1] is not None, (
+        "guard: the MERGE'd node must KEEP the folded set when the re-emit "
+        f"states none — got {kept}")
+
+    result = check_consistency(str(log_path), proj)
+    assert result["ok"], (
+        "the fold dropped the ref pair the graph kept, so `derived = "
+        f"replay(journal)` is false on a faithful graph: {result}")
+    assert result["divergence"] is None, result
+    assert "extractedFromAll" not in result.get("excluded_fields", {}), result

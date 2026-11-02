@@ -733,6 +733,53 @@ def test_the_thread_pin_is_not_one_process_wide_scalar():
         torch.set_num_threads(saved_threads)
 
 
+def test_the_read_path_reasserts_the_thread_pin_before_it_encodes():
+    """#10010 review P3 — ``search_points``' dense leg is an encode site too.
+
+    ``ensure_embed_threads``' contract is that EVERY encode site re-asserts the
+    pin first, because the intra-op count follows the CALLING thread's own
+    context (see the probe above): a caller thread that never ran
+    ``pin_embed_threads`` runs its forward pass at torch's default ``nproc``,
+    which is #10296's 100x+ case. This leg is reached through the production
+    read path (``search_engine.fallback_tfidf`` -> ``search_points``), so
+    leaving it out kept one leg of the regression open.
+
+    ORDER is asserted, not mere presence: a re-assert that runs AFTER the
+    encode is a pin applied where it does not matter. The model and the pin are
+    both test doubles, so this needs no torch and no encoder — pre-fix the
+    observed order is ``['encode']``.
+    """
+    import numpy as np
+
+    mod = _embed_module()
+    seen: list[str] = []
+
+    class _FakeModel:
+        model_id = "test-double"
+
+        def encode(self, texts, **_kw):
+            seen.append("encode")
+            return np.zeros((len(texts), 3), dtype=np.float64)
+
+    real_get = mod.EmbeddingModel.__dict__["get"]
+    real_ensure = mod.ensure_embed_threads
+
+    def _record_pin():
+        seen.append("pin")
+
+    try:
+        mod.EmbeddingModel.get = classmethod(lambda cls, *a, **k: _FakeModel())
+        mod.ensure_embed_threads = _record_pin
+        mod.search_points("alpha", [{"id": "p1", "content": "alpha"}])
+    finally:
+        mod.EmbeddingModel.get = real_get
+        mod.ensure_embed_threads = real_ensure
+    assert seen[:2] == ["pin", "encode"], (
+        "`search_points`' dense leg encoded WITHOUT re-asserting the intra-op "
+        f"thread pin first (observed order: {seen!r}) — the read path keeps a "
+        "leg of #10296's slow case open")
+
+
 def test_the_standalone_runner_cannot_lose_a_test_defined_below_it():
     """#10010 review F3 — the file's second execution mode must not silently skip.
 
