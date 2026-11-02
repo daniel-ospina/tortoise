@@ -610,7 +610,10 @@ def _alert_provider_billing_exhausted(adapter, exc: BaseException,
 #:      `ValueError: … cannot serve <model> — the <family> family is served
 #:      only by deepseek-direct, openrouter, venice`;
 #:   3. also in `_SPEC_FAMILY_PROVIDERS`, absent from `keyed` →
-#:      `KeyError` (500 on the ask lane).
+#:      `KeyError`, which the ask lane's own build wrapper surfaces as
+#:      `AskReaderUnavailable` (`reader_unavailable`, HTTP 502 — there is no
+#:      `/v1/ask` route since #3849, so it is never a 500; measured, review
+#:      cycle 4).
 #: Unifying the ask lane is a separate change — this comment names the residual
 #: rather than claiming it is closed.
 #:
