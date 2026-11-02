@@ -255,7 +255,9 @@ class TestBuildTranscripts(unittest.TestCase):
             build_transcripts(p)
 
     def test_non_codex_source_falls_back_to_tail_key(self):
-        p = self._write([{"src": "session://my-manual-session", "kind": "decision",
+        # a plain hand-built src (NOT `session:`, which has its own branch)
+        # reaches the documented tail-key fallback.
+        p = self._write([{"src": "manual/my-manual-session", "kind": "decision",
                           "by": None, "content": "Hello.", "at": None}])
         ts = build_transcripts(p)
         self.assertEqual(list(ts), ["my-manual-session"])
@@ -264,16 +266,30 @@ class TestBuildTranscripts(unittest.TestCase):
     def test_non_codex_fragments_do_not_split_one_session(self):
         # a hand-built file's src carries per-message fragments: stripping
         # them keeps one session one transcript (and no length cut silently
-        # merges distinct sessions the way the codex lane raises loudly on)
+        # merges distinct sessions the way the codex lane raises loudly on).
+        # A non-`session:` src, so it exercises the FALLBACK branch.
         p = self._write([
-            {"src": "session://my-session#message=1", "kind": "decision",
+            {"src": "manual/my-session#message=1", "kind": "decision",
              "by": None, "content": "one", "at": None},
-            {"src": "session://my-session#message=2", "kind": "decision",
+            {"src": "manual/my-session#message=2", "kind": "decision",
              "by": None, "content": "two", "at": None},
         ])
         ts = build_transcripts(p)
         self.assertEqual(list(ts), ["my-session"])
         self.assertEqual(ts["my-session"].count("\n"), 1)
+
+    def test_session_source_strips_only_the_message_fragment(self):
+        # the `session:` branch's OWN contract: one session, many message
+        # fragments, keyed by the whole id.
+        p = self._write([
+            {"src": "session://teamA/run-7#message=1", "kind": "event",
+             "by": "user", "content": "one", "at": None},
+            {"src": "session://teamA/run-7#message=2", "kind": "event",
+             "by": "user", "content": "two", "at": None},
+        ])
+        ts = build_transcripts(p)
+        self.assertEqual(list(ts), ["teamA/run-7"])
+        self.assertEqual(ts["teamA/run-7"].count("\n"), 1)
 
     def test_selector_exact_unique_prefix_and_ambiguity(self):
         p = self._write([
