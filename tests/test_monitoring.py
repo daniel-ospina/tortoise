@@ -3271,6 +3271,22 @@ class TestHealthzHardening:
 class TestStallWatchdog:
     """#2850 item 5: exit a genuinely hung process so the platform restarts it."""
 
+    @pytest.fixture(autouse=True)
+    def _isolated_ticker(self):
+        """No recorded ticker leaks IN or OUT of a test.
+
+        ``note_heartbeat_task`` records a process-global task; a hosted-API
+        test leaving a cancelled one behind would disarm the ceiling in a later
+        test (a cancelled ticker correctly means "cannot tick"), and a fake
+        left behind would arm it. Both directions are flakiness, so reset on the
+        way in AND out.
+        """
+        monitoring._reset_heartbeat_task()
+        try:
+            yield
+        finally:
+            monitoring._reset_heartbeat_task()
+
     def test_default_threshold_is_conservative_and_env_overridable(
             self, monkeypatch, caplog):
         """#2850 review P0/P2: the self-kill is OFF by default and the enabled
@@ -3454,18 +3470,145 @@ class TestStallWatchdog:
                 thread.join(timeout=2)
         assert fired == [], "a busy loop must not be killed without a ceiling"
 
+    @staticmethod
+    def _fake_ticker(*, done=False, cancelled=False, exc=None,
+                     unreadable=False):
+        """A stand-in for the heartbeat ticker task — only the three methods
+        ``heartbeat_task_is_dead`` reads, plus the callback registration that
+        ``note_heartbeat_task`` performs.
+
+        ``unreadable`` models the fail-open hazard the review named: a task
+        whose state cannot be read at all.
+        """
+        class _FakeTicker:
+            def __init__(self):
+                self.callbacks: list = []
+
+            def cancelled(self):
+                return cancelled
+
+            def done(self):
+                if unreadable:
+                    raise RuntimeError("ticker state unavailable")
+                return done
+
+            def exception(self):
+                return exc
+
+            def add_done_callback(self, cb):
+                self.callbacks.append(cb)
+
+        return _FakeTicker()
+
+    def test_heartbeat_ticker_verdict_is_derived_from_the_task(self):
+        """R3 review P2: the verdict must FOLLOW the recorded ticker.
+
+        The old ``_HEARTBEAT_TASK_DEAD`` was a one-way latch, so one ticker
+        death disarmed the ceiling for the whole process even after
+        ``_start_liveness`` installed a fresh ticker (hosted_api.py:1955-1962).
+        Every end state of the CURRENT task must disarm, and a re-armed running
+        ticker must re-arm the ceiling.
+        """
+        try:
+            monitoring._reset_heartbeat_task()
+            assert monitoring.heartbeat_task_is_dead() is False, (
+                "nothing instrumented: the ceiling fires on age alone")
+
+            running = self._fake_ticker()
+            monitoring.note_heartbeat_task(running)
+            assert monitoring.heartbeat_task_is_dead() is False
+
+            for label, ticker in (
+                    ("raised", self._fake_ticker(
+                        done=True, exc=RuntimeError("boom"))),
+                    ("returned cleanly", self._fake_ticker(done=True)),
+                    ("cancelled", self._fake_ticker(
+                        done=True, cancelled=True)),
+                    ("unreadable", self._fake_ticker(unreadable=True))):
+                monitoring.note_heartbeat_task(ticker)
+                assert monitoring.heartbeat_task_is_dead() is True, (
+                    f"a ticker that {label} cannot produce another tick, so "
+                    "the ceiling must not act on its stale heartbeat")
+
+            # The sticky-flag regression, stated as an assertion: a ticker
+            # death must not disarm a SUBSEQUENTLY re-armed ticker.
+            monitoring.note_heartbeat_task(self._fake_ticker())
+            assert monitoring.heartbeat_task_is_dead() is False, (
+                "the verdict must not outlive the ticker that produced it — "
+                "a latched flag silently disarms the ceiling for the rest of "
+                "the process")
+        finally:
+            monitoring._reset_heartbeat_task()
+
+    def test_note_heartbeat_task_reports_death_but_not_cancellation(
+            self, caplog):
+        """Review P2: the guard's SET PATH was untested (``note_heartbeat_task``
+        appeared in no test) and failed open — a suppressed read or a suppressed
+        ``add_done_callback`` made the whole guard a no-op. Drive a fake task
+        through it in both the death and the cancel case."""
+        import logging
+
+        try:
+            dead = self._fake_ticker(done=True, exc=RuntimeError("ticker died"))
+            with caplog.at_level(logging.CRITICAL):
+                monitoring.note_heartbeat_task(dead)
+                assert len(dead.callbacks) == 1, (
+                    "the death callback was never registered — the operator "
+                    "signal and the verdict both depend on it")
+                dead.callbacks[0](dead)          # the real callback path
+            assert monitoring.heartbeat_task_is_dead() is True
+            assert any(
+                "heartbeat TASK died" in r.getMessage()
+                for r in caplog.records if r.levelno == logging.CRITICAL), (
+                "a ticker death must be reported at CRITICAL")
+
+            caplog.clear()
+            cancelled = self._fake_ticker(done=True, cancelled=True)
+            with caplog.at_level(logging.CRITICAL):
+                monitoring.note_heartbeat_task(cancelled)
+                cancelled.callbacks[0](cancelled)
+            assert not any(
+                "heartbeat TASK died" in r.getMessage()
+                for r in caplog.records), (
+                "an orderly shutdown cancels the ticker; it is not a fault")
+            assert monitoring.heartbeat_task_is_dead() is True, (
+                "…but a cancelled ticker still cannot tick, so the ceiling "
+                "must stay disarmed (fail-closed)")
+        finally:
+            monitoring._reset_heartbeat_task()
+
     def test_hard_ceiling_refuses_to_fire_when_the_ticker_itself_died(
-            self, monkeypatch):
+            self, monkeypatch, caplog):
         """The crash-loop this MUST not add (review P2): if the heartbeat TASK
         dies while the loop is healthy, the heartbeat is stale forever and the
         ceiling would ``os._exit`` a HEALTHY process every threshold until the
-        platform's ``max_retries`` are spent and the machine is left STOPPED.
-        A dead ticker is an operator signal, never permission to kill."""
+        platform's ``max_retries`` are spent and the machine is left STOPPED
+        (Fly: ``on-fail``, ``max_retries 10``). A dead ticker is an operator
+        signal, never permission to kill.
+
+        Driven through a REAL asyncio task — the old test monkeypatched the
+        flag, so a broken derivation was invisible.
+        """
+        import asyncio
+        import logging
         import threading
         import time
 
+        async def _boom():
+            raise RuntimeError("ticker died")
+
+        async def _spawn():
+            task = asyncio.ensure_future(_boom())
+            monitoring.note_heartbeat_task(task)
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+            return task
+
+        ticker = asyncio.run(_spawn())
+        assert ticker.done() and not ticker.cancelled()
+        assert monitoring.heartbeat_task_is_dead() is True
+
         monkeypatch.setenv("TORTOISE_LOOP_STALL_HARD_EXIT_S", "0.1")
-        monkeypatch.setattr(monitoring, "_HEARTBEAT_TASK_DEAD", True)
         fired: list = []
         stop = threading.Event()
         monitoring._reset_heartbeat()
@@ -3480,12 +3623,134 @@ class TestStallWatchdog:
             time.sleep(0.6)
         finally:
             monitoring._reset_workload()
+            monitoring._reset_heartbeat_task()
             stop.set()
             if thread is not None:
                 thread.join(timeout=2)
         assert fired == [], (
             "a dead heartbeat ticker must NOT be treated as a wedge — this "
             "would restart-loop a healthy process")
+        assert sum(
+            1 for r in caplog.records
+            if r.levelno == logging.CRITICAL
+            and "not provably a wedge" in r.getMessage()) == 1, (
+            "the refusal must be reported exactly ONCE per process, not once "
+            "per poll (~43k lines/day at the hosted interval)")
+
+    def test_hard_ceiling_fires_before_the_min_ticks_liveness_gate(
+            self, monkeypatch):
+        """Review P2: the hard branch sat BEHIND ``if ticks < min_ticks``.
+
+        ``min_ticks`` exists so a slow BOOT is not mistaken for a wedge, which
+        is about the first seconds. A loop that wedges during startup — only the
+        synthetic tick at hosted_api.py:1959, never the real ticker's second
+        tick — never advances ``ticks``, so it hung indefinitely with the
+        ceiling armed. Past the ceiling the boot rationale no longer applies.
+        """
+        import threading
+        import time
+
+        monkeypatch.setenv("TORTOISE_LOOP_STALL_HARD_EXIT_S", "0.15")
+        monkeypatch.delenv("TORTOISE_LOOP_STALL_EXIT_S", raising=False)
+        fired: list = []
+        stop = threading.Event()
+        monitoring._reset_heartbeat()
+        monitoring._reset_workload()
+        monitoring._reset_heartbeat_task()
+        thread = None
+        try:
+            monitoring.heartbeat_record()   # the synthetic startup tick ONLY
+            assert monitoring.heartbeat_read()[1] == 1
+            thread = monitoring.start_stall_watchdog(
+                None, exit_fn=fired.append, stop_event=stop, poll_interval=0.05)
+            assert thread is not None
+            deadline = time.monotonic() + 3.0
+            while not fired and time.monotonic() < deadline:
+                time.sleep(0.05)
+        finally:
+            monitoring._reset_workload()
+            stop.set()
+            if thread is not None:
+                thread.join(timeout=2)
+        assert fired == [1], (
+            "a loop that wedges before its SECOND tick never grows ``ticks`` "
+            "— the min_ticks gate must not be able to hold the ceiling off")
+
+    def test_hard_ceiling_binds_below_a_larger_soft_threshold(
+            self, monkeypatch):
+        """Review P2: this ordering had no discriminating test — every other
+        test either disables the soft threshold or passes ``threshold=None``,
+        so a regression to ``max(threshold_s, hard_exit_s)`` passed unchanged.
+
+        With soft 5s and ceiling 0.15s, a real CEILING fires at ~0.15s; the
+        ``max()`` mutant would wait 5s.
+        """
+        import threading
+        import time
+
+        monkeypatch.setenv("TORTOISE_LOOP_STALL_HARD_EXIT_S", "0.15")
+        fired: list = []
+        stop = threading.Event()
+        monitoring._reset_heartbeat()
+        monitoring._reset_workload()
+        monitoring._reset_heartbeat_task()
+        thread = None
+        try:
+            monitoring.heartbeat_record()
+            monitoring.heartbeat_record()
+            assert monitoring.workload_is_idle() is True
+            thread = monitoring.start_stall_watchdog(
+                5.0, exit_fn=fired.append, stop_event=stop,
+                poll_interval=0.05)
+            assert thread is not None
+            deadline = time.monotonic() + 1.5
+            while not fired and time.monotonic() < deadline:
+                time.sleep(0.05)
+        finally:
+            stop.set()
+            if thread is not None:
+                thread.join(timeout=2)
+        assert fired == [1], (
+            "the ceiling was degraded to max(threshold, ceiling): an operator "
+            "who arms soft 5s beside a 0.15s ceiling must still exit at 0.15s")
+
+    def test_dead_ticker_branch_logs_once_not_once_per_poll(
+            self, monkeypatch, caplog):
+        """R3 review P2: the dead-ticker branch ``continue``d with no latch —
+        one CRITICAL per poll, ~43k lines/day at the hosted interval."""
+        import logging
+        import threading
+        import time
+
+        monkeypatch.setenv("TORTOISE_LOOP_STALL_HARD_EXIT_S", "0.05")
+        fired: list = []
+        stop = threading.Event()
+        monitoring._reset_heartbeat()
+        monitoring._reset_workload()
+        monitoring._reset_heartbeat_task()
+        monitoring.note_heartbeat_task(
+            self._fake_ticker(done=True, exc=RuntimeError("boom")))
+        thread = None
+        try:
+            monitoring.heartbeat_record()
+            monitoring.heartbeat_record()
+            with caplog.at_level(logging.CRITICAL):
+                thread = monitoring.start_stall_watchdog(
+                    None, exit_fn=fired.append, stop_event=stop,
+                    poll_interval=0.01)
+                assert thread is not None
+                time.sleep(0.3)
+        finally:
+            monitoring._reset_heartbeat_task()
+            stop.set()
+            if thread is not None:
+                thread.join(timeout=2)
+        assert fired == []
+        refusals = [r for r in caplog.records
+                    if "not provably a wedge" in r.getMessage()]
+        assert len(refusals) == 1, (
+            f"the refusal was logged {len(refusals)} times across ~30 polls — "
+            "it must be latched to once per process")
 
     def test_hard_ceiling_parser_is_fail_closed(self, monkeypatch):
         """Every unusable value must DISABLE the ceiling (fail closed) — a

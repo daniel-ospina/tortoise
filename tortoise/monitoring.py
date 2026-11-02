@@ -4245,11 +4245,24 @@ LOOP_STALL_EXIT_MIN_TICKS = 2      # at least one REAL heartbeat tick before jud
 #: recoverable (the platform replaces the process); NOT killing is unbounded
 #: and silent.
 #:
-#: The hosted 600s is ~3.3x the enabled-threshold floor (``_loop_stall_floor_s``
-#: = max(120s, 2 * LOOP_STALE_AFTER) = 180s), ~68x the observed p99 loop lag
-#: (8.8s), and far above the
-#: slowest legitimate synchronous handler, so it cannot fire on load; the
-#: measured wedge exceeded it (696s max lag) within minutes.
+#: DERIVED, not asserted (review P2). The ceiling must sit above the longest
+#: BOUNDED synchronous operation that can run ON the loop, and that operation is
+#: the synchronous LLM call: ``urlopen(req, timeout=self.timeout)`` with a 60s
+#: timeout (``tortoise/models.py:183,233``) and ``httpx timeout=(10, 60)``
+#: (``tortoise/model_adapters.py:159,276``) — the same 60s bound the
+#: ``LOOP_STALE_AFTER`` comment above already names as "the longest single
+#: bounded on-loop operation". 600s is therefore:
+#:   * 10x that single-call bound (so ~5 multi-stage 60s calls still fit);
+#:   * 3.3x the enabled-threshold floor (``_loop_stall_floor_s`` = max(120s,
+#:     2 * LOOP_STALE_AFTER) = 180s) and 6.7x LOOP_STALE_AFTER itself, which is
+#:     where /healthz already declares the loop stale;
+#:   * 68x the observed p99 loop lag (8.8s) on the live machine.
+#: It is NOT above an unbounded model call: ``_scaled_deadline(600, max_tokens)``
+#: is ~819s at a 16K budget (``tortoise/extractor_v2.py:11715``). That path is
+#: OFF the loop by the #3060 invariant (hosted_api.py:15744-15760), so it cannot
+#: provide the tick-blocking bound — but it is the reason this is a ceiling on
+#: the LOOP, not a general "operation is slow" timeout.
+#: The measured wedge exceeded 600s (696s max lag) within minutes, so it binds.
 #:
 #: DISABLED BY DEFAULT (``0``), preserving the shipped "no destructive action in
 #: process unless an operator asks for one" contract. The HOSTED deployment
@@ -4257,47 +4270,99 @@ LOOP_STALL_EXIT_MIN_TICKS = 2      # at least one REAL heartbeat tick before jud
 #: decision, so the product default is unchanged and a self-hoster opts in.
 LOOP_STALL_HARD_EXIT_S = 0.0       # 0 == hard ceiling DISABLED (the default)
 
-#: Set when the heartbeat TASK is known to have died (see
-#: ``note_heartbeat_task``). A dead task freezes the heartbeat while the loop is
-#: perfectly healthy, which would make the hard ceiling below ``os._exit`` a
-#: HEALTHY process every ``LOOP_STALL_HARD_EXIT_S`` until the platform's
-#: ``max_retries`` are spent and the machine is left STOPPED — a silent hang
-#: replaced by a silent stop. So the ceiling must be able to tell "the loop is
-#: wedged" from "the ticker is gone", and refuse to act in the second case.
-_HEARTBEAT_TASK_DEAD = False
+#: The heartbeat TASK, recorded by ``note_heartbeat_task``; ``None`` == no
+#: ticker instrumented (embedded callers, tests, a bare watchdog). A ticker
+#: that can no longer tick freezes the heartbeat while the loop is perfectly
+#: healthy, which would make the hard ceiling below ``os._exit`` a HEALTHY
+#: process every ``LOOP_STALL_HARD_EXIT_S`` until the platform's
+#: ``max_retries`` are spent and the machine is left STOPPED (Fly's restart
+#: policy is ``on-fail`` with ``max_retries 10`` — fly.toml:206) — a silent
+#: hang replaced by a silent stop. So the ceiling must be able to tell "the
+#: loop is wedged" from "the ticker is gone", and refuse to act in the
+#: second case.
+_HEARTBEAT_TASK = None
+_HEARTBEAT_TASK_LOCK = threading.Lock()
 
 
 def note_heartbeat_task(task) -> None:
-    """Mark ``task`` as the heartbeat ticker; record its death, loudly.
+    """Record ``task`` as the heartbeat ticker; log its death, once, loudly.
 
     Call this with the object returned by ``loop.create_task(
-    loop_heartbeat_task())``. The callback only ever flips a module flag: a
-    dead ticker is an operator signal (logged at CRITICAL), never permission
-    for the destructive path to fire.
+    loop_heartbeat_task())``. The done-callback is an OPERATOR SIGNAL only
+    (CRITICAL, exactly once); the ceiling's verdict is derived from the task
+    itself by :func:`heartbeat_task_is_dead`, never from state this callback
+    latches — a latch is sticky and would outlive a re-armed ticker (#2850
+    R3 review P2).
     """
+    global _HEARTBEAT_TASK
+    with _HEARTBEAT_TASK_LOCK:
+        _HEARTBEAT_TASK = task
+
     def _done(t) -> None:
-        global _HEARTBEAT_TASK_DEAD
         if t.cancelled():
             return  # an orderly shutdown cancels it; not a fault
         exc = None
         with contextlib.suppress(BaseException):
             exc = t.exception()
         if exc is None:
-            return  # returned cleanly; treat like a stop, not a fault
-        _HEARTBEAT_TASK_DEAD = True
+            return  # returned cleanly; the derived verdict still disarms
         logger.critical(
             "#2850: the event-loop heartbeat TASK died (%r) while the loop may "
-            "still be healthy — the hard stall ceiling is DISARMED for this "
-            "process so a dead ticker cannot be mistaken for a wedge",
+            "still be healthy — the hard stall ceiling is DISARMED so a dead "
+            "ticker cannot be mistaken for a wedge",
             exc)
 
     with contextlib.suppress(BaseException):
         task.add_done_callback(_done)
 
 
+def _reset_heartbeat_task() -> None:
+    """Test seam: forget the recorded ticker (no cross-test latch to leak)."""
+    global _HEARTBEAT_TASK
+    with _HEARTBEAT_TASK_LOCK:
+        _HEARTBEAT_TASK = None
+
+
 def heartbeat_task_is_dead() -> bool:
-    """True once the heartbeat ticker has died of an exception."""
-    return _HEARTBEAT_TASK_DEAD
+    """True when the ticker can no longer produce a tick — DISARM the ceiling.
+
+    DERIVED FROM THE TASK, never a module latch (#2850 R3 review P2): a latched
+    flag was STICKY, so one ticker death disarmed the ceiling for the rest of
+    the process even after ``_start_liveness`` re-armed a fresh ticker
+    (hosted_api.py:1955-1962 supports exactly that), and it leaked across
+    tests. Here the verdict follows the ticker that is ACTUALLY recorded, and
+    a re-armed ticker re-arms the ceiling.
+
+    The question is "can this ticker still tick?", so every end state answers
+    True, not only the exception this guard is named after:
+
+    * done with an exception — the fault it names;
+    * ``cancelled()`` — orderly shutdown; no further ticks are coming;
+    * done cleanly — the coroutine returned; no further ticks are coming;
+    * UNREADABLE (``done()``/``cancelled()`` raised) — undetermined.
+
+    The last two are FAIL-CLOSED as *disarm*, which is the safe direction here
+    (review P2): this branch guards a process exit, so an unreadable ticker
+    must never be read as "clean stop, ceiling still armed" and a returned
+    ticker must never be read as a wedge. Worst case the ceiling declines to
+    act — the state the product ships in anyway (``LOOP_STALL_HARD_EXIT_S=0``).
+
+    ``None`` (nothing instrumented) is False: the ceiling then fires on
+    heartbeat age alone, unchanged for callers that never armed a task.
+    """
+    with _HEARTBEAT_TASK_LOCK:
+        task = _HEARTBEAT_TASK
+    if task is None:
+        return False
+    try:
+        if task.cancelled():
+            return True
+        # ``not done`` == running == it can still tick. ``done`` == it cannot,
+        # whether it raised or returned; ``exception()`` cannot change that,
+        # and calling it on a cancelled task would itself raise.
+        return bool(task.done())
+    except BaseException:  # an unreadable ticker is UNKNOWN
+        return True   # fail-closed: disarm rather than authorise an exit
 
 
 # ── #2850 P0 review: workload-in-flight gauge for the idle gate ───────────
@@ -4545,13 +4610,14 @@ def start_stall_watchdog(threshold_s: float | None = None, *, exit_fn=None,
 
     def _watch() -> None:
         stale_windows = 0
+        dead_ticker_reported = False
         while not stop_event.wait(poll_interval):
-            # (2) judge only a loop that has demonstrated liveness.
-            _, ticks = heartbeat_read()
-            if ticks < min_ticks:
-                stale_windows = 0
-                continue
-            age = loop_heartbeat_age()
+            # ONE consistent read of the heartbeat (review P2): a tick landing
+            # between two reads could pair a stale ``age`` with a fresh
+            # ``ticks`` or vice versa, and the pair is what the guards below
+            # reason about.
+            at, ticks = heartbeat_read()
+            age = None if ticks == 0 else max(0.0, time.monotonic() - at)
             # (3a) HARD CEILING — evaluated BEFORE the soft threshold so it is
             # a real CEILING and not `max(threshold_s, hard_exit_s)`: an
             # operator who arms both (e.g. soft 900 beside a 600 ceiling) must
@@ -4560,19 +4626,32 @@ def start_stall_watchdog(threshold_s: float | None = None, *, exit_fn=None,
             # deliberately NOT consulted: it is TRUE by construction during
             # this failure (an open SSE stream, then the wedge itself), so
             # consulting it here is what made the outage permanent and silent.
-            if (hard_exit_s > 0 and age is not None and age >= hard_exit_s
-                    and heartbeat_task_is_dead()):
-                # The ticker itself died: the heartbeat is stale but the LOOP
-                # may be fine. Exiting here would restart-loop a healthy
-                # process. Report instead.
-                logger.critical(
-                    "#2850 loop-stall HARD ceiling reached (age=%s) but the "
-                    "heartbeat TASK is dead, so this is not provably a wedge "
-                    "— NOT exiting (a dead ticker must not restart a healthy "
-                    "process)", f"{age:.1f}s")
-                stale_windows = 0
-                continue
+            #
+            # It also runs BEFORE the ``ticks < min_ticks`` liveness gate
+            # (review P2): that gate exists so a slow BOOT is not mistaken for
+            # a wedge, and its rationale is about the first seconds — a loop
+            # that wedges during startup, before the real ticker lands its
+            # second tick (hosted_api.py:1959-1962 leaves the synthetic tick at
+            # 1), never advances ``ticks`` and would otherwise hang forever
+            # with the ceiling armed. ``age is None`` (never ticked) is still
+            # excluded: with no timestamp at all there is nothing to measure.
             if hard_exit_s > 0 and age is not None and age >= hard_exit_s:
+                if heartbeat_task_is_dead():
+                    # The ticker itself is gone: the heartbeat is stale but the
+                    # LOOP may be fine. Exiting here would restart-loop a
+                    # healthy process. Report ONCE (review P2: one CRITICAL per
+                    # poll is ~43k lines/day at the hosted interval) and keep
+                    # polling — a re-armed ticker re-arms the ceiling.
+                    if not dead_ticker_reported:
+                        dead_ticker_reported = True
+                        logger.critical(
+                            "#2850 loop-stall HARD ceiling reached (age=%s) but "
+                            "the heartbeat TASK is dead or unreadable, so this "
+                            "is not provably a wedge — NOT exiting (a dead "
+                            "ticker must not restart a healthy process; this "
+                            "is logged once per process)", f"{age:.1f}s")
+                    stale_windows = 0
+                    continue
                 logger.critical(
                     "#2850 loop-stall HARD ceiling: the event loop has not "
                     "ticked for %s (>= %.0fs, %d request(s) in flight) — no "
@@ -4583,6 +4662,10 @@ def start_stall_watchdog(threshold_s: float | None = None, *, exit_fn=None,
                 with contextlib.suppress(BaseException):
                     exit_fn(1)
                 return
+            # (2) judge only a loop that has demonstrated liveness.
+            if ticks < min_ticks:
+                stale_windows = 0
+                continue
             if age is not None and age <= threshold_s:
                 stale_windows = 0
                 continue

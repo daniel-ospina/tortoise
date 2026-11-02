@@ -154,13 +154,13 @@ from tortoise.monitoring import (  # #2850/2953 liveness-readiness decouple
     heartbeat_record,
     loop_heartbeat_info,
     loop_heartbeat_task,
+    note_heartbeat_task,
     record_analytics_outcome,  # #3820 analytics-sink outcome counter
     record_telemetry_drop,  # #4095 allowlist-drop counter (the /metrics seam)
     run_control_plane_call,
     run_on_daemon_worker,
     start_health_listener,
     start_stall_watchdog,
-    note_heartbeat_task,
     workload_enter,
     workload_exit,
 )

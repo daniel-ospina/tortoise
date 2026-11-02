@@ -202,9 +202,16 @@ kill_timeout = 30
   # a MACHINE attribute, not a fly.toml key (this file has no `[[restart]]`
   # block), so a machine recreated without it turns this exit into a STOPPED
   # machine. Re-check it after any recreate before trusting the self-heal.
-  # 600s is ~3.3x the enabled-threshold floor (_loop_stall_floor_s() = max(120,
-  # 2*LOOP_STALE_AFTER) = 180s), ~68x the observed p99 loop lag (8.8s), far above any legitimate
-  # synchronous handler, so it cannot fire on load. `0` disables it.
+  # 600s is DERIVED, not asserted (#10585 review P2): the longest BOUNDED
+  # synchronous operation that can run on the loop is the synchronous LLM call —
+  # `urlopen(req, timeout=self.timeout)` at 60s (tortoise/models.py:183,233) and
+  # `httpx timeout=(10, 60)` (tortoise/model_adapters.py:159,276), the same 60s
+  # bound LOOP_STALE_AFTER's own comment names. So 600s = 10x one such call /
+  # 3.3x the enabled-threshold floor (max(120, 2*LOOP_STALE_AFTER) = 180s) /
+  # 6.7x LOOP_STALE_AFTER (where /healthz already reports stale) / 68x the
+  # observed p99 loop lag (8.8s). It is NOT above the ~819s token-scaled model
+  # deadline (extractor_v2.py:11715) — that path is OFF the loop by the #3060
+  # invariant, so it cannot be the tick-blocking bound. `0` disables it.
   TORTOISE_LOOP_STALL_HARD_EXIT_S = "600"
   # ⛔ TORTOISE_RECORD_DSN is a Fly SECRET, not an [env] key (#9548, epic #7879
   # R1) — and must never be added here. Its value is a Postgres DSN carrying a
