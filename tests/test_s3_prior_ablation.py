@@ -54,6 +54,17 @@ _PINS = _MODULE.parse_pins((ROOT / _MODULE.PREREG_REL).read_text())
 BARS = _PINS["hypothesis_bars"]
 FLOORS = _PINS["denominator_floors"]
 
+#: Where the measured log lives, RELATIVE to the bundle (`probe.EVIDENCE_DIR`) — one constant, so the
+#: next move is one edit rather than four.
+#: ⛔ It is under `withdrawn/` on purpose (#10463): the pre-registration guard
+#: (`tools/capstone_preregistration_check.py`) globs `*.log` NON-recursively in the registration's own
+#: directory, and the squash merge #10468 collapsed the registration and this log into ONE commit, so
+#: its strict-ordering claim could not be shown from the merged history. The move is a WITHDRAWAL of
+#: the ordering provenance, NOT of the measurement: the bytes are identical (sha256
+#: `bba52c90d005ae728dc7c3cc7d25c232e322d0abe5bffc6873a6e74fa5960b4d`), which is why every assertion
+#: below still measures the run that shipped.
+MEASURED_LOG_REL = Path("withdrawn") / "s3-ablation-a1075dfc.log"
+
 
 def _log_thresholds(log_text: str) -> dict[str, float]:
     """Every threshold the committed log says the run compared against."""
@@ -290,7 +301,7 @@ def test_the_measured_log_agrees_with_the_thresholds_it_names(probe):
     against. An edit that also rewrites the log has to keep it a log (the one-measured-log rule,
     `capstone_preregistration_check`'s ordering rule and the RATIO/VERDICT lines all move with it).
     """
-    log_text = (probe.EVIDENCE_DIR / "s3-ablation-a1075dfc.log").read_text()
+    log_text = (probe.EVIDENCE_DIR / MEASURED_LOG_REL).read_text()
     seen = _log_thresholds(log_text)
     assert {"primary_ratio_max", "guard_ratio_min", "arm_integrity_required",
             "concentration_max", "cost_ratio_max"} <= set(seen), (
@@ -300,7 +311,7 @@ def test_the_measured_log_agrees_with_the_thresholds_it_names(probe):
 
 def test_the_log_and_the_document_check_can_actually_fail(probe):
     """Non-vacuity: the exact wrong outcome r6 F1 described is a `0.75 -> 0.90` pins edit."""
-    log_text = (probe.EVIDENCE_DIR / "s3-ablation-a1075dfc.log").read_text()
+    log_text = (probe.EVIDENCE_DIR / MEASURED_LOG_REL).read_text()
     moved_bars = {**BARS, "primary_ratio_max": 0.90, "guard_ratio_min": 0.80}
     moved_floors = {**FLOORS, "sessions": 6}
     problems = _threshold_mismatches(moved_bars, moved_floors, log_text)
@@ -316,6 +327,97 @@ def test_the_log_and_the_document_check_can_actually_fail(probe):
     assert probe.decide(moved_bars, FLOORS, off, on)["verdict"] == probe.VERDICT_SUPPORTED, (
         "0.8697 <= 0.90 with both guards held at 0.80 is exactly the verdict flip a two-line "
         "docs-only edit would buy")
+
+
+def test_the_withdrawn_log_still_hashes_to_the_digest_its_note_publishes(probe):
+    """The withdrawal publishes a digest and NOTHING read it back — the note could go stale.
+
+    `withdrawn/WITHDRAWN.md` states *"Contents are untouched (sha256 `bba52c90…`)"*, and the ruling
+    on #10463 (item 3) is *"do not delete it, and do not edit its contents"*. The log is still a
+    tracked file, so it is still editable — and an edit would leave the published digest
+    describing bytes that no longer exist, i.e. a FALSE evidence record on the one artifact whose
+    whole purpose is that these numbers were measured once. Nothing else looks: the guard globs
+    `*.log` non-recursively, so `withdrawn/` is invisible to it (`evidence logs: 0`), which is
+    exactly why the ruling is enforced here and nowhere else.
+
+    Prose versus BYTES, not a third copy of the constant: the expectation is parsed out of the note
+    so a re-cut note and a re-cut log have to move together (the two-copies-that-can-disagree
+    shape this file already refuses for the bars).
+    """
+    import hashlib
+    import re
+
+    note = (probe.EVIDENCE_DIR / "withdrawn" / "WITHDRAWN.md").read_text()
+    published = re.findall(r"\b[0-9a-f]{64}\b", note)
+    assert published, (
+        "the note must publish the withdrawn log's digest, so the next reader knows what was "
+        f"measured; found {published!r}")
+    actual = hashlib.sha256((probe.EVIDENCE_DIR / MEASURED_LOG_REL).read_bytes()).hexdigest()
+    assert actual in published, (
+        "the withdrawn log's bytes no longer match the digest its note publishes: the note "
+        f"states {published} and the file is {actual}. A withdrawal may retract PROVENANCE, never "
+        "the measured bytes (#10463 item 3: do not edit its contents) — if the log really has to "
+        "change, the note and this test move with it and the retraction is recorded, not silent. "
+        "A note that additionally publishes OTHER digests is fine: only this file's must be here")
+
+
+def _checker():
+    """The pre-registration checker as a module — same loader shape as `_probe()`.
+
+    Loaded for ONE thing: `EVIDENCE_LOG_GLOB`, so the test below globs the same set the ordering
+    half globs instead of a private copy of the literal. The glob is deliberately a named constant
+    in the guard (`tools/capstone_preregistration_check.py:134`, *"Widening it is a deliberate
+    act"*), and a second copy here would be exactly the two-copies-that-can-disagree shape this
+    file refuses for the bars.
+    """
+    spec = importlib.util.spec_from_file_location(
+        "_capstone_preregistration_check",
+        ROOT / "tools/capstone_preregistration_check.py")
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_the_withdrawn_log_is_not_back_in_the_checked_directory(probe):
+    """The withdrawal moves the log out of the glob — and NOTHING pinned it staying out.
+
+    Ruling item 2 on #10463: *"Do not re-add the log in a fresh commit to obtain a later
+    add-commit. That satisfies the letter of the check while the real ordering is unchanged — it is
+    precisely the fabrication the guard exists to prevent."* That ruling is unenforced by
+    construction: the guard requires only `log_add_epoch > prereg_add_epoch` over every `*.log` it
+    globs NON-recursively (`EVIDENCE_LOG_GLOB`, `directory.glob(...)`), and the single-measured-log
+    rule counts only `capstone-measured-*.log`. A copy put back here in a FRESH commit therefore
+    has a LATER add-commit than the registration and is blessed — `evidence logs: 1`, ordering
+    "verified" — i.e. the exact fabrication, now wearing a green gate.
+
+    The temptation is real and this PR's own note invites it: `withdrawn/WITHDRAWN.md` says the
+    claim stays PROVISIONAL until re-measured with the registration already on the base branch,
+    and the registration IS on the base branch now — so the cheapest-looking way to drop the
+    "provisional" is to move the file back.
+
+    The scanned set is `EVIDENCE_LOG_GLOB` ITSELF, read off the guard, so "the directory the ordering
+    half reads" is measured rather than asserted: if that glob is ever narrowed, this test narrows
+    with it instead of redding on a file the ordering half no longer orders. The match is by BYTES,
+    against the withdrawn file's own digest — a copy under any name the glob covers is the same act —
+    and a genuine re-measurement writes DIFFERENT bytes, so it is not refused here.
+    """
+    import hashlib
+
+    withdrawn = hashlib.sha256((probe.EVIDENCE_DIR / MEASURED_LOG_REL).read_bytes()).hexdigest()
+    back = sorted(
+        p.name for p in probe.EVIDENCE_DIR.glob(_checker().EVIDENCE_LOG_GLOB)
+        if hashlib.sha256(p.read_bytes()).hexdigest() == withdrawn)
+    assert not back, (
+        "the withdrawn log's measured bytes are back in the checked directory "
+        f"({back}): that directory is what the ordering half orders, and re-adding the log in a "
+        "fresh commit to obtain a later add-commit is the fabrication #10463 item 2 forbids — the "
+        "withdrawal, not a gate edit, is what keeps `main` green (see `withdrawn/WITHDRAWN.md`)")
+    assert not (probe.EVIDENCE_DIR / "s3-ablation-a1075dfc.log").exists(), (
+        "the withdrawn log is back AT THE PATH the ordering half reads. That is item 2's "
+        "fabrication whether the bytes are the measured ones or edited ones: a fresh add-commit "
+        "satisfies the letter of the ordering check while the real ordering is unchanged")
 
 
 def test_the_log_header_names_every_bar_and_floor(probe):
@@ -585,7 +687,7 @@ def test_the_code_that_computes_the_numbers_is_pinned_too(probe):
     for rel in (
         "tools/s3_prior_ablation.py",
         "docs/evidence/5087-hypothesis/README.md",
-        "docs/evidence/5087-hypothesis/s3-ablation-a1075dfc.log",
+        "docs/evidence/5087-hypothesis/withdrawn/s3-ablation-a1075dfc.log",
         "tests/test_s3_prior_ablation.py",
         "tortoise/extractor_v2.py",
     ):
@@ -1267,8 +1369,13 @@ def test_the_bundle_withdraws_the_frozen_documents_unverifiable_first_commit_cla
     assert "only add-commit" in errata, (
         "it must say WHY: the amendment commit is the document's only add-commit")
     assert "changes nothing" in errata and "00:12:17Z" in errata, (
-        "and what still holds — the add-commit epoch strictly precedes the log's, which is what "
-        "the ordering half reads")
+        "and what it names: the add-commit epoch on the CONTRIBUTION branch — the history, not an "
+        "assurance. The ordering it once reached for is not readable from merged history and is "
+        "withdrawn (#10463), so the erratum must say so rather than restore the claim")
+    assert "not readable from merged history" in errata and "withdrawn" in errata, (
+        "the erratum must not promise an ordering `capstone_preregistration_check.py` can no "
+        "longer read: the squash collapsed both add-commits, so the provenance is withdrawn "
+        "(`withdrawn/WITHDRAWN.md`) — a lane that 'restores' the assurance reds here on purpose")
     assert "a1075dfc2" in errata and "325f2a1a5" in errata, (
         "the erratum must name the same two commits the log and the record do (the amendment "
         "add-commit and the measured log's add-commit), so it cannot drift onto another")
@@ -1522,7 +1629,7 @@ def test_the_bundle_discloses_the_fresh_graph_refusal_and_what_the_log_cannot_sh
         "and it must say what the measured run does NOT establish: its arm headers name fresh "
         "graphs, which is consistency, not proof")
 
-    log_text = (probe.EVIDENCE_DIR / "s3-ablation-a1075dfc.log").read_text()
+    log_text = (probe.EVIDENCE_DIR / MEASURED_LOG_REL).read_text()
     assert "graph baseline" not in log_text, (
         "the committed log now carries a baseline census — the disclosure's 'not evidence' half "
         "has to be re-measured, and the measured run is not this probe's output")
@@ -1566,7 +1673,7 @@ def test_the_hardening_list_promises_no_completeness_and_carries_the_late_findin
     assert "RATIO: 0.8697" in section, (
         "and it must say where the number actually is — the log's own RATIO/WHY lines — so the "
         "disclosure is checkable instead of a reassurance")
-    log_text = (probe.EVIDENCE_DIR / "s3-ablation-a1075dfc.log").read_text()
+    log_text = (probe.EVIDENCE_DIR / MEASURED_LOG_REL).read_text()
     assert "VERDICT: HYPOTHESIS-FALSIFIED\n" in log_text, (
         "MEASURED, not asserted: the shipped log's VERDICT line is the bare token. If this fails, a "
         "measured log was rewritten or replaced and the deviation disclosure must be re-derived")
