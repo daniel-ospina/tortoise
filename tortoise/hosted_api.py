@@ -7505,6 +7505,39 @@ def _data_sdk(org: dict) -> TortoiseSDK:
     return sdk
 
 
+class _ProjectionOpenError(RuntimeError):
+    """The projection COLD OPEN failed inside the construction submission.
+
+    ``_data_sdk_with_projection`` bundles TWO different things into ONE worker
+    call, and a read route must map only ONE of them as a store impairment
+    (#10602 review P3):
+
+    * ``_data_sdk`` — the tenancy resolver (``_make_sdk``,
+      ``_assert_graph_owned``, ``_bind_record_tenant``). A fault there is OUR
+      bug or a structural refusal, and it must propagate UNCHANGED, exactly as
+      it did before the attach existed;
+    * ``sdk._get_proj()`` — the OPEN: connect, version probe,
+      ``_ensure_indexes()``. Its failure IS the store, which is why the SDK's
+      own ``tortoise_fts_query`` arm maps *any* exception from ``_get_proj()``
+      to ``status: degraded`` (``tortoise/sdk.py``).
+
+    Without a distinct type the route can only choose between two wrong
+    answers: a blanket ``except Exception`` that serves a tenancy fault to the
+    client as a STORE OUTAGE (unfalsifiable from the wire, and the mirror of the
+    misattribution rule this change applies everywhere else), or a narrow
+    class-based arm that stops recognising a real outage. Naming the SOURCE of
+    the failure keeps both honest.
+
+    The original rides along as ``__cause__``, so the driver's message and the
+    traceback reach the log unchanged.
+    """
+
+
+#: Exceptions that keep their own meaning when the attach raises them — a
+#: refusal the SDK itself produced is not a store-open failure.
+_ATTACH_PASSTHROUGH = (HTTPException,)
+
+
 def _data_sdk_with_projection(org: dict) -> TortoiseSDK:
     """#10602: ``_data_sdk`` PLUS the projection attach, in ONE worker call.
 
@@ -7526,14 +7559,25 @@ def _data_sdk_with_projection(org: dict) -> TortoiseSDK:
     P1).
 
     Failure closes the SDK first: the handle was opened by ``_data_sdk``, so a
-    raise from ``_get_proj()`` would otherwise leak it.
+    raise from ``_get_proj()`` would otherwise leak it. Then it is RE-RAISED as
+    :class:`_ProjectionOpenError`, so as to be distinguishable from the errors of
+    ``_data_sdk`` itself (#10602 review P3).
     """
     sdk = _data_sdk(org)
     try:
         sdk._get_proj()
-    except BaseException:
+    except BaseException as exc:
         with contextlib.suppress(Exception):
             sdk.close()
+        # Attribute the failure to its SOURCE (#10602 review P3). Only the
+        # ATTACH's failure is a store condition — `_data_sdk`'s own errors have
+        # already been raised above, outside this `try`, and keep propagating
+        # unchanged. A refusal the SDK raised on purpose
+        # (``_ATTACH_PASSTHROUGH``) keeps its own meaning; a cancellation or a
+        # ``KeyboardInterrupt`` is not a store verdict either.
+        if isinstance(exc, Exception) and not isinstance(
+                exc, _ATTACH_PASSTHROUGH):
+            raise _ProjectionOpenError(str(exc)) from exc
         raise
     return sdk
 
@@ -11055,15 +11099,25 @@ async def search(q: str, limit: int = Query(10, ge=1, le=100), org: dict = Depen
     # BOTH documented arms of the `OVERRIDES:` block above unreachable on this
     # route: `tortoise_fts_query` was never entered (so `_STATUS_DEGRADED` was
     # never set) and this route's own `except Exception: 500 "Search failed"`
-    # sat inside a `try` the failure now preceded. The construction is therefore
-    # mapped through those SAME two outcomes here, so the promise in the block
-    # above stays true. A construction-lane CAPACITY refusal is not a store
-    # condition and keeps its own 503 (hence the `HTTPException` arm first).
+    # sat inside a `try` the failure now preceded. The OPEN's failure is
+    # therefore mapped through those SAME two outcomes here, so the promise in
+    # the block above stays true.
+    #
+    # ⛔ …and ONLY the OPEN's failure (#10602 review P3). The seam raises
+    # `_ProjectionOpenError` for `sdk._get_proj()`, so this arm cannot absorb a
+    # fault from `_data_sdk` itself — a broken tenancy resolver answering
+    # `200 status: degraded` would be a FAULT reported as a store OUTAGE: the
+    # mirror of the impairment-as-absence rule every other arm here enforces,
+    # and unfalsifiable from the wire (the two are the same body). Such a fault
+    # propagates unchanged, exactly as it did before the attach existed, which
+    # is what the `OVERRIDES:` promise says. A construction-lane CAPACITY
+    # refusal is not a store condition either and keeps its own 503 (hence the
+    # `HTTPException` arm first).
     try:
         sdk = await _data_sdk_offloaded(org, attach_projection=True)
     except HTTPException:
         raise
-    except Exception:
+    except _ProjectionOpenError:
         import logging
         logging.getLogger("tortoise.api").exception("search failed")
         if status_out is None:
@@ -11176,13 +11230,15 @@ async def topic_summary(
     # ⛔ #10602 review P1 (fix): the attach makes this line touch the store, so
     # it can fail where `_data_sdk` alone could not. Its documented outcome on
     # this route is the 500 arm below; that arm sat inside a `try` the failure
-    # now preceded, so it is mapped here too (a construction-lane CAPACITY
-    # refusal is not a store condition and keeps its 503).
+    # now preceded, so it is mapped here too — for the OPEN's failure only
+    # (`_ProjectionOpenError`, #10602 review P3): a fault from `_data_sdk`
+    # itself propagates unchanged, as it did before, and a construction-lane
+    # CAPACITY refusal keeps its 503.
     try:
         sdk = await _data_sdk_offloaded(org, attach_projection=True)
     except HTTPException:
         raise
-    except Exception:
+    except _ProjectionOpenError:
         import logging
         logging.getLogger("tortoise.api").exception("topic summary failed")
         raise HTTPException(status_code=500, detail="Topic summary failed")  # noqa: B904

@@ -3779,6 +3779,79 @@ class TestTheReadLaneExemptsARequestOwnedColdSetup:
             f"setup must RE-AWAIT the running submission, never run the query "
             f"twice concurrently (#10602 review P2-2)")
 
+    def test_a_callable_timeout_error_on_the_re_arm_is_not_our_bound(
+            self, monkeypatch):
+        """#10602 review P2 (finding 1), end-to-end through the read seam.
+
+        A request-owned cold load puts the read on the RE-ARM path. If the
+        callable then fails with a builtin ``TimeoutError`` — a raw
+        ``socket.timeout`` escaping the graph driver is the plausible route, and
+        it IS ``TimeoutError`` since 3.10 — that error used to be filed as the
+        lane's second bound miss and answered **503 ``graph_unavailable``**: a
+        dependency saying "the graph pool had no worker" for a callable that ran
+        here and failed on its own, which is unfalsifiable from the wire.
+
+        RED before the fix (503 instead of the driver's error), with the REAL
+        ``run_control_plane_call`` / ``reawait_control_plane_call`` pair.
+        """
+        import tortoise.hosted_api as ha_mod
+        from tortoise import mcp_auth, monitoring
+
+        started = threading.Event()
+        release = threading.Event()
+        calls: list[int] = []
+
+        def _fn():
+            calls.append(1)
+            started.set()
+            # Fail only AFTER the drain, so the bound fires first and the
+            # re-await is the arm under test.
+            release.wait(30)
+            raise TimeoutError("driver socket timeout")
+
+        async def _drain():
+            assert started.wait(10), (
+                "the first submission never started — the bound fired while it "
+                "was still QUEUED, so this test's premise (a bound miss that "
+                "left the callable RUNNING) was never established")
+            release.set()
+
+        async def _warm():
+            await monitoring.run_control_plane_call(
+                lambda: None, op="warm", pool="read", timeout=10)
+
+        monkeypatch.setattr(ha_mod, "read_offload_timeout_s", lambda: 0.2)
+        monkeypatch.setattr(mcp_auth, "_cold_setup_ran_during",
+                            lambda *a, **k: True)
+        monkeypatch.setattr(mcp_auth, "_drain_cold_setup", _drain)
+
+        async def _run():
+            await _warm()
+            return await ha_mod._read_offload(_fn, op="rearm-domain-timeout")
+
+        try:
+            with pytest.raises(TimeoutError) as excinfo:
+                asyncio.run(_run())
+        finally:
+            release.set()
+        assert "driver socket timeout" in str(excinfo.value), (
+            "the driver's own TimeoutError did not reach the caller — the seam "
+            "replaced it with its own diagnosis")
+        assert len(calls) == 1, (
+            f"the callable ran {len(calls)} time(s) — the re-arm must RE-AWAIT "
+            f"the submission it already owns (#10602 review P2)")
+        outcomes = [r[2] for r in monitoring.control_plane_offload_records()
+                    if r[0] == "rearm-domain-timeout"]
+        # TWO attempts, honestly labelled: the first bound did genuinely miss
+        # (that is what put the read on the re-arm), and the second attempt
+        # carried the CALLABLE's error — a domain failure, not a second bound
+        # miss. Pre-fix the second entry read `bound_miss_running`, i.e. the
+        # saturation child fired twice for one never-saturated lane.
+        assert outcomes == ["bound_miss_running", "domain_error"], (
+            "the re-armed read recorded "
+            f"{outcomes!r} — a callable's own failure is not pool saturation "
+            "(`bound_miss_running`) and must not be counted as one")
+
     def test_a_missing_owner_probe_fails_closed_not_500(self, monkeypatch):
         """The identity probe is GUARDED, like the helpers it pairs with.
 

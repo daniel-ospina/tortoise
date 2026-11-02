@@ -1500,6 +1500,75 @@ def test_read_offload_maps_failure_to_the_graph_503(monkeypatch):
     assert excinfo.value.detail["error_code"] == "graph_unavailable"
 
 
+def test_a_re_await_reports_a_callable_timeout_as_a_domain_error():
+    """#10602 review P2 (finding 1) — RED before the fix, and unconditional.
+
+    ``reawait_control_plane_call`` awaits ``asyncio.wrap_future(future)``, which
+    re-raises the CALLABLE's own exception unchanged — so a builtin
+    ``TimeoutError`` raised by ``fn`` arrives at the same ``except TimeoutError``
+    arm with the same class as the arm's own bound expiry. The class therefore
+    cannot discriminate; only the FUTURE can. Pre-fix, a ``socket.timeout``
+    escaping the graph driver was answered as OUR lane's bound miss: 503
+    ``graph_unavailable`` for a callable that ran here, plus one increment of
+    ``bound_miss_running`` — the saturation child — for a pool that was never
+    saturated.
+
+    The sibling arm in ``run_control_plane_call`` already discriminates by
+    reading ``future.exception()``; this pins that the re-await does too.
+    """
+    import concurrent.futures as _cf
+
+    done: _cf.Future = _cf.Future()
+    done.set_exception(TimeoutError("driver socket timeout"))
+
+    async def _run():
+        return await monitoring.reawait_control_plane_call(
+            done, op="reawait-domain-timeout", timeout=5.0)
+
+    with pytest.raises(TimeoutError) as excinfo:
+        asyncio.run(_run())
+    assert "driver socket timeout" in str(excinfo.value), (
+        "the callable's own TimeoutError was replaced by a seam-generated one — "
+        "the original diagnosis must reach the caller unchanged")
+    records = [r for r in monitoring.control_plane_offload_records()
+               if r[0] == "reawait-domain-timeout"]
+    assert [r[2] for r in records] == ["domain_error"], (
+        "a callable-raised TimeoutError was recorded as "
+        f"{[r[2] for r in records]!r} — `bound_miss_running` is the "
+        "SATURATION child, and this lane was never saturated (#10602 review P2)")
+
+
+def test_a_genuine_re_armed_bound_miss_still_refuses_and_counts_running():
+    """The other direction, so "never call it a bound miss" cannot pass above.
+
+    A future that is still RUNNING when the re-armed bound expires IS a bound
+    miss: it must raise ``ControlPlaneOffloadError(refused=False)`` and record
+    ``bound_miss_running``. Without this, the discrimination could be
+    implemented by deleting the arm.
+    """
+    import concurrent.futures as _cf
+
+    still_running: _cf.Future = _cf.Future()   # never resolves
+    # Mark it RUNNING, as the pool's worker does once it dequeues the callable:
+    # a RUNNING future cannot be cancelled, so the bound abandons only the await
+    # and the submission stays re-awaitable — the real bound-miss shape, which a
+    # bare (cancellable) future does not model.
+    assert still_running.set_running_or_notify_cancel() is True
+
+    async def _run():
+        return await monitoring.reawait_control_plane_call(
+            still_running, op="reawait-still-running", timeout=0.05)
+
+    with pytest.raises(monitoring.ControlPlaneOffloadError) as excinfo:
+        asyncio.run(_run())
+    assert excinfo.value.refused is False
+    assert excinfo.value.in_flight is still_running, (
+        "a still-running submission must stay re-awaitable")
+    records = [r for r in monitoring.control_plane_offload_records()
+               if r[0] == "reawait-still-running"]
+    assert [r[2] for r in records] == ["bound_miss_running"], records
+
+
 def test_read_offload_isolates_the_caller_context():
     """#10602: the read callable runs under a CONTEXT COPY, like every other
     offload seam — a pool thread is process-lifetime, so a ContextVar written at

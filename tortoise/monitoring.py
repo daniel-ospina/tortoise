@@ -2117,7 +2117,10 @@ CONTROL_PLANE_OAUTH_BACKLOG = 64
 #: its documented ``status: degraded`` arm **when the read-status/residency flag
 #: is on** (with both flags off, ``tortoise_fts_query`` re-raises and the route's
 #: own 500 arm answers, exactly as before) — a domain error from ``_data_sdk``
-#: propagates unchanged either way.
+#: propagates unchanged either way. That last clause is ENFORCED, not asserted:
+#: the construction seam raises ``hosted_api._ProjectionOpenError`` for the
+#: projection OPEN only, so the routes' impairment arm cannot absorb a fault from
+#: ``_data_sdk`` itself (#10602 review P3).
 #: Both costs are accepted for a construction that
 #: otherwise blocks the loop on every dashboard load; if read pressure ever
 #: saturates this lane, size it or give reads their own pool rather than
@@ -2809,9 +2812,10 @@ async def reawait_control_plane_call(future, *, op: str, timeout: float,
     is ``False`` — the work is still running, so it is abandoned, not dropped)
     and lets a ``CancelledError`` from the awaiting task propagate, exactly as
     ``run_control_plane_call`` does. A ``domain`` exception from the callable
-    propagates unchanged. Every terminal state is recorded once, by the same
-    single writer (#5840), so a re-armed read stays visible as two attempts at
-    the op rather than one invisible one.
+    propagates unchanged — INCLUDING a builtin ``TimeoutError`` it raised
+    ITSELF (#10602 review P2, see the discrimination below). Every terminal
+    state is recorded once, by the same single writer (#5840), so a re-armed
+    read stays visible as two attempts at the op rather than one invisible one.
     """
     started = time.monotonic()
     outcome = "domain_error"
@@ -2819,6 +2823,30 @@ async def reawait_control_plane_call(future, *, op: str, timeout: float,
         try:
             result = await _await_future(future, timeout=timeout)
         except TimeoutError as exc:
+            # Distinguish the two sources of TimeoutError that meet here, as the
+            # sibling above does (#10602 review P2):
+            #   1. `fn` raised it       -> a DOMAIN error, propagate
+            #   2. our bound expired    -> fail closed (``bound_miss_running``)
+            # The CLASS cannot tell them apart. ``_await_future`` awaits
+            # ``asyncio.wrap_future(future)``, so the callable's own exception
+            # is re-raised unchanged, while the bound's expiry is the only
+            # ``TimeoutError`` this coroutine MINTS — and it mints it from a
+            # CancelledError inside ``wait_for``'s timeout scope (CPython
+            # ``asyncio/timeouts.py::Timeout.__aexit__``: the conversion happens
+            # only in the EXPIRING state with a ``CancelledError`` in hand). So
+            # the FUTURE is the only witness: a done, non-cancelled future
+            # carrying an exception means the work RAN and failed on its own.
+            #
+            # Filing that as a bound miss would answer 503
+            # ``graph_unavailable`` for a callable that ran HERE, and increment
+            # ``bound_miss_running`` — the saturation child — for a pool that was
+            # never saturated (a ``socket.timeout`` escaping the graph driver is
+            # the plausible route: it IS builtin ``TimeoutError`` since 3.10).
+            future_exc = (future.exception()
+                          if future.done() and not future.cancelled() else None)
+            if future_exc is not None and not isinstance(
+                    future_exc, _WorkerBacklogFull):
+                raise
             if not future.done():
                 future.add_done_callback(_log_abandoned_outcome(op))
             outcome = "bound_miss_running"

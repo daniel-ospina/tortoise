@@ -804,6 +804,42 @@ class TestAStoreThatWillNotOpenKeepsTheDocumentedArms:
         assert exc.value.detail == "Topic summary failed"
         assert closed == [True]
 
+    def test_a_tenancy_fault_is_not_laundered_as_a_store_impairment(
+            self, monkeypatch):
+        """#10602 review P3: the arm must catch the OPEN's failure, not every failure.
+
+        ``attach_projection=True`` bundles TWO things into one worker call:
+        ``_data_sdk`` (the tenancy resolver) and ``sdk._get_proj()`` (the cold
+        open). Only the second is a STORE condition. A blanket `except
+        Exception` therefore served a fault in the resolver to the client as
+        ``200 status: degraded`` with an incomplete empty — a diagnosis it was
+        never given, byte-identical to a real outage and therefore unfalsifiable
+        from the wire, and the mirror of the "an impairment is never reported as
+        absence" rule every other arm here enforces.
+
+        The recorded promise (the handler's ``OVERRIDES:`` block, and its twin at
+        ``monitoring.py``) is that a domain error from ``_data_sdk`` itself
+        propagates unchanged. RED before the fix: both routes answered the
+        degraded / 500 shape instead of letting the fault out.
+        """
+        import tortoise.hosted_api as hosted_api
+
+        class _TenancyFault(RuntimeError):
+            pass
+
+        def _boom(org):
+            raise _TenancyFault("the tenancy resolver is broken")
+
+        monkeypatch.setattr(hosted_api, "_data_sdk", _boom)
+        monkeypatch.setattr(hosted_api, "_require_scope",
+                            lambda org, scope, name: None)
+        monkeypatch.setenv("TORTOISE_READ_STATUS", "1")
+        with pytest.raises(_TenancyFault):
+            asyncio.run(hosted_api.search(q="alpha", limit=5, org={}))
+        monkeypatch.delenv("TORTOISE_READ_STATUS", raising=False)
+        with pytest.raises(_TenancyFault):
+            asyncio.run(hosted_api.topic_summary(topic="t", org={}))
+
     def test_a_construction_lane_capacity_refusal_is_not_a_store_500(
             self, monkeypatch):
         """A busy pool is not a broken store: the 503 must survive the new arm."""
