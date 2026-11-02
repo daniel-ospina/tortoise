@@ -403,8 +403,9 @@ class TimeConstraint:
     shape compares ("the dog bed for Max", "the training pads for Luna").
     Additive — the pre-#2976 consumers read only kind/start/end, so every
     existing shape is unchanged. An empty tuple means no comparison anchor
-    was recovered; the #2976 temporal leg REQUIRES a matched anchor and
-    stays inert in that case (it never promotes on date-spread alone).
+    was recovered; the #2976 temporal leg then promotes on session clustering
+    inside the resolved date window (#10538), and stays inert when there is
+    no window either — it never promotes on date-spread alone.
     """
     kind: str | None
     start: str | None = None
@@ -501,8 +502,11 @@ def _extract_anchors(t: str) -> tuple[str, ...]:
     single content token and are DROPPED — a one-token anchor is claimed by
     any candidate carrying that word (noise). A phrase whose tokens are ALL
     stopwords (deictics like "today") is dropped for the same reason.
-    Returns ``()`` when nothing usable remains — the leg then stays inert
-    (it requires a matched anchor; it never promotes on date-spread alone).
+    Returns ``()`` when nothing usable remains. With no anchors the leg is
+    inert UNLESS the caller also supplies a ``date_window`` AND the visible
+    slots are session-clustered (#10538) — a date-range question promotes on
+    that widened gate. Anchors alone, with no window, never promote on
+    date-spread alone (the #2976 no-harm property).
     """
     from tortoise.temporal_leg import content_tokens
 
@@ -1930,7 +1934,10 @@ def retrieve_for_question(
     #
     # Fail-safe OFF: explicit flag > env ``TORTOISE_LME_TEMPORAL_LEG`` >
     # OFF; a question with no temporal constraint, a non-TR question, or a
-    # pool with no dated/anchor-relevant candidates leaves the fused order
+    # pool with no dated candidates (or no anchor-relevant candidates AND no
+    # date window -- #10538's window arm promotes anchor-less pools whose
+    # visible slots are session-clustered, see
+    # tests/test_temporal_leg_date_window_10538.py) leaves the fused order
     # byte-identical. ──
     if temporal_leg is not None:
         temporal_leg_on = temporal_leg
@@ -1978,11 +1985,42 @@ def retrieve_for_question(
         # stats block is the ON/OFF reconstruction surface — never report a
         # knob value that was silently clamped away).
         _tl_limit = effective_promotion_budget(effective_top_k, _tl_limit)
+        # #10538: a question that names a DATE RANGE instead of comparison
+        # anchors targets the pool by that range. Resolve the SAME inclusive
+        # ISO bounds the filter above resolved (one arithmetic, one resolver),
+        # and hand them to the leg, which then promotes on session clustering
+        # inside the range.
+        #
+        # ⚠️ HONEST NOTE (review cycle 2): because these bounds are the ones
+        # ``_apply_time_window`` already filtered on, every surviving hit is
+        # in-window, so this window does NOT select a subset here — the
+        # clustering condition inside ``temporal_leg_order`` is the sole
+        # targeting signal on the wired path. That holds for the
+        # ``tr_window_fallback`` pool as well, which is why it is NOT a second
+        # place the window selects: that pool is unfiltered because the filter
+        # EMPTIED it (``tr_window_fallback`` is set only when
+        # ``_apply_time_window`` returned ``[]``, i.e. no DATED hit was
+        # in-window), and both seams resolve their bounds from the same
+        # ``facet_window_bounds`` call with the same anchor — so
+        # ``_in_date_window`` is false for every promotable candidate there
+        # too and the arm cannot fire on it by construction (review cycle 6,
+        # #10549: the earlier text claimed reachability here that does not
+        # exist; pinned by
+        # ``test_the_fallback_pool_cannot_fire_the_window_arm``). The window
+        # carries reach only for a caller that passes a span the filter has
+        # not already applied.
+        # ``ordering`` has no computable bound (`facet_window_bounds` returns
+        # ``None``) → ``None`` → byte-identical to the pre-#10538 leg.
+        _tl_date_window = None
+        if tr_constraint.kind in ("interval", "recency"):
+            _tl_date_window = facet_window_bounds(
+                tr_constraint.kind, tr_constraint.start, tr_constraint.end,
+                None, anchor=question_date)
         _tl_order, _tl_picks = temporal_leg_fusion_order(
             annotated, anchors=tr_constraint.anchors,
             window=effective_top_k, limit=_tl_limit,
             bucket_cap=DEFAULT_TEMPORAL_LEG_BUCKET_CAP,
-            weight=_tl_weight)
+            weight=_tl_weight, date_window=_tl_date_window)
         _tl_dated = sum(1 for h in annotated if h.get("session_date"))
         temporal_leg_stats = {
             "on": True,
@@ -2002,14 +2040,16 @@ def retrieve_for_question(
             legs.append({"leg": "temporal", "ran": True, "degraded": False,
                          "reason": None, "count": len(_tl_picks)})
         else:
-            # honest trace reason — the five distinct empty-leg causes
+            # honest trace reason — the six distinct empty-leg causes
+            # (``no_window_candidates`` is the #10538 windowed miss)
             # (never launder a budget/anchor/weight miss as "no dates").
             legs.append({"leg": "temporal", "ran": True, "degraded": False,
                          "reason": temporal_leg_empty_reason(
                              dated=_tl_dated,
                              anchors=len(tr_constraint.anchors),
                              weight=_tl_weight,
-                             budget=_tl_limit),
+                             budget=_tl_limit,
+                             date_window=bool(_tl_date_window)),
                          "count": 0})
 
     # ── deduped pool (the retrieval contract: ret["hits"] == pool) ──

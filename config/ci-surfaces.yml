@@ -6532,6 +6532,7 @@ surfaces:
   - test_temporal_constraint.py
   - test_terminal_dedup_nullhash.py  # #2971: _find_terminal_dedup_hit A10 hash-less fallback (rebuild-durable terminal guard)
   - test_temporal_leg_2976.py  # #2976: temporal retrieval leg — detector shapes, anchor co-presence + date spread, additive-fusion no-op (hermetic, no DB)
+  - test_temporal_leg_date_window_10538.py  # #10538: a DATE-RANGE question widens the candidate set by session — window-as-target gating (session clustering), head-slice exclusion of the sessions the reader already holds, fused tail placement (hermetic, no DB)
   - test_2976_session_admission.py  # #2976: TR session-level admission — token budget binds + session is the admission unit (gold at rank 45 admitted); render stays dated/contiguous (hermetic, pure functions)
   - test_sdk_ep.py
   - test_sdk_group3.py
@@ -6764,6 +6765,7 @@ surfaces:
   - test_8066_served_skill_relay_ratchet.py
   - longmem_eval/test_freq_count_disposition.py  # #2886: guards tools/longmem_eval/freq_count_disposition.py (the census frequency/count disposition tool) — `tools/longmem_eval/` is a SOURCE_PATTERNS entry of this surface, so an eval-tool change alone selects it
   - test_temporal_aggregate_arm.py  # #2886: guards tools/longmem_eval/retrieve.py's `temporal_aggregate_verdict` adapter — `tools/longmem_eval/` is a SOURCE_PATTERNS entry of this surface, so a retrieve.py-only change selects it (dual-registered with `core` for the core's verdict semantics)
+  - test_temporal_leg_replay_wiring_10538.py  # #10538: the offline replay proxy reproduces the SHIPPED temporal wiring — the question's resolved date window is threaded to the leg with the question date as the recency clock (hermetic, no DB/network; TF-IDF proxy over a hand-built pool, no dataset read)
   - longmem_eval/test_temporal_admission_trace.py  # #2976: temporal admission trace — pool-membership vs reader-window-cut receipts + TR-machinery-inert mechanism pin (hermetic, no DB)
   - longmem_eval/test_variant_containment_judge.py  # #2976: deterministic variant-aware containment judge — the keyless grader that reproduces the 42/52 ceiling (hermetic; the dataset leg skips when the split is not cached)
   - longmem_eval/test_temporal_admission_arms.py  # #2976: the admission-arms instrument — arm table/shared knobs/gold census/shard partition/summary aggregation (hermetic)
@@ -9176,6 +9178,26 @@ durations:
   test_surface_resolution.py: 0.9  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208): no declared testcase count for this file (UNKNOWN), so the reading cannot prove it saw the whole file; the reading (0.8s) is a LOWER bound; kept 0.9
   test_telemetry_registration.py: 1.0  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 1.6
   test_temporal_leg_2976.py: 0.4
+  # #10538: a file a PR ADDS can never carry a CI junit reading (the refresher
+  # samples push-to-main runs only), so it enters at the flat
+  # `DEFAULT_FAST_WEIGHT` per the #3400/#4348/#2818 convention — never a local
+  # dev-box reading, which this map forbids as a SHARD-LAYOUT input. The row
+  # must EXIST: registering the file on the `sdk` surface puts it in
+  # `fast_pool()`, and one unweighted fast file is what `--integrity`'s
+  # duration-coverage floor measures; `tools/ci_timing.py
+  # --refresh-durations` replaces it from junit once a push-to-main sweep
+  # includes it. What the weight covers: DB-free, server-free, network-free and
+  # model-free — the only imports are the stdlib plus `tortoise.temporal_leg`
+  # (pure functions over an in-memory candidate list), whose one external
+  # dependency is the calendar resolver `tortoise.coverage_loop._calendar_date`.
+  test_temporal_leg_date_window_10538.py: 2.0
+  # #10538: same NEW-FILE rule as the two rows here and for the same reasons.
+  # What the weight covers: hermetic — no DB, no network, no model, and no
+  # dataset read (the TF-IDF pool is hand-built in the test). It DOES import
+  # sklearn transitively (`tools.longmem_eval.temporal_leg_replay` builds a
+  # `TfidfVectorizer`), which the dev group already pins for
+  # `tests/test_gmm_proofs.py`, so no new dependency is introduced.
+  test_temporal_leg_replay_wiring_10538.py: 2.0
   # #2976: the three new surfaces take the header's flat `DEFAULT_FAST_WEIGHT`
   # (the #2818/#3419/#9121 convention), NOT a local timing. A file ADDED BY A
   # PR can never carry a CI junit measurement (the refresher samples
