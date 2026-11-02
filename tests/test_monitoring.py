@@ -3869,6 +3869,81 @@ class TestStallWatchdog:
                 "a restart policy with zero retries never restarts: "
                 f"{b}")
 
+    def test_the_module_contract_scopes_the_idle_gate_to_the_soft_path(self):
+        """#10585 review P2: the #2850 gate contract AGED against the code.
+
+        The block an operator reads before arming a PROCESS-KILLING knob
+        (``monitoring.py``, above ``LOOP_STALL_EXIT_S``) said the self-kill
+        "demands (a) N consecutive stale windows … (b) an IDLE WORKLOAD … and
+        (c) at least one real heartbeat tick", and told the reader the
+        in-process kill "cannot be relied on as wedge detection at all".
+        Both are false for the mechanism this PR ships and ``fly.toml`` arms:
+        the hard ceiling fires on the FIRST poll, deliberately does not consult
+        the in-flight gauge, and runs before the ``min_ticks`` boot gate. A
+        reader who lands here first was told to expect an idle gate this
+        deployment does not apply — the belief the 97-minute outage sat behind,
+        and the same defect already fixed in ``.env.example`` and in
+        ``start_stall_watchdog``'s docstring but not in the file that DEFINES
+        the knob.
+        """
+        from pathlib import Path
+
+        src = (Path(__file__).resolve().parent.parent
+               / "tortoise" / "monitoring.py").read_text(encoding="utf-8")
+        lines = src.splitlines()
+
+        start = next(i for i, line in enumerate(lines)
+                     if "the in-process self-kill exists only as an operator "
+                        "escape hatch" in line)
+        end = next(i for i, line in enumerate(lines)
+                   if line.startswith("LOOP_STALL_EXIT_S = 0.0"))
+        assert end > start, (start, end)
+        block = "\n".join(lines[start:end])
+
+        assert "TORTOISE_LOOP_STALL_HARD_EXIT_S" in block, (
+            "the gate contract must name the hard ceiling — it is the one the "
+            "hosted deployment ARMS, and the contract is read before arming")
+        assert "SOFT" in block, (
+            "its three conditions describe the SOFT path only; unqualified "
+            "they describe a mechanism production does not run")
+        assert "IGNORE" in block or "ignore" in block, (
+            "and must say what makes the hard ceiling different: it IGNORES "
+            "the in-flight gauge, which is the whole point")
+        assert "bypass" in block, (
+            "naming the exemption explicitly is the fix: the hard ceiling "
+            "bypasses the idle gate, not inherits it")
+
+        # the second copy of the same false belief, in absolute form
+        unqualified = [i for i, line in enumerate(lines)
+                       if "cannot be relied on as wedge detection" in line]
+        assert len(unqualified) == 1, unqualified
+        assert "SOFT" in lines[unqualified[0]], (
+            "that sentence is about the SOFT path; unqualified it denies the "
+            "in-process detection fly.toml relies on")
+
+    def test_the_test_session_pins_the_hard_ceiling_disarmed(self):
+        """#10585 review P3: the session-wide env pin covered only the sibling.
+
+        ``tests/conftest.py`` pins ``TORTOISE_LOOP_STALL_EXIT_S=0`` because the
+        watchdog ``os._exit``s the process and that is catastrophic in a test
+        runner. The HARD ceiling is the DELIBERATE exception to the idle gate —
+        it exits with a request in flight — so an ambient value is worse here:
+        ``fly.toml`` and ``.env.example`` both document ``600``, and a developer
+        who exported either would make any test that arms the watchdog kill the
+        runner instead of exercising it.
+        """
+        from pathlib import Path
+
+        conftest = (Path(__file__).resolve().parent
+                    / "conftest.py").read_text(encoding="utf-8")
+        assert (
+            'os.environ.setdefault("TORTOISE_LOOP_STALL_HARD_EXIT_S", "0")'
+            in conftest
+        ), (
+            "the hard ceiling must be pinned disarmed for the whole test "
+            "session, exactly like its sibling: it is the one path that kills "
+            "the process with work in flight")
+
     def test_hard_ceiling_parser_is_fail_closed(self, monkeypatch):
         """Every unusable value must DISABLE the ceiling (fail closed) — a
         parsed-but-unusable ceiling is the restart-loop this file guards."""

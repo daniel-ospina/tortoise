@@ -4170,11 +4170,22 @@ def stop_health_listener(server: ThreadingHTTPServer | None = None) -> None:
 #   * the /healthz signal (above) is the DETECTOR — it publishes staleness;
 #   * destructive action belongs OUT OF PROCESS (PR #3064's external watchdog,
 #     which is not stuck behind the same loop and can be given a real budget);
-#   * the in-process self-kill exists only as an operator escape hatch, and
-#     even then it demands (a) N CONSECUTIVE stale windows (hysteresis), (b) an
-#     IDLE WORKLOAD — never "the loop is busy serving a request" — and (c) at
-#     least one REAL heartbeat tick, so a slow boot can never be mistaken for a
+#   * the in-process self-kill exists only as an operator escape hatch, and on
+#     the SOFT path (``TORTOISE_LOOP_STALL_EXIT_S``) it demands (a) N
+#     CONSECUTIVE stale windows (hysteresis), (b) an IDLE WORKLOAD — never "the
+#     loop is busy serving a request" — and (c) TWO real heartbeat ticks
+#     (``LOOP_STALL_EXIT_MIN_TICKS``), so a slow boot is never mistaken for a
 #     wedge. See ``start_stall_watchdog``.
+#     The HARD ceiling (``TORTOISE_LOOP_STALL_HARD_EXIT_S``, defined below) is a
+#     DIFFERENT mechanism and does NOT inherit those conditions (review P2: this
+#     block, the contract an operator reads before arming a process-killing
+#     knob, still described the pre-ceiling behaviour): it IGNORES the in-flight
+#     gauge by design — that bypass IS the fix, because the gauge is true by
+#     construction during the outage it guards — needs no hysteresis, and
+#     reduces (c) to ONE recorded tick. It keeps only the dead-TICKER disarm (a
+#     dead heartbeat task is not a wedge), and past its age it depends on the
+#     deployment's restart policy to complete the recovery. Like its sibling it
+#     ships DISABLED; the HOSTED deployment arms it in ``fly.toml``.
 #
 # CONTRACT OF THE IDLE GATE (round-2 review P2) — read before enabling. The
 # gate is fed by an ASGI in-flight gauge that is incremented for the WHOLE
@@ -4190,11 +4201,16 @@ def stop_health_listener(server: ThreadingHTTPServer | None = None) -> None:
 #   * the wedge this escape hatch targets (thousands of synchronous on-loop
 #     queries from one request) is ITSELF an in-flight request, so the gate
 #     VETOES it by construction.
-# The in-process self-kill therefore cannot be relied on as wedge detection at
-# all: the mechanism that actually handles a wedge is the OUT-OF-BAND watchdog
-# (PR #3064), which is not stuck behind the same loop and does not share this
-# gauge. Enabling ``TORTOISE_LOOP_STALL_EXIT_S`` buys a GC-pause/hard-hang
-# backstop for the no-MCP-client case ONLY.
+# The SOFT in-process self-kill therefore cannot be relied on as wedge detection
+# at all — it is a backstop for the IDLE shape only. The mechanism that actually
+# handles a wedge out of process is the OUT-OF-BAND watchdog (PR #3064), which is
+# not stuck behind the same loop and does not share this gauge. Enabling
+# ``TORTOISE_LOOP_STALL_EXIT_S`` buys a GC-pause/hard-hang backstop for the
+# no-MCP-client case ONLY. In-process wedge detection IS now relied on, though:
+# the HARD ceiling below (``TORTOISE_LOOP_STALL_HARD_EXIT_S``) does not share
+# this gate or this failure mode — a request in flight does not stop the loop
+# ticking, so a MISSING TICK is the evidence of a wedge — and that ceiling is
+# what ``fly.toml`` arms in the hosted deployment.
 # A safe refinement (NOT implemented here — premature optimisation of a path
 # that is off by default) would be to exclude streaming responses from the
 # gauge: the SSE response's ``http.response.start`` fires once at stream open,

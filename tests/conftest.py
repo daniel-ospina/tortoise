@@ -31,6 +31,12 @@ os.environ.setdefault("RATE_LIMIT_DISABLED", "1")
 # exercise the watchdog with an injected exit_fn; the real one stays disarmed
 # for the whole session.
 os.environ.setdefault("TORTOISE_LOOP_STALL_EXIT_S", "0")
+# The HARD ceiling (#10585) is the deliberate exception to that gate — it exits
+# EVEN with a request in flight — so an ambient value is more dangerous here,
+# not less: ``fly.toml`` and ``.env.example`` both document 600, and a developer
+# who exported either would make any hosted-API test that arms the watchdog
+# ``os._exit`` the runner. Pinned for the same reason and the same way.
+os.environ.setdefault("TORTOISE_LOOP_STALL_HARD_EXIT_S", "0")
 # #2850: the dedicated liveness listener defaults to the fixed 0.0.0.0:9090
 # deployment contract. An ephemeral port for the test session keeps parallel
 # test sessions on one host from fighting over it (and never exposes a
