@@ -3285,9 +3285,39 @@ operator who read the line above as "CI defends this" would never run it.
 | RESEND_FROM_EMAIL | ✅ (single managed sender identity — #1136; default `noreply@premiselabs.co`) | — | ✅ |
 | BILLING_FROM_EMAIL | optional (distinct billing sender override — #1136) | — | ✅ |
 | BILLING_NOTIFY_TO | ✅ (ops inbox for billing email) | — | ✅ |
-| TORTOISE_RECORD_DSN | — (**not on Fly yet** — the secret is the operator's act; absent ⇒ `NOT_ARMED` and the record writes nothing). Setting it **arms the Postgres record** (epic #7879 R1) via GitHub secret → Fly ⚠️ Its **user must be `tortoise_record_app`** (R6, #9554), never `postgres`/`service_role` — see [The record's connecting role](#the-records-connecting-role-r6-decision-2026-10-22-9554) below | — (the record is a Supabase Postgres project, not FalkorDB) | ✅ **declared, value NOT created yet** — the operator act is [Arming the Postgres record](#arming-the-postgres-record--tortoise_record_dsn-epic-7879-r1-9548) (no such GitHub secret exists today; the ✅ is the *home* the deploy reads, not a provisioned value) |
+| TORTOISE_RECORD_DSN | ⛔ **POSTPONED — do not arm, provision or re-point it** (owner ruling 2026-11-01, quoted in [Arming the Postgres record](#arming-the-postgres-record--tortoise_record_dsn-epic-7879-r1-9548) below). The value **is already on Fly**: `GET /health` (`api.premiselabs.co`) read `"record":{"armed":true,…,"record_write_failures":{"write_failed":32},…}` on 2026-11-02 (**measured by another lane and recorded on #9548** — quoted here, not re-measured). Setting it **arms the Postgres record** (epic #7879 R1) via GitHub secret → Fly ⚠️ Its **user must be `tortoise_record_app`** (R6, #9554), never `postgres`/`service_role` — see [The record's connecting role](#the-records-connecting-role-r6-decision-2026-10-22-9554) below | — (the record is a Supabase Postgres project, not FalkorDB) | ✅ **set** — the GitHub secret and the Fly secret both exist; the app has reported `armed: true` continuously since at least 2026-10-26 (**measured on #9548**, quoted here, not re-measured — the row's former "value NOT created yet / no such GitHub secret exists today" was measured false). The *arming* procedure is [Arming the Postgres record](#arming-the-postgres-record--tortoise_record_dsn-epic-7879-r1-9548) and is ⛔ postponed above |
 
 ### Arming the Postgres record — `TORTOISE_RECORD_DSN` (epic #7879 R1, #9548)
+
+> ⛔ **POSTPONED BY OWNER RULING — this section's command is not to be run.** The owner postponed the
+> hosted deployment setup on **2026-11-01T05:58:03Z**, in a comment on `#9548` headed
+> `## Owner decision — the hosted setup is POSTPONED` (the issue carries the `owner-decision` label;
+> the [comment](https://github.com/daniel-ospina/tortoise/issues/9548#issuecomment-6554166515) itself is
+> the ruling's home), verbatim:
+>
+> > **The hosted deployment setup is postponed until the storage-architecture work and the
+> > extractor-architecture work are complete — otherwise we risk filling the hosted store with noise.**
+> >
+> > **Do not arm, provision, or point anything at the hosted store.** That explicitly covers `#9548`
+> > ("arm the record in the hosted deployment — `TORTOISE_RECORD_DSN`") — it is **not** work to pick
+> > up; it is gated behind this ruling.
+>
+> **`OVERRIDES:`** epic #7879 **R1** — this section's own objective, "arm the record in the hosted
+> deployment" — and the provisioning steps further down (`gh secret set TORTOISE_RECORD_DSN`, the
+> deploy, `fly secrets list`). The owner postponed that act, so **this section is reference, not a task
+> list**: read it for the DSN's shape, its role rule and the verify reads; do not execute the
+> provisioning block. ⚠️ **The store is already armed** (`armed: true`) and already failing writes
+> (`write_failed: 32`, measured 2026-11-02 and recorded on `#9548`), so "finish what was started" is
+> *also* a resumption of the postponed act — the live state is evidence to report, never a licence.
+> Until the ruling lifts, the authority for captured sessions is the **local** record under
+> `~/.tortoise/session-events/`, never the hosted store.
+>
+> **The reopening route — where it lives, and what would lift it.** The ruling lives on `#9548`, in
+> that `Owner decision` comment, and nowhere else. Its own words for the bar: *"The ruling lifts when the
+> **storage architecture** work and the **extractor architecture** work are complete — not on a date,
+> and not because a quota became available"*, and **the lifting is the owner's call, not a lane's**. So a lane
+> that believes both are complete states that on the respective epic **with evidence**, and asks the
+> owner there; it does not re-decide it here, and it does not soften it into "optional".
 
 **What the variable is.** The Postgres record's own connection string, read by
 `tortoise/record_writer.py` (`RECORD_DSN_ENV`). The seam is **presence-based**:
@@ -3318,6 +3348,13 @@ tenant-scoped rows**, so this is the existing Supabase project — *not* a secon
 database per team (refused on cost grounds).
 
 **Provisioning — one operator act, then the deploy does the rest.**
+
+⛔ **DO NOT RUN THESE UNTIL `#9548`'s RULING LIFTS.** Every command in the block below performs, or confirms, the
+postponed act (see the POSTPONED note at the top of this section, which quotes the
+ruling and names where it lives). They are written down so a *future*, un-postponed arming is not
+improvised, **not because they are scheduled**. Nothing about the arming being partly done makes any
+step below safe to resume: `armed: true` with `write_failed: 32` is a state to report on `#9548`, not
+a step to complete.
 
 ```bash
 # 1. the value's ONLY home (never a file, never a shell history):
@@ -3685,6 +3722,15 @@ pooler value §"The value" prescribes for the app.
 
 ### The record's connecting role (R6 decision, 2026-10-22, #9554)
 
+> ⛔ **Its steps 1 and 2 (granting the role `LOGIN` with a credential, and arming the DSN) are
+> postponed** by the `#9548` owner ruling of 2026-11-01, quoted
+> (its headline and operational point 3) in [Arming the Postgres record](#arming-the-postgres-record--tortoise_record_dsn-epic-7879-r1-9548)
+> above — read that note before acting on anything here. The **role** decision (`tortoise_record_app`,
+> `NOBYPASSRLS`, never `postgres`/`service_role`) stands and is what a future arming must obey; the
+> **arming** does not happen until the ruling lifts — and **step 1 is provisioning too**
+> (`ALTER ROLE … LOGIN` + `\password` are run against the hosted project, which is exactly what the
+> ruling's "do not arm, provision, or point anything at the hosted store" forbids).
+
 The Postgres record's tenancy boundary is **row-level security**, and it is enforceable only if the
 application path connects as a role that does not bypass it. The role, the policies and the reason
 are decided in
@@ -3705,13 +3751,20 @@ in git, re-minted on every deploy.
 **1. Give the role a login credential, once, out of band** (SQL editor as `postgres`; `\password`
 keeps the plaintext out of the statement and off the logs):
 
+⛔ **Do not run this until `#9548`'s ruling lifts** (quoted at the head of this section): `ALTER ROLE …
+LOGIN` plus a credential is a *provisioning* act on the hosted store, which the ruling names explicitly.
+The step is kept because the role rule still governs a future arming; it is not scheduled.
+
 ```sql
 ALTER ROLE tortoise_record_app LOGIN;
 \password tortoise_record_app      -- psql; or set it from the dashboard/your password manager
 ```
 
 **2. Arm the DSN** (R1) with that role — for the shared pooler this is
-`<role>.<project-ref>` as the user:
+`<role>.<project-ref>` as the user. ⛔ **Do not do this until `#9548`'s ruling lifts** (2026-11-01;
+quoted in [Arming the Postgres record](#arming-the-postgres-record--tortoise_record_dsn-epic-7879-r1-9548)):
+this text is the DSN's *shape*, which the ruling does not change — the act it describes is what the
+ruling postpones:
 
 ```text
 TORTOISE_RECORD_DSN=postgresql://tortoise_record_app.<ref>:<password>@aws-0-<region>.pooler.supabase.com:5432/postgres?sslmode=require
