@@ -36,7 +36,8 @@ It verifies five things, and it fails on each of them for a specific reason:
    _is_refused`). A checkout with a remote but no resolvable base fails closed (`UNPROVABLE`)
    rather than silently degrading to the PR-internal rule this change removed.
 
-   **The one exception, and why it is not a loophole.** ``e1-e2.log`` was landed by ``#9110``
+   **The one exception, and why it is not a loophole — and why the SAME-PR arm does not extend
+   it.** ``e1-e2.log`` was landed by ``#9110``
    *before* this registration existed, from a lane that correctly refused to score it. A bare date
    comparison can therefore only report a permanent failure, which is not a check but a stuck
    light. The exemption is granted per-log in the pins (``pre_existing_unscored_logs``) and is
@@ -61,6 +62,13 @@ It verifies five things, and it fails on each of them for a specific reason:
    The effect is the property the epic actually wants: **no number is scored against a threshold
    whose author could already see it**. An exempt log stays unscored forever; the moment E1/E2 are
    re-run, the new log must postdate this file or the check fails.
+
+   ⛔ Bounds (a) and (b) are TIMESTAMP relations against the registration **on the base**, so the
+   exemption is NOT consumable by the same-PR refusal arm: a registration and its grandfathered log
+   committed together become ONE commit after the squash, where ``prereg_epoch`` and the log's
+   last-touch epoch are the same second and (b) can never be satisfied. That arm therefore
+   subtracts only the CONTENT exemption (:func:`_log_declares_no_measurement`), which re-asks the
+   same question of the same bytes on the base and so cannot disagree with it (#10547 review 6 P1).
 
    **The third outcome.** In a SHALLOW clone (CI test jobs check out at ``fetch-depth: 1``) git grafts
    the boundary commit, so every path reports as added by HEAD and both epochs collapse onto one
@@ -1139,22 +1147,29 @@ def _log_declares_no_measurement(log: Path) -> tuple[bool, str]:
     return True, ""
 
 
-def _logs_making_an_ordering_claim(logs: list[Path], exempt: dict, exempted: list[str] | None,
-                                  ) -> list[Path]:
-    """The logs the ordering rule actually reaches: every log NEITHER exemption covers.
+def _logs_making_an_ordering_claim(logs: list[Path], exempted: list[str] | None) -> list[Path]:
+    """The logs the not-on-the-base arm still refuses, after the ONE squash-invariant exemption.
 
-    Both exemptions are the same statement — *this log produced no number, so it cannot have been
-    scored against a threshold chosen after it was read* — reached from two directions:
-    ``pins.pre_existing_unscored_logs`` (grandfathered, content re-verified by
-    :func:`_log_declares_unscored`) and :func:`_log_declares_no_measurement` (its own verdict block
-    says the run measured nothing). A log the rule exempts makes NO ordering claim, so refusing it
-    for want of an ordering claim is a false refusal — and it was reachable only through the
-    not-on-the-base arm, which returned before this loop (#10547 review P2).
+    The exemption subtracted here is the CONTENT one — :func:`_log_declares_no_measurement`, whose
+    verdict block is read out of the log itself. It is squash-invariant by construction: the base's
+    per-log loop re-asks the SAME question of the same bytes when the pair lands in one commit, so
+    a log exempted here is exempted there too, and the two verdicts cannot disagree.
+
+    ⛔ ``pins.pre_existing_unscored_logs`` is deliberately NOT subtracted here (#10547 review 6
+    P1, measured). It is granted by NAME and bounded on the base by *timestamps* — the base's
+    pins branch requires ``max(_touch_epochs(log)) < prereg_epoch``. A registration and its
+    grandfathered log committed together are ONE commit after the squash: ``prereg_epoch`` and the
+    log's last-touch epoch are that same number, so the bound is UNSATISFIABLE and the bundle is
+    refused on the base forever, with nothing to withdraw it (#10468's outage shape). Subtracting
+    it here made that pair green at PR time and red on the base — the exact merge-strategy-
+    dependent verdict #10463 exists to remove, hiding in the arm #10463 added. Measured on the
+    pre-fix tree: ``check_ordering(...) == []`` before the pair was published, and
+    ``"e1-e2.log: exempted, but it was MODIFIED at 1700000100 …"`` on the base afterwards.
+    The exemption keeps every one of its base-side bounds; it just cannot be claimed for a
+    registration that is not published there yet.
     """
     claiming: list[Path] = []
     for log in logs:
-        if log.name in exempt:
-            continue
         ok, _why = _log_declares_no_measurement(log)
         if ok:
             if exempted is not None:
@@ -1217,17 +1232,21 @@ def check_ordering(prereg: Path, logs: list[Path], pins: dict | None = None,
     if not prereg_epochs:
         if not logs:
             return failures  # no registration on base, and nothing to be ordered against
-        # ⛔ BOTH DOCUMENTED EXEMPTIONS ARE CONSULTED HERE TOO (#10547 review P2). This method's
-        # contract is "[] when every log is after the registration ON THE BASE **or provably
+        # ⛔ THE CONTENT EXEMPTION IS CONSULTED HERE TOO (#10547 review P2). This method's contract
+        # is "[] when every log is after the registration ON THE BASE **or provably
         # unscored**", and this arm used to return BEFORE the per-log loop that consults the second
         # disjunct — so a NEW bundle landing its registration beside a log that declares no
-        # measurement (the `e1-e2.log` shape the repo's own `7949-capstone` carries, and the shape
-        # #9110/#9089 carved out) was REFUSED, with a message asserting the log "has no such claim
-        # to make" when an unscored log never made an ordering claim at all. The gate then sends the
-        # author to a two-PR dance for an artefact the doctrine says it does not reach. So: subtract
-        # everything the exemptions already cover, refuse over what remains, and keep the refusal's
-        # wording for the SCORED case it was written for.
-        unquestioned = _logs_making_an_ordering_claim(logs, exempt, exempted)
+        # measurement (the `capstone.log` shape #9110/#9089 carved out) was REFUSED, with a message
+        # asserting the log "has no such claim to make" when an unscored log never made an ordering
+        # claim at all. The gate then sends the author to a two-PR dance for an artefact the doctrine
+        # says it does not reach. So: subtract what the CONTENT exemption covers, refuse over what
+        # remains, and keep the refusal's wording for the case it was written for.
+        #
+        # ⛔ THE PINS EXEMPTION IS *NOT* SUBTRACTED — see :func:`_logs_making_an_ordering_claim`.
+        # It is name-granted and timestamp-bounded on the base, so a pair sharing one commit after
+        # the squash can never satisfy its bound; subtracting it here bought a green at PR time for
+        # a shape the base refuses permanently (#10547 review 6 P1).
+        unquestioned = _logs_making_an_ordering_claim(logs, exempted)
         if not unquestioned:
             return failures  # nothing here claims an ordering, so there is none to prove
         # ⛔ Three DISTINCT refusals, deliberately not one: "you never committed it", "it has no

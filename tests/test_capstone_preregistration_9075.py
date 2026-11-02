@@ -2701,26 +2701,71 @@ def test_a_registration_added_beside_an_UNSCORED_log_is_not_refused(tmp_path, mo
     )
 
 
-def test_the_PINS_exemption_also_reaches_a_registration_added_beside_its_log(tmp_path, monkeypatch):
-    """The OTHER exemption, same arm: `pins.pre_existing_unscored_logs` exempts the log by name.
+def test_the_pins_exemption_is_NOT_squash_invariant_so_a_same_change_bundle_is_refused(
+        tmp_path, monkeypatch):
+    """#10547 review 6 P1: the pins arm used to green a pair that is refused on the base FOREVER.
 
-    Both exemptions are the same statement — this log produced no number, so it cannot have been
-    scored against thresholds chosen after it was read — and neither was reachable from the
-    not-on-the-base arm.
+    `pins.pre_existing_unscored_logs` is granted by NAME and bounded on the base-side by
+    *timestamps* — `max(_touch_epochs(log)) < prereg_epoch`. A registration and its grandfathered
+    log committed together are ONE commit once the squash lands them: `prereg_epoch` and the log's
+    last-touch epoch are that same number, so the bound is unsatisfiable and nothing ever withdraws
+    the bundle. Subtracting the pins exemption in the not-on-the-base arm therefore produced the
+    exact merge-strategy-dependent verdict #10463 exists to remove: green at PR time, red on `main`.
+
+    Measured on the pre-fix tree (this worktree, throwaway repo, both files in ONE commit):
+
+        check_ordering(...) before publishing  -> []            (green: the defect)
+        check_ordering(...) with the pair on base
+            -> "e1-e2.log: exempted, but it was MODIFIED at 1700000100, which is not strictly
+                before … at 1700000100"                        (refused for ever)
+
+    So the assertion below is the second half of the shape the old test asserted only the safe
+    half of: the PR-time verdict must agree with the verdict the same tree gets on the base.
     """
     repo = _repo_with_published_base(tmp_path, monkeypatch)
-    prereg = _commit_prereg(repo, epoch=1_700_000_100)   # NOT published: same change
-    log = _write_log(repo, "e1-e2.log", epoch=1_700_000_050, body=UNSCORED_LOG)
-    assert check.check_ordering(prereg, [log], _exempt()) == []
+    bundle = _bundle(repo, "7949-capstone")
+    prereg = bundle / check.PREREG_NAME
+    prereg.write_text("x\n")
+    log = bundle / "e1-e2.log"
+    log.write_text(UNSCORED_LOG)
+    # BOTH files in ONE commit: this is the pair a squash merge leaves on the base, not the two
+    # separate commits a branch has. The fixture's commit boundary is the only thing the pre-fix
+    # arm was reading.
+    _commit_files(repo, [prereg, log], epoch=1_700_000_100,
+                  message="a registration and its grandfathered log in ONE commit")
+    ok, why = check._log_declares_no_measurement(log)
+    assert not ok, (
+        "this test must exercise the PINS arm: a log the CONTENT arm exempts would be spared for a "
+        f"different (squash-invariant) reason and pin nothing. _log_declares_no_measurement={why}"
+    )
+
+    failures = check.check_ordering(prereg, [log], _exempt())
+    assert failures, (
+        "a pins-exempt log IS refused with an unpublished registration: the exemption's own "
+        "base-side bound cannot be satisfied once a squash puts both in one commit"
+    )
+    assert "not on the merge base" in failures[0], failures[0]
+    assert "adds 1 evidence log(s)" in failures[0], failures[0]
+
+    # ...and the base agrees. Publishing the pair is what the squash merge does; the pre-fix arm
+    # was green here and red there, which is the defect this pins shut.
+    _publish_base(repo)
+    on_base = check.check_ordering(prereg, [log], _exempt())
+    assert on_base, "the same tree must be refused on the base too — nothing may withdraw this pair"
+    assert "MODIFIED at" in on_base[0], on_base[0]
 
 
 def test_a_registration_added_beside_a_SCORED_log_is_still_refused(tmp_path, monkeypatch):
-    """The refusal keeps its STRICTNESS and its count: only the exempt logs are subtracted.
+    """The refusal keeps its STRICTNESS and its count: only the CONTENT exemption is subtracted.
 
     Relaxing the arm would turn the one gate that fires at PR time into a formality; the fix is
-    bounded to the logs that provably measured nothing. A bundle adding one exempt AND one scored
-    log is refused, and the message counts the log that actually made a claim — not the directory's
-    whole `*.log` population.
+    bounded to the logs whose own verdict block proves they measured nothing. A bundle adding one
+    content-exempt AND one scored log is refused, and the message counts the log that actually
+    made a claim — not the directory's whole `*.log` population.
+
+    The grandfathered log here is counted too, deliberately (#10547 review 6 P1): its content
+    carries no verdict block, so only the pins exemption could spare it, and that exemption cannot
+    be satisfied on a base where the registration shares its commit.
     """
     repo = _repo_with_published_base(tmp_path, monkeypatch)
     prereg = _commit_prereg(repo, epoch=1_700_000_100)   # NOT published: same change
@@ -2730,8 +2775,9 @@ def test_a_registration_added_beside_a_SCORED_log_is_still_refused(tmp_path, mon
     failures = check.check_ordering(prereg, [grandfathered, scored], _exempt())
     assert len(failures) == 1, failures
     assert "not on the merge base" in failures[0], failures[0]
-    assert "adds 1 evidence log(s)" in failures[0], (
-        f"the refusal must count the logs that CLAIM an ordering, not every *.log in the bundle: "
+    assert "adds 2 evidence log(s)" in failures[0], (
+        f"the refusal must count the logs that CLAIM an ordering — the scored one and the one only "
+        f"the (non-squash-invariant) pins exemption covered — not every *.log in the bundle: "
         f"{failures[0]}"
     )
 
@@ -3162,21 +3208,18 @@ def _bundles_that_poison_the_base(base: str) -> list[str]:
     change, because the squash that lands it collapses both add-epochs into one and nothing ever
     withdraws the pair.
 
-    A log NEITHER exemption covers makes no ordering claim (the same predicate the refusal arm uses
-    via :func:`check._logs_making_an_ordering_claim`), so a registration landing beside an unscored
-    or pins-exempt log is not poison either — on the base that log is still exempt, by content.
+    Which logs make a claim is :func:`check._logs_making_an_ordering_claim` — the SAME predicate the
+    refusal arm uses, so the two cannot disagree about a tree. Only the CONTENT exemption
+    (:func:`check._log_declares_no_measurement`) is subtracted: it re-asks the same question of the
+    same bytes on the base. A pins-exempt log is NOT spared (#10547 review 6 P1) — its exemption is
+    bounded by timestamps that one squash commit collapses onto a single second.
     """
     poison: list[str] = []
     for directory in check.discover_bundles():
         if check._added_epochs_on(base, directory / check.PREREG_NAME):
             continue                      # published on the base: a squash here cannot touch it
-        try:
-            pins = check.parse_pins((directory / check.PREREG_NAME).read_text())
-            exempt = check._pins_mapping(pins, "pre_existing_unscored_logs")
-        except (check.CheckError, OSError, UnicodeDecodeError):
-            exempt = {}                   # unreadable registration: the tool exits 2 on it already
         logs = sorted(directory.glob(check.EVIDENCE_LOG_GLOB))
-        claiming = check._logs_making_an_ordering_claim(logs, exempt, None)
+        claiming = check._logs_making_an_ordering_claim(logs, None)
         if any(not check._added_epochs_on(base, log) for log in claiming):
             poison.append(str(directory.relative_to(check.REPO_ROOT)))
     return poison
@@ -3187,12 +3230,12 @@ def test_the_tree_pin_flags_a_poisoned_bundle_and_spares_a_registration_only_one
     """#10547 review 5 P1: the tree-wide pin over-blocked the remedy its own refusal prescribes.
 
     Measured, in the throwaway repo this test builds: the PRE-FIX rule ("every discovered
-    registration must have an add-epoch on the base") reds all three bundles below — including
+    registration must have an add-epoch on the base") reds all four bundles below — including
     `5088-registration-only`, which is exactly what `SAME_PR_REFUSAL` tells a contributor to do, and
     `5089-unscored`, whose log makes no ordering claim at all. The two arms shipped by this PR then
     disagreed about the same tree, and the natural workaround was to hand-edit the base or skip the
-    gate. The fixed predicate is the discriminating one: only the bundle whose registration is
-    unpublished WHILE a claiming log lands with it.
+    gate. The fixed predicate is the discriminating one: only the bundles whose registration is
+    unpublished WHILE a claiming log lands with them.
     """
     repo = _repo_with_published_base(tmp_path, monkeypatch)
 
@@ -3215,12 +3258,25 @@ def test_the_tree_pin_flags_a_poisoned_bundle_and_spares_a_registration_only_one
                   epoch=1_700_000_500,
                   message="a registration beside a log that declares no measurement")
 
-    assert _bundles_that_poison_the_base("origin/main") == ["docs/evidence/9999-poison"], (
-        "only a registration landing BESIDE a claiming log is unconditional poison on the base; "
-        "the registration-only change is the remedy the refusal itself prescribes, and an unscored "
-        "log makes no ordering claim to squash"
+    # ...and the shape that LOOKS spared and is not (#10547 review 6 P1): `e1-e2.log` is exempt by
+    # pins NAME, but that exemption's base-side bound is a timestamp relation one squash commit
+    # collapses — so a registration landing beside it is refused on the base for ever.
+    pins_exempt = _bundle(repo, "5090-pins-exempt")
+    _readable_registration(pins_exempt)
+    (pins_exempt / "e1-e2.log").write_text(UNSCORED_LOG)
+    _commit_files(repo, [pins_exempt / check.PREREG_NAME, pins_exempt / "e1-e2.log"],
+                  epoch=1_700_000_600,
+                  message="a registration beside a PINS-exempt log")
+
+    assert _bundles_that_poison_the_base("origin/main") == [
+        "docs/evidence/5090-pins-exempt",
+        "docs/evidence/9999-poison",
+    ], (
+        "only a registration landing BESIDE a log that claims an ordering is unconditional poison "
+        "on the base; the registration-only change is the remedy the refusal itself prescribes, "
+        "and a log whose own verdict block says it measured nothing makes no claim to squash"
     )
-    # The PRE-FIX predicate, computed here on the same tree: it is what over-blocked (all three).
+    # The PRE-FIX predicate, computed here on the same tree: it is what over-blocked (every bundle).
     # Kept as the measurement, so a revert to the whole-population form is visible as a red.
     pre_fix = [
         str(directory.relative_to(check.REPO_ROOT))
@@ -3230,6 +3286,7 @@ def test_the_tree_pin_flags_a_poisoned_bundle_and_spares_a_registration_only_one
     assert pre_fix == [
         "docs/evidence/5088-registration-only",
         "docs/evidence/5089-unscored",
+        "docs/evidence/5090-pins-exempt",
         "docs/evidence/9999-poison",
     ], f"the pre-fix rule over-blocked these: {pre_fix}"
 
@@ -3286,6 +3343,33 @@ def test_discovery_reads_every_registered_bundle_and_only_those(tmp_path, monkey
     ]
 
 
+def _green_published_bundle(repo: Path, name: str) -> Path:
+    """A bundle that is GENUINELY `ok` — not merely present — once it is on the base.
+
+    The sibling in a `--all-bundles` run is the control that makes the poisoned bundle's refusal
+    attributable: if the healthy one is red, the run's `exit 1` is over-determined and would be the
+    same number even if the refusal never fired (#10547 review 6 P2, measured: a pins-only document
+    produced FIVE failures on the sibling — no criteria table, no E4 row, an exempt log that does not
+    declare itself unscored, an exemption that postdates the registration, and no machine record).
+
+    So it is built from the REAL bundle's three artefacts, in the order the real one has them — the
+    unscored log first (§7's grandfather), then the registration and the record it pins with
+    `document_sha256` — and only then published. Measured: `run(...)["ok"]` is `True`.
+    """
+    directory = _bundle(repo, name)
+    (directory / "e1-e2.log").write_text(UNSCORED_LOG)
+    _commit_files(repo, [directory / "e1-e2.log"], epoch=1_700_000_050,
+                  message="the unscored log predates the registration")
+    (directory / check.PREREG_NAME).write_text(PREREG.read_text())
+    record = PREREG_DIR / "preregistration.json"
+    assert record.is_file(), "the real bundle must carry the machine record the sibling needs"
+    (directory / record.name).write_text(record.read_text())
+    _commit_files(repo, [directory / check.PREREG_NAME, directory / record.name],
+                  epoch=1_700_000_100, message="the registration and its machine record")
+    _publish_base(repo)                       # the registration's own PR merged
+    return directory
+
+
 def test_all_bundles_refuses_a_registration_added_beside_its_own_log(tmp_path, monkeypatch,
                                                                     capsys):
     """THE AUTOMATED PATH: the refusal reaches `main`, not only a direct `check_ordering` call.
@@ -3294,14 +3378,16 @@ def test_all_bundles_refuses_a_registration_added_beside_its_own_log(tmp_path, m
     registration AND a log in ONE commit — the shape #10468 redded `main` with. The second bundle is
     named by NOTHING on any command line, which is exactly the situation the hardcoded `--dir` pair
     left it in, so a green here would mean the arm is decoration.
+
+    ⛔ THE SIBLING'S GREEN IS PART OF THE ASSERTION (#10547 review 6 P2). The first version of this
+    test wrote the sibling a pins-only document, so `check_completeness` reds it (no criteria table,
+    no E4 row), the pins exemption reds its log, and the machine record is missing: `exit 1` came
+    from the sibling too, and "a healthy bundle and a poisoned one in the same run" — the sentence
+    this test's docstring and the PR body both state — was never proved. The sibling is now built to
+    be genuinely `ok`, and its green line is asserted in the SAME captured output.
     """
     repo = _repo_with_published_base(tmp_path, monkeypatch)
-    published = _bundle(repo, "7949-capstone")
-    prereg = _readable_registration(published)
-    _commit_files(repo, [prereg], epoch=1_700_000_100, message="add the published registration")
-    _publish_base(repo)                       # the registration's own PR merged
-    (published / "e1-e2.log").write_text("x\n")
-    _commit_files(repo, [published / "e1-e2.log"], epoch=1_700_000_200, message="add its log")
+    published = _green_published_bundle(repo, "7949-capstone")
     same = _bundle(repo, "9999-throwaway")
     _readable_registration(same)
     (same / "s3-ablation.log").write_text("x\n")
@@ -3314,6 +3400,20 @@ def test_all_bundles_refuses_a_registration_added_beside_its_own_log(tmp_path, m
     assert "9999-throwaway" in out, out
     assert "not on the merge base" in out, out
     assert "own PR" in out, out
+
+    # Split the run by bundle and read each verdict on its own: the poisoned one FAILs for the
+    # ordering reason, and the healthy one is green in the same process, from the same invocation.
+    assert "OK (halves NOT checked)" in out, (
+        "the healthy sibling must be GREEN in this same run: otherwise `exit 1` is over-determined "
+        f"and could be the sibling's failures instead of the refusal. Found:\n{out}"
+    )
+    assert out.count("FAIL — ") == 1, (
+        f"exactly one bundle may fail — the poisoned one. Found:\n{out}"
+    )
+    assert "=== docs/evidence/9999-throwaway" in out, out
+    assert check.run(published, use_git=True, use_corpus=False)["ok"], (
+        "the sibling bundle must be genuinely ok, not merely quiet"
+    )
 
 
 def test_all_bundles_with_nothing_to_discover_fails_closed(tmp_path, monkeypatch, capsys):
