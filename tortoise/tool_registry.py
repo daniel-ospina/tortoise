@@ -1598,7 +1598,17 @@ GRAPH_ARGUMENT_EXCLUDED: frozenset[str] = frozenset({
 #: value-independent (a non-existent graph id was refused the same way), so the
 #: text does NOT promise that a non-redundant argument is safe.
 #:
-#: ⛔ The OMIT rule is TARGET-based, never ask-based, and carries its anti-bypass
+#: ⛔ The description states that `graph` is OPTIONAL — the FACT #9340 decided —
+#: and states what omission means. It does not INSTRUCT omission as the form to
+#: send (#10084 pack comment 6576482269 / `NOT-A-DECISION(10504, re-brief to the
+#: optional-graph form)`): `tortoise_list_graphs()` returns flat names with no
+#: `is_default`, so in a workspace with two or more graphs an "omit it" rule makes
+#: the model GUESS, and the guess that rule rewards lands the write on the
+#: default graph. The redundant no-op form `graph="default"` is still described
+#: as what it is — the same target as omitting it — as a FACT, never as
+#: permission to drop the argument.
+#:
+#: ⛔ The SEND rule is TARGET-based, never ask-based, and carries its anti-bypass
 #: clause on purpose: "omit unless the user asked" would let a target established
 #: by a system prompt or an earlier turn be omitted, and teaching that a host
 #: refuses routing arguments invites the obvious retry — drop `graph` after a
@@ -1625,15 +1635,17 @@ GRAPH_ARGUMENT_EXCLUDED: frozenset[str] = frozenset({
 #: ACCEPTS: `graph` is still advertised and honoured everywhere it was
 #: (`tests/test_10084_graph_argument_omit_first.py`).
 GRAPH_ARGUMENT_DESCRIPTION = (
-    "Optional graph to act on. "
-    "OMIT IT when you are acting on this workspace's default graph: for a workspace "
-    "credential, omission targets the default, and that is the form to send (a "
-    "graph-bound credential's omission stays on its own graph, never on the default). "
+    "Optional graph to act on: this parameter MAY be omitted. It is optional because "
+    "a graph is working context, not an identity, so it is stated here rather than "
+    "bound into the connection (#9340). Omitting it is legal, and for a workspace "
+    "credential, omission targets the default graph (a graph-bound credential's "
+    "omission stays on its own graph, never on the default) — that is what omission "
+    "MEANS, not a form to prefer. "
     "An explicit `graph=\"default\"` targets the same graph as omitting it (a "
-    "graph-bound credential is refused rather than re-pointed), so it buys nothing "
-    "here — and a host may refuse a write call that carries `graph` whatever its "
-    "value (measured on the ChatGPT venue), so do not send the redundant "
-    "`graph=\"default\"`. "
+    "graph-bound credential is refused rather than re-pointed), so it changes nothing "
+    "about where the write lands; a host may refuse a write call that carries `graph` "
+    "whatever its value (measured on the ChatGPT venue), which is a fact about hosts, "
+    "never permission to drop the argument. "
     "If the graph you are acting on is NOT this workspace's default, SEND it — "
     "including when a host has already refused an earlier call. Never drop `graph` to "
     "get a write through: the write would land on the default graph instead of the one "

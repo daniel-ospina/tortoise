@@ -12,12 +12,19 @@ blocked, and one of them was `graph="default"`, which our own schema described a
 argument was an equivalent way to say nothing.
 
 The model builds the call payload from this description, so the description is
-the one lever that acts BEFORE the venue sees the call. It now states
-omit-first. ⛔ This changes what the model is TOLD TO SEND, never what the
-surface ACCEPTS: `graph` is still advertised, still optional, still `string`, and
-still honoured on every tool that had it (#9340 stands — the argument is what
-makes the target legible at the call site, and a caller who needs a second graph
-still has to send it).
+the one lever that acts BEFORE the venue sees the call. It now states what
+`graph` being OPTIONAL means — omission is legal and, for a workspace
+credential, lands on the default graph — and it no longer INSTRUCTS omission as
+the form to send: `tortoise_list_graphs()` returns flat names with no
+`is_default`, so in a workspace with two or more graphs an "omit it" rule makes
+the model guess, and the guess such a rule rewards is the default graph
+(#10504 re-brief, `NOT-A-DECISION(10504, …optional-graph form)` — compliance
+with #9340's recorded "optional `graph` argument, defaulting to the workspace's
+default graph", not a reopen of it). ⛔ This changes what the model is TOLD TO
+SEND, never what the surface ACCEPTS: `graph` is still advertised, still
+optional, still `string`, and still honoured on every tool that had it (#9340
+stands — the argument is what makes the target legible at the call site, and a
+caller who needs a second graph still has to send it).
 
 What this file does NOT claim: that the venue will now pass a write that carries
 `graph` anyway. The venue's filter is a policy decision on their side, and the
@@ -45,12 +52,17 @@ def _props(name: str) -> dict:
 # ── what the model is told to send ─────────────────────────────────────────
 
 
-def test_the_description_states_omit_first():
-    """The instruction must come before the accepted forms, in the words a model
-    reads as a rule, not as an option."""
+def test_the_description_states_the_parameter_is_optional_not_a_drop_tactic():
+    """The 2026-11-02 re-brief: the text states the FACT #9340 decided (`graph` is
+    optional, omission lands on the default) and never instructs omission as the
+    form to send. The imperative it replaces made a model in a ≥2-graph workspace
+    GUESS — `tortoise_list_graphs()` carries no `is_default` — and the guess it
+    rewarded landed the write on the default graph."""
     head = GRAPH_ARGUMENT_DESCRIPTION.split("Accepts")[0]
-    assert "OMIT IT" in head, head
-    assert "that is the form to send" in head, head
+    assert "this parameter MAY be omitted" in head, head
+    assert "that is what omission MEANS, not a form to prefer" in head, head
+    assert "OMIT IT" not in head, head
+    assert "that is the form to send" not in head, head
 
 
 def test_the_description_sends_a_graph_that_is_not_the_default():
@@ -87,7 +99,9 @@ def test_the_host_observation_names_its_object_and_is_not_a_blanket_rule():
     head = GRAPH_ARGUMENT_DESCRIPTION.split("Accepts")[0]
     assert "a host may refuse a write call that carries `graph` whatever its value" in head, head
     assert "carries a routing argument at all" not in head, head
-    assert "do not send the redundant" in head, head
+    # and it is an OBSERVATION, never an instruction to drop the argument
+    assert "never permission to drop the argument" in head, head
+    assert "do not send the redundant" not in head, head
 
 
 def test_the_anti_bypass_clause_has_a_stop_condition():
@@ -120,7 +134,7 @@ def test_the_no_op_equivalence_is_qualified_for_a_graph_bound_credential():
     head = GRAPH_ARGUMENT_DESCRIPTION.split("Accepts")[0]
     no_op_sentence = head[head.index('graph="default"') :]
     assert "graph-bound credential is refused rather than" in no_op_sentence, no_op_sentence
-    assert "do not send the redundant" in no_op_sentence, no_op_sentence
+    assert "do not send the redundant" not in no_op_sentence, no_op_sentence
 
 
 def test_the_description_still_carries_the_forms_that_are_accepted():
