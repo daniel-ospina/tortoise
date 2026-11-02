@@ -2016,6 +2016,15 @@ jobs:
           WRANGLER_VERSION="$(cat config/wrangler-version)"
           : "${WRANGLER_VERSION:?config/wrangler-version is empty}"
           for attempt in 1 2 3; do
+            # #10523: HEAL the runner's prefix before the fetch. `npm install -g`
+            # retires the old directory to a name computed FROM THE INSTALL PATH
+            # (npm's retire-path.js), so an install killed mid-flight leaves a
+            # residue that every later install re-targets — `rename(2)` then fails
+            # ENOTEMPTY and no backoff can clear it (measured 2026-11-02T03:58Z:
+            # three attempts, one destination, `.wrangler-UdmJz4wm`). Inside the
+            # loop because a killed attempt can leave residue of its own.
+            bash "$GITHUB_WORKSPACE/.github/scripts/npm-global-wedge.sh" clear \
+              "$(npm root -g)/wrangler"
             if npm install -g "wrangler@${WRANGLER_VERSION:?}"; then
               got="$(wrangler --version | tr -d '[:space:]')"
               if [ "$got" = "$WRANGLER_VERSION" ]; then
@@ -2229,6 +2238,15 @@ jobs:
           WRANGLER_VERSION="$(cat config/wrangler-version)"
           : "${WRANGLER_VERSION:?config/wrangler-version is empty}"
           for attempt in 1 2 3; do
+            # #10523: HEAL the runner's prefix before the fetch. `npm install -g`
+            # retires the old directory to a name computed FROM THE INSTALL PATH
+            # (npm's retire-path.js), so an install killed mid-flight leaves a
+            # residue that every later install re-targets — `rename(2)` then fails
+            # ENOTEMPTY and no backoff can clear it (measured 2026-11-02T03:58Z:
+            # three attempts, one destination, `.wrangler-UdmJz4wm`). Inside the
+            # loop because a killed attempt can leave residue of its own.
+            bash "$GITHUB_WORKSPACE/.github/scripts/npm-global-wedge.sh" clear \
+              "$(npm root -g)/wrangler"
             if npm install -g "wrangler@${WRANGLER_VERSION:?}"; then
               got="$(wrangler --version | tr -d '[:space:]')"
               if [ "$got" = "$WRANGLER_VERSION" ]; then
@@ -2445,6 +2463,15 @@ jobs:
           WRANGLER_VERSION="$(cat config/wrangler-version)"
           : "${WRANGLER_VERSION:?config/wrangler-version is empty}"
           for attempt in 1 2 3; do
+            # #10523: HEAL the runner's prefix before the fetch. `npm install -g`
+            # retires the old directory to a name computed FROM THE INSTALL PATH
+            # (npm's retire-path.js), so an install killed mid-flight leaves a
+            # residue that every later install re-targets — `rename(2)` then fails
+            # ENOTEMPTY and no backoff can clear it (measured 2026-11-02T03:58Z:
+            # three attempts, one destination, `.wrangler-UdmJz4wm`). Inside the
+            # loop because a killed attempt can leave residue of its own.
+            bash "$GITHUB_WORKSPACE/.github/scripts/npm-global-wedge.sh" clear \
+              "$(npm root -g)/wrangler"
             if npm install -g "wrangler@${WRANGLER_VERSION:?}"; then
               got="$(wrangler --version | tr -d '[:space:]')"
               if [ "$got" = "$WRANGLER_VERSION" ]; then
