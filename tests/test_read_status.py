@@ -664,6 +664,16 @@ class TestHostedSearchRoute:
         import tortoise.hosted_api as hosted_api
 
         class _FakeSDK:
+            def _get_proj(self):
+                # #10602 review P1: a read route's SDK is constructed WITH its
+                # projection attached (``_data_sdk_with_projection``), because
+                # the cold open must ride the construction lane and not the read
+                # lane's 8 s bound. `_data_sdk` is the documented seam these
+                # tests patch to substitute the SDK, so the fake has to model
+                # that attach — otherwise it is not a fake of the object these
+                # routes now receive.
+                return object()
+
             def tortoise_fts_query(self, q, limit=10, read_status_out=None,
                                    _truncation_out=None, **_ignored):
                 if read_status_out is not None:
@@ -701,6 +711,120 @@ class TestHostedSearchRoute:
         assert body["status"] == STATUS_UNCONFIGURED
         assert body["count"] == 1
         assert body["results"]
+
+
+class TestAStoreThatWillNotOpenKeepsTheDocumentedArms:
+    """#10602 review P1: the CONSTRUCTION can now fail, so it must be mapped.
+
+    ``attach_projection=True`` made `_data_sdk_offloaded` TOUCH the store
+    (``Projection.__init__`` connects), where ``_data_sdk`` alone only resolves a
+    name. The failure therefore happens on the line that builds the SDK — and a
+    store that will not OPEN escaped from there as an unhandled Starlette 500,
+    because both documented arms of the handler's own ``OVERRIDES:`` block sat
+    either in ``tortoise_fts_query`` (never entered) or inside a ``try`` the
+    failure now preceded.
+
+    The recorded promise is the one under test, per flag state:
+
+    * read-status (or residency) ON → ``status: degraded`` plus an INCOMPLETE
+      empty, exactly what ``sdk.tortoise_fts_query``'s own ``_get_proj()`` arm
+      emits for the same store;
+    * both OFF → the route's own 500 ``"Search failed"``, byte for byte as
+      before.
+
+    RED on the pre-fix shape: the fake-store exception propagates out of
+    ``search`` (the ``HTTPException``/degraded assertions never run).
+    """
+
+    def _patch_unopenable(self, monkeypatch):
+        import tortoise.hosted_api as hosted_api
+
+        closed: list[bool] = []
+
+        class _UnopenableStoreSDK:
+            def _get_proj(self):
+                raise ConnectionError("the store at <fdb://x> will not open")
+
+            def tortoise_fts_query(self, *a, **kw):  # pragma: no cover
+                raise AssertionError(
+                    "the query ran against a store that never opened")
+
+            def close(self):
+                closed.append(True)
+
+        monkeypatch.setattr(hosted_api, "_data_sdk",
+                            lambda org: _UnopenableStoreSDK())
+        monkeypatch.setattr(hosted_api, "_require_scope",
+                            lambda org, scope, name: None)
+        return hosted_api, closed
+
+    def test_status_on_names_the_impairment_instead_of_escaping(
+            self, monkeypatch):
+        hosted_api, closed = self._patch_unopenable(monkeypatch)
+        monkeypatch.setenv("TORTOISE_READ_STATUS", "1")
+        body = asyncio.run(hosted_api.search(q="alpha", limit=5, org={}))
+        assert body["status"] == STATUS_DEGRADED
+        assert body["results"] == []
+        assert body["count"] == 0
+        # #8447: an UNREAD store is not a COMPLETE empty — the third state.
+        assert body["truncated"] is True
+        assert "total_available" not in body
+        # the handle `_data_sdk` opened is released, not leaked
+        assert closed == [True]
+
+    def test_residency_only_still_names_the_impairment(self, monkeypatch):
+        """§17.2: an absent marker over a bare empty is the silent-empty."""
+        hosted_api, _closed = self._patch_unopenable(monkeypatch)
+        monkeypatch.delenv("TORTOISE_READ_STATUS", raising=False)
+        monkeypatch.setenv("TORTOISE_RESIDENCY", "1")
+        body = asyncio.run(hosted_api.search(q="alpha", limit=5, org={}))
+        assert body["status"] == STATUS_DEGRADED
+        # the known-hot set was never read, so residency is ABSENT — never a
+        # guessed `not-hot` for a store we could not reach.
+        assert "residency" not in body
+
+    def test_both_flags_off_keeps_the_documented_500(self, monkeypatch):
+        hosted_api, closed = self._patch_unopenable(monkeypatch)
+        monkeypatch.delenv("TORTOISE_READ_STATUS", raising=False)
+        monkeypatch.delenv("TORTOISE_RESIDENCY", raising=False)
+        from fastapi import HTTPException
+        with pytest.raises(HTTPException) as exc:
+            asyncio.run(hosted_api.search(q="alpha", limit=5, org={}))
+        assert exc.value.status_code == 500
+        assert exc.value.detail == "Search failed"
+        assert closed == [True]
+
+    def test_topic_summary_keeps_its_500_arm(self, monkeypatch):
+        """Same ordering defect, same route shape, one documented outcome."""
+        hosted_api, closed = self._patch_unopenable(monkeypatch)
+        from fastapi import HTTPException
+        with pytest.raises(HTTPException) as exc:
+            asyncio.run(hosted_api.topic_summary(topic="t", org={}))
+        assert exc.value.status_code == 500
+        assert exc.value.detail == "Topic summary failed"
+        assert closed == [True]
+
+    def test_a_construction_lane_capacity_refusal_is_not_a_store_500(
+            self, monkeypatch):
+        """A busy pool is not a broken store: the 503 must survive the new arm."""
+        import tortoise.hosted_api as hosted_api
+        from fastapi import HTTPException as _HTTPException
+
+        async def _refuse(org, *, attach_projection=False):
+            raise _HTTPException(
+                status_code=503,
+                detail={"error_code": "graph_unavailable",
+                        "message": "graph lane refused"})
+
+        monkeypatch.setattr(hosted_api, "_data_sdk_offloaded", _refuse)
+        monkeypatch.setattr(hosted_api, "_require_scope",
+                            lambda org, scope, name: None)
+        for call in (lambda: hosted_api.search(q="alpha", limit=5, org={}),
+                     lambda: hosted_api.topic_summary(topic="t", org={})):
+            with pytest.raises(_HTTPException) as exc:
+                asyncio.run(call())
+            assert exc.value.status_code == 503
+            assert exc.value.detail["error_code"] == "graph_unavailable"
 
 
 # ---------------------------------------------------------------------------

@@ -11047,38 +11047,71 @@ async def search(q: str, limit: int = Query(10, ge=1, le=100), org: dict = Depen
     # re-raises and this route's own 500 arm answers, exactly as before. A
     # domain error from `_data_sdk` itself propagates unchanged either way.
     # Relayed to #3718 (issuecomment-6330213773).
-    sdk = await _data_sdk_offloaded(org, attach_projection=True)
+    # ⛔ #10602 review P1 (fix): `attach_projection=True` makes the
+    # CONSTRUCTION touch the store (`Projection.__init__` connects), whereas
+    # `_data_sdk` alone only resolves a name. So this line can now fail for a
+    # reason the `try:` below can no longer cover — and until it was wrapped,
+    # a store that would not OPEN escaped as an unhandled Starlette 500, making
+    # BOTH documented arms of the `OVERRIDES:` block above unreachable on this
+    # route: `tortoise_fts_query` was never entered (so `_STATUS_DEGRADED` was
+    # never set) and this route's own `except Exception: 500 "Search failed"`
+    # sat inside a `try` the failure now preceded. The construction is therefore
+    # mapped through those SAME two outcomes here, so the promise in the block
+    # above stays true. A construction-lane CAPACITY refusal is not a store
+    # condition and keeps its own 503 (hence the `HTTPException` arm first).
     try:
-        # #1676 (launch capacity): tortoise_fts_query is CPU-blocking — the
-        # query encode (sdk.py model.encode, ~10-50ms for bge-small) runs
-        # inline plus the 3 search legs. In a single-worker async server this
-        # serializes ALL requests on the event loop. Offload to a worker
-        # thread so concurrent searches overlap their encode/DB work — on the
-        # dedicated, BOUNDED read lane (#10602), never the shared default
-        # executor, where this 40–80 ms round trip sat behind other tenants'
-        # stalls and became a 3.7–14.6 s answer. Same callable, same result;
-        # only WHERE it runs changes.
-        results = await _read_offload(
-            lambda: sdk.tortoise_fts_query(
-                q, limit=limit, read_status_out=status_out,
-                _truncation_out=trunc_out),
-            op="search")
+        sdk = await _data_sdk_offloaded(org, attach_projection=True)
     except HTTPException:
-        # #10602 review P1: the read lane's capacity refusal is an
-        # ``HTTPException`` (503 ``graph_unavailable``) and it is raised INSIDE
-        # the ``try`` below — so this blanket arm would repaint the ONE legible,
-        # retryable refusal this change exists to deliver as a non-retryable 500
-        # "Search failed" (with no ``error_code``), plus a full ``exception()``
-        # traceback per refused request at the saturation moment. The construction
-        # refusal always sat OUTSIDE this ``try``, which is why the 503 copy was
-        # previously unreachable here.
         raise
     except Exception:
         import logging
         logging.getLogger("tortoise.api").exception("search failed")
-        raise HTTPException(status_code=500, detail="Search failed")  # noqa: B904
-    finally:
-        sdk.close()
+        if status_out is None:
+            # Both flags off: the documented pre-#10602 fallback, byte for byte.
+            raise HTTPException(status_code=500, detail="Search failed")  # noqa: B904
+        # Flags on: the store will not OPEN, which is an OUTAGE, not an empty
+        # result — the same answer `sdk.tortoise_fts_query`'s own `_get_proj()`
+        # arm produces (``tortoise/sdk.py``: *"A store that will not OPEN is
+        # `degraded` (off by OUTAGE) … Never an empty result, and never a
+        # raise"*), so the two cannot drift into disagreeing about ONE store.
+        # Keep them in step: `status` = degraded, and the empty is marked
+        # INCOMPLETE so a 0-row outage is never reported as a complete empty.
+        from tortoise.truncation import mark_truncation as _lost_mark
+        status_out["status"] = _STATUS_DEGRADED
+        _lost_mark(trunc_out, returned=0, candidates=0, incomplete=True)
+        results = []
+    else:
+        try:
+            # #1676 (launch capacity): tortoise_fts_query is CPU-blocking — the
+            # query encode (sdk.py model.encode, ~10-50ms for bge-small) runs
+            # inline plus the 3 search legs. In a single-worker async server this
+            # serializes ALL requests on the event loop. Offload to a worker
+            # thread so concurrent searches overlap their encode/DB work — on the
+            # dedicated, BOUNDED read lane (#10602), never the shared default
+            # executor, where this 40–80 ms round trip sat behind other tenants'
+            # stalls and became a 3.7–14.6 s answer. Same callable, same result;
+            # only WHERE it runs changes.
+            results = await _read_offload(
+                lambda: sdk.tortoise_fts_query(
+                    q, limit=limit, read_status_out=status_out,
+                    _truncation_out=trunc_out),
+                op="search")
+        except HTTPException:
+            # #10602 review P1: the read lane's capacity refusal is an
+            # ``HTTPException`` (503 ``graph_unavailable``) and it is raised
+            # INSIDE this ``try`` — so this blanket arm would repaint the ONE
+            # legible, retryable refusal this change exists to deliver as a
+            # non-retryable 500 "Search failed" (with no ``error_code``), plus a
+            # full ``exception()`` traceback per refused request at the
+            # saturation moment. The construction refusal sits in its own arm
+            # above, which is why the 503 copy was previously unreachable here.
+            raise
+        except Exception:
+            import logging
+            logging.getLogger("tortoise.api").exception("search failed")
+            raise HTTPException(status_code=500, detail="Search failed")  # noqa: B904
+        finally:
+            sdk.close()
     # Normalize to the public response shape (kind from pointKind).
     out = []
     for r in results:
@@ -11139,7 +11172,20 @@ async def topic_summary(
     _require_scope(org, "graphs:read", "topic_summary")
     # #3718 (construction half of #4660, second batch): built off the loop — see
     # the `search` handler for the full rationale and the `OVERRIDES:` line.
-    sdk = await _data_sdk_offloaded(org, attach_projection=True)
+    #
+    # ⛔ #10602 review P1 (fix): the attach makes this line touch the store, so
+    # it can fail where `_data_sdk` alone could not. Its documented outcome on
+    # this route is the 500 arm below; that arm sat inside a `try` the failure
+    # now preceded, so it is mapped here too (a construction-lane CAPACITY
+    # refusal is not a store condition and keeps its 503).
+    try:
+        sdk = await _data_sdk_offloaded(org, attach_projection=True)
+    except HTTPException:
+        raise
+    except Exception:
+        import logging
+        logging.getLogger("tortoise.api").exception("topic summary failed")
+        raise HTTPException(status_code=500, detail="Topic summary failed")  # noqa: B904
     try:
         # #1676 (launch capacity): topic_summarize is CPU-blocking (EP
         # classification + neighborhood traversal) — offload to a worker
