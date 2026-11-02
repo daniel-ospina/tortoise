@@ -1532,6 +1532,19 @@ jobs:
     # attachment provides, and this job bypasses it. Accepted here because the
     # job is non-required; it must NOT be copied onto a required leg.
     runs-on: [self-hosted, self-hosted-x64]
+    # ⚠️ THE RESIDUAL HAS TWO FAILURE MODES, NOT ONE — both measured on this job.
+    # A label set no runner carries leaves the job QUEUED (the 24h limit, no red,
+    # nothing to look at), which is the mode named above. A runner that CLAIMED the
+    # job and then dropped it does not wait — it REDS. Measured at `99e899f3b`, run
+    # `41367201398` / job `125030350732`: `repo-harnesses` on `pi-runner-cmux-x64-8`
+    # — the same runner that carried this job green (15 steps, 1m38s) in run
+    # `41343233944` — started 00:29:10Z, ended 00:40:10Z, reported ZERO steps, and
+    # annotated "The self-hosted runner lost communication with the server". Zero
+    # steps is the discriminator: no step of this job ran, so no step of it caused
+    # that. Re-run before investigating a harness. It costs no merge (this job is
+    # in no `needs:` of the required aggregate — `python-ci.yml:4411`), but a red
+    # carrying no steps READS as a job defect, which is the #9018 misdiagnosis one
+    # layer up — the same class this job's tool contract exists to prevent.
     # ⚠️ WHAT THIS CANARY PROVES — READ IT NARROWLY (#10237 ask 1).
     # The ask is two-part: a non-required canary, AND a proof list on it ("docker
     # available, the FalkorDB image pullable, `uv sync --extra embeddings --extra

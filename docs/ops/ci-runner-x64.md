@@ -936,6 +936,21 @@ and job queue waits in run `41320964047` were 15.3, 17.8, 19.0, 25.5, 33.7, 34.5
 `self-hosted` pin on them removes the GitHub-hosted half of the race, which the refusal recorded at
 `python-ci.yml:1891` and above forbids.
 
+The residual recorded there is a WAIT, which is only one of its two modes — both measured on this
+job itself:
+
+- **QUEUED** — a label set no runner carries: no red, no annotation, no alarm (GitHub holds the job
+  to the 24h limit). That is the silent mis-registration mode.
+- **RED with ZERO steps** — a runner that CLAIMED the job and then dropped it does not wait. At
+  `99e899f3b`, run `41367201398` / job `125030350732`: `repo-harnesses` on `pi-runner-cmux-x64-8`
+  (the same runner that had carried this job green — 15 steps, 1 m 38 s — in run `41343233944`)
+  started 00:29:10Z, ended 00:40:10Z, reported **no steps at all**, and annotated *"The
+  self-hosted runner lost communication with the server"*. The zero-step count is the
+  discriminator: none of the job's own steps ran, so none of them caused it. Re-run before
+  investigating a harness — a red here READS as a harness defect, which is #9018's misdiagnosis one
+  layer up. It costs no merge only because this job is absent from the required aggregate's
+  `needs:` (`python-ci.yml:4411`).
+
 ⛔ **Do not copy this pin onto a required leg.** The override is scoped to a job whose failure costs a
 wait, and a required leg's failure costs the merge. It also bypasses the label attachment
 `scripts/ci_runner_gate.sh` performs, so it has no hosted fallback at all.
