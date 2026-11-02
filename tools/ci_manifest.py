@@ -391,8 +391,8 @@ def floor_issues(manifest: dict) -> list[str]:
     Some weights in this map are not what the file cost, they are what the pack
     SHALL assume — deliberately high, because understating a weight "can red
     ``python-ci-gate`` with zero test failures" (#3395). ``test_lane_stash.py``
-    states that in prose directly above its own row (""⛔ 355.0 IS A DELIBERATE CAP,
-    NOT A READING … a CI-budget decision recorded on #9172"");
+    states that in prose directly above its own row ("⛔ 355.0 IS A DELIBERATE CAP,
+    NOT A READING … a CI-budget decision recorded on #9172");
     ``test_calibration.py`` and ``eval/write_path/test_write_path_operator_lane.py``
     hold the same cap. ``ci_timing._declared_floors`` makes such a declaration
     binding on the writer, and this is the read side that keeps it HONEST.
@@ -401,10 +401,10 @@ def floor_issues(manifest: dict) -> list[str]:
 
     * a key with no ``durations`` row — the floor guards a weight the map does not
       carry, so the file packs at the flat default and the floor never applies.
-      That is the #3400/#4348 trap (""a row must EXIST, not merely default"") applied
+      That is the #3400/#4348 trap ("a row must EXIST, not merely default") applied
       to the mechanism meant to make a declared cap binding;
     * a row that contradicts its own declaration — BELOW a floor, or ABOVE a CAP.
-      The map then says ""this weight is a declared minimum"" (or maximum) and
+      The map then says "this weight is a declared minimum" (or maximum) and
       writes a number on the wrong side of it, which is the state that makes a
       reader distrust both halves. The writer keeps a row inside its declaration
       in both cases, so reaching it means someone hand-edited one of the two and
