@@ -117,6 +117,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import concurrent.futures
 import os
 import threading
 import time
@@ -3202,6 +3203,21 @@ def test_the_read_path_answers_while_the_default_executor_is_stalled(client):
     shared pool; it does NOT prove the whole request path is clear of it, and
     it must not be cited as if it did. That pre-handler hop is a NAMED residual
     of #10602, not a property of this change.
+
+    ⛔ AND THE SAME LIMIT APPLIES BY ROUTE: four GET handlers are converted
+    (``GET /v1/points``, ``GET /v1/points/{id}``, ``GET /v1/search``,
+    ``GET /v1/topics/{t}/summary`` — ``_READ_LANE_CASES``). The REST read
+    surface is larger than that, and the SIBLING read handlers still submit
+    their blocking FalkorDB round trip to the shared default executor under an
+    unbounded wait — the identical ``await asyncio.to_thread(lambda: proj.g.
+    query(…))`` shape `list_points` was converted from. ``GET /v1/sessions``,
+    ``GET /v1/sessions/{id}`` (eight such submissions in one body),
+    ``GET /v1/team``, ``GET /v1/events``, ``GET /v1/context``,
+    ``GET /v1/issue-insight``, ``GET /v1/graphs/trash``,
+    ``GET /v1/organizations/{id}/export`` are tracked as #10651, NOT converted
+    here. So "the reads now answer while the shared pool is stalled" holds for
+    the four cases above and for no other route, and this test must not be
+    cited as a claim about the read surface as a whole.
     """
     from tortoise.hosted_api import app
 
@@ -3416,6 +3432,82 @@ def test_a_prefer_bound_miss_falls_back_to_the_cache(client):
             f"(before {before!r} -> after {after!r})")
 
 
+def test_a_record_bound_miss_is_not_reported_as_a_never_asked_lane_refusal(
+        client):
+    """#10602 review P2-3: ``refused=False`` is a DIFFERENT condition.
+
+    ``_read_offload`` used to drop the ``ControlPlaneOffloadError`` on the
+    floor, so the refusal factory could not see the seam's own discriminator
+    (``monitoring.ControlPlaneOffloadError.refused``). The ``prefer`` arm then
+    hard-coded ``record-read-lane-refused`` — whose contract says the record was
+    NEVER ASKED — for a plain bound miss, where the submission is still RUNNING
+    and the record WAS asked and was slow. An operator reading that counter
+    climb was sent to the read-pool backlog for a record that answered nothing
+    yet, which is the same misattribution the fourth reason exists to prevent,
+    one arm over.
+
+    RED before the fix: the wire carried ``record-read-lane-refused`` and that
+    counter incremented, for a record that was asked.
+    """
+    import tortoise.hosted_api as ha_mod
+    from tortoise import monitoring as mon
+    from tortoise import record_serve
+    from tortoise.hosted_api import app
+
+    _seed_read_surface()
+    real_call = ha_mod.run_control_plane_call
+    ops: list[str] = []
+    # ⚠️ Module-level counters shared by the session: assert a DELTA.
+    before = dict(record_serve.fallback_counts())
+
+    async def _bound_miss_only_the_record_leg(fn, *, op, **kwargs):
+        ops.append(op)
+        if op == "get_point.serve":
+            # ``refused=False`` = the bound abandoned only the await; the
+            # worker is STILL RUNNING the record callable.
+            raise mon.ControlPlaneOffloadError(
+                "probe: read lane bound miss", refused=False)
+        return await real_call(fn, op=op, **kwargs)
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(ha_mod, "run_control_plane_call",
+                        _bound_miss_only_the_record_leg)
+    monkeypatch.setattr(record_serve, "serve_mode",
+                        lambda: record_serve.MODE_PREFER)
+    monkeypatch.setattr(ha_mod, "_resolve_record_tenant",
+                        lambda _org: ("tenant-probe", "graph-probe"))
+    try:
+        async def _run():
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(transport=transport,
+                                         base_url="http://test") as ac:
+                return await ac.get(f"/v1/points/{_SEEDED_POINT}")
+
+        response = asyncio.run(_run())
+    finally:
+        monkeypatch.undo()
+
+    assert "get_point.serve" in ops, (
+        f"the record leg was never submitted (ops: {ops!r}) — this test would "
+        f"pass vacuously")
+    assert response.status_code == 200, response.text[:300]
+    body = response.json()
+    assert body.get("fallbackReason") == record_serve.FALLBACK_RECORD_BOUND_MISS, (
+        f"a RUNNING record bound miss was reported as "
+        f"{body.get('fallbackReason')!r} — a record that was ASKED and is slow "
+        f"must not be reported as a lane that refused before asking "
+        f"(#10602 review P2-3)")
+    after = record_serve.fallback_counts()
+    assert after.get(record_serve.FALLBACK_RECORD_LANE_REFUSED, 0) == \
+        before.get(record_serve.FALLBACK_RECORD_LANE_REFUSED, 0), (
+            f"an ASKED record inflated the never-asked counter "
+            f"(before {before!r} -> after {after!r})")
+    assert after.get(record_serve.FALLBACK_RECORD_BOUND_MISS, 0) == \
+        before.get(record_serve.FALLBACK_RECORD_BOUND_MISS, 0) + 1, (
+            f"the asked-but-slow record was not counted under its own reason "
+            f"(before {before!r} -> after {after!r})")
+
+
 def test_the_record_read_refusal_is_not_shadowed_by_the_session_one():
     """#10602 review P2, the defect a passing suite could not see.
 
@@ -3469,6 +3561,12 @@ class TestTheReadLaneExemptsARequestOwnedColdSetup:
         from tortoise import mcp_auth
 
         calls: list[str] = []
+        #: The submission the bound ABANDONS. It is still RUNNING, so the seam
+        #: must re-await THIS (never submit a second copy of the callable) —
+        #: #10602 review P2. Its result is deliberately a different string from
+        #: the callable's, so a test can tell which attempt answered.
+        in_flight = concurrent.futures.Future()
+        in_flight.set_result("rows-from-the-running-submission")
 
         async def _refuses_then_succeeds(fn, *, op, pool="auth", timeout=None,
                                          cancel_on_timeout=True):
@@ -3479,7 +3577,8 @@ class TestTheReadLaneExemptsARequestOwnedColdSetup:
 
         def mon_offload_error():
             from tortoise.monitoring import ControlPlaneOffloadError
-            return ControlPlaneOffloadError("probe: bound miss", refused=False)
+            return ControlPlaneOffloadError("probe: bound miss", refused=False,
+                                            in_flight=in_flight)
 
         drained: list[bool] = []
 
@@ -3501,15 +3600,23 @@ class TestTheReadLaneExemptsARequestOwnedColdSetup:
     def test_a_request_owned_cold_load_re_arms_the_bound_once(
             self, monkeypatch):
         """RED before the fix: the 8 s bound refused at 8 s and the #4055
-        exemption was never consulted, so a healthy graph answered 503."""
+        exemption was never consulted, so a healthy graph answered 503.
+
+        ⛔ And it re-arms the submission it ALREADY OWNS (#10602 review P2): the
+        answer must come from the abandoned, still-RUNNING submission, and the
+        callable must not be submitted a second time. A re-submission would run
+        the query twice concurrently, hold two of the lane's slots while it is
+        at its bound, and count one read as two in the retrieval ledger.
+        """
         _run, calls, drained = self._drive(monkeypatch, cold_setup=True)
-        assert asyncio.run(_run()) == "rows", (
+        assert asyncio.run(_run()) == "rows-from-the-running-submission", (
             "a read whose own embedder cold load was in flight was not "
             "exempted — the #4055 transport exemption exists for exactly this, "
             "and the read lane must not be the one bound that cannot see it")
-        assert len(calls) == 2, (
+        assert len(calls) == 1, (
             f"the read lane made {len(calls)} submission(s) — a request-owned "
-            f"cold setup must re-arm the bound AT MOST ONCE")
+            f"cold setup must re-AWAIT the running submission, never submit "
+            f"the callable a second time (#10602 review P2)")
         assert drained == [True], (
             f"the in-flight cold load was not drained outside the budget "
             f"(drains: {drained!r})")
@@ -3534,7 +3641,13 @@ class TestTheReadLaneExemptsARequestOwnedColdSetup:
 
     def test_the_exemption_re_arms_only_once(self, monkeypatch):
         """An exemption that can be re-taken is not a bound: a genuinely slow
-        read must still breach rather than being forgiven indefinitely."""
+        read must still breach rather than being forgiven indefinitely.
+
+        ⛔ #10602 review P2: the re-arm is a RE-AWAIT of the submission already
+        in flight, so a second bound miss refuses — it does not submit the
+        callable again (that would be a duplicate execution, and the submission
+        count is the observable for it).
+        """
         from fastapi import HTTPException
 
         import tortoise.hosted_api as ha_mod
@@ -3542,11 +3655,13 @@ class TestTheReadLaneExemptsARequestOwnedColdSetup:
         from tortoise.monitoring import ControlPlaneOffloadError
 
         calls: list[str] = []
+        busy = concurrent.futures.Future()   # never resolves: still running
 
         async def _always_refuses(fn, *, op, pool="auth", timeout=None,
                                   cancel_on_timeout=True):
             calls.append(op)
-            raise ControlPlaneOffloadError("probe: bound miss", refused=False)
+            raise ControlPlaneOffloadError("probe: bound miss", refused=False,
+                                           in_flight=busy)
 
         async def _drain():
             return None
@@ -3564,25 +3679,36 @@ class TestTheReadLaneExemptsARequestOwnedColdSetup:
         with pytest.raises(HTTPException) as excinfo:
             asyncio.run(_run())
         assert excinfo.value.status_code == 503
-        assert len(calls) == 2, (
-            f"the cold-setup exemption re-armed {len(calls) - 1} time(s) — it "
-            f"must re-arm AT MOST ONCE, or a genuinely slow read is forgiven "
-            f"indefinitely and the bound stops being a bound")
+        # ONE submission, ONE re-await. A second submission is the duplicate
+        # execution the re-arm must never become, and more than one re-await is
+        # an exemption that can be re-taken (i.e. not a bound).
+        assert len(calls) == 1, (
+            f"the cold-setup exemption submitted the callable {len(calls)} "
+            f"time(s) — a re-arm must re-await the RUNNING submission, never "
+            f"re-run it (#10602 review P2)")
 
-    def test_the_re_arm_does_not_re_enter_the_first_attempts_context(
+    def test_the_re_arm_keeps_the_running_submission_instead_of_running_it_twice(
             self, monkeypatch):
-        """#10602 review P1 — RED before the fix, with the real seam.
+        """#10602 review P2-2 — RED before the fix, with the REAL seam.
 
-        A bound miss abandons the AWAIT, never the thread (CPython cannot cancel
-        a started thread), and ``_drain_cold_setup`` returns as soon as the
-        load's in-flight flag clears — while the worker is still inside the
-        encode and the search legs. So the re-arm is submitted while the FIRST
-        attempt is still INSIDE its ``ctx.run``: a Context reused for the retry
-        raises ``RuntimeError: cannot enter context: … is already entered``.
-        That is not a ``ControlPlaneOffloadError``, so it escapes
-        ``_read_offload`` and the routes' blanket ``except Exception`` answers
-        **500** ("Search failed", no ``error_code``, not retryable) — a worse
-        answer than the 503 the bound would have given.
+        The cold-setup case is by construction a ``refused=False`` bound miss:
+        the load is triggered INSIDE the callable, so the worker is mid-encode
+        when the bound fires, and ``_drain_cold_setup`` returns as soon as the
+        load's in-flight flag clears — while the worker may still be inside the
+        encode and the search legs.
+
+        The pre-fix re-arm SUBMITTED AGAIN, so the query ran a second time
+        concurrently while the first kept running: two of the lane's slots for
+        one request at the moment the lane is at its bound, one search counted
+        as two retrievals (the tally is a mutable object shared by reference
+        through the copied context), and — the symptom that surfaced it first —
+        a ``RuntimeError: cannot enter context`` when the first attempt was
+        still inside its ``ctx.run``. (That P1 is fixed too: the copy is taken
+        per attempt.)
+
+        So the assertion is BOTH halves at once: the answer must come from the
+        submission the read already paid for, and the callable must have run
+        exactly ONCE.
 
         ⛔ The sibling tests in this class cannot see it: their
         ``_refuses_then_succeeds`` raises BEFORE invoking ``fn``, so no first
@@ -3600,11 +3726,12 @@ class TestTheReadLaneExemptsARequestOwnedColdSetup:
             calls.append(1)
             if len(calls) == 1:
                 started.set()
-                # Hold the first attempt INSIDE ``ctx.run`` until the retry has
-                # been submitted and returned: that is the collision window.
+                # Hold the first attempt INSIDE ``ctx.run`` until the drain has
+                # returned: that is the window in which a re-submission would
+                # collide with this very context.
                 release.wait(30)
-                return "first-done"
-            return "second-done"
+                return "the-run-that-was-already-paid-for"
+            return "a-second-concurrent-run"
 
         async def _drain():
             # The REAL helper returns while the load is still in flight; the
@@ -3613,6 +3740,9 @@ class TestTheReadLaneExemptsARequestOwnedColdSetup:
                 "the first submission never started — the bound fired while it "
                 "was still QUEUED, so this test's premise (a bound miss that "
                 "left the callable RUNNING) was never established")
+            # The cold load is done; the submission that was running it can now
+            # finish. A re-awaiting seam picks up ITS result.
+            release.set()
 
         async def _warm():
             # Dequeue the read pool's worker up front so the first submission
@@ -3631,16 +3761,18 @@ class TestTheReadLaneExemptsARequestOwnedColdSetup:
             return await ha_mod._read_offload(_fn, op="search")
 
         try:
-            assert asyncio.run(_run()) == "second-done", (
-                "the re-armed read did not answer — a retry that reuses the "
-                "first attempt's context raises RuntimeError (a 500 on "
-                "/v1/search), and one that re-runs the query in a second "
-                "worker answers this callable's SECOND result instead")
+            answer = asyncio.run(_run())
         finally:
             release.set()
-        assert len(calls) == 2, (
-            f"the callable ran {len(calls)} time(s) — the exemption re-arms "
-            f"AT MOST ONCE, so exactly one retry is expected")
+        assert answer == "the-run-that-was-already-paid-for", (
+            "the re-armed read answered from a SECOND execution — the "
+            "exemption re-submitted the callable instead of re-awaiting the "
+            "submission it already owned (#10602 review P2-2); got "
+            f"{answer!r}")
+        assert len(calls) == 1, (
+            f"the callable ran {len(calls)} time(s) — a request-owned cold "
+            f"setup must RE-AWAIT the running submission, never run the query "
+            f"twice concurrently (#10602 review P2-2)")
 
     def test_a_missing_owner_probe_fails_closed_not_500(self, monkeypatch):
         """The identity probe is GUARDED, like the helpers it pairs with.

@@ -169,6 +169,7 @@ from tortoise.monitoring import (  # #2850/2953 liveness-readiness decouple
     record_read_timeout_s,
     record_telemetry_drop,  # #4095 allowlist-drop counter (the /metrics seam)
     run_control_plane_call,
+    reawait_control_plane_call,
     run_on_daemon_worker,
     start_health_listener,
     start_stall_watchdog,
@@ -9116,9 +9117,16 @@ async def _cp_offload(fn, *, op: str, best_effort: bool = False,
         raise _control_plane_unavailable() from None
 
 
-def _graph_unavailable() -> HTTPException:
+def _graph_unavailable(_exc: object | None = None) -> HTTPException:
     """#3773: fail-closed 503 for a saturated / bound-missed GRAPH-lane offload
     (a data-plane helper or a registry read, #3718).
+
+    ``_exc`` is the ``ControlPlaneOffloadError`` the read seam caught, when a
+    caller's refusal factory wants to read ``refused`` / ``in_flight`` from it
+    (#10602 review P2). The graph-lane body does NOT vary by it — a refused and
+    a bound-missed graph submission are both retryable capacity failures — but
+    the parameter exists so every ``_read_offload(unavailable=…)`` factory has
+    ONE calling convention instead of a signature the seam has to sniff.
 
     Deliberately NOT ``_control_plane_unavailable``: that body's copy is
     sign-in specific and would mislead a client retrying a graph write. A
@@ -9335,9 +9343,13 @@ async def _read_offload(fn, *, op: str, unavailable=None, timeout=None):
 
     ``unavailable`` overrides that refusal BODY (#10602 review P2), for the one
     caller whose callable is not graph work: ``get_point``'s ARMED record phase,
-    which is a record round trip and answers ``record_unavailable`` instead. The
-    read lane still owns the bound and the fail-closed shape either way — only
-    the name of the dependency that was refused changes.
+    which is a record round trip. It is called with the
+    ``ControlPlaneOffloadError`` that was caught, so the factory can tell a
+    REFUSED submission (never ran) from a BOUND MISS (asked, still running) and
+    name each honestly — the distinction ``ControlPlaneOffloadError.refused``
+    exists for (`#10602 review P2`). The read lane still owns the bound and the
+    fail-closed shape either way — only the name of the dependency that was
+    refused changes.
 
     ``timeout`` (#10602 review P2) overrides the WAIT BOUND for a caller whose
     callable is a different RESOURCE CLASS. Default: ``read_offload_timeout_s()``,
@@ -9369,23 +9381,33 @@ async def _read_offload(fn, *, op: str, unavailable=None, timeout=None):
 
     ⛔ #10602 review P1 — THE CONTEXT COPY IS TAKEN PER ATTEMPT, NOT ONCE.
     ``Context.run`` refuses RE-ENTRY (``RuntimeError: cannot enter context: …
-    is already entered``), and the re-arm above is exactly the case where the
-    first attempt may still be INSIDE its copy: a bound miss abandons the
-    await, never the thread (CPython cannot cancel a started thread), and
-    ``_drain_cold_setup`` returns as soon as the load's in-flight flag clears —
-    while the worker is still running the encode and the search legs. A single
-    copy shared by the retry therefore raised a bare ``RuntimeError``, which is
-    NOT a ``ControlPlaneOffloadError``: it escaped this seam and the routes'
-    blanket ``except Exception`` answered **500** ("Search failed", no
-    ``error_code``, not retryable) in precisely the cold-embedder window this
-    exemption exists for — a worse answer than the 503 the bound would have
-    given, and it re-ran the query in a second worker besides. A fresh copy per
-    submission keeps the property ``ctx`` exists for (no ContextVar leaks into
-    the next request the process-lifetime worker serves) AND cannot collide
-    with the attempt it replaces.
+    is already entered``), and a re-submission is the case where that could
+    bite: a bound miss abandons the await, never the thread (CPython cannot
+    cancel a started thread). A single copy shared by a retry would raise a bare
+    ``RuntimeError``, which is NOT a ``ControlPlaneOffloadError``: it would
+    escape this seam and the routes' blanket ``except Exception`` would answer
+    **500** ("Search failed", no ``error_code``, not retryable). A fresh copy
+    per submission keeps the property ``ctx`` exists for (no ContextVar leaks
+    into the next request the process-lifetime worker serves) and cannot
+    collide with an attempt it replaces.
+
+    ⛔ #10602 review P2 — A RE-ARM IS ONLY HONEST WHEN THE SUBMISSION NEVER RAN,
+    AND IT IS NEVER A SECOND SUBMISSION WHILE THE FIRST IS RUNNING.
+    ``ControlPlaneOffloadError.refused`` is the seam's own discriminator:
+    ``True`` means the callable did not and will not run (backlog full, or
+    cancelled while queued), so re-submitting is free; ``False`` means the bound
+    abandoned only the AWAIT and the worker is STILL RUNNING the callable.
+    Re-submitting there would run the query TWICE concurrently — doubling the
+    CPU on a lane that is at its bound (the abandoned attempt keeps its slot
+    until it finishes), holding TWO of the lane's slots for one request, and
+    counting one read as two in the retrieval ledger (the tally is a mutable
+    object shared by reference through the copied context). So the cold-setup
+    case RE-AWAITS the submission it already owns (``exc.in_flight``, via
+    ``reawait_control_plane_call``) — the same shape
+    ``mcp_auth.await_under_wait_bound`` uses one seam over, where it shields the
+    task and re-awaits THAT task after draining.
     """
     bound = read_offload_timeout_s() if timeout is None else timeout
-    refuse = _graph_unavailable if unavailable is None else unavailable
     # #4055: the identity + clock the exemption compares against. ``owner`` is
     # whatever this request bound as its one-time-load owner (``None`` unarmed,
     # which never exempts — ``_cold_setup_ran_during`` enforces that).
@@ -9408,14 +9430,29 @@ async def _read_offload(fn, *, op: str, unavailable=None, timeout=None):
         try:
             return await run_control_plane_call(
                 submitted, op=op, pool="read", timeout=bound)
-        except ControlPlaneOffloadError:
+        except ControlPlaneOffloadError as exc:
+            # The refusal factory sees the error so it can name a REFUSED lane
+            # and a RUNNING bound miss differently (#10602 review P2).
+            refuse = (_graph_unavailable if unavailable is None
+                      else unavailable)
             # Re-arm AT MOST ONCE, exactly as the transport seam does, so a
-            # genuinely slow read still breaches.
-            if exempted or not _mcp_auth._cold_setup_ran_during(
-                    reference, owner):
-                raise refuse() from None
+            # genuinely slow read still breaches — and only for a submission
+            # that is still RUNNING behind a cold phase THIS request owns. A
+            # refused submission never started the load, so `refused` and the
+            # cold-setup probe agree by construction; checking both keeps the
+            # gate honest if either changes.
+            if (exempted or exc.refused or exc.in_flight is None
+                    or not _mcp_auth._cold_setup_ran_during(
+                        reference, owner)):
+                raise refuse(exc) from None
             exempted = True
             await _mcp_auth._drain_cold_setup()
+            # RE-AWAIT the submission already in flight — never a second copy.
+            try:
+                return await reawait_control_plane_call(
+                    exc.in_flight, op=op, pool="read", timeout=bound)
+            except ControlPlaneOffloadError as again:
+                raise refuse(again) from None
 
 
 async def _capture_session_probe_off_loop(org: dict, session_id: str):
@@ -10519,7 +10556,12 @@ async def get_point(point_id: str, org: dict = Depends(get_current_org_gated)): 
     misconfiguration.** Session and JWT credentials resolve no record tenant by
     design, so in `record` mode that is a **500** (there is no cache branch to
     fall back to) while in `prefer` mode it is a NAMED, COUNTED fallback —
-    `record-tenant-unresolved`, the third of the three reasons.
+    `record-tenant-unresolved`, the third of the FIVE reasons
+    (`record_serve.FALLBACK_REASONS`). The remaining two are conditions of the
+    READ LANE, not of the record: `record-read-lane-refused` (the submission
+    never ran, so the record was never asked) and `record-read-bound-miss` (the
+    submission RAN and did not answer inside the lane's bound — asked, not
+    unasked, and not an outage claim either).
 
     ⚠️ A record-served answer carries the record's PRIMARY field set, and the
     differences from the cache answer are named here in full. `content_hash` is
@@ -10666,10 +10708,20 @@ async def get_point(point_id: str, org: dict = Depends(get_current_org_gated)): 
             # `record-unavailable` — that reason is the alertable OUTAGE counter,
             # and misfiling a pool condition there sends ops to Postgres for a
             # saturation the database never caused.
-            def _record_refusal():
+            #
+            # ⚠️ …and only `exc.refused` earns that reason. A plain BOUND MISS
+            # (`refused=False`) leaves the record callable RUNNING: the record
+            # WAS asked and did not answer inside the bound, which is neither
+            # "never asked" nor the outage counter the refused arm stays out of.
+            # It has its own fifth reason (`record-read-bound-miss`) so an
+            # operator reading the counter climbs is sent to the right place
+            # (#10602 review P2).
+            def _record_refusal(exc=None):
                 if mode == record_serve.MODE_PREFER:
+                    never_ran = getattr(exc, "refused", False) is True
                     return record_serve.CacheAnswerRequired(
-                        record_serve.FALLBACK_RECORD_LANE_REFUSED)
+                        record_serve.FALLBACK_RECORD_LANE_REFUSED if never_ran
+                        else record_serve.FALLBACK_RECORD_BOUND_MISS)
                 return _record_read_unavailable()
 
             try:

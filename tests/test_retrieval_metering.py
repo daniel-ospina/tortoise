@@ -761,8 +761,16 @@ class TestTheDropReporterStaysOffTheLoop:
     """
 
     @staticmethod
-    def _drive(monkeypatch, *, refused: bool):
-        """Run one armed request whose flush is refused; return (loop_tid, calls)."""
+    def _drive(monkeypatch, *, refused: bool, settle_s: float = 10.0):
+        """Run one armed request whose flush is refused; return (loop_tid, calls).
+
+        ``settle_s`` is the grace this arm gives the reporter to land. The
+        POSITIVE arm needs the long one (the report is queued on a daemon lane
+        and is not awaited). The NEGATIVE arm asserts NOTHING was reported, so
+        no event it could wait on will ever fire — it must not pay the full
+        settle to prove a negative (it used to burn 10 s per run, #10602
+        review P3); a short grace is enough to catch a report that was queued.
+        """
         from tortoise import monitoring as mon
 
         calls: list[tuple[int, bool]] = []
@@ -796,7 +804,7 @@ class TestTheDropReporterStaysOffTheLoop:
             await mw({"type": "http", "state": {}}, _receive, _send)
 
         asyncio.run(_go())
-        done.wait(10.0)   # the reporter is queued on a daemon lane, not awaited
+        done.wait(settle_s)   # the reporter is queued on a daemon lane, not awaited
         return loop_tid[0], calls
 
     def test_a_refused_flush_never_reports_the_drop_on_the_event_loop(
@@ -821,7 +829,8 @@ class TestTheDropReporterStaysOffTheLoop:
         above: a NON-refused bound miss leaves a RUNNING submission, so its row
         IS written and reporting it would manufacture a durable
         ``unmetered_increments`` row for a flush that landed."""
-        _loop_tid, calls = self._drive(monkeypatch, refused=False)
+        _loop_tid, calls = self._drive(monkeypatch, refused=False,
+                                       settle_s=0.5)
         assert calls == [], (
             "a delivery-preserving bound miss was reported as a DROP — the row "
             "is written by the still-running submission, so this manufactures "

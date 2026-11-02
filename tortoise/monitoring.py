@@ -2450,11 +2450,25 @@ class ControlPlaneOffloadError(RuntimeError):
     NOT and WILL NOT run; ``False`` for a plain bound miss, where a RUNNING
     worker still completes the callable (the seam abandons only the await)
     and a non-cancellable lane keeps a QUEUED submission alive.
+
+    ``in_flight`` (#10602 review P2) carries that abandoned submission — the
+    ``concurrent.futures.Future`` — when the callable is STILL RUNNING. It is
+    ``None`` whenever ``refused`` is ``True`` (there is no work to wait on).
+    It exists so a caller that owns a COLD PHASE inside its callable can RE-AWAIT
+    the work it already paid for (``reawait_control_plane_call``) instead of
+    re-submitting it: a re-submission while the first attempt still runs
+    executes the callable TWICE concurrently, counts it twice in any ledger the
+    copied context carries (the tally is a mutable object shared by reference)
+    and holds a second slot of the lane exactly when that lane is at its bound.
     """
 
-    def __init__(self, message: str, *, refused: bool = False) -> None:
+    def __init__(self, message: str, *, refused: bool = False,
+                 in_flight=None) -> None:
         super().__init__(message)
         self.refused = refused
+        #: The abandoned submission, when it is still RUNNING (never for a
+        #: refused/cancelled one). ``concurrent.futures.Future`` or ``None``.
+        self.in_flight = in_flight
 
 
 def control_plane_worker(pool: str = "auth") -> _SingleSlotWorker:
@@ -2756,6 +2770,9 @@ async def run_control_plane_call(fn, *, op: str,
             raise ControlPlaneOffloadError(
                 f"control-plane call {op!r} {reason}",
                 refused=refused,
+                # Only a still-RUNNING submission is re-awaitable; a refused or
+                # cancelled one has no work behind it (#10602 review P2).
+                in_flight=(None if refused or future.done() else future),
             ) from exc
         outcome = "completed"
         return result
@@ -2763,6 +2780,59 @@ async def run_control_plane_call(fn, *, op: str,
         # The AWAITING task was cancelled — neither success nor a pool failure.
         outcome = "cancelled"
         raise
+    finally:
+        record_control_plane_offload(
+            op, time.monotonic() - started, outcome=outcome, pool=pool
+        )
+
+
+async def reawait_control_plane_call(future, *, op: str, timeout: float,
+                                     pool: str = "auth"):
+    """Re-await an ALREADY-SUBMITTED callable under a fresh bound (#10602).
+
+    The counterpart of :func:`run_control_plane_call` for the one case a bound
+    miss is not the end of the work: the callable is still RUNNING and the
+    caller has drained whatever COLD PHASE it was waiting on (the #4055 embedder
+    load). Re-awaiting ``exc.in_flight`` keeps that work instead of throwing it
+    away and doing it again:
+
+    * a RE-SUBMISSION would run the callable a second time **concurrently** —
+      double the CPU on a lane that is at its bound (the abandoned attempt keeps
+      its slot until it finishes, CPython cannot cancel a started thread), and
+    * it would also count the work twice in any ledger the copied context
+      carries, because a tally is a mutable OBJECT shared by reference.
+
+    ``mcp_auth.await_under_wait_bound`` is the same shape one seam over: it
+    shields the TASK and re-awaits THAT task after draining, never a new one.
+
+    Raises :class:`ControlPlaneOffloadError` on a second bound miss (``refused``
+    is ``False`` — the work is still running, so it is abandoned, not dropped)
+    and lets a ``CancelledError`` from the awaiting task propagate, exactly as
+    ``run_control_plane_call`` does. A ``domain`` exception from the callable
+    propagates unchanged. Every terminal state is recorded once, by the same
+    single writer (#5840), so a re-armed read stays visible as two attempts at
+    the op rather than one invisible one.
+    """
+    started = time.monotonic()
+    outcome = "domain_error"
+    try:
+        try:
+            result = await _await_future(future, timeout=timeout)
+        except TimeoutError as exc:
+            if not future.done():
+                future.add_done_callback(_log_abandoned_outcome(op))
+            outcome = "bound_miss_running"
+            raise ControlPlaneOffloadError(
+                f"control-plane call {op!r} exceeded its {timeout}s "
+                f"re-armed bound",
+                refused=False,
+                in_flight=(None if future.done() else future),
+            ) from exc
+        except asyncio.CancelledError:
+            outcome = "cancelled"
+            raise
+        outcome = "completed"
+        return result
     finally:
         record_control_plane_offload(
             op, time.monotonic() - started, outcome=outcome, pool=pool

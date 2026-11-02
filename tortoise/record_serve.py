@@ -166,10 +166,12 @@ __all__ = [
     "SERVED",
     "AnchorDidNotBind",
     "AnchoredRead",
+    "CacheAnswerRequired",
     "ParityDiff",
     "RecordServeError",
     "RecordUnavailable",
     "ServedAnswer",
+    "answered_by_cache",
     "fallback_counts",
     "not_served_reads",
     "open_record",
@@ -193,12 +195,16 @@ RECORD_SERVE_ENV = "TORTOISE_RECORD_SERVE"
 #: ``record``  the record answers; there is no cache branch at all.
 #: ``prefer``  the record answers first, and a NAMED, COUNTED fallback covers a
 #:             record that ANSWERS and cannot serve (`record-miss`), cannot be
-#:             reached (`record-unavailable`), or cannot be scoped because this
+#:             reached (`record-unavailable`), cannot be scoped because this
 #:             CREDENTIAL resolves no record tenant (`record-tenant-unresolved`
 #:             — since #10046 no credential CLASS lands here by design: an API
 #:             key since #10025, a session/JWT credential and an OAuth `oat_`
 #:             token since #10046 all name the org's default graph, so read this
-#:             as an UNNAMEABLE default row, never as ordinary session traffic).
+#:             as an UNNAMEABLE default row, never as ordinary session traffic),
+#:             was never asked because the READ LANE refused the submission
+#:             (`record-read-lane-refused`), or WAS asked and did not answer
+#:             inside the lane's bound (`record-read-bound-miss` — a running
+#:             bound miss: the record is neither down nor unasked).
 #:             It does NOT cover a record that was never armed or is
 #:             misconfigured: an absent/malformed DSN, a missing driver, an
 #:             unprojectable row and a bad tenancy are structural and answer
@@ -501,9 +507,20 @@ FALLBACK_RECORD_TENANT_UNRESOLVED = "record-tenant-unresolved"
 #: is the identical misattribution `record-tenant-unresolved` exists to prevent.
 #: `exc.refused` is precisely the discriminator: the submission never ran.
 FALLBACK_RECORD_LANE_REFUSED = "record-read-lane-refused"
+#: A FIFTH reason, for the OTHER half of the same lane condition: the submission
+#: RAN — the record WAS asked — and the bound abandoned only the AWAIT, so the
+#: callable is still running and may still answer. `exc.refused` is `False`
+#: here. It is not `record-unavailable` (the record was asked, and is not
+#: necessarily down: it was slower than the lane's budget, which is a capacity
+#: question about OUR lane or about the record's load), and it is emphatically
+#: not absence (the §17.2 rule). Kept apart from the fourth reason for the same
+#: reason the fourth is kept apart from the first: the two have different
+#: repairs, and an operator sent to the wrong one repairs nothing.
+FALLBACK_RECORD_BOUND_MISS = "record-read-bound-miss"
 FALLBACK_REASONS: tuple[str, ...] = (
     FALLBACK_RECORD_UNAVAILABLE, FALLBACK_RECORD_MISS,
-    FALLBACK_RECORD_TENANT_UNRESOLVED, FALLBACK_RECORD_LANE_REFUSED)
+    FALLBACK_RECORD_TENANT_UNRESOLVED, FALLBACK_RECORD_LANE_REFUSED,
+    FALLBACK_RECORD_BOUND_MISS)
 
 _FALLBACKS: dict[str, int] = {}
 #: The counter is incremented from BOTH the event loop (the endpoint's
