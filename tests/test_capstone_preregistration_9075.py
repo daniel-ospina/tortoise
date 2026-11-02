@@ -93,15 +93,17 @@ def test_the_real_registration_is_complete_and_orders_against_its_logs():
     assert report["ok"], report["failures"]
     # The base the verdict was measured against is REPORTED (#10463 review cycle 2, finding 5): a
     # green line must not read the same whether it measured the published base or this branch's HEAD.
-    # ⛔ …but it must not become an assertion this repo cannot satisfy everywhere (review cycle 3,
-    # finding 2). In a depth-1 checkout there is no `origin/main` and no local `main`, so the honest
-    # report is the unresolved marker — asserting a RESOLVED base there would red a correctly ordered
-    # tree from inside the test that exists to prevent exactly that. A base is required only where
-    # one is measurable.
-    named = {"origin/main", "main", "HEAD"}
+    # ⛔ …but only where a base was MEASURED (review cycles 3 and 7, findings 2 and F2). In a depth-1
+    # checkout there is no history to order, so the ordering arm is the UNPROVABLE third outcome and
+    # nothing was measured — asserting a resolved base there would either red a correctly ordered
+    # tree or be satisfied by a base the tool never used. The two outcomes are asserted separately
+    # rather than lumped into one set of tolerated strings.
     if check.history_unavailable():
-        named.add(check.UNRESOLVED_BASE)
-    assert report["ordering_base"] in named, report["ordering_base"]
+        assert report["ordering"] == check.HISTORY_UNAVAILABLE, report["ordering"]
+        assert report["ordering_base"] == "(not measured)", report["ordering_base"]
+    else:
+        assert report["ordering"] == "verified", report["ordering"]
+        assert report["ordering_base"] in {"origin/main", "main", "HEAD"}, report["ordering_base"]
     ids = [r["id"] for r in report["rows"]]
     assert "E1" in ids and "E4" in ids and "E5" in ids
     # E2 is allowed to be split; both halves must exist and be complete.
@@ -2942,7 +2944,14 @@ def test_a_depth_one_checkout_without_a_base_reports_the_unresolved_base(tmp_pat
     report = check.run(shallow / "docs" / "evidence" / "7949-capstone", use_git=True,
                        use_corpus=False)
     assert report["ok"], report["failures"]
-    assert report["ordering_base"] == check.UNRESOLVED_BASE, report["ordering_base"]
+    # ⛔ `(not measured)`, NOT the resolved-if-it-were base (review cycle 7, finding F2): this
+    # fixture has no `origin/main` at all, so the CANDIDATE is unresolved — but the field is named
+    # for what was measured, and in a shallow checkout nothing is. Both facts are asserted so this
+    # test can no longer be satisfied by the fixture's absent ref alone (see the sibling test below,
+    # whose depth-1 clone of `main` DOES carry `origin/main`).
+    assert report["ordering_base"] == "(not measured)", report["ordering_base"]
+    assert report["ordering_base_candidate"] == check.UNRESOLVED_BASE, \
+        report["ordering_base_candidate"]
     # …and the third outcome is what it is: UNPROVABLE, never "violated".
     assert report["ordering"] == check.HISTORY_UNAVAILABLE, report["ordering"]
 
@@ -2991,6 +3000,110 @@ def test_a_squash_collapsed_pair_names_the_withdrawal_remedy(tmp_path, monkeypat
     assert "SAME commit" in failures[0], failures[0]
     # It names the offending commit, so the operator can look at what collapsed.
     assert _git_out(repo, "rev-parse", "--short=12", "HEAD") in failures[0], failures[0]
+
+
+# ── #10463 review cycle 7: the remedy that could not work, and a base that was never measured ──
+#
+# TWO findings, both in surfaces an operator or a consumer READS rather than in the comparison:
+#   F1  the equal-epoch refusal ended by naming "re-add the log in a PR of its own" — a move that
+#       cannot clear the check (the collapsed add-commit stays in the base's history, so `min()` is
+#       still the collapsed epoch) AND that the ruling forbids (#10463 comment 6564634454 item 2).
+#   F2  `ordering_base` was assigned the RESOLVED candidate before `check_ordering` ran, so a
+#       shallow checkout that raised before reading an epoch still printed "measured against:
+#       origin/main" — a measurement that did not happen. The sibling depth-1 test could not catch
+#       it because its fixture clones a branch with no `origin/main` at all.
+# Each test below fails on the pre-fix code.
+
+
+def test_a_withdrawn_log_cannot_be_reordered_by_re_adding_it(tmp_path, monkeypatch):
+    """F1: the recipe the old refusal named cannot clear the check — measured, all the way through.
+
+    `_added_epochs_on` is `git log --diff-filter=A <base> -- <path>`, and a later DELETION does not
+    remove the earlier add from that ref's history. So the operator follows the old instruction to
+    the end — withdraw the log in its own PR, let it land, re-add the log in a PR of its own, let
+    THAT land — and the base still reports the collapsed add-commit, `min()` is still the collapsed
+    epoch, and the ref emits the same refusal. There is no later state to reach, which is why the
+    only honest remedy is a new artefact at a new path.
+    """
+    repo = _repo_with_published_base(tmp_path, monkeypatch)
+    _commit_together(repo, epoch=1_700_000_100)     # both artefacts in ONE squash commit
+    _publish_base(repo)                            # …which is what `origin/main` carries
+    bundle = repo / "docs" / "evidence" / "7949-capstone"
+    prereg, log = bundle / check.PREREG_NAME, bundle / "capstone.log"
+
+    # Step 1 — the withdrawal (#10544): the log leaves the checked directory, kept under `withdrawn/`.
+    (bundle / "withdrawn").mkdir()
+    (bundle / "withdrawn" / "capstone.log").write_text("x\n")
+    log.unlink()
+    _git(repo, "add", "docs")
+    _git(repo, "commit", "-q", "-m", "withdraw the log, keep it under withdrawn/", epoch=1_700_000_200)
+    _publish_base(repo)
+
+    # Step 2 — the old instruction's next step: "re-add the log in a PR of its own", and let it land.
+    log.write_text("x\n")
+    _git(repo, "add", str(log.relative_to(repo)))
+    _git(repo, "commit", "-q", "-m", "re-add the log to obtain a later add-commit", epoch=1_700_000_300)
+    _publish_base(repo)
+
+    # The premise, as a fact about git rather than prose: the base now holds BOTH adds, and the
+    # epoch the tool takes is the COLLAPSED one.
+    base_adds = check._added_epochs_on("origin/main", log)
+    assert len(base_adds) == 2, base_adds
+    assert min(base_adds) == 1_700_000_100, base_adds
+
+    failures = check.check_ordering(prereg, [log])
+    assert failures, "a re-added log must not turn the refusal green"
+    assert "not strictly after" in failures[0], failures[0]
+    assert "WITHDRAWAL" in failures[0], failures[0]
+    # ⛔ …and the message must not instruct the move it just refuted, nor the one the ruling forbids.
+    assert "re-add the log in a PR of its own" not in failures[0], failures[0]
+    assert "Do NOT re-add" in failures[0], failures[0]
+    assert "NEW artefact at a NEW path" in failures[0], failures[0]
+
+
+def test_a_depth_one_clone_of_main_reports_no_measured_base_even_though_one_resolves(
+        tmp_path, monkeypatch, capsys):
+    """F2: `ordering_base` must not name a base on a tree where nothing was measured.
+
+    ⛔ The shape matters, and this is the one the previous fixture could not build: a `--depth 1`
+    clone of `main` DOES carry `refs/remotes/origin/main` (measured — `resolve_base_ref` returns it),
+    while `history_unavailable()` is True so `check_ordering` raises before reading a single epoch.
+    The pre-fix code assigned the resolved ref to `ordering_base` BEFORE that raise, so the CI log —
+    the surface a human reads — printed `ordering measured against: origin/main` for a run that
+    measured nothing. The resolved ref is now reported as a CANDIDATE, on its own line, and the
+    measured line says what actually happened.
+    """
+    origin = _repo(tmp_path, monkeypatch)
+    bundle = origin / "docs" / "evidence" / "7949-capstone"
+    bundle.mkdir(parents=True, exist_ok=True)
+    for item in PREREG_DIR.iterdir():
+        if item.is_file():
+            (bundle / item.name).write_bytes(item.read_bytes())
+    _git(origin, "add", "docs")
+    _git(origin, "commit", "-q", "-m", "the real bundle", epoch=1_700_000_100)
+    _git(origin, "branch", "-m", "main")
+
+    shallow = tmp_path / "shallow-main"
+    _git(tmp_path, "clone", "-q", "--depth", "1", "--branch", "main",
+         f"file://{origin.resolve()}", str(shallow))
+    monkeypatch.setattr(check, "REPO_ROOT", shallow.resolve())
+    assert check.history_unavailable() is True, "the fixture must really be a depth-1 checkout"
+    # ⛔ The property the old fixture lacked: the candidate RESOLVES here.
+    assert check.resolve_base_ref() == "origin/main", "a depth-1 clone of main carries origin/main"
+
+    shallow_bundle = shallow / "docs" / "evidence" / "7949-capstone"
+    report = check.run(shallow_bundle, use_git=True, use_corpus=False)
+    assert report["ok"], report["failures"]
+    assert report["ordering"] == check.HISTORY_UNAVAILABLE, report["ordering"]
+    assert report["ordering_base"] == "(not measured)", report["ordering_base"]
+    assert report["ordering_base_candidate"] == "origin/main", report["ordering_base_candidate"]
+
+    assert check.main(["--dir", str(shallow_bundle), "--no-corpus"]) == 0
+    out = capsys.readouterr().out
+    assert "ordering measured against: (not measured)" in out, out
+    assert "would be measured against: origin/main" in out, out
+    # ⛔ The pre-fix line, verbatim: a base named as measured when none was.
+    assert "ordering measured against: origin/main" not in out, out
 
 
 def test_a_squash_collapsed_base_refuses_even_when_the_contribution_is_ordered(tmp_path, monkeypatch):
