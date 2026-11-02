@@ -5314,6 +5314,19 @@ _NON_POINT_RECORD_TYPES = frozenset(_JOURNALED_ENTITY_EVENT_TYPES) | frozenset({
 #: bounded-memory degradation, never a wrong verdict.
 _JOURNAL_PRESENCE_MAP_MAX = 200_000
 
+#: How many bytes across the memo's SEAM are read back to prove the retained
+#: presence map is still a prefix of the journal (#10543 review round 9, finding 2).
+#:
+#: The seam is the boundary at ``folded_to``: everything below it was folded, and a
+#: caller that resumes from it is asserting that those bytes have not changed. File
+#: identity and size cannot verify that (a truncate in place, regrown past the old
+#: watermark, keeps the inode and lands at a LARGER size), and ``mtime_ns`` moves on
+#: an ordinary append too — so the check is a byte comparison across the seam. 256
+#: bytes spans several records' worth of tail at the documented ~1.3 KB median row
+#: and is one ``pread``: O(1), no lock, no parse, paid only when the journal GREW
+#: (an unchanged journal answers from ``mtime_ns`` with no read at all).
+_JOURNAL_SEAM_BYTES = 256
+
 
 def _journal_record_payload(event: dict) -> dict:
     """``event``'s payload minus the keys ``_emit_event`` owns.
@@ -9850,7 +9863,10 @@ class TortoiseSDK:
         delta. Retained memory becomes the MAP rather than one window, so it is
         bounded explicitly: past ``_JOURNAL_PRESENCE_MAP_MAX`` ids the map is
         DROPPED and the call takes the needle-filtered pass instead (today's
-        cost, bounded memory) — a degradation, never a wrong answer.
+        cost, bounded memory) — a degradation, never a wrong answer. A RESUMED
+        call also pays one ``pread`` of ``_JOURNAL_SEAM_BYTES`` to verify the seam
+        (see the truncation block below); a journal that has not changed since the
+        last fold pays no read at all.
 
         ⛔ NOT ``EventLog.position()`` (review B2). That read takes the
         process-wide append lock AND the cross-process ``flock``, opens the
@@ -9887,6 +9903,32 @@ class TortoiseSDK:
         own position block names the same residual for the same reason. It needs a
         same-size in-place journal swap inside one clock tick; it is not covered by
         a record-count stamp either, which is the hole it was chosen over.
+
+        ⛔ A TRUNCATION IS NOT ONLY "BELOW THE FOLDED OFFSET" (review round 9,
+        finding 2). The guard used to end at ``size >= folded_to`` plus "it grew,
+        so resume": an in-place truncate that is then REGROWN past the old
+        watermark keeps ``st_dev``/``st_ino`` and lands at a larger size, so the
+        map was reused while the bytes below the seam were different content — a
+        deleted/merged id read from records the file no longer holds (a real loss
+        silenced), and a re-added id read as absent (a typo turned into an alarm).
+        A peak-size watermark ("discard when the observed size falls below the
+        largest ever seen") only catches the case where a stat happens to land
+        between the two writes; the case this finding describes ends ABOVE the
+        peak, so it does not. What closes it is a comparison across the SEAM
+        ITSELF: the memo retains ``_JOURNAL_SEAM_BYTES`` of the bytes it last
+        folded and re-reads them (one ``pread``, ``EventLog.tail_bytes``) whenever
+        the journal grew — the same reason SQLite's WAL carries a reset SALT in its
+        header instead of trusting the file's length, because a WAL is
+        legitimately rewound and regrown in place
+        (<https://www.sqlite.org/wal.html> §2.2, §4.1).
+
+        RESIDUAL of the seam, stated rather than implied: the check covers the
+        bytes ACROSS the seam, so a rewrite that changes content EARLIER in the
+        file while leaving the last ``_JOURNAL_SEAM_BYTES`` below the watermark
+        byte-identical still reads as the same prefix (an adversarial or
+        coincidental rewrite, not an operator's ``>`` truncate); and the
+        same-size/same-tick case above still skips the check, because it skips the
+        read.
         """
         log = self._get_event_log()
         if log is None:
@@ -9914,12 +9956,23 @@ class TortoiseSDK:
             dev, ino, size, stat_mtime = stat_key
             # A journal this memo does not describe any more is a REPLACEMENT
             # (inode), a TRUNCATION (below the folded offset) or an IN-PLACE
-            # REWRITE at the same size in a later tick. A map folded from a
+            # REWRITE (`mtime_ns` moved at the same size). A map folded from a
             # different file is not a prefix of this one, so it is discarded —
             # a full re-fold, never a guess.
-            if memo['ident'] == (dev, ino) and size >= memo['folded_to'] and (
-                    size > memo['folded_to']
-                    or stat_mtime == memo['mtime_ns']):
+            same_file = memo['ident'] == (dev, ino) and size >= memo['folded_to']
+            if same_file and size > memo['folded_to']:
+                # ⛔ THE JOURNAL GREW, AND SIZE ALONE CANNOT SAY IT IS THE SAME
+                # JOURNAL (review round 9, finding 2). An in-place truncate that
+                # is then regrown past the old watermark keeps `st_dev`/`st_ino`
+                # and ends LARGER than `folded_to`, so the size comparison this
+                # guard used to end at accepted a map folded from bytes the file
+                # no longer holds — and every answer was then read from records
+                # that are gone. The seam is the only cheap fact that can speak:
+                # compare the retained bytes across it.
+                same_file = self._journal_seam_matches(log, memo.get('seam'))
+            elif same_file and stat_mtime != memo['mtime_ns']:
+                same_file = False       # same-size rewrite in a later tick
+            if same_file:
                 known, folded_to = memo['known'], memo['folded_to']
                 if folded_to >= size:
                     # the map already covers every byte: no read at all
@@ -9983,8 +10036,45 @@ class TortoiseSDK:
         self._journal_presence_memo = {
             'log': log, 'ident': (dev, ino), 'folded_to': resume,
             'mtime_ns': stat_mtime, 'known': known,
+            'seam': self._journal_seam(log, resume),
         }
         return known.get(point_id, False)
+
+    @staticmethod
+    def _journal_seam(log, offset: int):
+        """The bytes ending at *offset* — what a later call re-reads to verify.
+
+        ``None`` when the log object cannot answer (no :meth:`EventLog.tail_bytes`,
+        a read that raised, an EMPTY prefix): a seam it never retained must never
+        be reported as a mismatch, or a synthetic log would re-fold on every call.
+        """
+        read = getattr(log, 'tail_bytes', None)
+        if not callable(read):
+            return None
+        try:
+            raw = read(offset, _JOURNAL_SEAM_BYTES)
+        except Exception:  # noqa: BLE001, RUF100 — no seam, no claim to disprove
+            return None
+        if not isinstance(raw, (bytes, bytearray)) or not raw:
+            return None
+        return (max(0, int(offset) - len(raw)), bytes(raw))
+
+    @staticmethod
+    def _journal_seam_matches(log, seam) -> bool:
+        """Is the retained presence map still a PREFIX of this journal?
+
+        ``False`` ⇒ discard the map and re-fold from byte 0. This never PROVES an
+        answer; it only stops one being read out of a file whose folded bytes are
+        gone (see the COST/RESIDUAL block in :meth:`_journal_knows_point`).
+        """
+        if not seam:
+            return True
+        start, expected = seam
+        try:
+            got = log.tail_bytes(start + len(expected), len(expected))
+        except Exception:  # noqa: BLE001, RUF100 — an unreadable seam re-folds
+            return False
+        return got == expected
 
     @staticmethod
     def _journal_carried_records(log) -> bool:

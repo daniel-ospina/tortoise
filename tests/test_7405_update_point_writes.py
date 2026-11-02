@@ -1657,6 +1657,93 @@ def test_an_empty_id_does_not_scan_the_journal_at_all(tmp_path, monkeypatch):
             sdk.close()
 
 
+def test_a_journal_truncated_and_regrown_in_place_drops_the_stale_map(
+        tmp_path, caplog):
+    """#10543 round 9, finding 2: growth is NOT proof the folded prefix survived.
+
+    The memo answered from a presence map folded from the file as it was, and the
+    only guard on reusing it was "same inode and it did not shrink below
+    ``folded_to``". An in-place truncate that is then REGROWN past that offset
+    leaves the same inode at a LARGER size, so the map was reused over a file whose
+    bytes below the seam are different content — every answer then came from
+    records the file no longer holds.
+
+    Both directions of that are harmful, and this pins the dangerous one: the id's
+    last record in the FIRST journal is a hard delete (folds ABSENT), and the
+    regrown journal re-adds it as a point BELOW the old watermark (the truth is
+    PRESENT), so a stale map silences a genuine revision loss — #10515 indicator 1.
+    The re-add deliberately sits UNDER the seam: the resuming fold re-reads
+    everything appended since, so a correcting record at the tail would mask the
+    stale prefix and this test would pass either way. The inverse control at the
+    end (a genuine typo stays silent after the re-fold) keeps the fix from passing
+    by alarming everything.
+    """
+    from tortoise import monitoring
+
+    sdk, journal = _sdk_journaled(tmp_path, "regrown")
+    try:
+        log = sdk._get_event_log()
+        point_id = str(uuid.uuid4())     # absent from the LIVE graph either way
+        for i in range(40):
+            log.append({"type": "PointAdded", "point": {"id": f"seed-{i:04d}"}})
+        # …and this id's LAST record in the first journal is a hard delete
+        log.append({"type": "EntityMutated", "id": point_id,
+                    "label": "Point", "op": "delete"})
+
+        # ── build the map: one absent read folds every record above ──
+        assert sdk.update_point(str(uuid.uuid4()), confidence=0.9) == {}
+        memo = sdk._journal_presence_memo
+        assert memo is not None and memo["folded_to"] == os.path.getsize(journal), (
+            "the map must be complete for the whole journal, or this is not the "
+            "prefix the guard reuses")
+        assert sdk._journal_knows_point(point_id) is False, (
+            "the first journal's last record for this id is a delete")
+        before = monitoring.silent_revision_loss_counts().get("journal_known", 0)
+
+        # ── truncate IN PLACE (same inode) and regrow PAST the watermark ──
+        with open(journal, "w", encoding="utf-8") as fh:
+            # the re-add goes FIRST, i.e. below the old watermark: a record at the
+            # tail would be re-read by the resumed fold whatever the map said
+            fh.write(json.dumps({"type": "PointAdded",
+                                 "point": {"id": point_id}}) + "\n")
+            for i in range(60):
+                fh.write(json.dumps({"type": "PointAdded",
+                                     "point": {"id": f"rewritten-{i:04d}"}}) + "\n")
+        assert os.stat(journal).st_ino == memo["ident"][1], (
+            "the case only means anything if the file was rewritten in place")
+        assert os.path.getsize(journal) > memo["folded_to"], (
+            "the case is a regrow PAST the folded offset — a file that ends below "
+            "it is already re-folded by the size comparison")
+
+        caplog.clear()
+        with caplog.at_level("WARNING"):
+            assert sdk.update_point(point_id, confidence=0.9) == {}
+        assert monitoring.silent_revision_loss_counts().get(
+            "journal_known", 0) == before + 1, (
+            "the regrown journal re-adds the id as a POINT, so the absent live "
+            "read is a journal-known loss — answering from the pre-truncation map "
+            "(whose last record for it was a delete) silences it, which is the "
+            "direction #10515 indicator 1 forbids: same inode + a larger size is "
+            "not proof the bytes below the seam survived")
+        assert any("will not be replayed" in r.getMessage()
+                   and point_id in r.getMessage() for r in caplog.records), (
+            "the loss is reported with the id it lost")
+
+        # ── inverse control: the re-fold must not turn typos into alarms ──
+        after = monitoring.silent_revision_loss_counts().get("journal_known", 0)
+        caplog.clear()
+        with caplog.at_level("WARNING"):
+            assert sdk.update_point(str(uuid.uuid4()), confidence=0.9) == {}
+        assert monitoring.silent_revision_loss_counts().get(
+            "journal_known", 0) == after, (
+            "re-folding must leave the id-absent-from-BOTH silence intact")
+        assert not caplog.records, (
+            "a typo on a re-folded map is still a typo")
+    finally:
+        with contextlib.suppress(Exception):
+            sdk.close()
+
+
 class TestJournalMentionScan:
     """The journal byte-scan's MECHANICS, pinned where they now live (#10543).
 

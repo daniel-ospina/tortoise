@@ -1059,6 +1059,26 @@ def _read_regular_file(path: Path) -> bytes | None:
         os.close(fd)
 
 
+def _read_regular_range(path: Path, offset: int, length: int) -> bytes | None:
+    """*length* bytes starting at *offset*, or ``None`` if it is not a REGULAR file.
+
+    The bounded read behind :meth:`EventLog.tail_bytes`, and it carries exactly the
+    guards ``_read_regular_file`` argues for, for the same reason: its caller runs on
+    the SDK's ABSENT-write path, so a special file left at the journal path must be a
+    MISS (the memo is discarded, the caller re-folds) and never a WAIT — ``O_NONBLOCK``
+    so a FIFO cannot park the call, ``S_ISREG`` so a device or directory is refused,
+    ``O_NOFOLLOW`` so a symlink cannot redirect a read. No full-file read and no
+    ``read()`` to EOF: ``pread`` touches only the window asked for.
+    """
+    fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return None
+        return os.pread(fd, length, offset)
+    finally:
+        os.close(fd)
+
+
 def _open_regular_for_write(path: Path) -> int:
     """An open descriptor for the cache, which must be a REGULAR file.
 
@@ -2123,6 +2143,29 @@ class EventLog:
         this method does not invent an empty answer for it.
         """
         return MentionScan(self.path, needle, start, self.MENTION_SCAN_CHUNK)
+
+    def tail_bytes(self, offset: int, length: int) -> bytes:
+        """The bytes just BELOW *offset* — the memo's seam check (#10543 round 9).
+
+        A caller that retains a parsed PREFIX of this journal (see
+        :meth:`TortoiseSDK._journal_knows_point`) is making a claim about bytes it read
+        earlier: "everything below my resume offset is still what I folded". File
+        IDENTITY (``st_dev``/``st_ino``) and SIZE cannot verify that claim — a truncate
+        in place followed by a regrow past the old watermark leaves the same inode at a
+        larger size with different bytes below the seam — and neither can ``mtime_ns``,
+        which moves on an ordinary append too. The one cheap read that can is a
+        comparison across the seam itself, which is what this returns.
+
+        Returns ``b''`` for a path that is not a regular file (a FIFO, a device, a
+        symlink, a directory), which a caller comparing against retained bytes reads as
+        a MISMATCH — the correct direction: re-fold, never reuse.
+
+        Read-only, ``O(1)`` in the journal's size, and it creates nothing.
+        """
+        start = max(0, int(offset) - max(0, int(length)))
+        stop = max(start, int(offset))
+        raw = _read_regular_range(Path(self.path), start, stop - start)
+        return raw or b''
 
     def carried_records(self) -> bool:
         """Did this journal demonstrably carry at least one RECORD? (#10543 r7)
