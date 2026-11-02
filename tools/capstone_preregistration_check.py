@@ -1444,7 +1444,10 @@ def _finding_discriminator(document: str, failure: str) -> str:
     the same tree yields the same discriminator on both surfaces, while a different log,
     epoch or bundle yields a different one.
     """
-    digest = hashlib.sha256(f"{document}\x00{failure}".encode("utf-8")).digest()
+    # `.encode()` with no argument IS UTF-8 (Python 3's default), so the digest is
+    # byte-identical to the explicit spelling — and UP012 refuses the redundant
+    # argument, which redded `agent-infra-ci / lint` on this very function.
+    digest = hashlib.sha256(f"{document}\x00{failure}".encode()).digest()
     return "finding-" + base64.b32encode(digest).decode("ascii").rstrip("=")[:20]
 
 

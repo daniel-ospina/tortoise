@@ -774,7 +774,10 @@ def test_every_finding_is_also_emitted_as_a_rail_parseable_annotation(tmp_path, 
     findings = [ln for ln in captured.out.splitlines() if ln.startswith("  - ")]
     assert findings, "the fixture must produce at least one finding"
     assert len(annotations) == len(findings), (annotations, findings)
-    for annotation, finding in zip(annotations, findings):
+    # `strict=True` because the length equality is already asserted on the line above;
+    # B905 wants it explicit, and it turns a future drift into a failure here rather
+    # than a silently truncated pairing.
+    for annotation, finding in zip(annotations, findings, strict=True):
         assert check.PREREG_NAME in annotation
         assert finding.strip().removeprefix("- ").split(" ")[0] in annotation
 
