@@ -1169,6 +1169,16 @@ def dispatch_pending(proj, *, transport=None, now: datetime | None = None,
     retry. Returns a summary dict for logging/tests:
 
     ``{"enabled", "subscriptions", "delivered", "failed", "disabled", "more_pending"}``
+
+    ``batch`` is a PAGE SIZE, so its domain is `read_after`'s: an integer of at
+    least 1. ``batch <= 0`` asks for NOTHING and delivers nothing — an early
+    return, not the ``max(1, ...)`` clamp this used to apply, which handed a
+    caller that asked for none exactly ONE event with no field saying so (the
+    rewritten-ask defect #8447 refuses at ``read_after``). A ``bool`` is not a
+    page size and is treated the same way (``int(True) == 1`` is the trap
+    ``_as_seq`` already names). An int ABOVE ``MAX_PAGE`` is bounded at
+    ``MAX_PAGE`` for this pass while ``more_pending`` reports the unread
+    remainder, so nothing is dropped silently.
     """
     summary = {"enabled": False, "subscriptions": 0, "delivered": 0,
                "failed": 0, "disabled": 0, "more_pending": 0}
@@ -1177,6 +1187,16 @@ def dispatch_pending(proj, *, transport=None, now: datetime | None = None,
     from tortoise.projection import DirectCacheWriteRefused
 
     summary["enabled"] = True
+    # #8447 row #6: `batch` is a PAGE SIZE (see the docstring). An ask for
+    # nothing is answered with nothing, BEFORE any graph read — the old
+    # `max(1, ...)` delivered exactly one event to a caller that asked for none,
+    # the same rewritten ask `read_after` now refuses. A non-numeric `batch`
+    # keeps its previous path: the per-subscription read below reports it.
+    try:
+        if isinstance(batch, bool) or int(batch) < 1:
+            return summary
+    except (TypeError, ValueError, OverflowError):
+        pass
     transport = transport or WebhookTransport()
     now_dt = now or _now()
     try:

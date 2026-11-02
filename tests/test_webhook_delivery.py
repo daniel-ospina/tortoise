@@ -1284,3 +1284,38 @@ def test_more_pending_compares_against_the_page_that_was_read(sdk_factory):
     summary = wd.dispatch_pending(proj, transport=FakeTransport([503]),
                                   batch=event_store.MAX_PAGE + 4000)
     assert summary["more_pending"] == 1, summary
+
+
+def test_a_batch_below_one_delivers_nothing_instead_of_clamping_to_one(sdk_factory):
+    """#8447 row #6: `batch` is a PAGE SIZE — an ask for none delivers none.
+
+    The page used to be ``max(1, min(int(batch), MAX_PAGE))``, so ``batch=0``
+    delivered exactly ONE event and no field reported the rewrite: the caller's
+    ask was silently replaced by a different one. Above the bound that rewrite
+    is at least MARKED by ``more_pending``; below 1 there is nothing to mark it
+    with, so the ask is answered literally (and the cursor does not move).
+
+    ``True``/``False`` are here for the same reason `read_after` refuses them:
+    ``bool`` is an ``int`` subclass, so ``int(True) == 1`` would otherwise be a
+    legal page size — a value that is not a page size at all.
+    """
+    sdk = _seed(sdk_factory, n=3)
+    proj = sdk._get_proj()
+    sub = wd.create_subscription(proj, url="https://hooks.example.com/cb")
+
+    for ask in (0, -5, True, False):
+        transport = FakeTransport([200, 200, 200])
+        summary = wd.dispatch_pending(proj, transport=transport, batch=ask)
+        assert summary["subscriptions"] == 0, (ask, summary)
+        assert summary["delivered"] == 0, (ask, summary)
+        assert transport.calls == [], (ask, transport.calls)
+        assert wd.get_subscription(proj, sub["sub_id"])["cursor"] == 0, ask
+
+    # ...and the events are still there for the pass that DOES ask for a page:
+    # a delivering pass is what proves the zero/negative asks were not merely
+    # "consumed" by a cursor that advanced behind the caller's back.
+    transport = FakeTransport([200])
+    summary = wd.dispatch_pending(proj, transport=transport, batch=1)
+    assert summary["delivered"] == 1, summary
+    assert summary["more_pending"] == 1, summary
+    assert [json.loads(c[1])["event"]["seq"] for c in transport.calls] == [1]

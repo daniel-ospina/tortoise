@@ -171,6 +171,24 @@ def test_a_duplicate_event_id_inside_a_full_page_shrinks_it(sdk_factory, tmp_pat
     assert [e["seq"] for e in tail] == [5], "...and rows beyond it DID exist"
 
 
+def test_a_bool_ask_is_not_a_page_size(sdk_factory, tmp_path):
+    """`limit=True` / `False` are REFUSED, not read as 1 / 0.
+
+    ``bool`` is an ``int`` subclass, so the value comparison alone
+    (``int(raw) != raw``) lets both through: ``int(True) == True`` serves a
+    1-row page for an ask that is not a number, and ``int(False) == False``
+    falls to the RANGE message — "got 0" — which names a value the caller
+    never passed. ``webhook_delivery._as_seq`` states the same rule.
+    """
+    sdk = sdk_factory(tmp_path)
+    proj = sdk._get_proj()
+    _seed(proj, 3)
+    for bad in (True, False):
+        with pytest.raises(ValueError) as exc:
+            event_store.read_after(proj, 0, limit=bad)
+        assert "whole number" in str(exc.value), (bad, str(exc.value))
+
+
 def test_domain_low_end_refuses(sdk_factory, tmp_path):
     """`limit=0` / negative are out of domain too.
 
@@ -252,13 +270,17 @@ def test_the_contract_change_and_its_departure_are_stated_where_they_are_read():
     and reddens the FROZEN citation pins in ``tests/test_7949_capstone_*``
     (that is what ``c437c2c6d`` was for).
 
-    The second half pins the ``OVERRIDES:`` marker. Coerce-down for an
-    over-max page size is AIP-158's (Google-approved) default, so refusing is
-    a deliberate departure — a lane holding that AIP must find the ruling
-    before "fixing" the refusal back into a silent clamp.
+    The second half pins the ``OVERRIDES:`` marker. The seam makes TWO
+    departures from AIP-158, and both are named there: coerce-down for an
+    over-max page size is AIP-158's (Google-approved) default, and AIP-158
+    answers a ``page_size`` of 0 with the API's DEFAULT rather than an error.
+    An unmarked departure is invisible to the lane holding the AIP, which is
+    how "restore the default-sized page" reads as a bug fix and re-opens
+    #8447's silent truncation.
 
     Both halves fail on the pre-fix tree: neither the sentence nor the marker
-    existed.
+    existed, and the two-departure assertions fail on the marker this PR first
+    shipped (which named only the over-max one).
     """
     from tortoise.sdk import TortoiseSDK
 
@@ -268,7 +290,20 @@ def test_the_contract_change_and_its_departure_are_stated_where_they_are_read():
         "method whose behaviour this PR changes (#8447 row #6)")
 
     src = Path(event_store.__file__).read_text(encoding="utf-8")
-    marker = [ln for ln in src.splitlines()
-              if ln.lstrip("#: ").startswith("OVERRIDES:")]
+    lines = src.splitlines()
+    marker = [ln for ln in lines if ln.lstrip("#: ").startswith("OVERRIDES:")]
     assert len(marker) == 1, f"expected one OVERRIDES line, found {marker}"
-    assert "AIP-158" in marker[0] and "coerce-down" in marker[0], marker[0]
+
+    # BOTH departures, not just the over-max one: the code also refuses
+    # `page_size = 0`, which AIP-158 answers with the DEFAULT ("The API must
+    # not return an error"). Unmentioned, a lane holding that AIP restores a
+    # default-sized page believing it is undoing a bug. Read over the whole
+    # marker block, since the two departures are numbered continuation lines.
+    start = lines.index(marker[0])
+    block = "\n".join(lines[start:start + 22])
+    assert "AIP-158" in block and "coerce-down" in block, block
+    assert "page_size` of 0 is refused" in block, block
+    assert "must not return an error" in block, block
+    # ...and the token point is stated as THIS seam's reason, not as AIP-158's
+    # condition (`the AIP does not qualify its coerce-down that way`).
+    assert "does not qualify" in block, block

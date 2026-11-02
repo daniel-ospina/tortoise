@@ -891,15 +891,31 @@ def _event_row_exists(proj, event_id: str) -> bool | None:
 #: (`max(1, min(int(limit), 1000))`, the defect) and the `webhook_delivery`
 #: page read, which carried its own copy of the literal.
 #:
-#: OVERRIDES: AIP-158's coerce-down for a `page_size` above the declared maximum
-#: (the Google-approved default — an over-max ask is coerced DOWN to the
-#: maximum, and only a NEGATIVE one is an INVALID_ARGUMENT). Coercing here
-#: would be the silent truncation #8447 forbids: `read_after` returns a bare
-#: `list[dict]` and `poll_events`' `next_cursor` is never empty, so a coerced
-#: page is indistinguishable from a drained stream — which is exactly why
-#: AIP-158 permits coerce-down only alongside an empty `next_page_token` that
-#: marks end-of-collection. An out-of-domain ask is REFUSED instead. The
-#: ruling is recorded on #8447.
+#: OVERRIDES: TWO departures from AIP-158's `page_size` contract, both the same
+#: instrument (#8447) — an out-of-domain ask is REFUSED, never silently
+#: rewritten into a page the caller did not ask for:
+#:
+#:   1. ABOVE the declared maximum, AIP-158's coerce-down is refused (that is
+#:      the Google-approved default: an over-max ask is coerced DOWN to the
+#:      maximum, and only a NEGATIVE one is an INVALID_ARGUMENT). Coercing here
+#:      would be the silent truncation #8447 forbids: `read_after` returns a
+#:      bare `list[dict]` and `poll_events`' `next_cursor` is never empty, so a
+#:      coerced page is indistinguishable from a drained stream. AIP-158 can
+#:      afford coerce-down because its completeness instrument is the
+#:      `next_page_token`, which "must be empty" exactly at end-of-collection;
+#:      this seam has no such token, which is why the coercion is UNUSABLE here.
+#:      (Stated as this seam's reason, NOT as AIP-158's condition — the AIP
+#:      does not qualify its coerce-down that way.)
+#:   2. A `page_size` of 0 is refused, although AIP-158 says "If the user does
+#:      not specify page_size (or specifies 0), the API chooses an appropriate
+#:      default ... The API must not return an error." Serving a 1-row page for
+#:      an ask of 0 is the same rewritten ask in the other direction, and
+#:      `GET /v1/events` has always refused 0 at its own edge (`Query(ge=1)`):
+#:      the seam now agrees with its public edge instead of with AIP-158. The
+#:      `ge=1` inherited from that route is not itself the recording of this
+#:      choice — THIS line is.
+#:
+#: Both departures are recorded on #8447.
 MAX_PAGE = 1000
 
 
@@ -927,8 +943,10 @@ def read_after(proj, after_seq: int, types: list[str] | None = None,
     silently truncated page indistinguishable from a complete one). Refusing
     at the reference point — rather than capping the caller's ask — is the same
     instrument ``next_seq`` uses for an out-of-domain ``seq`` (#5379). It also
-    departs from AIP-158's coerce-down default; see the ``OVERRIDES:`` line
-    above ``MAX_PAGE`` for why that departure is deliberate.
+    departs from AIP-158 on TWO counts — it refuses the coerce-down AIP-158
+    prescribes for an over-max ``page_size``, and it refuses ``0`` where
+    AIP-158 takes the default. See the ``OVERRIDES:`` line above ``MAX_PAGE``
+    for why each departure is deliberate.
 
     Dedup: a duplicate event_id (defense in depth — the unique constraint
     normally prevents them) keeps the FIRST occurrence.
@@ -941,14 +959,22 @@ def read_after(proj, after_seq: int, types: list[str] | None = None,
         # escape as OverflowError, which a caller catching ValueError (the
         # documented answer) would miss.
         raise ValueError(f"limit must be a whole number, got {raw!r}") from None
-    if limit != raw:
-        # A VALUE comparison, not an isinstance check: `int()` also floors
-        # `Decimal('2.9')` and `np.float32(2.9)`, which are not `float`
-        # instances — the silent shrink this refuses. `"5000"` is refused too:
-        # reporting the converted 5000 would describe a call that never
-        # happened (the same rule as the range message below).
+    if isinstance(raw, bool) or limit != raw:
+        # A VALUE comparison, not an isinstance check, for everything EXCEPT
+        # `bool`: `int()` also floors `Decimal('2.9')` and `np.float32(2.9)`,
+        # which are not `float` instances — the silent shrink this refuses.
+        # `"5000"` is refused too: reporting the converted 5000 would describe a
+        # call that never happened (the same rule as the range message below).
+        # `bool` needs the explicit test because it IS an `int` subclass:
+        # `int(True) == True` and `int(False) == False`, so the value comparison
+        # lets `limit=True` through as a 1-row page and sends `limit=False` to
+        # the RANGE message ("got 0"), describing a call nobody made. The same
+        # rule is already stated in `webhook_delivery._as_seq`.
         raise ValueError(f"limit must be a whole number, got {raw!r}")
     if not 1 <= limit <= MAX_PAGE:
+        # Covers 0 and negatives: AIP-158 would take the default for 0, and this
+        # refusal is a marked departure (departure 2 in the `OVERRIDES:` line
+        # above `MAX_PAGE`) — do not "restore" it to a default-sized page.
         raise ValueError(
             f"limit must be between 1 and {MAX_PAGE}, got {limit}. "
             "An out-of-domain page size is REFUSED rather than clamped: a "
