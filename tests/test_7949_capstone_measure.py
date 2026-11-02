@@ -1117,7 +1117,10 @@ def test_every_e1_key_the_renderer_reads_is_one_the_measure_returns():
     """
     returned = set(measure.measure_e1_e2(_REPO))
     tree = ast.parse(PROBE.read_text())
-    watched = {"render_log", "main"}
+    # The row-note builders are renderers too: they live outside `main` (extracted
+    # so their narration is pinnable, #10610 review issue 3), and a key renamed out
+    # from under them would crash a real 7-session run exactly as `render_log`'s did.
+    watched = {"render_log", "main", "e1_row_note", "e2_row_note"}
     read: set[str] = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.FunctionDef) and node.name in watched:
