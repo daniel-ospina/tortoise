@@ -61,6 +61,24 @@ def _turn_id(session: str, index: int) -> str:
     return _capture_turn_id(session, index)
 
 
+def _frame(role, body: str) -> str:
+    """A turn's stored `content`, built by the WRITER's own frame.
+
+    The same argument as `_turn_id`, applied to the other half of the
+    coupling: `_turn_record` inverts `[role] body` and `dump` maps rows on the
+    HOST, where `tortoise` is not necessarily importable — so `extract_turns`
+    keeps a LOCAL copy of the inverse and NOTHING but a writer-derived fixture
+    can catch the two drifting. Measured: spelling these fixtures as literals
+    and mutating the writer's frame to `f"[{role}]: {content}"` left all 12
+    `TestDumpReadsTheCaptureShape` tests green while `_FRAME_RE` would consume
+    `[user]` and emit `": hello"` for every real turn.
+    """
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    from tortoise.sdk import _capture_turn_frame
+
+    return _capture_turn_frame({"role": role, "content": body})
+
+
 # The prompt is the cross-model contract the benchmark depends on; pin its
 # exact bytes so any edit is a visible, benchmark-relevant change.
 PROMPT_SHA256 = "a28c10e10309483c9dc0507c76a7b9cf11181270bc03381a0f018e4d4920fc49"
@@ -369,25 +387,25 @@ class TestDumpReadsTheCaptureShape(unittest.TestCase):
         # `createdAt` cannot order a session's turns. The index in the id is
         # the order, parsed as an integer: `t10` must sort AFTER `t2`.
         ts = "2026-11-02T00:00:00+00:00"
-        rows = [["session://s1", "event", f"r{i}", f"[r] m{i}", ts, _turn_id("s1", i)]
+        rows = [["session://s1", "event", f"r{i}", _frame(f"r{i}", f"m{i}"), ts, _turn_id("s1", i)]
                 for i in range(11)]
         got = [r[5] for r in sorted(reversed(rows), key=_turn_order)]
         self.assertEqual(got, [_turn_id("s1", i) for i in range(11)])
         # two sessions never interleave
-        mixed = [["session://b", "event", "r", "[r] x", ts, _turn_id("b", 0)],
-                 ["session://a", "event", "r", "[r] x", ts, _turn_id("a", 1)],
-                 ["session://a", "event", "r", "[r] x", ts, _turn_id("a", 0)]]
+        mixed = [["session://b", "event", "r", _frame("r", "x"), ts, _turn_id("b", 0)],
+                 ["session://a", "event", "r", _frame("r", "x"), ts, _turn_id("a", 1)],
+                 ["session://a", "event", "r", _frame("r", "x"), ts, _turn_id("a", 0)]]
         self.assertEqual([r[5] for r in sorted(mixed, key=_turn_order)],
                          [_turn_id("a", 0), _turn_id("a", 1), _turn_id("b", 0)])
 
     def test_turn_record_unframes_the_written_turn_text(self):
         # `content` holds the writer's own `[role] body` frame and `speaker`
         # holds the role, so passing content through verbatim says it twice.
-        rec = _turn_record(["session://s1", "event", "user", "[user] hello", None])
+        rec = _turn_record(["session://s1", "event", "user", _frame("user", "hello"), None])
         self.assertEqual(rec["by"], "user")
         self.assertEqual(rec["content"], "hello")
         # an EMPTY role still unframes (the SDK inverse uses `*`, not `+`)
-        empty = _turn_record(["session://s1", "event", "", "[] hi", None])
+        empty = _turn_record(["session://s1", "event", "", _frame("", "hi"), None])
         self.assertEqual(empty["content"], "hi")
         # an unframed / hand-built record is passed through unchanged
         plain = _turn_record(["session://s1", "event", None, "hello", None])
@@ -435,9 +453,9 @@ class TestDumpReadsTheCaptureShape(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             out = Path(td) / "turns.jsonl"
             payload = "\n".join([
-                json.dumps(["session://s1", "event", "user", "[user] hi", None,
+                json.dumps(["session://s1", "event", "user", _frame("user", "hi"), None,
                             "s1_note"]),
-                json.dumps(["session://s1", "event", "user", "[user] hi", None,
+                json.dumps(["session://s1", "event", "user", _frame("user", "hi"), None,
                             "s1_other"]),
             ])
             with mock.patch("extract_turns.subprocess.run") as run:
@@ -464,13 +482,23 @@ class TestDumpReadsTheCaptureShape(unittest.TestCase):
         for fragment in ("matched NO point", "TORTOISE_RECORD_DSN",
                          "get_session", "--allow-empty"):
             self.assertIn(fragment, absent)
+        # ...and the predicate-mismatch cause is named TOO. That is the cause
+        # #9932 itself was, and the first cut of this message offered only two
+        # (capture off / the record), sending the operator to a setting that
+        # was not the cause — the same defect in a new coat. The named remedy
+        # must be the one that actually backfills `(s:Session)-[:CONTAINS]->`
+        # turns, so the fix is executable rather than merely mentioned.
+        for fragment in ("is_episodic", "backfill_is_episodic.py"):
+            self.assertIn(fragment, absent,
+                          "a pre-#947 graph has no `is_episodic` flag, so the "
+                          "predicate matches nothing — that cause needs naming")
 
     def test_dump_payload_round_trips_six_columns(self):
         # the container emitter and `_DUMP_QUERY`'s RETURN arity must agree;
         # a short row is an IndexError inside the sort, not a red test, unless
         # this drives `dump()` itself with the subprocess mocked.
         emitted = json.dumps(["session://s1", "event", "user",
-                              "[user] hello", "2026-11-02T00:00:00Z", _turn_id("s1", 0)])
+                              _frame("user", "hello"), "2026-11-02T00:00:00Z", _turn_id("s1", 0)])
         with tempfile.TemporaryDirectory() as td:
             out = Path(td) / "turns.jsonl"
             with mock.patch("extract_turns.subprocess.run") as run:
@@ -505,13 +533,13 @@ class TestDumpReadsTheCaptureShape(unittest.TestCase):
         # a lexicographic sort would put it between t0/t1 and before t2.
         ts = "2026-11-02T00:00:00+00:00"
         rows = [
-            ["session://s1", "event", "assistant", f"[assistant] m{i}", ts,
+            ["session://s1", "event", "assistant", _frame("assistant", f"m{i}"), ts,
              _turn_id("s1", i)]
             for i in (10, 2, 0)
         ] + [
             # a turn-shaped point whose id is NOT a turn: it must be dropped,
             # not spliced in by the sort.
-            ["session://s1", "event", "user", "[user] claim", ts, "s1_note"],
+            ["session://s1", "event", "user", _frame("user", "claim"), ts, "s1_note"],
         ]
         payload = "\n".join(json.dumps(r) for r in rows)
         with tempfile.TemporaryDirectory() as td:
@@ -536,7 +564,7 @@ class TestDumpReadsTheCaptureShape(unittest.TestCase):
 
     def test_turn_order_refuses_a_turn_id_with_no_index(self):
         with self.assertRaises(ValueError):
-            _turn_order(["session://s1", "event", "r", "[r] x", None, "no-index"])
+            _turn_order(["session://s1", "event", "r", _frame("r", "x"), None, "no-index"])
 
     def test_a_non_turn_point_is_not_spliced_into_the_transcript(self):
         # `is_episodic` + `pointKind='event'` is not enough: only the derived
