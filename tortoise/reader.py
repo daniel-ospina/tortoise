@@ -180,12 +180,17 @@ _MULTI_SESSION_FRAGMENT = (
 # because a silently missing session turns a count into a confident wrong
 # number, and a wrong number is a worse failure than an admitted gap.
 #
-# Field convergence (researched 2026-11-01, not adopted blind): the mechanism
-# the SOTA multi-document literature names for this class is "enumerate the
-# qualifying items across all sessions, resolve duplicates, then count" —
-# RAPTOR-style hierarchical summarisation is explicitly the WRONG instrument
-# here because lossy summaries discard the fine-grained items an exact count
-# needs. This is prompt-side discipline; no summarisation subsystem is added.
+# Why THIS instrument: the enumerative discipline is derived from #2513's own
+# measurement, not from an external endorsement — that profile has the reader
+# competent inside one session (single-session-user 0.94) and failing when it
+# must aggregate (multi-session 0.45), so the reading stage is the lever, and
+# A2's D1 (docs/plans/2026-08-20-1547-a2-aggregation.md) rules out a parallel
+# retrieval/graph mechanism — what is left is the reader's own instructions.
+# The one turn that IS sourced negatively: RAPTOR-style hierarchical
+# summarisation (arXiv:2401.18059 — "a tree with differing levels of
+# summarization") is abstractive, and abstractive levels discard the
+# fine-grained items an exact count needs. So this is prompt-side discipline;
+# no summarisation subsystem is added.
 _AGGREGATION_FRAGMENT = (
     "\n\nAGGREGATION INSTRUCTIONS: this section applies ONLY IF this "
     "question asks for a count, a total, or another aggregate over the memory "
