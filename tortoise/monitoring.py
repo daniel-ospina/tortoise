@@ -4365,6 +4365,19 @@ def heartbeat_task_is_dead() -> bool:
 
     ``None`` (nothing instrumented) is False: the ceiling then fires on
     heartbeat age alone, unchanged for callers that never armed a task.
+
+    THREADING (checked against the primary source rather than assumed): this is
+    read from the WATCHDOG THREAD, i.e. from outside a Task or a callback, and
+    the Python docs warn that "almost all asyncio objects are not thread
+    safe". The methods used here are the exception that matters: ``done()`` /
+    ``cancelled()`` are plain ``_state`` reads, statically, and neither
+    schedules, awaits nor raises a task exception — the APIs the docs direct
+    through ``loop.call_soon_threadsafe`` are the SCHEDULING ones
+    (``call_soon``, ``Future.cancel``). The pre-existing hard branch already
+    read them this way; #10585 moved the call to once per poll, so the
+    invariant is written down instead of implied, and the ``except`` above
+    keeps any unexpected read failure fail-closed. (``Task.exception()`` is
+    NOT called here — it re-raises and would need the loop.)
     """
     with _HEARTBEAT_TASK_LOCK:
         task = _HEARTBEAT_TASK
