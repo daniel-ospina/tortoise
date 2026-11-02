@@ -726,9 +726,9 @@ def test_the_onboarding_section_measures_on_a_box_that_exports_the_hosted_key() 
     raised, the `onboarding` section was UNMEASURED (rows 1 and 5a-5e never
     printed) and the probe exited 3: the documented recipe (`README.md` →
     "Re-running the measurable half") could not reproduce `25 premises, 0
-    unmeasured sections` anywhere but a box without the key. These pins are green
-    over it because `tests/conftest.py:18` supplies the pepper the recipe does
-    not — so this one reproduces the recipe, in a fresh process.
+    unmeasured sections` anywhere but a box without the key or with a pepper set.
+    These pins are green over it because `tests/conftest.py:18` supplies the pepper
+    the recipe does not — so this one reproduces the recipe, in a fresh process.
 
     Three arms: the exported arm proves the section measures at all and that the
     documented command's verdict is the published one; the unexported arm proves

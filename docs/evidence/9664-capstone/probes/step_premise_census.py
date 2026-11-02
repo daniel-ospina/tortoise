@@ -73,9 +73,10 @@ def _hosted_startup_guard_cleared():
     _CHECKPOINT_STEPS` raised there, the `onboarding` section was UNMEASURED
     (rows 1 and 5a-5e never printed) and this probe exited 3. The documented
     recipe (README.md → "Re-running the measurable half") therefore could not
-    reproduce `25 premises, 0 unmeasured sections` on any box that exports the
-    key; the pins in `tests/test_9664_premise_census.py` were green over it only
-    because `tests/conftest.py:18` supplies a pepper the recipe does not.
+    reproduce `25 premises, 0 unmeasured sections` on any box that exports the key
+    without a pepper; the pins in `tests/test_9664_premise_census.py` were green
+    over it only because `tests/conftest.py:18` supplies a pepper the recipe does
+    not.
 
     The remedy is the one `auth.py`'s own message prescribes for a non-server
     process ("For local stdio, UNSET TORTOISE_API_KEY"), applied for the import

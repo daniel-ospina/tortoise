@@ -237,8 +237,9 @@ imports `hosted_api` with a hosted `TORTOISE_API_KEY` cleared for that one impor
 immediately (`_hosted_startup_guard_cleared`), because `tortoise/auth.py:28-38` treats that
 key as a server-STARTUP precondition — exporting it for an MCP client (every fleet cell
 does) used to make rows 1 and 5a-5e unmeasurable on any box that exported it **without a
-pepper** (exit `3`), so the recipe was reproducible only where the key was unset. (The two
-pack knobs the census refuses to measure under are a separate, deliberate refusal.)
+pepper** (exit `3`), so the recipe was reproducible only where the key was unset or a pepper
+was set. (The two pack knobs the census refuses to measure under are a separate, deliberate
+refusal.)
 Each row measures exactly the clause it prints: a two-clause premise is read clause by clause
 (the org-create init fragment for "auto-satisfied", `_NON_AGENT_STEPS` for "never an agent
 act"), and "every completion gate" is the three named gates `_GATE_SELF` / `_GATE_BUILD` /
