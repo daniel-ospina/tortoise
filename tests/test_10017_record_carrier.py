@@ -185,14 +185,20 @@ def _node_ids(proj) -> set[str]:
 _TEXT_SCAN = (
     "MATCH (n) WHERE n.c CONTAINS $needle OR n.content CONTAINS $needle "
     "OR n.text CONTAINS $needle OR n.payload CONTAINS $needle "
-    "OR n.props CONTAINS $needle RETURN labels(n)[0], coalesce(n.id, '')")
+    "OR n.props CONTAINS $needle OR n.embeddingText CONTAINS $needle "
+    "RETURN labels(n)[0], coalesce(n.id, '')")
 
 
 def _text_hits(proj, needle: str) -> list[tuple[str, str]]:
-    """Every node carrying *needle*, by ANY property that holds text.
+    """Every node carrying *needle*, in the SIX text property names below.
 
     The population, not the id space: a second writer with its own label or
-    wiring would satisfy an id-shaped assertion and fail this one.
+    wiring would satisfy an id-shaped assertion and fail this one. It is a
+    copy of `tests/test_10000_turns_record_only.py::_graph_text_hits` (kept
+    separate because that file is the pin and this one is the carrier
+    census) — `embeddingText` was added to BOTH after #8488/#10523 made
+    `_TURN_WRITE_CYPHER` write the turn's raw text there on the enrichment
+    fallback path, where this scan could not see it.
     """
     return [tuple(row) for row in
             proj.g.query(_TEXT_SCAN, params={"needle": needle}).result_set]
