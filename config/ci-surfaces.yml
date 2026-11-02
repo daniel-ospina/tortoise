@@ -7869,6 +7869,26 @@ durations_captured_at: "2026-11-02T05:15:03Z"
 # The pin takes the LARGER of the two measured values, per the note on the row.
 durations_held_equal:
   test_mcp_rename_table.py: test_bridge_table.py
+# ⛔ Rows whose weight is a DECLARED FLOOR, not a reading: the sweep may RAISE a row
+# above its floor and never lower it below. Machine-readable because the writer is
+# the map's ONLY automatic re-writer, and a floor that lives only in the prose beside
+# a row is a decision the writer cannot honour — it cannot attribute a comment block
+# to a row at all (YAML carries no such association), so a cap stated in a block is
+# invisible to it. MEASURED at the 2026-11-02 sweep (#10575 review, P1):
+# `test_lane_stash.py` went 355.0 -> 25.4 — 6.8x below the lowest reading the file has
+# ever recorded, on a row whose full 115-test denominator made the reading look
+# provable — while the cap block above it stayed byte-identical. `erring high is the
+# rule` (#6133/#9172) is not something a comment can enforce.
+# A floor must name a row that EXISTS and that carries at least the floor; both are
+# checked by `tools/ci_manifest.py::floor_issues`, composed into `--integrity`
+# (`ci_selection --integrity`) and the writer's pre-write gate.
+# Raising a declared floor itself is a CI-budget decision recorded on #9172 rather
+# than smuggled in with a weight — lowering one is the same decision in the other
+# direction, so it is edited deliberately, never by a sweep.
+durations_floors:
+  test_lane_stash.py: 355.0
+  test_calibration.py: 355.0
+  eval/write_path/test_write_path_operator_lane.py: 355.0
 durations:
   test_8447_read_after_page_bound.py: 2.0  # new in #8447 (row #6) — a file a PR ADDS can never carry a CI junit reading yet (the refresher samples push-to-main runs only), so it takes the header's flat `DEFAULT_FAST_WEIGHT` and NOT this host's local reading, which the map forbids as a SHARD-LAYOUT input (#2818/#3419/#4348). The row must EXIST, not merely default — but ⚠️ NOT because its absence reds the coverage floor: that rationale was written here un-measured and it is false at this head. MEASURED with this PR's own `tools/ci_selection.py` + manifest: `fast_pool()` is 1058 and `duration_coverage_issues()` is `[]` BOTH ways — 1025/1058 = 0.968809 WITHOUT the row, 1026/1058 = 0.969754 with it, against the inclusive 0.90 floor (`--integrity` exits 0 with only this row deleted; control, same tree: dropping 200 duration rows DOES red it at 81.5%, so the check is live, not disabled). `tools/ci_selection.py --integrity` is the authority and this pair is a SNAPSHOT of a moving denominator, not a constant; the row is kept because a fast file added by a PR must carry a weight at all (the #3400/#4348 trap — a default is not a reading), not because its absence reds a gate. What the weight covers: most cases take `sdk_factory` (a throwaway embedded FalkorDB each; the tier-2 PR legs are URI-empty BY DESIGN, so that is how it runs there), one reads `app.openapi()`, and one reads the source (the public docstring + the `OVERRIDES:` marker) — with the seeding done as ONE Cypher `UNWIND` query per case, not 1001 `append_event` calls. No network, no model, no Postgres. ⛔ The CASE COUNT is deliberately NOT quoted: a hand-written count re-stales on every case a later round adds, and this row has already done it — it read "10 cases — 8 take `sdk_factory`" while the file had 11 after round 12 added `test_a_bool_ask_is_not_a_page_size` (the same re-stale the #10360 and #5087 rows below record). `tools/ci_timing.py --refresh-durations` replaces this row from junit, so the provenance names the reading and leaves the count to the file itself. Context for a human, NOT the weight: 14.78 s wall locally on a loaded box in the embedded carve-out lane. `tools/ci_timing.py --refresh-durations` replaces this from junit once a push-to-main sweep includes it.
   test_state_value_verbatim_10360.py: 2.0  # new in #10360 — a file a PR ADDS can never carry a CI junit reading yet (the `durations` refresher samples push-to-main runs only), so it takes the header's flat `DEFAULT_FAST_WEIGHT` and NOT a local reading, which this map forbids as a SHARD-LAYOUT input (#2818/#3419/#4348). The row must EXIST, not merely default: the `core` registration puts one more file in `fast_pool()`, and `--integrity`'s duration-coverage floor is measured against that pool's own size (the #3400/#4348 trap a fast file added by a PR hits). MEASURED LOCALLY at this head as a sanity bound, not as a weight: 6.78 s wall on the fixer's box — above the 2.0 flat weight, so the flat reading UNDERSTATES it until a sweep replaces this row; the point of the row is existence + coverage, not an accurate shard weight. ⛔ The CASE COUNT is deliberately NOT quoted here: a hand-written count re-staled twice on #10513 (it read "47 cases" against a 50-case file, review P3), and this row is refreshed from junit by `tools/ci_timing.py`, so the provenance names the reading and leaves the count to the file itself. What the weight covers: hermetic — a fake model, no DB read of its own, no network, no server; the only file reads are the committed `tests/eval/write_path/receipts/7947-arms-2026-10-18/*.arms.json` receipts (the residual test) plus the shipped `extractor_v2` predicates. `tools/ci_timing.py --refresh-durations` replaces this from junit once a push-to-main sweep includes it.
@@ -8532,7 +8552,7 @@ durations:
   # comment (the reason `test_journal_growth.py` below dropped its own), so a count
   # published here re-stales silently — the per-reading counts stay only because a
   # reading is meaningless without the run it came from.
-  test_lane_stash.py: 25.4  # ci-timing junit-census+top-15 2026-11-02 (run 41375596528); was 355.0
+  test_lane_stash.py: 355.0  # ci-timing junit-census+top-15 2026-11-02 (run 41375596528): this row's weight is a DECLARED FLOOR (355.0), not a reading; a sweep may RAISE it but never lower it; the reading (25.4s) is carried as evidence and refused as a discount; kept 355.0
   # #5612: 12.2 is the HIGHER of two local readings of this file at head 4b112ccbc
   # (5.9 s / 12.2 s; hermetic — temp-dir journals + the committed fixture, no DB;
   # the spread is fleet I/O, same as #6144 above). Erring high is correct for

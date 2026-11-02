@@ -6504,3 +6504,176 @@ def test_a_re_base_keeps_a_live_count_outside_the_stale_basis_claim() -> None:
         f"the note states {stated.group(1)} offline tests; the file defines {actual}")
     assert len(re.findall(r"ci-timing (?:junit-census\+top-15|top-15) \d{4}-\d{2}-\d{2}",
                           note)) == 1, note
+
+
+# ── `durations_floors`: a DECLARED FLOOR is not a reading ────────────────────
+
+_FLOOR_MANIFEST = """\
+# hand-curated sweep-basis header
+surfaces:
+  core:
+    - test_capped.py
+    - test_plain.py
+    - test_other.py
+durations_held_equal: {}
+durations_floors:
+  test_capped.py: 355.0
+durations_captured_at: "2026-10-26T04:45:51Z"
+durations:
+  # ⛔ 355.0 IS A DELIBERATE CAP, NOT A READING — the two loaded post-#8423
+  # readings are ABOVE it and a quiet-host one below; erring high is the rule.
+  test_capped.py: 355.0
+  test_plain.py: 4.0  # a normal row, no floor declared
+  test_other.py: 2.0
+"""
+
+
+def _rendered_floor(tmp_path: Path, weights: dict[str, float], *,
+                    coverage: dict[str, tuple[int, int]] | None = None
+                    ) -> tuple[str, dict]:
+    path = _bridge_manifest(tmp_path, _FLOOR_MANIFEST)
+    return ci_timing.render_refreshed_manifest(
+        path.read_text(), weights, "2026-11-09T00:00:00Z",
+        coverage=coverage,
+        sample_label="ci-timing junit-census+top-15 2026-11-09 (run 41379999999)",
+    )
+
+
+def test_a_declared_floor_cannot_be_lowered_even_by_a_provable_reading(
+        tmp_path: Path) -> None:
+    """THE #10575 P1 DEFECT. A row whose weight is a DECLARED FLOOR records what
+    the pack SHALL assume, not what the file cost — so no reading discounts it,
+    including one that provably saw every testcase.
+
+    This is the measured shape: `test_lane_stash.py` went `355.0 -> 25.4` on the
+    2026-11-02 sweep, 6.8x below the lowest reading the file has ever recorded,
+    while the `355.0 IS A DELIBERATE CAP, NOT A READING … #9172` block above its own
+    row stayed byte-identical. The coverage witness then read 115 of 115, so the
+    ordinary lower-bound guard (`declared > 1 and observed >= declared`) declared it
+    PROVABLE and adopted the discount. A decision the writer cannot honour is a
+    decision the next sweep re-decides.
+
+    Non-vacuity: against the pre-fix renderer (no `durations_floors` reader) the row
+    is adopted at 25.4 and BOTH value assertions fail while the note carries no
+    floor reason — the `; was 355.0` re-base instead.
+    """
+    text, stats = _rendered_floor(
+        tmp_path, {"test_capped.py": 25.4, "test_plain.py": 3.0},
+        coverage={"test_capped.py": (115, 115), "test_plain.py": (4, 4)})
+    durations = yaml.safe_load(text)["durations"]
+    assert durations["test_capped.py"] == 355.0, durations["test_capped.py"]
+    # …and a floor is a MINIMUM, not a pin: an ordinary row is still re-based, so
+    # the mechanism cannot be mistaken for a blanket freeze.
+    assert durations["test_plain.py"] == 3.0
+    assert stats["kept_as_lower_bound"] == 1
+    # Look INSIDE the `durations:` block: the same key is also declared in
+    # `durations_floors` above it, and a whole-file scan finds that declaration
+    # instead of the row it guards.
+    block = text.split("\ndurations:\n", 1)[1]
+    row = next(ln for ln in block.split("\n")
+               if ln.strip().startswith("test_capped.py:"))
+    assert "DECLARED FLOOR (355.0)" in row, row
+    assert "kept 355.0" in row, row
+    assert "; was 355.0" not in row, row
+    # the cap block is left byte-identical: the row's note is rewritten, the
+    # neighbour's prose is not
+    assert "⛔ 355.0 IS A DELIBERATE CAP, NOT A READING" in text
+    assert ci_timing.validate_refreshed_manifest(text) == []
+    # A floor is also HONOURED on a RAISE: a reading above it is adopted normally,
+    # so a file that genuinely got more expensive still moves.
+    raised, _ = _rendered_floor(
+        tmp_path, {"test_capped.py": 400.0}, coverage={"test_capped.py": (115, 115)})
+    assert yaml.safe_load(raised)["durations"]["test_capped.py"] == 400.0
+
+
+def test_a_floored_row_states_one_basis_across_consecutive_sweeps(
+        tmp_path: Path) -> None:
+    """The floor reason is re-prunable, so a weekly sweep cannot grow the note.
+
+    The reason text is deliberately free of an em dash: `_PRIOR_BASIS_RE` /
+    `_PRIOR_BASIS_SPAN_RE` bound a basis with `[^—]*`, so a ` — ` inside the reason
+    made the note UNRECOGNISABLE as a prior held basis and every sweep appended
+    another sentence. Measured while writing this: the committed row grew from one
+    basis to two on the first render.
+    """
+    first, _ = _rendered_floor(
+        tmp_path, {"test_capped.py": 25.4}, coverage={"test_capped.py": (115, 115)})
+    second, _ = _rendered_floor(
+        tmp_path, {"test_capped.py": 25.4}, coverage={"test_capped.py": (115, 115)})
+    # Feed the first render back in, which is what the next week's sweep does.
+    third, _ = ci_timing.render_refreshed_manifest(
+        first, {"test_capped.py": 25.4}, "2026-11-16T00:00:00Z",
+        coverage={"test_capped.py": (115, 115)},
+        sample_label="ci-timing junit-census+top-15 2026-11-16 (run 41399999999)")
+    floors_at = [ln for ln in third.split("\ndurations:\n", 1)[1].split("\n")
+                 if ln.strip().startswith("test_capped.py:")]
+    assert len(floors_at) == 1, floors_at
+    assert floors_at[0].count("DECLARED FLOOR") == 1, floors_at[0]
+    assert third.count("ci-timing junit-census+top-15") == 1, third
+    assert yaml.safe_load(second)["durations"]["test_capped.py"] == 355.0
+
+
+def test_a_floor_that_names_no_row_or_sits_above_one_is_red() -> None:
+    """Both ways a declared floor can mean nothing are named, not ignored.
+
+    A floor guarding a key the map does not carry never applies (the file packs at
+    the flat default instead — the #3400/#4348 "a row must EXIST" trap), and a row
+    BELOW its own floor makes the map say "this is a declared minimum" and write a
+    smaller number. Neither is reachable through the writer, so each is a hand-edit
+    that left the other half behind — the state a reader cannot reconcile.
+
+    Non-vacuity: with `floor_issues` absent from the composition (pre-fix), both
+    maps are green.
+    """
+    import ci_manifest
+
+    good = {"durations": {"test_a.py": 355.0},
+            "durations_floors": {"test_a.py": 355.0}}
+    assert ci_manifest.floor_issues(good) == []
+    # a row ABOVE its floor is fine: a floor is a minimum, and the sweep can raise
+    assert ci_manifest.floor_issues({"durations": {"test_a.py": 400.0},
+                                     "durations_floors": {"test_a.py": 355.0}}) == []
+    # a floor for a row that is not there — the silent one
+    missing = ci_manifest.floor_issues(
+        {"durations": {"test_a.py": 20.0},
+         "durations_floors": {"test_absent.py": 355.0}})
+    assert len(missing) == 1 and "test_absent.py" in missing[0], missing
+    # a row sitting BELOW its own declared floor
+    below = ci_manifest.floor_issues(
+        {"durations": {"test_a.py": 25.4},
+         "durations_floors": {"test_a.py": 355.0}})
+    assert len(below) == 1 and "25.4" in below[0] and "355.0" in below[0], below
+    # a floor nobody can read is not "no floor"
+    unreadable = ci_manifest.floor_issues(
+        {"durations": {"test_a.py": 355.0},
+         "durations_floors": {"test_a.py": "a lot"}})
+    assert len(unreadable) == 1 and "not a number" in unreadable[0], unreadable
+    # An ABSENT map is `check`'s UNKNOWN, not this check's red: there is no map for
+    # a floor to be inconsistent with, and one red per declared floor would turn
+    # that UNKNOWN into a wall of reds.
+    assert ci_manifest.floor_issues({"durations_floors": {"test_a.py": 355.0}}) == []
+
+
+def test_the_real_maps_cap_is_a_declared_floor_and_is_never_lowered(
+        tmp_path: Path) -> None:
+    """The committed `355.0` cap rows are guarded, not just documented.
+
+    `test_lane_stash.py`, `test_calibration.py` and
+    `eval/write_path/test_write_path_operator_lane.py` all carry a 355.0 cap whose
+    rationale sits in prose above a row. The declaration is what makes it binding —
+    and this pin is deliberately NON-vacuous in the way that matters: it drives the
+    real map with a discount reading for each floored key and requires every one to
+    survive.
+    """
+    text = (REPO_ROOT / "config" / "ci-surfaces.yml").read_text()
+    floors = ci_timing._declared_floors(text)
+    assert floors, "the committed map declares no floors any more"
+    assert floors["test_lane_stash.py"] == 355.0
+    rendered, stats = ci_timing.render_refreshed_manifest(
+        text, {key: 1.0 for key in floors}, "2026-11-09T00:00:00Z",
+        coverage={key: (115, 115) for key in floors},
+        sample_label="ci-timing junit-census+top-15 2026-11-09 (run 41379999999)")
+    durations = yaml.safe_load(rendered)["durations"]
+    for key, floor in floors.items():
+        assert durations[key] >= floor, (key, durations[key], floor)
+    assert stats["kept_as_lower_bound"] == len(floors)
