@@ -1890,6 +1890,35 @@ def test_the_table_escapes_a_pipe_in_every_row_not_only_row_two():
     assert all("\\|" in ln for ln in lines[2:]), lines
 
 
+@pytest.mark.parametrize("span", ["{p}", "`{p}`", "**{p}**", "_{p}_", "[{p}](u)"])
+def test_the_table_escape_holds_inside_every_inline_span_a_note_carries(span):
+    """Escaping at the emitter is only correct because the CELL is the exception.
+
+    The general GFM rule is that a backslash escape does NOT work in a code
+    span, an autolink or raw HTML — so "escape every pipe" is a bug outside a
+    table. GFM §4.10 (*Tables*) carves the cell out explicitly: *"Include a pipe
+    in a cell's content by escaping it, including inside other inline spans"*,
+    and its own examples escape a pipe in prose, in a code span and in
+    `<strong>`. That is what makes `_cell` sound rather than lucky, and it is
+    the half that a future “fix” skipping spans would silently trade away.
+
+    The shapes are not hypothetical: `Row.observed` carries row 1's
+    `path: <config line>` (prose, and a config line can carry a `|` — a
+    compose map or a shell pipe), row 2's backticked counts, row 3's
+    ``mechanism: value`` pairs, and row 4's `open: docs/...:1234: | **V1** |`
+    — a markdown table row read out of a `docs/` document.
+    """
+    note = span.format(p="a|b")
+    cell = probe._cell(note)
+    assert cell.count("|") == note.count("|"), cell  # a pipe is CARRIED, never dropped
+    assert "\\|" in cell, f"the pipe inside {span!r} was left unescaped: {cell}"
+    row = probe.Row(bullet=1, text="a bullet", verdict="PARTIAL",
+                    command="c", observed=note)
+    lines = [ln for ln in probe._table([row]).splitlines() if ln.startswith("|")]
+    assert len({_cell_count(ln) for ln in lines}) == 1, (
+        f"a pipe inside {span!r} split the cell: {lines}")
+
+
 
 # ── The two verdicts that had no falsifier (fresh-context review, P2-1) ──────
 #
