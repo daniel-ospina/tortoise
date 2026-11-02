@@ -186,6 +186,21 @@ the session window) must exist, and:
     torn write and REFUSES, because the day's only remaining copy is then
     unreadable.
 
+    An empty PLAIN day file is the SAME state and gets the SAME posture, settled
+    or newest: the writer (`reflect-hook.writeFallback`) does
+    `appendFileSync(filePath, JSON.stringify(record) + "\n")` — create AND write
+    in ONE call — so a 0-byte plain file has never held a record, and the seal
+    later compresses that very file into the empty archive above. Refusing it
+    would flip the verdict after `DEFAULT_KEEP_DAYS` on IDENTICAL provenance,
+    i.e. a verdict an owner signs would change with the WALL CLOCK. So a day
+    file that exists and is empty cannot hide a turn (the population is the
+    graph's) and is disclosed in `empty_days` exactly like the sealed arm. A
+    same-day collision between `archive/<day>.jsonl` and the root's own
+    `<day>.jsonl` (one queue key per day+shape, root scanned second) is
+    FAIL-CLOSED — a session living only in the displaced copy becomes
+    `missing_in_record` — and the displaced path is DISCLOSED in
+    `skipped_files` rather than silently narrowing the inspected surface.
+
 THE PASS CRITERION AND THE EXIT CODES
 =====================================
     0  measured AND parity clean — every session holding in-population graph
@@ -247,6 +262,18 @@ USAGE
 
     --uri            the FalkorDB URI of the TARGET graph (or --db-path for
                      an embedded graph). Read-only queries only.
+    --db-path        the embedded-graph path, used INSTEAD of --uri. Mutually
+                     exclusive with it; `--graph-name` defaults to
+                     `tortoise` on this leg.
+    --json           write the full artifact (parity, population, record and
+                     anomaly sections) to this path. Exit codes are unchanged
+                     by it: the file records the verdict, it does not soften
+                     a REFUSED into a pass.
+    --sample         how many TURN IDS the artifact samples per session in
+                     `per_session_sample`, for the operator's eyeball
+                     comparison (default 5). It never affects the verdict:
+                     the truncation is of a printed sample, never of the
+                     compared population.
     --local-record-dir   the per-session capture log directory, e.g.
                      `~/.tortoise/session-events` (REQUIRED when this is the
                      leg you want — there is NO ambient default and no
@@ -301,6 +328,12 @@ USAGE
                      under the wrong tenant compares the graph against an
                      empty record and must fail loudly (it does — every graph
                      node becomes missing_in_record), not silently.
+    --graph-name     the graph INSIDE the store (default: the URI's, or
+                     `tortoise` for --db-path). It selects the GRAPH leg only
+                     — it never scopes the record read; the record's tenant is
+                     chosen with --org-id/--graph-id. A wrong --graph-name is
+                     indistinguishable from a drained graph, which is why
+                     --expect-empty exists.
     --expect-empty   allow a graph holding ZERO turn-shaped nodes to certify.
                      Without it that is exit 3: a drained graph and a wrong
                      --graph-name / --db-path are indistinguishable from the
@@ -947,6 +980,11 @@ def read_local_record_turns(directory, node_keys: Iterable[str] | None = None
     # wins over an unusual copy under `archive/` — the seal only ever writes
     # `.gz` there, but it can still read a plain one.
     found: dict[tuple[str, str], Path] = {}
+    #: Paths displaced by a same-day, same-shape collision. The verdict stays
+    #: fail-closed (a session living only here becomes `missing_in_record`),
+    #: but a narrowed surface the artifact does not name is a silent claim of
+    #: coverage — the exact class the four-surface enumeration closed.
+    skipped_files: list[str] = []
     for directory in (root / "archive", root):
         if not directory.exists():
             continue
@@ -962,7 +1000,11 @@ def read_local_record_turns(directory, node_keys: Iterable[str] | None = None
                 continue
             for suffix in _LOCAL_RECORD_SUFFIXES:
                 if entry.name.endswith(suffix):
-                    found[(entry.name[: -len(suffix)], suffix)] = entry
+                    key = (entry.name[: -len(suffix)], suffix)
+                    displaced = found.get(key)
+                    if displaced is not None:
+                        skipped_files.append(str(displaced.relative_to(root)))
+                    found[key] = entry
                     break
     files = sorted(found.values())
     # The tail is only tolerance-able on the newest PLAIN day file in the LIVE
@@ -1249,6 +1291,7 @@ def read_local_record_turns(directory, node_keys: Iterable[str] | None = None
         "empty_days": empty_days,
         "duplicate_window": duplicate_window,
         "filed_window": filed_window,
+        "skipped_files": sorted(skipped_files),
     }
 
 
@@ -1531,9 +1574,13 @@ def census(graph: dict, record: dict, *, sample: int) -> dict:
                        "sessions": record.get("sessions"),
                        "lines_parsed": record.get("lines_parsed"),
                        "torn_tail": record.get("torn_tail") or [],
-                       # Tolerated AND counted: a sealed day that provably
-                       # holds no records. Never a silent skip (review P1).
+                       # Tolerated AND counted: an empty day (sealed or
+                       # plain). Never a silent skip (review P1).
                        "empty_days": record.get("empty_days") or [],
+                       # Displaced by a same-day/same-shape collision: the
+                       # surface is narrower than `files` alone suggests, so
+                       # the omission is named rather than implied.
+                       "skipped_files": record.get("skipped_files") or [],
                        # Held back from the positional key space, with the graph
                        # population each one needs placed: a duplicate that no
                        # graph turn needs is disclosed and does not block.
@@ -1815,9 +1862,25 @@ def main(argv: list[str] | None = None) -> int:
     for empty_day in report["record"].get("empty_days") or []:
         # Disclosed, never silent: a complete verified archive of no records
         # cannot hide a turn, but a tolerance nobody can see reads like a day
-        # that went missing.
-        print(f"empty day  : {empty_day} (a sealed day that provably held no "
-              f"records — tolerated and counted, NOT a parity pass)")
+        # that went missing. The PROVENANCE is stated per file: "provably"
+        # belongs to the sealed arm (the seal round-trips the archive before it
+        # unlinks the plain source). An empty PLAIN day is a different fact — a
+        # 0-byte file that never held a record — and calling it "sealed …
+        # provably" would be false on both halves (review P2).
+        if empty_day.endswith(".gz"):
+            why = "a sealed day that provably held no records"
+        else:
+            why = ("an empty plain day — never held a record (the writer "
+                   "creates and writes in one call)")
+        print(f"empty day  : {empty_day} ({why} — tolerated and counted, "
+              f"NOT a parity pass)")
+    for skipped in report["record"].get("skipped_files") or []:
+        # Named, not implied: one queue key per day+shape means a plain file
+        # under `archive/` cannot be read alongside the root's own file of the
+        # same day. Fail-closed on the verdict; disclosed on the surface.
+        print(f"skipped    : {skipped} (same day+shape as a file the root "
+              f"store already supplies — displaced, NOT read; a session "
+              f"living only here reads as missing_in_record)")
     for cls, entries in report["anomalies"].items():
         if entries:
             print(f"anomaly    : {len(entries)} {cls} "

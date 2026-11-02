@@ -64,6 +64,38 @@ def _record_row(tid: str, **over) -> dict:
     return row
 
 
+@pytest.mark.parametrize("graph_over,record_over,field", [
+    # ⛔ THE P0 SHAPE OF THE EXACT-FIELD `None` POLARITY (review P2, measured).
+    # A record row PRESENT with a NULL transcript against a graph turn that
+    # holds text is NOT parity: the row has the right key and no text, so a
+    # delete destroys the only copy. The mutation that makes it fail open is
+    # `gval is None **or** rval is None -> continue`, which kept all 94 tests
+    # green — none of the five field-mismatch cases carries a `None` on one
+    # side. Only `graph None AND record None` may be skipped.
+    ({"content": "[user] SECRET REAL TEXT"}, {"content": None}, "text"),
+    ({"speaker": "assistant"}, {"speaker": None}, "speaker"),
+])
+def test_a_record_row_PRESENT_with_a_NULL_field_is_a_mismatch_not_parity(
+        graph_over, record_over, field):
+    nodes = {"s1_t0": _graph_node("s1_t0", "s1", **graph_over)}
+    rows = {"s1_t0": _record_row("s1_t0", **record_over)}
+    report = _census(nodes, rows)
+    assert report["verdict"] == "REFUSED"
+    assert _problems(report, "s1")[0]["field"] == field
+    assert _problems(report, "s1")[0]["problem"] == "field_mismatch"
+
+
+def test_the_exact_fields_skip_ONLY_when_BOTH_sides_are_None():
+    """The other half of the polarity above: `None` on BOTH sides is a real
+    match (a turn that carried nothing), and must keep passing — so the pin
+    above cannot be satisfied by refusing every `None`."""
+    nodes = {"s1_t0": _graph_node("s1_t0", "s1", content=None, speaker=None)}
+    rows = {"s1_t0": _record_row("s1_t0", content=None, speaker=None)}
+    report = _census(nodes, rows)
+    assert report["verdict"] == "CLEAN"
+    assert _problems(report, "s1") == []
+
+
 def _stores(nodes: dict[str, dict], rows: dict[str, dict]) -> tuple[dict, dict]:
     return ({"nodes": nodes},
             {"rows_by_key": rows, "non_turn_shaped": 0})
@@ -1746,6 +1778,53 @@ def test_a_torn_line_inside_a_sealed_archive_always_refuses(tmp_path):
         tpc.read_local_record_turns(tmp_path)
 
 
+def test_a_torn_PLAIN_line_under_archive_always_refuses(tmp_path):
+    """The tail exemption is the LIVE directory only — and this is the pin
+    that holds that conjunct (review P2).
+
+    `plain` is filtered on BOTH `f.parent == root` and `not ...".gz"`, and the
+    only archive-side torn-line pin uses a `.gz`, which the second conjunct
+    excludes anyway — so deleting `f.parent == root` left all 94 tests green
+    while a torn line in a SETTLED `archive/<day>.jsonl` became tolerated.
+    A plain file under `archive/` is not an in-flight append: the writer never
+    touches it, so a torn line there is corruption, not a mid-write tip.
+    """
+    archive = tmp_path / "archive"
+    archive.mkdir()
+    (archive / "2026-10-31.jsonl").write_text(
+        json.dumps({"session_id": "s1",
+                    "conversation": _conversation(("user", "a"))})
+        + '\n{"session_id": "s2", "conversa', encoding="utf-8")
+    # A newer plain day in the LIVE directory, so the newest-plain term alone
+    # would have allowed a tail — only the parent filter can refuse this.
+    _local_record(tmp_path, {"s3": _conversation(("user", "c"))})
+    with pytest.raises(tpc.CensusError, match="UNPARSABLE line at"):
+        tpc.read_local_record_turns(tmp_path)
+
+
+def test_a_same_day_plain_collision_is_disclosed_not_silently_dropped(tmp_path):
+    """One queue key per day+shape: the displaced copy is NAMED (review P2).
+
+    `found` is keyed on `(day-without-suffix, suffix)` with no directory
+    component and `root` is scanned second, so `archive/<day>.jsonl` loses to
+    the root's own file of the same day. The verdict stays fail-closed, but a
+    narrowed surface the artifact does not name reads as full coverage — the
+    class round 9 closed for the shape axis.
+    """
+    archive = tmp_path / "archive"
+    archive.mkdir()
+    (archive / "2026-11-02.jsonl").write_text(
+        json.dumps({"session_id": "s_arch",
+                    "conversation": _conversation(("user", "arch"))}) + "\n",
+        encoding="utf-8")
+    _local_record(tmp_path, {"s_root": _conversation(("user", "root"))})
+    record = tpc.read_local_record_turns(tmp_path)
+    assert record["files"] == ["2026-11-02.jsonl"]
+    assert record["skipped_files"] == ["archive/2026-11-02.jsonl"]
+    assert "s_root_t0" in record["rows_by_key"]
+    assert "s_arch_t0" not in record["rows_by_key"]
+
+
 def test_an_enriched_turn_refuses_because_no_record_can_restore_it(tmp_path):
     """#8488: `embeddingText` is an LLM rewrite the conversation cannot rebuild."""
     _local_record(tmp_path, {"s1": _conversation(("user", "hi"))})
@@ -1920,9 +1999,30 @@ def test_the_USAGE_block_documents_every_flag_the_parser_accepts():
     flags = sorted(set(re.findall(r'add_argument\(\s*"(--[a-z][a-z0-9-]*)"',
                                   source)))
     assert flags, "no parser flags found — the scan is broken, not the doc"
-    undocumented = [f for f in flags if f not in usage]
+    undocumented = []
+    for f in flags:
+        # ⛔ A SUBSTRING TEST OVER THE WHOLE BLOCK IS VACUOUS (review P2).
+        # `--graph-name` passed it on prose inside `--expect-empty`
+        # ("a drained graph and a wrong `--graph-name` / `--db-path` are
+        # indistinguishable") while having no flag ENTRY at all — meaning and
+        # default undocumented. Scoping to a *flag position* closes it: a flag
+        # counts on an ENTRY line (4-space indent, aliases such as
+        # `--org-id/--graph-id` allowed) or in the SYNOPSIS (8-space indent),
+        # never inside an entry's explanatory prose (deeply indented).
+        entry = re.search(rf"^    \S*(?<![\w-]){re.escape(f)}(?![\w-])",
+                          usage, re.M)
+        # EXACTLY 8 spaces: `^        .*` would also match a deeply indented
+        # continuation line, which is prose — that reopened the very hole this
+        # pin exists to close (measured: renaming the `--graph-name` entry to
+        # `--NOT-A-FLAG` still passed, on the "A wrong --graph-name is
+        # indistinguishable" sentence inside the entry body).
+        synopsis = re.search(rf"^ {{8}}[^ \n].*(?<![\w-]){re.escape(f)}(?![\w-])",
+                             usage, re.M)
+        if not (entry or synopsis):
+            undocumented.append(f)
     assert not undocumented, (
-        f"flags accepted but absent from the USAGE block: {undocumented}")
+        f"flags accepted but with no USAGE ENTRY of their own (a prose "
+        f"mention does not count): {undocumented}")
 
 
 def test_the_docstring_states_the_local_legs_DECLARED_ABSENT_fields():
