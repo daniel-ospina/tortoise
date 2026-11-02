@@ -221,10 +221,10 @@ def test_unreproducible_context_fails_closed_and_named(monkeypatch) -> None:
         return "answer"
 
     def _poison(_snapshot):
-        # The only way a factory that must RETURN a Context can fail: it cannot
-        # produce one. (A freshly built Context is never already-entered, so
-        # the realistic failure is a reproduction step raising — which is what
-        # the real `var.set` loop would do.)
+        # The only way a factory that must RETURN a Context can fail. A Context
+        # from `Context.copy()` is never already-entered, so the realistic
+        # failure is `copy()` itself raising (MemoryError in practice) — which
+        # is exactly what the `except` in `_confined` exists to convert.
         raise RuntimeError("cannot enter context: simulated")
 
     monkeypatch.setattr(monitoring, "_fresh_context", _poison)
