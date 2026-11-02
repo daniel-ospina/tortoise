@@ -29,6 +29,8 @@ claims:
 | `test_a_duplicate_writer_identity_is_not_reported_as_a_census_defect` | #10541's census population | a `duplicate` identity — a different defect, with no key in `WRITER_CENSUS` — is counted as an UNCLASSIFIED #10541 census defect, and the census note is printed over a population of zero |
 | `test_the_census_counts_only_the_unresolved_producers` | the same population, in the other direction | the census stops naming a classed unresolved producer, or names a duplicate alongside it |
 | `test_the_census_carries_no_entry_for_a_writer_that_is_no_longer_unresolved` | the census has no STALE entry | a writer is fixed (or a typo'd key is added) and its entry keeps asserting a class for a hole that no longer exists |
+| `test_an_out_of_vocabulary_census_class_is_unclassified_not_invisible` | the census totals ACCOUNT for the population | a census entry's class string is a typo/retired, so it falls through both `by_class` and `unclassified` and every class total reads `0` over a population of one |
+| `test_the_census_note_names_the_population_it_counted` | the census total does not claim a population wider than it counted | a duplicate is listed as an "unresolved writer" while the census note claims to cover "the unresolved set" and silently omits it |
 | `test_the_tool_parses_under_the_floor` | the `#5128` guard is PROTECTIVE, not documentary | 3.12-only syntax (PEP 701) creeps back in, so the file dies in the tokenizer before its own guard can refuse |
 | `test_a_line_that_merely_mentions_the_flag_is_not_a_shipped_default` | bullet 1's `on_by_default` input | a line that *documents* the flag (prose, a workflow step name, a commented list item) is scored as a shipped ON |
 | `test_every_real_assignment_shape_still_reads_as_shipped_ON` | the same input, in the other direction | tightening the test makes a REAL shipped ON (compose map/array, `.env`, Dockerfile, `export`) read as a false `False` |
@@ -1286,10 +1288,24 @@ def test_the_census_carries_no_entry_for_a_writer_that_is_no_longer_unresolved()
     re-check at all, and a dead entry would silently inflate the `exempt` count
     a reader takes as "these are the instrument's false positives".
 
-    Bidirectional on purpose: **equality**, not containment. The stale
-    direction is this test's own; the containment direction (a newly unresolved
-    writer that no entry names) is redundantly asserted here as well, so a
-    reader cannot delete either half of the pair and still read a green suite.
+    Bidirectional on purpose: **equality**, not containment — but the two
+    halves are NOT equally backed, and the asymmetry runs the opposite way to
+    the temptation. The STALE direction is asserted HERE ONLY: no other test in
+    the tree covers it, so deleting the two `stale` assertion lines leaves the
+    property unguarded and the suite still GREEN. The containment direction (a
+    newly unresolved writer that no entry names) belongs to the sibling
+    falsifier `test_every_unresolved_writer_carries_a_census_class`; it is
+    asserted here too, and deleting it here is caught there. ⛔ Do not read that
+    as "both halves are double-covered" — the half with no backstop is the
+    stale one, and it is the whole reason this test exists.
+
+    This is also a PIN on the census dict's own freshness, not a discriminator
+    for the `unknown` → `unresolved_write` population change: it is green on
+    `origin/act-10465` and green after it (measured), because `WRITER_CENSUS`
+    already existed there and no entry is stale on the real tree. It does not
+    count as non-vacuity evidence for the harness change; the duplicate tests
+    above are.
+
     ⛔ No `getattr` default on the census: a `getattr(probe, "WRITER_CENSUS",
     {})` makes this test VACUOUS the day the constant is renamed — `stale`
     becomes `[]` and it passes having read nothing. A missing census must
@@ -1307,9 +1323,80 @@ def test_the_census_carries_no_entry_for_a_writer_that_is_no_longer_unresolved()
         "exercising the case, so it proves nothing")
     stale = sorted(set(census) - unresolved)
     assert not stale, (
-        "census entries with no unresolved writer behind them (a stale "
-        f"suppression — delete the entry, or explain the hole it names): {stale}")
+        "census entries with no unresolved writer behind them — EITHER the "
+        "hole was fixed (re-measure before deleting) or the writer was "
+        "re-kinded and is STILL a hole (became `duplicate`, or `gated`/"
+        "`ungated` with an unresolved label), OR the key is stale/typo'd. "
+        "Only the last case is a delete: "
+        f"{stale}")
     missing = sorted(unresolved - set(census))
     assert not missing, (
-        "unresolved writers carrying no census entry (this direction is the "
-        f"sibling's, asserted here so neither half can be deleted): {missing}")
+        "unresolved writers carrying no census entry (the containment "
+        f"direction — also covered by the sibling falsifier): {missing}")
+
+
+def test_an_out_of_vocabulary_census_class_is_unclassified_not_invisible(
+        monkeypatch):
+    """A class outside `CENSUS_CLASSES` must read as UNCLASSIFIED, not vanish.
+
+    `by_class` is gated on `cls in CENSUS_CLASSES` and `unclassified` was gated
+    on `_census_class(fn) is None`, so an entry whose class string is a typo (or
+    a retired class) matched NEITHER: the writer was named nowhere and the
+    per-class totals summed to `0 | 0 | 0` over a population of one — the
+    instrument printing a total that accounts for nothing it was asked about.
+    The sibling falsifier catches the typo in CI (it asserts
+    `census[w][0] in classes`), but the instrument's own output must not lie
+    while it waits for CI, and this diff's equality test makes editing census
+    entries a routine act.
+
+    Measured pre-fix: `recognised_producer=0 | exempt=0 | bypass=0`, no
+    `UNCLASSIFIED` note. The population is one, so the note is the only signal.
+    """
+    writers = {
+        "tortoise.consistency::_compare_views": {
+            "callee": probe.SEAM_CALL, "at": "tortoise/consistency.py:1",
+            "kind": "unresolved_write",
+            "label": "UNKNOWN(unresolved producer)",
+        },
+    }
+    # A class string that is NOT in CENSUS_CLASSES — the typo/retired shape.
+    assert "exmpt" not in probe.CENSUS_CLASSES
+    monkeypatch.setitem(
+        probe.WRITER_CENSUS, "tortoise.consistency::_compare_views",
+        ("exmpt", "MUTATION: an out-of-vocabulary class"))
+    monkeypatch.setattr(probe, "embedding_writers", lambda: writers)
+    row = probe.score_path_bullet()
+    unclassified = [n for n in row.notes if "UNCLASSIFIED" in n]
+    assert unclassified, (
+        "a census entry whose class is outside CENSUS_CLASSES disappeared from "
+        f"the instrument's output entirely: {row.notes}")
+    assert "tortoise.consistency::_compare_views" in unclassified[0], unclassified
+
+
+def test_the_census_note_names_the_population_it_counted(monkeypatch):
+    """The census total must not claim a population wider than it counted.
+
+    The note said "over the unresolved set", but the counted population is
+    `kind == "unresolved_write"` while the note four lines up ("unresolved
+    writers") prints `unknown` — which also carries duplicates. With one of
+    each present, a reader saw TWO listed writers and totals summing to ONE,
+    with the note asserting coverage of both. Naming the population makes any
+    future under-coverage visible instead of plausible.
+    """
+    writers = {
+        "tortoise.consistency::_compare_views": {
+            "callee": probe.SEAM_CALL, "at": "tortoise/consistency.py:1",
+            "kind": "unresolved_write",
+            "label": "UNKNOWN(unresolved producer)",
+        },
+        "tortoise.y::_upsert_point": {
+            "callee": probe.SEAM_CALL, "at": "tortoise/y.py:2",
+            "kind": "duplicate", "label": "UNKNOWN(duplicate writer name)",
+        },
+    }
+    monkeypatch.setattr(probe, "embedding_writers", lambda: writers)
+    row = probe.score_path_bullet()
+    census = [n for n in row.notes if n.startswith("#10541 census")]
+    assert len(census) == 1, row.notes
+    # It names how many of the UNKNOWN-labelled writers it actually counted.
+    assert "1 of 2 UNKNOWN-labelled" in census[0], census[0]
