@@ -490,6 +490,50 @@ class TestDumpReadsTheCaptureShape(unittest.TestCase):
                 self.assertIn(f"r[{i}]", script,
                               f"the emitter must print column {i}")
 
+    def test_dump_writes_the_file_in_turn_index_order_not_the_graph_order(self):
+        # `_turn_order` alone is NOT enough: it is only ever called by the test
+        # that exercises it directly, so deleting the `sorted(...)` around
+        # `dump`'s own write (or re-adding an ORDER-BY-shaped reorder) left the
+        # whole suite green and restored the cycle-1 bug — a scrambled
+        # transcript. Assert the FILE `dump` writes, from a payload the graph
+        # returns deliberately out of order, so the wiring is falsifiable and
+        # not just the comparator.
+        #
+        # The rows carry ONE identical `createdAt` (what the writer does: it
+        # stamps a capture batch with one `$now`), so a timestamp sort cannot
+        # rescue this the way the old predicate did. `s1_t10` must come last:
+        # a lexicographic sort would put it between t0/t1 and before t2.
+        ts = "2026-11-02T00:00:00+00:00"
+        rows = [
+            ["session://s1", "event", "assistant", f"[assistant] m{i}", ts,
+             _turn_id("s1", i)]
+            for i in (10, 2, 0)
+        ] + [
+            # a turn-shaped point whose id is NOT a turn: it must be dropped,
+            # not spliced in by the sort.
+            ["session://s1", "event", "user", "[user] claim", ts, "s1_note"],
+        ]
+        payload = "\n".join(json.dumps(r) for r in rows)
+        with tempfile.TemporaryDirectory() as td:
+            out = Path(td) / "turns.jsonl"
+            with mock.patch("extract_turns.subprocess.run") as run:
+                run.return_value = types.SimpleNamespace(stdout=payload + "\n",
+                                                         stderr="")
+                dump(out)
+            written = [json.loads(ln) for ln in out.read_text().splitlines() if ln]
+            # ...and the file is the transcript the operator actually reads.
+            transcripts = build_transcripts(out)
+        self.assertEqual([r["content"] for r in written],
+                         ["m0", "m2", "m10"],
+                         "dump must write the turn INDEX order, and t10 last")
+        self.assertNotIn("claim", [r["content"] for r in written],
+                         "a non-turn id is rejected, never sorted in")
+        self.assertEqual(
+            transcripts,
+            {"s1": "[2026-11-02] assistant: m0\n"
+                   "[2026-11-02] assistant: m2\n"
+                   "[2026-11-02] assistant: m10"})
+
     def test_turn_order_refuses_a_turn_id_with_no_index(self):
         with self.assertRaises(ValueError):
             _turn_order(["session://s1", "event", "r", "[r] x", None, "no-index"])

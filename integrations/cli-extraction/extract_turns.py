@@ -144,9 +144,14 @@ def _is_turn_of(row) -> bool:
     """`{session}_t{i}` — the id shape the one turn store derives.
 
     The suffix must be DECIMAL, mirroring `sdk._capture_turn_ids`' own
-    `isdecimal()` guard, so this filter and `_turn_order` agree about what a
-    turn is (an id this filter admitted but `_turn_order` could not index
-    would abort the whole dump).
+    `isdecimal()` guard, so this filter admits exactly what that sweep admits.
+
+    It is NOT an exact equivalence with `_turn_order`, and must not be
+    described as one: `isdecimal()` is True for a suffix longer than `int()`'s
+    4300-digit limit, which `_turn_order` then refuses with a `ValueError`
+    (`dump` does not catch it, so it surfaces as a traceback). No writer mints
+    such an id — `_capture_turn_id` emits a plain running index — so this is a
+    documented edge rather than a reachable state.
     """
     sid = str(row[0]).split("://", 1)[-1]
     tail = str(row[5])[len(sid) + 2:]
