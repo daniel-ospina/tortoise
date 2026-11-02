@@ -33,6 +33,41 @@ aboutObjects: ONTOLOGY.md, canonical ontology, model versions
 
 ---
 
+> **Correction to v3.31 (2026-11-02 — #9974 R1 / PR #10524 — a CITATION correction: no model change, no version bump):**
+>
+> **What moved, and why this is a correction rather than a model change.** Three `ONTOLOGY.md` cells cited the
+> `status` fold's *implementation* and no longer matched the code: §2's `Procedural` layer row and §4.3's
+> `Object.status` row said `ObjectRegistered→live`, and §4.2's `Subject.status` row said `_upsert_subject`
+> *"SEEDS it ON CREATE (`status=coalesce($st,'live')`)"*. #9974 R1 (PR #10524) moved the fold to
+> `s.status=$st` / `o.status=$st` (`tortoise/projection/entities.py`) and deleted the create door's
+> fabricated `out["status"] = "live"` (`tortoise/sdk.py::_entity_door_props`), so a birth status is
+> **DERIVED-OR-ABSENT**: the record's own value where the record states one, and the property ABSENT where it
+> does not (`SET x = NULL` REMOVES a property — the #7936 rule the same `ON MATCH` arm already carries). An
+> absent status still READS live, which is existing doctrine and unchanged: `live._terminal_excluded`'s NULL
+> arm, §11's cache rule, and the decision at
+> `docs/epics/2026-10-10-7879-postgres-record/02-identity-and-placement.md` §2.6 (*"`status` — DERIVED (a
+> cache) … projection-owned CACHE"*). **The model statement is untouched** — `status` was already ruled a
+> DERIVED cache; what was stale was the sentence describing how the code derives it. That is the header's
+> *factual error* exception, and this entry is the exception's record. No version bump and no `updated:`
+> change: no model statement moved.
+>
+> **⛔ Not landed here, and why.** An earlier draft of PR #10524 carried a new 37-line §4.3 note
+> (*"Querying liveness — do NOT filter the literal `status:'live'`"*). It added two things a reader would
+> take as **normative for consumers**: that a literal filter now matches zero rows, and that the supported
+> replacement is the four-value `:Object` predicate — i.e. a new rule, not a correction of a stale citation.
+> Under this document's CRITICAL RULE that needs Daniel Ospina's explicit approval of its exact text, and no
+> such approval is recorded anywhere reachable (PR body, PR comments, inline review comments, #9974 body and
+> its comments). It is therefore WITHDRAWN from `ONTOLOGY.md` by this correction and parked on **#9974** with
+> its verbatim text (comment on that issue, 2026-11-02), so the approval question arrives with the text in
+> hand rather than being re-derived by the next lane. **What a consumer needs is already stated by the
+> corrected cells above and nothing new is claimed there:** `status` is a cache of the event stream (§2's
+> Procedural row, the §4.2/§4.3 `status` cells, §11's derived-cache rule), and an absent status READS live (the
+> same cells). The predicate that implements "not terminal" — `live._terminal_excluded` /
+> `live.is_terminal_status`, never a literal — is stated where it lives, in `tortoise/live.py` and its §4.3
+> consumers; this document does not restate it as a consumer rule.
+
+---
+
 > **Changelog v3.31 (2026-10-26 — issue #9202 — the END's state is SETTLED, and the write door SHAPES or REFUSES):**
 >
 > **Owner rulings, 2026-10-26 (Daniel Ospina): the spec text approved verbatim, then the STRUCTURE of where it
