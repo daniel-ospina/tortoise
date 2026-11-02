@@ -48,6 +48,20 @@ aboutObjects: ONTOLOGY.md, canonical ontology, model versions
 > DERIVED cache. No version bump and no `updated:` change — no model statement moved, and (see below)
 > `ONTOLOGY.md` itself is byte-identical to `origin/main` in this PR.
 >
+> **⚠️ Deliberate consequence, stated: the projection-baseline FORMAT moves 4 → 5.**
+> `consistency.py::_PROJECTION_STATE_FORMAT_HISTORY` is now `(1, 2, 3, 4, 5)`, so `_PROJECTION_STATE_FORMAT`
+> is 5. `_entity_node_view` folds `status` into the baseline digest and the released fold seeded
+> `coalesce($st,'live')`, so every entity registered by a producer that never stated a status loses the
+> property on the first post-upgrade replay — `db_hash` moves while the journal does not. Without the bump
+> that is a sticky `unrecorded-mutation` on a healthy graph (`record_projection_state` is gated on `ok`);
+> with it, every existing `<journal>.projection-state.json` is a KNOWN predecessor that **re-baselines on the
+> next recording run**, and the operator is told so: `projection baseline MIGRATED (format 4 -> 5)`. ⛔ **The
+> cost, stated so it is not read as a free pass: `unrecorded-mutation` detection is BLIND for that one run**,
+> and a graph write that bypassed the journal before this run cannot be seen by the new baseline — so an
+> operator who suspects an out-of-band mutation must establish it by other means rather than by comparing
+> across this run. Same consequence and same remedy as v1 → v2 (`tags`), v2 → v3 (the `(label, id)` re-key)
+> and v3 → v4 (identifier aliases), all argued at `consistency.py:1056-1119`.
+>
 > **⛔ `ONTOLOGY.md` is deliberately UNMODIFIED, and this is the second ruling on the question.** Two later
 > reviewers disagreed about this file, so both judgments are recorded here rather than left for the next lane
 > to re-derive:
