@@ -2497,24 +2497,57 @@ def test_the_birth_event_labels_are_the_one_home_creation_map():
         "creation type that home names would select no birth record, so that "
         "node rebuilds with no status and reads LIVE"
     )
+    # ⛔ AND THE STATEMENT IS A THIRD COPY (review round 8, P2). `_BIRTH_EVENT_LABELS`
+    # only LABELS a row the SQL has already selected; the `event_type IN (...)`
+    # literals in `_LIFECYCLE_EVENTS_SQL` / `_LIFECYCLE_EVENTS_FOR_ONE_SQL` decide
+    # WHICH rows exist. Measured on round 6's head: adding a creation type to every
+    # declared home and leaving the SQL alone kept 133/133 green, and production
+    # would then select no row for it — the same harm, through the door the pin
+    # was supposed to close. So the SQL's birth set is pinned to the table, not
+    # described as following it.
+    birth_types = set(cp._BIRTH_EVENT_LABELS)
+    full_sets = [
+        {t.strip().strip("'") for t in m.group(1).split(",")}
+        for m in _EVENT_TYPE_SET_RE.finditer(cp._LIFECYCLE_EVENTS_SQL)
+    ]
+    assert full_sets == [birth_types], (
+        "the record-side SELECT's `event_type IN (...)` set(s) no longer match the "
+        f"birth table ({full_sets!r} vs {sorted(birth_types)!r}) — a type the table "
+        "names would never be SELECTED, so its born-terminal node rebuilds with no "
+        "status and reads LIVE"
+    )
+    one_sets = [
+        {t.strip().strip("'") for t in m.group(1).split(",")}
+        for m in _EVENT_TYPE_SET_RE.finditer(cp._LIFECYCLE_EVENTS_FOR_ONE_SQL)
+    ]
+    assert any(birth_types <= s for s in one_sets), (
+        "the single-row narrowing does not select every birth type the table names "
+        f"({one_sets!r} vs {sorted(birth_types)!r}) — the read door would answer a "
+        "status the rebuild door holds, the two-door split #9974 exists to prevent"
+    )
     # ⛔ The RECORD layer is a SECOND home, and it is the one that decides what a
     # creation record MATERIALISES — `RECORD_MUTATIONS` is written out again at
     # that door and never consults the fold's map. A type added there (plus its
     # producer and `JOURNAL_EVENT_TYPES`) would leave the assertion above green
     # while the birth leg named nothing for it: the exact drift, one door over.
-    record_home = {
-        k: m.effect.node.label
-        for k, m in rp.RECORD_MUTATIONS.items()
-        if isinstance(m.effect, rp.NodeSnapshot)
-        and m.effect.node.label in status_bearing
-    }
-    assert cp._BIRTH_EVENT_LABELS == record_home, (
-        "the birth label table drifted from the record layer's materialisation "
-        f"table (record_projection.RECORD_MUTATIONS snapshot labels={record_home!r}, "
-        f"cache_projection._BIRTH_EVENT_LABELS={cp._BIRTH_EVENT_LABELS!r}) — a "
-        "creation type the record materialises would select no birth record, so "
-        "that node rebuilds with no status and reads LIVE"
-    )
+    # ⚠️ ONE-DIRECTIONAL ON PURPOSE (review round 8, P2): every status-bearing
+    # creation the FOLD HOME declares must materialise a `NodeSnapshot` of the
+    # same label. It is NOT the converse — "every Object/Subject NodeSnapshot in
+    # RECORD_MUTATIONS is a creation" is a premise nothing declares, and asserting
+    # it turns a newly added non-creation snapshot (a `NodePatch` today, so the
+    # premise happens to hold) into a RED that invites the two wrong remedies:
+    # adding the type to `_BIRTH_EVENT_LABELS` (a dead entry) or to the fold home
+    # (declaring a non-creation as one).
+    for etype, label in fold_home.items():
+        if label not in status_bearing:
+            continue
+        effect = rp.RECORD_MUTATIONS[etype].effect
+        assert isinstance(effect, rp.NodeSnapshot) and effect.node.label == label, (
+            "the record layer does not materialise the creation record the "
+            f"journal fold declares ({etype!r}: expected a NodeSnapshot of "
+            f"{label!r}, got {effect!r}) — it would select no birth record, so a "
+            "born-terminal node rebuilds with no status and reads LIVE"
+        )
 
 
 def test_a_silent_birth_record_derives_no_status_rather_than_live():
