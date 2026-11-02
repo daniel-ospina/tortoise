@@ -4626,6 +4626,10 @@ def test_the_relays_a_sibling_test_file_makes_land_on_what_they_name():
         # above the sentence and left the cite pointing at an unrelated `#:` line, redding this
         # pin. Re-deriving to 1759 would only re-arm that decay. It is a SYMBOL citation now —
         # see `symbol_citations` below, which anchors on the SENTENCE the target must carry.
+        # The ninth re-derivation is why the number is gone rather than bumped one more time:
+        # `origin/main` carried it to 1687 (#10525's E3 class-set arms) while this branch was
+        # removing it, so the merge of those two heads is exactly the shape a number cannot
+        # survive. The symbol citation is the only form that is true on BOTH sides.
         # the four fleet observers' prose (`:25-26`): the inventory row it contrasts — the
         # moving alias the observers must NOT pin to, which the version pin below it replaces
         ("docs/ops/ci-runner-x64.md", 25): r"^\| `ubuntu-latest` \|",
