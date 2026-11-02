@@ -612,6 +612,29 @@ response_fields:
     (2024-3-1, 2024/03/01) and a refusal (ValueError) all return the pre-#9202 reply shape.'
   unchanged_when_off: not flag-gated — the key is ABSENT unless a shaping happened, and a write that shapes nothing
     returns byte-identical to before this field existed
+- response: tortoise_issue_insight
+  field: truncated
+  emitted_when: 'ALWAYS on the `tortoise_issue_insight` body (and the SDK verb `TortoiseSDK.issue_insight`, and
+    GET /v1/issue-insight) — the #8447 truncation marker on the read whose whole job is to say "there is more in
+    the graph": true when the delivered `data_points` are NOT the whole set this read matched. Two seams make it
+    true and the caller can reach neither — the `[:limit]` cut (`_issue_insight_rank(...)[:limit]`, shipped default
+    `limit=2`) and a candidate pool that saturated its own bound (`max(limit*5, 20)`), where matches past the pool
+    were never read. `false` only when nothing was dropped. It answers "did I get everything this read matched?",
+    NOT "did the cap fire?", and it rides its OWN field — never a fifth term of the recorded status vocabulary
+    (`tortoise/status_vocabulary.py` forbids one; `tortoise/truncation.py` is the marker''s ONE home)'
+  unchanged_when_off: n/a — not flag-gated. The key is emitted on EVERY response path of this read (including the
+    `no_prior_knowledge` and `repo_not_indexed` bodies, which make POSITIVE claims of absence), because a marker
+    that defaults off preserves exactly the defect it fixes. Callers that read only the pre-existing keys are
+    byte-identical; `insight` changes only where it was previously WRONG (it rendered the post-cut length as the
+    hit count)
+- response: tortoise_issue_insight
+  field: total_available
+  emitted_when: 'the `tortoise_issue_insight` body, ONLY when `truncated` is true AND the count is EXACT — the
+    relevance gate saw every match in a candidate pool that came back SHORT of its own bound and whose retrieval
+    path reported nothing dropped. ABSENT means the exact total is UNKNOWN, never zero: a saturated pool is a
+    lower bound, and publishing it as a total is the same defect one level down (Elasticsearch carries
+    `hits.total.relation: eq|gte` for exactly this)'
+  unchanged_when_off: n/a — not flag-gated; the key is absent on every complete or unprovable read
 - response: tortoise_update_point
   field: valid_to_shaped
   emitted_when: 'same field, same condition, on the UPDATE door (#9202): the caller''s validTo declared no date

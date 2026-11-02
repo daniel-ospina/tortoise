@@ -33801,6 +33801,13 @@ class TortoiseSDK:
         non-empty + zero points for repo -> repo_not_indexed; never raises
         (graph-service failure -> error dict via _safe at the handler).
         data_points never exceeds `limit` rows (repo-stage append is capped).
+
+        #8447 — every reply carries `truncated` (true when `data_points` are NOT
+        the whole set this read matched: the `limit` cut fired, or the candidate
+        pool saturated its own bound so matches past it were never read).
+        `total_available` rides it ONLY when the count is EXACT; its absence
+        means unknown, never zero. A caller that must not reason over a subset
+        reads `truncated` before `data_points`.
         """
         proj = self._get_proj()
         count_rows = proj.g.query(
@@ -33809,8 +33816,38 @@ class TortoiseSDK:
         ).result_set
         total_points = int(count_rows[0][0]) if count_rows else 0
 
+        # #8447: the TRUNCATION marker's sink for THIS response. Seeded COMPLETE
+        # so every return below is a POSITIVE claim rather than an un-marked
+        # body the caller must guess about, and then handed to the retrieval
+        # call so the marker's own proof (a lost leg, a saturated pool) is MADE
+        # ONCE, by the code that drops the rows — never re-derived here.
+        from .truncation import (
+            mark_truncation as _mark_truncation,
+            truncation_field as _truncation_field,
+        )
+        _trunc_out: dict = {"truncated": False}
+
+        def _with_truncation(response: dict) -> dict:
+            """Carry the #8447 marker on EVERY response path of this read.
+
+            `truncation.truncation_field` refuses to guess when the marker is
+            absent, so a producer bug is a loud 500 at the handler rather than
+            a silently-complete answer — the same posture `/v1/search` takes.
+            """
+            response.update(_truncation_field(_trunc_out))
+            return response
+
         text = " ".join(p for p in (title or "", body or "") if p and p.strip()).strip()
         semantic_hits: list[dict] = []
+        #: hits that cleared the relevance gate, BEFORE the `[:limit]` cut — the
+        #: honest population the cut was applied to, and the number the
+        #: `insight` sentence reports (post-cut it under-reported: a 17-hit
+        #: read at the shipped `limit=2` said "2 graph hit(s) relate").
+        relevant_hits = 0
+        #: does the pool prove it saw EVERY match? False unless the pool came
+        #: back short of its own bound AND the retrieval path reported nothing
+        #: dropped — a saturated pool is a floor, never a total.
+        _exact = False
         if text:
             # Fetch a wider candidate pool than `limit` (review P3): the gate
             # below filters post-retrieval, so a relevant hit ranked just past
@@ -33819,11 +33856,23 @@ class TortoiseSDK:
             # re-owns the order below, so the SDK-side validity selection could
             # only move which ids survive that cut. Same shape as
             # recall_state's opt-out.
+            pool_limit = max(limit * 5, 20)
             semantic_hits = self.tortoise_fts_query(
-                text, entity_type="point", limit=max(limit * 5, 20),
+                text, entity_type="point", limit=pool_limit,
                 _record_reads=False,  # #7983: a candidate pool
                 _valid_time_rerank=False,  # #8487: caller re-owns the order
+                _truncation_out=_trunc_out,  # #8447: the retrieval path's proof
             )
+            # The retrieval path's verdict: it dropped rows at the pool bound,
+            # or an ASKED leg never answered. Either way matches this read would
+            # have seen were never read, so no exact total is available and the
+            # answer is incomplete EVEN IF the gate below delivers everything it
+            # kept (``truncation.mark_truncation``'s ``incomplete`` case).
+            retrieval_incomplete = bool(_trunc_out.get("truncated"))
+            # A pool that came back EXACTLY at its bound was cut by it; matches
+            # past it exist and are unreachable by any follow-up call.
+            pool_saturated = len(semantic_hits) >= pool_limit
+            _exact = not retrieval_incomplete and not pool_saturated
             # c70: drop hits that clear neither the EP-confidence floor nor a
             # shared-token floor (TF-IDF fallback hits carry no EP annotation;
             # FTS-mode hits are EP-annotated but unmeasured points must still
@@ -33832,6 +33881,7 @@ class TortoiseSDK:
                 h for h in semantic_hits
                 if self._issue_insight_relevant(h, text)
             ]
+            relevant_hits = len(semantic_hits)
             # #3277: re-rank BEFORE truncating — retrieval order is
             # mode-dependent (#3254/#2573), so two unmeasured lexical matches
             # can precede a measured EP-confirmed claim and [:limit] at the
@@ -33839,6 +33889,10 @@ class TortoiseSDK:
             # _issue_insight_rank; the [:limit] cap still holds (reorder, not
             # exempt), so `data_points <= limit` is preserved.
             semantic_hits = self._issue_insight_rank(semantic_hits)[:limit]
+            _mark_truncation(
+                _trunc_out, returned=len(semantic_hits),
+                candidates=relevant_hits, exact=_exact,
+                incomplete=retrieval_incomplete or pool_saturated)
 
         repo_points: list[dict] = []
         if repo:
@@ -33848,7 +33902,7 @@ class TortoiseSDK:
             )
 
         if total_points == 0:
-            return {
+            return _with_truncation({
                 "has_prior": False,
                 "no_prior_knowledge": True,
                 "repo_not_indexed": False,
@@ -33859,7 +33913,7 @@ class TortoiseSDK:
                             "indexes EVERY connected repo, not one.",
                 "more_in_graph": None,
                 "repo_stats": None,
-            }
+            })
 
         # #7983: the semantic pool opted out above; the hits that SURVIVE the
         # gate are what the caller receives, so record those (this is the read).
@@ -33887,7 +33941,7 @@ class TortoiseSDK:
                 })
 
         if repo and not repo_points:
-            return {
+            return _with_truncation({
                 "has_prior": True,
                 "no_prior_knowledge": False,
                 "repo_not_indexed": True,
@@ -33899,12 +33953,16 @@ class TortoiseSDK:
                             f"so '{repo}' is covered only if it is one of them.",
                 "more_in_graph": None,
                 "repo_stats": None,
-            }
+            })
 
         # c70: nothing cleared the semantic gate -> "no matches", even when the
         # repo stage found points (repo context is still reported via repo_stats).
         if not semantic_hits:
-            return {
+            # ⛔ "No graph matches" is a POSITIVE claim of absence, and today it
+            # can be produced by a read that dropped rows (a saturated pool, a
+            # lost leg). The marker is what tells those two apart — the caller
+            # may not assert absence over a read the store could not complete.
+            return _with_truncation({
                 "has_prior": False,
                 "no_prior_knowledge": False,
                 "repo_not_indexed": False,
@@ -33912,18 +33970,29 @@ class TortoiseSDK:
                 "insight": "No graph matches for this issue title.",
                 "more_in_graph": None,
                 "repo_stats": repo_stats,
-            }
+            })
 
         top = semantic_hits[0]
-        return {
+        return _with_truncation({
             "has_prior": True,
             "no_prior_knowledge": False,
             "repo_not_indexed": False,
             "data_points": data_points,
-            "insight": f"{len(semantic_hits)} graph hit(s) relate to this issue — check the graph before filing.",
+            # `relevant_hits` (pre-cut), not `len(semantic_hits)` (post-cut):
+            # a 17-hit read at the shipped `limit=2` used to say "2 graph hit(s)
+            # relate" — a wrong statement, not merely an incomplete one.
+            #
+            # ⛔ And it is QUALIFIED when the count is not exact: a saturated
+            # pool makes `relevant_hits` a LOWER BOUND (which is why
+            # `total_available` is withheld on that read), so publishing it as
+            # an unqualified count would reintroduce the same defect one level
+            # down — a floor wearing a total's clothes, in prose this time.
+            "insight": (
+                f"{'' if _exact else 'at least '}{relevant_hits} graph hit(s) "
+                "relate to this issue — check the graph before filing."),
             "more_in_graph": ((top.get("content") or "")[:80] if top else None),
             "repo_stats": repo_stats,
-        }
+        })
 
     def _issue_insight_relevant(self, hit: dict, query_text: str) -> bool:
         """#1196 review c70 — semantic-stage relevance gate.

@@ -627,6 +627,11 @@ surfaces:
   # emits. The `core` arm (below) is the primary one — it pins
   # tortoise/truncation.py (no SOURCE_PATTERN) and tortoise/sdk.py.
   - test_8447_truncation_marker.py
+  # #8447 (the OTHER half): `issue_insight`'s marker rides the SDK verb and the
+  # hosted GET /v1/issue-insight body, whose handler lives in hosted_api.py —
+  # the same dual registration the /v1/search marker needed. DUAL-REGISTERED
+  # with `core` (below), which pins tortoise/sdk.py and tortoise/truncation.py.
+  - test_8447_issue_insight_truncation.py
   - test_hosted_aboutobject_journal_4240.py
   # #3718 (read half): the REST graph-READ handlers must not run synchronous
   # FalkorDB I/O on the event loop. Same dual registration as the three guards
@@ -4954,6 +4959,10 @@ surfaces:
   # surface is DUAL-REGISTERED with `api` (above) for the hosted /v1/search
   # response.
   - test_8447_truncation_marker.py
+  # #8447: the `issue_insight` marker — `tortoise/sdk.py` (insertions) and
+  # `tortoise/truncation.py` (the consumed instrument, unchanged) fall through
+  # to `core`, so this is the primary arm; DUAL-REGISTERED with `api` (above).
+  - test_8447_issue_insight_truncation.py
   # #9189 (§17.2): the reconciler's PRODUCTION TRIGGER. `tortoise/reconciliation.py`
   # had a comparison and no production caller (measured at `f96a18da1` and
   # re-derived for #9189), so "continuous reconciliation" had a mechanism and no
