@@ -3217,9 +3217,20 @@ def test_the_ok_line_names_the_blocker_verification():
     states = cvc.load_blocker_states(record_path)
     # (a) the SCORED log: the "every cited blocker verified" arm
     buf = io.StringIO()
-    scored = _REPO / "docs/evidence/7949-capstone/capstone-measured-9152448d.log"
+    # ⛔ THE SCORED LOG IS DISCOVERED, NEVER NAMED (#10601 review P2). This line
+    # read `capstone-measured-9152448d.log` by hand, and the bundle's OWN
+    # sanctioned remedy — a re-run writes `capstone-measured-<new-head8>.log`
+    # and DELETES the file it supersedes (`check_single_measured_log`, stated in
+    # README.md) — would have redded this pin on a FILENAME: `main()` returns 2
+    # for the missing path. That is the same defect the sibling disclosure pin
+    # stood down for in round 3, turned on a strictly MORE correct artifact.
+    # Discover it the way the three neighbouring pins do, so what is pinned is
+    # the arm (the OK line's three branches), not this run's name.
+    scored = sorted((_REPO / "docs/evidence/7949-capstone").glob(
+        "capstone-measured-*.log"))
+    assert len(scored) == 1, [p.name for p in scored]
     with redirect_stdout(buf):
-        code = cvc.main([str(scored), "--repo", str(_REPO)])
+        code = cvc.main([str(scored[0]), "--repo", str(_REPO)])
     assert code == 0, code
     out = buf.getvalue()
     assert "blocker states:" in out, out
@@ -3299,14 +3310,37 @@ def test_a_refused_run_row_that_carries_numbers_is_not_exempt():
     as integers and passed as floats. Every present value is a claim, so every
     one of these must red.
     """
-    for value in (1, 1.0, "1", True, 0, 0.0, ""):
+    # ⛔ BOTH CELLS MUST CARRY THE NON-COUNT VALUE (#10601 review P2). This
+    # loop used to vary only `numerator` and pin `denominator=2` — an INT — and
+    # that made the pin VACUOUS: the pre-fix predicate `not _count(num) and not
+    # _count(den)` was `not _count(value) and not True` = False on all seven
+    # iterations, i.e. the row was not exempt under EITHER predicate, V12 fired
+    # for an unrelated reason, and reverting `_blocker_exempt` left the suite
+    # green. The hole the fix names is a row whose BOTH cells are `157.0 / 397.0`
+    # — so the pair (not the numerator alone) is what has to vary, and the
+    # shipped floats are the case that must be present. Measured after the fix:
+    # the float/string/bool/`""` pairs are EXEMPT under the old predicate (V12
+    # silent → this assert reds) and checked under `is None`; the int pairs are
+    # the control that a genuinely counted row was being checked all along.
+    for num, den in ((1, 2), (1.0, 2.0), ("1", "2"), (True, True),
+                     (0, 2), (0.0, 2.0), ("", "2"), (157.0, 397.0)):
         record = _record()
         record["rows"] = [dict(r) for r in record["rows"]]
-        record["rows"][0].update(numerator=value, denominator=2)
+        record["rows"][0].update(numerator=num, denominator=den)
         assert "V12" in _codes(record, blocker_states=_states()), (
-            f"numerator={value!r} ({type(value).__name__}) was EXEMPTED — a row "
-            "that carries anything in its count cells asserts a result, and "
-            "the blocker's state is checkable against it")
+            f"numerator={num!r} ({type(num).__name__}), denominator={den!r} "
+            f"({type(den).__name__}) was EXEMPTED — a row that carries "
+            "anything in its count cells asserts a result, and the blocker's "
+            "state is checkable against it")
+    # The predicate ITSELF, asked directly: a V12 above can fire for another
+    # row's reason, so the leg this test names is also asserted where it lives.
+    refused = {"status": "REFUSED"}
+    assert cvc._blocker_exempt(refused, "refusal", 157.0, 397.0) is False, (
+        "the shipped measurement written as floats (157.0 / 397.0) is exempt — "
+        "the blocker check switches off on a numeric TYPE")
+    assert cvc._blocker_exempt(refused, "refusal", None, None) is True, (
+        "genuine absence (the shipped `capstone.log` rows are `null`/`null`) "
+        "stopped being the refusal shape")
     # Only genuine ABSENCE is the refusal record's shape (the shipped
     # `capstone.log` rows are `null`/`null`), and that stays exempt.
     record = _record()
