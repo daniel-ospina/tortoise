@@ -667,6 +667,50 @@ def test_guard_recap_uses_the_pinned_pool_session_key():
     assert len(out) == 2
 
 
+def test_reinjection_merge_order_forwards_the_floor_term():
+    """#2513: the LOW (minimum-representation) bound must be armable from
+    THIS composition too.
+
+    ``reinjection_merge_order`` is the second composition the eval lane
+    calls (``tools/longmem_eval/retrieve.py`` uses both it and
+    ``guard_and_recap_pool`` directly), so a measured A/B that could arm
+    only the direct one would leave the reinjection leg unmeasurable — the
+    exact property the default-off seam exists to make possible.
+
+    Fails pre-fix: ``floor_term`` is not a parameter (``TypeError``). Fails
+    if the forward is dropped: ``floor_term=True`` is then accepted and
+    silently ignored, leaving the capped output below.
+    """
+    # s1 and s2 hold two window slots each, s3 one — the window is FULL at
+    # rank 5, so s4 (no base rank at all, hence spliced into the defensive
+    # tail) is exactly the "session ranked past the window" case the floor
+    # term exists for. Turn points, so the C5 re-cap cannot masquerade as
+    # the reorder.
+    pool = [_point("a0", "s1"), _point("a1", "s1"),
+            _point("b0", "s2"), _point("b1", "s2"),
+            _point("c0", "s3"), _point("c1", "s3")]
+    added = {"s4": [_point("d0", "s4")]}
+    kw = dict(guard=True, guard_window=5, per_session_cap=2,
+              max_chunks_per_session=10)
+    off = reinjection_merge_order(pool, added, floor_term=False, **kw)
+    on = reinjection_merge_order(pool, added, floor_term=True, **kw)
+    # precondition: without the floor term the unrepresented session stays
+    # deferred past the window (the 4/0 row of the #2513 census).
+    assert [h["id"] for h in off] == [
+        "a0", "a1", "b0", "b1", "c0", "c1", "d0"], off
+    # the bound reached the guard: s4 takes a slot back from s2's duplicate.
+    assert [h["id"] for h in on][:5] == ["a0", "a1", "b0", "c0", "d0"], on
+    assert len({h["session_id"] for h in on[:5]}) == 4, on
+    # ... and it is the SAME answer the direct composition gives, so the two
+    # eval compositions cannot disagree about the armed arm.
+    assert [h["id"] for h in on] == [
+        h["id"] for h in guard_and_recap_pool(
+            pool + added["s4"], floor_term=True, window=5,
+            per_session_cap=2, max_chunks_per_session=10)]
+    # additive in both arms: the reorder never drops an item
+    assert sorted(h["id"] for h in on) == sorted(h["id"] for h in off)
+
+
 # ── contract: key authority + import direction ──────────────────────────
 def test_session_key_matches_the_historical_bucket_key():
     assert session_key_of({"session_id": "s1"}) == "s1"

@@ -470,6 +470,7 @@ def reinjection_merge_order(
         guard: bool = True,
         guard_window: int = DEFAULT_POOL_GUARD_WINDOW,
         per_session_cap: int = DEFAULT_POOL_SESSION_CAP,
+        floor_term: bool = False,
         max_chunks_per_session: int) -> list[dict]:
     """MERGE (pure, additive): splice each seeded session's injected group
     immediately after that session's LAST base rank in the pool, in
@@ -486,6 +487,15 @@ def reinjection_merge_order(
     NOTE: ``guard_and_recap_pool``'s C5 re-cap counts only ``is_raw_chunk``
     hits, so injected TURN points (the default kind) are not re-capped —
     the caller's total budget is the volume guard on that path.
+
+    ``floor_term`` (#2513) forwards to the guard's missing LOWER bound
+    unchanged (see ``coverage_loop.session_diverse_order``). It is OFF by
+    default and default-preserving. It is forwarded from HERE as well as
+    from ``guard_and_recap_pool`` because this is the second composition the
+    eval lane calls (``tools/longmem_eval/retrieve.py`` uses both): an A/B
+    that could arm the direct composition only would leave the reinjection
+    leg unmeasurable, which is the one thing the default-off seam exists to
+    make possible.
     """
     if not pool:
         return list(pool)
@@ -521,5 +531,5 @@ def reinjection_merge_order(
             merged.extend(groups.pop(sid))
     return guard_and_recap_pool(
         merged, guard=guard, session_key=key, window=guard_window,
-        per_session_cap=per_session_cap,
+        per_session_cap=per_session_cap, floor_term=floor_term,
         max_chunks_per_session=max_chunks_per_session)
