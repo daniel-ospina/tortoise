@@ -77,11 +77,13 @@ _HOSTED_SESSION_CYPHER = (
     "s.model=coalesce(s.model, $model)"
 )
 #: sha256 of the whitespace-normalized ``UNWIND $turns`` turn-store Cypher.
-#: Identical for W1 and W2 and identical pre-/post-refactor. Pinned as a hash
-#: (not by identity to ``_TURN_WRITE_CYPHER``) so a future edit to the text is
-#: caught rather than trivially satisfied.
+#: Identical for W1 and W2 and identical pre-/post-refactor (and after #8488's
+#: ``t.embeddingText=turn.et`` clause and its ``prior_et``-aware preserve arm —
+#: the pinned hash MOVED when those clauses were added, deliberately). Pinned as
+#: a hash (not by identity to ``_TURN_WRITE_CYPHER``) so a future edit to the
+#: text is caught rather than trivially satisfied.
 _TURN_CYPHER_SHA256 = \
-    "fe0c0e87c14993c6fd185fc72c71d75fd5c0d68cccae21d5584417818afdfdd9"
+    "221baab64b38cca8f3909a18ff37e8cedb037ec0bcd9e514a78ea6caf02726cf"
 
 #: The pre-refactor per-turn params (minus the environment-dependent vector and
 #: clock) for the 5-turn window above.

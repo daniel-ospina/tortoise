@@ -178,6 +178,9 @@ _EXCLUSION_REASONS: dict[str, str] = {
     "embedding_revision": "#5004 — payload-only embedding identity, never a node prop",
     "embedding_text_hash": "#5004 — payload-only embedding identity, never a node prop",
     "embedding_preserved": "#5004 — payload-only capture marker, never a node prop",
+    "evidence_fold": (
+        "#10010 — payload-only record flag (`_fold_source_evidence`): this "
+        "PointAdded folded evidence into an EXISTING Point, it created nothing"),
     # EP-owned runtime state. `ep_dirty`/`ep_dirty_at` are mutated out of band by
     # ep.py/dream.py with NO journal record; they are NOT in `_POINT_DENY`, so
     # the replay passthrough does copy them out of a payload — which is a
@@ -1351,9 +1354,15 @@ def _fold_journal(events: list[dict], retracted_out: dict | None = None) -> dict
       PointPromoted / OperatorPromoted  — upsert the snapshot (with the
         operator-ness synthesis that prevents a silent operator→claim
         conversion). Merge, not replace: `_upsert_point_props` only SETs the
-        keys the payload carries, except `content`/`is_operator`/`op_type`,
-        which it sets UNCONDITIONALLY — so a snapshot that omits those RESETS
-        them, and this arm pins them the same way.
+        keys the payload carries, except `content`/`is_operator`/`op_type`
+        and — since #8488 — `embeddingText`, which it sets UNCONDITIONALLY
+        (`n.embeddingText=$et`, `projection/entities.py`: an absent value is
+        None and `SET …=NULL` REMOVES, so an ON→OFF re-capture reverts to the
+        raw-only node) — so a snapshot that omits those RESETS them, and this
+        arm pins them the same way. ⛔ `embeddingText` is load-bearing there:
+        the RECORD lane's upsert MERGES its props tail, so an omitted key
+        cannot clear a stale text; the unconditional clause is the only shape
+        that removes it.
       PointRetracted  — `_retract` (`_apply_one`'s arm sets the same four:
         status, `VACUITY_BELIEF`, the #5048 recorded `updatedAt`, and the #4282
         `validTo` window end):

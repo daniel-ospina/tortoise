@@ -171,6 +171,12 @@ from .projection.entities import (
     append_identifier_aliases,
     point_identifier_aliases,
 )
+# #10010 review P2 / #8171: the ONE ``extractedFrom`` ref normalizer. The dedup
+# fold reads the survivor's PROPERTY and must apply the same container/scalar
+# gate the replay lane already applies (`_upsert_point_edges` hands this very
+# helper to `_link_source`), or a stored non-iterable raises inside the fold and
+# a stored mapping fans out invented refs.
+from .projection.entities import _point_source_refs
 from .sparse import identifier_tokens_enabled as _identifier_tokens_enabled
 # #10122: the FULLTEXT index FIELD TABLE (the one that CREATES the indexes).
 # The Point `name` advisory below reads the Point's fields OFF it rather than
@@ -180,6 +186,10 @@ from .projection import _FULLTEXT_INDEX_LABEL_FIELDS
 from .projection import _ANNOTATOR_PROPS as _ANNOTATOR_PROP_NAMES
 from .projection import _ENTITY_ID_PROP  # #3998: the write's own Source predicate
 from .projection import is_missing_graph_error  # #2163: absent-graph family == success
+# #10010: the dedup fold's record flag — spelled in the module that READS it
+# (the replay's recreate anchor), imported here by its only producer so a rename
+# cannot leave the fold emitting a flag nothing recognises.
+from .projection import EVIDENCE_FOLD_KEY
 from .graph_ops import counts_capture_ops, phased  # #3359: per-capture graph-op accounting
 from .quota import (
     DOCUMENT_METER_PREDICATE,
@@ -2385,6 +2395,39 @@ def _capture_turn_embeddings(
         return [None] * len(turn_texts)
 
 
+def _capture_enriched_texts(turn_texts: list[str]) -> list[str] | None:
+    """#8488 scope 1: the enriched ``embeddingText`` per turn, or ``None`` when off.
+
+    The gate is ``TORTOISE_CONTEXT_ENRICH`` (fail-safe OFF, the same posture as
+    ``TORTOISE_BM25_LEXICAL``). OFF → ``None``: the writer embeds the raw stored
+    text and stores no ``embeddingText``, byte-identical to pre-#8488. ON → the
+    per-turn rewrite the owner approved on #8932 (a self-contained segment built
+    from the neighbour window, NOT a fixed session blurb — the declined variant
+    collapses turn discrimination, ``NEAR_DUPLICATE_THRESHOLD = 0.89``).
+
+    Fail-soft: a model that cannot be built, or a rewrite that fails/returns
+    blank, degrades that turn to its raw text inside ``enrich_turn_texts``; a
+    model that cannot be built AT ALL returns ``None`` here, so the caller embeds
+    the raw stored text — never a half-enriched batch (#4194: the encoded text,
+    the stored text and the hash must be one string).
+    """
+    from .context_enrich import enrich_enabled, enrich_turn_texts
+    if not enrich_enabled():
+        return None
+    try:
+        from .model_adapters import build_extractor_model
+        # Bounded and deterministic: the rewrite is a single-turn transcription,
+        # not a reasoning task; temperature 0 keeps two captures of the same
+        # window stable.
+        model = build_extractor_model(max_tokens=2048, temperature=0.0)
+    except Exception:  # noqa: BLE001, RUF100 — enrichment is optional, never fatal
+        _logger.warning(
+            "context enrichment: extractor model unavailable — embedding the "
+            "raw stored turn text (#8488)", exc_info=True)
+        return None
+    return enrich_turn_texts(turn_texts, complete_fn=model.complete)
+
+
 # ── #3086: ONE turn-stream writer, shared by both capture lanes ────────────
 # The per-turn store used to be a loop duplicated between
 # `TortoiseSDK.capture_session` and hosted `_capture_session_impl` (kept in
@@ -2414,23 +2457,39 @@ _TURN_WRITE_CYPHER = (
     # `prior_ch` is read per row BEFORE the SET reassigns it, so the
     # stale-vector decision (#4194) is sound on a matched node and on a
     # just-created one (prior_ch NULL => nothing to preserve).
-    "WITH t, turn, t.content_hash AS prior_ch "
+    "WITH t, turn, t.content_hash AS prior_ch, t.embeddingText AS prior_et "
     # #4524/#4520: the shared clear-then-set seam clears t.embedding in the
     # SAME statement (and only when a new vector is written), so the rotation
     # self-heal this statement exists to provide is not defeated by the embedded
     # engine's silent no-op on a `vecf32` overwrite. See `tortoise/vector_write.py`.
     + clear_then_set_prefix("t", "turn.emb")
-    + "SET t.content=turn.c, t.pointKind=turn.k, t.is_operator=false, "
+    + "SET t.content=turn.c, "
+    # #8488 scope 1: ``embeddingText`` is the text the turn's vector describes
+    # (schema A′ on #8932). ``turn.et`` is NULL when the flag is off, and
+    # ``SET …=NULL`` REMOVES the property — so an ON→OFF re-capture reverts to
+    # the raw-only node, never leaving an enriched text a vector no longer
+    # describes (#4194).
+    "    t.embeddingText=turn.et, "
+    "    t.pointKind=turn.k, t.is_operator=false, "
     "    t.speaker=turn.speaker, t.is_episodic=true, "
     "    t.status=coalesce(t.status, turn.s), "
     "    t.createdAt=coalesce(t.createdAt, $now), "
     "    t.updatedAt=$now, t.content_hash=turn.ch, "
     # Three-way guard: new vector if we encoded one; else PRESERVE the stored
-    # vector only when the content is UNCHANGED; else CLEAR it — a preserved
-    # vector for changed text would rank the turn by text no longer on the
-    # node (the dense-leg lie).
+    # vector only when the text it describes is UNCHANGED; else CLEAR it — a
+    # preserved vector for changed text would rank the turn by text no longer
+    # on the node (the dense-leg lie). #8488 scope 1 (schema A′): the vector is
+    # a function of ``embeddingText`` when the node holds one, so the preserve
+    # arm compares ``prior_et`` (read BEFORE this statement's SET) as well as
+    # ``prior_ch``. Comparing ``content`` alone left the ON→OFF re-capture and
+    # an ON→ON re-capture with a different rewrite keeping a vector computed
+    # from text the node no longer holds (#4194). ``coalesce`` gives the
+    # null-safe spelling: an empty enrichment is never produced, so '' is
+    # unambiguous for "no enriched text".
     "    t.embedding=CASE WHEN turn.emb IS NOT NULL THEN vecf32(turn.emb) "
-    "        WHEN prior_ch = turn.ch THEN t.embedding ELSE NULL END "
+    "        WHEN prior_ch = turn.ch "
+    "             AND coalesce(prior_et, '') = coalesce(turn.et, '') "
+    "             THEN t.embedding ELSE NULL END "
     "WITH t, turn "
     "MATCH (s:Session {id:$sid}) "
     "MERGE (s)-[:CONTAINS]->(t) "
@@ -2505,8 +2564,12 @@ def _record_prior_vectors(sdk, session_id: str,
     this capture encoded — journalling ``None`` tells the replay the vector is
     genuinely gone and CLEARS it. With the turns in the record there is no node
     to read back, so the prior value is read from the record, and the caller
-    applies the same content-unchanged rule the Cypher applies — which is why
-    the stored CONTENT comes back with the vector. The rule's left-hand side is
+    applies the same text-unchanged rule the Cypher applies — which is why
+    the stored CONTENT comes back with the vector, and (since #8488) the stored
+    ``embeddingText`` too: the Cypher's preserve arm compares BOTH halves, so a
+    record read that returned only content let a re-capture whose rewrite moved
+    keep a vector computed from text the row no longer holds. The rule's
+    left-hand side is
     what the RECORD holds, never this capture's own ``turn_texts[i]`` — `_row["c"]`
     is computed FROM that value, so a comparison against it is the text with
     itself: every row would look unchanged and a vector for replaced text would
@@ -2770,6 +2833,7 @@ def _write_capture_turns(
     turn_offset: int = 0,
     prior_turn_max_index: int = -1,
     prior_graph_turns: list[tuple[str, int | None]] | None = None,
+    embedding_texts: list[str] | None = None,
 ) -> int:
     """Write a capture's episodic turn stream — to the RECORD when it can hold it (#10000).
 
@@ -2891,6 +2955,20 @@ def _write_capture_turns(
             "turn(s) with no vector (the dense leg degrades to keyword-only)",
             len(turn_embs), len(turn_texts), len(turn_texts))
         turn_embs = [None] * len(turn_texts)
+    # #8488 scope 1: ``embeddingText`` is the text the turn's vector describes.
+    # ``None`` (the default, and the flag OFF) means no enriched text — the
+    # node keeps only ``content`` and the vector is computed from it, which is
+    # byte-identical to pre-#8488. A list of the SAME length (the flag ON)
+    # writes it to the node and journals it; a length mismatch is dropped
+    # (never misaligned — a vector must not describe a text the node lacks).
+    enrich_on = embedding_texts is not None
+    if enrich_on and len(embedding_texts) != len(turn_texts):
+        _logger.error(
+            "enriched turn text has %d rows for %d turns — storing the raw "
+            "text instead (the enriched vector would describe text the node "
+            "does not hold)", len(embedding_texts), len(turn_texts))
+        embedding_texts = None
+        enrich_on = False
     turn_rows: list[dict] = []
     turn_hashes: list[str] = []
     for i, _turn in enumerate(windowed):
@@ -2900,6 +2978,9 @@ def _write_capture_turns(
         turn_rows.append({
             "id": _capture_turn_id(session_id, i, turn_offset),
             "c": text,
+            # ``None`` when off: ``SET t.embeddingText=NULL`` REMOVES a stale
+            # value (an ON→OFF re-capture reverts to the raw-only node).
+            "et": embedding_texts[i] if enrich_on else None,
             "k": "event",
             # #5445: derived from the SCRUBBED stored text, not from the raw
             # ``turn["role"]`` — the role is caller-controlled and the `role`
@@ -2963,6 +3044,10 @@ def _write_capture_turns(
         durable=_journal_configured and getattr(_log, "durable", True),
         tenant=getattr(sdk, "_record_tenant", None))
     stored: dict[str, tuple] = {}
+    #: turn ids whose RECORD row holds an enriched text that THIS capture does
+    #: not write (`enrich_on` is False). Filled once the prior rows are read,
+    #: below; only the record lane can use it (see the emit loop).
+    _et_to_clear: set[str] = set()
     if not _record_first:
         # The record cannot hold this capture's turns: the graph is the store,
         # exactly as before #10000 (byte-identical, read-back included).
@@ -3023,18 +3108,66 @@ def _write_capture_turns(
                 sdk, session_id, [row["id"] for row in turn_rows])
             _prior_unknown = _read is None
             _prior = _read or {}
+        # ── THE RECORD LANE MUST BE ABLE TO REMOVE `embeddingText` (#10523
+        # review round 4, P1) ──
+        # The graph lane is ABSOLUTE: `t.embeddingText = turn.et` with `et` NULL
+        # REMOVES the property, so an ON→OFF re-capture (or the fail-soft arm
+        # where the extractor model cannot be built and `enrich_on` is False)
+        # reverts the node to the raw-only shape. The record's upsert is a MERGE
+        # (`props = point.props || EXCLUDED.props`, `record_projection._upsert_statement`)
+        # and an ABSENT key in the right operand leaves the left value intact
+        # (PostgreSQL: "the union of their keys, taking the second object's value
+        # when there are duplicate keys"), so simply OMITTING the key — which is
+        # what the OFF snapshot does to stay byte-identical — cannot remove it.
+        # The row then keeps the PREVIOUS capture's enriched text beside a vector
+        # this capture computed from the raw `content`: the claim "the vector
+        # describes this text" becomes false, which is exactly the #4194 lie
+        # `_TURN_WRITE_CYPHER`'s absolute SET exists to prevent, on the store
+        # that IS the system of record for these turns.
+        #
+        # So the key is journalled EXPLICITLY as JSON null — present, and null, so
+        # `jsonb ||` DOES override — and `props->>'embeddingText'` is then SQL
+        # NULL, which the replay's `n.embeddingText=$et` treats as a removal.
+        # ⛔ ONLY for a row that actually HOLDS one: a turn whose row never
+        # carried an enriched text emits nothing, so the gate-OFF snapshot stays
+        # byte-identical to pre-#8488 in the shape `TURNS_SNAPSHOT_OPTIONAL_KEYS`
+        # describes (a key present only when the branch applies).
+        # ⚠️ RECORDED RESIDUAL: when the prior read could not attest
+        # (`_prior_unknown`) the row's `embeddingText` is unknown, so nothing is
+        # emitted and a stale value survives — the same fail-soft arm `_UNATTESTABLE`
+        # names for `created_at`/`status`. Clearing on an unknown prior would be a
+        # claim this capture cannot make, and it would also delete a perfectly
+        # faithful text on the transient-failure arm the preserve rule protects.
+        if not enrich_on:
+            _et_to_clear = {
+                _tid for _tid, _held in _prior.items()
+                if _held is not None and _held.embedding_text is not None}
         for _i, _row in enumerate(turn_rows):
             _held = _prior.get(_row["id"])
             _emb = turn_embs[_i]
             if _emb is None and _held is not None:
                 # The SAME rule the Cypher applies: a preserved vector survives
-                # only when the content did not change — a vector for text no
-                # longer stored is the dense-leg lie #5004 exists to remove. The
-                # comparison is against what the RECORD holds (`_held.content`),
-                # never against this capture's own `turn_texts[i]`: `_row["c"]`
-                # is computed FROM that value, so that comparison is the text
-                # with itself.
-                _unchanged = _held.content == _row["c"]
+                # only when the text it DESCRIBES is unchanged — a vector for text
+                # no longer stored is the dense-leg lie #5004 exists to remove. The
+                # comparison is against what the RECORD holds (`_held.content` /
+                # `_held.embedding_text`), never against this capture's own
+                # `turn_texts[i]`: `_row["c"]` is computed FROM that value, so
+                # that comparison is the text with itself.
+                #
+                # ⛔ BOTH HALVES, or the store of record keeps the #4194 lie the
+                # graph lane refuses (#10523 review round 3, P1). Since #8488 the
+                # vector is a function of ``embeddingText`` when the row holds one
+                # (schema A′), so comparing content alone preserved a vector for a
+                # turn whose REWRITE changed under identical content — reachable
+                # with the embedder unavailable on a re-capture and a
+                # non-deterministic/changed rewrite, and invisible afterwards
+                # because `embedding_preserved` withholds the identity stamps and
+                # `_record_embedding_identity` returns early on a missing hash.
+                # The `coalesce(…, '')` spelling is the Cypher's: an empty
+                # enrichment is never produced, so '' unambiguously means "none".
+                _unchanged = (
+                    _held.content == _row["c"]
+                    and (_held.embedding_text or "") == (_row["et"] or ""))
                 _emb = _held.embedding if (
                     _held.embedding is not None and _unchanged) else None
             if _held is not None:
@@ -3339,6 +3472,18 @@ def _write_capture_turns(
             _turn_snapshot["createdAt"] = created_at if created_at is not None else now
         _turn_snapshot["embedding"] = (
             turn_embs[i] if turn_embs[i] is not None else stored_emb)
+        # #8488 scope 1: the enriched text rides the SAME snapshot as the
+        # vector it describes, so the #4194 identity survives a rebuild —
+        # `stamp_journal_embedding` attests `embeddingText` when it is present.
+        # Absent (flag OFF, and the row never held one) the record is
+        # byte-identical to pre-#8488.
+        if enrich_on:
+            _turn_snapshot["embeddingText"] = embedding_texts[i]
+        elif turn_id in _et_to_clear:
+            # An EXPLICIT removal, not an omission — see `_et_to_clear`. The
+            # record's tail is MERGED, so only a present JSON null can clear the
+            # previous capture's enriched text (#10523 review round 4, P1).
+            _turn_snapshot["embeddingText"] = None
         # #5004 round-3: when THIS capture encoded nothing, what rides the
         # record is the vector the write PRESERVED — computed by whatever model
         # was active at the ORIGINAL capture. Attesting the active model here
@@ -3529,6 +3674,7 @@ def _write_session_and_turns(
     model: str | None = None,
     turn_offset: int = 0,
     embed_fn: Callable[[list[str]], list[list[float] | None]] | None = None,
+    enrich_fn: Callable[[list[str]], list[str] | None] | None = None,
     turn_embs: list[list[float] | None] | None = None,
     texts_and_counts: tuple[list[str], dict[str, int]] | None = None,
     session_existed: bool = True,
@@ -3866,15 +4012,50 @@ def _write_session_and_turns(
         turn_texts, redaction_counts = _capture_turn_texts_with_redactions(turns)
     else:
         turn_texts, redaction_counts = texts_and_counts
+    # #8488 scope 1: the text the vector describes. ``None`` (flag OFF, or an
+    # enrichment that returned nothing) means embed the raw stored text —
+    # byte-identical to pre-#8488. A list of the SAME length (flag ON) is the
+    # ``embeddingText``: embedded here, stored + journalled by
+    # ``_write_capture_turns``, and attested by ``stamp_journal_embedding``.
+    embedding_texts: list[str] | None = None
+    if enrich_fn is not None:
+        # Fail-soft at the SEAM too (review P2): this runs AFTER the caller's
+        # :Session MERGE, so an exception here would leave a committed Session
+        # with zero turns — the same after-the-write class `_write_capture_turns`
+        # guards its length check against. ``enrich_fn`` is caller-supplied and
+        # the module's stated posture is that enrichment is never fatal.
+        try:
+            _enriched = enrich_fn(turn_texts)
+        except Exception:  # noqa: BLE001, RUF100
+            _logger.warning(
+                "context enrichment failed — embedding the raw stored turn "
+                "text (#8488)", exc_info=True)
+            _enriched = None
+        if _enriched is not None and len(_enriched) == len(turn_texts):
+            embedding_texts = list(_enriched)
+        elif _enriched is not None:
+            # #8488 review round 2 (P2): ``None`` is the DOCUMENTED "the arm did
+            # not run" answer (`_capture_enriched_texts` returns it whenever the
+            # gate is off, and the model-cannot-be-built path logs its own
+            # warning) — warning on it fired once per capture on the hottest
+            # write path in the shipped configuration, conflating a deliberate
+            # no-op with an anomaly. Only a non-None list of the WRONG LENGTH is
+            # an anomaly.
+            _logger.warning(
+                "context enrichment returned %d rows for %d turns — embedding "
+                "the raw stored text instead (#8488)",
+                len(_enriched), len(turn_texts))
+    texts_to_embed = embedding_texts if embedding_texts is not None else turn_texts
     if embed_fn is not None:
-        turn_embs = embed_fn(turn_texts)
+        turn_embs = embed_fn(texts_to_embed)
     elif turn_embs is None:
-        turn_embs = [None] * len(turn_texts)
+        turn_embs = [None] * len(texts_to_embed)
     redacted_total = _write_capture_turns(
         proj, sdk, session_id, turns, now=now, turn_embs=turn_embs,
         session_existed=session_existed, turn_offset=turn_offset,
         prior_turn_max_index=prior_turn_max_index,
         prior_graph_turns=prior_graph_turns,
+        embedding_texts=embedding_texts,
         texts_and_counts=(turn_texts, redaction_counts))
     return {
         "turn_count": turn_count,
@@ -5780,6 +5961,14 @@ def _sanitize_props(props: dict, *, reject_id: bool = False,
     # this closes the only route by which they could become node properties.
     _embed_identity_keys = set(props) & {
         "embedding_model", "embedding_revision", "embedding_text_hash",
+        # #8488 scope 1: the enriched text a turn's vector describes is
+        # WRITER-minted (only the capture path stores it, beside the vector it
+        # was encoded from). A caller-supplied value would persist live through
+        # `update_point`'s bare `SET n += $props`, and no `PointRevised` arm
+        # replays it — a live-only write a rebuild drops. It is also the input
+        # to the #4194 comparison, so a caller-set value would let a node claim
+        # a vector describes text it was never computed from.
+        "embeddingText",
         # #5004 round-3/4: the verbatim marker is server-owned too. It is a
         # declared node property (so a re-emit carries it), which means a
         # tenant-supplied value WOULD persist live — and it both flips the
@@ -5793,6 +5982,21 @@ def _sanitize_props(props: dict, *, reject_id: bool = False,
         raise ValueError(
             f"{sorted(_embed_identity_keys)} are server-managed embedding "
             "journal fields and cannot be set via props."
+        )
+    # #10010 review P1: the dedup fold's RECORD flag is server-minted —
+    # `_fold_source_evidence` is its only writer, and the replay's recreate anchor
+    # reads it (`projection.record_is_evidence_fold`) to decide whether a
+    # creation-shaped record replaced an incarnation. A caller-supplied value
+    # would persist LIVE (it is not in `_POINT_HANDLED`'s write path, so the open
+    # prop passthrough takes it) while the replay ALSO read it as a record fact —
+    # simultaneously a live/replay parity break and a forged replay decision.
+    # HARD-REJECT, following the `embedding_preserved` precedent above: there is
+    # no legitimate caller intent for this key, so a silent strip would let the
+    # forgery pass unnoticed.
+    if "evidence_fold" in props:
+        raise ValueError(
+            "'evidence_fold' is a server-managed journal record flag and "
+            "cannot be set via props."
         )
     # #6151 (review P3): `baseline_system_default` is the RECORDED #2199 birth
     # fact — `_apply_source_inheritance` re-injects the system default ONLY on a
@@ -5966,9 +6170,15 @@ def _sanitize_props(props: dict, *, reject_id: bool = False,
     # (`sourceVersion`, `sourceVersions`, `sourceVersionTransit`): the plural
     # spelling is the natural caller guess (mirrors `extractedFrom`'s own
     # accepts-list/str shape) and must not slip through as an unknown prop.
+    # #7704: `extractedFromAll` joins them. It is the FOLD's own record of the
+    # ref set the fold wrote — `_upsert_point_edges` re-derives the
+    # `extractedFrom` edges from it on replay, so a caller-supplied value would
+    # put the SNAPSHOT'S edges ahead of the writes: live wires `extractedFrom`
+    # only, the replay wires the array too, and `derived = replay(journal)` goes
+    # false on a graph nobody folded.
     _source_version_keys = [k for k in
                             ("sourceVersion", "sourceVersions",
-                             "sourceVersionTransit")
+                             "sourceVersionTransit", "extractedFromAll")
                             if k in props]
     if _source_version_keys:
         raise ValueError(
@@ -11735,56 +11945,87 @@ class TortoiseSDK:
                 # (would make the `if props:` guard always truthy and bump
                 # updatedAt on every dedup hit, #80 review).
                 props.pop("content_hash", None)
-                # #3263 (review P1): `extractedFrom` must NOT ride the
-                # update_point prop path on a dedup hit. update_point writes the
-                # node property but never calls _link_source, so the Point would
-                # end up carrying `extractedFrom` with NO `:Source` edge — still
-                # an orphan — and `list_drafts` reads that prop, so it would
-                # report provenance that does not exist as an edge. It is not
-                # replayed either (_revise_point restores content/embedding
-                # only), so the rebuilt graph drops the prop entirely and
-                # live != rebuild for the very property this path introduced.
-                # The Point already exists: if it was created with a session
-                # context it already carries the edge. Retrofitting provenance
-                # onto an existing Point needs a journaled path, which does not
-                # exist yet — tracked separately (#3292).
-                _dropped_ef = props.pop("extractedFrom", None)
-                if _dropped_ef is not None:
-                    # #3263 (re-review P2): decide per REF, not per call. Two
-                    # coarse predicates were wrong: `is not None` also matched
-                    # an explicit empty list (so a caller who supplied NO ref
-                    # got a warning on every idempotent re-ingest), and "any
-                    # edge exists" treated a CHANGED ref as present — silently
-                    # discarding the new one. Normalise to the supplied non-empty
-                    # refs, then warn only for those genuinely absent from the
-                    # Point's edges. No refs supplied => nothing to report.
+                # ── #7704 (OWNER RULING 2026-10-25): a dedup hit KEEPS the new
+                # evidence. The owner ruled the W4-b "twin" case a DUPLICATION
+                # defect — "The dedup is the key here to solve the problem you
+                # had raised" — with the intended state "one claim, N sources"
+                # (docs/ONTOLOGY.md, `extractedFrom` many→many, #3263).
+                #
+                # `extractedFrom` must NOT ride the `update_point` prop path
+                # below: that writer sets the node property but never calls
+                # `_link_source`, so the Point would carry `extractedFrom` with
+                # no `:Source` edge — a provenance `list_drafts` reports and the
+                # graph does not hold. It is not replayed either, so live and
+                # rebuild would disagree.
+                #
+                # It also must NOT be dropped, which is what this branch did
+                # until #7704: it popped the ref and WARNED, because
+                # "retrofitting provenance onto an existing Point needs a
+                # journaled path, which does not exist yet (#3292)". #3292
+                # closed on its first-write INFERENCE half (#3295) and left that
+                # residual unowned, so every re-write that carried a NEW source
+                # lost it — the duplicate's evidence vanished into the fold,
+                # which is exactly the failure the ruling sends us to fix.
+                #
+                # `_fold_source_evidence` IS that journaled path (see its
+                # docstring): it wires the missing refs, writes the accumulated
+                # property, and appends the `PointAdded` record that makes the
+                # state replayable. Decide per REF, not per call — the refs
+                # already held are a no-op, so an idempotent re-write neither
+                # writes nor journals (#3263 re-review P2).
+                _incoming_ef = props.pop("extractedFrom", None)
+                if _incoming_ef is not None:
+                    # Normalise to the supplied non-empty refs: an explicit
+                    # ``[]`` means "no provenance" (the bundle contract), and a
+                    # scalar is ONE ref, never iterated character-wise.
                     _supplied = (
-                        [_dropped_ef] if isinstance(_dropped_ef, str)
-                        else [r for r in _dropped_ef if r]
+                        [_incoming_ef] if isinstance(_incoming_ef, str)
+                        else [r for r in _incoming_ef if r]
                     )
                     if _supplied:
-                        _present = {
+                        # The EDGES are authoritative (#3263): read them, not
+                        # the convenience prop, so the fold is measured against
+                        # the provenance the graph actually holds. Ordered, so
+                        # the accumulated property is byte-stable across runs.
+                        _present = [
                             row[0] for row in proj.g.query(
                                 "MATCH (p:Point {id:$id})-[:extractedFrom]->"
-                                "(s:Source) WHERE s.url IN $refs "
-                                "RETURN DISTINCT s.url",
-                                params={"id": pid,
-                                        "refs": _supplied}).result_set
-                        }
-                        _missing = [r for r in _supplied
-                                    if r not in _present]
+                                "(s:Source) RETURN DISTINCT s.url ORDER BY s.url",
+                                params={"id": pid}).result_set
+                        ]
+                        # `_present` holds the RESOLVED `s.url` of each
+                        # `:Source` the edges address, while `_supplied` is the
+                        # caller's RAW spelling. Comparing them directly makes a
+                        # URL VARIANT of a ref the Point already holds look
+                        # permanently absent — so the fold re-journals on every
+                        # idempotent retry and writes a prop ref that has no
+                        # Source and no edge (S0b/#5012: `resolve_source_key` is
+                        # the ONE resolver every source writer uses to map a raw
+                        # spelling onto the node the write will address, and
+                        # `_mint_source_stub` — i.e. `_link_source` — routes
+                        # through it). Resolve here so "present" is decided on
+                        # the identity the edge will address. It does not MINT
+                        # (an unregistered ref resolves to itself) and its only
+                        # write is the declared derived-recompute adopt-on-touch
+                        # — the same pre-append control-plane write the CREATE
+                        # path already makes via `resolve_source_versions`. The
+                        # RAW spelling is what stays in the ref lists: it is the
+                        # journal-stable key `sourceVersionTransit` is keyed by
+                        # (`resolve_source_versions`), never a live-time
+                        # resolution.
+                        from .source_identity import resolve_source_key
+                        _present_set = set(_present)
+                        _missing: list[str] = []
+                        _missing_keys: set[str] = set()
+                        for _ref in _supplied:
+                            _key = resolve_source_key(proj.g, _ref)
+                            if _key in _present_set or _key in _missing_keys:
+                                continue
+                            _missing_keys.add(_key)
+                            _missing.append(_ref)
                         if _missing:
-                            _logger.warning(
-                                "create_point dedup hit on %s: extractedFrom %r "
-                                "not applied — those refs are absent from the "
-                                "Point's Source edges, and update_point cannot "
-                                "wire one (the value is not replayed, so "
-                                "applying it would diverge live from rebuild). "
-                                "Retrofitting provenance onto an existing "
-                                "Point needs a journaled path (#3292); pass the "
-                                "ref on the FIRST write, or re-create the Point",
-                                pid, _missing,
-                            )
+                            self._fold_source_evidence(
+                                pid, _present, _missing)
                 # #7980 + #398: an authored ``credibility`` is a WRITE, never a
                 # silent drop, and it obeys the SAME rule as the create path —
                 # ONE weak evidence body (the declared word is a validated
@@ -13256,6 +13497,10 @@ class TortoiseSDK:
             session_existed=session_existed,
             embed_fn=lambda texts: _capture_turn_embeddings(
                 texts, proj.required_embedding_dim),
+            # #8488 scope 1: the enriched ``embeddingText`` (owner ruling #8932).
+            # ``None`` when the flag is off — the writer then embeds the raw
+            # stored text, byte-identical to pre-#8488.
+            enrich_fn=_capture_enriched_texts,
         )
         _capture_redactions = _capture_write["redacted_total"]
 
@@ -16419,6 +16664,17 @@ class TortoiseSDK:
             props["embedding_verbatim"] = True
         elif "embedding" in props:
             props["embedding_verbatim"] = None
+        # #8488 scope 1 (review round 3, P3): BOTH of those arms REPLACE or CLEAR
+        # the vector, so neither may leave the writer-minted ``embeddingText``
+        # behind — it describes the vector this write just replaced, which is the
+        # #4194 lie under a different door. Round 2 closed the branch that
+        # RE-ENCODES from `content` (`_derived_embedding`, below); a caller vector
+        # (`embedding=[…]`) and a caller clear (`embedding=None`) reach the node by
+        # the same bare `SET n += $props` and never touch the text. `None` REMOVES
+        # the property. Gated on the KEY, so an unrelated update leaves a
+        # writer-minted value alone — which is what makes it survive one.
+        if "embedding" in props:
+            props["embeddingText"] = None
 
         # #49 Phase 2: context is REMOVED — raise TypeError if passed
         if "context" in props:
@@ -16670,6 +16926,13 @@ class TortoiseSDK:
             # a rebuild drops it (`_revise_point` re-encodes and never reads
             # the marker) — live != rebuild, the round-6 false-verbatim class.
             props["embedding_verbatim"] = None
+            # #8488 scope 1 (review round 2, P1): the enriched text described the
+            # OLD vector. This branch re-encodes from `content`, so the node must
+            # not keep an `embeddingText` that no vector was computed from — the
+            # exact #4194 lie the capture path's `prior_et` arm exists to prevent,
+            # reached through the other write door. `None` REMOVES the property;
+            # the replay's `_revise_point` clears it under the same condition.
+            props["embeddingText"] = None
 
         # Check if node carries :Object label (entity node with version tracking)
         has_object = proj.g.query(
@@ -22505,7 +22768,8 @@ class TortoiseSDK:
         # rather than a mid-write one, and it covers EVERY section, including the
         # ones that never reach `_sanitize_props` at all. Rejected on every
         # spelling.
-        for _svk in ("sourceVersion", "sourceVersions", "sourceVersionTransit"):
+        for _svk in ("sourceVersion", "sourceVersions", "sourceVersionTransit",
+                     "extractedFromAll"):
             # #7925 review round 5: the door depth, not the top level — a
             # single-wrapped `props: {"sourceVersion": …}` reached
             # `_sanitize_props` and raised after earlier items committed
@@ -22516,6 +22780,25 @@ class TortoiseSDK:
                     "message": f"ingest: {section}[{index}] {_svk} is "
                                f"server-managed and cannot be set on bundle items",
                 })
+        # #10010 review P2: `evidence_fold` is the dedup FOLD's own RECORD flag.
+        # `_sanitize_props` hard-rejects it on presence (it is a server-minted
+        # journal fact — a caller-set value is a live/replay parity break and a
+        # forged recreate anchor), and it is NOT a declared parameter of
+        # `create_point`, so a bundle item's key lands in `**props` and the
+        # sanitizer refuses it. That refusal happens INSIDE step 3's write loop
+        # (`create_point(kind, content, dedup=True, **write_item)`), i.e. after
+        # step 1 (Sources) and every earlier points item committed — the exact
+        # partial-mutation class this gate exists to replace with a zero-mutation
+        # Phase-1 abort. Same door-depth rule as the siblings above: the nested
+        # `props` spelling is flattened by `_coerce_props` and reaches the same
+        # sanitizer, so a top-level-only reader would leave it a mid-write raise.
+        if _item_prop_at_depth(item, "evidence_fold", _door_depth)[0]:
+            violations.append({
+                "section": section, "index": index,
+                "message": f"ingest: {section}[{index}] evidence_fold is "
+                           f"server-managed (the dedup fold's own record "
+                           f"flag) and cannot be set on bundle items",
+            })
         if section == "points":
             # #8400 review P2 (the refusal message used to offer it): `dedup` is
             # NOT a bundle item field. Step 2 writes every points item as
@@ -32647,6 +32930,348 @@ class TortoiseSDK:
         ).result_set
         return [r[0] for r in rows]
 
+    def _fold_source_evidence(self, pid: str, present: list[str],
+                              missing: list[str]) -> dict:
+        """The WRITE half of a dedup fold: add the incoming source refs to a
+        Point that already exists, and journal it so the state is replayable.
+
+        #7704 — this is the journaled retrofit path the dedup branch said did
+        not exist ("tracked separately (#3292)"; #3292 closed on its first-write
+        INFERENCE half only, so the residual had no owner). Without it a fold
+        that carried a NEW source dropped it: the duplicate's evidence
+        disappeared into the survivor, which is the duplication defect the
+        owner's 2026-10-25 ruling sends us to fix rather than an ordering one.
+
+        `present` is the survivor's CURRENT ``extractedFrom`` refs read from the
+        EDGES — authoritative (ONTOLOGY §3.3; the node's ``extractedFrom`` prop
+        is a query convenience, #3263) — and `missing` is the subset of
+        incoming refs absent from it. The caller passes both so this stays a
+        pure write of a decision already made; an empty `missing` returns
+        before any write, so a future caller cannot emit a no-op journal record.
+
+        A ref the node's ``extractedFrom`` PROPERTY names but no edge addresses
+        — the shape ``update_point(extractedFrom=…)`` writes, since that writer
+        sets the property and wires no edge — is ADOPTED into the wiring rather
+        than dropped. Dropping it was a silent narrowing of the caller's
+        provenance (the same class this fold exists to close, in the other
+        direction); wiring it makes the ref list this fold writes a SUPERSET of
+        the property it replaces.
+
+        The re-emitted record carries ``embedding_preserved`` whenever it carries
+        a vector: that vector is the node's EXISTING one, which this fold did not
+        compute, so attesting the active embedder would journal a false origin
+        (``_write_capture_turns``' own marker, #5004).
+
+        **The property keeps the SHAPE it already had; the folded SET goes
+        beside it (#7704 review P1/P2).** ``extractedFrom`` is a query
+        convenience matched by EQUALITY (``sdk.query`` / ``paginated_query``:
+        ``n.`extractedFrom` = $extractedFrom``), and an ARRAY is not
+        equality-matchable — so writing the accumulated list there made the
+        survivor invisible to that door for EVERY source it carries, including
+        the one it was created under (measured: ``query(alpha)`` answered
+        before the fold, ``[]`` after; ``extract_turns.py``'s only population
+        read and its ``STARTS WITH`` dump went with it). A survivor created
+        under a SCALAR therefore keeps that scalar, unchanged by the fold; the
+        full folded set rides ``extractedFromAll``: the read door keeps
+        answering, nothing a caller could match before becomes unmatchable, and
+        the EDGES stay authoritative either way (#3263). A survivor created
+        under ANOTHER source is still not returned for THIS source's ref — the
+        same answer ``origin/main`` gave, and the residual #10063 tracks; no
+        EQUALITY-query rewrite is made anywhere to paper over it.
+
+        A survivor born from a ref SEQUENCE is the other shape, and it keeps its
+        ARRAY — the shared writer's own rule ("a STRING when a single string was
+        passed … an ARRAY whenever a SEQUENCE was passed — even a one-element
+        one, which is NOT collapsed", ``projection/entities.py``
+        ``_upsert_point_props``, #3263). Collapsing it to its first element
+        would delete N-1 refs from a REPORTED surface (``get_point`` is
+        ``properties(n)``; ``list_drafts`` reads this prop) and silently change
+        the stored property's TYPE (#10010 review P2). The fold therefore
+        preserves the node's own value: scalar as scalar, array as array.
+
+        **Journal first (§17.1).** The record is the commit point of a live
+        write. The snapshot is the full Point (``get_point`` + the accumulated
+        refs), re-emitted as a ``PointAdded`` — the SAME shape the capture
+        writer uses when it re-writes an existing turn
+        (``_write_capture_turns``), and a shape the replay already anticipates
+        (pass 2's ``operator_created_seq.setdefault`` names "a re-PointAdded of
+        the same id (upsert)"). Pass 1 folds the payload's props and pass 2
+        re-derives the ``extractedFrom`` edges from it, so a rebuild reproduces
+        the accumulated state without re-reading the graph's prior state.
+
+        **Then the fold.** ``_link_source`` mints the missing Source stubs and
+        MERGEs one edge per ref (many→many), which is why the refs are wired
+        BEFORE the property: a prop written first would report provenance the
+        edges do not hold for as long as the two writes are apart.
+
+        ``sourceVersionTransit`` (#5256) is merged, never rebuilt: the refs the
+        Point already held keep the read-version they recorded, and the new
+        refs get the version resolved NOW — the same value ``_link_source``
+        stamps on their edges — so the replay re-stamps exactly what live
+        wrote. Refs with no recorded hash contribute NO pair (honest-absent,
+        ``_valid_transit_pairs``' own rule).
+
+        Idempotent: called only with a non-empty `missing`, and every write
+        below is a MERGE/SET of the refs it names.
+        """
+        from .projection.edges import (
+            _source_version_transit,
+            resolve_source_versions,
+        )
+        proj = self._get_proj()
+        existing = self.get_point(pid)
+        if not missing:
+            # The caller already filtered the refs the Point holds. A record
+            # emitted here would be a no-op in the graph and a permanent entry
+            # in the journal, i.e. a replay that re-applies nothing on every
+            # idempotent retry — refused by construction, not by the caller's
+            # memory.
+            return existing
+        from .source_identity import resolve_source_key
+        # ── ONE identity pass over the THREE spellings this function juggles.
+        # `present` holds the edges' RESOLVED ``s.url``; `missing` holds the
+        # caller's RAW refs; a carrier pair is keyed by the RAW ref by contract
+        # (journal-stable — `resolve_source_versions`, which is also why the
+        # resolution is never a carrier key: it is a live-time fact). Every
+        # question below is "does the Point still hold this ref", so each is
+        # answered on the identity the edges ADDRESS, through the ONE resolver
+        # every source writer uses (#5012) — the same call the caller's presence
+        # test already makes, which is why `missing` is identity-disjoint from
+        # `present` on entry. The adopt-on-touch it may perform is the declared
+        # derived-recompute lane `resolve_source_versions` below already takes.
+        #
+        # #7704 review P1, and the CLASS it belongs to: a raw key compared with
+        # a resolved collection retains a held pair only when the two spellings
+        # are byte-identical, so a ref registered canonically and carried under
+        # a variant (`…?utm_source=x`) silently loses its recorded read-version
+        # — and when the new refs record no hash at all, `pairs` empties and the
+        # live write REMOVES a carrier the journal record OMITS while the replay
+        # KEEPS it (`_upsert_point_props` only sets the keys its payload
+        # carries): live ≠ replay(journal).
+        #
+        # The ref LISTS must therefore keep the spelling the NODE carries, never
+        # the resolver's: THREE replay-side selectors match a pair's key
+        # BYTE-WISE against the payload's own ``extractedFrom`` refs
+        # (`_point_source_transit`, `_point_source_versions`), so writing the
+        # resolved url here would rewrite the caller's provenance spelling AND
+        # strand the pair that spelling was the key of.
+        # ⛔ NORMALIZED through the shared helper, never iterated raw: the
+        # property is written by doors that do not validate it
+        # (`update_point(extractedFrom=…)` sets the prop and checks nothing,
+        # and an int/float/bool IS a legal Cypher property value — the engine
+        # reference admits scalars, and this repo measured the same), so
+        # ``for _ref in <int>`` raised ``TypeError: 'int' object is not
+        # iterable`` on the first dedup hit against such a point — BEFORE the
+        # journal append, i.e. ``create_point(..., dedup=True)`` failed with an
+        # error naming neither the prop nor the door. That is a regression
+        # against ``origin/main``, which popped the incoming ref and only
+        # warned. And a MAPPING would have fanned out to its KEYS, each a
+        # legal-looking string, i.e. INVENTED provenance — exactly the #8171
+        # defect this same PR closed one file over, which is why the fold
+        # reuses that gate instead of restating it (#10010 review P2).
+        _prop_refs = _point_source_refs(existing.get("extractedFrom"))
+        # RESOLVED s.url → the spelling the node already uses for it. Only a
+        # spelling that RESOLVES to the same identity is adopted, so this
+        # cannot merge two identities or invent one.
+        _carried: dict[str, str] = {}
+        for _ref in _prop_refs or []:
+            if isinstance(_ref, str) and _ref:
+                _carried.setdefault(resolve_source_key(proj.g, _ref), _ref)
+        # RESOLVED s.url → the spelling the ref list uses. The EDGES stay
+        # authoritative (#3263): every ref they hold is in the list, in the
+        # edges' own (``ORDER BY s.url``) order, so it is byte-stable.
+        _spelling: dict[str, str] = {}
+        for _url in present:
+            _spelling.setdefault(_url, _carried.get(_url, _url))
+        accumulated = list(_spelling.values())
+        _edge_urls = set(present)
+        # A ref the node's PROPERTY names but no EDGE addresses is not evidence
+        # (#3263: the edges are authoritative) — and rebuilding the list from
+        # the edges alone therefore DELETED it, leaving only the INFO below as
+        # a trace. `update_point(extractedFrom=…)` is the shape that writes one
+        # (it sets the prop and wires no edge, which is why the dedup branch
+        # refuses to use that writer — see its comment), and the fold is what
+        # made it disappear; on `origin/main` the dedup branch never touched the
+        # property, so the value survived. Dropping a caller's ref is the same
+        # class this fold exists to close (provenance vanishing), just in the
+        # other direction, so ADOPT it into the wiring instead: it is a ref the
+        # caller declared, `_link_source` is the ONE writer that turns a ref
+        # into an edge + `:Source` (and the replayer's `_upsert_point_edges`
+        # calls that same helper, so live == replay by construction), and the
+        # record below carries it in its own ``extractedFrom``. Healing toward
+        # KEPT evidence is the #7704 ruling's direction ("one claim, N
+        # sources"), and it makes the ref list the fold writes a SUPERSET of the
+        # prop it replaces — never a silent narrowing.
+        _adopted = [ref for key, ref in _carried.items()
+                    if key not in _edge_urls]
+        _wired: list[str] = []
+        for _ref in list(missing) + _adopted:
+            _key = resolve_source_key(proj.g, _ref)
+            if _key in _spelling:
+                continue
+            _spelling[_key] = _ref
+            accumulated.append(_ref)
+            _wired.append(_ref)
+        versions = resolve_source_versions(proj.g, _wired)
+        # Keep the pairs the Point already carries for refs it still holds —
+        # decided on the EDGE identity, which is the only authoritative
+        # statement that the ref is still held (#3263) — and re-key each to the
+        # spelling this payload's ref list actually uses, so the pair keys stay
+        # a SUBSET of its own ``extractedFrom`` refs (the byte-wise selector
+        # above drops any pair that is not). In the ordinary case the two
+        # spellings are the same string and this is a no-op. Add one pair per
+        # new ref whose Source has a recorded (non-blank) version.
+        prior = existing.get("sourceVersionTransit")
+        pairs: list[list[str]] = []
+        if isinstance(prior, list):
+            for pair in prior:
+                if (isinstance(pair, (list, tuple)) and len(pair) == 2
+                        and isinstance(pair[0], str)
+                        and isinstance(pair[1], str) and pair[1].strip()):
+                    _key = resolve_source_key(proj.g, pair[0])
+                    if _key in _edge_urls:
+                        pairs.append([_spelling[_key], pair[1]])
+        # Raw-vs-raw, and correctly so: `_seen` and `new_pairs` are both keyed
+        # by the journal-stable RAW ref (`_source_version_transit` over
+        # `resolve_source_versions`), and a retained pair is now keyed by the
+        # ref list's own spelling — the same surface. A new ref cannot collide
+        # with a retained pair on a DIFFERENT spelling either: `missing` is
+        # identity-disjoint from the edges, and the caller already collapsed
+        # identity-duplicates inside it.
+        _seen = {pair[0] for pair in pairs}
+        new_pairs = _source_version_transit(versions) or []
+        pairs.extend([ref, h] for ref, h in new_pairs if ref not in _seen)
+
+        # The survivor's OWN provenance, kept in the SHAPE the node already
+        # had. Two shapes, two reasons, and the fold must not convert one into
+        # the other:
+        #   * a Point created under a SCALAR keeps that scalar — deliberately,
+        #     so `query(extractedFrom=…)` (property EQUALITY) keeps answering
+        #     for the source it was created under; the folded SET rides
+        #     `extractedFromAll` beside it (#7704 review P1).
+        #   * a Point born from a SEQUENCE keeps its ARRAY — that is the shared
+        #     writer's own shape rule ("a STRING when a single string was
+        #     passed … an ARRAY whenever a SEQUENCE was passed — even a
+        #     one-element one, which is NOT collapsed",
+        #     `projection/entities.py::_upsert_point_props`, #3263). Collapsing
+        #     it to its first element would drop N-1 refs from a REPORTED
+        #     surface (`get_point` is `properties(n)`; `list_drafts` reads this
+        #     prop) and silently change the stored property's TYPE — the
+        #     evidence-loss class this fold exists to close, in the one shape no
+        #     pin constructed (#10010 review P2).
+        # Only a survivor holding NO prop at all (a sourceless Point) takes the
+        # first folded ref: there is no earlier shape to preserve, and material
+        # is what makes it readable at all.
+        _own = existing.get("extractedFrom")
+        if isinstance(_own, str) and _own.strip():
+            _primary_ref = _own
+        elif isinstance(_own, (list, tuple)) and any(
+                isinstance(r, str) and r.strip() for r in _own):
+            # KEPT AS AN ARRAY, every member intact: no collapse, no type
+            # change, and NO member is filtered — a blank one included. The
+            # gate does not promise there is none: `_own` above was read back
+            # from the NODE, and the door that writes this prop,
+            # `update_point(extractedFrom=…)`, validates nothing (the same
+            # function says so above, where `_point_source_refs` is narrowed),
+            # so a stored array CAN carry a blank member. The rule here is the
+            # survivor's SHAPE, and the array is carried VERBATIM — filtering
+            # it would be this fold editing the provenance it exists to keep.
+            # The `any()` above decides one thing only: whether the array is
+            # material at all (a wholly blank one falls through to
+            # `accumulated[0]`, like a sourceless Point).
+            _primary_ref = list(_own)
+        else:
+            _primary_ref = None
+        if _primary_ref is None:
+            _primary_ref = accumulated[0] if accumulated else None
+        snapshot = {**existing, "extractedFrom": _primary_ref,
+                    "extractedFromAll": accumulated}
+        # #7704 review P1: the fold computes NO vector — `existing["embedding"]`
+        # is the node's EXISTING one, read back through `get_point` — so this
+        # re-emitted `PointAdded` must not attest an origin. `_emit_event`
+        # stamps every PointAdded as a CREATING record (`creating=True`) and
+        # `stamp_journal_embedding` then attests the ACTIVE embedder whenever the
+        # payload owns a vector — so a fold performed after a model change would
+        # journal `embedding_model = <the new model>` for a vector the OLD one
+        # computed: a false origin, and the R1 model-change warning is silenced
+        # by construction (it compares the JOURNALED identity to the configured
+        # embedder). `embedding_preserved` is the marker the capture writer uses
+        # for exactly this case (see the marker `_write_capture_turns` sets) and it
+        # is payload-only metadata — never a node property — so it cannot leak
+        # into the graph. Set only when a vector is actually carried: with none,
+        # `stamp_journal_embedding`'s `vec is not None` arm already takes the
+        # other branch.
+        if existing.get("embedding") is not None:
+            snapshot["embedding_preserved"] = True
+        # #10010 review P1: this record creates NOTHING — it re-emits an
+        # EXISTING incarnation's snapshot so pass-1a can restate the props and
+        # pass-2 can re-derive the edges. The replay's recreate anchor cannot
+        # tell that from a creation by shape alone, and counting the fold as a
+        # re-creation refused the very terminalizer stamp that killed the
+        # survivor (`outdated`/`expiredAt`/CORRECTS are `_POINT_DENY`, so no
+        # payload restores them): a `rebuild_all` served a dead claim with no
+        # `outdated` flag. The flag is the record telling the plan what it is;
+        # `projection.EVIDENCE_FOLD_KEY` is its one spelling,
+        # `record_is_evidence_fold` its one reader, and the prop-intake
+        # boundaries refuse it as a caller prop (`_sanitize_props`).
+        snapshot[EVIDENCE_FOLD_KEY] = True
+        if pairs:
+            snapshot["sourceVersionTransit"] = pairs
+        else:
+            snapshot.pop("sourceVersionTransit", None)
+        _committed = self._emit_event(
+            "PointAdded",
+            {"id": pid,
+             "kind": existing.get("pointKind"),
+             "content_hash": existing.get("content_hash")},
+            point=snapshot)
+        if _committed is False:
+            # §17.1 / #7951: NO record ⇒ NO fold. Writing the edges here would
+            # put the cache AHEAD of truth, where a replay silently loses the
+            # evidence and no repair can recover it — the exact loss this fold
+            # exists to stop. `None` (no journal configured: embedded / dev /
+            # CI) writes as before. Same arm, same error and same reason as
+            # `update_point`'s no-record refusal.
+            from .exceptions import WriteNotLandedError
+            raise WriteNotLandedError(
+                pid, getattr(proj, "graph_name", None),
+                operation="create_point")
+
+        # The fold runs inside the live-write scope: the append above has
+        # COMMITTED, so the ordering is journal-then-cache by construction.
+        with _live_write_scope("create_point"):
+            self._graph_write_with_retry(
+                lambda: proj._link_source(pid, _wired,
+                                          source_versions=versions),
+                what="create_point dedup provenance edges",
+            )
+            # The `sourceVersionTransit` carrier (#5256) rides the SAME
+            # statement as the prop. The record above JOURNALS the merged pairs,
+            # so a live node left holding only its pre-fold pairs is a record
+            # `check_consistency` reports DIVERGENT on (a one-sided presence of
+            # this prop is a divergence — `consistency.py`, #5256) and a
+            # `derived = replay(journal)` break on the ordinary document path
+            # (any new Source with a recorded `contentHash`). `None` ⇒
+            # `SET … = NULL`, which REMOVES the property — exactly what a
+            # replayed `PointAdded` whose payload omits the carrier leaves
+            # behind, so live and replay agree in both directions.
+            self._graph_write_with_retry(
+                lambda: proj.g.query(
+                    "MATCH (n:Point {id:$id}) "
+                    "SET n.extractedFrom = $ref, "
+                    "    n.extractedFromAll = $all, "
+                    "    n.sourceVersionTransit = $sv",
+                    params={"id": pid, "ref": _primary_ref,
+                            "all": accumulated, "sv": pairs or None}),
+                what="create_point dedup provenance prop",
+            )
+        _logger.info(
+            "create_point dedup hit on %s: folded %d new extractedFrom ref(s) "
+            "%r onto the surviving Point — one claim, %d sources (#7704)",
+            pid, len(_wired), _wired, len(accumulated),
+        )
+        return snapshot
+
     def _resolve_dedup_hit(self, content: str, *,
                            pointKind: str | None = None,
                            key: str | None = None,
@@ -41461,6 +42086,26 @@ class TortoiseSDK:
                         point_props["embedding_verbatim"] = (
                             True if point_props.get("embedding") is not None
                             else None)
+                        # #10523 review (P1): the SAME #4194 rule, through THIS
+                        # door. The block above replaced (or cleared) the vector,
+                        # so the node must not keep the writer-minted
+                        # `embeddingText` it was never computed from —
+                        # `update_point` clears it in exactly this position
+                        # (in its caller-vector door), and round 3 closed that
+                        # door without reaching this one. Tenant-reachable as
+                        # `tortoise_update_entity(id, props={"embedding": […]})`,
+                        # and SILENT afterwards: `embedding_text_hash` is
+                        # payload-only (`consistency.py:179`) and
+                        # `_record_embedding_identity` returns early when the
+                        # journal carries none. `None` REMOVES the property
+                        # (matching `update_point`), and it is GATED ON THE KEY,
+                        # so an unrelated `update_entity` leaves a writer-minted
+                        # value alone. NOTE what this does NOT do: it journals
+                        # nothing, so it does not widen the #4094 exemption
+                        # declared below — which is why the clear is live-only
+                        # and a rebuild falls back to the snapshot's COHERENT
+                        # (text, vector) pair rather than leaving a lie live.
+                        point_props["embeddingText"] = None
                     else:
                         point_props = props
                     for match_prop in id_keys:

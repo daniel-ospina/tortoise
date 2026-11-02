@@ -163,6 +163,7 @@ from tortoise.monitoring import (  # #2850/2953 liveness-readiness decouple
     heartbeat_record,
     loop_heartbeat_info,
     loop_heartbeat_task,
+    note_heartbeat_task,
     record_analytics_outcome,  # #3820 analytics-sink outcome counter
     record_telemetry_drop,  # #4095 allowlist-drop counter (the /metrics seam)
     run_control_plane_call,
@@ -223,6 +224,7 @@ from tortoise.sdk import (
     UnapprovedKindNamespace,  # #5475: the named pack-approved refusal, mapped to 422 too
     _apply_capture_ingest_ep,  # W5 Phase C (#2104): live-at-capture + ingest EP pass
     _attach_source_change_notices,  # #5516: the ONE home for the capture receipt's source-change notice
+    _capture_enriched_texts,  # #8488 scope 1: the enriched embeddingText (gate OFF → None)
     _capture_ep_target_ids,  # W5 Phase D (#2104): EP pass targets (minted + first-time folds)
     _capture_extraction_window,  # #6246: the shared extraction view (both lanes)
     _capture_gate_window,  # #4897: strip synthetic markers before the empty/blank gate
@@ -1946,9 +1948,12 @@ def _start_liveness(app) -> None:
     (proving it is scheduling before the watchdog exists to judge it), then
     the heartbeat task, then the listener, then the watchdog. Starting the
     watchdog before the heartbeat would let it fire on a loop that simply had
-    not ticked yet. The watchdog additionally refuses to judge until at least
+    not ticked yet. The SOFT path additionally refuses to judge until at least
     one REAL tick has landed (``LOOP_STALL_EXIT_MIN_TICKS``), so the slow-
-    starting part of the startup half cannot be mistaken for a wedge.
+    starting part of the startup half cannot be mistaken for a wedge. The HARD
+    ceiling (#10585 review P2) is exempt from that gate: past
+    ``TORTOISE_LOOP_STALL_HARD_EXIT_S`` a boot that never ticked again IS the
+    wedge, and holding the ceiling off for it means hanging indefinitely.
     """
     loop = asyncio.get_running_loop()
     # A previous lifespan of the SAME app instance (in-process restart,
@@ -1966,15 +1971,29 @@ def _start_liveness(app) -> None:
             prev.cancel()
     heartbeat_record()
     app.state._loop_heartbeat_task = loop.create_task(loop_heartbeat_task())
+    # #2850: record that ticker's death, so the hard stall ceiling can tell a
+    # wedged LOOP from a dead TICKER and never restart-loop a healthy process.
+    note_heartbeat_task(app.state._loop_heartbeat_task)
     # #3944: the analytics canary heartbeat. Armed with the liveness block
     # (cheap, synchronous, no I/O at arm time — the coroutine sleeps first).
     app.state._analytics_canary_task = loop.create_task(_analytics_canary_loop())
     app.state._healthz_server = start_health_listener()
     app.state._loop_watchdog_stop = threading.Event()
-    # DISABLED BY DEFAULT (#2850 review P0): with TORTOISE_LOOP_STALL_EXIT_S
-    # unset this returns None — the /healthz listener is the signal and the
-    # destructive action lives in the out-of-band watchdog. Enabling it here
-    # also requires 3 consecutive stale windows and an idle workload.
+    # DISABLED BY DEFAULT (#2850 review P0): the SOFT, idle-gated self-kill is
+    # what this comment used to describe. TORTOISE_LOOP_STALL_EXIT_S is unset,
+    # so THAT path stays off: the /healthz listener is the signal and the
+    # destructive action lives in the out-of-band watchdog. When armed it
+    # requires 3 consecutive stale windows AND an idle workload.
+    #
+    # The HARD ceiling (#10585) is the exception, and it is the one the HOSTED
+    # deployment actually runs: fly.toml [env] arms
+    # TORTOISE_LOOP_STALL_HARD_EXIT_S=600 while leaving its sibling unset, so
+    # this call does NOT return None in production. That branch deliberately
+    # bypasses the idle gate and the hysteresis — the in-flight gauge is TRUE by
+    # construction during the wedge it guards (an open `GET /mcp` SSE stream is
+    # an in-flight request), so an idle-gated exit could never fire. It keeps
+    # only the dead-TICKER disarm, and relies on fly.toml's [[restart]] block
+    # (policy `on-failure`) to turn the non-zero exit into a RESTART.
     app.state._loop_watchdog = start_stall_watchdog(
         stop_event=app.state._loop_watchdog_stop)
 
@@ -5917,9 +5936,10 @@ async def health():
     counter snapshot, or an unread tenancy resolution degrades ``status``.
 
     Build check (#10447): ``build`` names the build that is SERVING — commit,
-    package version, whether the tree was dirty at build time (`null` until the
-    deploy stamps `TORTOISE_GIT_DIRTY`; see `_build_identity`), process start
-    time, and the highest schema migration this image carries. It is the same
+    whether the tree was dirty at build time (stamped by the deploy; `null` means
+    NOT STATED, never "clean" — see `_build_identity`), the image reference the
+    Machine was created from, process start time, and the highest schema
+    migration this image carries. It is the same
     VALUE ``/v1/version`` returns (one resolver, ``_build_identity``), because
     "is this deployed?" was previously unanswerable from this endpoint: a stale
     build served ``status: ok`` and every other block happily. Like
@@ -6053,13 +6073,22 @@ async def health_security():
 #: can see a restart (a deploy that landed) without a log grep — and can see that
 #: a build is OLD by comparing it to the deploy it was supposed to pick up.
 #:
-#: `commit_dirty` is published but is NULL on every real deployment today:
-#: nothing stamps `TORTOISE_GIT_DIRTY`. The deploy workflow's propagation block is
-#: pinned by `tests/test_fly_secret_drift.py` (whose harness stubs PATH to
-#: fly/flyctl only) and a new stamp would also need a declaration in
-#: `.github/scripts/fly-managed-secrets.txt` or the drift check blocks every later
-#: deploy — a deploy-surface change, filed separately rather than smuggled in here.
-#: A `null` here is the honest reading; it must not be read as "clean".
+#: #10447 (reopen): `commit_dirty` NOW HAS A PRODUCER. `deploy-hosted.yml`
+#: stamps `TORTOISE_GIT_DIRTY` from the build's own `git status --porcelain`
+#: (declared `workflow` in `.github/scripts/fly-managed-secrets.txt`, which the
+#: drift gate requires before the name can be staged at all). Before that stamp
+#: existed the field was published and permanently `null` on production — and
+#: because the identified predicate treated an unstated flag as "not dirty", a
+#: build from a modified tree still claimed `build_identified: true`. An unstamped
+#: deployment is now read as UNSTATED (see `build_identified_reason`), never as
+#: clean: a `null` here is silence, and silence is not the claim "this is the
+#: commit".
+#:
+#: The image identity is published the same way, from the platform rather than
+#: from a constant: Fly injects `FLY_IMAGE_REF` (the image reference the Machine
+#: was created from) into every Machine's environment, so the artefact is named
+#: by the runtime that chose it — no deploy step has to learn the digest after the
+#: fact, and there is no second rollout to carry it.
 _PROCESS_STARTED_AT: str = datetime.now(UTC).isoformat(timespec="seconds")
 
 
@@ -6221,13 +6250,50 @@ def _build_identity() -> dict:
     # which is what the pin's own title claims and what a reader keyed on
     # `build_identified` alone must not be told the opposite of. `commit_sha` stays
     # RAW so `/v1/version`'s two-key contract carries exactly what the deploy staged.
-    identified = (bool(re.fullmatch(r"[0-9a-f]{7,40}", sha or ""))
-                  and not dirty_flag)
+    # ⛔ SILENCE IS NOT "CLEAN" (the #10447 reopen). The predicate used to be
+    # `not dirty_flag`, and `not None` is True — so a build from a MODIFIED tree,
+    # on any deployment that had not stamped the flag, published
+    # `build_identified: true`. That is the false PASS this whole block exists to
+    # refuse: "is this the commit, or a modified tree?" was answered "the commit"
+    # by an absent reading. Production now stamps the flag, and an unstamped one
+    # is reported as UNSTATED.
+    sha_is_commit = bool(re.fullmatch(r"[0-9a-f]{7,40}", sha or ""))
+    identified = sha_is_commit and dirty_flag is False
+    # WHY, not just "false" (reopen: "unknown with a reason"). Four different
+    # worlds produce the same `false` and a reader must not have to guess which:
+    # nothing deployed a stamp (selfhost/local dev), the stamp is not a commit
+    # (`main`, `unknown`, an unexpanded `${GITHUB_SHA}`), the tree really was
+    # dirty, or the deploy did not say whether it was.
+    if identified:
+        reason = None
+    elif sha is None:
+        reason = "no_commit_stamp"
+    elif not sha_is_commit:
+        reason = "commit_stamp_not_a_sha"
+    elif dirty_flag is True:
+        reason = "tree_dirty"
+    else:
+        reason = "tree_dirt_unstated"
+    # THE ARTEFACT, FROM THE PLATFORM. `flyctl deploy --remote-only` builds the
+    # image during the deploy, so a digest CANNOT be staged into the environment
+    # beforehand — a deploy that read `flyctl image show` and re-staged it would
+    # restart the fleet a second time to publish the id of the image it had just
+    # started. Fly injects `FLY_IMAGE_REF` into every Machine instead, which names
+    # the image the machine was CREATED FROM: the artefact->runtime link the issue
+    # asked for, with no deploy-order dance and no value a human can edit.
+    # `TORTOISE_IMAGE_REF` is the non-Fly (selfhost/container) spelling; it is
+    # read first so a deployment that knows its own ref can state it.
+    image = ((os.environ.get("TORTOISE_IMAGE_REF") or "").strip()
+             or (os.environ.get("FLY_IMAGE_REF") or "").strip() or None)
     return {
         "version": tortoise.__version__,
         "commit_sha": sha,
         "commit_dirty": dirty_flag,
         "build_identified": identified,
+        "build_identified_reason": reason,
+        # The image (build artefact) the serving process was started from —
+        # `null` when nothing stated one (a local run), never a placeholder.
+        "image": image,
         "started_at": _PROCESS_STARTED_AT,
         # CARRIED by this image, never "applied in the database" — see
         # `_migrations_head`'s docstring for why the two diverge and why the
@@ -15495,7 +15561,10 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         actor_user_id=_actor_uid, machine_id=body.machine_id,
         model=body.model, session_existed=session_existed,
         embed_fn=lambda texts: _capture_turn_embeddings(
-            texts, proj.required_embedding_dim))
+            texts, proj.required_embedding_dim),
+        # #8488 scope 1: the enriched ``embeddingText`` (owner ruling #8932),
+        # kept in parity with ``sdk.capture_session`` (the ONE shared writer).
+        enrich_fn=_capture_enriched_texts)
     _turn_texts = _capture_write["turn_texts"]
     _capture_redactions = _capture_write["redacted_total"]
 
