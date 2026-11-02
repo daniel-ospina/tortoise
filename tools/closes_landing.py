@@ -186,12 +186,20 @@ def strip_code(body: str, strict: bool = False) -> str:
     Fences: a block opens with ``` or `~~~` and closes with the SAME character
     and a run at least as long.
 
-    `strict` is for the CARRIER side only. There the cost of leniency is
-    asymmetric: a quoted keyword in the carrier's body makes this tool report
-    `lands`, i.e. a PASS, which is the one outcome its doctrine forbids. So the
-    carrier is parsed strictly — indented blocks and blockquote containers are
-    stripped too — because under-reporting on the carrier merely costs an extra
-    `inert` warning, never a pass (review c4-5).
+    `strict` is for the CARRIER side, and for the arm that would otherwise report
+    `lands`. There the cost of leniency is asymmetric: a keyword that appears
+    only inside an indented block would buy a PASS, which is the one outcome this
+    module's doctrine forbids. Strict mode therefore also blanks INDENTED lines
+    and sees through blockquote prefixes when looking for a fence.
+
+    What it does NOT do, deliberately: a keyword in blockquote PROSE (`> Closes
+    #N`) stays a claim. GitHub acts on a closing keyword in a quoted paragraph —
+    only CODE is ignored — so blanking it would be the under-reporting direction
+    that loses real closures.
+
+    The concrete cost of strict mode: a carrier that restates the keyword in a
+    4-space bullet (`This PR:\n\n    - Closes #N`) reads `inert`. That is the
+    safe direction (an extra warning, never a pass) and is accepted.
     """
     out: list[str] = []
     fence: tuple[str, int] | None = None
@@ -312,6 +320,22 @@ def classify(pr: PullRequest, by_head: dict[str, PullRequest],
         # number comparison would make 0 == 0 read as "this PR lands" — a false
         # pass on exactly the shape this tool exists to catch.
         if carrier is pr:
+            # A PASS may not rest on a lenient-only match: if the keyword appears
+            # only inside an indented/quoted CODE block, GitHub will not act on it,
+            # and guessing `lands` there is the one outcome this module forbids.
+            # `strict_refs` is computed on the SAME body, so a claim at column 0
+            # passes and an ambiguous one downgrades to a warning (review c5-2).
+            if issue not in set(parse_closing_refs(pr.body, repo, strict=True)):
+                findings.append(Finding(
+                    issue=issue, pr=pr.number, base=pr.base, verdict="unresolved",
+                    carrier=pr.number,
+                    detail=(f"PR #{pr.number} targets `{default_branch}`, but the "
+                            f"`Closes #{issue}` in its body appears only inside a "
+                            f"quoted or indented code block, which GitHub does not "
+                            f"act on — it cannot be shown that the keyword will "
+                            f"fire. State it as plain text."),
+                ))
+                continue
             findings.append(Finding(
                 issue=issue, pr=pr.number, base=pr.base, verdict="lands",
                 carrier=pr.number,

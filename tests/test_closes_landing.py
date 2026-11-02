@@ -525,3 +525,34 @@ def test_a_carrier_that_really_states_the_keyword_still_lands():
     real = _pr(105, DEFAULT, "fix: the thing\n\nCloses #100\n", head=SIBLING)
     (finding,) = cl.classify(subject, _by_head(subject, real), DEFAULT)
     assert finding.verdict == "lands"
+
+
+# ── cycle 5: a PASS may not rest on a lenient-only match ─────────────────────
+
+def test_a_default_base_pr_whose_keyword_is_only_in_a_code_block_is_unresolved():
+    """Leniency is safe in the finding arms (a false warning) and unsafe in the
+    `lands` arm (a false pass). A keyword that appears only inside an indented
+    code block therefore downgrades to `unresolved` (#10597 review c5-2)."""
+    pr = _pr(110, DEFAULT, "fix: the thing\n\nOld body said, for context:\n\n    Closes #10541\n")
+    (finding,) = cl.classify(pr, _by_head(pr), DEFAULT)
+    assert finding.verdict == "unresolved"
+    assert "code block" in finding.detail
+
+
+def test_a_default_base_pr_with_a_plain_claim_still_lands():
+    pr = _pr(111, DEFAULT, "fix: the thing\n\nCloses #10541\n")
+    (finding,) = cl.classify(pr, _by_head(pr), DEFAULT)
+    assert finding.verdict == "lands"
+
+
+# ── cycle 5: blockquote PROSE is a claim (GitHub ignores code, not quotes) ───
+
+def test_a_keyword_in_quoted_prose_is_still_a_claim():
+    assert cl.parse_closing_refs("> earlier this said: Closes #10541\n") == [10541]
+
+
+def test_a_carrier_restating_the_keyword_in_a_quoted_paragraph_lands():
+    subject = _pr(112, SIBLING, "Closes #100")
+    carrier = _pr(113, DEFAULT, "> re-stated for clarity: Closes #100\n", head=SIBLING)
+    (finding,) = cl.classify(subject, _by_head(subject, carrier), DEFAULT)
+    assert finding.verdict == "lands"
