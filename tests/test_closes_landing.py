@@ -818,3 +818,22 @@ def test_the_container_ends_the_fence(body, expected):
 def test_fence_shapes_match_commonmark(body, expected, why):
     assert cl.parse_closing_refs(body) == expected, why
     assert cl.parse_closing_refs(body, None, strict=True) == expected, why
+
+
+# ── cycle 10: containers by DEPTH, the ending line is fresh, list items end ──
+
+@pytest.mark.parametrize("body,expected,why", [
+    # `>`, `> `, `  > ` are ONE container to CommonMark; comparing the raw prefix
+    # strings meant a legal closer was never recognised and the rest blanked.
+    (">```\n>Closes #123\n> ```\n> Closes #10541\n", [10541], "c10-1 prefix by depth"),
+    ("> ```\n  > ```\n> Closes #10541\n", [10541], "c10-1 prefix spacing"),
+    # The line that ends a container is a FRESH line: if it opens a fence, what
+    # follows is CODE, and reporting it as a claim would be a false `lands`.
+    ("> ```\n```\nCloses #10541\n", [], "c10-2 the ending line may open a fence"),
+    # A fence opened inside a list item ends when the item's content ends.
+    ("- item\n  ```\nCloses #10541\n", [10541], "c10-3 list item dedent"),
+    ("- item:\n\n  ```\n  Closes #40\n  ```\n", [], "c10-3 content stays in the item"),
+])
+def test_container_depth_and_list_endings(body, expected, why):
+    assert cl.parse_closing_refs(body) == expected, why
+    assert cl.parse_closing_refs(body, None, strict=True) == expected, why

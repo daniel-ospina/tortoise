@@ -172,6 +172,11 @@ def _split_prefix(line: str) -> tuple[str, str]:
 
 _MAX_FENCE_INDENT = 3  # a 4+ column ``` is an INDENTED CODE BLOCK, not a fence
 
+# A list item's content column, so a fence opened inside one can END when the
+# item ends. Without it, `- item\n  ```\nCloses #N\n` blanked the column-0 prose
+# and the tool reported nothing at all (review c10-3).
+_LIST_MARKER_RE = re.compile(r"^(?P<indent>[ \t]*)(?:[-*+]|\d{1,9}[.)])(?P<gap>[ \t]+)")
+
 
 def _fence_open(rest: str) -> tuple[str, int] | None:
     """(character, run length) if `rest` opens a fence — else None.
@@ -224,7 +229,14 @@ def strip_code(body: str, strict: bool = False) -> str:
       ends it — a `> ``` ` line inside it is CONTENT, and treating it as a closer
       blanked the prose after the block (review c9-2(i));
     * a QUOTED fence ends as soon as a line drops below its depth — including on a
-      blank line, which ends the blockquote (review c8-1);
+      blank line, which ends the blockquote (review c8-1) — and the line that ends
+      it is re-examined as a fresh line, because it may itself open a fence
+      (review c10-2);
+    * a fence opened inside a LIST ITEM ends when the item's content ends, i.e. a
+      non-blank line dedents below the opener (review c10-3);
+    * containers are compared by DEPTH, never by the raw prefix string: `>`, `> `,
+      `  > ` are one container to CommonMark, and comparing strings meant a legal
+      closer was never recognised (review c10-1);
     * `strict` (the CARRIER body, and the subject's own `lands` arm) additionally
       blanks indented lines, because there a lenient-only match would be a PASS.
 
@@ -234,26 +246,55 @@ def strip_code(body: str, strict: bool = False) -> str:
     that loses real closures.
     """
     out: list[str] = []
-    fence: tuple[tuple[str, int], str] | None = None  # (opener, its prefix)
-    for line in body.splitlines():
+    # (opener, its prefix, the indent it opened at, whether a list item was open)
+    fence: tuple[tuple[str, int], str, int, bool] | None = None
+    list_cols: list[int] = []
+    for raw in body.splitlines():
+        line = raw.expandtabs(4)
+        indent = len(line) - len(line.lstrip(" "))
         prefix, rest = _split_prefix(line)
-        if strict and (line.startswith("    ") or line.startswith("\t")):
+        marker = _LIST_MARKER_RE.match(line)
+        if marker and line.strip():
+            col = len(marker.group("indent")) + len(marker.group(0)) \
+                - len(marker.group("indent")) - len(marker.group("gap")) \
+                + len(marker.group("gap"))
+            list_cols.append(col)
+        elif line.strip() and list_cols and indent < list_cols[-1]:
+            while list_cols and indent < list_cols[-1]:
+                list_cols.pop()
+        if strict and (raw.startswith("    ") or raw.startswith("\t")):
             out.append("")
             continue
         if fence is None:
             opener = _fence_open(rest)
             if opener:
-                fence = (opener, prefix)
+                fence = (opener, prefix, indent, bool(list_cols))
                 out.append("")
             else:
-                out.append(line)   # prose: keep it, keywords and all
+                out.append(raw)   # prose: keep it, keywords and all
             continue
-        opener, fprefix = fence
-        if _quote_depth(fprefix) > 0 and _quote_depth(prefix) < _quote_depth(fprefix):
-            fence = None            # the blockquote ended, so the block ended
-            out.append(line)        # …and this line is prose again
+        opener, fprefix, findent, in_list = fence
+        # The container can END the block: the quote it lived in closed, or (for a
+        # fence opened inside a list item) the item did. Either way the line that
+        # ends it is a FRESH line — it may itself open a new fence (review c10-2).
+        ended = (_quote_depth(fprefix) > 0
+                 and _quote_depth(prefix) < _quote_depth(fprefix))
+        if not ended and in_list and line.strip() and indent < findent:
+            ended = True
+        if ended:
+            fence = None
+            fresh = _fence_open(rest)
+            if fresh:
+                fence = (fresh, prefix, indent, bool(list_cols))
+                out.append("")
+            else:
+                out.append(raw)   # prose again: keep it, keywords and all
             continue
-        if prefix == fprefix and _is_closer(rest, opener):
+        # PREFIX BY DEPTH, not by string: `>`, `> `, `  > ` are the SAME
+        # blockquote container to CommonMark, and comparing the raw strings meant
+        # a legal closer was never recognised and the rest of the body was
+        # blanked — a silent MISS (review c10-1).
+        if _quote_depth(prefix) == _quote_depth(fprefix) and _is_closer(rest, opener):
             fence = None
         out.append("")
     return "\n".join(out)
