@@ -951,10 +951,22 @@ _UNWRAP_MARK = "jsonb_typeof(payload -> 'event') = 'object'"
 #: The `restatus` leg's id predicate, as `_LIFECYCLE_EVENTS_FOR_ONE_SQL` spells it.
 #: The fake parses the KEY out of the statement it is handed (see
 #: `_project_journal_rows`) instead of assuming `id`, so a clause rewritten to a
-#: different column cannot keep passing. ⚠️ It is unambiguous: every other
-#: narrowing clause interpolates `_PAYLOAD_EVENT`, a `COALESCE(...)` expression,
-#: so the ONLY literal `payload ->> '<key>'` in the statement is the id one.
-_ID_CLAUSE_RE = re.compile(r"payload ->> '(\w+)' = %s")
+#: different column cannot keep passing. ⚠️ The spelling became the UNWRAPPED
+#: `(COALESCE(...) ->> 'id') = %s` (review round 2, P2 — a nested creation record
+#: is materialised by the record and must not be excluded by the single-row
+#: door), so the pattern tolerates both the closing paren and its absence and
+#: matches the LAST `->> '<key>' … = %s` in the statement.
+_ID_CLAUSE_RE = re.compile(r"->> '(\w+)'\)? = %s")
+
+#: The event types the id narrowing covers, READ OUT OF THE STATEMENT (review
+#: round 2, P2). It used to be hardcoded here, which made the fake unable to fail
+#: on the exact regression the two-door pin names: MEASURED, narrowing the SQL's
+#: `IN ('EntityMutated', 'ObjectRegistered', 'SubjectAdded')` down to
+#: `IN ('EntityMutated')` left all 75 legs green, because the fake still matched
+#: the birth row. The lesson is this file's own doctrine — the fake emulates the
+#: statement it is handed, never the shape the caller intended.
+_EVENT_TYPE_SET_RE = re.compile(r"event_type IN \(([^)]*)\)")
+_QUOTED_RE = re.compile(r"'([^']*)'")
 
 
 def _project_journal_rows(sql: str, rows, params):
@@ -999,11 +1011,61 @@ def _project_journal_rows(sql: str, rows, params):
     #     `read_node` answered no `status` where the rebuild folded one.
     # The key is now READ OUT OF THE STATEMENT, so an unmodelled rewrite finds
     # nothing here either.
-    _id_clause = _ID_CLAUSE_RE.search(sql)
-    id_key = _id_clause.group(1) if _id_clause else None
+    # The LAST match, not the first: the name clause spells `- >> 'object') = %s`
+    # too, so a first-match read would take the NAME key as the id coordinate and
+    # narrow every row away (measured — five read-door legs red).
+    _id_clauses = list(_ID_CLAUSE_RE.finditer(sql))
+    id_key = _id_clauses[-1].group(1) if _id_clauses else None
+    # TWO different event-type predicates live in this text: the BASE statement's
+    # SELECTION (`event_type = '...'` and `event_type IN (...)`) and the id
+    # NARROWING's own `IN (...)`, appended after the `@>` containment clause. They
+    # are modelled separately, split at that clause.
+    #
+    # ⚠️ HONEST HISTORY (review round 5, P2 — this comment previously claimed a
+    # measurement that cannot occur): the split was introduced because unioning
+    # the two LOOKED like it let the fake keep a `SubjectAdded` row on the narrowed
+    # statement. On every statement this PR has ever committed it does NOT: the
+    # narrowing set is a strict SUBSET of the base selection
+    # (`{EventRecorded, EntityMutated} ∪ ('ObjectRegistered','SubjectAdded')` ⊇
+    # `('EntityMutated','ObjectRegistered','SubjectAdded')`), so the union and the
+    # split filter IDENTICALLY and nothing pins the difference. Reintroducing the
+    # union leaves the suite green (measured). The split is kept because it is the
+    # modelling that stays correct if the base set is ever narrowed — NOT because
+    # it fixes an observed failure. ⚠️ CORRECTED (review round 5, P2): the note
+    # here used to end "a future lane should not read this as evidence that the
+    # `read_node` door is protected against base-set shrinkage (it is not: no
+    # `read_node(label=\"Subject\")` leg exists)". That leg NOW EXISTS
+    # (`test_a_born_terminal_object_rebuilds_terminal_not_live` reads the Subject
+    # at the same door), and it was measured against a shrink: narrowing the BASE
+    # selection to `IN ('ObjectRegistered')` reds that test. So base-set
+    # shrinkage IS caught today. What remains genuinely unpinned is only the
+    # union-vs-split modelling difference described in the sentence above, which
+    # stays green either way.
+    #
+    # The defect that IS measured, and pinned, is the one round 3 found: with NO
+    # base modelling at all, shrinking `IN ('ObjectRegistered', 'SubjectAdded')`
+    # to `IN ('ObjectRegistered')` left every leg green while Postgres drops every
+    # `SubjectAdded` row (a Subject born terminal rebuilds with no status and
+    # reads LIVE — #9974's harm one label over); the shrink now reds
+    # `test_a_born_terminal_object_rebuilds_terminal_not_live` on its Subject
+    # assertion.
+    _type_sets = list(_EVENT_TYPE_SET_RE.finditer(sql))
+    _narrow_at = sql.index("to_jsonb(") if "to_jsonb(" in sql else len(sql)
+    _base_sets = [m for m in _type_sets if m.start() < _narrow_at]
+    _narrow_sets = [m for m in _type_sets if m.start() >= _narrow_at]
+    id_event_types = (frozenset(_QUOTED_RE.findall(_narrow_sets[-1].group(1)))
+                      if _narrow_sets else frozenset())
+    selectable = (frozenset(m.group(1) for m in
+                            re.finditer(r"event_type = '([^']*)'", sql))
+                  | frozenset(lit for m in _base_sets
+                              for lit in _QUOTED_RE.findall(m.group(1))))
     out = []
     for row in rows:
         payload = row.get("payload")
+        # A row handed over ALREADY column-shaped (no `payload`) is outside the
+        # statement's model — this file's contract for such rows is "pass through
+        # unchanged" — so the selection predicate is applied to RECORD rows only.
+        from_record = "payload" in row
         if isinstance(payload, dict) or "payload" in row:
             row = dict(row)
             nested = payload.get("event") if isinstance(payload, dict) else None
@@ -1018,19 +1080,46 @@ def _project_journal_rows(sql: str, rows, params):
             state = src.get("state")
             row["restatus_status"] = (state.get("status")
                                       if isinstance(state, dict) else None)
+            # #9974: the CREATION record's own `status` — the fourth writer.
+            # Read from the payload top level, which is where a
+            # `NodeSnapshot` (`ObjectRegistered`/`SubjectAdded`) carries it.
+            # ⚠️ STRING ONLY, because Postgres' `->>` returns text for a JSON
+            # number too: the statement wraps this column in
+            # `CASE WHEN jsonb_typeof(...) = 'string'`, so the fake must apply
+            # the same guard or it would report a fold production never makes
+            # (review round 2, P2 — `create_object(name, status=5)`).
+            birth = src.get("status")
+            row["birth_status"] = birth if isinstance(birth, str) else None
         if narrow:
             about = row.get("about_entities") or row.get("about_entities_camel")
             names = [row.get("object_name")]
             names.extend(about if isinstance(about, list) else [about])
             matched = (
                 (name_target is not None and name_target in names)
+                # #9974: the id coordinate now covers the CREATION records
+                # too — the reader's single-row narrowing must select them, or
+                # `read_node` answers no `status` where `rebuild_from_record`
+                # folds one (the two-door disagreement this file exists to
+                # prevent).
                 or (id_key is not None
                     and id_target is not None
-                    and row.get("event_type") == "EntityMutated"
+                    and row.get("event_type") in id_event_types
                     and row.get("node_id") == id_target)
             )
             if not matched:
                 continue
+        # The SELECTION half: a row whose type the statement cannot select must
+        # not reach the fold, or a shrunken `IN (...)` passes the suite while
+        # production drops the row. Only RECORD rows carry a type the statement
+        # decides (`from_record`); a column-shaped row was handed over whole.
+        # ⚠️ Only where the row RESOLVES a type. Postgres reads `event_type` from
+        # the `public.journal_event` COLUMN, which a payload-only fixture does not
+        # model, so an unresolvable type is "unknown", never "excluded" — the
+        # filter must not invent an exclusion the statement did not make.
+        etype = row.get("event_type")
+        if from_record and selectable and isinstance(etype, str) and etype \
+                and etype not in selectable:
+            continue
         out.append(row)
     return out
 
@@ -1370,6 +1459,76 @@ def test_a_restatus_is_applied_unguarded_within_the_replay():
         "a `restatus` was refused by the terminal latch — the live fold applies "
         "a state op unguarded (`SET n += $state`), so the rebuild would leave "
         "this node terminal where the graph un-terminated it"
+    )
+
+
+def test_a_birth_record_cannot_resurrect_a_terminal_the_graph_holds():
+    """Review P1: the birth arm must not overwrite a TERMINAL it finds held.
+
+    MEASURED on the reviewed head (`92ed5d1b5`, and still live at `952e30fa7` —
+    the head this pin lands on): the `restatus` leg is UNGUARDED by design (it is
+    the caller's own `SET n += $state`), and the birth arm then assigned
+    `status = event.birth_status` UNCONDITIONALLY — so
+    `[restatus(seq 5,'archived'), birth(seq 9,'live')]` rebuilt **`live`** while
+    the live graph holds **`archived`**: seq 9 is a RE-MENTION, so
+    `_upsert_object` took the ON MATCH arm, which writes no `status`
+    (`projection/entities.py`).
+
+    ⛔ That is #9974's own harm, re-opened by the leg added to close it: a
+    rebuilt status of `live` is admitted by `live._terminal_excluded` as CURRENT
+    and its name resolves through `entity_identity.resolve_entity_id`. It is NOT
+    the benign "absent reads LIVE" flavour — the arm actively asserts CURRENT.
+    ⚠️ The value has to be STATED to land here: `sdk._entity_door_props` used to
+    seed `status='live'` on every create, and #9974 R1 (#10524) DELETED that
+    fabrication, so the route is now a caller-supplied
+    `create_object(..., status='live')` or a pre-R1 journal — narrower, and still
+    reachable. Reachability of the RE-MENTION is ordinary either way: the first
+    journaled creation record is a re-mention whenever the node pre-existed the
+    journal (name stub, explicit `id=`, pre-#3590 graph, partial replay from
+    `start_seq`), and `_upsert_object` then takes the ON MATCH arm, which writes
+    no `status` (`projection/entities.py`).
+
+    MEASURED without the latch (`if not _is_terminal_status(status)`): the first
+    assertion below reads `'live'`.
+    """
+    obj = cp.node_from_row("Object", {"id": "o-1", "name": "Acme",
+                                      "object_kind": "other"})
+    rebuilt = cp.apply_event_stream_folds([obj], [
+        cp.LifecycleEvent(seq=5, event_kind="", restatus_status="archived",
+                          target_id="o-1", target_label="Object"),
+        cp.LifecycleEvent(seq=9, event_kind="ObjectRegistered", is_birth=True,
+                          birth_status="live", target_id="o-1",
+                          target_label="Object"),
+    ])[0]
+    assert rebuilt.props.get("status") == "archived", (
+        f"the birth arm resurrected a terminal node ({rebuilt.props!r}) — the "
+        "graph holds 'archived' because a re-mention takes ON MATCH and writes "
+        "no status, so a rebuilt superseded Object answers as CURRENT and its "
+        "name resolves"
+    )
+
+    # ⛔ The latch must NOT degrade into "ignore the birth arm". A NON-terminal
+    # pre-birth fold is still displaced by the creation record (review round 6's
+    # case): an id that did not pre-exist folded nothing live, so the creation
+    # record is the write that made the node. This half is the POSITIVE sibling
+    # the absence-only pins lacked: a mutant that stops ASSIGNING the birth value
+    # (`if not birth_seen: birth_seen = True`, no write) leaves this assertion
+    # reading `live` and reds it — MEASURED. ⚠️ It does NOT pin
+    # `_BIRTH_EVENT_LABELS`: this test synthesises `LifecycleEvent(is_birth=True)`
+    # directly and `apply_event_stream_folds` never consults that table, so
+    # emptying it leaves this test green too. The table's own pin is
+    # `test_the_birth_event_labels_are_the_one_home_creation_map` (review P2).
+    still = cp.apply_event_stream_folds([obj], [
+        cp.LifecycleEvent(seq=1, event_kind="", restatus_status="live",
+                          target_id="o-1", target_label="Object"),
+        cp.LifecycleEvent(seq=2, event_kind="ObjectRegistered", is_birth=True,
+                          birth_status="archived", target_id="o-1",
+                          target_label="Object"),
+    ])[0]
+    assert still.props.get("status") == "archived", (
+        f"the terminal latch became 'ignore the birth arm' ({still.props!r}) — a "
+        "NON-terminal pre-birth fold must still be displaced by the creation "
+        "record, or the round-6 fix is undone"
     )
 
 
@@ -2125,6 +2284,566 @@ def test_the_read_door_folds_a_restatus_it_reads_by_id():
     view = cp.read_record_view(conn, org_id="o", graph_id="g")
     obj = next(n for n in view.nodes if n.label == "Object")
     assert obj.props.get("status") == props.get("status")
+
+
+# ── 3e. the FOURTH `status` writer — the CREATION record (#9974) ────────────
+
+
+def _birth_row(event_type, node_id, name, status, seq=1):
+    """One CREATION record as the record holds it, reduced to the fold's inputs.
+
+    `ObjectRegistered`/`SubjectAdded` is a `NodeSnapshot`: the payload carries the
+    snapshot the graph STORED, and the record keeps it in
+    `public.journal_event.payload` while its layer table cannot hold `status`
+    (no column; `_split_properties` refuses the name). So this is the value's
+    only carrier — the same placement `EntityMutated`'s `state.status` has.
+    """
+    payload = {"type": event_type, "id": node_id, "name": name}
+    if status is not None:
+        payload["status"] = status
+    return {"seq": seq, "payload": payload}
+
+
+def test_the_lifecycle_statement_is_parenthesised_as_declared():
+    """The birth leg is INSIDE the tenant group, and the statement is balanced.
+
+    `_FakeConn` matches this SQL by substring and never parses it, so a real
+    syntax error is invisible to every leg here — and one was: appending the
+    birth `OR` after the `EntityMutated` group's closing paren left the statement
+    unparseable (`syntax error at or near ")"`), which would have taken the
+    WHOLE record-sourced path down (`read_record_view`, `rebuild_from_record`,
+    `record_reconcile`, `record-restore`, `record_serve.read_node`) with a green
+    suite. Balanced parens are necessary, not sufficient — the reviewer executed
+    both statements against postgres:16 — so this pins the two properties a
+    DB-free test CAN pin: balance, and the birth predicate sitting after the
+    `org_id`/`graph_id` predicates (a `OR (...)` hoisted outside the group would
+    read every tenant's birth rows).
+    """
+    for sql in (cp._LIFECYCLE_EVENTS_SQL, cp._LIFECYCLE_EVENTS_FOR_ONE_SQL):
+        assert sql.count("(") == sql.count(")"), (
+            f"unbalanced parentheses in the lifecycle statement: "
+            f"{sql.count('(')} open vs {sql.count(')')} close"
+        )
+    where = cp._LIFECYCLE_EVENTS_SQL[cp._LIFECYCLE_EVENTS_SQL.index("WHERE"):]
+    assert where.index("org_id = %s") < where.index("graph_id = %s") \
+        < where.index("ObjectRegistered"), (
+        "the birth predicate was hoisted OUTSIDE the tenant scope — it would "
+        "fold every tenant's creation records into every graph"
+    )
+    # ⛔ ORDER ALONE DOES NOT CATCH A HOIST (review round 2, P2 — measured): the
+    # leaky form `... AND (A OR (B AND C)) OR (D)` is balanced, ordered after the
+    # scope predicates AND ends `))`, so every assertion above passes while the
+    # birth leg reads every tenant's rows. What "inside the tenant group"
+    # actually means is a PAREN DEPTH of exactly 1 at each non-first leg — the
+    # group opened once after the scope predicates and nothing closed it.
+    def depth_before(marker: str) -> int:
+        head = where[:where.index(marker)]
+        return head.count("(") - head.count(")")
+
+    assert depth_before("OR (event_type = 'EntityMutated'") == 1, (
+        "the EntityMutated leg is not at depth 1 inside the tenant group"
+    )
+    assert depth_before("OR (event_type IN ('ObjectRegistered'") == 1, (
+        "the birth leg is not at depth 1 inside the tenant group — a hoist "
+        "(`) OR (…)`) reads every tenant's creation records"
+    )
+    # The three legs all sit inside ONE `AND (...)` group: it opens once, after
+    # the scope predicates, and closes at the very end.
+    assert where.rstrip().endswith("))"), (
+        f"the statement does not close its tenant group at the end: "
+        f"{where[-60:]!r}"
+    )
+
+
+def test_a_nested_creation_record_is_read_by_the_id_narrowing():
+    """An `event`-nested `ObjectRegistered` must not be excluded by the door.
+
+    Review round 2 (P2) measured it: `record_projection._nested_node_carrier`
+    accepts an `event`-nested carrier for ANY `path=None` snapshot, so the record
+    MATERIALISES such a creation record (verified through `mutations_for`) and the
+    full statement folds it through `_PAYLOAD_EVENT` — while a raw
+    `payload ->> 'id'` is NULL for it, so `read_node` silently answered no
+    `status` where `rebuild_from_record` folded one. That is the two-door split
+    this whole file exists to prevent, on a shape the record accepts.
+
+    ⚠️ THE DOOR ASSERTIONS BELOW CANNOT RED ON THAT REGRESSION ON THEIR OWN (review
+    P2, measured): `_FakeConn` applies the unwrap whenever `_UNWRAP_MARK` is in the
+    statement and then matches only the KEY out of `_ID_CLAUSE_RE` against its own
+    pre-unwrapped `node_id`, so reverting the production clause to a raw
+    `payload ->> 'id'` leaves both assertions GREEN (measured: this test green,
+    `test_the_narrowing_id_expression_matches_the_selects_node_id` red). The
+    expression assertion below is therefore part of THIS pin, not decoration —
+    without it this test reads as coverage of a regression it cannot see.
+    """
+    from tortoise import record_serve as rs
+
+    assert f"({cp._PAYLOAD_EVENT} ->> 'id') = %s" in \
+        cp._LIFECYCLE_EVENTS_FOR_ONE_SQL, (
+        "the single-row narrowing no longer unwraps the payload before reading "
+        "`id` — a raw `payload ->> 'id'` is NULL for an event-nested creation "
+        "record, which the record still MATERIALISES, so the two doors split"
+    )
+
+    conn = _FakeConn({
+        "object": [{"id": "o-9", "name": "Nested", "object_kind": "other",
+                    "props": {}}],
+        "journal_event": [{
+            "seq": 1,
+            "payload": {"version": "1.0", "type": "ObjectRegistered",
+                        "event": {"type": "ObjectRegistered", "id": "o-9",
+                                  "name": "Nested", "status": "retracted"}},
+        }],
+    })
+    view = cp.read_record_view(conn, org_id="o", graph_id="g")
+    obj = next(n for n in view.nodes if n.label == "Object")
+    assert obj.props.get("status") == "retracted", (
+        f"the full statement did not fold the nested creation record "
+        f"({obj.props!r})"
+    )
+    read = rs.read_node(conn, org_id="o", graph_id="g", label="Object",
+                        key="o-9")
+    assert read.get("status") == obj.props.get("status"), (
+        f"the single-row door answered {read!r} while the rebuild folded "
+        f"{obj.props.get('status')!r} — a nested creation record the record "
+        f"itself materialises"
+    )
+
+
+def test_the_birth_column_guards_a_non_string_status():
+    """The birth column must be guarded IN THE STATEMENT, not only in the fake.
+
+    Review round 3 (P2) measured the shape this pin exists for: the batch-2 fix
+    described a `CASE WHEN jsonb_typeof(...) = 'string'` guard that never reached
+    the STATEMENT — the fake applied it alone, so Postgres textified a JSON number
+    (`{"status": 5}` selects `birth_status = '5'`) while the fake returned none.
+    A fake-only guard cannot pin a statement the fake itself invents.
+
+    ⚠️ The FIRST draft of this pin could not fail (review round 4, P2, measured):
+    its window was the 160 characters before `birth_status`, which
+    `_PAYLOAD_EVENT`'s own `jsonb_typeof(payload -> 'event')` already satisfies,
+    and its negative leg was a NON-f-string containing the literal
+    `{_PAYLOAD_EVENT}`, so it compared text that can never appear in the
+    interpolated statement. Round 4 interpolated the expected column, which
+    fixed the POSITIVE legs — but the negative leg was still decoration
+    (measured on review): it compared a hand-spelled spelling with two spaces
+    and no `END`, which the source's f-string concatenation can never render, so
+    `bare not in sql` was trivially true and an UNGUARDED column would have
+    passed it. It now reads the birth column EXPRESSION out of the statement and
+    asserts it is a guarded `CASE`, which reds on any unguarded spelling
+    whatever its whitespace.
+    """
+    sql = cp._LIFECYCLE_EVENTS_SQL
+    pae = cp._PAYLOAD_EVENT
+    # Asserted as PIECES, because the source's f-string concatenation puts
+    # run-length whitespace between them (the first draft compared a
+    # single-space render and could not match either).
+    assert f"jsonb_typeof({pae} -> 'status') = 'string'" in sql, (
+        "the birth column has no `jsonb_typeof(… -> 'status') = 'string'` "
+        "test — Postgres textifies a JSON number, so `create_object(name, "
+        "status=5)` would fold the STRING '5' the live graph stores as the int 5"
+    )
+    assert f"THEN {pae} ->> 'status' END AS birth_status" in sql, (
+        "the guarded CASE does not yield the birth column — the guard must pass "
+        "the value through, not replace it (`''` is a legal stored status and "
+        "must still fold)"
+    )
+
+    def birth_column(statement: str) -> str:
+        """The select item that yields `birth_status`, read out of the statement.
+
+        Depth-aware on purpose: `_PAYLOAD_EVENT` carries its OWN top-level-comma
+        `COALESCE(CASE WHEN …, payload)`, so the naive
+        `rsplit(",", 1)` lands inside the payload expression and reports a
+        column that starts with `payload)`. Only a comma at paren depth 0
+        separates select items.
+
+        ⚠️ The alias is matched WHOLE (`birth_status(?!\\w)`) and required to be
+        UNIQUE, because a decoy alias makes this pin unable to say which column
+        the reader consumes: with a guarded `… END AS birth_status_decoy,` in
+        front of an unguarded `… AS birth_status`, a bare `index("AS
+        birth_status")` reads the DECOY's `CASE` and passes the unguarded value
+        (measured — this was this leg's own vacuity, found the same way round 4's
+        was).
+        """
+        ends = [m.start() for m in re.finditer(r"AS birth_status(?!\w)", statement)]
+        assert len(ends) == 1, (
+            f"expected exactly ONE column aliased `birth_status`, found {len(ends)} "
+            "— a decoy alias (`…_decoy`, `…_2`) lets an unguarded value column sit "
+            "beside a guarded one and this pin would read the wrong expression"
+        )
+        end = ends[0]
+        depth = 0
+        start = 0
+        for i, ch in enumerate(statement[:end]):
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+            elif ch == "," and depth == 0:
+                start = i + 1
+        return statement[start:end].strip()
+
+    column = birth_column(sql)
+    assert column.startswith("CASE WHEN"), (
+        "the UNGUARDED birth column is back — the guard exists in the FAKE only; "
+        f"the statement selects {column!r}"
+    )
+
+
+def test_the_narrowing_id_expression_matches_the_selects_node_id():
+    """One expression for the coordinate, so the two doors cannot read differently.
+
+    A DB-free pin for the shape review round 2 found: the narrowing must resolve
+    the id through the SAME `_PAYLOAD_EVENT` unwrap the select list uses for
+    `node_id`. Asserting the expression (not its result) is what a suite without
+    Postgres can honestly check.
+    """
+    assert "payload ->> 'id'" not in cp._LIFECYCLE_EVENTS_FOR_ONE_SQL, (
+        "the narrowing compares a RAW `payload ->> 'id'` while the select list "
+        "unwraps — a nested creation record would be excluded by the door and "
+        "folded by the rebuild"
+    )
+    # …and the id clause really is in the statement (a pin that only asserts an
+    # absence would pass if the whole clause were deleted).
+    assert "->> 'id') = %s" in cp._LIFECYCLE_EVENTS_FOR_ONE_SQL, (
+        "the id narrowing clause is gone — the single-row door cannot reach a "
+        "`restatus` or a creation record at all"
+    )
+
+
+def test_a_born_terminal_object_rebuilds_terminal_not_live():
+    """#9974's remaining window: the BIRTH writer, and it read LIVE after a rebuild.
+
+    MEASURED before this leg (embedded engine + the record's own plan seam):
+    `create_object("Acme", status="superseded")` holds
+    `status='superseded'` in the live graph, the record refuses to store the
+    value (`record_projection.OpDispatch.never_store`; `_split_properties` drops
+    it from the snapshot too), and NEITHER existing derivation leg could see it —
+    the carrier table reads `superseded_by`/`superseded_at` (absent: this is a
+    birth, not a supersede) and the event-stream legs read `EventRecorded` and
+    `EntityMutated`. So `rebuild_from_record` materialised the node with no
+    `status`, and `live._terminal_excluded` reads an ABSENT status as LIVE —
+    `resolve_entity_id` then resolved the name to a superseded Object. That is
+    the exact artifact #9974 is about, on the one writer that was left.
+
+    ⛔ The fix is DERIVATION, not storage: the record still refuses the name
+    (§2.6 / #8179 / #8263 — a recorded decision), and the value is folded from
+    the record's OWN history, in `seq` order, exactly as the live fold applied
+    it.
+    """
+    from tortoise import record_serve as rs
+
+    conn = _FakeConn({
+        "object": [{"id": "o-1", "name": "Acme", "object_kind": "other",
+                    "props": {}}],
+        "subject": [{"id": "s-1", "name": "Team", "subject_kind": "other",
+                     "props": {}}],
+        "journal_event": [
+            _birth_row("ObjectRegistered", "o-1", "Acme", "superseded", seq=1),
+            _birth_row("SubjectAdded", "s-1", "Team", "archived", seq=2),
+        ],
+    })
+    view = cp.read_record_view(conn, org_id="o", graph_id="g")
+    by_label = {n.label: n for n in view.nodes}
+    assert by_label["Object"].props.get("status") == "superseded", (
+        f"a born-superseded Object rebuilt as {by_label['Object'].props!r} — "
+        "an absent status reads LIVE, so a superseded Object answers as current"
+    )
+    assert by_label["Subject"].props.get("status") == "archived", (
+        "the Subject half of the same writer was dropped — its name still "
+        "resolves after a record-sourced rebuild"
+    )
+    # …and the value reaches the STATEMENT the rebuild writes, not only the
+    # model: a `RecordNode`-only assertion would pass while `node_statement`
+    # dropped it.
+    assert cp.node_statement(by_label["Object"]).params["props"]["status"] ==         "superseded"
+    # The single-row door answers the same status, so the two doors cannot split.
+    assert rs.read_node(conn, org_id="o", graph_id="g", label="Object",
+                        key="o-1").get("status") == "superseded"
+    # ⛔ AND THE SUBJECT HALF AT THE SAME DOOR (review round 3, P2). The
+    # narrowing set this door reads is
+    # `event_type IN ('EntityMutated', 'ObjectRegistered', 'SubjectAdded')`
+    # (`cache_projection._LIFECYCLE_EVENTS_FOR_ONE_SQL`), and until this leg the
+    # file's EVERY read-door assertion was `label="Object"` — so dropping
+    # `'SubjectAdded'` from that set left the whole suite GREEN while a
+    # born-archived Subject folded at the rebuild door (`read_record_view`,
+    # asserted above) and answered NO status here. That is the two-door split on
+    # exactly the label this change adds: `live._terminal_excluded` reads the
+    # absent status as LIVE, so the Subject's name resolves again after a
+    # record-sourced rebuild taken through `read_node`. Measured, not assumed:
+    # the shrink leaves 79/79 green without this assertion.
+    assert rs.read_node(conn, org_id="o", graph_id="g", label="Subject",
+                        key="s-1").get("status") == "archived", (
+        "the Subject half of the birth leg did not reach the single-row door — "
+        "its status reads absent, which is LIVE "
+    )
+
+
+def test_the_birth_event_labels_are_the_one_home_creation_map():
+    """#9974 — the birth label table is a COPY of TWO homes, so it needs a pin.
+
+    `_BIRTH_EVENT_LABELS` restates BOTH of these, restricted to the two labels
+    that carry a §2.6 projection-owned `status` (`EVENT_STREAM_FOLDS`: `Object`,
+    `Subject`):
+
+    * the JOURNAL fold's home, `projection._ENTITY_CREATION_EVENT_LABEL`; and
+    * the RECORD layer's own literal, `record_projection.RECORD_MUTATIONS` —
+      `ObjectRegistered` / `SubjectAdded` are `NodeSnapshot`s of `object` /
+      `subject`. ⚠️ It does NOT read the fold's map (measured: the only
+      cross-check on it is `set(RECORD_MUTATIONS) == set(JOURNAL_EVENT_TYPES)`),
+      so "the one home" alone would NOT cover the table that actually decides
+      what the record materialises — this test therefore pins both.
+
+    `EventRecorded` is out by construction: `public.event` carries an
+    `event_status` COLUMN and its CHECK refuses only `confidence`, so `:Event`.
+    `status` is record-held, not a projection-owned cache (and its record key is
+    `event_id`, not `id`).
+
+    FAILS IF: a creation event type is added, renamed, or re-pointed in EITHER
+    home and this copy is not updated. The birth leg selects by the event type,
+    so the new type would select NOTHING, the node would rebuild with NO status,
+    and `live._terminal_excluded` would read it LIVE — #9974's harm returning
+    silently, with every other pin green. Same one-home discipline the sibling
+    copy uses (`tests/test_rebuild_parity_fail_loud_3585.py::
+    TestReferenceFoldEntityLabelSetHasOneHome`), which compares LABELS only and
+    so would not catch a RENAME here — that is why this pin compares the full
+    event-type → label map.
+    """
+    from tortoise.projection import _ENTITY_CREATION_EVENT_LABEL as fold_home
+
+    status_bearing = set(cp.EVENT_STREAM_FOLDS)
+    assert status_bearing == {"Object", "Subject"}, (
+        "`EVENT_STREAM_FOLDS` no longer names exactly the two status-bearing "
+        f"labels this pin was written for ({status_bearing!r}) — re-read the "
+        "EventRecorded exclusion above before widening it"
+    )
+    assert {
+        k: v for k, v in fold_home.items() if v in status_bearing
+    } == cp._BIRTH_EVENT_LABELS, (
+        "the birth label table drifted from the journal fold's home "
+        f"(projection._ENTITY_CREATION_EVENT_LABEL={fold_home!r}, "
+        f"cache_projection._BIRTH_EVENT_LABELS={cp._BIRTH_EVENT_LABELS!r}) — a "
+        "creation type that home names would select no birth record, so that "
+        "node rebuilds with no status and reads LIVE"
+    )
+    # ⛔ AND THE STATEMENT IS A THIRD COPY (review round 8, P2). `_BIRTH_EVENT_LABELS`
+    # only LABELS a row the SQL has already selected; the `event_type IN (...)`
+    # literals in `_LIFECYCLE_EVENTS_SQL` / `_LIFECYCLE_EVENTS_FOR_ONE_SQL` decide
+    # WHICH rows exist. Measured on round 6's head: adding a creation type to every
+    # declared home and leaving the SQL alone kept 133/133 green, and production
+    # would then select no row for it — the same harm, through the door the pin
+    # was supposed to close. So the SQL's birth set is pinned to the table, not
+    # described as following it.
+    birth_types = set(cp._BIRTH_EVENT_LABELS)
+    full_sets = [
+        {t.strip().strip("'") for t in m.group(1).split(",")}
+        for m in _EVENT_TYPE_SET_RE.finditer(cp._LIFECYCLE_EVENTS_SQL)
+    ]
+    assert full_sets == [birth_types], (
+        "the record-side SELECT's `event_type IN (...)` set(s) no longer match the "
+        f"birth table ({full_sets!r} vs {sorted(birth_types)!r}) — a type the table "
+        "names would never be SELECTED, so its born-terminal node rebuilds with no "
+        "status and reads LIVE"
+    )
+    one_sets = [
+        {t.strip().strip("'") for t in m.group(1).split(",")}
+        for m in _EVENT_TYPE_SET_RE.finditer(cp._LIFECYCLE_EVENTS_FOR_ONE_SQL)
+    ]
+    assert any(birth_types <= s for s in one_sets), (
+        "the single-row narrowing does not select every birth type the table names "
+        f"({one_sets!r} vs {sorted(birth_types)!r}) — the read door would answer a "
+        "status the rebuild door holds, the two-door split #9974 exists to prevent"
+    )
+    # ⛔ The RECORD layer is a SECOND home, and it is the one that decides what a
+    # creation record MATERIALISES — `RECORD_MUTATIONS` is written out again at
+    # that door and never consults the fold's map. A type added there (plus its
+    # producer and `JOURNAL_EVENT_TYPES`) would leave the assertion above green
+    # while the birth leg named nothing for it: the exact drift, one door over.
+    # ⚠️ ONE-DIRECTIONAL ON PURPOSE (review round 8, P2): every status-bearing
+    # creation the FOLD HOME declares must materialise a `NodeSnapshot` of the
+    # same label. It is NOT the converse — "every Object/Subject NodeSnapshot in
+    # RECORD_MUTATIONS is a creation" is a premise nothing declares, and asserting
+    # it turns a newly added non-creation snapshot (a `NodePatch` today, so the
+    # premise happens to hold) into a RED that invites the two wrong remedies:
+    # adding the type to `_BIRTH_EVENT_LABELS` (a dead entry) or to the fold home
+    # (declaring a non-creation as one).
+    for etype, label in fold_home.items():
+        if label not in status_bearing:
+            continue
+        effect = rp.RECORD_MUTATIONS[etype].effect
+        assert isinstance(effect, rp.NodeSnapshot) and effect.node.label == label, (
+            "the record layer does not materialise the creation record the "
+            f"journal fold declares ({etype!r}: expected a NodeSnapshot of "
+            f"{label!r}, got {effect!r}) — it would select no birth record, so a "
+            "born-terminal node rebuilds with no status and reads LIVE"
+        )
+
+
+def test_a_silent_birth_record_derives_no_status_rather_than_live():
+    """#9974 — the OTHER half: where the derivation cannot know, it says NOTHING.
+
+    An unknown status is honest — `live` is the bug. The creation record of a
+    bare `create_object("Acme")` carries no caller status, and the cache must
+    not invent one: `live._terminal_excluded` already reads an absent status as
+    LIVE for the transition it is willing to make on the READ side, and a
+    MATERIALISED `live` would additionally claim a positive lifecycle fact the
+    record never stated, and would overwrite a `status` a later `restatus`
+    replay is meant to own.
+
+    ⛔ This is the leg a `or "live"` default reds (measured: it turns the
+    derivation into a fabricator on every status-less creation record — the
+    exact class #9974 exists to remove, one writer over).
+    """
+    from tortoise import record_serve as rs
+
+    conn = _FakeConn({
+        "object": [{"id": "o-2", "name": "Beta", "object_kind": "other",
+                    "props": {}}],
+        "journal_event": [
+            _birth_row("ObjectRegistered", "o-2", "Beta", None, seq=1),
+        ],
+    })
+    view = cp.read_record_view(conn, org_id="o", graph_id="g")
+    obj = next(n for n in view.nodes if n.label == "Object")
+    assert "status" not in obj.props, (
+        f"a status-less creation record was MATERIALISED as {obj.props!r} — a "
+        "derived value the record never stated"
+    )
+    assert "status" not in rs.read_node(conn, org_id="o", graph_id="g",
+                                        label="Object", key="o-2")
+
+
+def test_a_pre_birth_fold_cannot_survive_the_creation_record():
+    """A fold that lands BEFORE the node exists must not outlive the birth value.
+
+    Review round 6 (P2), MEASURED on this head's parent: a pack/connector event
+    naming a target that does not exist yet folds NOTHING in the live graph
+    (`entity_identity.resolve_fold_name` never mints, and an `about_entities` miss
+    is the exempt `unfolded-mention`, so the event is legal and journaled) — but
+    this replay is NAME-keyed, so it folded the value anyway and then refused the
+    CREATION record's status because `status` was no longer `None`.
+
+    Measured scenario: `venture:disbursement` naming `T1` at seq 1 (no node),
+    then `create_object("T1", objectKind="venture:tranche", status="archived")`
+    at seq 2. The live graph holds `archived` (TERMINAL); the replay answered
+    `released` (the pack fold) — a NON-terminal status for a node the graph reads
+    as terminal, so the rebuilt Object is recalled and its name resolves: #9974's
+    own harm, one ordering case over, and NOT one of the declared residues (the id
+    was created BY the birth record, so this is not the ON MATCH bound).
+    """
+    obj = cp.node_from_row("Object", {"id": "o-1", "name": "T1",
+                                      "object_kind": "venture:tranche"})
+    pre_birth = cp.LifecycleEvent(seq=1, event_kind="venture:disbursement",
+                                  object_name="T1")
+    birth = cp.LifecycleEvent(seq=2, event_kind="", is_birth=True,
+                              birth_status="archived", target_id="o-1",
+                              target_label="Object")
+    folded = cp.apply_event_stream_folds([obj], [pre_birth, birth])[0]
+    assert folded.props.get("status") == "archived", (
+        f"a pre-birth fold outlived the creation record ({folded.props!r}) — the "
+        "rebuild answers a non-terminal status for a node the graph holds "
+        "terminal, so its name resolves after a record-sourced rebuild"
+    )
+    assert cp._is_terminal_status(folded.props.get("status"))
+    # …and a fold AFTER the creation still applies (birth `pending`, later
+    # disbursement → `released`), so the fix is not "ignore every other leg".
+    later = cp.apply_event_stream_folds([obj], [
+        cp.LifecycleEvent(seq=2, event_kind="", is_birth=True,
+                          birth_status="pending", target_id="o-1",
+                          target_label="Object"),
+        cp.LifecycleEvent(seq=3, event_kind="venture:disbursement",
+                          object_name="T1"),
+    ])[0]
+    assert later.props.get("status") == "released", (
+        f"a post-creation fold stopped applying ({later.props!r})"
+    )
+    # …and a SILENT birth clears whatever preceded it, deriving nothing.
+    silent = cp.apply_event_stream_folds([obj], [
+        pre_birth,
+        cp.LifecycleEvent(seq=2, event_kind="", is_birth=True,
+                          birth_status=None, target_id="o-1",
+                          target_label="Object"),
+    ])[0]
+    assert "status" not in silent.props, (
+        f"a silent creation record left a pre-birth fold in place "
+        f"({silent.props!r})"
+    )
+
+
+def test_the_birth_status_is_on_create_only_like_the_live_fold():
+    """A re-mention journals ANOTHER creation record; it must not overwrite.
+
+    `_upsert_object` writes `status=$st` **ON CREATE** (derived-or-absent
+    since #9974 R1), and
+    #3590 journals `ObjectRegistered` on EVERY create — so a second
+    `create_object` for the same node is carried by the record and must fold
+    NOTHING. A last-writer-wins replay here would resurrect (or retro-terminate)
+    a node the live graph left alone: the same class of divergence, from the
+    other direction.
+    """
+    obj = _node("Object", {"id": "o-1", "name": "Acme", "object_kind": "other"})
+    folded = cp.apply_event_stream_folds([obj], [
+        # ⚠️ THE DISCRIMINATING CASE, and it is the SILENT first birth: the
+        # `status is None` gate alone would let a later, status-carrying
+        # re-mention through, so only the "earliest creation record speaks" rule
+        # suppresses it. Measured: with `birth_seen` removed this case folds
+        # `archived`, a TERMINAL status the graph never held (create #1 stored
+        # NO status — `$st` is NULL and `SET x = NULL` REMOVES the property — and
+        # ON MATCH never replaced it) —
+        # `live._terminal_excluded` would then hide a live name.
+        cp.LifecycleEvent(seq=1, event_kind="", is_birth=True,
+                          birth_status=None,
+                          target_id="o-1", target_label="Object"),
+        cp.LifecycleEvent(seq=9, event_kind="", is_birth=True,
+                          birth_status="archived",
+                          target_id="o-1", target_label="Object"),
+    ])[0]
+    assert "status" not in folded.props, (
+        f"a later creation record supplied a status the graph never had "
+        f"({folded.props!r}) — the live fold is ON CREATE and never re-writes"
+    )
+    # …and a supersession the record's CARRIERS already derived is not
+    # overwritten by a birth value either. ⚠️ CORRECTED (review P2): this note
+    # credited a `status is None` gate, which the birth arm does not have — there
+    # is no such gate there (`apply_event_stream_folds`'s `status is None` is the
+    # OUTPUT gate that decides whether anything is written at all). The protector
+    # is the `_is_terminal_status(current)` early return, which skips the whole
+    # stream for a node whose carrier already made it terminal. A reader who
+    # "restored" the gate this note used to name would re-open the round-6 bug
+    # (`test_a_pre_birth_fold_cannot_survive_the_creation_record`). A `status`
+    # column still does not exist, so the derived row is the only legal shape.
+    derived = cp.node_from_row("Object", {"id": "o-1", "name": "Acme",
+                                          "object_kind": "other",
+                                          "superseded_by": "acme-v2"})
+    assert derived.props.get("status") == "superseded"
+    kept = cp.apply_event_stream_folds([derived], [
+        cp.LifecycleEvent(seq=1, event_kind="", is_birth=True,
+                          birth_status="live",
+                          target_id="o-1", target_label="Object"),
+    ])[0]
+    assert kept.props.get("status") == "superseded", (
+        f"a birth value overwrote a supersession ({kept.props!r})"
+    )
+
+
+def test_a_birth_record_cannot_cross_the_label_on_a_shared_id():
+    """Ids are per-label, so a birth record must name its own family.
+
+    The label comes from the EVENT TYPE (`_BIRTH_EVENT_LABELS`), which is the
+    only declaration of it a creation payload carries. Without the label match, a
+    `SubjectAdded` for `s-dup` would write the `:Object` named `s-dup` — a value
+    the live fold can never produce.
+    """
+    obj = _node("Object", {"id": "dup", "name": "Acme", "object_kind": "other"})
+    folded = cp.apply_event_stream_folds([obj], [
+        cp.LifecycleEvent(seq=1, event_kind="", is_birth=True,
+                          birth_status="archived",
+                          target_id="dup", target_label="Subject"),
+    ])[0]
+    assert "status" not in folded.props, (
+        f"a `:Subject` birth record wrote the `:Object` of the same id "
+        f"({folded.props!r})"
+    )
 
 
 def test_the_connector_fold_never_writes_a_subject_status():

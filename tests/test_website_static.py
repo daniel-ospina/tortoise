@@ -24,12 +24,12 @@ Repo-local, zero network, stdlib only (the test_waitlist_form.py pattern):
    pinned so a paraphrase cannot slip past. The availability premise that used
    to sit over it is retired — outbound webhook push shipped (#2081, PR #8104)
    — see `TestAutomateBeatCopy`.
-6. `/investors` Progress cell order + the owner's sanctioned demand headline
-   (PR #9283): the section must OPEN on what exists (`Product & distribution`
-   left of `Early demand`), the headline bullet is pinned verbatim — curly
-   quotation marks included — and the retired `20+ prospective beta testers`
-   line must stay gone. The verbatim quotation is an ACCEPTED RISK recorded by
-   the owner, not a defect to "fix" — see `TestInvestorsProgressCopy`.
+6. `/investors` Progress cell order + pinned bullet copy (PR #9283): the section
+   must OPEN on what exists (`Product & distribution` left of `Early demand`),
+   every bullet in both cells is pinned verbatim — curly quotation marks
+   included — and the retired `20+ prospective beta testers` line must stay
+   gone. The verbatim quotation is an ACCEPTED RISK recorded by the owner, not
+   a defect to "fix" — see `TestInvestorsProgressCopy`.
 
 7. Product-root marker contract (PR #9652 review, P1): the string that proves
    the tortoise host serves product.html at `/` is pinned in TWO surfaces that
@@ -70,7 +70,9 @@ import json
 import os
 import re
 import sys
+import tempfile
 from html import unescape
+from html.parser import HTMLParser
 from itertools import pairwise
 from pathlib import Path
 
@@ -578,6 +580,44 @@ def _served(markup: str) -> str:
     return re.sub(r"<!--.*", " ", markup, flags=re.S)
 
 
+def _ends_inside_attribute_value(section: str) -> bool:
+    """True when the slice stops inside a tag, i.e. inside an attribute value.
+
+    A `</section>` carried in a quoted OR unquoted attribute value is not an end
+    tag to a browser, but it ends this slice, so whatever follows it renders
+    while no assertion below can see it.
+
+    The verdict comes from the tokenizer, not from a delimiter scan: an
+    incomplete tag is exactly what `HTMLParser` leaves in `rawdata` after
+    `feed()`, and a value may itself contain `<` or `>` (both are parse errors the
+    tokenizer folds into the value), which defeats any `rfind("<")` or regex.
+
+    Trailing TEXT such as `<p>Ratio = 2` or `<div class="x">Ratio = 2` is a
+    complete document fragment, so it is not reported here — the `stray`
+    assertion names it accurately, where an attribute report would send a
+    maintainer hunting for an attribute that does not exist.
+    """
+    probe = HTMLParser(convert_charrefs=True)
+    probe.feed(section)
+    return bool(probe.rawdata)
+
+
+def _served_without_comments(markup: str) -> str:
+    """`_served`, except a comment is DELETED rather than replaced by a space.
+
+    A comment contributes neither text nor whitespace, so a space here
+    synthesises a word boundary no reader sees: `<span>2M+</span><!--x-->
+    <span>views</span>` renders `2M+views` but would pin as `2M+ views`. This is
+    the variant `#progress`'s text path slices with; `_served` is unchanged for
+    its existing callers, which take structure (and, in the pricing path, text)
+    from markup where a comment never sits between two words.
+    """
+    markup = re.sub(r"<!--.*?-->", "", markup, flags=re.S)
+    markup = re.sub(r"<script\b.*?</script>", " ", markup, flags=re.S | re.I)
+    markup = re.sub(r"<style\b.*?</style>", " ", markup, flags=re.S | re.I)
+    return re.sub(r"<!--.*", "", markup, flags=re.S)
+
+
 def _pricing_section() -> str:
     """The `#pricing-section` region as a reader receives it.
 
@@ -1035,6 +1075,248 @@ def _beat_text(markup: str) -> str:
     return re.sub(r"\s+", " ", unescape(re.sub(r"<[^>]+>", "", markup))).strip()
 
 
+def _norm(parts: list[str]) -> str:
+    """Rendered text from collected chunks: concatenated, whitespace collapsed.
+
+    Concatenated, NOT joined with a separator: `<span>2M+</span><span>views</span>`
+    renders `2M+views`, and a synthesised space would let that change pass the
+    pins while a reader sees different text. Spacing therefore has to come from
+    the source — `handle_data` keeps whitespace-only chunks for exactly that.
+    """
+    return re.sub(r"\s+", " ", "".join(parts)).strip()
+
+
+#: Declarations that stop text reaching a reader, checked on an inline
+#: `style=`. There is no stylesheet path on purpose (see the class docstring).
+#: The zero values are anchored at a property boundary and accept every SIGNED
+#: and decimal spelling of zero (`0`, `.0`, `00`, `+0`, `-0`, `0.0px`) — but not
+#: a computed one (`calc(0)`), which no regular expression can see. Two pieces
+#: each earn their place: the `(?![.\d])` lookahead is what keeps an honest
+#: `opacity: 0.35` or `font-size:0.9em` from reading as a zero, while
+#: `(?<![-\w])` keeps a DIFFERENT property whose name ends in `color`
+#: (`background-color: transparent`) from reading as `color: transparent`.
+_HIDING_DECL = re.compile(
+    r"(?<![-\w])(?:"
+    r"display\s*:\s*none"
+    r"|visibility\s*:\s*hidden"
+    r"|opacity\s*:\s*[+-]?(?:0+(?:\.0*)?|\.0+)(?:[eE][+-]?\d+)?(?![.\d])"
+    r"|color\s*:\s*transparent"
+    r"|font-size\s*:\s*[+-]?(?:0+(?:\.0*)?|\.0+)(?:[eE][+-]?\d+)?(?![.\d])"
+    r"|content-visibility\s*:\s*hidden"
+    r")",
+    re.I)
+
+
+class _ProgressTextParser(HTMLParser):
+    """Reads the served `#progress` markup STRUCTURALLY instead of by regex.
+
+    A regex over markup cannot tell a tag from a `<` in copy, mis-splits a tag
+    whose attribute value contains `>`, and never sees copy carried in `alt=` or
+    `title=`. Walking the document gets those right by construction, so what
+    this parser reports is exactly what a TEXT pin cannot cover:
+
+    - `attribute_copy` — copy-bearing attributes with a non-empty value: they
+      render, and a pin on text cannot see them. `srcdoc` is included because an
+      `<iframe>`'s document renders inside the section.
+    - `hidden` — text that does not reach every reader, or reaches none: an
+      element marked `hidden`, one whose inline `style` hides it
+      (`_HIDING_DECL`), or text inside `aria-hidden="true"`. The last one is an ACCESSIBILITY defect, not a
+      visual one — a sighted reader still sees that text — and it is text-only
+      so the page's own decorative `<svg aria-hidden="true">` still passes.
+    - `stray` — text outside the title, the headings and the bullets: a claim
+      added anywhere else in the section, including between a heading and its
+      list, and in a list that precedes every heading.
+
+    Scope, stated plainly: this is a TEXT gate. It pins the words the section
+    renders and refuses text this walk cannot attribute to a heading or a
+    bullet. It is NOT a defence against CSS: `clip`, `text-indent`, an
+    off-screen `position`, a `transform`, or any rule in the page stylesheet can
+    make text invisible without the walk noticing, and an attempted check for
+    those was removed rather than kept — it was unsound both ways (it matched
+    the page's own `html.gated section { display: none }` and missed indirection
+    through a class). A hidden-claim audit is a different instrument.
+
+    Markup that moves without changing a word (a `class`/`id`, a `<ul>` wrapped
+    in a `<div>`, an `<hr>`) carries no text and therefore passes. Text is
+    collected per element, and `convert_charrefs` decodes `&ldquo;` to the curly
+    quotation mark the page renders, so the tuples compare against what a reader
+    reads.
+    """
+
+    COPY_ATTRS = ("alt", "title", "placeholder", "aria-label", "value", "srcdoc")
+    #: HTML void elements never close, so `handle_starttag` does not push them.
+    #: Their synthetic end tag therefore has nothing to match and closes nothing
+    #: (`handle_endtag` only pops on a match); the set is here so the self-closing
+    #: override never treats one as ordinary HTML and tries to close it.
+    VOID = frozenset((
+        "area", "base", "br", "col", "embed", "hr", "img", "input",
+        "link", "meta", "param", "source", "track", "wbr",
+    ))
+    HIDING_STYLE = _HIDING_DECL
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        # (tag, aria_hidden) — the flag rides the stack so `aria-hidden` only
+        # counts when it wraps TEXT.
+        self.stack: list[tuple[str, bool]] = []
+        self.cells: list[tuple[str, list[str]]] = []
+        self.title: list[str] = []
+        self.attribute_copy: list[str] = []
+        self.hidden: list[str] = []
+        self.stray: list[str] = []
+        self._heading: list[str] = []
+        #: Whether a heading OPENED this cell — separate from its text being
+        #: non-empty, so `<h3></h3>` still owns the bullets that follow it.
+        self._heading_seen = False
+        self._bullets: list[str] = []
+        self._li: list[list[str]] = []
+        #: list nesting depth when each `_li` buffer opened — `</li>` is
+        #: optional before the next sibling `<li>`, but a nested list inside an
+        #: `<li>` must NOT be read as a sibling.
+        self._li_depth: list[int] = []
+        self._list_depth = 0
+
+    def _flush_open_li(self) -> None:
+        """Close any `<li>` still open (the browser auto-closes it), so its text
+        reaches the pins instead of being carried into the next cell.
+
+        Closing is inner-first, mirroring `handle_endtag`: a nested list inside
+        an `<li>` merges into the bullet that contains it, or the inner items
+        would surface as siblings in the wrong order.
+        """
+        while len(self._li) > 1:
+            inner = _norm(self._li.pop())
+            self._li_depth.pop()
+            self._li[-1].append(inner)
+        while self._li:
+            self._bullets.append(_norm(self._li.pop()))
+            self._li_depth.pop()
+
+    def _close_cell(self) -> None:
+        """Finish the cell whose bullets have all been seen (a cell is complete
+        when the NEXT heading opens, or the document ends).
+
+        Bullets collected before any heading exists have no cell to belong to,
+        so they are reported as stray. Bullets collected AFTER the last heading
+        belong to that (still open) cell and reach its tuple — either way they
+        are pinned or they fail; neither path drops text.
+
+        "A heading was seen" is a FLAG, not `self._heading` being non-empty: an
+        `<h3></h3>` (or one holding only a comment or an icon) carries no text
+        yet still opens a cell, and reading emptiness as "no heading" reported
+        that cell's pinned bullets as stray.
+        """
+        self._flush_open_li()
+        if self._heading_seen:
+            self.cells.append((_norm(self._heading), list(self._bullets)))
+        else:
+            self.stray.extend(b for b in self._bullets if b)
+        self._heading, self._bullets = [], []
+        self._heading_seen = False
+
+    def handle_starttag(self, tag: str, attrs) -> None:
+        aria_hidden = False
+        for name, value in attrs:
+            low = name.lower()
+            if low in self.COPY_ATTRS:
+                if value:
+                    self.attribute_copy.append(f"<{tag} {name}={value!r}>")
+                continue
+            if low == "hidden" or (low == "aria-hidden" and (value or "").lower() == "true"):
+                if low == "hidden":
+                    self.hidden.append(f"<{tag} {name}>")
+                else:
+                    aria_hidden = True
+            elif low == "style" and value and self.HIDING_STYLE.search(value):
+                self.hidden.append(f"<{tag} style={value!r}>")
+        if tag not in self.VOID:
+            self.stack.append((tag, aria_hidden))
+        if tag in ("ul", "ol"):
+            self._list_depth += 1
+        elif tag == "h3":
+            self._close_cell()
+            self._heading_seen = True
+        elif tag == "li":
+            if self._li and self._li_depth[-1] == self._list_depth:
+                # Implicit close: `</li>` is optional before the next sibling.
+                # It merges into an enclosing bullet exactly as an explicit
+                # `</li>` does, so ordering cannot depend on the omission.
+                self._li_depth.pop()
+                text = _norm(self._li.pop())
+                if self._li:
+                    self._li[-1].append(text)
+                else:
+                    self._bullets.append(text)
+            self._li.append([])
+            self._li_depth.append(self._list_depth)
+
+    def handle_startendtag(self, tag: str, attrs) -> None:
+        """A self-closing tag is closed only where a browser closes it.
+
+        The default fires BOTH halves, which is wrong on an ordinary HTML element
+        (`<li/>`, `<p/>`): the slash is a parse error there, so the element stays
+        OPEN and closing it would merge or drop the text that follows. Only
+        foreign content (SVG/MathML) honours the slash. Void elements are left to
+        `handle_starttag`, which never pushes them.
+        """
+        self.handle_starttag(tag, attrs)
+        foreign = tag in ("svg", "math") or any(
+            t in ("svg", "math") for t, _ in self.stack)
+        if foreign:
+            self.handle_endtag(tag)
+
+    def handle_endtag(self, tag: str) -> None:
+        # Only a MATCHING end tag closes anything. An end tag with nothing to
+        # match — `</br>` on a void element, a stray or mistyped close — is
+        # ignored by a browser, and popping for it would drop every open
+        # ancestor: an enclosing `aria-hidden` would stop applying, and text
+        # after `<h3>Early<br></br>demand</h3>` would be misrouted to stray.
+        for i in range(len(self.stack) - 1, -1, -1):
+            if self.stack[i][0] == tag:
+                del self.stack[i:]
+                break
+        if tag in ("ul", "ol"):
+            # A closing list closes the items it opened: `</li>` is optional
+            # before `</ul>` too, and leaving a buffer open would nest the next
+            # SIBLING item into the item before it.
+            while self._li and self._li_depth[-1] >= self._list_depth:
+                self._li_depth.pop()
+                text = _norm(self._li.pop())
+                if self._li:
+                    self._li[-1].append(text)
+                else:
+                    self._bullets.append(text)
+            self._list_depth = max(0, self._list_depth - 1)
+        if tag == "li" and self._li:
+            self._li_depth.pop()
+            text = _norm(self._li.pop())
+            if self._li:
+                # a nested list inside an <li> merges into the outer bullet:
+                # still pinned, and a mismatch still fails.
+                self._li[-1].append(text)
+            else:
+                self._bullets.append(text)
+
+    def handle_data(self, data: str) -> None:
+        if not data:
+            return
+        if data.strip() and any(aria for _, aria in self.stack):
+            self.hidden.append(f"aria-hidden text {data.strip()!r}")
+        if self._li:
+            self._li[-1].append(data)
+        elif any(tag == "h3" for tag, _ in self.stack):
+            self._heading.append(data)
+        elif any(tag == "h2" for tag, _ in self.stack):
+            self.title.append(data)
+        elif data.strip():
+            # Indentation between elements is not a claim; real text is.
+            self.stray.append(data.strip())
+
+    def close(self) -> None:
+        super().close()
+        self._close_cell()
+
+
 def _automate_paragraph_markup() -> str:
     section = _automate_beat_markup()
     match = re.search(r"<p>.*?</p>", section, re.S)
@@ -1125,99 +1407,275 @@ class TestAutomateBeatCopy:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# 6. /investors Progress: cell order + the owner's sanctioned headline (PR #9283)
+# 6. /investors Progress: cell order + both cells' pinned bullets (PR #9283)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
 def _investors_progress_section() -> str:
-    """The `<section id="progress">…</section>` slice, from the SECTION tag.
+    """The `<section id="progress">…</section>` slice, from the SECTION tag, as
+    a READER receives it — `_served_without_comments` strips comments (deleting
+    them, not spacing them) before the slice is taken.
+
+    Serving first is load-bearing, not tidiness: slicing the raw file and
+    filtering afterwards cannot see a comment that opens BEFORE the section, so
+    `<!-- <section id="progress"> … </section> -->` left every assertion in this
+    class green while no reader receives the section at all — the exact failure
+    `_served` exists to prevent. `_pricing_section` slices the stripped document
+    for the same reason.
 
     Same construction (and the same nested-section guard) as
     `_automate_beat_markup`: the slice must start at `<section`, and this slice
     stops at the FIRST `</section>`, so a claim inside a nested section would be
     invisible to every assertion below.
     """
-    src = INVESTORS_HTML.read_text(encoding="utf-8")
+    src = _served(INVESTORS_HTML.read_text(encoding="utf-8"))
+    raw = INVESTORS_HTML.read_text(encoding="utf-8")
     marker = 'id="progress"'
+    # Strip comments BEFORE locating anything in the raw file: a commented
+    # `</section>` would end the raw region early, and a comment that merely
+    # NAMES the marker would make the raw and served slices describe different
+    # sections.
+    raw_wo_comments = re.sub(r"<!--.*?-->", " ", raw, flags=re.S)
     assert marker in src, (
-        "#progress moved or was renamed on website/investors.html — this gate's "
-        "subject is gone; re-point it at wherever the Progress section lives "
-        "(PR #9283)")
-    i = src.index(marker)
-    start = src.rindex("<section", 0, i)
-    section = src[start:src.index("</section>", start)]
+        "#progress is absent from website/investors.html as served — moved, "
+        "renamed, or commented out. This gate's subject is gone; re-point it at "
+        "wherever the Progress section lives (PR #9283)")
+    assert src.count(marker) == 1 and raw_wo_comments.count(marker) == 1, (
+        f"website/investors.html mentions {marker} "
+        f"{src.count(marker)}x as served / {raw_wo_comments.count(marker)}x raw. "
+        "This gate slices raw and served separately and they must describe the "
+        "same section (PR #9283)")
+    # `_served` deletes <style>/<script> bodies, so copy they inject (a
+    # `content:` string appended to every heading, say) renders on the page and
+    # is invisible to every assertion below. Only the RAW region can show them.
+    raw_start = raw_wo_comments.rindex("<section", 0, raw_wo_comments.index(marker))
+    raw_section = raw_wo_comments[raw_start:raw_wo_comments.index("</section>", raw_start)]
+    assert not re.search(r"<(style|script)\b", raw_section, re.I), (
+        "#progress carries a <style> or <script>. `_served` removes its body "
+        "before this gate slices the section, so text it injects renders while "
+        "no assertion can see it. Move the rule into the page stylesheet and "
+        "delete it here (PR #9283).")
+    text_src = _served_without_comments(INVESTORS_HTML.read_text(encoding="utf-8"))
+    i = text_src.index(marker)
+    start = text_src.rindex("<section", 0, i)
+    section = text_src[start:text_src.index("</section>", start)]
     assert "<section" not in section[section.index(">") + 1:], (
         "a <section> is nested inside #progress — this slice stops at the first "
         "</section>, so a claim in the nested section would be invisible to "
         "every assertion in this class (PR #9283)")
+    # Testing for a `</section>` literal inside `section` cannot work — the
+    # slice stops BEFORE it. The truncation itself is what shows up: the slice
+    # ends inside an attribute value.
+    assert not _ends_inside_attribute_value(section), (
+        "#progress's slice ends inside an attribute value — a `</section>` "
+        "carried in one truncated it early, so whatever follows renders "
+        "unchecked (PR #9283)")
     return section
+
+
+class _ProfileCellCounter(HTMLParser):
+    """Counts the DIRECT `<div>` children of the section's ONE `.profile` block.
+
+    "Direct" is structural: a `<div>` counts only when no other element is open
+    inside `.profile`, so wrapping the cells in a `<span>` (which leaves the grid
+    with one child) counts nothing, while wrapping them in a `<div>` counts one.
+
+    Two children is a NECESSARY condition for the side-by-side read, not a
+    sufficient one: the columns themselves come from the `.profile` declaration,
+    which this counter does not read, so a `grid-template-columns: 1fr` edit
+    stacks them and stays green. What it removes is the specific bypass that
+    merged both cells into one child while keeping two `<h3>`s.
+
+    `count` is summed across every `.profile` block, so it says nothing on its
+    own about how many blocks there are: splitting the section into two
+    `.profile` divs (one cell each) also yields 2 while the columns stack.
+    `profiles` is what rules that out.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.count = 0
+        self.profiles = 0
+        self._inside = False
+        #: Elements open INSIDE the `.profile` div. Empty means a `<div>`
+        #: starting now is a direct child; a `<span>`/`<a>` wrapper puts its
+        #: contents one level down, where they are not grid children.
+        self._open: list[str] = []
+
+    def handle_startendtag(self, tag: str, attrs) -> None:
+        """HTML ignores the self-closing slash, so the element stays OPEN.
+
+        The default start-then-end pair would close a `<div/>` the browser keeps
+        open, and every child after it would fall outside the profile.
+        """
+        self.handle_starttag(tag, attrs)
+
+    def handle_starttag(self, tag: str, attrs) -> None:
+        if not self._inside:
+            if (tag == "div"
+                    and "profile" in (dict(attrs).get("class") or "").split()):
+                self._inside = True
+                self.profiles += 1
+                self._open = []
+            return
+        if tag == "div" and not self._open:
+            self.count += 1
+        if tag not in _ProgressTextParser.VOID:
+            self._open.append(tag)
+
+    def handle_endtag(self, tag: str) -> None:
+        if not self._inside:
+            return
+        if tag == "div" and not self._open:
+            self._inside = False
+            return
+        # An unmatched end tag closes nothing (a browser ignores it); popping
+        # for it would close the profile on a stray `</span>`.
+        for i in range(len(self._open) - 1, -1, -1):
+            if self._open[i] == tag:
+                del self._open[i:]
+                break
+
+
+def _walk_progress_section(markup: str) -> _ProgressTextParser:
+    """Run the walk over `markup` placed inside a minimal `#progress` shell.
+
+    Synthetic markup, not the live page: it reaches parser branches the served
+    section does not exercise today, so a branch cannot regress to silently
+    allowing a claim while the pins stay green.
+    """
+    parser = _ProgressTextParser()
+    parser.feed(
+        '<section id="progress"><div class="wrap"><h2>Progress</h2>'
+        f'<div class="profile">{markup}</div></div></section>')
+    parser.close()
+    return parser
 
 
 def _progress_cells() -> list[tuple[str, list[str]]]:
     """`(h3 heading, rendered bullets)` per cell, in DOM order.
 
-    Rendered text (entities decoded) on purpose: the bullet's quotation marks
-    are the `&ldquo;`/`&rdquo;` entities, and a pin on the raw markup would pass
-    on a rewrite that swapped them for plain ASCII quotes.
+    The walk is `_ProgressTextParser`, over the SERVED section
+    (`_investors_progress_section`), so a comment is not a claim a reader
+    receives. The parser refuses — rather than silently ignoring — the three
+    things a text pin cannot cover: copy in an attribute, a hidden element, and
+    any text outside the title, the headings and the bullets. Markup that moves
+    without changing a word does not fail.
     """
-    section = _investors_progress_section()
-    body = section[section.index(">") + 1:]
-    cells = re.findall(r"<h3>(.*?)</h3>\s*<ul[^>]*>(.*?)</ul>", body, re.S)
-    return [
-        (_beat_text(heading), [_beat_text(li) for li in re.findall(r"<li>.*?</li>", bullets, re.S)])
-        for heading, bullets in cells
-    ]
+    parser = _ProgressTextParser()
+    parser.feed(_investors_progress_section())
+    parser.close()
+    assert not parser.attribute_copy, (
+        "#progress carries copy in an attribute: "
+        f"{parser.attribute_copy!r}. It renders, but these pins compare TEXT and "
+        "cannot see it — put the claim in a <li> and pin it, or drop the value "
+        "(PR #9283).")
+    assert not parser.hidden, (
+        f"#progress hides an element: {parser.hidden!r}. A claim that reaches no "
+        "reader while its pin stays green is the failure this gate exists for: "
+        "for a `hidden`/inline-`style` hit delete the bullet and its tuple "
+        "instead of hiding it, and for an `aria-hidden` hit remove the attribute "
+        "— a sighted reader still sees that text, so deleting the copy would "
+        "hide a real claim from everyone (PR #9283).")
+    assert _norm(parser.title) == "Progress", (
+        f"#progress's own title is {_norm(parser.title)!r}, not 'Progress' — a "
+        "claim can hide there and no pinned tuple covers it (PR #9283)")
+    assert not parser.stray, (
+        "#progress carries text outside the pinned structure: "
+        f"{parser.stray!r}. No EXPECTED_*_BULLETS tuple can see it — put the "
+        "claim in a <li> and pin it, or remove it (PR #9283).")
+    return parser.cells
 
 
 class TestInvestorsProgressCopy:
-    """PR #9283: the Progress section's cell order and its sanctioned headline.
+    """PR #9283: the Progress section's cell order and both cells' pinned bullets.
 
-    TWO failure modes, both measured on that PR.
+    THREE failure modes.
 
     1. **The cell order silently reverts.** `.profile` is
        `display: grid; grid-template-columns: 1fr 1fr` with no `direction`
-       override, and the only positional rule on the page
-       (`#gtm .profile > div:last-child`) is scoped to `#gtm`. So DOM order IS
-       the rendered left/right order, and the section must OPEN on what exists
-       (`Product & distribution`) rather than on the demand claim. Rendering
-       collapses the difference: there is no diff marker, no test, and no CSS
-       selector that notices a swap.
+       override. Two rules reach `.profile`'s COLUMNS (typography does not
+       affect order): `#gtm .profile > div:last-child` (scoped to `#gtm`) and
+       the 620px breakpoint
+       (`.outcomes, .profile { grid-template-columns: 1fr }`). Neither REORDERS
+       a cell — one spans the last GTM cell, the other stacks the columns — so
+       DOM order remains the rendered order at every width, and the section must
+       OPEN on what exists (`Product & distribution`) rather than on the demand
+       claim. Rendering collapses the difference: there is no diff marker, no
+       test, and no CSS selector that notices a swap.
 
-    2. **The headline bullet is the owner's copy and must not be paraphrased.**
-       A reviewer P2 — "the quotation asserts a verbatim utterance nobody
-       recorded" — was actioned by an agent in `fbd706a` as a rewrite of the
-       owner's line into indirect speech (`asked when they could use it`). The
-       owner reverted the rewrite in `cd864dc` and recorded the P2 as an
-       ACCEPTED RISK: the copy is the owner's, and a reviewer finding does not
-       authorise an agent to rewrite it. This pin makes the next such rewrite
-       fail here instead of shipping, which is the outcome that cost a
-       round trip and a wrong audit record (`tortoise#9283`).
+    2. **A traction figure moves without the owner.** These bullets are the
+       claims this page makes to investors, so each one is pinned verbatim, in
+       DOM order. A figure that changes is a claim the page cannot back — the
+       provenance is recorded next to the tuples.
 
-    Scope, stated plainly: this is a hand-maintained SECOND COPY of a prose
-    claim over one static page's markup. A claim injected at runtime, or moved
-    to another page, is green here. It is kept because this specific bullet has
-    already been "corrected" once against the owner's copy.
+    3. **The quotation is paraphrased.** A reviewer P2 — "the quotation asserts
+       a verbatim utterance nobody recorded" — was actioned by an agent in
+       `fbd706a` as a rewrite of the owner's line into indirect speech (`asked
+       when they could use it`). The owner reverted the rewrite in `cd864dc`
+       and recorded the P2 as an ACCEPTED RISK: the copy is the owner's, and a
+       reviewer finding does not authorise an agent to rewrite it. This pin
+       makes the next such rewrite fail here instead of shipping
+       (`tortoise#9283`).
+
+    Scope, stated plainly: this is a hand-maintained SECOND COPY of prose over
+    one static page's markup. Within `#progress` the extraction is fail-closed
+    (`_progress_cells`): copy in an attribute, text hidden by one of the inline
+    declarations in `_HIDING_DECL` or by a `hidden` attribute, an injected
+    `<style>`/`<script>`, and any text outside the pinned `<h3>`/`<li>` text all
+    fail rather than hiding.
+
+    NOT covered, and deliberately: a claim injected at runtime; a claim on
+    another page; and ANY hiding done from the page stylesheet, whole section or
+    one bullet. A stylesheet check was written and then removed — it matched the
+    page's own `html.gated section { display: none }` and missed indirection
+    through a class, so it bought false reds in exchange for coverage it could
+    not deliver. A hidden-claim audit is a different instrument.
     """
 
     # Rendered left/right order of the two cells: what exists, then the demand.
     EXPECTED_CELL_ORDER = ("Product & distribution", "Early demand")
-    # The owner's sanctioned line, verbatim — entities decoded, so the curly
-    # quotation marks are pinned too (ASCII quotes are NOT this copy).
-    # Updated 2026-11-02 with the owner's wording from the submitted a16z
-    # Speedrun application video ("over 40 calls"); the earlier 32/34 pass rate
-    # is superseded by the owner's later figure.
-    EXPECTED_DEMAND_HEADLINE = "40+ calls: \u201cwhen can I use it\u201d"
+    # Both cells' bullets, verbatim and in DOM order — entities decoded, so the
+    # curly quotation marks are pinned too (ASCII quotes are NOT this copy).
+    #
+    # Both cells are pinned because these are the traction claims this page
+    # makes to investors: a figure that changes without the owner saying so is a
+    # claim the page cannot back. Provenance for the current figures: the
+    # submitted a16z Speedrun application video (2026-11-01) — "more than two
+    # million views", "over 40 calls", "more than 35 people now waiting". The
+    # page renders that last one as `35+ waiting to try it`.
+    EXPECTED_PRODUCT_BULLETS = (
+        "Working alpha, beta in development",
+        "2M+ views on founder-led content, generating inbound leads",
+    )
+    EXPECTED_DEMAND_BULLETS = (
+        "40+ calls: \u201cwhen can I use it\u201d",
+        "35+ waiting to try it",
+        "1 team design partner providing data & feedback",
+        "Enterprise discussions underway",
+    )
     # What an earlier revision carried. It must not come back: "prospective"
     # disclaims the noun it modifies.
     RETIRED_LINE = "20+ prospective beta testers"
 
     def test_progress_opens_on_what_exists(self):
         """Left cell is `Product & distribution` — DOM order is render order."""
+        counter = _ProfileCellCounter()
+        counter.feed(_investors_progress_section())
+        counter.close()
+        assert counter.profiles == 1, (
+            f"#progress must hold ONE `.profile` block, found {counter.profiles} "
+            "— two blocks (one cell each) stack the columns instead of placing "
+            "them side by side, which is the point of the section (PR #9283)")
+        assert counter.count == 2, (
+            f"#progress must hold exactly two `.profile` cells, found "
+            f"{counter.count} — the side-by-side read (what exists | what is "
+            "claimed) is the point of the section, and merging them into one "
+            "child leaves the right column empty (PR #9283)")
         cells = _progress_cells()
         assert len(cells) == 2, (
-            f"#progress must hold exactly two cells, found {len(cells)} — the "
-            "side-by-side read (what exists | what is claimed) is the point of "
-            "the section (PR #9283)")
+            f"#progress must carry exactly two cells, found {len(cells)} "
+            "headings (PR #9283)")
         headings = tuple(heading for heading, _ in cells)
         assert headings == self.EXPECTED_CELL_ORDER, (
             f"#progress cell order changed: {headings!r} != "
@@ -1227,22 +1685,249 @@ class TestInvestorsProgressCopy:
             "is `1fr 1fr` with no `direction` override and no positional rule "
             "reaching #progress — so swapping the two <div>s inverts the page.")
 
-    def test_early_demand_headline_is_the_sanctioned_copy_verbatim(self):
-        """The first `Early demand` bullet, character-for-character."""
+    def test_product_bullets_are_the_sanctioned_copy_verbatim(self):
+        """The `Product & distribution` cell, character-for-character."""
+        cells = dict(_progress_cells())
+        assert "Product & distribution" in cells, (
+            f"the 'Product & distribution' cell is gone (cells: {sorted(cells)}) "
+            "— this gate's subject moved (PR #9283)")
+        actual = tuple(cells["Product & distribution"])
+        assert actual == self.EXPECTED_PRODUCT_BULLETS, (
+            f"the Product & distribution bullets changed: {actual!r} != "
+            f"{self.EXPECTED_PRODUCT_BULLETS!r}. These are traction claims made "
+            "to investors — the submitted application video is the source for "
+            "the `2M+ views` figure, so take it from there, never paraphrase it "
+            "from a nearby draft.")
+
+    def test_early_demand_bullets_are_the_sanctioned_copy_verbatim(self):
+        """The whole `Early demand` cell, character-for-character."""
         cells = dict(_progress_cells())
         assert "Early demand" in cells, (
             f"the 'Early demand' cell is gone (cells: {sorted(cells)}) — this "
             "gate's subject moved (PR #9283)")
-        first_bullet = cells["Early demand"][0]
-        assert first_bullet == self.EXPECTED_DEMAND_HEADLINE, (
-            f"the Early-demand headline is not the owner's copy verbatim: "
-            f"{first_bullet!r} != {self.EXPECTED_DEMAND_HEADLINE!r}. ⛔ DO NOT "
-            "'fix' this by paraphrasing it to indirect speech: that edit was "
-            "made in fbd706a (a reviewer P2 about the quotation asserting a "
-            "verbatim utterance nobody recorded), reverted by the owner in "
-            "cd864dc, and the P2 recorded as an ACCEPTED RISK. The copy is the "
-            "owner's call. If the copy genuinely changed, get the owner's "
-            "wording and update this pin with it.")
+        actual = tuple(cells["Early demand"])
+        assert actual == self.EXPECTED_DEMAND_BULLETS, (
+            f"the Early-demand bullets are not the owner's copy verbatim: "
+            f"{actual!r} != {self.EXPECTED_DEMAND_BULLETS!r}. The first bullet "
+            "is the owner's quotation — ⛔ DO NOT 'fix' it by paraphrasing it "
+            "to indirect speech: that edit was made in fbd706a (a reviewer P2 "
+            "about the quotation asserting a verbatim utterance nobody "
+            "recorded), reverted by the owner in cd864dc, and the P2 recorded "
+            "as an ACCEPTED RISK. The copy is the owner's call. If the copy "
+            "genuinely changed, get the owner's wording and update this pin "
+            "with it.")
+
+    def test_the_hiding_declarations_and_their_zero_spellings(self):
+        hiding = (
+            "display:none", "visibility:hidden", "color:transparent",
+            "content-visibility:hidden",
+            # A zero value is the same declaration however it is spelled, sign
+            # included: `.0`, `00` and `+0` hide the text just as `0` does, so a
+            # parser anchored only on the bare form leaves a live bypass. A
+            # computed zero (`calc(0)`) is out of reach by construction.
+            "opacity:0", "opacity:0.0", "opacity:.0", "opacity:00",
+            "opacity:+0", "opacity:-0",
+            "font-size:0", "font-size:0.0px", "font-size:00", "font-size:+0",
+        )
+        for css in hiding:
+            assert _HIDING_DECL.search(f"margin:0;{css}"), css
+
+    def test_honest_styles_are_not_mistaken_for_hiding(self):
+        for css in (
+            "opacity:0.35", "opacity:.9", "opacity:1", "opacity:+0.5",
+            "font-size:0.9em", "font-size:+.5em",
+            "background-color:transparent", "transition:opacity 0.2s",
+        ):
+            assert not _HIDING_DECL.search(css), css
+
+    def test_an_unterminated_attribute_value_is_refused(self):
+        # A quoted value is the common shape, but an unquoted one truncates the
+        # slice just as effectively: the tokenizer appends the `<` to the value,
+        # so the browser never sees an end tag while this slice does.
+        for truncated in ('<span title="a', "<span title='a", "<span title=a",
+                          "</ul><span title=a",
+                          # a value may contain `>` or `<`
+                          '<span title="a>b', '<span data-x="a < b ',
+                          "<span data-x=a<b "):
+            assert _ends_inside_attribute_value(truncated), truncated
+        for whole in ('<span title="a</section>b">', "<li><span>x</span></li>",
+                      '<div class="profile">', "<ul>",
+                      # A trailing text node is not an attribute value: the
+                      # `stray` assertion is what should report it, and a closed
+                      # tag before the `=` proves the text is outside the tag.
+                      "</div><p>Ratio = 2", "</div><p>Revenue=2M",
+                      '<div class="x">Ratio = 2', '<p class="note">Total ='):
+            assert not _ends_inside_attribute_value(whole), whole
+
+    def test_an_empty_heading_still_owns_its_bullets(self):
+        # A heading that renders no text (`<h3></h3>`, or one holding only a
+        # comment) still opens a cell. Reading its emptiness as "no heading"
+        # reported that cell's pinned bullets as stray text.
+        assert _walk_progress_section(
+            "<h3></h3><ul><li>a</li><li>b</li></ul>").cells == [("", ["a", "b"])]
+        assert _walk_progress_section(
+            "<h3><!-- x --></h3><ul><li>a</li></ul>").cells == [("", ["a"])]
+        # Bullets with NO heading at all still have no cell to belong to.
+        orphan = _walk_progress_section("<ul><li>a</li></ul>")
+        assert orphan.cells == [] and orphan.stray == ["a"]
+
+    def test_a_comment_between_words_does_not_synthesise_a_space(self):
+        # The served text a reader gets has no space there, so the pin must not
+        # either; `_served` would turn the comment into one.
+        assert _served_without_comments(
+            "<span>2M+</span><!--x--><span>views</span>"
+        ) == "<span>2M+</span><span>views</span>"
+        assert _served_without_comments("a<!--x-->b") == "ab"
+        # The space a reader DOES get is preserved.
+        assert _served_without_comments("a <!--x--> b") == "a  b"
+
+    def test_a_comment_inside_the_section_does_not_synthesise_a_space(self) -> None:
+        # No comment sits inside the real section, so this reads the slice from a
+        # temporary page: with `_served` (comment -> space) the bullet would pin
+        # as `2M+ views` while a reader gets `2M+views`.
+        global INVESTORS_HTML
+        page = Path(tempfile.mkdtemp()) / "investors.html"
+        page.write_text(
+            '<section id="progress"><div class="wrap"><h2>Progress</h2>'
+            '<div class="profile"><div><h3>Product</h3><ul class="bullets">'
+            '<li><span>2M+</span><!--x--><span>views</span></li></ul></div>'
+            '<div><h3>Demand</h3><ul class="bullets"><li><span>a</span></li>'
+            '</ul></div></div></div></section>',
+            encoding="utf-8")
+        original, INVESTORS_HTML = INVESTORS_HTML, page
+        try:
+            assert dict(_progress_cells())["Product"] == ["2M+views"]
+        finally:
+            INVESTORS_HTML = original
+
+    def test_a_nested_list_never_reorders_a_bullet(self):
+        # `</li>` is optional before the next sibling, so the same markup is
+        # read the same way whether it is written or omitted. Closing inner
+        # first is what keeps the order; closing outer first emitted the inner
+        # items as siblings ahead of their own parent.
+        for markup, expected in (
+            ("<li>a<ul><li>b<li>c</ul></li>", ["abc"]),
+            ("<li>a<ul><li>b</li><li>c</li></ul></li>", ["abc"]),
+            # `</li>` is optional before `</ul>` too: the item that contains the
+            # nested list must close there, or the next SIBLING nests into it.
+            ("<li>a<ul><li>b</ul><li>c</li><li>d</li>", ["ab", "c", "d"]),
+            ("<li>a<ul><li>b</li></ul></li><li>c</li><li>d</li>", ["ab", "c", "d"]),
+        ):
+            assert _walk_progress_section(f"<h3>H</h3><ul>{markup}</ul>").cells == [("H", expected)]
+        assert _walk_progress_section("<h3>H</h3><ul><li>a</li><li>b</li></ul>").cells == [
+            ("H", ["a", "b"])]
+        # An `<li>` left open at the END of the document, or at a cell boundary,
+        # is still rendered by the browser: `_flush_open_li` is what carries it
+        # into the pins. Without these three the flush body could be deleted and
+        # every remaining case would still pass.
+        unclosed = _walk_progress_section("<h3>H</h3><ul><li>claim</ul>")
+        assert unclosed.cells == [("H", ["claim"])]
+        assert not unclosed._li and not unclosed._li_depth
+        assert _walk_progress_section(
+            "<h3>H</h3><ul><li>claim").cells == [("H", ["claim"])]
+        assert _walk_progress_section(
+            "<h3>A</h3><ul><li>ax<h3>B</h3><ul><li>bx").cells == [
+                ("A", ["ax"]), ("B", ["bx"])]
+        assert _walk_progress_section(
+            "<h3>H</h3><ul><li>a<ul><li>b").cells == [("H", ["ab"])]
+
+    def test_the_walks_survive_self_closing_tags(self):
+        # The counter runs the start half alone for every self-closing tag, so a
+        # `<br/>` or `<img/>` inside a cell can neither crash it nor unbalance
+        # its depth; the `<div class="profile"/>` case below is the one that
+        # would fail if it closed elements the browser keeps open.
+        counter = _ProfileCellCounter()
+        counter.feed('<div class="profile"><div><h3>a</h3><ul><li>x<br/></li>'
+                     '</ul></div><div><h3>b</h3><ul><li><img src="y"/></li>'
+                     '</ul></div></div>')
+        assert counter.count == 2
+        # "Direct" is structural: a non-div wrapper leaves the grid with ONE
+        # child, so it must not read as two cells.
+        for wrapper in ("span", "a href='#'", "p"):
+            wrapped = _ProfileCellCounter()
+            wrapped.feed('<div class="profile"><' + wrapper + '><div>a</div>'
+                         '<div>b</div></' + wrapper.split()[0] + '></div>')
+            assert wrapped.count == 0, wrapper
+        # A div wrapper merges the cells into one grid child.
+        merged = _ProfileCellCounter()
+        merged.feed('<div class="profile"><div><div>a</div><div>b</div></div></div>')
+        assert merged.count == 1
+        # Two `.profile` blocks stack the columns even though `count` is 2.
+        split = _ProfileCellCounter()
+        split.feed('<div class="profile"><div>a</div></div>'
+                   '<div class="profile"><div>b</div></div>')
+        assert (split.profiles, split.count) == (2, 2)
+        # HTML ignores the slash: the div stays open, so both children count.
+        counter = _ProfileCellCounter()
+        counter.feed('<div class="profile"/><div>a</div><div>b</div>')
+        assert counter.count == 2
+        # An end tag with nothing to match (`</br>` on a void element) is ignored
+        # by a browser, so it must not close an ancestor: doing that reddened an
+        # honest heading and switched off an enclosing `aria-hidden`.
+        assert _walk_progress_section(
+            "<h3>H<br></br>2</h3><ul><li>a</li></ul>").cells == [("H2", ["a"])]
+        assert not _walk_progress_section(
+            "<h3>H<br></br>2</h3><ul><li>a</li></ul>").stray
+        assert len(_walk_progress_section(
+            '<h3>H</h3><ul><li><div aria-hidden="true">a<br></br>b</div>'
+            '</li></ul>').hidden) == 2
+        # `<li/>` stays open in HTML, so the text after it is that bullet's.
+        assert _walk_progress_section(
+            "<h3>H</h3><ul><li/>a<li>b</li></ul>").cells == [("H", ["a", "b"])]
+
+    def test_the_walk_refuses_what_a_text_pin_cannot_see(self):
+        """The parser's branches, on synthetic markup rather than the live page.
+
+        Every refusal below exists because a claim escaped the pins in an
+        earlier revision of this gate, and the live page exercises none of them.
+        Without these cases a branch could regress to "silently allow" and the
+        suite would stay green — the failure mode the gate exists to prevent.
+        """
+
+        walk = _walk_progress_section
+
+        # Refusals — each is a claim a reader could be shown.
+        assert walk('<h3>H</h3><ul><li>a</li></ul><img alt="claim">').attribute_copy
+        assert walk('<h3>H</h3><ul><li>a</li></ul><iframe srcdoc="claim">').attribute_copy
+        assert walk('<h3>H</h3><ul><li hidden>a</li></ul>').hidden
+        assert walk('<h3>H</h3><ul><li style="display:none">a</li></ul>').hidden
+        assert walk('<h3>H</h3><ul><li style="color:transparent">a</li></ul>').hidden
+        assert walk('<h3>H</h3><ul><li style="opacity:0">a</li></ul>').hidden
+        assert walk('<h3>H</h3><ul><li><span aria-hidden="true">a</span></li></ul>').hidden
+        assert walk('<h3>H</h3><p>claim</p>').stray == ["claim"]
+        assert walk('<p>claim</p><h3>H</h3><ul><li>a</li></ul>').stray == ["claim"]
+        assert walk('<h3>H</h3>lead-in<ul><li>a</li></ul>').stray == ["lead-in"]
+
+        # Honest markup — none of these is a claim, so none may refuse.
+        assert not walk('<h3>H</h3><ul><li>a</li></ul><svg aria-hidden="true"></svg>').hidden
+        assert not walk('<h3>H</h3><ul><li>a</li></ul><img alt="">').attribute_copy
+        assert not walk('<h3>H</h3><ul><li style="opacity:0.35">a</li></ul>').hidden
+        assert not walk('<h3>H</h3><hr><ul><li>a</li></ul>').stray
+        assert not walk('<div><h3 class="x">H</h3></div><ul><li>a</li></ul>').stray
+
+        # Pinning still works through the shapes the page may legitimately take.
+        assert walk('<h3>H</h3><ul><li>a</li></ul>').cells == [("H", ["a"])]
+        # No space is synthesised: `out` and `in` touch in the markup, so they
+        # touch in the pin — a change a reader sees cannot pass.
+        assert walk('<h3>H</h3><ul><li>out<ul><li>in</li></ul></li></ul>').cells == [
+            ("H", ["outin"])]
+        assert walk('<h3>H</h3><ul><li><span>a</span><span>b</span></li></ul>').cells == [
+            ("H", ["ab"])]
+        assert walk('<h3>H</h3><ul><li><span>a</span> <span>b</span></li></ul>').cells == [
+            ("H", ["a b"])]
+        # Self-closing tags must not drain the stack: the synthetic end tag has
+        # nothing to match on a void element and would drop every ancestor.
+        assert walk('<h3>H</h3><ul><li><div aria-hidden="true">'
+                    '<img src="x"/>secret</div>a</li></ul>').hidden
+        assert walk('<h3>H<br/>x</h3><ul><li>a</li></ul>').cells == [("Hx", ["a"])]
+        assert not walk('<h3>H</h3><ul><li>a</li></ul><svg aria-hidden="true"/>').hidden
+        assert walk('<h3>H</h3><ul><li>claim</ul>').cells == [("H", ["claim"])]
+        assert walk('<h3>H</h3><div><ul><li>a</li></ul></div>').cells == [("H", ["a"])]
+        # `</li>` is optional before the next <li>: the browser closes it, so
+        # these are two bullets and neither may leak into the next cell.
+        assert walk('<h3>H</h3><ul><li>a<li>b</li></ul>').cells == [("H", ["a", "b"])]
+        assert walk('<h3>A</h3><ul><li>ax</ul><h3>B</h3><ul><li>bx</li></ul>').cells == [
+            ("A", ["ax"]), ("B", ["bx"])]
 
     def test_the_retired_prospective_beta_line_is_gone(self):
         """`20+ prospective beta testers` must not return anywhere in the section."""

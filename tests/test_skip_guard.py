@@ -1048,6 +1048,184 @@ def test_emit_manifest_passes_ignore_flags(tmp_path):
     assert "tests/test_a.py::test_x" in out.read_text()
 
 
+def test_emit_manifest_pins_confcutdir_to_the_invocation_tree_in_repo(tmp_path):
+    # The pin must NOT narrow the repo-wide chain the run step uses: a
+    # repo-relative selection keeps `--confcutdir` at the invocation directory,
+    # so `tests/conftest.py` still loads even when $FILES is made only of DEEP
+    # files (pinning to the files' own deepest common ancestor would drop it
+    # and make the manifest disagree with the run).
+    captured = {}
+
+    def fake_runner(cmd):
+        captured["cmd"] = list(cmd)
+        return 0, "tests/eval/retrieval/test_x.py::test_y\n1 tests collected in 0.00s\n"
+
+    out = tmp_path / "expected-nodeids.txt"
+    rc = _skip_guard.emit_manifest(
+        ["tests/eval/retrieval/test_x.py"], "not track_b", out,
+        runner=fake_runner)
+    assert rc == 0
+    pins = [a for a in captured["cmd"] if a.startswith("--confcutdir=")]
+    assert pins == [f"--confcutdir={os.path.abspath(os.getcwd())}"], pins
+
+
+def test_emit_manifest_pins_confcutdir_to_an_out_of_tree_selection(tmp_path):
+    # An out-of-tree selection (a temp tree, a fixture) must bound the conftest
+    # chain to ITS OWN tree. pytest walks every ancestor of the selected path
+    # and only skips dirs in `confcutdir.parents`, so without this pin a
+    # `conftest.py` sitting in a shared ancestor (`/tmp`) is imported into the
+    # manifest's collect-only run.
+    captured = {}
+
+    def fake_runner(cmd):
+        captured["cmd"] = list(cmd)
+        return 0, "test_a.py::test_x\n1 tests collected in 0.00s\n"
+
+    case = tmp_path / "case"
+    case.mkdir()
+    out = tmp_path / "expected-nodeids.txt"
+    rc = _skip_guard.emit_manifest([str(case / "test_a.py")], "not track_b", out,
+                                   runner=fake_runner)
+    assert rc == 0
+    pins = [a for a in captured["cmd"] if a.startswith("--confcutdir=")]
+    assert pins == [f"--confcutdir={case}"], pins
+
+
+def test_emit_manifest_pins_confcutdir_to_the_running_cwd_not_the_callers(tmp_path):
+    # #10636 review P2: `tools/embedded_evidence.py` spawns the collect-only
+    # child with `cwd=REPO_ROOT` while it may itself be invoked from anywhere.
+    # The pin was computed from the CALLER's cwd, so it described a tree the
+    # child never ran in and pruned the wrong ancestry. `cwd` is threaded
+    # through to the helper, and this pins that it WINS over the process cwd.
+    captured = {}
+
+    def fake_runner(cmd):
+        captured["cmd"] = list(cmd)
+        return 0, "tests/test_a.py::test_x\n1 tests collected in 0.00s\n"
+
+    out = tmp_path / "expected-nodeids.txt"
+    rc = _skip_guard.emit_manifest(["tests/test_a.py"], "not track_b", out,
+                                   runner=fake_runner, cwd=str(tmp_path))
+    assert rc == 0
+    pins = [a for a in captured["cmd"] if a.startswith("--confcutdir=")]
+    assert pins == [f"--confcutdir={os.path.abspath(tmp_path)}"], pins
+
+
+def test_emit_manifest_resolves_a_repo_relative_selection_against_the_running_cwd(
+    tmp_path,
+):
+    # Behavioural half of the same finding: the child runs in `cwd`, so the pin
+    # must prune THAT directory's ancestry. `tmp_path/conftest.py` is the
+    # shared-ancestor shape (the local stand-in for the leaked `/tmp`
+    # conftest): if the pin is computed from THIS process's cwd (the repo
+    # root), `tmp_path` is not in `confcutdir.parents`, the raising conftest is
+    # imported and the collect-only dies with rc=4 — no manifest.
+    (tmp_path / "conftest.py").write_text(
+        "raise RuntimeError('a conftest above the running cwd must not be "
+        "imported')\n",
+        encoding="utf-8")
+    repo = tmp_path / "repo"
+    (repo / "tests").mkdir(parents=True)
+    (repo / "tests" / "test_ok.py").write_text(
+        "def test_ok():\n    assert True\n", encoding="utf-8")
+    out = tmp_path / "expected-nodeids.txt"
+    rc = _skip_guard.emit_manifest(["tests/test_ok.py"], "not track_b", out,
+                                   cwd=str(repo))
+    assert rc == 0, rc
+    assert out.exists(), "the collection completed — the manifest must be written"
+    assert "test_ok.py::test_ok" in out.read_text(encoding="utf-8")
+
+
+def test_the_confcutdir_pin_does_not_bound_a_selection_spanning_trees(tmp_path):
+    # A LIMIT, asserted so the docstring and the code cannot drift apart. The
+    # pin is ONE directory and pytest loads a `conftest.py` sitting AT it
+    # (`_is_in_confcutdir` is `path not in confcutdir.parents`, and a directory
+    # is never in its own parents — pytest 9.1.1, `_config/__init__.py:669-682`),
+    # so only dirs STRICTLY ABOVE it are excluded. For a selection that spans
+    # two trees the deepest common ancestor is their shared parent — i.e. the
+    # very directory a leaked `/tmp/conftest.py` lives in — so the pin bounds
+    # nothing there.
+    #
+    # No caller produces this shape today (CI passes a repo-relative `$FILES`,
+    # every out-of-tree caller passes a SINGLE tree), which is why
+    # `_selection_confcutdir` documents the limit instead of refusing. This
+    # assertion is the tripwire: whoever widens the guarantee (refuse, or
+    # collect once per tree) must change it AND the docstring together.
+    a, b = tmp_path / "tt_a", tmp_path / "tt_b"
+    a.mkdir()
+    b.mkdir()
+    pin = _skip_guard._selection_confcutdir(
+        [str(a / "test_x.py"), str(b / "test_y.py")])
+    assert pin == str(tmp_path), pin
+
+
+def test_the_confcutdir_pin_does_not_bound_a_mixed_in_and_out_of_tree_selection(
+        tmp_path, monkeypatch):
+    # The other spanning shape, and the worse one: a repo-relative file plus an
+    # out-of-tree one share only an ancestor ABOVE the invocation directory, so
+    # the pin no longer sits inside the invocation tree at all. In production
+    # (cwd = the repo, the other file under `/tmp`) that ancestor is the
+    # filesystem root, whose `.parents` is EMPTY — nothing is excluded and the
+    # pre-pin behaviour stands. Reproduced under `tmp_path` so the assertion
+    # does not depend on where the checkout lives.
+    repo = tmp_path / "repo"
+    (repo / "tests").mkdir(parents=True)
+    other = tmp_path / "other"
+    other.mkdir()
+    monkeypatch.chdir(repo)
+    pin = _skip_guard._selection_confcutdir(
+        ["tests/test_a.py", str(other / "test_b.py")])
+    assert pin == str(tmp_path), pin
+
+
+
+def test_emit_manifest_does_not_inherit_a_conftest_above_the_selection(tmp_path):
+    # The CI shape that redded PR #10636's `test-slow (d)` shard (2026-11-02):
+    # the self-hosted runner's shared `/tmp` carried a leaked `conftest.py`, and
+    # the fixture files these tests hand `emit_manifest` live under `/tmp/tt_*`
+    # — so pytest imported the foreign conftest and every collect-only died
+    # ("ImportError while loading conftest '/tmp/conftest.py'", `rc=4`).
+    #
+    # A conftest ABOVE the selection is not part of the selection's tree. The
+    # probe is the shape a shared ancestor presents: a raising conftest in the
+    # fixture's PARENT (the local stand-in for `/tmp`), never in the case dir
+    # itself — a conftest in the case dir is deliberately refused, which
+    # `test_emit_manifest_refuses_a_conftest_that_raises` pins.
+    (tmp_path / "conftest.py").write_text(
+        "raise RuntimeError('a conftest above the selection must not be "
+        "imported')\n",
+        encoding="utf-8")
+    # ⚠️ The conftest ALONE does not reproduce the red, and a version of this
+    # test carrying only the conftest was non-discriminating: it passed on the
+    # PRE-fix tool. pytest's `confcutdir` is not unset when `--confcutdir` is
+    # absent — `Config.parse` defaults it to `inipath.parent` else `rootpath`
+    # (pytest 9.1.1, `_pytest/config/__init__.py:1598-1603`), and for an
+    # out-of-tree arg with no ini above it the `rootpath` is already the case
+    # dir, so nothing above it loads anyway. The runner's `/tmp` leaked BOTH
+    # files: the ini is what lifts the default cutoff above the selection (a
+    # `pyproject.toml` counts as `inipath` only when it carries
+    # `[tool.pytest.ini_options]`), and the conftest is then imported through
+    # it. MEASURED against the pre-fix tool with both files present: `rc=4`,
+    # `ImportError while loading conftest '<tmp>/conftest.py'`, no manifest —
+    # the `test-slow (d)` red. With the pin: `rc=0` and the manifest written.
+    (tmp_path / "pyproject.toml").write_text(
+        "[tool.pytest.ini_options]\n", encoding="utf-8")
+    case = tmp_path / "case"
+    case.mkdir()
+    (case / "test_ok.py").write_text(
+        "def test_ok():\n    assert True\n", encoding="utf-8")
+    out = tmp_path / "expected-nodeids.txt"
+    rc = _skip_guard.emit_manifest([str(case / "test_ok.py")], "not track_b", out)
+    assert rc == 0, rc
+    assert out.exists(), "the collection completed — the manifest must be written"
+    # Kept as a SUBSTRING on purpose: that leaked ini also becomes `inipath`, so
+    # `rootpath` moves to `tmp_path` and the nodeid is `case/test_ok.py::test_ok`
+    # (`test_ok.py::test_ok` where no ini is found). The pin bounds CONFTEST
+    # loading only — it does not restore `rootpath` — so an exact-equality
+    # assertion here would be pinning the leak, not the fix.
+    assert "test_ok.py::test_ok" in out.read_text(encoding="utf-8")
+
+
 def test_emit_manifest_empty_files_writes_nothing(tmp_path):
     out = tmp_path / "expected-nodeids.txt"
     rc = _skip_guard.emit_manifest([], "not track_b", out,
@@ -1951,6 +2129,10 @@ class TestGuardFailsOnModuleLevelCollectionSkip:
         proc = subprocess.run(
             [sys.executable, "-m", "pytest", str(tests_dir / "test_modskip.py"),
              "-p", "no:cacheprovider", "-o", "junit_family=xunit1",
+             # A conftest ABOVE the fixture tree must never be imported (a
+             # shared /tmp carries one on the self-hosted runners; it made
+             # this spawn die at import — the PR #10636 `test-slow (d)` red).
+             f"--confcutdir={tests_dir}",
              f"--junitxml={junit}"],
             capture_output=True, text=True, cwd=str(tmp_path),
         )

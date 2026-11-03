@@ -166,10 +166,12 @@ __all__ = [
     "SERVED",
     "AnchorDidNotBind",
     "AnchoredRead",
+    "CacheAnswerRequired",
     "ParityDiff",
     "RecordServeError",
     "RecordUnavailable",
     "ServedAnswer",
+    "answered_by_cache",
     "fallback_counts",
     "not_served_reads",
     "open_record",
@@ -193,12 +195,16 @@ RECORD_SERVE_ENV = "TORTOISE_RECORD_SERVE"
 #: ``record``  the record answers; there is no cache branch at all.
 #: ``prefer``  the record answers first, and a NAMED, COUNTED fallback covers a
 #:             record that ANSWERS and cannot serve (`record-miss`), cannot be
-#:             reached (`record-unavailable`), or cannot be scoped because this
+#:             reached (`record-unavailable`), cannot be scoped because this
 #:             CREDENTIAL resolves no record tenant (`record-tenant-unresolved`
 #:             — since #10046 no credential CLASS lands here by design: an API
 #:             key since #10025, a session/JWT credential and an OAuth `oat_`
 #:             token since #10046 all name the org's default graph, so read this
-#:             as an UNNAMEABLE default row, never as ordinary session traffic).
+#:             as an UNNAMEABLE default row, never as ordinary session traffic),
+#:             was never asked because the READ LANE refused the submission
+#:             (`record-read-lane-refused`), or WAS asked and did not answer
+#:             inside the lane's bound (`record-read-bound-miss` — a running
+#:             bound miss: the record is neither down nor unasked).
 #:             It does NOT cover a record that was never armed or is
 #:             misconfigured: an absent/malformed DSN, a missing driver, an
 #:             unprojectable row and a bad tenancy are structural and answer
@@ -476,9 +482,10 @@ def not_served_reads() -> tuple[str, ...]:
 
 # ── fallback accounting — the fallback must be MEASURABLE ───────────────────
 
-#: Why a read was answered by the cache while the record was armed. Two reasons,
-#: kept apart because they have different repairs: an OUTAGE is ops, a MISS is a
-#: backfill/completeness question.
+#: Why a read was answered by the cache while the record was armed. The reasons
+#: are kept apart because they have different repairs: an OUTAGE is ops, a MISS is
+#: a backfill/completeness question, an UNRESOLVED TENANT and a REFUSED LANE are
+#: each a condition the record never caused.
 FALLBACK_RECORD_UNAVAILABLE = "record-unavailable"
 FALLBACK_RECORD_MISS = "record-miss"
 #: A THIRD reason, for a condition that is neither: the credential resolves no
@@ -492,9 +499,28 @@ FALLBACK_RECORD_MISS = "record-miss"
 #: counter permanently on a condition the record never caused — and the counter's
 #: whole purpose is to be alertable.
 FALLBACK_RECORD_TENANT_UNRESOLVED = "record-tenant-unresolved"
+#: A FOURTH reason, for the same class as the third: the read LANE refused the
+#: submission (backlog full / wait bound) so the record was NEVER ASKED. The
+#: record was not slow and is not down, so folding this into
+#: `record-unavailable` would fire the OUTAGE counter — permanently, on every
+#: saturated read — and send an operator to Postgres for a pool condition. That
+#: is the identical misattribution `record-tenant-unresolved` exists to prevent.
+#: `exc.refused` is precisely the discriminator: the submission never ran.
+FALLBACK_RECORD_LANE_REFUSED = "record-read-lane-refused"
+#: A FIFTH reason, for the OTHER half of the same lane condition: the submission
+#: RAN — the record WAS asked — and the bound abandoned only the AWAIT, so the
+#: callable is still running and may still answer. `exc.refused` is `False`
+#: here. It is not `record-unavailable` (the record was asked, and is not
+#: necessarily down: it was slower than the lane's budget, which is a capacity
+#: question about OUR lane or about the record's load), and it is emphatically
+#: not absence (the §17.2 rule). Kept apart from the fourth reason for the same
+#: reason the fourth is kept apart from the first: the two have different
+#: repairs, and an operator sent to the wrong one repairs nothing.
+FALLBACK_RECORD_BOUND_MISS = "record-read-bound-miss"
 FALLBACK_REASONS: tuple[str, ...] = (
     FALLBACK_RECORD_UNAVAILABLE, FALLBACK_RECORD_MISS,
-    FALLBACK_RECORD_TENANT_UNRESOLVED)
+    FALLBACK_RECORD_TENANT_UNRESOLVED, FALLBACK_RECORD_LANE_REFUSED,
+    FALLBACK_RECORD_BOUND_MISS)
 
 _FALLBACKS: dict[str, int] = {}
 #: The counter is incremented from BOTH the event loop (the endpoint's
@@ -679,10 +705,12 @@ def read_node(conn: Any, *, org_id: str, graph_id: str, label: str,
     ⚠️ The map is the record's PRIMARY set **plus** the §2.6 cache names that
     ``node_from_row`` DERIVES from those columns (`status`, from a supersession
     carrier) — #9974 — **plus** the same `status` derived from the record's own
-    HISTORY, through TWO legs of `EVENT_STREAM_FOLDS`, both applied here:
+    HISTORY, through THREE legs of `EVENT_STREAM_FOLDS`, all applied here:
     the connector/pack lifecycle where an event kind names the `:Object`
-    (#10198), and an explicit `EntityMutated` `state.status` — a caller's own
-    lifecycle write, for an `:Object` OR a `:Subject` (#9974). So the schema's refused names CAN appear here,
+    (#10198), an explicit `EntityMutated` `state.status` — a caller's own
+    lifecycle write, for an `:Object` OR a `:Subject` (#9974), and the CREATION
+    record's `payload ->> 'status'` (`ObjectRegistered`/`SubjectAdded`, the BIRTH
+    writer, #9974). So the schema's refused names CAN appear here,
     synthesized rather than stored, and a consumer must not read their presence
     as "the record holds a column for this": ``_refused('object')`` still lists
     `status`. That is the projection's contract for a record-sourced node (the
@@ -721,17 +749,20 @@ def read_node(conn: Any, *, org_id: str, graph_id: str, label: str,
     # derived from the record's HISTORY, which no layer row carries — so a read
     # that stopped at `node_from_row` would answer without the status a
     # `rebuild_from_record` materializes, breaking this function's own "the same
-    # map" contract. TWO legs reach that stream and both are applied here:
+    # map" contract. THREE legs reach that stream and all are applied here:
     #   * the connector/pack lifecycle (#10198) — an `EventRecorded` whose
     #     `eventKind` a fold maps onto `Object.status` (`:Object` only, as the
     #     live fold is);
     #   * an explicit `EntityMutated` `state.status` (#9974) — the caller's own
     #     lifecycle write for an `:Object` OR a `:Subject`, whose only carrier is
     #     `public.journal_event.payload`. Narrowed to the events that can
-    # name THIS Object: a single-row read folds only the events that could
-    # possibly name it. ⚠️ That narrows the FOLD, not the read — the table's
-    # only index is keyed on the event's own subject, so the predicate filters
-    # after the scope scan (see `read_lifecycle_events`).
+    #     name THIS Object: a single-row read folds only the events that could
+    #     possibly name it. ⚠️ That narrows the FOLD, not the read — the table's
+    #     only index is keyed on the event's own subject, so the predicate filters
+    #     after the scope scan (see `read_lifecycle_events`).
+    #   * a CREATION record (#9974) — `ObjectRegistered`/`SubjectAdded`, whose
+    #     `payload ->> 'status'` is the BIRTH value the record may not store.
+    #     Selected by the same id coordinate (the snapshot's record key).
     target = node.props.get("name")
     # ⛔ The gate is the FOLD's membership, not a NAME. Since #9881 an Object's
     # record key is the `id` (`chk_object_node_key_is_contract_key`: `node_key =
@@ -810,8 +841,54 @@ class ServedAnswer:
                 "fallbackReason": self.fallback_reason}
 
 
+class CacheAnswerRequired(Exception):
+    """The record did not answer, and the CALLER must answer from the cache.
+
+    Raised by :func:`serve_point` in ``prefer`` mode when the caller passed
+    ``cache_answer=None`` — the deferred shape, for a caller whose cache read
+    has to run on a different LANE than the record consult (#10602): the record
+    is a bounded round trip on one pool, the cache's COLD OPEN (connect, version
+    probe, ``_ensure_indexes()``, and on a restored graph an index BUILD) is
+    budgeted by ``probe_setup_timeout()`` on another. One synchronous callback
+    cannot honour both bounds, so the seam keeps the DECISION (whether to fall
+    back, and the named reason why) and the caller keeps the EXECUTION.
+
+    ``reason`` is the same named, counted reason a callback fallback would have
+    used (:data:`FALLBACK_RECORD_MISS` / :data:`FALLBACK_RECORD_UNAVAILABLE`).
+    ⛔ Nothing is COUNTED here: the fallback is counted by
+    :func:`answered_by_cache` when the caller's cache read actually answers, so
+    a read that never came back still contributes no increment.
+    """
+
+    def __init__(self, reason: str) -> None:
+        if reason not in FALLBACK_REASONS:
+            raise ValueError(
+                f"reason must be one of {FALLBACK_REASONS}, got {reason!r}")
+        self.reason = reason
+        super().__init__(f"the record did not answer ({reason}) — the caller "
+                         f"must read the cache on its own lane")
+
+
+def answered_by_cache(*, read: str, coordinate: str,
+                      props: dict[str, Any] | None,
+                      reason: str) -> ServedAnswer:
+    """The ONE way a fallback that LANDED is recorded — count then answer.
+
+    The count belongs to the ANSWER, not to the intent: a fallback whose cache
+    read raised did not serve anything, and counting it would report a read that
+    never existed (the metric's meaning is "answered by the cache", which is
+    what an operator alerts on). Both fallback shapes go through here — the
+    callback one inside :func:`serve_point`, and the DEFERRED one a route runs
+    itself after :class:`CacheAnswerRequired` (`hosted_api.get_point`) — so the
+    ordering cannot be stated correctly in one place and inverted in the other.
+    """
+    note_fallback(reason)
+    return ServedAnswer(read=read, coordinate=coordinate, served_from="cache",
+                        props=props, fallback_reason=reason)
+
+
 def serve_point(*, tenant: tuple[str, str], point_id: str,
-                cache_answer: Callable[[], dict[str, Any] | None],
+                cache_answer: Callable[[], dict[str, Any] | None] | None,
                 record_dsn: str | None = None,
                 connect: Callable[[str | None], Any] | None = None,
                 mode: str | None = None) -> ServedAnswer:
@@ -823,6 +900,13 @@ def serve_point(*, tenant: tuple[str, str], point_id: str,
                      not a handle, on purpose: :data:`MODE_RECORD` never calls
                      it, so the strict mode's inability to fall back is
                      structural rather than a rule someone remembers.
+
+                     ⛔ ``None`` is legal in ``prefer`` mode ONLY, and means
+                     the DEFERRED shape: the seam decides and names the
+                     fallback exactly as it would for a callback, then raises
+                     :class:`CacheAnswerRequired` so the caller runs the cache
+                     read on the lane its own cold open is budgeted for. The
+                     caller records the answer with :func:`answered_by_cache`.
     ``connect``      the connection opener (injected by DB-free tests); defaults
                      to :func:`open_record`.
     ``mode``         an explicit override of :func:`serve_mode` — the seam's
@@ -845,6 +929,13 @@ def serve_point(*, tenant: tuple[str, str], point_id: str,
     mode = mode if mode is not None else serve_mode()
     if mode not in MODES:
         raise ValueError(f"mode must be one of {MODES}, got {mode!r}")
+    if cache_answer is None and mode != MODE_PREFER:
+        # `off` has no other answer, so a missing callback would be a silent
+        # "nothing to serve"; `record` never needs one and passes the real
+        # callback so the never-called contract stays visible at the call site.
+        raise ValueError(
+            f"cache_answer may be None only in {MODE_PREFER!r} mode (the "
+            f"deferred shape), got mode={mode!r}")
     coordinate = f"Point:{point_id}"
     if mode == MODE_OFF:
         return ServedAnswer(read=READ_POINT_BY_ID, coordinate=coordinate,
@@ -865,16 +956,20 @@ def serve_point(*, tenant: tuple[str, str], point_id: str,
                 conn.close()
 
     def _fell_back(reason: str) -> ServedAnswer:
-        # The count happens AFTER the cache answers: a fallback that itself
-        # failed did not land, and counting it would report a served read that
-        # never existed (the metric's meaning is "answered by the cache", which
-        # is what an operator alerts on). A cache failure raises out of here, so
-        # this request contributes no increment.
-        props = cache_answer()
-        note_fallback(reason)
-        return ServedAnswer(read=READ_POINT_BY_ID, coordinate=coordinate,
-                            served_from="cache", props=props,
-                            fallback_reason=reason)
+        if cache_answer is None:
+            # The DEFERRED shape: the caller's cache read must run on a lane
+            # this seam cannot reach (see `CacheAnswerRequired`). The reason is
+            # still the seam's — that is the decision being kept here — and
+            # nothing is counted, because nothing has answered yet.
+            raise CacheAnswerRequired(reason)
+        # The count happens AFTER the cache answers (`answered_by_cache`): a
+        # fallback that itself failed did not land, and counting it would report
+        # a served read that never existed (the metric's meaning is "answered by
+        # the cache", which is what an operator alerts on). A cache failure
+        # raises out of here, so this request contributes no increment.
+        return answered_by_cache(read=READ_POINT_BY_ID,
+                                 coordinate=coordinate,
+                                 props=cache_answer(), reason=reason)
 
     from .cache_projection import CacheProjectionError
     from .record_projection import RecordProjectionError

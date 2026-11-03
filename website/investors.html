@@ -283,7 +283,11 @@
        `text-wrap: pretty` re-breaks a paragraph to avoid ending it on a short
        lone word, which this copy does easily: the third capability gap ends on
        "modeling." alone — 82px against a 592px measure — and with the
-       declaration ends at 165px, and the `.profile` cells are not exempt. */
+       declaration ends at 165px. This rule is deliberately not scoped away
+       from `.profile`: the Progress lists inside it need the same re-break.
+       Paragraph prose in a `.profile` cell is not covered here — `.profile p`
+       carries its own `text-wrap: pretty` below, because a `.bullets li`
+       selector never reaches a paragraph. */
     .bullets { list-style: none; margin-top: 1.15rem; }
     .bullets li { display: flex; gap: 0.7rem; align-items: baseline; font-size: 0.95rem; text-wrap: pretty; }
     .bullets li + li { margin-top: 0.4rem; }
