@@ -51,7 +51,9 @@ verdict table, not as an exception. The chain:
 
     G0  the pre-registration commit resolves, carries the artifact, and is an
         ancestor of HEAD                                   → REFUSED (#9075)
-    G1  the corpus matches the sha the pre-registration froze → REFUSED (#9075)
+    G1  the corpus matches the freeze the pre-registration MADE — the fixture
+        revision when the record freezes ``corpus.fixtures_hash``, a turns
+        file's sha when it freezes ``corpus.sha256``      → REFUSED (#9075)
     G2  TORTOISE_DB_URI is a SEARCHABLE backend (not embedded/lite) — an
         embedded store never searches, so S3 resolves nothing and supersession
         records are structurally zero                           → REFUSED
@@ -215,6 +217,121 @@ END = "=== CAPSTONE-VERDICT-END ==="
 
 def corpus_sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+#: The corpus freeze forms a pre-registration may make. ⛔ TWO, because the record
+#: that LANDED (#9507, `docs/evidence/7949-capstone/preregistration.json`) freezes a
+#: **fixture revision** — ``corpus.fixtures_hash`` over ``corpus.path`` — because
+#: the corpus is a fixture TREE, not a turns file; ``corpus.sha256`` is the shape
+#: an earlier hypothesis assumed and is still honoured where a record carries it.
+#: They are not alternatives: a record that freezes both must satisfy both.
+FREEZE_SHA256 = "sha256"
+FREEZE_FIXTURES = "fixtures_hash"
+
+
+def _normalise_digest(value: object) -> str:
+    """A digest as bare lowercase hex — ``sha256:<hex>`` and ``<hex>`` agree.
+
+    The pre-registration writes ``sha256:dd7e…`` while ``hashlib`` and
+    ``compute_fixtures_hash`` return bare form, so comparing the two spellings
+    verbatim would report a mismatch on the SAME revision.
+    """
+    text = str(value or "").strip().lower()
+    return text[len("sha256:"):] if text.startswith("sha256:") else text
+
+
+def fixtures_hash(root: Path | None = None) -> str | None:
+    """This checkout's fixture-revision digest, or ``None`` when unreadable.
+
+    ``None`` rather than an exception: G1 must REFUSE with a reason it can print,
+    and a probe that raises emits no verdict table while ``tee`` truncates the
+    artifact — the same failure mode the G0 shape arms exist to avoid. The import
+    is late and the repo root is put on ``sys.path`` first, because this file is
+    run as a SCRIPT (``sys.path[0]`` is then the probes directory, not the root).
+    """
+    base = ROOT if root is None else root
+    if str(base) not in sys.path:
+        sys.path.insert(0, str(base))
+    try:
+        from tests.eval.write_path.corpus import compute_fixtures_hash
+
+        return compute_fixtures_hash(base / "tests" / "eval" / "write_path")
+    except Exception:  # noqa: BLE001 — any failure here means "cannot check"
+        return None
+
+
+def corpus_freeze(frozen: dict, *, corpus_sha: str,
+                  root: Path | None = None) -> tuple[dict | None, str]:
+    """G1 — is this run's corpus the corpus the pre-registration FROZE?
+
+    Returns ``(freeze, reason)``: ``freeze`` is the record G1 VERIFIED (and the
+    log carries it, so a reader can see which artifact was checked), ``reason``
+    is why the gate refused.
+
+    ⛔ TWO FREEZE FORMS, because a pre-registration may freeze two different
+    artifacts and comparing one against the other is how this gate became a
+    PERMANENT refusal. The landed record freezes ``corpus.fixtures_hash``; this
+    gate read only ``corpus.sha256``, so it refused the ONE legitimate record with
+    a reason that was false about it ("the pre-registration freezes no
+    corpus.sha256") — one gate before the real blocker. Measured at `8e49b7d2a`:
+
+        # run: REFUSED — the pre-registration freezes no corpus.sha256 — G1
+        #      would be a no-op, so the run would measure an arbitrary corpus …
+
+    `capstone_measure.py::check_corpus` reads the same record the way it was
+    written (``compute_fixtures_hash`` against ``corpus.fixtures_hash``); two
+    readings of one freeze that disagree is the defect, not the fix.
+
+    ⛔ WHY A FIXTURES-HASH MATCH DOES NOT ALSO REFUSE A TURNS FILE OUTSIDE
+    ``corpus.path``: the record freezes a fixture TREE and names no turns
+    artifact, so a containment rule would assert a binding no artifact states.
+    Its own ``interface_note`` says reconciling the two corpora is a follow-up's
+    job. What this gate CAN do is refuse a revision mismatch and record the
+    handed artifact's own sha BESIDE the frozen one, so the log never claims the
+    two are the same artifact.
+
+    Fail closed on a record that freezes NEITHER: an unfrozen corpus makes G1 a
+    no-op, and the run would then measure whatever it was handed and stamp that
+    sha on every row as the pre-registered one (V7 cannot catch it — row sha and
+    log sha agree by construction).
+    """
+    forms = [name for name in (FREEZE_SHA256, FREEZE_FIXTURES) if frozen.get(name)]
+    if not forms:
+        return None, (
+            "the pre-registration freezes no corpus — neither corpus.sha256 nor "
+            "corpus.fixtures_hash — so G1 would be a no-op: the run would "
+            "measure an arbitrary corpus and report it as the pre-registered one")
+    freeze: dict = {"path": frozen.get("path"), "verified": {}}
+    if FREEZE_SHA256 in forms:
+        wanted = _normalise_digest(frozen[FREEZE_SHA256])
+        if wanted != _normalise_digest(corpus_sha):
+            return None, (
+                f"corpus sha256 {corpus_sha} != the pre-registered "
+                f"{frozen[FREEZE_SHA256]} — a run on a different corpus cannot "
+                "decide a threshold frozen against this one")
+        freeze["verified"][FREEZE_SHA256] = wanted
+    if FREEZE_FIXTURES in forms:
+        wanted = _normalise_digest(frozen[FREEZE_FIXTURES])
+        actual = fixtures_hash(root)
+        if actual is None:
+            return None, (
+                "the pre-registration freezes corpus.fixtures_hash "
+                f"{frozen[FREEZE_FIXTURES]} but this checkout's fixture "
+                "revision cannot be computed, so G1 cannot confirm the corpus "
+                "the record froze")
+        if wanted != _normalise_digest(actual):
+            return None, (
+                f"fixture revision {actual} != the pre-registered "
+                f"{frozen[FREEZE_FIXTURES]} — this checkout's corpus "
+                f"({frozen.get('path')!r} in the record) is not the one the "
+                "record froze")
+        freeze["verified"][FREEZE_FIXTURES] = _normalise_digest(actual)
+    # `handed_is_frozen` states, in the machine record, whether the turns file
+    # this run consumed is ITSELF the artifact the record froze. False is the
+    # normal case under the landed record: the frozen artifact is the fixture
+    # tree, and `corpus.sha256` on this log is attribution, not a second freeze.
+    freeze["handed_is_frozen"] = FREEZE_SHA256 in freeze["verified"]
+    return freeze, ""
 
 
 def load_corpus(path: Path) -> list[dict]:
@@ -499,6 +616,15 @@ def emit_log(*, head: str, prereg: dict, corpus: dict, run: dict,
         f"# pre-registration: {prereg.get('sha')} ({prereg.get('status')})",
         f"# corpus: {corpus.get('path')} sha256={corpus.get('sha256')} "
         f"turns={corpus.get('turns')}",
+        *(["# corpus freeze: "
+           + " ".join(f"{k}={v}"
+                     for k, v in sorted(corpus["freeze"]["verified"].items()))
+           + (f"  record corpus.path={corpus['freeze'].get('path')!r}"
+              if corpus["freeze"].get("path") else "")
+           + ("" if corpus["freeze"].get("handed_is_frozen", True) else
+              "  (the handed turns file is attribution, not the frozen "
+              "artifact)")]
+          if (corpus.get("freeze") or {}).get("verified") else []),
         f"# run: {run.get('status')} — {run.get('reason')}",
     ]
     observed = run.get("steps_observed") or []
@@ -866,16 +992,24 @@ def main(argv: list[str] | None = None) -> int:
     # was handed and stamped that corpus's sha on every row as if it were the
     # pre-registered one. V7 cannot catch that: it compares a row's sha to the
     # log's own, which agree by construction.
-    if not frozen.get("sha256"):
-        return refuse(
-            "the pre-registration freezes no corpus.sha256 — G1 would be a "
-            "no-op, so the run would measure an arbitrary corpus and report it "
-            "as the pre-registered one", prereg_ok=True, code=2, corpus=corpus)
-    if frozen["sha256"] != sha:
-        return refuse(
-            f"corpus sha256 {sha} != the pre-registered {frozen['sha256']} — "
-            "a run on a different corpus cannot decide a threshold frozen "
-            "against this one", prereg_ok=True, code=2, corpus=corpus)
+    #
+    # ⛔ WHICH FREEZE is verified is `corpus_freeze`'s question, and the answer is
+    # recorded in the log (`corpus.freeze`): the landed record freezes a FIXTURE
+    # REVISION, not a turns file's sha, and reading only `corpus.sha256` refused
+    # the one legitimate record forever (#9737's closing comment, measured here).
+    freeze, why = corpus_freeze(frozen, corpus_sha=sha)
+    if freeze is None:
+        return refuse(why, prereg_ok=True, code=2, corpus=corpus)
+    corpus["freeze"] = freeze
+    if not freeze["handed_is_frozen"]:
+        # The turns file is an input DERIVED from the frozen revision, and the
+        # record names no turns artifact — say so rather than let the row's
+        # `corpus_sha256` read as the frozen digest.
+        corpus["freeze"]["note"] = (
+            "the record freezes the FIXTURE REVISION; the turns artifact handed "
+            "with --corpus is recorded under corpus.sha256 for attribution and "
+            "is NOT itself the frozen artifact (the record's own "
+            "interface_note)")
     try:
         turns = load_corpus(corpus_path)
     except (ValueError, json.JSONDecodeError) as e:

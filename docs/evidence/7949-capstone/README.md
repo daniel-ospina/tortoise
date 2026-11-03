@@ -108,7 +108,9 @@ that carries none (#9116), so it refuses at G5 for **every** input and its table
 measures the other way round: G0 reads the frozen record out of the **commit**
 (`git show <sha>:docs/evidence/7949-capstone/preregistration.json`), G1 compares this checkout's
 `fixtures_hash` with the frozen pin (the freeze the record actually made — `capstone_run.py`'s
-G1 wants a corpus file's sha, which the record does not freeze, so it refuses one gate later),
+G1 was the same freeze read the wrong way round: it demanded a `corpus.sha256` the landed record
+does not carry and so refused it at G1 for as long as the record existed, which is fixed in
+#10370; what remains of its refusal is G5, #9116),
 every bar is **parsed out of the record** by `parse_bars` (none is typed in the probe), and then
 one pass over the seven pre-registered sessions runs through
 `TortoiseSDK(graph_name=<fresh disposable graph>).capture_session(turns, session_id=<sid>)`.

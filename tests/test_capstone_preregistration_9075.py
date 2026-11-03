@@ -2402,8 +2402,8 @@ def test_the_content_arm_stops_covering_the_log_the_moment_it_could_score(
     anywhere.
 
     The PREREG STATUS is deliberately NOT in this list (#9089 review cycle 4, measured): the
-    bundle's own documented re-run passes G0 and refuses at G1, emitting `prereg.status=OK` with
-    every number null — a log that proves it measured nothing. Requiring `ABSENT` refused to
+    bundle's own documented re-run passes G0 and refuses after it, emitting `prereg.status=OK`
+    with every number null — a log that proves it measured nothing. Requiring `ABSENT` refused to
     exempt it, which turned that documented command into an ordering violation. What the run
     READ cannot make laundering possible; what it MEASURED can, and that is what these cases are.
     """
@@ -2421,8 +2421,10 @@ def test_a_post_g0_refusal_with_no_number_is_exempt(tmp_path, monkeypatch):
     """#9089 review cycle 4 — the bundle's OWN documented re-run must not turn CI red.
 
     Measured at this head: `capstone_run.py --prereg <sha> --corpus battery/config/corpus.json`
-    passes G0 (the registration is committed) and refuses at G1 (no frozen corpus sha), so it
-    emits `prereg.status=OK`, `run.status=REFUSED` and every numerator/denominator null. An
+    passes G0 (the registration is committed) and refuses on the corpus it was handed — after
+    #10370 G1's fixture-revision freeze VERIFIES, and the refusal is the input, not the
+    thresholds — so it emits `prereg.status=OK`, `run.status=REFUSED` and every
+    numerator/denominator null. An
     earlier revision of the predicate exempted only `ABSENT` and therefore refused this log —
     which, once committed by the README's own `| tee`, reds the ordering check for every PR on
     a log that provably measured nothing.

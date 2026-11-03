@@ -745,8 +745,9 @@ def _log_declares_no_measurement(log: Path) -> tuple[bool, str]:
     ⛔ AND THE PREREG STATUS IS NOT AN EXEMPTION CONDITION AT ALL (#9089 review cycle 4,
     MEASURED). A revision of this arm required ``prereg.status == "ABSENT"``; the bundle's own
     documented re-run refutes that, measured at this head: ``capstone_run.py --prereg <sha>
-    --corpus battery/config/corpus.json`` passes G0 (the artifact is committed) and refuses at G1
-    (the registration freezes no corpus sha), emitting ``prereg.status=OK``,
+    --corpus battery/config/corpus.json`` passes G0 (the artifact is committed), passes G1's
+    fixture-revision freeze (``#10370``) and refuses on the corpus it was handed — a scenario
+    corpus, not a turns file — emitting ``prereg.status=OK``,
     ``run.status=REFUSED``, and every numerator/denominator null — a log that PROVES it measured
     nothing. Refusing to exempt it turns the bundle's own acceptance command into an ordering
     violation and a repo-wide red. The question here is what the log MEASURED, which the two arms

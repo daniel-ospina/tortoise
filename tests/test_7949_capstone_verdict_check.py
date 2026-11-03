@@ -2211,6 +2211,117 @@ def test_a_missing_model_key_is_refused_not_measured_as_an_empty_extraction(monk
     assert not ok and "explicit" in why, why
 
 
+# ── G1 verifies the freeze the record ACTUALLY made (#9737) ───────────────
+
+def _landed_corpus_block() -> dict:
+    """The corpus block of the record COMMITTED in this repo, read from the file.
+
+    Read, never typed: a hard-coded digest here would be the same unverifiable
+    claim one level up, and the freeze this bundle ships is the thing under test.
+    """
+    record = json.loads((_REPO / "docs" / "evidence" / "7949-capstone"
+                         / "preregistration.json").read_text())
+    return record["corpus"]
+
+
+def test_g1_verifies_the_fixtures_hash_the_landed_record_freezes():
+    """G1 reads the freeze the record HAS, and says which artifact it verified.
+
+    Measured at `8e49b7d2a`, the pre-fix gate refused the only pre-registration
+    this repo has:
+
+        # run: REFUSED — the pre-registration freezes no corpus.sha256 …
+
+    That sentence is FALSE about `preregistration.json` (it freezes
+    ``corpus.fixtures_hash``, which `compute_fixtures_hash` verifies in this
+    checkout) — so the probe's whole documented refusal chain (G2/G3/G5) was
+    unreachable, and every G1 test in this file hand-built the field it wanted.
+
+    Non-vacuity: pre-fix this returns ``(None, "… freezes no corpus.sha256 …")``.
+    """
+    freeze, why = probe.corpus_freeze(_landed_corpus_block(),
+                                      corpus_sha="a" * 64)
+    assert freeze is not None, why
+    assert sorted(freeze["verified"]) == [probe.FREEZE_FIXTURES], freeze
+    assert freeze["verified"][probe.FREEZE_FIXTURES] == probe._normalise_digest(
+        probe.fixtures_hash()), "G1 verified a digest that is not this checkout's"
+    # The handed turns artifact is NOT the frozen artifact, and the machine
+    # record says so rather than letting the row's corpus_sha256 read as it.
+    assert freeze["handed_is_frozen"] is False, freeze
+
+
+def test_a_fixture_revision_mismatch_is_refused_naming_both_digests():
+    """A checkout whose corpus is not the frozen one must be REFUSED, not scored.
+
+    The pre-registration's own `interface_note`: "a run handed a DIFFERENT corpus
+    must mismatch G1 and be refused, never scored". Verifying the freeze is
+    worthless if a mismatch is not the thing that stops the run.
+    """
+    frozen = {"path": "tests/eval/write_path",
+              "fixtures_hash": "sha256:" + "0" * 64}
+    freeze, why = probe.corpus_freeze(frozen, corpus_sha="a" * 64)
+    assert freeze is None
+    assert "fixture revision" in why, why
+    assert "0" * 64 in why, why                        # the frozen digest
+    assert (probe.fixtures_hash() or "") in why, why    # the actual one
+    assert "tests/eval/write_path" in why, why         # and which corpus that is
+
+
+def test_a_record_that_freezes_both_artifacts_must_satisfy_both():
+    """Neither form is an alternative that short-circuits the other.
+
+    A record carrying both a turns-file sha AND a fixture revision freezes two
+    artifacts; letting the first match win would score a run on a corpus whose
+    fixtures had moved.
+    """
+    frozen = {"sha256": "a" * 64, "fixtures_hash": "sha256:" + "0" * 64}
+    assert probe.corpus_freeze(frozen, corpus_sha="b" * 64)[0] is None
+    freeze, why = probe.corpus_freeze(frozen, corpus_sha="a" * 64)
+    assert freeze is None and "fixture revision" in why, why
+    ok, why = probe.corpus_freeze(
+        {"sha256": "sha256:" + "a" * 64, "fixtures_hash": probe.fixtures_hash()},
+        corpus_sha="a" * 64)
+    assert ok is not None, why
+    assert sorted(ok["verified"]) == [probe.FREEZE_FIXTURES,
+                                      probe.FREEZE_SHA256], ok
+    assert ok["handed_is_frozen"] is True, ok
+
+
+def test_the_landed_preregistration_passes_g1_and_the_log_records_the_freeze(
+        tmp_path, monkeypatch):
+    """The REAL record, through the REAL reader, past G1 — the leg no test had.
+
+    Every other G1 test stubs `read_preregistration` with a hand-built record, so
+    a gate that could never pass on the artifact this repo ships stayed green.
+    This one reads `docs/evidence/7949-capstone/preregistration.json` out of the
+    commit at HEAD and requires the run to get PAST G1 (to G2, which refuses in a
+    keyless/no-datastore checkout) with the verified freeze in the log.
+
+    Non-vacuity: pre-fix, exit is 2 and `run.reason` says "freezes no
+    corpus.sha256"; post-fix it is 3 (G2) and the reason is about the backend.
+    """
+    monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+    monkeypatch.delenv("TORTOISE_API_URL", raising=False)
+    corpus = tmp_path / "corpus.json"
+    corpus.write_text(json.dumps([{"role": "user", "content": "hello"}]))
+    out = tmp_path / "landed-prereg.log"
+    code = probe.main(["--prereg", HEAD, "--corpus", str(corpus),
+                       "--out", str(out)])
+    text = out.read_text()
+    record = cvc.extract_block(text)
+    reason = record["run"]["reason"]
+    assert "freezes no corpus" not in reason, reason
+    assert code == 3, (code, reason)
+    assert record["run"]["gate_failed"] == 3, record["run"]
+    freeze = record["corpus"]["freeze"]
+    assert freeze["verified"][probe.FREEZE_FIXTURES] == (
+        probe._normalise_digest(probe.fixtures_hash()))
+    assert freeze["handed_is_frozen"] is False, freeze
+    # The human header carries it too — a reader of the log alone can see which
+    # artifact G1 checked, before reaching the machine block.
+    assert "# corpus freeze: fixtures_hash=" in text
+
+
 def test_a_prereg_that_freezes_no_corpus_is_refused_not_a_no_op(tmp_path, monkeypatch):
     """G1 must fail closed when the pre-registration carries no corpus block.
 
