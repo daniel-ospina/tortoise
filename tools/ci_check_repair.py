@@ -189,21 +189,23 @@ QUEUED_STATUSES = frozenset({"queued", "waiting", "requested", "pending"})
 #: jobs at 11-22 min), and a 1200 s floor selects the measured-MEDIAN wait rather than
 #: an anomaly.
 #:
-#: THE BUDGET THIS FLOOR DEFERS TO IS DERIVED IN `tools/ci_queue_health.py`, NOT IN
-#: `ci-wall-clock.md`: `DEFAULT_MAX_PR_WAIT_SECONDS = 90 * 60.0` there turns §1's max
-#: into a round number — *"A budget at or under that max would fire on the measured-
-#: NORMAL population and become an annotation nobody reads, so this is the first round
-#: number past it"* — and 5400 s sits on the same side of the same measurement: past
-#: the measured maximum, so a run named here has outlasted every first-job wait this
-#: repo has recorded.
+#: THE BUDGET THIS FLOOR DEFERS TO, cited at each place for what it actually says:
+#: `docs/ops/ci-wall-clock.md` §1 line 50 is the MEASUREMENT (the table, 54 `python-ci`
+#: runs: p50 29.9 min, p95 77.0 min, max 81.9 min wait for a run's FIRST job);
+#: `tools/ci_queue_health.py:300` is the DERIVED VALUE,
+#: `DEFAULT_MAX_PR_WAIT_SECONDS = 90 * 60.0`; and `docs/ops/ci-wall-clock.md` §6
+#: (lines 326-332) records that derivation in its own words — *"The budget's default is
+#: derived from this document's own §1 measurement (max first-job wait 81.9 min →
+#: 90 min), so it fires past the measured-normal population rather than on it."* 5400 s
+#: sits on the same side of the same measurement: past the measured maximum, so a run
+#: named here has outlasted every first-job wait this repo has recorded.
 #:
-#: ⛔ CITE THE RIGHT SECTION, because a wrong attribution here discredits the whole
-#: derivation. `ci-wall-clock.md` §6 opens *"**It does not bound queue wait.** §1. No
-#: `timeout-minutes` can."* — it is the statement that the document does NOT derive a
-#: queue-wait budget, and no 90-minute figure appears in that document at all. §1 is
-#: the MEASUREMENT; the queue-health tool is the derivation. A lane re-deriving 5400 s
-#: from a §6 citation finds the opposite of a justification and can only conclude the
-#: floor was invented.
+#: ⛔ CITE EACH PLACE FOR WHAT IT SAYS. §6 OPENS with *"**It does not bound queue
+#: wait.** §1. No `timeout-minutes` can."* — that sentence is about `timeout-minutes`,
+#: and the SAME BULLET, three lines later, supplies the 81.9 → 90 min derivation. Read
+#: as a denial of a queue-wait budget it is a misreading that then discards the one
+#: section that supports this floor. A lane re-deriving 5400 s follows §1
+#: (measurement) → §6 / `ci_queue_health.py:300` (budget).
 #:
 #: WHY THE ORDERING IS LOAD-BEARING: the repair for this class evaluates to
 #: cancel-then-rerun, and cancelling a run that is merely waiting for a slot discards

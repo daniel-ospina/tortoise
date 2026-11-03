@@ -1838,11 +1838,13 @@ def test_a_configured_budget_of_one_still_escalates_the_repair_it_forbids():
 def test_the_zero_job_floor_is_past_the_measured_queue_wait():
     """⭐ P1 (review): the floor must sit PAST the measured-normal population.
 
-    `docs/ops/ci-wall-clock.md` §1 (54 `python-ci` runs) measures the wait for a run's
-    FIRST job: p50 29.9 min, p95 77.0 min, max 81.9 min. The budget derivation this
-    floor defers to lives in `tools/ci_queue_health.py` (`DEFAULT_MAX_PR_WAIT_SECONDS
-    = 90 * 60.0`, "the first round number past" that max) — NOT in `ci-wall-clock.md`
-    §6, which says of its own document "It does not bound queue wait". The floor was
+    `docs/ops/ci-wall-clock.md` §1 line 50 (54 `python-ci` runs) measures the wait for a
+    run's FIRST job: p50 29.9 min, p95 77.0 min, max 81.9 min. The budget derivation
+    this floor defers to is `tools/ci_queue_health.py:300`
+    (`DEFAULT_MAX_PR_WAIT_SECONDS = 90 * 60.0`, "the first round number past" that max),
+    and `ci-wall-clock.md` §6 lines 326-332 records the same derivation in its own
+    words ("max first-job wait 81.9 min → 90 min, so it fires past the measured-normal
+    population rather than on it"). The floor was
     1200 s, i.e. it selected the MEDIAN wait, and the repair for this class is
     cancel-then-rerun: at the median it makes the median run slower and adds one more
     run to the queue it is starved behind.
@@ -2464,7 +2466,8 @@ def test_a_post_cancel_budget_exhaustion_is_not_the_pre_cancel_skip(monkeypatch)
     just cancelled a run and left it with no replacement attempt.
 
     Discriminating: pre-fix this returns 'no_budget', indistinguishable from the
-    pre-POST skip.
+    pre-POST skip — and the poll count below is what makes the IN-LOOP branch itself
+    load-bearing, because both it and the loop fallthrough answer 'cancel_unobserved'.
     """
     monkeypatch.setattr(R, "_sleep", lambda s: None)
     verbs: list[str] = []
@@ -2473,6 +2476,7 @@ def test_a_post_cancel_budget_exhaustion_is_not_the_pre_cancel_skip(monkeypatch)
     # Spend the remainder on the FIRST settle poll, so the loop's own budget check trips
     # on the next iteration — AFTER the cancel POST has been accepted.
     monkeypatch.setattr(R, "_CANCEL_SETTLE_SPENT_S", budget - 0.5)
+    seen = {"runs": 0}  # the pre-act re-measurement, then one read per settle poll
 
     def fake(a, **_kw):
         path = a[-1] if a else ""
@@ -2480,14 +2484,23 @@ def test_a_post_cancel_budget_exhaustion_is_not_the_pre_cancel_skip(monkeypatch)
             return {"headRefOid": "a" * 40}
         if "jobs" in path:
             return {"total_count": 0}
-        if a[-2].endswith("/runs/1"):
-            R._CANCEL_SETTLE_SPENT_S = budget + 1.0  # a slow read inside the loop
-            return {"status": "queued", "run_attempt": 1}
+        seen["runs"] += 1
+        if seen["runs"] > 1:
+            # A read INSIDE the settle loop is slow enough to spend the pass's remaining
+            # budget — real wall clock, which is what `_cancel` compares against. It is
+            # keyed on the PRE-ACT read's count, not on the argv shape: every `gh_json`
+            # call here passes the API path as the LAST element, so a predicate on
+            # `a[-2]` (always the literal "api") can never fire.
+            R._CANCEL_SETTLE_SPENT_S = budget + 1.0
         return {"status": "queued", "run_attempt": 1}
 
     monkeypatch.setattr(R, "gh_json", fake)
     assert R._cancel("o/r", run(1, "ci.yml", "pending")) == "cancel_unobserved"
     assert verbs == ["cancel"], "the POST was issued before the budget ran out"
+    assert seen["runs"] == 2, (
+        "the in-loop budget check must STOP the poll: one pre-act read plus exactly one "
+        f"settle read, not all {R._CANCEL_SETTLE_POLLS} polls falling through to the "
+        "same state")
 
 
 def test_a_run_whose_jobs_appear_before_the_cancel_is_never_cancelled(monkeypatch):
