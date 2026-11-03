@@ -588,8 +588,16 @@ def test_5153_served_document_pins_the_canonical_mcp_key_variable():
     per-surface split and the open dependency (`agent-infra#1117`) instead of
     generalising."""
     skill = LIVE_SKILL.read_text(encoding="utf-8")
-    assert "is the canonical name, and the **only** one any code path" in skill, (
-        "the Pi step must state that TORTOISE_API_KEY is the only name read")
+    # The claim is "canonical, and the name every recipe uses" — not "the only
+    # name any code path reads". Since #5200 the MCP HTTP client also accepts
+    # `TORTOISE_MCP_API_KEY` as an alias (the fleet host exports it, #10605), so
+    # an absolute "only one name" would be false, and the disclosure is what keeps
+    # a reader from renaming the key and getting an empty Bearer (#5153).
+    assert "is the canonical name, and the one every recipe in this" in skill, (
+        "the Pi step must state which name is canonical for every recipe")
+    assert ("additionally accepts `TORTOISE_MCP_API_KEY` as an alias") in skill, (
+        "the alias the MCP HTTP client accepts must be disclosed, or the "
+        "'only one name' reading returns (#5200, #10605)")
     assert 'export TORTOISE_API_KEY="$TORTOISE_MCP_API_KEY"' in skill, (
         "the Pi step must show the alias a separately-named MCP credential needs")
 
@@ -597,9 +605,18 @@ def test_5153_served_document_pins_the_canonical_mcp_key_variable():
         re.findall(r'"Authorization":\s*"Bearer \$\{([A-Z0-9_]+)\}', skill))
     assert referenced, (
         "the served document must carry an env-indirect Bearer snippet")
-    client = (REPO_ROOT / "tortoise" / "mcp_client.py").read_text(encoding="utf-8")
-    unread = sorted(v for v in referenced
-                    if f'os.environ.get("{v}"' not in client)
+    # Ask the CLIENT what it reads, rather than pattern-matching its source. The
+    # precedence loop (a names tuple consulted with `os.environ.get(name)`) has no
+    # per-variable literal for a shape-pin to find — pinning one redded a correct
+    # fix (#10727) — while "the name merely appears somewhere in mcp_client.py"
+    # would pass on a docstring or a comment, which is exactly the #5153 false
+    # PASS this guard exists to prevent. `_ENV_KEY_NAMES` is the declaration the
+    # resolution loop consumes, so it is shape-independent AND discriminating.
+    sys.path.insert(0, str(REPO_ROOT))
+    from tortoise import mcp_client as _client_module
+
+    read_names = set(_client_module._ENV_KEY_NAMES)
+    unread = sorted(v for v in referenced if v not in read_names)
     assert not unread, (
         "the served Bearer snippet references a variable the MCP HTTP client "
         f"never reads ({', '.join('$' + v for v in unread)}) — the 401 in #5153")

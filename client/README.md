@@ -147,7 +147,8 @@ as `unconfigured` (exit `4`) when that daemon is down. Declare the endpoint
 
 | Module | Purpose |
 |---|---|
-| `tortoise/mcp_client.py` | The network driver — fastmcp Client + BearerAuth + StreamableHttpTransport (`status`/`available`/`list_tools`/`call_tool`), sync wrappers over fastmcp's async API |
+| `tortoise/mcp_client.py` | The network driver — fastmcp Client + a per-request Bearer provider + StreamableHttpTransport (`status`/`available`/`list_tools`/`call_tool`), sync wrappers over fastmcp's async API. The credential is re-resolved on every request and a credential-less auth rejection raises `MCPKeyEmptyError` (`MCP-KEY-EMPTY`), never an empty `Authorization` header (#10605) |
+| `tortoise/mcp_bridge.py` | The stdio ↔ Streamable-HTTP bridge (`python3 -m tortoise.mcp_bridge`) — so a harness config declares a local command instead of a static `Authorization: Bearer ${VAR}` header that is expanded once at process start (#10605) |
 | `tortoise/config.py` | Shared config constants + env conventions (connection vars live in `mcp_client`: `TORTOISE_MCP_URL` / `TORTOISE_API_KEY`) |
 | `tortoise/exceptions.py` | Shared error taxonomy surfaced across the tool boundary |
 | `tortoise/status_vocabulary.py` | The **one recorded status vocabulary** (`available` / `empty` / `degraded` / `unconfigured`) — roadmap §7 item 9; the single declaration both client surfaces import |

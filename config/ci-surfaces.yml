@@ -1280,6 +1280,12 @@ surfaces:
   # would run on no change that can break it.
   - test_own_key_selfservice_2446.py
   - test_mcp_client.py
+  # #10605: the stdio↔HTTP bridge's guards (per-request credential resolution,
+  # the named MCP-KEY-EMPTY refusal, session propagation). Registered here
+  # because `tortoise/mcp_bridge.py` is an exact `api` SOURCE_PATTERNS entry —
+  # a bridge-only diff replaces the `core` fallback, so the guard has to run
+  # from this surface or it runs nowhere (the #7076 self-guard class).
+  - test_mcp_bridge.py
   - test_mcp_http.py
   - test_mcp_rename_table.py  # #4282: Phase 0.3 rename table — old name → new name, per tool
   - test_mcp_route_challenge.py  # #2864: RFC 9728 challenge on /mcp 401s + /mcp route canonicalization (docker lane)
@@ -8853,6 +8859,7 @@ durations:
   test_file_human_approval.py: 4.3  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 2.4
   test_kind_eval_set.py: 2.6  # ci-timing top-15 2026-10-20 (run 39467226356); was 1.5
   test_mcp_client.py: 1.6  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 1.8
+  test_mcp_bridge.py: 16.0  # #10605 review P2 (#3400/#4348 trap): the file is registered on the `api` surface (it IS the bridge's guard) and had NO row here, so it packed at the flat 2.0 s `DEFAULT_FAST_WEIGHT` although a file ADDED BY A PR can never carry a CI junit reading (the refresher samples push-to-main runs only) — that is the `# unmeasured` convention, not a CI measurement. MEASURED on this host at the fix head, embedded carve-out lane, `--junitxml`, 26 collected cases: sum of `testcase/@time` = 16.0 s, whole-file wall 16.41 s (the neighbouring rows' rule is the higher — the wall — and the per-test sum IS the packer's unit, so the sum is declared). The cost is real work, not a slow import: 26 tests spawn `python -m tortoise.mcp_bridge` as a REAL subprocess (the module's own doctrine — the header on the wire is the observable) plus two uvicorn upstreams per test. Do NOT drop the row without re-deriving: without it the file also counts as unweighted in `--integrity`'s `duration_coverage_issues` ratio. `tools/ci_timing.py --refresh-durations` replaces this from junit once a push-to-main sweep collects it.
   test_sdk_props_coercion.py: 4.6  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 1.9
   test_volunteer_pipeline.py: 4.0  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 2.6
   eval/retrieval/test_1348.py: 6.5  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 6.1
