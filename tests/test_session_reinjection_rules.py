@@ -28,7 +28,6 @@ constant) — no graph, no network.
 """
 from __future__ import annotations
 
-import re
 import subprocess
 import sys
 from pathlib import Path
@@ -53,6 +52,7 @@ from tortoise.session_reinjection import (
     DEFAULT_REINJECTION_SEED_WINDOW,
     DEFAULT_REINJECTION_TOTAL_ITEMS,
     SeededSession,
+    reader_window_displacement,
     reinjection_merge_order,
     seeded_sessions,
     source_session_chunk_pass,
@@ -257,15 +257,12 @@ def test_fetch_is_one_query_with_the_filter_in_the_query():
 
 def test_fetch_constrains_event_kind_to_the_turn_shape():
     """``pointKind``'s vocabulary is open, so the turn kind alone does not
-    prove a node is a turn: a graph seeded BEFORE ``#10000`` by the hosted
-    demo/dashboard seed holds ``pointKind='event'`` points with NO
-    ``is_episodic`` (its body IS ``[role]``-tagged, so ``is_episodic`` is the
-    conjunct that excludes them). Since ``#10000`` that seed writes no turn
-    node at all (§9.1/D1: the transcript is Postgres'), so no writer in this
-    tree produces that shape — the clause is kept because a legacy graph still
-    holds those nodes, and it must stay excluded. The default (turn) kind must
-    carry the shape predicate; the eval's chunk A/B must NOT (chunks are
-    role-prefixed windows whose shape is already pinned by the kind)."""
+    prove a node is a turn: the hosted demo/dashboard seed writes
+    ``pointKind='event'`` with NO ``is_episodic`` (its body IS
+    ``[role]``-tagged, so ``is_episodic`` is the conjunct that excludes
+    it). The default (turn) kind must carry the shape predicate; the eval's
+    chunk A/B must NOT (chunks are role-prefixed windows whose shape is
+    already pinned by the kind)."""
     proj = _FakeProj(rows=[])
     source_session_chunk_pass(proj, ["seed1"], pool_ids=[])
     turn_cypher, _ = proj.g.calls[0]
@@ -605,21 +602,10 @@ def test_the_guard_arm_requires_a_pool_order_composition():
     assert _run._pool_order_arm_on(False, False, True) is False
     assert _run._pool_order_arm_on(False, True, False) is False
 
-    for kwargs in (# the arms are pinned EXPLICITLY here, not inherited from
-                   # the environment (#10629 review): cases 1-2 pass neither
-                   # composition, so ``run_evaluation`` would resolve both from
-                   # the documented env twins (``TORTOISE_LME_COVERAGE_LOOP`` /
-                   # ``TORTOISE_LME_SESSION_REINJECTION``) — an exported value
-                   # armed a pool-order composition and made the expected
-                   # refusal DID-NOT-RAISE in the very test that pins the gate.
-                   # Pinning them also asserts the POSITIVE side of the truth
-                   # table above: no composition, knob armed ⇒ refused.
-                   {"coverage_loop": False, "session_reinjection": False,
-                    "floor_term": True},
-                   {"coverage_loop": False, "session_reinjection": False,
-                    "floor_term": False, "guard_per_session_cap": 3},
+    for kwargs in ({"floor_term": True},
+                   {"guard_per_session_cap": 3},
                    # a reinjection run with the guard ablated calls no guard
-                   {"coverage_loop": False, "session_reinjection": True,
+                   {"session_reinjection": True,
                     "session_reinjection_guard": False,
                     "floor_term": True}):
         with pytest.raises(ArmConflictError) as excinfo:
@@ -629,19 +615,12 @@ def test_the_guard_arm_requires_a_pool_order_composition():
 
 
 def test_floor_term_and_guard_cap_ride_the_fingerprint():
-    """#2513 (#10629 review): the BUILDER contract for the two guard knobs.
+    """#2513 (#10629 review): the resolved arm gates the checkpoint.
 
     ``floor_term`` is ALWAYS present (the arm/guard-bool convention), so a
     checkpoint produced with the lower bound armed can never be resumed with
     it OFF and a pre-feature checkpoint refuses on resume; the cap is present
     only while a pool-order arm runs (no inert value stamped).
-
-    ⛔ Scope (the #10629 review's finding): this calls ``_build_fingerprint``
-    DIRECTLY, so it proves only that the builder handles the keys — it cannot
-    observe that ``run_evaluation`` forwards them, and it stayed green over a
-    dropped `guard_per_session_cap` forward. The WIRING is pinned end to end
-    by ``test_eval_reinjection_cap_resume.py::
-    test_run_path_refuses_a_guard_cap_change_on_resume``.
     """
     from tools.longmem_eval import run as _run
 
@@ -1019,73 +998,380 @@ def test_annotate_pool_additions_is_whole_dict_identical_except_leg():
     assert base["match_source"] == "fts"
 
 
-# ── the DELETED demo turn writer may not be described as current fact ───────
-_REPO = Path(__file__).resolve().parent.parent
-
-#: Every home in the tree that explains WHY the turn-shape constraint needs
-#: the ``is_episodic`` conjunct (``session_reinjection._TURN_SHAPE_FILTER``).
-#: The hosted demo/dashboard seed's ``pointKind='event'`` turn writer is
-#: HISTORY since #10000, so a home stating it as current fact is the sentence a
-#: later reader would cite to delete a conjunct a legacy graph still needs.
-_TURN_SHAPE_NARRATIVE_HOMES = (
-    "tortoise/session_reinjection.py",
-    "tortoise/retrieval.py",
-    "tests/test_session_reinjection.py",
-    "tests/test_session_reinjection_rules.py",
-    # The eval census's own residual note: it names `_TURN_SHAPE_FILTER` by
-    # name and states that excluding a flagless `pointKind='event'` demo node
-    # is the repo's decision rather than a local predicate — the same narrative
-    # this tuple exists to keep honest. It was corrected by this change for
-    # exactly that reason, so it is a home and belongs in the population. Its
-    # pre-fix wording (`the demo seed, tortoise/hosted_api.py:12173`) carries
-    # no `#10000`, so this entry is not vacuous: it reds on that text.
-    "tools/longmem_eval/ep_activation.py",
-)
-
-#: The PRESENT-TENSE form: the demo/dashboard seed named as the WRITER of
-#: ``pointKind='event'``. The corrected sentences all say the opposite ("writes
-#: no turn node at all"), which this deliberately does not match — note the
-#: stored form is spelled out here as prose precisely so this comment is not
-#: itself a hit.
-_PRESENT_TENSE_DEMO_EVENT_WRITER = re.compile(
-    r"seed\s+writes?\s+(?:``)?pointKind")
+# ── READER-WINDOW crowding (#10540) ─────────────────────────────────────
+# ``reinjection_merge_order`` is additive on the POOL; the reader consumes a
+# PREFIX of it. These pin the prefix cost, which no other census key saw.
+def _corpus(per_session=5, n_sessions=8):
+    return [{"id": f"s{s}#{i}", "session_id": f"s{s}",
+             "point_kind": TURN_POINT_KIND, "is_episodic": True,
+             "content": f"[user] turn s{s}#{i}"}
+            for s in range(n_sessions) for i in range(per_session)]
 
 
-def test_no_home_states_the_deleted_demo_turn_writer_as_current_fact():
-    """#10000 review P3: three homes were corrected and the fourth was missed.
+def _groups(pool, sizes):
+    """The shipped fetch's admission shape: ``sizes`` items per seeded
+    session, seeded by that session's FIRST pool hit (in rank order)."""
+    order: list[str] = []
+    for h in pool:
+        if h["session_id"] not in order:
+            order.append(h["session_id"])
+    out: dict[str, list[dict]] = {}
+    for sid, n in zip(order, sizes, strict=False):
+        if n:
+            out[sid] = [_point(f"inj-{sid}-{k}", sid) for k in range(n)]
+    return out, order[:len(sizes)]
 
-    `hosted_api._seed_demo_graph` is the non-turn ``pointKind='event'`` writer
-    the ``is_episodic`` conjunct exists to exclude — the shape `#10000` removed
-    across §9.1/D1. A home that still says the seed WRITES that shape is false
-    in the present tense, and it reads as grounds for deleting the (still
-    necessary, legacy-population) conjunct.
 
-    A POPULATION assertion over every narrative home, not a pin at the one site
-    this round edited: that site-local shape is the failure. The same sentence
-    was restated in `session_reinjection.py`, `retrieval.py` and
-    `test_session_reinjection.py` and left present-tense HERE, so a pin inside
-    the one file being fixed reds on nothing when a fifth home is added.
+def _merge(pool, sizes):
+    added, seed_order = _groups(pool, sizes)
+    return added, seed_order, reinjection_merge_order(
+        pool, added, seed_order=seed_order, guard=True,
+        guard_window=5, per_session_cap=2, max_chunks_per_session=3)
+
+
+def test_reader_window_displacement_names_the_sessions_injection_evicts():
+    """The shipped budgets (per-session 3, total 10) over 40 hits / 8
+    sessions: the injection's cost lands ENTIRELY on the two lowest-ranked
+    sessions, which lose all five hits each. ``injected_merged`` reports a
+    healthy 10 either way — that is the blind spot this key closes.
+
+    ⚠️ This fixture is the **full-window** case (40 base hits, window 40),
+    where the function's own residual 2 makes ``base_displaced``
+    algebraically EQUAL to ``injected_in_window`` — the one case the
+    docstring says does not corroborate. It therefore cannot tell the two
+    keys apart on its own: an implementation that aliased
+    ``base_displaced := injected_in_window`` passes it. The partial-window
+    test below is what pins ``base_displaced`` independently.
     """
-    missing = [rel for rel in _TURN_SHAPE_NARRATIVE_HOMES
-               if not (_REPO / rel).is_file()]
-    assert not missing, (
-        "a narrative home moved or was deleted, so this pin no longer covers "
-        f"the claim it exists for: {missing}")
+    pool = _corpus()
+    _added, _order, merged = _merge(pool, [3, 3, 3, 1])
+    out = reader_window_displacement(pool, merged, window=40)
+    assert out["injected_in_window"] == 10
+    assert out["base_displaced"] == 10
+    assert out["sessions_lost"] == ["s6", "s7"]
+    assert (out["sessions_before"], out["sessions_after"]) == (8, 6)
+    # NOT a top-5 effect: against the FAIR counterfactual (the base pool the
+    # reader would have seen, guard reorder included) the injection costs the
+    # top-5 nothing. Measured on the helper itself at window=5 the number is
+    # 3, and those 3 are the guard's reorder — which is why this helper is
+    # used at the READER's window, not at the loop's.
+    fair_base = guard_and_recap_pool(
+        pool, guard=True, window=5, per_session_cap=2,
+        max_chunks_per_session=3)
+    top5_base = {h["id"] for h in fair_base[:5]}
+    top5_merged = {h["id"] for h in merged[:5]}
+    assert top5_base <= top5_merged, (top5_base - top5_merged)
 
-    for rel in _TURN_SHAPE_NARRATIVE_HOMES:
-        flat = " ".join((_REPO / rel).read_text(encoding="utf-8").split())
-        assert not _PRESENT_TENSE_DEMO_EVENT_WRITER.search(flat), (
-            f"`{rel}` says the demo/dashboard seed WRITES ``pointKind='event'`` "
-            "as current fact — since #10000 it writes no turn node at all "
-            "(§9.1/D1). Restate it as history (the clause is kept because a "
-            "graph seeded BEFORE #10000 still holds those nodes) rather than "
-            "leaving a claim about a writer that no longer exists")
-        # The positive half: the HISTORY MARKER is what makes the surviving
-        # conjunct defensible. Without it the clause reads as dead weight and
-        # the next reader deletes it — and legacy demo graphs lose the only
-        # exclusion keeping their orphan `event` nodes out of the turn set.
-        assert "#10000" in flat, (
-            f"`{rel}` explains the `is_episodic` turn-shape constraint without "
-            "naming #10000, so the reader cannot tell the demo/dashboard "
-            "seed's `event` nodes are a LEGACY population the clause is "
-            "retained for")
+
+def test_reader_window_displacement_partial_window_separates_the_two_keys():
+    """``base_displaced`` is NOT ``injected_in_window`` — pinned where they
+    must diverge, which the full-window fixture above cannot do.
+
+    Same pool and same 10 injected items, read at three windows. Only the
+    middle one is partial, and there the two keys disagree (10 injected in
+    the window, but just 5 base hits displaced, because the window already
+    contains all 40 base hits: 45 - 10 = 35). ``sessions_lost`` narrows with
+    it. Full window (50) is the other degenerate end: everything fits, so
+    nothing is lost and the counters are not the same number.
+
+    An aliasing implementation (``base_displaced = injected_in_window``)
+    passes at 40 and at 50 and FAILS at 45 with ``10 == 5``. That is the only
+    mutant these fixtures kill: every window here is ``0``, ``40``, ``45`` or
+    ``50`` against a 40-item base pool, so a whole-``base_pool`` read and
+    the shipped ``base_pool[:window]`` slice are the SAME list and the
+    substitution is a no-op. ``_corpus(per_session=5, n_sessions=12)`` below
+    is the fixture that separates them.
+    """
+    pool = _corpus()
+    _added, _order, merged = _merge(pool, [3, 3, 3, 1])
+    assert len(pool) == 40 and len(merged) == 50, (len(pool), len(merged))
+
+    partial = reader_window_displacement(pool, merged, window=45)
+    assert partial["injected_in_window"] == 10
+    assert partial["base_displaced"] == 5, "must not alias injected_in_window"
+    assert partial["sessions_lost"] == ["s7"]
+    assert (partial["sessions_before"], partial["sessions_after"]) == (8, 7)
+
+    full = reader_window_displacement(pool, merged, window=50)
+    assert (full["injected_in_window"], full["base_displaced"]) == (10, 0)
+    assert full["sessions_lost"] == []
+    assert (full["sessions_before"], full["sessions_after"]) == (8, 8)
+
+
+def test_reader_window_displacement_ignores_sessions_outside_the_window():
+    """The PRODUCTION shape: a base pool LONGER than the reader window.
+
+    Every other fixture in this file has a 40-item base pool read at a window
+    of ``0``, ``40``, ``45`` or ``50`` — none smaller than the pool — so
+    ``base_pool[:window]`` and ``base_pool`` are the same list there and an
+    implementation that read the whole pool cannot be told from the shipped
+    slice. This one is the shape the eval lane actually runs: pool 60 (the
+    default ``DEFAULT_POOL_SIZE`` is 120) read at the reader's 40
+    (``DEFAULT_CONTEXT_ITEM_CAP``).
+
+    Why it matters beyond the fixture: on this shape a whole-``base_pool``
+    read puts the sessions whose hits sit at base ranks >= 40 into
+    ``sessions_before``, and ``sessions_lost`` then NAMES A SESSION AS LOST
+    that the reader never had — on the key the function's own docstring calls
+    load-bearing. 12 sessions x 5 hits = 60, so the window holds s0-s7 and
+    ``sessions_before`` must be 8, not 12.
+    """
+    pool = _corpus(per_session=5, n_sessions=12)
+    _added, _order, merged = _merge(pool, [3, 3, 3, 1])
+    assert (len(pool), len(merged)) == (60, 70), (len(pool), len(merged))
+    assert sorted({h["session_id"] for h in pool[:40]}) == \
+        [f"s{s}" for s in range(8)]
+
+    out = reader_window_displacement(pool, merged, window=40)
+    assert out["sessions_before"] == 8, (
+        "the reader's window holds 8 of the 12 sessions — counting the whole "
+        "base pool would report 12 and name s8-s11 as lost")
+    assert out["injected_in_window"] == 10
+    assert out["sessions_lost"] == ["s6", "s7"]
+    assert out["sessions_after"] == 6
+
+
+def test_reader_window_displacement_ignores_the_phantom_namespace():
+    """An identity-less hit is keyed ``idx:-1`` (or ``idx:point:{id}`` since
+    #3591) by ``session_key_of``, and that key names NO graph session —
+    ``retrieval.session_key_of`` documents the whole namespace as phantom and
+    ``coverage_loop.coverage_gap`` excludes it from its window census.
+
+    Unfiltered, the phantom lands in ``sessions_before`` (inflating the
+    denominator of any derived rate) and, once it is pushed out of the merged
+    window, in ``sessions_lost`` — the function's own LOAD-BEARING key, whose
+    contract is "a session with no hit in the merged window has no evidence
+    the reader can cite". A phantom is the falsest possible entry there: the
+    reader could never have cited it. The path is reachable from the eval lane
+    (``retrieve.py``'s pool annotator always emits ``lme_session_index``,
+    defaulted to ``-1``), so this is not a hypothetical bucket.
+
+    Two injected items push the two phantom hits out of the 8-item window, so
+    pre-fix (no filter): ``sessions_lost == ['idx:-1']`` and
+    ``sessions_before == 4``; post-fix both assertions below hold. (The
+    injected items' own session is a REAL bucket in ``after`` — 4 there is
+    the injected session plus the three base ones, not a phantom.)
+    """
+    from tortoise.retrieval import session_key_of
+
+    pool = [{"id": f"{s}#{i}", "session_id": s}
+            for s in ("sA", "sB", "sC") for i in range(2)]
+    # the annotator's shape for a hit with no session identity: no
+    # ``session_id``, ``lme_session_index`` defaulted to -1
+    pool += [{"id": "x1", "lme_session_index": -1},
+             {"id": "x2", "lme_session_index": -1}]
+    assert {session_key_of(h) for h in pool[-2:]} == {"idx:-1"}
+    injected = [{"id": f"inj#{i}", "session_id": "inj"} for i in range(2)]
+    merged = injected + pool
+
+    out = reader_window_displacement(pool, merged, window=8)
+    assert out["injected_in_window"] == 2  # the push-out really happened
+    assert out["sessions_lost"] == [], (
+        "idx:-1 names no graph session — it must never be reported LOST")
+    assert out["sessions_before"] == 3, (
+        "the phantom also inflates the denominator")
+    assert out["sessions_after"] == 4  # 3 base sessions + the injected one
+
+    # the other half: a phantom that STAYS inside the window is not a session
+    # PRESENT either (``coverage_loop``'s #3591 note — the opposite reading)
+    full = reader_window_displacement(pool, merged, window=20)
+    assert (full["sessions_before"], full["sessions_after"]) == (3, 4), full
+    assert full["sessions_lost"] == []
+
+
+def test_reader_window_displacement_is_zero_without_injection():
+    pool = _corpus()
+    out = reader_window_displacement(pool, list(pool), window=40)
+    assert out == {"window": 40, "injected_in_window": 0,
+                   "base_displaced": 0, "sessions_lost": [],
+                   "sessions_before": 8, "sessions_after": 8,
+                   "measured": True}
+
+
+def test_a_rank_below_five_count_is_invariant_to_injection():
+    """The metric artifact #10540's probe reports as "35 fall out of the
+    top-5": 35 of 40 base hits START below rank 5, so counting base hits at
+    final rank >= 5 returns 35 with 0, 10 or 15 injected items. It is not a
+    crowding measurement; ``base_displaced`` (above) is."""
+    pool = _corpus()
+    base_ids = {h["id"] for h in pool}
+    for sizes in ([0], [3, 3, 3, 1], [3, 3, 3, 3, 3]):
+        _added, _order, merged = _merge(pool, sizes)
+        # RANK-based, not count-based: the artifact is that the population
+        # below the cut never shrinks, so the number is input-invariant.
+        below5 = sum(1 for i, h in enumerate(merged)
+                     if i >= 5 and h["id"] in base_ids)
+        assert below5 == 35, (sizes, below5)
+
+
+def test_reader_window_displacement_window_zero_is_a_clean_zero():
+    """The ``window < 1`` branch is load-bearing, not cosmetic: the SAME
+    list sliced with ``merged[:window]`` reads the tail at a negative
+    window and reports ``injected_in_window=10``. Deleting the guard must
+    fail this test, so the whole shape is asserted at 0 AND at -1."""
+    pool = _corpus()
+    _added, _order, merged = _merge(pool, [3, 3, 3, 1])
+    zero = {"window": 0, "injected_in_window": 0, "base_displaced": 0,
+            "sessions_lost": [], "sessions_before": 0,
+            "sessions_after": 0, "measured": True}
+    assert reader_window_displacement(pool, merged, window=0) == zero
+    # NEGATIVE is the case the guard exists for.
+    assert reader_window_displacement(pool, merged, window=-1) == zero
+
+
+def test_the_c4_arm_comment_does_not_promise_reader_additivity():
+    """#10632 review ISSUE 1: the C4 arm's own comment block said
+    *"additive, so an injected item can never evict a base item"* — true of
+    the pool LIST and false of the READER, which consumes a PREFIX. That is
+    the exact sentence the PR names as "why the crowding stayed invisible to
+    the census", and it survived verbatim ~215 lines above the census that
+    disproves it, in the file this PR modifies.
+
+    Non-vacuity: pre-fix ``"can never evict a base item"`` is present in
+    this source, so the first assertion reds; the other two pin that the
+    qualification names the reader limb and points at the census.
+
+    Reads the text rather than importing: the claim IS a comment, and
+    importing the eval lane's ``retrieve`` would drag its graph deps into
+    this hermetic rules file.
+    """
+    src = (ROOT / "tools" / "longmem_eval" / "retrieve.py").read_text(
+        encoding="utf-8")
+    assert "can never evict a base item" not in src, (
+        "the falsified pool-additivity claim must be QUALIFIED, not repeated")
+    flat = " ".join(src.split())
+    assert "NOT reader-additivity (#10540)" in flat, (
+        "the C4 arm comment must say pool-additivity is not reader-additivity")
+    assert "reader_window_displacement" in flat, (
+        "the arm comment must point at the census that measures the gap")
+
+
+def test_reader_window_displacement_docstring_never_claims_a_bound():
+    """#10632 review ISSUE 2 / F1: the residual list concluded *"inside the
+    window is an UPPER BOUND on the delivered surface"*.
+
+    That is false on every arm, by the mechanism the same residual list
+    states two bullets above: ``assemble_context`` admits a SKIP-FILTERED
+    subsequence — a hit that carries no claim text, or that a token/byte cap
+    refuses, is skipped WITHOUT spending an item slot
+    (``tortoise/retrieval.py``: ``for h in pool: if len(selected) >=
+    item_bound: break`` … ``continue``), so later hits are admitted past the
+    raw prefix. An injected item below the window can therefore be
+    DELIVERED while the census never counts it — the under-count, which is
+    the direction this key exists for.
+
+    ``tools/longmem_eval/retrieve.py`` re-SELECTS the pool from the WHOLE
+    candidate list when the reranker applies (``pool = selected``, ``<=
+    top_k``) and C6 ``prefer_latest_order`` reorders the final pool after
+    that — both AFTER this census — so with rerank ON the window bounds
+    neither side. Both movers must stay named; neither may be replaced by a
+    claim that the no-rerank arm is a bound.
+
+    Non-vacuity: pre-fix the docstring says "an UPPER BOUND on the delivered
+    surface" in the no-rerank sentence, so the first assertion reds (and the
+    under-count reason it now gives is absent). The R6/C6 assertions pin
+    what must SURVIVE the correction.
+    """
+    flat = " ".join((reader_window_displacement.__doc__ or "").split())
+    assert "upper bound" not in flat.lower(), (
+        "the window count is not a bound on the delivered surface: a "
+        "skipped hit frees its slot, so the reader admits later hits past "
+        "the raw prefix")
+    assert "not a bound on the delivered surface in EITHER direction" in flat, (
+        "the residual must say the count is no bound in either direction")
+    assert "under-count" in flat.lower(), (
+        "the residual must name the UNDER-count the skip mechanism causes — "
+        "it is the direction this key exists for")
+    assert "rerank" in flat.lower(), (
+        "the residual list must name the R6 rerank arm it is scoped away from")
+    assert "prefer_latest_order" in flat, (
+        "the residual list must name the C6 reorder it is scoped away from")
+    assert "not a bound at all" in flat, (
+        "the rerank-ON case must state that the window is no bound at all")
+
+
+def test_the_pool_only_window_is_not_claimed_as_a_hard_ceiling():
+    """#10632 review P3: the pool-only arm's comment said the narrowed window
+    makes the count ``never under-counts — the cut is below the reader's walk,
+    not inside it``.
+
+    That premise is only "the cut is below the WINDOW". ``--top-k`` and
+    ``--context-items`` are independent CLI flags (``run.py``), so with
+    ``top_k > eff_item_cap`` the truncation cut (``pool[:top_k]``) sits ABOVE
+    the census window, ``assemble_context`` walks past ``eff_item_cap``
+    whenever a skip frees a slot, and an injected item below the window IS
+    delivered without being counted — the under-count the P3 names.
+
+    Non-vacuity: pre-fix the source says "never under-counts" and "the cut is
+    below the reader's walk", so the first assertion reds.
+    """
+    src = (ROOT / "tools" / "longmem_eval" / "retrieve.py").read_text(
+        encoding="utf-8")
+    flat = " ".join(src.split())
+    assert "never under-counts" not in flat, (
+        "the pool-only window cannot claim to never under-count: the cut is "
+        "above the window whenever top_k > eff_item_cap")
+    assert "top_k <= eff_item_cap" in flat, (
+        "the comment must name the condition the no-under-count claim holds "
+        "under")
+    assert "walks past ``eff_item_cap``" in flat, (
+        "the comment must say WHY it under-counts above that condition: the "
+        "reader's walk extends past the window")
+
+
+def test_the_pool_only_under_count_is_MEASURED_not_merely_asserted_in_prose():
+    """The BEHAVIOURAL half of ``test_the_pool_only_window_is_not_claimed_as_a_hard_ceiling``.
+
+    That test proves the falsified sentence is GONE from the comment; this one
+    proves the replacement sentence is TRUE — on the pool-only arm with
+    ``top_k > eff_item_cap`` the census really does under-count. A comment
+    that stops over-claiming and starts asserting the opposite still has to
+    be checked against the code, which is this PR's whole thesis.
+
+    Shape: 40 base hits / 8 sessions, 10 injected for a ninth session at the
+    TAIL (the shipped lane's own shape), window = the 40-item cap. Two of the
+    hits INSIDE the window carry no claim text, so ``#2978`` frees their
+    slots; the arm truncates the pool to ``top_k = 50``, so the reader walks
+    all 50 candidates and admits 2 injected items from BELOW the window while
+    the census — which stops at 40 — counts none of them.
+
+    Passing ``window=50`` (the aligned shape) reports 10, so the assertion
+    discriminates on the window/pool MISALIGNMENT, not on delivery alone.
+    """
+    base = [{"id": f"b{i}", "session_id": f"s{i // 5}",
+             "point_kind": TURN_POINT_KIND,
+             "content": "" if i in (5, 17) else f"base hit content {i}"}
+            for i in range(40)]
+    injected = [{"id": f"x{i}", "session_id": "sx",
+                 "point_kind": TURN_POINT_KIND,
+                 "content": f"injected content {i}"}
+                for i in range(10)]
+    merged = base + injected
+    assert len(merged) == 50
+
+    window = 40                     # eff_item_cap: the reader's item bound
+    top_k = 50                      # --top-k, INDEPENDENT of --context-items
+    out = reader_window_displacement(base, merged, window=window)
+    assert out["injected_in_window"] == 0, (
+        "the census counts the RAW prefix, and every injected item sits below "
+        "it -- this is the number a lane reads as 'no crowding'")
+    aligned = reader_window_displacement(base, merged, window=top_k)
+    assert aligned["injected_in_window"] == 10, (
+        "with the window ALIGNED to the truncated pool the same items are "
+        "counted, so the zero above is the misalignment, not the fixture")
+
+    pool_only_arm = merged[:top_k]  # retrieve.py: pool = pool[:top_k]
+    assert len(pool_only_arm) == 50, (
+        "the arm truncates to top_k, which is LARGER than the window here -- "
+        "so candidates exist below the cut")
+    delivered = retrieval.assemble_context(
+        pool_only_arm, top_k=top_k, max_context_tokens=8000,
+        context_item_cap=window)
+    delivered_injected = [h for h in delivered if h["session_id"] == "sx"]
+    assert [h["id"] for h in delivered_injected] == ["x0", "x1"], (
+        "the two freed slots admit exactly the 2 injected items below the "
+        f"window; got {[h['id'] for h in delivered]}")
+
+    assert out["injected_in_window"] == 0 < len(delivered_injected), (
+        "\u26d4 the under-count: the census reports 0 injected items in the "
+        "window while the reader was delivered 2 of them")
