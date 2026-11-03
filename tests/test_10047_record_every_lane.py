@@ -700,12 +700,19 @@ def _binds_as_parameter(scope, key: str) -> bool:
     return False
 
 
-# A closure capture is judged by the enclosing function's WHOLE body rather
-# than by a position: the nested `def` binds no order relative to that body
-# (it may be called before or after a later rebind), so the fail-closed
-# reading — an unbound definition anywhere in the enclosing function keeps
-# the handle unbound — is the one this guard can defend.
-_STATE_AT_SCOPE_END = (float("inf"), float("inf"))
+def _position_of(node) -> tuple[int, int]:
+    """A node's `(lineno, col_offset)` — its ORDER inside its own scope.
+
+    Used to ask what an enclosing function's handle looked like AT the moment
+    the nested `def` was created (#10723 review round 2 P2). Folding that
+    enclosing scope to its END instead was wrong: an install **after** the nested
+    def then erased the earlier unbound definition and covered a write it never
+    reached — the same "an install arms only the writes after it" rule this file
+    already pins in the flat spelling. And starting the nested fold from
+    `inherited` rather than from this state let an install inside the nested body
+    arm a write that had already run.
+    """
+    return (getattr(node, "lineno", 0), getattr(node, "col_offset", 0))
 
 
 def _enclosing_scope(node, parents, lane) -> object:
@@ -991,22 +998,37 @@ def _unbound_record_writes(tree) -> list[str]:
             after the scoped fold, with neither direction pinned.
             """
             scope = _enclosing_scope(call, parents, lane)
-            own_events = scopes.get(id(scope), {}).get(key)
-            if own_events is not None:
-                return _handle_state_at(
-                    own_events, (call.lineno, call.col_offset), inherited.get(key))
-            current = scope
-            while current is not lane:
-                if _binds_as_parameter(current, key):
-                    return inherited.get(key)
-                current = _enclosing_scope(current, parents, lane)
-                if _binds_as_parameter(current, key):
-                    return inherited.get(key)
-                enclosing_events = scopes.get(id(current), {}).get(key)
+            # The state a nested scope STARTS from. For a closure capture this is
+            # the enclosing binding as it stands AT the nested `def`'s own
+            # position — not `inherited`, and not the enclosing function's final
+            # state (#10723 review round 2 P2, both halves): starting from
+            # `inherited` made an install inside the nested body arm a write that
+            # already ran, and folding the enclosing scope to its END let an
+            # install after the nested def cover the closure's write. A
+            # PARAMETER — here or in any enclosing function — is a value the
+            # caller supplied, so its state is not knowable: `inherited` answers
+            # and the walk stops.
+            initial = inherited.get(key)
+            anchor = scope
+            while anchor is not lane:
+                if _binds_as_parameter(anchor, key):
+                    initial = inherited.get(key)
+                    break
+                enclosing = _enclosing_scope(anchor, parents, lane)
+                if _binds_as_parameter(enclosing, key):
+                    initial = inherited.get(key)
+                    break
+                enclosing_events = scopes.get(id(enclosing), {}).get(key)
                 if enclosing_events is not None:
-                    return _handle_state_at(
-                        enclosing_events, _STATE_AT_SCOPE_END, inherited.get(key))
-            return inherited.get(key)
+                    initial = _handle_state_at(
+                        enclosing_events, _position_of(anchor), inherited.get(key))
+                    break
+                anchor = enclosing
+            own_events = scopes.get(id(scope), {}).get(key)
+            if own_events is None:
+                return initial
+            return _handle_state_at(
+                own_events, (call.lineno, call.col_offset), initial)
 
         for call in ast.walk(node):
             if not isinstance(call, ast.Call):
@@ -1686,6 +1708,57 @@ def _lane(org_id):
         "the control: the enclosing lane ARMED the handle, so the closure "
         "capture is covered and must not be reported")
 
+    # #10723 review round 2, P2: the anchor is the nested `def`'s own POSITION,
+    # not the end of the enclosing function. An install that happens AFTER the
+    # nested def is created does not cover a write the closure makes — the same
+    # "an install arms only the writes after it" rule this file already pins in
+    # the FLAT spelling. Folding the enclosing scope to its END erased the
+    # unbound definition and turned this lane green.
+    late_install = '''
+def _lane(org_id):
+    sdk = _make_sdk(namespace=org_id)
+    def _write():
+        sdk.create_point("Subject", {})
+    _write()
+    _bind_default_graph_record_tenant(sdk, org_id)
+'''
+    assert _flagged(late_install), (
+        "an install AFTER the nested `def` must not retroactively cover the "
+        "closure's write — extracting a write into a local closure would "
+        "otherwise turn a red lane green")
+
+    # #10723 review round 2, P2: the nested body's OWN events must fold FROM the
+    # captured state, not from `inherited`. Short-circuiting on "this scope has
+    # an event" started the fold at `None`, so an install anywhere in the nested
+    # body — even one that runs AFTER the write — armed it. That is the classic
+    # #10447 shape (install in a `finally` covering the write in its `try`),
+    # merely spelled inside a closure.
+    install_after = '''
+def _lane(org_id):
+    sdk = _make_sdk(namespace=org_id)
+    def _write():
+        sdk.create_point("Subject", {})
+        _bind_default_graph_record_tenant(sdk, org_id)
+    _write()
+'''
+    assert _flagged(install_after), (
+        "an install AFTER the write, inside the same nested `def`, must not "
+        "arm the write before it")
+
+    install_in_finally = '''
+def _lane(org_id):
+    sdk = _make_sdk(namespace=org_id)
+    def _write():
+        try:
+            sdk.create_point("Subject", {})
+        finally:
+            _bind_default_graph_record_tenant(sdk, org_id)
+    _write()
+'''
+    assert _flagged(install_in_finally), (
+        "an install in a `finally` must not retroactively cover the write in "
+        "its `try` — the nested spelling of the rule this file already pins")
+
 
 def test_a_nested_def_writing_through_a_PARAMETER_is_still_silent():
     """The declared indirection the scoped fold exists for, preserved.
@@ -1695,20 +1768,39 @@ def test_a_nested_def_writing_through_a_PARAMETER_is_still_silent():
     for a closure capture must stop at a parameter, or the fold's own fix is
     undone the moment the two shapes are confused.
 
-    Mutation this reddens on: deleting the `_binds_as_parameter` stop in
-    `state_at` — the enclosing lane's unbound `_make_sdk` then answers for a
-    handle that was passed in, reporting a lane the scan cannot see.
+    ⚠️ The snippet names the SAME handle in the enclosing lane on purpose
+    (#10723 review round 2, P3). Without that, a neutralised `_binds_as_parameter`
+    found no enclosing events either way and the whole file stayed green — the
+    one precondition this fix adds was unpinned by the test claiming to pin it.
+
+    Mutation this reddens on: neutralising `_binds_as_parameter` (return False)
+    — the enclosing lane's unbound `_make_sdk` then answers for a handle that
+    was passed in, and `_lane:5 writes through the unbound SDK `sdk`` appears.
     """
     parameter = '''
 def _lane(org_id):
+    sdk = _make_sdk(namespace=org_id)
     def _drain(sdk):
         sdk.create_point("Subject", {})
     _drain(_open_sdk(org_id))
 '''
     assert _flagged(parameter) == [], (
         "a helper writing through a PARAMETER is the declared indirection — "
-        "the outward walk must stop there rather than resolving a foreign "
-        "binding")
+        "the outward walk must stop there rather than resolving the "
+        "enclosing lane's same-named binding")
+
+    parameter_two_hops = '''
+def _lane(org_id):
+    sdk = _make_sdk(namespace=org_id)
+    def _outer(sdk):
+        def _inner():
+            sdk.create_point("Subject", {})
+        _inner()
+    _outer(_open_sdk(org_id))
+'''
+    assert _flagged(parameter_two_hops) == [], (
+        "the stop must fire on a parameter of an ENCLOSING function, two hops "
+        "out, not only on the writing scope's own")
 
 
 def test_a_literal_namespace_is_not_an_org_scoped_site():
