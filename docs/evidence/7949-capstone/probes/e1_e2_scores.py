@@ -58,7 +58,14 @@ naming the head is not enough — when a `with_anchor` block is PRESENT but EMPT
 (a record that never wrote its counter is not the flat shape), when its
 `as_written` block carries no graph (an
 absent provenance is not an inherited one), sits on another run, or reads counts
-that are not the E2a record's (that block IS the E2a reading), when the
+that are not the E2a record's (that block IS the E2a reading), when the falsifier's
+SCORED block does not declare the injection it is credited for (`injected_anchor`
+`is not True` — an un-injected reading reaching 14/14 is the inert counter under
+another name), when a share is not the fraction its OWN `bare_definite` / `objects`
+counts give (on either arm — the share is the one number E1's bar is scored on, and
+nothing may edit it while the counts printed beside it stand), when a graph name
+does not carry the measured head under the prefix the PRODUCERS write (`<head8>`),
+when the
 value-gate positive controls are dead, when a before arm's `arm` block is
 absent, PRESENT but EMPTY, or missing one of its four switches (a key that was
 never written is not a key that was written as unset), when the after arm's own
@@ -112,6 +119,64 @@ _ARM_ON_VARS = ("TORTOISE_VET", "TORTOISE_CLASSIFY_LATER")
 # `capstone_measure`; `test_the_arm_key_sets_are_the_producers` holds the two
 # definitions equal, so they cannot drift apart silently.
 _ARM_OFF_VARS = ("TORTOISE_VALUE_GATE", "TORTOISE_S2_DECISION_SEAM")
+
+#: The shortest head prefix the PRODUCERS actually write into a graph name.
+#:
+#: `capstone_measure.py` builds its own default graph as
+#: `capstone_measure_{head[:8]}_{stamp}`, and all three probes' `--graph` usage
+#: documents `capstone_off_<head8>_<epoch>` / `capstone_measure_<head8>_<epoch>`.
+#: The committed records happen to carry NINE characters
+#: (`capstone_on_54922a800_1793378318`), so a driver that required nine refused a
+#: graph produced by a producer's OWN documented command — fail-closed (no wrong
+#: number), but "a tool that cannot answer its own question" (#10610 review P3).
+#: Matching the SHORTER prefix accepts both spellings and still rejects a graph
+#: naming a different head; the two spellings below are pinned.
+_HEAD_PREFIX = 8
+
+
+def _names_head(graph: str, head: str) -> bool:
+    """Does ``graph`` name ``head`` under the prefix the producers write?"""
+    return head[:_HEAD_PREFIX] in graph
+
+
+def _consistent_share(where: str, share, bare, objects) -> None:
+    """Refuse a share the record's OWN counts do not reproduce.
+
+    The share is the only operand E1's bar has, and every producer writes it as
+    the float division of the two counts printed on the same line — so all three
+    inputs for `share == bare_definite / objects` are already in hand wherever it
+    is read. Nothing compared them (#10610 review P2), which made the share a
+    TRUSTED TOKEN: editing only `share` in the two OFF records scored both
+    pairings PASS on a share the record's own counts contradict, and the row —
+    the one `#9889` is waiting on — was written GREEN off the edit.
+
+    Every other guard in this file is a consistency check of exactly this shape
+    (the `as_written` counts must equal the E2a reading, the E2a `of` must equal
+    the frozen corpus denominator, the scored block's graph must BE the E2a
+    record's). This is the one number that was USED and whose components were
+    not checked against it. The tolerance is 1e-9: both producers write the
+    unreconciled float division (`len(bare) / len(names)`, `bare / len(...)`), so
+    the shipped artifacts reconcile exactly. A `None` state is a refusal rather
+    than a skip — an absent count is not a default one.
+    """
+    if bare is None or objects is None:
+        raise _refuse(f"{where} carries no bare_definite/objects beside its "
+                      "share, so the share cannot be reconciled against the "
+                      "counts it is supposed to be a fraction OF")
+    if objects <= 0:
+        raise _refuse(f"{where} carries objects={objects}, so its share is not "
+                      "a fraction of any population")
+    try:
+        implied = float(bare) / float(objects)
+    except (TypeError, ValueError) as exc:
+        raise _refuse(f"{where} carries bare_definite={bare!r} / "
+                      f"objects={objects!r}, which is not a share: {exc}") from exc
+    if abs(float(share) - implied) > 1e-9:
+        raise _refuse(f"{where} reports share={share!r} but its own counts "
+                      f"({bare} of {objects}) give {implied!r} — the share is "
+                      "the operand E1's bar is scored on, so a record whose "
+                      "share contradicts the counts printed beside it would "
+                      "score a number nothing in it measured")
 
 
 def _read_json(path: Path) -> dict:
@@ -249,6 +314,10 @@ def read_off_arms(repo: Path, floors: dict) -> list[dict]:
         objects = record.get("objects")
         if share is None or not objects:
             raise _refuse(f"{name} carries no share/objects")
+        # The share must be the fraction its OWN counts give — see
+        # `_consistent_share`. Read here, on the before side, because these two
+        # counts are the whole of the control arm's population.
+        _consistent_share(f"{name}", share, record.get("bare_definite"), objects)
         if objects < floors["e1_objects"]:
             raise _refuse(f"{name} has {objects} Objects, under the frozen "
                           f"floor of {floors['e1_objects']}")
@@ -308,6 +377,12 @@ def read_on_arm(repo: Path) -> dict:
     share = float(_grep(text, r"^e1-aux objects_in_graph=\d+ "
                               r"bare_definite=\d+ share=(\S+)",
                         what="e1-aux share"))
+    # …and the same reconciliation on the after side. The log prints all three
+    # numbers on ONE line (`objects_in_graph=61 bare_definite=13
+    # share=0.21311475409836064`, and `13/61` is that float exactly), so a share
+    # that disagrees with them is a record edited between the count and the
+    # share — the arm a false GREEN is cheapest to forge on.
+    _consistent_share(f"{EVIDENCE / ON_ARM_LOG}", share, bare, objects)
     real_facts = int(_grep(text, r"^e1b outcome=\S+ real_facts=(\d+)",
                            what="e1b real_facts"))
     head = _grep(text, r"^# head: (\S+)", what="# head")
@@ -495,6 +570,22 @@ def e2_score(repo: Path, floors: dict) -> dict:
                       "taken over, so an empty one is not the flat shape "
                       "(e2_score)")
     with_anchor = (falsifier.get("with_anchor") or falsifier)
+    # ⛔ The scored block must DECLARE the injection it is credited for. The
+    # artifact carries `injected_anchor` precisely to say which reading this is
+    # (`as_written.injected_anchor: false`, `with_anchor.injected_anchor: true`),
+    # and nothing read it (#10610 review P2): the liveness proof was a COUNT
+    # equality, so a block declaring `injected_anchor: false` with 14/14 was
+    # accepted — the driver certifying "the counter is shown to move" on a block
+    # that states, in the record's own words, that it ran no injection. That is
+    # the inert-counter class the refusal below is written for, read one field
+    # short. A permissive default is not an assertion: `is not True` (never a
+    # truthiness test) refuses `False`, `None` and an absent key alike.
+    if with_anchor.get("injected_anchor") is not True:
+        raise _refuse(f"the scored block of {E2A_FALSIFIER} does not declare an "
+                      f"injection (injected_anchor={with_anchor.get('injected_anchor')!r}) "
+                      "— a reading that certifies the counter moves must be the "
+                      "INJECTED one, or nothing establishes that the number "
+                      "moved because an anchor was injected")
     injected_survived = with_anchor.get("value_survived")
     injected_units = with_anchor.get("value_units")
     # The falsifier must move the SAME population the score is taken over. A
@@ -547,10 +638,10 @@ def score(repo: Path = _ROOT) -> dict:
     # must ALL name the same head (and the E2a / gate-drops pair the same graph),
     # or a number from one run is being reported under another run's corpus.
     for arm in before_arms:
-        if after["head"][:9] not in str(arm.get("graph") or ""):
+        if not _names_head(str(arm.get("graph") or ""), after["head"]):
             raise _refuse(f"{arm['artifact']} was taken on graph "
                           f"{arm.get('graph')!r}, which does not name head "
-                          f"{after['head'][:9]}")
+                          f"{after['head'][:_HEAD_PREFIX]}")
     e2a_record = _read_json(repo / EVIDENCE / E2A_RECORD)
     falsifier_record = _read_json(repo / EVIDENCE / E2A_FALSIFIER)
     gates_record = _read_json(repo / EVIDENCE / GATE_DROPS)
@@ -570,9 +661,9 @@ def score(repo: Path = _ROOT) -> dict:
                         if name == E2A_FALSIFIER else "")
                     or ((record.get("as_written") or {}).get("graph")
                         if name == E2A_FALSIFIER else "") or "")
-        if after["head"][:9] not in graph:
+        if not _names_head(graph, after["head"]):
             raise _refuse(f"{name} was taken on graph {graph!r}, which does not "
-                          f"name head {after['head'][:9]}")
+                          f"name head {after['head'][:_HEAD_PREFIX]}")
     # The AFTER arm's own `# graph:` line, not its head: an ON share from graph A
     # recorded beside E2a/gate-drops counts from graph B at the same head passes
     # every head check above (the head IS equal) while mixing two populations —
@@ -596,10 +687,10 @@ def score(repo: Path = _ROOT) -> dict:
                       "(score)")
     falsifier_scored = falsifier_record.get("with_anchor") or falsifier_record
     falsifier_graph = str(falsifier_scored.get("graph") or "")
-    if after["head"][:9] not in falsifier_graph:
+    if not _names_head(falsifier_graph, after["head"]):
         raise _refuse(f"{E2A_FALSIFIER}'s scored block was taken on graph "
                       f"{falsifier_graph!r}, which does not name head "
-                      f"{after['head'][:9]}")
+                      f"{after['head'][:_HEAD_PREFIX]}")
     # …and naming the head is not enough. A graph name is
     # `capstone_on_<head>_<stamp>`, so TWO runs of the same head are two
     # different graphs: a scored block from the sibling run would certify the

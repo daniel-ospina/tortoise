@@ -1031,12 +1031,21 @@ def test_the_record_does_not_narrate_an_under_floor_after_arm_as_a_disagreement(
     the pairing" — a pass condition printed against a refusal. The floor is now
     narrated as the floor, on the record itself. Non-vacuity: the pre-fix `why`
     for this input is asserted absent.
+
+    The mutation moves the population CONSISTENTLY — 25 Objects with 13 of them
+    bare-definite gives a share of 0.52 — because a log whose share no longer
+    matches the counts printed beside it is refused earlier, by the share
+    reconciliation (`_consistent_share`, #10610 review P2). A real producer writes
+    the division; only an edited line can disagree with itself.
     """
     repo = _copied_bundle(tmp_path)
     log = repo / "docs/evidence/9889/on-arm.log"
-    log.write_text(re.sub(r"^e1-aux objects_in_graph=61",
-                          "e1-aux objects_in_graph=25", log.read_text(),
-                          count=1, flags=re.MULTILINE))
+    edited = re.sub(
+        r"^e1-aux objects_in_graph=61 bare_definite=13 share=0\.21311475409836064",
+        f"e1-aux objects_in_graph=25 bare_definite=13 share={13 / 25!r}",
+        log.read_text(), count=1, flags=re.MULTILINE)
+    assert "objects_in_graph=25" in edited
+    log.write_text(edited)
     e1 = scores_probe.score(repo)["e1"]
     assert e1["below_floor"] is True, e1
     assert e1["outcome"] == "REFUSED", e1
@@ -4404,10 +4413,10 @@ def test_the_arm_key_sets_are_the_producers():
     silently: it reds here rather than certifying an arm nobody defined.
     """
     producer = _load_probe("e1_paired_arm")
-    assert scores_probe._ARM_VARS == (*producer.ARM_KEYS, producer.SEAM_KEY), (
+    assert (*producer.ARM_KEYS, producer.SEAM_KEY) == scores_probe._ARM_VARS, (
         scores_probe._ARM_VARS, producer.ARM_KEYS, producer.SEAM_KEY)
-    assert scores_probe._ARM_ON_VARS == tuple(measure.ARM_ON), measure.ARM_ON
-    assert scores_probe._ARM_OFF_VARS == tuple(measure.ARM_OFF), measure.ARM_OFF
+    assert tuple(measure.ARM_ON) == scores_probe._ARM_ON_VARS, measure.ARM_ON
+    assert tuple(measure.ARM_OFF) == scores_probe._ARM_OFF_VARS, measure.ARM_OFF
 
 
 def test_an_e2b_population_under_its_floor_is_REFUSED_not_FAILED(tmp_path):
@@ -4629,3 +4638,178 @@ def test_the_measured_arm_readback_must_CARRY_its_off_switches(tmp_path, capsys)
     assert "carries no TORTOISE_VALUE_GATE" in err, err
     assert "missing key is not an unset one" in err, err
 
+
+
+# ── the share is a FRACTION of the counts printed beside it (#10610 review P2) ───────────────
+
+#: The exact spelling `on-arm.log` writes on its `e1-aux` census line. The share is
+#: read off that one line, so the mutation below edits the ONE place the driver reads.
+_ON_ARM_SHARE_TOKEN = "share=0.21311475409836064"
+
+
+@pytest.mark.parametrize("arm", ["e1-paired-off-arm-1.json",
+                                 "e1-paired-off-arm-2.json"])
+def test_a_before_arm_share_must_be_the_fraction_its_counts_give(arm, tmp_path,
+                                                                capsys):
+    """The share is not a TRUSTED TOKEN: it is the fraction of its own counts.
+
+    `share` is the only operand E1's bar has, and every producer writes it as the
+    float division of the two counts printed on the same line — so all three
+    inputs for `share == bare_definite / objects` are already in hand wherever it
+    is read, and nothing compared them. Editing ONLY `share` in the two OFF records scored
+    both pairings PASS on a share the records' own counts (28/78 and 39/69)
+    contradict, which flipped E1's aggregate from REFUSED to a decided PASS and
+    wrote the row GREEN off the edit — the row `#9889` is waiting on.
+
+    Each arm is mutated ALONE because the reconciliation lives at two sites (the
+    before reader and the after reader below); a fix applied to one cannot stay
+    green on the other.
+
+    Non-vacuity: at the pre-fix head this bundle scores (measured: the shipped
+    `e1-e2-scores.json` is exactly what `score()` writes), so the `pytest.raises`
+    arm reds without the check.
+    """
+    repo = _bundle(tmp_path)
+    path = repo / "docs/evidence/9889" / arm
+    record = json.loads(path.read_text())
+    assert record["share"] == record["bare_definite"] / record["objects"]
+    record["share"] = 0.90                    # the counts are NOT touched
+    path.write_text(json.dumps(record))
+    with pytest.raises(SystemExit) as refused:
+        scores_probe.score(repo)
+    assert refused.value.code == 2, refused.value
+    err = capsys.readouterr().err
+    assert "but its own counts" in err, err
+    assert "score a number nothing in it measured" in err, err
+
+    # …and the shipped record still scores, so the arm discriminates an edited
+    # share from the unreconciled-but-consistent one that ships.
+    record["share"] = record["bare_definite"] / record["objects"]
+    path.write_text(json.dumps(record))
+    assert scores_probe.score(repo)["e1"]["outcome"] == "REFUSED"
+
+
+def test_the_after_arm_share_must_be_the_fraction_its_counts_give(tmp_path,
+                                                                 capsys):
+    """The same identity on the AFTER arm — the cheap half to forge.
+
+    `on-arm.log` prints `objects_in_graph=61 bare_definite=13
+    share=0.21311475409836064` on ONE line, and `13/61` is that float exactly. A
+    log whose share moved while its counts stood is the after arm scored on a
+    number the log does not carry, and it is the arm a false GREEN is cheapest to
+    forge: `share` alone decides `after <= multiplier x before`.
+
+    Non-vacuity: at the pre-fix head the edited log scores and reports the edited
+    share as the after arm's reading.
+    """
+    repo = _bundle(tmp_path)
+    log = repo / "docs/evidence/9889/on-arm.log"
+    text = log.read_text()
+    assert text.count(_ON_ARM_SHARE_TOKEN) == 1, text.count(_ON_ARM_SHARE_TOKEN)
+    log.write_text(text.replace(_ON_ARM_SHARE_TOKEN, "share=0.9"))
+    with pytest.raises(SystemExit) as refused:
+        scores_probe.score(repo)
+    assert refused.value.code == 2, refused.value
+    err = capsys.readouterr().err
+    assert "but its own counts (13 of 61)" in err, err
+
+    log.write_text(text)
+    assert scores_probe.score(repo)["e1"]["outcome"] == "REFUSED"
+
+
+# ── the falsifier must DECLARE the injection it certifies (#10610 review P2) ─────────────────
+
+@pytest.mark.parametrize("declared", [False, None, "absent"])
+def test_the_falsifier_must_declare_the_injection_it_is_credited_for(declared,
+                                                                    tmp_path,
+                                                                    capsys):
+    """A liveness certificate may not be minted from a block declaring NO injection.
+
+    `e2a-value-units-falsifier.json` carries `injected_anchor` precisely to say
+    which reading a block is (`as_written: false`, `with_anchor: true`), and
+    nothing read it: the liveness proof was a COUNT equality
+    (`value_survived == value_units`), so a scored block declaring
+    `injected_anchor: false` with 14/14 was accepted — the driver certifying "the
+    counter is shown to move" on a block that states, in the record's own words,
+    that it ran no injection. That is the inert-counter class the refusal above
+    it is written for, read one field short.
+
+    `False`, `None` and an ABSENT key are each mutated alone, because the guard is
+    `is not True` and a truthiness test would accept the first two; a permissive
+    default is not an assertion.
+
+    Non-vacuity: at the pre-fix head this bundle scores, reporting the 14/14 from a
+    block that declares no injection as the falsifier reading.
+    """
+    repo = _bundle(tmp_path)
+    path = repo / "docs/evidence/9889/e2a-value-units-falsifier.json"
+    record = json.loads(path.read_text())
+    assert record["with_anchor"]["injected_anchor"] is True
+    if declared == "absent":
+        record["with_anchor"].pop("injected_anchor")
+    else:
+        record["with_anchor"]["injected_anchor"] = declared
+    path.write_text(json.dumps(record))
+    with pytest.raises(SystemExit) as refused:
+        scores_probe.score(repo)
+    assert refused.value.code == 2, refused.value
+    err = capsys.readouterr().err
+    assert "does not declare an injection" in err, err
+    assert "moved because an anchor was injected" in err, err
+
+    # …and the declared-true block that ships still scores — the arm discriminates
+    # a block declaring no injection from the injected one, rather than refusing
+    # the whole falsifier form.
+    record["with_anchor"]["injected_anchor"] = True
+    path.write_text(json.dumps(record))
+    assert scores_probe.score(repo)["e2"]["outcome"] == "FAIL"
+
+
+# ── the head prefix is the one the PRODUCERS write (#10610 review P3) ───────────────────────
+
+def test_a_graph_naming_the_head_under_the_producers_eight_chars_scores(tmp_path):
+    """A record reproduced with a producer's OWN documented command must score.
+
+    The driver required NINE hex characters (`after["head"][:9]`), while every
+    producer documents and writes EIGHT: `e1_paired_arm.py`'s usage is
+    `--graph capstone_off_<head8>_<epoch>`, `e2a_value_units.py`'s and
+    `e1_gate_drops.py`'s are `capstone_measure_<head8>_<epoch>`, and
+    `capstone_measure.py` builds its own default as
+    `f"capstone_measure_{head[:8]}_{int(time.time())}"`. So reproducing this
+    record with the documented command produced
+    `capstone_off_54922a80_<epoch>`, which the driver refused with *"does not name
+    head 54922a800"* — a refusal that blames a correctly-named graph. The
+    committed artifacts happen to carry nine (`capstone_off_54922a800_…`), which
+    is why only the reproduction path failed.
+
+    The check now compares the SHORTER prefix, so both spellings score, and a graph
+    naming a DIFFERENT head is still refused (pinned by the sibling graph pins).
+
+    Non-vacuity: at the pre-fix head every `score()` call below exits 2.
+    """
+    repo = _bundle(tmp_path)
+    head = next(ln.split()[-1] for ln in
+                (repo / "docs/evidence/9889/on-arm.log").read_text().splitlines()
+                if ln.startswith("# head: "))
+    declared = (_REPO / "docs/evidence/7949-capstone/probes/capstone_measure.py"
+                ).read_text()
+    assert 'capstone_measure_{head[:8]}_' in declared, (
+        "the probe no longer builds its own graph from head[:8] — this pin's "
+        "claim about the producers is stale")
+    for arm in ("e1-paired-off-arm-1.json", "e1-paired-off-arm-2.json"):
+        path = repo / "docs/evidence/9889" / arm
+        record = json.loads(path.read_text())
+        record["graph"] = f"capstone_off_{head[:8]}_1793378986"   # the DOCUMENTED form
+        assert head[:9] not in record["graph"]     # …nine would fail, which was the bug
+        path.write_text(json.dumps(record))
+    assert scores_probe.score(repo)["e1"]["outcome"] == "REFUSED"
+
+    # …and a graph naming a DIFFERENT head is still refused, so the shorter prefix
+    # did not become no prefix at all.
+    path = repo / "docs/evidence/9889/e1-paired-off-arm-1.json"
+    record = json.loads(path.read_text())
+    record["graph"] = "capstone_off_00000000_1793378986"
+    path.write_text(json.dumps(record))
+    with pytest.raises(SystemExit) as refused:
+        scores_probe.score(repo)
+    assert refused.value.code == 2, refused.value
