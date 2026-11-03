@@ -672,3 +672,870 @@ def test_snapshot_store_is_bounded_and_lru(monkeypatch):
             "the least-recently-used entry is evicted")
     finally:
         fs._store.clear()
+
+
+# ── #10602: single-flight corpus build ─────────────────────────────────
+#
+# The degraded read path built the snapshot with a bare ``build_snapshot``
+# call, so EVERY concurrent reader ran its own whole-corpus fetch. Measured
+# (idle local store, 10,000 points): N simultaneous degraded reads cost N
+# builds — 8 readers took 4.0–4.6 s each while ONE took 0.8 s, i.e. a search
+# got slower the more agents were searching, which is #10602's own signature
+# (5 concurrent agents, every call ~13.2 s). ``get_or_build`` coalesces.
+
+def _snap_stub(tag="s"):
+    return {"built_at": time.monotonic(), "dirty": False, "points": [],
+            "vectorizer": None, "doc_vecs": None, "model_id": None,
+            "tag": tag}
+
+
+def _flight_for(key: tuple, generation: tuple[int, int], store=None):
+    """The registered flight for ``key``+``generation`` on the module store (or ``store``).
+
+    The registry slot is ``(store, key, generation)`` -- store identity is part of it
+    (review round 13), so a test cannot look the slot up by key alone.
+    """
+    target = fs._store if store is None else store
+    for slot, flight in list(fs._FLIGHTS.items()):
+        if slot[0] is target and slot[1] == key and slot[2] == generation:
+            return flight
+    return None
+
+
+def test_get_or_build_coalesces_concurrent_readers():
+    """N concurrent misses → exactly ONE build; every reader gets that snapshot."""
+    import threading
+
+    fs._store.clear()
+    key = ("coalesce-graph", "coalesce-ns")
+    builds = []
+    lock = threading.Lock()
+    start = threading.Barrier(8)
+
+    def slow_builder(_proj):
+        with lock:
+            builds.append(1)
+        time.sleep(0.25)  # long enough that all 8 readers are inside the miss
+        return _snap_stub()
+
+    out = {}
+
+    def reader(i):
+        start.wait()
+        out[i] = fs.get_or_build(None, key, builder=slow_builder)
+
+    threads = [threading.Thread(target=reader, args=(i,)) for i in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=30)
+
+    assert len(builds) == 1, (
+        f"one corpus build for {len(out)} concurrent readers — got {len(builds)} "
+        "(the pre-#10602 shape: N readers, N whole-corpus fetches)")
+    assert len(out) == 8 and all(v is not None for v in out.values())
+    assert len({id(v) for v in out.values()}) == 1, \
+        "every reader must be served the same built snapshot"
+    assert fs._FLIGHTS == {}, (
+        "the last waiter out must remove the flight — a leak serves every later "
+        "reader this stale result without ever reaching the store (review round 4, "
+        "P3; nothing pinned the registry before)")
+
+
+def test_get_or_build_reuses_cached_snapshot_without_building():
+    fs._store.clear()
+    key = ("cached-graph", "cached-ns")
+    fs._store.put(key, _snap_stub("warm"))
+    built = []
+
+    def builder(_proj):
+        built.append(1)
+        return _snap_stub("cold")
+
+    snap = fs.get_or_build(None, key, builder=builder)
+    assert snap is not None and snap["tag"] == "warm"
+    assert built == [], "a cached snapshot must not trigger a build"
+
+
+def test_get_or_build_rebuilds_after_invalidation_and_survives_failure():
+    """A write's invalidate() is still honoured, and a None build caches nothing."""
+    fs._store.clear()
+    key = ("inval-graph", "inval-ns")
+    calls = []
+
+    def builder(_proj):
+        calls.append(1)
+        return None if len(calls) == 1 else _snap_stub("second")
+
+    assert fs.get_or_build(None, key, builder=builder) is None, \
+        "a failed build must yield None (the legacy path), not a stale snapshot"
+    assert fs._store.get(key) is None, "a failed build must not be cached"
+    snap = fs.get_or_build(None, key, builder=builder)
+    assert snap is not None and snap["tag"] == "second"
+    fs._store.invalidate(key)
+    assert fs._store.get(key) is None, "invalidate() still drops the entry"
+    # …and the drop is HONOURED on the next read (review round 2: this half was
+    # only asserted on the store, so a get_or_build that served the invalidated
+    # snapshot across a write would have passed).
+    rebuilt = fs.get_or_build(None, key, builder=lambda _p: _snap_stub("third"))
+    assert rebuilt is not None and rebuilt["tag"] == "third", \
+        "a read after invalidate() must REBUILD, not serve the dropped snapshot"
+    assert len(calls) == 2, "the failed build must not have been retried implicitly"
+
+
+def test_get_or_build_coalesces_a_FAILED_build_too():
+    """The failure path must cost ONE attempt, not N (review round 2, P2).
+
+    ``build_snapshot`` returns None above MAX_CORPUS_POINTS and on any query
+    exception, and a None is never cached — so a per-key LOCK serialised those N
+    readers into N identical doomed builds. A flight publishes the single outcome
+    to everyone who joined it.
+    """
+    import threading
+
+    fs._store.clear()
+    key = ("fail-graph", "fail-ns")
+    attempts = []
+    lock = threading.Lock()
+    start = threading.Barrier(6)
+    out = {}
+
+    def failing(_proj):
+        with lock:
+            attempts.append(1)
+        time.sleep(0.15)
+        return None
+
+    def reader(i):
+        start.wait()
+        out[i] = fs.get_or_build(None, key, builder=failing)
+
+    threads = [threading.Thread(target=reader, args=(i,)) for i in range(6)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=30)
+
+    assert len(attempts) == 1, (
+        f"a failed build must be attempted ONCE for {len(out)} concurrent "
+        f"readers — got {len(attempts)} (serialised failure is concurrency-linear "
+        "latency on the over-cap / failing-store path)")
+    assert all(v is None for v in out.values()), \
+        "every joiner must get the None contract, so the legacy path runs"
+    assert fs._store.get(key) is None, "a failure must never be cached"
+    assert fs._FLIGHTS == {}, (
+        "the flight registry must be empty after a failed cohort, or the next "
+        "reader joins a completed flight and is served its None forever")
+
+
+def test_a_raising_build_serves_the_whole_cohort_the_legacy_path():
+    """A build that RAISES must not split the cohort (review round 4, P3).
+
+    ``build_snapshot`` swallows its own two documented failures (over-cap, query
+    exception), so a raise is an UNEXPECTED error. Left uncaught it propagates to
+    the LEADER while every joiner reads ``result is None`` and quietly takes the
+    legacy path — one failure, two different answers. The leader now publishes the
+    documented None contract to the whole cohort, so every reader takes one path.
+    """
+    import threading
+
+    fs._store.clear()
+    key = ("raise-graph", "raise-ns")
+    start = threading.Barrier(4)
+    out = {}
+    errors = []
+    calls = []
+    lock = threading.Lock()
+
+    def raising(_proj):
+        with lock:
+            calls.append(1)
+        time.sleep(0.15)
+        raise RuntimeError("boom")
+
+    def reader(i):
+        try:
+            start.wait()
+            out[i] = fs.get_or_build(None, key, builder=raising)
+        except Exception as exc:  # noqa: BLE001, RUF100
+            errors.append(exc)
+
+    threads = [threading.Thread(target=reader, args=(i,)) for i in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=30)
+
+    assert len(calls) == 1, f"a raising build is attempted ONCE — got {len(calls)}"
+    assert errors == [], (
+        "the cohort must NOT see the raise: it degrades to the legacy path, as the "
+        "pre-#10602 per-reader build's None contract did once build_snapshot "
+        "swallowed its own failures")
+    assert len(out) == 4 and all(v is None for v in out.values()), \
+        "every reader gets the documented None contract"
+    assert fs._store.get(key) is None, "a raise must never be cached"
+    assert fs._FLIGHTS == {}, "the registry must be empty after a raising build"
+
+
+def test_a_reader_arriving_AFTER_a_write_does_not_get_pre_write_rows():
+    """Read-your-writes for the DELIVERY half (review round 6, P2).
+
+    The generation guard stopped a build overtaken by a write from being CACHED —
+    but the flight stays registered and joinable, so a reader whose own ``get``
+    missed AFTER the write could still join that build and be served rows read
+    before it. Pre-#10602 that reader ran its own build and saw the write, so
+    serving the leader's rows loses the caller's own write. Measured before the
+    fix: a reader starting after the write got the PRE-write rows.
+    """
+    import threading
+
+    fs._store.clear()
+    key = ("ryw-graph", "ryw-ns")
+    started = threading.Event()
+    release = threading.Event()
+    out = {}
+
+    def leader_builder(_proj):
+        started.set()
+        release.wait(timeout=10)
+        return _snap_stub("pre-write")
+
+    joiner_building = threading.Event()
+
+    def joiner_builder(_proj):
+        joiner_building.set()
+        return _snap_stub("fresh")
+
+    t1 = threading.Thread(
+        target=lambda: out.__setitem__(
+            "leader", fs.get_or_build(None, key, builder=leader_builder)))
+    t1.start()
+    assert started.wait(timeout=10), "the leader's build never started"
+
+    # A write lands WHILE the build runs.
+    fs._store.invalidate(key)
+
+    t2 = threading.Thread(
+        target=lambda: out.__setitem__(
+            "joiner", fs.get_or_build(None, key, builder=joiner_builder)))
+    t2.start()
+    # ⛔ NOT "wait until the joiner has joined the leader's flight": with flights
+    # keyed by ``(key, generation)`` a reader that arrives AFTER a write can never
+    # join the pre-write build at all (it holds a different stamp), so it LEADS the
+    # build for its own generation. The deterministic condition is therefore "the
+    # late reader's own build has started", which is the mechanism this test exists
+    # to pin — a shared-waiter count would no longer exist to wait on.
+    assert joiner_building.wait(timeout=10), (
+        "a reader that arrived after the write never started its own build — it "
+        "must not be able to join the pre-write flight")
+
+    release.set()
+    t1.join(timeout=15)
+    t2.join(timeout=15)
+
+    assert out.get("leader") is not None and out["leader"]["tag"] == "pre-write"
+    assert out.get("joiner") is not None, "the late joiner still gets an answer"
+    assert out["joiner"]["tag"] == "fresh", (
+        f"a reader that arrived AFTER the write must not be served the leader's "
+        f"pre-write rows — got {out['joiner']['tag']!r}, i.e. read-your-writes is "
+        f"broken for the degraded tier")
+    # The joiner's fresh build is cached (it was not overtaken), the stale one is not.
+    cached = fs._store.get(key)
+    assert cached is not None and cached["tag"] == "fresh"
+    assert fs._FLIGHTS == {}, "no flight may leak"
+
+
+def test_a_raising_build_is_LOGGED(caplog):
+    """The swallow is acceptable only because it is loud (review round 6, P3).
+
+    ``except Exception`` publishes ``None`` to the cohort instead of raising; that
+    is only right if it is observable. Deleting the ``logger.exception`` call kept
+    every other test green, so the reason the swallow is safe was unpinned.
+    """
+    import logging
+
+    fs._store.clear()
+    key = ("logged-graph", "logged-ns")
+
+    def raising(_proj):
+        raise RuntimeError("boom")
+
+    with caplog.at_level(logging.ERROR):
+        assert fs.get_or_build(None, key, builder=raising) is None
+
+    assert any("corpus build raised" in r.getMessage() for r in caplog.records), (
+        "an unexpected build failure must be logged, not silently swallowed")
+    assert fs._FLIGHTS == {}
+
+
+def test_get_or_build_does_not_publish_a_build_overtaken_by_a_write():
+    """A write landing MID-BUILD must not be undone by that build's put.
+
+    Review round 2: rows are read at t1, a write invalidates at t2, and a naive
+    put publishes the PRE-write rows for the full 60 s TTL — to every reader,
+    where before each reader built its own and the later one self-healed. The
+    generation guard returns the answer to this cohort but caches nothing, so the
+    next reader rebuilds.
+    """
+    fs._store.clear()
+    key = ("race-graph", "race-ns")
+
+    def builder_overtaken_by_a_write(_proj):
+        # A write lands while the corpus is being read.
+        fs._store.invalidate(key)
+        return _snap_stub("stale")
+
+    first = fs.get_or_build(None, key, builder=builder_overtaken_by_a_write)
+    assert first is not None, "this cohort still gets an answer"
+    assert fs._store.get(key) is None, (
+        "a snapshot overtaken by a write must NOT be cached — caching it serves "
+        "pre-write rows to every reader for the whole TTL")
+    second = fs.get_or_build(None, key, builder=lambda _p: _snap_stub("fresh"))
+    assert second is not None and second["tag"] == "fresh", \
+        "the next reader must rebuild (self-healing, as the pre-#10602 path got free)"
+    assert fs._store.get(key) is not None, "the clean build IS cached"
+
+
+def test_a_cohort_overtaken_by_one_write_costs_ONE_build_not_one_per_reader():
+    """A write during a build must not fan the cohort out into N builds.
+
+    Review round 9, P2. The fix for round 6 (a late joiner must not be served
+    pre-write rows) was written as an inline rebuild per reader, gated on "the
+    generation changed" — a condition that is true for the WHOLE cohort, so one
+    leader + 5 joiners cost **6 whole-corpus builds**: the exact amplifier this
+    module exists to remove, restored, triggered by the ordinary event of a write
+    landing during a build. Measured at that head: 6 builds.
+
+    The mechanism that replaces it is structural rather than compensatory: the
+    flight slot is ``(key, generation)``, so a reader that arrived before the
+    write shares the leader's build (whose rows are no older than its own
+    arrival), and a reader that arrived AFTER the write holds a different stamp
+    and cannot join it at all. No reader needs to rebuild, so the cohort costs
+    ONE build however many readers join it.
+    """
+    import threading
+
+    fs._store.clear()
+    key = ("cohort-graph", "cohort-ns")
+    n_joiners = 5
+    builds: list[int] = []
+    builds_lock = threading.Lock()
+    started = threading.Event()
+    release = threading.Event()
+    out: dict[str, dict | None] = {}
+
+    def builder(_proj):
+        with builds_lock:
+            first = not builds
+            builds.append(1)
+        if first:
+            started.set()
+            release.wait(timeout=10)
+            return _snap_stub("pre-write")
+        return _snap_stub("rebuilt")
+
+    g0 = fs._store.generation(key)
+    leader = threading.Thread(
+        target=lambda: out.__setitem__("leader", fs.get_or_build(None, key, builder=builder)))
+    leader.start()
+    assert started.wait(timeout=10), "the leader's build never started"
+
+    joiners = [
+        threading.Thread(
+            target=lambda i=i: out.__setitem__(
+                f"j{i}", fs.get_or_build(None, key, builder=builder)))
+        for i in range(n_joiners)
+    ]
+    for t in joiners:
+        t.start()
+    # Deterministic: every joiner must be IN the leader's flight before the write,
+    # so this pins "a cohort overtaken by a write" and not a scheduling accident.
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        fl = _flight_for(key, g0)
+        if fl is not None and fl.waiters >= n_joiners + 1:
+            break
+        time.sleep(0.005)
+    else:
+        raise AssertionError("the cohort never assembled on the leader's flight")
+
+    fs._store.invalidate(key)   # the write that overtakes the in-flight build
+    release.set()
+    for t in [leader, *joiners]:
+        t.join(timeout=20)
+
+    assert len(out) == n_joiners + 1, f"every reader gets an answer, got {sorted(out)}"
+    assert all(v is not None for v in out.values()), "no reader is dropped"
+    assert len(builds) == 1, (
+        f"a cohort of {n_joiners + 1} readers overtaken by ONE write must cost ONE "
+        f"whole-corpus build, not one per reader — got {len(builds)} builds")
+    # The overtaken build is still not CACHED (round 2's rule stands) …
+    assert fs._store.get(key) is None, "an overtaken build must not be cached"
+    assert fs._FLIGHTS == {}, "no flight may leak"
+
+
+def test_same_key_writes_leave_the_degraded_cache_cold_which_is_the_stated_trade():
+    """The cost of the freshness guard, PINNED rather than discovered (round 9, P1).
+
+    ``_mark_dirty`` invalidates this key on every write surface, so when the write
+    rate exceeds the inverse of the build time EVERY build window contains an
+    invalidation: nothing is ever cached and the degraded tier costs one corpus
+    fetch per read. The pre-#10602 code cached that overtaken build unconditionally,
+    so on such a graph it achieved hits and this does not. That is a deliberate
+    trade — the alternative serves rows that predate a committed write, so an agent
+    that has just written a memory cannot find it — and this test exists so the
+    trade is a decision rather than an accident: if someone later "restores" the
+    unconditional ``put``, this test tells them what they are giving up, and if
+    someone makes the guard cost more than one build per read, it fails.
+    """
+    fs._store.clear()
+    key = ("trade-graph", "trade-ns")
+    builds = []
+
+    def builder(_proj):
+        # Every build is overtaken: the write lands inside the build window, exactly
+        # as it does on a graph written to faster than a corpus build completes.
+        builds.append(1)
+        fs._store.invalidate(key)
+        return _snap_stub(f"build-{len(builds)}")
+
+    for _ in range(5):
+        assert fs.get_or_build(None, key, builder=builder) is not None
+
+    assert len(builds) == 5, (
+        f"the stated trade is one corpus fetch per read under continuous same-key "
+        f"writes; got {len(builds)} builds for 5 reads — if this DROPPED, someone "
+        f"started caching pre-write rows (see the guard's comment); if it ROSE, the "
+        f"cohort is fanning out again")
+    assert fs._store.get(key) is None, (
+        "the cache must stay cold while every build is overtaken — caching a "
+        "pre-write snapshot here is what round 2 forbade")
+    assert fs._FLIGHTS == {}, "no flight may leak"
+
+
+def test_a_reader_racing_the_commit_invalidate_tail_gets_the_cohorts_rows():
+    """The bound is ONE FLIGHT, not "no result crosses a write boundary" (round 10, P2).
+
+    ``_mark_dirty`` runs ``invalidate()`` at the TAIL of each write surface, AFTER the
+    graph commit (``sdk.py:17590`` -> ``:17594``). So there is a window between a write
+    COMMITTING and its invalidate landing. A reader whose ``get`` misses inside that
+    window samples the PRE-write stamp and joins the pre-write flight.
+
+    This test exists because the earlier round-9 tests modelled the write AS the
+    invalidate (``fs._store.invalidate(key)`` at the exact instant of the write), which
+    pins the idealised zero-width case and cannot see this window at all — so the
+    comment's claim of "read-your-writes, structurally" went unchallenged. Here the
+    commit and the invalidate are separated, which is what the real code does.
+
+    The guarantee that DOES hold is the writer's own: a write surface invalidates before
+    it returns, so a caller cannot search before its own write's stamp has moved —
+    asserted at the end of this test.
+    """
+    import threading
+
+    fs._store.clear()
+    key = ("tail-graph", "tail-ns")
+    built = threading.Event()
+    release = threading.Event()
+    rows: list[dict] = []
+    # The write COMMITS between the leader's rows being read and its invalidate landing;
+    # the racing reader arrives in that window. Modelled as an event the leader's builder
+    # READS AT BUILD TIME, NOT as ``fs._store.invalidate`` — modelling the write AS the
+    # invalidate is exactly what hid this window from the round-9 tests. ⛔ The event must
+    # be READ BY THE BUILDER and asserted FALSE there: a ``committed`` flag set and
+    # asserted by the test thread alone is unfalsifiable (review round 12, P3: that is
+    # what the previous version did — wrapper changed, the property did not).
+    committed = threading.Event()
+    seen_at_build: list[bool] = []
+
+    def leader_builder(_proj):
+        # Read the commit state AT BUILD TIME, so the assertion below tests a fact the
+        # test thread cannot set afterwards.
+        seen_at_build.append(committed.is_set())
+        built.set()
+        release.wait(timeout=10)
+        return _snap_stub("pre-commit")
+
+    t1 = threading.Thread(
+        target=lambda: rows.append(fs.get_or_build(None, key, builder=leader_builder) or {}))
+    t1.start()
+    assert built.wait(timeout=10), "the leader's build never started"
+
+    # The write COMMITS now — after the leader's rows were read, BEFORE its invalidate.
+    committed.set()
+
+    heard: list[dict] = []
+    t2 = threading.Thread(
+        target=lambda: heard.append(
+            fs.get_or_build(None, key, builder=lambda _p: _snap_stub("post-commit")) or {}))
+    t2.start()
+    # Deterministic: wait until that reader is IN the pre-write flight.
+    g0 = fs._store.generation(key)
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        fl = _flight_for(key, g0)
+        if fl is not None and fl.waiters >= 2:
+            break
+        time.sleep(0.005)
+    else:
+        raise AssertionError("the racing reader never joined the pre-write flight")
+
+    # NOW the write's tail runs.
+    fs._store.invalidate(key)
+    release.set()
+    t1.join(timeout=20)
+    t2.join(timeout=20)
+
+    assert seen_at_build == [False], (
+        f"the leader's rows must be read BEFORE the write committed (that is what makes "
+        f"them pre-commit rows), and the builder records that fact at build time — got "
+        f"{seen_at_build}. If this is [True] the test has modelled the commit as landing "
+        f"before the build, i.e. it is no longer pinning the window it names")
+    assert rows and rows[0].get("tag") == "pre-commit"
+    assert heard and heard[0].get("tag") == "pre-commit", (
+        "the documented behaviour: a reader racing the commit->invalidate tail is served "
+        "the cohort's pre-commit rows, bounded by one flight. If this now returns "
+        "'post-commit' the window was closed — GOOD, but update the COMMIT->INVALIDATE "
+        "WINDOW note on get_or_build, because it currently states this bound")
+    assert fs._FLIGHTS == {}, "no flight may leak"
+
+    # ⭐ THE GUARANTEE THAT DOES HOLD, and the one a writer depends on: once the write
+    # surface has RETURNED (its invalidate has run), a reader cannot join the pre-write
+    # flight — its stamp has moved and it builds for itself.
+    fs.get_or_build(None, key, builder=lambda _p: _snap_stub("after-tail"))
+    post = fs.get_or_build(None, key, builder=lambda _p: _snap_stub("rebuilt"))
+    assert post is not None and post.get("tag") == "after-tail", (
+        "a writer that has already returned must not be served the pre-write cohort's "
+        "rows — this is the read-your-writes half that DOES hold")
+
+
+def test_two_stores_sharing_a_key_never_share_a_flight():
+    """The ``store`` test seam must not hand one store's rows to another (round 13, P3).
+
+    ``get_or_build`` accepts ``store`` as a test seam. With the flight slot keyed on
+    ``(key, generation)`` alone, two DIFFERENT stores sharing a key were handed each
+    other's flight: a reader on store B joined store A's in-flight build and was served
+    **store A's snapshot**, while ``b.get(key)`` stayed ``None``. Unreachable in
+    production (the only instantiation is the module singleton), which is worse rather
+    than better — a store-injection test would have been a **false PASS**.
+    """
+    import threading
+
+    store_a = fs.FallbackSnapshotStore()
+    store_b = fs.FallbackSnapshotStore()
+    key = ("shared-key-graph", "shared-key-ns")
+    started = threading.Event()
+    release = threading.Event()
+    got: dict[str, dict | None] = {}
+
+    def a_builder(_proj):
+        started.set()
+        release.wait(timeout=10)
+        return _snap_stub("FROM-STORE-A")
+
+    def b_builder(_proj):
+        return _snap_stub("FROM-STORE-B")
+
+    t1 = threading.Thread(
+        target=lambda: got.__setitem__(
+            "a", fs.get_or_build(None, key, store=store_a, builder=a_builder)))
+    t1.start()
+    assert started.wait(timeout=10), "store A's build never started"
+
+    t2 = threading.Thread(
+        target=lambda: got.__setitem__(
+            "b", fs.get_or_build(None, key, store=store_b, builder=b_builder)))
+    t2.start()
+    t2.join(timeout=15)
+    b_snap = got.get("b")
+    assert b_snap is not None and b_snap["tag"] == "FROM-STORE-B", (
+        f"store B's reader must be served STORE B's rows, got "
+        f"{b_snap['tag'] if b_snap else b_snap!r} — a reader handed another store's "
+        f"snapshot is a false PASS in any test using the ``store`` seam")
+    cached_b = store_b.get(key)
+    assert cached_b is not None and cached_b["tag"] == "FROM-STORE-B", (
+        "store B's own cache must hold its own build")
+
+    release.set()
+    t1.join(timeout=20)
+    a_snap = got.get("a")
+    assert a_snap is not None and a_snap["tag"] == "FROM-STORE-A"
+    assert fs._FLIGHTS == {}, "no flight may leak"
+
+
+def test_a_write_opens_a_concurrent_build_which_is_the_stated_concurrency_bound():
+    """At most one build per IN-FLIGHT GENERATION, not one per key (round 10, P3).
+
+    The module banner used to say "one whole-corpus fetch per key, not one per reader".
+    That is not what the code does: the slot is ``(key, generation)``, so a reader holding
+    a newer stamp opens its own build while the older one is still running. That is a
+    consequence of the correctness rule (a reader must never be served rows predating a
+    write it could have seen), not of coalescing — the pre-#10602 code ran every reader's
+    build concurrently too.
+
+    What IS guaranteed, and what this test pins, is that the bound is the number of
+    distinct generations in flight rather than the number of readers: the readers sharing
+    a stamp still coalesce, so 4 same-stamp readers cost ONE build even though a second
+    generation is building alongside.
+    """
+    import threading
+
+    fs._store.clear()
+    key = ("gen-graph", "gen-ns")
+    builds: list[str] = []
+    lock = threading.Lock()
+    g0_started = threading.Event()
+    g0_done = threading.Event()
+    release_g0 = threading.Event()
+    release_g1 = threading.Event()
+
+    def builder(tag):
+        def _b(_proj):
+            with lock:
+                builds.append(tag)
+            if tag == "g0":
+                g0_started.set()
+                try:
+                    release_g0.wait(timeout=10)
+                finally:
+                    g0_done.set()
+            else:
+                # ⛔ The g1 leader BLOCKS until released, so ``count("g1") == 1`` below
+                # can only be reached by the other three SHARING this flight. Without
+                # this the count also reads 1 when every late reader simply hits the
+                # cache, or when several sequential flights each re-check the cache —
+                # i.e. it would pass with ZERO coalescing (review round 11, P3: measured
+                # 19/20 trials with 2-4 non-coalescing leaders while the count was 1).
+                release_g1.wait(timeout=10)
+            return _snap_stub(tag)
+        return _b
+
+    t0 = threading.Thread(
+        target=lambda: fs.get_or_build(None, key, builder=builder("g0")))
+    t0.start()
+    assert g0_started.wait(timeout=10)
+
+    # A write lands: the stamp moves while the g0 build is still running.
+    fs._store.invalidate(key)
+
+    # Four readers arrive on the NEW stamp. They must coalesce with EACH OTHER (one
+    # build), and — the pinned bound — that build runs CONCURRENTLY with g0's.
+    late = [
+        threading.Thread(target=lambda: fs.get_or_build(None, key, builder=builder("g1")))
+        for _ in range(4)
+    ]
+    for t in late:
+        t.start()
+    # Deterministic: wait until the four late readers are SHARING the g1 flight, so the
+    # coalescing assertion below cannot be satisfied by cache hits or by sequential
+    # flights. The g1 leader is blocking in the builder, so no read can finish early.
+    g1 = fs._store.generation(key)
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        fl = _flight_for(key, g1)
+        with lock:
+            # ⛔ BOTH facts, not just the waiter count (review round 12, P3):
+            # ``_flight_begin`` bumps ``waiters`` for the LEADER before it reaches
+            # ``produce()`` -> ``builder``, so ``waiters >= 4`` alone can be satisfied
+            # while no g1 build has started — which then failed ``concurrent`` below and
+            # printed "generations were serialised", a misleading diagnosis of code that
+            # had not changed. Require the build to have entered as well.
+            entered = builds.count("g1") >= 1
+        if fl is not None and fl.waiters >= 4 and entered:
+            break
+        time.sleep(0.005)
+    else:
+        with lock:
+            _entered = builds.count("g1")
+        raise AssertionError(
+            f"the four same-stamp readers never shared one flight "
+            f"(waiters={getattr(_flight_for(key, g1), 'waiters', None)}, "
+            f"g1_builds={_entered}) — they are not coalescing")
+
+    with lock:
+        # ⛔ ``not g0_done`` — the EVENT that says the g0 build has returned, not
+        # ``not release_g0.is_set()``, which is True even after the builder's timeout
+        # fired (review round 11, P3: the event was never set on timeout, so the proxy
+        # was true when g0 had already finished).
+        concurrent = builds.count("g0") == 1 and builds.count("g1") == 1 and not g0_done.is_set()
+    assert concurrent, (
+        "the stated bound: a newer generation builds CONCURRENTLY with an in-flight "
+        "older one. If this fails, generations were serialised — a real change, and "
+        "the BANNER note must be updated to say so")
+
+    release_g1.set()
+    release_g0.set()
+    for t in [t0, *late]:
+        t.join(timeout=20)
+
+    with lock:
+        assert builds.count("g0") == 1, "one build for the old generation"
+        assert builds.count("g1") == 1, (
+            f"the 4 same-stamp readers must coalesce onto ONE build, got "
+            f"{builds.count('g1')} — the bound is distinct generations, not readers")
+    assert fs._FLIGHTS == {}, "no flight may leak"
+
+
+def test_degraded_read_with_claim_class_never_uses_the_snapshot(sdk, monkeypatch):
+    """#2351 must survive the #10602 reshape (review round 2, P3).
+
+    The snapshot is a LEAN projection with no class column, so a claim-class
+    filter cannot be honoured from it — the read must take the legacy path and
+    never call ``get_or_build``. A later "simplification" that calls
+    ``get_or_build`` first would silently break the pre-truncation class filter
+    with every other test green.
+    """
+    sdk.create_point("statement", "alpha beta gamma delta")
+    called = []
+    real = fs.get_or_build
+
+    def spy(proj, key, **kw):
+        called.append(key)
+        return real(proj, key, **kw)
+
+    monkeypatch.setattr(fs, "get_or_build", spy)
+    trace: list[dict] = []
+    results = sdk.tortoise_fts_query(
+        query=FTS_MISS, limit=10, claim_class="asserted", leg_trace=trace)
+    # ⛔ NOT a bare ``called == []``: that assertion alone passes VACUOUSLY if the
+    # degraded arm stops firing for any reason (a leg starts answering, the miss
+    # stops being a miss, the fallback is gated off) — ``get_or_build`` is equally
+    # not called, and the #2351 invariant it exists to protect goes unpinned while
+    # the test stays green (review round 4, P3: a false PASS). Pin that the LEGACY
+    # arm actually served this read.
+    assert isinstance(results, list) and results, (
+        "the seeded point must survive the class filter — an empty result would "
+        "make every assertion below vacuous")
+    assert any(t.get("reason") == "tfidf_legacy" for t in trace), (
+        "the claim-class read must be served by the LEGACY tf-idf arm; without "
+        "this the test cannot tell 'correctly bypassed the snapshot' from 'never "
+        "reached the degraded path at all'")
+    assert called == [], (
+        "a claim_class-filtered degraded read must NOT touch the snapshot "
+        "(#2351: the lean projection cannot honour it)")
+
+
+def test_degraded_read_path_goes_through_get_or_build(sdk, monkeypatch):
+    """The #10602 wiring: the read path must COALESCE, not build per reader.
+
+    A regression here is silent (results stay correct, latency grows with the
+    fleet), so the call itself is pinned: one degraded read → ``get_or_build``
+    once and no bare ``build_snapshot``.
+    """
+    sdk.create_point("statement", "alpha beta gamma delta")
+    calls = []
+    real = fs.get_or_build
+
+    def counting(proj, key, **kw):
+        calls.append(key)
+        return real(proj, key, **kw)
+
+    monkeypatch.setattr(fs, "get_or_build", counting)
+    trace: list[dict] = []
+    results = sdk.tortoise_fts_query(
+        query=FTS_MISS, limit=10, leg_trace=trace)
+    assert isinstance(results, list)
+    assert calls, (
+        "the degraded read never reached get_or_build — it is still calling "
+        "build_snapshot directly, i.e. one whole-corpus fetch PER READER "
+        "(#10602)")
+    assert len(calls) == 1, f"one degraded read → one coalesced build ({len(calls)})"
+    assert any(t.get("reason") == "tfidf_snapshot" for t in trace), \
+        "the read must still be served by the snapshot arm it went through"
+
+
+def test_put_if_generation_refuses_a_write_that_landed_after_the_read():
+    """A write landing between the caller's ``generation()`` and its ``put`` must win.
+
+    WHAT THIS PINS: the refused-insert contract — a snapshot whose build started
+    under generation N is not cached once a write has invalidated, and a put under
+    an unchanged generation still caches (the guard is not a veto).
+
+    WHAT THIS DOES NOT PIN (review round 3, and the reason this note exists): the
+    ATOMICITY of the compare+insert. This test is sequential, so it passes
+    identically against a two-critical-section implementation that re-opens the
+    window between the compare and the insert. That atomicity is enforced by
+    construction — ``put_if_generation`` does both inside ONE ``with self._lock``
+    hold — and is verified by READING that method, not by this test. Do not treat a
+    green run here as coverage of it.
+    """
+    fs._store.clear()
+    key = ("atomic-graph", "atomic-ns")
+
+    # The build starts under generation N…
+    generation = fs._store.generation(key)
+    # …a write lands while it runs (i.e. before it reaches its put)…
+    fs._store.invalidate(key)
+    # …and the build's insert must therefore be refused.
+    cached = fs._store.put_if_generation(key, _snap_stub("stale"), generation)
+    assert cached is False, "an insert overtaken by a write must not report success"
+    assert fs._store.get(key) is None, "the overtaken snapshot must NOT be cached"
+
+    # A put under an unchanged generation still caches (the guard is not a veto).
+    generation = fs._store.generation(key)
+    assert fs._store.put_if_generation(key, _snap_stub("fresh"), generation) is True
+    warm = fs._store.get(key)
+    assert warm is not None and warm["tag"] == "fresh"
+
+
+def test_a_write_to_ANOTHER_graph_must_not_refuse_this_keys_insert():
+    """The guard is PER-KEY, not one process-global counter (review round 4, P1).
+
+    ``_store`` is a module-level singleton shared by every tenant in a hosted
+    process, so a global counter meant a write to ANY other graph refused the cache
+    insert of every build overlapping it. Measured before the fix: 20 sequential
+    reads of key A with ONE ``invalidate(keyB)`` inside each build window → 20
+    builds / 0 cache hits, against 19/20 with no foreign write. In a writing fleet —
+    #10602's own scenario — that turns the warm cache into a rebuild-per-read.
+    """
+    fs._store.clear()
+    key = ("mine-graph", "mine-ns")
+    other = ("their-graph", "their-ns")
+
+    generation = fs._store.generation(key)
+    fs._store.invalidate(other)  # a DIFFERENT graph's write lands mid-build
+    assert fs._store.put_if_generation(key, _snap_stub("mine"), generation) is True, (
+        "a write to another graph must not cost this key its cache insert — that is "
+        "the global-counter regression (rebuild-per-read in a writing fleet)")
+    warm = fs._store.get(key)
+    assert warm is not None and warm["tag"] == "mine"
+
+    # …and a write to THIS key still refuses it (the guard is not weakened).
+    generation = fs._store.generation(key)
+    fs._store.invalidate(key)
+    assert fs._store.put_if_generation(key, _snap_stub("stale"), generation) is False
+
+    # clear() resets the whole store, so it must refuse every key.
+    generation = fs._store.generation(key)
+    fs._store.clear()
+    assert fs._store.put_if_generation(key, _snap_stub("pre-clear"), generation) is False, (
+        "clear() is a whole-store reset — a build captured before it must not cache")
+
+
+def test_get_or_build_still_caches_when_another_graph_writes_mid_build():
+    """End-to-end form of the same pin, through ``get_or_build`` itself.
+
+    The unit test above pins ``put_if_generation``; this pins the path callers
+    actually take, so a future reshape that reintroduces a global stamp is caught
+    at the seam that matters.
+    """
+    fs._store.clear()
+    key = ("mine2-graph", "mine2-ns")
+    other = ("their2-graph", "their2-ns")
+    builds = []
+
+    def builder(_proj):
+        builds.append(1)
+        fs._store.invalidate(other)  # foreign graph writes while we build
+        return _snap_stub("mine2")
+
+    first = fs.get_or_build(None, key, builder=builder)
+    assert first is not None and first["tag"] == "mine2"
+    assert len(builds) == 1
+    assert fs._store.get(key) is not None, (
+        "a foreign write during the build must NOT leave this key uncached "
+        "(a global generation counter would — rebuild-per-read)")
+    second = fs.get_or_build(None, key, builder=lambda _p: _snap_stub("rebuilt"))
+    assert second is not None and second["tag"] == "mine2", (
+        "the second read must be a CACHE HIT, not a rebuild")
+    assert len(builds) == 1, "no second build — the foreign write did not evict us"
