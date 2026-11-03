@@ -1875,6 +1875,19 @@ _COMMONMARK_SHAPES = [
      "…same shape with an ORDERED marker"),
     ("> - item\n>   ```\n  > ```\n>   Closes #100\n",
      "…and with a closer carrying a 2-column pre-marker indent"),
+    # …and a CLOSER'S "up to three spaces" is measured after this line's own
+    # markers, in the same space the containing block's column lives in. Measured
+    # from a RAW column instead, the opener's `  > ` allowance (4 columns) was
+    # charged against the closer's `> ` (2), so a 4-space-indented run came out 2
+    # columns past the container, closed a fence the renderer keeps OPEN, and the
+    # keyword after it read as prose: `lands`, exit 0, no annotation. Found by a
+    # sweep against the CommonMark REFERENCE implementation (the Python `cmark`
+    # port), not by a review cycle — every generated item/quote/fence shape now
+    # agrees with it in both directions (#10634).
+    ("  > item\n  > ```\n>     ```\n  > Closes #100\n",
+     "a closer's marker allowance cannot shift its three-space budget"),
+    ("  > item\n  >    ```\n>     ```\n  > Closes #100\n",
+     "…same shape with the fence opened one column deeper"),
     # …and inside a QUOTE that sits inside an ITEM: the item's content column is
     # expressed in `rest` space, so a 4-column run there is NOT a fence (the
     # renderer shows <pre><code>) and the claim after it is PROSE. Passing the
