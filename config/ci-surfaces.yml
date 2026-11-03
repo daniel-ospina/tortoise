@@ -898,6 +898,16 @@ surfaces:
   - test_per_session_census.py
   - test_graph_integrity_gate.py
   - test_cli_claim.py
+  # #10655: `tortoise config show` — the credential-provenance ladder, the masked
+  # DSN/key fingerprints and the `team info` remedy table, all of which live in
+  # `tortoise/__main__.py`. Registered on `api` because that file is an EXACT `api`
+  # SOURCE_PATTERN whose match REPLACES the `core` fallback, so an
+  # `__main__.py`-only diff selects `api` and nothing else — without this row the
+  # file is classified by NO surface, reds `tools/ci_selection.py --integrity`
+  # (the required `manifest-integrity` leg) and is selected by no shard, leg or
+  # tier-2 run at all (`fast_pool()` is built from these lists, not from a
+  # `tests/**` glob).
+  - test_cli_config_show.py
   - test_cli_global_config.py
   - test_cli_context.py
   - test_cli_resolver.py
@@ -4418,6 +4428,20 @@ surfaces:
   # tortoise/config.py, which is a core-surface path) — registered here so a
   # config.py-only change still runs the guard.
   - test_from_uri_userinfo.py
+  # #10655 (dual registration, `api` + here): `test_cli_config_show.py` carries
+  # the ONLY pin on `tortoise/config.py`'s #5109 log redaction — `resolve_db_path`
+  # cuts a `?password=…` query off the `TORTOISE_DB_URI` warning, and the pin is
+  # asserted on `caplog.text` (the record never reaches stderr under pytest, so a
+  # stream-only assertion passed on the reverted cut). `config.py` matches NO
+  # `SOURCE_PATTERNS` row, so a config.py-only diff falls through to `core`; with
+  # the suite registered on `api` alone that diff selected `core` and this suite
+  # was ABSENT (measured: `select(['tortoise/config.py'])` -> surfaces ['core'],
+  # suite selected: False) — the redaction pin could regress on the one diff that
+  # reverts it and nothing would run. `core` is the arm for exactly this shape,
+  # the same placement argument as `test_from_uri_userinfo.py` directly above and
+  # the `record_backup.py` dual registration. `api` keeps the classification
+  # (first-match order), so `classify_test_file` still answers "api".
+  - test_cli_config_show.py
   - test_frontmatter_validator.py
   - test_gate_b_tooling.py
   - test_graph_delete_guard.py       # #2961: race-safe GRAPH.DELETE guard + poisoned-AOF detection (hermetic, no DB)
@@ -9157,6 +9181,8 @@ durations:
   test_battery_run.py: 0.1  # ci-timing junit-census+top-15 2026-11-02 (run 41375596528); was 0.2
   test_chain_enforcer.py: 0.2
   test_cli_claim.py: 0.1  # ci-timing junit-census+top-15 2026-11-02 (run 41375596528); was 0.4
+  test_cli_claim.py: 0.4  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 0.1
+  test_cli_config_show.py: 2.0  # new in #10655 (the #3400/#4348 trap): a file a PR ADDS can never carry a CI junit reading yet (the `durations` refresher samples push-to-main runs only), so it takes the header's flat `DEFAULT_FAST_WEIGHT` and NOT a local reading, which this map forbids as a SHARD-LAYOUT input (#2818/#3419). The row has to EXIST, not merely default: the `api` registration puts one more file in `fast_pool()`. ⚠️ Stated precisely, because the opposite was claimed in review: the durations row is NOT what reds `--integrity` at this head — measured with this PR's own `tools/ci_selection.py` + manifest, `duration_coverage_issues()` is `[]` both ways (delete this row and the coverage floor still passes); the SURFACE row above is the failing half. The row is kept because a fast file added by a PR must carry a weight at all (a default is not a reading). What the weight covers: DB-free, graph-free, network-free and model-free — every case is a `tmp_path` child process driving `tortoise config show` (argparse + the pure helpers) or an in-process call with the HTTP seam stubbed, and the autouse fixture rewrites `HOME` and deletes `TORTOISE_API_KEY`/`TORTOISE_API_URL`/`TORTOISE_DB_URI` so no developer store or socket is reachable. `tools/ci_timing.py --refresh-durations` replaces this from junit once a push-to-main sweep includes it.
   test_cli_global_config.py: 0.3
   test_cli_resolver.py: 0.1  # ci-timing junit-census+top-15 2026-11-02 (run 41375596528); was 0.3
   test_de2e7_gates_mcp.py: 0.1  # ci-timing junit-census+top-15 2026-11-02 (run 41375596528); was 0.2
