@@ -652,7 +652,7 @@ def record_tenant_for_graph(plan: dict | None) -> tuple[str, str] | None:
       :func:`plan_graph_target` answers that ref with ``None``, and refuses it
       whenever ``_current_graph_id`` is set, because its default-ref branch
       compares the bound id against the ``"default"`` SENTINEL
-      (`_DEFAULT_GRAPH_ID`, :316) while a resolved credential carries a real
+      (`_DEFAULT_GRAPH_ID`, :338) while a resolved credential carries a real
       ``public.graphs`` id. A bound credential is therefore REFUSED there
       rather than resolved, INCLUDING one bound to the default graph's own row
       (pinned by ``test_9340_graph_tool_argument.py``::
@@ -676,7 +676,8 @@ def record_tenant_for_graph(plan: dict | None) -> tuple[str, str] | None:
     above even when the credential's own read was fail-soft and stamped no
     ``default_graph_id``. In that shape the honest answer is the fail-closed
     ``no_tenant`` refusal, NOT an install — because a default row's
-    ``plan["graph_id"]`` is the ``"default"`` SENTINEL (:336), and
+    ``plan["graph_id"]`` is the ``"default"`` SENTINEL (`_DEFAULT_GRAPH_ID`,
+    :338), and
     :func:`tortoise.record_writer.record_tenant_for` accepts any non-empty
     string in that field, so installing it would hand the record an
     FK-invalid tenant and turn an attributable DECLINE into an unattributable
