@@ -2740,8 +2740,24 @@ def consent_bounce_url(app_origin: str, raw_query: str) -> str:
       and `redirect_uri` are compared byte-for-byte by the client, and a
       `+`/`%2B`/`%20` normalisation at this hop is the silent
       CSRF-mismatch-after-consent class the bridge refuses everywhere else.
+    * ⛔ THIS SERVER MINTS THE ATTEMPT KEY, because this hop is the ONLY leg on
+      which no key exists yet (#10487). `/api/consent/start` binds the flow to a
+      browser with an insert-only `attempt_key` and hands it back inside the
+      return target — but on a cold start it had to INVENT that key, so the key
+      existed only in the one URL `start` happened to emit. A visitor who signed
+      in on a DIFFERENT `/auth` entry for the same flow (the back button, a
+      refresh, this bounce's own return target) came back without it and was
+      refused with `403 flow_not_yours`: the row was already claimed by a key
+      nobody could present. Generating the key HERE makes it the property of the
+      flow rather than of one emitted URL — the bounce, the sign-in return, and
+      every re-entry carry the same value, so `start` ADOPTS it on the insert
+      and the insert-only row is never poisoned. It is `secrets`, not a
+      counter: it is the browser's only proof of ownership, so it must not be
+      predictable from the `state` (which is client-chosen and public).
     """
     inner = CONSENT_START_PATH + (("?" + raw_query) if raw_query else "")
+    inner += ("&" if "?" in inner else "?") + urlencode(
+        {CONSENT_ATTEMPT_KEY_PARAM: secrets.token_urlsafe(32)})
     return (app_origin.rstrip("/") + CONSENT_SIGNIN_PATH + "?"
             + urlencode({"next": inner}))
 
