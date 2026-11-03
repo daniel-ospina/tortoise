@@ -102,7 +102,7 @@ into this salvage as a firing instrument.
 | `test_recover_from_log_tolerates_a_per_event_apply_failure` | one failing event does not abort the sweep | A | no-port |
 | `test_fold_sweep_handles_2500_folds` | the fold sweep issues one round-trip per surviving fold | A | no-port — the retraction sweep does not exist |
 | `test_retracted_object_excluded_from_recall_even_with_superseded` | a retracted Object is excluded from recall | A | no-port — recall read filters are held by `tests/test_status_projection.py`; the specific pair is the tombstone model's |
-| `test_live_object_still_returned` | positive control: a live Object is still returned | A | held — `tests/test_status_projection.py::test_object_result_carries_status` |
+| `test_live_object_still_returned` | positive control: a live Object is still returned | A | held — `tests/test_status_projection.py::test_object_result_carries_the_status_the_graph_holds` |
 | `test_retracted_object_excluded_from_search` | a retracted Object is excluded from search | A | superseded — post-#3299 a deleted Object is *gone*, not filtered (`tests/test_7951_delete_resurrection.py`) |
 | `test_retracted_object_excluded_from_structural_leg` | the structural leg excludes retracted | A | no-port |
 | `test_retracted_object_excluded_by_post_filter` | the `sdk.py` post-filter excludes retracted | A | no-port |
