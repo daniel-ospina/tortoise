@@ -1040,6 +1040,14 @@ def read_local_record_turns(directory, node_keys: Iterable[str] | None = None
     #: but a narrowed surface the artifact does not name is a silent claim of
     #: coverage — the exact class the four-surface enumeration closed.
     skipped_files: list[str] = []
+    #: A record-SHAPED path that exists but is not a regular file (a dangling
+    #: symlink, a FIFO, a directory named `<day>.jsonl`). A SEPARATE list from
+    #: `skipped_files` on purpose: that one is the day+shape COLLISION
+    #: disclosure and its stdout sentence states a collision cause, so sharing
+    #: it printed a contradictory cause for this class (review P3). Named, never
+    #: silent — a narrowed surface the artifact does not name is a silent claim
+    #: of coverage.
+    unreadable_paths: list[str] = []
     # ⛔ `scan_dir`, NOT `directory`: the loop variable used to reuse the name of
     # this function's own PARAMETER (`directory`, declared in the signature), so
     # every iteration silently destroyed the argument the caller passed. It is
@@ -1048,6 +1056,20 @@ def read_local_record_turns(directory, node_keys: Iterable[str] | None = None
     # loop would read the root path instead of the caller's value (review P3).
     for scan_dir in (root / "archive", root):
         if not scan_dir.exists():
+            # ⛔ AN UNRESOLVABLE SURFACE IS NOT AN ABSENT ONE (review P3).
+            # `exists()` follows links, so an `archive/` symlink whose target is
+            # gone (an unmounted archive volume, a re-provisioned disk) read
+            # exactly like "no archive directory yet" and was skipped in
+            # silence — while the artifact went on reporting the four
+            # shape x directory surfaces as covered. A GENUINELY missing
+            # `archive/` is normal and stays silent; a symlink that does not
+            # resolve never is, and it could be holding every sealed day.
+            if scan_dir.is_symlink():
+                raise CensusError(
+                    f"the local record's surface {scan_dir} is a symlink that "
+                    "does not resolve — an archive volume that is not mounted "
+                    "is NOT an archive that holds nothing, so an absence is "
+                    "NOT established")
             continue
         try:
             entries = list(scan_dir.iterdir())
@@ -1067,8 +1089,16 @@ def read_local_record_turns(directory, node_keys: Iterable[str] | None = None
                 # which is the one thing this leg's own `skipped_files` contract
                 # forbids. Only record-SHAPED names are named here; a plain
                 # directory (e.g. `archive/`) is not a narrowing.
+                #
+                # ⛔ ITS OWN LIST, not `skipped_files` (review P3). That list is
+                # the COLLISION disclosure and its stdout line states a
+                # collision cause per entry, so putting this class there printed
+                # a self-contradicting sentence ("not a regular file … same
+                # day+shape as a file the root store already supplies") that
+                # named the wrong repair. Two causes, two lists, each with its
+                # own sentence.
                 if any(entry.name.endswith(s) for s in _LOCAL_RECORD_SUFFIXES):
-                    skipped_files.append(
+                    unreadable_paths.append(
                         f"{entry.relative_to(root)} (not a regular file, "
                         "so its records were not read)")
                 continue
@@ -1093,7 +1123,18 @@ def read_local_record_turns(directory, node_keys: Iterable[str] | None = None
             f"no record files under {root} ({' / '.join(_LOCAL_RECORD_GLOBS)}) "
             "— the local record is EMPTY, and an empty record is not evidence "
             "of parity (it is the shape that would certify deleting every "
-            "turn). An absence is NOT established")
+            "turn). An absence is NOT established"
+            # ⛔ EMPTY vs DAMAGED (review P3): a record-SHAPED path that exists
+            # and could not be read is not an empty record — the same
+            # distinction the all-dropped arm above makes for LINES. The report
+            # is built after this raise, so this is the only place it can be
+            # said; without it an operator is told to check the directory when
+            # the truth is an unreadable day file.
+            + (("\n\nThe directory is NOT empty of record-shaped paths: "
+                + "; ".join(unreadable_paths)
+                + " — those were present and NOT read, so this is a DAMAGED "
+                  "read, not an empty record.")
+               if unreadable_paths else ""))
 
     # ⛔ THE FILING LEG'S WINDOW (review P2): the graph's `t<i>` are minted over
     # the list that leg POSTed, not over the file's raw list, so `_window` is
@@ -1466,6 +1507,7 @@ def read_local_record_turns(directory, node_keys: Iterable[str] | None = None
         "duplicate_window": duplicate_window,
         "filed_window": filed_window,
         "skipped_files": sorted(skipped_files),
+        "unreadable_paths": sorted(unreadable_paths),
     }
 
 
@@ -1773,6 +1815,10 @@ def census(graph: dict, record: dict, *, sample: int) -> dict:
                        # surface is narrower than `files` alone suggests, so
                        # the omission is named rather than implied.
                        "skipped_files": record.get("skipped_files") or [],
+                       # Record-SHAPED paths that exist and were NOT read (a
+                       # different cause from a displaced day+shape collision,
+                       # so its own key and its own stdout sentence).
+                       "unreadable_paths": record.get("unreadable_paths") or [],
                        # Held back from the positional key space, with the graph
                        # population each one needs placed: a duplicate that no
                        # graph turn needs is disclosed and does not block.
@@ -2125,6 +2171,11 @@ def main(argv: list[str] | None = None) -> int:
         print(f"skipped    : {skipped} (same day+shape as a file the root "
               f"store already supplies — displaced, NOT read; a session "
               f"living only here reads as missing_in_record)")
+    for unreadable in report["record"].get("unreadable_paths") or []:
+        # Its OWN sentence: this class was never read for a DIFFERENT reason, and
+        # the collision cause above named the wrong repair for it (review P3).
+        print(f"unreadable : {unreadable} — present and NOT read; a session "
+              f"living only here reads as missing_in_record")
     for cls, entries in report["anomalies"].items():
         if entries:
             print(f"anomaly    : {len(entries)} {cls} "

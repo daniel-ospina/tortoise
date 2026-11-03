@@ -443,7 +443,16 @@ def classify_sessions(report: dict) -> dict:
         sid = verdict["session"]
         problems = verdict.get("problems") or []
         missing = [p for p in problems if p.get("problem") == "missing_in_record"]
-        mismatched = [p for p in problems if p.get("problem") != "missing_in_record"]
+        # ⛔ `duplicate_window` IS NOT A "MISMATCHED FIELD" (review P3). The arm
+        # below names the class correctly, but this count was left alone: a
+        # DUPLICATE-WINDOW exclusion therefore carried `mismatched: 1` in the
+        # APPROVABLE artifact over a session the census never compared a single
+        # field of (its own reason says no key can be placed), so the artifact
+        # told an operator the MISMATCH remedy — a field fix — applied. The same
+        # inversion this commit fixes in `class`, from the other field.
+        mismatched = [p for p in problems
+                      if p.get("problem") not in ("missing_in_record",
+                                                  "duplicate_window")]
         duplicate = [p for p in problems
                      if p.get("problem") == "duplicate_window"]
         if duplicate and not missing:

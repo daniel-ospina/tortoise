@@ -2526,10 +2526,81 @@ def test_a_record_SHAPED_path_that_is_not_a_file_is_DISCLOSED(tmp_path):
     (tmp_path / "2026-11-03.jsonl").symlink_to(tmp_path / "gone.jsonl")
     record = tpc.read_local_record_turns(tmp_path)
     assert list(record["rows_by_key"]) == ["s1_t0"]
-    named = record["skipped_files"]
+    # ⛔ ITS OWN LIST, not `skipped_files` (cycle-2 review P3): that one is the
+    # day+shape COLLISION disclosure, and its stdout sentence states a collision
+    # cause per entry — so sharing it printed "not a regular file … same
+    # day+shape as a file the root store already supplies", a self-contradicting
+    # line naming a repair (reconcile a displaced copy) that does not exist for
+    # this class. The collision list must stay collision-only.
+    assert record["skipped_files"] == [], record["skipped_files"]
+    named = record["unreadable_paths"]
     assert any(s.startswith("2026-11-02.jsonl") for s in named), named
     assert any(s.startswith("2026-11-03.jsonl") for s in named), named
     assert all("not a regular file" in s for s in named), named
+
+
+def test_a_record_SHAPED_path_that_is_not_a_file_gets_its_OWN_reason_on_stdout(
+        tmp_path, capsys, monkeypatch):
+    """The disclosure must name the cause that is TRUE for this class.
+
+    Cycle-2 review P3: the printer appends the COLLISION cause to every
+    `skipped_files` entry, so a not-a-regular-file path in that list printed a
+    sentence that contradicted itself and pointed at the wrong repair.
+    """
+    _local_record(tmp_path, {"s1": _conversation(("user", "hi"))},
+                  name="2026-11-01.jsonl")
+    (tmp_path / "2026-11-02.jsonl").symlink_to(tmp_path / "gone.jsonl")
+    monkeypatch.setattr(tpc, "read_graph_turns", lambda *a, **k: {
+        "nodes": {"s1_t0": _graph_node("s1_t0", "s1", content="[user] hi")},
+        "unidentifiable": []})
+    code = tpc.main(["--uri", "docker://:@127.0.0.1:1/g",
+                     "--local-record-dir", str(tmp_path)])
+    out = capsys.readouterr().out
+    assert code == 0, out
+    assert "unreadable : 2026-11-02.jsonl" in out
+    assert "not a regular file" in out
+    # The collision sentence must NOT be glued onto this class.
+    assert "same day+shape" not in out
+
+
+def test_a_record_shaped_path_is_not_reported_as_an_EMPTY_record(tmp_path):
+    """EMPTY vs DAMAGED, on the path axis (cycle-2 review P3).
+
+    A directory whose only entry is a record-shaped path that cannot be read is
+    NOT an empty record: the previous message told the operator to check the
+    directory/path, when the truth is an unreadable day file.
+
+    Mutation that goes RED here: dropping the `unreadable_paths` clause from the
+    `not files` refusal.
+    """
+    (tmp_path / "2026-11-01.jsonl").symlink_to(tmp_path / "gone.jsonl")
+    with pytest.raises(tpc.CensusError) as excinfo:
+        tpc.read_local_record_turns(tmp_path)
+    message = str(excinfo.value)
+    assert "EMPTY" in message
+    assert "DAMAGED" in message, message
+    assert "2026-11-01.jsonl" in message, message
+
+
+def test_an_archive_symlink_that_does_not_resolve_REFUSES(tmp_path):
+    """An unmounted archive volume is not an archive that holds nothing.
+
+    Cycle-2 review P3: `exists()` follows links, so a dangling `archive/` was
+    skipped in silence while the artifact reported the four shape x directory
+    surfaces as covered. A GENUINELY missing `archive/` stays silent (the
+    common fresh-directory state); only an unresolvable symlink refuses.
+
+    Mutation that goes RED here: restoring the bare `if not scan_dir.exists():
+    continue`.
+    """
+    _local_record(tmp_path, {"s1": _conversation(("user", "hi"))})
+    (tmp_path / "archive").symlink_to(tmp_path / "unmounted-volume")
+    with pytest.raises(tpc.CensusError) as excinfo:
+        tpc.read_local_record_turns(tmp_path)
+    assert "does not resolve" in str(excinfo.value)
+    # …and a genuinely absent archive directory is still normal.
+    (tmp_path / "archive").unlink()
+    assert list(tpc.read_local_record_turns(tmp_path)["rows_by_key"]) == ["s1_t0"]
 
 
 def test_an_EMPTY_record_dsn_alongside_the_local_dir_is_REFUSED(tmp_path,

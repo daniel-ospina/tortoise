@@ -2613,6 +2613,14 @@ def test_a_record_side_DUPLICATE_is_named_not_reported_as_a_transcript_mismatch(
     assert out["counts"][purge.CLASS_DUPLICATE_WINDOW] == 1
     assert out["counts"][purge.CLASS_MISMATCH] == 0
 
+    # ⛔ AND NOT AS A "MISMATCHED FIELD" EITHER (review P3). `class` was fixed to
+    # name the duplicate; the `mismatched` COUNT was not, so the approvable
+    # artifact carried `mismatched: 1` for a session the census never compared a
+    # single field of — telling an operator the MISMATCH remedy (a field fix)
+    # applied to a session whose only repair is to resolve the capture by hand.
+    assert entry["mismatched"] == 0, entry
+    assert entry["missing"] == 0, entry
+
 
 def test_a_planned_DUPLICATE_session_refuses_under_its_OWN_name():
     """Review P2: the named diagnosis, before the generic set mismatch.
