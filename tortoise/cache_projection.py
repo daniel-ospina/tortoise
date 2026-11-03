@@ -475,7 +475,11 @@ FOLD_ON_CREATE_DEFAULTS: dict[str, dict[str, Any]] = {
 #:   `t == 'subject'` branch checks `_SUBJECT_STATUS_VALUES`, its `t == 'object'`
 #:   branch has no status check at all — so `create_object(name, status='superseded')`
 #:   writes a terminal status at
-#:   birth that `never_store` keeps out of the layer tables. `ObjectRegistered` /
+#:   birth that the schema's refused-props CHECK drops from the layer tables
+#:   (`_split_properties` / `_refused('object')` — `status` is in `_refused` for
+#:   both labels; `never_store` is the MUTATION path's second line and does NOT
+#:   run on a creation snapshot, whose `RECORD_MUTATIONS` effect is a plain
+#:   `NodeSnapshot`). `ObjectRegistered` /
 #:   `SubjectAdded` are now selected from the SAME stream (their `payload ->
 #:   'status'`) and replayed in `seq` order, ON CREATE, so a record-sourced
 #:   rebuild reproduces the value `rebuild_all` (which reads the JSONL payload)

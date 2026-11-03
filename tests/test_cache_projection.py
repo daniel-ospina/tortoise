@@ -2619,8 +2619,10 @@ def test_the_birth_event_labels_are_the_one_home_creation_map():
 def test_a_silent_birth_record_derives_no_status_rather_than_live():
     """#9974 — the OTHER half: where the derivation cannot know, it says NOTHING.
 
-    An unknown status is honest — `live` is the bug. The creation record of a
-    bare `create_object("Acme")` carries no caller status, and the cache must
+    An unknown status is honest — `live` is the bug. A creation record can carry
+    NO status at all (the quiet producer is `EventAPI.add_object`, which seeds
+    none — `sdk.create_entity` is NOT silent: `_entity_door_props` sets
+    `status='live'` on every create), and the cache must
     not invent one: `live._terminal_excluded` already reads an absent status as
     LIVE for the transition it is willing to make on the READ side, and a
     MATERIALISED `live` would additionally claim a positive lifecycle fact the
