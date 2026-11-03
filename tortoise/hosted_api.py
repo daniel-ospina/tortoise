@@ -8575,7 +8575,7 @@ def _gate_sdk_for(org: dict, resource: str):
         return _make_sdk(graph_name=graph)
     if not org.get("org_id"):
         return None
-    return _org_sdk_for_credential(org)
+    return _make_sdk(namespace=org["org_id"])  # MUTANT-B
 
 
 def _check_org_limit(org: dict, resource: str, *,

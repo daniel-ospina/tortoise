@@ -990,18 +990,38 @@ def _credential(**over) -> dict:
     return org
 
 
+def _stub_enforce_org_limit(monkeypatch, quota) -> dict:
+    """A `quota.enforce_org_limit` double that RESOLVES the lazy #4051 seam.
+
+    `_check_org_limit` passes `sdk_factory=`, not `sdk=` (#4051): a gate that
+    returns before counting must not build a graph handle. A double that only
+    reads `sdk=` therefore observes "the gate built no SDK at all" — which is
+    true of the CALL, false of the COUNT, and was how this file went red on a
+    correct tree. The behaviour these tests measure is WHICH GRAPH is counted,
+    so the double resolves the factory exactly as `quota._resolve_count_sdk`
+    does. Laziness keeps its own pin in `test_4051_gate_graph.py::`
+    `test_a_gate_that_never_counts_never_builds_a_sdk`, so nothing is weakened.
+    """
+    seen: dict = {}
+
+    def _counter(limits, resource, sdk=None, *, sdk_factory=None, **kw):
+        seen.update({"resource": resource,
+                     "sdk": sdk if sdk is not None else (
+                         sdk_factory() if sdk_factory is not None else None)})
+
+    monkeypatch.setattr(quota, "enforce_org_limit", _counter)
+    return seen
+
+
 def test_the_quota_gate_counts_the_promoted_graph(monkeypatch):
     """The money gate. `_check_org_limit` must hand the counter the DEFAULT
     graph's SDK: counting the demoted graph admits an org past its real cap
-    (fail-open, revenue) or refuses writes it is under (customer)."""
+    (fail-open, revenue) or refuses writes it is under (customer).
+    """
     import tortoise.quota as quota
 
     _hosted(monkeypatch)
-    seen: dict = {}
-    monkeypatch.setattr(
-        quota, "enforce_org_limit",
-        lambda limits, resource, sdk=None, **kw: seen.update(
-            {"resource": resource, "sdk": sdk}))
+    seen = _stub_enforce_org_limit(monkeypatch, quota)
     # A read here would also break the gate's fail-CLOSED contract: a read
     # failure would fall back to the demoted graph, i.e. count the wrong graph
     # silently. Prove there is no read at all.
@@ -1021,20 +1041,32 @@ def test_the_quota_gate_counts_the_promoted_graph(monkeypatch):
     assert opened == [] and seen["sdk"] is None
 
 
-def test_a_graph_bound_credential_keeps_the_historical_quota_count(monkeypatch):
+def test_a_graph_bound_credential_counts_the_graph_it_bound(monkeypatch):
     """A graph-bound credential's `graph_namespace` IS a custom graph's — the
     default-graph question does not apply to it, and `_default_graph_name`
-    answering it would count a graph the credential never bound."""
+    answering it would count a graph the credential never bound.
+
+    ⛔ #4051 SUPERSEDED this test's second half. It used to assert
+    `opened == [{"namespace": TEAM}]` — i.e. the gate counting the org's
+    DEFAULT graph for a credential whose write goes to its BOUND custom graph.
+    That IS the defect #4051 names ("a gate that cannot see what it guards"):
+    a custom graph already over `max_points` passed the gate because the count
+    read a different graph. The premise above still holds and is still pinned
+    (`_default_graph_name` is None here); only the conclusion changed — the
+    graph to count is the one the credential BOUND (`_data_graph_name`), not
+    the one it never opens.
+    """
     import tortoise.quota as quota
 
     _hosted(monkeypatch)
-    monkeypatch.setattr(
-        quota, "enforce_org_limit", lambda *a, **k: None)
+    _stub_enforce_org_limit(monkeypatch, quota)
     opened = _capture_make_sdk(monkeypatch)
     ha._check_org_limit(
         _credential(graph_id=NEW_ID,
                     graph_namespace=f"org_{TEAM}_{NEW_ID}"), "points")
-    assert opened == [{"namespace": TEAM}]
+    assert opened == [{"graph_name": f"org_{TEAM}_{NEW_ID}"}], (
+        "a graph-bound key must be counted in the graph it writes into — "
+        "counting the org default is the #4051 vacuity")
     assert ha._default_graph_name(
         _credential(graph_id=NEW_ID,
                     graph_namespace=f"org_{TEAM}_{NEW_ID}")) is None

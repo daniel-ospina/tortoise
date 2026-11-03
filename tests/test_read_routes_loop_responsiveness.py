@@ -1397,6 +1397,13 @@ _SDK_CONSTRUCTION_SEAMS = frozenset({
     # as clean and make this class blind to every lane the default-graph
     # resolver converted (`patch_onboarding_state` is the one that caught it).
     "_org_sdk", "_org_sdk_for_credential", "_org_sdk_from_name",
+    # #4051: `_gate_sdk_for` is the org-limit gate's ONLY SDK construction path
+    # (called through `quota._resolve_count_sdk`, from the capture/commit
+    # request bodies). A body that builds the gate SDK INLINE on the loop
+    # constructs exactly as an inline `_make_sdk` does, so leaving it out would
+    # report that shape as clean — the same blindness the #10180 note above
+    # records.
+    "_gate_sdk_for",
 })
 #: Calls whose callable argument runs in a WORKER. ``_graph_offload`` was the
 #: missing member (#4660): it is the #3498 bounded graph-pool seam
@@ -2039,7 +2046,8 @@ def test_on_loop_sdk_construction_residual_is_named_head_on():
     would go vacuously green.
     """
     assert frozenset({"_make_sdk", "_data_sdk", "_org_sdk",
-                      "_org_sdk_for_credential", "_org_sdk_from_name"}
+                      "_org_sdk_for_credential", "_org_sdk_from_name",
+                      "_gate_sdk_for"}
                      ) == _SDK_CONSTRUCTION_SEAMS, (
         "the #4660 construction seam set changed shape — re-derive the "
         "inventory before trusting this pin")
