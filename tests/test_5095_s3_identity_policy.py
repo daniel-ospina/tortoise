@@ -966,6 +966,51 @@ class TestIdentityOnTheResult:
             "the lookup did not run, and this run proposed no candidate whose "
             "identity it could have established"), messages[0]
 
+    def test_an_unresolved_state_with_a_checkable_candidate_cannot_claim_vacancy(
+            self, monkeypatch):
+        """Arm 3's guard is the SENTENCE's precondition, not only the state.
+
+        `unresolved` + a zero numerator normally means no candidate was
+        checkable, which is exactly what arm 3's sentence asserts. Guarding on the
+        state ALONE is weaker than the sentence: a `degraded` search that still
+        carried a per-candidate query log answers `unresolved` while covering the
+        candidate, so a state-only guard prints "this run proposed no candidate
+        whose identity it could have established" over a run that proposed one
+        and CHECKED it — the claim-about-a-check-that-did-not-happen defect, one
+        input over (#10633 review, P2).
+
+        No shipped producer emits that pair today (`extract_session_v2` takes no
+        `search`; both `search_graph` degrade paths pin `query_results` empty), so
+        this pins the INVARIANT rather than a live failure: `_denominator == 0`
+        is in the guard, and a contradictory input falls to the residual arm,
+        which claims nothing. Without this test the clause would be protected by
+        a comment alone — the shape this file exists to remove.
+        """
+        contradictory = {
+            "state": fp.LOOKUP_UNRESOLVED,
+            "reason": "degraded",
+            "unresolved_total": 0,
+            "candidates": {"entities": 1, "events": 0, "points": 0,
+                           "operators": 0, "retractions": 0},
+        }
+        monkeypatch.setattr(v2, "_identity_report",
+                            lambda *a, **k: dict(contradictory,
+                                                 candidates=dict(contradictory["candidates"])))
+        out = v2.extract_session_v2(_NoCandidates(), _conv(), session_id="s1")
+        block = out["identity"]
+        assert block["state"] == fp.LOOKUP_UNRESOLVED, block
+        assert block["unresolved_total"] == 0, block
+        assert _denominator(block) == 1, block
+        messages = [w for w in out["warnings"] if "S3 identity" in w]
+        assert len(messages) == 1, out["warnings"]
+        # The vacancy sentence is NOT reachable here; the residual arm names the
+        # state and the counter and claims nothing else.
+        assert messages[0] == _identity_line(
+            block,
+            "this warning describes no sentence for that state; the run carries "
+            f"unresolved_total={block['unresolved_total']} of "
+            f"{_denominator(block)} candidate(s)"), messages[0]
+
     def test_a_state_the_warning_does_not_describe_claims_nothing(self, monkeypatch):
         """The residual arm's only protection is this test (#5095 review round 6).
 
@@ -982,16 +1027,18 @@ class TestIdentityOnTheResult:
         block = out["identity"]
         # EXACT, and the counter is pinned as PROVENANCE — the number the run was
         # HANDED — never as a coverage claim: reaching this arm implies
-        # `unresolved_total == 0`, so "0 of N were not checked against the graph"
-        # would assert universal coverage about a check this arm cannot know
-        # happened, for a state that is by construction not `resolved` (#10633
+        # `unresolved_total == 0`, so a "0 of N were not checked" clause would
+        # assert universal coverage about a check this arm cannot know happened,
+        # for a state that is by construction not `resolved` (#10633 review, P3).
+        # The exact pin above is the whole guard: it forbids any appended clause,
+        # so a negative substring assertion beside it could never bite and would
+        # be the inert-assertion class this file removed in round 5 (#10633
         # review, P3).
         assert messages[0] == _identity_line(
             block,
             f"this warning describes no sentence for that state; the run carries "
             f"unresolved_total={block['unresolved_total']} of "
             f"{_denominator(block)} candidate(s)"), messages[0]
-        assert "were not checked against the graph" not in messages[0], messages[0]
 
     def test_a_resolved_run_reports_resolved_and_does_not_warn(self):
         """The flag-side of R1: the disposition must not fire on a healthy run.
