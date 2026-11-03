@@ -907,6 +907,7 @@ def test_a_whitespace_only_db_uri_is_unset_everywhere_not_half_set(
     assert _run(("config", "show", "--json")) == 0
     store = json.loads(capsys.readouterr().out)["graph_store"]
     assert store["status"] == "configured but unusable"
+    assert store["source"] == "TORTOISE_DB_URI (file path)"   # SET, and refused
     assert "target" not in store
     assert "target_kind" not in store
     assert _run() == 0
@@ -987,6 +988,7 @@ def test_a_hostile_org_id_cannot_forge_a_cache_graph_line(capsys, tmp_path):
     assert _run() == 0
     out = capsys.readouterr().out
     assert not any(ln.strip().startswith("PWNED") for ln in out.splitlines())
+    assert "org_'00e8e3\n" in out or "org_'00e8e3" in out     # quoted, not bare
 
 
 def test_a_control_character_in_a_path_cannot_forge_a_ladder_rung(
@@ -1405,6 +1407,57 @@ def test_a_whitespace_only_api_url_env_is_disclosed(monkeypatch, capsys, tmp_pat
     assert _run(("config", "show", "--json")) == 0
     cred = json.loads(capsys.readouterr().out)["credential"]
     assert "blank" in cred["api_url_note"]
+
+
+def test_a_shell_metacharacter_is_quoted_in_the_CACHE_GRAPH_line_too(
+        capsys, tmp_path):
+    """`--cache-graph` takes no derived default, so this line is the only place the
+    name is printed — and it is pasted. Quoting `--org` and not this token left the
+    worse hole open."""
+    _write(tmp_path / ".tortoise" / "credentials.json", json.dumps({
+        "api_key": GLOBAL_KEY, "api_url": "https://api.premiselabs.co",
+        "org_id": "$(touch${IFS}/tmp/PWNED_BY_CONFIG_SHOW)",
+    }))
+    assert _run(("config", "show", "--json")) == 0
+    convention = json.loads(capsys.readouterr().out)["graph_store"][
+        "cache_graph_convention"]
+    import shlex
+    # the first shell token must be the LITERAL name, quotes stripped
+    token = shlex.split(convention.split(" (org SDK)")[0])[0]
+    assert token == "org_$(touch${IFS}/tmp/PWNED_BY_CONFIG_SHOW)"
+
+
+def test_an_unreadable_store_is_not_offered_for_deletion(capsys, tmp_path):
+    """The file is INTACT and may hold the signup_token — a full credential and the
+    only way back into the org. "repair or delete it" made deletion the
+    actionable-sounding option."""
+    d = tmp_path / ".tortoise"
+    d.mkdir()
+    (d / "credentials.json").write_text(GLOBAL)
+    d.chmod(0o000)
+    try:
+        assert _run() == 1
+        out = capsys.readouterr().out
+        assert "Do NOT delete it" in out
+        assert "chmod 600" in out
+        assert "repair or delete it" not in out
+    finally:
+        d.chmod(0o700)
+
+
+def test_the_refusal_does_not_claim_every_hosted_command_fails(
+        monkeypatch, capsys, tmp_path):
+    """With a corrupt `./.tortoise` and a healthy global store the transmitting
+    verbs still work — and the row note right above says so."""
+    _global(tmp_path)                                  # HOME/tmp_path: the global store
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    monkeypatch.chdir(repo)
+    (repo / ".tortoise").write_text("{not json")
+    assert _run() == 1
+    out = capsys.readouterr().out
+    assert "Every hosted command will fail" not in out
+    assert "transmitting verbs" in out
 
 
 def test_a_shell_metacharacter_in_org_id_is_quoted_in_the_record_scope(

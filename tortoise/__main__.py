@@ -3498,7 +3498,12 @@ def _cmd_config(args) -> int:
         db_source = "FALKORDB_* trio"
     elif (_os.environ.get("TORTOISE_DB_PATH") or "").strip():
         db_source = "TORTOISE_DB_PATH"
-    elif (raw_uri or "").strip():
+    elif raw_uri:
+        # `resolve_db_path`'s branch 3 tests TRUTHINESS (`if uri and not
+        # is_db_uri(uri)`), so a whitespace-only value takes that rung and is then
+        # REFUSED as a relative path — it does not reach the default. Reporting
+        # `default` beside `status: configured but unusable` made one payload say
+        # both "nothing is configured" and "the configured store is unusable".
         db_source = "TORTOISE_DB_URI (file path)"
     else:
         db_source = "default"
@@ -3548,15 +3553,19 @@ def _cmd_config(args) -> int:
 
     org_id = cred.get("org_id")
     if isinstance(org_id, str) and org_id:
-        graph_store["cache_graph_convention"] = (
-            f"org_{org_id} (org SDK) or org_{org_id}_<graph_id> (registry/ACL)"
-        )
-        # SHELL-QUOTED: `<cwd>/.tortoise` is attacker-controllable by this file's
-        # own threat model, this line is presented as the arguments to paste into
-        # the `record-*` verbs, and `quickstart-cloud.md` now tells users to run
-        # this verb first — an unquoted `$(…)` in org_id would RUN. The value is
-        # still shown real on the `org_id` line, which is not shell-shaped.
+        # BOTH lines are SHELL-QUOTED, and for the same reason: `<cwd>/.tortoise` is
+        # attacker-controllable by this file's own threat model, and both are
+        # presented as things to paste into a `record-*` command (`--cache-graph`
+        # takes no derived default, so this line is the ONLY place its name is
+        # printed — and `record-restore` against a wrong cache graph wipes a graph
+        # nobody reads). Quoting `--org` and not the cache-graph token left the
+        # worse hole open: pasting `--cache-graph org_$(…)` executes it. The raw
+        # value is still shown on the `org_id` line, which is not shell-shaped.
         import shlex as _shlex
+        q_org = _shlex.quote(str(org_id))
+        graph_store["cache_graph_convention"] = (
+            f"org_{q_org} (org SDK) or org_{q_org}_<graph_id> (registry/ACL)"
+        )
         graph_store["record_scope"] = (
             f"--org {_shlex.quote(str(org_id))} --graph <graph_id>")
     payload["graph_store"] = graph_store
@@ -3675,8 +3684,26 @@ def _cmd_config(args) -> int:
     if blocked_path:
         print(f"\n⛔ the resolver REFUSED {_printable(cred['blocked_by'])} "
               f"({_printable(cred['blocked_reason'])}).")
-        print("   Every hosted command will fail until that store is fixed or removed.")
-        print("   Fix: repair or delete it, or set TORTOISE_API_KEY to override.")
+        blocked_states = {r["state"] for r in ladder if r["blocks"]}
+        if _STORE_UNREADABLE in blocked_states:
+            # NEVER offer deletion as an equal-looking option here: the file is
+            # intact, and this store may hold the `signup_token` — a full credential
+            # in its own right, and the only way back into the org (`tortoise
+            # recover`). The right fix is a permission change.
+            print("   The file is there but unreadable — fix its permissions "
+                  f"(`chmod 600 {_printable(cred['blocked_by'])}`).")
+            print("   ⛔ Do NOT delete it: this store may hold the signup_token that "
+                  "`tortoise recover` needs.")
+        else:
+            print("   The commands that resolve through this store (`team info`, "
+                  "`team keys …`, `init`) will fail until it is fixed.")
+            print("   Repair it; if you delete it, SAVE any `signup_token` from it "
+                  "first — `tortoise recover` needs it.")
+        print("   Or set TORTOISE_API_KEY to override for one shell.")
+        if blocked_path and cwd_cfg is not None and _same_path(
+                Path(blocked_path), cwd_cfg):
+            print("   The transmitting verbs (`session capture/drain/import`) are "
+                  "unaffected: they skip this candidate.")
     if cwd is None:
         print("\n· the current directory could not be resolved — the `./.tortoise` "
               "candidate was not evaluated. Re-run from a directory that exists.")
