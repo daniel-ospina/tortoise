@@ -16,6 +16,7 @@ The tool is a reader: these tests assert it never writes, mints or posts anythin
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 from pathlib import Path
 
@@ -485,7 +486,24 @@ def test_an_absent_gate_run_is_not_reported_as_a_marker_absence(monkeypatch, tmp
     assert ac.main(["--reviews-dir", str(tmp_path), "--out", str(tmp_path / "o.md")]) == 0
     text = (tmp_path / "o.md").read_text()
     assert "gate reported nothing readable on this head" in text
-    assert "and no head-bound published marker" not in text
+    # ⛔ the phrase the TOOL actually emits (cycle 5: the old `"and no head-bound …"` matched
+    # nothing the tool can print, so the assertion that reads as the guard could not fail).
+    assert "found no head-bound published marker" not in text
+
+
+def test_the_positive_marker_clause_does_fire_when_the_gate_reported_red(monkeypatch, tmp_path):
+    """The mirror of the test above: a REAL red gate must produce the marker clause, so neither
+    direction can be satisfied by a phrase the tool never prints."""
+    monkeypatch.setattr(
+        ac,
+        "gh_json",
+        lambda args: [{"number": 3, "headRefOid": LIVE, "headRefName": "b", "title": "t"}]
+        if args[0] == "pr"
+        else {"check_runs": [{"id": 5, "name": ac.GATE_CHECK, "status": "completed", "conclusion": "failure"}]},
+    )
+    assert ac.main(["--reviews-dir", str(tmp_path), "--out", str(tmp_path / "o.md")]) == 0
+    text = (tmp_path / "o.md").read_text()
+    assert "the gate ran and found no head-bound published marker" in text
 
 
 def test_a_directory_named_like_a_record_is_unreadable_not_a_crash(tmp_path):
@@ -513,7 +531,38 @@ def test_no_gate_run_does_not_assert_a_github_absence_it_never_read(monkeypatch,
     assert ac.main(["--reviews-dir", str(tmp_path), "--no-gate", "--out", str(tmp_path / "o.md")]) == 0
     text = (tmp_path / "o.md").read_text()
     assert "published-marker surface was NOT" in text
-    assert "and no head-bound published marker" not in text
+    assert "found no head-bound published marker" not in text
+
+
+def test_a_record_declaring_another_pr_AS_A_STRING_is_never_evidence(tmp_path):
+    """Cycle 5: `isinstance(rec_pr, int)` let `"pr": "8"` through, so PR 8's artifact could
+    attest PR 7 — a fabricated attribution."""
+    for bogus_pr in ("8", 8.0, " 8 "):
+        (tmp_path / "daniel-ospina-tortoise-7.json").write_text(
+            '{"repo":"daniel-ospina/tortoise","pr":' + json.dumps(bogus_pr) + ',"head_sha":"' + LIVE + '",'
+            '"mint":"fresh","verdict":"clean","evidence":"comment:1"}'
+        )
+        got = ac.load_record(tmp_path, "daniel-ospina", "tortoise", 7)
+        assert got is not None and "foreign record" in got.error, bogus_pr
+        assert ac.classify(LIVE, got, *RED)[0] != ac.RESTORE, bogus_pr
+
+
+def test_prose_carrying_a_colon_is_not_evidence():
+    """Cycle 5: a bare `":" in evidence` test accepted `"TODO: verify"` and licensed RESTORE."""
+    for prose in ("TODO: verify", "evidence: none", " : ", "see PR body: n/a", "comment:abc"):
+        r = ac.Record(path=Path("/x.json"), head_sha=LIVE, mint="fresh", verdict="clean", evidence=prose)
+        assert r.real_evidence is False, prose
+        assert ac.classify(LIVE, r, *RED)[0] != ac.RESTORE, prose
+
+
+def test_both_real_registry_evidence_shapes_are_accepted():
+    # The 3 742-record registry holds exactly two shapes: `comment:<id>`, and one GitHub URL.
+    for good in (
+        "comment:6194795895",
+        "https://github.com/daniel-ospina/tortoise/pull/8725#issuecomment-6194795895",
+    ):
+        r = ac.Record(path=Path("/x.json"), head_sha=LIVE, mint="fresh", verdict="clean", evidence=good)
+        assert r.real_evidence is True, good
 
 
 def test_main_returns_2_and_writes_no_artifact_when_gh_answers_non_json(monkeypatch, tmp_path):

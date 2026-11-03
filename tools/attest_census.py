@@ -88,6 +88,16 @@ def _is_carried(mint: str) -> bool:
     """
     return mint.strip().lower() == "carried"
 
+
+# An evidence reference is an ARTIFACT POINTER, not prose: `<kind>:<numeric id>` or a GitHub URL
+# carrying one. Cycle 5 measured that the previous test (`":" in evidence`) accepted
+# `"TODO: verify"` / `"evidence: none"` / `" : "` as evidence and licensed `RESTORE` for a record
+# with no artifact at all — the docstring's rule, unimplemented.
+_EVIDENCE_REF = re.compile(
+    r"^(?:comment|issuecomment|review|review-comment|discussion):\d+$"
+    r"|^https?://\S*#(?:issuecomment|discussion_r|pullrequestreview)[-]?\d+$"
+)
+
 RESTORE = "RESTORE"
 RE_REVIEW = "RE-REVIEW"
 NOTHING = "NOTHING-TO-RESTORE"
@@ -122,21 +132,21 @@ class Record:
         """The record attests that a reviewer actually reported something.
 
         Requires ALL of: a verdict in the clean allow-list, an evidence reference that is an
-        ARTIFACT SHAPE (`<kind>:<id>` or a URL containing one), and `mint` not carried. The mint
-        exclusion is deliberate: #10177 measured a carry re-binding an older `clean` onto a head
-        whose own review found a P1 — a carried record is a *pointer to another review*, and
+        ARTIFACT SHAPE (`<kind>:<id>` or a GitHub URL carrying one), and `mint` not carried. The
+        mint exclusion is deliberate: #10177 measured a carry re-binding an older `clean` onto a
+        head whose own review found a P1 — a carried record is a *pointer to another review*, and
         re-posting it as proof of this head is the laundering this tool exists to refuse.
 
-        The colon requirement is what refuses a stringified empty (`"null"`, `"None"`, `"n/a"`,
-        `"undefined"`): each is colon-free, so no separate nullish list is needed — and a list
-        that can never be the deciding test is worse than none (it reads as protection; cycle 3
-        found exactly that, unreachable behind this rule).
+        The match is `_EVIDENCE_REF`, not a bare colon test: cycle 5 measured `"TODO: verify"`,
+        `"evidence: none"` and `" : "` passing a colon check and licensing RESTORE for a record
+        with no artifact at all (a stringified empty like `"null"`/`"n/a"` is colon-free, so this
+        rule also subsumes the null-ish cases without a separate list that can never fire).
         """
         return (
             bool(self.verdict)
             and self.verdict in CLEAN_VERDICTS
             and isinstance(self.evidence, str)
-            and ":" in self.evidence
+            and _EVIDENCE_REF.match(self.evidence.strip()) is not None
             and not _is_carried(self.mint)
         )
 
@@ -293,8 +303,11 @@ def load_record(
             f"{owner}/{repo}, so it is not evidence"
         )
     rec_pr = data.get("pr")
-    if isinstance(rec_pr, int) and rec_pr != pr:
-        rec.error = f"foreign record: pr={rec_pr}, census pr is {pr}"
+    if rec_pr is not None and str(rec_pr).strip() != str(pr):
+        # NOT `isinstance(rec_pr, int)`: cycle 5 measured a record declaring `"pr":"8"` escaping
+        # the check and reaching RESTORE for PR 7 — a re-post of PR 8's `comment:<id>` as PR 7's
+        # proof. Any declared pr that is not this pr is foreign, whatever its JSON type.
+        rec.error = f"foreign record: pr={rec_pr!r}, census pr is {pr}"
     return rec
 
 
