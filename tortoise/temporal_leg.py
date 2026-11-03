@@ -691,3 +691,195 @@ def temporal_leg_fusion_order(
     )
     known = set(order_ids)
     return [pid for pid in fused if pid in known], picks
+
+
+def window_arm_retention(
+    candidates: list[dict],
+    fused_ids: list[str],
+    *,
+    picks: tuple[str, ...] | list[str] = (),
+    window: int,
+    limit: int = DEFAULT_TEMPORAL_LEG_LIMIT,
+) -> dict:
+    """Measure what a promotion DID to the reader window — retention, not order.
+
+    WHY THIS EXISTS (#10538). The fused caller above is a **post-cut splice**: it
+    re-orders ids AFTER the reader's membership cut (``retrieve.py``'s additive-
+    rerank contract — *"the semantic leg still supplies the candidate membership
+    … It NEVER filters"*). A tail splice therefore moves items INSIDE a fixed
+    window; it cannot add a piece without displacing the one already there. So
+    the only questions that can be asked of the arm are window-level ones —
+    *did the set of evidence sessions the reader can see get wider, or merely
+    different?* — and until this function existed the repo measured neither.
+    Every figure the arm was ever justified with lived in issue prose and in
+    ``/tmp`` probe scripts that die with the box (see
+    ``tools/longmem_eval/window_arm_baseline.py``, which is the reproducible
+    instrument over this function).
+
+    ⛔ **This function REPORTS; it never gates.** Nothing in this module branches
+    on any value it returns, and no caller may turn ``additive`` into a pick
+    filter without an owner ruling: whether an arm MAY pay for a slot by
+    evicting base evidence inside the reader window is the open question on
+    #10538 (``window-exit`` vs ``ab-head-ab``), so wiring the predicate into the
+    promotion would answer it silently. The predicate is exposed exactly so the
+    ruling — and the exit measurement behind it — can rest on reproducible
+    numbers instead of an argument.
+
+    ``candidates`` is the caller's semantic pool in rank order; ``fused_ids`` is
+    what :func:`temporal_leg_fusion_order` returned; ``picks`` is its second
+    return value (default ``()`` — an inert arm). ``window`` is the reader's
+    ``effective_top_k``.
+
+    Returns a JSON-serialisable mapping:
+
+    ``base_ids`` / ``fused_ids``   the two reader windows (``[:window]``)
+    ``base_sessions`` / ``fused_sessions``  DISTINCT real ``session_id`` values
+                                   in them. A hit with NO ``session_id`` is not a
+                                   session — the same fail-closed rule
+                                   :func:`_session_clustered` applies — so it
+                                   counts toward neither, and its slots are
+                                   reported SEPARATELY PER WINDOW as
+                                   ``base_sessionless_slots`` /
+                                   ``fused_sessionless_slots``. Collapsing every
+                                   absent id into one bucket would let "the
+                                   window dropped a session" fire on hits that
+                                   belong to no session at all; reporting one
+                                   count for both windows would under-report,
+                                   because a sessionless hit CAN be promoted
+                                   (it carries a ``session_date``, so it forms
+                                   its own ``(date, "")`` bucket).
+    ``net``                        ``fused_sessions - base_sessions`` — a
+                                   CARDINALITY delta: ``> 0`` widened, ``< 0``
+                                   narrowed. ``0`` means only that the COUNT did
+                                   not grow — it covers a swap AND an arm that
+                                   never fired at all (the committed receipt
+                                   carries 20 ``net: 0`` rows with
+                                   ``fired: false``, ``pick_ranks: []``), so read
+                                   ``evicted_ids`` / ``pick_ranks`` to tell them
+                                   apart. It is silent about WHICH sessions left,
+                                   and it is NOT equivalent to ``additive`` in
+                                   either direction (the receipt contains
+                                   ``net 1`` with ``additive False`` and
+                                   ``net 0`` with ``additive True``).
+    ``evicted_ids`` / ``evicted_sessions``  base-window ids (and their real
+                                   sessions) absent from the fused window
+    ``deleted_sessions``           the sessions present in the base window and
+                                   ABSENT from the fused one — a session is
+                                   deleted when EVERY slot it had is displaced,
+                                   and that is the harm this arm can do.
+                                   Source-of-truth for ``additive``.
+    ``evicted_sole_representatives``  the narrower, SLOT-level diagnostic: the
+                                   evicted ids whose ``(session_date,
+                                   session_id)`` bucket held exactly ONE
+                                   base-window slot. ⚠️ It is NEITHER sufficient
+                                   NOR necessary for a deletion — read
+                                   ``deleted_sessions`` for the verdict:
+                                   * not necessary: a session holding two slots
+                                     disappears when both are displaced, with no
+                                     sole representative at all (measured on the
+                                     ``two_slot_tail_session`` pool);
+                                   * not sufficient: a sole representative can be
+                                     displaced while its session stays visible
+                                     through a DIFFERENT bucket — two hits of one
+                                     session carrying different raw date strings
+                                     are two buckets (see ``held_buckets``), and
+                                     that shape is reachable through the shipped
+                                     caller.
+    ``additive``                   ``not deleted_sessions`` — no session leaves
+                                   the reader window. It is SESSION-level, so it
+                                   says nothing about displaced NON-sessions: a
+                                   displaced sessionless base slot leaves it
+                                   ``True`` and is reported only in
+                                   ``evicted_ids`` and the
+                                   ``base_sessionless_slots`` /
+                                   ``fused_sessionless_slots`` pair. An INERT arm
+                                   also reports ``True`` trivially (it displaced
+                                   nothing), so pair it with ``pick_ranks`` and
+                                   ``evicted_ids`` before reading it as a win.
+    ``pick_ranks``                 each pick's index in the caller's FULL
+                                   ``fused_ids`` — note this is the caller's
+                                   order, not the returned ``fused_ids`` slice
+                                   (which is ``[:window]``); a pick at index
+                                   ``>= window`` is outside the reader window, so
+                                   the two are reported apart
+    ``picks_absent_from_fused``    picks that appear in NO position of
+                                   ``fused_ids``. Reported rather than silently
+                                   dropped: an emptied ``pick_ranks`` would
+                                   otherwise be indistinguishable from an INERT
+                                   arm, i.e. a lost pick would read as no harm.
+                                   Unreachable through the shipped caller (it
+                                   filters to ids it knows), reachable by any
+                                   direct caller.
+    ``ceiling``                    ``max(window - effective_promotion_budget(
+                                   window, limit), 0)`` — where a TAIL-placement
+                                   pick STARTS. It is computed from
+                                   ``window``/``limit`` alone (this function has
+                                   no ``placement`` argument), so under
+                                   ``placement='head'`` the picks start at rank 0
+                                   and this is the tail ceiling the budget WOULD
+                                   use, not the head row's pick position — read
+                                   ``pick_ranks`` for that. A pick at rank
+                                   ``>= 5`` can never be graded by
+                                   ``recall_all@5``. The clamped budget is
+                                   recomputed from ``limit``, never from
+                                   ``len(picks)``, so an inert arm reports the
+                                   geometry it WOULD have used.
+    ``graded_by_recall_all_at_5``  how many picks land at an index ``< 5``
+                                   AND ``< window`` — the metric grades the
+                                   READER's top 5, so a pick outside the window
+                                   is not graded however high it ranks in the
+                                   caller's order
+    ``picks_outside_window``       picks whose index is ``>= window`` (invisible
+                                   to the reader at all)
+    ``base_graded_evicted``        evicted ids that were themselves inside
+                                   ``[:5]`` — a direct top-5 loss
+    """
+    width = max(int(window), 0)
+    rank_of = {pid: i for i, pid in enumerate(fused_ids)}
+    session_of = {c["id"]: str(c.get("session_id") or "") for c in candidates}
+    base_ids = [c["id"] for c in candidates[:width]]
+    fused_window = list(fused_ids[:width])
+    fused_set = set(fused_window)
+
+    base_sessions = {session_of.get(i, "") for i in base_ids} - {""}
+    fused_sessions = {session_of.get(j, "") for j in fused_window} - {""}
+    deleted_sessions = sorted(base_sessions - fused_sessions)
+
+    slots_per_session: dict[str, int] = {}
+    for i in base_ids:
+        key = session_of.get(i, "")
+        if not key:
+            continue
+        slots_per_session[key] = slots_per_session.get(key, 0) + 1
+
+    evicted_ids = [i for i in base_ids if i not in fused_set]
+    evicted_sole = [i for i in evicted_ids
+                    if slots_per_session.get(session_of.get(i, ""), 0) == 1]
+    pick_list = [p for p in picks if p in rank_of]
+    return {
+        "window": width,
+        "base_ids": base_ids,
+        "fused_ids": fused_window,
+        "base_sessions": len(base_sessions),
+        "fused_sessions": len(fused_sessions),
+        "net": len(fused_sessions) - len(base_sessions),
+        "base_sessionless_slots": sum(1 for i in base_ids
+                                      if not session_of.get(i, "")),
+        "fused_sessionless_slots": sum(1 for j in fused_window
+                                      if not session_of.get(j, "")),
+        "evicted_ids": evicted_ids,
+        "evicted_sessions": sorted({session_of[i] for i in evicted_ids
+                                    if session_of.get(i, "")}),
+        "deleted_sessions": deleted_sessions,
+        "evicted_sole_representatives": evicted_sole,
+        "additive": not deleted_sessions,
+        "pick_ranks": [rank_of[p] for p in pick_list],
+        "picks_absent_from_fused": [p for p in picks if p not in rank_of],
+        "picks_outside_window": [p for p in pick_list if rank_of[p] >= width],
+        "ceiling": max(
+            width - effective_promotion_budget(width, int(limit)), 0),
+        "graded_by_recall_all_at_5": sum(
+            1 for p in pick_list if rank_of[p] < min(5, width)),
+        "base_graded_evicted": [i for i in evicted_ids
+                                if base_ids.index(i) < 5],
+    }
