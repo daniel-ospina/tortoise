@@ -1188,8 +1188,10 @@ def test_a_failed_question_beside_a_resumed_one_is_not_red(tmp_path):
     the whole-census cross-check red a correct artifact (#10678 review 3, P2).
 
     The two inert rows are NOT interchangeable. q2 is a READ question (a
-    manifest exists and FAILED), so its own ``ep_ran``/``error`` cells put it in
-    ``cells.measured`` and ``_rebuild_outcome`` rebuilds it from the row; q3 has
+    manifest exists and FAILED): the manifest is a DICT, and a dict counts as
+    measured whether or not it was read, so ``cells.measured`` includes it;
+    its ``ep_ran``/``error`` cells are what make it a READ row, and
+    ``_rebuild_outcome`` rebuilds it from those cells. q3 has
     no manifest at all and is the only row whose census cells are ALL null, so
     only q3 needs a shape from ``inert_questions[].reason``. ``inert_by_reason``
     counts both (2) and ``per_question_unread`` counts both (2, asserted below),
