@@ -163,7 +163,7 @@ A marker is only an instrument if a caller can act on it. Therefore:
    `::TestMarkerVocabulary::test_complete_is_positively_marked_complete`. It flips only when the
    bound actually cut rows or a downstream leg lost rows. ⚠️ A marker that is `true` at
    exactly-at-limit is the *false* incompleteness that withholds an exact total and trains callers
-   to ignore the field (`sdk.py:33996-33999`) — the opposite failure, and just as damaging.
+   to ignore the field — the opposite failure, and just as damaging.
 4. **It is applied at the bound, not at the deserialisation** — a marker computed after a second
    truncation silently reports the first cut only.
 
