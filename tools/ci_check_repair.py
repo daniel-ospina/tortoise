@@ -331,6 +331,30 @@ _sleep = time.sleep
 #: generic `'failed'`; the direct rerun is the remaining primitive.
 _CANCEL_NOT_QUEUED_RE = re.compile(r"has not been queued yet", re.I)
 
+#: ⛔ A 403 ON THE CANCEL IS *NOT* A DEFERRAL — it is a CREDENTIAL refusal (#10763).
+#:
+#: `_cancel`'s other skips are all TRANSIENT and deferring them can succeed: a spent
+#: settle budget ('no_budget') refills, an observation that missed ('unsettled') or
+#: could not be read ('unreadable') is re-attempted, and a detail-less POST failure
+#: ('refused') may be a blip. A permission failure cannot be deferred into success —
+#: the token lacks `actions:write`, and no window grants it.
+#:
+#: Folding it into 'refused' (and so into `_rerun`'s 'deferred') made the caller stamp
+#: `deferred: True`, which the escalation predicate EXCLUDES — so the tool exited 0
+#: while the required check was still absent, indefinitely, and
+#: `ci-check-repair-local.sh` (which keys on the workflow CONCLUSION) never took over
+#: either. That is a no-op gate: an empty repair indistinguishable from a performed
+#: one. It gets its own TERMINAL state instead, which escalates.
+#:
+#: The wording is GitHub's own for the permission class. A bare `HTTP 403` is
+#: deliberately NOT the anchor — the secondary rate limiter answers 403 too, and
+#: `_RATE_LIMIT_RE` above records why that distinction is load-bearing, so a
+#: rate-limited 403 is excluded here and stays a deferral.
+_CANCEL_DENIED_RE = re.compile(
+    r"resource not accessible by (?:integration|app)"
+    r"|must have (?:admin|write) (?:rights|access)"
+    r"|\bforbidden\b", re.I)
+
 #: How long to wait for a CANCELLED run to settle before re-running it. A
 #: non-completed run cannot be re-run in place (see `_cancel`), so the repair is
 #: cancel-then-rerun and the API needs a moment to mark the run completed.
@@ -1052,7 +1076,11 @@ def _cancel(repo: str, run: Run) -> str:
                     a peer re-ran it — a different attempt is a different
                     measurement) → SKIP, never act
       'unreadable'  the pre-act re-measurement could not be read → SKIP, never act
-      'refused'     the cancel POST failed for any other reason → SKIP
+      'refused'     the cancel POST failed for a reason that may be transient → SKIP
+      'denied'      the cancel POST was refused for PERMISSION (403: the credential
+                    lacks `actions:write`) — TERMINAL, never a skip: no window
+                    repairs a token, so `_rerun` propagates it and the pass escalates
+                    instead of reporting a window it never discharged (#10763)
       'unsettled'   the cancel landed but the run never reported `completed` in bound
       'no_budget'   this pass's cancel-settle budget is spent → SKIP
 
@@ -1115,6 +1143,11 @@ def _cancel(repo: str, run: Run) -> str:
             # The orphan shape: nothing can cancel it, so a direct rerun is the only
             # primitive left. Reported distinctly, never as a generic failure.
             return "not_queued"
+        if _CANCEL_DENIED_RE.search(detail) and not _RATE_LIMIT_RE.search(detail):
+            # PERMANENT. A permission refusal is not a window that did not happen —
+            # it is a window that never can. Kept out of 'refused' precisely because
+            # 'refused' is a SKIP (see the predicate at the other end of this chain).
+            return "denied"
         return "refused"
     started = time.time()
     try:
@@ -1147,12 +1180,21 @@ def _rerun(repo: str, run: Run, number: int, expected_head: str = "") -> str:
     """Re-run an EXISTING workflow run at the head it was measured at.
 
     Returns 'rerun'|'cancelled_rerun'|'rerun_not_queued'|'head_moved'|'target_moved'
-    |'deferred'|'failed'. The head is re-read immediately before acting, the SAME
+    |'deferred'|'denied'|'failed'. The head is re-read immediately before acting, the SAME
     load-bearing precondition `_reopen` documents: a repair pass over many PRs takes
     minutes, so a run whose head has already been replaced would be re-run on a
     superseded sha and burn a CI cycle. If the head cannot be re-read the action is
     SKIPPED, never guessed. 'head_moved' is a skip, not a failure — the new head's
     own CI is the repair (mirrors `_reopen`).
+
+    'denied' IS THE ONE CANCEL STATE THAT IS *NOT* A SKIP (#10763). It is the 403
+    permission refusal, and the distinction is the whole point of the state: every
+    other skip is a deferral to a window that could succeed, while a credential that
+    lacks `actions:write` will lack it in the next window too. Folding it into
+    'deferred' made `report` exclude it from the escalation predicate and exit 0 —
+    the required check absent, the window reported discharged, nothing told anyone.
+    It therefore propagates to the caller, which records `credential_denied` and
+    escalates (exit 1) so `ci-check-repair-local.sh` takes over.
 
     'deferred' IS A SKIP TOO, and it exists because the alternative mis-reported one.
     `_cancel`'s own contract already distinguishes the states in which NOTHING was
@@ -1201,11 +1243,16 @@ def _rerun(repo: str, run: Run, number: int, expected_head: str = "") -> str:
             state = "rerun_not_queued"
         elif cancelled == "moved":
             return "target_moved"
+        elif cancelled == "denied":
+            # NOT a deferral — see this function's docstring. Propagated so the caller
+            # escalates instead of promising a window that cannot ever succeed.
+            return "denied"
         else:
             # 'no_budget' / 'unsettled' / 'refused' / 'unreadable' — the cancel did not
-            # happen (or could not be observed), so the rerun must not be attempted and
-            # NOTHING was changed. That is a deferral to the next window, not a repair
-            # this credential cannot perform.
+            # happen (or could not be observed), and each of those is TRANSIENT, so
+            # the rerun must not be attempted and NOTHING was changed. That is a
+            # deferral to the next window, which can succeed. 'denied' is deliberately
+            # NOT in this set: a permission refusal cannot succeed in any window.
             return "deferred"
     try:
         ok = _run([GH_BIN, "api", "-X", "POST",
@@ -1509,7 +1556,14 @@ def report(plans: list[PrPlan], apply: bool, trigger_ok: bool, repo: str,
                                          # budget. Also a SKIP: a deferral is not "a
                                          # repair this credential cannot perform".
                                          **({"deferred": True}
-                                            if state == "deferred" else {})})
+                                            if state == "deferred" else {}),
+                                         # ⛔ THE OPPOSITE CASE, AND NAMED SO IT CANNOT
+                                         # BE READ AS A DEFERRAL: the cancel was refused
+                                         # for PERMISSION, which no window repairs. It is
+                                         # given NO exemption key below, so it reaches the
+                                         # escalation predicate as a real failure (#10763).
+                                         **({"credential_denied": True}
+                                            if state == "denied" else {})})
                 else:
                     rec["rerun"].append({"run": run.id, "attempt": run.run_attempt,
                                          "workflow": run.name, "ok": None})

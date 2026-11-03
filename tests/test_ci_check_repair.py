@@ -2350,6 +2350,81 @@ def test_a_refused_cancel_does_not_spend_the_rerun(monkeypatch):
     assert verbs == ["cancel"], "no rerun may be issued after a refused cancel"
 
 
+def test_a_PERMISSION_denied_cancel_is_TERMINAL_and_never_a_deferral(monkeypatch):
+    """⭐ P1 #10763: a 403 is the ONE cancel refusal no next window can repair.
+
+    `_cancel` mapped every non-`not_queued` POST failure to 'refused', `_rerun`
+    mapped 'refused' to 'deferred', `report` excludes 'deferred' from the escalation
+    predicate — so a token without `actions:write` made the tool exit 0 with the
+    required check still absent, indefinitely, and nothing ever escalated. That is a
+    no-op gate: an empty repair that is indistinguishable from a performed one.
+
+    Discriminating: pre-fix this returns 'deferred' (measured before the fix).
+    """
+    monkeypatch.setattr(R, "gh_json", _api())
+    monkeypatch.setattr(R, "_sleep",
+                        lambda s: pytest.fail("a refused cancel has no settle loop"))
+    verbs: list[str] = []
+    monkeypatch.setattr(R, "_run", _verbs(
+        verbs, cancel_rc=1,
+        cancel_stderr="gh: Resource not accessible by integration (HTTP 403)"))
+    assert R._rerun("o/r", run(1, "ci.yml", "pending"), 1,
+                    expected_head="a" * 40) == "denied", (
+        "a permission refusal is terminal — deferring it promises a window that can "
+        "never succeed, and the caller then reports the window as discharged")
+    assert verbs == ["cancel"], "a denied cancel must not be followed by a rerun"
+
+
+def test_a_rate_limited_403_cancel_is_STILL_a_deferral(monkeypatch):
+    """The trap in the other direction: the secondary rate limiter ALSO answers 403.
+
+    `_RATE_LIMIT_RE` exists because that wording must not be read as a token problem.
+    The mirror is just as load-bearing here: escalating a rate-limited 403 every
+    window would spam a human for a condition that clears itself, which is the
+    over-reporting `deferred` was introduced to stop.
+
+    ⭐ P2 (review): the stub must match BOTH regexes — `_CANCEL_DENIED_RE` *and*
+    `_RATE_LIMIT_RE` — or the `and not _RATE_LIMIT_RE.search(detail)` guard is never
+    the deciding operand: `…secondary rate limit (HTTP 403)` matches the rate-limit
+    pattern ONLY, so deleting the guard left this test green. The input below is the
+    real overlapping shape, and with it the guard is load-bearing (verified: drop the
+    guard and this test fails).
+    """
+    monkeypatch.setattr(R, "gh_json", _api())
+    monkeypatch.setattr(R, "_sleep",
+                        lambda s: pytest.fail("a refused cancel has no settle loop"))
+    verbs: list[str] = []
+    monkeypatch.setattr(R, "_run", _verbs(
+        verbs, cancel_rc=1,
+        cancel_stderr="gh: Forbidden (HTTP 403): You have exceeded a secondary "
+                      "rate limit — please wait before retrying"))
+    detail = "gh: Forbidden (HTTP 403): You have exceeded a secondary rate limit"
+    assert R._CANCEL_DENIED_RE.search(detail), "the stub must look like a denial …"
+    assert R._RATE_LIMIT_RE.search(detail), "… AND like a rate limit, or the guard is inert"
+    assert R._rerun("o/r", run(1, "ci.yml", "pending"), 1,
+                    expected_head="a" * 40) == "deferred", (
+        "a rate-limited 403 clears itself; it is a deferral, not a credential defect")
+    assert verbs == ["cancel"]
+
+
+def test_a_denied_cancel_ESCALATES_and_is_named_in_the_record(monkeypatch):
+    """⭐ P1 #10763, the half that actually fails open: the exit code.
+
+    `deferred` is exempted by the escalation predicate in `report`, so the state must
+    NOT carry that exemption. 'denied' carries its own `credential_denied` flag
+    instead — nameable in `--json`, and not exempt — so the pass exits 1 and
+    `ci-check-repair-local.sh` takes over.
+    """
+    monkeypatch.setattr(R, "_rerun", lambda *a, **k: "denied")
+    plan = _plan(absent=["docs"], rerun=[run(42, "ci.yml", "completed", "failure")])
+    code, recs = R.report([plan], apply=True, trigger_ok=True, repo="o/r", cooldown_min=60)
+    row = recs[0]["rerun"][0]
+    assert code == 1, "a permission refusal must escalate, not report a discharged window"
+    assert row["ok"] is False
+    assert row.get("credential_denied") is True, "the cause must be named in the record"
+    assert "deferred" not in row, "'denied' must never be filed as a skip"
+
+
 def test_a_cancel_that_never_settles_is_not_followed_by_a_rerun(monkeypatch):
     """The settle wait is bounded, and an unsettled run is SKIPPED, not guessed.
 
