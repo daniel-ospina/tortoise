@@ -132,6 +132,56 @@ def test_gate_still_passes_a_bound_key_under_the_limit():
     _check_org_limit(dict(GRAPH_BOUND_ORG), "points")  # must not raise
 
 
+def test_a_FULL_default_graph_cannot_refuse_a_write_into_an_EMPTY_bound_graph():
+    """#8906 — the P0's LIVE symptom, which no case above covers.
+
+    The two cases above cut ONE direction each (bound graph at/under its own
+    cap, default graph always EMPTY), so a gate that read the DEFAULT graph
+    would pass both while the credential class was frozen — which is exactly why
+    this defect survived: `test_gate_still_passes_a_bound_key_under_the_limit`
+    seeds the default graph with 0, so it cannot observe whether the default
+    graph is consulted at all.
+
+    #8906 measured the other cut in production: the org's DEFAULT graph sat at
+    `max_points` (every REST write behind it refused forever, with no delete
+    path to lower it) while the graph-bound key's OWN graph was still absorbing
+    ~200 counted Points in 48 minutes. The refusal body was
+    `Team points limit reached`, so the fleet's writes stopped for a reason
+    that had nothing to do with the graph they were writing into.
+
+    This is therefore the discriminating arm: SAME credential, SAME limit, and
+    only the two graphs' populations swapped. Admitting the top half while
+    refusing the bottom half is possible only if the gate counts the graph the
+    request WRITES — a gate that reads either graph alone cannot produce both
+    verdicts.
+
+    RED pre-fix (measured by restoring the pre-#10637 gate: `_gate_sdk_for`
+    returning `_make_sdk(namespace=org_id)`): the first call raises
+    `HTTPException 402` — the full default graph refuses a write into an empty
+    bound graph. GREEN after #10637, which resolves the count through the same
+    `_data_graph_name(org)` the opener writes.
+
+    The five REST points doors (`/v1/points`, `/v1/objects`, `/v1/subjects`,
+    `/v1/sessions/commit`, `/v1/demo`) are not enumerated here on purpose: the
+    graph is resolved INSIDE `_check_org_limit`, so the seam is one and every
+    door inherits it. A door that bypassed `_check_org_limit` for
+    `enforce_org_limit(org, "points")` with neither `sdk` nor `sdk_factory`
+    would reopen the defect; that gap is tracked separately rather than
+    re-asserted per door here.
+    """
+    # Direction 1 (#8906's false refusal): default FULL, write graph EMPTY.
+    _seed(DEFAULT_GRAPH, 5)  # GRAPH_BOUND_ORG's max_points == 5
+    _seed(CUSTOM_GRAPH, 0)
+    _check_org_limit(dict(GRAPH_BOUND_ORG), "points")  # must NOT raise
+
+    # Direction 2 (#8906's cap hole): the same numbers, swapped.
+    _seed(DEFAULT_GRAPH, 0)
+    _seed(CUSTOM_GRAPH, 5)
+    with pytest.raises(HTTPException) as ei:
+        _check_org_limit(dict(GRAPH_BOUND_ORG), "points")
+    assert ei.value.status_code == 402, ei.value
+
+
 def test_org_wide_key_still_counts_the_default_graph():
     """Unchanged: an org-wide key (no `graph_id`) counts `org_<tid>`."""
     org_wide = {
