@@ -3025,6 +3025,28 @@ def test_the_write_path_vocabulary_names_every_refusal_the_door_returns():
 
 
 # ── the demo seeders are writers too (the population, not the capture path) ──
+def _seed_demo_out(monkeypatch, org_id="demo-seed-10000"):
+    """The dict `_seed_demo_graph` returns, with its SDK stubbed out."""
+    from tortoise import hosted_api
+
+    class _G:
+        def query(self, cypher, params=None):
+            class _R:
+                def __init__(self):
+                    self.result_set: list = []
+            return _R()
+
+    class _Proj:
+        g = _G()
+
+    class _Sdk:
+        def _get_proj(self):
+            return _Proj()
+
+    monkeypatch.setattr(hosted_api, "_make_sdk", lambda **_kw: _Sdk())
+    return hosted_api._seed_demo_graph(org_id)
+
+
 def _seeded_statements(monkeypatch, org_id="demo-seed-10000"):
     """Every ``(cypher, params)`` `hosted_api._seed_demo_graph` issues.
 
@@ -3112,22 +3134,90 @@ def test_the_demo_seed_writes_no_turn_text_into_the_graph(monkeypatch):
         "the seed did not run to completion under this recorder")
 
 
-def test_the_demo_seed_still_states_the_sample_transcripts_LENGTH(monkeypatch):
-    """Removing the text must not remove the demo's episodic COUNTER.
+def test_the_demo_seed_declares_NO_length_it_cannot_serve(monkeypatch):
+    """`turn_count` is a COMPLETENESS CLAIM, so the demo seed may not state 3.
 
-    The Session is what the episodic layer keeps under §9.1/D1 — a length, not a
-    transcript — so the seeded `:Session` still declares `turn_count`, read from
-    the same `_DEMO_EPISODIC_TURNS` declaration the nodes used to be built from.
+    `record_read.served_turn_count` refuses a copy holding fewer turns than the
+    Session declares, and `sdk._write_session_and_turns` sets `turn_count` to
+    the length it ACTUALLY wrote. The demo seed now stores no turn anywhere
+    (§9.1/D1), so a non-zero count is the one shape the product never produces:
+    on an armed, journaling deployment the demo session's read refuses with
+    `record_unavailable` (503); on an unarmed one it serves
+    `{"turns": 3, "turn_points": []}` — two numbers in one body contradicting
+    each other. This pins the count at 0 and the declared length in the ONE
+    place that is not a promise about stored rows: the response's
+    `sample_turns`.
+
+    ⚠️ This test ALSO passes on the pre-#10000 writer, where the count matched
+    three turn nodes it really wrote. It is a regression guard for the counter's
+    MEANING, not a falsifier of the text removal — the sibling test above is
+    the falsifier.
     """
     issued, hosted_api = _seeded_statements(monkeypatch)
-
     declared = len(hosted_api._DEMO_EPISODIC_TURNS)
+
     counters = [(c, p) for c, p in issued if "turn_count" in c]
     assert counters, "the seeded Session no longer declares a turn count"
-    # The PROPERTY is "the Session states the declared length", not "$turns is
-    # bound": a refactor may inline the literal or rename the parameter and
-    # still satisfy it, so both shapes are accepted. Only a count that is
-    # neither bound to the declaration nor equal to it fails.
-    assert any(p.get("turns") == declared
-               or re.search(rf"turn_count\s*=\s*{declared}\b", c)
-               for c, p in counters), counters
+    for cypher, params in counters:
+        stored = params.get("turns")
+        if stored is None:
+            m = re.search(r"turn_count\s*=\s*(\d+)", cypher)
+            stored = int(m.group(1)) if m else None
+        assert stored == 0, (
+            "the demo seed declares a turn count it cannot serve — it stores "
+            f"no turn, so the count must be 0 (got {stored!r}): {cypher!r}")
+
+    # The declared sample length lives in the RESPONSE, where no read treats it
+    # as a promise about stored rows. Nothing else in the tree consumes either
+    # value, so without this assertion both could be re-spelled or zeroed with
+    # nothing reddening.
+    out = _seed_demo_out(monkeypatch)
+    assert out["sample_turns"] == declared, out
+    assert out["layers"] == {"semantic": 3, "episodic": 0, "epistemic": 3,
+                            "procedural": 3}, out
+    # `points` is the `:Point` census the meter bills, not the sample content:
+    # counting the three unwritten turns would bill nodes that do not exist.
+    assert out["points"] == 9, out
+
+
+def test_the_demo_seed_does_not_declare_a_length_its_session_read_refuses():
+    """The READ DOOR on the seeded demo session must not refuse or contradict.
+
+    This is the pin whose absence let the completeness-claim regression through:
+    710 tests touched the seeder and none asked what its `:Session` read
+    RETURNS. `record_read.served_turn_count` decides `turns` and the refusal for
+    BOTH session doors (#10021 review P2), so a declared count that the served
+    rows do not back is exactly the shape that guard exists to reject.
+
+    Asserted at the predicate both doors share rather than through HTTP, so it
+    holds on the record-armed and the graph lane alike with no database:
+      * declared 0, served 0 — the honest pair the seed now writes: no refusal,
+        and the published count is the served count;
+      * declared 3, served 0 — the pair the seed used to write: the published
+        count DISAGREES with the rows (or the read refuses). Pinned so this test
+        guards the real defect rather than a tautology.
+    """
+    from tortoise.record_read import TurnAnswer, served_turn_count
+
+    published, reason = served_turn_count(
+        answer=None, served=0, declared=0, read_failed=False)
+    assert reason == "", f"declaring 0 and serving 0 was refused: {reason!r}"
+    assert published == 0, f"published {published!r} beside 0 rows"
+
+    published3, reason3 = served_turn_count(
+        answer=None, served=0, declared=3, read_failed=False)
+    assert (published3, reason3) != (0, ""), (
+        "declaring 3 while serving 0 must NOT read as an honest answer — "
+        "either the count disagrees with the rows or the read refuses. Got "
+        f"({published3!r}, {reason3!r}); if this abstains, the completeness "
+        "guard is not armed and the counter's value stops mattering")
+
+    # The ARMED arm refuses rather than publishing the contradiction, which is
+    # the 503 the demo session produced before the count was set to 0.
+    armed, armed_reason = served_turn_count(
+        answer=TurnAnswer(answered=False, kind="no_account"),
+        served=0, declared=3,
+        read_failed=False)
+    assert (armed, armed_reason) != (3, ""), (
+        "the armed arm published a count its rows do not back: "
+        f"({armed!r}, {armed_reason!r})")

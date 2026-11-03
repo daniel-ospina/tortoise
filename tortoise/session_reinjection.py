@@ -86,10 +86,11 @@ ONE bounded graph pass:
 
    **Turn-shape constraint.** ``pointKind``'s vocabulary is open
    (``create_point`` accepts any registered kind), so ``pointKind='event'``
-   alone does not prove a TURN: the hosted demo/dashboard seed writes
-   ``pointKind='event'`` points with NO ``is_episodic`` — their body IS
-   ``[role]``-tagged, so the ``is_episodic`` conjunct is what excludes them
-   (``hosted_api.py:~6243``) — and any SDK/API caller can mint one.
+   alone does not prove a TURN: a graph seeded before #10000 by the hosted
+   demo/dashboard seed holds ``pointKind='event'`` points with NO
+   ``is_episodic`` (``hosted_api._seed_demo_graph``; since #10000 it writes no
+   turn node at all) — their body IS ``[role]``-tagged, so the ``is_episodic``
+   conjunct is what excludes them — and any SDK/API caller can mint one.
    ``_TURN_SHAPE_FILTER`` therefore requires the shape EVERY product and
    eval turn writer emits and no non-turn ``event`` writer does:
    ``is_episodic=true`` plus a ``[...]``-prefixed body.

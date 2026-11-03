@@ -510,14 +510,15 @@ def test_demo_seed_is_excluded_from_the_primitive(client):
     assert "_write_capture_turns" not in src
     assert "_capture_turn_id" not in src
     # It still writes its OWN deliberately-different demo Session (a turn
-    # counter, no is_episodic / capture_ok) — the reason it must stay out. The
-    # counter is STATEMENTS (#10000/#3551 review): it is bound from the demo's
-    # declared transcript length (`$turns`), not the literal it used to be, so
-    # this pin asserts the parameterised form AND that the value still comes
-    # from `_DEMO_EPISODIC_TURNS` — a literal would pass a literal-shaped pin
-    # while drifting from the declaration.
-    assert "s.turn_count=$turns" in src
-    assert 'len(_DEMO_EPISODIC_TURNS)' in src
+    # counter, no is_episodic / capture_ok) — the reason it must stay out.
+    # ⛔ The counter is 0 since #10000: the seed stores no turn anywhere
+    # (§9.1/D1), so it may not declare a length. A non-zero count here is a
+    # completeness claim `served_turn_count` acts on, and the demo session has
+    # nothing to serve — that refusal/contradiction is the regression the value
+    # was changed to remove. Asserted by VALUE, not by parameter name, so a
+    # refactor that reintroduces a declared length fails this pin.
+    assert "s.turn_count=0" in src
+    assert "s.turn_count=3" not in src
 
     demo_org = "demo-3551-org"
     ha_mod._seed_demo_graph(demo_org)

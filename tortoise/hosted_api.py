@@ -10913,7 +10913,8 @@ async def org_info(org: dict = Depends(get_current_org_session_ungated)):  # noq
     # can never drift. Since #10000 the set is a SUPERSET of what the seeder
     # writes: the three `epi_turn*` ids no longer name a node (§9.1/D1 — the
     # demo's episodic layer is the Session), and they stay in the set so the
-    # count keeps excluding a graph seeded before that change. #1591: FAIL SOFT — a missing/broken org graph
+    # count keeps excluding a graph seeded before that change.
+    # #1591: FAIL SOFT — a missing/broken org graph
     # (half-failed provisioning, restores) must not dead-end the dashboard
     # with a hard 500; the client renders the empty state and a write
     # recreates the graph. SCOPE (#3718): the SDK construction above is a
@@ -12559,16 +12560,22 @@ def _seed_demo_graph(org_id: str) -> dict:
     # #3554: the id comes from the ONE declaration (`session_schema.demo_session_id`),
     # not a local f-string, so the writer and any future exclusion cannot drift.
     session_id = demo_session_id(org_id)
-    # The count is the SEED's declared transcript length, read from the same
-    # declaration the turn nodes used to be built from — so the Session still
-    # states how long the sample transcript is while the graph holds none of its
-    # text. One write, not two: a second `SET s.turn_count` would be a second
-    # statement to keep in step with this one.
+    # ⛔ `turn_count` is 0, NOT the sample transcript's length. `turn_count` is a
+    # COMPLETENESS CLAIM the capture path earns by storing the turns it counts
+    # (`record_read.served_turn_count` refuses a copy that holds fewer than the
+    # declared count, and the capture writer sets it to the length it actually
+    # wrote). This seed stores no turn anywhere, so declaring 3 would
+    # be the one shape the product never produces: measured on an armed,
+    # journaling deployment the demo session's read refused with
+    # `record_unavailable` (503), and on an unarmed one it served
+    # `{"turns": 3, "turn_points": []}` — two numbers in one body contradicting
+    # each other, the exact class #10021-P2 added that guard to eliminate.
+    # The sample transcript's LENGTH is reported as `sample_turns` in the
+    # response instead, where no read treats it as a promise about stored rows.
     proj.g.query(
         "MERGE (s:Session {id:$sid}) "
-        "SET s.created_at=$now, s.turn_count=$turns",
-        params={"sid": session_id, "now": now,
-                "turns": len(_DEMO_EPISODIC_TURNS)},
+        "SET s.created_at=$now, s.turn_count=0",
+        params={"sid": session_id, "now": now},
     )
     # ── §9.1/D1: the demo's episodic layer is the SESSION, never turn nodes ──
     # `STORAGE-ARCHITECTURE.md` §9.1 (D1), under §2.0's authority split, puts raw
@@ -12576,9 +12583,11 @@ def _seed_demo_graph(org_id: str) -> dict:
     # `Point`". This seeder wrote one `:Point {pointKind:'event'}` per demo turn
     # carrying that turn's literal text, `CONTAINS`-wired to the Session: the
     # per-turn-text-node shape `#10000` removed from the capture path, and the
-    # last writer in the tree producing it. It is not a captured transcript, so
-    # there is no record row it duplicates — which made the graph the only
-    # STORED copy of text §2.0 says the graph may not authoritatively hold.
+    # last writer producing it UNCONDITIONALLY (the capture path keeps that
+    # shape only as its record-incapable fallback, which is deliberate). It is
+    # not a captured transcript, so there is no record row it duplicates —
+    # which made the graph the only RUNTIME store of text §2.0 says the graph
+    # may not authoritatively hold.
     #
     # The demo now writes the shape the product produces: the Session with its
     # counter and no turn text on any node.
@@ -12651,8 +12660,9 @@ def _seed_demo_graph(org_id: str) -> dict:
         params={"now": now},
     )
 
-    # `points` is a NODE CENSUS, not a description of the sample content: its
-    # only consumer meters a write op — `public_demo` calls
+    # `points` is a `:Point` CENSUS of what this call writes (the sentinel
+    # excluded — `public_demo` adds it), not a description of the sample
+    # content: its only consumer meters a write op — `public_demo` calls
     # `_record_write_op(org, nodes_written=created["points"] + 1)`, whose
     # contract is "net-new non-episodic nodes written by this call". The
     # episodic layer now writes NO node (its text would be a §9.1/D1

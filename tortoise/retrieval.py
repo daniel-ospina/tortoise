@@ -2951,11 +2951,13 @@ def _is_turn_point(h: dict) -> bool:
 
     ⚠️ DELIBERATELY BROADER than ``session_reinjection._TURN_SHAPE_FILTER``,
     which needs BOTH conjuncts. This OR classifies a non-turn ``event``
-    point (the hosted demo/dashboard seed, which writes no ``is_episodic``)
-    as a turn. That is NOT harmless any more, and this docstring said it was
+    point (the hosted demo/dashboard seed, which WROTE no ``is_episodic``
+    before #10000 stopped it writing ``event`` at all) as a turn. That is NOT
+    harmless any more, and this docstring said it was
     until #9092: D3 made the predicate an ORDERING key as well as a
     collapse/slot key (``_package_type_tier``), so every ``point_kind ==
-    "event"`` hit — including that demo/dashboard seed — is filed in the
+    "event"`` hit — including one on a graph the demo seed populated before
+    #10000 — is filed in the
     MIDDLE (turn) tier and ordered BEHIND every distilled statement. That is
     intended: an ``event`` point is verbatim-event-shaped, not a distilled
     claim, so it belongs with the turns rather than leading the window — and
@@ -3084,8 +3086,9 @@ def _package_type_tier(h: dict) -> int:
 
     ⚠️ The turn leg reuses :func:`_is_turn_point`, which is deliberately
     broader than the C4 fetch's conjunct predicate (any ``point_kind ==
-    "event"`` counts, including the hosted demo/dashboard seed that writes no
-    ``is_episodic``). That breadth is REQUIRED here: pass 2 partitions
+    "event"`` counts, including a demo/dashboard ``event`` point seeded before
+    #10000, which wrote no ``is_episodic``). That breadth is REQUIRED here:
+    pass 2 partitions
     ``sources`` with the same predicate, so a narrower tier predicate would
     file a hit that pass 2 treats as a source in the STATEMENT tier and the
     sort key would disagree with the package membership. The consequence —

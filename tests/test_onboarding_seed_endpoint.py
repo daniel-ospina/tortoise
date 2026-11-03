@@ -592,9 +592,11 @@ class TestDigestExcludesDemo:
             tc.__exit__(None, None, None)
 
     def test_demo_seeder_ids_match_exclusion_constant(self):
-        """The exclusion set is the single source of truth: the demo seeder
-        writes exactly the ids team.point_count excludes (a drifted id would
-        silently count as user data)."""
+        """The exclusion set is the source of truth: the demo seeder writes a
+        SUBSET of the ids team.point_count excludes (a drifted id would
+        silently count as user data). Since #10000 the set also names the three
+        `epi_turn*` ids the seeder no longer writes — a graph seeded before that
+        change still holds them, and they must stay excluded."""
         tc, org_id, _email = _registered()
         try:
             r = tc.post("/internal/demo", json={"org_id": org_id},
@@ -603,10 +605,10 @@ class TestDigestExcludesDemo:
             rows = _proj(org_id).query(
                 "MATCH (p:Point) RETURN p.id").result_set
             written = {row[0] for row in rows}
-            from tortoise.hosted_api import _DEMO_POINT_IDS, _DEMO_SENTINEL_ID
+            from tortoise.hosted_api import (
+                _DEMO_EPISODIC_TURNS, _DEMO_POINT_IDS, _DEMO_SENTINEL_ID)
             assert _DEMO_SENTINEL_ID == "_demo_sentinel"
             assert written <= _DEMO_POINT_IDS
-            assert len(written) == 10
             # The set is a deliberate SUPERSET since #10000: it still names the
             # three `epi_turn*` ids the seeder no longer writes, so a graph
             # seeded before that change keeps them excluded from the digest.
@@ -614,7 +616,6 @@ class TestDigestExcludesDemo:
             # to 10 and silently start counting a legacy demo graph.
             assert len(_DEMO_POINT_IDS) == 13
             assert written == _DEMO_POINT_IDS - {
-                pid for pid, _c in __import__(
-                    "tortoise.hosted_api", fromlist=["x"])._DEMO_EPISODIC_TURNS}
+                pid for pid, _c in _DEMO_EPISODIC_TURNS}
         finally:
             tc.__exit__(None, None, None)
