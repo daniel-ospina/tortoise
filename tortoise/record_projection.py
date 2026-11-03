@@ -843,16 +843,20 @@ class OpDispatch:
     nothing, the cache derived nothing, and a record-sourced rebuild
     materialized a superseded entity with NO `status`, which
     `live._terminal_excluded` reads as LIVE. The computing half is now TWO legs
-    of `cache_projection`: `DERIVED_FROM_RECORD` (from this module's own PRIMARY
+    of `cache_projection` — `DERIVED_FROM_RECORD` (from this module's own PRIMARY
     carriers, `superseded_by` / `superseded_at`, the same OR-predicate the
-    record's `public.*_current_status` views use) and `EVENT_STREAM_FOLDS` —
-    the connector/pack vocabulary (#10198) and an explicit state op's
-    `state.status` (#9974), read from `public.journal_event.payload`, which IS
-    this module's own layer-1 record. So an explicit `restatus` is no longer
+    record's `public.*_current_status` views use) and `EVENT_STREAM_FOLDS`, which
+    reads THREE record shapes out of `public.journal_event.payload` (this
+    module's own layer-1 record): the connector/pack vocabulary (#10198), an
+    explicit state op's `state.status` (#9974), and the CREATION record's own
+    `status` (`ObjectRegistered` / `SubjectAdded` — #9974's birth leg, and the
+    FOURTH status writer overall once the supersession carriers are counted, so
+    a census that stopped at the two stream legs above left the birth writer
+    reading as unowned here). So an explicit `restatus` is no longer
     uncomputable: it is dropped HERE by design and folded THERE from the record
-    itself. (This paragraph used to end "those stay an ownership decision, not a
-    silent success" — true before #9974's second leg, and the contradiction the
-    detail gate caught.)
+    itself — and neither is a birth status the record seeded. (This paragraph
+    used to end "those stay an ownership decision, not a silent success" — true
+    before the state-op leg, and the contradiction the detail gate caught.)
     """
 
     table_for_label: Mapping[str, str]
