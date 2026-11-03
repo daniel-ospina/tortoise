@@ -575,8 +575,8 @@ def _handle_state(value) -> bool | None:
     return state
 
 
-def _assigned_handle(node):
-    """`(handle key, value)` for `x = …`, `self.x = …`, `x: T = …`, `with … as x`.
+def _assigned_handles(node) -> list[tuple[str, ast.expr]]:
+    """Every `(handle key, value)` a statement or binding introduces.
 
     The key is a bare name for a local and the DOTTED spelling for an attribute
     (`self._own_sdk`), because an SDK a class OWNS is a handle too (#10046
@@ -589,29 +589,33 @@ def _assigned_handle(node):
     `with … as sdk` is here too (#10046 review round 6 P1): `TortoiseSDK`
     implements `__enter__`/`__exit__` (`sdk.py`), so the context-manager form is
     a SUPPORTED way to hold it and the plainest Python spelling for one — not an
-    indirect shape like a lambda or a factory, which are declared out.
+    indirect shape like a lambda or a factory, which are declared out. EVERY item
+    is returned (#10046 review round 7 P2): a `with _lock() as lk,
+    _make_sdk(...) as sdk:` used to stop at the first binding, so the SDK in the
+    second item was never a handle and the write inside was silent.
     """
     if isinstance(node, ast.With):
+        pairs: list[tuple[str, ast.expr]] = []
         for item in node.items:
             target = item.optional_vars
             if isinstance(target, ast.Name):
-                return target.id, item.context_expr
-            if isinstance(target, ast.Attribute):
-                return ast.unparse(target), item.context_expr
-        return None, None
+                pairs.append((target.id, item.context_expr))
+            elif isinstance(target, ast.Attribute):
+                pairs.append((ast.unparse(target), item.context_expr))
+        return pairs
     if isinstance(node, ast.Assign) and len(node.targets) == 1:
         target = node.targets[0]
         if isinstance(target, ast.Name):
-            return target.id, node.value
+            return [(target.id, node.value)]
         if isinstance(target, ast.Attribute):
-            return ast.unparse(target), node.value
+            return [(ast.unparse(target), node.value)]
     if (isinstance(node, ast.AnnAssign)
             and isinstance(node.target, (ast.Name, ast.Attribute))
             and node.value is not None):
         target = node.target
-        return (target.id if isinstance(target, ast.Name)
-                else ast.unparse(target)), node.value
-    return None, None
+        return [((target.id if isinstance(target, ast.Name)
+                  else ast.unparse(target)), node.value)]
+    return []
 
 
 def _class_attribute_handles(tree) -> dict[str, dict[str, bool]]:
@@ -653,11 +657,12 @@ def _sdk_handles(node) -> dict[str, bool]:
     """
     handles: dict[str, bool] = {}
     for sub in ast.walk(node):
-        name, value = _assigned_handle(sub)
-        if name is None:
-            continue
-        state = _handle_state(value)
-        if state is not None:
+        for name, value in _assigned_handles(sub):
+            if name is None:
+                continue
+            state = _handle_state(value)
+            if state is None:
+                continue
             # WORST-WINS across assignments (#10046 review round 6 P2): keeping the
             # last one lets `sdk = _make_sdk(org)` followed by
             # `if not sdk: sdk = _data_sdk(org)` answer bound while an unbound
@@ -672,7 +677,7 @@ def _sdk_handles(node) -> dict[str, bool]:
         called = getattr(sub.func, "id", None) or getattr(sub.func, "attr", None)
         if called not in _TENANT_INSTALLERS:
             continue
-        # Key on the SAME spelling `_assigned_handle` produces, or an install on
+        # Key on the SAME spelling `_assigned_handles` produces, or an install on
         # an SDK held on `self` cannot mark it bound (#10046 review round 6 P1):
         # `_bind_default_graph_record_tenant(self._sdk, org)` has an ATTRIBUTE in
         # `args[0]`, and the method form has one as `sub.func.value` — reading
@@ -680,7 +685,12 @@ def _sdk_handles(node) -> dict[str, bool]:
         # False, so a developer who followed this test's own failure message
         # ("Install one at the construction site: `_bind_default_graph_record_
         # tenant(sdk, org_id)`") stayed RED.
-        for arg in sub.args:
+        #
+        # KEYWORD arguments count too (#10046 review round 7 P2): `…(sdk=sdk,
+        # org_id=org_id)` installs the tenant just as much as the positional
+        # spelling, and reading only `sub.args` reported that lane RED — the same
+        # false-positive family as the line above, one spelling over.
+        for arg in (*sub.args, *(kw.value for kw in sub.keywords)):
             if isinstance(arg, (ast.Name, ast.Attribute)):
                 key = arg.id if isinstance(arg, ast.Name) else ast.unparse(arg)
                 handles[key] = True
@@ -932,11 +942,16 @@ def test_no_lane_ANYWHERE_in_the_package_writes_records_through_an_unbound_sdk()
     call in either position (`_write(_org_sdk(org))` / `_write(sdk=_org_sdk(org))`
     — the bound-name forms of both ARE caught); an SDK held on a MODULE-LEVEL
     global and written from a function; a passing alias (`s2 = sdk`); a walrus
-    (`if (sdk := _make_sdk(...))`); `setattr(self, "_sdk", ...)`; tuple unpack;
-    and a SUBCLASS writing through a handle its base class's `__init__` opened
-    (the class map is keyed per class). What IS scanned: methods, an SDK held on
-    `self` (opened in one method, written in another), `with … as sdk`, and
-    module-qualified dispatch (`_ha._make_sdk(...)`).
+    (`if (sdk := _make_sdk(...))`); `setattr(self, "_sdk", ...)`; tuple unpack; a
+    handle held in a DICT/LIST and written through a SUBSCRIPT; a class-body
+    opener; an install performed in a THIRD method (the class-attribute map merges
+    worst-wins, so an install there cannot arm a handle another method opened —
+    install in the writer, or in the opener); and a SUBCLASS writing through a
+    handle its base class's `__init__` opened (the class map is keyed per class).
+    What IS scanned: methods, an SDK held on `self` (opened in one method, written
+    in another, and armed by a positional, keyword or method-form install),
+    `with … as sdk` (EVERY item of a multi-item `with`), and module-qualified
+    dispatch (`_ha._make_sdk(...)`).
     """
     modules = sorted(_PACKAGE_ROOT.rglob("*.py"))
     assert len(modules) >= 200, (
@@ -1180,7 +1195,7 @@ def test_a_CLASS_METHOD_writing_through_an_unbound_sdk_is_caught():
     `self.*sdk` attributes comes from a parameter, so nothing exercised them.
 
     Mutation this reddens on: dropping the `for cls in tree.body` walk from
-    `_module_functions`, or the attribute half of `_assigned_handle`.
+    `_module_functions`, or the attribute half of `_assigned_handles`.
     """
     local = '''
 class _MethodLane:
@@ -1242,6 +1257,47 @@ class _ParamWorker:
     assert _flagged(control) == [], (
         "the control: a handle that came from a PARAMETER has an unknown state "
         "and must NOT be flagged — guessing is the mis-filing this guard stops")
+
+
+def test_an_install_in_any_spelling_arms_the_handle_it_names():
+    """Pins round-7: a KEYWORD install arms the handle, and every `with` item binds.
+
+    Both were false NEGATIVES of the same family one spelling over from the
+    round-6 P1. A developer who follows this test's own failure message
+    (`_bind_default_graph_record_tenant(sdk, org_id)`) but writes it with keyword
+    arguments must not stay RED — and a `with … as lk, _make_sdk(...) as sdk:`
+    must not hide the SDK in the second item.
+    """
+    keyword_local = '''
+def _local_kw(org_id: str) -> None:
+    sdk = _make_sdk(namespace=org_id)
+    _bind_default_graph_record_tenant(sdk=sdk, org_id=org_id)
+    sdk.create_point("Subject", {})
+'''
+    assert _flagged(keyword_local) == [], (
+        "a KEYWORD-argument install installs the tenant; reporting it RED tells "
+        "the reader to add an install it already has")
+
+    keyword_self = '''
+class _KwWorker:
+    def __init__(self, org_id: str) -> None:
+        self._sdk = _make_sdk(namespace=org_id)
+        _bind_default_graph_record_tenant(sdk=self._sdk, org_id=org_id)
+
+    def run(self) -> None:
+        self._sdk.create_point("Subject", {})
+'''
+    assert _flagged(keyword_self) == [], (
+        "the same, on a handle the class owns")
+
+    multi_with = '''
+def _run_multi(org_id: str) -> None:
+    with _lock() as lk, _make_sdk(namespace=org_id) as sdk:
+        sdk.create_point("Subject", {})
+'''
+    assert _flagged(multi_with), (
+        "EVERY item of a multi-item `with` binds a handle — stopping at the first "
+        "one let a lock-plus-SDK `with` hide the SDK entirely")
 
 
 def test_a_literal_namespace_is_not_an_org_scoped_site():
