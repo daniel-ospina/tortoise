@@ -18702,7 +18702,9 @@ def _commit_response(
     * the payload's DOMAIN integrity warnings, derived from the payload alone
       — deterministic per payload, so an idempotent re-commit returns the
       same ones;
-    * WRITE-TIME advisories (``temporal_not_applied``, #7819; and
+    * WRITE-TIME advisories (``temporal_not_applied``, #7819;
+      ``metadata_not_applied``, #10368 — a dedup fold onto a terminal claim
+      drops the metadata props it carries; and
       ``narrative_not_recorded``, #10000 — observed while the writes ran: a
       dedup fold dropped on an already-terminal claim wrote NOTHING, and a
       commit whose `SessionNarrated` carrier did not reach the record left
@@ -19315,12 +19317,17 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
     session_id = payload.session_id
     reconcile = plan.reconcile
     # #7819: TRANSIENT write-time advisories this phase has to REPORT but that
-    # are not payload domain warnings — today the only one is
-    # `temporal_not_applied`, raised when `create_point`'s dedup branch DROPS a
-    # fold carrying a validity window because the content address resolves to a
-    # terminal claim. A dropped fold writes nothing, so without this the client
-    # gets a 200 whose `when` was silently not applied. The handler folds these
-    # into the response's `warnings[]` (#405's additive channel).
+    # are not payload domain warnings — `temporal_not_applied`, raised when
+    # `create_point`'s dedup branch DROPS a fold carrying a validity window
+    # because the content address resolves to a terminal claim, and (since
+    # #10368) `metadata_not_applied`, raised when the same fold carries GENERIC
+    # metadata props instead. A dropped fold writes nothing, so without this the
+    # client gets a 200 whose `when` or whose props were silently not applied.
+    # ⚠️ NOT a closed enumeration: every `advisories` entry a `create_point` leg
+    # returns is forwarded below, so a NEW write-time code reaches `warnings[]`
+    # without an edit here — but a code that is never named in this comment is a
+    # code a maintainer can wire a code-conditional path against by mistake.
+    # The handler folds these into the response's `warnings[]` (#405).
     _write_advisories: list[dict] = []
     # #5363 (B): each supersede window is validated inside the points loop
     # below, PER ACTION and immediately BEFORE that action's successor is

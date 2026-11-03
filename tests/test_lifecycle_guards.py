@@ -870,16 +870,116 @@ def test_create_point_dedup_folds_a_window_onto_a_live_claim(sdk):
     assert _stored(pid, "confidence", sdk) == pytest.approx(0.97)
 
 
-def test_create_point_dedup_without_a_window_still_folds(sdk):
-    """The boundary: a fold with NO temporal prop keeps applying, dead target or
-    not — the same rule as any other revision of a dead claim (#3305)."""
-    content = f"dedup metadata {uuid.uuid4().hex[:8]}"
-    pid = sdk.create_point("statement", content)["id"]
-    sdk.retract_point(pid)
-    again = sdk.create_point("statement", content, confidence=0.99,
+def test_create_point_dedup_metadata_folds_a_live_target_only(sdk):
+    """The boundary, re-drawn by #10368: a metadata fold applies to a LIVE
+    target and is DROPPED on a TERMINAL one.
+
+    This test used to read "a fold with NO temporal prop keeps applying, dead
+    target or not — the same rule as any other revision of a dead claim
+    (#3305)", and it pinned `confidence=0.99` landing on a retracted point.
+    #10368 (P1-severe) overturns exactly that half: the *implicit*
+    content-identity fold must not rewrite a settled belief, while the
+    *explicit* doors (`update_point`, `supersede_point`) keep the #3305
+    revision capability. The dead-target half now lives in
+    `test_create_point_dedup_does_not_mutate_a_terminal_point`."""
+    live_content = f"dedup metadata live {uuid.uuid4().hex[:8]}"
+    live = sdk.create_point("statement", live_content)["id"]
+    sdk.create_point("statement", live_content, confidence=0.99, dedup=True)
+    assert sdk.get_point(live)["confidence"] == pytest.approx(0.99)
+
+    # ...and the same fold on a TERMINAL target lands nothing.
+    dead_content = f"dedup metadata dead {uuid.uuid4().hex[:8]}"
+    dead = sdk.create_point("statement", dead_content)["id"]
+    sdk.retract_point(dead)
+    before = sdk.get_point(dead)["confidence"]
+    again = sdk.create_point("statement", dead_content, confidence=0.99,
                              dedup=True)
-    assert again["id"] == pid
-    assert sdk.get_point(pid)["confidence"] == pytest.approx(0.99)
+    assert again["id"] == dead
+    assert sdk.get_point(dead)["confidence"] == before
+    assert sdk.get_point(dead)["status"] == "retracted"
+
+
+def test_create_point_dedup_does_not_mutate_a_terminal_point(sdk):
+    """#10368 — the SDK door of the #9819 class: a content-dedup fold must not
+    REWRITE a TERMINAL point.
+
+    `create_point(dedup=True)` resolves a content match unconditionally
+    (`_resolve_dedup_hit` -> `_find_point_by_content`, which applies no
+    status/outdated filter), and the only terminal guard on the fold is #7819,
+    scoped to `_TEMPORAL_RESTAMP_PROPS`. A fold carrying a GENERIC prop is
+    therefore invisible to it and reaches
+
+        props["updatedAt"] = now
+        self.update_point(pid, **props)
+
+    so a re-assertion of a settled claim rewrote the dead node: `updatedAt`
+    moved, the prop was stored, `status` stayed `retracted`. The ingest door
+    refuses the same shape at Phase 1 (#9819 / #10377); this is the residual on
+    the direct-SDK surface.
+
+    The caller is TOLD (the advisory), because a silently dropped write is the
+    #5365 defect that #7819's landing also refused to leave behind.
+    """
+    content = f"direct ctx {uuid.uuid4().hex[:8]}"
+    pid = sdk.create_point("statement", content, dedup=True)["id"]
+    sdk.retract_point(pid)
+    before = sdk.get_point(pid)
+
+    again = sdk.create_point("statement", content, dedup=True,
+                             custom_probe="x")
+
+    assert again["id"] == pid, "a dedup HIT is still reported"
+    after = sdk.get_point(pid)
+    assert after["updatedAt"] == before["updatedAt"], (
+        "the fold re-stamped updatedAt on a TERMINAL point")
+    assert "custom_probe" not in after, (
+        "the fold stored a caller prop on a TERMINAL point")
+    assert after["status"] == "retracted", after["status"]
+    codes = [a.get("code") for a in (again.get("advisories") or [])]
+    assert "metadata_not_applied" in codes, again
+    # TRANSIENT, like the #8171 advisories it sits beside: never on the node.
+    assert "advisories" not in after
+
+    # ...and the stamp must not sneak back in through the OTHER leg: a fold that
+    # carries a generic prop AND an authored word applies the (ruled, #398)
+    # evidence leg but still writes no revision, so `updatedAt` must not move.
+    # This is the shape that made "returned unchanged" false in review.
+    before = after
+    again = sdk.create_point("statement", content, dedup=True,
+                             custom_probe="y", credibility="gold")
+    after = sdk.get_point(pid)
+    assert "custom_probe" not in after, after
+    assert after["updatedAt"] == before["updatedAt"], (
+        "the word leg re-stamped updatedAt on a TERMINAL point after the "
+        "metadata leg was refused")
+    assert after["status"] == "retracted"
+
+
+def test_create_point_dedup_still_folds_EVIDENCE_onto_a_terminal_point(sdk):
+    """#10368 must not over-reject: EVIDENCE still folds onto a dead claim.
+
+    The owner ruling on #7704 is that a dedup hit KEEPS the new evidence —
+    "one claim, N sources" — and #398 rules an authored `credibility` word is a
+    SOURCE. So the refusal is scoped to the generic-metadata leg: the evidence
+    fold (`_fold_source_evidence`, its own journaled path) and the attribution
+    word both keep applying to a terminal target, exactly as #10010's
+    `test_a_fold_onto_a_dead_claim_keeps_its_terminalizer_stamp` pins.
+    """
+    content = f"direct ctx evidence {uuid.uuid4().hex[:8]}"
+    url = "https://example.com/10368-second-source"
+    pid = sdk.create_point("statement", content, dedup=True)["id"]
+    sdk.retract_point(pid)
+
+    sdk.create_point("statement", content, dedup=True, extractedFrom=url,
+                     credibility="gold")
+
+    sources = {
+        row[0] for row in sdk._get_proj().g.query(
+            "MATCH (p:Point {id:$id})-[:extractedFrom]->(s:Source) "
+            "RETURN DISTINCT s.url", params={"id": pid}).result_set
+    }
+    assert sources == {url}, (
+        f"the evidence fold must still land on a terminal claim: {sources!r}")
     assert sdk.get_point(pid)["status"] == "retracted"
 
 
