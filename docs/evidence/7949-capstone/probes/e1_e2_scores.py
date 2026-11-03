@@ -84,12 +84,20 @@ E2A_RECORD = "e2a-value-units.json"
 E2A_FALSIFIER = "e2a-value-units-falsifier.json"
 GATE_DROPS = "e1-gate-drops.json"
 PREREG = Path("docs/evidence/7949-capstone/preregistration.json")
-# The three switches `e1_paired_arm.py` forces OFF for a before arm and refuses to
-# run over when they are already set (#9889 acceptance item 4). The driver re-reads
-# them from each artifact's own `arm` block, because it is the driver that puts the
-# number in a scored row.
-_ARM_VARS = ("TORTOISE_VET", "TORTOISE_CLASSIFY_LATER", "TORTOISE_VALUE_GATE")
+# The switches `e1_paired_arm.py` forces OFF for a before arm and refuses to run over
+# when they are already set (#9889 acceptance item 4). It is FOUR keys, not the three
+# the acceptance list names: `TORTOISE_S2_DECISION_SEAM` arms S2.2 *through the
+# arbiter*, so `_vet_enabled` reads True even against an explicit `TORTOISE_VET=0`
+# (`e1_paired_arm.SEAM_KEY`'s own comment, and #5087). The driver re-reads all four
+# from each artifact's own `arm` block, because it is the driver that puts the number
+# in a scored row.
+_ARM_VARS = ("TORTOISE_VET", "TORTOISE_CLASSIFY_LATER", "TORTOISE_VALUE_GATE",
+             "TORTOISE_S2_DECISION_SEAM")
 _ARM_OFF_STATES = ("none", "null", "", "0", "false", "unset", "<unset>")
+# The measured arm is the mirror image: it must have been ON. `capstone_measure`
+# writes that readback onto the log this driver already parses (`# arm: …`), so
+# nothing about the after side needs to be assumed either.
+_ARM_ON_VARS = ("TORTOISE_VET", "TORTOISE_CLASSIFY_LATER")
 
 
 def _read_json(path: Path) -> dict:
@@ -206,7 +214,7 @@ def read_off_arms(repo: Path, floors: dict) -> list[dict]:
 
     The THIRD refusal the probe makes is asserted here too, and it is the one
     that decides whether the row means anything at all: the arm must have been
-    OFF. `e1_paired_arm.py` refuses to run when any of the three variables is
+    OFF. `e1_paired_arm.py` refuses to run when any of the FOUR variables is
     already set (#9889 acceptance item 4), and it writes the env it read back
     into `arm` — so the record CARRIES the proof. Collecting that field without
     reading it (which this function did) let two ON realizations be scored as
@@ -277,10 +285,31 @@ def read_on_arm(repo: Path) -> dict:
                    what="# corpus fixtures_hash")
     fused, atomic = _grep(text, r"^e2b outcome=\S+ fused=(\d+/\d+)",
                           what="e2b fused").split("/")
+    # The after arm's OWN readback, off the `# arm:` line `capstone_measure` writes
+    # from `os.environ` after forcing the passes. E1's bar compares an ON run
+    # against an OFF one, so an after arm whose treatment was never enabled is not
+    # a "before/after pair" at all — it is two control arms, and the bar would be
+    # scored over a treatment the run never applied. Read, not assumed: the log
+    # carries the proof, so a driver that skips it is choosing not to look.
+    after_arm_line = _grep(text, r"^# arm: (.+?)(?:\s+\(|$)",
+                           what="# arm")
+    after_arm = {}
+    for token in after_arm_line.split():
+        if "=" in token:
+            key, _, value = token.partition("=")
+            after_arm[key] = value
+    for var in _ARM_ON_VARS:
+        if str(after_arm.get(var)).strip().lower() in _ARM_OFF_STATES:
+            raise _refuse(
+                f"{EVIDENCE / ON_ARM_LOG}'s arm readback has {var}="
+                f"{after_arm.get(var)!r}, so the measured passes were not ON — "
+                "an after arm that never enabled the treatment cannot be the "
+                "ON half of a before/after pair")
     return {
         "artifact": f"{EVIDENCE / ON_ARM_LOG}",
         "head": head,
         "graph": graph,
+        "arm": after_arm,
         "corpus_sha256": corpus,
         "objects": objects,
         "bare_definite": bare,
@@ -608,6 +637,10 @@ def score(repo: Path = _ROOT) -> dict:
                               "checkout's corpus matches this pin (G1)"),
         "head": after["head"],
         "graph": after["graph"],
+        # Both halves of the pair carry their arm readback, so the provenance of
+        # the comparison is in the evidence rather than only in the driver that
+        # checked it.
+        "after_arm": after["arm"],
         "bars_source": (
             f"{PREREG}#criteria + #denominator_floors, parsed by "
             "capstone_measure.parse_bars — the same reader the scoring probe "

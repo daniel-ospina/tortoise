@@ -4,6 +4,12 @@
  "corpus_pin_source": "docs/evidence/7949-capstone/preregistration.json#corpus.fixtures_hash \u2014 e1_paired_arm.py refuses to run unless the checkout's corpus matches this pin (G1)",
  "head": "54922a800f96858935b58ef250da569a4896df44",
  "graph": "capstone_on_54922a800_1793378318",
+ "after_arm": {
+  "TORTOISE_VET": "1",
+  "TORTOISE_CLASSIFY_LATER": "1",
+  "TORTOISE_VALUE_GATE": "<unset>",
+  "TORTOISE_S2_DECISION_SEAM": "<unset>"
+ },
  "bars_source": "docs/evidence/7949-capstone/preregistration.json#criteria + #denominator_floors, parsed by capstone_measure.parse_bars \u2014 the same reader the scoring probe uses, so this record and that row cannot read two bars",
  "denominators": {
   "e1_objects": 30,

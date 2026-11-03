@@ -115,11 +115,11 @@ registered refusal, on the number itself rather than its denominator:
 arm under that share "cannot measure E1 (a share metric needs a non-trivial
 base)" and is **REFUSED**. A before-share under 0.20 therefore exits **2** and
 writes no record, citing the frozen floor. Both floors are read out of the
-record (`e1_objects` and `e1_min_before_share` both through `parse_bars`'s
-`floors` map — the bundle's ONE bar reader, which #10610 extended to expose the
-share floor precisely so this driver would not need a second path; the
-denominator itself still comes off `denominator_floors`, because a denominator
-is not a bar), never typed here, and
+record (`e1_objects` through `parse_bars`'s `floors` map, `e1_min_before_share`
+straight off `denominator_floors` — `parse_bars` exposes the share floor too, but
+this probe is the PRODUCER of the number that floor is written over and refuses
+with its own message, because an escaping `ValueError` from a helper is not a
+refusal a run can be read from), never typed here, and
 an absent or unreadable `e1_min_before_share` is refused rather than read as "no
 floor" (#9513). Both arms below clear both floors (0.3590 and 0.5652 against
 0.20; 78 and 69 Objects against 30), so their shares are measurements.

@@ -4343,25 +4343,97 @@ def test_an_e2b_population_under_its_floor_is_REFUSED_not_FAILED(tmp_path):
 
 
 def test_the_readmes_floor_provenance_claim_matches_the_code():
-    """#10610 review P2: the README stated the OPPOSITE of what `parse_bars` does.
+    """#10610 review P2: the README's floor-provenance sentence vs its READER.
 
-    The sentence was the only stated justification for the one place this driver
-    bypassed the bar map, so a reader following it would have re-added the
-    bypass. Asserted against BOTH surfaces, so neither can drift alone.
+    The paragraph describes **Probe 1, `e1_paired_arm.py`**, and that probe's
+    `min_before_share()` reads the share floor STRAIGHT off `denominator_floors`,
+    on purpose and with its own stated reason (an escaping `ValueError` from a
+    helper is not a refusal a run can be read from). The first cut of this pin
+    asserted the opposite — that both floors come through `parse_bars` — so it
+    passed a false sentence and would have redded the true one. A pin that makes
+    a false claim load-bearing is worse than no pin.
+
+    So this asserts doc and code agree, by asking the CODE for the number: the
+    floor the driver enforces must BE the floor the README names the source of.
     """
     readme = (_REPO / "docs/evidence/9889/README.md").read_text()
+    probe = (_REPO / "docs/evidence/7949-capstone/probes/e1_paired_arm.py").read_text()
+    # The stale parenthetical is gone: `parse_bars` DOES expose the share floor
+    # since this PR (#10610), so "does not expose" is refuted by the tree.
     assert "which `parse_bars` does not expose" not in readme
+    # …and the README names the map the probe really reads.
     claim = [line for line in readme.splitlines()
-             if "e1_min_before_share" in line and "parse_bars" in line]
+             if "e1_min_before_share" in line and "denominator_floors" in line]
     assert claim, "the README no longer states where the share floor is read from"
-    floors = cvc_bars = None
-    with tempfile.TemporaryDirectory() as tmp:
-        repo = Path(tmp)
-        shutil.copytree(_REPO / "docs/evidence/7949-capstone",
-                        repo / "docs/evidence/7949-capstone")
-        prereg = json.loads(
-            (repo / "docs/evidence/7949-capstone/preregistration.json").read_text())
-        floors = scores_probe._parse_bars(prereg)["floors"]
-    # the code surface the README now claims: the share floor IS in the map
-    assert isinstance(floors["e1_min_before_share"], float), floors
+    # The probe's own docstring states the same provenance, so neither can drift.
+    assert "Read straight off the record, not through `parse_bars`" in probe
+    # And the floor the driver ENFORCES is the one the README claims it reads.
+    prereg = _prereg()
+    enforced = scores_probe.frozen_denominators(_REPO)["e1_min_before_share"]
+    assert enforced == prereg["denominator_floors"]["e1_min_before_share"], enforced
+
+
+def test_the_measured_arm_must_be_ON_in_its_own_readback(tmp_path, capsys):
+    """#10610 review P1, the other half: the AFTER arm's readback is checked too.
+
+    E1's bar is `after <= 0.5 x before`, which only means anything if the after
+    arm was ON and the before arms were OFF. The driver checked the before side
+    and never looked at `on-arm.log`'s own `# arm:` readback — which
+    `capstone_measure` writes from `os.environ` after forcing the passes — so two
+    OFF realizations would be reported as a before/after pair: a treatment the run
+    never applied, scored as the treated arm.
+
+    Non-vacuity: the pre-fix driver scores this log unchanged (measured: the record
+    it writes is byte-identical to the committed one).
+    """
+    repo = _bundle(tmp_path)
+    log = repo / "docs/evidence/9889/on-arm.log"
+    text = log.read_text()
+    arm_line = [ln for ln in text.splitlines() if ln.startswith("# arm: ")]
+    assert len(arm_line) == 1, arm_line
+    dead = (arm_line[0]
+            .replace("TORTOISE_VET=1", "TORTOISE_VET=<unset>")
+            .replace("TORTOISE_CLASSIFY_LATER=1",
+                     "TORTOISE_CLASSIFY_LATER=<unset>"))
+    log.write_text(text.replace(arm_line[0], dead))
+    with pytest.raises(SystemExit) as refused:
+        scores_probe.score(repo)
+    assert refused.value.code == 2, refused.value
+    err = capsys.readouterr().err
+    assert "were not ON" in err, err
+    assert "TORTOISE_VET" in err, err
+
+    # …and the shipped log still scores, with its readback carried into the
+    # record so the after side's provenance is auditable, not only checked.
+    log.write_text(text)
+    record = scores_probe.score(repo)
+    assert record["after_arm"]["TORTOISE_VET"] == "1", record["after_arm"]
+    assert record["after_arm"]["TORTOISE_CLASSIFY_LATER"] == "1", record["after_arm"]
+
+
+def test_the_seam_switch_counts_as_ON_for_a_before_arm(tmp_path, capsys):
+    """The producer refuses on FOUR keys; the driver must not check three.
+
+    `e1_paired_arm.py` checks `(*ARM_KEYS, SEAM_KEY)` and says why: the seam arms
+    S2.2 *through the arbiter*, so `_vet_enabled` reads True even against an
+    explicit `TORTOISE_VET=0`. A before arm with the seam armed is therefore a
+    treatment, and scoring it as the control is exactly the defect the guard
+    exists for — arriving through the one key the acceptance list does not name.
+
+    Non-vacuity: the shipped records already carry the key (as `None`), so widening
+    the tuple cannot reject them; the pre-fix three-key driver exits 0 on this
+    bundle (measured) and writes the ON block into the pairing.
+    """
+    repo = _bundle(tmp_path)
+    path = repo / "docs/evidence/9889/e1-paired-off-arm-1.json"
+    record = json.loads(path.read_text())
+    assert record["arm"]["TORTOISE_S2_DECISION_SEAM"] is None
+    record["arm"]["TORTOISE_S2_DECISION_SEAM"] = "1"
+    path.write_text(json.dumps(record))
+    with pytest.raises(SystemExit) as refused:
+        scores_probe.score(repo)
+    assert refused.value.code == 2, refused.value
+    err = capsys.readouterr().err
+    assert "not a before arm" in err, err
+    assert "TORTOISE_S2_DECISION_SEAM='1'" in err, err
 
