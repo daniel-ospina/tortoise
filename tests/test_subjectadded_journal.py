@@ -124,7 +124,9 @@ class TestRoundTrip:
             assert line["name"] == name
             assert line["subject_kind"] == "core:team", line
             assert line["subjectKind"] == "core:team", line
-            assert line["status"] == "live", line
+            # #9974 R1: the record carries NO status for a status-less birth —
+            # the door no longer fabricates `'live'` into it (absent READS live).
+            assert "status" not in line, line
             assert line.get("createdAt"), line
             if is_episodic is None:
                 assert "is_episodic" not in line, line
@@ -261,10 +263,12 @@ class TestStubAdoption:
             assert rows and rows[0][0] == line["id"], (
                 "rebuild must restore the canonical id, not the stub ulid")
             assert rows[0][1] == line["createdAt"], rows[0]
-            # Accepted stub asymmetry: rebuild's ON CREATE writes status='live'
-            # from the journaled line, the live stub keeps it absent.
+            # Accepted stub asymmetry: rebuild's ON CREATE writes the
+            # journaled line's own properties, the live stub keeps its own. Since
+            # #9974 R1 the line carries NO status for a status-less birth, so
+            # both sides are ABSENT and the field no longer diverges.
             rebuilt_props = _subject_row(proj, "connector-person")[0][0]
-            assert rebuilt_props.get("status") == "live", rebuilt_props
+            assert "status" not in rebuilt_props, rebuilt_props
         finally:
             sdk.close()
 
