@@ -1016,13 +1016,16 @@ class TestIdentityOnTheResult:
             f"unresolved_total={block['unresolved_total']} of "
             f"{_denominator(block)} candidate(s)"), messages[0]
 
-    def test_a_state_the_warning_does_not_describe_claims_nothing(self, monkeypatch):
+    def test_a_state_the_warning_does_not_describe_claims_no_coverage(self, monkeypatch):
         """The residual arm's only protection is this test (#5095 review round 6).
 
         A state added to `failure_policy.LOOKUP_STATES` later must not INHERIT the
         `partial` or the counted sentence — that is the defect class this whole
         change removes, and without this pin the arm would be protected by a
-        comment alone. The arm states only what it was handed.
+        comment alone. The arm states the state, the counter, and that no arm
+        covers that state with those counters — the last of those is DERIVED from
+        no earlier arm matching, not handed in, which is why it can go stale when
+        the arm partition changes and why this pin is what catches that.
         """
         monkeypatch.setattr(fp, "lookup_state", lambda search: "future_state")
 
