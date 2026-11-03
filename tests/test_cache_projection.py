@@ -2361,8 +2361,24 @@ def test_a_nested_creation_record_is_read_by_the_id_narrowing():
     `payload ->> 'id'` is NULL for it, so `read_node` silently answered no
     `status` where `rebuild_from_record` folded one. That is the two-door split
     this whole file exists to prevent, on a shape the record accepts.
+
+    ⚠️ THE DOOR ASSERTIONS BELOW CANNOT RED ON THAT REGRESSION ON THEIR OWN (review
+    P2, measured): `_FakeConn` applies the unwrap whenever `_UNWRAP_MARK` is in the
+    statement and then matches only the KEY out of `_ID_CLAUSE_RE` against its own
+    pre-unwrapped `node_id`, so reverting the production clause to a raw
+    `payload ->> 'id'` leaves both assertions GREEN (measured: this test green,
+    `test_the_narrowing_id_expression_matches_the_selects_node_id` red). The
+    expression assertion below is therefore part of THIS pin, not decoration —
+    without it this test reads as coverage of a regression it cannot see.
     """
     from tortoise import record_serve as rs
+
+    assert f"({cp._PAYLOAD_EVENT} ->> 'id') = %s" in \
+        cp._LIFECYCLE_EVENTS_FOR_ONE_SQL, (
+        "the single-row narrowing no longer unwraps the payload before reading "
+        "`id` — a raw `payload ->> 'id'` is NULL for an event-nested creation "
+        "record, which the record still MATERIALISES, so the two doors split"
+    )
 
     conn = _FakeConn({
         "object": [{"id": "o-9", "name": "Nested", "object_kind": "other",
@@ -2781,8 +2797,15 @@ def test_the_birth_status_is_on_create_only_like_the_live_fold():
         f"({folded.props!r}) — the live fold is ON CREATE and never re-writes"
     )
     # …and a supersession the record's CARRIERS already derived is not
-    # overwritten by a birth value either (the `status is None` gate; a `status`
-    # column does not exist, so the derived row is the only legal shape).
+    # overwritten by a birth value either. ⚠️ CORRECTED (review P2): this note
+    # credited a `status is None` gate, which the birth arm does not have — there
+    # is no such gate there (`apply_event_stream_folds`'s `status is None` is the
+    # OUTPUT gate that decides whether anything is written at all). The protector
+    # is the `_is_terminal_status(current)` early return, which skips the whole
+    # stream for a node whose carrier already made it terminal. A reader who
+    # "restored" the gate this note used to name would re-open the round-6 bug
+    # (`test_a_pre_birth_fold_cannot_survive_the_creation_record`). A `status`
+    # column still does not exist, so the derived row is the only legal shape.
     derived = cp.node_from_row("Object", {"id": "o-1", "name": "Acme",
                                           "object_kind": "other",
                                           "superseded_by": "acme-v2"})
