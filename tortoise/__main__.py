@@ -3488,10 +3488,20 @@ def _cmd_config(args) -> int:
     raw_uri = _os.environ.get("TORTOISE_DB_URI")
     trio_set = any((_os.environ.get(k) or "").strip() for k in
                    ("FALKORDB_HOST", "FALKORDB_PORT", "FALKORDB_PASSWORD"))
-    db_source = ("TORTOISE_DB_URI" if is_db_uri(raw_uri or "")
-                 else "FALKORDB_* trio" if trio_set
-                 else "TORTOISE_DB_PATH" if (_os.environ.get("TORTOISE_DB_PATH") or "").strip()
-                 else "default")
+    # Mirrors `_resolve_db_target`'s precedence, INCLUDING the backward-compat
+    # branch `resolve_db_path` documents (a scheme-less TORTOISE_DB_URI is treated
+    # as an embedded file path). Counting only `is_db_uri` labelled a user-supplied
+    # path as `default` — "nothing is configured" about a target the user set.
+    if is_db_uri(raw_uri or ""):
+        db_source = "TORTOISE_DB_URI"
+    elif trio_set:
+        db_source = "FALKORDB_* trio"
+    elif (_os.environ.get("TORTOISE_DB_PATH") or "").strip():
+        db_source = "TORTOISE_DB_PATH"
+    elif (raw_uri or "").strip():
+        db_source = "TORTOISE_DB_URI (file path)"
+    else:
+        db_source = "default"
     graph_store: dict = {"source": db_source}
     resolved: str | None = None
     db_error: str | None = None
@@ -3555,6 +3565,7 @@ def _cmd_config(args) -> int:
     harness_path = (home / ".pi" / "agent" / "tortoise-config.json") if home is not None else None
     harness_state, harness_cfg = (_describe_store(harness_path, "apiKey")
                                   if harness_path is not None else ("home unresolvable", None))
+    harness_url_raw: str | None = None
     harness: dict = {"path": (str(harness_path) if harness_path is not None
                               else "(home unresolvable)"),
                      "state": harness_state}
@@ -3596,19 +3607,23 @@ def _cmd_config(args) -> int:
                 "brute-forceable, so it is not published")
     if env_key:
         harness["source"] = "env:TORTOISE_API_KEY"
-        harness["api_url"] = _mask_display_target(
-            _os.environ.get("TORTOISE_API_URL") or "https://api.premiselabs.co")
+        harness_url_raw = (_os.environ.get("TORTOISE_API_URL")
+                           or "https://api.premiselabs.co")
+        harness["api_url"] = _mask_display_target(harness_url_raw)
     else:
         harness["source"] = "file" if file_harness_key else "none"
         raw_url = (harness_cfg or {}).get("apiUrl")
-        harness["api_url"] = _mask_display_target(
-            raw_url if isinstance(raw_url, str) and raw_url else
-            "https://api.premiselabs.co")
+        harness_url_raw = (raw_url if isinstance(raw_url, str) and raw_url
+                           else "https://api.premiselabs.co")
+        harness["api_url"] = _mask_display_target(harness_url_raw)
     payload["harness"] = harness
     same_identity: bool | None = None
     relation: str | None = None
+    # Compare the RAW urls: `_mask_display_target` truncates at `?`/`#` and appends
+    # an ellipsis, so comparing the published (masked) form made two IDENTICAL
+    # endpoints with a query string read as "a DIFFERENT endpoint".
     hosts_agree = bool(api_key) and bool(harness_effective) and _same_endpoint(
-        api_url, harness.get("api_url"))
+        api_url, harness_url_raw)
     if api_key and harness_effective:
         # Compare the VALUES, not the published 48-bit labels: `_key_fingerprint`
         # is a display label ("never used as an authenticator"), and deciding "the
@@ -3706,18 +3721,23 @@ def _cmd_config(args) -> int:
             print("  existing team from the current directory.")
     print()
     print("Graph store")
+    if graph_store.get("status"):
+        # The mode a user actually reads must not say "nothing is configured"
+        # about a store the CLI REFUSES — that was the split this block exists to
+        # close, reintroduced on the human side.
+        print(f"  ⛔ {_printable(graph_store['status'])}: "
+              f"{_printable(graph_store.get('error', ''))}")
     if graph_store.get("note_default"):
         print(f"  ·  {graph_store['note_default']}")
     if graph_store.get("target"):
         kind = graph_store.get("target_kind")
         suffix = f"  ({graph_store['source']}{', ' + kind if kind else ''})"
         print(f"  target        {_printable(graph_store['target'])}{suffix}")
-    else:
-        print("  target        (no TORTOISE_DB_URI — `tortoise doctor` reports the resolved default)")
+    elif not graph_store.get("status"):
+        print("  target        (no TORTOISE_DB_URI — `tortoise doctor` reports the "
+              "resolved default)")
     if graph_store.get("warning"):
         print(f"  ⚠️  {graph_store['warning']}")
-    if graph_store.get("note"):
-        print(f"  ·  {graph_store['note']}")
     if graph_store.get("cache_graph_convention"):
         print(f"  cache graph   {_printable(graph_store['cache_graph_convention'])}")
         print(f"  record scope  {_printable(graph_store['record_scope'])}"
@@ -3750,7 +3770,7 @@ def _cmd_config(args) -> int:
                        else "  (digest withheld — short key)")
             print(f"  stale file    {_printable(harness['file_api_key'])}"
                   f"{fdetail} — NOT in use")
-    if harness_state in (_STORE_NO_KEY, _STORE_INVALID):
+    if harness_state == _STORE_NO_KEY:
         # `resolveConfig` reads a keyless harness file happily (it supplies
         # apiUrl/settings; the key may come from the env), so this is NOT
         # "repair or delete" territory — it is the documented env-provisioned

@@ -909,6 +909,8 @@ def test_a_whitespace_only_db_uri_is_unset_everywhere_not_half_set(
     assert store["status"] == "configured but unusable"
     assert "target" not in store
     assert "target_kind" not in store
+    assert _run() == 0
+    assert "configured but unusable" in capsys.readouterr().out
 
 
 def test_a_key_with_surrounding_whitespace_is_reported_not_called_healthy(
@@ -1501,6 +1503,52 @@ def test_a_configured_but_unusable_store_is_reported_as_such(
     assert store["status"] == "configured but unusable"
     assert store["error"]
     assert "target" not in store
+    # …and the mode a HUMAN reads must say so, not "nothing is configured"
+    assert _run() == 0
+    out = capsys.readouterr().out
+    assert "configured but unusable" in out
+    assert "no TORTOISE_DB_URI" not in out
+
+
+@pytest.mark.parametrize("uri, source", [
+    ("/tmp/x/some.db", "TORTOISE_DB_URI (file path)"),      # backward-compat branch
+    ("postgresql://h:5432/db", "TORTOISE_DB_URI (file path)"),
+])
+def test_a_scheme_less_db_uri_is_not_called_the_default(
+        monkeypatch, capsys, tmp_path, uri, source):
+    """`resolve_db_path` treats a scheme-less TORTOISE_DB_URI as an embedded file
+    path — so labelling it `default` said "nothing is configured" about a target
+    the user set."""
+    _global(tmp_path)
+    monkeypatch.setenv("TORTOISE_DB_URI", uri)
+    assert _run(("config", "show", "--json")) == 0
+    store = json.loads(capsys.readouterr().out)["graph_store"]
+    assert store["source"] == source
+    assert "note_default" not in store
+
+
+def test_a_query_string_does_not_fake_an_endpoint_mismatch(capsys, tmp_path):
+    """The published api_url is truncated at `?`; comparing the MASKED form made
+    two identical endpoints read as different."""
+    _write(tmp_path / ".tortoise" / "credentials.json", json.dumps({
+        "api_key": GLOBAL_KEY, "api_url": "https://api.example/v1?tenant=acme",
+        "org_id": "00e8e36129794bcdb2c992ff47",
+    }))
+    _harness(tmp_path, json.dumps({"apiKey": GLOBAL_KEY,
+                                  "apiUrl": "https://api.example/v1?tenant=acme"}))
+    assert _run(("config", "show", "--json")) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["identity_host_agrees"] is True
+    assert payload["identity_relation"] == "same"
+
+
+def test_a_wrong_typed_harness_key_is_not_the_keyless_shape(monkeypatch, capsys, tmp_path):
+    _global(tmp_path)
+    _harness(tmp_path, json.dumps({"apiKey": 12345, "apiUrl": "https://x.example"}))
+    assert _run() == 0
+    out = capsys.readouterr().out
+    assert "unusable harness store (invalid-key)" in out
+    assert "no api-key in this file" not in out
 
 
 def test_the_harness_no_key_state_is_not_called_invalid(monkeypatch, capsys, tmp_path):
