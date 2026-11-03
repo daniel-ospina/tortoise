@@ -39,8 +39,7 @@ import requests
 
 import tortoise.model_adapters as ma
 from tests._provider_env import pin_provider_routing_env
-from tests.test_hosted_api import TEST_ORG_ID  # noqa: F401  (seeds the org)
-from tests.test_hosted_api import client as client  # noqa: F401
+from tests.test_hosted_api import client as client  # noqa: F401  (its fixture seeds the org)
 
 
 @pytest.fixture(autouse=True)
@@ -71,9 +70,19 @@ def test_capture_fails_over_when_a_provider_hits_its_key_limit(client, monkeypat
 
     ``openrouter`` is the exhausted leg (exactly #4860's configured chain:
     deepseek-direct funded, openrouter spent). Pre-#4860 the 403 was
-    unconditionally FATAL: the extraction aborted, the capture returned
-    ``ok=False`` and the session's claims were never written. Post-fix the lane
-    is cooled, the next provider serves, and the receipt names it.
+    unconditionally FATAL: the extraction aborted and the session's claims were
+    never written. Post-fix the lane is cooled, the next provider serves, and the
+    receipt names it.
+
+    ⚠️ What "aborted" looks like through THIS door is NOT an ``ok=False``
+    receipt — the hosted capture receipt has no ``ok`` field by design
+    (``hosted_api.py``: the HTTP status is the ok signal). A fatal extraction
+    still answers **HTTP 200** and reports ``extraction_mode == "error"`` with a
+    non-empty ``errors[]``. The old SDK-door probe asserted ``ok is True`` /
+    ``errors == []``; here ``extraction_mode == f"llm:{provider}"`` is the
+    equivalent and stricter spelling, because a non-empty ``extraction_errors``
+    forces ``effective_mode`` to ``"error"``. A later lane must not go looking
+    for ``body["ok"]`` on this door — it does not exist.
     """
     or_key_limit = json.dumps({"error": {
         "message": "Key limit exceeded (monthly limit).",
