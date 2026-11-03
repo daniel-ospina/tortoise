@@ -1039,6 +1039,18 @@ SOURCE_PATTERNS = {
             "tortoise/temporal_leg.py"),
     "api": ("tortoise/hosted_api.py", "tortoise/hosted_backup.py",
             "tortoise/acl_graph_users.py", "tortoise/__main__.py", "tortoise/mcp_auth.py",
+            # #10605: the MCP CLIENT side — the driver every long-lived consumer
+            # holds (`mcp_client.py`, staged into the client-only wheel) and the
+            # stdio↔HTTP bridge that exists so a harness config never needs a
+            # static `Authorization` header (`mcp_bridge.py`). Both of their
+            # guards (`tests/test_mcp_client.py`, `tests/test_mcp_bridge.py`)
+            # are registered in this surface, and a named-surface match REPLACES
+            # the `core` fallback — so without these entries a client-only diff
+            # selected `core`, where neither guard runs. That was the measured
+            # #7076 self-guard pair for `test_mcp_client.py` (it sat in
+            # `_SELF_GUARD_DEBT` because of exactly this); adding the source
+            # entries is the named fix, and the debt row is deleted with it.
+            "tortoise/mcp_client.py", "tortoise/mcp_bridge.py",
             # #3154: hosted_api.py imports hosted_backup.py at module level (the
             # backup/restore/import endpoints), and the boolean-index audit lives
             # there — without this entry a hosted_backup.py-only change matched
