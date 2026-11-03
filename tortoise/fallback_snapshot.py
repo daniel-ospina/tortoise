@@ -145,15 +145,6 @@ class FallbackSnapshotStore:
             return snap
 
     def put(self, key: tuple, snap: dict) -> None:
-        """Insert unconditionally — TEST-ONLY since #10602 (review P2).
-
-        No production caller uses this any more: the read path goes through
-        ``put_if_generation``, which refuses a snapshot a write has overtaken.
-        Left public because the store's own tests seed and evict through it, but
-        an UNGUARDED insert beside the guarded one is exactly the stale-put bug
-        the generation guard exists to stop, so a new production caller should
-        reach for ``put_if_generation`` instead.
-        """
         with self._lock:
             self._put_locked(key, snap)
 
@@ -189,7 +180,7 @@ class FallbackSnapshotStore:
 
 _store = FallbackSnapshotStore()
 
-# ── #10602: SINGLE-FLIGHT build (one whole-corpus fetch per key, not one per reader) ──
+# ── #10602: SINGLE-FLIGHT build (one whole-corpus fetch per in-flight generation) ──
 #
 # The degraded read used to go ``get(key)`` → miss → ``build_snapshot(proj)`` → ``put``
 # with NOTHING serialising the build. Every concurrent reader therefore ran its own
@@ -202,8 +193,26 @@ _store = FallbackSnapshotStore()
 # and it is self-amplifying: the busier the fleet, the more whole-corpus reads the
 # store is asked for *while it is already the thing under strain*.
 #
-# What this is NOT: it changes no cache policy, no TTL, no size cap, no bound and no
-# result. Nothing is cached that was not already cached, and no answer changes.
+# Which part of that is fixed, stated exactly (review round 10, P3): AT MOST ONE BUILD PER
+# IN-FLIGHT GENERATION, not at most one per key. The slot is ``(key, generation)`` so a
+# reader holding a NEWER stamp opens its own build while the older one is still running —
+# measured: 10 concurrent readers of one key with a same-key ``invalidate`` every 50 ms and
+# a 400 ms build → 9 builds, 7 of them concurrent. That is a deliberate consequence of the
+# correctness rule below (a reader must never be served rows that predate a write it could
+# have seen), NOT of coalescing: the pre-#10602 code ran every reader's build concurrently
+# too. It is bounded by the number of distinct generations in flight, not by reader count,
+# which is the property that made latency linear in the fleet. Serialising generations
+# (a newer reader waits, re-checks the cache, then leads) would cap it at one build per key
+# at a time and is the natural follow-up if the store's slots are the binding constraint;
+# it was NOT done here because it adds cross-generation blocking to a P0 read path.
+#
+# What this is NOT: it adds no cache entry, no TTL and no size cap. ⛔ "It changes no cache
+# POLICY" is NOT true and must not be restored (review round 13, P3: a reader taking that
+# at face value concludes the freshness guard is free, which the next 25 lines disprove).
+# The one admission change is the put guard below — an overtaken build is no longer cached,
+# so on a graph written to faster than a build completes this LOSES cache hits the
+# pre-change code had. "No answer changes" is likewise NOT true (review round 10, P2): see
+# the COMMIT→INVALIDATE WINDOW note on ``get_or_build``.
 #
 # ⛔ It is also not the "add a cache" remedy #10602's recorded decisions forbid
 # (STORAGE-ARCHITECTURE §14.2 / §12.1c make FalkorDB itself the cache under the
@@ -217,26 +226,32 @@ _store = FallbackSnapshotStore()
 # concurrency-linear latency this fixes, on the two paths it most needed to help
 # (an over-cap hosted graph, and a store whose snapshot query is failing). A flight
 # publishes ONE outcome — success or ``None`` — to every reader that joined it, so the
-# failure path costs one BUILD ATTEMPT, not N (narrowed, review P2: a published ``None``
-# still sends every reader down the legacy path, whose full-payload fetch is per reader —
-# that remaining amplification is #10602's residual, not something this flight claims to
-# close). A lock registry also had to be evicted to stay
+# failure path costs one attempt, not N. A lock registry also had to be evicted to stay
 # bounded, and an evicted-then-re-minted lock let two builds run at once for one key
 # (the bug, back). A flight is removed when its last waiter leaves, so the registry is
 # bounded by what is IN FLIGHT and needs no eviction at all.
-#
-# KEYED BY ``(store, key)``, not by ``key`` alone (review P2): ``get_or_build`` accepts a
-# ``store=`` seam, and a registry keyed by the snapshot key alone would coalesce two
-# distinct stores onto ONE builder — the joiner then receives the OTHER store's snapshot
-# for that key, a silent wrong answer rather than a slow one.
+# ⛔ KEYED BY ``(key, generation)``, NOT BY ``key`` ALONE (review round 9, P2). Keying by
+# the key alone made the OVERTAKEN case fan out: every joiner of an overtaken build
+# compared against the (now stale) flight generation, so the comparison was true for the
+# WHOLE cohort and each of them ran its own uncoupled rebuild — measured 1 leader + 5
+# joiners = **6 whole-corpus builds**, i.e. exactly the amplifier this module exists to
+# remove, triggered by the ordinary event of a write landing during a build. Keying by
+# the generation makes the cohort itself correct: a reader arriving after a write holds a
+# different stamp and cannot join the pre-write build, so it never needs re-validating.
+# The same 6-reader cohort now costs ONE build.
 _FLIGHTS: dict[tuple, _Flight] = {}
 _FLIGHTS_GUARD = threading.Lock()
 
 
 class _Flight:
-    """One in-flight corpus build, shared by everyone waiting on the same key."""
+    """One in-flight corpus build, shared by everyone waiting on the same key AND generation.
 
-    __slots__ = ("done", "generation", "result", "waiters")
+    Round 13 (P3) corrected "the same key": with ``(store, key, generation)`` slotting a
+    same-key reader that holds a newer generation explicitly does NOT share this flight —
+    it leads its own.
+    """
+
+    __slots__ = ("done", "result", "waiters")
 
     def __init__(self) -> None:
         self.done = threading.Event()
@@ -246,46 +261,61 @@ class _Flight:
         #: P3: an uncaught raise used to reach the leader only, while every joiner
         #: read this ``None`` — one failure, two different answers).
         self.result: dict | None = None
-        #: The key's invalidation stamp captured BEFORE the build. ``None`` when the
-        #: leader was served from a warm entry (no build ran). A joiner compares it
-        #: against the store's current stamp to tell "I arrived before the write"
-        #: from "I arrived AFTER it" — see the joiner branch in ``get_or_build``.
-        self.generation: tuple[int, int] | None = None
         self.waiters = 0
 
 
-def _flight_begin(store: FallbackSnapshotStore, key: tuple) -> tuple[_Flight, bool]:
-    """Join (or open) the flight for ``(store, key)``. Returns ``(flight, is_leader)``."""
-    flight_key = (store, key)
+def _flight_slot(store, key: tuple, generation: tuple[int, int]) -> tuple:
+    """Registry slot for one build: **store identity** + key + generation.
+
+    ⛔ THE STORE IS PART OF THE SLOT (review round 13, P3). ``get_or_build`` takes
+    ``store`` as a test seam, and with the slot keyed on ``(key, generation)`` alone two
+    DIFFERENT stores sharing a key were handed each other's flight: a reader on store B
+    joined store A's in-flight build and was served **store A's snapshot**, while
+    ``b.get(key)`` stayed ``None``. Unreachable in production (the only instantiation is
+    the module singleton below, and ``sdk.py`` passes exactly it), which is worse rather
+    than better: a store-injection test would have been a **false PASS**. The store is
+    hash-identified by its default identity hash, which is exactly the semantics wanted.
+    """
+    return (store, key, generation)
+
+
+def _flight_begin(store, key: tuple, generation: tuple[int, int]) -> tuple[_Flight, bool]:
+    """Join (or open) the flight for this store+key+generation. Returns ``(flight, leader)``."""
+    slot = _flight_slot(store, key, generation)
     with _FLIGHTS_GUARD:
-        flight = _FLIGHTS.get(flight_key)
+        flight = _FLIGHTS.get(slot)
         if flight is not None:
             flight.waiters += 1
             return flight, False
         flight = _Flight()
         flight.waiters = 1
-        _FLIGHTS[flight_key] = flight
+        _FLIGHTS[slot] = flight
         return flight, True
 
 
-def _flight_end(
-    store: FallbackSnapshotStore, key: tuple, flight: _Flight
-) -> None:
+def _flight_end(store, key: tuple, generation: tuple[int, int], flight: _Flight) -> None:
     """Leave a flight; the last one out removes it (registry is in-flight-bounded)."""
-    flight_key = (store, key)
+    slot = _flight_slot(store, key, generation)
     with _FLIGHTS_GUARD:
         flight.waiters -= 1
-        if flight.waiters <= 0 and _FLIGHTS.get(flight_key) is flight:
-            del _FLIGHTS[flight_key]
+        if flight.waiters <= 0 and _FLIGHTS.get(slot) is flight:
+            del _FLIGHTS[slot]
 
 
 def get_or_build(proj, key: tuple, *, store: FallbackSnapshotStore | None = None,
                  builder=None) -> dict | None:
-    """Cached snapshot for ``key``, building it at most ONCE per key at a time.
+    """Cached snapshot for ``key``, building it at most once per IN-FLIGHT GENERATION.
 
-    Behaviourally identical to the read path's ``get``/``build_snapshot``/``put``
-    sequence — same entry, same ``None``-on-too-big / ``None``-on-failed contract, same
-    write-side invalidation — except that concurrent readers COALESCE onto one build.
+    Same entry, same ``None``-on-too-big / ``None``-on-failed contract, same write-side
+    invalidation, and concurrent readers on one generation COALESCE onto one build —
+    but this is **NOT result-identical to the read path's ``get``/``build_snapshot``/
+    ``put`` sequence**, and that sentence must not be restored (review round 11, P2: it
+    survived here after round 10 had already forbidden the same claim 20 lines above).
+    Two documented differences: a reader racing a write's commit→invalidate tail can be
+    served that cohort's pre-commit rows (see the COMMIT→INVALIDATE WINDOW note), and an
+    overtaken build is no longer cached, so on a graph written to faster than a build
+    completes this LOSES cache hits the pre-change code had (see THE COST OF THAT
+    GUARD).
 
     STALENESS, stated exactly (review round 2 corrected an overstatement here). A build
     can be OVERTAKEN by a write: rows are read at t1, ``_mark_dirty`` →
@@ -297,6 +327,23 @@ def get_or_build(proj, key: tuple, *, store: FallbackSnapshotStore | None = None
     next reader starts a fresh build. A cohort's own staleness is then bounded by the
     build it joined — the very rows it would have read itself — never by the TTL.
 
+    ⛔ THE COST OF THAT GUARD, stated here rather than left to be discovered (review
+    round 9, P1 — this note corrects an overstated "nothing else changes" claim). On a
+    graph whose write rate exceeds the inverse of the build time, EVERY build window
+    contains a same-key ``invalidate`` (``_mark_dirty`` fires it for this key on every
+    write surface), so nothing is ever cached and the degraded tier costs one corpus
+    fetch per read. The pre-#10602 code cached that overtaken build unconditionally, so
+    on such a graph IT achieved hits and this does not. That is a deliberate trade, not
+    an oversight: the alternative serves rows that predate a committed write — an agent
+    that has just written a memory cannot find it, for up to the 60 s TTL when writes
+    stop — and the freshness half was accepted in review round 2. It is PINNED by
+    ``test_same_key_writes_leave_the_degraded_cache_cold_which_is_the_stated_trade`` so
+    the trade is a decision rather than an accident. The concurrency half — the part
+    that made latency linear in the fleet, which is #10602's actual shape — is bounded
+    by the number of distinct generations in flight rather than by reader count (see the
+    BANNER note at the top of this section: at most one build per IN-FLIGHT GENERATION,
+    not one per key).
+
     ``builder``/``store`` are test seams.
 
     ⛔ PRECONDITION: ``builder`` must NOT call ``get_or_build`` for the same ``key``.
@@ -305,115 +352,110 @@ def get_or_build(proj, key: tuple, *, store: FallbackSnapshotStore | None = None
     the worker thread with no log (review round 7, P3: measured, not theoretical).
     Unreachable today: the only builder is ``build_snapshot``, which makes no such
     call. This line exists so the next reshape that routes a builder through this
-    seam fails loudly instead of wedging a flight.
+    seam MEETS THE PRECONDITION IN ITS OWN REVIEW instead of wedging a flight — a
+    docstring cannot fail loudly (review round 12, P3: the previous wording promised a
+    loud failure three lines above a hazard it had just described as silent).
     """
     store = _store if store is None else store
     build = build_snapshot if builder is None else builder
 
-    #: A late joiner may re-enter the flight ONCE (see the staleness branch below);
-    #: bounded on purpose, so a stream of writes cannot livelock a reader. The
-    #: bounded fallback is the pre-#10602 behaviour — this reader builds for itself
-    #: — never a stale answer and never a spin.
-    reentered = False
-    while True:
-        snap = store.get(key)
-        if snap is not None:
-            return snap
+    snap = store.get(key)
+    if snap is not None:
+        return snap
 
-        flight, leader = _flight_begin(store, key)
-        if leader:
-            try:
-                # Re-check under leadership: a build may have completed between the
-                # miss above and this flight opening.
-                snap = store.get(key)
-                if snap is None:
-                    generation = store.generation(key)
-                    flight.generation = generation
-                    try:
-                        snap = build(proj)
-                    except Exception:  # noqa: BLE001, RUF100
-                        # A raise here is NOT one of the two failures ``build_snapshot``
-                        # swallows itself (over-cap, query exception) — it is an
-                        # unexpected error. Uncaught, it would propagate to the LEADER
-                        # while every joiner read ``result is None`` and quietly took the
-                        # legacy path: one failure, two different answers (review round
-                        # 4, P3). Publish the documented None contract to the whole
-                        # cohort instead, so every reader of this key takes the same
-                        # path — and LOG it, because a silent swallow would hide a bug.
-                        logger.exception(
-                            "#10602: corpus build raised — serving this key's cohort "
-                            "the legacy path (key=%r)", key)
-                        snap = None
-                    # Publish only if no write invalidated the corpus mid-build (see
-                    # STALENESS above) — otherwise this cohort keeps its answer and the
-                    # next reader rebuilds, which is the self-healing the pre-#10602
-                    # per-reader build got for free. The compare and the insert are ONE
-                    # hold of the store lock, so a write landing between them cannot be
-                    # undone by this put (review round 2).
-                    if snap is not None:
-                        store.put_if_generation(key, snap, generation)
-                flight.result = snap
-            finally:
-                flight.done.set()
-                _flight_end(store, key, flight)
-            return flight.result
+    def produce(generation: tuple[int, int]) -> dict | None:
+        """Lead this generation's build: re-check the cache, build, publish.
 
+        Never raises ON A BUILD FAILURE: an unexpected build failure is logged and
+        published as ``None`` to the whole cohort, because a raise reaching only the
+        leader while every joiner read ``None`` gave one failure two different
+        answers (review round 4, P3).
+        """
+        cached = store.get(key)
+        if cached is not None:
+            return cached
         try:
-            # NOT deadline-bounded, and the comment says so on purpose (review round 2):
-            # the two corpus queries are bounded by the store socket timeouts (connect
-            # 2 s / read 10 s), but ``build_snapshot`` then runs ``EmbeddingModel.encode``
-            # (a hosted provider call) and ``TfidfVectorizer.fit`` over up to
-            # ``MAX_CORPUS_POINTS`` documents, and NEITHER carries a deadline. So a stuck
-            # embedder pins every reader of this key — the same hang those readers each
-            # hit individually before #10602, now shared. Do not read this wait as bounded.
-            flight.done.wait()
-            stale = (
-                flight.result is not None
-                and flight.generation is not None
-                and store.generation(key) != flight.generation
-            )
-            if not stale:
-                return flight.result
-        finally:
-            _flight_end(store, key, flight)
-
-        # A write landed while the build this reader joined ran, and THIS reader
-        # arrived AFTER it — its own ``store.get`` above missed, so serving the
-        # leader's rows would hand the caller pre-write data after its own write
-        # committed (review round 6, P2: the generation guard stopped that result
-        # being CACHED, but not being DELIVERED to a late joiner; pre-#10602 this
-        # reader ran its own build and saw the write).
-        #
-        # ⛔ NOT ``return get_or_build(...)``: the flight is still registered until
-        # the leader's ``_flight_end``, so a recursive call would re-join this
-        # completed flight and spin. The flight is ENDED above (the ``finally``)
-        # before anything else happens, which is what makes re-entry safe.
-        #
-        # The first clean rebuild after the write IS cached (``put_if_generation``
-        # with a matching generation), so check the store first: a cohort of N late
-        # joiners then pays for ONE build, not N (review round 8, P1: building inline
-        # here ran a whole-corpus build PER WAITER — the very amplification #10602
-        # exists to remove, on the path its own comment calls "a writing fleet").
-        generation = store.generation(key)
-        fresh = store.get(key)
-        if fresh is not None:
-            return fresh
-        if not reentered:
-            # Re-enter as a NEW leader: the rebuild coalesces onto a fresh flight
-            # instead of running once per waiter. BOUNDED to one re-entry (see
-            # ``reentered`` above).
-            reentered = True
-            continue
-        try:
-            fresh = build(proj)
+            built = build(proj)
         except Exception:  # noqa: BLE001, RUF100
             logger.exception(
-                "#10602: rebuild for a late joiner raised — serving the legacy "
-                "path (key=%r)", key)
+                "#10602: corpus build raised — serving this key's cohort "
+                "the legacy path (key=%r)", key)
             return None
-        if fresh is not None:
-            store.put_if_generation(key, fresh, generation)
-        return fresh
+        # Publish only if no write invalidated the corpus mid-build (see
+        # STALENESS above). The compare and the insert are ONE hold of the store
+        # lock, so a write landing between them cannot be undone by this put
+        # (review round 2); the comparison is PER-KEY (review round 4, P1).
+        if built is not None:
+            store.put_if_generation(key, built, generation)
+        return built
+
+    # ⛔ THE FLIGHT SLOT CARRIES THIS READER'S OWN ARRIVAL STAMP. That single choice is
+    # what makes the cohort correct, and it is why no reader ever needs to rebuild:
+    #
+    # * A reader arriving AFTER a write has bumped the key's stamp holds a DIFFERENT
+    #   stamp, so it cannot join the pre-write build at all — it leads (or joins) the
+    #   build for its own generation. That is why round 6's inline per-reader rebuild is
+    #   gone: the partition is structural, so nothing has to be re-validated afterwards.
+    # * A reader that DOES share the leader's stamp sampled a stamp no older than the
+    #   leader's, and the leader's rows were read after that stamp was taken.
+    #
+    # ⛔ COMMIT→INVALIDATE WINDOW — the precondition, stated instead of glossed (review
+    # round 10, P2: this comment previously claimed "read-your-writes, structurally: no
+    # result can cross a write boundary", which is FALSE and was measured false). The
+    # stamp only moves when ``invalidate()`` runs, and ``_mark_dirty`` calls it at the
+    # TAIL of each write surface, AFTER the graph commit (``sdk.py:17590`` →
+    # ``:17594``, retract ``:20191``, promote ``:20346``). So there is a window between a
+    # write COMMITTING and its invalidate landing. A reader whose ``store.get`` misses in
+    # that window samples the PRE-write stamp and joins the pre-write flight, so it can be
+    # served that cohort's pre-commit rows — bounded by one flight's duration, never by
+    # the TTL. Two things are nevertheless true and are what this design actually
+    # guarantees:
+    #
+    #   1. A WRITER's own read-your-writes holds: every write surface invalidates before
+    #      it returns, so by the time the caller can issue a search the stamp has moved
+    #      and the pre-write flight is unjoinable. ⛔ BEST-EFFORT, stated so it is not
+    #      read as a hard guarantee: the hook swallows its own failure
+    #      (``sdk.py:29896`` ``except Exception: pass``) and ``update_point``'s tag sync
+    #      can abort after the promote ``SET`` landed and before ``_mark_dirty``
+    #      (``sdk.py:17075``), so the stamp moves on every write that REACHES
+    #      ``_mark_dirty`` — not on one whose hook raised.
+    #   2. An unrelated reader racing a write's commit→invalidate tail gets the cohort's
+    #      pre-commit rows, exactly as it would have got them from a cache hit; pre-#10602
+    #      it built its own rows and saw the write. That is a real, narrow difference from
+    #      the old behaviour, and it is the price of not having a per-reader build.
+    #
+    # Pinned by ``test_a_reader_racing_the_commit_invalidate_tail_gets_the_cohorts_rows``.
+    #
+    # ⇒ "overtaken" never means "must be REBUILT for this reader"; it only means "must
+    # not be CACHED" (the put guard inside ``produce``). ⛔ NOT "never means stale for
+    # this reader" — that contradicted guarantee 2 above (review round 12, P3): the
+    # racing reader IS served rows predating a committed write. What the partition buys
+    # is that no reader needs its own build, not that no reader sees a stale row. So
+    # there is NO rebuild path here — the
+    # previous version had one, keyed on "the generation changed", which was true for the
+    # WHOLE cohort and cost one corpus build PER READER (review round 9, P2: measured 6
+    # builds for 1 leader + 5 joiners — the amplifier this module exists to remove,
+    # restored by the fix for round 6).
+    generation = store.generation(key)
+    flight, leader = _flight_begin(store, key, generation)
+    try:
+        if leader:
+            flight.result = produce(generation)
+        else:
+            # NOT deadline-bounded, and the comment says so on purpose (review
+            # round 2): the two corpus queries are bounded by the store socket
+            # timeouts (connect 2 s / read 10 s), but ``build_snapshot`` then runs
+            # ``EmbeddingModel.encode`` (a hosted provider call) and
+            # ``TfidfVectorizer.fit`` over up to ``MAX_CORPUS_POINTS`` documents,
+            # and NEITHER carries a deadline. So a stuck embedder pins every reader
+            # of this key — the same hang those readers each hit individually
+            # before #10602, now shared. Do not read this wait as bounded.
+            flight.done.wait()
+        return flight.result
+    finally:
+        if leader:
+            flight.done.set()
+        _flight_end(store, key, generation, flight)
 
 
 # Stable key for a ``:memory:`` projection whose client exposes no store
