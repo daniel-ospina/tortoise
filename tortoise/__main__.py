@@ -3671,7 +3671,12 @@ def _cmd_config(args) -> int:
         if db_source == "default":
             graph_store["note_default"] = (
                 "nothing is configured — this is the resolved default")
-        userinfoish = "@" in uri and ":" in uri.rsplit("@", 1)[0]
+        # AUTHORITY FORM, not "contains a colon": `//token@host/x.db` carries a
+        # token as the user with no `:` at all. A filesystem path (`/tmp/me@work/…`)
+        # does not start with `//`, so it stays legible — which is why the
+        # predicate is written this way rather than as "any `@`".
+        userinfoish = (uri.startswith("//")
+                       and "@" in uri.split("/", 2)[-1].split("/", 1)[0])
         if is_db_uri(uri) or "://" in uri or userinfoish:
             graph_store["target"] = _mask_display_target(uri)
             if graph_store["target"].startswith("<"):
