@@ -314,21 +314,24 @@ def _fence_open(rest: str, content_col: int = 0) -> tuple[str, int] | None:
     return (ch, n)
 
 
-def _is_closer(rest: str, opener: tuple[str, int], base: int = 0) -> bool:
+def _is_closer(rest: str, opener: tuple[str, int], content_col: int = 0) -> bool:
     """A closer carries the same character, a run at least as long, and NOTHING
     but whitespace after it (an "info string" on a closing fence is content).
 
-    `base` is the column the block's CONTENT starts at inside `rest` — the run's
-    own indent for a fence opened in prose, the list item's content column for
-    one opened on a marker line. CommonMark allows a closer up to three columns
-    past that column, so `10. ``` ` (content column 4, past the absolute limit a
-    fence opener may have) still closes on a four-space-indented run; measuring
-    the closer from column 0 instead left that fence open and blanked the real
-    prose after it — the under-report direction this module forbids.
+    `content_col` is the CONTAINING BLOCK's content column inside `rest` — §4.5:
+    "The closing code fence may be preceded by up to three spaces of indentation,
+    and may be followed only by spaces or tabs … their indentation need not match
+    that of the opening fence". So the allowance is measured from the CONTENT
+    COLUMN, NEVER from the opening run's own indent: a top-level fence opened at
+    two columns does not license a four-space closer (the renderer keeps both
+    lines inside `<pre><code>`), while a fence inside a list item whose content
+    column is 2 does (Example 137 vs. the content-column rule). Measuring from
+    the run's indent accepted a closer the renderer calls CONTENT, which left the
+    block open exactly one line too few — a `lands` on a quoted keyword.
     """
     ch, n = opener
     body = rest.expandtabs(4)
-    if len(body) - len(body.lstrip(" ")) - base > _MAX_FENCE_INDENT:
+    if len(body) - len(body.lstrip(" ")) - content_col > _MAX_FENCE_INDENT:
         return False
     m = re.match(r"(`{3,}|~{3,})\s*$", body.lstrip(" "))
     return bool(m) and m.group(1)[0] == ch and len(m.group(1)) >= n
@@ -346,15 +349,17 @@ class _Fence:
       that block starts. Using the run's indent instead ended a fence on a line
       that was still inside the item, so the block's content read as prose — a
       `lands` (#10634 review P1);
-    * `base` — the column its run sits at WITHIN `rest`, which is what a closing
-      fence is measured from (a closer may sit up to three columns past it);
+    * `close_base` — the CONTAINING BLOCK's content column inside `rest`, which
+      is what a closing fence is measured from (§4.5 allows a closer up to three
+      spaces past it, and its indent need not match the opener's); it is
+      `item_col` restated in `rest` coordinates;
     * `in_list` — whether a list item was open, so a dedent can end the block.
     """
 
     opener: tuple[str, int]
     prefix: str
     item_col: int
-    base: int
+    close_base: int
     in_list: bool
 
 
@@ -394,7 +399,7 @@ def _fence_candidate(prefix: str, rest: str, indent: int,
     if opener is None:
         return None
     return _Fence(opener, prefix, content_col,
-                  len(rest) - len(rest.lstrip(" ")), bool(list_cols))
+                  max(0, content_col - len(prefix)), bool(list_cols))
 
 
 def strip_code(body: str, strict: bool = False) -> str:
@@ -462,7 +467,7 @@ def strip_code(body: str, strict: bool = False) -> str:
                 # strings meant a legal closer was never recognised and the rest
                 # of the body was blanked — a silent MISS (review c10-1).
                 if _quote_depth(prefix) == _quote_depth(fence.prefix) and _is_closer(
-                        rest, fence.opener, fence.base):
+                        rest, fence.opener, fence.close_base):
                     fence = None
                 out.append("")
                 continue

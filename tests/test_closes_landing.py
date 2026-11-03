@@ -1510,6 +1510,16 @@ def test_container_depth_and_list_endings(body, expected, why):
     # a phantom item whose "dedent" ended the NEXT fence early, so that block's
     # content read as prose (a `lands`).
     ("  ```\n- a\n  ```\n  ```\n- Closes #1002\n", [], "marker inside a fence is content"),
+    # A closer's allowance is measured from the CONTAINING BLOCK's content column,
+    # never from the opening run's own indent (§4.5: "their indentation need not
+    # match that of the opening fence"). A top-level fence opened at 2 columns
+    # therefore does NOT close on a 4-space run — the renderer keeps it in
+    # `<pre><code>` — and everything after it is CONTENT, not a claim.
+    ("  ```\n  a\n    ```\nCloses #1001\n", [], "a 4-space closer at top level is CONTENT"),
+    # …while the SAME run does close a fence inside a 2-column item, whose budget
+    # is content column + 3. Both directions, or the fix is a coin flip.
+    ("- item\n  ```\n  a\n    ```\nCloses #1001\n", [1001],
+     "a 4-space closer inside a 2-column item still closes"),
 ])
 def test_a_fence_is_measured_from_its_items_content_column(body, expected, why):
     assert cl.parse_closing_refs(body) == expected, why
@@ -1593,6 +1603,9 @@ _COMMONMARK_SHAPES = [
     ("- prose\n    ```\n  Closes #100\n", "opener 4 cols from col 0, inside the item"),
     ("- item\n   ```\n  Closes #100\n", "content below the run's own indent"),
     ("  ```\n- a\n  ```\n  ```\n- Closes #100\n", "marker line inside a fence is content"),
+    ("  ```\n  a\n    ```\nCloses #100\n", "a 4-space closer at top level is CONTENT"),
+    ("- item\n  ```\n  a\n    ```\nCloses #100\n",
+     "a 4-space closer inside a 2-column item still closes"),
     # indented code blocks, flat and quoted
     ("old version:\n\n    Closes #100\n", "flat indented code block"),
     ("> old version:\n>\n>     Closes #100\n", "indented code block inside a quote"),
