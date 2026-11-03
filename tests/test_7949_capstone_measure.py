@@ -449,6 +449,11 @@ def test_e3_cannot_pass_on_a_registered_class_leg_that_is_empty():
                                  unmeasured_legs=("Document",))
     assert shipped["outcome"] == "FAIL", shipped
     # the floor still wins where it applies — a too-small population is REFUSED, never a verdict
+    # NOT a Document-only guard: a tuple whose empty leg is `Event` must fail too, or an
+    # implementation that honoured only the class the issue happens to name would pass every arm.
+    assert measure.e3_outcome(anchored=30, derived=30, bars=BARS,
+                              unmeasured_legs=("Event",))["outcome"] == "FAIL"
+    # and a FLOOR refusal outranks it — a too-small population is not a verdict either way
     below = measure.e3_outcome(anchored=5, derived=20, bars=BARS,
                               unmeasured_legs=("Document",))
     assert below["outcome"] == "REFUSED", below
@@ -506,12 +511,52 @@ def test_main_feeds_the_census_legs_into_e3_and_renders_them():
     render = next(node for node in tree.body
                   if isinstance(node, ast.FunctionDef) and node.name == "render_log")
     rendered = [n for n in ast.walk(render)
-                if isinstance(n, ast.Constant) and isinstance(n.value, str)
-                and "e3 unmeasured_legs=" in n.value]
+                if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+                and n.func.id == "e3_legs_line"]
     assert rendered, (
-        "render_log no longer prints `e3 unmeasured_legs=` — the log's per-label lines show a 0-node "
-        "leg as `nodes=0 anchored=0 unanchored=0`, which reads as a clean class rather than an "
-        "unmeasured one")
+        "render_log no longer prints the `e3 unmeasured_legs=` line — the log's per-label lines show "
+        "a 0-node leg as `nodes=0 anchored=0 unanchored=0`, which reads as a clean class rather than "
+        "an unmeasured one")
+    # ...and it must read the line from the CENSUS, not from a row a caller may have built by hand:
+    # a positive "every registered class carried nodes" asserted from an ABSENT key is the same
+    # claim-from-nothing this line exists to disclose.
+    assert "census_data" in ast.dump(rendered[0]), ast.dump(rendered[0])
+
+
+def test_the_empty_leg_line_and_note_are_derived_from_the_census():
+    """Both disclosures are DERIVED, and the arms are discriminated in both directions.
+
+    The row note must gain the clause when a leg is empty and lose it when none is (an
+    implementation that always appended it, or never did, fails here). The log line must read the
+    census it is printed beside: this bundle's own render fixture builds the E3 row by hand over a
+    canned census whose `Document` leg is 0, so a line taken from the ROW would print "every
+    registered class carried nodes" two lines below `e3 label=Document nodes=0`.
+    """
+    full_census = {"Point": {"nodes": 10, "anchored": 10},
+                   "Document": {"nodes": 1, "anchored": 1},
+                   "Event": {"nodes": 1, "anchored": 1}}
+    assert "=none" in measure.e3_legs_line(full_census), measure.e3_legs_line(full_census)
+    empty_census = {"Point": {"nodes": 10, "anchored": 10},
+                    "Document": {"nodes": 0, "anchored": 0},
+                    "Event": {"nodes": 1, "anchored": 1}}
+    line = measure.e3_legs_line(empty_census)
+    assert "Document" in line and "narrower than the registered one" in line, line
+    # an ABSENT census entry is empty, not "fine" — the same rule the detector applies
+    assert "Document" in measure.e3_legs_line({"Point": {"nodes": 1, "anchored": 1}})
+
+    graph, corpus_sha = "capstone_measure_test_1", "sha256:" + "f" * 64
+    noted = measure.e3_row_note(
+        composition=_shipped_composition(),
+        e3_result=measure.e3_outcome(anchored=30, derived=30, bars=BARS,
+                                     unmeasured_legs=("Document",)),
+        graph=graph, corpus_sha=corpus_sha)
+    assert "NARROWER THAN THE REGISTRATION" in noted, noted
+    assert "Document" in noted.split("NARROWER THAN THE REGISTRATION", 1)[1][:200], noted
+    clean = measure.e3_row_note(
+        composition=_shipped_composition(),
+        e3_result=measure.e3_outcome(anchored=30, derived=30, bars=BARS),
+        graph=graph, corpus_sha=corpus_sha)
+    assert "NARROWER THAN THE REGISTRATION" not in clean, clean
 
 
 def test_e4_is_scored_over_the_frozen_fifteen():

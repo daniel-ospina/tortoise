@@ -590,6 +590,11 @@ Exit 0 only when **all** of these hold:
    registered class carried nodes is scored exactly as
    before, and whether the honest document class is `Document` or `Source`-as-document — and whether
    that anchor belongs in the denominator at all — remains `#9736`'s owner-gated ruling.
+   ⛔ **This item is NOT one the gate can exit 0 on.** `tools/capstone_preregistration_check.py`
+   never reads `probes/capstone_measure.py` (it lints registrations, not runs), so a gate exit 0
+   says nothing about it. The rule lives in the probe and is pinned where it runs:
+   `tests/test_7949_capstone_measure.py`'s empty-leg arms (the pure rule, the census-derived log
+   line and row note, and an AST pin that `main` feeds the legs in).
 
 The pins block below is the machine-readable copy; the prose in §1–§3 is the argument. Both are
 checked, so neither can rot alone.

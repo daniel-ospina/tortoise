@@ -708,6 +708,27 @@ def e3_unmeasured_legs(per_label: dict[str, dict[str, int]] | None,
     return tuple(empty)
 
 
+def e3_legs_line(per_label: dict[str, dict[str, int]] | None) -> str:
+    """The log's ``e3 unmeasured_legs=`` line, DERIVED from the census it is printed beside.
+
+    ⛔ Derived from ``per_label``, never from a caller's ``e3``/``e3_out`` dict. The first cut read
+    the row's ``unmeasured_legs`` key, so a caller that built the row by hand (this bundle's own
+    render fixture did exactly that, over a canned census whose ``Document`` leg is 0) rendered
+    ``e3 unmeasured_legs=none — every registered class carried nodes`` two lines below
+    ``e3 label=Document nodes=0``. A positive measurement claim asserted from an ABSENT KEY is the
+    same defect this line exists to disclose, one layer up.
+    """
+    legs = e3_unmeasured_legs(per_label)
+    if legs:
+        return ("e3 unmeasured_legs=" + ",".join(legs)
+                + " — a registered class the run wrote ZERO of; its `0/0` cannot "
+                  "satisfy '= 1.000', so the measured denominator is narrower than "
+                  "the registered one and E3 cannot PASS on it (#9736)")
+    return ("e3 unmeasured_legs=none — every registered class the census "
+            "enumerates carried nodes, so the measured denominator IS the "
+            "registered one")
+
+
 def e3_outcome(*, anchored: int, derived: int, bars: dict,
                unmeasured_legs: tuple[str, ...] = ()) -> dict:
     """E3: derived nodes carrying a version anchor, floor 30 derived nodes.
@@ -2416,13 +2437,7 @@ def render_log(*, head: str, prereg_sha: str, bars: dict, corpus_sha: str,
     add(f"e3 numerator={e3['numerator']} denominator={e3['denominator']} "
         f"below_floor={'REFUSED' if e3['below_floor'] else 'no'} "
         f"outcome={e3['outcome']} bar={e3['bar']}")
-    unmeasured = e3_out.get("unmeasured_legs") or ()
-    add("e3 unmeasured_legs=" + (",".join(unmeasured) if unmeasured else "none")
-        + (" — a registered class the run wrote ZERO of; its `0/0` cannot satisfy "
-           "'= 1.000', so the measured denominator is narrower than the registered "
-           "one and E3 cannot PASS on it (#9736)" if unmeasured else
-           " — every registered class carried nodes, so the measured denominator "
-           "IS the registered one"))
+    add(e3_legs_line(census_data.get("per_label")))
     add("e3 relationship anchors: " + ", ".join(
         f"{name}={census_data['relationship_anchored'].get(name, 0)}/{count}"
         for name, count in sorted(census_data["relationship_counts"].items())))
