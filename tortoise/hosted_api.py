@@ -12441,8 +12441,9 @@ _DEMO_SEMANTIC_POINTS = [
 # (pid, content) — the demo's SAMPLE TRANSCRIPT: DECLARED, NOT WRITTEN.
 # ⛔ Since #10000 these carry NO graph node. §9.1/D1 puts raw turn text in
 # Postgres ("not in the graph, not a `Document`, not a `Point`"), so
-# `_seed_demo_graph` writes only the demo `:Session` — whose `turn_count` is
-# **0**, because it stores no turn — and reports this list's LENGTH as the
+# `_seed_demo_graph` writes only the demo `:Session` FOR THIS LAYER — whose
+# `turn_count` is **0**, because it stores no turn — and reports this list's
+# LENGTH as the
 # response's `sample_turns`, NEVER as `turn_count` (which is a completeness
 # claim the session read acts on; see the note at the write site). The ids are still
 # declared here because `_DEMO_POINT_IDS` names them: a graph seeded BEFORE
@@ -12585,8 +12586,12 @@ def _seed_demo_graph(org_id: str) -> dict:
     # `Point`". This seeder wrote one `:Point {pointKind:'event'}` per demo turn
     # carrying that turn's literal text, `CONTAINS`-wired to the Session: the
     # per-turn-text-node shape `#10000` removed from the capture path, and the
-    # last writer producing it UNCONDITIONALLY (the capture path keeps that
-    # shape only as its record-incapable fallback, which is deliberate). It is
+    # last PRODUCT/RUNTIME writer producing it unconditionally. Two residuals
+    # still write that shape and are deliberate, so they are named rather than
+    # left to be rediscovered: the capture path keeps it as its
+    # record-incapable fallback, and both offline eval-corpus ingest legs
+    # (`tools/longmem_eval/ingest.py`, `ingest_v2.py`) mint it ungated for the
+    # corpus graphs they build. It is
     # not a captured transcript, so there is no record row it duplicates —
     # which made the graph the only RUNTIME store of text §2.0 says the graph
     # may not authoritatively hold.

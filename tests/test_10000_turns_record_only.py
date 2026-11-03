@@ -3221,7 +3221,7 @@ def test_the_shared_read_predicate_accepts_0_and_rejects_a_short_claim():
     # The ARMED arm refuses rather than publishing the contradiction, which is
     # the 503 the demo session produced before the count was set to 0.
     armed, armed_reason = served_turn_count(
-        answer=TurnAnswer(answered=False, kind="no_account"),
+        answer=TurnAnswer(answered=False, kind=TurnAnswer.NO_ACCOUNT),
         served=0, declared=3,
         read_failed=False)
     assert (armed, armed_reason) != (3, ""), (
