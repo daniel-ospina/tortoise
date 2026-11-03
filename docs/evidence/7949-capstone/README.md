@@ -64,7 +64,7 @@ running end to end."*
 > | **E1** | `after_share <= 0.50 × before_share`, over all `:Object` nodes, floor **30** | before **0.3590** (78 Objects) and **0.5652** (69 Objects), after **0.2131** (61 Objects) — the record `docs/evidence/9889/e1-e2-scores.json`; bound **0.1795** → FAIL vs bound **0.2826** → PASS, so the pairings DISAGREE | ⛔ **BLOCKED** (n=1 per arm — not decided, not the floor) |
 > | **E2** | E2a `>= 13 of 14` value-bearing units; E2b fused share `<= 0.05` | E2a **8/14** strictly survive (the falsifier reaches **14/14** over the same population); E2b **1/114 = 0.008772** | ⛔ **RED** (8 of 14) |
 > | **E3** | `= 1.000` (zero unanchored), floor **30** derived nodes | **148 / 433 = 0.3418** as registered (2026-10-21); **148 / 383 = 0.38642** under the amended class set (`Point`+`Event`+`Document`, `PRE-REGISTRATION.md` §10.1) — `Point` 141/338 anchored, `:Object` **0/50**, `:Event` **7/45** | ⛔ **RED** |
-> | **E4** | `= 15 of 15` planted operator edges wired AND persisted | **2 / 15** | ⛔ **RED** |
+> | **E4** | `= 15 of 15` planted operator edges wired AND persisted | **5 / 15** on the **frozen** pin (the `2 / 15` this table shipped until 2026-11-02 was a receipt on `943a99ec…`, a NON-frozen revision — see §E4) | ⛔ **RED** |
 > | **E5** | ratio `>= 0.90` **AND** raw absolute `>= 0.80` | ratio **1.0833** (passes) but raw absolute **0.4800** (fails), n = 25 | ⛔ **RED** |
 >
 > E1's and E2's proxies are printed rather than dropped (E1b 90/90 real facts; E2b 1/114) — and
@@ -423,7 +423,8 @@ frozen `fixtures_hash`, so the row above was a measurement of a different corpus
 code that predates `#8503`'s fix. `probes/capstone_measure.py` now selects E4's receipt **by its
 own `corpus_hash`** (`select_e4_receipt`): the newest receipt on the frozen pin wins, and no match
 REFUSES instead of falling back. Three receipts on the frozen pin (`w2b-operator-2026-10-24-8503-{preleg,a,b}.json`,
-all after `#8503`) read **5/15** — `content_ok=11`, `operators_total=29..33`, commit `a999be41e`.
+all after `#8503`) read **5/15**, with `content_ok` 11–13 and `operators_total` 29–33 across the
+three (the row reads `b`: `content_ok=11`, `operators_total=33`, commit `a999be41e`).
 So **E4 is 5/15, still RED** against the 15/15 bar. The verdict did not move; the number did, and
 it is now a measurement of the pre-registered corpus. The scored log below keeps its 2/15 because
 a superseded run is replaced by RE-RUNNING the probe, not by editing the log it wrote.
@@ -667,10 +668,12 @@ stop.
 
 **One gate change shipped with this run, and it only ever ADDS a check.** V7 used to require every
 measured row's `corpus_sha256` to equal the log's corpus. This table cannot satisfy that honestly:
-E4 cites an operator receipt measured on *another* corpus revision, and before `#9889` so did
-E1/E2 (they now measure the FROZEN corpus and need no declaration; E4's record says so for itself).
-Refusing those rows would hide the only numbers they have;
-accepting them on the row's word would let any red row name any corpus. So a **non-green** row may
+No row currently takes this declaration arm. Both rows that used to have been moved onto the
+frozen corpus: E1/E2 now measure it via the `#9889` record (before that they cited `#9076`'s
+arm run, which measured a different revision), and E4's receipt is now selected BY the frozen
+pin (`select_e4_receipt`), so its row carries the run's own corpus instead of this declaration.
+The arm is kept rather than deleted because refusing such a row would hide the only numbers it
+has;accepting them on the row's word would let any red row name any corpus. So a **non-green** row may
 declare `artifact_corpus_sha256`, and V7 then requires (a) it equals the row's own
 `corpus_sha256`, (b) that digest **appears in the cited artifact's text**, and (c) the row's note
 says so. A **GREEN** row never takes that path: it must still equal the log's corpus exactly. The

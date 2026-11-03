@@ -4725,6 +4725,26 @@ def test_e4_is_selected_by_the_receipts_own_corpus_hash_not_by_its_filename():
     assert record["corpus_hash"] == pin
 
 
+def test_the_newest_frozen_pin_receipt_wins_because_the_ordering_is_the_property():
+    """`matched[-1]` is a claim the docs make; pin it or `matched[0]` stays green.
+
+    Both candidates match the pin, so the corpus check cannot decide between them and
+    only the ordering can. They differ in `edge_correct`, so picking the wrong end
+    changes the ROW's number — which is the measured property, not the sort.
+    """
+    pin = "sha256:" + "d" * 64
+    root = Path(tempfile.mkdtemp())
+    receipts = root / measure.E4_RECEIPT_DIR
+    receipts.mkdir(parents=True)
+    _receipt(receipts / "w2b-operator-older.json", corpus_hash=pin,
+             edge_correct=13, date="2026-10-24T05:46:51Z")
+    _receipt(receipts / "w2b-operator-newer.json", corpus_hash=pin,
+             edge_correct=5, date="2026-10-24T06:10:47Z")
+    rel, record = measure.select_e4_receipt(root, frozen_pin=pin)
+    assert rel.endswith("w2b-operator-newer.json"), rel
+    assert record["operator_audit"]["edge_correct"] == 5, record
+
+
 def test_e4_refuses_rather_than_falling_back_to_another_corpus():
     """No receipt on the pin = no measurement, named — never "the newest file".
 
@@ -4828,12 +4848,19 @@ def _receipt_audit(rel: str) -> dict:
 def test_the_e4_number_is_the_frozen_receipts_two_and_not_the_old_ones():
     """The defect, pinned as a NUMBER: the old artifact says 2, the selected one 5.
 
-    This test is meant to re-stale. It records that the row used to report **2/15**
-    from `w2b-operator-2026-10-19.json` (corpus `943a99ec…`, pre-`#8503`) while the
-    frozen-corpus receipts read **5/15**; if either number moves, the corpus or the
-    connect step moved and the epic's record has to be re-read, which is exactly what
-    should be noisy. It compares the two artifacts rather than asserting one of them
-    in isolation, so it cannot be greened by editing a single constant.
+    ⛔ THIS IS THE ONE DELIBERATE HARD PIN in this family, and it is labelled as one:
+    the test above deliberately does not pin E4's number (so a 15/15 receipt cannot
+    red it on the epic's own success), and THAT is why this one exists — the number
+    the row used to publish has to be recorded somewhere or the correction has no
+    evidence behind it.
+
+    It records that the row used to report **2/15** from `w2b-operator-2026-10-19.json`
+    (corpus `943a99ec…`, pre-`#8503`) while the frozen-corpus receipts read **5/15**.
+    When either number moves — a 15/15 receipt landing, or the connect step improving —
+    this test reds ON PURPOSE: the epic's record then has to be re-read, and the fix is
+    to re-derive BOTH numbers here with the receipts in front of you, never to delete
+    the comparison. It reads the two artifacts rather than asserting one in isolation,
+    so it cannot be greened by editing a single literal.
     """
     old = _receipt_audit(measure.E4_RECEIPT)
     assert old["edge_correct"] == 2 and old["planted"] == 15, old
