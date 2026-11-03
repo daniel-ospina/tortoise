@@ -243,10 +243,12 @@ def load_record(
 
     wanted = [f"{owner}-{repo}-{pr}.json".lower(), f"{pr}.json"]
     chosen: Path | None = None
-    for want in wanted:
+    canonical = False
+    for idx, want in enumerate(wanted):
         for entry in entries:
             if entry.name.lower() == want:
                 chosen = entry
+                canonical = idx == 0
                 break
         if chosen is not None:
             break
@@ -277,9 +279,19 @@ def load_record(
     )
     # Identity: a record names its own PR and repo; one that disagrees is another
     # artifact entirely (mirrors/forks/lineage repos collide on small PR numbers).
+    # ⛔ The LEGACY `<pr>.json` name carries no repo at all, so a legacy record that does not
+    # DECLARE one cannot be attributed to this repo — and an unattributable artifact that reaches
+    # RESTORE would have a lane re-post `comment:<id>` from another repo's PR. Under-report
+    # (UNREADABLE), never over-report (cycle 4, finding 5).
     rec_repo = data.get("repo")
-    if isinstance(rec_repo, str) and rec_repo.strip() and rec_repo.strip().lower() != f"{owner}/{repo}".lower():
+    declared_repo = isinstance(rec_repo, str) and rec_repo.strip() != ""
+    if declared_repo and rec_repo.strip().lower() != f"{owner}/{repo}".lower():
         rec.error = f"foreign record: repo={rec_repo!r}, census repo is {owner}/{repo}"
+    elif not canonical and not declared_repo:
+        rec.error = (
+            f"legacy record {chosen.name} declares no repo — it cannot be attributed to "
+            f"{owner}/{repo}, so it is not evidence"
+        )
     rec_pr = data.get("pr")
     if isinstance(rec_pr, int) and rec_pr != pr:
         rec.error = f"foreign record: pr={rec_pr}, census pr is {pr}"
@@ -294,6 +306,8 @@ def gh_json(args: list[str]) -> object:
         out = subprocess.run(["gh", *args], capture_output=True, text=True)
     except OSError as exc:  # gh not installed / not executable
         raise RuntimeError(f"could not run gh ({' '.join(args[:2])}…): {exc}") from exc
+    except ValueError as exc:  # a non-UTF-8 stdout body — UnicodeDecodeError is a ValueError
+        raise RuntimeError(f"gh {' '.join(args[:2])}… returned undecodable output: {exc}") from exc
     if out.returncode != 0:
         raise RuntimeError(f"gh {' '.join(args[:3])}… failed rc={out.returncode}: {out.stderr.strip()[:300]}")
     try:
@@ -333,7 +347,11 @@ def read_gate(repo: str, head: str) -> tuple[str, str]:
     # ⛔ NEWEST BY `id`, never by list position: the endpoint answers newest-first, so
     # `runs[-1]` would read the OLDEST attempt — the rollup error requirement (c) forbids
     # (a re-run ADDS an attempt; the oldest may be a stale `cancelled`/`failure`).
-    newest = max(runs, key=lambda r: r.get("id", 0))
+    # An id that is not an integer is a payload we cannot order, so it is a TRANSPORT verdict.
+    ordered = [r for r in runs if isinstance(r.get("id"), int)]
+    if runs and not ordered:
+        raise RuntimeError(f"check-runs payload for {head[:12]}… carries no integer id — cannot order attempts")
+    newest = max(ordered, key=lambda r: r["id"])
     return str(newest.get("status") or ""), str(newest.get("conclusion") or "")
 
 

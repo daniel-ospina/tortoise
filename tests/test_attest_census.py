@@ -249,6 +249,91 @@ def test_read_gate_picks_the_newest_attempt_by_id_not_by_order(monkeypatch):
     assert ac.read_gate("o/r", "a" * 40) == ("completed", "failure")
 
 
+def test_read_gate_also_refuses_LIST_ORDER_when_the_newest_id_comes_last(monkeypatch):
+    """The sibling fixture puts the newest id FIRST (killing `runs[-1]`); this one puts it LAST
+    (killing `runs[0]`), so positional reads are refused in both directions (cycle 4, finding 3)."""
+    payload = {
+        "check_runs": [
+            {"id": 10, "name": ac.GATE_CHECK, "status": "completed", "conclusion": "success"},
+            {"id": 99, "name": ac.GATE_CHECK, "status": "completed", "conclusion": "failure"},
+        ]
+    }
+    monkeypatch.setattr(ac, "gh_json", lambda args: payload)
+    assert ac.read_gate("o/r", "a" * 40) == ("completed", "failure")
+
+
+def test_read_gate_requests_the_exact_production_query(monkeypatch):
+    """`filter=all` and `check_name=` are the request, not decoration: `filter=all`'s default is
+    NOT all (a measured 26-of-40), so dropping it silently reads the verdict from a stale subset."""
+    seen = {}
+
+    def gh(args):
+        seen["args"] = args
+        return {"check_runs": []}
+
+    monkeypatch.setattr(ac, "gh_json", gh)
+    ac.read_gate("o/r", "a" * 40)
+    argv = " ".join(seen["args"])
+    assert "filter=all" in argv, argv
+    assert f"check_name={ac.GATE_CHECK}" in argv, argv
+    assert "-X GET" in argv, argv
+
+
+def test_read_gate_refuses_a_non_integer_id(monkeypatch):
+    """An unorderable id is a payload we cannot judge — a transport verdict, never a TypeError."""
+    for bad in (None, "99", 99.5):
+        monkeypatch.setattr(
+            ac,
+            "gh_json",
+            lambda args, b=bad: {"check_runs": [{"id": b, "name": ac.GATE_CHECK, "status": "completed"}]},
+        )
+        try:
+            ac.read_gate("o/r", "a" * 40)
+        except RuntimeError as exc:
+            assert "integer id" in str(exc)
+        else:
+            raise AssertionError(f"id={bad!r} must be a transport failure")
+
+
+def test_gh_json_wraps_an_undecodable_answer_as_runtime_error(monkeypatch):
+    def boom(*a, **k):
+        raise UnicodeDecodeError("utf-8", b"\xff\xfe", 0, 1, "invalid start byte")
+
+    monkeypatch.setattr(ac.subprocess, "run", boom)
+    try:
+        ac.gh_json(["api", "x"])
+    except RuntimeError as exc:
+        assert "undecodable" in str(exc)
+    else:
+        raise AssertionError("an undecodable answer must be RuntimeError (contract: never exit 1)")
+
+
+def test_a_legacy_named_record_without_a_repo_is_never_evidence(tmp_path):
+    """`<pr>.json` carries no repo in its NAME, so an undeclared one cannot be attributed —
+    adopting it would let a fork/mirror's PR #7 attest THIS repo's PR #7 (cycle 4, finding 5)."""
+    (tmp_path / "7.json").write_text(
+        '{"head_sha":"' + LIVE + '","mint":"fresh","verdict":"clean","evidence":"comment:1"}'
+    )
+    got = ac.load_record(tmp_path, "daniel-ospina", "tortoise", 7)
+    assert got is not None and "declares no repo" in got.error
+    assert ac.classify(LIVE, got, *RED)[0] != ac.RESTORE
+
+
+def test_a_legacy_named_record_that_DECLARES_this_repo_is_accepted(tmp_path):
+    (tmp_path / "7.json").write_text(
+        '{"repo":"daniel-ospina/tortoise","pr":7,"head_sha":"' + LIVE + '","mint":"fresh",'
+        '"verdict":"clean","evidence":"comment:1"}'
+    )
+    got = ac.load_record(tmp_path, "daniel-ospina", "tortoise", 7)
+    assert got is not None and got.error == ""
+    assert ac.classify(LIVE, got, *RED)[0] == ac.RESTORE
+
+
+def test_main_returns_2_on_a_non_list_pr_payload(monkeypatch, tmp_path):
+    monkeypatch.setattr(ac, "gh_json", lambda args: {"message": "Not Found"})
+    assert ac.main(["--reviews-dir", str(tmp_path), "--out", str(tmp_path / "o.md")]) == 2
+
+
 def test_read_gate_ignores_another_check_that_has_the_highest_id(monkeypatch):
     """The local `name ==` filter is load-bearing: check-run ids are repo-global and monotonic,
     so if the `check_name` query is ever not honoured the newest run of ANY check would become
