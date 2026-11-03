@@ -3405,8 +3405,23 @@ def _cmd_config(args) -> int:
             value = (winner_cfg or {}).get(field)
             if isinstance(value, str) and value:
                 cred[field] = value
-        cred["recovery_token"] = ("present" if (winner_cfg or {}).get("signup_token")
-                                  else "absent")
+        # `recover` does NOT read the token from the winning store — it scans
+        # `<cwd>/.tortoise` then `~/.tor…/credentials.json` regardless of which
+        # store supplied the KEY (#1752's divergence case). Asking the winner
+        # alone reported "absent" for a token `recover` finds and uses.
+        try:
+            stored_token, token_source = _read_stored_signup_token_with_source()
+        except OSError:
+            stored_token, token_source = None, None
+        cred["recovery_token"] = "present" if stored_token else "absent"
+        if stored_token and token_source is not None:
+            cred["recovery_token_source"] = str(token_source)
+            if not (winner_path is not None and _same_path(token_source, winner_path)):
+                # Includes the env-key case (`recover` still finds the token in a
+                # FILE) — which is the commonest divergence of all.
+                cred["recovery_token_note"] = (
+                    "the recovery token lives in a DIFFERENT store than the key "
+                    "(#1752) — `tortoise recover` reads it from there")
         raw_env_url = _os.environ.get("TORTOISE_API_URL")
         if raw_env_url is not None and winner_path is not None:
             # #2369 D1.1 co-source: a FILE-sourced key resolves its URL from the
@@ -3449,14 +3464,35 @@ def _cmd_config(args) -> int:
     payload["credential"] = cred
 
     # ── the graph store this shell would use, plus the record verbs' naming ──
+    # The CLI resolves its graph target through `_resolve_db_target`'s ONE
+    # precedence: TORTOISE_DB_URI (a scheme) > the FALKORDB_* legacy trio >
+    # TORTOISE_DB_PATH > the canonical default. Reporting only the first of those
+    # named a store the CLI would NOT use — the exact "reporter disagrees with
+    # the resolver" failure this verb exists to end, and the shipped selfhost
+    # image sets TORTOISE_DB_PATH with no URI at all.
     raw_uri = _os.environ.get("TORTOISE_DB_URI")
     uri = (raw_uri or "").strip()
-    graph_store: dict = {"source": "TORTOISE_DB_URI" if uri else "none"}
+    db_source = "TORTOISE_DB_URI" if uri else "none"
+    graph_store: dict = {"source": db_source}
     if not uri:
-        # A script must not read "none" as "no store configured": the embedded
-        # default is in play, and only `doctor` resolves it.
-        graph_store["note_default"] = (
-            "no TORTOISE_DB_URI — `tortoise doctor` reports the resolved default")
+        trio_set = any((_os.environ.get(k) or "").strip() for k in
+                       ("FALKORDB_HOST", "FALKORDB_PORT", "FALKORDB_PASSWORD"))
+        db_path = (_os.environ.get("TORTOISE_DB_PATH") or "").strip()
+        if trio_set or db_path:
+            try:
+                resolved = _resolve_db_target(db_path or None)
+            except (ValueError, OSError):
+                resolved = None
+            if resolved:
+                uri = str(resolved)
+                db_source = "FALKORDB_* trio" if trio_set else "TORTOISE_DB_PATH"
+                graph_store["source"] = db_source
+        if not uri:
+            # A script must not read "none" as "no store configured": the embedded
+            # default is in play, and only `doctor` resolves it.
+            graph_store["note_default"] = (
+                "no TORTOISE_DB_URI/DB_PATH — `tortoise doctor` reports the "
+                "resolved default")
     if raw_uri is not None and not uri:
         # Set-but-empty is not "absent": the user believes they configured it.
         graph_store["note"] = "TORTOISE_DB_URI is set but empty — treated as unset"
@@ -3513,7 +3549,14 @@ def _cmd_config(args) -> int:
         graph_store["cache_graph_convention"] = (
             f"org_{org_id} (org SDK) or org_{org_id}_<graph_id> (registry/ACL)"
         )
-        graph_store["record_scope"] = f"--org {org_id} --graph <graph_id>"
+        # SHELL-QUOTED: `<cwd>/.tortoise` is attacker-controllable by this file's
+        # own threat model, this line is presented as the arguments to paste into
+        # the `record-*` verbs, and `quickstart-cloud.md` now tells users to run
+        # this verb first — an unquoted `$(…)` in org_id would RUN. The value is
+        # still shown real on the `org_id` line, which is not shell-shaped.
+        import shlex as _shlex
+        graph_store["record_scope"] = (
+            f"--org {_shlex.quote(str(org_id))} --graph <graph_id>")
     payload["graph_store"] = graph_store
 
     # ── the OTHER store: the harness seam resolves its own identity ──
@@ -3640,7 +3683,12 @@ def _cmd_config(args) -> int:
               if cred.get("api_key_fingerprint")
               else "  (digest withheld — short key)")
         print(f"  api_key       {_printable(cred['api_key'])}{fp}")
-        print(f"  recovery      signup_token {cred['recovery_token']}")
+        rec = cred["recovery_token"]
+        if cred.get("recovery_token_source"):
+            rec += f"  ({_printable(cred['recovery_token_source'])})"
+        print(f"  recovery      signup_token {rec}")
+        if cred.get("recovery_token_note"):
+            print(f"  ⚠️  {cred['recovery_token_note']}")
         if cred.get("org_id_warning"):
             print(f"  ⚠️  org_id is {cred['org_id_warning']}")
         if cred.get("org_id_hint"):

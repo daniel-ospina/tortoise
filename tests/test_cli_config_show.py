@@ -1396,6 +1396,48 @@ def test_a_whitespace_only_api_url_env_is_disclosed(monkeypatch, capsys, tmp_pat
     assert "blank" in cred["api_url_note"]
 
 
+def test_a_shell_metacharacter_in_org_id_is_quoted_in_the_record_scope(
+        monkeypatch, capsys, tmp_path):
+    """`./.tortoise` is attacker-controllable, the line is presented as the
+    arguments to paste into `record-*`, and the quickstart tells users to run this
+    verb first — an unquoted `$(…)` would RUN."""
+    _write(tmp_path / ".tortoise" / "credentials.json", json.dumps({
+        "api_key": GLOBAL_KEY,
+        "api_url": "https://api.premiselabs.co",
+        "org_id": "00e8e3; touch /tmp/PWNED_FILE #",
+    }))
+    assert _run(("config", "show", "--json")) == 0
+    scope = json.loads(capsys.readouterr().out)["graph_store"]["record_scope"]
+    # quoted, so the pasted line passes ONE argument and runs nothing
+    import shlex
+    assert shlex.split(scope)[1] == "00e8e3; touch /tmp/PWNED_FILE #"
+    assert scope.startswith("--org '")
+
+
+def test_the_graph_target_follows_the_resolver_precedence(monkeypatch, capsys, tmp_path):
+    """The CLI resolves via `_resolve_db_target`: URI > FALKORDB_* > DB_PATH >
+    default. Reporting only TORTOISE_DB_URI named a store the CLI would not use —
+    and the shipped selfhost image sets TORTOISE_DB_PATH with no URI."""
+    _global(tmp_path)
+    monkeypatch.setenv("TORTOISE_DB_PATH", "/data/tortoise.db")
+    assert _run(("config", "show", "--json")) == 0
+    store = json.loads(capsys.readouterr().out)["graph_store"]
+    assert store["source"] == "TORTOISE_DB_PATH"
+    assert "tortoise.db" in store["target"]
+
+
+def test_the_recovery_token_is_found_where_recover_reads_it(monkeypatch, capsys, tmp_path):
+    """`recover` scans both stores regardless of which one supplied the KEY; asking
+    the winner alone reported "absent" for a token recover finds and uses."""
+    _global(tmp_path)                                   # holds the st_ token
+    monkeypatch.setenv("TORTOISE_API_KEY", GLOBAL_KEY)  # the KEY comes from env
+    assert _run(("config", "show", "--json")) == 0
+    cred = json.loads(capsys.readouterr().out)["credential"]
+    assert cred["recovery_token"] == "present"
+    assert cred["recovery_token_source"].endswith("credentials.json")
+    assert "recovery_token_note" in cred                # the #1752 divergence
+
+
 def test_a_keyless_harness_file_is_not_called_unusable(monkeypatch, capsys, tmp_path):
     """`resolveConfig` reads a keyless harness file happily — it supplies apiUrl
     and settings while the env supplies the key. Telling the user to delete it
