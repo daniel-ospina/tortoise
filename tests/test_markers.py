@@ -147,9 +147,14 @@ ROUTED_NAMESPACES: dict[str, dict[str, str]] = {
     # mis-counted — so they are declared here rather than renamed to a `test_*`
     # namespace, which would make the pin exercise a spelling no prod lane uses
     # (and the docstring `grep` a literal it no longer explains). The guard greps
-    # file TEXT, so it cannot tell this from a real construction; MEASURED:
-    # without this row it reds on lines 1304 and 1313 → `test-slow (e)` →
-    # python-ci-gate, which is how it was found.
+    # file TEXT, so it cannot tell this from a real construction; MEASURED with
+    # the guard's own `_sdk_call_namespace_literals()` at #10723's head — it
+    # reports lines 2020 (the docstring's own `_make_sdk(namespace="registry")`
+    # sample) and 2037 (the `registry = 'def f(): … namespace="registry" …'`
+    # snippet) — and without this row it reds on exactly those two →
+    # `test-slow (e)` → python-ci-gate, which is how it was found. Re-derive by
+    # running the generator; the numbers move whenever the test file above them
+    # is edited, so they are a measurement, not a constant.
     "test_10047_record_every_lane.py": {"registry": "synthetic-source"},
     # #7677: the retry-idempotency tests drive REAL org creation through the
     # registry control plane — `_make_sdk(namespace="registry")._get_registry()`
