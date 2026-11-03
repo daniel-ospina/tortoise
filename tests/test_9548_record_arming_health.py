@@ -73,23 +73,31 @@ def _isolate_env(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _start_from_zero_write_failures():
-    """Isolate the PROCESS-GLOBAL write-failure counter (#10620).
+    """Isolate the PROCESS-GLOBAL write-failure state (#10620, #10185).
 
-    `/health` now folds a non-zero `record_write_failures` into `record.ok` — a
-    record that is dropping rows must not read healthy, which is the whole point
-    — so a leg that arms the record and asserts `ok is True` would otherwise be
-    asserting "no OTHER test in this process tripped the seam": an ordering
-    dependency between test files, not a property of the block. The counter is
-    process-lifetime in PRODUCTION by design (it clears on restart, which is what
-    makes it actionable); each leg here starts from zero.
+    `/health` folds a RECENT refusal into `record.ok` — a record that is dropping
+    rows must not read healthy, which is the whole point — so a leg that arms the
+    record and asserts `ok is True` would otherwise be asserting "no OTHER test in
+    this process tripped the seam": an ordering dependency between test files, not
+    a property of the block.
 
-    Removal goes through the public `remove(reason)` for every reason the
-    snapshot currently reports, so a future reason is cleared too rather than
-    silently re-introducing the bleed.
+    TWO pieces of process state must be cleared, and they are different things:
+
+    * the CUMULATIVE counter — cleared per reason via the public `remove(reason)`
+      for every reason the snapshot currently reports, so a future reason is
+      cleared too rather than silently re-introducing the bleed;
+    * the REFUSAL STAMP that the window-based verdict reads (#10185). Removing the
+      counter does NOT clear it, and the default window is 5 minutes — longer than
+      the whole suite — so ONE refusal counted by an earlier leg would redden every
+      later leg. This is the exact cross-file bleed the counter half already had.
+
+    Production never calls `clear_record_last_refusal` (it is test-only by
+    contract): the stamp is what makes a refusal observable.
     """
     for reason in monitoring.record_write_failure_counts():
         with contextlib.suppress(KeyError):  # already gone — nothing to do
             monitoring.RECORD_WRITE_FAILURE_COUNT.remove(reason)
+    monitoring.clear_record_last_refusal()
     yield
 
 

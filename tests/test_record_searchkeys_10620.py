@@ -188,6 +188,37 @@ def test_a_failed_live_write_names_the_record_and_its_id(monkeypatch, caplog):
     )
 
 
+def test_an_unattributed_UPDATE_still_names_the_columns_it_set():
+    """`_UPDATE_SETS_RE` must be WIRED, not a dead regex (#10620 review, P2).
+
+    When a statement declines its positional pairing (`columns is None`), the
+    attribution names the columns the SQL itself spells. The INSERT arm did that
+    from the start; the UPDATE arm fell through to a bare `params=N`, naming no
+    column at all — which is exactly the case the regex was written for.
+
+    No builder declines an UPDATE's columns today, so this drives the helper
+    directly with the shape a future one would emit.
+    """
+    statement = record_projection.Statement(
+        "UPDATE public.point SET content = %s, search_keys = %s, "
+        "props = props || %s::jsonb WHERE org_id = %s AND graph_id = %s",
+        ("c", "err4032 release", "{}", "org", "graph"),
+        None,
+    )
+
+    text = record_projection._statement_attribution(statement, 2, 3)
+
+    assert "UPDATE public.point" in text, text
+    assert "columns(content, search_keys, props)" in text, (
+        f"an unattributed UPDATE must still name its SET columns: {text}"
+    )
+    assert "params=5" in text, text
+    assert "err4032 release" not in text, (
+        "declining the pairing means NO values — a mis-paired value is worse "
+        f"than none: {text}"
+    )
+
+
 def test_the_identity_reader_never_invents_a_value():
     """Absence is STATED, never a blank an operator reads as 'no problem'."""
     assert "no identity field" in record_writer._record_identity({"type": "X"})
@@ -201,11 +232,23 @@ def test_the_identity_reader_never_invents_a_value():
 # ════════════════════════════════════════════════════════════════════════════
 
 
-def _health(monkeypatch, failures: dict[str, int]) -> dict:
+def _health(monkeypatch, failures: dict[str, int], *, refusing=None) -> dict:
+    """The record block with the counters stubbed and the refusal state given.
+
+    `refusing` is the OUTPUT of ``monitoring.record_refusing()`` — ``None`` for
+    "no refusal inside the window" or ``{"reason", "age_s"}``. The verdict is
+    window-based (#10185), so a cumulative count alone must NOT redden it; the
+    two are passed separately here precisely because the block must not conflate
+    them.
+    """
     from tortoise import hosted_api, monitoring
 
     monkeypatch.setattr(monitoring, "record_write_failure_counts",
                         lambda: dict(failures))
+    # `_record_health` imports this name FROM `monitoring` at call time, so the
+    # stub belongs on `monitoring` — patching `hosted_api` would bind a module
+    # attribute the local import never reads, and the stub would be inert.
+    monkeypatch.setattr(monitoring, "record_refusing", lambda: refusing)
     monkeypatch.setattr(hosted_api, "_WATCHER", None)
     monkeypatch.setattr(hosted_api, "_WATCHER_START_ERROR", None)
     monkeypatch.setattr(hosted_api, "_WATCHER_EXPECTED", False)
@@ -216,26 +259,90 @@ def _health(monkeypatch, failures: dict[str, int]) -> dict:
     return hosted_api._record_health()
 
 
-def test_a_dropped_row_makes_the_record_block_not_ok(monkeypatch):
-    """`write_failed` = 302 with `ok: true` IS the defect — the surface that lies."""
-    record = _health(monkeypatch, {"write_failed": 302})
+def test_a_refusal_inside_the_window_makes_the_record_block_not_ok(monkeypatch):
+    """A refusal NOW is the defect — the surface that lies about dropped rows."""
+    record = _health(monkeypatch, {"write_failed": 302},
+                     refusing={"reason": "write_failed", "age_s": 1.2})
 
     assert record["ok"] is False, "a surface dropping rows must not read healthy"
     assert record["degraded"] is True
-    assert record["degraded_reasons"] == {"write_failed": 302}
+    assert record["refusing"] == {"reason": "write_failed", "age_s": 1.2}
+    assert record["degraded_reasons"] == {"write_failed": 302}, (
+        "the reason behind the verdict, with its cumulative count — the number "
+        "is still mirrored verbatim, the verdict is ADDED"
+    )
+    assert record["record_write_failures"] == {"write_failed": 302}
+
+
+def test_a_historical_refusal_does_not_degrade_forever(monkeypatch):
+    """#10185's first false direction: one transient refusal, red for ever.
+
+    A cumulative count with NO refusal inside the window is HISTORY, not a
+    current state. Folding it in (the pre-fix shape) reported `degraded: true`
+    for the life of the process — and an operator who learns the flag is always
+    red ignores the next real one.
+    """
+    record = _health(monkeypatch, {"write_failed": 302}, refusing=None)
+
+    assert record["degraded"] is False, (
+        "a refusal that already cleared the window must not pin `degraded`"
+    )
+    assert record["refusing"] is None
+    assert record["degraded_reasons"] == {}, (
+        "the current verdict has no reason behind it"
+    )
+    assert record["ok"] is True
     assert record["record_write_failures"] == {"write_failed": 302}, (
-        "the number is still mirrored verbatim — the verdict is ADDED, not a "
-        "second opinion about the counter"
+        "NOTHING is reset or hidden: the history stays readable"
     )
 
 
 def test_zero_failures_stays_ok(monkeypatch):
     """The control: `off` and `healthy` must not be reddened into each other."""
-    record = _health(monkeypatch, {})
+    record = _health(monkeypatch, {}, refusing=None)
 
     assert record["ok"] is True
     assert record["degraded"] is False
     assert record["degraded_reasons"] == {}
+    assert record["refusing"] is None
+
+
+def test_the_refusal_window_clears_with_no_restart_and_no_reset():
+    """#10185 indicator 2, on the real seam — not a stubbed dict.
+
+    Count one refusal through the PUBLIC writer, read the signal (refusing), then
+    advance past the window and read again (not refusing) while the cumulative
+    counter is still non-zero and never reset.
+    """
+    from tortoise import monitoring
+
+    monitoring.clear_record_last_refusal()
+    before = dict(monitoring.record_write_failure_counts())
+    try:
+        monitoring.record_record_write_failure("write_failed")
+        assert monitoring.record_refusing() is not None, (
+            "a just-counted refusal must read as refusing"
+        )
+        assert monitoring.record_last_refusal() is not None
+        # Advance the clock PAST the window rather than sleeping it out.
+        window = monitoring.RECORD_REFUSAL_WINDOW_SECONDS
+        stamp = monitoring.record_last_refusal()
+        monitoring._RECORD_LAST_REFUSAL = (stamp[0] - window - 1.0, stamp[1])
+        assert monitoring.record_refusing() is None, (
+            "a quiet window must clear the signal with no restart (#10185)"
+        )
+        after = monitoring.record_write_failure_counts()
+        assert after.get("write_failed", 0) >= before.get("write_failed", 0) + 1, (
+            "the cumulative counter must never be reset or hidden — only the "
+            "VERDICT is time-bounded"
+        )
+    finally:
+        monitoring.clear_record_last_refusal()
+        import contextlib
+        for reason in list(monitoring.record_write_failure_counts()):
+            if before.get(reason, 0) == 0:
+                with contextlib.suppress(KeyError):
+                    monitoring.RECORD_WRITE_FAILURE_COUNT.remove(reason)
 
 
 def test_status_itself_degrades_not_only_the_sub_block(monkeypatch):
@@ -246,6 +353,8 @@ def test_status_itself_degrades_not_only_the_sub_block(monkeypatch):
 
     monkeypatch.setattr(monitoring, "record_write_failure_counts",
                         lambda: {"no_tenant": 3})
+    monkeypatch.setattr(monitoring, "record_refusing",
+                        lambda: {"reason": "no_tenant", "age_s": 2.0})
     monkeypatch.setattr(hosted_api, "_WATCHER", None)
     monkeypatch.setattr(hosted_api, "_WATCHER_START_ERROR", None)
     monkeypatch.setattr(hosted_api, "_WATCHER_EXPECTED", False)

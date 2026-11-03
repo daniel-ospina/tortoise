@@ -5017,6 +5017,10 @@ _INSERT_COLUMNS_RE = re.compile(
     r"^INSERT INTO\s+public\.\w+\s*\((?P<columns>[^)]*)\)")
 _UPDATE_SETS_RE = re.compile(
     r"^UPDATE\s+public\.\w+\s+SET\s+(?P<sets>.*?)\s+WHERE\s", re.S)
+#: One `column = <expression>` item of an UPDATE's SET list — the LHS only.
+#: A value may be a quoted literal holding a comma, which splits into a part
+#: that matches nothing and is dropped rather than mis-named.
+_SET_ASSIGNMENT_RE = re.compile(r"\s*(?P<column>\w+)\s*=")
 
 
 def _bounded(text: str, limit: int) -> str:
@@ -5073,9 +5077,27 @@ def _statement_attribution(statement: Statement, index: int, total: int) -> str:
     else:
         # A `_SqlExpr` (or a shape no builder declared): name the columns the SQL
         # itself spells, and the parameter count, and pair NOTHING.
-        declared = _INSERT_COLUMNS_RE.match(statement.sql) if verb == "INSERT INTO" else None
-        names = ([c.strip().strip('"') for c in declared.group("columns").split(",")]
-                 if declared is not None else [])
+        #
+        # Both verbs are covered. `_UPDATE_SETS_RE` was added with the INSERT arm
+        # and left UNREFERENCED, so an unattributed UPDATE fell through to a bare
+        # `params=N` — no column names at all — which is exactly the case the
+        # regex was written for (#10620 review, finding 3). No builder declines
+        # its columns for an UPDATE today (`_patch_statement` always states them),
+        # so this arm is unreachable until one does; it is wired rather than
+        # deleted because the failure it prevents is a blank diagnosis, and a
+        # dead regex is not evidence the case cannot return.
+        names: list[str] = []
+        if verb == "INSERT INTO":
+            inserted = _INSERT_COLUMNS_RE.match(statement.sql)
+            if inserted is not None:
+                names = [c.strip().strip('"')
+                         for c in inserted.group("columns").split(",")]
+        elif verb == "UPDATE":
+            updated = _UPDATE_SETS_RE.match(statement.sql)
+            if updated is not None:
+                names = [assignment.group("column")
+                         for part in updated.group("sets").split(",")
+                         if (assignment := _SET_ASSIGNMENT_RE.match(part))]
         parts.append(f"columns({', '.join(names)}) params={len(params)}"
                      if names else f"params={len(params)}")
     return " ".join(parts)

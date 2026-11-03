@@ -6311,15 +6311,27 @@ def _record_health() -> dict:
         serves several.
 
     ``ok`` is False when the value was SET and refused, when the counters could
-    not be read, when the tenancy resolution could not be read, and when a record
-    write FAILED (``degraded``, #10620) — a monitoring surface that cannot read
-    its own state must not report healthy, and one that reads "rows were
-    dropped" and still says ``ok`` is worse than one that cannot read at all.
-    that being fail-open on the monitoring path itself. All three fold into
-    ``status`` (the ``backup_watcher`` rule: off-by-policy stays ``ok``,
-    "wanted but broken" degrades). A refused DSN is exactly the silent-arming
-    defect this exists to end: it is counted ``malformed_dsn`` on every capture
-    and the record stays empty while the operator believes it is armed.
+    not be read, when the tenancy resolution could not be read, and when the
+    record is REFUSING writes RIGHT NOW (``degraded``, #10185/#10620) — a
+    monitoring surface that cannot read its own state must not report healthy,
+    and one that reads "rows are being dropped" and still says ``ok`` is worse
+    than one that cannot read at all. All of them fold into ``status`` (the
+    ``backup_watcher`` rule: off-by-policy stays ``ok``, "wanted but broken"
+    degrades). A refused DSN is exactly the silent-arming defect this exists to
+    end: it is counted ``malformed_dsn`` on every capture and the record stays
+    empty while the operator believes it is armed.
+
+    ``degraded`` is WINDOW-based, not a fold over the cumulative counters. #10185
+    (owner-authored, the open home for this half) measured why the obvious fold
+    is wrong and forbids it verbatim: *"Do not simply fold
+    any(record_write_failures) ⇒ ok = False. The counters are cumulative since
+    process start and never reset, so one historical refusal … would pin the
+    deployment `degraded` forever"*. It is wrong in BOTH directions — that
+    forever-red, and a restart that reads ``ok: true`` while the rows are still
+    missing. So the verdict is :func:`monitoring.record_refusing`: a refusal
+    inside a bounded window, which clears on its own with no restart and no
+    counter reset (#10185 indicator 2). The cumulative totals stay in
+    ``record_write_failures`` as the HISTORY, per reason.
 
     Never raises and never 5xxes — a health path must always answer.
     """
@@ -6328,6 +6340,7 @@ def _record_health() -> dict:
         from tortoise.monitoring import (
             record_non_journal_skip_counts,
             record_position_unproven_count,
+            record_refusing,
             record_write_failure_counts,
         )
     except Exception as exc:  # liveness must answer, always
@@ -6342,6 +6355,7 @@ def _record_health() -> dict:
                 "record_non_journal_skips": None,
                 "record_position_unproven": None,
                 "degraded": None, "degraded_reasons": None,
+                "refusing": None,
                 "counters_error": reason, "tenancy_error": reason,
                 "fetched_at": datetime.now(UTC).isoformat(),
                 "error": reason}
@@ -6357,18 +6371,22 @@ def _record_health() -> dict:
         "record_write_failures": None,
         "record_non_journal_skips": None,
         "record_position_unproven": None,
-        # ⛔ WHETHER THE RECORD IS LOSING ROWS RIGHT NOW (#10620). ``None`` is
-        # "not evaluated" (the counter snapshot could not be read); ``False`` is
-        # "every armed write this process attempted landed"; ``True`` is "rows
-        # were DROPPED", and it makes ``ok`` False — so it folds into
-        # ``status`` too. Before this field the block mirrored the counters and
-        # stopped there, which left the exact failure this surface exists to
+        # ⛔ WHETHER THE RECORD IS LOSING ROWS RIGHT NOW (#10185/#10620). ``None``
+        # is "not evaluated" (the counter snapshot could not be read); ``False``
+        # is "no armed write was refused inside the window"; ``True`` is "rows
+        # were DROPPED moments ago", and it makes ``ok`` False — so it folds
+        # into ``status`` too. Before this field the block mirrored the counters
+        # and stopped there, which left the exact failure this surface exists to
         # report reading as ``ok: true``: 302 point records were dropped on the
         # hosted app (one ``jsonb`` column refusing every point that carried
         # search keys) while ``/health`` answered `ok` for five hours. A counter
         # with no verdict is a counter nobody reads.
         "degraded": None,
         "degraded_reasons": None,
+        # WHAT is refusing and HOW LONG AGO, or ``None``. ``degraded`` is this
+        # block's boolean; ``refusing`` is its identity, so an operator reading
+        # a red deployment never has to guess which arm tripped.
+        "refusing": None,
         "counters_error": None,
         "tenancy_error": None,
         "error": None,
@@ -6392,20 +6410,43 @@ def _record_health() -> dict:
     except Exception as exc:  # liveness must answer, always
         block["counters_error"] = str(exc)[:200]
         block["ok"] = False
-    # ⛔ THE VERDICT, not just the number (#10620). Every reason this counter
-    # carries is an ARMED WRITE THAT DID NOT HAPPEN (`monitoring`'s vocabulary):
-    # ``write_failed``, ``no_tenant``, ``malformed_dsn``, ``circuit_open``. A
-    # non-zero count therefore means the
-    # record is MISSING rows the journal holds — the derived cache is behind the
-    # graph and a replay is owed — which is not a healthy deployment by any
-    # reading. So it degrades, exactly like a refused DSN: the `backup_watcher`
-    # rule (off-by-policy stays ok, wanted-but-broken degrades), and a counter
-    # left as a number nobody reads is the "gate that lies" shape this fixes.
+    # ⛔ THE VERDICT, not just the number (#10185/#10620). The full vocabulary
+    # this counter carries — SIX values, documented at
+    # ``monitoring.record_record_write_failure`` — is not uniformly
+    # replay-healable, and naming four of them here sent operators to a replay
+    # that could not exist for two:
     #
-    # It is process-lifetime and therefore does NOT clear on a successful replay;
-    # that is deliberate — the rows are still missing until someone replays, and
-    # a flag that clears itself would report the gap as over. It clears on
-    # restart, which is what makes it actionable rather than permanent.
+    #   ``write_failed``      the record was unreachable or the projection
+    #                         refused the row — a REPLAY heals it.
+    #   ``no_tenant``         armed with no tenant in scope; heal the tenant
+    #                         resolution, then replay.
+    #   ``malformed_dsn``     the value is configured but unusable — fix the
+    #                         value; every write is refused until then.
+    #   ``circuit_open``      a connect failed moments ago, so the live door
+    #                         refused locally; a replay heals it.
+    #   ``no_journal``        armed on a deployment with NO journal: the write
+    #                         has no source and NO REPLAY CAN HEAL IT — the
+    #                         remedy is to stop counting a record that can never
+    #                         exist, not to replay.
+    #   ``seam_unimportable`` the record module itself could not be imported
+    #                         (a failing import hook), so the seam never ran —
+    #                         the remedy is the import, not a replay.
+    #
+    # THE VERDICT IS WINDOW-BASED, NOT A FOLD OVER THE COUNTERS. #10185
+    # (owner-authored; the open home for this half) forbids the fold: the
+    # counters are cumulative and never reset, so `any(count > 0)` pins a
+    # deployment ``degraded`` for the life of the process after ONE transient
+    # refusal — and a flag that is always red is a flag an operator ignores —
+    # while a restart clears it with the rows still missing. So we ask the
+    # bounded-window question instead: was a write refused in the last
+    # ``RECORD_REFUSAL_WINDOW_SECONDS``? That clears on its own, with no restart
+    # and with no cumulative counter reset or hidden (#10185 indicator 2).
+    #
+    # ``degraded_reasons`` therefore names the reason behind THIS verdict (the
+    # newest counted one) with its cumulative count — the count is history, the
+    # reason is current. It is NOT a filter of the cumulative dict presented as
+    # a current state; a reason that stopped refusing drops out of it while its
+    # total stays visible in ``record_write_failures``.
     #
     # ⛔ THE SKIP COUNTERS ARE DELIBERATELY EXCLUDED, and this is the line that
     # keeps `/health` from reddening on a healthy deployment: a
@@ -6415,10 +6456,13 @@ def _record_health() -> dict:
     # either in here would make every `capture_session` read as a broken record.
     failures = block["record_write_failures"]
     if isinstance(failures, dict):
-        lost = {reason: count for reason, count in failures.items() if count > 0}
-        block["degraded"] = bool(lost)
-        block["degraded_reasons"] = lost
-        if lost:
+        refusing = record_refusing()
+        block["refusing"] = refusing
+        reason = refusing["reason"] if refusing else None
+        block["degraded"] = bool(refusing)
+        block["degraded_reasons"] = (
+            {reason: failures.get(reason, 0)} if isinstance(reason, str) else {})
+        if refusing:
             block["ok"] = False
     try:
         block["single_tenant_declared"] = record_writer.single_tenant_declared()
