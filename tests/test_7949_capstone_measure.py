@@ -1031,12 +1031,21 @@ def test_the_record_does_not_narrate_an_under_floor_after_arm_as_a_disagreement(
     the pairing" — a pass condition printed against a refusal. The floor is now
     narrated as the floor, on the record itself. Non-vacuity: the pre-fix `why`
     for this input is asserted absent.
+
+    The mutation moves the population CONSISTENTLY — 25 Objects with 13 of them
+    bare-definite gives a share of 0.52 — because a log whose share no longer
+    matches the counts printed beside it is refused earlier, by the share
+    reconciliation (`_consistent_share`, #10610 review P2). A real producer writes
+    the division; only an edited line can disagree with itself.
     """
     repo = _copied_bundle(tmp_path)
     log = repo / "docs/evidence/9889/on-arm.log"
-    log.write_text(re.sub(r"^e1-aux objects_in_graph=61",
-                          "e1-aux objects_in_graph=25", log.read_text(),
-                          count=1, flags=re.MULTILINE))
+    edited = re.sub(
+        r"^e1-aux objects_in_graph=61 bare_definite=13 share=0\.21311475409836064",
+        f"e1-aux objects_in_graph=25 bare_definite=13 share={13 / 25!r}",
+        log.read_text(), count=1, flags=re.MULTILINE)
+    assert "objects_in_graph=25" in edited
+    log.write_text(edited)
     e1 = scores_probe.score(repo)["e1"]
     assert e1["below_floor"] is True, e1
     assert e1["outcome"] == "REFUSED", e1
@@ -1549,6 +1558,76 @@ def test_the_shipped_measurement_log_is_structurally_clean():
     codes = [code for code, _w, _m in cvc.check(
         record, repo=_REPO, require_green=True).items]
     assert codes == ["V9"], codes
+
+
+def test_the_scored_logs_pre_repoint_rows_are_disclosed():
+    """#10610 review at `2d9e8608` (P3): a frozen log is not re-rendered — so DISCLOSE it.
+
+    `#9889` item 5 moved the E1/E2 rows off `e1-e2.log`, and this README says so — but the
+    artifact `capstone_verdict_check.py` is run against is the SCORED log, which is frozen
+    at its own stamp, and §"Two artifacts" below forbids editing it (a row moves only by
+    RE-RUNNING the probe). So the shipped log still carries both rows on the hard-coded
+    name, with E2 `BLOCKED` by the now-CLOSED `#9775` — the eleven-day state `#9889` exists
+    to end, and the only reading an artifact gave.
+
+    The fix is disclosure, and this pin holds the disclosure to the log's ACTUAL rows in
+    BOTH directions: while the rows are pre-re-point the artifact table must say so, and
+    the README's "cited by no row" / "no longer read" claims must be qualified to the rows
+    the builder EMITS; once a re-recorded log carries the record's rows, the disclosure
+    must go rather than survive as a stale sentence. Neither direction is assumed: the
+    premise is read out of the committed log.
+
+    Non-vacuity: at the pre-fix head the artifact table carried no such line and the three
+    claims were unqualified, so both legs red (measured).
+    """
+    readme = (_REPO / "docs/evidence/7949-capstone/README.md").read_text()
+    log = _newest_log(_scored_logs())
+    record = cvc.extract_block(log.read_text())
+    rows = {row["criterion"]: row for row in record["rows"]}
+    superseded = "docs/evidence/7949-capstone/e1-e2.log"
+    stale = sorted(c for c in ("E1", "E2") if rows[c]["evidence"] == superseded)
+    assert stale in ([], ["E1", "E2"]), (
+        "only ONE of the shipped log's E1/E2 rows is pre-re-point — a state no stamp can "
+        f"describe: { {c: rows[c]['evidence'] for c in ('E1', 'E2')} }")
+
+    flat = [re.sub(r"\s+", " ", line) for line in readme.splitlines()]
+    table_rows = [line for line in flat if line.startswith(f"| `{log.name}`")]
+    assert len(table_rows) == 1, (
+        f"the artifact table no longer describes {log.name} in exactly one row: "
+        f"{table_rows} — this leg's subject is gone, so it would pass by vacancy")
+    row = table_rows[0]
+
+    # The disclosure's sub-claim is CHECKED, not trusted: `#9775` really is closed and the
+    # record really is the builder's evidence, so requiring them here names a state a
+    # reader can verify rather than a phrase they must take on faith.
+    if stale:
+        assert rows["E2"]["blocked_by"] == "#9775", rows["E2"]["blocked_by"]
+        for anchor in ("PREDATE", "#9889", superseded, "#9775",
+                       "docs/evidence/9889/e1-e2-scores.json"):
+            assert anchor in row, (
+                f"the artifact table row for {log.name} does not disclose that its E1/E2 "
+                f"rows predate the #9889 re-point (missing {anchor!r}). A reader who follows "
+                "the evidence chain lands on a CLOSED blocker and a superseded log with "
+                f"nothing saying so — the row reads: {row[:500]}")
+        squashed = re.sub(r"\s+", " ", readme)
+        for claim in ("cited by no row", "no longer read `e1-e2.log`"):
+            hits = list(re.finditer(re.escape(claim), squashed))
+            assert hits, (
+                f"the README no longer states {claim!r} at all — this leg would pass by "
+                "vacancy on a document that stopped describing the move")
+            for match in hits:
+                tail = squashed[match.end():match.end() + 60]
+                assert "current builder emits" in tail, (
+                    f"the README claim {claim!r} is UNQUALIFIED while the FROZEN scored "
+                    f"log {log.name} still carries both rows on `e1-e2.log` and E2 BLOCKED "
+                    f"by the CLOSED `#9775`: {tail!r}\n"
+                    "Qualify it to the rows the current builder emits, and let the "
+                    "artifact table disclose the frozen rows (a frozen log moves only by "
+                    "re-running the probe).")
+    else:
+        assert "PREDATE" not in row, (
+            f"{log.name} now carries the record's E1/E2 rows, so the disclosure that they "
+            "predate the #9889 re-point is FALSE — remove it with the re-record")
 
 
 def test_the_durations_row_quotes_the_case_count_it_weights():
@@ -3839,7 +3918,9 @@ def test_the_bare_entry_point_call_cite_resolves_to_the_call_it_names():
 # PR #10382 closed #9775's render half: every path that builds a prompt now
 # carries `STATE_VALUE_CARVE_OUT`, the compact render included. What still blocks
 # E2 is the OTHER half — nothing in the write path ENFORCES retention — plus the
-# 1-of-14 value loss that sits upstream of the filter, and both are #10360. Until
+# value loss (13 of 14 lost when #10382's round landed; 6 of 14 lost on the
+# `#9889` record, `docs/evidence/9889/e1-e2-scores.json`) that sits upstream of the
+# filter, and both are #10360. Until
 # this pin, four routes still sent a reader to #9775 as an OPEN blocker, i.e. to a
 # lane that had LANDED — and the fourth (the `#9080` capstone row of
 # `docs/00_index.md`, which is a DIFFERENT line of the same file from the
@@ -3861,6 +3942,15 @@ _RETRACTED_E2_RENDER_ABSENCE = (
     "| `#9775` the state-value carve-out on one render path |",
     "the carve-out is absent on the compact render path",
 )
+
+
+#: The BOLD verdict token the `#9080` row states E2 under. A selector keyed on one
+#: literal word (`BLOCKED`) went stale the moment #10610 review issue 1 moved the
+#: row to `E2 RED` — and it stayed green, because the same line still carries E1's
+#: `BLOCKED`. Reading the token rather than the word keeps the leg's subject alive
+#: across a verdict change (a verdict moves by re-running the probe, not by editing
+#: this regex).
+_E2_VERDICT_ROW = re.compile(r"\*\*E2 (?:BLOCKED|RED|GREEN)\*\*")
 
 
 def test_the_bundle_names_the_live_e2_blocker_and_no_closed_render_absence():
@@ -3918,14 +4008,20 @@ def test_the_bundle_names_the_live_e2_blocker_and_no_closed_render_absence():
     #    itself on E2's blocker and every gate was green.
     #
     #    The rule is over rows, not over the `#9775` spellings found today: a row
-    #    that marks E2 BLOCKED must name the live blocker and must not name the
-    #    closed one, whichever words it uses to do it.
-    e2_blocked_rows = [line for line in index.splitlines()
-                       if "E2" in line and "BLOCKED" in line]
-    assert e2_blocked_rows, (
-        "no line of docs/00_index.md marks E2 blocked — this leg is vacuous "
-        "(it would pass on an index that stopped routing E2 at all)")
-    for row in e2_blocked_rows:
+    #    that states E2's verdict must name the live blocker and must not name the
+    #    closed one, whichever words it uses to do it — AND whichever verdict word
+    #    it uses. The selector below reads the BOLD verdict token (`**E2 <WORD>**`),
+    #    not one literal: #10610 review issue 1 moved this row from `E2 BLOCKED`
+    #    to `E2 RED` (the `#9889` record scores the row), and a selector keyed on
+    #    `BLOCKED` would have dropped the row out of this leg's subject while the
+    #    leg went on passing on E1's own verdict word in the same line.
+    e2_verdict_rows = [line for line in index.splitlines()
+                       if _E2_VERDICT_ROW.search(line)]
+    assert e2_verdict_rows, (
+        "no line of docs/00_index.md states E2's verdict (`**E2 BLOCKED**` / "
+        "`**E2 RED**` / `**E2 GREEN**`) — this leg is vacuous (it would pass on "
+        "an index that stopped routing E2 at all)")
+    for row in e2_verdict_rows:
         assert "`#10360`" in row, (
             "an index row marks E2 blocked without naming the live blocker "
             f"`#10360`: {row[:400]}")
@@ -3933,6 +4029,140 @@ def test_the_bundle_names_the_live_e2_blocker_and_no_closed_render_absence():
             "an index row still routes a reader to `#9775` as E2's blocker — "
             "#9775's render half is CLOSED (PR #10382), so the live blocker is "
             f"`#10360`: {row[:400]}")
+
+
+# ── the three routes to E1/E2's verdict state the RECORD's verdict (#10610 issue 1) ──────────
+
+#: `capstone_measure.verdict_word`'s vocabulary, keyed by the record's own outcome word: a
+#: REFUSED measurement is BLOCKED (neither a pass nor a fail), a FAIL over a decided
+#: population is RED, a PASS is GREEN.
+_ROW_VERDICT = {"REFUSED": "BLOCKED", "FAIL": "RED", "PASS": "GREEN"}
+
+#: The bundle's verdict column — `⛔ **BLOCKED** (n=1 per arm …)`, `⛔ **RED** (8 of 14)`.
+_README_VERDICT = re.compile(r"(?:⛔|✅)\s*\*\*(BLOCKED|RED|GREEN)\b")
+
+#: The claim #10610 review issue 1 found in TWO documents after both rows moved off
+#: `e1-e2.log`: that the frozen 14-unit denominator "is carried by no committed artifact".
+#: The premise is CHECKED below (the record names the artifact, the artifact exists, and its
+#: denominator IS the frozen 14), so these are REFUTED phrases, not merely unwelcome ones —
+#: if the artifact were ever withdrawn the pin reds on its premise instead of banning truth.
+_UNCARRIED_DENOMINATOR = (
+    "carried by no committed artifact",
+    "no committed artifact carries the registered denominators",
+)
+
+
+def test_the_three_routes_to_the_e1_e2_verdict_state_the_records_verdict():
+    """A document that routes a reader to E1/E2 must state the verdict the record gives.
+
+    #10610 review issue 1 (P2): the change re-pointed both rows at
+    `docs/evidence/9889/e1-e2-scores.json` and moved E2 from BLOCKED to RED, and the two
+    documents a reader is routed to kept asserting the superseded reading IN THE PRESENT
+    TENSE — `docs/00_index.md`'s `#9080` row (`3 RED + 2 BLOCKED`, "E1 … its only artifact
+    is 25 Objects … with no before arm", "E2 … carried by no committed artifact") and
+    `E1-E5-PROOFS.md`'s E2a/E2b rows ("the bundle's README marks the row BLOCKED because
+    the frozen 14-unit denominator is carried by no committed artifact"), whose
+    `README.md:65` pointer now lands on a row reading `RED (8 of 14)`. Nothing read that
+    prose, so the suite stayed green while the bundle's own entry point told a reader the
+    opposite of the table beside it.
+
+    Every leg is DERIVED: the verdict from the record's `outcome`, the counts from the
+    record's own pairings and E2a block, and the headline (`N RED + M BLOCKED`) from the
+    bundle README's five verdict rows. Nothing here is a typed expectation, so a re-run
+    that flips an outcome either moves the documents or reds this pin.
+
+    Non-vacuity, measured at `e989c6449` (the head this pin was written against): the index
+    row carries `**E2 BLOCKED**` against a record that says FAIL, the proofs E2a row carries
+    `**BLOCKED**` as well, and all three `_UNCARRIED_DENOMINATOR`-class phrases are present
+    in those two files — so legs 3, 4 and 5 each red on the pre-fix tree. Leg 1 makes the
+    phrase ban honest rather than rhetorical: at that head the record carries two before
+    arms and the E2a artifact carries the frozen 14.
+    """
+    record = json.loads((_REPO / "docs/evidence/9889/e1-e2-scores.json")
+                        .read_text(encoding="utf-8"))
+
+    # 1. The PREMISE, measured: two before arms exist, and the denominator the two
+    #    documents called "uncarried" is carried by the artifact the record names.
+    pairings = record["e1"]["pairings"]
+    assert len(pairings) == 2, (
+        "the record no longer carries two before arms — `with no before arm` would stop "
+        "being a refuted claim, so the ban below would be redding on a TRUE sentence")
+    e2a = record["e2"]["e2a"]
+    denominator = record["denominators"]["e2a_units"]
+    assert (e2a["value_units"], e2a["frozen_units"], denominator) == (14, 14, 14), (
+        "the E2a block and the frozen denominator disagree — reconcile them before the "
+        f"documents can be held to either: {(e2a['value_units'], e2a['frozen_units'], denominator)}")
+    for rel in (e2a["artifact"], e2a["falsifier_artifact"]):
+        assert (_REPO / rel).is_file(), (
+            f"{rel} is missing, so the frozen denominator is uncarried again — this pin "
+            "would now be banning a true sentence, not a refuted one")
+
+    # 2. The bundle's own table is where the record's outcomes become row verdicts, and it
+    #    is the surface the other two documents describe. Read it, do not restate it.
+    listed = [ln for ln in (_REPO / "docs/evidence/7949-capstone/README.md")
+              .read_text(encoding="utf-8").splitlines()
+              if re.match(r"^> \| \*\*E[1-5]\*\* ", ln)]
+    assert len(listed) == 5, (
+        f"the README's verdict table lists {len(listed)} rows, not 5 — the headline this "
+        "pin derives has no subject until the table is whole")
+    table = {ln.split("**")[1]: _README_VERDICT.findall(ln)[0] for ln in listed}
+    assert table["E1"] == _ROW_VERDICT[record["e1"]["outcome"]], (
+        f"README says E1 is {table['E1']}, the record's outcome {record['e1']['outcome']!r} "
+        "maps to a different verdict")
+    assert table["E2"] == _ROW_VERDICT[record["e2"]["outcome"]], (
+        f"README says E2 is {table['E2']}, the record's outcome {record['e2']['outcome']!r} "
+        "maps to a different verdict")
+    headline = (f"{sum(1 for w in table.values() if w == 'RED')} RED + "
+                f"{sum(1 for w in table.values() if w == 'BLOCKED')} BLOCKED")
+
+    # 3. The `#9080` row — the route a reader meets first — states E2's verdict, the
+    #    headline the table gives, and the numbers the record measured.
+    index = (_REPO / "docs/00_index.md").read_text(encoding="utf-8")
+    route = next(line for line in index.splitlines() if "#9080" in line)
+    assert f"**E2 {table['E2']}**" in route, (
+        f"the `#9080` row does not state E2's verdict as `**E2 {table['E2']}**` — the "
+        f"record's own outcome is {record['e2']['outcome']!r}: {route[:400]}")
+    assert f"E1 {record['e1']['outcome']}" in route or f"E1 {table['E1']}" in route, (
+        f"the `#9080` row states neither the record's own word ({record['e1']['outcome']!r}) "
+        f"nor the row verdict ({table['E1']!r}) for E1: {route[:400]}")
+    assert headline in route, (
+        f"the `#9080` row's headline is not the verdict table's own count ({headline!r}) — "
+        f"the README lists {' / '.join(f'{k}:{v}' for k, v in table.items())}")
+    for value in [p["before_share"] for p in pairings] + [pairings[0]["after_share"]]:
+        assert f"{value:.4f}" in route, (
+            f"the `#9080` row does not carry the record's measured share {value:.4f} — a row "
+            "that prints the superseded run's numbers describes a population the record "
+            f"does not: {route[:400]}")
+
+    # 4. The audit's per-row table carries the same verdict, and no rival one.
+    proofs = (_REPO / "docs/evidence/7949-capstone/E1-E5-PROOFS.md").read_text(
+        encoding="utf-8")
+    e2_rows = [ln for ln in proofs.splitlines() if re.match(r"^\| \*\*E2[ab]\*\*", ln)]
+    assert len(e2_rows) == 2, (
+        f"the audit's E2a + E2b rows are {len(e2_rows)}, not 2 — the audit stopped "
+        "auditing one half of E2, so this leg has no subject")
+    for row in e2_rows:
+        rival = set(re.findall(r"\*\*(BLOCKED|RED|GREEN)\b", row)) - {table["E2"]}
+        assert not rival, (
+            f"an audit row still states {sorted(rival)} for E2, but the record scores it "
+            f"{table['E2']}: {row[:400]}")
+    survived = f"{e2a['value_survived']} of {e2a['frozen_units']}"
+    assert table["E2"] in set(re.findall(r"\*\*(BLOCKED|RED|GREEN)\b", e2_rows[0])), (
+        f"the audit's E2a row states no verdict — the record's is {table['E2']}")
+    assert survived in e2_rows[0] and e2a["artifact"] in e2_rows[0], (
+        f"the audit's E2a row does not carry the record's own count ({survived!r}) and "
+        f"artifact ({e2a['artifact']!r}): {e2_rows[0][:400]}")
+
+    # 5. The refuted absence claim, in every routing surface.
+    for name, text in (("docs/00_index.md", index), ("E1-E5-PROOFS.md", proofs)):
+        assert "with no before arm" not in text, (
+            f"{name} still says E1 measured `with no before arm` — the record carries two "
+            "before arms (78 and 69 Objects) on the frozen corpus")
+        for phrase in _UNCARRIED_DENOMINATOR:
+            assert phrase not in text, (
+                f"{name} still asserts the frozen 14-unit denominator is {phrase!r}, which "
+                f"{e2a['artifact']} refutes — the row it describes reads "
+                f"{table['E2']} ({survived})")
 
 
 # ── the header's import claim, MEASURED (#10525 review P3) ───────────────────────────────────
@@ -4438,6 +4668,77 @@ def test_a_before_arm_missing_one_arm_key_is_refused(key, tmp_path, capsys):
     assert scores_probe.score(repo)["e1"]["outcome"] in ("REFUSED", "PASS", "FAIL")
 
 
+def test_the_two_before_arms_must_be_two_RUNS_not_two_copies(tmp_path, capsys):
+    """#10610 review P2: the before pair is the ONE place the run rule inverts.
+
+    Every other record class in the driver refuses a record from a DIFFERENT run
+    ("the same head is not the same run"). The before pair is the one pair that
+    must not be the same run, and nothing enforced it: `decidable` is computed
+    from the SET of pairings, so two copies of a single OFF reading pair
+    identically and come back `decidable: True` — "every before realization
+    agrees" over ONE realization, plus a `before_spread_pp: 0.0` that reads as
+    perfect agreement rather than as the absent replication it is. The row then
+    drops its honest REFUSED for a decided FAIL, and `e1_row_note` narrates
+    agreement between realizations that never happened.
+
+    The producers mint a fresh `capstone_off_<head8>_<stamp>` per run, so an
+    identical graph is a duplicated record, not a replicate — which also makes
+    this the cheapest way to fake #9889's own next requirement (n >= 2 per arm).
+
+    Non-vacuity, measured: at the pre-fix head this exact bundle SCORES a decided
+    `FAIL` (exit 0, `before_spread_pp: 0.0`, both pairings on
+    `capstone_off_54922a800_1793378986`), so the `pytest.raises` arm reds.
+    """
+    repo = _bundle(tmp_path)
+    first = repo / "docs/evidence/9889/e1-paired-off-arm-1.json"
+    second = repo / "docs/evidence/9889/e1-paired-off-arm-2.json"
+    graph = json.loads(first.read_text())["graph"]
+    whole = second.read_text()
+    assert graph != json.loads(whole)["graph"], (
+        "the SHIPPED before arms already share a graph — re-derive this pin")
+    second.write_text(first.read_text())              # the same run, copied
+    with pytest.raises(SystemExit) as refused:
+        scores_probe.score(repo)
+    assert refused.value.code == 2, refused.value
+    err = capsys.readouterr().err
+    assert "the same run is not a second realization" in err, err
+    assert graph in err, err
+    assert "e1-paired-off-arm-1.json" in err, err
+    assert "e1-paired-off-arm-2.json" in err, err
+
+    # …and the shipped bundle (TWO graphs, 20.6 pp apart) still scores, so this
+    # discriminates a duplicated record from the pair that ships rather than
+    # refusing the form.
+    second.write_text(whole)
+    assert scores_probe.score(repo)["e1"]["decidable"] is False
+
+
+def test_a_before_arm_with_no_graph_is_refused(tmp_path, capsys):
+    """An ABSENT run is not a second realization either.
+
+    The duplicate check compares graphs, so an artifact that names none compares
+    equal to any other artifact that names none — the refusal would fire for the
+    wrong reason (or, one arm later, not at all). Refused as an absent provenance,
+    the same rule the falsifier's `as_written` block is held to: "an absent
+    provenance is not an inherited one".
+
+    Non-vacuity: at the pre-fix head the bundle scores (the head check downstream
+    is the only reader of `graph`, and it runs after this pair is assembled).
+    """
+    repo = _bundle(tmp_path)
+    path = repo / "docs/evidence/9889/e1-paired-off-arm-2.json"
+    record = json.loads(path.read_text())
+    assert record["graph"] == "capstone_off_54922a800_1793379347"   # ships with one
+    record.pop("graph")
+    path.write_text(json.dumps(record))
+    with pytest.raises(SystemExit) as refused:
+        scores_probe.score(repo)
+    assert refused.value.code == 2, refused.value
+    err = capsys.readouterr().err
+    assert "carries no `graph`" in err, err
+    assert "SECOND realization" in err, err
+
+
 def test_the_arm_key_sets_are_the_producers():
     """The driver's three key sets must BE the producer's, not restatements.
 
@@ -4484,7 +4785,8 @@ def test_an_e2b_population_under_its_floor_is_REFUSED_not_FAILED(tmp_path):
     assert e2["decided_by"] == "E2b floor", e2
 
 
-def test_the_readmes_floor_provenance_claim_matches_the_code():
+def test_the_readmes_floor_provenance_claim_matches_the_code(monkeypatch,
+                                                             tmp_path):
     """#10610 review P2: the README's floor-provenance sentence vs its READER.
 
     The paragraph describes **Probe 1, `e1_paired_arm.py`**, and that probe's
@@ -4536,6 +4838,31 @@ def test_the_readmes_floor_provenance_claim_matches_the_code():
     # `denominator_floors`. Non-vacuity: routing `min_before_share` through
     # `parse_bars` reds here with that same exception.
     assert probe.min_before_share(broken) == frozen, probe.min_before_share(broken)
+
+    # ⛔ …and the sentence is about a RUN, so drive `main()`. #10610 review at
+    # `2d9e8608` (P3): `parse_bars` reads `e1_min_before_share` too (this PR put it
+    # in the map), and `main()` resolved the map-backed `object_floor` FIRST — so
+    # for the exact shapes above the run died on a bare `ValueError` from a helper
+    # and the `REFUSED:` message this paragraph describes was unreachable from the
+    # production path. The helper-only assertion above could not see that split.
+    # Non-vacuity: on the pre-fix head `main()` propagates `ValueError` here, so
+    # the `SystemExit` expectation reds.
+    monkeypatch.setattr(
+        probe, "read_preregistration",
+        lambda sha: {**prereg, "denominator_floors": {
+            **prereg["denominator_floors"], "e1_min_before_share": "0.20"}})
+    monkeypatch.setattr(probe, "resolve_head", lambda: "0" * 40)
+    monkeypatch.setattr(probe, "corpus_pin", lambda record: "sha256:frozen")
+    monkeypatch.setattr(probe, "backend_ready", lambda: (True, "ok"))
+    for key in (*probe.ARM_KEYS, probe.SEAM_KEY):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("TORTOISE_DB_URI", "docker://:@127.0.0.1:1/tortoise_test")
+    with pytest.raises(SystemExit) as refused:
+        probe.main(["--graph", "g", "--out", str(tmp_path / "off.json")])
+    assert "REFUSED" in str(refused.value), refused.value
+    assert "e1_min_before_share" in str(refused.value), refused.value
+    assert not (tmp_path / "off.json").exists(), (
+        "a refused run writes no record")
 
 
 @pytest.mark.parametrize("key", ["TORTOISE_VET", "TORTOISE_CLASSIFY_LATER"])
@@ -4675,3 +5002,182 @@ def test_the_measured_arm_readback_must_CARRY_its_off_switches(tmp_path, capsys)
     assert "carries no TORTOISE_VALUE_GATE" in err, err
     assert "missing key is not an unset one" in err, err
 
+
+
+# ── the share is a FRACTION of the counts printed beside it (#10610 review P2) ───────────────
+
+#: The exact spelling `on-arm.log` writes on its `e1-aux` census line. The share is
+#: read off that one line, so the mutation below edits the ONE place the driver reads.
+_ON_ARM_SHARE_TOKEN = "share=0.21311475409836064"
+
+
+@pytest.mark.parametrize("arm", ["e1-paired-off-arm-1.json",
+                                 "e1-paired-off-arm-2.json"])
+def test_a_before_arm_share_must_be_the_fraction_its_counts_give(arm, tmp_path,
+                                                                capsys):
+    """The share is not a TRUSTED TOKEN: it is the fraction of its own counts.
+
+    `share` is the only operand E1's bar has, and every producer writes it as the
+    float division of the two counts printed on the same line — so all three
+    inputs for `share == bare_definite / objects` are already in hand wherever it
+    is read, and nothing compared them. Editing ONLY `share` in the two OFF records scored
+    both pairings PASS on a share the records' own counts (28/78 and 39/69)
+    contradict, which flipped E1's aggregate from REFUSED to a decided PASS and
+    wrote the row GREEN off the edit — the row `#9889` is waiting on.
+
+    Each arm is mutated ALONE because the reconciliation lives at two sites (the
+    before reader and the after reader below); a fix applied to one cannot stay
+    green on the other.
+
+    Non-vacuity: at the pre-fix head this bundle scores (measured: the shipped
+    `e1-e2-scores.json` is exactly what `score()` writes), so the `pytest.raises`
+    arm reds without the check.
+    """
+    repo = _bundle(tmp_path)
+    path = repo / "docs/evidence/9889" / arm
+    record = json.loads(path.read_text())
+    assert record["share"] == record["bare_definite"] / record["objects"]
+    record["share"] = 0.90                    # the counts are NOT touched
+    path.write_text(json.dumps(record))
+    with pytest.raises(SystemExit) as refused:
+        scores_probe.score(repo)
+    assert refused.value.code == 2, refused.value
+    err = capsys.readouterr().err
+    assert "but its own counts" in err, err
+    assert "score a number nothing in it measured" in err, err
+
+    # …and the shipped record still scores, so the arm discriminates an edited
+    # share from the unreconciled-but-consistent one that ships.
+    record["share"] = record["bare_definite"] / record["objects"]
+    path.write_text(json.dumps(record))
+    assert scores_probe.score(repo)["e1"]["outcome"] == "REFUSED"
+
+
+def test_the_after_arm_share_must_be_the_fraction_its_counts_give(tmp_path,
+                                                                 capsys):
+    """The same identity on the AFTER arm — the cheap half to forge.
+
+    `on-arm.log` prints `objects_in_graph=61 bare_definite=13
+    share=0.21311475409836064` on ONE line, and `13/61` is that float exactly. A
+    log whose share moved while its counts stood is the after arm scored on a
+    number the log does not carry, and it is the arm a false GREEN is cheapest to
+    forge: `share` alone decides `after <= multiplier x before`.
+
+    Non-vacuity: at the pre-fix head the edited log scores and reports the edited
+    share as the after arm's reading.
+    """
+    repo = _bundle(tmp_path)
+    log = repo / "docs/evidence/9889/on-arm.log"
+    text = log.read_text()
+    assert text.count(_ON_ARM_SHARE_TOKEN) == 1, text.count(_ON_ARM_SHARE_TOKEN)
+    log.write_text(text.replace(_ON_ARM_SHARE_TOKEN, "share=0.9"))
+    with pytest.raises(SystemExit) as refused:
+        scores_probe.score(repo)
+    assert refused.value.code == 2, refused.value
+    err = capsys.readouterr().err
+    assert "but its own counts (13 of 61)" in err, err
+
+    log.write_text(text)
+    assert scores_probe.score(repo)["e1"]["outcome"] == "REFUSED"
+
+
+# ── the falsifier must DECLARE the injection it certifies (#10610 review P2) ─────────────────
+
+@pytest.mark.parametrize("declared", [False, None, "absent"])
+def test_the_falsifier_must_declare_the_injection_it_is_credited_for(declared,
+                                                                    tmp_path,
+                                                                    capsys):
+    """A liveness certificate may not be minted from a block declaring NO injection.
+
+    `e2a-value-units-falsifier.json` carries `injected_anchor` precisely to say
+    which reading a block is (`as_written: false`, `with_anchor: true`), and
+    nothing read it: the liveness proof was a COUNT equality
+    (`value_survived == value_units`), so a scored block declaring
+    `injected_anchor: false` with 14/14 was accepted — the driver certifying "the
+    counter is shown to move" on a block that states, in the record's own words,
+    that it ran no injection. That is the inert-counter class the refusal above
+    it is written for, read one field short.
+
+    `False`, `None` and an ABSENT key are each mutated alone, because the guard is
+    `is not True` and a truthiness test would accept the first two; a permissive
+    default is not an assertion.
+
+    Non-vacuity: at the pre-fix head this bundle scores, reporting the 14/14 from a
+    block that declares no injection as the falsifier reading.
+    """
+    repo = _bundle(tmp_path)
+    path = repo / "docs/evidence/9889/e2a-value-units-falsifier.json"
+    record = json.loads(path.read_text())
+    assert record["with_anchor"]["injected_anchor"] is True
+    if declared == "absent":
+        record["with_anchor"].pop("injected_anchor")
+    else:
+        record["with_anchor"]["injected_anchor"] = declared
+    path.write_text(json.dumps(record))
+    with pytest.raises(SystemExit) as refused:
+        scores_probe.score(repo)
+    assert refused.value.code == 2, refused.value
+    err = capsys.readouterr().err
+    assert "does not declare an injection" in err, err
+    assert "moved because an anchor was injected" in err, err
+
+    # …and the declared-true block that ships still scores — the arm discriminates
+    # a block declaring no injection from the injected one, rather than refusing
+    # the whole falsifier form.
+    record["with_anchor"]["injected_anchor"] = True
+    path.write_text(json.dumps(record))
+    assert scores_probe.score(repo)["e2"]["outcome"] == "FAIL"
+
+
+# ── the head prefix is the one the PRODUCERS write (#10610 review P3) ───────────────────────
+
+def test_a_graph_naming_the_head_under_the_producers_eight_chars_scores(tmp_path):
+    """A record reproduced with a producer's OWN documented command must score.
+
+    The driver required NINE hex characters (`after["head"][:9]`), while every
+    producer documents and writes EIGHT: `e1_paired_arm.py`'s usage is
+    `--graph capstone_off_<head8>_<epoch>`, `e2a_value_units.py`'s and
+    `e1_gate_drops.py`'s are `capstone_measure_<head8>_<epoch>`, and
+    `capstone_measure.py` builds its own default as
+    `f"capstone_measure_{head[:8]}_{int(time.time())}"`. So reproducing this
+    record with the documented command produced
+    `capstone_off_54922a80_<epoch>`, which the driver refused with *"does not name
+    head 54922a800"* — a refusal that blames a correctly-named graph. The
+    committed artifacts happen to carry nine (`capstone_off_54922a800_…`), which
+    is why only the reproduction path failed.
+
+    The check now compares the SHORTER prefix, so both spellings score, and a graph
+    naming a DIFFERENT head is still refused (pinned by the sibling graph pins).
+
+    Non-vacuity: at the pre-fix head every `score()` call below exits 2.
+    """
+    repo = _bundle(tmp_path)
+    head = next(ln.split()[-1] for ln in
+                (repo / "docs/evidence/9889/on-arm.log").read_text().splitlines()
+                if ln.startswith("# head: "))
+    declared = (_REPO / "docs/evidence/7949-capstone/probes/capstone_measure.py"
+                ).read_text()
+    assert 'capstone_measure_{head[:8]}_' in declared, (
+        "the probe no longer builds its own graph from head[:8] — this pin's "
+        "claim about the producers is stale")
+    # A distinct EPOCH per arm: the two before artifacts must be two RUNS, so
+    # spelling them with one stamp would trip the duplicate-run guard and red this
+    # pin on a defect that is not the one it is about.
+    for arm, stamp in (("e1-paired-off-arm-1.json", 1793378986),
+                       ("e1-paired-off-arm-2.json", 1793379347)):
+        path = repo / "docs/evidence/9889" / arm
+        record = json.loads(path.read_text())
+        record["graph"] = f"capstone_off_{head[:8]}_{stamp}"   # the DOCUMENTED form
+        assert head[:9] not in record["graph"]     # …nine would fail, which was the bug
+        path.write_text(json.dumps(record))
+    assert scores_probe.score(repo)["e1"]["outcome"] == "REFUSED"
+
+    # …and a graph naming a DIFFERENT head is still refused, so the shorter prefix
+    # did not become no prefix at all.
+    path = repo / "docs/evidence/9889/e1-paired-off-arm-1.json"
+    record = json.loads(path.read_text())
+    record["graph"] = "capstone_off_00000000_1793378986"
+    path.write_text(json.dumps(record))
+    with pytest.raises(SystemExit) as refused:
+        scores_probe.score(repo)
+    assert refused.value.code == 2, refused.value
