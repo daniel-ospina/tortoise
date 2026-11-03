@@ -2601,6 +2601,11 @@ def test_a_broken_code_field_yields_one_verdict_on_a_not_implemented_row(
         code=["src.py"],
         tests=["test_x.py"],
         symbols=["present_symbol"],
+        # The `pins:` rule is MANDATORY on a not-implemented row, so a fixture
+        # that flips `state` without one now reds on the rule rather than on the
+        # defect under test — one unrelated verdict drowning the assertion (#5064
+        # review P0). `test_x.py` is written above, so the pin resolves.
+        pins=["test_x.py::test_ok"],
     )
     assert gate_errors([good], root=tmp_path) == []
 
@@ -2641,6 +2646,9 @@ def test_the_unreadable_source_verdict_names_the_symbols_it_could_not_verify(
         code=["broken.py"],
         tests=["test_x.py"],
         symbols=["present_symbol"],
+        # Mandatory `pins:` on a not-implemented row — see the sibling fixture
+        # above (#5064 review P0).
+        pins=["test_x.py::test_ok"],
     )
     errors = gate_errors([row], root=tmp_path)
     assert len(errors) == 1, errors
