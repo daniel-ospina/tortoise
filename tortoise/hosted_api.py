@@ -8501,10 +8501,13 @@ def _check_org_limit(org: dict, resource: str, *,
     sdk (#8906): the SDK this request WRITES through. Count on it, never on a
     fresh one. The contract lives at the seam that owns the trap —
     ``quota.enforce_org_limit``'s ``sdk:`` doc explains which graph an OMITTED
-    sdk counts; the short version is that it counts the org's DEFAULT graph
-    ``org_{org_id}``, while a CUSTOM-graph-bound key writes
-    ``_data_graph_name(org)`` = its own ``graph_namespace``
-    (``org_{org_id}_{gid}``) — two graphs that differ for that credential class
+    sdk counts. At THIS seam an omitted one resolves the credential's DEFAULT
+    graph (#10180's ``_org_sdk_for_credential`` — right for an org-wide
+    credential, including one whose default a promotion MOVED), and for a
+    GRAPH-BOUND credential that default is the historical ``org_{org_id}``
+    (``_default_graph_name`` answers None there by construction) — while the key
+    itself writes ``_data_graph_name(org)`` = its own ``graph_namespace``
+    (``org_{org_id}_{gid}``), two graphs that differ for that credential class
     by construction (the mint matrix refuses a ``kind='default'`` binding, so a
     custom binding's namespace is never ``org_{org_id}``). For such a key the
     omitted-sdk gate therefore compared the cap against a graph the request
@@ -8552,7 +8555,30 @@ def _check_org_limit(org: dict, resource: str, *,
         quota_refusal_payload,
     )
     try:
-        enforce_org_limit(org, resource, sdk=sdk, slot_credit=slot_credit)
+        # #8906: the request's OWN sdk WINS — the count and the write then
+        # target one graph by construction (see the ``sdk:`` contract above).
+        # #10180: when the caller passes none, a TENANT-graph count must still not
+        # fall back to `_count_resource`'s `namespace=org_id` construction — the
+        # points/sessions/documents counts are TENANT-graph counts, so the SDK
+        # they run against decides which graph the cap is measured on, and a
+        # PROMOTED default lives in another namespace. Without that fallback the
+        # gate counts the graph a promotion DEMOTED: a stale-low count admits an
+        # org past its real cap (the money gate failing OPEN) and a stale-high one
+        # refuses writes it is under. `_org_sdk_for_credential` resolves the
+        # credential's own default with NO I/O: `org` is the RESOLVED CREDENTIAL
+        # (not the org ROW), so an org-wide one carries `graph_namespace` — its
+        # default's namespace, resolved once at auth — and this cannot fail open.
+        # (An earlier draft read `graph_name` here, a key no credential dict has:
+        # every gate then took the I/O branch, i.e. a blocking PostgREST read on
+        # the event loop of the capture path.) Scoped to the resources that ARE
+        # counted in the tenant graph — `api_keys`/`users`/`graphs` are counted
+        # from the control plane or the registry and must not pay for an SDK
+        # they never touch.
+        enforce_org_limit(
+            org, resource, slot_credit=slot_credit,
+            sdk=(sdk if sdk is not None
+                 else (_org_sdk_for_credential(org)
+                       if resource in _TENANT_GRAPH_RESOURCES else None)))
     except QuotaExceededError as e:
         # #4614: the refusal is a STRUCTURED, distinguishable state — a `code`
         # plus the resource/used/limit the gate actually compared — not the
@@ -35512,12 +35538,13 @@ async def public_demo(org: dict = Depends(get_current_org_gated)):  # noqa: B008
         # re-calls short-circuit above and skip the gate (no write).
         # #8906: this door is DEFAULT-GRAPH ONLY by construction —
         # `_reject_graph_bound_org_surface` refuses a graph-bound key above, and
-        # `_seed_demo_graph` below opens its own ``namespace=org_id`` handle, so
-        # the count and the write already resolve alike (two constructions, same
-        # graph — NOT one shared handle). Passing the local `sdk` makes the count
+        # `_seed_demo_graph` below opens its own `_org_sdk(org_id)` handle (#10180's
+        # promotion-aware default resolver — NOT a bare ``namespace=org_id``), so
+        # the count and the write resolve alike (two constructions of the same
+        # graph, NOT one shared handle). Passing the local `sdk` makes the count
         # run on the graph `_seed_demo_sync` just probed; the structural guard
         # that keeps this door honest is the 403 above. If `_seed_demo_graph`'s
-        # namespace ever moves, thread THIS sdk into it.
+        # namespace ever moves again, thread THIS sdk into it.
         _check_org_limit(org, "points", sdk=sdk)
         # The shared demo seeder (extracted from /internal/demo) opens its own
         # SDK and writes ~13 Points.

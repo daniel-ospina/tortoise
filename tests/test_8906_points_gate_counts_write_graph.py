@@ -341,7 +341,8 @@ def test_demo_door_gates_on_the_default_graph_and_rejects_bound_keys(env):
     """``/v1/demo`` (the 5th points door) is DEFAULT-GRAPH ONLY by design.
 
     Two pins, because this door's count and its write are two constructions of
-    the same ``namespace=org_id`` (NOT one shared handle):
+    the same graph (``_seed_demo_graph`` opens it through `_org_sdk(org_id)`,
+    #10180's promotion-aware default resolver — NOT one shared handle):
     - an ORG-WIDE key is gated on the default graph (refused at its cap), so
       the door's count target is asserted behaviourally, not just described;
     - a GRAPH-BOUND key is refused 403 GRAPH_SCOPED_TEAM_SURFACE before the
