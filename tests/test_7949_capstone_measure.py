@@ -4369,10 +4369,12 @@ def test_the_readmes_floor_provenance_claim_matches_the_code():
     its "claim" filter matched an unrelated line and its last assertion compared a
     value with itself.
 
-    So this does not read the prose for tokens at all. It BEHAVES the claim: hand
-    the probe a pre-registration whose bars `parse_bars` cannot read at all. A
-    probe routed through that map cannot return a floor; a probe reading
-    `denominator_floors` returns the frozen 0.20. That is the provenance, measured.
+    So the README half is checked in BOTH directions — the two false phrasings
+    must be absent AND each half of the sentence must name its own reader, on the
+    collapsed paragraph (a wrapped line cannot hide a claim from `in`). The
+    behaviour half then BEHAVES the claim: hand the probe a pre-registration whose
+    bars `parse_bars` cannot read at all. A probe routed through that map cannot
+    return a floor; a probe reading `denominator_floors` returns the frozen 0.20.
     """
     probe = _load_probe("e1_paired_arm")
     readme = (_REPO / "docs/evidence/9889/README.md").read_text()
@@ -4381,6 +4383,13 @@ def test_the_readmes_floor_provenance_claim_matches_the_code():
     assert "which `parse_bars` does not expose" not in readme
     # …and the false replacement an earlier cut wrote must not come back either.
     assert "both through `parse_bars`" not in readme
+    # Prohibitions alone are satisfied by DELETING or REVERSING the sentence, so
+    # the required shape is asserted too — each half against the reader the code
+    # actually uses (`object_floor` → the map, `min_before_share` → the record).
+    para = " ".join(readme.split())
+    assert re.search(r"`e1_objects` through `parse_bars`", para), para[:400]
+    assert re.search(r"`e1_min_before_share` straight off `denominator_floors`",
+                     para), para[:400]
 
     prereg = _prereg()
     frozen = prereg["denominator_floors"]["e1_min_before_share"]
