@@ -400,6 +400,11 @@ def test_related_status_survives_the_widening(sdk):
     ``:Object`` and ``:Subject`` all carry ``status``; ``:Event`` carries
     ``eventStatus`` instead and therefore reports ``""`` — pinned here so the
     field's meaning is explicit rather than silently layer-dependent.
+
+    An ABSENT ``status`` on the three status-carrying labels reports ``live``
+    (``live.status_as_reported``) — which since #9974 R1 is the shape a
+    status-less birth ACTUALLY leaves on an Object/Subject, so this leg covers
+    it rather than writing a status on first.
     """
     hub = _event(sdk, "INCIDENT-45 the superseded-cause outage")
     live_peer = _point(sdk, "the current explanation of incident 45")
@@ -419,12 +424,25 @@ def test_related_status_survives_the_widening(sdk):
                 for e in sdk.expand_relationships(hub)}
     assert statuses[live_peer] == "live"
     assert statuses[stale_peer] == "superseded"
-    # :Object / :Subject carry a `status` — the lookup must find it under
-    # whichever of the four labels the peer actually holds
+    # :Object / :Subject carry a `status` family, so the lookup must find it
+    # under whichever of the four labels the peer actually holds — and since
+    # #9974 R1 they are born with NO stored status at all, so this is the ABSENT
+    # case: it must still report `live` (absent READS live,
+    # `live._terminal_excluded`), NOT the `""` the Event below reports. A leg
+    # that wrote `status='live'` onto these peers first would dodge the case
+    # this assertion exists for (#9974 R1 review P2).
+    _stored = _graph(sdk).query(
+        "MATCH (n) WHERE n.id IN $ids RETURN n.status",
+        params={"ids": [obj_peer, subj_peer]},
+    ).result_set
+    assert len(_stored) == 2 and all(r[0] is None for r in _stored), (
+        f"the leg must exercise the ABSENT case: {_stored!r}")
     assert statuses[obj_peer] == "live"
     assert statuses[subj_peer] == "live"
     # :Event has no `status` (its lifecycle is `eventStatus`): "" is the honest
-    # answer, and it is now reached by looking rather than by never asking
+    # answer, and it is now reached by looking rather than by never asking. This
+    # is the carve-out that keeps `""` meaning "no status family", so it is NOT
+    # the absent-status-to-`live` default the two peers above use.
     assert statuses[event_peer] == ""
 
 
