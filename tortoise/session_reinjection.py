@@ -621,9 +621,10 @@ def reader_window_displacement(
       the entire ``pool``. So with rerank ON the delivered surface may
       include base hits AND injected items from BELOW this window while
       excluding ones inside it.
-      ⇒ The bound below holds for the NO-RERANK arm ONLY. With R6 active,
-      ``injected_in_window``/``base_displaced`` describe ``merged[:40]``
-      and are not a bound — upper or lower — on what the reader got.
+      ⇒ With R6 active, ``injected_in_window``/``base_displaced`` describe
+      ``merged[:40]`` and are not a bound at all — upper or lower — on what
+      the reader got. (Nor are they one with R6 OFF, for the reason the
+      bullet below gives.)
     * So the count is not a bound on the delivered surface in EITHER
       direction, and the skip semantics above are why in both: a
       claim-text-less (or cap-refused) hit INSIDE the window is counted and
@@ -632,14 +633,12 @@ def reader_window_displacement(
       PAST the raw prefix and admits later hits up to its item bound, and
       injected items BELOW the window can therefore be delivered without
       ever being counted. That under-count is the direction this key exists
-      for. It is a WINDOW CENSUS, not a ceiling and not a floor. With rerank
-      ON it is not a bound at all, for the R6/C6 reasons just stated. This
-      module already
-      states the same residual class for ``seeded_sessions`` (*"matches the
-      reader MODULO the budget caps"*); a reuse at a different window, or
-      alongside the packaging, boost or rerank arms, needs the same
-      ``admitted=``/counterfactual treatment before the number is read as
-      delivered evidence.
+      for. It is a WINDOW CENSUS, not a ceiling and not a floor. This
+      module already states the same residual class for ``seeded_sessions``
+      (*"matches the reader MODULO the budget caps"*); a reuse at a
+      different window, or alongside the packaging, boost or rerank arms,
+      needs the same ``admitted=``/counterfactual treatment before the
+      number is read as delivered evidence.
 
     ⛔ The TOP-5 is NOT where this happens, and a probe that counts base
     hits at final rank ``>= 5`` says otherwise: it reports 35 for that shape
