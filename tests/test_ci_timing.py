@@ -6119,7 +6119,7 @@ def test_a_stripped_basis_clause_does_not_orphan_a_parenthesis() -> None:
 # ── a WRAPPED note is ONE note (the 2026-11-02 refresh's half-parenthesis) ────
 #
 # A row's note is not the tail on its row line: a note CAN wrap across indented `#`
-# continuation lines (measured at this head: 1 row of 1225 — the block's
+# continuation lines (measured at this head: 1 row of 1227 — the block's
 # dominant shape is the PREAMBLE for the row below, 73 of its 74 indented blocks),
 # and the guard that judges a written map joins them before judging
 # (`tests/test_ci_selection.py`
@@ -7081,3 +7081,51 @@ def test_an_unreadable_or_pinned_odd_declaration_refuses_the_write() -> None:
         f"{header}")
     assert parsed["a.py"] == ci_timing.DeclaredFloor(355.0, False), parsed
     assert parsed["b.py"] == ci_timing.DeclaredFloor(12.5, True), parsed
+
+
+# ── the ROW-COUNT absolutes in that rationale must name THIS map ─────────────
+#
+# Three docstrings justify a DESTRUCTIVE rule (the CUT arm deletes a row's
+# continuation lines) by counting the map they were measured on, and the counts
+# are stated in TWO files. The distribution tests COMPUTE their counts, which is
+# exactly why nothing noticed the pair drifting: the re-base onto a main that
+# added two rows left both sites saying 1225 in a block carrying 1227 (#10575
+# review, P3) — in the same branch that had just corrected them from 1222. So
+# this is the re-derivation those comments ask a reader to do, run on every leg.
+_ROW_COUNT_PROSE = {
+    "tools/ci_timing.py": "measured at this head: 1 row of {} does",
+    "tests/test_ci_timing.py": "continuation lines (measured at this head: 1 row of {} — the block's",
+}
+
+
+def test_the_row_count_absolutes_in_the_rationale_name_THIS_map() -> None:
+    """`… 1 row of N …` must be the N this map carries, in BOTH files stating it.
+
+    ⛔ Any change to `config/ci-surfaces.yml::durations` that adds or removes a
+    row moves every figure in this rationale — update both sites below, and the
+    `X of its Y indented blocks` pair, in the same commit.
+
+    Non-vacuity: on the pre-fix tree (both sites at 1225 against the 1227 rows
+    this map carries) the first assertion fails on the tools/ site.
+    """
+    root = Path(__file__).resolve().parent.parent
+    lines = (root / "config" / "ci-surfaces.yml").read_text().splitlines()
+    _key_line, entries = ci_timing._locate_durations_block(lines)
+    assert entries, "the durations block did not parse — this guard would be vacuous"
+    runs = [ci_timing._row_indented_comment_run(lines, i) for i in entries.values()]
+    blocks = [run for run in runs if run]
+    openers = [run for run in blocks if ci_timing._starts_a_new_note(lines[run[0]])]
+    wrapped = [key for key, i in entries.items() if ci_timing._row_continuation_lines(lines, i)]
+    # The two figures per site are three claims; the third is what the other two
+    # are ABOUT, so assert it rather than assume it.
+    assert wrapped == ["test_source_staleness_sweep_5038.py"], wrapped
+    assert len(blocks) - len(openers) == len(wrapped), (len(blocks), len(openers), wrapped)
+    for rel, template in _ROW_COUNT_PROSE.items():
+        needle = template.format(len(entries))
+        assert needle in (root / rel).read_text(), (
+            f"{rel} does not state this map's {len(entries)} rows — re-derive "
+            f"`_DURATION_LINE_RE`'s count over `_locate_durations_block` and update BOTH sites")
+    pair = f"{len(openers)} of its {len(blocks)} indented blocks"
+    assert pair in (root / "tests/test_ci_timing.py").read_text(), (
+        f"the PREAMBLE figure is not `{pair}` — re-derive it from "
+        f"`_row_indented_comment_run` + `_starts_a_new_note`")
