@@ -110,10 +110,29 @@ class FallbackSnapshotStore:
 
     def put(self, key: tuple, snap: dict) -> None:
         with self._lock:
-            self._store.pop(key, None)  # re-insert so order is by recency
-            self._store[key] = snap
-            while len(self._store) > MAX_SNAPSHOT_ENTRIES:
-                self._store.pop(next(iter(self._store)), None)
+            self._put_locked(key, snap)
+
+    def _put_locked(self, key: tuple, snap: dict) -> None:
+        """Insert under the (already held) lock, evicting the LRU tail."""
+        self._store.pop(key, None)  # re-insert so order is by recency
+        self._store[key] = snap
+        while len(self._store) > MAX_SNAPSHOT_ENTRIES:
+            self._store.pop(next(iter(self._store)), None)
+
+    def put_if_generation(self, key: tuple, snap: dict, generation: int) -> bool:
+        """Insert ``snap`` only if nothing was invalidated since ``generation``.
+
+        The generation COMPARE and the insert happen inside the SAME lock hold, so a
+        write whose ``invalidate()`` lands between the two cannot be silently undone
+        by this ``put`` (review round 2: the compare and the insert were separate
+        critical sections, which left exactly that window). Returns whether it was
+        cached.
+        """
+        with self._lock:
+            if self._generation != generation:
+                return False
+            self._put_locked(key, snap)
+            return True
 
     def clear(self) -> None:
         with self._lock:
@@ -232,9 +251,11 @@ def get_or_build(proj, key: tuple, *, store: FallbackSnapshotStore | None = None
                 # Publish only if no write invalidated the corpus mid-build (see
                 # STALENESS above) — otherwise this cohort keeps its answer and the
                 # next reader rebuilds, which is the self-healing the pre-#10602
-                # per-reader build got for free.
-                if snap is not None and store.generation() == generation:
-                    store.put(key, snap)
+                # per-reader build got for free. The compare and the insert are ONE
+                # hold of the store lock, so a write landing between them cannot be
+                # undone by this put (review round 2).
+                if snap is not None:
+                    store.put_if_generation(key, snap, generation)
             flight.result = snap
         finally:
             flight.done.set()
@@ -242,8 +263,13 @@ def get_or_build(proj, key: tuple, *, store: FallbackSnapshotStore | None = None
         return flight.result
 
     try:
-        # Bounded by the build's own store socket timeouts (the projection's socket
-        # sets connect 2 s / read 10 s), not by an arbitrary join deadline.
+        # NOT deadline-bounded, and the comment says so on purpose (review round 2):
+        # the two corpus queries are bounded by the store socket timeouts (connect
+        # 2 s / read 10 s), but ``build_snapshot`` then runs ``EmbeddingModel.encode``
+        # (a hosted provider call) and ``TfidfVectorizer.fit`` over up to
+        # ``MAX_CORPUS_POINTS`` documents, and NEITHER carries a deadline. So a stuck
+        # embedder pins every reader of this key — the same hang those readers each
+        # hit individually before #10602, now shared. Do not read this wait as bounded.
         flight.done.wait()
         return flight.result
     finally:

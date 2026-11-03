@@ -889,3 +889,32 @@ def test_degraded_read_path_goes_through_get_or_build(sdk, monkeypatch):
     assert len(calls) == 1, f"one degraded read → one coalesced build ({len(calls)})"
     assert any(t.get("reason") == "tfidf_snapshot" for t in trace), \
         "the read must still be served by the snapshot arm it went through"
+
+
+def test_put_if_generation_refuses_a_write_that_landed_after_the_read():
+    """A write landing between the caller's ``generation()`` and its ``put`` must win.
+
+    Review round 2: the first version compared the generation, RELEASED the lock,
+    then inserted — so a write whose ``invalidate()`` landed in that gap was
+    silently undone and the pre-write snapshot served for the whole TTL. The
+    compare and the insert now share one hold of the store lock, which is what
+    ``put_if_generation`` pins: the generation passed in is the one the BUILD
+    started under, and any invalidation after it makes the insert a no-op.
+    """
+    fs._store.clear()
+    key = ("atomic-graph", "atomic-ns")
+
+    # The build starts under generation N…
+    generation = fs._store.generation()
+    # …a write lands while it runs (i.e. before it reaches its put)…
+    fs._store.invalidate(key)
+    # …and the build's insert must therefore be refused.
+    cached = fs._store.put_if_generation(key, _snap_stub("stale"), generation)
+    assert cached is False, "an insert overtaken by a write must not report success"
+    assert fs._store.get(key) is None, "the overtaken snapshot must NOT be cached"
+
+    # A put under an unchanged generation still caches (the guard is not a veto).
+    generation = fs._store.generation()
+    assert fs._store.put_if_generation(key, _snap_stub("fresh"), generation) is True
+    warm = fs._store.get(key)
+    assert warm is not None and warm["tag"] == "fresh"
