@@ -469,7 +469,24 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # it was not given. The setenv IS the point; the fixture-param monkeypatch
     # auto-restores (no lane leak).
     "test_cli_config_show.py": [r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"',
-                                 r'monkeypatch\.setenv\(\s*$'],  # the multi-line form (`setenv(` then the name on the next line) is censused by its FIRST source line, so it needs the open-paren pattern
+                                 r'monkeypatch\.setenv\(\s*$'],  # the multi-line form (`setenv(` with the name on the NEXT line) is censused by its FIRST
+    # source line, so it needs the open-paren pattern. ⛔ ONE entry, not two: the batch-9 fold
+    # composed #10655's two arrivals (its own PR and the #10703 fold) into THIS dict, which
+    # is a literal — so the second spelling silently REPLACED the first (ruff F601) and the
+    # multi-line declaration was gone while the dict still read as if it held both. Nothing
+    # multi-line exists today, so the guard was green by luck; the next `setenv(` split across
+    # lines would have been uncensused with no error.
+    # #9889/#10610's `e1_min_before_share` refusal arm: the URI is set to an
+    # UNREACHABLE target (`127.0.0.1:1`) on purpose, so the probe REFUSES before it
+    # spends anything — the mutation IS the test input, and the assertion is about
+    # the refusal's text rather than about any graph. Deleting the line would make
+    # the arm pass for the wrong reason (a real backend), so it is DELIBERATE_URI:
+    # no server is contacted, and the fixture-param `monkeypatch` auto-undoes it
+    # (no lane leak). Registered by the batch-9 fold: #10610's branch landed the
+    # arm without the declaration, and the gap only becomes visible when the whole
+    # tree is censused together — which is what the fold is for.
+    "test_7949_capstone_measure.py": [
+        r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"'],
     "test_cli_context.py": [r'monkeypatch\.(?:delenv|setenv)\(\s*"TORTOISE_DB_URI"',
                             r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])'],
     "test_cli_serve.py": [r'monkeypatch\.(?:delenv|setenv)\(\s*"TORTOISE_DB_URI"'],
@@ -817,26 +834,6 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     "test_s3_prior_ablation.py": [
         r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"',
         r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
-    # #10655 `tortoise config show`: the URI VALUE is the input under test — a
-    # scheme-less DSN, an empty string, white space, a docker DSN with
-    # user:password, a query-string credential — because the verb's whole job is
-    # to classify the target and MASK its credentials. DELIBERATE_URI: several
-    # sites deliberately probe a docker DSN, and every site needs the lane the
-    # value names rather than the ambient one (a redirect would fold the masked
-    # DSN onto the lane's own URI and the assertion would observe the ambient
-    # target instead of the one under test). Nothing connects: `config show` is a
-    # REPORT of the resolved target, so a docker-half green is not claimed for
-    # any site. Function-scoped `monkeypatch`, auto-undone at teardown (no lane
-    # leak) — including the site that replaces a RAW `os.environ[...] = ...`
-    # whose `finally: del` is a DELETE, not a restore: the site never puts the
-    # ambient value back, which is the shape this module's second guard reds
-    # (the #2062 pop-without-restore class). ⚠️ In THIS module that shape could
-    # not have reached a later test — the autouse `_isolated` fixture removes the
-    # URI with `monkeypatch.delenv` before every test and its teardown restores
-    # the ambient value — so the red was the mutation SHAPE, not an observed
-    # lane flip. Do not cite it as a measured leak (review finding, baf951165).
-    "test_cli_config_show.py": [
-        r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"'],
 }
 
 # Carve-out TEST-MODULE stems (Task 5 wires these into TEST_NO_REDIRECT_STEMS;

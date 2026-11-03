@@ -563,6 +563,20 @@ def witness_ok(arm: str, blob: dict, real_calls_this_session: int) -> bool:
 def run_arm(arm: str, graph: str, sessions: list[str], census, golds: dict[str, dict],
             log) -> dict:
     """One full replay of the corpus into a fresh graph, with the arm's S3 behaviour."""
+    # ⛔ #4282 DELETED `TortoiseSDK.capture_session` (150 → 124 public methods), and the
+    # replay below drove that exact wrapper. The surviving composite needs an ASGI
+    # org+slot context (`hosted_api._capture_session_impl`), and the two surviving SDK
+    # halves (`_extract_session_v2` / `_commit_session_v2`) are not the same call — so
+    # re-wiring this arm is a DECISION about what the E1 pair MEASURES, not a rename,
+    # and it belongs to the lane that owns the arm. Until then the arm REFUSES BY NAME
+    # (exit 3 via `refuse`, never 1 — see its own contract) instead of dying on a bare
+    # AttributeError, and instead of printing numbers from an arm that no longer runs.
+    # The body is left INTACT below on purpose: it is the specification the lane
+    # re-pointing the arm has to satisfy, and deleting it would delete the contract.
+    refuse("tools/s3_prior_ablation.py cannot run: #4282 deleted the SDK door this "
+           "arm drove (`TortoiseSDK.capture_session`). Re-point the arm at a surviving "
+           "capture path (or record why the arm is retired) before trusting any E1 "
+           "before/after number this probe prints")
     import tortoise.extractor_v2 as ev
     from tortoise.sdk import TortoiseSDK
 
@@ -614,19 +628,7 @@ def run_arm(arm: str, graph: str, sessions: list[str], census, golds: dict[str, 
             witness.clear()
             calls["real_session"] = 0
             calls["intercepted"] = 0
-            # ⛔ #4282 DELETED `TortoiseSDK.capture_session` (150 → 124 public methods),
-            # and this probe drove that exact wrapper. The surviving composite needs an
-            # ASGI org+slot context (`hosted_api._capture_session_impl`), and the two
-            # surviving SDK halves (`_extract_session_v2` / `_commit_session_v2`) are not
-            # the same call — so re-wiring this arm is a DECISION about what the E1 pair
-            # measures, not a rename, and it belongs to the lane that owns the arm.
-            # Until then it REFUSES BY NAME instead of dying on a bare AttributeError
-            # (the shape #4282 left the three other probes: an explicit `#4282` refusal).
-            raise SystemExit(
-                "tools/s3_prior_ablation.py cannot run: #4282 deleted the SDK door this\n"
-                "arm drove (`TortoiseSDK.capture_session`). Re-point the arm at a\n"
-                "surviving capture path (or record why the arm is retired) before\n"
-                "trusting any E1 before/after number this probe prints.")
+            receipt = sdk.capture_session(_turns(sid), session_id=sid)
             stats = receipt.get("stats") or {}
             # ⚠️ THE RECEIPT CARRIES NO `search` BLOCK ON THIS LANE. `capture_session` ->
             # `_extract_session_v2` never surfaces S3's report onto the meta it returns (only

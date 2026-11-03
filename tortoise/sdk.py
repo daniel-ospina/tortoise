@@ -187,12 +187,11 @@ from .sparse import identifier_tokens_enabled as _identifier_tokens_enabled
 from .projection import _FULLTEXT_INDEX_LABEL_FIELDS
 from .projection import _ANNOTATOR_PROPS as _ANNOTATOR_PROP_NAMES
 from .projection import _ENTITY_ID_PROP  # #3998: the write's own Source predicate
-from .projection import is_missing_graph_error  # #2163: absent-graph family == success
 # #10010: the dedup fold's record flag — spelled in the module that READS it
 # (the replay's recreate anchor), imported here by its only producer so a rename
 # cannot leave the fold emitting a flag nothing recognises.
 from .projection import EVIDENCE_FOLD_KEY
-from .graph_ops import counts_capture_ops, phased  # #3359: per-capture graph-op accounting
+from .graph_ops import phased  # #3359: per-capture graph-op accounting
 from .quota import (
     DOCUMENT_METER_PREDICATE,
     MAX_EXTRACTIONS_PER_TURN,
