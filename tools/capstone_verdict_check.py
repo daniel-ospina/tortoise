@@ -266,10 +266,48 @@ def _blocker_exempt(run: dict, kind: object, num: object, den: object) -> bool:
     JSON `true` that `_count` also refuses) is a claim a state can be checked
     against, so it fails CLOSED into V12. The shipped `capstone.log` refusal
     rows carry `null`/`null`, which is what keeps them exempt.
+
+    ⛔ AND THE READER OF A ROW'S TWO CELLS IS NOT THE RECORD'S READER (#10601
+    review P1). The two legs above read only the ROW, and the run block sits in
+    the same record carrying the measurement those cells were nulled from —
+    measured on the review: a copy of the scored log with E4 set to BLOCKED,
+    `evidence_kind: "refusal"`, `blocked_by: "#8503"` (CLOSED) and both counts
+    nulled still EXITED 0 with `e4_receipt: {"numerator": 2, "denominator":
+    15}` and all eight `steps_observed` in the run block, because the same
+    one-field edit also turns V10's receipt arm off. A row whose RECORD still
+    carries a counted measurement is not a refusal that measured nothing, so
+    the record is checked too: `e4_receipt`'s own counts and a non-empty
+    `steps_observed` are both evidence the population exists. The shipped
+    REFUSAL record (`capstone.log`) carries neither key, which is what keeps it
+    exempt.
     """
+    if _record_carries_a_measurement(run):
+        return False
     return (run.get("status") == "REFUSED"
             and kind == "refusal"
             and num is None and den is None)
+
+
+def _record_carries_a_measurement(run: dict) -> bool:
+    """Does the RUN block itself still hold a counted measurement?
+
+    One question, one place: `_blocker_exempt` asks it, and nothing else may
+    restate it. Absence of a KEY and a `null` value are the same answer ("no
+    measurement here") — the shipped refusal record has neither key, and a
+    writer that emits `"e4_receipt": null` is saying the same thing. Anything
+    present (an int, a float, a string, `0`) is a claim, so it fails CLOSED
+    into V12 rather than being read as "nothing measured".
+    """
+    receipt = run.get("e4_receipt")
+    if receipt is not None:
+        if not isinstance(receipt, dict):
+            return True
+        if receipt.get("numerator") is not None or receipt.get("denominator") is not None:
+            return True
+    steps = run.get("steps_observed")
+    if steps is not None and (not isinstance(steps, list) or steps):
+        return True
+    return False
 
 
 def load_blocker_states(path: Path) -> dict:

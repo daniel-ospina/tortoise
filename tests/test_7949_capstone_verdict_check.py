@@ -3492,6 +3492,58 @@ def test_a_refused_run_row_that_carries_numbers_is_not_exempt():
     assert "V12" not in _codes(record, blocker_states=_states())
 
 
+def test_a_refused_run_whose_RECORD_still_carries_a_measurement_is_not_exempt():
+    """The row's two cells are not the record's reader (#10601 review P1).
+
+    ⛔ MEASURED ON THE REVIEW, and it was a FAIL-OPEN in the arm this PR adds.
+    ``_blocker_exempt`` read only ``row["numerator"]``/``row["denominator"]``, and
+    the SAME one-field edit that nulls them (``evidence_kind: "refusal"``) also
+    turns V10's receipt arm off. A copy of the shipped scored log with E4 set to
+    ``verdict: BLOCKED``, ``evidence_kind: "refusal"``, both counts ``null`` and
+    ``blocked_by: "#8503"`` (CLOSED 2026-10-24) therefore EXITED 0 — printing
+    "structurally sound … 1 row(s) are EXEMPT" — while ``run.e4_receipt`` still
+    carried ``{"numerator": 2, "denominator": 15}`` and ``run.steps_observed``
+    still listed all eight steps. The measurement was in the same record and V12
+    never looked at it.
+
+    The repair is that the RUN block is read too: a record that still holds a
+    counted receipt or a non-empty step list is not a refusal that measured
+    nothing. Non-vacuity: with ``_record_carries_a_measurement`` returning False
+    unconditionally, the first assertion reds (the row is exempted).
+    """
+    # The predicate, asked directly, on the three shapes that must differ.
+    measured = {"status": "REFUSED",
+                "e4_receipt": {"numerator": 2, "denominator": 15}}
+    assert cvc._blocker_exempt(measured, "refusal", None, None) is False, (
+        "a REFUSED run whose e4_receipt still carries 2/15 was EXEMPTED — the "
+        "measurement is in the record and V12 must read it")
+    witnessed = {"status": "REFUSED", "steps_observed": ["S0", "S1"]}
+    assert cvc._blocker_exempt(witnessed, "refusal", None, None) is False, (
+        "a REFUSED run that still lists observed steps was EXEMPTED")
+    # Only a record with NEITHER is the refusal shape — which is what the
+    # shipped `capstone.log` is (verified: it carries neither key).
+    refusal = {"status": "REFUSED", "e4_receipt": None, "steps_observed": []}
+    assert cvc._blocker_exempt(refusal, "refusal", None, None) is True, (
+        "a genuine refusal record (no receipt, no observed steps) stopped being "
+        "the exempt shape the shipped `capstone.log` relies on")
+
+    # And on the SHIPPED record: the scored log really does carry both keys, so
+    # the reads above are not empty on the artifact this repository ships.
+    scored = sorted((_REPO / "docs/evidence/7949-capstone").glob(
+        "capstone-measured-*.log"))
+    assert len(scored) == 1, [q.name for q in scored]
+    table = cvc.extract_block(scored[0].read_text())
+    assert cvc._record_carries_a_measurement(table["run"]) is True, (
+        "the shipped scored log's run block no longer reads as a measurement — "
+        "re-derive this pin")
+    # …and the shipped REFUSAL record does not, which is why V12 keeps its five
+    # rows exempt instead of rewriting the history of a refusal.
+    refusal = cvc.extract_block(LOG.read_text())
+    assert cvc._record_carries_a_measurement(refusal["run"]) is False, (
+        "the shipped `capstone.log` refusal now reads as carrying a measurement "
+        "— its five rows would red V12 on historical causes")
+
+
 def test_the_blocker_record_was_refreshed_with_the_log_it_covers():
     """`checked_at` older than the log it judges is the same decay, one level up.
 
