@@ -4994,7 +4994,21 @@ _ATTRIBUTION_VALUE_LIMIT = 80
 #: the whole `props` JSON).
 #: Every one of these is a REAL column of a record table (`table_columns()`),
 #: asserted by `tests/test_record_searchkeys_10620.py::test_content_columns_are_
-#: real_record_columns` so the next content column cannot be left out of it.
+#: real_record_columns`. ⛔ That assertion proves only that every LISTED name is
+#: real — nothing in the schema can prove the list is COMPLETE, so it cannot
+#: detect a missing entry and must not be described as if it did. What catches an
+#: omission is a leg driving a REAL builder and asserting the value is absent
+#: (`test_a_failing_source_insert_withholds_the_document_title`), which is why
+#: that leg exists (#10648 review cycle 6, P2).
+#: ⚠️ Withholding is by COLUMN NAME, across every table, so a name is content
+#: because of what it holds SOMEWHERE — `name` is a document title on `source`
+#: and a user's text on `object`/`subject`; `_column_pair` cannot tell them apart.
+#: Over-withholding is the chosen error: the column is still NAMED with its
+#: length, so the line stays diagnosable.
+#: ⚠️ This set is not the whole story about what reaches the log: the driver's own
+#: text is appended verbatim, and a Postgres `DETAIL`/`CONTEXT` can echo a refused
+#: value (`invalid input syntax for type json` … `CONTEXT: JSON data, line 1:
+#: <value>`). The set bounds what THIS module prints, not what the driver does.
 _CONTENT_COLUMNS: frozenset[str] = frozenset({
     "content", "quote", "props", "narrative", "summary", "story_arc",
     "embedding", "embedding_verbatim",
@@ -5016,6 +5030,28 @@ _CONTENT_COLUMNS: frozenset[str] = frozenset({
     # operator log (#10620 review cycle 5, P2). The line still NAMES the column
     # and its length, which is what makes a refusal diagnosable.
     "search_keys",
+    # ⛔ The rest of the SAME class, found by review cycle 6 against
+    # `record_writer`'s own rule rather than against this list. `record_writer`
+    # withholds a `source`'s `name` because "a source's `name` is its document
+    # title — the same datum `record_projection._CONTENT_COLUMNS` withholds as
+    # `title`" (`_IDENTITY_CONTENT_KEYS`), and it was right about the datum and
+    # wrong about this set: `name` was NOT in it, so one log line withheld
+    # `title` and printed its twin. Measured on the real builder, pre-fix:
+    #
+    #   INSERT INTO public.source columns(..., name=Q3 pricing memo — confidential,
+    #     title=<15 chars withheld>, url=https://internal.example/secret,
+    #     raw_state={"extracted": "John Smith"}, props=<2 chars withheld>)
+    #
+    # Every name below is a REAL record column holding the user's own text: the
+    # source's title in its other spellings (`name`), its locator (`url`,
+    # `canonical_url` — a URL carries query strings and share tokens), the raw
+    # extractor payload (`raw_state`), the claim's own subject/object text, the
+    # verbatim spans taken from the document (`provenance_spans`), the derived
+    # keyword/participant lists, and the on-disk path of the ingested file
+    # (`source_path` — a home directory carries a username).
+    "name", "url", "canonical_url", "raw_state",
+    "subject", "object", "provenance_spans",
+    "keywords", "participants", "source_path",
 })
 
 #: How much of the DRIVER's message a failure line carries. The driver names the
@@ -5070,8 +5106,14 @@ _INSERT_COLUMNS_RE = re.compile(
 _UPDATE_SETS_RE = re.compile(
     r"^UPDATE\s+public\.\w+\s+SET\s+(?P<sets>.*?)\s+WHERE\s", re.S)
 #: One `column = <expression>` item of an UPDATE's SET list — the LHS only.
-#: A value may be a quoted literal holding a comma, which splits into a part
-#: that matches nothing and is dropped rather than mis-named.
+#: ⚠️ The SET body is split on bare commas, so a quoted literal holding one
+#: WOULD be mis-named, not dropped: `SET x = 'a, b = c'` splits into `x = 'a`
+#: and ` b = c'`, and the second half matches, naming a column `b` that is not
+#: in the SET list. That is unreachable TODAY because every builder binds its
+#: values as parameters (`%s`), never as literals — so there is no comma inside
+#: the text to split on. If a builder ever inlines a literal, this arm must split
+#: on top-level commas (or quote-aware) before it can be trusted (#10648 review
+#: cycle 6, P3 — the previous comment claimed the impossible outcome instead).
 _SET_ASSIGNMENT_RE = re.compile(r"\s*(?P<column>\w+)\s*=")
 
 
@@ -5122,7 +5164,13 @@ def _statement_attribution(statement: Statement, index: int, total: int) -> str:
     verb, table = head.group("verb"), head.group("table")
     parts = [f"record statement {index}/{total}: {verb} public.{table}"]
     params = statement.params
-    if statement.columns is not None and len(statement.columns) <= len(params):
+    # ⛔ `if statement.columns` — NOT `is not None`. `_patch_statement` returns
+    # `columns=()`, not `None`, when it wrote nothing but its own
+    # `node_key = node_key` no-op, and a truthiness test then rendered the empty
+    # pairing as a literal `columns() params=5`, which reads as a broken column
+    # list rather than as "this statement legitimately pairs nothing" (#10648
+    # review cycle 6, P3).
+    if statement.columns and len(statement.columns) <= len(params):
         parts.append("columns(" + ", ".join(
             _column_pair(column, params[offset])
             for offset, column in enumerate(statement.columns)) + ")")

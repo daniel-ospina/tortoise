@@ -1,5 +1,5 @@
 -- ============================================================================
--- Migration 20261102000001: `public.point.search_keys` is TEXT — the graph's
+-- Migration 20261102000002: `public.point.search_keys` is TEXT — the graph's
 -- own flat string (#10620, epic #7879 · R4's remaining half)
 -- ----------------------------------------------------------------------------
 -- `public.point.search_keys` was declared `jsonb` (the table's blanket type for
@@ -130,9 +130,36 @@ AS $$
     -- remove — the record is `replay(journal)` and `rebuild_from_record` copies
     -- this column back into the graph. So each element is trimmed and blanks are
     -- DROPPED; the character set is Python's ASCII whitespace, and a non-ASCII
-    -- whitespace element is the one residual (`str.strip()` is Unicode-aware,
+    -- whitespace element is one residual (`str.strip()` is Unicode-aware,
     -- `btrim` here is explicit). With no surviving element the aggregate is NULL,
     -- which is the graph's own "no value" state (its flattener POPS a blank key).
+    --
+    -- ⚠️ THE OTHER RESIDUAL, stated because the rule above is quoted as if it
+    -- held arm for arm (#10648 review cycle 6, P2). `jsonb_array_elements_text`
+    -- renders a NON-SCALAR element as JSON text, where Python's `str()` renders
+    -- the same element with Python spelling. Measured on `postgres:16`, the
+    -- migration's own expression vs the quoted rule (run through Python):
+    --
+    --   input                    USING arm          " ".join(str(s)…)
+    --   ["a", ["b","c"]]         a ["b", "c"]       a ['b', 'c']
+    --   ["a", {"k":"v"}]         a {"k": "v"}       a {'k': 'v'}
+    --   ["a", 1, true]           a 1 true           a 1 True
+    --
+    -- So for a nested element this conversion is NOT the byte-identical rule; it
+    -- is the JSON rendering of the same element, which is the form Postgres can
+    -- produce and the form a `rebuild_from_record` reads back as the same text.
+    -- It is unreachable from every producer (the extractor emits a list of
+    -- STRINGS; a nested element never reaches the graph, so never reaches a new
+    -- record), and it applies only to a PRE-EXISTING row whose `jsonb` already
+    -- held one. The boolean case is the same divergence at the top level: this
+    -- migration yields `true`/`false`, which is the form
+    -- `record_projection._record_column_value` also produces for a boolean column
+    -- value (`$1 #>> '{}'`), so the two agree there by construction, and the
+    -- test matrix pins `true` for that arm. `record_projection` therefore leaves
+    -- the ROW's nested-element spelling alone rather than rewriting a value it
+    -- cannot identify; `tests/test_record_searchkeys_10620.py` pins these three
+    -- shapes so a rewrite of the arm goes red instead of silently changing what a
+    -- converted row becomes.
     SELECT CASE jsonb_typeof($1)
                WHEN 'string' THEN $1 #>> '{}'
                WHEN 'array'  THEN (

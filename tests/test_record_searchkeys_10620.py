@@ -733,7 +733,13 @@ def test_content_columns_are_real_record_columns():
         f"withheld name(s) that are not a column of any record table: {unknown} — "
         "a stale entry protects nothing")
     for required in ("content", "quote", "props", "_search_text", "title",
-                     "topics", "search_keys"):
+                     "topics", "search_keys",
+                     # #10648 review cycle 6, P2: the same class one table over.
+                     # `name` is withheld by `record_writer` under the explicit
+                     # claim that THIS set withholds it; it did not.
+                     "name", "url", "canonical_url", "raw_state",
+                     "subject", "object", "provenance_spans",
+                     "keywords", "participants", "source_path"):
         assert required in record_projection._CONTENT_COLUMNS, (
             f"{required!r} carries the user's own text and must be withheld")
 
@@ -752,6 +758,51 @@ def test_a_string_passes_through_unchanged():
     """The canonical form is NEVER re-flattened — a string is already the answer."""
     assert record_projection._record_column_value(
         "point", "search_keys", "err4032 release") == "err4032 release"
+
+
+def test_a_failing_source_insert_withholds_the_document_title():
+    """The withhold list, tested against the rule it CLAIMS to agree with.
+
+    `record_writer._IDENTITY_CONTENT_KEYS` withholds a `source`'s `name` because
+    *"a source's `name` is its document title — the same datum
+    `record_projection._CONTENT_COLUMNS` withholds as `title`"*. It was right
+    about the datum and wrong about the set: `name` was not in it, so the same
+    failure was reported twice — once with `title` withheld and once with the
+    document title printed in full (#10648 review cycle 6, P2).
+
+    This drives a REAL builder for a REAL table, and asserts on the ATTRIBUTION
+    the operator would read. That is the check the schema cannot make: a
+    completeness claim over `_CONTENT_COLUMNS` is a maintained list, so the only
+    thing that can catch an omission is a leg like this one, which names the
+    values it refuses to see.
+    """
+    node = record_projection.Node("source", "Source", "node_key")
+    secret_values = {
+        "name": "Q3 pricing memo — confidential",
+        "title": "Q3 pricing memo — confidential",
+        "url": "https://internal.example/secret?token=abc123",
+        "canonical_url": "https://internal.example/secret?token=abc123",
+        "raw_state": "extracted: John Smith, 12 Example St",
+        "source_path": "/home/jsmith/Documents/q3-pricing.pdf",
+    }
+    statement = record_projection._upsert_statement(
+        "o", "g", node, "src-1", dict(secret_values), {"long": "y" * 400})
+    text = record_projection._statement_attribution(statement, 1, 2)
+
+    for column in secret_values:
+        assert f"{column}=<" in text, (
+            f"{column!r} is a content-bearing record column and must be NAMED "
+            f"with its length, not quoted: {text}"
+        )
+    for value in ("Q3 pricing memo", "internal.example", "John Smith",
+                  "q3-pricing.pdf", "jsmith", "token=abc123"):
+        assert value not in text, (
+            f"{value!r} is the document's or the user's own text and reached the "
+            f"operator log through a column next door: {text}"
+        )
+    # …and the column NAMES survive, because naming what failed is the point.
+    for column in secret_values:
+        assert column in text, f"the line must still name {column!r}: {text}"
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -1008,3 +1059,61 @@ def test_the_migration_converts_existing_rows_by_the_write_path_rule(value, expe
         # exists — so the test states both rather than letting the arms drift.
         with pytest.raises(record_projection.RecordProjectionError):
             record_projection._record_column_value("point", "search_keys", value)
+
+
+@pytest.mark.parametrize("value,migration_form,writer_form", [
+    # ⛔ THE STATED RESIDUAL, pinned so it cannot drift silently (#10648 review
+    # cycle 6, P2). The migration's header quotes the write path's rule as if the
+    # two agreed arm for arm; they agree on every SCALAR shape (the matrix above)
+    # and diverge on a NON-SCALAR element only in RENDERING: `jsonb_array_
+    # elements_text` gives JSON spelling, Python's `str()` gives Python spelling.
+    (["a", ["b", "c"]], 'a ["b", "c"]', "a ['b', 'c']"),
+    (["a", {"k": "v"}], 'a {"k": "v"}', "a {'k': 'v'}"),
+    (["a", 1, True], "a 1 true", "a 1 True"),
+])
+def test_a_nested_element_differs_from_the_write_path_by_rendering_only(
+        value, migration_form, writer_form):
+    """The one place `USING` is not byte-identical to the writer's rule.
+
+    Both forms are correct for their own store: the graph holds Python's `str()`
+    of each element, and a `jsonb` column can only render JSON. What must not
+    happen is the divergence going UNDECLARED — the migration is the only path
+    that produces the JSON spelling, and `rebuild_from_record` reads the column
+    back as text, so the difference is spelling, not meaning.
+
+    Unreachable from every producer (the extractor emits a list of STRINGS, so a
+    nested element never reaches the graph and never reaches a new record); it
+    applies only to a pre-existing `jsonb` row that already held one.
+    """
+    conn = _record_schema_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(_shipped_flatten_ddl())
+            try:
+                cur.execute(
+                    "SELECT public.record_flatten_search_keys(%s::jsonb)",
+                    (json.dumps(value),))
+                actual = cur.fetchone()[0]
+            finally:
+                cur.execute("DROP FUNCTION IF EXISTS "
+                            "public.record_flatten_search_keys(jsonb)")
+    finally:
+        conn.close()
+
+    assert actual == migration_form, (
+        f"{value!r} converted to {actual!r}, expected {migration_form!r} — the "
+        "migration's own rendering changed; if that was deliberate, the header's "
+        "residual block must be updated with it"
+    )
+    written = record_projection._record_column_value(
+        "point", "search_keys", value)
+    assert written == writer_form, (
+        f"the write path gives {written!r}, expected {writer_form!r}"
+    )
+    # The divergence is RENDERING, not content: every element's text survives
+    # either way, which is why it is declared and pinned rather than refused.
+    assert actual != written, (
+        "the two arms now agree — the stated residual in the migration header is "
+        "stale and must be re-derived (or removed) rather than left claiming a "
+        "divergence that no longer exists"
+    )
