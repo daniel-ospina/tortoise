@@ -6109,6 +6109,65 @@ def test_the_armed_rule_does_not_claim_a_measured_ordering_when_it_compared_noth
     assert check.PROPOSED_ORDERING_BASE not in out, out
 
 
+def test_the_armed_rule_reports_an_uncommitted_registration_and_no_log_as_unmeasured(
+        tmp_path, monkeypatch, capsys):
+    """⛔ ISSUE 1 of the review at `43b6a3952` (BLOCKING): the counter never saw the EARLY RETURN.
+
+    `_check_ordering_proposed` returned from `if not prereg_adds: if not logs: return failures`
+    ABOVE `compared = 0`, so the bundle-level guard at the end of the same function could not run:
+    a full-history checkout whose registration exists but is UNCOMMITTED, with no evidence log,
+    returned `[]` with `unmeasured == []`, and `run()`'s armed `else` therefore reported
+    `ordering: verified` / `run_order_claim: verified` / `ordering_base: PROPOSED_ORDERING_BASE`
+    over ZERO comparisons — the very "dressed `decided nothing` as `verified`" shape this PR claims
+    to have ended, surviving on one return.
+
+    ⛔ AND THE TWO RULES DISAGREE ON A STATE BOTH MUST DESCRIBE. The ruled path answers the same
+    tree with `unmeasured` ("no registration on the base and no evidence log to order"); the armed
+    path is asked here through the SAME dispatcher on the SAME tree, and the assertion is that both
+    report that they compared nothing and neither prints a measured claim. That is the property a
+    reader needs: whichever rule is in force, "nothing was compared" is not "verified".
+
+    Non-vacuity: this test reds on the pre-fix tree at every one of the three armed assertions (no
+    `unmeasured` append on the return ⇒ `verified`), and it reds on the ruled half if the sibling's
+    own append is removed — the mutation the earlier cycle already used for the ruled path.
+    """
+    repo = _repo_with_published_base(tmp_path, monkeypatch)
+    bundle = repo / "docs" / "evidence" / "7949-capstone"
+    bundle.mkdir(parents=True)
+    # The REAL document, written and NEVER committed: this is the state a lane is in before it
+    # commits anything, and `git log --diff-filter=A` finds no add-commit for it anywhere.
+    prereg = bundle / check.PREREG_NAME
+    prereg.write_text((PREREG_DIR / check.PREREG_NAME).read_text())
+    assert list(bundle.glob(check.EVIDENCE_LOG_GLOB)) == [], "the fixture must carry NO evidence log"
+    assert check._added_commits(prereg) == [], "premise: the registration has NO add-commit here"
+    _measurement_only(monkeypatch)
+
+    report = check.run(bundle, use_git=True, use_corpus=False, allow_atomic_disclosure=True)
+    assert report["ok"] is True, report["failures"]
+    assert report["ordering"].startswith(check.ORDERING_UNMEASURED), report["ordering"]
+    assert report["ordering_base"] == "(not measured)", report["ordering_base"]
+    assert report["run_order_claim"].startswith(check.ORDERING_UNMEASURED), report["run_order_claim"]
+
+    assert check.main(["--dir", str(bundle), "--no-corpus", "--allow-atomic-disclosure"]) == 0
+    out = capsys.readouterr().out
+    assert f"machine record run-order claim: {check.ORDERING_UNMEASURED}" in out, out
+    assert check.PROPOSED_ORDERING_BASE not in out, out
+
+    # ⛔ SAME TREE, BOTH RULES: the two invariants must AGREE that nothing was compared. An armed
+    # rule that says `verified` where the ruled one says `UNMEASURED` is a rule that has lost the
+    # guard, not a rule with a different opinion about the base.
+    ruled_unmeasured: list[str] = []
+    armed_unmeasured: list[str] = []
+    ruled = check.check_ordering(prereg, [], {}, unmeasured=ruled_unmeasured)
+    armed = check.check_ordering(prereg, [], {}, allow_atomic_disclosure=True,
+                                unmeasured=armed_unmeasured)
+    assert ruled == [] and armed == [], (ruled, armed)
+    assert ruled_unmeasured, "the ruled path already reported this state — the armed one must too"
+    assert armed_unmeasured, (
+        "the armed path walked zero pairs and said nothing about it, so run()'s armed `else` "
+        "hands it `verified`")
+
+
 def test_the_armed_rule_still_reports_a_pair_it_did_order_as_measured(tmp_path, monkeypatch):
     """The mirror of the untracked-log test, on the armed path: a REAL measurement stays `verified`.
 

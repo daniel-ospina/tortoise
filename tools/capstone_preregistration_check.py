@@ -2841,6 +2841,21 @@ def _check_ordering_proposed(prereg: Path, logs: list[Path], pins: dict | None =
     prereg_adds = _added_commits(prereg)
     if not prereg_adds:
         if not logs:
+            # ⛔ THE RETURN IS ABOVE `compared = 0`, SO THE BUNDLE-LEVEL GUARD AT THE END OF THIS
+            # FUNCTION CANNOT REACH IT (#10546 review at `43b6a3952`, ISSUE 1 — BLOCKING). Nothing
+            # was ordered here, and returning SILENTLY made `run()`'s armed `else` report
+            # `verified` / `run_order_claim: verified` / `ordering_base: PROPOSED_ORDERING_BASE`
+            # over ZERO comparisons — the "dressed `decided nothing` as `verified`" shape this PR
+            # exists to end, surviving on one return. The ruled path answers this exact tree with
+            # an `unmeasured` note (see its `no registration on the base and no evidence log to
+            # order` arm), so the two rules agreed about the base and disagreed about whether a
+            # measurement happened. They must not: `unmeasured` is a fact about the BUNDLE, not
+            # about the rule in force.
+            if unmeasured is not None:
+                unmeasured.append(
+                    f"{PREREG_NAME} has no add-commit in this history and there is no evidence "
+                    "log to order"
+                )
             return failures  # not committed yet, and nothing to be ordered against
         if not _is_tracked(prereg):
             failures.append(
@@ -3207,18 +3222,40 @@ def _check_ordering_proposed(prereg: Path, logs: list[Path], pins: dict | None =
             if atomic_detail is not None:
                 atomic_detail[log.name] = _atomic_detail_entry(atomic[log.name])
             continue
-        if log_epoch <= prereg_epoch:
-            # THE ATTACK, and the conservative catch-all. Untouched and undeclarable (#10529).
-            # Distinct commits where git shows the log's add as the OLDER one, OR cannot order them
-            # at all (identical epoch, unrelated history) — `main`'s verdict, kept, because an
-            # unprovable ordering is not an ordering and this is NOT the squash shape.
-            failures.append(
-                f"{log.name}: added at {log_epoch} which is not strictly after the "
-                f"pre-registration's add-commit {prereg_epoch} — the log may have been scored "
-                f"against thresholds chosen after it was read, and it does not prove it measured "
-                f"nothing ({why})"
-            )
-            continue
+        # ⛔ CONTROL NEVER ARRIVES HERE, AND THE ARMS ABOVE ARE WHAT PROVE IT (#10546 review at
+        # `43b6a3952`, ISSUE 2). The arm this replaces was a CONDITIONAL
+        # `if log_epoch <= prereg_epoch:` whose comment claimed to be *"THE ATTACK, and the
+        # conservative catch-all … `main`'s verdict, kept"* — code no tree can execute, dressed as
+        # the arm that decides that shape, which is cycle 23's ISSUE 1 all over again (a claim
+        # resting on a container no reachable path can enter). The predecessor arms are an
+        # exhaustive partition, over git's own two-commit relation (`git-merge-base`:
+        # `--is-ancestor` is parent-graph REACHABILITY and exits 1 for "not an ancestor"; there is
+        # no third relation):
+        #   * a strict ANCESTOR add-commit ⇒ the `predating_sha` arm refused it BY TOPOLOGY, before
+        #     `%ct` could matter — `test_a_future_dated_log_that_is_a_true_ancestor_still_hard_fails`
+        #     is "THE ATTACK" shape (log older, date set LATER), and it is refused THERE;
+        #   * an add-commit that is neither ancestor nor descendant ⇒ the `unordered` arm refused it;
+        #   * every add-commit a descendant, and not atomic ⇒ the proven-order pass `continue`d;
+        #   * `atomic_pair` ⇒ the atomic arm above always `continue`d;
+        #   * an exempt log ⇒ the pins-exemption arm always `continue`d.
+        # It is KEPT, as the fail-closed DEFAULT rather than deleted, because the arm it replaces
+        # failed OPEN on one side: control arriving with `log_epoch > prereg_epoch` was accepted by
+        # falling out of the loop, and on a `%ct` comparison this module rules attacker-controlled
+        # everywhere else. A default that REFUSES cannot be reached by any tree this rule accepts,
+        # so its reachability is not a measurement about the log — REACHING IT MEANS A PREDECESSOR
+        # ARM WAS LOOSENED, i.e. a bug in this rule, and that is exactly what it says. The reach is
+        # observable rather than hypothetical: delete the `unordered` arm and
+        # `test_an_unordered_add_dated_after_the_registration_is_still_refused` reds on THIS text
+        # instead of the UNORDERED cause — so the net is pinned by the mutations it must catch.
+        # `why` is deliberately not named: it is bound only under the content arm's guard, and a
+        # fall-through is the one state its binding cannot be proven from.
+        failures.append(
+            f"{log.name}: no ordering arm could decide this log (its add-commit "
+            f"{log_sha[:9]}, recorded dates {log_epoch} vs the pre-registration's {prereg_epoch}) "
+            "— the arms above are meant to be exhaustive, so this is a defect in the ordering rule "
+            "itself and NOT a verdict about the log; an undecided ordering is not an ordering"
+        )
+        continue
     # Declarations are held to the same anti-rot rule as the exemption: one describing a NORMALLY
     # ordered log is a waiver granted where none is needed — and a waiver that is routine is the
     # silent-pass shape this tool refuses. Read from ``atomic_seen``, the STATE, never from the
