@@ -2448,6 +2448,17 @@ surfaces:
   # graph, no URI and no carve-out registration. Its live-engine half is #9188,
   # not here.
   - test_record_writer_seam.py
+  # #9973 (+#9972) — `DirectEdgeRepoint` is a MOVE: the record DELETEs the edge
+  # at the descriptor's `src` and upserts it at `_final(src)`, and a structural
+  # descriptor's target is resolved by its REPLAY key (a name/url),
+  # never by the label's entity id. Registered against `core` for the same reason
+  # as the entries above: `tortoise/record_projection.py` matches no named
+  # SOURCE_PATTERN (the `core` fallback), so a projection-only change selects
+  # `core` and this guard runs with it. Its plan-level legs are DB-free; the
+  # executed legs SKIP unless `TEST_RECORD_DB_URI` names a Postgres carrying the
+  # record migrations (the `test_9078`/`test_9567` arming surface), which is why
+  # it is registered here rather than in the slow pool.
+  - test_9973_repoint_move.py
   # #9554 (R6) — the record's TENANCY POSTURE on the CODE side: the GUC the
   # production path sets IS the one the record policies read (compared against
   # the SQL, not restated), it is transaction-local (`is_local=true`), it

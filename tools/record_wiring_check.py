@@ -327,6 +327,11 @@ def layer_writers() -> tuple[dict[str, list[str]], list[str]]:
 _IMPLICIT_TABLES: dict[str, tuple[str, ...]] = {
     "RelationUpsert": ("relation",),
     "RelationDelete": ("relation",),
+    # #9973 — the repoint MOVE: the same `relation` layer, reached through a
+    # DELETE at the descriptor's src plus an upsert at `_final(src)`. Declared
+    # here for the same reason as the two above: the emitter names the table,
+    # the effect does not carry one.
+    "EdgeRepoint": ("relation",),
     # The refusal STAYS in the event stream: it writes no layer row by design
     # (NoRecordEffect, #9187/#9200 row 4).
     "NoRecordEffect": (),
