@@ -4433,6 +4433,20 @@ surfaces:
   # tortoise/config.py, which is a core-surface path) — registered here so a
   # config.py-only change still runs the guard.
   - test_from_uri_userinfo.py
+  # #10655 (dual registration, `api` + here): `test_cli_config_show.py` carries
+  # the ONLY pin on `tortoise/config.py`'s #5109 log redaction — `resolve_db_path`
+  # cuts a `?password=…` query off the `TORTOISE_DB_URI` warning, and the pin is
+  # asserted on `caplog.text` (the record never reaches stderr under pytest, so a
+  # stream-only assertion passed on the reverted cut). `config.py` matches NO
+  # `SOURCE_PATTERNS` row, so a config.py-only diff falls through to `core`; with
+  # the suite registered on `api` alone that diff selected `core` and this suite
+  # was ABSENT (measured: `select(['tortoise/config.py'])` -> surfaces ['core'],
+  # suite selected: False) — the redaction pin could regress on the one diff that
+  # reverts it and nothing would run. `core` is the arm for exactly this shape,
+  # the same placement argument as `test_from_uri_userinfo.py` directly above and
+  # the `record_backup.py` dual registration. `api` keeps the classification
+  # (first-match order), so `classify_test_file` still answers "api".
+  - test_cli_config_show.py
   - test_frontmatter_validator.py
   - test_gate_b_tooling.py
   - test_graph_delete_guard.py       # #2961: race-safe GRAPH.DELETE guard + poisoned-AOF detection (hermetic, no DB)

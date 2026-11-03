@@ -71,6 +71,42 @@ def _run(argv=("config", "show")):
     return main.main(list(argv))
 
 
+def _bounded(fn, seconds=20):
+    """Run `fn` on a daemon thread and FAIL if it has not returned in `seconds`.
+
+    A credential read that BLOCKS (`read_text()` on a FIFO/socket blocks in
+    `open()` and never raises — no `except` fires) would otherwise hang the
+    whole suite: CI reports a job timeout instead of the defect, and the test
+    that names the hazard cannot say it regressed. `join(seconds)` turns the
+    hang into an assertion (#10655 review F1).
+    """
+    import threading
+
+    box: dict[str, object] = {}
+
+    def _target():
+        try:
+            box["value"] = fn()
+        except BaseException as exc:          # re-raised on the main thread
+            box["error"] = exc
+
+    t = threading.Thread(target=_target, daemon=True)
+    t.start()
+    t.join(seconds)
+    if t.is_alive():
+        raise AssertionError(
+            f"the call did not return within {seconds}s — a store read blocked "
+            "on a non-regular file (`read_text()` on a FIFO blocks in `open()` "
+            "and never raises, so no guard fires)")
+    if "error" in box:
+        raise box["error"]                   # type: ignore[misc]
+    return box["value"]
+
+
+def _run_bounded(argv, seconds=20):
+    return _bounded(lambda: main.main(list(argv)), seconds)
+
+
 def payload_of(cap):
     return json.loads(cap.out)
 
@@ -440,18 +476,50 @@ def test_an_invalid_utf8_store_is_corrupt_not_a_traceback(capsys, tmp_path):
     assert [r["state"] for r in payload["credential"]["ladder"] if r["blocks"]] == ["corrupt"]
 
 
-def test_a_fifo_at_the_candidate_does_not_hang_or_read_it(monkeypatch, capsys, tmp_path):
+def test_a_fifo_at_the_candidate_does_not_hang_or_read_it(
+        monkeypatch, capsys, tmp_path):
     """`read_text()` on a FIFO BLOCKS forever; the resolver skips it (`is_file()`
-    is False), so the report must say so instead of reading."""
+    is False), so the report must say so instead of reading.
+
+    The exported KEY is what makes this test capable of failing (#10655 review
+    F1): the recovery-token read sits inside `if api_key:`, so with NO credential
+    anywhere the pre-fix code never reached the unguarded read and this test
+    passed on the very defect its name claims. With a key resolved, the resolver
+    skips the FIFO, the global store wins, and the token read runs — which used
+    to block the verb forever (bounded, so a regression FAILS here).
+    """
     import os
     try:
         os.mkfifo(tmp_path / ".tortoise")
     except (AttributeError, OSError):
         pytest.skip("mkfifo unavailable on this platform")
-    assert _run(("config", "show", "--json")) in (0, 1)
+    monkeypatch.setenv("TORTOISE_API_KEY", GLOBAL_KEY)
+    assert _run_bounded(("config", "show", "--json")) in (0, 1)
     payload = json.loads(capsys.readouterr().out)
     cwd_row = payload["credential"]["ladder"][1]
     assert cwd_row["state"] == "not a regular file"
+    # …and the recovery-token read the key unblocked skipped it too, instead of
+    # blocking on it (the FIFO holds no token, so "absent" is the honest answer).
+    assert payload["credential"]["recovery_token"] == "absent"
+
+
+def test_no_store_reader_blocks_on_a_non_regular_candidate(tmp_path, monkeypatch):
+    """One gate, three readers: `signup`, `recover` and `config show` each read a
+    store candidate directly, and a FIFO at `<cwd>/.tortoise` hung every one of
+    them. Pinned per reader because a gate remembered at two of three call sites
+    is the same defect on the third (#10655 review F1)."""
+    import os
+    try:
+        os.mkfifo(tmp_path / ".tortoise")
+    except (AttributeError, OSError):
+        pytest.skip("mkfifo unavailable on this platform")
+    for fn in (main._read_stored_signup_token_with_source,
+               main._read_stored_config_api_url,
+               main._token_only_config_path):
+        result = _bounded(fn)
+        assert result in ((None, None), None), (
+            f"{fn.__name__} reported {result!r} for a FIFO — it must SKIP a "
+            "non-regular candidate (the resolver's own `is_file()` predicate)")
 
 
 def test_a_broken_symlink_store_is_unreadable_not_absent(capsys, tmp_path):
@@ -1593,17 +1661,66 @@ def test_a_transport_drop_is_reported_as_transport_not_as_an_invalid_response(
     assert "Remote end closed connection" in err
 
 
-def test_the_db_uri_log_line_does_not_print_a_query_credential(
+def test_a_retry_side_transport_drop_is_reported_as_transport(
         monkeypatch, capsys, tmp_path):
-    """`resolve_db_path` logs the RAW value; a `?password=…` in a path-shaped
-    TORTOISE_DB_URI reached stderr in clear, one line above the redacted field."""
+    """The SAME order invariant as the first attempt, on the RETRY (#10655
+    review F2): `http.client.RemoteDisconnected` is BOTH a ConnectionResetError
+    (OSError) and an HTTPException, and Python takes the FIRST matching clause.
+    With the retry's arms in the pre-fix order the drop was printed as "Invalid
+    response from API" — the server's BODY blamed for a dropped connection, on
+    exactly the cold-app path this retry exists for.
+
+    No other test in this file drives a retry-side transport drop: the first
+    attempt's sibling (`..._is_reported_as_transport_not_as_an_invalid_response`)
+    asserts `calls == [10]`, i.e. no retry happens at all."""
+    import http.client
+    import urllib.error
+
     _global(tmp_path)
-    monkeypatch.setenv("TORTOISE_DB_URI",
-                       "/tmp/x.db?password=topsecret&api_key=tt_leak")
-    assert _run(("config", "show", "--json")) == 0
+    bounds: list[float] = []
+
+    def _fake_urlopen(_req, timeout=None):
+        bounds.append(timeout)
+        if len(bounds) == 1:
+            raise urllib.error.URLError(TimeoutError("timed out"))
+        raise http.client.RemoteDisconnected("Remote end closed connection")
+
+    monkeypatch.setattr("urllib.request.urlopen", _fake_urlopen)
+    assert main.main(["team", "info"]) == 1
+    _out, err = capsys.readouterr()
+    assert bounds == [10, 30]                        # the retry DID happen
+    assert "still no answer" in err                  # a transport failure …
+    assert "Remote end closed connection" in err
+    assert "Invalid response from API" not in err    # … not the server's body
+
+
+def test_the_db_uri_log_line_does_not_print_a_query_credential(
+        monkeypatch, capsys, caplog, tmp_path):
+    """`resolve_db_path` logs the value; a `?password=…` in a path-shaped
+    TORTOISE_DB_URI reached the LOG in clear, one line above the redacted field.
+
+    Asserted on `caplog.text`, NOT only on the streams (#10655 review F3):
+    `tortoise/config.py` logs through a plain propagating
+    `logging.getLogger(__name__)`, pytest attaches its own handler to the ROOT
+    logger for the call phase, and the record therefore never reaches the
+    `logging.lastResort` stderr fallback — so a `capsys`-only assertion passes on
+    a `config.py` whose `?`/`#` cut is reverted (the payload side it does see is
+    masked by `_cmd_config` itself). Measured: reverted, the stream assertions
+    stay green and these log assertions go red.
+    """
+    _global(tmp_path)
+    monkeypatch.setenv(
+        "TORTOISE_DB_URI", "/tmp/x.db?password=topsecret&api_key=tt_leak")
+    with caplog.at_level("WARNING"):
+        assert _run(("config", "show", "--json")) == 0
     cap = capsys.readouterr()
     assert "topsecret" not in cap.out + cap.err
     assert "tt_leak" not in cap.out + cap.err
+    # The log record is where the pre-fix leak happened. The `file path` half
+    # keeps the secret assertions from passing vacuously on an empty capture.
+    assert "file path" in caplog.text
+    assert "topsecret" not in caplog.text
+    assert "tt_leak" not in caplog.text
 
 
 def test_a_resolved_path_with_a_colon_is_still_a_path(monkeypatch, capsys, tmp_path):
