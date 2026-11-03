@@ -115,7 +115,16 @@ def test_refused_state_carries_the_rails_own_reason(tmp_path, monkeypatch):
 
 
 def test_a_killed_rail_is_lost_never_merged(tmp_path):
-    """No EXIT line is NOT a verdict. Reporting `merged` here would be #2235."""
+    """No EXIT line is NOT a verdict. Reporting `merged` here would be #2235.
+
+    POLLED, not a fixed sleep. A SIGKILLed launcher is a ZOMBIE until its parent
+    reaps it, and the window in which the OS has not yet published that state is
+    long enough to lose a race: measured on macOS at this head, `time.sleep(0.3)`
+    plus a single `collect` reddened this case while the same tree passed with a
+    poll. The ASSERTION is unchanged — only `lost` satisfies it, and a rail that
+    stays `waiting` (the non-Linux zombie hole `tools/rail_detach.py::
+    _process_state` closes) still fails here, at the deadline.
+    """
     co = make_checkout(tmp_path)
     sd = tmp_path / "state"
     os.environ["FAKE_RAIL_SLEEP"] = "30"
@@ -125,8 +134,7 @@ def test_a_killed_rail_is_lost_never_merged(tmp_path):
         os.environ.pop("FAKE_RAIL_SLEEP", None)
     time.sleep(0.2)
     os.kill(ln.pid, signal.SIGKILL)
-    time.sleep(0.3)
-    st = rd.collect(sd, "o/r", 13)
+    st = wait_state(sd, 13, rd.LOST)
     assert st.state == rd.LOST and st.exit_code is None
     assert "no EXIT line" in st.reason
 
@@ -163,8 +171,7 @@ def test_previous_attempts_merge_line_is_not_inherited(tmp_path):
         os.environ.pop("FAKE_RAIL_SLEEP", None)
     time.sleep(0.2)
     os.kill(ln.pid, signal.SIGKILL)                              # …and is killed
-    time.sleep(0.3)
-    st = rd.collect(sd, "o/r", 61)
+    st = wait_state(sd, 61, rd.LOST)   # polled: see `…a_killed_rail_is_lost…`
     assert st.state == rd.LOST, st.as_dict()
     assert st.merge_sha == ""
 

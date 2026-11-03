@@ -158,6 +158,36 @@ def _age_seconds(iso: str) -> float | None:
     return (datetime.now(UTC) - then).total_seconds()
 
 
+def _process_state(pid: int) -> str | None:
+    """The single-letter process state, or `None` when it cannot be read.
+
+    `/proc` is the cheap path and the only one that also carries the argv; `ps`
+    is the portable one, and it is NOT optional. A ZOMBIE — a rail that has
+    exited but whose parent has not reaped it — answers `os.kill(pid, 0)` on
+    every platform, so with a /proc-only check a FINISHED rail reads `waiting`
+    forever everywhere `/proc` does not exist. Measured on macOS at this head:
+    all four `collect`-verdict cases in `tests/test_rail_detach.py` that kill or
+    finish a rail (`…a_killed_rail_is_lost_never_merged`,
+    `…announced_merge_survives_a_missing_exit_line`,
+    `…merged_without_a_printed_sha_is_still_merged`,
+    `…previous_attempts_merge_line_is_not_inherited`) returned `waiting` — the
+    `merged`/`lost` verdicts were unreachable off Linux.
+    """
+    try:
+        return Path(f"/proc/{pid}/stat").read_text().rsplit(") ", 1)[1].split()[0]
+    except (OSError, IndexError):
+        pass
+    try:
+        out = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "state="],
+            capture_output=True, text=True, timeout=5, check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None  # no /proc and no usable `ps`: the kill probe is all we have
+    letter = out.stdout.strip()[:1]
+    return letter or None
+
+
 def _pid_alive(pid: int, marker: str) -> bool:
     """Alive AND still ours — `os.kill(pid, 0)` alone reports a RECYCLED pid as
     a live rail, which would report `waiting` forever on a dead rail."""
@@ -168,14 +198,12 @@ def _pid_alive(pid: int, marker: str) -> bool:
     except OSError:
         return False
     # A ZOMBIE still answers kill(0) and its cmdline is EMPTY — reporting it alive
-    # would leave a killed rail reading `waiting` forever. /proc/<pid>/stat field 3
-    # is the state letter; `Z` is gone-as-far-as-a-verdict-is-concerned.
-    try:
-        stat = Path(f"/proc/{pid}/stat").read_text()
-        if stat.rsplit(") ", 1)[1].split()[0] == "Z":
-            return False
-    except (OSError, IndexError):
-        pass
+    # would leave a killed rail reading `waiting` forever. `Z` is
+    # gone-as-far-as-a-verdict-is-concerned, and `_process_state` reads it on
+    # Linux (/proc) and elsewhere (`ps`), because a zombie is invisible to the
+    # kill probe on BOTH.
+    if _process_state(pid) == "Z":
+        return False
     cmdline = Path(f"/proc/{pid}/cmdline")
     if cmdline.exists():
         try:
