@@ -3163,7 +3163,7 @@ def test_the_demo_seed_declares_NO_length_it_cannot_serve(monkeypatch):
     the PR's own account, as one of the two independent falsifiers of "the seed
     may not declare a length". The semantics it named are already pinned twice,
     each time by a pin that CAN fail: at the door,
-    `tests/test_hosted_api.py::TestSessionDetailRecordAnswers::
+    `tests/test_hosted_api.py::TestSessionDetail::
     test_detail_refuses_a_short_record_answer_instead_of_a_contradicting_body` (the
     503 refusal of a short transcript, mutation stated in its docstring), and
     through the real seed on a real graph,
