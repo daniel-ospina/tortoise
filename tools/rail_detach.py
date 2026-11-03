@@ -69,11 +69,10 @@ import fcntl
 import json
 import os
 import re
-import signal
 import subprocess
 import sys
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 # ── the mutation seam ────────────────────────────────────────────────────────
@@ -136,17 +135,17 @@ def read_all(text: str, key: str) -> list[str]:
 
 
 def _iso_now() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _age_seconds(iso: str) -> float | None:
     """Seconds since an artifact timestamp, or None when it cannot be read."""
     try:
         then = datetime.strptime(iso.strip(), "%Y-%m-%dT%H:%M:%SZ").replace(
-            tzinfo=timezone.utc)
+            tzinfo=UTC)
     except (AttributeError, ValueError):
         return None
-    return (datetime.now(timezone.utc) - then).total_seconds()
+    return (datetime.now(UTC) - then).total_seconds()
 
 
 def _pid_alive(pid: int, marker: str) -> bool:
@@ -394,18 +393,23 @@ def _head_sha(cwd: Path, repo: str, pr: int) -> str:
     return out.stdout.strip() if out.returncode == 0 else "unreadable"
 
 
+def _shquote(value: object) -> str:
+    """POSIX single-quote `value` for the child's `bash -c` body."""
+    return "'" + str(value).replace("'", "'\\''") + "'"
+
+
 def child_script(rail: Path, repo: str, pr: int, logp: Path, art: Path,
                  extra: list[str]) -> list[str]:
     """The detached rail's argv. NOTHING but the one lander is invoked: no gh
     merge, no flags added, no gate relaxed. `extra` is passed through verbatim
     because it is the operator's own rail invocation (e.g. `--dry-run`)."""
-    q = lambda s: "'" + str(s).replace("'", "'\\''") + "'"
-    rail_args = " ".join(q(a) for a in [str(rail), str(pr), "--repo", repo, *extra])
+    rail_args = " ".join(
+        _shquote(a) for a in [str(rail), str(pr), "--repo", repo, *extra])
     body = (
-        f"printf 'CHILD_STARTED=%s\\n' \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\" >> {q(art)}\n"
-        f"bash {rail_args} >> {q(logp)} 2>&1\n"
+        f"printf 'CHILD_STARTED=%s\\n' \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\" >> {_shquote(art)}\n"
+        f"bash {rail_args} >> {_shquote(logp)} 2>&1\n"
         f"rc=$?\n"
-        f"printf 'EXIT=%s\\nFINISHED_AT=%s\\n' \"$rc\" \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\" >> {q(art)}\n"
+        f"printf 'EXIT=%s\\nFINISHED_AT=%s\\n' \"$rc\" \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\" >> {_shquote(art)}\n"
         f"exit \"$rc\"\n"
     )
     return ["bash", "-c", body]

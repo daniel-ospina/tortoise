@@ -8,9 +8,10 @@ set by the runner QUEUE (run 41557371710: created 01:05:15Z, still queued at
 ceiling is 18064 s, so it was healthy-and-waiting when the LANE died and took the
 verdict with it. Make the rail the thing that outlives the lane.
 
-The proof that matters is `test_rail_survives_the_lane_group_kill` TOGETHER WITH
-`test_mutant_without_detachment_the_rail_dies_with_the_lane`: the same launch,
-the same kill, opposite outcomes. A test that passes either way proves nothing.
+The proof that matters is `test_detachment_is_what_survives_the_lane` in its
+TWO arms (`[False]` and `[True]`): the same launch, the same kill, opposite
+outcomes — the `[False]` arm is the mutant (detachment off) and the rail dies
+with the lane, so a test that passes either way proves nothing.
 
 No database, no network: the "rail" is a stub script that says what the real one
 says, and the launcher never resolves a repo it was given.
