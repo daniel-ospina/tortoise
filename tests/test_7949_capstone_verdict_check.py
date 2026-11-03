@@ -3426,6 +3426,69 @@ def test_the_absent_record_arm_is_LOUD_and_is_the_only_place_it_shows(tmp_path):
     assert "every cited blocker verified" not in out, out
 
 
+def test_an_unreadable_record_at_the_default_path_is_exit_2_not_an_absent_one(tmp_path):
+    """`is_file()` is not "is the path free" (#10601 review round 3, P1).
+
+    ⛔ MEASURED ON THE REVIEW, and it is a B2-class disarm of the arm this PR
+    adds. The presence test was ``states_path.is_file()``, so a DIRECTORY, a
+    FIFO or a DANGLING SYMLINK at ``blocker-states.json`` made it False — the
+    loader was never called, ``blocker_states`` stayed ``None``, V12 did not
+    apply, and the gate exited 0 printing "no …blocker-states.json" over a path
+    that EXISTS. The SAME path named through ``--blocker-states`` exited 2, so
+    one unreadable record got two verdicts decided by how the path was spelled.
+    ``os.path.lexists`` makes anything that was PUT there the exit 2 this arm's
+    docstring promises; only a path with nothing at it is the documented
+    absent-record arm (pinned separately, and asserted here as the control).
+
+    Non-vacuity: with the pre-fix ``is_file()`` test the directory and the
+    dangling symlink both return 0 and both print "NOT verified".
+    """
+    import io
+    import os
+    import shutil
+    from contextlib import redirect_stderr, redirect_stdout
+    bundle = _REPO / "docs/evidence/7949-capstone"
+    dest = tmp_path / "docs/evidence/7949-capstone"
+    dest.mkdir(parents=True)
+    for name in ("capstone.log", "preregistration.json"):
+        src = bundle / name
+        if src.exists():
+            shutil.copy(src, dest / name)
+    record = dest / cvc.BLOCKER_STATES_DEFAULT.name
+
+    def gate():
+        buf, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(buf), redirect_stderr(err):
+            code = cvc.main([str(LOG), "--repo", str(tmp_path)])
+        return code, buf.getvalue(), err.getvalue()
+
+    # 1. A DIRECTORY at the record's path. Committable as `blocker-states.json/.keep`.
+    record.mkdir()
+    (record / ".keep").write_text("")
+    code, out, err = gate()
+    assert code == 2, (
+        "a DIRECTORY at the default blocker-states path was read as 'no record' "
+        f"and the gate exited {code} — V12 was disarmed by the path's TYPE: {out}")
+    assert "NOT verified" not in out, out
+    shutil.rmtree(record)
+
+    # 2. A DANGLING SYMLINK at the same path — nothing to read, but something
+    #    was put there, and it is not the absent arm.
+    os.symlink(str(tmp_path / "nope.json"), record)
+    code, out, err = gate()
+    assert code == 2, (
+        "a DANGLING SYMLINK at the default blocker-states path was read as 'no "
+        f"record' and the gate exited {code}: {out}")
+    record.unlink()
+
+    # 3. CONTROL — genuinely nothing at the path is still the documented arm.
+    assert not os.path.lexists(record), "the control needs the path to be empty"
+    code, out, _ = gate()
+    assert code == 0 and "NOT verified" in out, (
+        "the absent-record arm stopped being the loud exit-0 the bundle states: "
+        f"{code} {out}")
+
+
 def test_a_refused_run_whose_row_carries_a_measurement_is_not_exempt():
     """The exemption needs ALL THREE legs, and this is the one that was missing.
 

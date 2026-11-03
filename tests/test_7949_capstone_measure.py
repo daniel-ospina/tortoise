@@ -3710,11 +3710,11 @@ def test_the_bare_continuation_cites_name_what_they_say():
         # are pinned here instead. The sentence wraps over three lines and a row
         # scopes to ONE line, so the claim takes three rows.
         ("E1-E5-PROOFS.md", 'declares `STEPS = ("S0"', (
-            ("132", 'STEPS = ("S0", "S1", "S2.1", "S2.2", "S2.3", "S3", '
+            ("133", 'STEPS = ("S0", "S1", "S2.1", "S2.2", "S2.3", "S3", '
                     '"S5", "S6")'),
         ), "capstone_verdict_check"),
-        ("E1-E5-PROOFS.md", "_step_accounting` (`:603`) refuses a GREEN row whose", (
-            ("603", "def _step_accounting("),
+        ("E1-E5-PROOFS.md", "_step_accounting` (`:604`) refuses a GREEN row whose", (
+            ("604", "def _step_accounting("),
         ), "capstone_verdict_check"),
         # ⛔ A SECOND DOCUMENT PRINTS THE SAME DECLARATION (#10601 review round 2).
         # `docs/00_index.md`'s capstone row cites this gate too, and it moved
@@ -3724,7 +3724,7 @@ def test_the_bare_continuation_cites_name_what_they_say():
         # and the rows above covered ONE document. Every doc that prints a
         # `tools/*.py` number needs its own row here, not just the first one.
         ("docs/00_index.md", "declares the eight steps", (
-            ("132", 'STEPS = ("S0", "S1", "S2.1", "S2.2", "S2.3", "S3", '
+            ("133", 'STEPS = ("S0", "S1", "S2.1", "S2.2", "S2.3", "S3", '
                     '"S5", "S6")'),
         ), "capstone_verdict_check"),
     )

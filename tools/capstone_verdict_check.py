@@ -121,6 +121,7 @@ if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
 
 import argparse
 import json
+import os
 import posixpath
 import re
 import subprocess
@@ -1401,7 +1402,18 @@ def main(argv: list[str] | None = None) -> int:
     blocker_states = None
     states_path = (Path(args.blocker_states) if args.blocker_states
                    else repo / BLOCKER_STATES_DEFAULT)
-    if args.blocker_states or states_path.is_file():
+    # ⛔ `is_file()` IS NOT "IS THE PATH FREE" (#10601 review round 3, P1).
+    # The presence test was `states_path.is_file()`, so a DIRECTORY, a FIFO or a
+    # DANGLING SYMLINK at the same path made it False — the loader was never
+    # called, `blocker_states` stayed None, V12 did not apply, and the gate
+    # exited 0 printing "no …blocker-states.json" over a path that EXISTS. The
+    # SAME path named via `--blocker-states` exited 2, so one unreadable record
+    # got two verdicts decided by how the path was spelled. `os.path.lexists`
+    # is the honest test for "something is at this path": a dangling symlink is
+    # still a thing someone put there, and the loader's `OSError` turns it into
+    # the exit 2 this arm's docstring promises. Only a path with NOTHING at it
+    # is the "no record on disk" arm.
+    if args.blocker_states or os.path.lexists(states_path):
         # A record that is PRESENT but unreadable is exit 2, never "no V12".
         # Downgrading a malformed record to "not applicable" would make
         # `{"blockers": []}` a way to disarm the arm the bundle depends on.
