@@ -1898,6 +1898,24 @@ def test_the_db_uri_log_line_does_not_print_a_query_credential(
     assert "tt_leak" not in caplog.text
 
 
+@pytest.mark.parametrize("hostile", [
+    "/tmp/x.db?password=hunter2",
+    "//u:hunter2@host/x.db",          # #2987: absolute, scheme dropped, authority kept
+])
+def test_the_db_uri_log_line_does_not_print_a_userinfo_credential(
+        monkeypatch, capsys, caplog, tmp_path, hostile):
+    """The `?`/`#` cut was only HALF the masker's rule: a scheme-dropped value keeps
+    its USERINFO, so the log line printed it in clear while stdout redacted the same
+    value. Both halves must hold."""
+    _global(tmp_path)
+    monkeypatch.setenv("TORTOISE_DB_URI", hostile)
+    with caplog.at_level("WARNING"):
+        assert _run(("config", "show", "--json")) == 0
+    cap = capsys.readouterr()
+    assert "hunter2" not in cap.out + cap.err
+    assert "hunter2" not in caplog.text
+
+
 def test_a_resolved_path_with_a_colon_is_still_a_path(monkeypatch, capsys, tmp_path):
     """`_resolve_db_target` only returns absolute paths here, so a colon is legal —
     calling it "userinfo-shaped" was a false statement about a working store."""
