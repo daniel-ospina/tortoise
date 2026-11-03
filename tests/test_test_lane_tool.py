@@ -1057,6 +1057,166 @@ def test_arm_2_fails_CLOSED_when_the_moment_of_action_liveness_goes_UNREADABLE(
     assert "could not be re-established at the moment of action" in "\n".join(out), out
 
 
+def test_arm_3_fails_CLOSED_when_the_moment_of_action_liveness_goes_UNREADABLE(
+        tmp_path, monkeypatch):
+    """Arm 3's moment-of-action chain carries the SAME fail-closed term as arm 2's,
+    and until this test existed nothing pinned it.
+
+    Measured, not assumed: deleting `now_live is None or` from arm 3's chain left
+    the whole suite GREEN (the sibling test one screen up does not arm the
+    consent switch, so `removed == []` there is held by the report-only gate that
+    runs *after* this one). With the term gone and the operator's switch ARMED,
+    an unreadable `/proc` at the moment of action makes `now_named` False by
+    construction — `now_live is not None and ...` is the term that produces it —
+    so the chain falls through to `docker rm -f` on a container the sweep can no
+    longer establish is unheld. That is the one fail-open step a destructive path
+    must not have, on the arm a cross-`CELL_HOME` lane depends on.
+
+    Mutation: drop `now_live is None or` from arm 3's moment-of-action chain in
+    `reap_orphans` and this reaps — red (`removed == []` fails)."""
+    wt = tmp_path / ".worktrees" / "lost-lane"
+    wt.mkdir(parents=True)
+    slug = tl.slug_for(wt)          # 10 hex, so `_HEX_SLUG` admits the name
+    removed: list = []
+    reads = {"n": 0}
+
+    def fake(*a, **k):
+        if a[0] == "ps":
+            return _R(0, f"fdb-lane-{slug}\trunning\n", "")
+        if a[0] == "rm":
+            removed.append(a[1:])
+        return _R(0, "", "")
+
+    def live():
+        reads["n"] += 1
+        # (1) readable with no holder, (2) the surface goes away mid-sweep.
+        return set() if reads["n"] == 1 else None
+
+    monkeypatch.setattr(tl, "_docker", fake)
+    monkeypatch.setattr(tl, "_touch_lease", lambda _n: None)
+    monkeypatch.setattr(tl, "lane_name", lambda: "fdb-lane-mine")
+    monkeypatch.setattr(tl, "_worktree_slugs", lambda: {})   # owner indeterminate
+    monkeypatch.setattr(tl, "_live_lane_paths", live)
+    monkeypatch.setattr(tl, "_container_in_use", lambda _n: False)
+    monkeypatch.setattr(tl, "container_state", lambda _n: "running")
+    monkeypatch.setattr(tl, "_started_epoch", lambda _n: time.time() - 40 * 3600)
+    monkeypatch.setattr(tl, "_unused_gap", lambda _n: 40.0)
+    monkeypatch.setenv(tl.OWNER_INDETERMINATE_REAP_ENV, "1")
+    out = tl.reap_orphans()
+    assert removed == [], (removed, out)
+    assert "liveness could not be re-established" in "\n".join(out), out
+
+
+@pytest.mark.parametrize("unreadable_at", ["sweep", "moment_of_action"])
+def test_arm_2_fails_CLOSED_when_the_CLIENT_probe_goes_UNREADABLE(
+        tmp_path, monkeypatch, unreadable_at):
+    """`_container_in_use` returning `None` is not "no client attached".
+
+    Both places arm 2 consults the container for an attached client carry the
+    same fail-closed term — `if busy is None:` at the sweep snapshot and
+    `busy_now is not False` at the moment of action — and until this test
+    existed NEITHER was pinned. Measured: replacing `busy_now is not False` with
+    the truthiness test leaves the whole suite green, and so does deleting the
+    `busy is None` branch (with the second probe answering `False`, which is the
+    only state in which the earlier guard is the deciding one). An unreadable
+    probe then falls straight through to `docker rm -f` — the one fail-open step
+    a destructive path must not have, and the rule the source comment states
+    verbatim ("None (unreadable) must never fall through the `or` chain to the
+    removal").
+
+    The stub counts calls: probe #1 is the sweep snapshot, probe #2 is the
+    moment-of-action re-read, so each parametrisation makes exactly ONE of them
+    unreadable and leaves the other `False`.
+
+    Mutation: delete the arm-2 `if busy is None:` branch (`sweep`) or replace
+    `busy_now is not False` with `busy_now` (`moment_of_action`) and the matching
+    case reaps — red."""
+    owner = tmp_path / "live-lane-worktree"
+    owner.mkdir()
+    removed: list = []
+    probes = {"n": 0}
+
+    def fake(*a, **k):
+        if a[0] == "ps":
+            return _R(0, "fdb-lane-losinglane\trunning\n", "")
+        if a[0] == "rm":
+            removed.append(a[1:])
+        return _R(0, "", "")
+
+    def in_use(_name):
+        probes["n"] += 1
+        return None if probes["n"] == (1 if unreadable_at == "sweep" else 2) else False
+
+    monkeypatch.setattr(tl, "_docker", fake)
+    monkeypatch.setattr(tl, "_touch_lease", lambda _n: None)
+    monkeypatch.setattr(tl, "lane_name", lambda: "fdb-lane-mine")
+    monkeypatch.setattr(tl, "_worktree_slugs", lambda: {"losinglane": str(owner)})
+    monkeypatch.setattr(tl, "_live_lane_paths", lambda: set())
+    monkeypatch.setattr(tl, "_container_in_use", in_use)
+    monkeypatch.setattr(tl, "container_state", lambda _n: "running")
+    monkeypatch.setattr(tl, "_started_epoch", lambda _n: time.time() - 5 * 3600)
+    monkeypatch.setattr(tl, "_unused_gap", lambda _n, **k: 40.0)
+    monkeypatch.setenv(tl.LANE_GONE_REAP_ENV, "1")
+    out = tl.reap_orphans()
+    assert removed == [], (unreadable_at, removed, out)
+    assert probes["n"] == (1 if unreadable_at == "sweep" else 2), (unreadable_at, probes)
+    expected = ("could not be asked whether it is in use"
+                if unreadable_at == "sweep"
+                else "could not be re-established at the moment of action")
+    assert expected in "\n".join(out), (unreadable_at, out)
+
+
+@pytest.mark.parametrize("unreadable_at", ["sweep", "moment_of_action"])
+def test_arm_3_fails_CLOSED_when_the_CLIENT_probe_goes_UNREADABLE(
+        tmp_path, monkeypatch, unreadable_at):
+    """Arm 3's two client probes carry the same unpinned fail-closed terms.
+
+    Same measured gap as arm 2: neither `if busy is None:` (sweep) nor
+    `now_busy is not False` (moment of action) was pinned, so either could be
+    deleted or turned into a truthiness test with the suite still green — and an
+    unreadable `CLIENT LIST` (an `ERR`/`LOADING`/`NOAUTH` reply, or a failed
+    `docker exec`) would then be read as "nothing is using it" on the arm a
+    cross-`CELL_HOME` lane depends on, because its lease lives elsewhere.
+
+    Mutation: delete arm 3's `if busy is None:` branch (`sweep`) or replace
+    `now_busy is not False` with `now_busy` (`moment_of_action`) and the matching
+    case reaps — red."""
+    wt = tmp_path / ".worktrees" / "clientless-lane"
+    wt.mkdir(parents=True)
+    slug = tl.slug_for(wt)
+    removed: list = []
+    probes = {"n": 0}
+
+    def fake(*a, **k):
+        if a[0] == "ps":
+            return _R(0, f"fdb-lane-{slug}\trunning\n", "")
+        if a[0] == "rm":
+            removed.append(a[1:])
+        return _R(0, "", "")
+
+    def in_use(_name):
+        probes["n"] += 1
+        return None if probes["n"] == (1 if unreadable_at == "sweep" else 2) else False
+
+    monkeypatch.setattr(tl, "_docker", fake)
+    monkeypatch.setattr(tl, "_touch_lease", lambda _n: None)
+    monkeypatch.setattr(tl, "lane_name", lambda: "fdb-lane-mine")
+    monkeypatch.setattr(tl, "_worktree_slugs", lambda: {})   # owner indeterminate
+    monkeypatch.setattr(tl, "_live_lane_paths", lambda: set())
+    monkeypatch.setattr(tl, "_container_in_use", in_use)
+    monkeypatch.setattr(tl, "container_state", lambda _n: "running")
+    monkeypatch.setattr(tl, "_started_epoch", lambda _n: time.time() - 40 * 3600)
+    monkeypatch.setattr(tl, "_unused_gap", lambda _n, **k: 40.0)
+    monkeypatch.setenv(tl.OWNER_INDETERMINATE_REAP_ENV, "1")
+    out = tl.reap_orphans()
+    assert removed == [], (unreadable_at, removed, out)
+    assert probes["n"] == (1 if unreadable_at == "sweep" else 2), (unreadable_at, probes)
+    expected = ("could not be asked whether it is in use"
+                if unreadable_at == "sweep"
+                else "liveness could not be re-established")
+    assert expected in "\n".join(out), (unreadable_at, out)
+
+
 def test_arm_2_reports_an_UNREADABLE_proc_as_UNKNOWN_not_as_unheld(
         tmp_path, monkeypatch):
     """The report must not state an unreadable read AS A RESULT (#10693 review).
