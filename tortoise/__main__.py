@@ -3867,6 +3867,13 @@ def _cmd_config(args) -> int:
                       "that first (`chmod u+x "
                       f"{_printable(_shlex.quote(str(blocker)))}`); the "
                       "file's own mode cannot be checked until it is.")
+                # The blocker is chosen shallowest and can be a shared parent,
+                # and `chmod` needs OWNERSHIP — which the report cannot grant.
+                # Naming that here is the difference between advice that can be
+                # followed and an imperative the reader cannot obey.
+                print("   That `chmod` needs ownership of the directory — if it "
+                      "is a shared parent you do not own, ask its owner to "
+                      "grant traversal.")
             else:
                 print("   The file is there but unreadable — fix its permissions "
                       f"(`chmod 600 "

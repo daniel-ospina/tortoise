@@ -1592,7 +1592,7 @@ def test_the_unreadable_remedy_names_which_object_blocks(capsys, tmp_path):
         line = next(ln for ln in out.splitlines() if "chmod " in ln)
         assert "chmod 600 " in line
         inside = line.split("chmod 600 ", 1)[1].rstrip("`).")
-        assert shlex.split(inside) == [str(file_store)]
+        assert shlex.split(inside) == [os.path.realpath(str(file_store))]
     finally:
         file_store.chmod(0o600)
 
@@ -1613,7 +1613,8 @@ def test_the_unreadable_remedy_names_which_object_blocks(capsys, tmp_path):
         line = next(ln for ln in out.splitlines() if "chmod u+x " in ln)
         inside = line.split("chmod u+x ", 1)[1].split("`", 1)[0]
         # the DIRECTORY, not the child file nothing can stat
-        assert shlex.split(inside) == [str(dir_store.parent)]
+        assert shlex.split(inside) == [
+            os.path.realpath(str(dir_store.parent))]
     finally:
         dir_store.parent.chmod(0o700)
 
@@ -1644,15 +1645,16 @@ def test_the_unreadable_remedy_finds_the_shallowest_and_the_real_blocker(
     inner = outer / "inner"
     _write(inner / ".tortoise" / "credentials.json", GLOBAL)   # the FILE is 0600
     monkeypatch.setenv("HOME", str(inner))     # so the store IS a candidate
-    inner.chmod(0o000)
-    outer.chmod(0o000)
     try:
+        inner.chmod(0o000)
+        outer.chmod(0o000)
         os.chdir(elsewhere)
         assert _run() == 1
         out = capsys.readouterr().out
         line = next(ln for ln in out.splitlines() if "chmod u+x " in ln)
         inside = line.split("chmod u+x ", 1)[1].split("`", 1)[0]
-        assert shlex.split(inside) == [str(outer)]     # NOT inner
+        assert shlex.split(inside) == [
+            os.path.realpath(str(outer))]      # NOT inner
     finally:
         outer.chmod(0o700)
         inner.chmod(0o700)
@@ -1664,15 +1666,19 @@ def test_the_unreadable_remedy_finds_the_shallowest_and_the_real_blocker(
     repo = tmp_path / "repo"
     repo.mkdir()
     (repo / ".tortoise").symlink_to(real_store)   # the CWD candidate is a link
-    deep.chmod(0o000)
+    # block 2 must not inherit block 1's HOME: the CWD candidate is the store
+    # under test here, and a leftover HOME would add a second one.
+    monkeypatch.setenv("HOME", str(tmp_path / "no-store"))
     try:
+        deep.chmod(0o000)
         os.chdir(repo)
         assert _run() == 1
         out = capsys.readouterr().out
         assert "chmod 600" not in out
         line = next(ln for ln in out.splitlines() if "chmod u+x " in ln)
         inside = line.split("chmod u+x ", 1)[1].split("`", 1)[0]
-        assert shlex.split(inside) == [str(deep)]      # the REAL blocker
+        assert shlex.split(inside) == [
+            os.path.realpath(str(deep))]       # the REAL blocker
     finally:
         deep.chmod(0o700)
 
@@ -1884,11 +1890,12 @@ def test_an_unreadable_store_is_not_offered_for_deletion(capsys, tmp_path):
         out = capsys.readouterr().out
         assert "Do NOT delete it" in out
         assert "repair or delete it" not in out
+        import os
         import shlex
         line = next(ln for ln in out.splitlines() if "chmod u+x " in ln)
         inside = line.split("chmod u+x ", 1)[1].split("`", 1)[0]
         # the DIRECTORY, not the child file that cannot even be stat'ed
-        assert shlex.split(inside) == [str(d)]
+        assert shlex.split(inside) == [os.path.realpath(str(d))]
         assert "chmod 600" not in out
     finally:
         d.chmod(0o700)
