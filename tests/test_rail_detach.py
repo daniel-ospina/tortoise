@@ -522,7 +522,10 @@ def test_an_unbounded_gh_cannot_wedge_the_duplicate_rail_lock(tmp_path, monkeypa
     t0 = time.time()
     ln = launch(sd, co, pr=71)
     elapsed = time.time() - t0
-    assert elapsed < rd.GH_PROBE_TIMEOUT_S + 3, f"launch blocked {elapsed:.1f}s on `gh`"
+    # The LOWER bound is the vacuity guard: an instant `gh` would mean the stub
+    # below never ran and this test proves nothing about the timeout.
+    assert rd.GH_PROBE_TIMEOUT_S <= elapsed < rd.GH_PROBE_TIMEOUT_S + 3, \
+        f"launch took {elapsed:.1f}s — not the {rd.GH_PROBE_TIMEOUT_S}s bound"
     assert ln.head == "unreadable"           # informational only; nothing gates on it
     assert wait_state(sd, 71, rd.MERGED).state == rd.MERGED   # the rail still ran
 
@@ -538,4 +541,4 @@ def test_an_unanswering_gh_repo_view_refuses_instead_of_hanging(tmp_path, monkey
     with pytest.raises(rd.Refused) as ei:
         rd.launch(72, cwd=co, state_dir=tmp_path / "state")
     assert "did not answer within" in str(ei.value)
-    assert time.time() - t0 < rd.GH_PROBE_TIMEOUT_S + 3
+    assert rd.GH_PROBE_TIMEOUT_S <= time.time() - t0 < rd.GH_PROBE_TIMEOUT_S + 3
