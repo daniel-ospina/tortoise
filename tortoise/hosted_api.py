@@ -12441,8 +12441,10 @@ _DEMO_SEMANTIC_POINTS = [
 # (pid, content) — the demo's SAMPLE TRANSCRIPT: DECLARED, NOT WRITTEN.
 # ⛔ Since #10000 these carry NO graph node. §9.1/D1 puts raw turn text in
 # Postgres ("not in the graph, not a `Document`, not a `Point`"), so
-# `_seed_demo_graph` writes only the demo `:Session` and states this list's
-# LENGTH as its `turn_count` / the response's `sample_turns`. The ids are still
+# `_seed_demo_graph` writes only the demo `:Session` — whose `turn_count` is
+# **0**, because it stores no turn — and reports this list's LENGTH as the
+# response's `sample_turns`, NEVER as `turn_count` (which is a completeness
+# claim the session read acts on; see the note at the write site). The ids are still
 # declared here because `_DEMO_POINT_IDS` names them: a graph seeded BEFORE
 # #10000 holds those nodes, and `org.point_count` must keep excluding them.
 # Read the texts as the sample transcript the demo DESCRIBES — nothing writes
@@ -12679,7 +12681,8 @@ def _seed_demo_graph(org_id: str) -> dict:
         "session_id": session_id,
         "points": total_points,
         #: The declared length of the sample transcript. Survives the removal
-        #: of the turn nodes because the demo Session still states it.
+        #: of the turn nodes because the DECLARATION survives; the Session
+        #: states 0 — the number of turns it actually stores.
         "sample_turns": len(_DEMO_EPISODIC_TURNS),
         "layers": {
             "semantic": len(semantic_points),
@@ -12695,7 +12698,9 @@ def _seed_demo_graph(org_id: str) -> dict:
 
 @app.post("/internal/demo")
 async def create_demo_graph(request: Request):
-    """Create an OPT-IN demo graph with sample Points across all 4 ontology
+    """Create an OPT-IN demo graph with sample Points across the semantic,
+    epistemic and procedural layers, plus the demo `:Session` (the episodic
+    layer carries no Point since #10000, §9.1/D1), across the 4 ontology
     layers.
 
     #2360 (re-spec): this is NO LONGER auto-called by the tenant-provision
@@ -34141,8 +34146,10 @@ async def public_demo(org: dict = Depends(get_current_org_gated)):  # noqa: B008
         # worker hand-off too (the probe in the lane guard finds it otherwise).
         await asyncio.to_thread(
             _update_onboarding_state, org["org_id"], demo_created=True)
+        # 10 = the 9 seeded `:Point` nodes + `_demo_sentinel` (was a stale 15
+        # that never matched the seed; corrected with the #10000 census).
         await _track_onboarding_event(org, "first_memory_created",
-                                      source="demo", point_count=15)
+                                      source="demo", point_count=10)
         return {"status": "already_seeded", "org_id": org["org_id"]}
 
     created = out["created"]

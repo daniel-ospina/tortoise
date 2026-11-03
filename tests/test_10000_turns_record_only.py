@@ -3088,7 +3088,8 @@ def test_the_demo_seed_writes_no_turn_text_into_the_graph(monkeypatch):
     shape §9.1/D1 forbids and the shape `#10000` removed from the capture path
     (`sdk._write_capture_turns` keeps only `_SESSION_REDACTIONS_CYPHER` when the
     record holds the turns). It was reachable on `main` through the MCP demo tool
-    (`mcp_server` → `hosted_api._seed_demo_graph`) and the `/demo-graph` route.
+    (`mcp_server` → `hosted_api._seed_demo_graph`), `/v1/demo` and
+    `/internal/demo`.
 
     A POPULATION assertion, not a call-site one: it reads the text from
     `_DEMO_EPISODIC_TURNS` (the constant survives on purpose — it still names the
@@ -3148,10 +3149,10 @@ def test_the_demo_seed_declares_NO_length_it_cannot_serve(monkeypatch):
     place that is not a promise about stored rows: the response's
     `sample_turns`.
 
-    ⚠️ This test ALSO passes on the pre-#10000 writer, where the count matched
-    three turn nodes it really wrote. It is a regression guard for the counter's
-    MEANING, not a falsifier of the text removal — the sibling test above is
-    the falsifier.
+    ⛔ It is a genuine falsifier of the counter's VALUE: it fails on the
+    pre-#10000 writer (`turn_count=3`) and on the round-1 parameterised form
+    (`turn_count=$turns` with turns=3). The sibling test above is the falsifier
+    of the TEXT removal; these two fail for different reasons.
     """
     issued, hosted_api = _seeded_statements(monkeypatch)
     declared = len(hosted_api._DEMO_EPISODIC_TURNS)
@@ -3180,17 +3181,22 @@ def test_the_demo_seed_declares_NO_length_it_cannot_serve(monkeypatch):
     assert out["points"] == 9, out
 
 
-def test_the_demo_seed_does_not_declare_a_length_its_session_read_refuses():
-    """The READ DOOR on the seeded demo session must not refuse or contradict.
+def test_the_shared_read_predicate_accepts_0_and_rejects_a_short_claim():
+    """The predicate both session doors call must accept 0 and reject a short claim.
 
-    This is the pin whose absence let the completeness-claim regression through:
-    710 tests touched the seeder and none asked what its `:Session` read
-    RETURNS. `record_read.served_turn_count` decides `turns` and the refusal for
-    BOTH session doors (#10021 review P2), so a declared count that the served
-    rows do not back is exactly the shape that guard exists to reject.
+    ⚠️ SCOPE, stated because its own earlier docstring overclaimed it: this is a
+    pin on `record_read.served_turn_count` — the predicate `hosted_api`'s
+    `GET /v1/sessions/{id}` and `sdk.get_session_detail` both delegate to — and
+    NOT on either door, and NOT on the seeder. A seeder that regressed to a
+    declared 3 would still pass THIS test; that regression is caught by the
+    counter pin above and by
+    `tests/test_write_session_and_turns_3551.py::test_demo_seed_is_excluded_from_the_primitive`.
+    What this test buys is the other half: it proves the semantic the seeder's 0
+    relies on — that 0 is an honest answer and a non-zero count with nothing
+    behind it is not.
 
-    Asserted at the predicate both doors share rather than through HTTP, so it
-    holds on the record-armed and the graph lane alike with no database:
+    Asserted at the predicate rather than through HTTP, so it holds on the
+    record-armed and the graph lane alike with no database:
       * declared 0, served 0 — the honest pair the seed now writes: no refusal,
         and the published count is the served count;
       * declared 3, served 0 — the pair the seed used to write: the published

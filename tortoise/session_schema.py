@@ -341,8 +341,10 @@ SESSION_WRITERS: tuple[SessionWriter, ...] = (
             "from the capture primitive (#3551): no `is_episodic`, no "
             "`capture_ok`. Since #10000 it writes NO demo turn node (§9.1/D1 "
             "puts the transcript in Postgres): the demo's episodic layer is its "
-            "Session plus a `turn_count` read from `_DEMO_EPISODIC_TURNS`, and "
-            "that constant is DECLARED, not written. Its Session id comes "
+            "Session with `turn_count` **0** (it stores no turn — the counter "
+            "is a completeness claim the session read acts on), and "
+            "`_DEMO_EPISODIC_TURNS` is DECLARED and reported as the response's "
+            "`sample_turns`, never written and never the counter. Its Session id comes "
             "from `demo_session_id` (the ONE derivation, #3554); the session "
             "read surfaces do NOT yet exclude the demo Session — a recorded "
             "gap (**#8290**), not a claim of coverage."),

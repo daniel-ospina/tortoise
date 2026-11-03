@@ -420,7 +420,7 @@ class TestSeedJourney:
 # naturalPerson Subject + their Organization as an organization Subject,
 # linked memberOf (org_id/user_id/email refs). Never writes demo Points, so
 # the Overview digest (team.point_count — Points only) reads 0 on a fresh
-# org, never '13 points filed'.
+# org, never the demo's count filed.
 
 # Internal endpoints authenticate via FASTAPI_INTERNAL_KEY — read at CALL
 # time by hosted_api._check_internal, so setting it here is sufficient even
@@ -477,7 +477,7 @@ class TestStarterSeed:
             assert "first-points-filed" in _completed(org_id)
             # ZERO demo/sample Points on the fresh org
             assert _point_count(org_id) == 0
-            # the Overview digest reads 0 (never '13 points filed')
+            # the Overview digest reads 0 (never the demo's count filed)
             r2 = tc.get("/v1/team")
             assert r2.status_code == 200, r2.text
             assert r2.json()["point_count"] == 0
@@ -578,6 +578,19 @@ class TestDigestExcludesDemo:
             assert r.status_code == 200, r.text
             assert r.json()["status"] == "demo_created"
             assert _point_count(org_id) == 10  # 9 + _demo_sentinel (graph)
+            # ── #10000: the READ DOOR on the demo Session ──────────────────
+            # The counter is a COMPLETENESS CLAIM `record_read.served_turn_count`
+            # acts on for BOTH session doors, so a seeder that declared the
+            # sample transcript's length while storing no turn made this read
+            # either refuse (`record_unavailable`) or publish `turns: 3` beside
+            # `turn_points: []`. Asserted HERE, through the real door on a real
+            # graph, because that is the shape the seeder-side pins cannot see.
+            from tortoise.session_schema import demo_session_id
+            detail = tc.get(f"/v1/sessions/{demo_session_id(org_id)}")
+            assert detail.status_code == 200, detail.text
+            body = detail.json()
+            assert body["turns"] == 0, body
+            assert body["turn_points"] == [], body
             # ...but the digest count EXCLUDES them — still 0
             assert tc.get("/v1/team").json()["point_count"] == 0
             # a real user filing counts normally
@@ -605,8 +618,7 @@ class TestDigestExcludesDemo:
             rows = _proj(org_id).query(
                 "MATCH (p:Point) RETURN p.id").result_set
             written = {row[0] for row in rows}
-            from tortoise.hosted_api import (
-                _DEMO_EPISODIC_TURNS, _DEMO_POINT_IDS, _DEMO_SENTINEL_ID)
+            from tortoise.hosted_api import _DEMO_EPISODIC_TURNS, _DEMO_POINT_IDS, _DEMO_SENTINEL_ID
             assert _DEMO_SENTINEL_ID == "_demo_sentinel"
             assert written <= _DEMO_POINT_IDS
             # The set is a deliberate SUPERSET since #10000: it still names the
