@@ -303,9 +303,24 @@ _SDK_OPENERS = frozenset({
     # learn these names would silently stop counting those lanes — exactly the
     # drift this inventory exists to catch.
     "_org_sdk", "_org_sdk_for_credential", "_org_sdk_from_name",
+    # #4051: the org-limit gate's SDK (`graph_name=_data_graph_name(org)` or
+    # `_org_sdk_for_credential(org)`). Listed here SO THAT its call sites count
+    # as sites — the site walker's `unconditional` set is `_SDK_OPENERS +
+    # _INSTALLING_OPENERS`, so an opener declared only in `_UNBOUND_OPENERS`
+    # would be judged as a handle with its own construction uncounted.
+    "_gate_sdk_for",
 })
 #: The openers that install a record tenant on the SDK they return.
-_INSTALLING_OPENERS = frozenset({"_data_sdk", "_data_sdk_offloaded"})
+#:
+#: `_data_sdk_with_projection` (#10602) is `_data_sdk` PLUS the projection
+#: attach: it opens through `_data_sdk` (`sdk = _data_sdk(org)`), and `_data_sdk`
+#: binds this request's record tenant before returning
+#: (`_bind_record_tenant(sdk, org)`), so it installs before returning exactly
+#: like its two neighbours. It arrived on `origin/main` AFTER this branch's base
+#: and the classification leg below went RED on the MERGE tree while staying
+#: green on the branch — the leg doing precisely its job (#10723 review F1).
+_INSTALLING_OPENERS = frozenset({"_data_sdk", "_data_sdk_offloaded",
+                                 "_data_sdk_with_projection"})
 #: The openers that return an SDK with NO record tenant installed on it. Every
 #: one of these is a real SDK handle, so a write through it without a later
 #: `_TENANT_INSTALLERS` call is exactly the unbound write this file exists to
@@ -324,6 +339,18 @@ _UNBOUND_OPENERS = frozenset({
     "_org_sdk",                   # #10180: the one default-graph resolver
     "_org_sdk_from_name",         #   …its already-resolved-name twin (no I/O)
     "_org_sdk_for_credential",    #   …and its credential-shaped twin
+    # #4051: the org-limit gate's own SDK — `_make_sdk(graph_name=…)` for a
+    # graph-bound key, `_org_sdk_for_credential(org)` for an org-wide one, and
+    # `None` for a registry-scoped or unresolved binding. It installs nothing,
+    # so it is the UNBOUND class: today it is only ever COUNTED through (so
+    # this scan reports 0 writes through it), and a future write through it
+    # must not be looked past. Also landed on `origin/main` after this branch's
+    # base (#10723 review F1).
+    # ⚠️ This member is ALSO in `_SDK_OPENERS`, and that is not redundant:
+    # `_org_scoped_sdk_sites` builds its site set from `_SDK_OPENERS` +
+    # `_INSTALLING_OPENERS`, so a member here alone would be judged as a HANDLE
+    # while its own call site was never counted as a construction site.
+    "_gate_sdk_for",
 })
 #: The carriers that install a record tenant on an SDK that already exists.
 _TENANT_INSTALLERS = frozenset({
@@ -371,6 +398,12 @@ _NOT_A_LANE_OPENER = frozenset({
     "mine_corpus_with_sdk", "_retire_probe_sdk_locked", "_sdk_matches_env",
     "_sdk_usable", "_sdk_backend_is_embedded", "sdk_reflex",
     "_probe_sdk_key", "_probe_sdk_reset",
+    # #4051: a PASS-THROUGH, not an opener — it returns the `sdk` it was GIVEN,
+    # or `sdk_factory()`'s return, and constructs nothing itself. Same class as
+    # `mine_corpus_with_sdk`: the handle it hands back was classified at its own
+    # construction site (`_gate_sdk_for`, above). Also on `origin/main` only
+    # (#10723 review F1).
+    "_resolve_count_sdk",
 })
 
 #: The same, for CLASS-SCOPED opener methods. A method is scoped to its class, so
@@ -526,10 +559,26 @@ def _namespace_is_org_scoped(call) -> bool:
     predicate, so answering "not an org graph" here would ALSO answer `None`
     ("not an SDK handle at all") THERE and make a write through such a handle
     invisible, which is the one direction this scan must never take. The census
-    therefore counts 83 sites (81 org-graph + those 2 probes), and both halves
+    therefore counts the two probe constructions among the package's org-scoped
+    sites (the measured breakdown lives in `_org_scoped_sdk_sites`, dated to the
+    tree it was measured on), and both halves
     are pinned by `test_a_literal_namespace_is_not_an_org_scoped_site`.
+
+    An ABSENT keyword is the same construction (#10723 review F2):
+    `hosted_api._make_sdk` is `def _make_sdk(*, namespace: str | None = None,
+    graph_name: str | None = None)`, so `_make_sdk()` IS `namespace=None` at
+    runtime — the org's DEFAULT graph with no tenant. It was the one spelling
+    that reached the OPPOSITE answer on BOTH halves (not a site, and
+    `_handle_state` → `None` → the write looked past), because
+    `kwargs.get("namespace")` is Python `None` for an omitted keyword just as it
+    is for an explicit `None`. `_make_sdk(**opts)` folds in here too (`**`
+    has no `arg`), which is the same fail-closed direction. No site count moves:
+    the shipped package has no bare or `**`-spread `_make_sdk` call.
     """
     kwargs = {k.arg: k.value for k in call.keywords}
+    if "namespace" not in kwargs and "graph_name" not in kwargs:
+        # `_make_sdk()` / `_make_sdk(**opts)`: namespace=None at runtime.
+        return True
     namespace = kwargs.get("namespace")
     if "graph_name" in kwargs:
         return True
@@ -917,12 +966,20 @@ def _org_scoped_sdk_sites(tree) -> dict[str, int]:
     pass a string-literal namespace. Measured at #10046 review round 3: 94 of
     175 counted "sites" were literal-namespace constructions, i.e. 54% of the
     count was not org-scoped at all, which let the non-vacuity floor stand on
-    registry lanes alone. Corrected, the package has 83 org-scoped sites across
-    THREE modules — `hosted_api.py` 80 (two of which are the `namespace=None`
-    probe constructions the predicate COUNTS deliberately), `quota.py` 1 and
-    `supabase_control.py` 2 (the module-qualified spelling). An earlier revision
-    of this line said "81 across two modules", which described a predicate that
-    excluded `namespace=None` and missed `supabase_control.py` (#10046 review F3).
+    registry lanes alone. Corrected, the package has 88 org-scoped sites across
+    THREE modules, measured on the tree #10723 merges into (`origin/main`
+    `a6e20f05b`, 264 modules): `hosted_api.py` 85 (two of which are the
+    `namespace=None` probe constructions the predicate COUNTS deliberately),
+    `quota.py` 1 and `supabase_control.py` 2 (the module-qualified spelling).
+    ⚠️ The number is DATED on purpose. Two earlier revisions of this line said
+    "81 across two modules" and then "83 across three": each was true of the
+    predicate on the day it was written and false at the next merge, because
+    `origin/main` keeps adding openers (#10602's `_data_sdk_with_projection`,
+    #4051's `_gate_sdk_for` — both counted here by DECLARATION, which is why the
+    vocabulary is what moves this number). A bare number that outlives its tree
+    is the claim-vs-code defect this file has been sent back for four times
+    (#10046 review F3, #10723 review F3), so quote the snapshot or quote the
+    breakdown, never a bare figure.
     """
     sites: dict[str, int] = {}
     unconditional = (_SDK_OPENERS - {"_make_sdk"}) | _INSTALLING_OPENERS
@@ -1187,8 +1244,9 @@ def test_no_lane_ANYWHERE_in_the_package_writes_records_through_an_unbound_sdk()
     nothing, which is exactly the silent-invisible class #10046 was filed for
     ("the gap is invisible until such a tenant tries to write").
 
-    Measured when this leg was added: 264 modules, 83 org-scoped construction
-    sites across THREE modules, and 0 unbound record writes, so widening the scan
+    Measured on the tree this leg was last verified against (`origin/main`
+    `a6e20f05b`, 264 modules): 88 org-scoped construction sites across THREE
+    modules, and 0 unbound record writes, so widening the scan
     cannot red on the code as it stands. Its whole job is the module that does
     not exist yet. (Two earlier revisions reported different counts, each fixed
     at review: "149 entries / 175 sites" was inflated by a doubled predicate —
@@ -1197,7 +1255,10 @@ def test_no_lane_ANYWHERE_in_the_package_writes_records_through_an_unbound_sdk()
     then "81 sites / two modules" still missed `supabase_control.py`, whose two
     lanes open through the MODULE-QUALIFIED spelling `_ha._make_sdk(...)` that a
     bare-name reader cannot see. Both are fixed in `_org_scoped_sdk_sites` /
-    `_handle_state`.)
+    `_handle_state`. A third revision said "83" until `origin/main` added #10602's
+    `_data_sdk_with_projection` and #4051's `_gate_sdk_for`; the count follows the
+    declared vocabulary, so it moves when main adds an opener — see the dated
+    note in `_org_scoped_sdk_sites`.)
 
     WHAT THIS SCAN CANNOT SEE, stated rather than implied: it judges a write by
     the handle's OPENER, and only openers in the declared vocabularies are
@@ -1273,7 +1334,9 @@ def test_no_lane_ANYWHERE_in_the_package_writes_records_through_an_unbound_sdk()
         "whether they install a record tenant:" + _joined(unparsed))
 
     # The MODULE axis, which a global site floor cannot see: THREE modules
-    # contribute sites and `hosted_api.py` holds 80 of the 83, so criteria drift
+    # contribute sites and `hosted_api.py` holds 85 of the 88 (measured on
+    # `origin/main` `a6e20f05b`; the ratio, not the figure, is what matters
+    # here), so criteria drift
     # that stopped matching anywhere else would still clear the floor below with
     # the one module it already covered. A SUPERSET assertion (not equality) is
     # the honest form — a legitimate new org-scoped lane may ADD a module freely,
@@ -1287,7 +1350,7 @@ def test_no_lane_ANYWHERE_in_the_package_writes_records_through_an_unbound_sdk()
         "in which case update `_ORG_SCOPED_MODULES` deliberately:" + _joined(missing))
 
     # Non-vacuity, the same rule the single-module leg states: a scan that
-    # matched nothing is not a pass. 60 against a measured 83.
+    # matched nothing is not a pass. 60 against a measured 88.
     assert sum(sites.values()) >= 60, (
         f"the package scan found only {sum(sites.values())} org-scoped SDK "
         "construction sites — the AST criteria no longer match how lanes open "
@@ -1887,6 +1950,13 @@ def test_a_literal_namespace_is_not_an_org_scoped_site():
     `_handle_state` reaches this same predicate, so excluding it would make a
     write through such a handle invisible — so the docstring was corrected and
     the behaviour pinned here instead of left to drift either way.
+
+    The THIRD half pins the ABSENT keyword (#10723 review F2). `_make_sdk()` is
+    `namespace=None` at runtime — `hosted_api._make_sdk`'s defaults — and it was
+    the one spelling that answered the OPPOSITE way on BOTH halves: not a site,
+    and `_handle_state` → `None` ("not an SDK handle at all"), so a write
+    through it was looked straight past. The write half is asserted through
+    `_flagged` because that is the leg the silence actually cost.
     """
     registry = 'def f():\n    return _make_sdk(namespace="registry")\n'
     assert _org_scoped_sdk_sites(ast.parse(registry)) == {}, (
@@ -1897,6 +1967,22 @@ def test_a_literal_namespace_is_not_an_org_scoped_site():
         "surface, but a handle opened that way writes to the DEFAULT graph with "
         "no tenant, and `_handle_state` must not answer `None` (not-a-handle) "
         "for it")
+    absent_kwarg = 'def f():\n    return _make_sdk()\n'
+    assert _org_scoped_sdk_sites(ast.parse(absent_kwarg)) == {"f": 1}, (
+        "`_make_sdk()` with NO keyword is `namespace=None` at runtime "
+        "(`hosted_api._make_sdk`'s defaults), so it must count exactly like the "
+        "explicit `namespace=None` — otherwise the omission is the one spelling "
+        "that answers `not an org graph` on both halves")
+    absent_kwarg_write = (
+        "def f(org_id):\n"
+        "    sdk = _make_sdk()\n"
+        "    sdk.create_point('Subject', {})\n")
+    flagged = _flagged(absent_kwarg_write)
+    assert flagged and "`sdk`" in flagged[0], (
+        "a write through `_make_sdk()` is an UNBOUND write: the handle carries "
+        "no tenant and `_handle_state` answering `None` for it made the write "
+        "invisible — the false-PASS shape this file exists to remove; "
+        f"got {flagged!r}")
     org = 'def f(org_id):\n    return _make_sdk(namespace=org_id)\n'
     assert _org_scoped_sdk_sites(ast.parse(org)), (
         "the control: a non-literal namespace IS an org-scoped site")
