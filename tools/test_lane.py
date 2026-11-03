@@ -438,9 +438,13 @@ IDLE_PROBE_WINDOW_S = 5.0
 #: container may be REAPED, and "cannot tell" already means KEEP, so it must not
 #: be worth a minute of the lane's start-up.
 IDLE_PROBE_TIMEOUT = 5
-#: Wall-clock budget for the WHOLE probe, both passes. Candidates not reached
+#: Wall-clock budget for the WHOLE probe's two passes. Candidates not reached
 #: inside it are not sampled at all and are reported as not reaped (#10712
 #: review: "a sweep that cannot run must not stop a lane from starting").
+#: It does NOT cover the removal-time re-check, which is per REMOVAL rather than
+#: per candidate and is bounded by ``IDLE_PROBE_TIMEOUT`` per exec: a candidate
+#: that would burn that bound has already been dropped as unreadable in the
+#: probe, so the re-check only ever runs against a container that just answered.
 IDLE_PROBE_BUDGET_S = 20.0
 PORT_RANGE = (16390, 16499)
 DEFAULT_GRAPH = "tortoise_test_matrix"
