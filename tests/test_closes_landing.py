@@ -776,10 +776,19 @@ def test_a_keyword_separated_from_its_reference_by_a_BLANK_LINE_cannot_buy_a_pas
     # The REMEDY must be achievable for THIS cause (#10634 review of the fix):
     # the arm used to name indentation as the cause and prescribe "at the start of
     # a line", which this body ALREADY satisfies — a reader who complies stays
-    # unresolved and the issue stays open. Both causes and one actionable form.
-    assert "BLANK LINE" in finding.detail, finding.detail
+    # unresolved and the issue stays open. All THREE causes (a blank-line
+    # separator, a four-space-indented line, and a code span that now must be
+    # named too: the message once named two of three, #10634 review P3) and one
+    # actionable form.
+    assert "blank line" in finding.detail, finding.detail
+    assert "code span" in finding.detail, finding.detail
+    assert "indented" in finding.detail, finding.detail
     assert "on one line" in finding.detail, finding.detail
     assert "at the start of a line" not in finding.detail, finding.detail
+    # …and the other half of that finding: for a body that only QUOTES the
+    # keyword the remedy must not talk the author into creating a closure.
+    assert "QUOTATION" in finding.detail, finding.detail
+    assert "there is nothing to fix" in finding.detail, finding.detail
     # …and a same-line claim on the same shape still lands (the guard is the
     # blank line, not the multi-paragraph body).
     ok = _pr(121, DEFAULT, "fix: the thing\n\nCloses #100\n")
@@ -1626,6 +1635,51 @@ def test_a_carrier_that_only_quotes_the_keyword_in_a_quoted_code_block_does_not_
     assert finding.carrier == 74
 
 
+@pytest.mark.parametrize("carrier_body,why", [
+    ("Use `foo in the old version\n> note\n`Closes #100`\n",
+     "a stray run paired with the opener of a span in a later blockquote"),
+    ("Use `foo in the old version\n- note\n`Closes #100`\n",
+     "…or in a later list item"),
+    ("Use `foo in the old version\n# note\n`Closes #100`\n",
+     "…or under a later ATX heading"),
+])
+def test_a_carrier_cannot_carry_through_a_span_THAT_CROSSES_A_BLOCK(carrier_body, why):
+    """The `lands` arm again, through the INLINE strip rather than `strip_code`.
+
+    A code span is inline content, so it cannot cross a BLOCK boundary — and a
+    blockquote line, a list item, a heading, a thematic break or an HTML block
+    all end the paragraph WITHOUT a blank line. The strict scan was bounded at
+    the next BLANK line, so it paired the stray run in line 1 with the OPENER of
+    the real span in line 3, blanked the wrong region, and exposed `Closes #100`
+    — which the renderer puts inside `<code>`:
+
+        Use `foo in the old version   ->  <p>Use `foo in the old version</p>
+        > note                        ->  <blockquote><p>note
+        `Closes #100`                 ->  <code>Closes #100</code></p></blockquote>
+
+    Reported `lands`, exit 0, no annotation — the silent stranding #10597 exists
+    to surface, on the CARRIER arm (#10634 review P2, fail-open, reproduced
+    before the fix)."""
+    stacked = _pr(81, SIBLING, "Closes #100")
+    carrier = _pr(82, DEFAULT, carrier_body, head=SIBLING)
+    (finding,) = cl.classify(stacked, _by_head(stacked, carrier), DEFAULT)
+    assert finding.verdict == "inert", (why, finding)
+    assert finding.carrier == 82, why
+
+
+@pytest.mark.parametrize("body", [
+    "> a `Closes\n> #100` b\n",
+    "> - item `Closes\n>   #100` here\n",
+    "- item `Closes\n  #100` here\n",
+])
+def test_a_span_that_legitimately_crosses_lines_inside_ONE_container_is_stripped(body):
+    """…and the CONTROLS for that fix: stopping at any line that so much as
+    starts with `>` would refuse a span that legitimately crosses two lines of
+    ONE paragraph, leaving a real quoted keyword visible — the under-report
+    direction. The boundary is the CONTAINER, compared by depth."""
+    assert cl.parse_closing_refs(body, None, strict=True) == []
+
+
 def test_a_list_item_fence_cannot_buy_a_lands_on_the_default_base():
     pr = _pr(75, DEFAULT, "- item\n   ```\n  Closes #100\n")
     assert cl.classify(pr, _by_head(pr), DEFAULT) == []
@@ -1742,6 +1796,15 @@ _COMMONMARK_SHAPES = [
      "a 4-space closer inside a 2-column item still closes"),
     ("    > Closes #100\n", "4-space indent before a quote marker is an INDENTED code block"),
     ("   > Closes #100\n", "3-space indent before a quote marker is still a quote"),
+    # The bound is THREE, and the difference between 3 and 2 is a false PASS, not
+    # a cosmetic one: at 2 the 3-column quoted FENCE below stops being a fence
+    # (`` `_fence_open` `` measures from the container's content column, which the
+    # unmatched `>` no longer establishes) and the keyword inside it reads as
+    # prose. The `~~~` form is the one that discriminates — the ``` form is
+    # accidentally protected by the inline strip pairing its own two runs — so
+    # this row is what makes `{0,3}` impossible to tighten (#10634 review P3).
+    ("   > ~~~\n   > Closes #100\n   > ~~~\n",
+     "3-space indent before a quoted tilde fence is still a fence"),
     # indented code blocks, flat and quoted
     ("old version:\n\n    Closes #100\n", "flat indented code block"),
     ("> old version:\n>\n>     Closes #100\n", "indented code block inside a quote"),
@@ -1776,6 +1839,26 @@ _COMMONMARK_SHAPES = [
      "a two-backtick span across a soft line break"),
     ("- item `Closes\n  #100` here\n",
      "a span inside a list item across a soft line break"),
+    # …but a span is INLINE content, so it cannot cross a BLOCK boundary — and a
+    # blockquote / list item / heading / thematic break / HTML block all end the
+    # paragraph WITHOUT a blank line. Bounding the strict scan at the next blank
+    # line let an unmatched run pair with the OPENER of a real span in the next
+    # block, blank the wrong region and expose that span's keyword: `lands` on
+    # the CARRIER arm, exit 0, no annotation (#10634 review P2, fail-open).
+    ("a`\n> `Closes #100`\n",
+     "a stray run may not pair across a blockquote boundary"),
+    ("a`\n- `Closes #100`\n",
+     "…nor across a list-item boundary"),
+    ("a`\n# `Closes #100`\n",
+     "…nor across an ATX heading boundary"),
+    ("a`\n---\n`Closes #100`\n",
+     "…nor across a thematic break"),
+    # …and the CONTROLS that must keep working: a span legitimately crosses a
+    # soft line break INSIDE one container, so stopping at "any line starting
+    # with >" would lose these real claims (the under-report direction).
+    ("> a `Closes\n> #100` b\n", "a span across two lines of ONE paragraph"),
+    ("> - item `Closes\n>   #100` here\n",
+     "a span across two lines of ONE quoted list item"),
     # …and the claims that ARE prose
     ("> Closes #100\n", "a quoted paragraph is prose"),
     ("- item\n  ```\nCloses #100\n", "a column-0 line ends the item"),

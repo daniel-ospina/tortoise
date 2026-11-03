@@ -166,6 +166,68 @@ _CLOSING_RE_ONELINE = _closing_re(_CLOSING_SEPARATORS["strict"])
 #: scan stops looking for a closing backtick run (`_span_limit`).
 _BLANK_LINE_RE = re.compile(r"\n[ \t]*\n")
 
+#: A line that STARTS a new block, tested on the line's text AFTER its blockquote
+#: prefix. A span is inline content and cannot cross a block boundary, and most
+#: blocks end the paragraph WITHOUT a blank line — which is why the strict scan
+#: needed this as well as `_BLANK_LINE_RE` (see `_paragraph_end`).
+_BLOCK_START_RE = re.compile(
+    r"(?: {0,3}(?:[-*+]|\d{1,9}[.)])(?:[ \t]|$)"          # a list item marker
+    r"| {0,3}#{1,6}(?:[ \t]|$)"                             # an ATX heading
+    r"| {0,3}(?:(?:\*[ \t]*){3,}|(?:-[ \t]*){3,}|(?:_[ \t]*){3,})$"  # thematic break
+    r"| {0,3}<)"                                            # an HTML block
+)
+
+
+def _paragraph_end(text: str, start: int) -> int:
+    """Where the PARAGRAPH containing `start` ends, per CommonMark's block rules.
+
+    This is the STRICT arm's bound for a span's closing run, and it must be the
+    renderer's own: a code span is INLINE content, so it cannot cross a block
+    boundary — and a blockquote line, a list item, an ATX heading, a thematic
+    break or an HTML block all end the paragraph WITHOUT a blank line. Bounding
+    the search at the next blank line alone therefore let an unmatched backtick
+    pair with the OPENER of a genuine span in a later block, blank the wrong
+    region, and expose the keyword that span held:
+
+        Use `foo in the old version
+        > note
+        `Closes #100`
+
+    renders `<p>Use `foo in the old version</p><blockquote><p>note
+    <code>Closes #100</code></p></blockquote>`, i.e. CODE — and the carrier arm
+    read it as carrying the keyword: `lands`, exit 0, no annotation, on the arm
+    the whole tool exists to protect (#10634 review P2, fail-open).
+
+    Stopping EARLY can only cost a pass that was never demonstrable (a warning),
+    never a false closure, so the boundary tests err toward stopping: the
+    container is compared by DEPTH (never by prefix string) and any line that
+    could start a block ends the span.
+    """
+    line_start = text.rfind("\n", 0, start) + 1
+    first_end = text.find("\n", start)
+    if first_end < 0:
+        return len(text)
+    # The opener's own container: a span MAY cross lines inside ONE block (a
+    # continuation of the same quote or list item), and must not cross into
+    # another — `> a `Closes\n> #100` b` is one span, `a `x\n> `Closes #100``
+    # is not.
+    depth = _quote_depth(_split_prefix(text[line_start:first_end])[0])
+    pos = first_end + 1
+    while pos < len(text):
+        end = text.find("\n", pos)
+        if end < 0:
+            end = len(text)
+        line = text[pos:end]
+        if not line.strip():
+            return pos                      # a blank line ends the paragraph
+        prefix, rest = _split_prefix(line)
+        if _quote_depth(prefix) != depth:
+            return pos                      # a different container
+        if _BLOCK_START_RE.match(rest):
+            return pos                      # a new block type
+        pos = end + 1
+    return len(text)
+
 
 def _span_limit(text: str, start: int, strict: bool) -> int:
     """Where the search for a code span's CLOSING run stops.
@@ -177,10 +239,13 @@ def _span_limit(text: str, start: int, strict: bool) -> int:
         "Example: `Closes\n#10541` is the quoted form."
         -> <p>Example: <code>Closes #10541</code> is the quoted form.</p>
 
-    A span cannot cross a BLANK line (§6.1's content stays inside one paragraph),
-    so the blank line is the renderer-accurate boundary — but the two callers
-    want OPPOSITE things from an unsure case, and this is the one place the
-    module's asymmetry has to be spelled out in code:
+    A span cannot cross a BLANK line (§6.1's content stays inside one paragraph)
+    or any other BLOCK boundary (§6.1: a span is inline content), so the strict
+    scan stops at `_paragraph_end` — the renderer's own boundary. Bounding it at
+    the next blank line alone paired a stray run with the opener of a real span
+    in a later block and exposed the keyword that span held (#10634 review P2).
+    The two callers want OPPOSITE things from an unsure case, and this is the one
+    place the module's asymmetry has to be spelled out in code:
 
     * `strict` is the PASS arms (the carrier body, and the subject's own `lands`
       arm). Under-stripping there is a `lands` on a shape GitHub ignores — the
@@ -197,8 +262,7 @@ def _span_limit(text: str, start: int, strict: bool) -> int:
       reported by the strict arm's paragraph bound below.
     """
     if strict:
-        blank = _BLANK_LINE_RE.search(text, start)
-        return len(text) if blank is None else blank.start()
+        return _paragraph_end(text, start)
     line_end = text.find("\n", start)
     return len(text) if line_end < 0 else line_end
 
@@ -773,29 +837,38 @@ def classify(pr: PullRequest, by_head: dict[str, PullRequest],
             # ambiguous one downgrades to a warning (review c5-2).
             if issue not in strict_refs:
                 # The message must not assert WHAT GitHub thinks, and it must not
-                # name a CAUSE it cannot distinguish: the strict parse refuses TWO
-                # shapes — a keyword on a four-space-indented line, and a keyword
-                # separated from its `#N` by a blank line (#10634 review) — and
-                # only the first is about indentation. Prescribing "at the start of
-                # a line" for the SECOND leaves a body that already satisfies the
-                # remedy unresolved, so the requirement is stated in a form BOTH
-                # shapes can act on. The indented case is still a CODE BLOCK in one
-                # context and a list item's continuation — where GitHub DOES fire —
-                # in another (see `strip_code`, and the list-item cases pinned
-                # below), so this states what THIS tool can show, not a fact it
-                # cannot.
+                # name a CAUSE it cannot distinguish. The strict parse refuses THREE
+                # shapes and the reader can see none of them from here: a keyword on
+                # a four-space-indented line, a keyword separated from its `#N` by a
+                # blank line (#10634 review), and a keyword inside a code span that
+                # crosses a soft line break (added by the span fix). Naming two of
+                # the three told the third body's author that a cause was present
+                # that was not (#10634 review P3) — so the requirement is stated in
+                # a form ALL of them can act on. The indented case is still a CODE
+                # BLOCK in one context and a list item's continuation — where GitHub
+                # DOES fire — in another (see `strip_code`, and the list-item cases
+                # pinned below), so this states what THIS tool can show, not a fact
+                # it cannot.
+                #
+                # The remedy must also not CREATE a closure. A body that QUOTES the
+                # keyword (the multi-line code span above is exactly that) is being
+                # ignored CORRECTLY, and telling its author to "state `Closes #N` at
+                # column 0" would talk a quotation into becoming a real closure.
                 findings.append(Finding(
                     issue=issue, pr=pr.number, base=pr.base, verdict="unresolved",
                     carrier=pr.number,
                     detail=(f"PR #{pr.number} targets `{default_branch}`, but its "
                             f"`Closes #{issue}` survives only the LENIENT parse: "
-                            f"the keyword and its `#{issue}` are separated by a "
-                            f"BLANK LINE, or sit on a four-space-indented line "
-                            f"that is a code block in one context and a list "
-                            f"item's continuation in another. Neither can be "
-                            f"shown to fire, so neither is counted as a pass. "
-                            f"State `Closes #{issue}` on one line, in plain "
-                            f"prose, at column 0."),
+                            f"the reference is there in the body, but on a shape "
+                            f"this tool cannot show GitHub acts on — inside a code "
+                            f"span, on a four-space-indented line (a code block in "
+                            f"one context, a list item's continuation in "
+                            f"another), or across a blank line. None of those is "
+                            f"counted as a pass. If the reference is a "
+                            f"QUOTATION, it is being ignored correctly and there "
+                            f"is nothing to fix; if it is meant as a claim, state "
+                            f"`Closes #{issue}` on one line, in plain prose at "
+                            f"column 0, outside any backticks."),
                 ))
                 continue
             findings.append(Finding(
