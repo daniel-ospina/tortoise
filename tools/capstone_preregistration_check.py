@@ -894,8 +894,6 @@ def _touch_epochs(path: Path) -> list[int]:
 # has nothing on the base to appeal to, so it is REFUSED — the registration must land FIRST, in its
 # own PR. That refusal is what makes this a gate rather than a red `main`.
 
-#: The ref the ordering is measured against. `origin/main` first: that is what a contribution is
-#: merged into. `PREREG_ORDERING_BASE_REF` (or `--base-ref`) overrides it.
 def _touch_commits(path: Path) -> list[str]:
     """Every commit sha that TOUCHED ``path`` (``--full-history``, so a merge on a side branch counts).
 
@@ -983,8 +981,8 @@ def _atomic_detail_entry(block: dict) -> dict:
     }
 
 
-
-
+#: The ref the ordering is measured against. `origin/main` first: that is what a contribution is
+#: merged into. `PREREG_ORDERING_BASE_REF` (or `--base-ref`) overrides it.
 BASE_REF_ENV = "PREREG_ORDERING_BASE_REF"
 BASE_REF_CANDIDATES = ("origin/main", "main")
 
@@ -2130,10 +2128,15 @@ PROPOSED_ORDERING_BASE = "(this contribution — the proposed rule; no base is c
 #: document the two-field shape the validator rejects — an author following the only definition of
 #: the key wrote a disclosure the tool refused (#10546 review cycle 20, IS-1).
 #:
-#: ⛔ IT IS NOT A WAIVER UNLESS THE ARM IS ARMED (#10546 review cycle 17, IS-1). The block is read
-#: only when ``--allow-atomic-disclosure`` is passed; without it an atomic pair is REFUSED and a
-#: present block is reported as inert. The ruling on ``#10463`` (comment ``6564634454``) keeps the
-#: refusal and its reopen (``6566767704``) is ungranted; see ``check_ordering`` for the full ground.
+#: ⛔ IT IS NOT A WAIVER UNLESS THE ARM IS ARMED (#10546 review cycle 17, IS-1) — and it is NOT
+#: IGNORED WITHOUT IT (#10546 review cycle 29, ISSUE 2). What the arm buys is the PASS: disarmed —
+#: the CLI, ``run()`` and every invocation CI performs — an atomic pair is REFUSED and a present
+#: block is reported as INERT. The block is still READ on that path, and it can FAIL there: invalid
+#: or missing fields, a name that is not in the directory, or an entry carried by an ORDINARILY
+#: ordered log, which the anti-rot rule refuses while disarmed BY DESIGN. So an author who commits
+#: an entry must expect it to be judged, never assumed harmless. The ruling on ``#10463`` (comment
+#: ``6564634454``) keeps the refusal and its reopen (``6566767704``) is ungranted; see
+#: ``check_ordering`` for the full ground.
 #:
 #: ⛔ WHY THIS EXISTS AND WHY IT IS NOT ROUTE B (#10529) — the full argument is in the module
 #: docstring's "FOURTH outcome" section; one copy on purpose, so the two cannot rot apart. In short:

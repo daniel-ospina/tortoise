@@ -1700,6 +1700,23 @@ def test_the_withdrawn_bundle_no_longer_carries_an_atomic_disclosure():
     assert check._record_atomic_add(directory) == {}
 
 
+def _documenting_block_above(name: str) -> str:
+    """The contiguous `#:` block immediately above ``name = …`` in the tool's source, as one string.
+
+    Read from the source rather than restated, so a claim in the comment and the code it describes
+    cannot drift apart: a `#:` block is the ONLY definition an author reads.
+    """
+    lines = Path(check.__file__).read_text(encoding="utf-8").splitlines()
+    at = next(n for n, line in enumerate(lines) if line.split("=")[0].strip() == name)
+    block: list[str] = []
+    for line in reversed(lines[:at]):
+        if not line.startswith("#:"):
+            break
+        block.append(line)
+    assert block, f"no `#:` block documents {name}"
+    return "\n".join(reversed(block))
+
+
 def test_the_atomic_add_record_key_documents_every_required_field():
     """The comment that DEFINES the disclosure schema may not prescribe the refused shape.
 
@@ -1711,26 +1728,65 @@ def test_the_atomic_add_record_key_documents_every_required_field():
     one pointer a reader can RESOLVE: a squash leaves `branch_commits` unreachable from `main`, so
     `squash_merge` is the only commit the disclosure can be checked against.
 
-    Read from the source rather than restated, so the two cannot drift apart again: the contiguous
-    `#:` block immediately above the assignment must name every required field. On the pre-fix
-    code it names two, so this fails there.
+    The contiguous `#:` block immediately above the assignment must name every required field. On
+    the pre-fix code it names two, so this fails there.
     """
-    lines = Path(check.__file__).read_text(encoding="utf-8").splitlines()
-    at = next(
-        n for n, line in enumerate(lines) if line.split("=")[0].strip() == "ATOMIC_ADD_KEY"
-    )
-    block: list[str] = []
-    for line in reversed(lines[:at]):
-        if not line.startswith("#:"):
-            break
-        block.append(line)
-    assert block, f"no `#:` block documents {check.ATOMIC_ADD_KEY}"
-    documented = "\n".join(reversed(block))
+    documented = _documenting_block_above("ATOMIC_ADD_KEY")
     for field in ("reason", "branch_commits", "squash_merge"):
         assert field in documented, (
             f"{check.ATOMIC_ADD_KEY}'s only definition omits {field!r}, which the validator "
             f"REQUIRES — an author following it writes a block the tool refuses:\n{documented}"
         )
+
+
+def test_the_atomic_add_record_key_does_not_say_the_block_goes_unread_without_the_arm():
+    """The ONLY definition of the key must not tell an author the default path ignores the block.
+
+    ⛔ (#10546 review cycle 29, ISSUE 2) The block stated *"The block is read only when
+    ``--allow-atomic-disclosure`` is passed"*. That is FALSE on the path this PR ships, in three
+    ways, each of them ADDED by this PR and each already pinned by a sibling test:
+
+    * invalid/missing fields are refused while disarmed — `disclosure_failed.add(name)` at the top
+      of `_check_ordering_ruled` (`test_an_undisclosed_atomic_add_is_not_excused_by_an_empty_reason`
+      calls `check_ordering` with the arm OFF);
+    * a name that is not in the directory is a stale-waiver failure on that same path;
+    * the anti-rot loop runs while disarmed BY DESIGN, so an entry on an ordinarily ordered log
+      reds the default gate (`test_a_disclosure_for_a_normally_ordered_log_fails_with_the_arm_disarmed`).
+
+    Only "the pair is REFUSED and a present block is reported inert" is true, and only for the
+    atomic case. An author who reads the old sentence concludes an entry is harmless without the
+    flag — and committing one for an ordinarily ordered log reds the default gate. So the block
+    must state what the arm actually buys (the PASS) and that the block is READ and can FAIL
+    without it. On the pre-fix text neither is there, and the false clause IS, so this fails there.
+    """
+    flat = " ".join(_documenting_block_above("ATOMIC_ADD_KEY").replace("#:", " ").split())
+    assert "read only when" not in flat, (
+        f"{check.ATOMIC_ADD_KEY}'s only definition still says the block is read only when the arm "
+        f"is passed — but the disarmed path validates fields, refuses a stale name and runs the "
+        f"anti-rot rule on it:\n{flat}"
+    )
+    assert "NOT IGNORED WITHOUT IT" in flat, flat
+    for disarmed_failure in ("invalid", "not in the directory", "anti-rot"):
+        assert disarmed_failure in flat, (
+            f"{check.ATOMIC_ADD_KEY}'s only definition must name the way the block can FAIL while "
+            f"the arm is disarmed ({disarmed_failure!r} is missing):\n{flat}"
+        )
+
+
+def test_the_base_ref_env_constant_carries_the_doc_comment_written_for_it():
+    """`BASE_REF_ENV`'s `#:` block must document the CONSTANT, not the function below it.
+
+    ⛔ (#10546 review cycle 29, ISSUE 2/P3) `_touch_commits` was inserted BETWEEN the block and the
+    assignment it documents, so the block — *"The ref the ordering is measured against …"* — read
+    as the doc comment of a function that consults NO ref, and the constant it was written for sat
+    89 lines further down with nothing above it but blank lines. A `#:` block is the only
+    definition a reader gets, so a misplaced one documents the wrong object. On the pre-fix layout
+    there is no `#:` block above the assignment at all, which is why this fails there.
+    """
+    documented = _documenting_block_above("BASE_REF_ENV")
+    assert check.BASE_REF_ENV in documented, documented
+    assert "--base-ref" in documented, documented
+    assert "origin/main" in documented, documented
 
 
 def test_an_undisclosed_atomic_add_is_not_excused_by_an_empty_reason(tmp_path, monkeypatch):
