@@ -4621,6 +4621,14 @@ surfaces:
   # unregistered, this file is ALSO the `ci_selection.py --integrity` drift the
   # `manifest-integrity` required check reds on (#10475).
   - test_vocabulary_gap_census_5329.py
+  # #10626: the census's RUN-LEVEL READER. Registered `core` for the same reason
+  # as the census file above (a diff touching only `extractor_v2.py` selects
+  # `core`, and an unregistered file is the `ci_selection.py --integrity` drift
+  # the `manifest-integrity` check reds on). It asserts against a REAL searchable
+  # graph — the v2 run skips its S3 search on an embedded store, so the seam it
+  # pins is only reachable on the docker lane — and it skips VISIBLY via
+  # `LIVE_URI_SKIP_REASON` on a URI-less one rather than passing vacuously.
+  - test_vocabulary_gap_run_reader_10626.py
   # #5006: the attachments half of the same D12/O4 ruling — a fold that would
   # drop an entity only the candidate names is refused. Registered `core` beside
   # `test_never_across_fold_5080.py` (same classifier, same fold asymmetry):
