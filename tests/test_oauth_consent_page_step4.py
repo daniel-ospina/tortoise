@@ -1233,6 +1233,135 @@ def test_the_page_is_not_RENDERED_when_the_AS_cannot_verify_what_it_mints(
         bounced.headers["location"])
 
 
+def test_the_bounce_does_not_append_a_SECOND_key_when_the_flow_already_has_one() -> None:
+    """The two callers are not alike, and an unconditional append made the URL ambiguous (#10487).
+
+    The bounce (`oauth_authorize`) carries no key, but the page's own sign-in link
+    (`consent_page_html` → SIGNIN_URL) is rendered ONLY for a keyed flow, so its raw query always
+    carries one. Appending there emitted `…&attempt_key=K&attempt_key=<minted>`: benign only while
+    every reader takes the FIRST value, and a re-run of this very dead end the day one takes the
+    last. A present-but-BLANK value counts as absent — it selects the bounce branch upstream, by
+    the same stripped predicate the bounce emits by — and so does a whitespace-only one.
+    """
+    from urllib.parse import parse_qs, urlsplit
+
+    from tortoise.oauth import CONSENT_ATTEMPT_KEY_PARAM, consent_bounce_url
+
+    raw = f"client_id=c1&state=s1&{CONSENT_ATTEMPT_KEY_PARAM}=K-page"
+    emitted = consent_bounce_url(APP_ORIGIN, raw)
+    inner = parse_qs(urlsplit(parse_qs(urlsplit(emitted).query)["next"][0]).query,
+                     keep_blank_values=True)
+    assert inner[CONSENT_ATTEMPT_KEY_PARAM] == ["K-page"], (
+        "the bounce emitted a SECOND attempt key beside the flow's own: "
+        f"{inner[CONSENT_ATTEMPT_KEY_PARAM]}")
+
+    # …and a blank or whitespace-only value is treated as absent — for the SAME reason, and it is
+    # one state rather than two: `oauth_authorize` bounces on the stripped predicate above, so
+    # `%20` reaches this function in place of a key exactly like `` does.
+    # ⛔ Assert what the READERS see — the FIRST value — not that a minted key exists SOMEWHERE in
+    # the string. ``["", "<minted>"]`` satisfies "a key is present" while all three readers
+    # (`request.query_params.get`, `start.ts::searchParams.get`, the page's `attemptKey()`) take the
+    # blank first value: `start` then minted its own key, i.e. the AS mint was dead on exactly the
+    # input it was added for. The whitespace form was worse — `%20` is TRUTHY upstream, so the page
+    # rendered and `start.ts` bound the row to the guessable one-character key `" "` (#10208).
+    for blankish in ("", "%20", "+"):
+        blank = consent_bounce_url(
+            APP_ORIGIN, f"client_id=c1&state=s1&{CONSENT_ATTEMPT_KEY_PARAM}={blankish}")
+        inner_blank = parse_qs(urlsplit(parse_qs(urlsplit(blank).query)["next"][0]).query,
+                               keep_blank_values=True)
+        keys = inner_blank[CONSENT_ATTEMPT_KEY_PARAM]
+        assert len(keys) == 1, (
+            f"the bounce emitted {len(keys)} attempt_key values for the blank input "
+            f"{blankish!r}. Every reader takes the FIRST value, so a blank pair beside a minted "
+            f"key leaves the mint unread and `start` mints its own: {keys}")
+        assert len(keys[0].strip()) >= 32, (
+            f"the blank input {blankish!r} was adopted as the flow's key instead of being "
+            f"replaced by a minted one — a guessable key reopens the ownerless window (#10208): "
+            f"{keys}")
+        # The forwarded authorize request still rides along verbatim — only the key was replaced.
+        assert (inner_blank["client_id"], inner_blank["state"]) == (["c1"], ["s1"]), inner_blank
+
+
+@pytest.mark.parametrize("blankish", ["", "%20", "+"])
+def test_the_AS_bounces_on_the_SAME_blank_predicate_the_readers_use(api_client, blankish):
+    """Blank and whitespace-only are ONE state at the AS too, and it is "absent" (#10487 review).
+
+    The two halves of this hop disagreed, and each disagreed in a different direction:
+    `oauth_authorize` tested `request.query_params.get(...)` — the RAW first value, so a blank one
+    bounced while `%20` did not — and `consent_bounce_url` appended its minted key after whatever it
+    found. Measured on the pre-fix code: a blank key emitted `…&attempt_key=&attempt_key=<minted>`,
+    where every reader takes the FIRST value and so read `""`, and `%20` was TRUTHY at the AS, so
+    the PAGE rendered, its sign-in link appended a second key, and `start.ts` bound the row to the
+    guessable one-character key `" "` — the ownerless-window form of #10208.
+
+    So this pins the AS side of the one predicate: any of the three encodings a browser can send for
+    "no usable key" must take the BOUNCE branch, and the bounce must then hand back exactly one
+    non-blank key — the value the page and `start.ts` will read.
+    """
+    from urllib.parse import parse_qs, urlencode, urlsplit
+
+    from tortoise.oauth import CONSENT_ATTEMPT_KEY_PARAM
+
+    tc, _ = api_client
+    # Hand-built RAW query, so the value arrives as written: httpx would re-encode a parsed
+    # `{"attempt_key": " "}` and `"%20"` as a literal value would test the wrong thing entirely.
+    params = _authorize_params(tc, state=f"st-blank-{blankish}")
+    r = tc.get(
+        f"/oauth/authorize?{urlencode(params)}&{CONSENT_ATTEMPT_KEY_PARAM}={blankish}",
+        follow_redirects=False)
+    assert r.status_code == 302, r.text
+    base, q, _raw = _split(r.headers["location"])
+    assert base == APP_ORIGIN + "/auth", (
+        f"the AS treated attempt_key={blankish!r} as a PRESENTED key, so it rendered the page "
+        f"instead of bouncing — a whitespace-only key is guessable, and `start.ts` adopts it: {base}")
+    keys = parse_qs(urlsplit(q["next"]).query, keep_blank_values=True)[CONSENT_ATTEMPT_KEY_PARAM]
+    assert len(keys) == 1 and len(keys[0].strip()) >= 32, (
+        f"the bounce did not leave exactly one minted key for attempt_key={blankish!r}: {keys}")
+
+
+def test_the_bounce_carries_the_attempt_key_the_flow_is_bound_to(api_client) -> None:
+    """#10487: the AS mints the attempt key on the ONE leg where none exists yet.
+
+    `/api/consent/start` binds a flow to a browser with an insert-only `attempt_key` and hands it
+    back inside the return target. On a cold start it had to INVENT that key, so the key lived only
+    in the URL it happened to emit — and a visitor who signed in on a different `/auth` entry for
+    the same flow (back button, refresh, this bounce's own return target) came back without it and
+    was refused `403 flow_not_yours`.
+
+    Generating it here gives the BOUNCE and its own return leg one value end to end, and `start` adopts
+    it instead of inventing one. What that does NOT buy is a per-FLOW key: each bounce mints a fresh
+    value, so a keyless re-entry AFTER the row exists still meets `flow_not_yours` — the part of #10487
+    that remains open, because closing it needs a key an unauthenticated re-entry can re-derive. The
+    three properties pinned below are what make the mint safe and useful: the key is carried at all,
+    it is UNPREDICTABLE and per-request (it is the browser's only proof of ownership, and `state` is
+    client-chosen and public), and the inner target is still the only allowlisted API path.
+    """
+    from urllib.parse import parse_qs, urlsplit
+
+    tc, _supabase = api_client
+    params = _authorize_params(tc, state="st-carriage")
+    _r1, q1, _raw1 = _bounce(tc, params)
+    inner1 = urlsplit(q1["next"])
+    assert inner1.path == "/api/consent/start", (
+        f"the bounce's inner target must stay the allowlisted route, got {inner1.path!r}")
+    iq1 = parse_qs(inner1.query, keep_blank_values=True)
+    assert iq1.get("attempt_key"), (
+        "the bounce carries NO attempt_key, so a cold visitor returns with nothing to prove "
+        "ownership and dies on `flow_not_yours` (#10487)")
+    key1 = iq1["attempt_key"][0]
+    assert len(key1) >= 32, f"the attempt key is too short to be unguessable: {key1!r}"
+    assert key1 != params["state"], "the attempt key is derived from the public `state`"
+
+    # The forwarded authorize request must still reach the app VERBATIM — the key is additive.
+    for name in ("client_id", "redirect_uri", "code_challenge", "state", "scope"):
+        assert iq1[name][0] == params[name], (name, iq1[name][0], params[name])
+
+    # Per-request, not a constant: two bounces of the SAME flow never share a key.
+    _r2, q2, _raw2 = _bounce(tc, params)
+    key2 = parse_qs(urlsplit(q2["next"]).query, keep_blank_values=True)["attempt_key"][0]
+    assert key1 != key2, "the attempt key is a constant — it would be guessable, and shared"
+
+
 @pytest.mark.parametrize("issuer", [
     # (1) absolute-but-not-a-serviceable-origin — the DOCUMENTED `None` branch.
     "app.premiselabs.co",
