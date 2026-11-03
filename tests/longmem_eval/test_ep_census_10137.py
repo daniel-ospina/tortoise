@@ -896,106 +896,90 @@ _CENSUS_CELLS = ("operators", "factor_edges", "points_with_ep",
 # summarizer publishes for it. ``measurement_posture.INERT_REASONS`` names both.
 _UNREAD_ABSENT = "absent"         # no ``belief_activation`` key at all
 _UNREAD_EMPTY = "dict-of-nulls"   # ``"belief_activation": {}``
-_UNREAD_SHAPES = {mp.INERT_NO_MANIFEST: _UNREAD_ABSENT,
-                  mp.INERT_ACTIVATION_FAILED: _UNREAD_EMPTY}
 
 
-def _unread_shapes(doc, source=None) -> dict:
-    """``{qid_key: shape}`` for every never-read ``per_question`` row.
+def _row_shapes(doc, source=None) -> list:
+    """One shape per ``per_question`` ROW — ``None`` for a read row, else the
+    manifest shape that row came from.
 
     A ``per_question`` row is LOSSY about exactly one thing. The probe projects
     every outcome through ``(o.get("belief_activation") or {}).get(...)``
     (``probes/census.py:245-258``), so an outcome carrying NO
-    ``belief_activation`` and one carrying ``"belief_activation": {}`` produce
-    a byte-identical all-null row — the probe's own ``_census_unread`` calls
-    BOTH unread (``census.py:52-68``), while
+    ``belief_activation`` and one carrying ``"belief_activation": {}`` produce a
+    byte-identical all-null row — the probe's own ``_census_unread`` calls BOTH
+    unread (``census.py:52-68``), while
     ``measurement_posture._classify_question`` classifies them DIFFERENTLY:
     ``no_manifest`` for a non-dict (``:235``) and ``activation_failed`` for a
     manifest that carries none of the census cells, e.g. the empty dict
     (``:237``, through ``_failed``'s ``ep_ran is not True``).
+
     The probe does not leave the reader without the answer, though: it ALSO
     publishes ``inert_questions``, one entry per inert question carrying the
-    classification ``reason`` (``measurement_posture:533-545``). That reason
-    IS the shape, so it is derived PER ROW from the artifact — never guessed
-    for the population. A MIXED re-cut (one outcome with no manifest, one with
-    an empty one — both ordinary shapes) carries both reasons in one artifact
-    and round-trips exactly; one guess for all of them reds it.
+    classification ``reason`` (``measurement_posture:533-545``). That reason is
+    what the shape is derived from — per ROW, never guessed for the population.
+
+    A qid's never-read rows are assigned IN ROW ORDER: its ``no_manifest``
+    entries are the ABSENT ones (a ``no_manifest`` row is all-null by
+    definition, so every such entry IS a never-read row) and the rest are the
+    EMPTY-manifest shape, which requires enough remaining
+    ``activation_failed`` entries to cover them. That resolves a qid carrying
+    BOTH reasons, which is ordinary rather than exotic — a READ fail-open row is
+    ``activation_failed`` while a never-read row under the same id is absent.
 
     ``inert_by_reason`` is NOT the cross-check: that census counts every inert
-    question, including READ ones (a fail-open manifest that records its
-    diagnosis is a non-null row classified ``activation_failed``), so comparing
-    it against the never-read rows alone refuses an ordinary artifact whose
-    failures and whose resumed pre-arm outcomes coexist. ``cells.measured`` is
-    the witness that separates them: a dict manifest counts as measured whether
-    or not it was read, so ``no_manifest = rows - measured`` and
+    question, including READ ones, so comparing it against the never-read rows
+    alone refuses an ordinary artifact whose failures and whose resumed pre-arm
+    outcomes coexist. ``cells.measured`` is the witness that separates them: a
+    dict manifest counts as measured whether or not it was read, so
+    ``no_manifest = rows - measured`` and
     ``activation_failed = measured - read_rows``.
 
-    ``{}`` when no row is never-read — the committed sample — which leaves
+    All ``None`` when no row is never-read — the committed sample — which leaves
     every assertion in the aggregate test exactly as strict as it was.
     """
     source = source or _ARTIFACT
     key = _probe()._qid_key
     rows = doc.get("per_question") or []
-    null_rows = [r for r in rows
-                 if all(r.get(k) is None for k in _CENSUS_CELLS)]
-    if not null_rows:
-        return {}
+    shapes: list = [None] * len(rows)
 
-    # Per qid: how many ``inert_questions`` entries carry each shape reason.
-    # Counted from the RAW entries (never a last-wins map, which hides a
-    # conflict) and keyed by ``_qid_key`` so a non-str qid stays hashable.
-    entry_counts = {}
+    null_by_qid: dict = {}
+    for i, row in enumerate(rows):
+        if all(row.get(k) is None for k in _CENSUS_CELLS):
+            null_by_qid.setdefault(key(row.get("question_id")), []).append(i)
+    if not null_by_qid:
+        return shapes
+
+    entries: dict = {}
     for iq in (doc.get("inert_questions") or []):
         if not (isinstance(iq, dict) and "question_id" in iq):
             continue
-        entry = entry_counts.setdefault(
-            key(iq["question_id"]),
-            {"qid": iq["question_id"], mp.INERT_NO_MANIFEST: 0,
-             mp.INERT_ACTIVATION_FAILED: 0})
-        if iq.get("reason") in (mp.INERT_NO_MANIFEST,
-                                mp.INERT_ACTIVATION_FAILED):
-            entry[iq["reason"]] += 1
-    null_counts = {}
-    for row in null_rows:
-        k = key(row.get("question_id"))
-        null_counts[k] = null_counts.get(k, 0) + 1
+        counts = entries.setdefault(key(iq["question_id"]),
+                                    {mp.INERT_NO_MANIFEST: 0,
+                                     mp.INERT_ACTIVATION_FAILED: 0})
+        if iq.get("reason") in counts:
+            counts[iq["reason"]] += 1
 
-    # Resolve ONE shape per never-read ROW, from the ROW COUNTS rather than
-    # from the reason set. One qid legitimately carries BOTH reasons at once —
-    # a READ fail-open row is ``activation_failed`` while a never-read row
-    # under the same id is absent — so "this qid has two reasons" refuses
-    # correct artifacts. A qid's never-read rows are all ABSENT when its
-    # ``no_manifest`` entries cover them, and all the EMPTY-manifest shape when
-    # it has no ``no_manifest`` entry and enough ``activation_failed`` entries
-    # to cover them. A qid that would need BOTH shapes for its never-read rows
-    # cannot be expressed per row and is refused by name.
-    shapes, row_shapes = {}, []
-    unresolvable = []          # (qid_key, qid_for_display)
-    for k, n in null_counts.items():
-        counts = entry_counts.get(k)
-        if counts is None:
-            unresolvable.append((k, k))
-        elif counts[mp.INERT_NO_MANIFEST] == n:
-            shapes[k] = _UNREAD_ABSENT
-            row_shapes.extend([_UNREAD_ABSENT] * n)
-        elif (not counts[mp.INERT_NO_MANIFEST]
-              and counts[mp.INERT_ACTIVATION_FAILED] >= n):
-            shapes[k] = _UNREAD_EMPTY
-            row_shapes.extend([_UNREAD_EMPTY] * n)
-        else:
-            unresolvable.append((k, counts["qid"]))
+    unresolvable = []
+    for k, idxs in null_by_qid.items():
+        counts = entries.get(k) or {mp.INERT_NO_MANIFEST: 0,
+                                    mp.INERT_ACTIVATION_FAILED: 0}
+        absent = counts[mp.INERT_NO_MANIFEST]
+        failed = counts[mp.INERT_ACTIVATION_FAILED]
+        if absent > len(idxs) or failed < len(idxs) - absent:
+            unresolvable.append((rows[idxs[0]].get("question_id"), len(idxs),
+                                 absent, failed))
+            continue
+        for position, i in enumerate(idxs):
+            shapes[i] = _UNREAD_ABSENT if position < absent else _UNREAD_EMPTY
     if unresolvable:
         detail = ", ".join(
-            f"{str(q)!r}: never_read={null_counts[k]}, "
-            f"no_manifest={(entry_counts.get(k) or {}).get(mp.INERT_NO_MANIFEST, 0)}, "
-            f"activation_failed="
-            f"{(entry_counts.get(k) or {}).get(mp.INERT_ACTIVATION_FAILED, 0)}"
-            for k, q in unresolvable)
+            f"{str(q)!r}: never_read={n}, no_manifest={a}, "
+            f"activation_failed={f}" for q, n, a, f in unresolvable)
         raise AssertionError(
-            f"{source}: {len(null_rows)} never-read per_question row(s), but "
-            f"inert_questions cannot place "
-            f"{sorted({str(q) for _, q in unresolvable})!r} as one manifest "
-            f"shape ({detail}). A never-read row cannot say which shape it "
+            f"{source}: {sum(len(v) for v in null_by_qid.values())} never-read "
+            f"per_question row(s), but inert_questions cannot place "
+            f"{sorted({str(q) for q, *_ in unresolvable})!r} as manifest "
+            f"shapes ({detail}). A never-read row cannot say which shape it "
             f"came from, so the artifact must — otherwise this pin is "
             f"guessing, which is the defect it exists to prevent")
 
@@ -1007,10 +991,10 @@ def _unread_shapes(doc, source=None) -> dict:
                      if any(r.get(k) is not None for k in _CENSUS_CELLS)]
         want = {_UNREAD_ABSENT: len(rows) - measured,
                 _UNREAD_EMPTY: measured - len(read_rows)}
-        got = {_UNREAD_ABSENT: sum(1 for s in row_shapes
-                                   if s == _UNREAD_ABSENT),
-               _UNREAD_EMPTY: sum(1 for s in row_shapes
-                                  if s == _UNREAD_EMPTY)}
+        derived = [s for s in shapes if s is not None]
+        got = {_UNREAD_ABSENT: sum(1 for s in derived
+                                  if s == _UNREAD_ABSENT),
+               _UNREAD_EMPTY: sum(1 for s in derived if s == _UNREAD_EMPTY)}
         assert got == want, (
             f"{source}: inert_questions places the never-read rows as "
             f"no_manifest={got[_UNREAD_ABSENT]}, "
@@ -1022,11 +1006,6 @@ def _unread_shapes(doc, source=None) -> dict:
             f"hand-edited or the producer changed and this pin has not been "
             f"told")
     return shapes
-
-
-def _shape_of(shapes: dict, row) -> str | None:
-    """The shape ``_unread_shapes`` derived for ONE row, or ``None``."""
-    return shapes.get(_probe()._qid_key(row.get("question_id")))
 
 
 def _rebuild_outcome(row, unread_shape: str | None = None) -> dict:
@@ -1052,7 +1031,7 @@ def _rebuild_outcome(row, unread_shape: str | None = None) -> dict:
         raise AssertionError(
             f"{row.get('question_id')!r} is a NEVER-read per_question row "
             f"(every census cell null), so its manifest shape must be derived "
-            f"from the artifact — pass `_shape_of(_unread_shapes(doc), row)`. "
+            f"from the artifact — pass `_row_shapes(doc)` alongside the row. "
             f"Defaulting to manifest-less would guess, and a guess is what reds "
             f"a correct artifact")
     elif unread_shape == _UNREAD_EMPTY:
@@ -1136,15 +1115,15 @@ def test_a_recut_with_a_never_read_row_is_not_red(tmp_path, never_read):
            "failures": []}
     cut = _probe().cells(_write(tmp_path, doc))
 
-    shapes = _unread_shapes(cut, source="a re-cut")
-    shape = _shape_of(shapes, cut["per_question"][1])
+    shapes = _row_shapes(cut, source="a re-cut")
+    shape = shapes[1]
     assert shape is not None, (
         f"a re-cut reports inert_by_reason={cut['inert_by_reason']!r} and "
         f"inert_questions={cut['inert_questions']!r} beside "
         f"{cut['per_question_unread']} never-read row(s), but no shape was "
         f"derived for the never-read row")
     derived = mp.summarize_belief_activation(
-        [_rebuild_outcome(r, _shape_of(shapes, r)) for r in cut["per_question"]],
+        [_rebuild_outcome(r, sh) for r, sh in zip(cut["per_question"], shapes, strict=True)],
         requested=True)
 
     assert derived["measured"] == cut["cells"]["measured"], (
@@ -1180,9 +1159,9 @@ def test_a_mixed_never_read_population_round_trips(tmp_path):
                                      mp.INERT_ACTIVATION_FAILED: 1}, (
         f"the fixture must produce BOTH reasons; got "
         f"{cut['inert_by_reason']!r}")
-    shapes = _unread_shapes(cut, source="a mixed re-cut")
+    shapes = _row_shapes(cut, source="a mixed re-cut")
     derived = mp.summarize_belief_activation(
-        [_rebuild_outcome(r, _shape_of(shapes, r)) for r in cut["per_question"]],
+        [_rebuild_outcome(r, sh) for r, sh in zip(cut["per_question"], shapes, strict=True)],
         requested=True)
 
     assert derived["measured"] == cut["cells"]["measured"], (
@@ -1225,9 +1204,9 @@ def test_a_failed_question_beside_a_resumed_one_is_not_red(tmp_path):
     # why the never-read set is computed from the CELLS, never from this count.
     assert cut["per_question_unread"] == 2, cut["per_question_unread"]
 
-    shapes = _unread_shapes(cut, source="a failure+resume re-cut")
+    shapes = _row_shapes(cut, source="a failure+resume re-cut")
     derived = mp.summarize_belief_activation(
-        [_rebuild_outcome(r, _shape_of(shapes, r)) for r in cut["per_question"]],
+        [_rebuild_outcome(r, sh) for r, sh in zip(cut["per_question"], shapes, strict=True)],
         requested=True)
 
     assert derived["measured"] == cut["cells"]["measured"], (
@@ -1253,7 +1232,7 @@ def test_a_never_read_row_without_a_derived_shape_is_refused():
         _rebuild_outcome(unread)
     message = str(refused.value)
     assert "'q'" in message, f"the refusal must name the row; got: {message}"
-    assert "_unread_shapes" in message, (
+    assert "_row_shapes" in message, (
         f"the refusal must name the derivation it wants; got: {message}")
 
 
@@ -1273,49 +1252,68 @@ def test_a_census_whose_row_classifications_disagree_with_its_counts_is_refused(
            ],
            "failures": []}
     cut = _probe().cells(_write(tmp_path, doc))
-    assert _unread_shapes(cut, source="honest")  # the honest cut is accepted
+    assert _row_shapes(cut, source="honest")  # the honest cut is accepted
 
     # A single flip: the counts can no longer be right, because the shape the
     # label claims would make the row MEASURED and ``cells.measured`` says not.
     for entry in cut["inert_questions"]:
         entry["reason"] = mp.INERT_ACTIVATION_FAILED
     with pytest.raises(AssertionError) as refused:
-        _unread_shapes(cut, source="a relabelled census")
+        _row_shapes(cut, source="a relabelled census")
     message = str(refused.value)
     assert "a relabelled census" in message, message
     assert "cells.measured" in message, (
         f"the refusal must name the witness it checked; got: {message}")
 
 
-def test_a_duplicate_qid_never_read_population_is_counted_per_row(tmp_path):
+@pytest.mark.parametrize("never_read", [
+    {"question_id": "q1", "question_type": "t"},
+    {"question_id": "q1", "question_type": "t", "belief_activation": {}},
+], ids=["absent", "empty"])
+def test_a_duplicate_qid_never_read_population_is_counted_per_row(
+        tmp_path, never_read):
     """Two never-read ROWS under one ``question_id`` are two rows, not one
     (#10678 review 4, P2).
 
     A duplicate ``question_id`` is an input shape this file already pins as
     supported (foreign JSON, ``test_census_probe_keeps_the_disclosure_invariant
-    _on_a_duplicate_qid``). Counting the ``{qid: shape}`` map collapsed the two
-    rows into one and refused a self-consistent artifact as "hand-edited" — a
-    false RED whose message blamed a hand-edit. The witness arithmetic is per
-    ROW: 3 rows, 1 measured, so 2 never-read.
+    _on_a_duplicate_qid``). Counting the shape map collapsed the two rows into
+    one and refused a self-consistent artifact as "hand-edited" — a false RED
+    whose message blamed a hand-edit.
+
+    Parametrized over BOTH shapes because the collapse and the per-row fix are
+    per ARM: a fixture with two ABSENT rows leaves the EMPTY arm untested, and
+    the "count the map" mutation then survives on that arm alone (#10678
+    review 6, P3).
     """
     doc = {"fingerprint": {"activate_beliefs": True},
            "outcomes": [
                {"question_id": "q0", "question_type": "t",
                 "belief_activation": _manifest()},
-               {"question_id": "q1", "question_type": "t"},
-               {"question_id": "q1", "question_type": "t"},
+               never_read,
+               dict(never_read),
            ],
            "failures": []}
     cut = _probe().cells(_write(tmp_path, doc))
 
+    absent_shape = never_read.get("belief_activation") is None
     assert len(cut["per_question"]) == 3, len(cut["per_question"])
-    assert cut["cells"]["measured"] == 1, cut["cells"]["measured"]
+    # ``measured`` counts dict manifests: an ABSENT row is not measured, an
+    # EMPTY one is — which is exactly what makes it the independent witness.
+    assert cut["cells"]["measured"] == (1 if absent_shape else 3), (
+        cut["cells"]["measured"])
+    assert cut["inert_by_reason"] == {
+        (mp.INERT_NO_MANIFEST if absent_shape
+         else mp.INERT_ACTIVATION_FAILED): 2}, cut["inert_by_reason"]
 
-    shapes = _unread_shapes(cut, source="a duplicate-qid re-cut")
+    shapes = _row_shapes(cut, source="a duplicate-qid re-cut")
+    assert shapes[1] == shapes[2] is not None, (
+        f"both never-read rows must resolve to the same shape; got {shapes!r}")
+
     derived = mp.summarize_belief_activation(
-        [_rebuild_outcome(r, _shape_of(shapes, r)) for r in cut["per_question"]],
+        [_rebuild_outcome(r, sh)
+         for r, sh in zip(cut["per_question"], shapes, strict=True)],
         requested=True)
-
     assert derived["measured"] == cut["cells"]["measured"], (
         f"duplicate-qid re-cut says measured={cut['cells']['measured']!r} but "
         f"the rows re-derive {derived['measured']!r}")
@@ -1325,12 +1323,15 @@ def test_a_duplicate_qid_never_read_population_is_counted_per_row(tmp_path):
         f"{derived['inert_by_reason']!r}")
 
 
-def test_a_duplicate_qid_classified_two_ways_is_refused(tmp_path):
-    """One qid the artifact classifies BOTH ways cannot be attributed to a row,
-    so the pin refuses and names it (#10678 review 4, P2).
+def test_a_duplicate_qid_classified_two_ways_is_resolved_in_row_order(tmp_path):
+    """One qid whose never-read rows are one ABSENT and one EMPTY is
+    DETERMINATE — the artifact's own counts say the split — so it resolves
+    instead of being refused (#10678 review 6, P3).
 
-    Non-vacuous: collapsing the map silently gives both rows the last reason
-    and passes.
+    The per-row assignment is row order: the ``no_manifest`` entries are the
+    ABSENT rows and the rest are the EMPTY shape. Non-vacuous: a resolution
+    that needs ONE shape per qid refuses this fixture (the round-4 behaviour),
+    and one that counts the qid map under-counts the witness.
     """
     doc = {"fingerprint": {"activate_beliefs": True},
            "outcomes": [
@@ -1343,14 +1344,21 @@ def test_a_duplicate_qid_classified_two_ways_is_refused(tmp_path):
            "failures": []}
     cut = _probe().cells(_write(tmp_path, doc))
 
-    with pytest.raises(AssertionError) as refused:
-        _unread_shapes(cut, source="a doubly-classified census")
-    message = str(refused.value)
-    assert "a doubly-classified census" in message, message
-    assert "'q1'" in message, (
-        f"the refusal must name the duplicated qid; got: {message}")
-    assert "cannot place" in message, (
-        f"the refusal must say why; got: {message}")
+    shapes = _row_shapes(cut, source="a doubly-classified census")
+    assert shapes == [None, _UNREAD_ABSENT, _UNREAD_EMPTY], (
+        f"a qid carrying one of each shape must resolve per ROW in row order; "
+        f"got {shapes!r} for inert_by_reason={cut['inert_by_reason']!r}")
+
+    derived = mp.summarize_belief_activation(
+        [_rebuild_outcome(r, sh)
+         for r, sh in zip(cut["per_question"], shapes, strict=True)],
+        requested=True)
+    assert derived["measured"] == cut["cells"]["measured"], (
+        f"measured={cut['cells']['measured']!r} but the rows re-derive "
+        f"{derived['measured']!r}")
+    assert derived["inert_by_reason"] == cut["inert_by_reason"], (
+        f"inert_by_reason={cut['inert_by_reason']!r} but the rows re-derive "
+        f"{derived['inert_by_reason']!r}")
 
 
 def test_one_qid_with_a_failed_read_row_and_a_never_read_row_is_not_red(tmp_path):
@@ -1375,9 +1383,9 @@ def test_one_qid_with_a_failed_read_row_and_a_never_read_row_is_not_red(tmp_path
                                      mp.INERT_NO_MANIFEST: 1}, (
         f"the fixture must give ONE qid both reasons; got "
         f"{cut['inert_by_reason']!r}")
-    shapes = _unread_shapes(cut, source="one qid, two populations")
+    shapes = _row_shapes(cut, source="one qid, two populations")
     derived = mp.summarize_belief_activation(
-        [_rebuild_outcome(r, _shape_of(shapes, r)) for r in cut["per_question"]],
+        [_rebuild_outcome(r, sh) for r, sh in zip(cut["per_question"], shapes, strict=True)],
         requested=True)
 
     assert derived["measured"] == cut["cells"]["measured"], (
@@ -1394,8 +1402,9 @@ def test_an_unplaceable_non_str_qid_refuses_with_a_message(tmp_path):
     ``KeyError`` (#10678 review 5, P3) — the "a message, not a traceback"
     contract ``_qid_key`` exists for.
 
-    The duplicate here is a LIST qid carrying both shapes, so it is genuinely
-    unplaceable and must say so by name.
+    The qid here is a LIST, and the per-row classification is removed so the
+    rows are genuinely unplaceable — the refusal must still be a MESSAGE
+    naming the qid, never a ``KeyError`` on an unhashable key.
     """
     doc = {"fingerprint": {"activate_beliefs": True},
            "outcomes": [
@@ -1405,9 +1414,10 @@ def test_an_unplaceable_non_str_qid_refuses_with_a_message(tmp_path):
            ],
            "failures": []}
     cut = _probe().cells(_write(tmp_path, doc))
+    cut["inert_questions"] = []     # unplaceable, and the qid is unhashable
 
     with pytest.raises(AssertionError) as refused:
-        _unread_shapes(cut, source="a list-qid census")
+        _row_shapes(cut, source="a list-qid census")
     message = str(refused.value)
     assert "a list-qid census" in message, message
     assert "cannot place" in message, f"must say why; got: {message}"
@@ -1432,7 +1442,7 @@ def test_a_census_that_cannot_place_its_never_read_rows_is_refused(tmp_path):
     cut["inert_questions"] = []
 
     with pytest.raises(AssertionError) as refused:
-        _unread_shapes(cut, source="a doctored census")
+        _row_shapes(cut, source="a doctored census")
     message = str(refused.value)
     assert "a doctored census" in message, message
     assert "'q2'" in message, (
@@ -1454,7 +1464,10 @@ def test_committed_census_rederives_its_own_aggregate():
     ⚠️ Three things are RESIDUALLY un-derived, by the artifact's own limits
     rather than by choice, and this pin cannot close them: the
     ``questions_in_run`` / ``questions_failed`` pair, checked only against each
-    other and the ratio (`:1456`), because ``per_question`` carries outcomes
+    other and the ratio (the `questions_in_run - questions ==
+    questions_failed` assertion below — cited by SYMBOL, not by line, because a
+    line citation in this file is invalidated by any insertion above it),
+    because ``per_question`` carries outcomes
     and never the failure ids, so a coordinated edit of both ships green; and
     the per-row shape IDENTITY — ``inert_questions[].reason`` is where the
     shape is read from, so a BALANCED swap of two rows' reasons reproduces
@@ -1469,9 +1482,9 @@ def test_committed_census_rederives_its_own_aggregate():
     # A never-read row does not say WHICH manifest shape it came from; the
     # artifact does, per row, through ``inert_questions``'s ``reason`` — so the
     # shape is derived, never assumed (#10678 review, P2).
-    shapes = _unread_shapes(doc)
+    shapes = _row_shapes(doc)
     summary = mp.summarize_belief_activation(
-        [_rebuild_outcome(r, _shape_of(shapes, r)) for r in rows],
+        [_rebuild_outcome(r, sh) for r, sh in zip(rows, shapes, strict=True)],
         requested=True)
 
     for key, committed in doc["cells"].items():
