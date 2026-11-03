@@ -6,6 +6,7 @@ SIGKILL mid-sweep, lock release on SIGKILL).
 """
 from __future__ import annotations
 
+import inspect
 import os
 import signal
 import subprocess
@@ -470,6 +471,51 @@ def _clean_spawned_residue():
     residue = SessionRedisResidue(kill=_kill_pid, alive=_pid_alive)
     yield
     residue.reap()
+
+
+def test_the_autouse_teardown_actually_calls_reap(monkeypatch):
+    """The finaliser must CALL ``reap()`` — the code after the ``yield``.
+
+    The sibling pin of ``tests/test_reaper.py::test_the_autouse_teardown_actually_calls_reap``,
+    for THIS module's fixture. ``yield SessionRedisResidue(...)`` performs no
+    cleanup at all (pytest never inspects the yielded object), so the whole
+    kill/rmtree block is dead while the fixture's docstring still promises it:
+    nothing reds, and every server a test leaked stays discoverable for the
+    rest of the module — the order-flakiness the fixture exists to prevent
+    (#493, #1365). That regressed HERE once already (#7522, fixed in
+    ``db02391dc``), which is why both fixtures carry a pin rather than one.
+
+    Driven as a plain generator (``inspect.unwrap`` steps past pytest's
+    direct-call guard), so the assertion is about the finaliser's REAL body
+    rather than its source text. The module skips without ``redislite``, and
+    so does this pin — the coverage it certifies is exactly the coverage the
+    fixture it guards has.
+    """
+    from tortoise import embedded_reaper
+
+    # No real process probe: the baseline is beside the point here.
+    monkeypatch.setattr(embedded_reaper, "_pgrep_redis_servers_or_none",
+                        lambda: [])
+    monkeypatch.setattr(embedded_reaper, "_batch_cmdlines_or_none",
+                        lambda pids: {})
+    reaped: list[bool] = []
+    monkeypatch.setattr(SessionRedisResidue, "reap",
+                        lambda self: reaped.append(True))
+
+    setup_and_teardown = inspect.unwrap(_clean_spawned_residue)
+    assert inspect.isgeneratorfunction(setup_and_teardown), (
+        "the teardown fixture must be a yield fixture: a `return`-style body "
+        "has no finaliser at all"
+    )
+    events = setup_and_teardown()
+    next(events)                      # setup — the before-snapshot
+    list(events)                      # drain — runs the finaliser
+
+    assert reaped == [True], (
+        "the autouse teardown never called reap(): `yield "
+        "SessionRedisResidue(...)` is a no-op finaliser, so the servers and "
+        "socket dirs THIS test spawned are never removed"
+    )
 
 
 @pytest.fixture(scope="module", autouse=True)
