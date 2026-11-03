@@ -1117,12 +1117,21 @@ def gate_errors(mechanisms: list[dict], root: Path = ROOT) -> list[str]:
                     # the IMPLEMENTED branch refuses exactly this shape — a
                     # branch that passes what the other refuses is the drift the
                     # shared-rule comment above claims is impossible.
-                    errors.append(
-                        f"{mid}: `symbols` is declared on a not-implemented "
-                        f"row but `code:` names no non-empty file list (got "
-                        f"{declared_code!r}) — the symbol's home is unnamed, so "
-                        f"the claim cannot be verified"
-                    )
+                    #
+                    # ⚠️ ONE DEFECT, ONE VERDICT (#10636 review P3): this fires
+                    # only when `code:` is ABSENT from the row. When it is
+                    # present but malformed (`code: "src.py"`) or empty
+                    # (`code: []`), the artifact-field loop above already
+                    # reported that defect, and the IMPLEMENTED branch yields a
+                    # single error for it — a second verdict here would grade
+                    # the same defect twice, in the same fail-closed direction.
+                    if "code" not in row:
+                        errors.append(
+                            f"{mid}: `symbols` is declared on a not-implemented "
+                            f"row but `code:` names no non-empty file list (got "
+                            f"{declared_code!r}) — the symbol's home is unnamed, so "
+                            f"the claim cannot be verified"
+                        )
                 else:
                     defined: set[str] = set()
                     resolved_entries: list[str] = []
@@ -1142,11 +1151,17 @@ def gate_errors(mechanisms: list[dict], root: Path = ROOT) -> list[str]:
                         else:
                             defined |= names
                     if unreadable:
+                        # Mirrors the IMPLEMENTED branch's per-source message
+                        # (#10636 review P3): it names the symbols whose claim
+                        # could not be verified, not just the files it could
+                        # not read — and no backticked field name with a
+                        # trailing space inside it.
                         errors.append(
                             f"{mid}: declared `code:` source(s) {unreadable} "
-                            f"could not be read or parsed, so `symbols: ` cannot "
-                            f"be verified in them — an unreadable source is "
-                            f"not the record of what is built"
+                            f"could not be read or parsed, so the declared "
+                            f"symbol(s) {declared_symbols} cannot be verified in "
+                            f"them — an unreadable source is not the record of "
+                            f"what is built"
                         )
                     # Review cycle 2 (P2): the absence check runs over a
                     # COMPLETE read, keyed on `resolved_entries` — NOT on
@@ -2126,6 +2141,81 @@ def test_the_artifact_fields_of_a_not_implemented_row_are_still_verified(
     errors = gate_errors([unreadable], root=tmp_path)
     assert any("could not be read or parsed" in e for e in errors), errors
     assert not any("not defined at module level" in e for e in errors), errors
+
+
+def test_a_broken_code_field_yields_one_verdict_on_a_not_implemented_row(
+    tmp_path,
+) -> None:
+    """#10636 review P3: ONE defect, ONE verdict — both branches, same count.
+
+    `symbols:` on a not-implemented row whose `code:` is present-but-broken
+    used to produce TWO errors for one defect: the artifact-field loop reports
+    the shape (`is not a list` / `is empty`) and the symbols-home rule fired
+    again on the same field. The IMPLEMENTED branch yields exactly one for the
+    same shape. Two verdicts for one defect is how a per-field message stops
+    naming the field that is actually wrong.
+    """
+    (tmp_path / "src.py").write_text("def present_symbol():\n    return 1\n")
+    (tmp_path / "test_x.py").write_text("def test_ok():\n    assert True\n")
+    (tmp_path / FIXTURE_DECLARED_DOC).parent.mkdir(parents=True, exist_ok=True)
+    (tmp_path / FIXTURE_DECLARED_DOC).write_text("# declaration\n")
+    good = dict(
+        _row("mid"),
+        state=NOT_IMPLEMENTED,
+        tracking_issue=2684,
+        code=["src.py"],
+        tests=["test_x.py"],
+        symbols=["present_symbol"],
+    )
+    assert gate_errors([good], root=tmp_path) == []
+
+    for broken in ("src.py", [], None):  # scalar / empty / explicit null
+        errors = gate_errors([dict(good, code=broken)], root=tmp_path)
+        assert len(errors) == 1, (
+            f"code={broken!r} produced {len(errors)} verdicts for ONE defect: "
+            f"{errors}"
+        )
+        assert "`code` is declared on a not-implemented row" in errors[0], errors
+
+    # The symbols-home verdict still fires on the shape it alone owns: `code:`
+    # ABSENT from the row (nothing else reports that).
+    without_code = {k: v for k, v in good.items() if k != "code"}
+    errors = gate_errors([without_code], root=tmp_path)
+    assert len(errors) == 1, errors
+    assert "the symbol's home is unnamed" in errors[0], errors
+
+
+def test_the_unreadable_source_verdict_names_the_symbols_it_could_not_verify(
+    tmp_path,
+) -> None:
+    """#10636 review P3: name what could not be verified, not just the file.
+
+    The not-implemented branch's unreadable-source message said "so
+    `symbols: ` cannot be verified" — a backticked field name with a trailing
+    space inside it, and no indication of WHICH symbols the row's claim rested
+    on. The IMPLEMENTED branch names them; this mirrors it.
+    """
+    (tmp_path / "broken.py").write_text("def broken(:\n")
+    (tmp_path / "test_x.py").write_text("def test_ok():\n    assert True\n")
+    (tmp_path / FIXTURE_DECLARED_DOC).parent.mkdir(parents=True, exist_ok=True)
+    (tmp_path / FIXTURE_DECLARED_DOC).write_text("# declaration\n")
+    row = dict(
+        _row("mid"),
+        state=NOT_IMPLEMENTED,
+        tracking_issue=2684,
+        code=["broken.py"],
+        tests=["test_x.py"],
+        symbols=["present_symbol"],
+    )
+    errors = gate_errors([row], root=tmp_path)
+    assert len(errors) == 1, errors
+    assert "could not be read or parsed" in errors[0], errors
+    assert "['present_symbol']" in errors[0], (
+        f"the verdict does not name the symbols whose claim it refuses: {errors[0]}"
+    )
+    assert "`symbols: `" not in errors[0], (
+        f"a backticked field name with a trailing space inside it: {errors[0]}"
+    )
 
 
 # ── THE DDL SCAN, as a function so it can be TESTED ─────────────────────────
