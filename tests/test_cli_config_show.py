@@ -1805,12 +1805,31 @@ def test_a_query_string_does_not_fake_an_endpoint_mismatch(capsys, tmp_path):
 
 
 def test_a_wrong_typed_harness_key_is_not_the_keyless_shape(monkeypatch, capsys, tmp_path):
+    """`resolveConfig` reads `apiUrl` from this file whatever the key's type, so the
+    file is still IN USE — "repair or delete it" would drop the endpoint and
+    silently repoint the hook at the default host."""
     _global(tmp_path)
     _harness(tmp_path, json.dumps({"apiKey": 12345, "apiUrl": "https://x.example"}))
     assert _run() == 0
     out = capsys.readouterr().out
-    assert "unusable harness store (invalid-key)" in out
+    assert "not a string, so the hook ignores it" in out
+    assert "IS still in use" in out                 # THIS file supplies the host
+    assert "unusable harness store" not in out      # that remedy invites deletion
     assert "no api-key in this file" not in out
+
+
+def test_a_wrong_typed_harness_key_under_an_env_host_does_not_claim_its_url_is_used(
+        monkeypatch, capsys, tmp_path):
+    """`resolveConfig` is `envKey ? TORTOISE_API_URL : fileUrl || DEFAULT`, so with
+    an env key the file's apiUrl is IGNORED and deleting the file drops nothing."""
+    _global(tmp_path)
+    _harness(tmp_path, json.dumps({"apiKey": 12345, "apiUrl": "https://selfhost.example"}))
+    monkeypatch.setenv("TORTOISE_API_KEY", GLOBAL_KEY)
+    monkeypatch.setenv("TORTOISE_API_URL", "https://envhost.example")
+    assert _run() == 0
+    out = capsys.readouterr().out
+    assert "IS still in use" not in out
+    assert "drops nothing" in out
 
 
 def test_the_harness_no_key_state_is_not_called_invalid(monkeypatch, capsys, tmp_path):

@@ -3613,6 +3613,15 @@ def _cmd_config(args) -> int:
         graph_store["cache_graph_convention"] = (
             f"org_{q_org} (org SDK) or org_{q_org}_<graph_id> (registry/ACL)"
         )
+        if cred.get("org_id_warning"):
+            # The same payload says this org id looks TRUNCATED. A paste-ready
+            # `--cache-graph`/`--org` built from it would point at a junk graph,
+            # and `record-restore` against a wrong cache graph leaves the real one
+            # stale while reporting success — the hazard the quoting above names.
+            graph_store["org_id_unverified"] = (
+                "the org id in the resolved store looks truncated, so the cache-"
+                "graph and record-scope values below name a graph that probably "
+                "does not exist — confirm the org id first")
         graph_store["record_scope"] = (
             f"--org {_shlex.quote(str(org_id))} --graph <graph_id>")
     payload["graph_store"] = graph_store
@@ -3622,6 +3631,7 @@ def _cmd_config(args) -> int:
     harness_state, harness_cfg = (_describe_store(harness_path, "apiKey")
                                   if harness_path is not None else ("home unresolvable", None))
     harness_url_raw: str | None = None
+    file_url_in_use = False
     harness: dict = {"path": (str(harness_path) if harness_path is not None
                               else "(home unresolvable)"),
                      "state": harness_state}
@@ -3666,12 +3676,15 @@ def _cmd_config(args) -> int:
         harness_url_raw = (_os.environ.get("TORTOISE_API_URL")
                            or "https://api.premiselabs.co")
         harness["api_url"] = _mask_display_target(harness_url_raw)
+        file_url_in_use = False        # the ENV chooses the host on this path
     else:
         harness["source"] = "file" if file_harness_key else "none"
         raw_url = (harness_cfg or {}).get("apiUrl")
         harness_url_raw = (raw_url if isinstance(raw_url, str) and raw_url
                            else "https://api.premiselabs.co")
         harness["api_url"] = _mask_display_target(harness_url_raw)
+        # The FILE supplies the host on this path — but only if it carries one.
+        file_url_in_use = bool(isinstance(raw_url, str) and raw_url)
     payload["harness"] = harness
     same_identity: bool | None = None
     relation: str | None = None
@@ -3848,6 +3861,8 @@ def _cmd_config(args) -> int:
               "resolved default)")
     if graph_store.get("warning"):
         print(f"  ⚠️  {graph_store['warning']}")
+    if graph_store.get("org_id_unverified"):
+        print(f"  ⛔ {_printable(graph_store['org_id_unverified'])}")
     if graph_store.get("cache_graph_convention"):
         print(f"  cache graph   {_printable(graph_store['cache_graph_convention'])}")
         print(f"  record scope  {_printable(graph_store['record_scope'])}"
@@ -3887,8 +3902,23 @@ def _cmd_config(args) -> int:
         # shape, and telling the user to delete it would break their settings.
         print("  ·  no api-key in this file (the key comes from the environment "
               "or is simply unset)")
+    elif harness_state == _STORE_INVALID:
+        # `resolveConfig` reads `apiUrl` from this file REGARDLESS of the key's
+        # type — but only when no env key is set AND the file actually supplies one
+        # (`envKey ? TORTOISE_API_URL : fileUrl || DEFAULT`). Claiming "this file's
+        # api_url IS still in use" unconditionally was false in two reachable
+        # states: an env key (which chooses the host) and a file with no apiUrl
+        # (where the printed value is the hardcoded default).
+        print("  ⚠️  the harness apiKey here is not a string, so the hook ignores it"
+              " — repair the field.")
+        if file_url_in_use:
+            print("     This file's api_url IS still in use, so deleting the file "
+                  "would drop that endpoint too.")
+        else:
+            print("     The hook reads no endpoint from this file either (the "
+                  "environment/default host governs), so deleting it drops nothing.")
     elif harness_state in _STORE_REFUSING:
-        # The harness reader treats an unusable file as "unset", so this is a
+        # A corrupt/unreadable file yields nothing the hook can use, so this is a
         # dead file rather than a blocking one — but it is still the reason a
         # harness seam silently stopped authenticating.
         print(f"  ⚠️  unusable harness store ({harness_state}) — repair or delete it")
