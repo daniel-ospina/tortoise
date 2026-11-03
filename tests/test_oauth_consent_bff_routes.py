@@ -1696,6 +1696,43 @@ def _key_from(location: str | None) -> str:
     return keys[0]
 
 
+def test_start_ADOPTS_a_presented_attempt_key_so_a_cold_flow_can_return() -> None:
+    """#10487: the key must belong to the FLOW, not to one URL the route happened to emit.
+
+    Measured in production: a visitor who signed in during the flow came back through the AS
+    bounce's own return target — which carried no `attempt_key`, because the key did not exist
+    until `start` invented one — and was refused `403 flow_not_yours`. The row was already
+    claimed by a key nobody could present. The AS now mints the key on the bounce leg (it is the
+    only leg where none exists yet), and this pins the half that makes that work: a PRESENTED key
+    is ADOPTED on the insert rather than replaced by a freshly generated one.
+
+    Non-vacuity: with `presentedKey` ignored (the pre-fix behaviour) the propagated key differs
+    from the presented one and the assertions below fail on the first line.
+    """
+    presented = "ak-as-minted-0123456789abcdef"
+    first = _run("start_cold_browser", params=dict(_PARAMS, attempt_key=presented))
+    assert first["status"] == 302, first
+    assert _key_from(first["location"]) == presented, (
+        "the route INVENTED a key while the caller already held one — the row and the browser "
+        "now disagree, and every later leg of this flow is a 403 waiting to happen")
+    assert first["attempts"][0]["user_id"] is None
+    assert first["attempts"][0]["attempt_key_hash"], "the attempt was recorded with no key"
+
+    # The sign-in return leg, carrying the SAME key, fills the owner and advances — this is the
+    # exact sequence a cold visitor executes, and the one that used to dead-end.
+    back = _run("start_signed_in", seededAttempts=first["attempts"],
+                sessionUserId="user-1", params=dict(_PARAMS, attempt_key=presented))
+    assert back["status"] == 302, f"the cold visitor's own return leg was refused: {back}"
+    assert "api.premiselabs.co/oauth/authorize" in (back["location"] or ""), back["location"]
+    assert back["attempts"][0]["user_id"] == "user-1"
+
+    # …and the control is untouched: a DIFFERENT identity still cannot walk in on a guess.
+    foreign = _run("start_signed_in", seededAttempts=back["attempts"],
+                   sessionUserId="user-2", params=dict(_PARAMS, attempt_key="ak-guessed"))
+    assert foreign["status"] == 403, foreign
+    assert foreign["body"]["reason"] == "flow_not_yours", foreign["body"]
+
+
 def test_the_ownerless_window_is_closed_by_the_attempt_key() -> None:
     """#10208: the flow belongs to a BROWSER, not to whoever knows the `state`.
 
