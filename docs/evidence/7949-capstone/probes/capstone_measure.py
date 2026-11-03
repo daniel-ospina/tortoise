@@ -672,7 +672,7 @@ def e2a_outcome(e1: dict, bars: dict) -> dict:
                    value=f"value_units {survived}/{units} survived")
 
 
-def e3_unmeasured_legs(per_label: dict[str, dict[str, int]] | None,
+def e3_unmeasured_legs(per_label: dict[str, dict[str, int]] | None, *,
                        labels: tuple[str, ...] = DERIVED_LABELS) -> tuple[str, ...]:
     """The registered denominator classes the measured graph carries **zero** nodes of (#9736).
 
