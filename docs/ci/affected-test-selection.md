@@ -37,6 +37,7 @@ tools/run_affected.sh v1.2.0          # a bare revision means `<rev>...HEAD`
 tools/run_affected.sh --range origin/main~10...HEAD
 tools/run_affected.sh --files-from /tmp/changed.txt   # I already have the list
 tools/run_affected.sh --allow-full    # accept a `full: true` selection
+tools/run_affected.sh -h|--help       # this table, exit 0 (see "Exit codes" below)
 ```
 
 The default range is `origin/main...HEAD` — three dots, i.e. `git merge-base`, so commits that landed

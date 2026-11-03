@@ -52,7 +52,7 @@
 #   tools/run_affected.sh origin/main~10...HEAD
 #   tools/run_affected.sh --files-from /tmp/changed.txt
 #   tools/run_affected.sh --allow-full         # accept a `full: true` selection
-#   tools/run_affected.sh --help               # this table (exit 0, from any directory)
+#   tools/run_affected.sh -h|--help            # this table (exit 0, from any directory)
 #
 # DEFAULT RANGE: `origin/main...HEAD` (three-dot = merge-base, so commits landing on
 # main since your branch forked do not appear as "your" changed files).
