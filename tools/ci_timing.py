@@ -2133,10 +2133,17 @@ def _balance_cut_parens(text: str) -> str:
 # ── a row's NOTE is one paragraph, WRAPPED across physical lines ──────────
 #
 # `_DURATION_LINE_RE` reads a row's note as the tail on its own line, but a
-# note CAN wrap: an indented `#` line under a row can continue THAT row's note
-# (measured at this head: 1 row of 1227 does — `test_source_staleness_
-# sweep_5038.py` — and re-derive it, do not trust the figure, because a refresh
-# re-emits notes and moves it). The guard that judges the written map joins a
+# note CAN wrap: an indented `#` line under a row can continue THAT row's note.
+# ⛔ How many rows wrap is DERIVED, never stated here as an absolute. The writer
+# FLATTENS a wrapped note on any adopting re-render, so one weekly sweep can take
+# this map to ZERO wraps, and the row count grows with every file the census
+# measures — a frozen figure would describe neither state, and this file is not
+# one the sweep (`tortoise-ci[bot]`, three paths under `docs/` and `config/`) can
+# edit. At this head one row wraps (`test_source_staleness_sweep_5038.py`);
+# `tests/test_ci_timing.py::test_the_maps_indented_blocks_are_preamble_shaped_
+# not_wrap_shaped` computes the pair (and re-runs it on a swept map), and
+# `::test_the_rationales_map_counts_stay_DERIVED_not_frozen_in_prose` keeps this
+# prose from freezing it again. The guard that judges the written map joins a
 # row's tail with its continuations before it judges a note
 # (`tests/test_ci_selection.py::_durations_row_comments`).
 #
@@ -2218,9 +2225,10 @@ def _row_continuation_lines(lines: list[str], index: int) -> list[int]:
        associated with a particular node", so *nothing* in the file says which row
        an indented block documents. This map's DOMINANT convention is the opposite
        of the one the previous two conditions imply — an indented block PRECEDES
-       the row it documents (measured at this head with this module's own
-       predicates: 73 of the 74 such blocks open a new note, and the ones sampled
-       document the row BELOW — `# #4071: …` sits
+       the row it documents — with this module's own predicates, the OVERWHELMING
+       majority of such blocks open a new note of their own (all but the one wrap
+       noted above, at this head), and the ones sampled document the row BELOW —
+       `# #4071: …` sits
        above `test_embedded_lane_canonical_store_4071.py`, `# #5612: …` above
        `test_journal_growth.py`, and the `355.0 IS A DELIBERATE CAP … #9172` block
        above `test_lane_stash.py` while lying directly under `test_work_claim.py`).

@@ -6556,9 +6556,21 @@ def test_the_unmeasured_on_ci_claim_check_is_not_vacuous():
 # full-file CI measurement) — by CI — #10025: …` on a HELD one (#10575 review, F2).
 # The stub is only ever in those two positions — at the note's OPENING, or straight
 # after the carried-forward restatement — so the detector names them and cannot
-# confuse a note that merely mentions CI.
+# confuse a note that merely mentions CI. It must name them LITERALLY: a bare
+# `— (by|on|in) CI` anchor also matches ordinary prose (`# measured on this host —
+# on CI it reads 3.1`, `— in CI the leg's own junit is the source`), which this
+# map is written in almost entirely, so a guard written that way would red a
+# merge-gating leg on a note with no marker in it while telling its author to
+# "restore the marker's subject" (#10575 review, P3 — the same defect class as a
+# matcher broader than the shape it names).
 _ORPHANED_UNMEASURED_QUALIFIER_RE = re.compile(
-    r"(?:^[ \t]*#[ \t]*|—[ \t]*)(?:by|on|in)[ \t]+CI\b", re.IGNORECASE)
+    # the note's OPENING, where an ADOPTED row's stripped marker leaves the stub …
+    r"(?:^[ \t]*#[ \t]*"
+    # … or the em dash that follows a marker RESTATED in place of it, which is the
+    # only other place the writer can strand one (`_restate_unmeasured_marker`)
+    r"|(?:unmeasured|carried forward \(not a full-file CI measurement\))"
+    r"[ \t]*[—–-][ \t]*)"
+    r"(?:by|on|in)[ \t]+CI\b", re.IGNORECASE)
 
 
 def test_no_durations_row_note_carries_an_orphaned_unmeasured_qualifier():
@@ -6591,9 +6603,14 @@ def test_the_orphaned_qualifier_check_is_not_vacuous():
         "  test_c.py: 2.0  # unmeasured by CI — a new file takes the flat default.\n"
         "  test_d.py: 3.0  # carried forward (not a full-file CI measurement)"
         " — #10025: the marker was restated, not mangled.\n"
-        # prose ABOUT CI that is not a stranded marker qualifier
+        # prose ABOUT CI after an em dash: the anchor on the left is neither the
+        # note's `#` nor a marker, so these are NOT stranded qualifiers
         "  test_e.py: 0.4  # the census reads the leg's own junit; CI is the source,"
-        " and by CI timings this file is trivial.\n")
+        " and by CI timings this file is trivial.\n"
+        "  test_f.py: 3.1  # measured on this host — on CI it reads 3.1, so the"
+        " flat default is not this row's basis.\n"
+        "  test_g.py: 2.2  # the split is decided upstream — in CI the leg's own"
+        " junit is the source, and the census only reads it.\n")
     assert [key for key, note in _durations_row_comments(stale)
             if _ORPHANED_UNMEASURED_QUALIFIER_RE.search(note)] == [
         "test_a.py", "test_b.py"]
@@ -6674,9 +6691,12 @@ def _durations_row_comments(text: str):
     row does this block document" — §3.2.3.3 of the YAML spec says comments are "a
     presentation detail … not associated with a particular node" — and this map's
     dominant convention is the OPPOSITE of "the block continues the row above": the
-    block PRECEDES the row it documents (73 of the 74 such blocks at this head open
-    a new note). Joining anyway attributes a neighbour's prose to the wrong key,
-    which matters because these guards read CLAIMS off the joined text — a stale
+    block PRECEDES the row it documents (the overwhelming majority of such blocks
+    open a new note at this head; the count is DERIVED —
+    `tests/test_ci_timing.py::test_the_maps_indented_blocks_are_preamble_shaped_
+    not_wrap_shaped` — and never frozen in prose, because a refresh moves it).
+    Joining anyway attributes a neighbour's prose to the wrong key, which matters
+    because these guards read CLAIMS off the joined text — a stale
     case count or a `WATCHDOG_FLOOR_MIN` claim from the block below then lands on a
     row whose value it does not describe. The writer bounds its span identically
     (`tools/ci_timing._row_continuation_lines`), which is the property that keeps a

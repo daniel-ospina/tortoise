@@ -490,13 +490,33 @@ def floor_issues(manifest: dict) -> list[str]:
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             continue  # the wrong TYPE is `duration_issues`' diagnostic, not this one
         if float(value) < float(floor):
-            issues.append(
-                f"{name} is declared with a ``durations_floors`` FLOOR of "
-                f"{float(floor):.1f} but its row carries {value!r} — the writer "
-                f"keeps a row at or above its floor, so this map states both that "
-                f"the value is a declared minimum and that it is below it; raise "
-                f"the row, or lower the declared floor"
-            )
+            # The DECLARATION decides the sentence, not the direction of the
+            # disagreement (the writer-side mirror of `kept_at_declared_cap` vs
+            # `kept_as_lower_bound`, `tools/ci_timing.py`). A `pinned` row is a CAP:
+            # the writer holds it AT the declared value in BOTH directions, and the
+            # key's own header forbids "lower the declared floor" as a repair —
+            # raising or lowering a cap is a CI-budget decision recorded on #9172,
+            # never a sweep's side effect (`config/ci-surfaces.yml`,
+            # `durations_floors`). Naming the wrong mechanism here sent a reader to
+            # the one action the declaration forbids (#10575 review, P3).
+            if pinned:
+                issues.append(
+                    f"{name} is declared with a ``durations_floors`` CAP of "
+                    f"{float(floor):.1f} but its row carries {value!r} — the writer "
+                    f"holds a capped row AT its declared value in both directions, "
+                    f"so this map states both that the weight is a declared weighing "
+                    f"choice and that it is a measurement below it; correcting the "
+                    f"row (or the declaration itself) is a CI-budget decision "
+                    f"(#9172), never a side effect of a sweep"
+                )
+            else:
+                issues.append(
+                    f"{name} is declared with a ``durations_floors`` FLOOR of "
+                    f"{float(floor):.1f} but its row carries {value!r} — the writer "
+                    f"keeps a row at or above its floor, so this map states both that "
+                    f"the value is a declared minimum and that it is below it; raise "
+                    f"the row, or lower the declared floor"
+                )
         elif pinned and float(value) > float(floor):
             issues.append(
                 f"{name} is declared with a ``durations_floors`` CAP of "

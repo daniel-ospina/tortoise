@@ -6119,9 +6119,12 @@ def test_a_stripped_basis_clause_does_not_orphan_a_parenthesis() -> None:
 # ── a WRAPPED note is ONE note (the 2026-11-02 refresh's half-parenthesis) ────
 #
 # A row's note is not the tail on its row line: a note CAN wrap across indented `#`
-# continuation lines (measured at this head: 1 row of 1227 — the block's
-# dominant shape is the PREAMBLE for the row below, 73 of its 74 indented blocks),
-# and the guard that judges a written map joins them before judging
+# continuation lines (at this head exactly one row does, and the block's dominant
+# shape is the PREAMBLE for the row below — the overwhelming majority of indented
+# blocks open a note of their own). ⛔ Both counts are DERIVED below and never
+# stated as absolutes here: a refresh flattens the wrap and grows the row count,
+# and this file is not one the sweep can edit (#10575 review, P2).
+# And the guard that judges a written map joins them before judging
 # (`tests/test_ci_selection.py`
 # `_durations_row_comments`). The renderer used to reason about the row-line
 # FRAGMENT only, so a cut on the fragment dropped half a sentence and
@@ -6284,7 +6287,9 @@ def test_a_registered_row_is_appended_after_the_last_rows_wrapped_note() -> None
 # ── …and the OTHER convention: a block that OPENS a note is not the row above's ──
 #
 # This map's dominant convention is the block that PRECEDES the row it documents
-# (73 of the 74 blocks beside a row at this head open a note of their own),
+# (the overwhelming majority of blocks beside a row open a note of their own; the
+# count is derived by `test_the_maps_indented_blocks_are_preamble_shaped_not_wrap_
+# shaped`, never frozen here),
 # and nothing in YAML says which row a comment belongs to — §3.2.3.3 of the spec:
 # comments are “a presentation detail … not associated with a particular node”.
 #
@@ -6854,6 +6859,19 @@ def test_a_floor_that_names_no_row_or_sits_above_one_is_red() -> None:
          "durations_floors": {"test_a.py": {"value": 355.0, "pinned": True}}})
     assert len(above_cap) == 1 and "390.0" in above_cap[0], above_cap
     assert "CAP" in above_cap[0], above_cap
+    # …and BELOW the declaration is the same disagreement, so the diagnostic must
+    # name the same mechanism. It said FLOOR here and recommended "lower the
+    # declared floor" — the one action a CAP's own header forbids (#9172) — which
+    # is the read-side mirror of the writer's `kept_at_declared_cap` defect; the
+    # word must follow the DECLARATION, not the direction (#10575 review, P3).
+    below_cap = ci_manifest.floor_issues(
+        {"durations": {"test_a.py": 355.0 - 25.4},
+         "durations_floors": {"test_a.py": {"value": 355.0, "pinned": True}}})
+    assert len(below_cap) == 1 and "329.6" in below_cap[0], below_cap
+    assert "CAP" in below_cap[0], below_cap
+    assert "FLOOR" not in below_cap[0], below_cap
+    assert "lower the declared floor" not in below_cap[0], below_cap
+    assert "#9172" in below_cap[0], below_cap
     # an UNPINNED declaration keeps the one-directional meaning: 390.0 over a 355.0
     # minimum is exactly what a floor permits
     assert ci_manifest.floor_issues(
@@ -7083,49 +7101,58 @@ def test_an_unreadable_or_pinned_odd_declaration_refuses_the_write() -> None:
     assert parsed["b.py"] == ci_timing.DeclaredFloor(12.5, True), parsed
 
 
-# ── the ROW-COUNT absolutes in that rationale must name THIS map ─────────────
+# ── the RATIONALE counts are DERIVED, never frozen in prose ──────────────────
 #
 # Three docstrings justify a DESTRUCTIVE rule (the CUT arm deletes a row's
-# continuation lines) by counting the map they were measured on, and the counts
-# are stated in TWO files. The distribution tests COMPUTE their counts, which is
-# exactly why nothing noticed the pair drifting: the re-base onto a main that
-# added two rows left both sites saying 1225 in a block carrying 1227 (#10575
-# review, P3) — in the same branch that had just corrected them from 1222. So
-# this is the re-derivation those comments ask a reader to do, run on every leg.
-_ROW_COUNT_PROSE = {
-    "tools/ci_timing.py": "measured at this head: 1 row of {} does",
-    "tests/test_ci_timing.py": "continuation lines (measured at this head: 1 row of {} — the block's",
-}
+# continuation lines) by arguing from the map's SHAPE: the indented blocks beside a
+# row overwhelmingly OPEN a note of their own for the row BELOW, and only an
+# exception wraps the row above. Those figures were once written into the prose as
+# bare absolutes and pinned by a test — and that made the weekly sweep a test
+# dependency: `render_refreshed_manifest` FLATTENS a wrapped note on any adopting
+# re-render, and the row count grows with every file the census measures, so the
+# first sweep that re-valued the map's last wrapped row left a map HEALTHY in every
+# respect and a guard that could not pass. The sweep is `tortoise-ci[bot]`, which
+# commits exactly three paths (`docs/ci-timing.md`, `docs/ci-timing.json`,
+# `config/ci-surfaces.yml`), so the author of that red cannot edit the `.py` files
+# that state the absolute — the same false red `_assert_preamble_shape` had already
+# removed once (#10575 review, P2).
+#
+# So the SHAPE is pinned where it can be DERIVED (`_indented_block_shape` +
+# `_assert_preamble_shape`, run on the committed map AND on a swept render, by
+# `test_the_maps_indented_blocks_are_preamble_shaped_not_wrap_shaped`), and this
+# guard pins the other direction: the prose must not freeze a count the sweep
+# moves. Both halves are needed, or deleting the rationale would be a way to pass.
+_FROZEN_MAP_COUNT_RE = re.compile(
+    r"\b1 row of \d+\b"
+    r"|\b\d+ of (?:its|the) \d+ (?:indented |such )?blocks?\b")
+_RATIONALE_SITES = ("tools/ci_timing.py", "tests/test_ci_timing.py",
+                    "tests/test_ci_selection.py")
+_SHAPE_CLAIM = "open a new note"
 
 
-def test_the_row_count_absolutes_in_the_rationale_name_THIS_map() -> None:
-    """`… 1 row of N …` must be the N this map carries, in BOTH files stating it.
+def test_the_rationales_map_counts_stay_DERIVED_not_frozen_in_prose() -> None:
+    """A rationale may argue from the map's shape — never from a frozen count.
 
-    ⛔ Any change to `config/ci-surfaces.yml::durations` that adds or removes a
-    row moves every figure in this rationale — update both sites below, and the
-    `X of its Y indented blocks` pair, in the same commit.
+    ⛔ Both figures move WITHOUT anyone touching these files: the sweep flattens a
+    wrapped note (one adopting render takes the committed wrap to zero) and the
+    `durations:` block grows with each newly measured file. State the shape, point
+    at the guard that computes it, and re-derive rather than restate.
 
-    Non-vacuity: on the pre-fix tree (both sites at 1225 against the 1227 rows
-    this map carries) the first assertion fails on the tools/ site.
+    Non-vacuity: on the pre-fix tree every site below reds — the two `.py` sites
+    stated the row count as an absolute after `1 row of`, and all three stated the
+    opener/blocks pair as `N of its M indented blocks` / `N of the M such blocks`.
     """
     root = Path(__file__).resolve().parent.parent
-    lines = (root / "config" / "ci-surfaces.yml").read_text().splitlines()
-    _key_line, entries = ci_timing._locate_durations_block(lines)
-    assert entries, "the durations block did not parse — this guard would be vacuous"
-    runs = [ci_timing._row_indented_comment_run(lines, i) for i in entries.values()]
-    blocks = [run for run in runs if run]
-    openers = [run for run in blocks if ci_timing._starts_a_new_note(lines[run[0]])]
-    wrapped = [key for key, i in entries.items() if ci_timing._row_continuation_lines(lines, i)]
-    # The two figures per site are three claims; the third is what the other two
-    # are ABOUT, so assert it rather than assume it.
-    assert wrapped == ["test_source_staleness_sweep_5038.py"], wrapped
-    assert len(blocks) - len(openers) == len(wrapped), (len(blocks), len(openers), wrapped)
-    for rel, template in _ROW_COUNT_PROSE.items():
-        needle = template.format(len(entries))
-        assert needle in (root / rel).read_text(), (
-            f"{rel} does not state this map's {len(entries)} rows — re-derive "
-            f"`_DURATION_LINE_RE`'s count over `_locate_durations_block` and update BOTH sites")
-    pair = f"{len(openers)} of its {len(blocks)} indented blocks"
-    assert pair in (root / "tests/test_ci_timing.py").read_text(), (
-        f"the PREAMBLE figure is not `{pair}` — re-derive it from "
-        f"`_row_indented_comment_run` + `_starts_a_new_note`")
+    frozen = {rel: _FROZEN_MAP_COUNT_RE.findall((root / rel).read_text())
+              for rel in _RATIONALE_SITES}
+    assert {rel: hits for rel, hits in frozen.items() if hits} == {}, (
+        "a rationale states a MAP COUNT as an absolute; the weekly sweep moves "
+        "both figures and cannot edit these files — state the shape and point at "
+        f"the guard that derives it: {frozen}")
+    # …and the shape itself must still be argued for: deleting the rationale is not
+    # a way to satisfy the assertion above.
+    silent = [rel for rel in _RATIONALE_SITES
+              if _SHAPE_CLAIM not in (root / rel).read_text()]
+    assert silent == [], (
+        f"the rationale no longer states the dominant convention ({_SHAPE_CLAIM!r}) "
+        f"for: {silent} — the CUT arm is destructive, and the shape IS its justification")
