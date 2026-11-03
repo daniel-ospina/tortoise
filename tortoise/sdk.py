@@ -36891,12 +36891,17 @@ class TortoiseSDK:
                 # available (kills the ~350ms full-payload re-fetch + per-call
                 # TF-IDF re-fit). Falls back to the legacy path when the
                 # snapshot is unavailable (too big / build failed).
+                #
+                # #10602: through ``get_or_build``, NOT ``build_snapshot`` — a
+                # degraded read used to fetch the whole corpus per reader, so N
+                # concurrent agents cost N corpus reads and each call's latency
+                # grew with the fleet's concurrency (measured: 8 readers, 4.6 s
+                # each vs 595 ms for one). Coalescing is result-identical.
                 from tortoise.fallback_snapshot import (  # noqa: I001
-                    _store as _fb_store, snapshot_key, build_snapshot,
+                    _store as _fb_store, snapshot_key, get_or_build,
                     search_snapshot,
                 )
                 _key = snapshot_key(proj, getattr(self, "_namespace", None))
-                _snap = _fb_store.get(_key)
                 # #2351: the snapshot is a deliberately LEAN projection (it
                 # carries no class column), so it cannot honour a claim-class
                 # filter pre-truncation. When one is requested, DROP the (cached
@@ -36906,10 +36911,8 @@ class TortoiseSDK:
                 # class-filtered read.
                 if claim_class is not None:
                     _snap = None
-                elif _snap is None:
-                    _snap = build_snapshot(proj)
-                    if _snap is not None:
-                        _fb_store.put(_key, _snap)
+                else:
+                    _snap = get_or_build(proj, _key, store=_fb_store)
                 if _snap is not None:
                     snap_hits = search_snapshot(
                         query, _snap, limit=limit, kind=kind,
