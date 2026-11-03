@@ -909,6 +909,90 @@ def _test_node_names(path: Path) -> set[str] | None:
             parts.append(current.id)
         return ".".join(reversed(parts))
 
+    #: Markers that leave a node COLLECTED but unable to RED. Only the
+    #: UNCONDITIONAL forms qualify, and that boundary is the whole point: an
+    #: `@pytest.mark.skip` or a non-strict `@pytest.mark.xfail` can never fail,
+    #: so citing one is a pin that watches nothing — the exact fail-open this
+    #: gate exists to close (review cycle 9, P2). A `skipif(cond)` and an
+    #: in-body `pytest.skip()` are CONDITIONAL: the node still reds on the other
+    #: branch, so both stay legitimate pins and are deliberately NOT excluded
+    #: here. Built from REAL imports, never seeded — seeding is what made both
+    #: `fixture_markers` import branches inert (cycle 8, P2).
+    never_red_skips: set[str] = set()
+    never_red_xfails: set[str] = set()
+    for top in tree.body:
+        if isinstance(top, ast.Import):
+            for alias in top.names:
+                if alias.name != "pytest":
+                    continue
+                stem = alias.asname or alias.name
+                never_red_skips.add(f"{stem}.mark.skip")
+                never_red_xfails.add(f"{stem}.mark.xfail")
+        elif isinstance(top, ast.ImportFrom) and (top.module or "") == "pytest":
+            for alias in top.names:
+                spelled = alias.asname or alias.name
+                if alias.name == "skip":
+                    never_red_skips.add(spelled)
+                elif alias.name == "xfail":
+                    never_red_xfails.add(spelled)
+                elif alias.name == "mark":
+                    never_red_skips.add(f"{spelled}.skip")
+                    never_red_xfails.add(f"{spelled}.xfail")
+
+    def _decorator_never_reds(decorator: ast.expr) -> bool:
+        """An UNCONDITIONAL skip/xfail decorator — it removes the node's red.
+
+        `xfail(strict=True)` is NOT excluded: a strict xfail REDS when the test
+        unexpectedly passes, so the node still carries a red and remains a pin.
+        """
+        name = _dotted_decorator(decorator)
+        if name in never_red_skips:
+            return True
+        if name in never_red_xfails:
+            if isinstance(decorator, ast.Call):
+                for keyword in decorator.keywords:
+                    if keyword.arg == "strict" and isinstance(
+                        keyword.value, ast.Constant
+                    ):
+                        return not keyword.value.value
+            return True
+        return False
+
+    def _never_reds(node: ast.AST) -> bool:
+        """Collected, but it can never FAIL — so it is not a watch."""
+        if _own_disabled(node):
+            return True
+        return any(
+            _decorator_never_reds(decorator)
+            for decorator in getattr(node, "decorator_list", ())
+        )
+
+    def _module_never_reds() -> bool:
+        """`pytestmark = pytest.mark.skip` at module scope: nothing can red."""
+        for top in tree.body:
+            targets: list[ast.expr]
+            value: ast.expr | None
+            if isinstance(top, ast.Assign):
+                targets, value = list(top.targets), top.value
+            elif isinstance(top, ast.AnnAssign) and top.value is not None:
+                targets, value = [top.target], top.value
+            else:
+                continue
+            if not any(
+                isinstance(target, ast.Name) and target.id == "pytestmark"
+                for target in targets
+            ):
+                continue
+            entries = (
+                list(value.elts) if isinstance(value, (ast.List, ast.Tuple)) else [value]
+            )
+            if any(_decorator_never_reds(entry) for entry in entries):
+                return True
+        return False
+
+    if _module_never_reds():
+        return set()  # a module-wide skip marker: no collectable node can red
+
     def _base_names(node: ast.ClassDef) -> list[str]:
         out: list[str] = []
         for base in node.bases:
@@ -978,6 +1062,7 @@ def _test_node_names(path: Path) -> set[str] | None:
                 node.name.startswith("test")
                 and node.name not in module_plain
                 and not _is_fixture(node)
+                and not _never_reds(node)
             ):
                 nodes.add(node.name)
             continue
@@ -1005,6 +1090,7 @@ def _test_node_names(path: Path) -> set[str] | None:
                 and child.name.startswith("test")
                 and child.name not in excluded
                 and not _is_fixture(child)
+                and not _never_reds(child)
             )
     return nodes
 
@@ -5864,3 +5950,69 @@ def test_load_registry_refuses_a_non_mapping_document(tmp_path) -> None:
 
 if __name__ == "__main__":  # pragma: no cover - manual mutation aid
     raise SystemExit(pytest.main([__file__, "-q"]))
+
+
+def test_an_unconditional_skip_or_xfail_is_not_a_pin(tmp_path):
+    """A `pins:` entry must cite a test that can RED (review cycle 9, P2).
+
+    `@pytest.mark.skip` and a non-strict `@pytest.mark.xfail` leave the node
+    COLLECTED but unable to fail, so a row citing one reads "watched" while
+    nothing watches it — the exact fail-open this gate closes. The boundary is
+    the point: `skipif(cond)` and an in-body `pytest.skip()` are CONDITIONAL and
+    still red on the other branch, so both stay legitimate pins.
+    """
+    module = tmp_path / "test_pinned.py"
+    module.write_text(
+        "import pytest\n"
+        "\n"
+        "def test_plain():\n"
+        "    assert True\n"
+        "\n"
+        "@pytest.mark.skip(reason='not yet')\n"
+        "def test_skipped():\n"
+        "    assert True\n"
+        "\n"
+        "@pytest.mark.xfail\n"
+        "def test_xfailed():\n"
+        "    assert False\n"
+        "\n"
+        "@pytest.mark.xfail(strict=True)\n"
+        "def test_strict_xfail():\n"
+        "    assert True\n"
+        "\n"
+        "@pytest.mark.skipif(False, reason='conditional')\n"
+        "def test_conditionally_skipped():\n"
+        "    assert True\n"
+        "\n"
+        "def test_skips_in_body():\n"
+        "    pytest.skip('conditional at runtime')\n"
+        "\n"
+        "class TestGroup:\n"
+        "    @pytest.mark.skip\n"
+        "    def test_in_class(self):\n"
+        "        assert True\n"
+        "\n"
+        "    def test_kept(self):\n"
+        "        assert True\n"
+    )
+    assert _test_node_names(module) == {
+        "test_plain",
+        "test_strict_xfail",
+        "test_conditionally_skipped",
+        "test_skips_in_body",
+        "TestGroup::test_kept",
+    }
+
+
+def test_a_module_wide_pytestmark_skip_pins_nothing(tmp_path):
+    """`pytestmark = pytest.mark.skip` opts the whole module out of reddening."""
+    module = tmp_path / "test_all_skipped.py"
+    module.write_text(
+        "import pytest\n"
+        "\n"
+        "pytestmark = pytest.mark.skip(reason='whole module')\n"
+        "\n"
+        "def test_a():\n"
+        "    assert True\n"
+    )
+    assert _test_node_names(module) == set()
