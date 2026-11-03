@@ -51,9 +51,12 @@ and the cap is a separate decision.
 returns `capture_calls` / `capture_tokens_in` / `capture_tokens_out` / `capture_cost_usd` per org per metering
 window on BOTH substrates (`:MeteringRecord` in the registry, or `supabase.metering_records`), degrading to a zero
 view and never raising; `capture_extraction`'s declared `READER` binding in `tortoise/cost_dimensions.py` points at
-it. The reader is MEASUREMENT ONLY — no request path calls it, and the ceiling above still cannot see these columns
-by construction. The metric set itself — the per-call metrics, the disclosure counters, the attribution and the
-derived figures — is defined in `docs/ops/extraction-cost-metrics.md` (`#3840`); the consumption model that consumes
+it. The reader is MEASUREMENT ONLY — no request path calls it, and the ceiling above still cannot see the **token
+counters** (`capture_tokens_in` / `capture_tokens_out` / `ask_tokens_in` / `ask_tokens_out`) by construction. It
+does of course see `capture_cost_usd` — that column is one of the two the ceiling sums, so a change in capture
+*cost* moves the cap while a change in capture *tokens* does not. The metric set itself — the per-call metrics, the
+disclosure counters, the attribution and the derived figures — is defined in
+`docs/ops/extraction-cost-metrics.md` (`#3840`); the consumption model that consumes
 the reader is `docs/architecture/CONSUMPTION-MODEL.md` (`#4051`).
 
 **⚠️ Open, and not decided here:** whether the token allowance and the storage allowance are enforced at the same
