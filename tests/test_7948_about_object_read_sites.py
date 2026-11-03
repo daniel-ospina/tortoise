@@ -2624,12 +2624,16 @@ def _route_table() -> dict[tuple[str, str], frozenset[str]]:
 #: How many reference hops a door→reader attribution may take. See the residual
 #: note above: this is a BOUND, not a proof.
 #:
-#: ⚠️ **Three, and this is a BOUND, not a proof.** Re-measured 2026-10-24 at
-#: `d07c9e99e`, with function-local ASSIGNMENT targets excluded from the symbol
-#: index (see `_symbol_index`; the NAME of a nested `def`/`class` is still indexed)
-#: and the per-reader exceptions DISABLED, so these are the PURE
-#: relation's figures over the 418 pairs: a uniform 2 accepts 24, a uniform 3 34,
-#: a uniform 4 43, a uniform 5 52. The SHIPPED predicate — the two exceptions in
+#: ⚠️ **Three, and this is a BOUND, not a proof.** Re-measured 2026-11-03 at the
+#: `self.`-scoped relation (`_symbol_index`, read through `_resolved_targets`),
+#: with function-local ASSIGNMENT targets excluded (see `_symbol_index`; the NAME
+#: of a nested `def`/`class` is still indexed) and the per-reader exceptions
+#: DISABLED, so these are the PURE relation's figures over the 418 pairs: a
+#: uniform 2 accepts 24, a uniform 3 34, a uniform 4 39, a uniform 5 40. ⚠️ The
+#: column this note carried before the scope fix (2026-10-24 at `d07c9e99e`) was
+#: `24/34/43/52` — SUPERSEDED, quoted only so an older figure met elsewhere reads
+#: as superseded rather than as a contradiction of this one. The SHIPPED predicate
+#: — the two exceptions in
 #: `_DISTANCE_EXCEPTIONS` added — accepts 36, i.e. the exceptions are worth exactly
 #: the 34 -> 36 above, stated separately so neither figure hides the other. Every
 #: one of the 31 true attributions is within 3 hops except the two named in
@@ -2697,7 +2701,7 @@ _DISTANCE_EXCEPTIONS: dict[str, tuple[int, str]] = {
 #: two exceptions whose budgets are 4 and 5) — which is NOT the same as above
 #: every CHAIN, and the difference is measured, not assumed: at this head
 #: `MCP tortoise_search` reaches `hosted_backup.py::_independent_counts` and
-#: `_DUMP_EDGE_PAGE_QUERY` in 13 hops and `_COUNT_ALL_EDGES_QUERY` in 14, so
+#: `_DUMP_EDGE_PAGE_QUERY` in 15 hops and `_COUNT_ALL_EDGES_QUERY` in 16, so
 #: `_door_distance` returns `None` for them at this cap. **`None` therefore means
 #: "not found within `_DISTANCE_SEARCH_CAP` hops", never "unreachable"**, and
 #: every message that consumes the value says which of the two it is — a short
@@ -2773,10 +2777,24 @@ def _symbol_index() -> tuple[
     every row's own door still attributing, the uniform-3 sweep back to 34) and
     the refused pair is a negative probe in
     `test_the_door_attribution_refuses_a_door_that_reaches_another_reader`.
+    ⚠️ The FIRST hop of that recorded chain no longer exists at this head: the
+    context wrap moved from the inline `functools.partial(copy_context().run, fn)`
+    onto `monitoring.confine_context` (main's #10642 seam, required because main
+    deleted this module's `import contextvars`), so the chain now breaks at step
+    two as well. The arm still pins the SCOPE, which is the part that is a fact
+    about the language rather than an accident of which spelling the wrapper used.
     ⚠️ A name mentioned as `self.X` AND somewhere non-`self` in the same body is
     NOT scoped — the free mention may be a real reference, so only the PURE
     member-only case is narrowed (pinned in
     `test_a_self_attribute_hop_resolves_only_inside_its_own_module`).
+    ⚠️ **The scope's claim is about the CLASSES it was measured on, not a proof
+    that no real reach is lost.** A `self.X` whose definition is a METHOD
+    INHERITED FROM A BASE CLASS IN ANOTHER MODULE is a real reference this rule
+    drops — no such row is in the table (every row's own door still attributes,
+    which is what the arm asserts), and the measured pair it closes is a
+    module-level FUNCTION collision, so the rule is not narrowed on conjecture.
+    If a future row reds for that inheritance shape, the honest repair is to keep
+    cross-module BASE-CLASS definitions rather than to widen the rule back.
     """
     defs: dict[str, set[str]] = {}
     refs: dict[str, frozenset[str]] = {}
@@ -2950,7 +2968,7 @@ def _door_distance(door: str, reader: str) -> int | None:
 
     ⚠️ `None` is a TRUNCATION, not a proof of absence — a chain longer than the
     cap reports `None` exactly like one that does not exist (measured at this
-    head: `_COUNT_ALL_EDGES_QUERY` is 14 hops against a cap of 12), which is why
+    head: `_COUNT_ALL_EDGES_QUERY` is 16 hops against a cap of 12), which is why
     the two are never conflated in a message.
 
     Returns the DISTANCE rather than a boolean so the failure can say how far the
@@ -3360,6 +3378,15 @@ def test_a_self_attribute_hop_resolves_only_inside_its_own_module():
 #: `test_a_self_attribute_hop_resolves_only_inside_its_own_module`. The ceiling
 #: never moved: a RISE that is refused leaves the pin where the last derivation
 #: put it.
+#: ⛔ RE-DERIVED AGAIN at the merge-with-main head: 36 -> 36, unchanged, and the
+#: measurement was re-run rather than assumed. The read seam's context wrap moved
+#: from the inline `functools.partial(contextvars.copy_context().run, fn)` onto
+#: `monitoring.confine_context` (main's #10642 seam — required here, because main
+#: deleted this module's `import contextvars` and the bare inline call was a
+#: `NameError` on every read route at the merge commit), which removes the FIRST
+#: collision hop of the chain the note above records. Nothing else moved: no row,
+#: no door, no exception. Both the scope rule and the seam change tighten, so the
+#: pin reads the same either way — and the uniform-3 sweep stays at 34.
 _ACCEPTED_PAIRS_AT_THIS_HEAD = 36
 #: 15 -> 17 on 2026-10-21: the TABLE's door set grew by the two SDK doors the new
 #: call-time rows name, and `_hop_query` (an all-edge walk) legitimately reaches

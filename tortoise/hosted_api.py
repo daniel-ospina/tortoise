@@ -10136,8 +10136,9 @@ async def _read_offload(fn, *, op: str, unavailable=None, timeout=None):
     here is most likely to break:
 
     * **contextvars** — the callable runs under a COPY of the caller's context
-      (``ctx.run``), exactly as ``_submit_off_loop`` and ``_graph_offload`` do,
-      because a pool thread is process-lifetime: a ContextVar set at its top
+      (``monitoring.confine_context``), exactly as ``_submit_off_loop`` and
+      ``_graph_offload`` do, because a pool thread is process-lifetime: a
+      ContextVar set at its top
       level would leak into the NEXT request the worker serves. That copy is
       also what carries the loop-side ``_bind_actor_context`` / ``_bind_record_tenant``
       binds into the worker.
@@ -10208,10 +10209,21 @@ async def _read_offload(fn, *, op: str, unavailable=None, timeout=None):
     cancel a started thread). A single copy shared by a retry would raise a bare
     ``RuntimeError``, which is NOT a ``ControlPlaneOffloadError``: it would
     escape this seam and the routes' blanket ``except Exception`` would answer
-    **500** ("Search failed", no ``error_code``, not retryable). A fresh copy
-    per submission keeps the property ``ctx`` exists for (no ContextVar leaks
+    **500** ("Search failed", no ``error_code``, not retryable). A fresh wrap
+    per submission keeps the property the copy exists for (no ContextVar leaks
     into the next request the process-lifetime worker serves) and cannot
     collide with an attempt it replaces.
+
+    That wrap is ``monitoring.confine_context`` — the SHARED seam main's #10642
+    introduced for exactly this class, not the hand-rolled
+    ``functools.partial(contextvars.copy_context().run, fn)`` idiom. Two reasons
+    it must go through the seam rather than inline: the idiom stores ONE
+    ``Context``, which is the re-entry trap itself (the seam re-materialises a
+    fresh copy on every invocation, so no caller can reintroduce the one-shot
+    shape without deleting a documented seam), and main's merge deleted this
+    module's ``import contextvars`` when it migrated both pre-existing sites —
+    so an inline ``copy_context()`` here is not merely a style choice, it is a
+    ``NameError`` on every read route at the merge commit.
 
     ⛔ #10602 review P2 — A RE-ARM IS ONLY HONEST WHEN THE SUBMISSION NEVER RAN,
     AND IT IS NEVER A SECOND SUBMISSION WHILE THE FIRST IS RUNNING.
@@ -10248,7 +10260,16 @@ async def _read_offload(fn, *, op: str, unavailable=None, timeout=None):
     exempted = False
     while True:
         # A FRESH copy per ATTEMPT (see the docstring's #10602 review P1 note).
-        submitted = functools.partial(contextvars.copy_context().run, fn)
+        # The copy is taken by the SHARED seam, `monitoring.confine_context`
+        # (main #10642) — never the hand-rolled
+        # `functools.partial(contextvars.copy_context().run, fn)` idiom. That
+        # idiom is one-shot per stored Context, which is the trap this loop
+        # would have reintroduced a second copy of; and going through the seam
+        # is also what keeps this module from owning a private
+        # `import contextvars` (main deleted it, and a locally-added
+        # `copy_context()` here `NameError`d in every read route at the merge
+        # commit).
+        submitted = _monitoring.confine_context(fn)
         try:
             return await run_control_plane_call(
                 submitted, op=op, pool="read", timeout=bound)
