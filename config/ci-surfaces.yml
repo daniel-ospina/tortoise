@@ -9968,8 +9968,12 @@ durations:
   # legs + the 12-shape conversion leg, which the armed `test-record-postgres`
   # job runs). The leg that lands WITH this line
   # (`test_an_unreadable_verdict_is_never_published_as_not_refusing`) adds one, so
-  # the file at its own face collects **45 / 31 run / 14 skip** — re-derive with
-  # `--collect-only -q` rather than carrying either figure. Unarmed it is ~8-10 s;
+  # the file at its own face collected **45 / 31 run / 14 skip**. #10648's
+  # driver-withhold fix added three DB-free legs (a driver-shaped `22P02`
+  # DETAIL/CONTEXT leg, a `23514` CHECK whose DETAIL is the failing row, and the
+  # same withhold driven through the real `RecordWriter.write` wrap), so it now
+  # collects **48 / 34 run / 14 skip** — re-derive with `--collect-only -q`
+  # rather than carrying any of these figures. Unarmed it is ~8-10 s;
   # the 4.5 s budget keeps headroom for the armed legs on a cold container. An
   # earlier revision of this note said 42 / 28 / 14 — stale, and quietly short of
   # the file it describes.
