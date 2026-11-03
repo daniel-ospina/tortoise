@@ -1317,3 +1317,61 @@ def test_the_pool_only_window_is_not_claimed_as_a_hard_ceiling():
     assert "walks past ``eff_item_cap``" in flat, (
         "the comment must say WHY it under-counts above that condition: the "
         "reader's walk extends past the window")
+
+
+def test_the_pool_only_under_count_is_MEASURED_not_merely_asserted_in_prose():
+    """The BEHAVIOURAL half of ``test_the_pool_only_window_is_not_claimed_as_a_hard_ceiling``.
+
+    That test proves the falsified sentence is GONE from the comment; this one
+    proves the replacement sentence is TRUE — on the pool-only arm with
+    ``top_k > eff_item_cap`` the census really does under-count. A comment
+    that stops over-claiming and starts asserting the opposite still has to
+    be checked against the code, which is this PR's whole thesis.
+
+    Shape: 40 base hits / 8 sessions, 10 injected for a ninth session at the
+    TAIL (the shipped lane's own shape), window = the 40-item cap. Two of the
+    hits INSIDE the window carry no claim text, so ``#2978`` frees their
+    slots; the arm truncates the pool to ``top_k = 50``, so the reader walks
+    all 50 candidates and admits 2 injected items from BELOW the window while
+    the census — which stops at 40 — counts none of them.
+
+    Passing ``window=50`` (the aligned shape) reports 10, so the assertion
+    discriminates on the window/pool MISALIGNMENT, not on delivery alone.
+    """
+    base = [{"id": f"b{i}", "session_id": f"s{i // 5}",
+             "point_kind": TURN_POINT_KIND,
+             "content": "" if i in (5, 17) else f"base hit content {i}"}
+            for i in range(40)]
+    injected = [{"id": f"x{i}", "session_id": "sx",
+                 "point_kind": TURN_POINT_KIND,
+                 "content": f"injected content {i}"}
+                for i in range(10)]
+    merged = base + injected
+    assert len(merged) == 50
+
+    window = 40                     # eff_item_cap: the reader's item bound
+    top_k = 50                      # --top-k, INDEPENDENT of --context-items
+    out = reader_window_displacement(base, merged, window=window)
+    assert out["injected_in_window"] == 0, (
+        "the census counts the RAW prefix, and every injected item sits below "
+        "it -- this is the number a lane reads as 'no crowding'")
+    aligned = reader_window_displacement(base, merged, window=top_k)
+    assert aligned["injected_in_window"] == 10, (
+        "with the window ALIGNED to the truncated pool the same items are "
+        "counted, so the zero above is the misalignment, not the fixture")
+
+    pool_only_arm = merged[:top_k]  # retrieve.py: pool = pool[:top_k]
+    assert len(pool_only_arm) == 50, (
+        "the arm truncates to top_k, which is LARGER than the window here -- "
+        "so candidates exist below the cut")
+    delivered = retrieval.assemble_context(
+        pool_only_arm, top_k=top_k, max_context_tokens=8000,
+        context_item_cap=window)
+    delivered_injected = [h for h in delivered if h["session_id"] == "sx"]
+    assert [h["id"] for h in delivered_injected] == ["x0", "x1"], (
+        "the two freed slots admit exactly the 2 injected items below the "
+        f"window; got {[h['id'] for h in delivered]}")
+
+    assert out["injected_in_window"] == 0 < len(delivered_injected), (
+        "\u26d4 the under-count: the census reports 0 injected items in the "
+        "window while the reader was delivered 2 of them")
