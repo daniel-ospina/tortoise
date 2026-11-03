@@ -49,7 +49,7 @@ import re
 import secrets
 from datetime import datetime, timedelta, timezone
 from typing import NoReturn
-from urllib.parse import parse_qs, urlencode, urlparse, urlsplit, urlunsplit  # noqa: F401
+from urllib.parse import parse_qs, urlencode, urlparse, urlsplit, urlunsplit
 
 # #8218 — the client-identity decision (SCOPE §9 class 4(i)) is its own module so
 # the invariant has ONE enumerable home; the consent page only renders it.
@@ -2740,8 +2740,35 @@ def consent_bounce_url(app_origin: str, raw_query: str) -> str:
       and `redirect_uri` are compared byte-for-byte by the client, and a
       `+`/`%2B`/`%20` normalisation at this hop is the silent
       CSRF-mismatch-after-consent class the bridge refuses everywhere else.
+    * ⛔ THIS SERVER MINTS THE ATTEMPT KEY, because this hop is the ONLY leg on
+      which no key exists yet (#10487). `/api/consent/start` binds the flow to a
+      browser with an insert-only `attempt_key` and hands it back inside the
+      return target — but on a cold start it had to INVENT that key, so the key
+      existed only in the one URL `start` happened to emit. A visitor who signed
+      in on a DIFFERENT `/auth` entry for the same flow (the back button, a
+      refresh, this bounce's own return target) came back without it and was
+      refused with `403 flow_not_yours`: the row was already claimed by a key
+      nobody could present. Generating the key HERE makes it the property of the
+      flow rather than of one emitted URL — the bounce, the sign-in return, and
+      every re-entry carry the same value, so `start` ADOPTS it on the insert
+      and the insert-only row is never poisoned. It is `secrets`, not a
+      counter: it is the browser's only proof of ownership, so it must not be
+      predictable from the `state` (which is client-chosen and public).
     """
     inner = CONSENT_START_PATH + (("?" + raw_query) if raw_query else "")
+    # ⛔ APPEND ONLY WHERE NONE EXISTS. There are two callers and they are NOT alike: the bounce
+    # (`hosted_api.oauth_authorize`) carries no key, but the page's own sign-in link
+    # (`consent_page_html` → SIGNIN_URL) is rendered ONLY for a keyed flow, so ITS raw_query always
+    # carries one. Appending unconditionally emitted `…&attempt_key=K&attempt_key=<minted>`, which
+    # is benign today only because every reader takes the FIRST value — i.e. correctness would rest
+    # on a detail no consumer promises, and the day one takes the last, the page's sign-in leg
+    # presents the minted key instead of the row's and the visitor meets this very dead end again
+    # (#10487). A present-but-BLANK value counts as absent: it selects the bounce branch upstream
+    # (`if not key`), and start.ts reads `""` as no key at all.
+    if not any(v.strip() for v in parse_qs(raw_query, keep_blank_values=True)
+               .get(CONSENT_ATTEMPT_KEY_PARAM, [])):
+        inner += ("&" if "?" in inner else "?") + urlencode(
+            {CONSENT_ATTEMPT_KEY_PARAM: secrets.token_urlsafe(32)})
     return (app_origin.rstrip("/") + CONSENT_SIGNIN_PATH + "?"
             + urlencode({"next": inner}))
 
