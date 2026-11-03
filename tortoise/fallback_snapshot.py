@@ -206,10 +206,13 @@ _store = FallbackSnapshotStore()
 # at a time and is the natural follow-up if the store's slots are the binding constraint;
 # it was NOT done here because it adds cross-generation blocking to a P0 read path.
 #
-# What this is NOT: it changes no cache policy, no TTL, no size cap and no bound. Nothing
-# is cached that was not already cached. ⛔ "No answer changes" is NOT true and must not be
-# restored (review round 10, P2): see the COMMIT→INVALIDATE WINDOW note on
-# ``get_or_build`` for the one window in which a reader can be served pre-commit rows.
+# What this is NOT: it adds no cache entry, no TTL and no size cap. ⛔ "It changes no cache
+# POLICY" is NOT true and must not be restored (review round 13, P3: a reader taking that
+# at face value concludes the freshness guard is free, which the next 25 lines disprove).
+# The one admission change is the put guard below — an overtaken build is no longer cached,
+# so on a graph written to faster than a build completes this LOSES cache hits the
+# pre-change code had. "No answer changes" is likewise NOT true (review round 10, P2): see
+# the COMMIT→INVALIDATE WINDOW note on ``get_or_build``.
 #
 # ⛔ It is also not the "add a cache" remedy #10602's recorded decisions forbid
 # (STORAGE-ARCHITECTURE §14.2 / §12.1c make FalkorDB itself the cache under the
@@ -241,7 +244,12 @@ _FLIGHTS_GUARD = threading.Lock()
 
 
 class _Flight:
-    """One in-flight corpus build, shared by everyone waiting on the same key."""
+    """One in-flight corpus build, shared by everyone waiting on the same key AND generation.
+
+    Round 13 (P3) corrected "the same key": with ``(store, key, generation)`` slotting a
+    same-key reader that holds a newer generation explicitly does NOT share this flight —
+    it leads its own.
+    """
 
     __slots__ = ("done", "result", "waiters")
 
@@ -256,9 +264,24 @@ class _Flight:
         self.waiters = 0
 
 
-def _flight_begin(key: tuple, generation: tuple[int, int]) -> tuple[_Flight, bool]:
-    """Join (or open) the flight for ``(key, generation)``. Returns ``(flight, leader)``."""
-    slot = (key, generation)
+def _flight_slot(store, key: tuple, generation: tuple[int, int]) -> tuple:
+    """Registry slot for one build: **store identity** + key + generation.
+
+    ⛔ THE STORE IS PART OF THE SLOT (review round 13, P3). ``get_or_build`` takes
+    ``store`` as a test seam, and with the slot keyed on ``(key, generation)`` alone two
+    DIFFERENT stores sharing a key were handed each other's flight: a reader on store B
+    joined store A's in-flight build and was served **store A's snapshot**, while
+    ``b.get(key)`` stayed ``None``. Unreachable in production (the only instantiation is
+    the module singleton below, and ``sdk.py`` passes exactly it), which is worse rather
+    than better: a store-injection test would have been a **false PASS**. The store is
+    hash-identified by its default identity hash, which is exactly the semantics wanted.
+    """
+    return (store, key, generation)
+
+
+def _flight_begin(store, key: tuple, generation: tuple[int, int]) -> tuple[_Flight, bool]:
+    """Join (or open) the flight for this store+key+generation. Returns ``(flight, leader)``."""
+    slot = _flight_slot(store, key, generation)
     with _FLIGHTS_GUARD:
         flight = _FLIGHTS.get(slot)
         if flight is not None:
@@ -270,9 +293,9 @@ def _flight_begin(key: tuple, generation: tuple[int, int]) -> tuple[_Flight, boo
         return flight, True
 
 
-def _flight_end(key: tuple, generation: tuple[int, int], flight: _Flight) -> None:
+def _flight_end(store, key: tuple, generation: tuple[int, int], flight: _Flight) -> None:
     """Leave a flight; the last one out removes it (registry is in-flight-bounded)."""
-    slot = (key, generation)
+    slot = _flight_slot(store, key, generation)
     with _FLIGHTS_GUARD:
         flight.waiters -= 1
         if flight.waiters <= 0 and _FLIGHTS.get(slot) is flight:
@@ -414,7 +437,7 @@ def get_or_build(proj, key: tuple, *, store: FallbackSnapshotStore | None = None
     # builds for 1 leader + 5 joiners — the amplifier this module exists to remove,
     # restored by the fix for round 6).
     generation = store.generation(key)
-    flight, leader = _flight_begin(key, generation)
+    flight, leader = _flight_begin(store, key, generation)
     try:
         if leader:
             flight.result = produce(generation)
@@ -432,7 +455,7 @@ def get_or_build(proj, key: tuple, *, store: FallbackSnapshotStore | None = None
     finally:
         if leader:
             flight.done.set()
-        _flight_end(key, generation, flight)
+        _flight_end(store, key, generation, flight)
 
 
 # Stable key for a ``:memory:`` projection whose client exposes no store

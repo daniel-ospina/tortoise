@@ -689,6 +689,19 @@ def _snap_stub(tag="s"):
             "tag": tag}
 
 
+def _flight_for(key: tuple, generation: tuple[int, int], store=None):
+    """The registered flight for ``key``+``generation`` on the module store (or ``store``).
+
+    The registry slot is ``(store, key, generation)`` -- store identity is part of it
+    (review round 13), so a test cannot look the slot up by key alone.
+    """
+    target = fs._store if store is None else store
+    for slot, flight in list(fs._FLIGHTS.items()):
+        if slot[0] is target and slot[1] == key and slot[2] == generation:
+            return flight
+    return None
+
+
 def test_get_or_build_coalesces_concurrent_readers():
     """N concurrent misses → exactly ONE build; every reader gets that snapshot."""
     import threading
@@ -1039,7 +1052,7 @@ def test_a_cohort_overtaken_by_one_write_costs_ONE_build_not_one_per_reader():
     # so this pins "a cohort overtaken by a write" and not a scheduling accident.
     deadline = time.monotonic() + 10
     while time.monotonic() < deadline:
-        fl = fs._FLIGHTS.get((key, g0))
+        fl = _flight_for(key, g0)
         if fl is not None and fl.waiters >= n_joiners + 1:
             break
         time.sleep(0.005)
@@ -1160,7 +1173,7 @@ def test_a_reader_racing_the_commit_invalidate_tail_gets_the_cohorts_rows():
     g0 = fs._store.generation(key)
     deadline = time.monotonic() + 10
     while time.monotonic() < deadline:
-        fl = fs._FLIGHTS.get((key, g0))
+        fl = _flight_for(key, g0)
         if fl is not None and fl.waiters >= 2:
             break
         time.sleep(0.005)
@@ -1194,6 +1207,60 @@ def test_a_reader_racing_the_commit_invalidate_tail_gets_the_cohorts_rows():
     assert post is not None and post.get("tag") == "after-tail", (
         "a writer that has already returned must not be served the pre-write cohort's "
         "rows — this is the read-your-writes half that DOES hold")
+
+
+def test_two_stores_sharing_a_key_never_share_a_flight():
+    """The ``store`` test seam must not hand one store's rows to another (round 13, P3).
+
+    ``get_or_build`` accepts ``store`` as a test seam. With the flight slot keyed on
+    ``(key, generation)`` alone, two DIFFERENT stores sharing a key were handed each
+    other's flight: a reader on store B joined store A's in-flight build and was served
+    **store A's snapshot**, while ``b.get(key)`` stayed ``None``. Unreachable in
+    production (the only instantiation is the module singleton), which is worse rather
+    than better — a store-injection test would have been a **false PASS**.
+    """
+    import threading
+
+    store_a = fs.FallbackSnapshotStore()
+    store_b = fs.FallbackSnapshotStore()
+    key = ("shared-key-graph", "shared-key-ns")
+    started = threading.Event()
+    release = threading.Event()
+    got: dict[str, dict | None] = {}
+
+    def a_builder(_proj):
+        started.set()
+        release.wait(timeout=10)
+        return _snap_stub("FROM-STORE-A")
+
+    def b_builder(_proj):
+        return _snap_stub("FROM-STORE-B")
+
+    t1 = threading.Thread(
+        target=lambda: got.__setitem__(
+            "a", fs.get_or_build(None, key, store=store_a, builder=a_builder)))
+    t1.start()
+    assert started.wait(timeout=10), "store A's build never started"
+
+    t2 = threading.Thread(
+        target=lambda: got.__setitem__(
+            "b", fs.get_or_build(None, key, store=store_b, builder=b_builder)))
+    t2.start()
+    t2.join(timeout=15)
+    b_snap = got.get("b")
+    assert b_snap is not None and b_snap["tag"] == "FROM-STORE-B", (
+        f"store B's reader must be served STORE B's rows, got "
+        f"{b_snap['tag'] if b_snap else b_snap!r} — a reader handed another store's "
+        f"snapshot is a false PASS in any test using the ``store`` seam")
+    cached_b = store_b.get(key)
+    assert cached_b is not None and cached_b["tag"] == "FROM-STORE-B", (
+        "store B's own cache must hold its own build")
+
+    release.set()
+    t1.join(timeout=20)
+    a_snap = got.get("a")
+    assert a_snap is not None and a_snap["tag"] == "FROM-STORE-A"
+    assert fs._FLIGHTS == {}, "no flight may leak"
 
 
 def test_a_write_opens_a_concurrent_build_which_is_the_stated_concurrency_bound():
@@ -1265,7 +1332,7 @@ def test_a_write_opens_a_concurrent_build_which_is_the_stated_concurrency_bound(
     g1 = fs._store.generation(key)
     deadline = time.monotonic() + 10
     while time.monotonic() < deadline:
-        fl = fs._FLIGHTS.get((key, g1))
+        fl = _flight_for(key, g1)
         with lock:
             # ⛔ BOTH facts, not just the waiter count (review round 12, P3):
             # ``_flight_begin`` bumps ``waiters`` for the LEADER before it reaches
@@ -1282,7 +1349,7 @@ def test_a_write_opens_a_concurrent_build_which_is_the_stated_concurrency_bound(
             _entered = builds.count("g1")
         raise AssertionError(
             f"the four same-stamp readers never shared one flight "
-            f"(waiters={getattr(fs._FLIGHTS.get((key, g1)), 'waiters', None)}, "
+            f"(waiters={getattr(_flight_for(key, g1), 'waiters', None)}, "
             f"g1_builds={_entered}) — they are not coalescing")
 
     with lock:
