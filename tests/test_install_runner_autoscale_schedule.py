@@ -1386,6 +1386,45 @@ def test_a_crashing_probe_is_refused_at_install_not_only_the_tools_own_exit_2(tm
     assert res.returncode == 0, (res.stdout, res.stderr)
 
 
+def test_a_wedged_pool_is_ARMED_and_NAMED_not_refused_as_a_measurement_failure(tmp_path):
+    """⛔ THE BOX THAT MOST NEEDS THE SCHEDULE IS THE ONE THE PROBE MUST NOT REFUSE.
+
+    The probe runs the tool's `--status` mode, and the tool reports `verdict=wedged` (exit 6) and
+    `verdict=uncertified` (exit 2) on a REAL pass. Those two codes are not measurement failures:
+    the pass measured fine and found a broken pool. When they leaked into `--status`, this
+    installer read them as `the guard cannot MEASURE on this box` and refused to arm anything on
+    the measured wedged pool — sending the operator to check `gh` on PATH and memory, the two
+    things that were fine — while `--status` on an installed schedule reported `probe: FAILED`.
+    The tool now keeps `--status` at exit 0 by contract and the installer names the state instead.
+
+    Mutation: drop the `case "$probe_out"` advisory (or narrow it back to silence) -> the operator
+    is never told the pool is wedged -> RED. The other half — that `--status` really does exit 0 on
+    a wedged and on an unreadable fixture — is pinned where the code is, in
+    `tests/test_runner_autoscale.py::test_a_status_read_of_a_wedged_pool_reports_it_and_stays_exit_0`.
+    """
+    sb = _sandbox(tmp_path)
+    wedged = _write_stub(
+        sb["bin"],
+        "py-wedged",
+        "#!/usr/bin/env bash\n"
+        'if [ "$1" = "-c" ]; then exit 0; fi  # the >= 3.12 floor probe\n'
+        'case " $* " in\n'
+        '  *" --status "*) echo "repo=o/n cell=box"; echo "  wedged=r1"; echo "verdict=wedged"; exit 0 ;;\n'
+        "esac\n"
+        'echo "verdict=wedged"; exit 6\n',
+    )
+    res = _run(sb, env=dict(sb["env"], AUTOSCALE_PYTHON=str(wedged)))
+    assert res.returncode == 0, (res.stdout, res.stderr)  # ARMED — the schedule is the instrument
+    assert "REFUSED" not in res.stderr, res.stderr
+    assert "WEDGED" in res.stderr and "MEASURED" in res.stderr, res.stderr
+    assert (sb["agents"] / PLIST_NAME).exists(), "the advisory must not cost the install"
+
+    res = _run(sb, "--status", env=dict(sb["env"], AUTOSCALE_PYTHON=str(wedged)))
+    assert res.returncode == 0, (res.stdout, res.stderr)
+    assert "probe: OK (exit 0)" in res.stdout, res.stdout
+    assert "WEDGED" in res.stderr and "MEASURED" in res.stderr, res.stderr
+
+
 def test_a_large_crontab_does_not_corrupt_the_install_or_the_status(tmp_path):
     """⛔ `crontab -l | grep -qF` + `set -o pipefail` = the SIGPIPE bug fixed for launchd.
 
