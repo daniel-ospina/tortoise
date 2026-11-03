@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import concurrent.futures
 import contextlib
+import contextvars
 import json
 import logging
 import math
@@ -2472,6 +2473,154 @@ class ControlPlaneOffloadError(RuntimeError):
         #: The abandoned submission, when it is still RUNNING (never for a
         #: refused/cancelled one). ``concurrent.futures.Future`` or ``None``.
         self.in_flight = in_flight
+
+
+class ContextConfinementError(RuntimeError):
+    """The submitting context could not be reproduced in the worker.
+
+    Raised by :func:`confine_context` when the caller's ``Context`` cannot be
+    re-materialised for an invocation. Deliberately a NAMED error and not a
+    fallback: the only "recovery" available at that point would be to run the
+    callable under the WORKER'S AMBIENT context, which on a process-lifetime
+    pool thread still carries whatever the previous request set (the exact
+    cross-request leak ``copy_context`` exists to prevent — `_graph_offload`'s
+    "Context isolation" note). A wrong-tenant graph read is a far worse answer
+    than a refusal, so this fails CLOSED.
+
+    It is NOT a :class:`ControlPlaneOffloadError`: that one is the pool telling
+    the caller the wait bound or the backlog refused the submission. This one
+    says the offload could not carry the request's context, so the callable
+    NEVER RAN either — the hosted seam maps it onto the same retryable 503
+    (see ``hosted_api._cp_offload``), because both are "no work was done".
+
+    Reachability: this is a DEFENSIVE arm, not an observed mode. ``Context.copy()``
+    does not realistically fail; the seam test drives this by monkeypatching
+    ``_fresh_context``. It exists so that no FUTURE implementation of
+    ``_fresh_context`` can degrade into the one answer that is worse than a
+    refusal: running the callable under the worker's ambient context. Do not
+    read a log line from here as an incident class.
+
+    The seam maps :class:`_ContextNotReproduced` — the PRIVATE subclass
+    ``confine_context`` raises BEFORE running its callable — and it maps it by
+    OWNERSHIP (``error.origin is`` the submitted wrapper), not by type. Both
+    halves matter: a ``ContextConfinementError`` raised from inside the callable
+    is a DOMAIN error and must propagate unchanged, or a caller would be told
+    "no work was done" about work that had already started. The type alone is
+    not enough to establish that — a NESTED ``confine_context`` that fails while
+    an OUTER confined callable is already executing raises the same subclass,
+    after the outer callable has done work.
+    """
+
+
+class _ContextNotReproduced(ContextConfinementError):
+    """``confine_context`` could not build the invocation's context — it did not run.
+
+    Private on purpose (see the base class). Only the pre-run arm inside
+    ``confine_context`` raises it, and it stamps ``origin`` with the wrapper that
+    raised it, so the hosted seam can tell "MY submission never ran" (safe to
+    retry) from a same-typed failure nested inside a callable that DID run. The
+    claim it carries is per INVOCATION of the wrapper that raised it, never
+    "nothing in this submission happened".
+    """
+
+
+def _fresh_context(snapshot: contextvars.Context) -> contextvars.Context:
+    """Reproduce ``snapshot``'s values in a NEW, never-entered ``Context``.
+
+    A ``Context`` object is SINGLE-ENTRY, not re-entrant: ``Context.run`` raises
+    ``RuntimeError: cannot enter context: <...> is already entered`` while any
+    other ``run`` on the SAME object is still on a stack — this thread's or
+    another's (PEP 567; https://docs.python.org/3/library/contextvars.html:
+    *"A Context cannot be entered while already entered, including from another
+    thread"*). A stored ``Context`` is therefore unusable for anything that may
+    execute MORE THAN ONCE, and a bounded offload can produce exactly that
+    overlap: ``_await_future``'s bound cancels the AWAIT and never the thread
+    (CPython #87185), so a first callable can still be inside its ``ctx.run``
+    when a retry arrives — measured on #10612's branch as
+    ``RuntimeError: cannot enter context ... already entered``.
+
+    ``Context.copy()`` (3.7+) returns a DISTINCT, never-entered context sharing
+    the same values (the HAMT is shared, so this is O(1) — cheaper than walking
+    ``items()``), which is exactly the per-invocation handle this needs. The
+    copy is shallow in the same way ``copy_context`` is: the VALUES are shared,
+    only the mapping is new.
+    """
+    return snapshot.copy()
+
+
+def confine_context(fn: Callable[..., object]) -> Callable[..., object]:
+    """Wrap ``fn`` so every invocation runs in a fresh copy of the WRAP-TIME context.
+
+    The context is captured when THIS function is called, not when the wrapper
+    is invoked — each invocation then works on its own copy of that captured
+    set. A wrapper may therefore be re-used freely for re-entry safety, but it
+    is bound to the tenant/actor it was captured under: a wrapper captured while
+    serving request A and invoked later from request B answers under A's
+    org/graph/actor. ``hosted_api`` wraps per submission for exactly that
+    reason; re-wrap whenever the submitting context may have changed.
+
+    This is the re-entry-proof replacement for the hand-rolled offload idiom
+    ``functools.partial(contextvars.copy_context().run, fn)``, which is correct
+    exactly ONCE per submission and silently a trap the moment anything may run
+    the wrapped callable twice: the ``Context`` captured at wrap time is already
+    entered by the first run, so the second raises ``RuntimeError: cannot enter
+    context: ... is already entered`` — inside a worker, i.e. NOT a
+    ``ControlPlaneOffloadError``, so it escapes the offload seam's fail-closed
+    mapping and lands on a route's blanket ``except Exception`` as an unlabelled
+    **500** the client cannot act on. That is a LATENT trap on this seam
+    (``hosted_api`` wraps once per submission today, so it cannot fire), and a
+    MEASURED one on #10612's branch, whose #4055 cold-setup re-arm re-submits a
+    single wrapped callable — the blast radius there was ``/v1/search`` and
+    ``/v1/topics/{t}/summary``.
+
+    Two properties are preserved from the idiom it replaces, so this is a
+    drop-in:
+
+    * **isolation** — the snapshot is taken in the WRAPPING call (the
+      submitting thread), so a var the callable sets is confined to that
+      invocation and cannot survive into the NEXT request a process-lifetime
+      pool thread serves;
+    * **freshness** — each invocation gets its own ``Context``, so retries,
+      re-submissions and overlapping workers cannot collide.
+
+    The snapshot is taken HERE (at wrap time), not inside the wrapper: a copy
+    taken in the worker would capture the worker's ambient context instead of
+    the request's — the leak this exists to prevent.
+
+    Cost: one ``Context.copy()`` (O(1), shared HAMT) per invocation, against a
+    call whose budget is measured in tens of milliseconds.
+
+    Three other in-repo sites still carry the plain idiom —
+    ``tortoise/selfhost.py`` (``_submit_probe``),
+    ``tortoise/indexer/github_indexer.py`` (``_submit_index_off_loop``) and
+    ``tortoise/extractor_v2.py`` (``_call_once``) — and are deliberately NOT
+    migrated here: each builds its ``Context`` per call and runs it once, so
+    none can re-enter, and none is on the hosted request path this change is
+    about. A caller that may run its wrapped callable MORE than once (a retry,
+    a re-submission, an overlap) belongs here instead — because a re-submitted
+    wrapper carries the WRAP-TIME values, one captured in request A and
+    re-submitted from request B answers under A's tenant. Re-wrap per
+    submission; do not cache the wrapper across requests.
+    """
+    snapshot = contextvars.copy_context()
+    name = getattr(fn, "__name__", None) or repr(fn)
+
+    def _confined(*args, **kwargs):
+        try:
+            ctx = _fresh_context(snapshot)
+        except Exception as exc:
+            err = _ContextNotReproduced(
+                f"could not reproduce the submitting context for {name!r}: "
+                f"{type(exc).__name__}: {exc}")
+            # OWNERSHIP, not type: the seam may only treat this as "my
+            # submission never ran" when the wrapper that raised it IS the one
+            # it submitted. A nested wrapper's identical failure happens with
+            # an outer callable already part-way through its work.
+            err.origin = _confined
+            raise err from exc
+        return ctx.run(fn, *args, **kwargs)
+
+    return _confined
 
 
 def control_plane_worker(pool: str = "auth") -> _SingleSlotWorker:
