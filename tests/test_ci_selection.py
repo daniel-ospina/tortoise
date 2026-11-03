@@ -1151,13 +1151,25 @@ def test_every_source_pattern_is_selectable():
     Direction: entry -> runs. This does NOT catch the reverse (a guarded page with
     no SOURCE_PATTERNS entry at all) — that direction is tracked separately.
     """
-    assert "onboarding" in load_manifest()["surfaces"]
+    # ONE manifest parse for the WHOLE test, the guard below included: `_sel`
+    # re-reads and re-parses the ~10k-line `config/ci-surfaces.yml` on every
+    # call, and this loop calls it once per SOURCE_PATTERNS entry — measured
+    # 92.5 s of a 300 s pytest-timeout budget on a quiet box, i.e. a
+    # load-dependent flake on a congested runner (test-slow leg c, run
+    # 41534018861). `select()` is a pure function of (changed, event, manifest)
+    # — it only ever `.get`s from it, and `load_manifest()` has no cache — so
+    # hoisting the parse changes the timing and nothing else: same calls, same
+    # assertions. The guard reads the SAME parsed value instead of parsing a
+    # second time, so the comment's claim is true by construction rather than
+    # by the reader subtracting one (review note, PR #10631).
+    manifest = load_manifest()
+    assert "onboarding" in manifest["surfaces"]
     dead = []
     for surface, pats in SOURCE_PATTERNS.items():
         if surface == "core":
             continue
         for pat in pats:
-            if not _sel([pat])["surfaces"]:
+            if not select([pat], "pull_request", manifest)["surfaces"]:
                 dead.append((surface, pat))
     assert not dead, (
         f"SOURCE_PATTERNS entries that select NO surface (dead on arrival — the "
