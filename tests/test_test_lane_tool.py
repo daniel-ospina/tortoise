@@ -3670,6 +3670,50 @@ def test_run_propagates_pytest_failure_unchanged(lane, monkeypatch):
     assert tl.main(["run", "--", "-q", "tests/"]) == 1
 
 
+def test_run_re_stamps_the_lease_AFTER_the_child(lane, monkeypatch):
+    """#10693 review F1: the lease epoch must be the END of the last use.
+
+    With the stamp written only in `start()`, a run longer than `OWNER_GRACE_H`
+    ends with an already-expired gap, and the next peer sweep may reap the
+    container in the between-steps window the grace exists to cover. The ORDER is
+    the assertion: the stamp must land after the child returns.
+
+    Mutation: drop `_touch_lease(name)` from `cmd_run` and the events list is
+    `[("child", None)]` alone."""
+    _stub_start(monkeypatch, port=16412)
+    events: list = []
+
+    def fake_run(argv, env=None, **kwargs):
+        events.append(("child", None))
+        return _R(0, "", "")
+
+    monkeypatch.setattr(tl.subprocess, "run", fake_run)
+    monkeypatch.setattr(tl, "_touch_lease", lambda n: events.append(("lease", n)))
+    assert tl.main(["run", "--", "-q", "tests/"]) == 0
+    assert events == [("child", None), ("lease", "fdb-lane-0123456789")], events
+
+
+def test_a_run_LONGER_than_the_grace_ends_with_a_FRESH_lease(lane, monkeypatch):
+    """The measured shape behind F1: the container is USED for the whole run, so
+    the gap after the run must be ~0 — never the run's own wall time.
+
+    Mutation: remove the post-child `_touch_lease` and `_unused_gap` still
+    reports the 3 h old stamp from before the run, i.e. a gap already past the
+    2 h grace at the exact moment the lane is between steps."""
+    monkeypatch.setattr(tl, "_touch_lease", _REAL_TOUCH_LEASE)
+    monkeypatch.setattr(tl, "_container_id", lambda _n: "ffffffffffff")
+    name = "fdb-lane-0123456789"
+    f = tl._reap_state_path(name)
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_text(f"ffffffffffff {time.time() - 3 * 3600:.0f}\n")
+    assert tl._unused_gap(name) > 2.9          # the pre-run lease, past the grace
+    _stub_start(monkeypatch, port=16413)
+    _capture_run(monkeypatch)                  # a child that ran and returned
+    assert tl.main(["run", "--", "-q", "tests/"]) == 0
+    gap = tl._unused_gap(name)
+    assert gap is not None and gap < 0.1, gap
+
+
 def test_run_reports_a_SIGNAL_kill_as_128_plus_N_not_a_negative_code(
         lane, monkeypatch, capsys):
     """A killed run is NOT a test failure, and it has no count line.

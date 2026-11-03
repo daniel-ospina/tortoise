@@ -2146,17 +2146,26 @@ def _container_in_use(name: str) -> bool | None:
 #:     real-container proof, not by a unit test).
 #:
 #: What is implemented is a LEASE the LANE writes: `<container id> <epoch>`,
-#: refreshed by `_touch_lease` at every successful `start()` (which `cmd_run`
-#: goes through once, at its start) and at a first sighting. The clock is the wall
-#: time since that lease. During a long `run` the lane's own process holds the
-#: worktree, which is `_holds`' spare; the lease covers the between-steps gaps.
+#: refreshed by `_touch_lease` at every successful `start()`, at the END of every
+#: `run` (the lane just used the container for as long as the child ran), and at a
+#: first sighting. The clock is the wall time since that lease. During a long
+#: `run` the lane's own process holds the worktree, which is `_holds`' spare; the
+#: lease covers the between-steps gaps.
+#:
+#: ⛔ THE REFRESH AT THE END OF `run` IS LOAD-BEARING, not decoration (#10693
+#: review F1): with the epoch written only at `start()`, the gap is measured from
+#: the BEGINNING of the last use, so a run longer than `OWNER_GRACE_H` ENDS
+#: already expired and the next peer sweep may reap the container in the
+#: between-steps window the grace exists to cover — and one full-suite step is
+#: measured at ~2 h wall, i.e. the boundary is reached by normal work.
+#:
 #: Keyed to the INSTANCE id, so a replaced container is a first sighting and never
 #: inherits a dead one's gap.
 #:
 #: The uncovered class, stated as a MECHANISM rather than an instance: a container
-#: that (a) no process on this host names, (b) no `start()` has run against for
-#: the grace, and (c) has no client attached within `ACTIVE_CLIENT_IDLE_S` — is
-#: reaped by design. A `run`
+#: that (a) no process on this host names, (b) whose lane has neither `start()`ed
+#: nor `run` pytest against it for the grace, and (c) has no client attached
+#: within `ACTIVE_CLIENT_IDLE_S` — is reaped by design. A `run`
 #: invoked from OUTSIDE its worktree for longer than the grace is one instance of
 #: it.
 #:
@@ -2259,15 +2268,20 @@ def _unused_gap(name: str) -> float | None:
 def _touch_lease(name: str) -> None:
     """Record that the container's LANE is using it right now.
 
-    Called at every successful `start()`. It is deliberately NOT refreshed during
-    a long `run`: an in-flight lane is spared by `_holds` — its `pytest` process
-    has the worktree as its cwd — and the lease covers the BETWEEN-steps gaps,
-    which is what the grace is about. Saying "every step of a live lane" would be
-    a claim this does not keep.
+    Called at every successful `start()` and at the END of `cmd_run`'s child —
+    the two moments a lane demonstrably uses its DB. Re-stamping at the end of
+    the `run` is what makes the grace a BETWEEN-steps bound rather than an "age
+    since the last `start()`" bound (#10693 review F1); without it a run longer
+    than the grace ends with an already-expired lease.
 
-    RESIDUAL (documented in the PR): a `run` invoked from OUTSIDE its worktree,
-    lasting longer than the grace, is not covered by either spare. Filed rather
-    than hidden.
+    What it deliberately does NOT claim: that the lease follows every step of a
+    live lane. Only these call sites write it, so a lane whose work happens
+    entirely inside the child (`pytest`) is covered by this record plus its own
+    process holding the worktree — not by a per-step refresh.
+
+    RESIDUAL (documented in the PR): a `run` invoked from OUTSIDE its worktree is
+    covered by the lease while it runs, and by nothing afterwards if the lane's
+    remaining processes name no worktree. Filed rather than hidden.
 
     The instance id is stored beside it so a replaced container is a first
     sighting, never an inherited gap.
@@ -2584,16 +2598,16 @@ def reap_orphans() -> list[str]:
                            f"it")
                 continue
             # PROOF 2: the owner worktree exists, its lane is gone, and the gap
-            # has lasted. The gap is WALL TIME over which the container's own use
-            # counter did not move — not the container's age, and not "time since
-            # a peer sweep happened to catch a hold".
+            # has lasted. The gap is WALL TIME since the lane's own LEASE record
+            # was written — not the container's age, and not "time since a peer
+            # sweep happened to catch a hold".
             gap_h = _unused_gap(name)
             if gap_h is None:
                 out.append(f"reap: kept {name} — the lane that owns {owner} "
                            f"holds nothing now, but the container has not yet "
                            f"been observed unused for {OWNER_GRACE_H:g}h "
-                           f"(first sighting, a replaced instance, or traffic "
-                           f"since the last sweep); report only")
+                           f"(first sighting, or a replaced container "
+                           f"instance); report only")
                 continue
             if gap_h < OWNER_GRACE_H:
                 out.append(f"reap: kept {name} — no live process holds {owner} "
@@ -2684,8 +2698,8 @@ def reap_orphans() -> list[str]:
         if gap_h is None:
             out.append(f"reap: kept {name} — no owner here and no client, but it "
                        f"has not yet been observed unused for "
-                       f"{ORPHAN_MAX_AGE_H:g}h (first sighting, a replaced "
-                       f"instance, or traffic since the last sweep)")
+                       f"{ORPHAN_MAX_AGE_H:g}h (first sighting, or a replaced "
+                       f"container instance)")
             continue
         if gap_h < ORPHAN_MAX_AGE_H:
             out.append(f"reap: kept {name} — no owner here and no client, but "
@@ -2948,6 +2962,15 @@ def cmd_run(args: argparse.Namespace) -> int:
     )
     sys.stderr.flush()
     rc = subprocess.run(argv, env=env).returncode
+    # The lane has just USED its container for however long the child ran, so the
+    # lease is re-stamped at the END of the use as well as at `start()` (#10693
+    # review F1). Load-bearing, not decoration: with the epoch written only at
+    # `start()`, the gap is measured from the BEGINNING of the last use, so a run
+    # longer than OWNER_GRACE_H ends already expired and the next peer sweep may
+    # reap the container in the between-steps window the grace exists to cover.
+    # One full-suite step is measured at ~2 h wall, i.e. the boundary is reached
+    # by normal work. Stamped for ANY `rc`: a failing run used the container too.
+    _touch_lease(name)
     if rc < 0:
         print(
             f"test-lane: pytest was KILLED by signal {-rc} (no pytest count "
