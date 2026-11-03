@@ -922,6 +922,23 @@ _ALLOWED_KEYED = {
         # job (S1), not a read route.
         'proj.g.query( "MATCH (p:Point {id:$pid}), (o:Object {name:$name}) " "MERGE (p)-[:aboutObject]->(o)", params={"pid": pid, "name": name}, )': 1,
     },
+    'tortoise/onboarding/state.py': {
+        # #10180's promote CARRY: does the TARGET graph already hold a Subject
+        # under this name (any id)? A COUNT-only existence probe guarding a
+        # name-keyed WRITE — `carry_onboards_edge` is about to MERGE a
+        # `(s:Subject {id:$sid})` that SETs `name`, so this must enumerate the
+        # key space the writer occupies (the same disposition, and the same
+        # reason, as `onboarding/seed.py`'s candidate enumeration below).
+        # ⛔ It cannot pick a carrier: it returns an aggregate COUNT, never a
+        # row, and the answer is used only to DECLINE the write
+        # (`not_in_target`) so a second same-name carrier is never minted —
+        # where `find_subject_by_name` would report two carriers as ambiguous
+        # and `_classify_anchor` would refuse. Routing it through
+        # `entity_identity.resolve_entity_id` would turn "decline" into a raise
+        # for the exact case this guard exists to handle. Owner: S3
+        # identity/resolver (a write key, migration-gated with the rest).
+        'res = _run(graph, "MATCH (s:Subject {name: $name}) RETURN count(s)", {"name": name})': 1,
+    },
     'tortoise/onboarding/seed.py': {
         # B: candidate enumeration that refuses — single holder or
         # AmbiguousEntityName, and NO status filter ON PURPOSE: it guards a
