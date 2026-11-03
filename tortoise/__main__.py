@@ -3082,9 +3082,11 @@ def _mask_display_target(value: str) -> str:
     return masked[:min(cuts)] + "…"
 
 
-def _same_endpoint(a: object, b: object) -> bool:
+def _same_endpoint(a: object, b: object) -> bool | None:
     """Do two configured api_urls name the SAME endpoint?
 
+    Three-valued: True/False for two PARSEABLE endpoints, None when either side is
+    not a URL at all (so "I could not read it" is never rendered as "they differ").
     Compares the parsed endpoint (host case-folded, port defaulted per scheme, path
     with trailing slashes stripped — the normalisation the Pi hook applies before
     use), not the literal string. Comparing
@@ -3118,7 +3120,16 @@ def _same_endpoint(a: object, b: object) -> bool:
             return None
 
     left, right = parts(a), parts(b)
-    return left is not None and left == right
+    if left is None or right is None:
+        # UNKNOWN, not "different". A missing scheme (`host` instead of
+        # `https://host`) is the normal shape of a mistyped TORTOISE_API_URL, and
+        # collapsing "I could not parse either side" into False made the report
+        # print two IDENTICAL api_url values one above the other and then assert
+        # they differ — a false statement about the user's own configuration, and
+        # the real finding (neither value is a URL, so BOTH surfaces fail the same
+        # way) was never stated.
+        return None
+    return left == right
 
 
 def _publishable_fingerprint(key: object) -> str | None:
@@ -3658,15 +3669,23 @@ def _cmd_config(args) -> int:
     # Compare the RAW urls: `_mask_display_target` truncates at `?`/`#` and appends
     # an ellipsis, so comparing the published (masked) form made two IDENTICAL
     # endpoints with a query string read as "a DIFFERENT endpoint".
-    hosts_agree = bool(api_key) and bool(harness_effective) and _same_endpoint(
-        api_url, harness_url_raw)
+    endpoint_verdict = (_same_endpoint(api_url, harness_url_raw)
+                        if (api_key and harness_effective) else None)
+    hosts_agree = endpoint_verdict is True
     if api_key and harness_effective:
         # Compare the VALUES, not the published 48-bit labels: `_key_fingerprint`
         # is a display label ("never used as an authenticator"), and deciding "the
         # SAME key" on a truncated digest is a collision away from a false claim.
         if harness_effective == api_key:
             same_identity = True
-            relation = "same" if hosts_agree else "same-key-different-host"
+            if hosts_agree:
+                relation = "same"
+            elif endpoint_verdict is False:
+                relation = "same-key-different-host"
+            else:
+                # Same key, and the api_url cannot be parsed on either side — the
+                # honest answer, and the finding the reader needs.
+                relation = "same-key-host-unknown"
         elif isinstance(api_key, str) and api_key.strip() == harness_effective:
             # The SAME credential, differing only by the whitespace the report
             # already flags (the CLI's copy cannot authenticate; the hook's can).
@@ -3674,14 +3693,17 @@ def _cmd_config(args) -> int:
             # `identity_relation` carries the caveat. Reporting `false` here made
             # the payload's two fields disagree about the same question.
             same_identity = True
-            relation = ("same-modulo-whitespace" if hosts_agree
-                        else "same-modulo-whitespace-different-host")
+            if hosts_agree:
+                relation = "same-modulo-whitespace"
+            elif endpoint_verdict is False:
+                relation = "same-modulo-whitespace-different-host"
+            else:
+                relation = "same-modulo-whitespace-host-unknown"
         else:
             same_identity, relation = False, "different"
     payload["identity_agrees"] = same_identity
     payload["identity_relation"] = relation
-    payload["identity_host_agrees"] = (hosts_agree if (api_key and harness_effective)
-                                       else None)
+    payload["identity_host_agrees"] = endpoint_verdict
 
     if payload.get("message"):
         # The message goes to stderr in BOTH modes. The two failure payloads
@@ -3881,6 +3903,11 @@ def _cmd_config(args) -> int:
         if relation == "same-modulo-whitespace-different-host":
             print("     …but a DIFFERENT endpoint — a refusal on one says nothing"
                   " about the other")
+    elif relation in ("same-key-host-unknown", "same-modulo-whitespace-host-unknown"):
+        print("  → the SAME key, but the endpoint comparison cannot be made: one or"
+              " both api_url values are not URLs (or are empty). Check the two"
+              " api_url lines above — a missing scheme (`https://host`) is the usual"
+              " cause, and both surfaces then fail the same way.")
     elif relation == "same-key-different-host":
         print("  → the SAME key as the CLI but a DIFFERENT endpoint — a refusal on"
               " one says nothing about the other")
