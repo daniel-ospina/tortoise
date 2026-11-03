@@ -230,7 +230,8 @@ is the owner's call in the measurement pass (§4), and until he rules it stays a
 `max_points` is set from `max_graph_nodes` for **every** tier (`apply_limits`, `tortoise/billing.py:702`), so the
 node stock refuses a **paying** tenant too, on capture (`tortoise/hosted_api.py:16033-16076` returns `402` when
 `count + est > max_points`, with no overage bypass) and on the points-gated write doors (`_check_org_limit(org,
-"points")` — `:10639`, `:10701`, `:10740`, and every other points door, each via `enforce_org_limit`). `#4815` itself says so: *"`max_graph_nodes` is a stock enforced as a write
+"points")` — `:10639`, `:10701`, `:10740`, and every other points door, each via `enforce_org_limit`). `#4815`
+itself says so: *"`max_graph_nodes` is a stock enforced as a write
 refusal (402) … the node cap binds before the ops allowance, making ~93% of free's and **~83% of solo's** monthly
 allowance unusable"* — solo is a paid tier. That is `#4495`'s **model defect** (a stock cap the flow cannot reach),
 and it is precisely what the two dimensions in §2 replace once the owner measures. It is not a licence for this
@@ -300,7 +301,7 @@ This document **implements** these; it reverses none of them. Run first, before 
 | storage overage is **purchase, not refusal** | owner 2026-09-26, `STORAGE-ARCHITECTURE.md` §0 | **obeys** — §5 forbids a refusal at the allowance edge **where an overage path exists** (`solo`/`pro`/`team`) |
 | tiers price **features**, never refusal | owner 2026-09-22, `#4815` (**paid** tiers; `free`/`anon` keep `overage: false`) | **obeys** — §5 carries the carve-out verbatim and adds no refusal of its own |
 | the **node stock** stays a hard write refusal until the owner measures | `#4815` scope §1, `#4495`, `product/pricing.json` `max_graph_nodes` | **obeys** — §5 records it as the constraint the two dimensions replace, on every tier and on the capture door |
-| **no capture caps**; usage is metered separately | owner 2026-08-09 | **obeys** — no consumption cap on either session write lane |
+| **no capture caps**; usage is metered separately | owner 2026-08-09 | **obeys** — no consumption cap on either session write lane. The node stock's `402` on capture is the **code** defect §5 records (the constraint these dimensions replace), not a cap this document adopts |
 | **no** session cap; **no** retention window of any length | `#4010`, `#3853` | **obeys** — §7 |
 | prices are calibrated by the owner **after beta**, from measured consumption | owner 2026-09-26 | **obeys** — every number `TBD-BY-MEASUREMENT` |
 | `write_ops` is the billed unit **today**, and redefining it is an owner decision | `metering.py` `#3359` | **obeys** — §2 keeps it as the transition unit; no redefinition here |
