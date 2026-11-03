@@ -512,11 +512,22 @@ _RECORD_EMITTING_VERBS = _derived_record_emitting_verbs()
 def _namespace_is_org_scoped(call) -> bool:
     """`_make_sdk(namespace=<not a string literal>)` or `graph_name=…`.
 
-    A string-literal namespace is the registry lane (`namespace="registry"`,
-    `namespace=None` — the probe/anchor surfaces), never an org's graph; every
+    A STRING-literal namespace is the registry lane (`namespace="registry"` and
+    the other literal spellings PROD resolves), never an org's graph; every
     other spelling (`org_id`, `org["org_id"]`, `namespace`) is org-scoped, and
-    `graph_name=` is by definition a tenant graph (registry graphs are opened
-    by namespace).
+    `graph_name=` is by definition a tenant graph (registry graphs are opened by
+    namespace).
+
+    `namespace=None` is COUNTED, deliberately (#10046 review F3). It reads like
+    the probe/anchor surface, and two shipped constructions do pass it
+    (`hosted_api._probe_sdk`, `_data_plane_db`), but a `namespace=None` handle
+    writes to the DEFAULT graph and carries no tenant either — so the
+    fail-closed answer is "org-scoped too". `_handle_state` reaches this same
+    predicate, so answering "not an org graph" here would ALSO answer `None`
+    ("not an SDK handle at all") THERE and make a write through such a handle
+    invisible, which is the one direction this scan must never take. The census
+    therefore counts 83 sites (81 org-graph + those 2 probes), and both halves
+    are pinned by `test_a_literal_namespace_is_not_an_org_scoped_site`.
     """
     kwargs = {k.arg: k.value for k in call.keywords}
     namespace = kwargs.get("namespace")
@@ -637,25 +648,127 @@ def _class_attribute_handles(tree) -> dict[str, dict[str, bool]]:
         merged: dict[str, bool] = {}
         for node in cls.body:
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                for key, state in _sdk_handles(node).items():
-                    if "." in key:
-                        merged[key] = merged.get(key, True) and state
+                for key, events in _sdk_handles(node).items():
+                    if "." not in key:
+                        continue
+                    # The state the method LEAVES BEHIND — the fold is ordered
+                    # within a method, so its own rebind is honoured here too.
+                    merged[key] = merged.get(key, True) and bool(
+                        _handle_state_at(events, _END_OF_LANE))
         if merged:
             by_class[cls.name] = merged
     return by_class
 
 
-def _sdk_handles(node) -> dict[str, bool]:
-    """`{local SDK handle: tenant installed?}` for one lane.
+#: A sort key past every statement in a lane: asks a handle's events for the
+#: state at the END of the function (the class-attribute union needs the state a
+#: method LEAVES BEHIND, not the state at a particular call).
+_END_OF_LANE = (1 << 30, 1 << 30)
 
-    Identity, not name presence (#10380 review P2.2): the answer belongs to the
-    HANDLE, so an install on one handle says nothing about another in the same
-    function. An install is found in any of its three spellings —
-    `_bind_default_graph_record_tenant(sdk, org_id)`, `_bind_record_tenant(sdk,
-    org)`, or the method form `sdk._bind_record_tenant(...)` — and marks THAT
-    handle, then and for the rest of the lane.
+
+def _parent_map(node) -> dict[int, object]:
+    """`{id(child): parent}` for one lane, so a statement's nesting is readable.
+
+    `ast.walk` hands out nodes without their parents, and the fold below needs
+    to know whether a definition sits in the lane's straight line or inside a
+    branch that may be skipped (#10046 review F1/F2).
     """
-    handles: dict[str, bool] = {}
+    parents: dict[int, object] = {}
+    for parent in ast.walk(node):
+        for child in ast.iter_child_nodes(parent):
+            parents[id(child)] = parent
+    return parents
+
+
+def _enclosing_scope(node, parents, lane) -> object:
+    """The innermost `def`/`class` around `node` inside `lane` (else `lane`).
+
+    Events are grouped by the function that EXECUTES them: a nested `def` is its
+    own scope, not the parent's straight line (see `_handle_events_by_scope`).
+    """
+    child = node
+    parent = parents.get(id(child))
+    while parent is not None and parent is not lane:
+        if isinstance(parent, (ast.FunctionDef, ast.AsyncFunctionDef,
+                               ast.ClassDef)):
+            return parent
+        child, parent = parent, parents.get(id(parent))
+    return lane
+
+
+def _is_conditional(node, parents, scope) -> bool:
+    """Does `node` sit inside a branch of `scope` that may NOT execute?
+
+    Conditional = under an `if`/`for`/`while`, an `except` handler, or a `try`'s
+    `orelse`. Straight-line for this purpose = the function's own body, a
+    `try`/`with` body, and a `finally` — those run on every path that reaches a
+    later write. The walk stops at `scope`, so a nested `def` does not make the
+    code INSIDE it conditional; `_enclosing_scope` already gave it a scope of
+    its own.
+    """
+    child = node
+    parent = parents.get(id(child))
+    while parent is not None and parent is not scope:
+        if isinstance(parent, (ast.If, ast.For, ast.AsyncFor, ast.While,
+                               ast.ExceptHandler)):
+            return True
+        if isinstance(parent, ast.Try) and any(
+                child is statement for statement in parent.orelse):
+            return True
+        child, parent = parent, parents.get(id(parent))
+    return False
+
+
+def _handle_state_at(events, position, initial=None) -> bool | None:
+    """The handle's state AT `position`, folded from its ordered events.
+
+    This is the ORDERED half of the container (#10046 review F1, F2). A write is
+    judged by the definitions that REACH it, not by the whole lane:
+
+    - an UNCONDITIONAL definition KILLS the earlier one, so a rebind to a bound
+      opener before the write clears the handle (`_rebind_local`), and
+    - an INSTALL arms only the writes AFTER it, so a lane whose install sits in
+      a `finally` no longer retroactively covers the write in its `try` — the
+      `no_tenant` DECLINE this file exists to prevent.
+
+    A CONDITIONAL definition is worst-wins, because the branch may not run: that
+    is the shape `if not sdk: sdk = _data_sdk(org)` protects (an unbound operand
+    keeps winning), and treating it as a kill would invert it.
+    `initial` is the state a class INHERITS before its own first event.
+    """
+    state = initial
+    for event_position, event_state, conditional in events:
+        if event_position > position:
+            break
+        if event_state is False:
+            state = False
+        elif conditional:
+            state = state if state is not None else True
+        else:
+            state = True
+    return state
+
+
+def _handle_events_by_scope(node, parents) -> dict[int, dict[str, list[tuple[tuple[int, int], bool, bool]]]]:
+    """`{scope id: {SDK handle: [(position, tenant installed?, conditional?)]}}`.
+
+    Events are grouped by the function that EXECUTES them — `node` itself and
+    every `def` nested in it — because a position is only an execution order
+    WITHIN one function, and a handle is only the same variable within one.
+    `_dream_worker` is the shipped shape that needs it: `_open_sdk` opens and
+    arms the SDK, `_drain` writes it, and the write's handle is handed in by a
+    callback factory (a declared out-of-scan indirection) rather than bound in
+    the writing function — judging that write lane-wide said "bound" on the
+    strength of a definition in a different function (#10046 review F1/F2).
+    """
+    handles: dict[int, dict[str, list[tuple[tuple[int, int], bool, bool]]]] = {}
+
+    def record(owner, key: str, state: bool) -> None:
+        scope = _enclosing_scope(owner, parents, node)
+        handles.setdefault(id(scope), {}).setdefault(key, []).append((
+            (getattr(owner, "lineno", 0), getattr(owner, "col_offset", 0)),
+            state, _is_conditional(owner, parents, scope)))
+
     for sub in ast.walk(node):
         for name, value in _assigned_handles(sub):
             if name is None:
@@ -663,14 +776,18 @@ def _sdk_handles(node) -> dict[str, bool]:
             state = _handle_state(value)
             if state is None:
                 continue
-            # WORST-WINS across assignments (#10046 review round 6 P2): keeping the
-            # last one lets `sdk = _make_sdk(org)` followed by
-            # `if not sdk: sdk = _data_sdk(org)` answer bound while an unbound
-            # path is still live — inverting the "an unbound operand wins" rule
-            # `_handle_state` already applies WITHIN one value. An explicit
-            # install below still arms the handle, which is the sequence the
-            # failure message tells a developer to write.
-            handles[name] = handles.get(name, True) and state
+            # WORST-WINS across assignments (#10046 review round 6 P2) is kept
+            # for a CONDITIONAL assignment only, because the branch may not run:
+            # `sdk = _make_sdk(org)` followed by `if not sdk: sdk =
+            # _data_sdk(org)` must not answer bound while an unbound path is
+            # still live — inverting the "an unbound operand wins" rule
+            # `_handle_state` already applies WITHIN one value. An
+            # UNCONDITIONAL rebind KILLS the earlier definition instead, and an
+            # INSTALL arms only the writes after it: a lane that already bound
+            # its handle must not be reported unbound, and an install in a
+            # `finally` must not retroactively cover the write in its `try`
+            # (#10046 review F1/F2).
+            record(sub, name, state)
     for sub in ast.walk(node):
         if not isinstance(sub, ast.Call):
             continue
@@ -693,13 +810,32 @@ def _sdk_handles(node) -> dict[str, bool]:
         for arg in (*sub.args, *(kw.value for kw in sub.keywords)):
             if isinstance(arg, (ast.Name, ast.Attribute)):
                 key = arg.id if isinstance(arg, ast.Name) else ast.unparse(arg)
-                handles[key] = True
+                record(sub, key, True)
         if isinstance(sub.func, ast.Attribute) and isinstance(
                 sub.func.value, (ast.Name, ast.Attribute)):
             receiver = sub.func.value
-            handles[receiver.id if isinstance(receiver, ast.Name)
-                    else ast.unparse(receiver)] = True
+            record(sub, receiver.id if isinstance(receiver, ast.Name)
+                   else ast.unparse(receiver), True)
+    for by_key in handles.values():
+        for events in by_key.values():
+            events.sort(key=lambda event: event[0])
     return handles
+
+
+def _sdk_handles(node) -> dict[str, list[tuple[tuple[int, int], bool, bool]]]:
+    """`{SDK handle: [ordered events]}` for ONE function body (`node`).
+
+    Identity, not name presence (#10380 review P2.2): the answer belongs to the
+    HANDLE, so an install on one handle says nothing about another in the same
+    function. An install is found in any of its three spellings —
+    `_bind_default_graph_record_tenant(sdk, org_id)`, `_bind_record_tenant(sdk,
+    org)`, or the method form `sdk._bind_record_tenant(...)` — and arms THAT
+    handle FROM THAT POSITION ON (#10046 review F1: the map is ordered events
+    rather than one lane-wide boolean, so an install cannot reach backwards).
+    Callers that judge WRITES use `_handle_events_by_scope`, which also has the
+    nested functions.
+    """
+    return _handle_events_by_scope(node, _parent_map(node)).get(id(node), {})
 
 
 def _org_scoped_sdk_sites(tree) -> dict[str, int]:
@@ -718,8 +854,12 @@ def _org_scoped_sdk_sites(tree) -> dict[str, int]:
     pass a string-literal namespace. Measured at #10046 review round 3: 94 of
     175 counted "sites" were literal-namespace constructions, i.e. 54% of the
     count was not org-scoped at all, which let the non-vacuity floor stand on
-    registry lanes alone. Corrected, the package has 81 org-scoped sites across
-    two modules.
+    registry lanes alone. Corrected, the package has 83 org-scoped sites across
+    THREE modules — `hosted_api.py` 80 (two of which are the `namespace=None`
+    probe constructions the predicate COUNTS deliberately), `quota.py` 1 and
+    `supabase_control.py` 2 (the module-qualified spelling). An earlier revision
+    of this line said "81 across two modules", which described a predicate that
+    excluded `namespace=None` and missed `supabase_control.py` (#10046 review F3).
     """
     sites: dict[str, int] = {}
     unconditional = (_SDK_OPENERS - {"_make_sdk"}) | _INSTALLING_OPENERS
@@ -760,19 +900,24 @@ def _writers_over_a_parameter(tree) -> dict[str, set[str]]:
 def _unbound_record_writes(tree) -> list[str]:
     """Every call site that writes a record through an SDK handle no install covers."""
     functions = _module_functions(tree)
-    handles_by_lane = {name: _sdk_handles(node)
+    # Handles are read PER SCOPE — the lane's own body plus each nested `def` — so
+    # a definition is never allowed to arm a write in a different function, and
+    # a position is only used as an order within the function it belongs to.
+    parents_by_lane = {name: _parent_map(node)
                        for name, node in functions.items()}
+    scopes_by_lane = {name: _handle_events_by_scope(node, parents_by_lane[name])
+                      for name, node in functions.items()}
     # An SDK a CLASS owns (`self._own_sdk`) is opened in one method and written in
-    # another, so the per-lane map cannot see it. Union the attribute half across
-    # each class's methods into the lanes that belong to it (#10046 review round 5
-    # P1: a worker class holding its handle on `self` was green).
+    # another, so the per-lane map cannot see it. The class's merged state is what
+    # a lane INHERITS before its own first event: a method that only WRITES the
+    # attribute is judged by what `__init__` left behind (a worker class holding
+    # its handle on `self` was green — #10046 review round 5 P1), while a method
+    # that BINDS the attribute itself is judged by its own binding at the write.
+    # The old `and`-merge re-imposed `__init__`'s unbound state over the writer's
+    # own correct binding, telling a developer to install a tenant the lane
+    # already had (#10046 review F2b — the guard rejecting its own documented
+    # fix, the same false-positive family as rounds 6-7).
     class_attrs = _class_attribute_handles(tree)
-    for name in handles_by_lane:
-        owner = name.split(".", 1)[0]
-        if "." in name and owner in class_attrs:
-            for key, state in class_attrs[owner].items():
-                handles_by_lane[name][key] = (
-                    handles_by_lane[name].get(key, True) and state)
     # The CALLEE's parameter list maps a positional argument to the parameter
     # the helper writes through — not the caller's.
     callee_params = {name: [a.arg for a in
@@ -780,20 +925,41 @@ def _unbound_record_writes(tree) -> list[str]:
                      for name, node in functions.items()}
     handed = _writers_over_a_parameter(tree)
     found: list[str] = []
-    for name, node in _module_functions(tree).items():
-        handles = handles_by_lane[name]
+    for name, node in functions.items():
+        parents = parents_by_lane[name]
+        scopes = scopes_by_lane[name]
+        owner = name.split(".", 1)[0]
+        inherited = class_attrs.get(owner, {}) if "." in name else {}
+
+        def state_at(key: str, call, scopes=scopes, parents=parents, lane=node,
+                     inherited=inherited) -> bool | None:
+            """The state of `key` AT this call — the ordered answer (#10046 F1/F2).
+
+            The loop variables are bound as DEFAULTS on purpose: the callables are
+            used within this iteration only, and binding them keeps the closure
+            from reading a later lane's maps if that ever changes (ruff B023).
+            """
+            scope_events = scopes.get(
+                id(_enclosing_scope(call, parents, lane)), {})
+            lane_events = scope_events.get(key)
+            if lane_events is None:
+                return inherited.get(key)
+            return _handle_state_at(
+                lane_events, (call.lineno, call.col_offset), inherited.get(key))
+
         for call in ast.walk(node):
             if not isinstance(call, ast.Call):
                 continue
             if (isinstance(call.func, ast.Attribute)
                     and call.func.attr in _RECORD_EMITTING_VERBS):
                 receiver = call.func.value
-                if isinstance(receiver, ast.Name) and handles.get(receiver.id) is False:
+                if (isinstance(receiver, ast.Name)
+                        and state_at(receiver.id, call) is False):
                     found.append(f"{name}:{call.lineno} writes through the "
                                  f"unbound SDK `{receiver.id}` "
                                  f"(`{receiver.id}.{call.func.attr}(…)`)")
                 elif (isinstance(receiver, ast.Attribute)
-                        and handles.get(ast.unparse(receiver)) is False):
+                        and state_at(ast.unparse(receiver), call) is False):
                     dotted = ast.unparse(receiver)
                     found.append(f"{name}:{call.lineno} writes through the "
                                  f"unbound SDK `{dotted}` "
@@ -812,7 +978,8 @@ def _unbound_record_writes(tree) -> list[str]:
                 param = positional[index] if index < len(positional) else None
                 if param not in handed[callee]:
                     continue
-                if isinstance(arg, ast.Name) and handles.get(arg.id) is False:
+                if (isinstance(arg, ast.Name)
+                        and state_at(arg.id, call) is False):
                     found.append(f"{name}:{call.lineno} hands the unbound SDK "
                                  f"`{arg.id}` to `{callee}`, which writes "
                                  f"records through it")
@@ -820,7 +987,7 @@ def _unbound_record_writes(tree) -> list[str]:
                 if keyword.arg not in handed[callee]:
                     continue
                 if (isinstance(keyword.value, ast.Name)
-                        and handles.get(keyword.value.id) is False):
+                        and state_at(keyword.value.id, call) is False):
                     found.append(f"{name}:{call.lineno} hands the unbound SDK "
                                  f"`{keyword.value.id}` to `{callee}`, which "
                                  "writes records through it")
@@ -937,7 +1104,16 @@ def test_no_lane_ANYWHERE_in_the_package_writes_records_through_an_unbound_sdk()
     blind spot (`_AMBIENT_OPENERS`). Two indirections are likewise OUT of the
     scan and are named so they are not mistaken for coverage: an SDK handed to a
     writing helper as a KEYWORD argument (`_write(sdk=_org_sdk(org))`) and one
-    reached through a lambda or local factory. Also OUT, and listed so `0 unbound`
+    reached through a lambda or local factory. ORDER is modelled, but only
+    WITHIN one function (`_handle_events_by_scope`): a definition reaches a
+    write positionally, so an install arms only the writes after it and an
+    unconditional rebind kills the earlier definition — while a write in a
+    DIFFERENT function is judged by that function's own definitions. The shipped
+    shape that costs is a callback FACTORY, `_run_dream_on_pool(_drain,
+    _open_sdk)` in `hosted_api.py`: `_open_sdk` opens and arms the handle,
+    `_drain` writes it, and the write's handle is therefore unknown rather than
+    assumed bound (the local-factory indirection above, one spelling over).
+    Also OUT, and listed so `0 unbound`
     is not read as covering them: an SDK handed to a writing helper as an INLINE
     call in either position (`_write(_org_sdk(org))` / `_write(sdk=_org_sdk(org))`
     — the bound-name forms of both ARE caught); an SDK held on a MODULE-LEVEL
@@ -949,9 +1125,11 @@ def test_no_lane_ANYWHERE_in_the_package_writes_records_through_an_unbound_sdk()
     install in the writer, or in the opener); and a SUBCLASS writing through a
     handle its base class's `__init__` opened (the class map is keyed per class).
     What IS scanned: methods, an SDK held on `self` (opened in one method, written
-    in another, and armed by a positional, keyword or method-form install),
-    `with … as sdk` (EVERY item of a multi-item `with`), and module-qualified
-    dispatch (`_ha._make_sdk(...)`).
+    in another, and armed by a positional, keyword or method-form install), the
+    ORDER of a handle's definitions within a function (an install arms only the
+    writes after it; an unconditional rebind kills the earlier one; a conditional
+    one is worst-wins), `with … as sdk` (EVERY item of a multi-item `with`), and
+    module-qualified dispatch (`_ha._make_sdk(...)`).
     """
     modules = sorted(_PACKAGE_ROOT.rglob("*.py"))
     assert len(modules) >= 200, (
@@ -984,8 +1162,8 @@ def test_no_lane_ANYWHERE_in_the_package_writes_records_through_an_unbound_sdk()
         "the package walk could not parse these modules, so it cannot answer "
         "whether they install a record tenant:" + _joined(unparsed))
 
-    # The MODULE axis, which a global site floor cannot see: only two modules
-    # contribute sites and `hosted_api.py` holds 80 of the 81, so criteria drift
+    # The MODULE axis, which a global site floor cannot see: THREE modules
+    # contribute sites and `hosted_api.py` holds 80 of the 83, so criteria drift
     # that stopped matching anywhere else would still clear the floor below with
     # the one module it already covered. A SUPERSET assertion (not equality) is
     # the honest form — a legitimate new org-scoped lane may ADD a module freely,
@@ -1300,6 +1478,94 @@ def _run_multi(org_id: str) -> None:
         "one let a lock-plus-SDK `with` hide the SDK entirely")
 
 
+def test_an_install_arms_the_writes_THAT_FOLLOW_it_and_no_earlier_ones():
+    """#10046 review F1 (fail-open): install ORDERING, not lane-wide presence.
+
+    `_sdk_handles` used to fold ONE lane-wide boolean, so an install ANYWHERE in
+    the lane armed every write in it. A lane that installs in its `finally`
+    therefore read GREEN while the write in its `try` ran with no tenant — the
+    `no_tenant` DECLINE this leg's own failure message exists to prevent ("the
+    lane looks healthy and files nothing"). Reaching-definition semantics: an
+    install arms the writes AFTER it.
+
+    Mutation this reddens on: reverting the arm to `handles[key] = True` over a
+    separate pass (or dropping the position from the event) — `late` goes silent
+    again.
+    """
+    late = '''
+def _late_bind(org_id: str) -> None:
+    sdk = _make_sdk(namespace=org_id)
+    try:
+        sdk.create_point("Subject", {})
+    finally:
+        _bind_default_graph_record_tenant(sdk, org_id)
+        sdk.close()
+'''
+    assert _flagged(late), (
+        "an install in `finally` must NOT retroactively arm the write in `try` — "
+        "that write runs with no tenant, and an armed deployment refuses it")
+
+    early = '''
+def _early_bind(org_id: str) -> None:
+    sdk = _make_sdk(namespace=org_id)
+    _bind_default_graph_record_tenant(sdk, org_id)
+    sdk.create_point("Subject", {})
+'''
+    assert _flagged(early) == [], (
+        "the control: the SAME lane with the install before the write is clean, "
+        "so the flag above is ordering rather than a broken harness")
+
+
+def test_a_rebind_to_a_BOUND_opener_before_the_write_clears_the_handle():
+    """#10046 review F2 (false positive): the binding in force AT the write wins.
+
+    Worst-wins across a lane's assignments is right for a CONDITIONAL rebind (the
+    branch may not run) and wrong for an UNCONDITIONAL one: a lane that opens an
+    SDK, REPLACES it with a bound one, then writes was reported unbound — telling
+    the reader to "install one at the construction site" on a lane that already
+    installs one. The class-attribute half had the same defect one merge further
+    out: the class-wide `and` re-imposed `__init__`'s state over the WRITER's own
+    binding.
+
+    Mutation this reddens on: replacing the position-aware fold with the old
+    `handles[name] = handles.get(name, True) and state` (both rebinds red), or
+    restoring the `and`-merge in `_unbound_record_writes` (the class rebind
+    reds).
+    """
+    local_rebind = '''
+def _rebind_local(org):
+    sdk = _make_sdk(namespace=org["org_id"])
+    sdk = _data_sdk(org)
+    sdk.create_point("Subject", {})
+'''
+    assert _flagged(local_rebind) == [], (
+        "an unconditional rebind to a BOUND opener before the write clears it")
+
+    class_rebind = '''
+class _RebindWorker:
+    def __init__(self, org_id: str) -> None:
+        self._sdk = _make_sdk(namespace=org_id)
+
+    def run(self, org) -> None:
+        self._sdk = _data_sdk(org)
+        self._sdk.create_point("Subject", {})
+'''
+    assert _flagged(class_rebind) == [], (
+        "the same, on a handle the class OWNS: the WRITER's own binding must win "
+        "over `__init__`'s — the round-5 `and`-merge reported this lane RED")
+
+    conditional_rebind = '''
+def _conditional_rebind(org):
+    sdk = _make_sdk(namespace=org["org_id"])
+    if not sdk:
+        sdk = _data_sdk(org)
+    sdk.create_point("Subject", {})
+'''
+    assert _flagged(conditional_rebind), (
+        "the control the round-6 worst-wins rule protects: a CONDITIONAL rebind "
+        "may not run, so the unbound definition still reaches the write")
+
+
 def test_a_literal_namespace_is_not_an_org_scoped_site():
     """Pins the round-3 predicate: `_make_sdk(namespace="registry")` is not ours.
 
@@ -1309,10 +1575,24 @@ def test_a_literal_namespace_is_not_an_org_scoped_site():
     the non-vacuity floor could be cleared by them alone. Without this pin the
     double-count can be reinstated by a "simplification" and nothing reds: the
     floor is a LOWER bound and the module inventory is a superset.
+
+    The SECOND half pins `namespace=None`, which the predicate COUNTS (#10046
+    review F3). The docstring used to list it with the registry literals while
+    the code counted it; the count is the behaviour we want — a `namespace=None`
+    handle writes to the default graph and carries no tenant either, and
+    `_handle_state` reaches this same predicate, so excluding it would make a
+    write through such a handle invisible — so the docstring was corrected and
+    the behaviour pinned here instead of left to drift either way.
     """
     registry = 'def f():\n    return _make_sdk(namespace="registry")\n'
     assert _org_scoped_sdk_sites(ast.parse(registry)) == {}, (
         "a string-literal namespace is the registry/base lane, not an org graph")
+    none_namespace = 'def f():\n    return _make_sdk(namespace=None)\n'
+    assert _org_scoped_sdk_sites(ast.parse(none_namespace)) == {"f": 1}, (
+        "`namespace=None` is COUNTED deliberately: it is the probe/anchor "
+        "surface, but a handle opened that way writes to the DEFAULT graph with "
+        "no tenant, and `_handle_state` must not answer `None` (not-a-handle) "
+        "for it")
     org = 'def f(org_id):\n    return _make_sdk(namespace=org_id)\n'
     assert _org_scoped_sdk_sites(ast.parse(org)), (
         "the control: a non-literal namespace IS an org-scoped site")
