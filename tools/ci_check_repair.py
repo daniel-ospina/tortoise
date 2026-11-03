@@ -187,11 +187,23 @@ QUEUED_STATUSES = frozenset({"queued", "waiting", "requested", "pending"})
 #: is therefore the NORMAL pre-start state for the whole of the first half hour (the
 #: same 2026-11-02 read that motivated this class had 11 of 16 `pending` runs at zero
 #: jobs at 11-22 min), and a 1200 s floor selects the measured-MEDIAN wait rather than
-#: an anomaly. The same document's §6 derives the repo's queue-wait budget from that
-#: max (81.9 min → 90 min) *"so it fires past the measured-normal population rather
-#: than on it"*, and this floor defers to the SAME derivation: 5400 s is past the
-#: measured maximum, so a run named here has outlasted every first-job wait this repo
-#: has recorded.
+#: an anomaly.
+#:
+#: THE BUDGET THIS FLOOR DEFERS TO IS DERIVED IN `tools/ci_queue_health.py`, NOT IN
+#: `ci-wall-clock.md`: `DEFAULT_MAX_PR_WAIT_SECONDS = 90 * 60.0` there turns §1's max
+#: into a round number — *"A budget at or under that max would fire on the measured-
+#: NORMAL population and become an annotation nobody reads, so this is the first round
+#: number past it"* — and 5400 s sits on the same side of the same measurement: past
+#: the measured maximum, so a run named here has outlasted every first-job wait this
+#: repo has recorded.
+#:
+#: ⛔ CITE THE RIGHT SECTION, because a wrong attribution here discredits the whole
+#: derivation. `ci-wall-clock.md` §6 opens *"**It does not bound queue wait.** §1. No
+#: `timeout-minutes` can."* — it is the statement that the document does NOT derive a
+#: queue-wait budget, and no 90-minute figure appears in that document at all. §1 is
+#: the MEASUREMENT; the queue-health tool is the derivation. A lane re-deriving 5400 s
+#: from a §6 citation finds the opposite of a justification and can only conclude the
+#: floor was invented.
 #:
 #: WHY THE ORDERING IS LOAD-BEARING: the repair for this class evaluates to
 #: cancel-then-rerun, and cancelling a run that is merely waiting for a slot discards
@@ -334,10 +346,10 @@ _CANCEL_NOT_QUEUED_RE = re.compile(r"has not been queued yet", re.I)
 #: ⛔ A 403 ON THE CANCEL IS *NOT* A DEFERRAL — it is a CREDENTIAL refusal (#10763).
 #:
 #: `_cancel`'s other skips are all TRANSIENT and deferring them can succeed: a spent
-#: settle budget ('no_budget') refills, an observation that missed ('unsettled') or
-#: could not be read ('unreadable') is re-attempted, and a detail-less POST failure
-#: ('refused') may be a blip. A permission failure cannot be deferred into success —
-#: the token lacks `actions:write`, and no window grants it.
+#: settle budget ('no_budget') refills, an observation that missed
+#: ('cancel_unobserved') or could not be read ('unreadable') is re-attempted, and a
+#: detail-less POST failure ('refused') may be a blip. A permission failure cannot be
+#: deferred into success — the token lacks `actions:write`, and no window grants it.
 #:
 #: Folding it into 'refused' (and so into `_rerun`'s 'deferred') made the caller stamp
 #: `deferred: True`, which the escalation predicate EXCLUDES — so the tool exited 0
@@ -1081,8 +1093,16 @@ def _cancel(repo: str, run: Run) -> str:
                     lacks `actions:write`) — TERMINAL, never a skip: no window
                     repairs a token, so `_rerun` propagates it and the pass escalates
                     instead of reporting a window it never discharged (#10763)
-      'unsettled'   the cancel landed but the run never reported `completed` in bound
-      'no_budget'   this pass's cancel-settle budget is spent → SKIP
+      'cancel_unobserved'
+                    the cancel POST was ACCEPTED and the run was never OBSERVED
+                    `completed` inside the settle bound. ⛔ THE CANCEL LANDED: the run
+                    is cancelled with NO replacement attempt. Distinct state, because
+                    reporting this as "nothing was changed" understates a destructive
+                    act that took effect. GitHub documents the shape — a cancel can
+                    simply not take effect, which is why its force-cancel endpoint
+                    exists for a run "not responding to POST …/cancel"
+      'no_budget'   this pass's cancel-settle budget is spent BEFORE the POST → SKIP,
+                    nothing is cancelled
 
     ⛔ THE SAFETY PROPERTY IS MEASURED HERE, AT THE MOMENT OF ACTION — NOT BY THE
     CALLER, AND NOT AT THE START OF THE PASS. This is reached only from the zero-job
@@ -1130,7 +1150,9 @@ def _cancel(repo: str, run: Run) -> str:
         # TESTED BEFORE THE POST, deliberately: with no budget left to OBSERVE the
         # settle, the rerun that follows would be refused (`already running`) — so
         # cancelling here would destroy the attempt's verdict without being able to
-        # re-establish it. Skip; the next window has a fresh budget.
+        # re-establish it. Skip; the next window has a fresh budget. NOTHING was
+        # cancelled in this branch — every post-POST outcome below answers
+        # 'cancel_unobserved' instead.
         return "no_budget"
     try:
         r = _run([GH_BIN, "api", "-X", "POST",
@@ -1154,14 +1176,18 @@ def _cancel(repo: str, run: Run) -> str:
         for poll in range(_CANCEL_SETTLE_POLLS):
             elapsed = time.time() - started
             if elapsed >= _CANCEL_SETTLE_TOTAL_S:
-                return "unsettled"
+                return "cancel_unobserved"
             if _CANCEL_SETTLE_SPENT_S + elapsed >= CANCEL_SETTLE_PASS_BUDGET_S:
-                return "no_budget"
+                # ⛔ AFTER THE POST: the cancel was accepted and cannot be recalled, so
+                # this is NOT the pre-POST 'no_budget' skip. The run is cancelled and
+                # will get no replacement attempt from this pass.
+                return "cancel_unobserved"
             try:
                 data = gh_json(["api", f"repos/{repo}/actions/runs/{run.id}"],
                                retries=0, timeout=_CANCEL_SETTLE_POLL_TIMEOUT_S)
             except (MeasureError, subprocess.TimeoutExpired):
-                return "unsettled"
+                # The observation failed, not the cancel: the POST was accepted.
+                return "cancel_unobserved"
             if isinstance(data, dict) and data.get("status") == "completed":
                 return "cancelled"
             if poll + 1 < _CANCEL_SETTLE_POLLS:
@@ -1173,14 +1199,15 @@ def _cancel(repo: str, run: Run) -> str:
         # Real wall clock, not the nominal sleeps: the budget must bound what the
         # pass ACTUALLY spends, and a patched-out `_sleep` must not spend it.
         _CANCEL_SETTLE_SPENT_S += time.time() - started
-    return "unsettled"
+    return "cancel_unobserved"
 
 
 def _rerun(repo: str, run: Run, number: int, expected_head: str = "") -> str:
     """Re-run an EXISTING workflow run at the head it was measured at.
 
     Returns 'rerun'|'cancelled_rerun'|'rerun_not_queued'|'head_moved'|'target_moved'
-    |'deferred'|'denied'|'failed'. The head is re-read immediately before acting, the SAME
+    |'cancel_unobserved'|'deferred'|'denied'|'failed'. The head is re-read immediately
+    before acting, the SAME
     load-bearing precondition `_reopen` documents: a repair pass over many PRs takes
     minutes, so a run whose head has already been replaced would be re-run on a
     superseded sha and burn a CI cycle. If the head cannot be re-read the action is
@@ -1197,8 +1224,8 @@ def _rerun(repo: str, run: Run, number: int, expected_head: str = "") -> str:
     escalates (exit 1) so `ci-check-repair-local.sh` takes over.
 
     'deferred' IS A SKIP TOO, and it exists because the alternative mis-reported one.
-    `_cancel`'s own contract already distinguishes the states in which NOTHING was
-    done — 'no_budget' is documented there as *"Skip; the next window has a fresh
+    `_cancel`'s own contract already distinguishes the states in which nothing was
+    DONE — 'no_budget' is documented there as *"Skip; the next window has a fresh
     budget"*, 'moved' as a skip, 'unreadable'/'refused' as refusals that never act —
     yet every one of them except 'moved' used to fall through to 'failed', and
     `report` escalates a failure to exit 1, whose documented meaning is *"some PR needs
@@ -1222,7 +1249,16 @@ def _rerun(repo: str, run: Run, number: int, expected_head: str = "") -> str:
     — re-running it would be churn on a run that is working, or a second attempt on one
     that already finished), 'not_queued' falls through to the direct rerun, because
     the API's 409 means the run was never queued and there is nothing to cancel first,
-    and the remaining states are 'deferred' — nothing was done, so nothing escalated.
+    'cancel_unobserved' is a skip in which the cancel DID LAND (named distinctly, see
+    below), and the remaining states are 'deferred' — nothing was done, so nothing
+    escalated.
+
+    ⛔ 'cancel_unobserved' IS NOT 'deferred', AND THE DIFFERENCE IS THE RECORD. Both
+    are skips (neither escalates), but 'deferred' means the pass changed NOTHING,
+    while 'cancel_unobserved' means the cancel POST was accepted and the settle was
+    never observed: the run IS cancelled and gets no replacement attempt. Folding the
+    two together made the record understate a destructive act that took effect — the
+    same reason 'cancel_refused_409' exists.
     """
     if expected_head:
         try:
@@ -1243,16 +1279,22 @@ def _rerun(repo: str, run: Run, number: int, expected_head: str = "") -> str:
             state = "rerun_not_queued"
         elif cancelled == "moved":
             return "target_moved"
+        elif cancelled == "cancel_unobserved":
+            # THE CANCEL LANDED; THE RERUN DID NOT. Reached ONLY after `_cancel`'s POST
+            # was accepted, so the run is genuinely cancelled with no replacement
+            # attempt — a SKIP, but one the record must not describe as "nothing was
+            # changed". The next window sees the cancelled run, takes the DEAD path
+            # and re-runs it as the next attempt, so nothing is stranded.
+            return "cancel_unobserved"
         elif cancelled == "denied":
             # NOT a deferral — see this function's docstring. Propagated so the caller
             # escalates instead of promising a window that cannot ever succeed.
             return "denied"
         else:
-            # 'no_budget' / 'unsettled' / 'refused' / 'unreadable' — the cancel did not
-            # happen (or could not be observed), and each of those is TRANSIENT, so
-            # the rerun must not be attempted and NOTHING was changed. That is a
-            # deferral to the next window, which can succeed. 'denied' is deliberately
-            # NOT in this set: a permission refusal cannot succeed in any window.
+            # 'no_budget' (checked BEFORE the POST) / 'refused' / 'unreadable' — the
+            # cancel did NOT happen, so no rerun may be attempted and NOTHING was
+            # changed. That is a deferral to the next window, not a repair this
+            # credential cannot perform.
             return "deferred"
     try:
         ok = _run([GH_BIN, "api", "-X", "POST",
@@ -1549,14 +1591,25 @@ def report(plans: list[PrPlan], apply: bool, trigger_ok: bool, repo: str,
                                          # and nothing escalates.
                                          **({"target_moved": True}
                                             if state == "target_moved" else {}),
-                                         # Nothing was done because the pass could not
-                                         # afford or could not observe the act
-                                         # ('no_budget'/'unsettled'/'refused'/
-                                         # 'unreadable') — the next window has a fresh
-                                         # budget. Also a SKIP: a deferral is not "a
-                                         # repair this credential cannot perform".
+                                         # Nothing was changed because the pass could
+                                         # not afford or could not perform the act
+                                         # ('no_budget' checked before the POST,
+                                         # 'refused', 'unreadable') — the next window
+                                         # has a fresh budget. Also a SKIP: a deferral
+                                         # is not "a repair this credential cannot
+                                         # perform".
                                          **({"deferred": True}
                                             if state == "deferred" else {}),
+                                         # THE CANCEL LANDED, THE RERUN DID NOT: the
+                                         # POST was accepted and the settle was never
+                                         # observed, so the run IS cancelled with no
+                                         # replacement attempt. Still a SKIP (the next
+                                         # window re-runs it as the next attempt), but
+                                         # recorded with `cancel_landed` so the entry
+                                         # never reads as "nothing was changed" — the
+                                         # same reason `cancel_refused_409` exists.
+                                         **({"deferred": True, "cancel_landed": True}
+                                            if state == "cancel_unobserved" else {}),
                                          # ⛔ THE OPPOSITE CASE, AND NAMED SO IT CANNOT
                                          # BE READ AS A DEFERRAL: the cancel was refused
                                          # for PERMISSION, which no window repairs. It is
