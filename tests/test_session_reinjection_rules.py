@@ -1050,6 +1050,17 @@ _TURN_SHAPE_NARRATIVE_HOMES = (
 _PRESENT_TENSE_DEMO_EVENT_WRITER = re.compile(
     r"seed\s+writes?\s+(?:``)?pointKind")
 
+#: How far from a seed mention the ``#10000`` history marker may sit and still
+#: be read as annotating it. The POSITIVE half below is a WINDOW, not a
+#: file-scoped ``"#10000" in flat``: those five homes carry 6, 4, 3, 10 and 1
+#: other ``#10000`` mentions between them (#10675 review P3), so the file-scoped
+#: form stays GREEN when the marker leaves the one sentence that makes the
+#: conjunct defensible — and for THIS file it was strictly tautological, since
+#: the assertion's own message names ``#10000``. Measured: stripping the marker
+#: from each home's explaining sentence reds this window on all five.
+_MARKER_WINDOW = 400
+_SEED_MENTION = re.compile(r"demo(?:/dashboard)?[\s-]+seed", re.IGNORECASE)
+
 
 def test_no_home_states_the_deleted_demo_turn_writer_as_current_fact():
     """#10000 review P3: three homes were corrected and the fourth was missed.
@@ -1084,8 +1095,20 @@ def test_no_home_states_the_deleted_demo_turn_writer_as_current_fact():
         # conjunct defensible. Without it the clause reads as dead weight and
         # the next reader deletes it — and legacy demo graphs lose the only
         # exclusion keeping their orphan `event` nodes out of the turn set.
-        assert "#10000" in flat, (
-            f"`{rel}` explains the `is_episodic` turn-shape constraint without "
-            "naming #10000, so the reader cannot tell the demo/dashboard "
-            "seed's `event` nodes are a LEGACY population the clause is "
-            "retained for")
+        # ⛔ WINDOWED, and it must be: a file-scoped check passes on ANY
+        # `#10000` mention elsewhere in the file, so it cannot red on the
+        # regression above that it claims to guard.
+        seed_hits = list(_SEED_MENTION.finditer(flat))
+        assert seed_hits, (
+            f"`{rel}` is a declared narrative home but no longer mentions the "
+            "demo/dashboard seed at all — either the home was reworded beyond "
+            "this pin's reach or the seed's legacy `event` nodes stopped being "
+            "the reason given for the `is_episodic` conjunct")
+        for _hit in seed_hits:
+            window = flat[max(0, _hit.start() - _MARKER_WINDOW):
+                          _hit.end() + _MARKER_WINDOW]
+            assert "#10000" in window, (
+                f"`{rel}` names the demo/dashboard seed without naming #10000 "
+                "beside it, so the reader cannot tell the seed's `event` nodes "
+                "are a LEGACY population the conjunct is retained for. Got: "
+                f"...{window}...")
