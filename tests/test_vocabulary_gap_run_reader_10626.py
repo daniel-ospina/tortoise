@@ -479,3 +479,138 @@ def test_the_alarm_is_never_malformed_even_for_an_empty_reading():
         v2._VocabularyGapRunAccumulator().reading())
     assert "absorbed ." not in warning, warning
     assert "absorbed ;" not in warning, warning
+
+
+# ── round 7, P2 (1): the accumulator is SHARED across context-carrying threads ─
+#
+# `_VocabularyGapRunAccumulator`'s docstring used to justify having no lock with
+# "run-confined by construction". Those halves disagree: `copy_context()` copies
+# the MAPPING, not the values, so every context-carrying thread holds the SAME
+# accumulator object — which is why
+# `test_a_fold_on_a_context_carried_worker_lands_on_the_run_reading` has a second
+# thread writing into it at all. `absorb` is then an unlocked read-modify-write on
+# shared state, exactly what `_VocabularyGapCensus._lock` exists to prevent on the
+# process census it mirrors. The arm below pins the property the lock is for, by
+# MEASURING overlap rather than by asserting an internal attribute exists.
+
+
+def test_an_absorb_cannot_interleave_with_another_absorb():
+    """DETERMINISTIC pin of the property the missing lock broke: mutual exclusion.
+
+    The docstring used to justify having no lock with "run-confined by
+    construction" — but `copy_context()` copies the MAPPING, not the values, so
+    every context-carrying thread holds the SAME accumulator object (that sharing
+    is the whole point of the scope, and it is why
+    `test_a_fold_on_a_context_carried_worker_lands_on_the_run_reading` has a
+    second thread writing into it). Two `absorb` calls can therefore be in flight
+    at once, and unlocked `+=` loses increments / over-admits past the cap.
+
+    Measured by OVERLAP, not by inspecting internals: the first fold's token
+    iterable parks between two tokens and waits for a second fold to finish. With
+    the lock, the second fold cannot enter while the first is inside `absorb`, so
+    the wait times out; without it, the second fold completes inside the first —
+    which is exactly the interleaving that corrupts the counts.
+    """
+    import threading
+
+    acc = v2._VocabularyGapRunAccumulator()
+    parked = threading.Event()
+    second_done = threading.Event()
+    overlapped: list[bool] = []
+
+    def _tokens():
+        yield UNLISTED_MARKER
+        # Park INSIDE absorb(), and tell the main thread we are here so the peer
+        # cannot win the race by folding before we ever entered.
+        parked.set()
+        overlapped.append(second_done.wait(0.50))
+        yield "also-unlisted"
+
+    def _second_fold() -> None:
+        acc.absorb([UNLISTED_MARKER])
+        second_done.set()
+
+    first = threading.Thread(target=acc.absorb, args=(_tokens(),), daemon=True)
+    first.start()
+    assert parked.wait(5), "the first fold never entered `absorb`"
+    try:
+        second = threading.Thread(target=_second_fold)
+        second.start()
+        second.join(5)
+    finally:
+        first.join(5)
+
+    assert overlapped == [False], (
+        "a second `absorb` ran to completion while the first was still inside "
+        "`absorb` — the run accumulator has no mutual exclusion, so concurrent "
+        "context-carrying folds lose increments and can over-admit past "
+        f"_VOCABULARY_GAP_CAP (observed overlap={overlapped})")
+    reading = acc.reading()
+    assert reading["fold_decisions"] == 2, reading
+    assert reading["tokens"] == {UNLISTED_MARKER: 2, "also-unlisted": 1}, reading
+
+
+# ── round 7, P2 (2): the post-run attach sits INSIDE the module's suppress ─────
+
+def test_a_raising_attach_never_turns_a_committed_run_into_a_raised_one(monkeypatch):
+    """Observability may degrade to UNATTACHED — it may not decide the capture.
+
+    This wrapper runs AFTER the run has committed its points, so an exception out
+    of the attach would leave this function and `sdk` would report `ok: False` on
+    a capture that SUCCEEDED. The two existing census writers are wrapped in
+    `contextlib.suppress(Exception)` for exactly this reason; the new sibling path
+    was not. A raising receipt-field builder stands in for any raise here.
+    """
+    def _boom(_reading):
+        raise RuntimeError("receipt alarm builder blew up")
+
+    monkeypatch.setattr(v2, "_vocabulary_gap_run_warning", _boom)
+
+    def _run() -> dict:
+        v2._record_vocabulary_gap([UNLISTED_MARKER])
+        return {"stats": {}, "warnings": []}
+
+    out = v2._run_scoped_vocabulary_gap(_run)()
+
+    assert out == {"stats": {}, "warnings": []}, (
+        "a raising attach must leave the receipt EXACTLY as the lane built it "
+        f"(built before written) and must not escape; got {out!r}")
+    # The loss is not silent: the process census still holds it.
+    assert v2.vocabulary_gap_report().get(UNLISTED_MARKER, 0) >= 1
+
+
+def test_the_reader_never_replaces_a_lanes_own_receipt_fields():
+    """A container of the wrong type is the LANE's value, not this reader's to
+    overwrite.
+
+    `_attach` used to replace a non-`dict` `stats` (and a non-`list` `warnings`)
+    with a fresh container, silently discarding whatever the lane had put there.
+    The reader owns only its own key/entry: here `stats` is the lane's string, so
+    it must survive untouched while the alarm still lands on `warnings` (the
+    reading stays loud even where it cannot attach), and the control shows the
+    reverse direction — a dict `stats` takes the reading while the lane's tuple
+    `warnings` survives.
+    """
+    def _foreign_stats() -> dict:
+        v2._record_vocabulary_gap([UNLISTED_MARKER])
+        return {"stats": "the lane's own shape", "warnings": []}
+
+    receipt = v2._run_scoped_vocabulary_gap(_foreign_stats)()
+    assert receipt["stats"] == "the lane's own shape", (
+        "the reader CLOBBERED a receipt field the lane owns; "
+        f"stats={receipt['stats']!r}")
+    assert len(_gap_warnings(receipt)) == 1, (
+        "the reading cannot attach to a foreign `stats`, so the alarm must still "
+        f"land on `warnings` rather than the loss going silent; {receipt!r}")
+
+    def _foreign_warnings() -> dict:
+        v2._record_vocabulary_gap([UNLISTED_MARKER])
+        return {"stats": {}, "warnings": ("the lane's own tuple",)}
+
+    receipt = v2._run_scoped_vocabulary_gap(_foreign_warnings)()
+    assert receipt["warnings"] == ("the lane's own tuple",), (
+        "the reader CLOBBERED a receipt field the lane owns; "
+        f"warnings={receipt['warnings']!r}")
+    assert receipt["stats"]["vocabulary_gap"]["tokens"].get(UNLISTED_MARKER) == 1, (
+        "the reading must still land on a dict `stats`; "
+        f"stats={receipt['stats']!r}")

@@ -12706,15 +12706,25 @@ class _VocabularyGapRunAccumulator:
     ``_VOCABULARY_GAP_CAP`` and says so (``truncated_observations``); oversize
     tokens are counted and never retained.
 
-    Run-confined by construction (installed in the run's own execution context),
-    so it needs no lock of its own — and unlike a thread-local it follows the run
-    into any worker that carries the run's context.
+    Run-confined by construction (installed in the run's own execution context)
+    — and STILL LOCKED, because "run-confined" is not "thread-confined".
+    ``contextvars.copy_context()`` copies the *mapping*, not the values, so every
+    context-carrying thread holds **the same accumulator object**: that sharing is
+    precisely the propagation this scope exists for (a fold on a worker carrying
+    the run's context must land on THIS run's reading), and it is equally
+    precisely why ``absorb`` can run on several threads at once.  The process
+    census this mirrors carries a lock for the same reason
+    (``_VocabularyGapCensus._lock``, same three-way bucket logic); without one
+    here the unlocked ``+=`` would lose increments and could over-admit past
+    ``_VOCABULARY_GAP_CAP``, so the receipt would UNDER-report the loss it exists
+    to disclose — the silent absence invariant I2 forbids.
     """
 
-    __slots__ = ("_counts", "_oversize", "_paired", "_truncated",
+    __slots__ = ("_counts", "_lock", "_oversize", "_paired", "_truncated",
                  "fold_decisions")
 
     def __init__(self) -> None:
+        self._lock = threading.Lock()
         self._counts: Counter[str] = Counter()
         self._paired: dict[str, Counter[str]] = {
             name: Counter() for name in _PAIR_READ_BUCKETS}
@@ -12723,45 +12733,57 @@ class _VocabularyGapRunAccumulator:
         self.fold_decisions = 0
 
     def absorb(self, tokens) -> None:
-        """Count one fold decision's absorbed tokens (mirrors ``_record``)."""
-        self.fold_decisions += 1
-        for t in tokens:
-            bucket = _pair_read_bucket(t)
-            if bucket is not None:
-                self._paired[bucket][t] += 1
-                continue
-            if len(t) > _VOCABULARY_GAP_MAX_TOKEN:
-                self._oversize += 1
-                continue
-            if t in self._counts or len(self._counts) < _VOCABULARY_GAP_CAP:
-                self._counts[t] += 1
-            else:
-                self._truncated += 1
+        """Count one fold decision's absorbed tokens (mirrors ``_record``).
+
+        Serialized by ``self._lock``: several threads can carry the same run's
+        context, so this is a read-modify-write on SHARED state.
+        """
+        with self._lock:
+            self.fold_decisions += 1
+            for t in tokens:
+                bucket = _pair_read_bucket(t)
+                if bucket is not None:
+                    self._paired[bucket][t] += 1
+                    continue
+                if len(t) > _VOCABULARY_GAP_MAX_TOKEN:
+                    self._oversize += 1
+                    continue
+                if t in self._counts or len(self._counts) < _VOCABULARY_GAP_CAP:
+                    self._counts[t] += 1
+                else:
+                    self._truncated += 1
 
     def reading(self) -> dict[str, Any]:
-        """The run's census — the SAME shape ``snapshot()`` reports, per run."""
+        """The run's census — the SAME shape ``snapshot()`` reports, per run.
+
+        Taken under the lock (as ``snapshot()`` does): a worker thread carrying
+        the run's context may be mid-``absorb``, and a torn reading would report
+        its own sums inconsistently.
+        """
         def _sorted(counter: Counter[str]) -> dict[str, int]:
             return dict(sorted(counter.items(), key=lambda kv: (-kv[1], kv[0])))
 
-        connective = self._paired["one_sided_connective"]
-        state = self._paired["one_sided_state"]
-        return {
-            "tokens": _sorted(self._counts),
-            "distinct_tokens": len(self._counts),
-            # NOT "claims folded": this counts the run's BOUNDARY calls that
-            # returned a fold decision (the census's own definition).
-            "fold_decisions": self.fold_decisions,
-            "one_sided_connective": _sorted(connective),
-            "one_sided_state": _sorted(state),
-            "pair_read_residual": sum(connective.values()) + sum(state.values()),
-            "truncated_observations": self._truncated,
-            "oversize_observations": self._oversize,
-            "cap": _VOCABULARY_GAP_CAP,
-            "max_token_chars": _VOCABULARY_GAP_MAX_TOKEN,
-            # Named for what it is: the reading is THIS run's own boundary
-            # calls, not a window over the process's lifetime totals.
-            "scope": "run",
-        }
+        with self._lock:
+            connective = self._paired["one_sided_connective"]
+            state = self._paired["one_sided_state"]
+            return {
+                "tokens": _sorted(self._counts),
+                "distinct_tokens": len(self._counts),
+                # NOT "claims folded": this counts the run's BOUNDARY calls that
+                # returned a fold decision (the census's own definition).
+                "fold_decisions": self.fold_decisions,
+                "one_sided_connective": _sorted(connective),
+                "one_sided_state": _sorted(state),
+                "pair_read_residual": (sum(connective.values())
+                                       + sum(state.values())),
+                "truncated_observations": self._truncated,
+                "oversize_observations": self._oversize,
+                "cap": _VOCABULARY_GAP_CAP,
+                "max_token_chars": _VOCABULARY_GAP_MAX_TOKEN,
+                # Named for what it is: the reading is THIS run's own boundary
+                # calls, not a window over the process's lifetime totals.
+                "scope": "run",
+            }
 
 
 #: The ContextVar carrying the run accumulator, created on FIRST USE so this
@@ -12948,6 +12970,13 @@ def _run_scoped_vocabulary_gap(run):
     carry it) and the process-level census + WARNING still hold it — the reader
     never converts a failure into a silent one, and never changes a decision:
     the fold outcome is whatever ``_boundary`` computed, bit-identical.
+
+    And the converse, which is the module's own invariant rather than a nicety
+    (#10626 review round 7, P2): a RAISING READER never converts a successful,
+    already-committed capture into an exception.  The post-run attach runs inside
+    ``contextlib.suppress(Exception)`` for exactly the reason the two census
+    writers do — the points have landed by then, so an escape would leave this
+    function and `sdk` would report ``ok: False`` on a capture that SUCCEEDED.
     """
     from functools import wraps
 
@@ -12960,17 +12989,34 @@ def _run_scoped_vocabulary_gap(run):
         unconditionally made the M2 lane's ``stats`` non-empty on EVERY capture,
         including the zero-call path whose documented contract is a clean
         ``{}``.
+
+        ⛔ THE RECEIPT FIELDS BELONG TO THE LANE, NOT TO THIS READER (#10626
+        review round 7, P2).  The alarm is built BEFORE anything is written, so a
+        raising builder leaves the receipt EXACTLY as the lane built it instead
+        of half-attached (the caller suppresses the escape — observability never
+        turns a committed capture into a raised one).  And a container of the
+        wrong type is never REPLACED: this reader adds its own key/entry to a
+        ``dict``/``list`` the lane provided, and where the lane shipped something
+        else (a foreign ``stats`` shape, a tuple ``warnings``) it leaves that
+        value alone and lands the half that fits — the alarm still names every
+        shape the reading recorded, and the process census + WARNING hold it.
+        Clobbering the lane's field to fit the reading is receipt-field loss, the
+        same class of damage the attach exists to prevent.
         """
         if not _vocabulary_gap_recorded_a_loss(reading):
             return
+        # Build first, write second: nothing below can leave a torn receipt.
+        warning = _vocabulary_gap_run_warning(reading)
         stats = receipt.get("stats")
-        if not isinstance(stats, dict):
+        if stats is None:
             stats = receipt["stats"] = {}
-        stats["vocabulary_gap"] = reading
+        if isinstance(stats, dict):
+            stats["vocabulary_gap"] = reading
         warnings = receipt.get("warnings")
-        if not isinstance(warnings, list):
+        if warnings is None:
             warnings = receipt["warnings"] = []
-        warnings.append(_vocabulary_gap_run_warning(reading))
+        if isinstance(warnings, list):
+            warnings.append(warning)
 
     @wraps(run)
     def _run_with_census(*args, **kwargs):
@@ -12985,13 +13031,21 @@ def _run_scoped_vocabulary_gap(run):
             # accumulator cannot leak into the NEXT run in this context — that
             # would report one run's folds on another run's receipt.
             scope.reset(token)
-        reading = accumulator.reading()
-        if isinstance(result, dict):
-            _attach(result, reading)
-        elif (isinstance(result, tuple) and len(result) == 2
-              and isinstance(result[1], dict)):
-            # the M2 lane's ``(extracted, meta)`` contract (#1530 D8)
-            _attach(result[1], reading)
+        # ⛔ INSIDE the module's own suppress, for the reason `_record_vocabulary_gap`
+        # and `_VocabularyGapCensus.record` are: this runs AFTER the run has
+        # already committed its points, so an escaping exception here would turn a
+        # SUCCESSFUL capture into a reported failure (`sdk.py` returns
+        # ``{**result, "ok": False, …}`` on an escape).  Observability may degrade
+        # to unattached — the process census + WARNING still hold the reading —
+        # but it may never decide the capture's outcome.
+        with contextlib.suppress(Exception):  # observability never decides
+            reading = accumulator.reading()
+            if isinstance(result, dict):
+                _attach(result, reading)
+            elif (isinstance(result, tuple) and len(result) == 2
+                  and isinstance(result[1], dict)):
+                # the M2 lane's ``(extracted, meta)`` contract (#1530 D8)
+                _attach(result[1], reading)
         return result
 
     return _run_with_census
