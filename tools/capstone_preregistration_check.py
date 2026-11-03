@@ -2346,13 +2346,16 @@ def check_ordering(prereg: Path, logs: list[Path], pins: dict | None = None,
     put two contradictory semantics on the same lines — the exact outcome the contradiction test
     exists to prevent.
 
-    ``base_ref``/``unmeasured`` are the RULED path's (a base the claim is measured against, and the
-    reasons a bundle compared nothing), and so are ``atomic_added``/``atomic_detail``: they report a
-    DISCLOSED atomic add, and a disclosure is a ground only on the armed path, so the ruled path
-    accepts them and never writes them (#10546 review cycle 23, ISSUE 1 — this said "on either
-    path", which only a vacuous test could agree with). ``unreadable_atomic`` is the one out-param
-    BOTH paths write: an unreadable record is a fact about the tree, not about which rule is in
-    force. None of them decide a verdict.
+    ``base_ref`` is the RULED path's: it names a base the claim is measured against, and the armed
+    rule consults no base at all. ``atomic_added``/``atomic_detail`` are the ARMED path's: they
+    report a DISCLOSED atomic add, and a disclosure is a ground only where the arm is armed, so the
+    ruled path accepts them and never writes them (#10546 review cycle 23, ISSUE 1 — this said "on
+    either path", which only a vacuous test could agree with). ``unmeasured`` and
+    ``unreadable_atomic`` are written by BOTH paths, because "nothing was compared" and "the record
+    could not be read" are facts about the bundle, not about which rule is in force: each path
+    appends the reason ITS rule compared nothing (#10546 review at `01d9ce879`, ISSUE 1 — the armed
+    path had no counter and no out-param, so a bundle it walked without comparing anything reported
+    `verified`). None of them decide a verdict.
 
     Raises ``HistoryUnavailable`` (a ``CheckError``, the NON-FAILING third outcome) when this
     checkout is shallow — the ruled path needs the base's history. ``_check_ordering_proposed``
@@ -2366,6 +2369,10 @@ def check_ordering(prereg: Path, logs: list[Path], pins: dict | None = None,
         return _check_ordering_proposed(
             prereg, logs, pins, exempted, atomic_added, atomic_disclosures, atomic_detail,
             record_unreadable, unreadable_atomic, allow_atomic_disclosure=True,
+            # ⛔ Passed on for the same reason the flag is: leaving it at its default would leave the
+            # armed path with no way to say "nothing was compared", which is the one state its
+            # `else: verified` fallback cannot tell apart from a real measurement.
+            unmeasured=unmeasured,
         )
     return _check_ordering_ruled(
         prereg, logs, pins, exempted, base_ref, unmeasured,
@@ -2715,11 +2722,20 @@ def _check_ordering_proposed(prereg: Path, logs: list[Path], pins: dict | None =
                    atomic_detail: dict | None = None,
                    record_unreadable: bool = False,
                    unreadable_atomic: list[str] | None = None,
-                   allow_atomic_disclosure: bool = False) -> list[str]:
+                   allow_atomic_disclosure: bool = False,
+                   unmeasured: list[str] | None = None) -> list[str]:
     """``[]`` when every log is either after the registration or provably unscored.
 
     ``atomic_disclosures`` is the machine record's ``atomic_add_ordering`` block — the record, NOT
     the pins block (see ``ATOMIC_ADD_KEY`` for why the distinction is load-bearing).
+
+    ``unmeasured``, when given, is APPENDED with the reason this rule compared NO ordering pair —
+    the same out-param, with the same meaning, that ``_check_ordering_ruled`` writes (#10546 review
+    at `01d9ce879`, ISSUE 1). It is not a verdict and it may not be read back as one: ``run()``
+    consults it only to refuse to print `verified` over an empty comparison, which is exactly what
+    this path used to do — a bundle whose only log was withdrawn (or was never committed) walked
+    zero pairs and returned ``[]``, and the armed arm's final ``else`` dressed that as `verified` on
+    the field a machine consumer reads by name.
 
     ⛔ ``allow_atomic_disclosure`` IS OFF BY DEFAULT, AND THAT IS THE WHOLE POINT (#10546 review
     cycle 17, IS-1/IS-2). The disclosure arm answers "the pre-registration and its log entered in
@@ -2814,6 +2830,15 @@ def _check_ordering_proposed(prereg: Path, logs: list[Path], pins: dict | None =
     #: anti-rot message "but it is not one" would be false — the predating-add failure already
     #: reports the real defect (#10529 review cycle 8, P2).
     atomic_no_matter: set[str] = set()
+    #: ⛔ How many logs this rule actually ORDERED (#10546 review at `01d9ce879`, ISSUE 1). Its
+    #: sibling has had this counter since `#10463` review cycle 12, and this path did not — so a
+    #: bundle whose only log was withdrawn, or every log of which is untracked, walked the loop and
+    #: compared NOTHING, returned ``[]``, and `run()`'s armed `else` dressed that as `verified` on
+    #: the one field a machine consumer reads by name. Incremented where the pair is ESTABLISHED
+    #: (its add-commits were read), exactly as the ruled path increments where an epoch is
+    #: established — never derived from `len(logs)`, which cannot see the `continue` for an
+    #: untracked log.
+    compared = 0
     # ⛔ EVERY present disclosure is TYPE-CHECKED once, here, before the per-log arms (#10529 review
     # cycle 2, P2). The arms previously validated only the SCORED atomic path, so a disclosure on an
     # atomic-and-unscored log was never checked (`reason: {a: 1}` was accepted), and the field rules
@@ -2860,6 +2885,7 @@ def _check_ordering_proposed(prereg: Path, logs: list[Path], pins: dict | None =
         # output"), so determinism cannot be inherited from it — the rule has to hold over every
         # candidate, which is what the proven-order arm below now does (#10546 review cycle 25).
         log_sha = predating_sha or (prereg_sha if atomic_pair else sorted(add_shas)[0])
+        compared += 1
         sha_known.add(log.name)
         if atomic_pair:
             atomic_no_matter.add(log.name)
@@ -3193,6 +3219,14 @@ def _check_ordering_proposed(prereg: Path, logs: list[Path], pins: dict | None =
             f"{MACHINE_RECORD}.{ATOMIC_ADD_KEY} discloses {name!r} as an atomic add, but it is "
             "not one — a disclosure granted to an ORDINARILY ordered log would hide a real "
             "ordering failure, the same rule pins.pre_existing_unscored_logs applies"
+        )
+    if compared == 0 and unmeasured is not None:
+        # Appended ONCE, for the bundle — never per log (#10463 review cycle 12): a 3-log bundle
+        # whose fourth log is untracked DID order a pair, and a per-log append would report a real
+        # measurement as unmeasured, the same lie one polarity over.
+        unmeasured.append(
+            "no ordering pair was compared — this bundle has no evidence log carrying an "
+            "add-commit the registration can be ordered against"
         )
     return failures
 
@@ -3845,22 +3879,41 @@ def run(directory: Path, use_git: bool = True, use_corpus: bool = True,
             if allow_atomic_disclosure:
                 # ⛔ The armed path measured the pair out of THIS contribution, not against the base,
                 # so naming the base here would restate the silent-green `ordering_base` exists to
-                # remove (#10463 review cycle 4). The claim is qualified per outcome below.
-                report["ordering_base"] = PROPOSED_ORDERING_BASE
-                # A FAILED ordering half must not carry a green CLAIM (#10529 review cycle 6, P2):
-                # `run_order_claim` is the field a machine consumer reads by name.
+                # remove (#10463 review cycle 4). The claim is qualified per outcome below — and it
+                # is claimed ONLY when a pair was actually ordered: printing it over an empty
+                # comparison is the same lie one polarity over (#10546 review at `01d9ce879`,
+                # ISSUE 1), so the UNMEASURED arm leaves `ordering_base` at its `(not measured)`
+                # default and `main()` prints the candidate on its own "would be measured" line.
                 if ordering_failures:
+                    # A FAILED ordering half must not carry a green CLAIM (#10529 review cycle 6,
+                    # P2): `run_order_claim` is the field a machine consumer reads by name.
                     ordering = "failed"
+                    report["ordering_base"] = PROPOSED_ORDERING_BASE
+                elif unmeasured:
+                    # ⛔ MIRRORS THE RULED PATH'S ARM, ONE PATH OVER (#10546 review at `01d9ce879`,
+                    # ISSUE 1). `_check_ordering_proposed` had no comparison counter and no
+                    # `unmeasured` out-param, so a bundle it walked without ordering a single pair
+                    # — a registration whose only log was withdrawn, or whose every log is
+                    # untracked — fell through to the `else` below and reported `verified`, and
+                    # `run_order_claim` (the field a machine consumer reads by name) said
+                    # `verified` over zero comparisons. The counter exists now, and this arm is
+                    # where it is read: the sibling has refused this shape since #10463 cycle 12.
+                    ordering = f"{ORDERING_UNMEASURED} ({unmeasured[0]})"
                 elif unreadable_atomic:
                     ordering = (
                         "UNPROVEN (the machine record is unreadable, so the atomic add of "
                         + ", ".join(sorted(unreadable_atomic)) + " cannot be disclosed)"
                     )
+                    report["ordering_base"] = PROPOSED_ORDERING_BASE
                 elif atomic_added:
                     ordering = ("verified (atomic-add DECLARED: "
                                 + ", ".join(sorted(atomic_added)) + ")")
+                    report["ordering_base"] = PROPOSED_ORDERING_BASE
                 else:
+                    # Reaching here means `unmeasured` is empty AND the arm did not refuse: at
+                    # least one pair was ordered, so the proposed base is a measurement, not a hope.
                     ordering = "verified"
+                    report["ordering_base"] = PROPOSED_ORDERING_BASE
             elif unmeasured:
                 # ⛔ The arm marks the outcome only when NOTHING was compared (review cycle 12):
                 # a registration ReadError, a registration absent from the base, a bundle with no

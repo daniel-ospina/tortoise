@@ -6018,6 +6018,62 @@ def test_one_comparable_pair_is_enough_to_report_the_bundle_as_measured(tmp_path
     assert report["ordering_base"] == "origin/main", report["ordering_base"]
 
 
+def test_the_armed_rule_does_not_claim_a_measured_ordering_when_it_compared_nothing(
+        tmp_path, monkeypatch, capsys):
+    """The ARMED rule had no comparison counter, so "I compared nothing" read as `verified`.
+
+    ⛔ ISSUE 1 of the review at `01d9ce879`. `_check_ordering_proposed` had neither a `compared`
+    counter nor an `unmeasured` out-param (the ruled path has had both since #10463 cycle 12), so a
+    bundle whose only log was WITHDRAWN — the honest end state this file already tests on the ruled
+    path, two tests up — walked zero pairs, returned `[]`, and the armed `else` handed it
+    `ordering: verified` / `run_order_claim: verified` / `ordering_base: PROPOSED_ORDERING_BASE`.
+    `run_order_claim` is the field the module says a machine consumer reads by name, so the one
+    path this PR adds was the one path that had lost the guard its sibling gained.
+
+    Non-vacuity: this assertion cannot pass on the pre-fix tree — there the report says `verified`
+    over an empty loop (mutation: delete `compared += 1` in `_check_ordering_proposed` and this
+    test reds the same way, because the counter is the only thing that reaches the arm).
+    """
+    _repo, bundle = _bundle_with_published_registration(tmp_path, monkeypatch)
+    assert list(bundle.glob(check.EVIDENCE_LOG_GLOB)) == [], "the fixture must carry NO evidence log"
+    _measurement_only(monkeypatch)
+
+    report = check.run(bundle, use_git=True, use_corpus=False, allow_atomic_disclosure=True)
+    assert report["ok"] is True, report["failures"]
+    assert report["ordering"].startswith(check.ORDERING_UNMEASURED), report["ordering"]
+    # …and the base is NOT claimed either: naming the proposed base over zero comparisons is the
+    # same silent green, one field over (#10548 r15 F3's mirror).
+    assert report["ordering_base"] == "(not measured)", report["ordering_base"]
+    assert report["run_order_claim"].startswith(check.ORDERING_UNMEASURED), report["run_order_claim"]
+
+    assert check.main(["--dir", str(bundle), "--no-corpus", "--allow-atomic-disclosure"]) == 0
+    out = capsys.readouterr().out
+    assert f"machine record run-order claim: {check.ORDERING_UNMEASURED}" in out, out
+    assert check.PROPOSED_ORDERING_BASE not in out, out
+
+
+def test_the_armed_rule_still_reports_a_pair_it_did_order_as_measured(tmp_path, monkeypatch):
+    """The mirror of the untracked-log test, on the armed path: a REAL measurement stays `verified`.
+
+    A per-log `unmeasured` append would report this bundle — one orderable log beside one untracked
+    scratch file — as UNMEASURED, which is the same class of lie in the other direction. The counter
+    is bundle-level on both paths, and the armed path must not have bought its new guard by
+    refusing to ever say `verified`.
+    """
+    repo, bundle = _bundle_with_published_registration(tmp_path, monkeypatch)
+    ordered = bundle / "a-ordered.log"
+    ordered.write_text("x\n")
+    _git(repo, "add", str(ordered.relative_to(repo)))
+    _git(repo, "commit", "-q", "-m", "log after the registration", epoch=1_700_000_200)
+    (bundle / "scratch.log").write_text("x\n")  # untracked, and irrelevant
+    _measurement_only(monkeypatch)
+
+    report = check.run(bundle, use_git=True, use_corpus=False, allow_atomic_disclosure=True)
+    assert report["ok"] is True, report["failures"]
+    assert report["ordering"] == "verified", report["ordering"]
+    assert report["ordering_base"] == check.PROPOSED_ORDERING_BASE, report["ordering_base"]
+
+
 # ── cycle 13: the readers must see an add hidden behind a merge ───────────────
 
 
