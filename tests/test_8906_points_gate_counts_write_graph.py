@@ -196,7 +196,10 @@ def test_default_graph_full_write_graph_empty_is_ADMITTED(env):
     # The write went to the key's OWN graph, and the default graph is untouched
     # (so the admission is not a widen onto the counted graph).
     assert e.counted(e.write_ns) == 1, "the admitted write did not land"
-    assert e.counted(e.default_ns) == 1, "the default graph was written"
+    assert e.counted(e.default_ns) == 1, (
+        "the default graph must be UNTOUCHED — it held 1 before the request, "
+        "so a count above 1 means the write widened onto the graph the old "
+        "gate counted")
 
 
 def test_write_graph_full_default_empty_is_REFUSED(env):
@@ -244,7 +247,9 @@ def test_objects_and_subjects_doors_count_the_write_graph(env):
             f"(#8906): {r.status_code} {r.text[:300]}")
     assert e.counted(e.write_ns) == 2, (
         "the two admitted writes must BOTH land in the key's own graph")
-    assert e.counted(e.default_ns) == 2, "the default graph was written"
+    assert e.counted(e.default_ns) == 2, (
+        "the default graph must be UNTOUCHED — it held 2 before the requests, "
+        "so a count above 2 means a write widened onto it")
 
 
 def test_objects_and_subjects_doors_REFUSE_a_full_write_graph(env):
@@ -340,13 +345,16 @@ def test_org_wide_key_is_admitted_while_a_custom_graph_is_full(env):
 def test_demo_door_gates_on_the_default_graph_and_rejects_bound_keys(env):
     """``/v1/demo`` (the 5th points door) is DEFAULT-GRAPH ONLY by design.
 
-    Two pins, because this door's count and its write are two constructions of
-    the same graph (``_seed_demo_graph`` opens it through `_org_sdk(org_id)`,
-    #10180's promotion-aware default resolver — NOT one shared handle):
+    Three pins:
     - an ORG-WIDE key is gated on the default graph (refused at its cap), so
       the door's count target is asserted behaviourally, not just described;
     - a GRAPH-BOUND key is refused 403 GRAPH_SCOPED_TEAM_SURFACE before the
-      gate — which is what keeps this door from ever needing a wrong-graph fix.
+      gate — which is what keeps this door from ever needing a wrong-graph fix;
+    - **structurally**, the gate and the seeder are handed ONE handle (#8906
+      review P2). Behaviour alone cannot discriminate here: an org-wide
+      credential's fallback and `_org_sdk` resolve the same graph, so reverting
+      the threading would still go green. The identity assertion is the only
+      pin that fails when the handle is split again.
     """
     e = env(max_points=1)
     e.seed(e.default_ns, "default-at-cap")
@@ -362,3 +370,40 @@ def test_demo_door_gates_on_the_default_graph_and_rejects_bound_keys(env):
     assert r2.json()["detail"]["error_code"] == "GRAPH_SCOPED_TEAM_SURFACE"
 
 
+
+def test_demo_door_hands_the_gate_and_the_seeder_ONE_handle(env, monkeypatch):
+    """The structural pin the behavioural demo arm cannot provide (#8906 P2).
+
+    An org-wide credential's fallback SDK and `_seed_demo_sync`'s `_org_sdk` both
+    resolve the default graph, so reverting `_check_org_limit(..., sdk=sdk)` at
+    that door keeps every behavioural assertion green — the fix would be
+    unproven. This arm asserts the property the change exists to buy: the gate
+    and the seeder receive the SAME object, and it is not None.
+    """
+    import tortoise.hosted_api as ha_mod
+
+    e = env(max_points=100)
+    seen: dict[str, object] = {}
+
+    real_gate = ha_mod._check_org_limit
+
+    def _spy_gate(org, resource, *, slot_credit=0, sdk=None):
+        seen["gate"] = sdk
+        return real_gate(org, resource, slot_credit=slot_credit, sdk=sdk)
+
+    def _spy_seed(org_id, sdk=None):
+        seen["seed"] = sdk
+        return {"status": "stub"}
+
+    monkeypatch.setattr(ha_mod, "_check_org_limit", _spy_gate)
+    monkeypatch.setattr(ha_mod, "_seed_demo_graph", _spy_seed)
+
+    r = e.tc.post("/v1/demo", headers=e.headers(graph_bound=False))
+    assert r.status_code in (200, 201), r.text[:300]
+    assert seen.get("gate") is not None, (
+        "the demo door's gate ran without an sdk — it counted the org DEFAULT "
+        "graph instead of the graph it writes (#8906)")
+    assert seen["gate"] is seen.get("seed"), (
+        "the gate and the seeder were handed DIFFERENT SDK handles at /v1/demo "
+        "— the count and the write can then split when the default resolution "
+        "moves between them (#8906)")

@@ -13171,7 +13171,7 @@ _DEMO_POINT_IDS: frozenset[str] = frozenset(
 ) | {_DEMO_SENTINEL_ID}
 
 
-def _seed_demo_graph(org_id: str) -> dict:
+def _seed_demo_graph(org_id: str, sdk=None) -> dict:
     """Seed the 4-layer OPT-IN demo/sample graph for an org. Idempotent
     (sentinel). #2360: NEVER called on the fresh-org provisioning path —
     fresh orgs get the REAL starter seed (/internal/starter-seed) instead.
@@ -13197,7 +13197,12 @@ def _seed_demo_graph(org_id: str) -> dict:
     filings; deleting the sentinel and re-seeding, or a one-shot backfill of
     `tags` from the existing `TAGGED` edges, closes it per graph.
     """
-    sdk = _org_sdk(org_id)
+    # #8906: a caller that ALREADY opened this graph (and gated its count on that
+    # handle, `public_demo`) passes it in, so the count and the write are one
+    # handle rather than two `_org_sdk(org_id)` constructions that agree only
+    # while the default resolution does not move between them. `sdk=None` keeps
+    # every other caller unchanged (they open it here, as before).
+    sdk = sdk if sdk is not None else _org_sdk(org_id)
     proj = sdk._get_proj()
     now = datetime.now(UTC).isoformat()
 
@@ -16177,7 +16182,15 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # Removing it needs that contract re-pointed at `max_points` AND a decision
     # for the store-only lanes, so it is tracked separately rather than copied
     # half-way here.
-    _check_org_limit(org, "sessions")
+    #
+    # #8906: `sdk=` is passed for the same reason as the points doors — this is a
+    # TENANT-GRAPH resource, so an omitted sdk makes `_count_resource` mint
+    # `org_{org_id}` (the org DEFAULT graph) while a graph-bound key's Sessions
+    # land in its own `graph_namespace`. Vacuous TODAY only because every
+    # resolver emits `max_sessions: None` (#4010), so `enforce_org_limit` returns
+    # before counting; the moment a finite session cap ships, an omitted sdk
+    # re-arms #8906 on this door. Count on the handle the capture writes through.
+    _check_org_limit(org, "sessions", sdk=sdk)
     # Optional frontmatter-metadata validation (#1362) — warn-only, gated by
     # TORTOISE_VALIDATE_FRONTMATTER=1 (default OFF). The SessionRequest is a
     # payload (no frontmatter block), so the shape validator runs over a
@@ -35538,17 +35551,19 @@ async def public_demo(org: dict = Depends(get_current_org_gated)):  # noqa: B008
         # re-calls short-circuit above and skip the gate (no write).
         # #8906: this door is DEFAULT-GRAPH ONLY by construction —
         # `_reject_graph_bound_org_surface` refuses a graph-bound key above, and
-        # `_seed_demo_graph` below opens its own `_org_sdk(org_id)` handle (#10180's
-        # promotion-aware default resolver — NOT a bare ``namespace=org_id``), so
-        # the count and the write resolve alike (two constructions of the same
-        # graph, NOT one shared handle). Passing the local `sdk` makes the count
-        # run on the graph `_seed_demo_sync` just probed; the structural guard
-        # that keeps this door honest is the 403 above. If `_seed_demo_graph`'s
-        # namespace ever moves again, thread THIS sdk into it.
+        # `_org_sdk(org_id)` is #10180's promotion-aware default resolver (NOT a
+        # bare ``namespace=org_id``). The count runs on the handle this closure
+        # probed, and that SAME handle is handed to the seeder below, so the
+        # count and the write are one handle rather than two constructions of
+        # the same graph (#8906 review, P2: a promotion landing between the two
+        # `_org_sdk` calls would split them, and the second call is a second
+        # control-plane read when the auth hint is absent).
         _check_org_limit(org, "points", sdk=sdk)
-        # The shared demo seeder (extracted from /internal/demo) opens its own
-        # SDK and writes ~13 Points.
-        return {"existing": False, "created": _seed_demo_graph(org["org_id"])}
+        # The shared demo seeder (extracted from /internal/demo) writes ~13
+        # Points through the handle passed in (it opens its own when called
+        # without one, e.g. from `/internal/demo`).
+        return {"existing": False,
+                "created": _seed_demo_graph(org["org_id"], sdk=sdk)}
 
     async with await _demo_seed_lock(org["org_id"]):
         out = await asyncio.to_thread(_seed_demo_sync)

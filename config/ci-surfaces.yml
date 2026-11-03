@@ -1347,7 +1347,8 @@ surfaces:
   - test_quota.py
   # #8906: the points gate must count the graph the request WRITES. Every pin
   # lives in `tortoise/hosted_api.py` (`_check_org_limit`'s `sdk` threading + the
-  # four write doors that omitted it) and `tortoise/quota.py` (`_count_resource`'s
+  # five points doors that omitted it: /v1/points, /v1/objects, /v1/subjects,
+  # /v1/sessions/commit, /v1/demo) and `tortoise/quota.py` (`_count_resource`'s
   # `sdk=None` fallback to the org DEFAULT graph) — both EXACT `api`
   # SOURCE_PATTERNS matches that REPLACE the `core` fallback in `select()`. So an
   # `api` arm is the ONLY one a hosted_api.py/quota.py-only diff reaches: a
