@@ -887,7 +887,10 @@ def test_a_reader_arriving_AFTER_a_write_does_not_get_pre_write_rows():
         release.wait(timeout=10)
         return _snap_stub("pre-write")
 
+    joiner_building = threading.Event()
+
     def joiner_builder(_proj):
+        joiner_building.set()
         return _snap_stub("fresh")
 
     t1 = threading.Thread(
@@ -903,16 +906,15 @@ def test_a_reader_arriving_AFTER_a_write_does_not_get_pre_write_rows():
         target=lambda: out.__setitem__(
             "joiner", fs.get_or_build(None, key, builder=joiner_builder)))
     t2.start()
-    # Deterministic (not a sleep): wait until the joiner is IN the flight, so this
-    # pins "late joiner of an overtaken build" rather than a scheduling accident.
-    deadline = time.monotonic() + 5
-    while time.monotonic() < deadline:
-        fl = fs._FLIGHTS.get(key)
-        if fl is not None and fl.waiters >= 2:
-            break
-        time.sleep(0.005)
-    else:
-        raise AssertionError("the joiner never joined the in-flight build")
+    # ⛔ NOT "wait until the joiner has joined the leader's flight": with flights
+    # keyed by ``(key, generation)`` a reader that arrives AFTER a write can never
+    # join the pre-write build at all (it holds a different stamp), so it LEADS the
+    # build for its own generation. The deterministic condition is therefore "the
+    # late reader's own build has started", which is the mechanism this test exists
+    # to pin — a shared-waiter count would no longer exist to wait on.
+    assert joiner_building.wait(timeout=10), (
+        "a reader that arrived after the write never started its own build — it "
+        "must not be able to join the pre-write flight")
 
     release.set()
     t1.join(timeout=15)
@@ -979,6 +981,123 @@ def test_get_or_build_does_not_publish_a_build_overtaken_by_a_write():
     assert second is not None and second["tag"] == "fresh", \
         "the next reader must rebuild (self-healing, as the pre-#10602 path got free)"
     assert fs._store.get(key) is not None, "the clean build IS cached"
+
+
+def test_a_cohort_overtaken_by_one_write_costs_ONE_build_not_one_per_reader():
+    """A write during a build must not fan the cohort out into N builds.
+
+    Review round 9, P2. The fix for round 6 (a late joiner must not be served
+    pre-write rows) was written as an inline rebuild per reader, gated on "the
+    generation changed" — a condition that is true for the WHOLE cohort, so one
+    leader + 5 joiners cost **6 whole-corpus builds**: the exact amplifier this
+    module exists to remove, restored, triggered by the ordinary event of a write
+    landing during a build. Measured at that head: 6 builds.
+
+    The mechanism that replaces it is structural rather than compensatory: the
+    flight slot is ``(key, generation)``, so a reader that arrived before the
+    write shares the leader's build (whose rows are no older than its own
+    arrival), and a reader that arrived AFTER the write holds a different stamp
+    and cannot join it at all. No reader needs to rebuild, so the cohort costs
+    ONE build however many readers join it.
+    """
+    import threading
+
+    fs._store.clear()
+    key = ("cohort-graph", "cohort-ns")
+    n_joiners = 5
+    builds: list[int] = []
+    builds_lock = threading.Lock()
+    started = threading.Event()
+    release = threading.Event()
+    out: dict[str, dict | None] = {}
+
+    def builder(_proj):
+        with builds_lock:
+            first = not builds
+            builds.append(1)
+        if first:
+            started.set()
+            release.wait(timeout=10)
+            return _snap_stub("pre-write")
+        return _snap_stub("rebuilt")
+
+    g0 = fs._store.generation(key)
+    leader = threading.Thread(
+        target=lambda: out.__setitem__("leader", fs.get_or_build(None, key, builder=builder)))
+    leader.start()
+    assert started.wait(timeout=10), "the leader's build never started"
+
+    joiners = [
+        threading.Thread(
+            target=lambda i=i: out.__setitem__(
+                f"j{i}", fs.get_or_build(None, key, builder=builder)))
+        for i in range(n_joiners)
+    ]
+    for t in joiners:
+        t.start()
+    # Deterministic: every joiner must be IN the leader's flight before the write,
+    # so this pins "a cohort overtaken by a write" and not a scheduling accident.
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        fl = fs._FLIGHTS.get((key, g0))
+        if fl is not None and fl.waiters >= n_joiners + 1:
+            break
+        time.sleep(0.005)
+    else:
+        raise AssertionError("the cohort never assembled on the leader's flight")
+
+    fs._store.invalidate(key)   # the write that overtakes the in-flight build
+    release.set()
+    for t in [leader, *joiners]:
+        t.join(timeout=20)
+
+    assert len(out) == n_joiners + 1, f"every reader gets an answer, got {sorted(out)}"
+    assert all(v is not None for v in out.values()), "no reader is dropped"
+    assert len(builds) == 1, (
+        f"a cohort of {n_joiners + 1} readers overtaken by ONE write must cost ONE "
+        f"whole-corpus build, not one per reader — got {len(builds)} builds")
+    # The overtaken build is still not CACHED (round 2's rule stands) …
+    assert fs._store.get(key) is None, "an overtaken build must not be cached"
+    assert fs._FLIGHTS == {}, "no flight may leak"
+
+
+def test_same_key_writes_leave_the_degraded_cache_cold_which_is_the_stated_trade():
+    """The cost of the freshness guard, PINNED rather than discovered (round 9, P1).
+
+    ``_mark_dirty`` invalidates this key on every write surface, so when the write
+    rate exceeds the inverse of the build time EVERY build window contains an
+    invalidation: nothing is ever cached and the degraded tier costs one corpus
+    fetch per read. The pre-#10602 code cached that overtaken build unconditionally,
+    so on such a graph it achieved hits and this does not. That is a deliberate
+    trade — the alternative serves rows that predate a committed write, so an agent
+    that has just written a memory cannot find it — and this test exists so the
+    trade is a decision rather than an accident: if someone later "restores" the
+    unconditional ``put``, this test tells them what they are giving up, and if
+    someone makes the guard cost more than one build per read, it fails.
+    """
+    fs._store.clear()
+    key = ("trade-graph", "trade-ns")
+    builds = []
+
+    def builder(_proj):
+        # Every build is overtaken: the write lands inside the build window, exactly
+        # as it does on a graph written to faster than a corpus build completes.
+        builds.append(1)
+        fs._store.invalidate(key)
+        return _snap_stub(f"build-{len(builds)}")
+
+    for _ in range(5):
+        assert fs.get_or_build(None, key, builder=builder) is not None
+
+    assert len(builds) == 5, (
+        f"the stated trade is one corpus fetch per read under continuous same-key "
+        f"writes; got {len(builds)} builds for 5 reads — if this DROPPED, someone "
+        f"started caching pre-write rows (see the guard's comment); if it ROSE, the "
+        f"cohort is fanning out again")
+    assert fs._store.get(key) is None, (
+        "the cache must stay cold while every build is overtaken — caching a "
+        "pre-write snapshot here is what round 2 forbade")
+    assert fs._FLIGHTS == {}, "no flight may leak"
 
 
 def test_degraded_read_with_claim_class_never_uses_the_snapshot(sdk, monkeypatch):
