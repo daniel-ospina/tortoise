@@ -166,9 +166,13 @@ class CommitRecordStore:
         (measured: a 26-net-new payload 200s with ``held`` 26 on a clean graph,
         and WRITES them after a refusal left the record).
 
-        The 429 ingest throttle calls this; the 402 org-limit gates still do
-        not, which is #9826 — so a 402-then-retry still writes what a first
-        adjudication would have held.
+        The 429 ingest throttle and the single `[4a]` org-points gate both call
+        this (via ``hosted_api._discard_refused_attempt``): every PRE-WRITE
+        refusal that discards leaves the graph as it found it, so a retry after
+        the documented backoff — or after a cap is raised (#9826) — is a first
+        adjudication, never a second one. The `>50` budget refusal is the one
+        pre-write refusal that deliberately KEEPS its record (a re-submission
+        must 402 deterministically), so the rule is per-outcome, not blanket.
 
         Deleting restores the pre-attempt state exactly, which is what the
         refusal promised: nothing was written, so the client's documented

@@ -20209,6 +20209,52 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
     return _write_advisories
 
 
+def _discard_refused_attempt(store, client_commit_id: str, created: bool) -> None:
+    """Undo this attempt's idempotency record when a PRE-WRITE gate refuses.
+
+    `store.acquire(...)` merges the `:CommitRecord` before EVERY gate in the
+    commit handler, and `commit_schema.is_first_adjudication` is
+    `record is None` — so a refusal that keeps its record silently converts the
+    client's documented retry into a RE-adjudication, without the
+    first-adjudication hard-25 band, and writes what the band had held. The 429
+    ingest throttle was fixed that way in #9825; the 402 org-limit gate kept the
+    hole (#9826) until this helper was shared with it. MEASURED at the 402:
+    cap raised, same payload retried -> `held 0`, 26 Points written, where a
+    first adjudication holds the 26 and writes none.
+
+    One rule in one place, because the two refusals must not drift: both are
+    PRE-WRITE (the gate at `[4a]` and the throttle at `[4c]` both run before
+    `_execute_commit_writes`), so both must leave the graph exactly as they
+    found it. `created` is True only for the record THIS attempt merged — a
+    retry that found an existing one must not delete it — and
+    `CommitRecordStore.discard_attempt` itself refuses anything carrying write
+    work (`value_nodes_declared IS NULL`), so a genuine mid-write record is
+    never touched.
+
+    ⛔ NOT for the budget `fail` (>50) branch: that record is deliberately KEPT
+    so re-submission 402s deterministically (DE2E-7 Session B/C). The rule is
+    per-outcome, not blanket.
+
+    ⛔ INERT ON FAULT: a cleanup that fails must not REPLACE the refusal. The
+    refusal is the answer the client needs (a structured 402/500 with its
+    `code`/`resource`/`used`/`limit`, or a 429 with `Retry-After`); raising from
+    here instead would turn it into an unrelated 500 AND leave the record — i.e.
+    re-open this very hole through an error door. So a failed delete is logged
+    at ERROR (visible in production dashboards, like `_check_org_limit`'s own
+    data-fault logging) and the original refusal propagates unchanged.
+    """
+    if not created:
+        return
+    try:
+        store.discard_attempt(client_commit_id)
+    except Exception:  # noqa: BLE001, RUF100 — never replace the refusal with a fault
+        _logger.exception(
+            "commit refusal cleanup failed — the :CommitRecord for "
+            "client_commit_id=%s was left behind, so the retry will be "
+            "re-adjudicated (the refusal itself is unchanged)",
+            client_commit_id)
+
+
 @app.post("/v1/sessions/commit")
 async def commit_session(request: Request, org: dict = Depends(get_current_org_gated)):  # noqa: B008
     """Derived-commit receiver (epic #909 slice 5b — plan §6.1 + W-3).
@@ -20518,7 +20564,27 @@ async def commit_session(request: Request, org: dict = Depends(get_current_org_g
         # per-graph-locked region. The site (after every replay return, before the
         # budget adjudication) is unchanged, so an idempotent re-POST is still
         # never gated.
-        _check_org_limit(org, "points")
+        #
+        # ⛔ #9826 — the refusal discards the record it just created, exactly as
+        # the `[4c]` throttle does. `store.acquire` merged it ABOVE this line and
+        # a 402 that kept it made the client's retry a RE-adjudication: the
+        # >25 first-adjudication band is skipped, so the items the ceiling HELD
+        # were written on the second attempt (measured at the pre-fix head: 402
+        # at the cap, cap raised, same payload retried -> `held 0`,
+        # `nodes_created 27`, 26 Points minted where a first adjudication writes
+        # none). A gate a client can satisfy once and thereby write what it
+        # refused is not a gate. Every refusal this gate can raise — the 402, and
+        # the 500 for a missing, unreadable or uncountable limit — happens
+        # before any write, so all of them discard; the `except` is deliberately
+        # not narrowed to the 402, because an exception type added to the gate
+        # later must not silently reopen this hole. The helper owns the rule for
+        # this site and `[4c]`.
+        try:
+            _check_org_limit(org, "points")
+        except Exception:
+            _discard_refused_attempt(
+                store, payload.client_commit_id, created)
+            raise
 
         # [4c] #4051 §3.1 — the per-ORG ingest budget. The gates above bound the
         # REQUEST (payload shape, #9425) and the org's ALREADY-COUNTED nodes
@@ -20594,8 +20660,8 @@ async def commit_session(request: Request, org: dict = Depends(get_current_org_g
             # record. Delete only what THIS attempt created (`created`) and
             # only while it is still write-free, so the retry is a genuine
             # first attempt and a real mid-write `partial` is untouched.
-            if created:
-                store.discard_attempt(payload.client_commit_id)
+            _discard_refused_attempt(
+                store, payload.client_commit_id, created)
             # #5425's seam, not a hand-appended sentence: it terminates the
             # prose and appends the ONE contact path. A throttle is not a
             # ceiling to buy out of — it names its own next step ("retry

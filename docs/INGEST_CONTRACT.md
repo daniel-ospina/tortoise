@@ -519,8 +519,9 @@ the `{error}`-only shape whose retry action is different.
   attempt was the first for this `client_commit_id`, the retry is therefore a
   **first** attempt — the same `held[]` adjudication a clean request would have
   received, not a second one. When an EARLIER attempt of the same id left a
-  record — a `held` deferral, a crash mid-write, or a refusal by a gate that
-  does not clean up after itself (see #9826) — that record is preserved and the
+  record — a `held` deferral, a crash mid-write, or the `>50` ceiling refusal
+  (which deliberately KEEPS its record so a re-submission refuses
+  deterministically) — that record is preserved and the
   retry is a re-submission: it is not re-adjudicated against the 25-item
   first-adjudication band, only against the 50-item ceiling. A `fully_written`
   record is not re-run at all: the replay check returns `duplicate: true` with
@@ -552,7 +553,14 @@ the `{error}`-only shape whose retry action is different.
   yet; the real escalation is support / an operator raising the team's
   `max_points` (`team_update` / Supabase `graph_size_cap`). An admin raise
   propagates within the 60s auth-cache TTL and applies at the next call's
-  pre-write check — an in-flight bundle is unaffected.
+  pre-write check — an in-flight bundle is unaffected. The refused request is
+  **not** an attempt you have to reason about later: a pre-write quota refusal
+  (and the ingest throttle above) writes nothing and leaves no commit record of
+  its own. So **when no earlier attempt of the same `client_commit_id` left
+  one** — the `>50` ceiling refusal above is the case that does — the retry is
+  a **first** attempt: it receives the same `held[]` adjudication a clean
+  request would have, rather than a re-adjudication that writes what the
+  first-adjudication band deferred (#9826).
 
 ---
 

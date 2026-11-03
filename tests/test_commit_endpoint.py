@@ -2599,9 +2599,10 @@ class TestCommitPointsGate:
         limits = dict(TEST_TEAM)
         del limits["max_points"]
         app.dependency_overrides[get_current_org] = lambda: limits
-        r = _commit(client, _raw_payload(0, session_id="sMissingMaxPoints",
-                                         points=[], entities=[],
-                                         provenance_refs=[]))
+        raw = _raw_payload(0, session_id="sMissingMaxPoints",
+                           points=[], entities=[],
+                           provenance_refs=[])
+        r = _commit(client, raw)
         assert r.status_code == 500, (
             "a limits dict with no max_points key passed the gate: "
             f"{r.status_code} {r.text}")
@@ -2610,6 +2611,13 @@ class TestCommitPointsGate:
             f"the refusal must NAME the missing field, got: {detail}")
         assert self._chain_counts("sMissingMaxPoints") == (0, 0, 0), (
             "the refused commit minted nodes")
+        # #9826: the 500 arm of the `[4a]` refusal is PRE-WRITE too, so it
+        # discards like the 402 does. This pins the BREADTH of the handler's
+        # `except` — narrowing it to the 402 alone would leave the record here
+        # and re-open the re-adjudication hole on a path no other test reads.
+        assert _commit_record(_finalize(dict(raw))["client_commit_id"]) is None, (
+            "the 500 refusal left its :CommitRecord behind — the retry would "
+            "be re-adjudicated without the first-adjudication band")
 
     def test_at_max_points_refused_and_mints_nothing(self, client):
         """#4051: with the org AT max_points, a `points: []` commit — the
@@ -2629,10 +2637,10 @@ class TestCommitPointsGate:
         assert detail["used"] == 1
         assert self._chain_counts("sGateAt") == (0, 0, 0), (
             "a refused commit must mint no Session/Event/Source — NOT 'nothing': "
-            "a :CommitRecord with status='partial' IS merged before the gate "
-            "(`store.acquire(..., status='partial')`, hosted_api.py:17865, which "
-            "runs ahead of the gate at :17968); replay-safe, and invisible to "
-            "_chain_counts by design")
+            "the :CommitRecord `store.acquire(..., status='partial')` merged "
+            "before the gate is discarded by the refusal itself (#9826, pinned "
+            "by `test_a_402_refusal_does_not_change_the_retry_adjudication`) and "
+            "is invisible to _chain_counts by design")
         assert self._point_count() == before  # no partial Point either
 
     def test_over_max_points_refused_and_mints_nothing(self, client):
@@ -2644,6 +2652,140 @@ class TestCommitPointsGate:
         assert r.status_code == 402, r.text
         assert r.json()["detail"]["resource"] == "points"
         assert self._chain_counts("sGateOver") == (0, 0, 0)
+
+    def test_a_402_refusal_does_not_change_the_retry_adjudication(
+            self, client):
+        """#9826 — the 402 half of the refusal contract #9825 fixed for the 429.
+
+        `store.acquire(...)` merges this attempt's `:CommitRecord` before every
+        gate in the handler, and `commit_schema.is_first_adjudication` is
+        `record is None` — so a refusal that leaves its record turns the
+        client's documented retry into a RE-adjudication, without the
+        first-adjudication hard-25 band. A gate that refuses therefore WRITES
+        what the ceiling held, on the second attempt: the refusal is not a
+        refusal, it is a delay.
+
+        MEASURED before this change: a 26-net-new payload against a graph at
+        its cap 402s, and the SAME payload retried once the cap is raised (the
+        documented escalation) 200s with `held == []` and the 26 Points
+        written, instead of `held == 26` and `nodes_created == 0`.
+
+        Mutation REDs this: remove the discard on the `[4a]` gate.
+        """
+        self._set_max_points(1)
+        self._seed_points(1)  # count == limit -> the gate 402s
+        raw = _raw_payload(
+            26, session_id="sPointsRetry",
+            points=[_point(i, about_entities=[]) for i in range(26)])
+        refused = _commit(client, raw)
+        assert refused.status_code == 402, refused.text
+        assert refused.json()["detail"]["code"] == "quota_exceeded"
+        cid = _finalize(dict(raw))["client_commit_id"]
+        assert _commit_record(cid) is None, (
+            "the refused attempt left its :CommitRecord behind — the retry "
+            "would be re-adjudicated without the first-adjudication band")
+
+        # The documented escalation: the cap is raised, then the SAME payload
+        # is retried. It must be a FIRST adjudication.
+        self._set_max_points(1_000_000)
+        retry = _commit(client, raw)
+        assert retry.status_code == 200, retry.text
+        body = retry.json()
+        assert len(body["held"]) == 26, (
+            "the retry wrote what the first adjudication should have HELD — "
+            f"held={len(body['held'])}")
+        assert body["nodes_created"] == 0
+        assert self._point_count() == 1, "the held payload's Points were written"
+
+    def test_a_402_does_not_delete_an_earlier_attempts_record(self, client):
+        """#9826 — the discard is scoped to the record THIS attempt created.
+
+        `store.acquire` returns `created=False` when an earlier attempt of the
+        same `client_commit_id` already merged a record. That record is EVIDENCE
+        (a `held` deferral, a crash mid-write, the `>50` refusal), and deleting
+        it would silently promote the retry to a first adjudication the earlier
+        attempt never got. The `created` limb of `_discard_refused_attempt` is
+        the only thing stopping that, and it is not reachable through the
+        discard path — so pin it here: drop `created` from the helper and this
+        test REDS.
+        """
+        self._set_max_points(1)
+        self._seed_points(1)
+        raw = _raw_payload(2, session_id="sEarlierAttempt")
+        cid = _finalize(dict(raw))["client_commit_id"]
+        _team_sdk()._get_proj().g.query(
+            "MERGE (r:CommitRecord {client_commit_id:$cid}) "
+            "SET r.status='partial', r.write_ops_billed=0",
+            params={"cid": cid},
+        )
+        r = _commit(client, raw)
+        assert r.status_code == 402, r.text
+        assert _commit_record(cid) is not None, (
+            "the 402 deleted a record it did not create — an earlier attempt's "
+            "deferral was erased and the retry is now a first adjudication")
+
+    def test_discard_attempt_refuses_a_record_carrying_write_work(self, client):
+        """#9826 — the guard that makes the discard safe, pinned directly.
+
+        `discard_attempt` deletes only a WRITE-FREE record. Its load-bearing limb
+        is `value_nodes_declared IS NULL`: the write phase stamps that on its
+        first statement, while `write_ops_billed` is still 0 on a mid-write
+        record, so a `status`/`write_ops_billed`-only guard would DELETE a live
+        in-flight record and its written data would lose its idempotency anchor.
+        Nothing else exercised this predicate — verified: no test called
+        `discard_attempt` before this one.
+        """
+        from tortoise.commit_idempotency import CommitRecordStore
+
+        proj = _team_sdk()._get_proj()
+        store = CommitRecordStore(_team_sdk())
+
+        proj.g.query(
+            "MERGE (r:CommitRecord {client_commit_id:$cid}) "
+            "SET r.status='partial', r.write_ops_billed=0",
+            params={"cid": "cid_write_free"},
+        )
+        assert store.discard_attempt("cid_write_free") is True
+        assert _commit_record("cid_write_free") is None
+
+        proj.g.query(
+            "MERGE (r:CommitRecord {client_commit_id:$cid}) "
+            "SET r.status='partial', r.write_ops_billed=0, "
+            "    r.value_nodes_declared=9",
+            params={"cid": "cid_mid_write"},
+        )
+        assert store.discard_attempt("cid_mid_write") is False, (
+            "the guard deleted a record the write phase had already stamped — "
+            "a live in-flight attempt's anchor")
+        assert _commit_record("cid_mid_write") is not None
+
+    def test_a_failing_cleanup_does_not_replace_the_refusal(
+            self, client, monkeypatch):
+        """#9826 — the cleanup is INERT on fault: the refusal still reaches the
+        client, with its structured payload.
+
+        `_discard_refused_attempt` runs inside the refusal path, so a store
+        fault there would otherwise replace a 402 (`quota_exceeded`, with
+        `resource`/`used`/`limit`) by an unrelated 500 — and leave the record,
+        re-opening this hole through an error door. It must log and swallow.
+        Mutation REDs this: re-raise inside the helper's `except`.
+        """
+        from tortoise.commit_idempotency import CommitRecordStore
+
+        self._set_max_points(1)
+        self._seed_points(1)
+
+        def _boom(store_self, cid):
+            raise RuntimeError("store unavailable")
+
+        monkeypatch.setattr(CommitRecordStore, "discard_attempt", _boom)
+        r = _commit(client, _raw_payload(0, session_id="sCleanupFault",
+                                         points=[], entities=[],
+                                         provenance_refs=[]))
+        assert r.status_code == 402, (
+            "a failing cleanup replaced the refusal — the client got "
+            f"{r.status_code} instead of its structured 402: {r.text}")
+        assert r.json()["detail"]["code"] == "quota_exceeded"
 
     def test_count_error_fails_closed(self, client, monkeypatch):
         """#4051: a COUNTING FAILURE must never be a silent pass.
