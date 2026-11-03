@@ -1095,7 +1095,7 @@ def test_the_confcutdir_pin_does_not_bound_a_selection_spanning_trees(tmp_path):
     # A LIMIT, asserted so the docstring and the code cannot drift apart. The
     # pin is ONE directory and pytest loads a `conftest.py` sitting AT it
     # (`_is_in_confcutdir` is `path not in confcutdir.parents`, and a directory
-    # is never in its own parents — pytest 9.1.1, `_config/__init__.py:699-712`),
+    # is never in its own parents — pytest 9.1.1, `_config/__init__.py:669-682`),
     # so only dirs STRICTLY ABOVE it are excluded. For a selection that spans
     # two trees the deepest common ancestor is their shared parent — i.e. the
     # very directory a leaked `/tmp/conftest.py` lives in — so the pin bounds
