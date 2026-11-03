@@ -507,6 +507,12 @@ def test_main_feeds_the_census_legs_into_e3_and_renders_them():
     # the argument is the CENSUS, not a typed tuple: a hardcoded class list would be the very
     # narrowing this rule exists to refuse, and would re-stale with the class set.
     assert "census_data" in ast.dump(wired), ast.dump(wired)
+    # ...and the class set must not be NARROWED at the call site: `labels=("Document",)` would keep
+    # this AST pin green while a run that wrote no `Event` scored PASS over a narrower population —
+    # the same defect, one layer up from the pure rule.
+    assert not [kw for kw in wired.keywords if kw.arg == "labels"], (
+        "main narrows e3_unmeasured_legs' class set at the call site — the registered set must come "
+        "from DERIVED_LABELS, or the wiring re-creates the hole the rule closes: " + ast.dump(wired))
 
     render = next(node for node in tree.body
                   if isinstance(node, ast.FunctionDef) and node.name == "render_log")
@@ -1552,6 +1558,11 @@ def test_the_renderer_renders_a_log_from_the_committed_record(monkeypatch):
 
     text = render(_prereg())
     assert "e1 note: both before realizations clear E1's own floors" in text
+    # #9736: the empty-leg line is read from the CENSUS, not from the `e3_out` built by hand above
+    # it. This fixture's canned census carries `Document` = 0 nodes while `e3_out` was constructed
+    # WITHOUT the legs, so a line taken from the row would print "=none" here — two lines below
+    # `e3 label=Document nodes=0`. That is the escape this assertion closes.
+    assert "e3 unmeasured_legs=Document" in text, text[-2000:]
     assert "e1_min_before_share 0.2" in text, text[-3000:]
     # The number is READ, not typed: the same render over a moved floor moves it.
     moved = _prereg()

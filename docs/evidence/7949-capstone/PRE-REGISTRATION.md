@@ -582,8 +582,9 @@ Exit 0 only when **all** of these hold:
    That is reachable on every post-D10 graph, because `:Document` is a retired label (the writer
    remaps it onto `:Source`) and §10.1 records that the scored run wrote none at all — a leg that
    `0/0` makes permanently unable to fail. So the probe derives the empty legs from the census
-   (`e3_unmeasured_legs`, over `DERIVED_LABELS` and never `:Object`) and a row naming one **fails**
-   rather than passing by arithmetic, with the leg disclosed in its bar and note. **This decides no
+   (`e3_unmeasured_legs`, over `DERIVED_LABELS` and never `:Object`) and a row naming one **cannot
+   PASS** — it is `FAIL`, or `REFUSED` where the node floor applies (a too-small population is not a
+   verdict either way) — with the leg disclosed in its bar, note and log line. **This decides no
    spelling and moves no threshold**: a row that already failed stays failed (the scored run shipped
    in this bundle, `capstone-measured-9152448d.log`, reads E3 `157/397` and is RED before and after —
    and it is itself the empty-leg shape, carrying `e3 label=Document nodes=0`), a row whose every
