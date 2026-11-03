@@ -101,6 +101,13 @@ are rather than naming them:
   ``tortoise_issue_insight`` surface).
 - ``tortoise/hosted_api.py::list_points`` — hosted ``GET /v1/points``, a
   store-side ``LIMIT`` with no offset and no cursor.
+- ``tortoise/hosted_api.py::search`` — hosted ``GET /v1/search``, on the arm
+  where the store will not OPEN (#10602): the read returns zero rows by
+  OUTAGE, so the empty is marked ``incomplete`` rather than published as a
+  complete empty. Same reasoning, the other way round — a 0-row answer that is
+  really an outage is exactly the silent result this contract forbids, and it
+  is unreachable by any follow-up call for the same reason (no offset, no
+  cursor).
 
 Every such site must be on a DICT body; a field cannot ride a bare ``list``, so
 a list-shaped surface needs a return-shape decision first
