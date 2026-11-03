@@ -550,13 +550,33 @@ def test_demo_seed_is_excluded_from_the_primitive(client):
     # statement still declared exactly 0.
     used = {node.id for node in ast.walk(fn) if isinstance(node, ast.Name)}
     module = ast.parse(Path(ha_mod.__file__).read_text(encoding="utf-8"))
-    hoisted = [
-        node.value.value for node in module.body
-        if isinstance(node, ast.Assign) and len(node.targets) == 1
-        and isinstance(node.targets[0], ast.Name)
-        and node.targets[0].id in used
-        and isinstance(node.value, ast.Constant)
-        and isinstance(node.value.value, str)]
+
+    def _const_str(node: ast.AST) -> str | None:
+        """A string constant, folded through `+` — `ast.literal_eval` refuses
+        a `+` of two strings, and `A = "x" "y"` / `A = "x" + "y"` / `A: str = …`
+        are all spellings this module uses."""
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            return node.value
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+            left, right = _const_str(node.left), _const_str(node.right)
+            if left is not None and right is not None:
+                return left + right
+        return None
+
+    hoisted: list[str] = []
+    for node in module.body:
+        if isinstance(node, ast.Assign):
+            names = [t.id for t in node.targets if isinstance(t, ast.Name)]
+            value = node.value
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            names, value = [node.target.id], node.value
+        else:
+            continue
+        if value is None or not (set(names) & used):
+            continue
+        text = _const_str(value)
+        if text:
+            hoisted.append(text)
     cypher = [text for text in literals + hoisted
               if "SET " in text or "MERGE " in text]
     # ⚠️ NON-VACUITY: an empty population would make the assertion below pass for

@@ -1097,7 +1097,7 @@ _PRESENT_TENSE_DEMO_EVENT_WRITER = re.compile(
     # ``the seeder``. `the ask-fixture seeder` does not match — the article has
     # to sit directly on ``seeder`` — and that seeder really does read `event`,
     # so it must not be swept up.
-    r"(?:(?:demo|dashboard|hosted|sample)[^.\n]{0,40}?seed(?:er)?"
+    r"(?:(?:demo|dashboard|hosted|sample)[^.;:,\n]{0,40}?seed(?:er)?"
     r"|_seed_demo_graph|the\s+seeder)"
     # The gap matters: this tree writes "the demo seed STILL writes …",
     # "… CONTINUES TO WRITE …", and backticks the identifier
@@ -1125,10 +1125,19 @@ def _present_tense_writer_claim(flat: str) -> str | None:
     """The forbidden present-tense claim in ``flat``, or ``None``.
 
     A match is a violation unless it names a kind that is NOT ``event``: the
-    seeder still writes ``claim`` points, so a true sentence about those must
-    not red (#10675 review round 10, P2).
+    seeder still writes ``hypothesis``/``observation``/``statement``/``decision``
+    points, so a true sentence about those must not red (#10675 review round 10,
+    P2).
     """
     for hit in _PRESENT_TENSE_DEMO_EVENT_WRITER.finditer(flat):
+        # ⛔ ``the seeder`` is only THIS seeder when no other one was just named.
+        # `tools/ask_spotcheck.py`'s fixture seeder really does write the `event`
+        # kind, and a sentence introducing it ("A demo-only fixture: the seeder
+        # writes …") is TRUE — it must not be attributed to the demo seed
+        # (#10675 review round 13, P3).
+        before = flat[max(0, hit.start() - 40):hit.start()]
+        if _OTHER_SEEDER_CONTEXT.search(before):
+            continue
         kind = _POINT_KIND.search(hit.group())
         if kind is None or kind.group(1).lower() == "event":
             return hit.group()
@@ -1150,7 +1159,8 @@ _GUARD_BLOCK = "# ── the " + "DELETED demo turn writer"
 #: Where the guard's machinery ENDS and the population file resumes. Excising
 #: from the header to EOF would leave every test appended after it unscanned —
 #: measured (round 12, P2): a present-tense claim appended at EOF stayed GREEN.
-_GUARD_END = "def test_no_home_states_the_deleted_demo_turn_writer_as_current_fact("
+_GUARD_END = ("def " +
+              "test_no_home_states_the_deleted_demo_turn_writer_as_current_fact(")
 
 
 def _narrative_text(rel: str) -> str:
@@ -1199,6 +1209,20 @@ def _narrative_text(rel: str) -> str:
 #: file"; it is not a grammar.
 _MARKER_WINDOW = 800
 _SEED_MENTION = re.compile(r"demo(?:/dashboard)?[\s-]+seed", re.IGNORECASE)
+
+#: What makes a seed mention a statement about the TURN SHAPE — the only
+#: kind that owes a `#10000` history marker. Deliberately narrow: the
+#: `event` kind, the `turn node` the seeder stopped writing, or the
+#: `is_episodic` flag that excludes the legacy ones.
+#: A subject introduced as somebody ELSE's seeder, so a `the seeder writes
+#: …` immediately after it is not the demo seed's claim.
+_OTHER_SEEDER_CONTEXT = re.compile(
+    r"(?:ask[-_ ]?fixture|ask_spotcheck|fixture|onboarding)\W*$",
+    re.IGNORECASE)
+
+_TURN_SHAPE_VOCABULARY = re.compile(
+    r"pointKind\s*[=:]\s*[`'\"“]*event\b|\bturn node\b|\bis_episodic\b",
+    re.IGNORECASE)
 
 
 def test_no_home_states_the_deleted_demo_turn_writer_as_current_fact():
@@ -1251,6 +1275,13 @@ def test_no_home_states_the_deleted_demo_turn_writer_as_current_fact():
         for _hit in seed_hits:
             window = flat[max(0, _hit.start() - _MARKER_WINDOW):
                           _hit.end() + _MARKER_WINDOW]
+            # ⛔ Only a mention ABOUT the turn shape owes the marker. The demo
+            # seed is discussed for other reasons too ("writes ~10 Points",
+            # "the fixture every read test reuses"), and demanding `#10000`
+            # beside those refused TRUE sentences a lane would plausibly write
+            # (#10675 review round 13, P2).
+            if not _TURN_SHAPE_VOCABULARY.search(window):
+                continue
             assert "#10000" in window, (
                 f"`{rel}` names the demo/dashboard seed without naming #10000 "
                 "beside it, so the reader cannot tell the seed's `event` nodes "
