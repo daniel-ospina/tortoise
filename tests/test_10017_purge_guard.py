@@ -2581,3 +2581,59 @@ def test_a_MIXED_session_where_the_survivor_is_not_last(
     rc = purge._execute(setup.plan, setup.args, setup.target)
     assert rc == 2
     assert setup.journaled == ["s1_t1"]
+
+
+def test_a_record_side_DUPLICATE_is_named_not_reported_as_a_transcript_mismatch():
+    """Review P2: the census's duplicate arm must not be INVERTED downstream.
+
+    The census refuses a duplicated session by name (`duplicate_window`) and
+    holds its nodes back, with the explicit warning "do NOT backfill over it".
+    Falling through to MISMATCH told the operator the opposite — "the record
+    holds a DIFFERENT transcript for those turns" — which is an invitation to
+    backfill the wrong window. It also collected the census's `node` value into
+    `sample_ids`, where it used to be the fabricated string `s2_t*`: an id no
+    consumer can resolve.
+
+    Mutation that goes RED here: deleting the `duplicate and not missing`
+    branch (the session then classifies MISMATCH with that reason).
+    """
+    report = _report(failed=[{
+        "session": "s2", "graph_turn_nodes": 2, "record_turn_rows": 0,
+        "counts_equal": False,
+        "problems": [{"node": None, "field": "key",
+                      "problem": "duplicate_window", "detail": "…"}],
+    }])
+    out = purge.classify_sessions(report)
+    assert out["eligible"] == []
+    entry = out["excluded"][0]
+    assert entry["class"] == purge.CLASS_DUPLICATE_WINDOW
+    assert "do not backfill" in entry["reason"].lower()
+    # No fabricated node id can leak into a consumer's sample list.
+    assert entry["sample_ids"] == []
+    assert out["counts"][purge.CLASS_DUPLICATE_WINDOW] == 1
+    assert out["counts"][purge.CLASS_MISMATCH] == 0
+
+
+def test_a_planned_DUPLICATE_session_refuses_under_its_OWN_name():
+    """Review P2: the named diagnosis, before the generic set mismatch.
+
+    The plan was approved while `s2` was PARITY; the record later gained a
+    second window for it. The exact-set check would refuse this anyway (a
+    duplicate is excluded, so the digest moves), but `exact-set-mismatch` sends
+    the operator to re-approve a plan that is still correct — the record is the
+    side that holds two windows. Mutation that goes RED here: deleting the
+    `duplicated` refusal (the reason degrades to `exact-set-mismatch`).
+    """
+    plan = _plan([_clean_with_ids("s1", ["s1_t0"]),
+                  _clean_with_ids("s2", ["s2_t0"])])
+    live = _report(clean=[_clean_with_ids("s1", ["s1_t0"])],
+                   failed=[{
+                       "session": "s2", "graph_turn_nodes": 1,
+                       "record_turn_rows": 0, "counts_equal": False,
+                       "problems": [{"node": None, "field": "key",
+                                     "problem": "duplicate_window",
+                                     "detail": "…"}],
+                   }])
+    code, message = _gate(plan, live=live)
+    assert code == purge.REFUSE_DUPLICATE_WINDOW
+    assert "DUPLICATE-WINDOW" in message
