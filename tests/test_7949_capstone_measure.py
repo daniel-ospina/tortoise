@@ -3352,8 +3352,8 @@ def test_the_e4_note_follows_the_outcome_it_sits_beside_and_not_a_fixed_claim():
     bars = measure.parse_bars(_prereg())
     pin = "sha256:" + "d" * 64
 
-    def row(edge_correct: int) -> dict:
-        receipt = {"evidence": "x.json", "planted": 15,
+    def row(edge_correct: int, planted: int = 15) -> dict:
+        receipt = {"evidence": "x.json", "planted": planted,
                    "edge_correct": edge_correct, "content_ok": 11,
                    "operators_total": 33, "date": "d", "commit": "abc",
                    "corpus_hash": pin, "verdict": "regression",
@@ -3375,6 +3375,19 @@ def test_the_e4_note_follows_the_outcome_it_sits_beside_and_not_a_fixed_claim():
     # it stays on BOTH arms — removing it with the #8503 clause would lose a true
     # disclosure at the exact moment the row goes green.
     assert "#9596" in green["note"] and "#9596" in red["note"]
+
+    # ── third arm: FAIL is not one cause ────────────────────────────────────
+    # `e4_outcome` fails on `edge_correct < required` OR on `planted != of`, so a
+    # receipt that plants its own count is RED with numerator == denominator — where
+    # "the planted edges are still not all formed" is refuted by the row's own fields.
+    mismatch = row(14, planted=14)
+    assert mismatch["verdict"] == "RED", mismatch
+    assert mismatch["numerator"] == mismatch["denominator"] == 14, mismatch
+    assert "still not all formed" not in mismatch["note"], (
+        "numerator == denominator — every planted edge IS formed, so the wiring "
+        f"clause is refuted by the row's own fields: {mismatch['note']}")
+    assert "COUNT" in mismatch["note"], mismatch["note"]
+    assert "#9596" in mismatch["note"], mismatch["note"]
 
 
 def test_the_newest_frozen_pin_receipt_wins_because_the_ordering_is_the_property():
@@ -4091,3 +4104,54 @@ def test_a_row_with_no_evidence_path_is_refused_not_defaulted_to_the_constant():
                 "note": "E4 note"},
             e5={"verdict": "RED", "numerator": 12, "denominator": 25,
                 "note": "E5 note"})
+
+
+def test_a_non_string_date_is_UNREADABLE_and_refuses_instead_of_parsing():
+    """`repr(raw)` must never be PARSED — the repr of an int IS the ISO basic form.
+
+    `repr(20261024)` is `'20261024'`, which `datetime.fromisoformat` ACCEPTS, so a
+    non-string date used to rank at midnight UTC (measured) while `0` — whose repr
+    fails to parse — was refused: two non-string dates, opposite outcomes, for no
+    stated reason. A recorded date that is not a string is UNREADABLE, not absent, so
+    it takes the same refusal a garbled string does. The absent shapes are pinned
+    alongside, because the whole point is that they must stay distinguishable.
+    """
+    assert measure._instant(20261024)[0] == 0, measure._instant(20261024)
+    assert measure._instant(None) == (0, ""), "an ABSENT date keeps the absent shape"
+    assert measure._instant("") == (0, ""), "an empty date is absent, not unreadable"
+
+    pin = "sha256:" + "d" * 64
+    root = Path(tempfile.mkdtemp())
+    receipts = root / measure.E4_RECEIPT_DIR
+    receipts.mkdir(parents=True)
+    (receipts / "w2b-operator-int-date.json").write_text(json.dumps({
+        "date": 20261024, "run_id": "int", "corpus_hash": pin,
+        "operator_audit": {"planted": 15, "edge_correct": 15},
+    }))
+    with pytest.raises(SystemExit) as exc:
+        measure.select_e4_receipt(root, frozen_pin=pin)
+    message = str(exc.value)
+    assert "REFUSED" in message, message
+    assert "not an instant" in message, message
+    assert "w2b-operator-int-date.json" in message, message
+
+
+def test_a_green_e4_row_carries_no_blocker():
+    """GREEN and blocked are mutually exclusive — the gate refuses both (V5).
+
+    `build_rows` stamped `blocked_by="#8503"` on E4 unconditionally, so the very
+    success state the row exists to reach emitted a table
+    `tools/capstone_verdict_check` calls dishonest ("GREEN carries a blocker"). The
+    blocker now follows the verdict, exactly like the note clause it sits beside.
+    """
+    rows = _rows(e4={"verdict": "GREEN", "numerator": 15, "denominator": 15,
+                     "sha": "a999be41e", "corpus_sha256": "sha256:" + "d" * 64,
+                     "evidence": _E4_ON_PIN, "note": "E4 note"})
+    green = {row["criterion"]: row for row in rows}["E4"]
+    assert green["verdict"] == "GREEN", green
+    assert not green["blocked_by"], (
+        f"a GREEN row may not carry a blocker: {green['blocked_by']!r}")
+
+    red = {row["criterion"]: row for row in _rows()}["E4"]
+    assert red["blocked_by"] == "#8503", (
+        f"the RED row still names the open blocker: {red['blocked_by']!r}")

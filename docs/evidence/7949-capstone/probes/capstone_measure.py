@@ -740,7 +740,14 @@ def build_rows(*, head: str, out_path: str, log_corpus_sha: str,
             corpus_sha256=e4["corpus_sha256"],
             artifact_corpus_sha256=(e4["corpus_sha256"] if e4_off_this_corpus
                                     else None),
-            blocked_by="#8503", note=e4["note"]),
+            # #8503 is the mechanism for a red row: it names the OPEN blocker keeping
+            # E4 from closing. A GREEN row may not carry any blocker at all — the gate
+            # refuses "GREEN carries a blocker … green and blocked are mutually
+            # exclusive" (V5) — so an unconditional `"#8503"` here made the very
+            # success state this row exists to reach emit a table the gate calls
+            # dishonest. Same invariant as the note clause above, one field over.
+            blocked_by=("#8503" if e4["verdict"] != "GREEN" else None),
+            note=e4["note"]),
         row("E5", verdict=e5["verdict"], evidence=E5_RESCORE, sha=head,
             numerator=e5["numerator"], denominator=e5["denominator"],
             corpus_sha256=log_corpus_sha, blocked_by="#9738", note=e5["note"]),
@@ -1941,7 +1948,19 @@ def _instant(raw: object) -> tuple[int, object]:
     into the absent shape). Both are only ever compared against other strings, so
     ordering is unaffected.
     """
-    text = raw if isinstance(raw, str) else ("" if raw is None else repr(raw))
+    if raw is None:
+        return (0, "")
+    if not isinstance(raw, str):
+        # ⛔ NEVER PARSE `repr(raw)`. A recorded date that is not a string is
+        # UNREADABLE, and the repr of an int is the ISO BASIC form — `repr(20261024)`
+        # is `'20261024'`, which `datetime.fromisoformat` ACCEPTS, so parsing here
+        # silently ranked a malformed date at midnight UTC instead of refusing it
+        # (measured: it did exactly that, while `0` — whose repr fails to parse — was
+        # refused; two non-string dates, opposite outcomes, for no stated reason).
+        # Tag 0 puts every non-string on the refusal path `select_e4_receipt` already
+        # implements for a present-but-unreadable date.
+        return (0, repr(raw))
+    text = raw
     if not text:
         return (0, "")
     try:
@@ -2207,18 +2226,25 @@ def build_e4_row(receipt: dict, *, bars: dict, corpus_sha: str) -> dict:
             "the row's own fields refute")
     result = e4_outcome_for(receipt, bars)
     # ⛔ THIS CLAUSE IS A CLAIM ABOUT THE NUMBER BESIDE IT, so it follows that
-    # number's outcome. It used to be unconditional, which was harmless only while
+    # number's operands. It used to be unconditional, which was harmless only while
     # every receipt read below the bar: the bar is 15 of 15, so the moment an on-pin
     # receipt reads 15/15 the row is GREEN and it announced that "the planted edges
     # are still not all formed" — a sentence the row's OWN fields refute, fired at
-    # exactly the epic's success state. The `#9596` half is metric-specific (the
-    # receipt's retrievability is unreported whatever the edge count) and stays
-    # unconditional; only the `#8503` half is a claim about the number.
-    edge_clause = (
-        "the planted-edge bar IS met by this receipt, so #8503's fix holds here"
-        if result["outcome"] == "PASS"
-        else "the planted edges are still not all formed (#8503)"
-    )
+    # exactly the epic's success state. Nor is `FAIL` a single cause: `e4_outcome`
+    # fails on `edge_correct < required` OR on `planted != of`, so a receipt that
+    # plants its own count (14/14, 16/16) is RED with numerator == denominator and
+    # the wiring clause would be refuted there too. The `#9596` half is a fact about
+    # the RECEIPT (its retrievability is unreported whatever the edge count) and
+    # stays unconditional; only the `#8503` half is a claim about this number.
+    if result["outcome"] == "PASS":
+        edge_clause = ("the planted-edge bar IS met by this receipt, so #8503's fix "
+                       "holds here")
+    elif receipt["edge_correct"] < receipt["planted"]:
+        edge_clause = "the planted edges are still not all formed (#8503)"
+    else:
+        edge_clause = (f"the planted-edge COUNT, not the wiring, is the shortfall — "
+                       f"this receipt plants {receipt['planted']} where the record "
+                       f"freezes {bars['E4']['of']} (#8503)")
     return {
         "verdict": verdict_word(result),
         "numerator": receipt["edge_correct"],

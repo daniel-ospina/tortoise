@@ -437,8 +437,10 @@ corpus revision (`943a99ec…`), and the gate (V7) requires that digest to appea
 artifact the row declares — which is why *that* row carries `artifact_corpus_sha256`. The
 **current** row does not take that arm: it is selected BY the frozen pin, so its
 `corpus_sha256` IS the log's corpus and V7's short-circuit applies to it (§*The gate: two
-questions, two exits* states which arm each row takes). The mechanism is #8503 (the planted
-edges are not formed at all); the receipt's retrievability rate is unmeasured (#9596).
+questions, two exits* states which arm each row takes). The mechanism is #8503 — the planted
+edges are largely unformed: **2 of 15** on the shipped log's `943a99ec…` receipt and **5 of 15**
+on the current row's frozen-pin one, which is why both are RED against the 15/15 bar; the
+receipt's retrievability rate is unmeasured (#9596).
 
 ⚠️ **The frozen record still publishes the pre-fix figure for E4, and is deliberately NOT
 edited.** `PRE-REGISTRATION.md` §10.3 says *"E4 is not amended"*, scores it at **2 of 15**, and
