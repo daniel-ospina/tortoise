@@ -27,24 +27,20 @@ committed in this tree and is read as a file. The SCORED run below is stamped se
 **Blast radius — the files this branch touches** (`git diff --name-only origin/main...HEAD`; the
 COUNT is deliberately not restated here — it changed twice while this was open, and a stale
 integer in the one paragraph a reviewer bounds the PR by is worse than no integer):
-the bundle itself (`docs/evidence/7949-capstone/**`, `tools/capstone_verdict_check.py`,
-`tests/test_7949_capstone_verdict_check.py`, `tests/test_7949_capstone_measure.py`) **and the
-ordering gate that judges it** (`tools/capstone_preregistration_check.py` +
-`tests/test_capstone_preregistration_9075.py`, added in the `#9089` review round: the gate
-exempts this bundle's REFUSAL log on its CONTENT, so a reviewer who bounds this PR by its own
-reading must see it); its registration (`config/ci-surfaces.yml` `core`/`tier1`/`durations`
-arms, `docs/00_index.md`); the selection edits `tools/ci_selection.py` +
-`tests/test_ci_selection.py` **remove** a `CORE_ALSO` row this branch had added and could not
-justify (the bundle prefix `docs/evidence/7949-capstone/`, landed by #9076, already selects
-`core` for a PROBE-ONLY diff — measured, not assumed), and **add** one for the gate source
-(`tools/capstone_verdict_check.py`), because a GATE-ONLY diff selected no surface at all while
-the bundle prefix covers only the probe/evidence paths (pinned by
-`tests/test_ci_selection.py::test_the_capstone_gate_change_selects_core_not_tier1`) — and add a pin
-that no `CORE_ALSO` row is shadowed by a parent prefix; the surface re-cut the new caller forces
-(`config/surface-manifest.yml`, `docs/product/mcp-sdk-surface.md`); and two test-side edits —
-`tests/test_ci_check_repair.py` (the `gh` launcher stub) and
-`tests/test_uri_env_mutations_declared.py` (this suite's `TORTOISE_DB_URI` env-control
-declaration, plus the removal of a dead duplicate row).
+the bundle itself — `docs/evidence/7949-capstone/**` (this `README.md`, `E1-E5-PROOFS.md`, the
+committed `blocker-states.json`, the scored log `capstone-measured-9152448d.log` that replaces
+`capstone-measured-e0fc940b.log`, and `probes/capstone_measure.py`) and
+`tools/capstone_verdict_check.py` with `tests/test_7949_capstone_verdict_check.py` (the V12 arm and
+its pins) plus `tests/test_7949_capstone_measure.py` (the bundle's own claim pins); its registration
+(`config/ci-surfaces.yml` `core`/`tier1`/`durations` arms, `docs/00_index.md`).
+⛔ A previous revision of this paragraph named eight files this branch does **not** touch —
+`tools/capstone_preregistration_check.py`, `tests/test_capstone_preregistration_9075.py`,
+`tools/ci_selection.py`, `tests/test_ci_selection.py`, `config/surface-manifest.yml`,
+`docs/product/mcp-sdk-surface.md`, `tests/test_ci_check_repair.py`,
+`tests/test_uri_env_mutations_declared.py` — from an earlier cut whose selection and surface edits
+were dropped. It is corrected here rather than carried, because it claimed the PR re-cut the
+**MCP/SDK surface** (`config/surface-manifest.yml`, `docs/product/mcp-sdk-surface.md`), which this
+branch does not do: no surface tool was added, removed or renamed.
 **Nothing under `tortoise/` changes behaviour and nothing instruments the extractor** — this
 bundle installs no wrapper, spy or step-composition anywhere in the measured path, so the E4
 row's "no monkeypatch" clause holds on the fact that matters. The `sdk.py`/`extractor_v2.py`
@@ -97,20 +93,33 @@ a row moves only by RE-RUNNING the probe and deleting the file it replaces, so t
 from the tree while the numbers it produced stay citable from history. Where the two disagree, the
 log at `9152448d7` wins.
 
-⚠️ **The FROZEN pre-registration still names the deleted file, and it cannot be edited.**
+⚠️ **The pre-registration still names the deleted file, and this PR does not edit it.**
 `PRE-REGISTRATION.md` (§8's "**A scored evidence log already exists**: `capstone-measured-e0fc940b.log`"
 and its `E3 census` / `E5` cites) and `preregistration.json`'s three `post_registration_measurement`
 fields all name `capstone-measured-e0fc940b.log`, which this PR deletes. That is expected, not a
-broken reference: the record is **hash-frozen** — `document_sha256:
-sha256:e8b838724a344251d5a8ef51a641e097b97f18319d03a82f1c8de714ad6ddb45` — so editing it to follow
-the supersede would destroy the pre-registration's whole point. Read every path it names as **as-of
-its own stamp**, and use the durable route for the content: `git show
+broken reference: the record names the log **as of its own stamp**, and re-pointing it at the
+supersede would be a rewrite of the record rather than a correction of it. Read every path it names
+as **as-of its own stamp**, and use the durable route for the content: `git show
 2609039079717e445a19a0b0308e4302b02f0a8b:docs/evidence/7949-capstone/capstone-measured-e0fc940b.log`.
 ⚠️ That commit is the file's ADD commit on `origin/main` — `e0fc940b5` itself does **not** contain the
 log (it is the head the run was stamped at, written by a later commit), which is the trap a reader
 hits first if they try `git show e0fc940b5:…`. `tools/capstone_preregistration_check.py --dir
-docs/evidence/7949-capstone` exits 0 against the frozen bytes, which is why this is disclosed HERE
-instead of "fixed" there.
+docs/evidence/7949-capstone` exits 0 against the bytes in the tree, which is why this is disclosed
+HERE instead of "fixed" there.
+
+⛔ **AND THAT RECORD WAS AMENDED SIX MINUTES AFTER THIS RUN — quoting its current hash alone says
+the opposite.** The scored run at `9152448d7` (`# generated: 2026-11-02T12:16:06Z`) read the record
+whose `document_sha256` was
+`sha256:5ff05906cf383f50a873dafeee12216d5eafc80b89ae9676c78a109f16714fbe` — what
+`PRE-REGISTRATION.md` hashed to *at that commit*. The record in this tree hashes to
+`sha256:e8b838724a344251d5a8ef51a641e097b97f18319d03a82f1c8de714ad6ddb45`, because `8bc2fbed1`
+(`#10215` / PR `#10509`, merged 2026-11-02T12:22:19Z) amended it: the step set is restated as **all
+eight ACCOUNTED** — seven observed plus the one the record declares conditional. That amendment is
+the same DISCLOSED class of revision the record's own §0 discount rule covers, but it is **post-run**,
+so the document this run was measured against is `5ff05906…` and **not** `e8b83872…`. Neither the
+artifact nor the gate can show a reader this — the gate compares the tree's bytes with the
+tree's record, so each version passes in its own tree — which is why it is stated here instead of
+being left to be inferred.
 
 ---
 

@@ -3198,9 +3198,24 @@ def test_the_committed_blocker_record_covers_every_cited_blocker():
 
 
 def test_a_malformed_blocker_record_is_a_usage_error_not_a_disarm(tmp_path):
-    """A present-but-broken record must not answer "no V12"."""
+    """A present-but-broken record must not answer "no V12".
+
+    ⛔ The fixture carries a VALID `checked_at` on purpose (#10601 review round 6).
+    Without it the loader raised on the read time first, so this pin proved the
+    `checked_at` leg twice and the `blockers is a list, not an object` guard — the
+    one whose own comment names `{"blockers": []}` as the disarm V12 must refuse —
+    was exercised by NOTHING: deleting that guard left this file green, and a
+    record with a good stamp then died on an uncaught `AttributeError` (exit 1)
+    instead of the contracted exit 2. The stamp is what makes the malformation
+    under test the ONLY malformation present.
+    """
     bad = tmp_path / "states.json"
-    bad.write_text('{"schema": "capstone-blocker-states-v1", "blockers": []}')
+    bad.write_text('{"schema": "capstone-blocker-states-v1", '
+                   '"checked_at": "2026-11-02T12:00:00Z", "blockers": []}')
+    import pytest
+
+    with pytest.raises(ValueError, match="blockers is a list"):
+        cvc.load_blocker_states(bad)
     code = cvc.main([str(LOG), "--repo", str(_REPO), "--blocker-states", str(bad)])
     assert code == 2, code
 
