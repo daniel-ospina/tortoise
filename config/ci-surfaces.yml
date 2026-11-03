@@ -1941,12 +1941,11 @@ surfaces:
   # `tortoise/record_writer.py` (the error that no longer discards the driver's
   # cause) — NEITHER matches a `SOURCE_PATTERN`, so both fall through to `core`
   # and this arm is the load-bearing one for exactly the diff class it guards.
-  # ELEVEN of its twelve legs are DB-free (the bound value, the read-side
-  # decode, the param/column alignment, the per-parameter memo, the
-  # synthetic-tree forward + fail-closed arms, the replay attribution wrapper,
-  # the migrations parse, the no-shared-name check, the column-naming error, the
-  # pre-fix binding shape built by hand, the cause the writer keeps). ⚠️ The
-  # TWELFTH —
+  # Every leg but ONE is DB-free (the bound value, the read-side decode, the
+  # param/column alignment, the per-parameter memo, the synthetic-tree forward +
+  # fail-closed arms, the replay attribution wrapper, the migrations parse, the
+  # no-shared-name check, the column-naming error, the pre-fix binding shape
+  # built by hand, the cause the writer keeps). ⚠️ The exception —
   # `test_the_record_applies_the_live_search_keys_shape_and_reads_it_back`, the
   # only leg that proves the JSON scalar APPLIES and round-trips — needs
   # `TEST_RECORD_DB_URI` and therefore SKIPS in the fast matrix. It is NOT yet
@@ -1955,8 +1954,18 @@ surfaces:
   # stays a reviewed change. Until then this entry is what keeps the file in the
   # selected pool at all — without it `--integrity` reds the required
   # `manifest-integrity` job (measured: `manifest drift:
-  # ['test_9548_record_search_keys_shape.py']`) and no leg runs the ten DB-free
-  # pins, not even a push (its fast pool is built from this manifest).
+  # ['test_9548_record_search_keys_shape.py']`) and no leg runs the DB-free pins,
+  # not even a push (its fast pool is built from this manifest).
+  # ⛔ NO LEG COUNT IS STATED HERE, deliberately: the arithmetic in this block
+  # drifted TWICE inside #10692 — a reviewer P3 corrected the opening count, and
+  # the closing sentence still said "ten" afterwards, because a count in prose
+  # re-stales the moment a leg is added (#10707 arming the DB leg will move it
+  # again). Re-derive instead of reading a number out of a comment:
+  # `TORTOISE_TEST_CARVE_OUT=1 .venv/bin/python -m pytest
+  # tests/test_9548_record_search_keys_shape.py -q` prints the passed/skipped
+  # split, and this file's `durations` row carries the case count that
+  # `tests/test_ci_selection.py::test_no_durations_row_states_a_stale_case_count`
+  # machine-checks against the file.
   - test_9548_record_search_keys_shape.py
   # #9325/#9326: the record's schema ships as a MAPPED package
   # (`pyproject.toml` `package-dir` -> `supabase/migrations`), so BOTH Dockerfiles
