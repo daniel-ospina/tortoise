@@ -398,8 +398,8 @@ NAME_PREFIX = "fdb-lane-"
 #: alive: a live process holding the owning worktree, or an attached client (both
 #: positive reads), keeps the container AND refreshes the lease, so a lane a
 #: sweep can see alive is spared at any age (#10693 review F1). The lease marks
-#: the last OBSERVED use, not the last use — `REAP_STATE_DIR` states the one
-#: population that leaves uncovered. The lease itself is stated in full there.
+#: the last OBSERVED use, not the last use — `REAP_STATE_DIR` states what that
+#: leaves uncovered. The lease itself is stated in full there.
 #:
 #: ⛔ WHAT THE **DEFAULT** AUTHORISES (#10693 review F2) — the ownership evidence
 #: above is necessary and NOT sufficient. #8180's owner ruling is the operative
@@ -2351,10 +2351,13 @@ def _touch_lease(name: str) -> None:
     keeps using an ALREADY-started container without a `run`-end stamp (the
     documented `uri` / `eval "$uri"` form): its lease advances only when some
     sweep OBSERVES that use, so if no sweep runs during the lane's final
-    `OWNER_GRACE_H` the gap over-reports by the unobserved stretch. That is a
-    report-and-grace precision limit, never a live-lane removal: a sweep that can
-    see the lane keeps it outright (`held` / `live_slugs`), and both reads are
-    re-taken at the moment of action.
+    `OWNER_GRACE_H` the gap over-reports by the unobserved stretch. Under the
+    DEFAULT that only mis-states a report; on the ARMED arms it advances the
+    grace, so a lane that no sweep OBSERVED for `OWNER_GRACE_H` is a removal
+    candidate while it is between steps — the class the block above already names
+    as reaped by design, and what the opt-in accepts. It is never a mid-RUN
+    removal: a sweep that can see the lane keeps it outright (`held` /
+    `live_slugs`), and both reads are re-taken at the moment of action.
 
     RESIDUAL (documented in the PR): a `run` invoked from OUTSIDE its worktree is
     covered by the lease while it runs, and by nothing afterwards if the lane's
@@ -2651,7 +2654,9 @@ def reap_orphans() -> list[str]:
             #
             # So the worktree only establishes WHOSE the container is. Whether
             # that owner is still ALIVE is a separate, positive read — and a
-            # live owner is still never reaped, at any age.
+            # live owner a sweep can SEE is never reaped, at any age. A lane that
+            # is between steps is bounded by the lease's `OWNER_GRACE_H`, which
+            # measures the last OBSERVED use (`REAP_STATE_DIR`).
             held = live_paths is not None and any(
                 _holds(p, owner) for p in live_paths)
             if held:
@@ -2731,8 +2736,8 @@ def reap_orphans() -> list[str]:
                 continue
             if gap_h < OWNER_GRACE_H:
                 out.append(f"reap: kept {name} — no live process holds {owner} "
-                           f"and it has done no work, but only {gap_h:.1f}h of "
-                           f"{OWNER_GRACE_H:g}h grace has passed")
+                           f"and it shows no OBSERVED use, but only "
+                           f"{gap_h:.1f}h of {OWNER_GRACE_H:g}h grace has passed")
                 continue
             # Moment of action: re-read LIVENESS (not the age — re-reading the age
             # proves nothing, because a lane reuses the running container and
