@@ -2637,3 +2637,33 @@ def test_a_planned_DUPLICATE_session_refuses_under_its_OWN_name():
     code, message = _gate(plan, live=live)
     assert code == purge.REFUSE_DUPLICATE_WINDOW
     assert "DUPLICATE-WINDOW" in message
+
+
+def test_every_plan_CLASS_is_defined_in_the_module_class_table():
+    """Review P3: `DUPLICATE-WINDOW` reached the plan at six sites while the
+    module docstring's class table — the operator's decision table, the thing
+    that says what each class MEANS and whether it may be purged — stopped at
+    `MISMATCH`. A class an operator meets in a plan with no definition in the
+    contract is a decision they cannot make: this class in particular carries
+    the opposite repair from its two neighbours (resolve the capture by hand,
+    never backfill), so an undocumented one reads as a MISMATCH gap.
+
+    The pin is scoped to `CLASS_*` on purpose. The `REFUSE_*` codes are
+    refusal reasons, printed with their own sentences at the point of refusal
+    and asserted by their own tests; listing all 32 in the docstring would be
+    documentation churn no reader consults, which is exactly the kind of
+    process weight this repo's rules refuse to add.
+
+    Mutation that goes RED here: deleting the DUPLICATE-WINDOW entry from the
+    class table (its name then vanishes from `__doc__`), or adding a new
+    `CLASS_*` constant without documenting it.
+    """
+    doc = purge.__doc__ or ""
+    classes = {
+        name: value for name, value in vars(purge).items()
+        if name.startswith("CLASS_") and isinstance(value, str)
+    }
+    # Non-vacuity: the table exists and holds the class under review.
+    assert "DUPLICATE-WINDOW" in classes.values()
+    undocumented = sorted(v for v in classes.values() if v not in doc)
+    assert undocumented == []
