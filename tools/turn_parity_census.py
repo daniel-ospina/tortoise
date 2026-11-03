@@ -989,6 +989,18 @@ def read_local_record_turns(directory, node_keys: Iterable[str] | None = None
     every OTHER session the record CAN certify — with no repair path except
     editing audit evidence.
 
+    A line that PARSES but is malformed for this record — not a JSON object, no
+    usable `session_id`, no `conversation` key, or a `conversation` that is not
+    a list — takes the SAME posture, for the same reason and on stronger
+    evidence: `session_events_drain` DEAD-LETTERS every one of those classes
+    (`unparseable_record`, `no_session_id`, `no_conversation`), so a malformed
+    line NEVER REACHED THE GRAPH and contributes no key to the population. It
+    is dropped and named in `malformed_lines` (`malformed  : …` on stdout), and
+    any graph turn its session holds is `missing_in_record` -> REFUSED. A
+    malformed `conversation` is never coerced to `[]`: an ABSENT transcript is
+    not an empty one, so the session is left uncertified rather than read as a
+    session that held no turns.
+
     That distinction is load-bearing and was measured, not assumed: this box's
     authority store held TEN such lines (all lost-newline merges of two
     concurrent appends), so the refusing posture meant the gate #10017 waits on
@@ -1019,14 +1031,20 @@ def read_local_record_turns(directory, node_keys: Iterable[str] | None = None
     #: but a narrowed surface the artifact does not name is a silent claim of
     #: coverage — the exact class the four-surface enumeration closed.
     skipped_files: list[str] = []
-    for directory in (root / "archive", root):
-        if not directory.exists():
+    # ⛔ `scan_dir`, NOT `directory`: the loop variable used to reuse the name of
+    # this function's own PARAMETER (`directory`, declared in the signature), so
+    # every iteration silently destroyed the argument the caller passed. It is
+    # inert today (the later reads all use `root`), which is exactly why it is
+    # worth removing now — the next edit that reaches for `directory` after this
+    # loop would read the root path instead of the caller's value (review P3).
+    for scan_dir in (root / "archive", root):
+        if not scan_dir.exists():
             continue
         try:
-            entries = list(directory.iterdir())
+            entries = list(scan_dir.iterdir())
         except OSError as exc:
             raise CensusError(
-                f"the local record directory {directory} could not be LISTED "
+                f"the local record directory {scan_dir} could not be LISTED "
                 f"({type(exc).__name__}: {exc}) — an unreadable surface is "
                 "not an empty one, so an absence is NOT established") from exc
         for entry in entries:
@@ -1084,6 +1102,19 @@ def read_local_record_turns(directory, node_keys: Iterable[str] | None = None
     #: later append did not complete. DROPPED and DISCLOSED — never partially
     #: recovered (see the module contract's `unparsable_lines`).
     unparsable_lines: list[dict] = []
+    #: Lines that PARSE as JSON but are malformed for this record: not an
+    #: object, no usable `session_id`, no `conversation` key, or a
+    #: `conversation` that is not a list. DROPPED and DISCLOSED, exactly like
+    #: `unparsable_lines`, and for the same reason — the two classes the filing
+    #: leg refuses (`no_session_id`, `no_conversation`,
+    #: `unparseable_record` — `session_events_drain` DEAD-LETTERS them) never
+    #: reach the graph, so they contribute NO key to the population. Dropping
+    #: one therefore cannot hide a turn, while refusing the whole leg over one
+    #: is an unrepeatable false refusal: it blocks every OTHER session the
+    #: record CAN certify, with no repair path (#3870 forbids deleting the
+    #: audit lines that would clear it). Same posture as round 12, which is
+    #: what made this gate openable on the store the ruling names (review P2).
+    malformed_lines: list[dict] = []
     #: Sealed days that are PROVABLY empty: a complete, round-trip-verified
     #: gzip stream whose payload holds no records. Disclosed in the artifact —
     #: a tolerance that is not counted is indistinguishable from a day that
@@ -1173,13 +1204,18 @@ def read_local_record_turns(directory, node_keys: Iterable[str] | None = None
                 "so an absence is NOT established") from exc
         nonempty = [(n + 1, ln) for n, ln in enumerate(raw) if ln.strip()]
         for pos, (lineno, line) in enumerate(nonempty):
+            #: `<file>:<lineno>`, root-relative. Hoisted out of the `except`
+            #: below because the malformed-line arms (which run AFTER a
+            #: successful parse) name the line too — the first cut of those arms
+            #: read a `where` that only existed on the parse-failure path and
+            #: raised `UnboundLocalError` on every malformed line.
+            where = str(path.relative_to(root)) + f":{lineno}"
             try:
                 entry = json.loads(line)
             except Exception as exc:
                 at_tail = (newest_plain is not None
                            and path == newest_plain
                            and pos == len(nonempty) - 1)
-                where = str(path.relative_to(root)) + f":{lineno}"
                 if at_tail:
                     # The append-only TIP: a mid-write line the next append
                     # completes, or one a crash cut. Counted, never silent.
@@ -1199,34 +1235,50 @@ def read_local_record_turns(directory, node_keys: Iterable[str] | None = None
                 continue
             parsed += 1
             if not isinstance(entry, dict):
-                raise CensusError(
-                    f"the local record's line at {path.name}:{lineno} is not a "
-                    "JSON object — the record cannot be read")
-            sid = entry.get("session_id")
-            if not isinstance(sid, str) or not sid:
-                raise CensusError(
-                    f"the local record's line at {path.name}:{lineno} carries no "
-                    "`session_id` — a turn's key cannot be derived, so no "
-                    "session can be certified")
+                malformed_lines.append({
+                    "at": where,
+                    "error": f"not a JSON object ({type(entry).__name__})"})
+                continue
+            # ⛔ THE SUBSTRATE'S RULE, NOT TRUTHINESS (review P2).
+            # `session_events_drain` normalises
+            # `raw_sid if isinstance(raw_sid, str) and raw_sid.strip() else None`
+            # and then DEAD-LETTERS the record, so a WHITESPACE-only id never
+            # reaches the graph. Plain truthiness accepted `"   "` as a session
+            # named three spaces — a session no door can mint, whose keys can
+            # therefore never match a graph turn. One rule, spelled once.
+            raw_sid = entry.get("session_id")
+            sid = (raw_sid if isinstance(raw_sid, str) and raw_sid.strip()
+                   else None)
+            if sid is None:
+                malformed_lines.append({
+                    "at": where,
+                    "error": f"no usable `session_id` ({type(raw_sid).__name__})"
+                             " — dead-lettered by the filing leg, so it filed "
+                             "no turn and can hide none"})
+                continue
             conversation = entry.get("conversation")
             if conversation is None:
-                # ⛔ ABSENT is not EMPTY (review P2). The writer always emits
-                # the array, so a line without one is a MALFORMED record — and
-                # coercing it to `[]` made a lost transcript read as
-                # `missing_in_record`, i.e. the artifact pointed the operator at
-                # the graph/backfill for a turn that was present in a line whose
-                # transcript had been dropped. An explicit `[]` is a real
-                # session with no turns and stays tolerated.
-                raise CensusError(
-                    f"the local record's line at {path.name}:{lineno} (session "
-                    f"{sid}) carries NO `conversation` key — the writer always "
-                    "emits it, so its transcript was lost in a malformed line "
-                    "rather than never existing. An absence is NOT established")
+                # ⛔ ABSENT is not EMPTY (review P2, kept). The writer always
+                # emits the array, so coercing a missing key to `[]` would make
+                # a LOST transcript read as if the session genuinely held no
+                # turns. It is NOT coerced — the line is dropped and named, so
+                # any graph turn this session holds reads as
+                # `missing_in_record` (REFUSED) rather than as an empty
+                # session. An explicit `[]` is real data and stays tolerated.
+                malformed_lines.append({
+                    "at": where,
+                    "error": f"session {sid} carries NO `conversation` key — "
+                             "dead-lettered by the filing leg "
+                             "(no_conversation), so its transcript never "
+                             "reached the graph; NOT coerced to an empty "
+                             "session"})
+                continue
             if not isinstance(conversation, list):
-                raise CensusError(
-                    f"the local record's session {sid} carries a "
-                    f"`conversation` that is {type(conversation).__name__}, not "
-                    "a list — the record cannot be read")
+                malformed_lines.append({
+                    "at": where,
+                    "error": f"session {sid} `conversation` is "
+                             f"{type(conversation).__name__}, not a list"})
+                continue
             occurrences[sid] = occurrences.get(sid, 0) + 1
             conversations[sid] = conversation
 
@@ -1336,6 +1388,11 @@ def read_local_record_turns(directory, node_keys: Iterable[str] | None = None
         # Corruption that was DROPPED (never partially recovered). Named so a
         # tolerance nobody can see never reads as a parity pass.
         "unparsable_lines": unparsable_lines,
+        # Parsed-but-malformed lines DROPPED from the read (not an object, no
+        # usable `session_id`, no `conversation`, or a non-list one). The filing
+        # leg dead-letters all four, so none can hide a turn — but a tolerance
+        # nobody can see reads as a parity pass, so every one is named.
+        "malformed_lines": malformed_lines,
         "empty_days": empty_days,
         "duplicate_window": duplicate_window,
         "filed_window": filed_window,
@@ -1634,6 +1691,12 @@ def census(graph: dict, record: dict, *, sample: int) -> dict:
                        # the verdict rests on is stated, not implied.
                        "unparsable_lines":
                            record.get("unparsable_lines") or [],
+                       # Parsed-but-malformed lines dropped from the read. A
+                       # separate list from `unparsable_lines` on purpose: one
+                       # is a parse failure, the other a shape the filing leg
+                       # dead-letters. Both DROP, neither recovers.
+                       "malformed_lines":
+                           record.get("malformed_lines") or [],
                        # Tolerated AND counted: an empty day (sealed or
                        # plain). Never a silent skip (review P1).
                        "empty_days": record.get("empty_days") or [],
@@ -1958,6 +2021,12 @@ def main(argv: list[str] | None = None) -> int:
         # so any graph turn it may have described is `missing_in_record`.
         print(f"unparsable : {bad['at']} ({bad['error']}) — the line was "
               f"DROPPED, not recovered; any turn it described is "
+              f"missing_in_record, so this is NOT a parity pass")
+    for bad in report["record"].get("malformed_lines") or []:
+        # Parsed but malformed: dropped for the same reason, and dead-lettered
+        # by the filing leg, so it filed no turn and can hide none.
+        print(f"malformed  : {bad['at']} ({bad['error']}) — the line was "
+              f"DROPPED, not recovered; any turn it may have described is "
               f"missing_in_record, so this is NOT a parity pass")
     for empty_day in report["record"].get("empty_days") or []:
         # Disclosed, never silent: a complete verified archive of no records

@@ -1856,21 +1856,40 @@ def test_a_tolerated_empty_PLAIN_day_still_cannot_hide_a_graph_turn(tmp_path):
     assert report["dry_run"]["would_delete_turn_nodes"] == 0
 
 
-def test_a_line_with_NO_conversation_key_refuses_rather_than_reading_as_empty(
+def test_a_line_with_NO_conversation_key_is_DROPPED_and_still_fails_CLOSED(
         tmp_path):
-    """Review P2: ABSENT is not EMPTY. The writer always emits `conversation`,
-    so coercing a missing key to `[]` made a LOST transcript read as
-    `missing_in_record` — pointing the operator at the graph/backfill for a
-    turn that was present in a line whose transcript had been dropped. An
-    explicit `[]` is a real session with no turns and stays tolerated.
+    """Review P2: ABSENT is not EMPTY.
+
+    The writer always emits `conversation`, so coercing a missing key to `[]`
+    would make a LOST transcript read as `missing_in_record` — pointing the
+    operator at the graph/backfill for a turn whose transcript had been dropped.
+    It is NOT coerced. Nor does it refuse the whole leg: the filing leg
+    DEAD-LETTERS `no_conversation` (`session_events_drain`), so this line never
+    reached the graph and contributes no key. It is dropped and named, and the
+    affected session reads as `missing_in_record` → REFUSED.
 
     Mutation that goes RED here: restoring `if conversation is None:
-    conversation = []`.
+    conversation = []` (the session becomes an empty CLEAN session), or
+    restoring the whole-leg `raise CensusError` (the two asserts below).
     """
     (tmp_path / "2026-11-02.jsonl").write_text(
-        json.dumps({"session_id": "s1"}) + "\n", encoding="utf-8")
-    with pytest.raises(tpc.CensusError, match="NO `conversation` key"):
-        tpc.read_local_record_turns(tmp_path)
+        json.dumps({"session_id": "s1"}) + "\n"
+        + json.dumps({"session_id": "s2",
+                      "conversation": _conversation(("user", "hi"))}) + "\n",
+        encoding="utf-8")
+    record = tpc.read_local_record_turns(tmp_path)
+    assert record["malformed_lines"][0]["at"] == "2026-11-02.jsonl:1"
+    assert "NO `conversation` key" in record["malformed_lines"][0]["error"]
+    # ... and the drop is fail-CLOSED for the session it described. The SIBLING
+    # session is still certifiable, which is the whole point: one lost
+    # transcript no longer makes the leg unopenable.
+    assert list(record["rows_by_key"]) == ["s2_t0"]
+    report = tpc.census(
+        {"nodes": {"s1_t0": _graph_node("s1_t0", "s1", content="[user] hi")}},
+        record, sample=5)
+    assert report["verdict"] == "REFUSED"
+    assert report["parity"]["failed_sessions"][0]["problems"][0]["problem"] \
+        == "missing_in_record"
 
 
 def test_an_explicitly_EMPTY_conversation_is_a_real_session_with_no_turns(
@@ -2067,33 +2086,79 @@ def test_a_record_that_parses_ZERO_sessions_refuses(tmp_path):
         tpc.read_local_record_turns(tmp_path)
 
 
-# ── the three thin shape arms (review P3: none of them had a pin) ───────────
+# ── the four thin shape arms (review P3: none had a pin; then review P2 turned
+#    them from whole-leg refusals into DISCLOSED DROPS — fail-closed by
+#    construction, because the filing leg dead-letters every one of them) ─────
 
-def test_a_line_that_is_not_a_JSON_OBJECT_refuses_not_crashes(tmp_path):
-    """`not isinstance(entry, dict)` was unpinned: removing it turns a hygienic
-    exit-3 refusal into an uncaught `AttributeError` from `entry.get`, which
-    escapes `main`'s `except CensusError` as a traceback + exit 1 —
-    indistinguishable from a tool bug."""
-    (tmp_path / "2026-11-02.jsonl").write_text("[1, 2]\n", encoding="utf-8")
-    with pytest.raises(tpc.CensusError, match="not a JSON object"):
-        tpc.read_local_record_turns(tmp_path)
+def test_a_line_that_is_not_a_JSON_OBJECT_is_DROPPED_not_crashed(tmp_path):
+    """`not isinstance(entry, dict)` guarded an uncaught `AttributeError` from
+    `entry.get`, which would escape `main`'s `except CensusError` as a traceback
+    + exit 1 — indistinguishable from a tool bug. The guard now DROPS and names
+    the line instead of refusing the leg; the crash must not come back.
 
-
-def test_a_line_with_NO_session_id_refuses(tmp_path):
-    """A turn's key cannot be derived, so no session can be certified."""
+    Mutation that goes RED here: deleting the `isinstance(entry, dict)` arm.
+    """
     (tmp_path / "2026-11-02.jsonl").write_text(
-        json.dumps({"conversation": []}) + "\n", encoding="utf-8")
-    with pytest.raises(tpc.CensusError, match=r"carries no .session_id"):
-        tpc.read_local_record_turns(tmp_path)
+        "[1, 2]\n"
+        + json.dumps({"session_id": "s1",
+                      "conversation": _conversation(("user", "hi"))}) + "\n",
+        encoding="utf-8")
+    record = tpc.read_local_record_turns(tmp_path)
+    assert "not a JSON object" in record["malformed_lines"][0]["error"]
+    assert list(record["rows_by_key"]) == ["s1_t0"]
 
 
-def test_a_conversation_that_is_not_a_LIST_refuses(tmp_path):
+def test_a_line_with_NO_session_id_is_DROPPED(tmp_path):
+    """A turn's key cannot be derived — and the filing leg dead-letters
+    `no_session_id`, so the line never reached the graph and can hide no turn.
+    """
+    (tmp_path / "2026-11-02.jsonl").write_text(
+        json.dumps({"conversation": []}) + "\n"
+        + json.dumps({"session_id": "s1",
+                      "conversation": _conversation(("user", "hi"))}) + "\n",
+        encoding="utf-8")
+    record = tpc.read_local_record_turns(tmp_path)
+    assert "no usable `session_id`" in record["malformed_lines"][0]["error"]
+    assert record["sessions"] == 1
+
+
+def test_a_WHITESPACE_ONLY_session_id_is_BLANK_not_a_session_named_spaces(
+        tmp_path):
+    """Review P2: truthiness is not the platform's rule.
+
+    `session_events_drain` normalises
+    `raw_sid if isinstance(raw_sid, str) and raw_sid.strip() else None` and then
+    dead-letters the record, so `"   "` can never name a session in the graph.
+    Plain truthiness ACCEPTED it, inventing a session no door can mint — its
+    keys could never match a graph turn, so it was a silently uncomparable
+    session rather than a refusal.
+
+    Mutation that goes RED here: restoring `if not isinstance(sid, str) or not
+    sid` (the `"   "` file is then read as one session named three spaces).
+    """
+    (tmp_path / "2026-11-02.jsonl").write_text(
+        json.dumps({"session_id": "   ", "conversation": []}) + "\n"
+        + json.dumps({"session_id": "s1",
+                      "conversation": _conversation(("user", "hi"))}) + "\n",
+        encoding="utf-8")
+    record = tpc.read_local_record_turns(tmp_path)
+    assert record["sessions"] == 1
+    assert list(record["rows_by_key"]) == ["s1_t0"]
+    assert "no usable `session_id`" in record["malformed_lines"][0]["error"]
+
+
+def test_a_conversation_that_is_not_a_LIST_is_DROPPED(tmp_path):
     """A dict where the array belongs is a malformed record, not a transcript."""
     (tmp_path / "2026-11-02.jsonl").write_text(
         json.dumps({"session_id": "s1", "conversation": {"role": "user"}})
-        + "\n", encoding="utf-8")
-    with pytest.raises(tpc.CensusError, match=r"not *a list"):
-        tpc.read_local_record_turns(tmp_path)
+        + "\n"
+        + json.dumps({"session_id": "s2",
+                      "conversation": _conversation(("user", "hi"))}) + "\n",
+        encoding="utf-8")
+    record = tpc.read_local_record_turns(tmp_path)
+    assert "not a list" in record["malformed_lines"][0]["error"]
+    assert record["sessions"] == 1
+    assert list(record["rows_by_key"]) == ["s2_t0"]
 
 
 def test_expect_empty_reaches_a_verdict_when_the_local_record_is_absent(
