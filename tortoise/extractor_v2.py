@@ -10638,11 +10638,14 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
                            for section in _failure_policy.LEG_BY_SECTION)
         _reason = f" ({_id['reason']})" if _id["reason"] else ""
         if _id["unresolved_total"]:
-            # ⛔ Two sentences, never one generalised over both, and NEITHER
-            # asserts what a candidate's own `link_before_create` says: a
-            # candidate whose query was cut can still be folded onto a prior by
-            # S5 (`found: true`), so "their record says UNRESOLVED" was a false
-            # claim about that candidate's record (#5095 review round 3).
+            # ⛔ One sentence per FACT — three below, plus the residual arm for a
+            # state nobody wrote one for — and NONE of them asserts what a
+            # candidate's own `link_before_create` says: a candidate whose query
+            # was cut can still be folded onto a prior by S5 (`found: true`), so
+            # a sentence claiming its "record says UNRESOLVED" is a claim about a
+            # record this block never read. That wording was rejected in review
+            # and never shipped (#5095 review round 3), so do not reintroduce it
+            # and do not test for it as though it existed.
             result.setdefault("warnings", []).append(
                 f"S3 identity {_id['state']}{_reason}: the existing-item lookup "
                 f"did not run for {_id['unresolved_total']} of {_denominator} "

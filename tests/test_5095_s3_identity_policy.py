@@ -539,15 +539,32 @@ class TestTheReportCannotContradictItself:
 
         ⛔ It must NOT claim what the candidate's own record says: a candidate
         whose query was cut can still be folded onto a prior by S5
-        (`found: true`), so "their record says UNRESOLVED" was a false claim
-        about that record (#5095 review round 3).
+        (`found: true`), so a sentence saying its "record says UNRESOLVED" — the
+        wording rejected in #5095 review round 3, never shipped — would be false
+        about that record. The assertion below pins the sentence exactly, which
+        forbids that by construction.
         """
         out = v2.extract_session_v2(_FakeModel(), _conv(), session_id="s1")
-        assert out["identity"]["unresolved_total"] >= 1
+        ident = out["identity"]
+        assert ident["unresolved_total"] >= 1
         messages = [w for w in out["warnings"] if "S3 identity" in w]
         assert messages, out["warnings"]
-        assert "did not run for" in messages[0]
-        assert "their record says" not in messages[0]
+        # Pin the WHOLE sentence, built from the report's own numbers, rather than
+        # a paraphrase of the prohibition. A cut candidate can still be folded onto
+        # a prior by S5 (`found: true`), so nothing may be claimed about any
+        # candidate's record; exact equality forbids that by construction, and it
+        # bites on a changed numerator, denominator, state or added clause. The
+        # former body closed with `assert "their record says" not in messages[0]`
+        # — a phrase no producer ever emitted, so it could never bite (the
+        # inert-assertion class removed from the arm-3 test in round 5; #10633
+        # review, non-blocking observation 1).
+        _denominator = sum(ident["candidates"].get(section, 0)
+                           for section in fp.LEG_BY_SECTION)
+        _reason = f" ({ident['reason']})" if ident["reason"] else ""
+        assert messages[0] == (
+            f"S3 identity {ident['state']}{_reason}: the existing-item lookup "
+            f"did not run for {ident['unresolved_total']} of {_denominator} "
+            f"candidate(s)"), messages[0]
 
     def test_a_partial_lookup_with_nothing_unchecked_says_so(self, monkeypatch):
         """`partial` with a ZERO numerator gets the `partial` sentence — end to end.
@@ -563,21 +580,22 @@ class TestTheReportCannotContradictItself:
         get DIFFERENT sentences — `partial` (bounded; every candidate's own query
         ran) and `unresolved` (nothing ran at all).
         """
-        original_search = v2.search_graph
         cover = {"derived": {"object": 1, "point": 3},
                  "ran": {"object": 1, "point": 2}, "failed": {"object": 0, "point": 0}}
         keys = [v2._query_key("object", "ACME Corp"),
                 v2._query_key("point", "the budget is 40k")]
-        try:
-            v2.search_graph = lambda *a, **k: _search(
-                query_coverage=cover,
-                query_results={"ran": [q for q in keys if q], "failed": []})
-            partial = v2.extract_session_v2(_FakeModel(), _conv(), session_id="s1")
-            v2.search_graph = lambda *a, **k: _search(
-                degraded=True, reason="S3 skipped: no graph client")
-            unrun = v2.extract_session_v2(_NoCandidates(), _conv(), session_id="s1")
-        finally:
-            v2.search_graph = original_search
+        # `monkeypatch` is the restorer here: it re-records the second patch and
+        # puts the original back at teardown, so neither patch can leak into a
+        # sibling test (the former body carried an unused `monkeypatch` parameter
+        # and restored by hand in a `try:`/`finally:` — #10633 review,
+        # non-blocking observation 2).
+        monkeypatch.setattr(v2, "search_graph", lambda *a, **k: _search(
+            query_coverage=cover,
+            query_results={"ran": [q for q in keys if q], "failed": []}))
+        partial = v2.extract_session_v2(_FakeModel(), _conv(), session_id="s1")
+        monkeypatch.setattr(v2, "search_graph", lambda *a, **k: _search(
+            degraded=True, reason="S3 skipped: no graph client"))
+        unrun = v2.extract_session_v2(_NoCandidates(), _conv(), session_id="s1")
 
         assert partial["identity"]["state"] == fp.LOOKUP_PARTIAL, partial["identity"]
         assert partial["identity"]["unresolved_total"] == 0, partial["identity"]
