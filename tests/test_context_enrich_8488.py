@@ -561,10 +561,10 @@ def _attestable(point: dict) -> bool:
 
       1. NOT an operator — the call site enters the identity/text check only
          on ``not op`` (``projection/entities.py:2484``), where ``op`` is
-         ``p.get("operator")`` (``:2452``) — the Point's ``operator`` dict. An operator attests no text at all, so
-         this is the FIRST gate; leaving it out let clause 4 rescue the
-         population only by accident (operators happen to carry no
-         ``content``);
+         ``p.get("operator")`` (``:2452``) — the Point's ``operator`` dict.
+         An operator attests no text at all, so this is the FIRST gate;
+         leaving it out let clause 4 rescue the population only by
+         accident (operators happen to carry no ``content``);
       2. a RESTORABLE vector — ``_writable_journalled_vector`` (``:2483``)
          refuses ``None``, an empty/non-list value, a non-finite or
          non-numeric element, and an implausible length. It is a PURE function
