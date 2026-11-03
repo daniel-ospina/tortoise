@@ -1178,7 +1178,6 @@ def test_the_confcutdir_pin_does_not_bound_a_mixed_in_and_out_of_tree_selection(
     assert pin == str(tmp_path), pin
 
 
-
 def test_emit_manifest_does_not_inherit_a_conftest_above_the_selection(tmp_path):
     # The CI shape that redded PR #10636's `test-slow (d)` shard (2026-11-02):
     # the self-hosted runner's shared `/tmp` carried a leaked `conftest.py`, and
