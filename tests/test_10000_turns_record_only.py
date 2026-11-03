@@ -3227,12 +3227,27 @@ def test_the_repair_note_names_BOTH_halves_of_a_legacy_demo_graph():
     assert "epi_turn" in note and "RE-SEEDING" in note, (
         f"the repair-note extraction found the wrong span: {note!r}")
 
-    assert "s.turn_count=0" in note, (
-        "the repair note names the node delete but not the counter — deleting "
-        "the `epi_turn*` nodes ALONE leaves `s.turn_count=3` beside zero rows, "
-        "which the read refuses (503 on an armed deployment, "
+    # ⛔ SCOPED TO THE REPAIR PARAGRAPH, not the whole note: the counter literal
+    # also appears in the RE-SEEDING paragraph ("sets `s.turn_count=0`"), so
+    # `"s.turn_count=0" in note` is satisfied by prose about the WRONG half —
+    # measured (#10675 review P2): reverting only the repair sentence to the
+    # node-only instruction left this pin GREEN. Everything below is therefore
+    # read from the sentence that tells a destructive lane what to DO.
+    parts = note.split("The graph-side repair", 1)
+    assert len(parts) == 2, (
+        "the note no longer has a distinct 'The graph-side repair' paragraph, "
+        "so this pin cannot tell the instruction from the surrounding history: "
+        f"{note!r}")
+    repair = parts[1]
+    assert "epi_turn" in repair and "DETACH DELETE" in repair, (
+        "the repair paragraph does not say which nodes go or how: "
+        f"{repair!r}")
+    assert "s.turn_count=0" in repair, (
+        "the repair paragraph names the node delete but not the counter — "
+        "deleting the `epi_turn*` nodes ALONE leaves `s.turn_count=3` beside "
+        "zero rows, which the read refuses (503 on an armed deployment, "
         "`{\"turns\": 3, \"turn_points\": []}` on an unarmed one), so it "
-        f"instructs a destructive lane to re-create the defect: {note}")
+        f"instructs a destructive lane to re-create the defect: {repair!r}")
     assert "DETACH DELETE" in note, (
         "the repair note does not say HOW the nodes go, so the half it does "
         f"name is still not executable: {note}")

@@ -26,6 +26,7 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import inspect
+import re
 import sys
 
 import pytest
@@ -517,16 +518,25 @@ def test_demo_seed_is_excluded_from_the_primitive(client):
     # nothing to serve — that refusal/contradiction is the regression the value
     # was changed to remove. Asserted by VALUE, not by parameter name, so a
     # refactor that reintroduces a declared length fails this pin.
-    # ⛔ Asserted over CODE only: `inspect.getsource` keeps interior COMMENTS,
-    # and `_seed_demo_graph`'s `NOT RETROACTIVE` note quotes this very literal
-    # in prose — so a raw `in src` test is satisfied BY THE COMMENT while the
-    # Cypher declares a length. Measured (#10675 review P3): rewriting the
-    # statement to `SET s.created_at=$now, s.turn_count=$n` with `params={"n": 3}`
-    # left the wording in the comment and this pin GREEN.
-    code = "\n".join(line for line in src.splitlines()
-                     if not line.lstrip().startswith("#"))
-    assert "s.turn_count=0" in code
-    assert "s.turn_count=3" not in code
+    # ⛔ Asserted over the CYPHER statement lines, not over `src` and not over
+    # "lines that are not full-line comments". Both weaker forms are satisfied by
+    # PROSE, measured (#10675 review P3): `_seed_demo_graph`'s `NOT RETROACTIVE`
+    # note quotes `s.turn_count=0`, and a docstring or a TRAILING comment carries
+    # the literal past a whole-line filter — so a statement rewritten to declare
+    # a length stayed green either way. Here the assignment is read from the
+    # statement itself and must be exactly 0: a param (`turn_count=$n`) or a
+    # literal fails it. Residual: a trailing Python comment mentioning a
+    # NON-zero literal would over-block this pin — it can never make it pass,
+    # which is the direction that matters.
+    cypher = [
+        line for line in src.splitlines()
+        if ("SET " in line or "MERGE " in line)
+        and not line.lstrip().startswith("#")]
+    assignments = re.findall(r"turn_count\s*=\s*([^,\)\"\s]+)",
+                             "\n".join(cypher))
+    assert assignments == ["0"], (
+        "the demo seed's own Session write must declare turn_count=0 and "
+        f"nothing else — got {assignments!r} from {cypher!r}")
 
     demo_org = "demo-3551-org"
     ha_mod._seed_demo_graph(demo_org)

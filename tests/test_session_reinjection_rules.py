@@ -1045,14 +1045,16 @@ _TURN_SHAPE_NARRATIVE_HOMES = (
     "tools/longmem_eval/ep_activation.py",
 )
 
-#: Homes that name the demo/sample seed for OTHER reasons and so cannot carry the
-#: marker-beside-the-mention invariant — `session_schema.py`'s inventory mentions
-#: it for the `demo_session_id` prefix (#3554) and for the three-shapes history,
-#: neither of which is about `#10000` — but that still must never state the
-#: DELETED writer as current fact. Present-tense half ONLY, on purpose: pinning
-#: the marker there would either force an unrelated note to name #10000 or
-#: demand an exception carved inside the window loop, and an exception is how a
-#: population pin stops being one (#10675 review P3).
+#: Homes that name the demo/sample seed for a reason that is NOT about the
+#: `is_episodic` conjunct and so cannot carry the marker-beside-the-mention
+#: invariant, but that still must never state the DELETED writer as current fact.
+#: `session_schema.py` has exactly ONE seed mention (`_SEED_MENTION`): a
+#: PAST-TENSE line in the three-shapes history ("…the demo seeder wrote a third
+#: shape…") that carries no `#10000` because it is not about this change — so
+#: the windowed half would demand a marker that does not belong there.
+#: Present-tense half ONLY, on purpose: pinning the marker would need an
+#: exception carved inside the window loop, and an exception is how a population
+#: pin stops being one (#10675 review P3).
 _TURN_SHAPE_NARRATIVE_HOMES_PRESENT_TENSE_ONLY = (
     "tortoise/session_schema.py",
 )
@@ -1087,7 +1089,13 @@ _TURN_SHAPE_NARRATIVE_HOMES_PRESENT_TENSE_ONLY = (
 #:   a false RED before, and is GREEN now.
 _PRESENT_TENSE_DEMO_EVENT_WRITER = re.compile(
     r"(?:demo|dashboard|hosted|sample)[^.\n]{0,40}?seed(?:er)?\s+"
-    r"(?:also\s+)?(?:writes?|mints?|creates?)\b[^.\n]{0,160}?pointKind"
+    r"(?:also\s+)?(?:writes?|mints?|creates?)\b"
+    # * **NEGATION** — the CORRECTED sentences say the seed "writes NO turn
+    #   node at all", and a bare verb match refuses exactly the prose this pin
+    #   wants written: measured, "since #10000 the demo seed writes no
+    #   `pointKind='event'` node" matched before this lookahead and is GREEN
+    #   after it (the `event` kind would otherwise still be a violation).
+    r"(?!\s+(?:no|nothing|none|never)\b)[^.\n]{0,160}?pointKind"
     r"(?:\s*[=:]\s*[`'\"“]*[a-z_]+)?", re.IGNORECASE)
 
 #: The kind a ``pointKind`` mention names, if it names one — the group read by
