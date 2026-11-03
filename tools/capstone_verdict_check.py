@@ -154,6 +154,25 @@ BLOCKER_STATES_DEFAULT = Path("docs/evidence/7949-capstone/blocker-states.json")
 BLOCKER_STATES_SCHEMA = "capstone-blocker-states-v1"
 BLOCKER_STATE_WORDS = ("OPEN", "CLOSED")
 
+#: The RUN-block keys that carry a MEASUREMENT, as the emitter writes them
+#: (``docs/evidence/7949-capstone/probes/capstone_measure.py``). `_blocker_exempt`
+#: refuses the exemption when ANY of these is present and non-empty, so a table
+#: cannot hide a real run behind `evidence_kind: "refusal"` by nulling one or two
+#: cells. The shipped REFUSAL record (``capstone.log``) carries NONE of them;
+#: a record emptied of every one is a fabricated file, which is the residual
+#: limit stated in `_record_carries_a_measurement`.
+_MEASUREMENT_RUN_KEYS = (
+    "sessions",
+    "step_witnesses",
+    "steps_observed",
+    "e3_census",
+    "e4_receipt",
+    "e5_rescore",
+    "e1_e2_artifact",
+    "errors",
+    "corpus_sha256",
+)
+
 #: The nested blocks ``check()`` reads as OBJECTS. Declared so the type guard is
 #: derived from one list rather than repeated per call site.
 _BLOCK_KEYS = ("run", "prereg", "corpus")
@@ -297,15 +316,37 @@ def _record_carries_a_measurement(run: dict) -> bool:
     writer that emits `"e4_receipt": null` is saying the same thing. Anything
     present (an int, a float, a string, `0`) is a claim, so it fails CLOSED
     into V12 rather than being read as "nothing measured".
+
+    ⛔ THE KEY SET IS THE EMITTER'S, NOT THE TWO KEYS THE FIRST FIX NAMED
+    (#10601 review round 2, P1). Reading only `e4_receipt` and `steps_observed`
+    closed the construction the first review found and left the RECORD's own
+    census behind: emptying exactly those two keys and flipping
+    `status`/`evidence_kind` still exited 0 over five CLOSED blockers while
+    `run.sessions` held 7 sessions / `sum(extracted) = 150`, `step_witnesses`
+    held all eight, `e5_rescore.raw_recovery = 0.48` and
+    `e1_e2_artifact.after_share = 0.6` — and every row's `note` went on printing
+    its number. `probes/capstone_measure.py` writes ALL of these, so the honest
+    test is "does the run block carry ANY of the emitter's measurement keys",
+    not "does it carry the two this arm happens to look at". A record that has
+    been emptied of every one of them is a fabricated file — the residual limit
+    this gate states about itself — rather than a stale pointer.
     """
-    receipt = run.get("e4_receipt")
-    if receipt is not None:
-        if not isinstance(receipt, dict):
-            return True
-        if receipt.get("numerator") is not None or receipt.get("denominator") is not None:
-            return True
-    steps = run.get("steps_observed")
-    if steps is not None and (not isinstance(steps, list) or steps):
+    for key in _MEASUREMENT_RUN_KEYS:
+        value = run.get(key)
+        if value is None:
+            continue
+        if isinstance(value, list):
+            if value:
+                return True
+            continue
+        if isinstance(value, dict):
+            # A dict with any counted/valued cell is a claim. An EMPTY dict is
+            # the writer's way of saying it produced nothing.
+            if value:
+                return True
+            continue
+        # Any scalar present — an int, a float, a string, `0`, `True` — is a
+        # claim, so it fails CLOSED into V12.
         return True
     return False
 

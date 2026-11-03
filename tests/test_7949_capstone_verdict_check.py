@@ -3520,6 +3520,28 @@ def test_a_refused_run_whose_RECORD_still_carries_a_measurement_is_not_exempt():
     witnessed = {"status": "REFUSED", "steps_observed": ["S0", "S1"]}
     assert cvc._blocker_exempt(witnessed, "refusal", None, None) is False, (
         "a REFUSED run that still lists observed steps was EXEMPTED")
+    # ⛔ AND NOT JUST THE TWO KEYS THE FIRST FIX NAMED (#10601 review round 2,
+    # P1). Round 1's repair read `e4_receipt` and `steps_observed` only, so
+    # EMPTYING exactly those two and flipping status/evidence_kind still exited 0
+    # over five CLOSED blockers while the record's own census stayed behind
+    # (`sessions` 7 / `sum(extracted) = 150`, all eight `step_witnesses`,
+    # `e5_rescore.raw_recovery = 0.48`, `e1_e2_artifact.after_share = 0.6`).
+    # Every one of the emitter's measurement keys must refuse the exemption on
+    # its own — that is the whole point of deriving the set from the emitter.
+    for key, value in (
+            ("sessions", [{"session_id": "wp01", "extracted": 25}]),
+            ("step_witnesses", {"S5": "the graph write landed"}),
+            ("e3_census", {"anchored": 157, "derived": 397}),
+            ("e4_receipt", {"numerator": 2, "denominator": 15}),
+            ("e5_rescore", {"raw_recovery": 0.48}),
+            ("e1_e2_artifact", {"after_share": 0.6}),
+            ("errors", ["boom"]),
+    ):
+        run = {"status": "REFUSED", key: value}
+        assert cvc._blocker_exempt(run, "refusal", None, None) is False, (
+            f"a REFUSED run whose `{key}` still carries a measurement was "
+            "EXEMPTED — emptying the two keys the first fix named is a "
+            "one-field disarm of V12")
     # Only a record with NEITHER is the refusal shape — which is what the
     # shipped `capstone.log` is (verified: it carries neither key).
     refusal = {"status": "REFUSED", "e4_receipt": None, "steps_observed": []}

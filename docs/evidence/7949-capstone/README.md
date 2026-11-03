@@ -542,7 +542,7 @@ measurement of this number): `EXTRACTOR-V4-ARCHITECTURE.md` §10's
 prior measurement was visible when the record said none was, and the 25-bound (this instrument) vs
 29-marker-sentence (the record) populations must be reconciled before either number is called final.
 
-## E1 / E2 — scored from the `#9889` record: E1 REFUSED (n=1 per arm), E2 RED (8 of 14)
+## E1 / E2 — the `#9889` record: E1 still UNDECIDED (n=1 per arm), E2 would score 8 of 14 on a RE-RUN
 
 **These two rows no longer read `e1-e2.log`.** Their `evidence` is
 `docs/evidence/9889/e1-e2-scores.json`, produced in ONE invocation by
@@ -568,7 +568,7 @@ E2 FAIL — E2a 8/14 (bar >= 13), E2b fused 1/114 = 0.008772
   depend on which before run is chosen. The two OFF runs of the same arm differ
   by **20.6 pp** — wider than the 14.6 pp the ON arm moved away from OFF 1. The
   next requirement is **n >= 2 per arm**, not a second arm.
-- **E2 = RED, and the denominator that was missing for eleven days is carried.**
+- **E2 would score RED 8/14 on a re-run, and the denominator that was missing for eleven days is now carried.**
   E2a is **8 of 14** value-bearing planted units strictly surviving on the run's
   own graph, against `>= 13 of 14`. The denominator is §3.3's rule read off the
   pre-registration and computed from the gold by `probes/e2a_value_units.py`; the
@@ -826,7 +826,7 @@ witnessed steps is printed — an honest finding for `#7949`, never a guess.
   `docs/evidence/9889/e1-e2-scores.json`), so E1 is no longer refused for want of a population:
   it is `BLOCKED` because the two pairings disagree, and a verdict that changes with which before
   run you pick has not been decided (n >= 2 per arm is the next requirement). E2a's 14-unit
-  denominator IS carried and scores **8/14**, so E2 is **RED**, not blocked. (The superseded
+  denominator IS carried and scores **8/14**, so a RE-RUN of this probe makes E2 **RED**, not blocked. (The superseded
   `e1-e2.log` — 25 Objects, one arm, a corpus that is not the frozen one — is kept as history and
   cited by no row.)
 - **No evidence that E3's `= 1.000` bar is reachable as registered.** It is not: `:Object`
@@ -1018,7 +1018,7 @@ gated the pass off, or the stage produced nothing.
 
 A **scored** row moves to a different verdict only by RE-RUNNING the probe, never by reading an
 issue's state — which is why E1 stays `BLOCKED` (its two before realizations disagree, so it is not
-decided at n=1 per arm) and E3/E4/E5 are `RED` rather than "blocked by a closed child". E2 is `RED`
-since `#9889`'s record carried the 14-unit denominator (8 of 14). (The table above is the
+decided at n=1 per arm) and E3/E4/E5 are `RED` rather than "blocked by a closed child". E2 becomes `RED`
+on a re-run, because `#9889`'s record carried the 14-unit denominator (8 of 14); the shipped table above is the
 dependencies' own state, not a scoreboard — `#9116`'s landing is recorded there because the seam
 shipped, and the S2.2/S2.3 rows above keep the count the frozen run measured.)
