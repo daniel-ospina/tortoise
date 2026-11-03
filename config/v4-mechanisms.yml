@@ -20,7 +20,17 @@
 #                              module level in the `code:` file(s) this same row
 #                              names — where `__all__`/dunders do not count,
 #                              because re-exporting a name is not defining it
-#   state: not-implemented  -> `tracking_issue:` is present
+#   state: not-implemented  -> `tracking_issue:` is present. `code:`, `tests:`
+#                              and `symbols:` are OPTIONAL on this state — they
+#                              are how a row records the half that IS built —
+#                              but WHEN PRESENT they are verified by the SAME
+#                              rules: every declared path is kind-checked,
+#                              contained and must exist, every symbol must be
+#                              DEFINED at module level in the row's own `code:`
+#                              file(s), `symbols:` without `code:` is refused,
+#                              and an explicit null is a declaration of nothing
+#                              that looks like a declaration, so it is refused
+#                              rather than read as an omission
 #
 # ⭐ `preconditions:` is the ORDERING (#5064's Verification Checklist: *"a
 # mechanism whose precondition is unbuilt cannot be marked implemented"*). It
@@ -398,7 +408,8 @@ mechanisms:
     declared_in:
       - docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md  # §2.4.1
       - docs/architecture/STORAGE-ARCHITECTURE.md       # §9.4
-    state: implemented
+    state: not-implemented
+    tracking_issue: 2684
     code:
       - tortoise/commit_schema.py
     tests:
@@ -408,6 +419,50 @@ mechanisms:
     note: >-
       `source_turn_id` + `span_start`/`span_end` character offsets into the
       `Source`; the span TEXT is never stored on the `Point`.
+      ⚠️ WHAT IS BUILT (the ADDRESS half): the schema carries the two offsets,
+      `validate_span` refuses a MALFORMED pair at the commit boundary (half,
+      inverted, zero-length, non-integer, outside the storeable int64 range —
+      it never sees the source TEXT, so nothing checks that a committed pair
+      actually indexes into its source), the offsets round-trip through
+      `create_point` and the hosted commit path, and the span text is never
+      copied onto the node — `tests/test_verbatim_span.py` pins all of it.
+      ⚠️ WHAT IS NOT BUILT (the EVERY-POINT half, and why this row is not
+      `implemented`): `STORAGE-ARCHITECTURE.md` §9.4 declares *"Every committed
+      `Point`/`Object` must walk up to its `Source`"*, and
+      `EXTRACTOR-V4-ARCHITECTURE.md` §2.4.1 rule 1 states the same requirement as
+      *"must carry a reachable link to its `Source` span"* — §2.4 records the
+      widening from `#2684`'s value-bearing points to ALL points as deliberate.
+      The live write path does not do it:
+      `extractor_v2._value_verbatim_span` stamps offsets only when the point's
+      own content/quote CARRIES A VALUE **and** a source turn resolves **and**
+      the quote is VERBATIM in it **and** the text the span addresses itself
+      carries a value — so every other committed point is written with no
+      address at all. MEASURED, and WHICH result was measured matters: of 3
+      points through `execute_embed` exactly 1 is spanned, and both unspanned
+      points stop at the FIRST of those four gates — the shape *a point whose
+      content and quote carry no value* — which is the only absence
+      `test_the_span_link_row_records_the_widening_as_unbuilt`
+      (`tests/test_v4_declared_mechanisms.py`) actually pins. The other THREE
+      gates are pinned ELSEWHERE, not by it, and all in
+      `tests/test_extractor_v2.py::TestValueVerbSpan2684`: no resolvable turn by
+      `test_no_resolution_reuses_the_existing_anchor_warning`, the band-resolved
+      route by `test_a_band_resolved_value_is_REPORTED_not_silently_unspanned`,
+      and the verbatim-but-value-free route by
+      `test_a_value_free_quote_gets_no_span_and_is_REPORTED`. One more absence
+      class REACHES `_value_verbatim_span` and is refused at the THIRD gate,
+      but reports nothing there: an empty quote with a resolved index
+      (`_verbatim_span_in_turn` returns None, and the `if quote:` guard
+      suppresses the band warning because the band was never consulted). Its
+      only report is therefore the resolver's "unverified (empty quote)" step —
+      OUTSIDE `_value_verbatim_span` — pinned by
+      `test_empty_quote_model_index_path_carries_no_span`. NONE of these four
+      appears in the row test above, so do not read its 2 unspanned points as
+      coverage of them. A `validate_span`
+      that validates a SUPPLIED pair is not a producer: a row marked
+      `implemented` here would recreate exactly the declared-implies-present
+      defect this registry exists to catch, so the absence is recorded against
+      `#2684` and the mechanism stays `not-implemented` until every committed
+      point carries a reachable span (or the widening is withdrawn).
 
   - id: embed_gate
     name: "EMBED gate — which written rows earn a vector"
@@ -1062,7 +1117,8 @@ mechanisms:
       did not run (per candidate, not per run), and `extract_session_v2` carries
       an always-present `identity` block plus a warning that fires when a candidate's
       own identity query did not run (a budget cut that touches only non-candidate
-      queries gets its own sentence — the two are different facts).
+      queries gets its own sentence, and a lookup that ran NOTHING at all with no
+      candidate to check gets a third — the three are different facts).
       ⛔ **WHAT IS STILL ABSENT — and this is why the row stays
       `not-implemented`:** nothing suppresses a create. I1's *"never mint it"*
       needs a CREATE gate inside S5, and NOT `execute_embed({})`: that function

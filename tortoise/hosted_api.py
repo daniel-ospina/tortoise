@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import atexit
 import contextlib
+import contextvars
 import functools
 import hmac
 import inspect
@@ -165,7 +166,10 @@ from tortoise.monitoring import (  # #2850/2953 liveness-readiness decouple
     loop_heartbeat_info,
     loop_heartbeat_task,
     note_heartbeat_task,
+    read_offload_timeout_s,
+    reawait_control_plane_call,
     record_analytics_outcome,  # #3820 analytics-sink outcome counter
+    record_read_timeout_s,
     record_telemetry_drop,  # #4095 allowlist-drop counter (the /metrics seam)
     run_control_plane_call,
     run_on_daemon_worker,
@@ -189,7 +193,10 @@ from tortoise.projection import (
     is_missing_graph_error,  # #2163: absent-graph GRAPH.DELETE family == success
     journal_mint_write_ahead,  # #3390: journal the intended name BEFORE the CREATE
 )
-from tortoise.quota import with_limit_contact  # #5425 refusal seam
+from tortoise.quota import (  # #5425 refusal seam; #4051 count-scope split
+    TENANT_GRAPH_RESOURCES,
+    with_limit_contact,
+)
 
 # #9555 / R7: the ONE spelling of §9.1's narrative carrier type. Its record home
 # is `public.session_narrative` and it materialises no node (§9.1: "not in the
@@ -325,8 +332,8 @@ _KEEPALIVE_LOCK = threading.Lock()
 # ── #3060: dedicated executors for long / stallable work ───────────────────
 # `asyncio.to_thread` (the house style — see `list_packs`) submits to the
 # loop's SHARED default executor, which is where ~80 other `to_thread` call
-# sites and the auth middleware's abuse hooks (`_abuse_post_auth` et al.) run.
-# That is fine for short work. It is NOT fine for the capture extraction: on a
+# sites run. That is fine for short work. It is NOT fine for the capture
+# extraction: on a
 # stalled provider it blocks for the token-scaled deadline (~800s at a 16K
 # budget, per attempt, retried), so enough concurrent stalls would occupy every
 # default worker (min(32, cpu+4) — 6 on prod's 2 vCPU) and hold that shared,
@@ -639,13 +646,487 @@ def _graph_name_for_namespace(namespace: str | None, *,
     return uri_graph or "tortoise"
 
 
+def _moved_default_namespace(org_id: str | None,
+                             namespace: str | None) -> str | None:
+    """The namespace an ORG-WIDE open must use when the default graph has MOVED
+    (#10180), or ``None`` for every organization whose default never moved.
+
+    ``None`` is the whole safety property: the caller then takes the HISTORICAL
+    open (``namespace=org_id`` → ``org_{org_id}``) EXACTLY as before, so this
+    change moves no existing organization's data access — including the SDK's
+    own ``namespace=`` shape, which ``_namespace`` and the fallback-snapshot
+    identity key depend on.
+
+    The decision itself is ONE function,
+    :func:`tortoise.supabase_control.moved_default_namespace`, shared with the
+    MCP lane (``mcp_auth._get_org_sdk``) and the quota counter so the three
+    cannot drift: hosted only, and only for a PER-GRAPH namespace of THIS org —
+    ``org_{org_id}_{gid}`` (what ``insert_graph``/``_provision_graph`` mint) or
+    the pre-#3543 ``team_{org_id}_{gid}`` that is still stored for older graphs.
+    Both are values only a promotion can put in ``organizations.graph_name``,
+    and the promotion's MOVE arm REFUSES any other shape, so a moved default is
+    followable. ⚠️ The IDEMPOTENT repair arm is deliberately exempt from that
+    refusal (it converges whatever namespace the default row already carries,
+    which is what §3 of ``20261028000001`` pins the pointer to), so a REPAIRED
+    pointer for a legacy org can still be the bare ``team_{org_id}``/``org_{name}``
+    that this function answers ``None`` for — which is exactly why the bare
+    ``team_{org_id}`` is not a promotable target (tortoise#10505). The untouched
+    ``org_{org_id}``, the pre-#3543 org-level ``team_{org_id}`` and the
+    registry's ``org_{name}`` (#2023) all keep the open they always had.
+    """
+    from tortoise.supabase_control import moved_default_namespace
+
+    return moved_default_namespace(org_id, namespace)
+
+
+class _NamespaceNotResolved:
+    """Sentinel type for the ``moved=`` argument (#10180).
+
+    ``None`` already MEANS something there — "this org's default graph was never
+    promoted, open the historical namespace" — so it cannot double as "the
+    caller did not resolve it". Without the distinction a caller could not hand
+    a resolved ``None`` down without making the callee resolve again, which is
+    the double read this argument exists to remove.
+
+    ⚠️ DEFINED HERE, next to the resolver whose answers it marks, because it is
+    a DEFAULT ARGUMENT VALUE: a default is evaluated when its ``def`` is, so
+    every function that takes this sentinel must be defined after it. The two
+    consumers are far apart in this file (``_eager_provision_org_graph`` at the
+    org-create lane, ``_open_org_graph_sdk`` / ``_graph_has_org_namespace`` at
+    the graph-open gate) and the earlier one wins.
+    """
+_NAMESPACE_NOT_RESOLVED = _NamespaceNotResolved()
+
+
+class _ProbeNotSampled:
+    """Sentinel type for the ``listed=`` argument (``_open_org_graph_sdk``,
+    ``_graph_has_org_namespace``, ``_eager_provision_org_graph``).
+
+    ``None`` already MEANS something on that argument — the registry probe
+    FAILED (fail-open, #3543) — so it cannot double as "the caller did not
+    sample the listing". ``isinstance`` keeps the two distinguishable without
+    a second boolean parameter.
+
+    ⚠️ DEFINED HERE, next to ``_NamespaceNotResolved``, for the same reason: it
+    is a DEFAULT ARGUMENT VALUE (evaluated when its ``def`` is, so every
+    function that takes it must be defined after this line). Its consumers are
+    far apart in this file — ``_eager_provision_org_graph`` at the org-create
+    lane (~22.3k) comes BEFORE the graph-open gate (~33.1k) — and the earlier
+    one wins.
+    """
+_PROBE_NOT_SAMPLED = _ProbeNotSampled()
+
+
+class _ForkNotResolved:
+    """Sentinel type for the ``prior_fork=`` argument (#10452).
+
+    ``None`` already MEANS something there — "the prior org's default graph
+    holds no onboarding node, so inherit 'self'" — so it cannot double as "the
+    caller did not resolve it". Same distinction, same reason, as
+    ``_NamespaceNotResolved`` above.
+
+    ⚠️ DEFINED HERE, with the other two sentinels, because it is a DEFAULT
+    ARGUMENT VALUE: every function that takes it must be defined after its
+    ``def`` runs. ``_eager_provision_org_graph`` (~22.3k) is the only consumer.
+    """
+_FORK_NOT_RESOLVED = _ForkNotResolved()
+
+
+def _default_graph_name(org: dict) -> str | None:
+    """The FULL DB graph name this credential's DEFAULT graph resolves to (#10180).
+
+    ``None`` means "resolve it the historical way" (``namespace=org_id``, the
+    org's graph 0) — never a guess. This is the I/O-FREE resolver: the
+    credential already carries ``graph_namespace`` (see below), so the request
+    path pays nothing for it.
+
+    WHY THIS EXISTS. Until #10180 nothing could MOVE the default graph, so
+    ``namespace=org_id`` (whose resolved name is ``org_{org_id}``) and
+    ``organizations.graph_name`` were the same string for every hosted org, and
+    ``_data_sdk`` deliberately opened the former. Promotion
+    (``POST /v1/graphs/{id}/promote``) moves BOTH the ``kind='default'`` row and
+    ``organizations.graph_name`` to the promoted graph's namespace — so from
+    then on the org's default storage is that graph, and an org-wide credential
+    must open it. Without this, an org-wide capture would keep writing into the
+    OLD namespace while its record rows were filed under the NEW graph's id: the
+    graph/record disagreement #10025 exists to remove, in the other direction.
+
+    BYTE-IDENTICAL BEFORE ANY PROMOTION, and that is the safety property —
+    enforced by `_moved_default_namespace`, not by a comment: the hosted lane
+    mints ``organizations.graph_name = org_{org_id}`` and
+    ``_graph_name_for_namespace(org_id)`` derives exactly that same string, so
+    for every org that has not promoted anything this returns ``None`` and the
+    caller opens the very graph it always opened (including the SDK's
+    ``namespace=`` shape, which ``_namespace`` and the fallback-snapshot key
+    depend on).
+
+    ``graph_namespace`` is carried on the resolved credential by every hosted
+    auth seam (``supabase_control.resolve_api_key`` for keys,
+    ``_session_user_org`` for a session, ``oauth.resolve_oauth_access_token``
+    for an ``oat_`` token) — the same field ``_dispatch_webhooks_sync`` and the
+    dream drain already open by, so this is the third caller of an existing
+    carrier, not a new resolution path.
+
+    A GRAPH-BOUND credential always answers ``None``: its ``graph_namespace`` is
+    a CUSTOM graph's namespace, and "the default graph" is not the question it
+    asks. Guarded here rather than at each caller, because the gate's shape test
+    cannot tell a custom graph's namespace from a promoted default's.
+    """
+    if org.get("graph_id"):
+        return None
+    return _moved_default_namespace(org.get("org_id"),
+                                    org.get("graph_namespace"))
+
+
+#: #10180: the DEFAULT graph belonging to the credential THIS request
+#: resolved, as ``(org_id, graph_namespace, default_graph_id)``. Read by
+#: :func:`_org_default_namespace` so the lanes that hold only an ``org_id`` —
+#: the onboarding projection and its completion gate, the seed/indexing runners,
+#: the event sweep — reuse the value the auth seam already has instead of paying
+#: a control-plane read for it (on the event loop, on the capture path), and so
+#: they can never disagree with the credential the request was admitted with.
+#: The PAIR's presence means "resolved": ``namespace`` may legitimately be None
+#: (registry lane, or an org with no ``graph_name``), which means "take the
+#: historical open", not "go read". ``default_graph_id`` is the SAME
+#: credential's record tenant (#10025), carried in the same tuple so a lane that
+#: needs both does not read for one of them.
+_resolved_default_namespace: contextvars.ContextVar[
+    tuple[str, str | None, str | None] | None] = contextvars.ContextVar(
+        "_resolved_default_namespace", default=None)
+
+
+def _publish_default_namespace(org: dict) -> None:
+    """Hand this request's default namespace to the ``org_id``-only lanes (#10180).
+
+    Purely an optimization-with-a-guarantee: the value comes from the credential
+    the request was ADMITTED with, so a lane that reads it here cannot land on a
+    different graph than the one the data plane opened for the same request.
+
+    ⛔ ORG-WIDE CREDENTIALS ONLY, exactly like ``_default_graph_name`` — and for
+    the same reason, which is why this is not a convenience but a correctness
+    guard: for a GRAPH-BOUND credential ``graph_namespace`` is a CUSTOM graph's
+    namespace, it passes the ``org_{org_id}_`` shape test, and a "default graph"
+    consumer that took it would evaluate and write org-level state (the capture
+    completion gate, the onboarding projection) into the caller's own graph while
+    every org-level reader looked at the org's default. Nothing is published for
+    that credential, so those lanes fall back to the control-plane read and still
+    answer "the org's default", never the caller's binding.
+
+    ``default_graph_id`` rides along because it is the OTHER answer about the
+    same graph (the record tenant, #10025) and it came from the same credential
+    resolution: a lane that takes the name from here and the id from a second
+    read straddles a promotion that commits between them, opening the DEMOTED
+    graph while filing every record row under the PROMOTED one.
+    """
+    org_id = org.get("org_id")
+    if org_id and not org.get("graph_id"):
+        _resolved_default_namespace.set(
+            (org_id, org.get("graph_namespace"), org.get("default_graph_id")))
+
+
+def _org_default_namespace(org_id: str) -> str | None:
+    """`_moved_default_namespace` for a lane that holds only an ``org_id``.
+
+    On a REQUEST it costs nothing: the auth seam publishes the resolved
+    credential's value (`_publish_default_namespace`) and this returns that,
+    which is also what makes the answer the one the request's data plane used.
+    Otherwise — a background lane, or a GRAPH-BOUND credential, whose
+    ``graph_namespace`` is a custom graph's and must not be mistaken for the
+    default — it does one primary-key read of ``organizations.graph_name``: the
+    column the promotion writes and §3 of ``20261028000001`` pins to the default
+    row's namespace. It exists so the lanes that build their OWN SDK (the event
+    sweep, the dream drain, pack install, the seed/indexing runners) resolve the
+    default the same way the request path does instead of re-deriving
+    ``org_{org_id}`` and writing into the graph the promotion DEMOTED.
+
+    FAIL-SOFT, deliberately: any read failure (PostgREST down, schema behind)
+    logs a warning and returns ``None``, i.e. the historical open. Falling back
+    to a graph that is, for every org that has not promoted, the SAME graph
+    keeps these best-effort lanes working through a control-plane blip instead
+    of turning them into a new outage — and it can never make them worse than
+    the code this replaces, which always opened the historical graph.
+    """
+    from tortoise.supabase_control import (
+        get_control_plane,
+        is_supabase_enabled,
+    )
+
+    if not is_supabase_enabled():
+        return None
+    # This request already resolved a credential for this org — use its answer
+    # (see `_resolved_default_namespace`). No read, and no chance of disagreeing
+    # with the graph the data plane opened.
+    hint = _resolved_default_namespace.get()
+    if hint is not None and hint[0] == org_id:
+        return _moved_default_namespace(org_id, hint[1])
+    try:
+        rows = get_control_plane().query(
+            "organizations", select=["graph_name"],
+            filters=[("id", "eq", org_id)])
+    except Exception as e:
+        _logger.error(
+            "default-graph namespace read failed for %s — falling back to the "
+            "historical namespace=org_id open, which is the DEMOTED graph if "
+            "this org was promoted: %s", org_id, e)
+        return None
+    return _moved_default_namespace(
+        org_id, rows[0].get("graph_name") if rows else None)
+
+
+def _org_default_graph(org_id: str) -> tuple[str | None, str | None]:
+    """BOTH answers about the org's default graph — from ONE instant.
+
+    ``(moved_namespace, default_graph_id)``: the namespace an org-wide open must
+    use (``None`` ⇒ the historical ``namespace=org_id`` open, exactly as
+    `_org_default_namespace` answers) and the record tenant for that same graph
+    (``None`` ⇒ nothing nameable, so the write stays refused ``no_tenant``).
+
+    WHY ONE FUNCTION. The lanes below resolve the NAME to open their SDK and the
+    ID to file their records, and asked separately the two are two reads at two
+    instants: a ``promote_default_graph`` commit landing between them makes the
+    lane write the graph the promotion DEMOTED while every Object / Event /
+    ``-closed`` row it mints names the graph the promotion PROMOTED — the
+    ``derived != measured`` split #10025 exists to remove, re-created by the very
+    verb #10180 adds. Answers about one graph must come from one row, so this
+    reads ``public.graphs``'s active ``kind='default'`` row ONCE (its ``id`` and
+    ``namespace`` — see :func:`tortoise.supabase_control.default_graph_row_for`),
+    and the promotion writes that row and ``organizations.graph_name`` in one
+    transaction, so the pair cannot disagree.
+
+    On a REQUEST it costs nothing and is coherent by construction: the auth seam
+    published the admitted credential's own two values
+    (`_publish_default_namespace`), which were resolved from the same credential
+    dict the data plane opened, so both come back without a read.
+
+    FAIL-SOFT, for `_org_default_namespace`'s reason: an unreadable control plane
+    yields ``(None, None)`` — the historical open and NO tenant, which is the
+    fail-closed ``no_tenant`` direction (#9192), never a guess.
+    """
+    from tortoise.supabase_control import (
+        default_graph_row_for,
+        get_control_plane,
+        is_supabase_enabled,
+    )
+
+    if not is_supabase_enabled():
+        # The self-host registry lane has no `public.graphs` row and no tenant
+        # its record could name — do not pay a control-plane call to learn that.
+        return None, None
+    hint = _resolved_default_namespace.get()
+    if hint is not None and hint[0] == org_id:
+        return _moved_default_namespace(org_id, hint[1]), hint[2]
+    row = default_graph_row_for(get_control_plane(), org_id)
+    if row is None:
+        return None, None
+    return (_moved_default_namespace(org_id, row.get("namespace")),
+            row.get("id"))
+
+
+def _org_sdk(org_id: str, *, namespace: str | None = None) -> TortoiseSDK:
+    """The SDK for the org's DEFAULT graph — the ONE way an org-wide lane opens it.
+
+    Every caller that used ``_make_sdk(namespace=org_id)`` to reach "the org's
+    graph" means *the org's default graph*, and after #10180 that is a pointer
+    that can MOVE. Routing them through one function is what keeps the graph a
+    promotion moved TO and the graph those lanes read and write the same one —
+    otherwise a promotion would leave the record tenant on the promoted graph
+    while the dream pass, the event sweep, the pack catalog, the quota counter
+    and the seed/indexing runners all kept filing into the graph it demoted
+    (the ``derived != measured`` class #10025 exists to remove).
+
+    ``namespace`` is an OPTIONAL shortcut for a caller that already holds the
+    value (a resolved credential carries ``graph_namespace``): passing it skips
+    the read and goes through the same decision. Omitting it costs one
+    primary-key read — and a promoted org whose control plane is unreadable then
+    falls back to the historical graph, i.e. the DEMOTED one. That residual is
+    accepted only for the lanes that call THIS form — a background/sweep/dream/
+    webhook/indexing pass, the org-import endpoint, or an on-request helper
+    reached WITHOUT an auth-resolved credential. On a REQUEST the resolver never
+    reads at all: the auth seam publishes the credential's value
+    (`_publish_default_namespace`) and `_org_default_namespace` consumes it, so
+    the capture's completion gate, the onboarding projection/echo and the seed
+    runners resolve the same graph the request's data plane opened. The request
+    data plane, the MCP lane and the quota gate take the value directly
+    (`_default_graph_name` / `_org_sdk_for_credential`) and cannot fail open.
+
+    For every organization that has not promoted, this returns byte-for-byte
+    what ``_make_sdk(namespace=org_id)`` returns — same graph, same SDK
+    ``namespace=`` shape (see `_moved_default_namespace`).
+    """
+    moved = (_moved_default_namespace(org_id, namespace) if namespace is not None
+             else _org_default_namespace(org_id))
+    return _org_sdk_from_name(org_id, moved)
+
+
+def _org_sdk_from_name(org_id: str, moved: str | None) -> TortoiseSDK:
+    """Build the DEFAULT-graph SDK from an ALREADY-RESOLVED name — NO I/O.
+
+    Split out of `_org_sdk` so a background job that has to do the resolving
+    READ anyway can run it in a WORKER and still CONSTRUCT on the event loop.
+    The split is not cosmetic: ``_make_sdk`` resolves the store path, and built
+    in a POOLED worker thread that path comes from the thread's stale inherited
+    test-module stamp once the pool reuses it — the job then writes to a store
+    the test's reader never looks at (tortoise#7500; measured as 3 reds under
+    #4645, which is why those hand-offs were reverted). So: off-load the READ,
+    keep the CONSTRUCTION on the loop.
+    """
+    return _make_sdk(graph_name=moved) if moved else _make_sdk(namespace=org_id)
+
+
+def _awaits_default_namespace(org: dict) -> bool:
+    """True when this caller dict is ORG-WIDE and carries no default namespace.
+
+    ONE predicate for the two consumers that must never disagree — the
+    ADMISSION KEY (`_capture_session_key`) and the WRITE
+    (`_hydrate_default_namespace`). A GRAPH-BOUND dict is False by construction:
+    its ``graph_namespace`` is a CUSTOM graph's and "the default graph" is not
+    the question it asks (the same reason `_default_graph_name` refuses it,
+    #2023).
+    """
+    return bool(org.get("org_id")) and not org.get("graph_id") \
+        and not org.get("graph_namespace")
+
+
+def _admitted_default_namespace(org: dict) -> str | None:
+    """The default namespace THIS request was ADMITTED with, when the dict lacks it.
+
+    The REST auth seams stamp ``graph_namespace`` on the credential; the MCP
+    `tortoise_session_capture` tool builds its OWN dict and stamps it only for a
+    graph-BOUND key — and its SERVED implementation is frozen by
+    `tools/surface-guard.py`, so it cannot be changed to carry it (#3863/#4282).
+    The middleware did stamp the admitted credential's namespace on
+    ``mcp_auth._current_graph_namespace``, so that is where an org-wide dict's
+    answer comes from.
+
+    ⛔ READ BY BOTH HALVES, and that is the whole point (#10452 review, P2).
+    Before this existed, only the WRITE resolved it: the capture key was
+    computed from the bare dict, so on a PROMOTED org an org-wide MCP capture
+    keyed the DEMOTED graph (``org_{org_id}``) while `_capture_session_impl`
+    hydrated and wrote the PROMOTED one. That broke the invariant
+    `_capture_session_key` states — its graph component is "the graph the
+    capture will ACTUALLY write to" — and produced both halves of the #3365
+    class: a FALSE 409 (an org-wide MCP key colliding with a graph-bound key
+    bound to the demoted graph, whose namespace IS ``org_{org_id}``), and a
+    reopened #3129 SILENT-LOSS window (two captures of the same session on the
+    same physical graph landing in different buckets, so both pass admission
+    and the second is served a 0-extract replay). One function, two readers:
+    they cannot drift again.
+
+    ``None`` when the request is not org-wide, or when its transport resolved no
+    credential at all (self-host static/none) — the caller then falls back
+    exactly as before.
+    """
+    if _awaits_default_namespace(org):
+        return _mcp_auth._current_graph_namespace.get() or None
+    return None
+
+
+def _hydrate_default_namespace(org: dict) -> dict:
+    """Give an ORG-WIDE caller dict the default-graph namespace it lacks.
+
+    The REST auth seams stamp ``graph_namespace`` on the credential; the MCP
+    `tortoise_session_capture` tool builds its OWN dict and stamps it only for a
+    graph-BOUND key — and its SERVED implementation is frozen by
+    `tools/surface-guard.py`, so it cannot be changed to carry it (#3863/#4282).
+    Hydrating here is what keeps an org-wide MCP capture on the graph a
+    promotion MOVED it to: without it the data plane opened the DEMOTED graph
+    while the record rows (tenant = the credential's `default_graph_id`) named
+    the promoted one — the record/data split #10025 exists to remove, on the
+    lane agents write through.
+
+    A GRAPH-BOUND dict is returned UNTOUCHED: its ``graph_namespace`` is a CUSTOM
+    graph's, and "the default graph" is not the question it asks (the same
+    reason `_default_graph_name` refuses it). A dict that already carries the
+    field is untouched too — the REST lanes are unaffected.
+
+    ⛔ THE ANSWER COMES FROM THE CREDENTIAL THIS REQUEST WAS ADMITTED WITH, not
+    from a fresh control-plane read, and that is a correctness requirement — not
+    an optimization. The DATA half (which graph the nodes go to) and the RECORD
+    half (which graph the rows are filed under, #10025) must describe ONE graph.
+    On this lane the record half is installed per request by
+    ``mcp_auth.OrgResolutionMiddleware`` from the credential it resolved
+    (``_record_tenant_scope`` → ``record_tenant_for``, which gives the ambient
+    scope PRECEDENCE over anything an SDK carries). A fresh read here would
+    therefore be a SECOND instant: inside the resolver cache's 60 s TTL after a
+    promotion it answers the PROMOTED namespace while the ambient tenant still
+    names the DEMOTED graph, so the capture writes one graph and files every
+    row under the other — the ``derived != measured`` split #10025 exists to
+    remove, in the other direction.
+
+    The middleware stamped the admitted credential's own namespace on
+    ``mcp_auth._current_graph_namespace`` (set beside the tenant scope, from the
+    same dict), so taking it makes both halves one snapshot by construction —
+    and matches what the runbook promises operators: a capture admitted before a
+    promotion keeps the graph it resolved. It cannot route the data to a graph
+    the tenant is not: a CUSTOM graph target always sets ``_current_graph_id``
+    beside that namespace (``mcp_auth.use_graph_target``), so a graph-bound
+    request carries ``graph_id`` and never reaches this branch.
+
+    ⛔ ONE SOURCE, TWO READERS — and the second reader is SYNC, so the source
+    must be too (#10452 review). The ADMISSION KEY (`_capture_session_key`) runs
+    before this function does (the slot is reserved before any write), it cannot
+    await, and it must name the very graph this write opens. It therefore reads
+    `_admitted_default_namespace` as well and falls through to the SAME
+    historical `namespace=org_id` open. A control-plane read here — the shape
+    this function used to carry, and the reason its "agree by construction on
+    every branch" claim was false — is a SECOND instant the key can never see:
+    on a promoted org it resolved the PROMOTED namespace while the key had
+    already named the DEMOTED one, so the capture landed in a bucket that named
+    a graph it was not writing (a FALSE 409 for a legitimate capture of that
+    graph, and TWO buckets for the graph actually written — the #3129
+    silent-loss window, reopened by the fix for #3365).
+
+    Reads nothing, and that is not a lost capability: every credential resolution
+    that carries the RECORD tenant carries the namespace BESIDE it, from ONE
+    `public.graphs` row (`default_graph_for_credential` — the #10452 F2 pair),
+    and it falls back to `organizations.graph_name` on an additive-read degrade,
+    which is the same column a read here would consult. So "this request has no
+    namespace to carry" always means "it has no tenant either", and for those
+    lanes (self-host static/none) there is no promotion to miss: the historical
+    open IS the org's default graph.
+    """
+    if _awaits_default_namespace(org):
+        carried = _admitted_default_namespace(org)
+        if carried:
+            return {**org, "graph_namespace": carried}
+    return org
+
+
+def _org_sdk_for_credential(org: dict) -> TortoiseSDK:
+    """The DEFAULT-graph SDK for an already-resolved credential dict — NO I/O.
+
+    The credential carries ``graph_namespace`` (resolved once, at auth), so this
+    is the same decision as `_org_sdk` taken from a value already in hand. It is
+    what the REQUEST paths use — the capture/data plane, the org-wide half of the
+    quota gate (`_gate_sdk_for`, whose contract is fail-CLOSED, #686: falling
+    back to the historical open would count the DEMOTED graph — a stale-low count
+    admits an org past its cap (revenue) and a stale-high one 402s writes it is
+    under (customer)), the pack catalog/install, the Overview count and the
+    onboarding PATCH.
+
+    A GRAPH-BOUND credential answers the historical `namespace=org_id` count
+    `_count_resource` has always done for it — `_default_graph_name` is None
+    there by construction (its `graph_namespace` is a custom graph's). That is
+    exactly why the quota gate must NOT route a graph-bound credential here:
+    its write opens the CUSTOM graph, so `_gate_sdk_for` takes the
+    `graph_name=_data_graph_name(org)` branch instead (#4051). This function
+    stays the answer to "which graph is this org's DEFAULT" — not to "which
+    graph will this request open".
+    """
+    moved = _default_graph_name(org)
+    return (_make_sdk(graph_name=moved) if moved
+            else _make_sdk(namespace=org["org_id"]))
+
+
 def _data_graph_name(org: dict) -> str | None:
     """The FULL DB graph name this request's data path will open — #3365.
 
     It is the single value the ADMISSION GATE and the opener share. For a
     graph-bound key `_data_sdk` passes it straight through as ``graph_name=``;
-    for an org-wide key the name is decided by ``TortoiseSDK._get_proj`` from
-    ``namespace=org_id``, and this function mirrors that derivation — so the two
+    for an org-wide key the name is `_default_graph_name`'s answer when the
+    credential carries one (#10180 — a promoted default lives in another
+    namespace), else ``TortoiseSDK._get_proj``'s derivation from
+    ``namespace=org_id`` — and this function mirrors exactly that, so the two
     agree by construction on both branches. `_capture_session_key` keys the
     in-flight registry on the SAME value, so two credentials that route to the
     same physical graph share one bucket whatever ``graph_id`` shape they carry.
@@ -666,12 +1147,17 @@ def _data_graph_name(org: dict) -> str | None:
     """
     if org.get("graph_id"):
         return org.get("graph_namespace") or None
-    # Org-wide key / session auth: `_data_sdk` opens `namespace=org_id`, whose
-    # resolved name is the SDK derivation. Deliberately NOT the dict's
-    # `graph_namespace`: that is `teams.graph_name`/`t.graph_name`, which
-    # `_data_sdk` ignores on purpose (the selfhost `org_{name}` lane diverges —
-    # #2023), so keying on it would bucket the request by a graph it never opens.
-    return _graph_name_for_namespace(org.get("org_id"))
+    # Org-wide key / session auth: the org's DEFAULT graph. #10180: that is the
+    # promoted graph's namespace when the org has promoted one (see
+    # `_default_graph_name`, which `_data_sdk` opens with — the two MUST agree,
+    # because this value is what the admission gate and the in-flight capture
+    # registry key on). Otherwise it is the historical `namespace=org_id`
+    # derivation, byte-for-byte as before.
+    # Deliberately not the raw `graph_namespace` on every lane: in the registry
+    # lane that field is `t.graph_name`/`org_{name}`, a graph `_data_sdk` never
+    # opened (#2023) — `_default_graph_name` returns None there for exactly that
+    # reason, so this cannot bucket a request by a graph it does not write.
+    return _default_graph_name(org) or _graph_name_for_namespace(org.get("org_id"))
 
 
 def _capture_session_key(org: dict, session_id: str | None) -> str | None:
@@ -703,6 +1189,16 @@ def _capture_session_key(org: dict, session_id: str | None) -> str | None:
     """
     if not session_id:
         return None
+    # #10452 review: the KEY must name the graph the WRITE opens. Both read the
+    # ONE source — `_admitted_default_namespace`, the namespace this request was
+    # admitted with — and both fall through to the historical
+    # `namespace=org_id` derivation (this function via `_data_graph_name`, the
+    # write via `_hydrate_default_namespace`, which reads nothing). That is what
+    # makes the two agree on every branch: neither may consult a control-plane
+    # instant the other cannot see (see `_hydrate_default_namespace`).
+    carried = _admitted_default_namespace(org)
+    if carried:
+        org = {**org, "graph_namespace": carried}
     graph = _data_graph_name(org)
     if graph is None:
         # Fail closed: a bound key whose namespace did not resolve opens NO
@@ -1157,7 +1653,10 @@ def _iter_registered_orgs(*, require_complete: bool = False) -> list[dict] | Non
                 # advanced `last_id`.
                 asked_for_count = last_id is None
                 page, page_total = _read_page(
-                    "organizations", select=["id", "name"],
+                    # #10180: `graph_name` rides the same page so the
+                    # event-retention sweep can resolve each org's DEFAULT graph
+                    # without a second read per org (`_org_sdk(..., namespace=)`).
+                    "organizations", select=["id", "name", "graph_name"],
                     filters=page_filters,
                     # A stable `order` is REQUIRED: keyset paging is only sound
                     # if the cursor column is the sort key.
@@ -1234,7 +1733,11 @@ def _iter_registered_orgs(*, require_complete: bool = False) -> list[dict] | Non
                     if rid in emitted:
                         continue
                     emitted.add(rid)
-                parsed.append({"org_id": rid, "name": r.get("name")})
+                # #10180: carry `graph_name` through — it is fetched on the
+                # same page precisely so the retention sweep can resolve each
+                # org's DEFAULT graph without a second read per org.
+                parsed.append({"org_id": rid, "name": r.get("name"),
+                               "graph_name": r.get("graph_name")})
             # Completeness. The walk above stops only on an EMPTY page (or the
             # page cap, which leaves ``exhausted`` False); only THEN is it asked
             # whether the fleet is complete:
@@ -1524,7 +2027,7 @@ def _sweep_events() -> None:
             if existing is not None and f"org_{org['org_id']}" not in existing:
                 continue
             try:
-                sdk = _make_sdk(namespace=org["org_id"])
+                sdk = _org_sdk(org["org_id"], namespace=org.get("graph_name"))
                 proj = sdk._get_proj()
                 purge_expired(proj, retention_days=days)
                 purge_overflow(proj, max_events=cap)
@@ -2663,6 +3166,20 @@ _DREAM_QUEUES: dict[str, asyncio.Queue] = {}
 # enqueue (where the request's credential is in hand), read in `_open_sdk`,
 # and popped WITH the queue so it cannot outlive the key it describes.
 _DREAM_RECORD_TENANTS: dict[str, tuple[str, str]] = {}
+# #10452 review P2: the GRAPH the enqueueing request resolved, per dream key. The
+# drain used to resolve `_org_sdk(org_id)` for an ORG-WIDE key, i.e. read the
+# org's default at DRAIN time, while the tenant beside it was captured at
+# ENQUEUE time — so a `promote_default_graph` committing in that window made the
+# pass write its nodes into the PROMOTED graph and file every record it emitted
+# under the DEMOTED one. That is the `derived != measured` split #10025 exists to
+# remove, and it contradicts the promise this file publishes for the verb ("an
+# in-flight capture — and anything already queued behind it, including the dream
+# drain it enqueues ... finishes against the graph it started on"). So the graph
+# is carried BY VALUE beside the tenant, from the same credential, and the drain
+# opens it with NO read of its own (`_org_sdk_from_name`). Set at enqueue only
+# when a tenant was carried (no tenant ⇒ nothing to split, and the pre-fix
+# fail-soft read stays), and popped WITH the queue.
+_DREAM_DRAIN_GRAPHS: dict[str, str | None] = {}
 # #329: per-org hourly budget for /v1/dream?full=true (CPU DoS bound)
 _DREAM_FULL_BUCKETS: dict[str, list[float]] = {}
 _DREAM_TASKS: dict[str, asyncio.Task] = {}
@@ -2677,11 +3194,14 @@ _DREAM_QUEUE_TTL_S = 600
 # class. `asyncio.to_thread` submits to the loop's SHARED default executor, and
 # this module's own #3060 criterion (:145-160) is explicit that the shared pool
 # "is fine for short work" and "NOT fine" for long/stallable work. The ~80
-# other `to_thread` sites on that pool include the auth middleware's abuse
-# hooks (`_abuse_post_auth`, awaited on EVERY authenticated request), so a
-# burst of dream passes would park every worker (prod is 2 vCPU →
+# other `to_thread` sites on that pool are enough on their own to park every
+# worker during a burst (prod is 2 vCPU →
 # `min(32, cpu+4)` = 6) and stall unrelated tenants BEFORE their handlers —
-# while `/health` stays green by design (#2850), so nothing would notice. That
+# #10618 removed the last PER-REQUEST tenant of that pool (`first_api_call` and
+# `_abuse_post_auth`, both awaited on every authenticated request; they ride the
+# bounded telemetry lane now), which shortens no fuse: the shared pool is still
+# unbounded-wait and still `min(32, cpu+4)`. While `/health` stays green by
+# design (#2850), nothing would notice. That
 # is the #3060 starvation path relocated, not removed. Dream therefore gets its
 # OWN pool: it can only ever starve itself.
 #
@@ -2881,7 +3401,8 @@ def _dream_lock(key: str) -> threading.Lock:
 
 def _enqueue_dream(org_id: str, dirty_roots: list[str],
                    *, graph_namespace: str | None = None,
-                   record_tenant: tuple[str, str] | None = None) -> None:
+                   record_tenant: tuple[str, str] | None = None,
+                   default_graph_name: str | None = None) -> None:
     """Enqueue affected roots for a tenant's next dream cycle (per graph).
 
     ``record_tenant`` (#9188) is the Postgres record's tenant for THAT graph,
@@ -2900,6 +3421,14 @@ def _enqueue_dream(org_id: str, dirty_roots: list[str],
     key = _dream_key(org_id, graph_namespace)
     if record_tenant is not None:
         _DREAM_RECORD_TENANTS[key] = record_tenant
+        # #10452 review P2: carry the GRAPH too, so the drain cannot re-resolve
+        # it at drain time and land on the other side of a promotion from the
+        # tenant above. `default_graph_name` is the I/O-free answer this
+        # request's own credential already carries (`_default_graph_name`);
+        # ``None`` is the HISTORICAL open, not "unknown", so an unpromoted org
+        # keeps the exact graph it always drained.
+        _DREAM_DRAIN_GRAPHS[key] = (graph_namespace if graph_namespace is not None
+                                    else default_graph_name)
     q = _DREAM_QUEUES.setdefault(key, asyncio.Queue())
     for root in dirty_roots[: _DREAM_BATCH_MAX]:
         q.put_nowait(root)
@@ -2983,7 +3512,11 @@ def _dispatch_webhooks_sync(org_id: str, graph_namespace: str | None = None,
     elif graph_namespace is not None:
         sdk = _make_sdk(graph_name=graph_namespace)
     else:
-        sdk = _make_sdk(namespace=org_id)
+        # Org-wide: the org's DEFAULT graph, through the ONE resolver (#10180).
+        # After a promotion this is the promoted graph, so the events dispatched
+        # here are the ones the request path actually emitted; before one it is
+        # byte-identical to `_make_sdk(namespace=org_id)`.
+        sdk = _org_sdk(org_id)
     try:
         return _webhook_delivery.dispatch_pending(sdk._get_proj())
     finally:
@@ -3427,8 +3960,17 @@ async def _dream_worker(org_id: str, key: str | None = None) -> None:
             # fail closed to, and its roots are already drained — an offload
             # failure there would DROP them (until a later sweep) while logging
             # a capacity signal as a graph failure.
-            sdk = (_make_sdk(graph_name=gns) if gns is not None
-                   else _make_sdk(namespace=org_id))
+            if gns is not None:
+                sdk = _make_sdk(graph_name=gns)
+            elif key in _DREAM_DRAIN_GRAPHS:
+                # #10452 review P2: the ORG-WIDE graph this enqueue resolved,
+                # opened BY VALUE — no read here, so the pass cannot land on the
+                # other side of a promotion from the tenant it binds below.
+                sdk = _org_sdk_from_name(org_id, _DREAM_DRAIN_GRAPHS[key])
+            else:
+                # Nothing was carried (the tenant was unnameable), so there is
+                # no pair to keep together — keep the pre-fix fail-soft read.
+                sdk = _org_sdk(org_id)
             # #9188: this drain writes as the tenant the ENQUEUEING request
             # named (see `_DREAM_RECORD_TENANTS`) — otherwise every dream-
             # emitted record on an armed hosted lane is refused `no_tenant`.
@@ -3495,6 +4037,7 @@ async def _dream_worker(org_id: str, key: str | None = None) -> None:
             # stale one would make every dream-emitted record `write_failed`
             # (counted, never misfiled, but a permanent red nobody can explain).
             _DREAM_RECORD_TENANTS.pop(key, None)
+            _DREAM_DRAIN_GRAPHS.pop(key, None)
 
 
 # ── Rate Limiter ──────────────────────────────────────────────────
@@ -5783,13 +6326,27 @@ def _record_health() -> dict:
         serves several.
 
     ``ok`` is False when the value was SET and refused, when the counters could
-    not be read, and when the tenancy resolution could not be read — a
+    not be read, when the tenancy resolution could not be read, and when the
+    record is REFUSING writes RIGHT NOW (``degraded``, #10185/#10620) — a
     monitoring surface that cannot read its own state must not report healthy,
-    that being fail-open on the monitoring path itself. All three fold into
-    ``status`` (the ``backup_watcher`` rule: off-by-policy stays ``ok``,
-    "wanted but broken" degrades). A refused DSN is exactly the silent-arming
-    defect this exists to end: it is counted ``malformed_dsn`` on every capture
-    and the record stays empty while the operator believes it is armed.
+    and one that reads "rows are being dropped" and still says ``ok`` is worse
+    than one that cannot read at all. All of them fold into ``status`` (the
+    ``backup_watcher`` rule: off-by-policy stays ``ok``, "wanted but broken"
+    degrades). A refused DSN is exactly the silent-arming defect this exists to
+    end: it is counted ``malformed_dsn`` on every capture and the record stays
+    empty while the operator believes it is armed.
+
+    ``degraded`` is WINDOW-based, not a fold over the cumulative counters. #10185
+    (owner-authored, the open home for this half) measured why the obvious fold
+    is wrong and forbids it verbatim: *"Do not simply fold
+    any(record_write_failures) ⇒ ok = False. The counters are cumulative since
+    process start and never reset, so one historical refusal … would pin the
+    deployment `degraded` forever"*. It is wrong in BOTH directions — that
+    forever-red, and a restart that reads ``ok: true`` while the rows are still
+    missing. So the verdict is :func:`monitoring.record_refusing`: a refusal
+    inside a bounded window, which clears on its own with no restart and no
+    counter reset (#10185 indicator 2). The cumulative totals stay in
+    ``record_write_failures`` as the HISTORY, per reason.
 
     Never raises and never 5xxes — a health path must always answer.
     """
@@ -5798,6 +6355,7 @@ def _record_health() -> dict:
         from tortoise.monitoring import (
             record_non_journal_skip_counts,
             record_position_unproven_count,
+            record_refusing,
             record_write_failure_counts,
         )
     except Exception as exc:  # liveness must answer, always
@@ -5811,6 +6369,8 @@ def _record_health() -> dict:
                 "record_write_failures": None,
                 "record_non_journal_skips": None,
                 "record_position_unproven": None,
+                "degraded": None, "degraded_reasons": None,
+                "refusing": None,
                 "counters_error": reason, "tenancy_error": reason,
                 "fetched_at": datetime.now(UTC).isoformat(),
                 "error": reason}
@@ -5826,6 +6386,22 @@ def _record_health() -> dict:
         "record_write_failures": None,
         "record_non_journal_skips": None,
         "record_position_unproven": None,
+        # ⛔ WHETHER THE RECORD IS LOSING ROWS RIGHT NOW (#10185/#10620). ``None``
+        # is "not evaluated" (the counter snapshot could not be read); ``False``
+        # is "no armed write was refused inside the window"; ``True`` is "rows
+        # were DROPPED moments ago", and it makes ``ok`` False — so it folds
+        # into ``status`` too. Before this field the block mirrored the counters
+        # and stopped there, which left the exact failure this surface exists to
+        # report reading as ``ok: true``: 302 point records were dropped on the
+        # hosted app (one ``jsonb`` column refusing every point that carried
+        # search keys) while ``/health`` answered `ok` for five hours. A counter
+        # with no verdict is a counter nobody reads.
+        "degraded": None,
+        "degraded_reasons": None,
+        # WHAT is refusing and HOW LONG AGO, or ``None``. ``degraded`` is this
+        # block's boolean; ``refusing`` is its identity, so an operator reading
+        # a red deployment never has to guess which arm tripped.
+        "refusing": None,
         "counters_error": None,
         "tenancy_error": None,
         "error": None,
@@ -5849,6 +6425,73 @@ def _record_health() -> dict:
     except Exception as exc:  # liveness must answer, always
         block["counters_error"] = str(exc)[:200]
         block["ok"] = False
+    # ⛔ THE VERDICT, not just the number (#10185/#10620). The full vocabulary
+    # this counter carries — SIX values, documented at
+    # ``monitoring.record_record_write_failure`` — is not uniformly
+    # replay-healable, and naming four of them here sent operators to a replay
+    # that could not exist for two:
+    #
+    #   ``write_failed``      the record was unreachable or the projection
+    #                         refused the row — a REPLAY heals it.
+    #   ``no_tenant``         armed with no tenant in scope; heal the tenant
+    #                         resolution, then replay.
+    #   ``malformed_dsn``     the value is configured but unusable — fix the
+    #                         value; every write is refused until then.
+    #   ``circuit_open``      a connect failed moments ago, so the live door
+    #                         refused locally; a replay heals it.
+    #   ``no_journal``        armed on a deployment with NO journal: the write
+    #                         has no source and NO REPLAY CAN HEAL IT — the
+    #                         remedy is to stop counting a record that can never
+    #                         exist, not to replay.
+    #   ``seam_unimportable`` the record module itself could not be imported
+    #                         (a failing import hook), so the seam never ran —
+    #                         the remedy is the import, not a replay.
+    #
+    # THE VERDICT IS WINDOW-BASED, NOT A FOLD OVER THE COUNTERS. #10185
+    # (owner-authored; the open home for this half) forbids the fold: the
+    # counters are cumulative and never reset, so `any(count > 0)` pins a
+    # deployment ``degraded`` for the life of the process after ONE transient
+    # refusal — and a flag that is always red is a flag an operator ignores —
+    # while a restart clears it with the rows still missing. So we ask the
+    # bounded-window question instead: was a write refused in the last
+    # ``RECORD_REFUSAL_WINDOW_SECONDS``? That clears on its own, with no restart
+    # and with no cumulative counter reset or hidden (#10185 indicator 2).
+    #
+    # ``degraded_reasons`` therefore names the reason behind THIS verdict (the
+    # newest counted one) with its cumulative count — the count is history, the
+    # reason is current. It is NOT a filter of the cumulative dict presented as
+    # a current state; a reason that stopped refusing drops out of it while its
+    # total stays visible in ``record_write_failures``.
+    #
+    # ⛔ THE SKIP COUNTERS ARE DELIBERATELY EXCLUDED, and this is the line that
+    # keeps `/health` from reddening on a healthy deployment: a
+    # `no_durable_journal` decline (the M2 scratch-journal lane) and a
+    # `position_unproven` append are NOT lost rows — the first has no journal to
+    # lose one from, the second is healed by a later replay (#9231/#9307). Folding
+    # either in here would make every `capture_session` read as a broken record.
+    failures = block["record_write_failures"]
+    if isinstance(failures, dict):
+        # ⛔ GUARDED, like every other read in this function (#10648 review P2).
+        # The docstring above promises this block "never raises and never
+        # 5xxes", and each sibling read — the monitoring import, the counter
+        # snapshot, the tenancy read, the DSN read — is wrapped with "liveness
+        # must answer, always". This one was not, and it is the shape that turns
+        # a monitoring fix into a 500 on the endpoint Fly probes. No current
+        # raiser exists (`record_refusing` touches one module global and
+        # `time.monotonic`); the guard is the contract, not a bug workaround.
+        try:
+            refusing = record_refusing()
+        except Exception as exc:  # liveness must answer, always
+            refusing = None
+            block["ok"] = False
+            block["error"] = f"refusal state unreadable: {str(exc)[:160]}"
+        block["refusing"] = refusing
+        reason = refusing["reason"] if refusing else None
+        block["degraded"] = bool(refusing)
+        block["degraded_reasons"] = (
+            {reason: failures.get(reason, 0)} if isinstance(reason, str) else {})
+        if refusing:
+            block["ok"] = False
     try:
         block["single_tenant_declared"] = record_writer.single_tenant_declared()
     except Exception as exc:
@@ -5941,7 +6584,14 @@ async def health():
     the process can resolve) and the same class as ``backup_watcher`` (a
     durability seam whose "off" state must be distinguishable from "on"). See
     ``_record_health``; it collects no I/O, and only a REFUSED DSN, an unread
-    counter snapshot, or an unread tenancy resolution degrades ``status``.
+    counter snapshot, an unread tenancy resolution, or an armed write REFUSED
+    inside ``RECORD_REFUSAL_WINDOW_SECONDS`` (``record.refusing`` feeding
+    ``record.degraded``, #10185/#10620 — the record is dropping rows RIGHT NOW)
+    degrades ``status``. A NON-ZERO ``record_write_failures`` whose last refusal
+    is older than that window does NOT: the counters are cumulative since
+    process start and never reset, so folding the total in would pin the
+    deployment degraded for the life of the process — the forever-red failure
+    #10185 forbids (``test_a_historical_refusal_does_not_degrade_forever``).
 
     Build check (#10447): ``build`` names the build that is SERVING — commit,
     whether the tree was dirty at build time (stamped by the deploy; `null` means
@@ -6509,11 +7159,19 @@ async def get_current_org(request: Request) -> dict:
         # tortoise/analytics.py); distinct_id is the key creator's user UUID
         # (joins web + server funnels), with org_id fallback for legacy/
         # bootstrap keys that predate created_by.
+        # #10618: activation telemetry, so it rides the bounded telemetry lane
+        # — NOT the loop's shared default executor, which is what made this
+        # per-request hop able to park a request BEFORE its handler.
         if first_api_call_pending(org_id):
-            await asyncio.to_thread(
-                first_api_call,
-                created_by or org_id, org_id, request.url.path, request.method,
-            )
+            try:  # noqa: SIM105
+                await _telemetry_hook_off_loop(
+                    functools.partial(
+                        first_api_call,
+                        created_by or org_id, org_id, request.url.path,
+                        request.method),
+                    op="first_api_call")
+            except Exception:
+                pass  # never gate auth on activation telemetry
         # #329: fetch quota limits in the SAME fetch as tier (one round-trip;
         # mirrors quota.resolve_org_limits so REST and MCP see identical limits).
         org = sdk._get_registry().query(
@@ -6564,6 +7222,19 @@ async def get_current_org(request: Request) -> dict:
         from tortoise.pricing import tier_limits
         request.state.org_id = org_id
         request.state.tier = tier or "free"
+        # `graph_id` MUST ride along: it is the whole of
+        # `_publish_default_namespace`'s ORG-WIDE-ONLY guard. Omit it and the
+        # guard cannot fire, so a GRAPH-BOUND registry key publishes its own
+        # custom namespace — which passes the `org_{org_id}_` shape test — as
+        # the org's default, in direct contradiction of the helper's docstring
+        # and of every Supabase sibling call site (they pass the resolved `org`
+        # dict, which carries it). Inert TODAY only because this lane runs with
+        # `is_supabase_enabled()` false and `moved_default_namespace` answers
+        # `None` off that branch; the shape is still wrong, and the next reader
+        # of the guard would find it not doing what it says (tortoise#10452).
+        _publish_default_namespace({"org_id": org_id,
+                                    "graph_namespace": graph_namespace,
+                                    "graph_id": graph_id})
         lim = tier_limits(tier or "free")
         # max_orgs removed: multi-org is a USER capability, not a tier field
         # (per-org billing; tier limits come from pricing.json)
@@ -6680,16 +7351,25 @@ async def _get_current_org_supabase(request: Request, token: str) -> dict:
         # #528: activation telemetry — first successful API auth per org.
         # created_by (key creator's user UUID) joins web + server funnels,
         # with org_id fallback for keys that predate created_by.
+        # #10618: activation telemetry, so it rides the bounded telemetry lane
+        # — NOT the loop's shared default executor, which is what made this
+        # per-request hop able to park a request BEFORE its handler.
         if first_api_call_pending(org_id):
-            await asyncio.to_thread(
-                first_api_call,
-                org.get("created_by") or org_id, org_id,
-                request.url.path, request.method,
-            )
+            try:  # noqa: SIM105
+                await _telemetry_hook_off_loop(
+                    functools.partial(
+                        first_api_call,
+                        org.get("created_by") or org_id, org_id,
+                        request.url.path, request.method),
+                    op="first_api_call")
+            except Exception:
+                pass  # never gate auth on activation telemetry
         request.state.org_id = org_id
         request.state.tier = org["tier"]
-        # #308: R3 read velocity + R4 geo (best-effort, off the critical
-        # path via to_thread).
+        _publish_default_namespace(org)
+        # #308: R3 read velocity + R4 geo (best-effort). #10618: it rides the
+        # bounded telemetry lane, never the loop's shared default executor —
+        # this hook is awaited on EVERY authenticated request.
         await _abuse_post_auth(request, org)
         # #2600: canonical actor_user_id alias (UUID-gated, reads created_by
         # already on the resolve_api_key dict). Additive; ContextVar set lives
@@ -6861,7 +7541,7 @@ async def _session_user_org(request: Request, user: dict) -> dict:
         _ORG_ADDITIVE_IMPORT_TIER,
         _QUOTA_SELECT,
         _orgs_row_fail_soft,
-        default_graph_id_for_credential,
+        default_graph_for_credential,
     )
     row = await _cp_offload(
         lambda: _orgs_row_fail_soft(
@@ -6932,6 +7612,17 @@ async def _session_user_org(request: Request, user: dict) -> dict:
         # column, in _ORG_BASE_SELECT) so /v1/team can tell the Graphs tab
         # that backups are OFF for this team rather than merely unrecorded.
         "backup_enabled": row.get("backup_enabled"),
+        # #10180: the org's DEFAULT graph namespace, carried on the credential so
+        # this lane resolves the same default `resolve_api_key` gives a
+        # key-auth request (`graph_namespace`) — including after the default has
+        # been PROMOTED into another namespace. It is stamped BELOW, from the
+        # same single read that yields `default_graph_id` (#10452 review F2):
+        # taken off the `organizations` row (`row["graph_name"]`) while the id
+        # came from a later `public.graphs` read, a promotion committing between
+        # the two opened the DEMOTED graph and filed the record rows under the
+        # PROMOTED one. `graph_name` stays the FALLBACK value on the arm where
+        # that read is refused.
+        #
         # #2475: dashboard_key_login doubles as the UI state the dashboard
         # switch renders (website/apps/dashboard main.jsx: aria-checked /
         # data-on = org.dashboard_key_login !== false) — carry the REAL
@@ -6951,9 +7642,16 @@ async def _session_user_org(request: Request, user: dict) -> dict:
     # refused `no_tenant` while the data lands in the default graph
     # (`_data_sdk` opens `namespace=org_id`): a whole credential class invisible
     # to the record, silently. Resolved through the SAME home the API-key lane
-    # uses — `default_graph_id_for_credential`, which is
-    # `default_graph_id_for` plus the on-miss mint — never a second notion of
-    # "which graph is this".
+    # uses — `default_graph_for_credential`, which is the pair plus the on-miss
+    # mint — never a second notion of "which graph is this".
+    #
+    # ⛔ BOTH FIELDS COME FROM THAT ONE READ (#10452 review F2, and the reason
+    # this lane no longer stamps `graph_namespace` in the dict literal above):
+    # the namespace used to come off the `organizations` row while the id came
+    # from a later `public.graphs` read, so a promotion committing between them
+    # left this credential opening the DEMOTED graph and filing the record under
+    # the PROMOTED one. `row["graph_name"]` remains the FALLBACK namespace, for
+    # the arm where the read is refused (fail-soft, otherwise unchanged).
     #
     # Fail-soft and never gating the request (#5148's rule, and the resolver's
     # own contract): a `None` here is a NAMED refusal counted `no_tenant`, not
@@ -6966,17 +7664,26 @@ async def _session_user_org(request: Request, user: dict) -> dict:
     # `OFFLOAD_REFUSED` sentinel rather than `None` (see `_cp_offload`).
     # `record_tenant_for` type-checks `str`, so the refusal direction is already
     # fail-closed — but the sentinel must not sit in a field NAMED
-    # `default_graph_id`, so it is normalised here and a later consumer cannot
-    # inherit it.
-    _resolved_default_graph_id = await _cp_offload(
-        lambda: default_graph_id_for_credential(
+    # `default_graph_id`, so the pair is normalised here and a later consumer
+    # cannot inherit it.
+    _resolved_default_pair = await _cp_offload(
+        lambda: default_graph_for_credential(
             cp, org_id, row.get("graph_name"),
             context="session auth self-heal"),
         op="default_graph_row", best_effort=True)
+    _pair_namespace, _pair_row_id = (
+        _resolved_default_pair
+        if isinstance(_resolved_default_pair, tuple)
+        and len(_resolved_default_pair) == 2
+        else (None, None))
     org["default_graph_id"] = (
-        _resolved_default_graph_id
-        if isinstance(_resolved_default_graph_id, str) and _resolved_default_graph_id
+        _pair_row_id
+        if isinstance(_pair_row_id, str) and _pair_row_id
         else None)
+    org["graph_namespace"] = (
+        _pair_namespace
+        if isinstance(_pair_namespace, str) and _pair_namespace
+        else row.get("graph_name"))
     # #1913: post-auth abuse evaluation — the session-JWT lane was the
     # abuse-blind hole (key lanes call _abuse_post_auth in get_current_org /
     # _get_current_org_supabase; session-driven REST calls never recorded an
@@ -6992,6 +7699,7 @@ async def _session_user_org(request: Request, user: dict) -> dict:
     # (UNMETERED_INCREMENT on a perfectly resolvable org). Setting it here —
     # before the handler runs — makes the org resolvable at the boundary.
     request.state.org_id = org["org_id"]
+    _publish_default_namespace(org)
     return org
 
 
@@ -7243,13 +7951,20 @@ def _dream_record_tenant(org: dict,
       (``_open_sdk`` → ``_make_sdk(graph_name=gns)``), and the credential's own
       answer names it (a present ``graph_id`` answers or refuses — see
       :func:`tortoise.record_writer.record_tenant_for`);
-    * ``graph_namespace`` None → the drain opens the ORG-WIDE graph
-      (``_open_sdk`` → ``_make_sdk(namespace=org_id)``), which is BYTE-IDENTICAL
-      to what `_data_sdk` opens for the same credential on this very request
-      (`_make_sdk(namespace=org_id)`) — so an org-wide API KEY's
-      ``default_graph_id`` names exactly the graph the pass will write. That is
-      #10025's whole premise, and the REST request lane already files its rows
-      that way (`_bind_record_tenant`, reached from `_data_sdk`).
+    * ``graph_namespace`` None → the drain opens the ORG-WIDE graph, i.e. the
+      same graph `_data_sdk` opened for this very request. That is #10025's
+      whole premise, and the REST request lane already files its rows that way
+      (`_bind_record_tenant`, reached from `_data_sdk`).
+
+    ⛔ AND THE GRAPH IS CARRIED WITH IT (#10452 review P2). "The same graph"
+    used to be an argument about the resolver, not a fact about the drain: the
+    drain called `_org_sdk(org_id)` itself, i.e. READ the org's default at
+    DRAIN time, so a `promote_default_graph` committing between the enqueue and
+    the pass made the nodes land in the PROMOTED graph while ``default_graph_id``
+    filed every record under the DEMOTED one. `_enqueue_dream` therefore also
+    carries the graph (`_DREAM_DRAIN_GRAPHS`, resolved I/O-free from this same
+    credential) and the drain opens it by name, so the pair is one answer at
+    both ends.
 
     The ONE shape that must NOT carry a tenant is a **graph-bound credential
     with a falsy namespace**: `graph_namespace` is then None, so the enqueue
@@ -7334,26 +8049,32 @@ def _bind_record_tenant(sdk: TortoiseSDK, org: dict) -> None:
                         exc_info=True)
 
 
-def _bind_default_graph_record_tenant(sdk: TortoiseSDK,
-                                      org_id: str) -> None:
+_UNRESOLVED_DEFAULT_GRAPH = object()
+
+
+def _bind_default_graph_record_tenant(
+        sdk: TortoiseSDK, org_id: str,
+        *, default_graph_id: object = _UNRESOLVED_DEFAULT_GRAPH) -> None:
     """Bind the ORG'S DEFAULT GRAPH as this lane's record tenant (#10047).
 
     For the lanes that build their OWN SDK — the two background indexing jobs,
     the index-completion relink, and the two seed runners. Their auth is either
     a detached ``asyncio`` task (the jobs keep only ``org_id``) or a plain
     ``org_id`` parameter (the runners), so NONE of them holds the credential
-    dict ``_data_sdk`` resolves a tenant from; they open
-    ``_make_sdk(namespace=org_id)`` and every record they emit was refused
-    ``no_tenant`` no matter which credential started them.
+    dict ``_data_sdk`` resolves a tenant from; they open ``_org_sdk(org_id)``
+    and every record they emit was refused ``no_tenant`` no matter which
+    credential started them.
 
-    What they DO share is the graph they write: ``namespace=org_id`` is the
-    org's DEFAULT graph, BY CONSTRUCTION — these lanes cannot be pointed at a
-    custom graph (adding that is a tenancy change, not a record fix). So the
-    tenant they need is exactly the one #10025 made nameable:
-    ``default_graph_id_for``'s active ``kind='default'`` ``public.graphs`` id.
-    Never a graph-bound key's id — that is a different graph from the one the
-    lane opens, and binding it would file the rows under a graph the write
-    never touched (the #9188 N3 hazard).
+    What they DO share is the graph they write: ``_org_sdk`` opens the org's
+    DEFAULT graph, **resolved the same way the request lane resolves it** (see
+    ``_org_sdk`` / ``moved_default_namespace`` — ``namespace=org_id`` for every
+    org that has not promoted, the promoted graph's namespace afterwards) — and
+    these lanes cannot be pointed at a custom graph (adding that is a tenancy
+    change, not a record fix). So the tenant they need is exactly the one #10025
+    made nameable: ``default_graph_id_for``'s active ``kind='default'``
+    ``public.graphs`` id. Never a graph-bound key's id — that is a different
+    graph from the one the lane opens, and binding it would file the rows under
+    a graph the write never touched (the #9188 N3 hazard).
 
     ONE chokepoint, no second write path: the id is put on a credential-shaped
     dict and handed to :func:`_bind_record_tenant`, so the answer still comes
@@ -7380,26 +8101,37 @@ def _bind_default_graph_record_tenant(sdk: TortoiseSDK,
     (``_github_token_enc`` / ``_get_onboarding_state`` for the jobs), it is not
     per-request, and it cannot fail the lane: an unreadable control plane logs
     and leaves the write refused, which is the direction #5148 requires.
+
+    ``default_graph_id`` is the PRE-RESOLVED id, for a lane that already read it
+    — and it exists because the id and the namespace are answers about ONE row:
+    `_org_default_graph` reads both in one round trip, and a lane that took the
+    name from there and then read the id again here would straddle a promotion
+    committing between the two, writing the DEMOTED graph's namespace while
+    filing every record under the PROMOTED graph's id. Passing it (including
+    ``None``, meaning "no row was nameable — bind nothing") skips the read and
+    closes that window; omitting it keeps the read for the lanes that resolved
+    nothing else.
     """
-    try:
-        from tortoise.supabase_control import (
-            default_graph_id_for,
-            get_control_plane,
-            is_supabase_enabled,
-        )
-        # The SELF-HOST lane has no control plane and no `public.graphs` row to
-        # read: `record_tenant_for` refuses its ids anyway (they are Falkor
-        # `:Graph` node ids the record's FK cannot satisfy), so do not pay a
-        # control-plane call to learn that.
-        if not is_supabase_enabled():
+    if default_graph_id is _UNRESOLVED_DEFAULT_GRAPH:
+        try:
+            from tortoise.supabase_control import (
+                default_graph_id_for,
+                get_control_plane,
+                is_supabase_enabled,
+            )
+            # The SELF-HOST lane has no control plane and no `public.graphs` row
+            # to read: `record_tenant_for` refuses its ids anyway (they are
+            # Falkor `:Graph` node ids the record's FK cannot satisfy), so do not
+            # pay a control-plane call to learn that.
+            if not is_supabase_enabled():
+                return
+            default_graph_id = default_graph_id_for(get_control_plane(), org_id)
+        except Exception:
+            _logger.warning(
+                "could not resolve the DEFAULT-graph record tenant for org %s — "
+                "its record writes stay refused no_tenant",
+                org_id, exc_info=True)
             return
-        default_graph_id = default_graph_id_for(get_control_plane(), org_id)
-    except Exception:
-        _logger.warning(
-            "could not resolve the DEFAULT-graph record tenant for org %s — "
-            "its record writes stay refused no_tenant",
-            org_id, exc_info=True)
-        return
     if not default_graph_id:
         return
     _bind_record_tenant(sdk, {"org_id": org_id, "graph_id": None,
@@ -7452,13 +8184,18 @@ def _data_sdk(org: dict) -> TortoiseSDK:
       resolved FULL graph name (custom org_{tid}_{gid} or a bound default)
       via the explicit graph-name seam — cross-graph denied at the app
       layer (ACL-OFF proof), never widened onto the org default.
-    - org-wide key / session auth (graph_id None): the DEFAULT graph via
-      the namespace path (namespace=org_id) — BYTE-IDENTICAL to today's
-      open (E2E-5 regression gate: existing org-key flows unchanged).
-      graph_namespace (t.graph_name) is NOT used here — the hosted lane
-      stores graph_name == org_{org_id}, but the selfhost legacy lane
-      (sdk.org_create org_{name}, #2023) diverges and flipping would
-      silently move those orgs' data access.
+    - org-wide key / session auth (graph_id None): the DEFAULT graph. Opened by
+      NAME only when the default has actually MOVED (``_default_graph_name`` on
+      the credential's ``graph_namespace``, #10180 — a promotion leaves the
+      default living in the promoted graph's namespace), else by the historical
+      namespace path (``namespace=org_id``). BYTE-IDENTICAL for every org that
+      has not promoted anything, and gated on the DATA rather than on the lane:
+      `_moved_default_namespace` returns None unless the namespace is a
+      per-graph namespace of this org, so the selfhost legacy lane
+      (``sdk.org_create org_{name}``, #2023), a pre-#3543 ``team_{org_id}`` row
+      and an untouched ``org_{org_id}`` all keep the open they always had — with
+      the SDK's own ``namespace=`` shape, which ``_namespace`` and the
+      fallback-snapshot identity key depend on.
 
     #9188: the SDK it returns also carries this request's RECORD tenant
     (``_bind_record_tenant``), resolved from the same dict by the one
@@ -7502,7 +8239,15 @@ def _data_sdk(org: dict) -> TortoiseSDK:
         _assert_graph_owned(org, gid, ns)
         sdk = _make_sdk(graph_name=ns)
     else:
-        sdk = _make_sdk(namespace=org_id)
+        # Org-wide key / session auth: the org's DEFAULT graph, opened BY NAME
+        # when the credential carries one (#10180 — a promoted default lives in
+        # another namespace; the fallback keeps the historical
+        # `namespace=org_id` open byte-identical). `_default_graph_name` is
+        # hosted-only and returns None in the registry lane, so self-host data
+        # access is unchanged by construction.
+        _default_ns = _default_graph_name(org)
+        sdk = (_make_sdk(graph_name=_default_ns) if _default_ns
+               else _make_sdk(namespace=org_id))
     # #9188: the record's tenant rides THIS SDK (see `_bind_record_tenant`).
     # After the bind and before the caller can write: an armed record on this
     # lane is otherwise refused `no_tenant` on every request.
@@ -7510,7 +8255,85 @@ def _data_sdk(org: dict) -> TortoiseSDK:
     return sdk
 
 
-async def _data_sdk_offloaded(org: dict) -> TortoiseSDK:
+class _ProjectionOpenError(RuntimeError):
+    """The projection COLD OPEN failed inside the construction submission.
+
+    ``_data_sdk_with_projection`` bundles TWO different things into ONE worker
+    call, and a read route must map only ONE of them as a store impairment
+    (#10602 review P3):
+
+    * ``_data_sdk`` — the tenancy resolver (``_make_sdk``,
+      ``_assert_graph_owned``, ``_bind_record_tenant``). A fault there is OUR
+      bug or a structural refusal, and it must propagate UNCHANGED, exactly as
+      it did before the attach existed;
+    * ``sdk._get_proj()`` — the OPEN: connect, version probe,
+      ``_ensure_indexes()``. Its failure IS the store, which is why the SDK's
+      own ``tortoise_fts_query`` arm maps *any* exception from ``_get_proj()``
+      to ``status: degraded`` (``tortoise/sdk.py``).
+
+    Without a distinct type the route can only choose between two wrong
+    answers: a blanket ``except Exception`` that serves a tenancy fault to the
+    client as a STORE OUTAGE (unfalsifiable from the wire, and the mirror of the
+    misattribution rule this change applies everywhere else), or a narrow
+    class-based arm that stops recognising a real outage. Naming the SOURCE of
+    the failure keeps both honest.
+
+    The original rides along as ``__cause__``, so the driver's message and the
+    traceback reach the log unchanged.
+    """
+
+
+#: Exceptions that keep their own meaning when the attach raises them — a
+#: refusal the SDK itself produced is not a store-open failure.
+_ATTACH_PASSTHROUGH = (HTTPException,)
+
+
+def _data_sdk_with_projection(org: dict) -> TortoiseSDK:
+    """#10602: ``_data_sdk`` PLUS the projection attach, in ONE worker call.
+
+    The attach is the COLD half of a read: ``Projection.__init__`` connects,
+    probes the version and runs ``_ensure_indexes()`` — and when an index is
+    MISSING it BUILDS it over the whole graph (the O(1) fast path exists only
+    once the index is there; a restored/DR graph reaches the fresh branch with
+    arrays and no index — see ``projection``'s own note). That is the phase this
+    repo budgets with ``probe_setup_timeout()`` (20 s, up to 300 s) and why the
+    graph lane's bound is ``probe_setup_timeout() + margin``: *"a cold projection
+    open is a legitimate ~28-round-trip phase"* that must never be
+    false-degraded into a retryable 503.
+
+    So the attach rides the CONSTRUCTION lane (whose bound already covers it),
+    and the read submission on the ``read`` lane contains only the QUERY. That
+    is what makes the read lane's shorter bound honest — without it, the bound
+    would be measuring an index build, and a DR graph's first read would be
+    refused as a capacity failure while the store is healthy (cycle-2 review,
+    P1).
+
+    Failure closes the SDK first: the handle was opened by ``_data_sdk``, so a
+    raise from ``_get_proj()`` would otherwise leak it. Then it is RE-RAISED as
+    :class:`_ProjectionOpenError`, so as to be distinguishable from the errors of
+    ``_data_sdk`` itself (#10602 review P3).
+    """
+    sdk = _data_sdk(org)
+    try:
+        sdk._get_proj()
+    except BaseException as exc:
+        with contextlib.suppress(Exception):
+            sdk.close()
+        # Attribute the failure to its SOURCE (#10602 review P3). Only the
+        # ATTACH's failure is a store condition — `_data_sdk`'s own errors have
+        # already been raised above, outside this `try`, and keep propagating
+        # unchanged. A refusal the SDK raised on purpose
+        # (``_ATTACH_PASSTHROUGH``) keeps its own meaning; a cancellation or a
+        # ``KeyboardInterrupt`` is not a store verdict either.
+        if isinstance(exc, Exception) and not isinstance(
+                exc, _ATTACH_PASSTHROUGH):
+            raise _ProjectionOpenError(str(exc)) from exc
+        raise
+    return sdk
+
+
+async def _data_sdk_offloaded(org: dict, *,
+                              attach_projection: bool = False) -> TortoiseSDK:
     """#3773: ``_data_sdk`` off the event loop (context-isolated).
 
     The write handlers built their per-request SDK inline, so in embedded mode
@@ -7523,8 +8346,19 @@ async def _data_sdk_offloaded(org: dict) -> TortoiseSDK:
     The #2600 actor bind runs LOOP-side first: the off-loaded call executes
     under a context COPY, so its own bind does not reach the loop — and the
     later off-loaded write's ``asyncio.to_thread`` copies the LOOP's context.
+
+    ``attach_projection`` (#10602) bundles ``sdk._get_proj()`` into the SAME
+    submission — still ONE ``graph``-lane submission per request (the pinned
+    occupancy), but now carrying the cold open, so the read that follows on the
+    read lane is a hot query against an attached projection. Only the read
+    routes that are about to query the data plane pass it; a route that never
+    touches the projection (a registry or control-plane read) must not pay a
+    connect it does not use.
     """
     _bind_actor_context(org)
+    if attach_projection:
+        return await _graph_offload(
+            lambda: _data_sdk_with_projection(org), op="data_sdk.attach")
     return await _graph_offload(lambda: _data_sdk(org), op="data_sdk")
 
 
@@ -7619,6 +8453,7 @@ async def get_current_org_gated(request: Request) -> dict:
         # bare dict; a missing id must not turn a metering lookup into a 500.
         if org.get("org_id"):
             request.state.org_id = org["org_id"]
+            _publish_default_namespace(org)
         return org
     return await get_current_org(request)
 
@@ -7808,6 +8643,7 @@ async def get_current_org_session(request: Request, gate_key_login: bool = True)
         # reason: an override may return a bare dict.
         if org.get("org_id"):
             request.state.org_id = org["org_id"]
+            _publish_default_namespace(org)
         return org
     # Session JWT (eyJ...) — verify + resolve the user's org.
     user = await get_current_user(request)
@@ -7873,6 +8709,93 @@ def _key_limit_refusal(
         QuotaExceededError(message, resource="api_keys"))
 
 
+#: The resources whose count reads the TENANT GRAPH (`quota._count_resource`'s
+#: tenant-graph branch). For these the gate must count the graph the request
+#: actually opens; the registry-scoped resources (`api_keys`/`users`/`graphs`)
+#: are counted in the control plane and take no data SDK (#4051).
+#:
+#: ⛔ IMPORTED, never re-listed here. `quota.TENANT_GRAPH_RESOURCES` DERIVES the
+#: set (`_RESOURCE_LIMIT_KEYS` + the derived `documents` cap, minus
+#: `quota.REGISTRY_SCOPED_RESOURCES`), and `_count_resource` branches on that
+#: same declaration. A hand-copied literal equalled the truth only on the day it
+#: was written: add one gate-able resource to `_RESOURCE_LIMIT_KEYS` and this
+#: gate would return `None` for it — counting the org's DEFAULT graph while the
+#: write opens its own, which is exactly the #4051 defect — and nothing would
+#: red, because a literal cannot drift from a fact it does not share a source
+#: with (round-3 review, P2).
+#:
+#: This SUPERSEDES the `_TENANT_GRAPH_RESOURCES` literal #10180 added on this
+#: line: one name for the one set, so the two cannot drift.
+_GRAPH_SCOPED_QUOTA_RESOURCES = TENANT_GRAPH_RESOURCES
+
+
+def _gate_sdk_for(org: dict, resource: str):
+    """The SDK whose graph the org-limit gate must COUNT — #4051.
+
+    `_data_graph_name` is *"the single value the ADMISSION GATE and the opener
+    share"*, but the gate did not use it: it called `enforce_org_limit(org,
+    resource)` with no SDK, so `quota._count_resource` fell back to its own
+    `_make_sdk(namespace=org_id)` — the org's **DEFAULT** graph, whatever graph
+    the request would actually open. `_data_sdk` writes into the graph-bound
+    key's CUSTOM `org_<tid>_<gid>` graph, so the gate counted a different graph
+    than it guarded: a custom graph already OVER its `max_points` still passed
+    the commit lane's points gate (measured: 5 points against a limit of 5, the
+    default graph empty, no refusal).
+
+    This mirrors the opener's TWO call forms rather than re-deriving one:
+    a graph-bound key gets `graph_name=_data_graph_name(org)` (the value
+    `_data_sdk` passes verbatim), and an org-wide key gets exactly what
+    `_org_sdk_for_credential` builds — which is the SAME decision the #10180
+    promotion work put on this path, reused rather than restated: a moved
+    default opens `graph_name=<promoted namespace>`, and every other org opens
+    the historical `namespace=org_id`. Those two axes are ORTHOGONAL and both
+    were real — #10180 made an org-wide count follow a PROMOTION, #4051 makes a
+    graph-BOUND count follow the BINDING, and before the merge of the two each
+    fix left the other's lane vacuous.
+
+    Mirroring the FORMS matters as much as the graph: `_make_sdk` keys its
+    embedded keepalive anchor on `graph_name if graph_name is not None else
+    namespace` (`_FALLBACK_KEEPALIVE`), and that dict never evicts a HEALTHY
+    anchor — it is only replaced when `_anchor_usable` fails (#1502) and never to
+    bound its size — so `graph_name="org_team-001"` for an org-wide key would
+    park a SECOND anchor (`org_team-001` beside the write's `team-001`) for every
+    org in the process. Mirroring also preserves the "identical connection"
+    property `mcp_server._enforce_quota` states as the rule.
+
+    Two deliberate non-uses:
+    - registry-scoped resources get `None`: their count is a control-plane read
+      and building a data SDK for them would be pure cost on the key-mint path.
+    - an UNRESOLVED graph binding (`_data_graph_name` → `None`) also gets
+      `None`, and NOT because the gate's reading is harmless: what holds is that
+      **no write can occur either way** — `_data_sdk` refuses the request 403
+      GRAPH_NOT_FOUND — so returning `None` cannot widen access. Substituting a
+      graph here WOULD be a fail-open widening. ⚠️ At the three
+      `/v1/{points,objects,subjects}` sites the gate runs before that 403, so the
+      default-graph count is still taken first and a 402 can pre-empt the 403 —
+      the same ordering the residual below records for the RESOLVED arm; this
+      arm is not exempt from it.
+
+    ⛔ KNOWN RESIDUAL (recorded, not fixed): on the three `/v1/{points,objects,
+    subjects}` sites the gate runs BEFORE `_data_sdk`'s `_assert_graph_owned`, so
+    for a binding whose namespace RESOLVES but is not owned (a DB-inconsistency
+    window, never client input — `graph_namespace` is auth-stamped) the gate now
+    counts that graph and a 402 can pre-empt the 403. Closing it means either
+    moving the gate after the SDK open at those three sites or gating the graph
+    SDK on a completed ownership check; both are their own change. The commit
+    lane is NOT in this class: it opens `_data_sdk` before its gate.
+    """
+    if resource not in _GRAPH_SCOPED_QUOTA_RESOURCES:
+        return None
+    if org.get("graph_id"):
+        graph = _data_graph_name(org)
+        if graph is None:
+            return None
+        return _make_sdk(graph_name=graph)
+    if not org.get("org_id"):
+        return None
+    return _org_sdk_for_credential(org)
+
+
 def _check_org_limit(org: dict, resource: str, *,
                      slot_credit: int = 0) -> None:
     """Enforce per-org limits. Raises 402 (payment required) when at capacity.
@@ -7882,7 +8805,6 @@ def _check_org_limit(org: dict, resource: str, *,
     primitive passes 1 so the admission check is evaluated post-release. Only
     the rotate path may pass a non-zero credit, and only after
     ``quota.api_key_occupies_slot`` proved the displaced row is counted.
-
     Fail-closed decision (#686)
     ~~~~~~~~~~~~~~~~~~~~~~~~~~~
     Counting errors raise HTTP 500 (QuotaCheckError) — never a silent pass.
@@ -7914,7 +8836,26 @@ def _check_org_limit(org: dict, resource: str, *,
         quota_refusal_payload,
     )
     try:
-        enforce_org_limit(org, resource, slot_credit=slot_credit)
+        # #4051 + #10180: the points/sessions/documents counts are TENANT-graph
+        # counts, so the SDK they run against decides WHICH graph the cap is
+        # measured on. Two orthogonal ways that went wrong, both closed by
+        # `_gate_sdk_for`: (a) #4051 — a graph-BOUND key was counted in the org's
+        # DEFAULT graph while its write went to a custom one, so the gate was
+        # present and vacuous; (b) #10180 — a PROMOTED default was counted where
+        # it used to be, so a stale-low count admitted an org past its real cap
+        # (the money gate failing OPEN). `org` is the RESOLVED CREDENTIAL (not
+        # the org ROW): an org-wide one carries `graph_namespace` — its
+        # default's namespace, resolved once at auth — so this needs no
+        # control-plane read and cannot fail open.
+        #
+        # `sdk_factory=` (lazy), NOT `sdk=`: a gate that RETURNS before counting
+        # must not build a graph handle to prove it. `sessions` is unlimited by
+        # #4010 and `documents` returns for an unlimited `max_points`, so an
+        # eager resolve was measured as 0 -> 1 `_make_sdk` per capture, 764 us of
+        # it embedded, on the event loop — for a count that never ran.
+        enforce_org_limit(org, resource,
+                          sdk_factory=lambda: _gate_sdk_for(org, resource),
+                          slot_credit=slot_credit)
     except QuotaExceededError as e:
         # #4614: the refusal is a STRUCTURED, distinguishable state — a `code`
         # plus the resource/used/limit the gate actually compared — not the
@@ -8037,8 +8978,8 @@ async def _emit_capture_ledger(org_id: str, session_id: str, meta: dict,
     blocking I/O, and this API runs a single uvicorn worker (the #2988 / #3498
     class). The analytics emit goes through the SHARED off-loop entry point
     (``_emit_analytics_off_loop`` → ``_cp_offload`` on the dedicated
-    ``telemetry`` pool, #4468) rather than the loop's SHARED default executor,
-    which the abuse hooks compete on — #4015 moved every other hosted funnel
+    ``telemetry`` pool, #4468) rather than the loop's SHARED default executor
+    — #4015 moved every other hosted funnel
     emit there and left this lane for #4468. The ledger write stays on
     ``asyncio.to_thread`` deliberately: it is a DIFFERENT op (the durable
     per-period row the spend cap reads, not the analytics row), it has no
@@ -8087,8 +9028,133 @@ def _suspended_detail() -> dict:
 
 
 
+# ── #10618: the per-request telemetry hooks leave the SHARED pool ──────────
+# Every authenticated request used to pay a hop on the loop's SHARED default
+# executor (``asyncio.to_thread``) BEFORE its handler ran — ``first_api_call``
+# and ``_abuse_post_auth``. That pool is ``min(32, cpu+4)`` (**6** on prod's
+# 2 vCPU), its queue is UNBOUNDED, and ~180 other ``to_thread`` sites compete
+# for it, so a few stalled tenants parked every worker and the request that
+# could not get one never reached its handler at all. Measured (#10618): with
+# the pool full, ``await _abuse_post_auth(...)`` does not return.
+#
+# Both hooks are BEST-EFFORT TELEMETRY whose contract is "this must never gate
+# the request path", so they move to a bounded control-plane pool — the #3060
+# pattern applied to the last two per-request tenants of the shared pool. They
+# get their OWN pool (``monitoring.CONTROL_PLANE_ABUSE_*``, ``pool="abuse"``)
+# rather than riding ``telemetry``: that pool also carries the UNRECOVERABLE
+# ``billing_notify`` (its ``WebhookEvent`` marker is already committed, so a
+# refused submission is a notification lost for good), and ``check_new_country``
+# holds a PROCESS-GLOBAL lock across a PostgREST round trip, so a cold geo cache
+# — the first request after every restart — could have offered that stall the
+# capacity a billing notify needs. On their own pool the hooks can only ever
+# starve themselves.
+#
+# Delivery is PRESERVED, not traded: ``cancel_on_timeout=False`` (#4456) makes
+# the bound abandon only the AWAIT, so a submission still QUEUED when the bound
+# expires STILL RUNS, and the record lands later instead of vanishing. The only
+# real drop left is a genuinely REFUSED submission (the pool's backlog is
+# full), which is escalated to a rate-limited ERROR line
+# (``_log_abuse_offload_refused``) so a suppression is ATTRIBUTABLE — never
+# silent. That is deliberate: an attacker who can saturate the pool must not be
+# able to suppress their own velocity accounting INVISIBLY.
+#
+# The bound is short on purpose. These hooks are bookkeeping; a request must not
+# pay seconds for them, and because the bound is delivery-preserving a short one
+# costs LATENCY of the record, never the record itself.
+_ABUSE_OFFLOAD_TIMEOUT_S = 1.0
+
+#: Rate limit for the ``ABUSE_OFFLOAD_REFUSED`` ERROR floor (#10618, the #4456
+#: shape). ONE saturation refuses a hook per request for EVERY tenant — the repo
+#: already ruled against per-drop alert amplification
+#: (``operator_alert._log_shed``), so the line is shed-logged: one per window is
+#: enough to see it.
+_ABUSE_REFUSED_LOG_INTERVAL_S = 60.0
+#: ``None`` = never logged (NOT ``0.0`` — ``time.monotonic()``'s reference point
+#: is undefined, so a fresh-boot clock would suppress every line).
+_LAST_ABUSE_REFUSED_LOG: float | None = None
+_ABUSE_REFUSED_LOG_LOCK = threading.Lock()
+
+
+def _log_abuse_offload_refused(op: str) -> None:
+    """The rate-limited ERROR floor for a REFUSED hook (#10618).
+
+    Without it a refused submission is indistinguishable from routine
+    best-effort telemetry noise — a WARNING at most, and
+    ``record_control_plane_offload`` counts it on the ``bound_miss_refused``
+    outcome, neither of which says an abuse record was LOST for a request the
+    caller got a 200 for. Never raises (a reporting path must not become the
+    failure it reports).
+    """
+    global _LAST_ABUSE_REFUSED_LOG
+    with contextlib.suppress(Exception):
+        now = time.monotonic()
+        with _ABUSE_REFUSED_LOG_LOCK:
+            if (_LAST_ABUSE_REFUSED_LOG is not None
+                    and now - _LAST_ABUSE_REFUSED_LOG
+                    < _ABUSE_REFUSED_LOG_INTERVAL_S):
+                return
+            _LAST_ABUSE_REFUSED_LOG = now
+        _logger.error(
+            "ABUSE_OFFLOAD_REFUSED: %s was REFUSED by the control-plane "
+            "offload seam — the abuse/activation record for this request was "
+            "DROPPED (the abuse pool's backlog is full), so velocity "
+            "accounting is missing a request it served. One line per %.0fs "
+            "window.",
+            op, _ABUSE_REFUSED_LOG_INTERVAL_S)
+
+
+async def _telemetry_hook_off_loop(fn, *, op: str) -> None:
+    """Run ONE per-request telemetry hook on the BOUNDED ``abuse`` lane.
+
+    #10618: never the loop's shared default executor (``min(32, cpu+4)``,
+    unbounded wait — a stalled tenant there parks a request BEFORE its
+    handler). Three properties are deliberate:
+
+    * ``cancel_on_timeout=False`` (#4456) makes the short bound
+      DELIVERY-preserving: the bound abandons only the AWAIT, so a submission
+      still QUEUED when it expires STILL RUNS. A saturated pool delays the
+      record; it does not drop it.
+    * A REFUSAL (backlog full — the callable never ran) is the ONE real drop,
+      and it is reported through ``_log_abuse_offload_refused`` (rate-limited)
+      instead of being swallowed.
+    * A BOUND MISS is NOT logged per call. ``_cp_offload(best_effort=True)``
+      emits an unthrottled WARNING on every miss, and this hook runs on EVERY
+      authenticated request — under saturation that would be one WARNING per
+      request, exactly the per-drop amplification the refusal line sheds, and
+      it would bury the one line worth reading. ``run_control_plane_call``
+      still records the miss on the ``bound_miss_running`` outcome and
+      attributes the abandoned work's eventual result (#4456), so nothing is
+      invisible — it is simply metered instead of shouted.
+
+    ⛔ CONTEXT: a pool thread is process-lifetime, so each invocation runs
+    under a FRESH COPY of the submitting context (``monitoring.confine_context``,
+    wrapped per submission because the wrapper binds the context it was created
+    with — #10612/#10642). That reproduces the ``asyncio.to_thread`` copy the
+    hooks relied on (a request's ContextVars are still visible inside the hook)
+    and guarantees a ContextVar set there cannot leak into the NEXT request the
+    worker serves — the same rule ``_graph_offload`` follows. None of today's
+    hook callables touches a ContextVar; this keeps that from becoming a silent
+    trap if one ever does.
+
+    A raise from the callable ITSELF still propagates to the caller's own guard
+    — same as the direct ``to_thread``/``await`` it replaces.
+    ``CancelledError`` is a ``BaseException`` and is untouched.
+    """
+    from tortoise.monitoring import ControlPlaneOffloadError
+    try:
+        await run_control_plane_call(
+            confine_context(fn), op=op, pool="abuse",
+            timeout=_ABUSE_OFFLOAD_TIMEOUT_S, cancel_on_timeout=False)
+    except ControlPlaneOffloadError as exc:
+        if exc.refused:
+            _log_abuse_offload_refused(op)
+        # A bound miss is not a drop: the queued submission still runs and the
+        # seam meters its outcome (``bound_miss_running`` + the abandoned-result
+        # callback). Deliberately no per-call line (#10618 review P2).
+
+
 def _abuse_post_auth_sync(method: str, headers: dict, org: dict) -> None:
-    """#308 post-auth hooks (run via asyncio.to_thread): R3 read velocity
+    """#308 post-auth hooks (run off the loop, #10618): R3 read velocity
     (GET only — writes never count as reads, scoping delta 11) + R4 geo
     (every request). Best-effort; TORTOISE_ABUSE_DISABLED kills both."""
     from tortoise import abuse as _abuse
@@ -8105,10 +9171,19 @@ def _abuse_post_auth_sync(method: str, headers: dict, org: dict) -> None:
 
 
 async def _abuse_post_auth(request: Request, org: dict) -> None:
-    """Async wrapper — never raises into the auth path."""
+    """Async wrapper — never raises into the auth path.
+
+    #10618: awaited on EVERY authenticated request, so it rides the bounded
+    ``telemetry`` lane (``_telemetry_hook_off_loop``) and never the loop's
+    shared default executor. ``request.headers``/``request.method`` are read
+    HERE, on the loop: ``Request`` is not thread-safe and a worker must not
+    touch it.
+    """
     try:
         headers = dict(request.headers)
-        await asyncio.to_thread(_abuse_post_auth_sync, request.method, headers, org)
+        await _telemetry_hook_off_loop(
+            functools.partial(_abuse_post_auth_sync, request.method, headers, org),
+            op="abuse.post_auth")
     except Exception:
         pass  # best-effort — abuse telemetry never breaks auth
 
@@ -8123,7 +9198,10 @@ def _abuse_record_points_sync(org: dict, n: int) -> None:
 
 async def _abuse_record_points(request: Request, org: dict, n: int) -> None:
     try:  # noqa: SIM105
-        await asyncio.to_thread(_abuse_record_points_sync, org, n)
+        # #10618: the bounded telemetry lane, never the shared default pool.
+        await _telemetry_hook_off_loop(
+            functools.partial(_abuse_record_points_sync, org, n),
+            op="abuse.record_points")
     except Exception:
         pass  # best-effort — never block the write path
 
@@ -8136,7 +9214,10 @@ def _abuse_evaluate_keys_sync(org_id: str) -> None:
 
 async def _abuse_evaluate_keys(org_id: str) -> None:
     try:  # noqa: SIM105
-        await asyncio.to_thread(_abuse_evaluate_keys_sync, org_id)
+        # #10618: the bounded telemetry lane, never the shared default pool.
+        await _telemetry_hook_off_loop(
+            functools.partial(_abuse_evaluate_keys_sync, org_id),
+            op="abuse.evaluate_keys")
     except Exception:
         pass
 
@@ -9114,9 +10195,16 @@ async def _cp_offload(fn, *, op: str, best_effort: bool = False,
         raise _control_plane_unavailable() from None
 
 
-def _graph_unavailable() -> HTTPException:
+def _graph_unavailable(_exc: object | None = None) -> HTTPException:
     """#3773: fail-closed 503 for a saturated / bound-missed GRAPH-lane offload
     (a data-plane helper or a registry read, #3718).
+
+    ``_exc`` is the ``ControlPlaneOffloadError`` the read seam caught, when a
+    caller's refusal factory wants to read ``refused`` / ``in_flight`` from it
+    (#10602 review P2). The graph-lane body does NOT vary by it — a refused and
+    a bound-missed graph submission are both retryable capacity failures — but
+    the parameter exists so every ``_read_offload(unavailable=…)`` factory has
+    ONE calling convention instead of a signature the seam has to sniff.
 
     Deliberately NOT ``_control_plane_unavailable``: that body's copy is
     sign-in specific and would mislead a client retrying a graph write. A
@@ -9251,6 +10339,230 @@ async def _graph_offload(fn, *, op: str, timeout: float | None = None):
         confine_context(fn), op=op, pool="graph",
         timeout=graph_offload_timeout_s() if timeout is None else timeout,
         unavailable=_graph_unavailable)
+
+
+def _record_read_unavailable() -> HTTPException:
+    """#10602 review P2: the fail-closed 503 for an armed read's RECORD phase.
+
+    ⛔ NAMED ``_record_read`` DELIBERATELY. A module-level ``_record_unavailable``
+    already exists — #8447's session-detail refusal, defined LATER in this file —
+    and a second definition with that name was SHADOWED by it (the last binding
+    wins at import). The #10602 refusal then shipped #8447's copy, whose message
+    is about "this session" and "a complete copy" on a POINT read: the intended
+    body was dead code and no test could see it, because both spellings answer
+    ``record_unavailable`` and the pin only asserts the error_code. The two
+    refusals are for different surfaces; they must not share a name.
+
+    ``get_point`` submits ``record_serve.serve_point`` — in ``record`` mode that
+    callable contains no graph work at all, and in ``prefer`` mode its record
+    phase contains none either (the cache is deferred to
+    ``CacheAnswerRequired``, so the cold open keeps its own construction lane).
+    Reporting a *record* bound miss with ``graph_unavailable`` collapses the two
+    meanings this route's own arms keep apart: "the record could not answer"
+    (503, absence NOT established — the §17.2 rule mirrored onto the record) and
+    "the graph pool had no worker" (503 ``graph_unavailable``). A client that
+    can tell them apart retries the right thing, and an operator is not sent to
+    look at a store the read never touched.
+
+    Same 503 status as its sibling: the record round trip is retryable in both
+    directions. Only the BODY differs, and it carries the route's own
+    "absence is NOT established" wording so the two refusals cannot be confused
+    on the wire.
+    """
+    return HTTPException(
+        status_code=503,
+        detail={
+            "error_code": "record_unavailable",
+            "message": ("The record service is temporarily unavailable — try "
+                        "again in a moment; absence is NOT established."),
+        },
+    )
+
+
+async def _read_offload(fn, *, op: str, unavailable=None, timeout=None):
+    """#10602: run ONE read-path graph ROUND TRIP on the dedicated read lane.
+
+    The read handlers used to submit their blocking query with the house
+    ``asyncio.to_thread(...)``. That submits to the loop's SHARED default
+    executor (``min(32, cpu+4)`` — 6 on prod's 2 vCPU), whose queue is
+    UNBOUNDED and which ~180 other ``to_thread`` sites share. The measured
+    consequence (#10602, comment 6582118507): a 40–80 ms store behind a
+    3.7–14.6 s answer, with a single-id point read degrading in the same 32 s
+    step — the request was waiting for a WORKER SLOT, not for the store.
+
+    #3060 answered this class for long/stallable WORK (``_CAPTURE_EXECUTOR``,
+    ``_DREAM_EXECUTOR``, …) and #3498/#3773 for the graph HELPERS
+    (``_graph_offload``); the read path is the tenant that was left on the
+    shared pool. This is the same seam for it: the ``read`` pool
+    (``monitoring.CONTROL_PLANE_READ_*``), a BOUNDED wait
+    (``read_offload_timeout_s()``, deliberately below the transport bound), and
+    the graph lane's fail-closed 503 (``_graph_unavailable``) so a stranded slot
+    fails LEGIBLY rather than queueing forever.
+
+    Preserved, deliberately — these are the four properties a concurrency change
+    here is most likely to break:
+
+    * **contextvars** — the callable runs under a COPY of the caller's context
+      (``monitoring.confine_context``), exactly as ``_submit_off_loop`` and
+      ``_graph_offload`` do, because a pool thread is process-lifetime: a
+      ContextVar set at its top
+      level would leak into the NEXT request the worker serves. That copy is
+      also what carries the loop-side ``_bind_actor_context`` / ``_bind_record_tenant``
+      binds into the worker.
+    * **``bind_metering_context``** — unchanged in meaning: the retrieval legs
+      inside ``search_engine`` still bind the two metering vars explicitly for
+      THEIR sub-threads, and the copied context carries a capture's ``_ACTIVE``
+      counter (a mutable object shared by reference) exactly as the
+      ``asyncio.to_thread`` copy did. No rebinding happens here.
+    * **``_submit_off_loop``'s contract** — untouched. That helper exists for the
+      capture/dream pools and its callers depend on receiving the CONCURRENT
+      future; this seam needs a bounded await instead, which is
+      ``run_control_plane_call``'s job — the same pairing ``_graph_offload``
+      already uses rather than a second helper.
+    * **graceful shutdown** — the ``read`` pool is a ``daemon_worker`` (daemon
+      threads, bounded backlog, process-lifetime), so a read wedged on a
+      black-holed socket cannot make uvicorn/Fly shutdown join it — the #2850
+      reason the offload seams are daemon pools and not a second
+      ``ThreadPoolExecutor``.
+
+    Only WHERE the round trip runs changes: the callable and its result are the
+    same objects the route returned before, so every route's own error mapping
+    (its 500 arm, its ``status: degraded`` arm) is preserved. A lane refusal is a
+    503 ``graph_unavailable`` — retryable, and NOT the empty-shape refusal #3892
+    forbids.
+
+    ``unavailable`` overrides that refusal BODY (#10602 review P2), for the one
+    caller whose callable is not graph work: ``get_point``'s ARMED record phase,
+    which is a record round trip. It is called with the
+    ``ControlPlaneOffloadError`` that was caught, so the factory can tell a
+    REFUSED submission (never ran) from a BOUND MISS (asked, still running) and
+    name each honestly — the distinction ``ControlPlaneOffloadError.refused``
+    exists for (`#10602 review P2`). The read lane still owns the bound and the
+    fail-closed shape either way — only the name of the dependency that was
+    refused changes.
+
+    ``timeout`` (#10602 review P2) overrides the WAIT BOUND for a caller whose
+    callable is a different RESOURCE CLASS. Default: ``read_offload_timeout_s()``,
+    the hot-query bound, justified by a 41–80 ms measured graph answer. The
+    record leg passes ``record_read_timeout_s()`` instead, because its callee
+    declares a 15 s ceiling — a bound that does not cover its callee refuses
+    work that was inside its own budget. Same override argument the graph lane's
+    ``_graph_offload`` makes for the cold projection open.
+
+    ⛔ #4055 (review P1) — A REQUEST-OWNED ONE-TIME EMBEDDER LOAD IS SETUP, NOT
+    THE WORK THIS BOUND MEASURES, and ``/v1/search``'s callable contains one:
+    ``sdk.tortoise_fts_query`` calls ``EmbeddingModel.get()`` synchronously in
+    the worker (a cold bge-small load is measured at ~57 s, budgeted
+    ``_LOAD_TIMEOUT_S`` = 90 s). Judging that by this lane's 8 s answers **503
+    ``graph_unavailable`` for a HEALTHY graph while the embedder is merely
+    loading** — a capacity error naming the wrong dependency. The transport
+    seam already refuses to make that mistake: ``mcp_auth.await_under_wait_bound``
+    drains a load that is OWNED BY THIS REQUEST AND STILL IN FLIGHT *outside* the
+    budget and re-arms the bound **at most once**. This seam reuses those same
+    helpers rather than re-deriving the rule, so the two bounds cannot disagree
+    about what "setup" means. Without it the lane would be the third instance of
+    the class this change already fixed twice (the projection cold open, the
+    record leg): a bound that does not cover its callee's cold phase.
+
+    ⚠️ The exemption is deliberately NARROW — identity, not a time window: a
+    load this request did not OWN (a background pre-warm, a concurrent
+    request's) is never exempted, because then the read really is waiting on
+    init it did not trigger.
+
+    ⛔ #10602 review P1 — THE CONTEXT COPY IS TAKEN PER ATTEMPT, NOT ONCE.
+    ``Context.run`` refuses RE-ENTRY (``RuntimeError: cannot enter context: …
+    is already entered``), and a re-submission is the case where that could
+    bite: a bound miss abandons the await, never the thread (CPython cannot
+    cancel a started thread). A single copy shared by a retry would raise a bare
+    ``RuntimeError``, which is NOT a ``ControlPlaneOffloadError``: it would
+    escape this seam and the routes' blanket ``except Exception`` would answer
+    **500** ("Search failed", no ``error_code``, not retryable). A fresh wrap
+    per submission keeps the property the copy exists for (no ContextVar leaks
+    into the next request the process-lifetime worker serves) and cannot
+    collide with an attempt it replaces.
+
+    That wrap is ``monitoring.confine_context`` — the SHARED seam main's #10642
+    introduced for exactly this class, not the hand-rolled
+    ``functools.partial(contextvars.copy_context().run, fn)`` idiom. Two reasons
+    it must go through the seam rather than inline: the idiom stores ONE
+    ``Context``, which is the re-entry trap itself (the seam re-materialises a
+    fresh copy on every invocation, so no caller can reintroduce the one-shot
+    shape without deleting a documented seam), and main's merge deleted this
+    module's ``import contextvars`` when it migrated both pre-existing sites —
+    so an inline ``copy_context()`` here is not merely a style choice, it is a
+    ``NameError`` on every read route at the merge commit.
+
+    ⛔ #10602 review P2 — A RE-ARM IS ONLY HONEST WHEN THE SUBMISSION NEVER RAN,
+    AND IT IS NEVER A SECOND SUBMISSION WHILE THE FIRST IS RUNNING.
+    ``ControlPlaneOffloadError.refused`` is the seam's own discriminator:
+    ``True`` means the callable did not and will not run (backlog full, or
+    cancelled while queued), so re-submitting is free; ``False`` means the bound
+    abandoned only the AWAIT and the worker is STILL RUNNING the callable.
+    Re-submitting there would run the query TWICE concurrently — doubling the
+    CPU on a lane that is at its bound (the abandoned attempt keeps its slot
+    until it finishes), holding TWO of the lane's slots for one request, and
+    counting one read as two in the retrieval ledger (the tally is a mutable
+    object shared by reference through the copied context). So the cold-setup
+    case RE-AWAITS the submission it already owns (``exc.in_flight``, via
+    ``reawait_control_plane_call``) — the same shape
+    ``mcp_auth.await_under_wait_bound`` uses one seam over, where it shields the
+    task and re-awaits THAT task after draining.
+    """
+    bound = read_offload_timeout_s() if timeout is None else timeout
+    # #4055: the identity + clock the exemption compares against. ``owner`` is
+    # whatever this request bound as its one-time-load owner (``None`` unarmed,
+    # which never exempts — ``_cold_setup_ran_during`` enforces that).
+    #
+    # The probe is GUARDED, matching ``mcp_auth._cold_setup_ran_during`` /
+    # ``_drain_cold_setup``: the embedder is optional, and a wait-bound seam
+    # must not fail the read because a probe's import did. An unavailable probe
+    # yields ``owner=None``, which never exempts — fail-closed, never fail-open.
+    try:
+        from tortoise.embeddings import current_load_owner
+    except Exception:  # noqa: BLE001, RUF100 — optional embedder; no bound may depend on it
+        owner = None
+    else:
+        owner = current_load_owner()
+    reference = time.monotonic()
+    exempted = False
+    while True:
+        # A FRESH copy per ATTEMPT (see the docstring's #10602 review P1 note).
+        # The copy is taken by the SHARED seam, `monitoring.confine_context`
+        # (main #10642) — never the hand-rolled
+        # `functools.partial(contextvars.copy_context().run, fn)` idiom. That
+        # idiom is one-shot per stored Context, which is the trap this loop
+        # would have reintroduced a second copy of; and going through the seam
+        # is also what keeps this module from owning a private
+        # `import contextvars` (main deleted it, and a locally-added
+        # `copy_context()` here `NameError`d in every read route at the merge
+        # commit).
+        submitted = _monitoring.confine_context(fn)
+        try:
+            return await run_control_plane_call(
+                submitted, op=op, pool="read", timeout=bound)
+        except ControlPlaneOffloadError as exc:
+            # The refusal factory sees the error so it can name a REFUSED lane
+            # and a RUNNING bound miss differently (#10602 review P2).
+            refuse = (_graph_unavailable if unavailable is None
+                      else unavailable)
+            # Re-arm AT MOST ONCE, exactly as the transport seam does, so a
+            # genuinely slow read still breaches — and only for a submission
+            # that is still RUNNING behind a cold phase THIS request owns. A
+            # refused submission never started the load, so `refused` and the
+            # cold-setup probe agree by construction; checking both keeps the
+            # gate honest if either changes.
+            if (exempted or exc.refused or exc.in_flight is None
+                    or not _mcp_auth._cold_setup_ran_during(
+                        reference, owner)):
+                raise refuse(exc) from None
+            exempted = True
+            await _mcp_auth._drain_cold_setup()
+            # RE-AWAIT the submission already in flight — never a second copy.
+            try:
+                return await reawait_control_plane_call(
+                    exc.in_flight, op=op, pool="read", timeout=bound)
+            except ControlPlaneOffloadError as again:
+                raise refuse(again) from None
 
 
 async def _capture_session_probe_off_loop(org: dict, session_id: str):
@@ -10161,24 +11473,38 @@ async def create_point(body: CreatePointRequest, request: Request, org: dict = D
     # namespace is falsy is the one shape whose tenant is refused, because the
     # enqueue then falls back to the ORG-WIDE key (default graph) while its
     # tenant would name the custom graph. An org-wide API KEY is NOT that
-    # shape — its drain opens `_make_sdk(namespace=org_id)`, the same graph
-    # `_data_sdk` opened for this request, so #10025's `default_graph_id` names
-    # it and the carry is correct rather than a guess.
+    # shape — its drain opens `_org_sdk(org_id)`, the SAME resolution
+    # `_data_sdk` used for this request (both go through
+    # `moved_default_namespace`, so both the historical graph and a #10180
+    # promotion land on one graph), so #10025's `default_graph_id` names it and
+    # the carry is correct rather than a guess. ⚠️ That equality used to be
+    # quoted as "both open `_make_sdk(namespace=org_id)`"; it is now the shared
+    # RESOLVER that makes it true, which is why the two cannot drift apart.
+    # (#10452 review P2: the RESOLVER is now taken HERE, from this request's
+    # credential, and carried by value — the drain used to call `_org_sdk`
+    # itself at drain time, i.e. read the default a second time, so a promotion
+    # in that window split the pass's nodes from its records. See
+    # `_DREAM_DRAIN_GRAPHS`.)
     # (`_data_sdk` refuses the falsy-namespace org first with 403
     # GRAPH_NOT_FOUND, so that shape is latent rather than live.)
     _dream_ns = (org.get("graph_namespace") if org.get("graph_id") else None)
     _enqueue_dream(org["org_id"], list(sdk._dirty_roots),
                    # graph-bound key → ITS custom graph; org-wide/session →
-                   # the legacy org-keyed drain (graph_namespace is always
-                   # set by C1 even for org-wide keys — org_{id} or a
-                   # selfhost org_{name} — so gate on graph_id).
+                   # the org-keyed drain, which opens the org's DEFAULT graph
+                   # — i.e. the same graph THIS request used, historical or
+                   # promoted
                    graph_namespace=_dream_ns,
                    # #9188: the record's tenant for the SAME graph, resolved
                    # once from THIS request's credential. Nothing else in the
                    # drain knows it (`_open_sdk` opens a namespace, not a
                    # tenant), and an armed lane otherwise refuses every
                    # dream-emitted record `no_tenant`.
-                   record_tenant=_dream_record_tenant(org, _dream_ns))
+                   record_tenant=_dream_record_tenant(org, _dream_ns),
+                   # #10452 review P2: …and the GRAPH that tenant names, from
+                   # the SAME credential and the same instant, so the drain
+                   # cannot open a different one. I/O-FREE: this is the
+                   # resolver `_data_sdk` opened with on this very request.
+                   default_graph_name=_default_graph_name(org))
     # Log audit event
     await _async_audit(
         request, org["org_id"], "point_create",
@@ -10283,7 +11609,7 @@ async def list_points(
     # first statement even though the query below was already off-loaded. Same
     # `_data_sdk_offloaded` twin the write lane uses (#3773) — it returns the
     # identical SDK (`_data_sdk`), so only WHERE the call runs changes.
-    sdk = await _data_sdk_offloaded(org)
+    sdk = await _data_sdk_offloaded(org, attach_projection=True)
     conditions = ["n.is_operator = false"]
     # #432 Task 2: retracted points (status='retracted') are EXCLUDED from the
     # default listing surface — tombstone contract: retrievable by id via
@@ -10311,10 +11637,12 @@ async def list_points(
     # socket client) — `_get_proj()` opens/attaches it and `g.query` is the
     # round trip — so BOTH ride one worker hand-off. Nothing between the two
     # touches thread-unsafe state, and the query string/params were already
-    # built on the loop. Same `asyncio.to_thread` pattern the write handlers
-    # and /v1/search use.
-    rows = await asyncio.to_thread(
-        lambda: sdk._get_proj().g.query(query, params=params).result_set)
+    # built on the loop. #10602: on the dedicated, BOUNDED read lane rather
+    # than the shared default executor (the write handlers keep their own
+    # lanes; this one is the read path's).
+    rows = await _read_offload(
+        lambda: sdk._get_proj().g.query(query, params=params).result_set,
+        op="list_points")
     results = []
     for r in rows:
         d = r[0]
@@ -10353,7 +11681,12 @@ async def get_point(point_id: str, org: dict = Depends(get_current_org_gated)): 
     misconfiguration.** Session and JWT credentials resolve no record tenant by
     design, so in `record` mode that is a **500** (there is no cache branch to
     fall back to) while in `prefer` mode it is a NAMED, COUNTED fallback —
-    `record-tenant-unresolved`, the third of the three reasons.
+    `record-tenant-unresolved`, the third of the FIVE reasons
+    (`record_serve.FALLBACK_REASONS`). The remaining two are conditions of the
+    READ LANE, not of the record: `record-read-lane-refused` (the submission
+    never ran, so the record was never asked) and `record-read-bound-miss` (the
+    submission RAN and did not answer inside the lane's bound — asked, not
+    unasked, and not an outage claim either).
 
     ⚠️ A record-served answer carries the record's PRIMARY field set, and the
     differences from the cache answer are named here in full. `content_hash` is
@@ -10389,42 +11722,34 @@ async def get_point(point_id: str, org: dict = Depends(get_current_org_gated)): 
     # 503 arm below exists to forbid — and on an embedded deployment the SDK's
     # construction itself probes (and may start) the store.
     #
-    # ⚠️ The other two modes construct it EXACTLY as before, through the
-    # bounded graph-lane seam (#3498) — which supplies the graph pool slot, the
-    # wait bound and the fail-closed 503. An earlier cut of this change built the
-    # handle from inside a worker thread with a bare sync `_data_sdk`, which made
-    # `record` lazy but silently dropped all three from the DEFAULT path; the
-    # laziness belongs to `record` alone.
+    # ⚠️ `prefer` constructs NO handle up front either (#10602 review, P2). Its
+    # cache is a FALLBACK, and the record answers most reads: an eager open would
+    # make every record-served read pay a graph-pool slot for a cold open it
+    # never uses, and on a restored graph that open is the phase budgeted by
+    # `probe_setup_timeout()` (20 s, up to 300 s) — in front of the record
+    # consult, so a read the record answers in milliseconds could cross
+    # `mcp_auth._TRANSPORT_WAIT_BOUND_S` and come back as the 504 -32009 "the
+    # work may still complete" body this change exists to replace. So the handle
+    # is built on the CONSTRUCTION lane (#3498) only once the record has not
+    # answered — a fallback read pays it, a record-served read pays nothing.
+    #
+    # `off` constructs it eagerly, as before: there the cache IS the only answer.
+    # Every construction goes through `_data_sdk_offloaded(...,
+    # attach_projection=True)`, which supplies the graph pool slot, the wait
+    # bound, and — for the cold attach — the construction lane whose bound
+    # already covers it, so the read lane never measures an index build
+    # (cycle-2 review, P1).
     mode = record_serve.serve_mode()
     sdk = None
-    # ⚠️ A `prefer` read must be able to answer from the RECORD even when the
-    # CACHE cannot be opened: the lenient mode exists to survive an unavailable
-    # store, and an eager 403 GRAPH_NOT_FOUND here would make it strictly LESS
-    # able to answer than `record` — every prefer read would pay a graph-pool
-    # slot and, with the graph stopped, would never consult the record at all.
-    # So a `prefer` construction failure is CAPTURED and re-raised only when the
-    # cache is actually needed (the record missed or was unavailable). `off`
-    # keeps propagating it, exactly as before.
-    cache_open_error: Exception | None = None
-    if mode == record_serve.MODE_PREFER:
-        try:
-            sdk = await _data_sdk_offloaded(org)
-        except Exception as e:  # the seam's 403/503, or the driver's own
-            cache_open_error = e
-    elif mode == record_serve.MODE_OFF:
-        sdk = await _data_sdk_offloaded(org)
+    if mode == record_serve.MODE_OFF:
+        sdk = await _data_sdk_offloaded(org, attach_projection=True)
 
     def _cache_props() -> dict | None:
         if sdk is None:
-            # The handle could not be built (see `cache_open_error`): this is
-            # only reachable when the CACHE is genuinely needed, so the caller
-            # gets the ORIGINAL error — the 403/503 the seam raised — rather
-            # than a plausible empty answer or a rewritten status.
-            # ⚠️ Never `raise captured or RuntimeError(...)`: truthiness decides
-            # that, and an exception class defining `__bool__`/`__len__` would be
-            # silently replaced by an uncaused 500.
-            if cache_open_error is not None:
-                raise cache_open_error
+            # Unreachable by construction: `off` builds eagerly above, and both
+            # armed arms build (below) before they read. It is a LOUD programming
+            # error rather than a plausible empty answer — the failure mode §17.2
+            # forbids is an impairment reported as absence.
             raise RuntimeError(
                 "the cache handle is unavailable and the cache is required")
         # #3718 residual 2: sync FalkorDB read off the loop (see list_points).
@@ -10469,27 +11794,95 @@ async def get_point(point_id: str, org: dict = Depends(get_current_org_gated)): 
             # on outages, fire permanently on a condition the record never
             # caused.
             # ⚠️ Count AFTER the cache answers — the same invariant as
-            # `record_serve._fell_back`. A cache failure raises out of here, so a
-            # request that was never answered contributes no increment (this arm
-            # is the most-travelled counting path in `prefer` mode: it is taken
-            # for every request whose org has no nameable default row).
+            # `record_serve.answered_by_cache`. A cache failure raises out of
+            # here, so a request that was never answered contributes no
+            # increment (this arm is the most-travelled counting path in
+            # `prefer` mode: it is taken for every request whose org has no
+            # nameable default row). The handle is built HERE, lazily, because
+            # this is the first point at which the cache is genuinely needed.
             reason = record_serve.FALLBACK_RECORD_TENANT_UNRESOLVED
-            props_from_cache = await asyncio.to_thread(_cache_props)
-            record_serve.note_fallback(reason)
-            served = record_serve.ServedAnswer(
+            sdk = await _data_sdk_offloaded(org, attach_projection=True)
+            props_from_cache = await _read_offload(_cache_props,
+                                                  op="get_point.cache")
+            served = record_serve.answered_by_cache(
                 read=record_serve.READ_POINT_BY_ID,
-                coordinate=f"Point:{point_id}", served_from="cache",
-                props=props_from_cache,
-                fallback_reason=reason)
+                coordinate=f"Point:{point_id}", props=props_from_cache,
+                reason=reason)
         else:
+            # #10602 review P2: the record's OWN round trip used to queue on the
+            # shared default executor, so the anchored read degraded in the same
+            # 32 s step as everything else. It rides the read lane now — but the
+            # cache FALLBACK is DEFERRED, because its cold open is budgeted on
+            # the construction lane (`probe_setup_timeout()` + margin), not on
+            # this lane's 8 s query bound. `cache_answer=None` is the deferred
+            # shape: `serve_point` still decides and NAMES the fallback reason,
+            # and raises `CacheAnswerRequired` for it (#10602 review, P2).
+            # #10602 review P2: a lane BOUND MISS on this arm is not graph
+            # capacity — and in `prefer` mode it is a MISS-SHAPED outcome, not a
+            # hard refusal. `prefer` is the LENIENT mode; its contract (the route
+            # docstring) is to fall back on "an outage or a miss", and the
+            # deferred-cache shape exists for exactly that. A refused submission
+            # never ran, so the cache answer is still a legitimate answer to this
+            # read: reporting 503 here would make the lenient mode STRICTER than
+            # the strict one under lane saturation, which is a property no caller
+            # can reason about. `record` mode keeps its refusal — it has no
+            # cache branch to fall back to.
+            #
+            # ⛔ The REASON is its own fourth one (review P2): a refused lane
+            # means the record was NEVER ASKED, so it must not be counted as
+            # `record-unavailable` — that reason is the alertable OUTAGE counter,
+            # and misfiling a pool condition there sends ops to Postgres for a
+            # saturation the database never caused.
+            #
+            # ⚠️ …and only `exc.refused` earns that reason. A plain BOUND MISS
+            # (`refused=False`) leaves the record callable RUNNING: the record
+            # WAS asked and did not answer inside the bound, which is neither
+            # "never asked" nor the outage counter the refused arm stays out of.
+            # It has its own fifth reason (`record-read-bound-miss`) so an
+            # operator reading the counter climbs is sent to the right place
+            # (#10602 review P2).
+            def _record_refusal(exc=None):
+                if mode == record_serve.MODE_PREFER:
+                    never_ran = getattr(exc, "refused", False) is True
+                    return record_serve.CacheAnswerRequired(
+                        record_serve.FALLBACK_RECORD_LANE_REFUSED if never_ran
+                        else record_serve.FALLBACK_RECORD_BOUND_MISS)
+                return _record_read_unavailable()
+
             try:
-                served = await asyncio.to_thread(
-                    record_serve.serve_point, tenant=tenant, point_id=point_id,
-                    cache_answer=_cache_props, mode=mode)
+                served = await _read_offload(
+                    lambda: record_serve.serve_point(
+                        tenant=tenant, point_id=point_id,
+                        cache_answer=(None if mode == record_serve.MODE_PREFER
+                                      else _cache_props),
+                        mode=mode),
+                    op="get_point.serve",
+                    # The callable is the RECORD's round trip, not graph work:
+                    # a bound miss here must not be reported as graph capacity.
+                    unavailable=_record_refusal,
+                    # …and it is a different RESOURCE CLASS: its callee declares
+                    # a 15 s ceiling, so it must not be judged by the hot
+                    # query's 8 s bound (#10602 review P2).
+                    timeout=record_read_timeout_s())
+            except record_serve.CacheAnswerRequired as needed:
+                # `prefer` only: the record missed or could not be asked. The
+                # reason is the SEAM's; the read is the ROUTE's, on the lanes it
+                # belongs to — construction (cold open + attach) then read (the
+                # hot query), so the 8 s read bound never measures an index
+                # build and a record-served read never pays the open at all.
+                sdk = await _data_sdk_offloaded(org, attach_projection=True)
+                props_from_cache = await _read_offload(_cache_props,
+                                                      op="get_point.cache")
+                served = record_serve.answered_by_cache(
+                    read=record_serve.READ_POINT_BY_ID,
+                    coordinate=f"Point:{point_id}", props=props_from_cache,
+                    reason=needed.reason)
             except record_serve.RecordUnavailable as e:
-                # 'record' mode has no cache branch. Answering 404 here would
-                # turn an IMPAIRED read into a finding of absence — the exact
-                # defect §17.2 exists to forbid, mirrored onto the record.
+                # 'record' mode has no cache branch (in `prefer` the seam
+                # raises `CacheAnswerRequired` instead of this). Answering 404
+                # here would turn an IMPAIRED read into a finding of absence —
+                # the exact defect §17.2 exists to forbid, mirrored onto the
+                # record.
                 raise HTTPException(
                     status_code=503,
                     # `str(e)`, not `type(e).__name__`: `RecordUnavailable`
@@ -10521,7 +11914,11 @@ async def get_point(point_id: str, org: dict = Depends(get_current_org_gated)): 
                 raise
 
     if served is None:
-        props = await asyncio.to_thread(_cache_props)
+        # #10602: the single-id point read's graph round trip rides the same
+        # dedicated read lane as the listing/search reads — the ticket's own
+        # evidence is that a point read degraded in the SAME 32 s step as
+        # search, because both waited for a shared-executor slot.
+        props = await _read_offload(_cache_props, op="get_point.cache")
     else:
         props = served.props
     if not props:
@@ -10775,23 +12172,81 @@ async def search(q: str, limit: int = Query(10, ge=1, le=100), org: dict = Depen
     # re-raises and this route's own 500 arm answers, exactly as before. A
     # domain error from `_data_sdk` itself propagates unchanged either way.
     # Relayed to #3718 (issuecomment-6330213773).
-    sdk = await _data_sdk_offloaded(org)
+    # ⛔ #10602 review P1 (fix): `attach_projection=True` makes the
+    # CONSTRUCTION touch the store (`Projection.__init__` connects), whereas
+    # `_data_sdk` alone only resolves a name. So this line can now fail for a
+    # reason the `try:` below can no longer cover — and until it was wrapped,
+    # a store that would not OPEN escaped as an unhandled Starlette 500, making
+    # BOTH documented arms of the `OVERRIDES:` block above unreachable on this
+    # route: `tortoise_fts_query` was never entered (so `_STATUS_DEGRADED` was
+    # never set) and this route's own `except Exception: 500 "Search failed"`
+    # sat inside a `try` the failure now preceded. The OPEN's failure is
+    # therefore mapped through those SAME two outcomes here, so the promise in
+    # the block above stays true.
+    #
+    # ⛔ …and ONLY the OPEN's failure (#10602 review P3). The seam raises
+    # `_ProjectionOpenError` for `sdk._get_proj()`, so this arm cannot absorb a
+    # fault from `_data_sdk` itself — a broken tenancy resolver answering
+    # `200 status: degraded` would be a FAULT reported as a store OUTAGE: the
+    # mirror of the impairment-as-absence rule every other arm here enforces,
+    # and unfalsifiable from the wire (the two are the same body). Such a fault
+    # propagates unchanged, exactly as it did before the attach existed, which
+    # is what the `OVERRIDES:` promise says. A construction-lane CAPACITY
+    # refusal is not a store condition either and keeps its own 503 (hence the
+    # `HTTPException` arm first).
     try:
-        # #1676 (launch capacity): tortoise_fts_query is CPU-blocking — the
-        # query encode (sdk.py model.encode, ~10-50ms for bge-small) runs
-        # inline plus the 3 search legs. In a single-worker async server this
-        # serializes ALL requests on the event loop. Offload to a worker
-        # thread so concurrent searches overlap their encode/DB work (same
-        # asyncio.to_thread pattern used throughout this file).
-        results = await asyncio.to_thread(
-            sdk.tortoise_fts_query, q, limit=limit,
-            read_status_out=status_out, _truncation_out=trunc_out)
-    except Exception:
+        sdk = await _data_sdk_offloaded(org, attach_projection=True)
+    except HTTPException:
+        raise
+    except _ProjectionOpenError:
         import logging
         logging.getLogger("tortoise.api").exception("search failed")
-        raise HTTPException(status_code=500, detail="Search failed")  # noqa: B904
-    finally:
-        sdk.close()
+        if status_out is None:
+            # Both flags off: the documented pre-#10602 fallback, byte for byte.
+            raise HTTPException(status_code=500, detail="Search failed")  # noqa: B904
+        # Flags on: the store will not OPEN, which is an OUTAGE, not an empty
+        # result — the same answer `sdk.tortoise_fts_query`'s own `_get_proj()`
+        # arm produces (``tortoise/sdk.py``: *"A store that will not OPEN is
+        # `degraded` (off by OUTAGE) … Never an empty result, and never a
+        # raise"*), so the two cannot drift into disagreeing about ONE store.
+        # Keep them in step: `status` = degraded, and the empty is marked
+        # INCOMPLETE so a 0-row outage is never reported as a complete empty.
+        from tortoise.truncation import mark_truncation as _lost_mark
+        status_out["status"] = _STATUS_DEGRADED
+        _lost_mark(trunc_out, returned=0, candidates=0, incomplete=True)
+        results = []
+    else:
+        try:
+            # #1676 (launch capacity): tortoise_fts_query is CPU-blocking — the
+            # query encode (sdk.py model.encode, ~10-50ms for bge-small) runs
+            # inline plus the 3 search legs. In a single-worker async server this
+            # serializes ALL requests on the event loop. Offload to a worker
+            # thread so concurrent searches overlap their encode/DB work — on the
+            # dedicated, BOUNDED read lane (#10602), never the shared default
+            # executor, where this 40–80 ms round trip sat behind other tenants'
+            # stalls and became a 3.7–14.6 s answer. Same callable, same result;
+            # only WHERE it runs changes.
+            results = await _read_offload(
+                lambda: sdk.tortoise_fts_query(
+                    q, limit=limit, read_status_out=status_out,
+                    _truncation_out=trunc_out),
+                op="search")
+        except HTTPException:
+            # #10602 review P1: the read lane's capacity refusal is an
+            # ``HTTPException`` (503 ``graph_unavailable``) and it is raised
+            # INSIDE this ``try`` — so this blanket arm would repaint the ONE
+            # legible, retryable refusal this change exists to deliver as a
+            # non-retryable 500 "Search failed" (with no ``error_code``), plus a
+            # full ``exception()`` traceback per refused request at the
+            # saturation moment. The construction refusal sits in its own arm
+            # above, which is why the 503 copy was previously unreachable here.
+            raise
+        except Exception:
+            import logging
+            logging.getLogger("tortoise.api").exception("search failed")
+            raise HTTPException(status_code=500, detail="Search failed")  # noqa: B904
+        finally:
+            sdk.close()
     # Normalize to the public response shape (kind from pointKind).
     out = []
     for r in results:
@@ -10852,17 +12307,39 @@ async def topic_summary(
     _require_scope(org, "graphs:read", "topic_summary")
     # #3718 (construction half of #4660, second batch): built off the loop — see
     # the `search` handler for the full rationale and the `OVERRIDES:` line.
-    sdk = await _data_sdk_offloaded(org)
+    #
+    # ⛔ #10602 review P1 (fix): the attach makes this line touch the store, so
+    # it can fail where `_data_sdk` alone could not. Its documented outcome on
+    # this route is the 500 arm below; that arm sat inside a `try` the failure
+    # now preceded, so it is mapped here too — for the OPEN's failure only
+    # (`_ProjectionOpenError`, #10602 review P3): a fault from `_data_sdk`
+    # itself propagates unchanged, as it did before, and a construction-lane
+    # CAPACITY refusal keeps its 503.
+    try:
+        sdk = await _data_sdk_offloaded(org, attach_projection=True)
+    except HTTPException:
+        raise
+    except _ProjectionOpenError:
+        import logging
+        logging.getLogger("tortoise.api").exception("topic summary failed")
+        raise HTTPException(status_code=500, detail="Topic summary failed")  # noqa: B904
     try:
         # #1676 (launch capacity): topic_summarize is CPU-blocking (EP
         # classification + neighborhood traversal) — offload to a worker
-        # thread so the event loop stays free (same as the /v1/search fix).
-        result = await asyncio.to_thread(
-            sdk.topic_summarize, topic,
-            max_seeds=max_seeds, max_hops=max_hops,
-            include_relationships=include_relationships,
-        )
+        # thread so the event loop stays free. #10602: on the dedicated,
+        # BOUNDED read lane (same as /v1/search), not the shared pool.
+        result = await _read_offload(
+            lambda: sdk.topic_summarize(
+                topic,
+                max_seeds=max_seeds, max_hops=max_hops,
+                include_relationships=include_relationships,
+            ),
+            op="topic_summary")
         return result
+    except HTTPException:
+        # #10602 review P1: same arm as /v1/search — a read-lane refusal keeps
+        # its 503 ``graph_unavailable`` body instead of a 500.
+        raise
     except Exception:
         import logging
         logging.getLogger("tortoise.api").exception("topic summary failed")
@@ -10904,13 +12381,17 @@ async def org_info(org: dict = Depends(get_current_org_session_ungated)):  # noq
     # to the burn-down tracker rather than left here alone: #3718,
     # issuecomment-6305730612 (DECISION RELAY).
     sdk = await _graph_offload(
-        lambda: _make_sdk(namespace=org["org_id"]), op="org_sdk")
+        lambda: _org_sdk_for_credential(org), op="org_sdk")
     # Count REAL Points in default graph. #2360: demo/sample Points
-    # (_seed_demo_graph: the 12 sample Points + _demo_sentinel) are EXCLUDED
+    # (_seed_demo_graph: the 9 sample Points + _demo_sentinel) are EXCLUDED
     # — the Overview memory digest (this count) presents the user's own
     # filings, never opt-in/legacy sample content masquerading as user data.
-    # The exclusion set is the same constant the demo seeder writes from, so
-    # it can never drift. #1591: FAIL SOFT — a missing/broken org graph
+    # The exclusion set is the same constant the demo seeder declares, so it
+    # can never drift. Since #10000 the set is a SUPERSET of what the seeder
+    # writes: the three `epi_turn*` ids no longer name a node (§9.1/D1 — the
+    # demo's episodic layer is the Session), and they stay in the set so the
+    # count keeps excluding a graph seeded before that change.
+    # #1591: FAIL SOFT — a missing/broken org graph
     # (half-failed provisioning, restores) must not dead-end the dashboard
     # with a hard 500; the client renders the empty state and a write
     # recreates the graph. SCOPE (#3718): the SDK construction above is a
@@ -11377,7 +12858,9 @@ async def list_packs(org: dict = Depends(get_current_org_gated)):  # noqa: B008
         raise HTTPException(status_code=401, detail="Authentication required")
     _reject_graph_bound_org_surface(org, "pack catalog")
     from tortoise.pack_state import get_tenant_packs
-    sdk = _make_sdk(namespace=org_id)
+    # Credential in hand → no control-plane read (and nothing that can fail
+    # open onto the demoted graph): #10180.
+    sdk = _org_sdk_for_credential(org)
     try:
         # to_thread (contextvars-propagating, py3.9+) — never
         # run_in_executor (does NOT propagate; cpython#78195).
@@ -11482,7 +12965,7 @@ async def upload_pack_manifest(
     # #2781: the pre-check seeds the tenant's own installed manifests, exactly
     # as the install below does — a pre-check that could not see them would
     # refuse the very manifests it exists to admit.
-    sdk = _make_sdk(namespace=org_id)
+    sdk = _org_sdk_for_credential(org)
     result = validate_manifest_for_tenant(sdk, manifest_yaml)
     if not result.ok:
         raise HTTPException(status_code=422,
@@ -12434,7 +13917,19 @@ _DEMO_SEMANTIC_POINTS = [
      ["tortoise", "ontology"]),
 ]
 
-# (pid, content) — episodic turns (pointKind 'event', no tags)
+# (pid, content) — the demo's SAMPLE TRANSCRIPT: DECLARED, NOT WRITTEN.
+# ⛔ Since #10000 these carry NO graph node. §9.1/D1 puts raw turn text in
+# Postgres ("not in the graph, not a `Document`, not a `Point`"), so
+# `_seed_demo_graph` writes only the demo `:Session` FOR THIS LAYER — whose
+# `turn_count` is **0**, because it stores no turn — and reports this list's
+# LENGTH as the
+# response's `sample_turns`, NEVER as `turn_count` (which is a completeness
+# claim the session read acts on; see the note at the write site). The ids are still
+# declared here because `_DEMO_POINT_IDS` names them: a graph seeded BEFORE
+# #10000 holds those nodes, and `org.point_count` must keep excluding them.
+# Read the texts as the sample transcript the demo DESCRIBES — nothing writes
+# them to a store, and `tests/test_10000_turns_record_only.py` reads them to
+# assert exactly that.
 _DEMO_EPISODIC_TURNS = [
     ("epi_turn1", "[user] Let's set up our agent memory system with Tortoise."),
     ("epi_turn2", "[assistant] I'll initialize the graph and configure the ontology layers. "
@@ -12474,9 +13969,12 @@ _DEMO_PROCEDURAL_POINTS = [
      ["workflow", "review"]),
 ]
 
-# Every demo/sample Point the seeder can write, incl. the sentinel. The
-# Overview digest (org.point_count) excludes exactly this set — sample
-# content never counts as the user's own filings (#2360).
+# Every demo/sample Point the seeder can write, incl. the sentinel — PLUS the
+# `epi_turn*` ids it no longer writes (see `_DEMO_EPISODIC_TURNS`). The
+# Overview digest (org.point_count) excludes this set — sample content never
+# counts as the user's own filings (#2360) — and a graph seeded before #10000
+# still holds those three, so the set is deliberately a SUPERSET of what the
+# seeder writes today.
 _DEMO_POINT_IDS: frozenset[str] = frozenset(
     pid for pid, *_ in (
         _DEMO_SEMANTIC_POINTS + _DEMO_EPISODIC_TURNS
@@ -12510,7 +14008,7 @@ def _seed_demo_graph(org_id: str) -> dict:
     filings; deleting the sentinel and re-seeding, or a one-shot backfill of
     `tags` from the existing `TAGGED` edges, closes it per graph.
     """
-    sdk = _make_sdk(namespace=org_id)
+    sdk = _org_sdk(org_id)
     proj = sdk._get_proj()
     now = datetime.now(UTC).isoformat()
 
@@ -12544,24 +14042,54 @@ def _seed_demo_graph(org_id: str) -> dict:
     # #3554: the id comes from the ONE declaration (`session_schema.demo_session_id`),
     # not a local f-string, so the writer and any future exclusion cannot drift.
     session_id = demo_session_id(org_id)
+    # ⛔ `turn_count` is 0, NOT the sample transcript's length. `turn_count` is a
+    # COMPLETENESS CLAIM the capture path earns by storing the turns it counts
+    # (`record_read.served_turn_count` refuses a copy that holds fewer than the
+    # declared count, and the capture writer sets it to the length it actually
+    # wrote). This seed stores no turn anywhere, so declaring 3 would
+    # be the one shape the product never produces: measured on an armed,
+    # journaling deployment the demo session's read refused with
+    # `record_unavailable` (503), and on an unarmed one it served
+    # `{"turns": 3, "turn_points": []}` — two numbers in one body contradicting
+    # each other, the exact class #10021-P2 added that guard to eliminate.
+    # The sample transcript's LENGTH is reported as `sample_turns` in the
+    # response instead, where no read treats it as a promise about stored rows.
     proj.g.query(
         "MERGE (s:Session {id:$sid}) "
-        "SET s.created_at=$now, s.turn_count=3",
+        "SET s.created_at=$now, s.turn_count=0",
         params={"sid": session_id, "now": now},
     )
-    episodic_turns = _DEMO_EPISODIC_TURNS
-    for pid, content in episodic_turns:
-        proj.g.query(
-            "MERGE (t:Point {id:$id}) "
-            "SET t.content=$c, t.pointKind='event', t.is_operator=false, "
-            "t.status='live', t.createdAt=$now, t.updatedAt=$now",
-            params={"id": pid, "c": content, "now": now},
-        )
-        proj.g.query(
-            "MATCH (s:Session {id:$sid}), (t:Point {id:$pid}) "
-            "MERGE (s)-[:CONTAINS]->(t)",
-            params={"sid": session_id, "pid": pid},
-        )
+    # ── §9.1/D1: the demo's episodic layer is the SESSION, never turn nodes ──
+    # `STORAGE-ARCHITECTURE.md` §9.1 (D1), under §2.0's authority split, puts raw
+    # turn text in Postgres — "not in the graph, not a `Document`, not a
+    # `Point`". This seeder wrote one `:Point {pointKind:'event'}` per demo turn
+    # carrying that turn's literal text, `CONTAINS`-wired to the Session: the
+    # per-turn-text-node shape `#10000` removed from the capture path, and the
+    # last PRODUCT/RUNTIME writer producing it unconditionally. THREE residuals
+    # still write that shape and are deliberate, so they are named rather than
+    # left to be rediscovered — this enumeration is the book a §9.1/D1 audit
+    # would close on: the capture path keeps it as its record-incapable
+    # fallback; both offline eval-corpus ingest legs (`tools/longmem_eval/
+    # ingest.py`, `ingest_v2.py`) mint it ungated for the corpus graphs they
+    # build; and `tools/ask_spotcheck.py::seed_capture_turn_store` mints it
+    # (raw Cypher, no gate) for every ask fixture since #3914 — the copy this
+    # module's capture-side NOTE calls the THIRD. It is
+    # not a captured transcript, so there is no record row it duplicates —
+    # which made the graph the only RUNTIME store of text §2.0 says the graph
+    # may not authoritatively hold.
+    #
+    # The demo now writes the shape the product produces: the Session with its
+    # counter and no turn text on any node.
+    #
+    # ⚠️ NOT RETROACTIVE, the same posture as the `tags` note above: the sentinel
+    # short-circuits before any write, so a demo graph seeded BEFORE this keeps
+    # its `epi_turn*` nodes. ⛔ RE-SEEDING DOES NOT REPAIR THEM — a re-seed
+    # writes nothing for those ids and deletes nothing (unlike the `tags` case,
+    # whose `MERGE` re-writes `p.tags`). Deleting those three nodes is the
+    # graph-side repair, and it is destructive, so it is out of this change's
+    # scope. Blast radius: opt-in sample content that `org.point_count`
+    # excludes — but the demo `:Session` is still returned by the session reads,
+    # so the pre-existing nodes stay reachable there and in search.
 
     # ── Epistemic Layer — claims with evidence ───────────────────
     epistemic_points = _DEMO_EPISTEMIC_POINTS
@@ -12621,18 +14149,32 @@ def _seed_demo_graph(org_id: str) -> dict:
         params={"now": now},
     )
 
+    # `points` is a `:Point` CENSUS of what this call writes (the sentinel
+    # excluded — `public_demo` adds it), not a description of the sample
+    # content: its only consumer meters a write op — `public_demo` calls
+    # `_record_write_op(org, nodes_written=created["points"] + 1)`, whose
+    # contract is "net-new non-episodic nodes written by this call". The
+    # episodic layer now writes NO node (its text would be a §9.1/D1
+    # violation), so counting it here would bill three nodes that do not
+    # exist. The declared transcript LENGTH is reported separately as
+    # `sample_turns`, so nothing that wants the demo's shape has to read the
+    # census, and nothing that bills has to read the declaration.
     total_points = (
-        len(semantic_points) + len(episodic_turns)
-        + len(epistemic_points) + len(procedural_points)
+        len(semantic_points) + len(epistemic_points) + len(procedural_points)
     )
     return {
         "status": "demo_created",
         "org_id": org_id,
         "session_id": session_id,
         "points": total_points,
+        #: The declared length of the sample transcript. Survives the removal
+        #: of the turn nodes because the DECLARATION survives; the Session
+        #: states 0 — the number of turns it actually stores.
+        "sample_turns": len(_DEMO_EPISODIC_TURNS),
         "layers": {
             "semantic": len(semantic_points),
-            "episodic": len(episodic_turns),
+            # 0 NODES: the episodic layer is the Session, per §9.1/D1.
+            "episodic": 0,
             "epistemic": len(epistemic_points),
             "procedural": len(procedural_points),
         },
@@ -12643,7 +14185,9 @@ def _seed_demo_graph(org_id: str) -> dict:
 
 @app.post("/internal/demo")
 async def create_demo_graph(request: Request):
-    """Create an OPT-IN demo graph with sample Points across all 4 ontology
+    """Create an OPT-IN demo graph with sample Points across the semantic,
+    epistemic and procedural layers, plus the demo `:Session` (the episodic
+    layer carries no Point since #10000, §9.1/D1), across the 4 ontology
     layers.
 
     #2360 (re-spec): this is NO LONGER auto-called by the tenant-provision
@@ -15105,6 +16649,17 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     )
     from tortoise.sdk import _current_actor_user_id  # #2600 actor stamp
 
+    # #10180: an ORG-WIDE caller that handed us a dict WITHOUT the default
+    # namespace gets it resolved HERE, not in the caller. The MCP
+    # `tortoise_session_capture` tool builds its own dict (it cannot be changed:
+    # minting/altering that tool's SERVED implementation is a surface change —
+    # `tools/surface-guard.py` freezes the file), and it only stamped the field
+    # for a graph-BOUND key. Without this, an org-wide MCP capture wrote the
+    # graph a promotion DEMOTED while its record rows (tenant = the credential's
+    # `default_graph_id`) named the promoted one — the split #10025 exists to
+    # remove, on the lane agents write through.
+    org = _hydrate_default_namespace(org)
+
     # #1927: session_recording is an OPT-OUT now (default ON, ToS-covered) —
     # not an enforced consent gate. C6 #2115 (D-C6-3): the gate resolves
     # PER-GRAPH — the key's graph override (D-C6-1 storage) beats the org
@@ -15881,11 +17436,14 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
             # ALL traffic ("no known healthy instances for route tcp/443") — one
             # slow model call took down the whole product, not just the capture.
             # `to_thread`-style context propagation, but on the CAPTURE pool:
-            # a stalled extraction must not be able to starve the auth
-            # middleware's abuse hooks or the other `to_thread` call sites out
-            # of the shared default executor (#3060). /health is no longer one
-            # of those tenants — since #2850 it reads in-memory state and takes
-            # no thread hand-off (see the pool notes at the top of the file).
+            # a stalled extraction must not be able to starve the other
+            # `to_thread` call sites out of the shared default executor
+            # (#3060) — that pool is 6 workers with an unbounded wait. (#10618
+            # moved the auth path's per-request hooks off it; the hazard this
+            # comment guards is the pool's, not theirs.) /health is no longer
+            # one of those tenants — since #2850 it reads in-memory state and
+            # takes no thread hand-off (see the pool notes at the top of the
+            # file).
             # `_run_off_loop` copies the caller's contextvars into the worker,
             # which is what `_call_once`'s own `copy_context()` snapshot
             # depends on (#2185).
@@ -16847,6 +18405,28 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
             # contract; the wording renders from
             # tortoise/config/capture_disclosure.json — #3517).
             "first_capture": bool(first_capture)}
+    # #10180: NAME THE GRAPH THIS CAPTURE LANDED IN. A capture must be
+    # answerable with "which graph did this land in?" — shown, never inferred
+    # (the UX requirement on the issue), and it stopped being inferable once the
+    # default graph could be PROMOTED: an org-wide key's default may now live in
+    # a graph whose namespace is not the org's historical one, and a graph-bound
+    # key names its own. Both halves are already resolved for this request, so
+    # this adds no read, no lookup and no guess.
+    #
+    # ADDITIVE: a new `graph` object. No existing receipt field is renamed or
+    # removed, so every current consumer (the SDK receipt's byte-parity fields,
+    # the dashboard's capture-status reader, `tortoise session verify`) keeps
+    # working untouched.
+    _receipt_tenant = _resolve_record_tenant(org)
+    resp["graph"] = {
+        # The `public.graphs` id the record files these rows under. None = this
+        # lane could not name a tenant (the record then REFUSES the write rather
+        # than filing under a guess) — reported as null, never invented.
+        "id": _receipt_tenant[1] if _receipt_tenant else None,
+        # The physical graph the nodes went to (`_data_graph_name` — the same
+        # value the admission gate and the opener share).
+        "namespace": _data_graph_name(org),
+    }
     if meta.get("route"):
         resp["extraction_provider"] = meta.get("provider")
     # #5516: the write-time notice that a fact was written against a Source
@@ -19533,10 +21113,11 @@ def _record_tenant_for_read(org: dict) -> tuple[str, str] | None:
 
     ⛔ THE JOURNAL PATH IS RESOLVED THE WAY THE WRITE RESOLVES IT (#10000 review
     P1) — from `_data_sdk`'s OWN branch, never from the dict's
-    `graph_namespace`. The previous version read `org["graph_namespace"]`, which
-    only the KEY lanes stamp (`_get_current_org_supabase`); the SESSION-JWT org
-    dict (`_session_user_org`) carries neither `graph_id` nor `graph_namespace`,
-    so that read was `None` → `record_holds_turns(journal_configured=False)` →
+    `graph_namespace`. The previous version read `org["graph_namespace"]`
+    directly. WHEN #10000 WAS FIXED that field was stamped by the KEY lanes
+    only (`_get_current_org_supabase`), so the SESSION-JWT org dict
+    (`_session_user_org`) carried neither `graph_id` nor `graph_namespace` and
+    the read was `None` → `record_holds_turns(journal_configured=False)` →
     `None` → the record was never consulted on the one lane
     `get_session_detail`'s own docstring says it exists for (#2002/W6, the
     Settings Captured-sessions transcript DE2E-11), and the endpoint served
@@ -19546,6 +21127,21 @@ def _record_tenant_for_read(org: dict) -> tuple[str, str] | None:
     graph-bound key and `_make_sdk(namespace=org_id)` otherwise, and `_make_sdk`
     derives its journal from exactly those two arguments — so this mirrors the
     branch, and the read cannot resolve a journal the writer did not write to.
+
+    ⚠️ THE CARRIER HAS WIDENED SINCE, AND THAT IS WHY THE FIELD IS STILL NOT AN
+    ANSWER BY ITSELF (checked at this head, so the aside above is history rather
+    than a live claim): `_session_user_org` now stamps `graph_namespace`
+    (#10180's default-graph carrier) and `default_graph_id` (#10046;
+    `oauth.resolve_oauth_access_token` carries the same pair for `oat_`
+    tokens) — so the `None`-because-absent mechanism above no longer applies to
+    that lane. The rule it taught survives for a different and stronger reason:
+    `graph_namespace` present does NOT say WHICH branch wrote the turns. On a
+    GRAPH-BOUND credential it is the CUSTOM graph's namespace (a valid value,
+    `org_{org_id}_{gid}`), and the writer took the `graph_name=` branch — so a
+    reader that keyed the journal on the field would derive the OTHER
+    (`namespace=`) path and look for the transcript where nothing was written.
+    The branch is decided by `org["graph_id"]`, which is the same bit
+    `_data_sdk` asks; the field only ever supplies the VALUE inside a branch.
     """
     from tortoise.config import _resolve_event_log_path
     from tortoise.record_writer import record_holds_turns, record_tenant
@@ -19562,10 +21158,16 @@ def _record_tenant_for_read(org: dict) -> tuple[str, str] | None:
         journal_path = _resolve_event_log_path(
             namespace=None, graph_name=_data_graph_name(org))
     else:
-        # Org-wide key AND session auth: `_data_sdk` opens `namespace=org_id`,
-        # whose journal key the SDK derives from that namespace alone.
+        # Org-wide key AND session auth: the org's DEFAULT graph. #10180: when a
+        # promotion MOVED it, that graph is opened BY NAME (`_org_sdk` /
+        # `_data_sdk`), so the journal key comes from the name; otherwise it is
+        # the historical `namespace=org_id` derivation — exactly the pattern the
+        # graph-bound branch above uses for its own graph, and the same decision
+        # the opener took (one resolver, `_default_graph_name`).
+        _default_ns = _default_graph_name(org)
         journal_path = _resolve_event_log_path(
-            namespace=org.get("org_id"), graph_name=None)
+            namespace=None if _default_ns else org.get("org_id"),
+            graph_name=_default_ns)
     # ⛔ THE WRITE BREAKER IS NOT ASKED HERE (#10000 review P1). `circuit_open`
     # says a connect failed within the last 60 s — a bound on the COST of the
     # write path (one timeout per journal record), and no evidence about where a
@@ -21847,8 +23449,68 @@ async def create_org(body: dict, user: dict = Depends(get_current_user)):  # noq
         return await _create_org_registry_lane(sdk, name, user)
 
 
+def _prior_org_onboarding_fork(
+        prior_org_id: str, *,
+        listed: set[str] | _ProbeNotSampled | None = _PROBE_NOT_SAMPLED,
+        moved: str | _NamespaceNotResolved | None = _NAMESPACE_NOT_RESOLVED
+) -> str | None:
+    """The creator's EARLIEST PRIOR org fork, read through the default-graph
+    door; ``None`` when there is nothing to inherit.
+
+    #10180: the prior org's ``:OnboardingState`` lives in ITS DEFAULT graph, and
+    a promotion MOVES that default — so this read resolves through
+    ``_open_org_graph_sdk`` instead of re-deriving ``org_{prior}``. After a
+    promotion the historical name holds no node, ``read_prior_org_fork``
+    answers None, and the new org silently starts in a different onboarding
+    mode (``fork='self'``) than the creator chose — the "org-level state stored
+    in the default graph" class this change converts everywhere else.
+
+    ⛔ IT IS A MODULE-LEVEL HELPER SO THE ASYNC CALLER CAN SUBMIT IT BY NAME
+    (``_graph_offload(functools.partial(...))``) AND RUN IT IN A WORKER. Both
+    legs here are BLOCKING graph I/O — the server-wide listing probe
+    (``db.list_graphs()``) and the ``MATCH`` on the prior org's onboarding node
+    — and the org-create lane is the one whose own comment measures a ~9.5 s
+    pass against the 10 s transport bound (#4816). The first draft read them
+    from inside the SYNC ``_eager_provision_org_graph``, which that coroutine
+    calls directly, so both ran on the event loop; ``#4625``'s guard caught it
+    (``tests/test_health_ready_nonblocking.py``), and a fork read is not worth
+    a stalled loop.
+
+    ``listed`` / ``moved`` are the same two facts, resolved (or not) by the
+    caller — the defaults keep the LEGACY arm working: the checkout-replay lane
+    is sync and already issues its control-plane calls inline, so it passes
+    neither and both resolve here, off the loop by construction because that
+    lane never runs on it.
+
+    Every failure is ``None`` ("inherit 'self'"), never a guess: an unlisted
+    graph is not opened (read-path write pin 4 — opening would MINT it), and a
+    raised read is the same answer ``read_prior_org_fork`` gives.
+    """
+    if isinstance(listed, _ProbeNotSampled):
+        listed = _registry_existing_graphs()
+    if isinstance(moved, _NamespaceNotResolved):
+        moved = _org_default_namespace(prior_org_id)
+    sdk = _open_org_graph_sdk(prior_org_id, listed=listed, moved=moved)
+    if sdk is None:
+        return None
+    try:
+        from tortoise.onboarding import state as _os
+        return _os.read_prior_org_fork(sdk._get_proj(), prior_org_id)
+    except Exception:
+        return None
+    finally:
+        with contextlib.suppress(Exception):
+            sdk.close()
+
+
 def _eager_provision_org_graph(cp, org_id: str, name: str, user_id: str,
-                               prior_org_ids: list[str] | None = None) -> str:
+                               prior_org_ids: list[str] | None = None,
+                               prior_moved: str | _NamespaceNotResolved | None
+                               = _NAMESPACE_NOT_RESOLVED,
+                               prior_listed: set[str] | _ProbeNotSampled | None
+                               = _PROBE_NOT_SAMPLED,
+                               prior_fork: str | _ForkNotResolved | None
+                               = _FORK_NOT_RESOLVED) -> str:
     """Effect the eager default-graph TeamMeta + OnboardingState init for an
     org that is about to be provisioned; return its graph name.
 
@@ -21871,6 +23533,28 @@ def _eager_provision_org_graph(cp, org_id: str, name: str, user_id: str,
     does not issue the same control-plane read a second time on the request.
     ``None`` keeps the legacy behaviour — read it here — for the checkout
     replay lane, which has no caller-side read to reuse.
+
+    ``prior_moved`` / ``prior_listed`` / ``prior_fork`` (#10452): the PRIOR
+    org's already-resolved default namespace, the server-wide graph listing, and
+    the fork that read produced. ``prior_fork`` is the resolved VALUE and the one
+    the async lane passes: :func:`_prior_org_onboarding_fork` is submitted to
+    ``_graph_offload`` by name, so the listing probe and the ``MATCH`` on the
+    prior org's onboarding node both run in a WORKER.
+    ⛔ Every one of them is a value the caller already holds, and that is the
+    point: this helper is SYNC and called DIRECTLY from
+    ``_create_org_supabase_lane``, so any read issued here runs on the event
+    loop of the org-create request — the exact class two earlier rounds of this
+    PR removed from request sites, and the class the #4625 guard
+    (``tests/test_health_ready_nonblocking.py``) now fails on.
+
+    ⚠️ Passing the namespace ALONE is not enough, and that was a real defect:
+    the name says WHICH graph the org's default holds, not whether the server
+    LISTS it — and the three answers a legacy org needs (canonical
+    ``org_{id}``, pre-#3543 ``team_{id}``, or "skip the read") come from the
+    listing, not from the registry column. The three default sentinels keep the
+    legacy behaviour — probe and resolve here — for the checkout-replay lane,
+    which is sync, off the loop, and already issues its control-plane calls
+    inline.
     """
     from tortoise.onboarding import state as _os
     graph_name = f"org_{org_id}"
@@ -21900,14 +23584,23 @@ def _eager_provision_org_graph(cp, org_id: str, name: str, user_id: str,
     if prior_org_ids is None:
         from tortoise.supabase_control import active_membership_org_ids
         prior_org_ids = active_membership_org_ids(cp, user_id)
-    prior_fork = None
-    if prior_org_ids:
-        try:
-            prior_fork = _os.read_prior_org_fork(
-                _make_sdk(namespace=prior_org_ids[0])._get_proj(),
-                prior_org_ids[0])
-        except Exception:
-            prior_fork = None
+    if isinstance(prior_fork, _ForkNotResolved):
+        # Only the LEGACY (checkout-replay, sync, off-loop) lane reaches this
+        # arm: `_create_org_supabase_lane` resolves the fork in a worker and
+        # passes the VALUE. `_prior_org_onboarding_fork` is the same read either
+        # way — one door, so the two lanes cannot disagree about which graph
+        # holds the prior org's record:
+        #   * the PROMOTED namespace `org_{id}_{gid}`  → open it by name;
+        #   * the canonical `org_{id}`, when listed    → the `namespace=` open;
+        #   * the pre-#3543 `team_{id}`, when listed   → open THAT graph (no
+        #     data migration rewrote it: opening `org_{id}` instead reads an
+        #     EMPTY graph, `read_prior_org_fork` answers None, and the new org
+        #     silently starts `fork='self'` — the failure this block exists for);
+        #   * neither listed (or the probe failed)     → None, and the fork read
+        #     is SKIPPED rather than minting `org_{prior}` and reading it.
+        prior_fork = (_prior_org_onboarding_fork(
+            prior_org_ids[0], listed=prior_listed, moved=prior_moved)
+            if prior_org_ids else None)
     init_fork, init_compact = _os.resolve_init_fork_compact(
         bool(prior_org_ids), prior_fork)
     _init_q, _init_p = _os.eager_init_query(
@@ -22010,10 +23703,60 @@ async def _create_org_supabase_lane(cp, name: str, user: dict) -> dict:
     prior_org_ids = await _cp_offload(
         lambda: active_membership_org_ids(cp, user["user_id"]),
         op="active_membership_org_ids", pool="org")
+    # #10180 (review P2): resolve EVERY fact the prior-org read needs HERE, off
+    # the event loop, and hand the RESULT to the sync eager-init helper below.
+    # That helper is called directly from this coroutine, so every read it
+    # issues runs ON THE EVENT LOOP; the prior-org read needs the
+    # `organizations.graph_name` lookup, the server-wide graph listing probe
+    # (`db.list_graphs()`) and the `MATCH` on the prior org's onboarding node —
+    # exactly the class two earlier rounds of this PR removed from request
+    # sites (#3834/#4816: this lane is the one whose own comment measures a
+    # ~9.5 s pass against the 10 s transport bound). `None` (no prior org) costs
+    # nothing, and pays no submission.
+    # ⛔ The namespace ALONE is not enough: it says which graph the org's
+    # default holds, not which names the server actually LISTS — and the legacy
+    # `team_{prior}` arm and the "skip the read" arm come from the listing.
+    # ⛔ TWO submissions, not one, and they ride DIFFERENT lanes (#3718/#3773):
+    # `organizations.graph_name` is a control-plane read and belongs on this
+    # lane's `org` pool (#7678); the listing probe is a REGISTRY read —
+    # `db.list_graphs()` through `_registry_probe_sdk`, i.e. a cold projection
+    # open (connect + version probe + `_ensure_indexes()`) on the first call
+    # after boot — and it must reach the graph pool THROUGH `_graph_offload`,
+    # never `_cp_offload`. Folding both into ONE `org`-pool submission (the
+    # shape this replaces, chosen to save a hand-off) charged the registry read
+    # to the PostgREST lane's contract: `timeout=None` resolves to
+    # `CONTROL_PLANE_OFFLOAD_TIMEOUT_S` (10 s) instead of
+    # `graph_offload_timeout_s()` (~30 s: `probe_setup_timeout()` + the margin
+    # that exists precisely so a cold projection open is not false-degraded),
+    # and a bound miss mapped to `_control_plane_unavailable` — the SIGN-IN 503
+    # body — instead of `_graph_unavailable`. The probe's OWN exceptions stay
+    # swallowed (`_registry_existing_graphs` returns `None` on failure), but a
+    # bound miss is raised by the SEAM, not by the callable, so the fold DID
+    # add a failure mode on this request path: a graph-capacity failure dressed
+    # as an auth outage, on a lane already budgeted close to 10 s. One extra
+    # hand-off is the price; a wrong-pool submission is not payable.
+    # ⛔ The graph-lane submission carries the WHOLE read (`_prior_org_onboarding_fork`:
+    # probe → open → `MATCH`), not just the probe (#10452 CI, #4625). Passing
+    # the listing DOWN let the open and the `MATCH` run back on the loop inside
+    # the sync helper: the guard in `tests/test_health_ready_nonblocking.py`
+    # caught `_open_org_graph_sdk` there, and a graph read is not worth a stalled
+    # request either — the listing and the read are one question about one graph
+    # and now come from ONE worker, which also removes the window where the two
+    # saw different listings.
+    prior_moved = (await _cp_offload(
+        lambda: _org_default_namespace(prior_org_ids[0]),
+        op="org_default_namespace", pool="org")
+        if prior_org_ids else None)
+    prior_fork = (await _graph_offload(
+        functools.partial(_prior_org_onboarding_fork, prior_org_ids[0],
+                          moved=prior_moved),
+        op="prior_org_onboarding_fork")
+        if prior_org_ids else None)
     # Eager default-graph TeamMeta FIRST (see _eager_provision_org_graph) — the
     # helper returns the graph name (f"org_{org_id}", the convention above).
     graph_name = _eager_provision_org_graph(cp, org_id, name, user["user_id"],
-                                            prior_org_ids=prior_org_ids)
+                                            prior_org_ids=prior_org_ids,
+                                            prior_fork=prior_fork)
     try:
         # #1921: all-NULL key params → the RPC writes orgs + membership but
         # NO api_keys row (all-or-none guard, migration 20260825214233) —
@@ -23490,6 +25233,508 @@ async def _apply_graph_rename(
     return {"graph_id": graph_id, "name": name}
 
 
+def _historical_onboarding_sources(org_id: str, namespace: str | None,
+                                   listed: set[str]) -> list[str]:
+    """The graphs an org's onboarding record may still be sitting in, in
+    PREFERENCE order (#10180, #10452 review P2).
+
+    ``listed`` is the caller's ``_registry_existing_graphs()`` result and it is
+    REQUIRED to be a real listing, because that probe is TRI-STATE: ``None``
+    means "could not look", a listed empty set means "the server lists no
+    graph". This used to collapse the two with ``or set()`` (#10452 review P2).
+    On the idempotent REPAIR arm — the one path that recovers a failed carry —
+    that turned a graph-service hiccup into ``no_source``, i.e. "nothing to
+    carry", the verdict the runbook tells the operator to accept without
+    acting, while the record was still stranded in the demoted graph. The
+    tri-state is therefore decided by the caller, where the receipt is written.
+
+    TWO CLASSES of candidate, and the ORDER between them is itself a fix
+    (#10452 review P2):
+
+    1. This org's PER-GRAPH namespaces (``per_graph_namespace_prefixes``) that
+       the server lists. A record that moved more than once sits in the graph
+       that was the default MOST RECENTLY, and every graph that was EVER the
+       default keeps its own frozen copy — `copy_org_state` is a UNION-style
+       merge that never deletes its source. So after a promotion
+       ``org_{org_id}`` → A, then A → B whose carry FAILED, the live record is
+       in A while ``org_{org_id}`` holds a snapshot frozen at the first
+       promotion. Consulting only the historical names carried that STALE
+       snapshot into B and reported it as a successful repair, silently
+       dropping every step, member-progress entry and status gained in A.
+    2. The HISTORICAL tenant names, ``org_{org_id}`` then ``team_{org_id}``.
+       Along such a chain they are strictly OLDER than any per-graph namespace,
+       so they rank last.
+
+    Only names the server actually LISTS are candidates: ``_make_sdk(namespace=…)``
+    re-derives ``org_{org_id}`` and would MINT it, which is the pin-4 read-path
+    write this tree bans. A name the probe never observed is never opened.
+
+    The result is a RANKING, not the answer: the caller reads each candidate's
+    record and takes the most ADVANCED one (`_pick_onboarding_source`), because
+    a listing carries no order — ``graphs.created_at`` says when a graph was
+    minted, never when it last became the default.
+    """
+    from tortoise.supabase_control import per_graph_namespace_prefixes
+
+    per_graph = sorted(
+        name for name in listed
+        if name != namespace
+        and name.startswith(per_graph_namespace_prefixes(org_id)))
+    historical = [c for c in (f"org_{org_id}", f"team_{org_id}")
+                  if c != namespace and c in listed]
+    return per_graph + historical
+
+
+def _onboarding_progress(node: dict, steps: list[str]) -> tuple:
+    """How far along an ``:OnboardingState`` record is — the only order this
+    tree can derive between two candidate SNAPSHOTS of it (#10180).
+
+    ``onboarding.state`` documents the record as MONOTONIC, and `copy_org_state`
+    is the writer that keeps it so: ``write_status`` never regresses from
+    ``complete``, the ``COMPLETED_STEP`` edge set only gains, and
+    ``member_progress`` only accumulates. A carry copies the source FORWARD and
+    leaves it in place, so along a promotion chain each snapshot is a SUBSET of
+    the next — which makes "most advanced" and "most recent" the same question,
+    answerable from the DATA rather than from a clock (``graphs.created_at``
+    records when a graph was minted, not when it last became the default).
+
+    ⛔ THE PROGRESS HALF ALONE IS NOT ENOUGH (#10452 review P2). `copy_org_state`
+    also copies the FLOW keys, and two snapshots can hold EQUAL progress while
+    holding DIFFERENT flow state: an org that answered the fork card after the
+    first promotion, without completing another step, ties its frozen
+    predecessor on ``(status, steps, members)``. Ranking on progress only then
+    broke the tie on CANDIDATE ORDER, so the repair carried the stale
+    ``fork = None`` into a fresh default graph and silently dropped the owner's
+    choice — the one thing this carry exists to preserve.
+
+    So the FLOW keys are ranked after the progress keys, and every one of them
+    is orderable for the same reason the progress keys are — monotonic along a
+    copy chain, not a guess about what the value means:
+
+    * ``fork`` — SET-ONCE (`write_fork` answers 'conflict' rather than
+      overwrite), copied forward, so a snapshot carrying one is strictly later
+      than a snapshot that has none;
+    * ``fork_unsure_at`` — LWW while the fork is unset, and CLEARED when the fork
+      is answered, so among snapshots still awaiting a choice a later stamp is a
+      later state;
+    * ``compact`` — set at node creation and carried forward, so it only ever
+      goes False → True along a chain.
+
+    ⛔ NOT RANKED: ``last_decide_attempt`` ('failed' / 'dismissed'). It is LWW
+    but NOT monotonic — ``write_completed_step('decide-completed')`` REMOVES it —
+    so presence is not an order and ranking on it would prefer a stale failure
+    marker to the state that superseded it. Two candidates that tie on
+    everything above and differ only there are still separated by candidate
+    order; that residual is recorded on the issue (#10452), not guessed at here.
+    """
+    status = 1 if node.get("status") == "complete" else 0
+    members = sum(len(steps_done or ()) for steps_done in
+                  _os.parse_member_progress(node.get("member_progress")).values())
+    fork = 1 if node.get("fork") in _os.FORK_VALUES else 0
+    unsure = str(node.get("fork_unsure_at") or "")
+    compact = 1 if node.get("compact") else 0
+    return (status, len(steps), members, fork, unsure, compact)
+
+
+def _pick_onboarding_source(candidates: list[str], org_id: str) -> str | None:
+    """The candidate graph holding the MOST-ADVANCED onboarding record, or
+    ``None`` when none of them holds one (#10180, #10452 review P2).
+
+    Ties keep the EARLIER candidate, i.e. the preference order
+    `_historical_onboarding_sources` already established (a per-graph namespace
+    before the bare historical ones) — but only after the FLOW half of the
+    comparison, because "equal progress" does NOT mean "the same state":
+    `_onboarding_progress` ranks the flow keys too, so the tie that reaches this
+    fallback is one where the two snapshots carry the same choice AND the same
+    progress. (Before that, a tie was decided by candidate order alone and a
+    stale ``fork = None`` beat the owner's answered fork — #10452 review P2.)
+
+    A read FAILURE propagates, deliberately. This is the repair arm for a record
+    a failed carry stranded, so "I could not read this candidate" must never be
+    answered by carrying some older snapshot instead: the caller turns the
+    exception into ``carry_failed`` (the receipt's instruction to RETRY), the
+    same tri-state discipline that keeps ``probe_failed`` distinct from
+    ``no_source``.
+    """
+    best: str | None = None
+    best_key: tuple | None = None
+    for candidate in candidates:
+        sdk = None
+        try:
+            sdk = _make_sdk(graph_name=candidate)
+            proj = sdk._get_proj()
+            node = _os.read_onboarding_node(proj, org_id)
+            if node is None:
+                continue
+            key = _onboarding_progress(node, _os.completed_steps(proj, org_id))
+        finally:
+            if sdk is not None:
+                with contextlib.suppress(Exception):
+                    sdk.close()
+        if best_key is None or key > best_key:
+            best, best_key = candidate, key
+    return best
+
+
+def _carry_onboarding_state(org_id: str, previous_ns: str | None,
+                            namespace: str | None) -> dict:
+    """#10180 — carry the org's ONBOARDING record into the graph that is now
+    the default. Returns the report the endpoint puts in its response.
+
+    WHY THE VERB MUST DO THIS. ``:OnboardingState`` + its step edges are
+    org-level state that is STORED IN THE DEFAULT GRAPH, and this change
+    converts every org-level reader onto the PROMOTED default. A move that left
+    the record behind would serve ``flow_defaults()`` over an org that had
+    completed: ``onboarding_complete`` flips to the legacy jsonb answer, the
+    onboarding tool group is re-exposed to agents, the dashboard wizard
+    re-opens, and the org's ``fork``/``compact`` choice is lost — a silent
+    regression of state ``onboarding.state`` documents as MONOTONIC.
+
+    WHY IT IS NOT IN THE TRANSACTION. The move is one SQL transaction; the
+    record lives in a graph, so it CANNOT join it. The response is therefore
+    where its verdict belongs (``onboarding_state``), and the copy is
+    idempotent so a retry converges instead of duplicating.
+
+    TWO ARMS, both reported:
+
+    1. A REAL MOVE carries from ``previous_namespace`` — the namespace of the
+       row the SAME transaction demoted, taken from its own result, so there is
+       no second read to straddle the move. Unconditional: the demoted graph's
+       node is the authoritative one (org-level lanes wrote there until this
+       instant), so it wins over a stale node a custom graph may have picked up.
+    2. The IDEMPOTENT arm (the target is already the default, so the RPC reports
+       no previous namespace) REPAIRS: if the target holds no node it carries
+       from the most-advanced listed candidate — this org's PER-GRAPH
+       namespaces first, then the bare historical ones, and among them the
+       record that got furthest (`_historical_onboarding_sources` /
+       `_pick_onboarding_source`). That is what makes a failed carry — and an
+       org promoted before this carry existed — recoverable by re-promoting the
+       current default, mirroring the RPC's own idempotent-arm repair
+       (``namespace_repaired``). It never overwrites a present node.
+
+       ⛔ The candidate set is NOT just the two historical tenant names: every
+       graph that was EVER the default keeps a frozen copy (the merge never
+       deletes its source), so an org that promoted more than once holds a
+       STALE record in ``org_{org_id}`` and the LIVE one in a per-graph
+       namespace. Reading only the historical names repaired from the stale
+       copy and reported it as success, dropping everything gained in between
+       (#10452 review P2). Per-graph namespaces therefore rank first, and the
+       most-advanced record wins outright.
+
+       The listing probe behind that name is TRI-STATE, and the arm keeps it:
+       when the probe FAILS it answers ``probe_failed`` (an instruction to
+       RETRY) rather than ``no_source`` (an instruction to do nothing). This is
+       the only recovery path a failed carry has, so collapsing "could not
+       look" into "nothing there" would let the recovery report success-by-
+       silence over a record that is still stranded (#10452 review P2).
+
+    Best-effort by contract: the move has already COMMITTED when this runs, so
+    a graph failure must not fail the verb — it is reported as
+    ``carry_failed`` with its exception type (never silently reported as done).
+    """
+    report: dict = {"migrated": False, "reason": "no_move", "from": None,
+                    "to": namespace, "steps": 0, "status": None}
+    if not namespace:
+        return {**report, "reason": "no_namespace"}
+    source = previous_ns if previous_ns and previous_ns != namespace else None
+    src_sdk = dst_sdk = None
+    try:
+        if source is None:
+            dst_sdk = _make_sdk(graph_name=namespace)
+            if _os.read_onboarding_node(dst_sdk._get_proj(), org_id) is not None:
+                # Never overwrite: the idempotent arm only ever repairs an
+                # ABSENT record, so a repeated promote cannot churn state.
+                return {**report, "reason": "already_present"}
+            listed = _registry_existing_graphs()
+            if listed is None:
+                # TRI-STATE, kept (#10452 review P2): the probe could not look.
+                # "I could not look" is NOT "there is nothing to carry" — this
+                # is the only path that recovers a failed carry, so the one
+                # verdict the operator must RETRY gets its own reason instead of
+                # `no_source`, which the runbook says to accept.
+                return {**report, "reason": "probe_failed"}
+            source = _pick_onboarding_source(
+                _historical_onboarding_sources(org_id, namespace, listed),
+                org_id)
+            if source is None:
+                return {**report, "reason": "no_source"}
+        dst_sdk = dst_sdk or _make_sdk(graph_name=namespace)
+        src_sdk = _make_sdk(graph_name=source)
+        carried = _os.copy_org_state(src_sdk._get_proj(),
+                                    dst_sdk._get_proj(), org_id)
+        if not carried.get("migrated"):
+            # The source graph exists and is listed but holds no node: nothing
+            # to carry, and saying so is the point (silence would read as
+            # "migrated" to the caller).
+            return {**report, "from": source, "reason": "absent"}
+        return {"migrated": True, "reason": "copied", "from": source,
+                "to": namespace,
+                "steps": len(carried.get("steps") or []),
+                "status": carried.get("status"),
+                # Which graph the org's DM-1 anchor landed in, and whether the
+                # target already held it ("linked"), had to receive its
+                # identity from the demoted graph ("carried"), or holds none
+                # ("not_in_target" / "absent" — the next seed mints the real
+                # anchor). Reported because the target is now the org's DEFAULT
+                # graph: an anonymous Subject standing in for the org's
+                # identity there is state a caller must be able to see.
+                "subject_anchor": carried.get("subject_anchor")}
+    except Exception as e:  # the move already committed — report, never raise
+        _logger.error(
+            "onboarding carry failed for %s (%s -> %s): the org's onboarding "
+            "record is still in the PREVIOUS default graph; re-promoting the "
+            "current default repairs it: %s",
+            org_id, previous_ns, namespace, e)
+        return {**report, "from": source, "reason": "carry_failed",
+                "error": type(e).__name__}
+    finally:
+        for _sdk in (src_sdk, dst_sdk):
+            if _sdk is not None:
+                with contextlib.suppress(Exception):
+                    _sdk.close()
+
+
+class GraphPromote(BaseModel):
+    """#10180 — POST /v1/graphs/{graph_id}/promote body: DELIBERATELY EMPTY.
+
+    A promotion takes no options: the target is the path parameter and the move
+    is all-or-nothing. The model exists so an unknown field is a 422 rather
+    than a silently ignored one (a caller that sends ``{"kind": "default"}``
+    or ``{"force": true}`` must be told the verb has no such knob — ``force``
+    in particular would advertise an override the invariant must never have).
+    A body is optional, so ``POST …/promote`` with no body is valid.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+
+@app.post("/v1/graphs/{graph_id}/promote")
+async def promote_graph(graph_id: str, request: Request, org_id: str,
+                        body: GraphPromote | None = None,
+                        key_ctx: dict = Depends(get_current_org_session)):  # noqa: B008
+    """#10180 — make an EXISTING graph the organization's DEFAULT graph.
+
+    The gap this closes (measured 2026-10-27 on the issue): a team could create
+    graphs and mint a key bound to one, but nothing could MOVE the default —
+    every writer of ``kind='default'`` was a creation path, so the default a
+    team got was the default it kept for the life of the account, and a team
+    that outgrew a graph needed a hand-edited production row.
+
+    Auth mirrors the neighbouring PATCH/DELETE (``_apply_graph_rename``,
+    ``delete_graph``): a key carrying ``team:manage`` (or the legacy
+    full-access class), or an owner/admin session user. This is a MANAGEMENT
+    action on an ORG-WIDE pointer, so an ordinary data-plane or minted
+    ``deleg=0`` key never reaches it. Unknown/foreign org → 404, suspended org
+    → 403, unknown or foreign graph → 404, a graph in the TRASH → 409 naming
+    the restore verb, a non-active status → 409, a target whose NAMESPACE no
+    org-wide resolver can follow → 409 ``GRAPH_NAMESPACE_UNFOLLOWABLE`` (see
+    below), the CURRENT default → idempotent 200 (``already_default: true``: no
+    graph row moves; a drifted ``organizations.graph_name`` is REPAIRED and
+    reported as ``namespace_repaired``) — EXCEPT 409 ``GRAPH_DEFAULT_DRIFT`` when
+    the org already holds two active default rows, a state that arm cannot
+    converge because it returns before the demote.
+
+    ⛔ THE TARGET'S NAMESPACE MUST BE ONE THE ORG-WIDE LANES CAN FOLLOW. The
+    verb writes the target row's ``namespace`` into ``organizations.graph_name``,
+    and every resolver derives the default from that column through ONE shape
+    test (``supabase_control.per_graph_namespace_prefixes``):
+    ``org_{org_id}_{gid}``, or the pre-#3543 ``team_{org_id}_{gid}`` that no data
+    migration rewrites — plus the org's own bare ``org_{org_id}``, which the
+    historical open already resolves (that is what promoting the ORIGINAL graph
+    back looks like). Anything else (a bare ``team_{org_id}``, a pre-#1903
+    ``org_{name}``) is refused rather than accepted: the move would SUCCEED and
+    then route every org-wide lane to a graph other than the one just promoted.
+
+    ATOMICITY: one call into ``public.promote_default_graph`` (migration
+    ``20261102000001``), i.e. ONE transaction that locks the organization row
+    AND the target graph row and demotes-then-promotes. There is never an
+    observable moment with two defaults or with none: the index
+    ``uq_graphs_org_default_active`` (``20261028000001``) forbids two, and the
+    function checks the "exactly one, and it is the target" post-condition
+    itself before returning — so a race the locks did not cover rolls the whole
+    move back and answers 409 ``PROMOTE_CONFLICT`` (retryable) instead of `ok`.
+
+    WHAT MOVES, AND WHAT THAT MEANS FOR A CAPTURE — the consequence, stated
+    because it is the point of the verb:
+
+    * The ``kind='default'`` marker moves to the target row, and so does the
+      org's default NAMESPACE (``organizations.graph_name``). ``graph_metadata``
+      (hence ``GET /v1/graphs`` and the per-graph backup sweep) derives the
+      default from that column, so without the second move the published
+      default would keep naming the OLD graph's namespace while ``stable_id``
+      named the new row — the graph and the record disagreeing about where a
+      capture went.
+
+    * An ORG-WIDE credential's record tenant is resolved through this row —
+      ``supabase_control.default_graph_id_for`` puts its id on the credential as
+      ``default_graph_id``, and ``record_writer.record_tenant_for`` (reached from
+      ``_bind_default_graph_record_tenant`` for the lanes that build their own
+      SDK and from ``_data_sdk`` for a request) names it. After the move, a
+      capture taken with an org-wide key files its record rows under the NEW
+      graph and writes its nodes into the NEW graph's namespace. A
+      graph-bound key is untouched: it already named its own graph, and
+      ``record_tenant_for`` reads that binding first.
+
+    * CAPTURES IN FLIGHT OR QUEUED AT THE MOMENT OF THE SWITCH are NOT
+      re-homed. Each request resolves its graph ONCE, at admission: the graph
+      name it opens (``_data_sdk``) and the record tenant it binds come from the
+      same credential dict, so an in-flight capture — and anything already
+      queued behind it, including the dream drain it enqueues, which carries
+      that tenant AND that graph by value (``_DREAM_RECORD_TENANTS`` /
+      ``_DREAM_DRAIN_GRAPHS``, both set from the enqueueing request's own
+      credential) — finishes against the graph it started on. The
+      switch is visible to the NEXT request that resolves its credential, not to
+      work already admitted. Nothing is copied, moved or replayed: the old graph
+      keeps its own data and stays a normal custom graph (list it, read it with
+      a graph-bound key, back it up).
+
+    * THE ORG'S ONBOARDING RECORD FOLLOWS THE MOVE. ``:OnboardingState`` and its
+      step edges are org-level state STORED IN THE DEFAULT GRAPH, and every
+      org-level reader in this change now opens the PROMOTED default — so the
+      record is CARRIED across by ``_carry_onboarding_state`` and the outcome is
+      reported in ``onboarding_state`` (``migrated``/``reason``/``from``/``to``/
+      ``steps``). Without it a promotion would serve ``flow_defaults()`` over an
+      org that had completed: onboarding re-opens, the tool group is re-exposed
+      to agents, and the recorded ``fork``/``compact`` is lost. It cannot join
+      the SQL transaction (a second store), so the response is where its verdict
+      lives; it is idempotent, and re-promoting the current default REPAIRS a
+      carry that failed.
+
+    Response echoes the move (``graph_id``, ``name``, ``namespace``,
+    ``previous_default_graph_id``, ``already_default``) and restates the tenant
+    consequence in machine-readable fields so a client never has to infer it
+    from the prose above.
+    """
+    if key_ctx.get("org_id") != org_id:
+        raise HTTPException(status_code=404, detail="Unknown organization")
+    org = await _org_node(org_id)
+    if org is None:
+        raise HTTPException(status_code=404, detail="Unknown organization")
+    _ensure_not_suspended(org)
+    # Auth: same class as rename/recording/delete (the management plane).
+    if key_ctx.get("key_id"):
+        scopes = key_ctx.get("scopes") or []
+        if "team:manage" not in scopes and not key_ctx.get("legacy_full_access"):
+            raise HTTPException(status_code=403,
+                                detail="Missing team:manage scope")
+    else:
+        membership = await _membership_org(
+            key_ctx.get("session_user_id") or "", org_id)
+        if membership is None or membership.get("role") not in ("owner", "admin"):
+            raise HTTPException(status_code=403,
+                                detail="Requires owner or admin role in team")
+    from tortoise.supabase_control import (
+        PromoteDefaultGraphError,
+        default_graph_id_for,
+        get_control_plane,
+        is_supabase_enabled,
+    )
+    from tortoise.supabase_control import (
+        promote_default_graph as sb_promote,
+    )
+    if not is_supabase_enabled():
+        # The default graph is a `public.graphs` ROW with a stable id (#10025);
+        # the self-host registry lane has no such row to move, and inventing a
+        # node-level equivalent here would be a second, driftable answer to
+        # "which graph is the default". Name the boundary instead.
+        raise HTTPException(
+            status_code=501,
+            detail={"error_code": "PROMOTE_REQUIRES_HOSTED_CONTROL_PLANE",
+                    "message": ("promoting the default graph needs the hosted "
+                                "control plane (public.graphs); this deployment "
+                                "has no default-graph row to move")})
+    cp = get_control_plane()
+    target = graph_id
+    if graph_id == "default":
+        # The literal sentinel is accepted by the neighbouring endpoints
+        # (`_apply_graph_rename`, `_apply_graph_recording_override`,
+        # `delete_graph`), so accept it here too: promoting the current default
+        # is the idempotent case, and the RPC needs a real ID to say so.
+        target = await _cp_offload(
+            lambda: default_graph_id_for(cp, org_id), op="default_graph_id_for") \
+            or ""
+        if not target:
+            raise HTTPException(
+                status_code=404,
+                detail={"error_code": "GRAPH_NOT_FOUND",
+                        "message": "this organization has no default graph row"})
+    try:
+        # ONE call → ONE transaction. Deliberately no Python pre-check of the
+        # target's state: a read-then-write here would be a TOCTOU window, and
+        # the function already reads the row under the org lock and names every
+        # refusal. Its error text is mapped to the house statuses below.
+        result = await _cp_offload(
+            lambda: sb_promote(cp, org_id, target),
+            op="promote_default_graph")
+    except PromoteDefaultGraphError as e:
+        detail = {"error_code": e.code, "message": str(e)}
+        if e.code == "GRAPH_IN_TRASH":
+            detail["message"] = (
+                "this graph is in the trash — restore it first "
+                f"(POST /v1/graphs/trash/{target}/restore)")
+        raise HTTPException(status_code=e.status, detail=detail) from None
+    # Audit: an org-wide tenancy pointer moved, so it must be attributable
+    # (`graph_packs_update` is the neighbouring per-graph audit event).
+    # #10180: the onboarding record's carry runs FIRST, so the audit event and
+    # the response report the same verdict. `_graph_offload` for the graph I/O;
+    # a bound/503 escape is caught because the MOVE has already committed and
+    # must still answer 200.
+    try:
+        onboarding_state = await _graph_offload(
+            lambda: _carry_onboarding_state(
+                org_id, result.get("previous_namespace"),
+                result.get("namespace")),
+            op="carry_onboarding_state")
+    except Exception as e:  # the move stands; report the carry, never raise
+        _logger.error(
+            "onboarding carry did not run for %s (move committed): %s",
+            org_id, e)
+        onboarding_state = {"migrated": False, "reason": "carry_failed",
+                           "from": result.get("previous_namespace"),
+                           "to": result.get("namespace"), "steps": 0,
+                           "status": None, "error": type(e).__name__}
+    await _async_audit(
+        request, org_id, "graph_promote_default",
+        resource_type="graph", resource_id=result.get("graph_id"),
+        actor_user_id=key_ctx.get("session_user_id"),
+        detail={"via": "session" if not key_ctx.get("key_id") else "key",
+                "already_default": bool(result.get("already_default")),
+                "namespace_repaired": bool(result.get("namespace_repaired")),
+                "previous_default_graph_id": result.get(
+                    "previous_default_graph_id"),
+                "namespace": result.get("namespace"),
+                "onboarding_state_migrated": bool(
+                    onboarding_state.get("migrated")),
+                "onboarding_state_reason": onboarding_state.get("reason")})
+    return {
+        # The graph that is now the default (its real `public.graphs` id).
+        "graph_id": result.get("graph_id") or target,
+        "name": result.get("name"),
+        "namespace": result.get("namespace"),
+        "kind": "default",
+        # Idempotent success is 200 with `already_default: true`: no graph row
+        # moves. The ONE write it may make is the §-3 repair of a drifted
+        # `organizations.graph_name`, reported so a caller can tell the two
+        # apart (`namespace_repaired`).
+        "already_default": bool(result.get("already_default")),
+        "namespace_repaired": bool(result.get("namespace_repaired")),
+        "previous_default_graph_id": result.get("previous_default_graph_id"),
+        # The consequence, machine-readable: the record tenant an org-wide
+        # credential now resolves to, and the fact that in-flight work is not
+        # re-homed. Both mirror the docstring; neither is inferable from the id.
+        "record_tenant": {"org_id": org_id,
+                          "graph_id": result.get("graph_id") or target},
+        "org_wide_credentials_land_in": result.get("namespace"),
+        # #10180: the org-level state that lives INSIDE the default graph moved
+        # with it (or did not — and why). Machine-readable for the same reason
+        # `in_flight_captures` is: an operator must not have to infer from prose
+        # whether the org's onboarding record followed its graph.
+        "onboarding_state": onboarding_state,
+        "in_flight_captures": (
+            "not re-homed — each request resolves its graph once at admission, "
+            "so work already admitted finishes against the graph it started on"),
+    }
+
 
 @app.delete("/v1/graphs/{graph_id}")
 async def delete_graph(graph_id: str, org_id: str,
@@ -23590,8 +25835,22 @@ async def delete_graph(graph_id: str, org_id: str,
         key_ids = await _graph_offload(
             lambda: sdk.graph_key_ids(org_id, graph_id), op="graph_key_ids")
     if not deleted:
-        # Kind was non-default and present a moment ago — belt-and-
-        # suspenders only (no code path reaches here).
+        # #10180: reachable now — a promotion can commit between the kind read
+        # above and the tombstone, and `soft_delete_graph`'s PATCH is conditioned
+        # on `kind != 'default'` so it then matches nothing. Say which: the row is
+        # still there and it is now the default, so this is the same refusal as
+        # the guard above, not a 404 for a graph that exists.
+        if is_supabase_enabled():
+            rows = await _cp_offload(
+                lambda: cp.query(
+                    "graphs", select=["kind"],
+                    filters=[("id", "eq", graph_id),
+                             ("org_id", "eq", org_id)]),
+                op="query")
+            if rows and rows[0].get("kind") == "default":
+                raise HTTPException(
+                    status_code=403,
+                    detail="Cannot delete the default graph")
         raise HTTPException(status_code=404, detail="Unknown graph")
     # Cascade: revoke every key bound to the graph (401 on next use).
     # Best-effort per key (mirrors _revoke_graph_keys) — the tombstone is
@@ -27362,7 +29621,14 @@ async def import_org(org_id: str, request: Request,
             get_control_plane,
             is_supabase_enabled,
         )
-        sdk = _make_sdk(namespace=org_id)
+        # #7500: the READ rides the worker, the CONSTRUCTION stays on the loop.
+        # `_org_sdk` builds the SDK, and built inside a POOLED worker thread
+        # `_make_sdk`'s store-path resolution picks up the thread's stale
+        # inherited stamp once the pool reuses it — the job then writes a store
+        # the reader never looks at (the reason `_run_indexing` /
+        # `_run_docs_indexing` use this same split).
+        sdk = _org_sdk_from_name(org_id, await _cp_offload(
+            lambda: _org_default_namespace(org_id), op="org_sdk"))
         registry_sdk = None
         try:
             if is_supabase_enabled():
@@ -31977,7 +34243,7 @@ def _write_onboarding_state(org_id: str, state: dict) -> None:
 
 def _org_proj(org_id: str):
     """Tenant-graph projection handle for onboarding writes/reads."""
-    return _make_sdk(namespace=org_id)._get_proj()
+    return _org_sdk(org_id)._get_proj()
 
 
 def _maybe_apply_completion(org_id: str) -> bool:
@@ -32290,22 +34556,10 @@ class OnboardingStateResponse(BaseModel):
 _ACCEPT_AND_DROP = True  # W1 (#1997) landed — PATCH onboarding_complete is dropped on node-present orgs (plan T7)
 
 
-class _ProbeNotSampled:
-    """Sentinel type for ``_open_org_graph_sdk``'s ``listed`` argument.
-
-    ``None`` already MEANS something on that argument — the registry probe
-    FAILED (fail-open, #3543) — so it cannot double as "the caller did not
-    sample the listing". ``isinstance`` keeps the two distinguishable without
-    a second boolean parameter.
-    """
-
-
-_PROBE_NOT_SAMPLED = _ProbeNotSampled()
-
-
 def _graph_has_org_namespace(
         org_id: str, *,
         listed: set[str] | _ProbeNotSampled | None = _PROBE_NOT_SAMPLED,
+        moved: str | _NamespaceNotResolved | None = _NAMESPACE_NOT_RESOLVED,
 ) -> bool:
     """Existence check WITHOUT constructing the ORG projection (constructing
     org_{tid} would materialize an absent org graph — a read-path write,
@@ -32326,7 +34580,16 @@ def _graph_has_org_namespace(
     and both must come from ONE snapshot: a second probe was a second
     FalkorDB connection in URI mode, and it could also list a DIFFERENT name
     than the one the verdict was about. ``None`` cannot be the default — it is
-    the probe's own FAILURE signal (fail-open below)."""
+    the probe's own FAILURE signal (fail-open below).
+
+    ``moved`` carries the org's ALREADY-resolved default namespace on the same
+    principle (#10180): this verdict and the open that follows it are two
+    questions about one graph, so they must be one resolution. Resolving here
+    and again in `_open_org_graph_sdk` answered them at two instants, and on a
+    lane with no credential hint (the MCP onboarding gate, a background pass)
+    it paid TWO control-plane reads per projection instead of one. The default
+    sentinel keeps every other caller byte-identical: it resolves exactly where
+    this function always did."""
     # #3543: both tenant prefixes are probed — a graph minted before the
     # rename is `team_{org_id}`, and no data migration rewrites it. Probing
     # only `org_` reported "node absent" for every pre-rename org, which made
@@ -32337,6 +34600,19 @@ def _graph_has_org_namespace(
         # connection failure — treat as graph-up-unknown → the projection
         # falls through to the read (which raises → 'unavailable' markers)
         return True
+    # #10180: a PROMOTED org's default graph is a per-graph namespace
+    # (`org_{org_id}_{gid}`), and the promotion CARRIES the org's onboarding
+    # record into it (`_carry_onboarding_state`). So for such an org "does it
+    # have an org graph" is a question about the DEFAULT — asking only about the
+    # historical names answered False the moment the demoted graph was deleted
+    # (it is an ordinary custom graph now), which sent the projection down the
+    # no-write FLOW-defaults path over a graph that is present. `None` from the
+    # resolver (fail-soft: unreadable control plane) keeps the historical
+    # probe below, i.e. the pre-#10180 answer.
+    if isinstance(moved, _NamespaceNotResolved):
+        moved = _org_default_namespace(org_id)
+    if moved is not None:
+        return moved in listed
     return any(name in listed
                for name in (f"org_{org_id}", f"team_{org_id}"))
 
@@ -32509,6 +34785,7 @@ def _registry_existing_graphs() -> set[str] | None:
 def _open_org_graph_sdk(
         org_id: str, *,
         listed: set[str] | _ProbeNotSampled | None = _PROBE_NOT_SAMPLED,
+        moved: str | _NamespaceNotResolved | None = _NAMESPACE_NOT_RESOLVED,
 ) -> TortoiseSDK | None:
     """SDK on the org's DEFAULT graph, or None when the server lists neither
     the canonical nor the pre-rename name.
@@ -32521,6 +34798,14 @@ def _open_org_graph_sdk(
     name is listed the namespace form is used unchanged, so the embedded
     keepalive key and every downstream `sdk._namespace` consumer stay
     byte-identical to before this helper existed.
+
+    #10180: when the org's default graph has been PROMOTED its namespace is a
+    per-graph one (`org_{org_id}_{gid}`, or the pre-#3543
+    `team_{org_id}_{gid}` for a graph minted before the tenancy rename), so THAT
+    is the default this helper must open — resolved through
+    `_org_default_namespace`, and still gated on the listing (a name the probe
+    did not observe is never opened). For every org that has not promoted that
+    call returns None and nothing changes.
 
     None means "not listed" OR "the registry probe failed" —
     ``_registry_existing_graphs`` returns None on a probe failure, and
@@ -32540,6 +34825,15 @@ def _open_org_graph_sdk(
         listed = _registry_existing_graphs()
     if not listed:
         return None
+    if isinstance(moved, _NamespaceNotResolved):
+        moved = _org_default_namespace(org_id)
+    if moved is not None:
+        # #10180: this org's default graph was PROMOTED into its own namespace
+        # (`org_{org_id}_{gid}`, or a pre-#3543 `team_{org_id}_{gid}`), so that
+        # name — not `org_{org_id}` — is the default this helper is named for. Same listing guard as below: a name
+        # the probe did not observe is not opened (pin 4: the read path must not
+        # materialize).
+        return _make_sdk(graph_name=moved) if moved in listed else None
     if f"org_{org_id}" in listed:
         return _make_sdk(namespace=org_id)
     if f"team_{org_id}" in listed:
@@ -32552,7 +34846,9 @@ def _graph_available(org_id: str) -> bool:
     Biased opposite to the READ path: a connection failure → False (the
     write must not half-land jsonb-side without the graph leg)."""
     try:
-        _make_sdk(namespace=org_id)._get_proj().db.list_graphs()
+        # The graph the write will actually use — the DEFAULT one, which #10180
+        # may have moved (see `_org_sdk`).
+        _org_sdk(org_id)._get_proj().db.list_graphs()
         return True
     except Exception:
         return False
@@ -32580,7 +34876,16 @@ def _get_onboarding_projection(org_id: str) -> dict:
     # share this single snapshot, which also closes the gap where the second
     # probe could list a DIFFERENT name than the one the verdict was about.
     listed = _registry_existing_graphs()
-    if not _graph_has_org_namespace(org_id, listed=listed):
+    # #10180: the existence VERDICT and the OPEN are two questions about ONE
+    # graph, so they are answered from ONE resolution of the org's default
+    # namespace — resolving inside both helpers was two answers at two instants
+    # (a promotion landing between them makes the verdict about one graph and
+    # the open about another), and two control-plane reads per projection on a
+    # lane with no credential hint. `listed` decides whether a resolution is
+    # owed at all: a failed probe (`None`) fails open without one and an empty
+    # listing reaches the same early return, so neither pays a new read.
+    moved = _org_default_namespace(org_id) if listed else _NAMESPACE_NOT_RESOLVED
+    if not _graph_has_org_namespace(org_id, listed=listed, moved=moved):
         state = dict(raw)
         state.update(_os.flow_defaults())
         state["onboarding_complete"] = _os.resolve_wire_completion(
@@ -32598,8 +34903,8 @@ def _get_onboarding_projection(org_id: str) -> dict:
         # name this line never opens. None comes back when the probe failed
         # (fail-open) or neither name is listed: fall back to the inline
         # construction so the read proceeds and raises → 'unavailable'.
-        proj = (_open_org_graph_sdk(org_id, listed=listed)
-                or _make_sdk(namespace=org_id))._get_proj()
+        proj = (_open_org_graph_sdk(org_id, listed=listed, moved=moved)
+                or _org_sdk(org_id))._get_proj()
         node = _os.read_onboarding_node(proj, org_id)
         steps = _os.completed_steps(proj, org_id) if node is not None else []
     except Exception:
@@ -33033,7 +35338,7 @@ async def patch_onboarding_state(body: OnboardingStatePatchRequest,
             # 4). None (probe failed / not listed) → the inline construction,
             # unchanged. Closed in the finally below either way.
             _node_sdk = (_open_org_graph_sdk(org["org_id"])
-                         or _make_sdk(namespace=org["org_id"]))
+                         or _org_sdk_for_credential(org))
             # The WORKER owns the close: it runs in the worker's own
             # ``finally``, so the SDK is closed exactly once there whether the
             # read succeeds, raises, or the request is cancelled (the worker
@@ -33551,12 +35856,20 @@ def _run_onboarding_seed(org_id: str, *, org_name: str | None = None,
                 "org_name_source": org_source if org_display else None,
                 "person_name_source": person_source}
 
-    sdk = _make_sdk(namespace=org_id)
-    # #10047: this runner writes the org's DEFAULT graph (`namespace=org_id`)
-    # and holds no credential dict, so name that graph's record tenant here —
+    # #10047: this runner writes the org's DEFAULT graph (`namespace=org_id`
+    # — or the namespace a #10180 promotion moved it to, which `_org_sdk` and
+    # `_bind_default_graph_record_tenant` resolve the SAME way) and holds no
+    # credential dict, so name that graph's record tenant here —
     # through the one chokepoint — or every Subject/edge it files is refused
     # `no_tenant` while the seed reports success.
-    _bind_default_graph_record_tenant(sdk, org_id)
+    #
+    # ⛔ ONE READ for BOTH answers: `_org_default_graph` returns the namespace
+    # the seed OPENS and the tenant it FILES UNDER from a single `public.graphs`
+    # read, so a promotion committing between two reads cannot leave the seed
+    # writing the demoted graph while naming the promoted one (#10180 review).
+    moved, tenant = _org_default_graph(org_id)
+    sdk = _org_sdk_from_name(org_id, moved)
+    _bind_default_graph_record_tenant(sdk, org_id, default_graph_id=tenant)
     try:
         surface = _OrgSeedSurface(sdk)
         try:
@@ -33728,10 +36041,13 @@ def _run_starter_seed(org_id: str, *, org_name: str | None = None,
     if person_user_id in (None, "api") or "@" in str(person_user_id):
         person_user_id = None
     include_person = person is not None
-    sdk = _make_sdk(namespace=org_id)
     # #10047: the starter seed writes the org's DEFAULT graph by construction —
     # bind that graph's record tenant (see _bind_default_graph_record_tenant).
-    _bind_default_graph_record_tenant(sdk, org_id)
+    # ⛔ Both answers from ONE `public.graphs` read (`_org_default_graph`), for
+    # `_run_onboarding_seed`'s reason: two reads straddle a promotion.
+    moved, tenant = _org_default_graph(org_id)
+    sdk = _org_sdk_from_name(org_id, moved)
+    _bind_default_graph_record_tenant(sdk, org_id, default_graph_id=tenant)
     try:
         proj = sdk._get_proj()
         surface = _OrgSeedSurface(sdk)
@@ -34042,7 +36358,7 @@ async def public_demo(org: dict = Depends(get_current_org_gated)):  # noqa: B008
     Reuses the same seeding logic as /internal/demo but requires a Bearer
     tt_ key instead of the internal key. Idempotent (sentinel check).
     """
-    # C5 #2114 (code-review P1): the demo seed writes ~13 Points into the
+    # C5 #2114 (code-review P1): the demo seed writes ~10 Points into the
     # org's DEFAULT graph — a graph-bound key seeding it would be a
     # cross-graph write; a graphs:read-only key seeding it would be a
     # read→write scope bypass. Demo is a default-graph org surface.
@@ -34051,7 +36367,7 @@ async def public_demo(org: dict = Depends(get_current_org_gated)):  # noqa: B008
     # #3718 residual (DATA plane): every step of the seed region below is SYNC
     # FalkorDB socket I/O — `_make_sdk` (in embedded mode it probes the anchor
     # and can open the DB), the projection attach, the sentinel read, the quota
-    # count and the ~13-Point seed. They run as ONE worker hand-off, so the
+    # count and the ~10-Point seed. They run as ONE worker hand-off, so the
     # region's statements stay uninterleaved WITHIN the request.
     #
     # ⚠️ ONE HAND-OFF IS NOT MUTUAL EXCLUSION: `asyncio.to_thread` submits to
@@ -34063,7 +36379,7 @@ async def public_demo(org: dict = Depends(get_current_org_gated)):  # noqa: B008
     # `_org_restore_lock` pattern; #3718 round-2 review, empirically reproduced
     # with a two-party barrier on `_seed_demo_graph`).
     def _seed_demo_sync() -> dict:
-        sdk = _make_sdk(namespace=org["org_id"])
+        sdk = _org_sdk(org["org_id"])
         proj = sdk._get_proj()
         existing = proj.g.query(
             "MATCH (p:Point {id: '_demo_sentinel'}) RETURN p.id"
@@ -34072,13 +36388,13 @@ async def public_demo(org: dict = Depends(get_current_org_gated)):  # noqa: B008
             return {"existing": True, "created": None}
         # #1922: quota-gate the seed like the MCP twin
         # (tortoise_onboarding_demo_create → _enforce_quota("points")). The
-        # demo seed writes ~13 Points, so it must consume the points quota
+        # demo seed writes ~10 Points, so it must consume the points quota
         # like any other Point-creating write — the REST surface was the
         # 0-quota bypass (bug-hunt 2026-08-28 server P2-13). Idempotent
         # re-calls short-circuit above and skip the gate (no write).
         _check_org_limit(org, "points")
         # The shared demo seeder (extracted from /internal/demo) opens its own
-        # SDK and writes ~13 Points.
+        # SDK and writes ~10 Points.
         return {"existing": False, "created": _seed_demo_graph(org["org_id"])}
 
     async with await _demo_seed_lock(org["org_id"]):
@@ -34089,13 +36405,15 @@ async def public_demo(org: dict = Depends(get_current_org_gated)):  # noqa: B008
         # worker hand-off too (the probe in the lane guard finds it otherwise).
         await asyncio.to_thread(
             _update_onboarding_state, org["org_id"], demo_created=True)
+        # 10 = the 9 seeded `:Point` nodes + `_demo_sentinel` (was a stale 15
+        # that never matched the seed; corrected with the #10000 census).
         await _track_onboarding_event(org, "first_memory_created",
-                                      source="demo", point_count=15)
+                                      source="demo", point_count=10)
         return {"status": "already_seeded", "org_id": org["org_id"]}
 
     created = out["created"]
 
-    # #1922: meter the seed that actually ran — one write op billing 12
+    # #1922: meter the seed that actually ran — one write op billing the 9
     # seeded points + the _demo_sentinel Point (net-new non-episodic nodes,
     # the value-first commit cost driver epic #909 §4.4). A concurrent
     # request may have completed the seed first (sentinel now present) —
@@ -35790,9 +38108,9 @@ async def _emit_analytics_off_loop(org_id: str, event_name: str,
     ``_cp_offload``, and since #4468 it is also the capture-cost lane's
     (``_emit_capture_ledger``) off-loop path: that lane used to keep its own
     ``asyncio.to_thread`` call — still off-loop, but on the loop's SHARED
-    default executor, which the abuse hooks and the selfhost readiness probe
-    also use, so it was not isolated the way this pool is. ``mcp_server`` keeps
-    its own retained emitter.
+    default executor, shared with the selfhost readiness probe and every other
+    ``to_thread`` site, so it was not isolated the way this pool is.
+    ``mcp_server`` keeps its own retained emitter.
 
     ``_track_analytics_event`` is a synchronous ``httpx.Client`` POST and
     ``hosted_api`` runs a SINGLE uvicorn worker, so calling it inline from an
@@ -37305,7 +39623,8 @@ async def _run_indexing(job_id: str, org_id: str, org: str,
       persist is caught and folded into the terminal status — never allowed to
       wedge the job at ``started``.
     * WHAT STAYS ON THE LOOP, and why it is not an omission: the
-      ``_make_sdk`` construction and the single ``org_sdk._get_proj()`` attach
+      ``_org_sdk_from_name`` SDK construction and the single
+      ``org_sdk._get_proj()`` attach
       handed to ``backfill_legacy_closed``; ``index_repo``'s own attach too
       (it attaches on ITS caller's loop before handing the handle to the
       worker). Off-loading those resolves the store path from a POOLED worker
@@ -37313,6 +39632,9 @@ async def _run_indexing(job_id: str, org_id: str, org: str,
       is reused across tests — the job then writes where the test's reader
       never looks (tortoise#7500; measured as 3 reds under #4645, which is why
       its hand-offs were reverted). They can move only once #7500 lands.
+      What IS off-loaded is the #10180 default-graph NAME read
+      (``_org_default_namespace``): one control-plane round trip, taken in a
+      worker and handed to a construction that stays here.
     * ``backfill_legacy_closed``'s OWN SCAN is ALSO still inline, and it is a
       declared residual too — but NOT a #7500 site. It runs two full-:Event
       reads plus one journaled ``apply`` per mint (``github_indexer.py``), all
@@ -37396,12 +39718,23 @@ async def _run_indexing(job_id: str, org_id: str, org: str,
     terminal_status: str | None = None
     terminal_error: str | None = None
     try:
-        org_sdk = _make_sdk(namespace=org_id)
+        # The default-graph answers are resolved in a worker (one control-plane
+        # round trip, which must not run on the loop), but the SDK is
+        # CONSTRUCTED back here, ON the loop — ``_make_sdk`` in a pooled worker
+        # resolves the store path from that thread's stale stamp (#7500).
+        # `_org_default_graph` returns the NAME to open AND the record tenant to
+        # file under from that ONE read: two reads would straddle a promotion
+        # (the walk then writes the demoted graph while its rows name the
+        # promoted one — #10180 review).
+        moved, tenant = await _cp_offload(
+            lambda: _org_default_graph(org_id), op="org_sdk")
+        org_sdk = _org_sdk_from_name(org_id, moved)
         # #10047: the walk is a DETACHED task carrying only `org_id`, so it
         # cannot see the credential that started it; it opens the org's DEFAULT
         # graph, so that graph's record tenant is the answer for every Object /
         # Event / `-closed` row it mints.
-        _bind_default_graph_record_tenant(org_sdk, org_id)
+        _bind_default_graph_record_tenant(org_sdk, org_id,
+                                         default_graph_id=tenant)
 
         # #1844: the index job writes zero non-episodic :Point nodes, so it never
         # trips the POINT arm of the "points" resource.
@@ -37746,11 +40079,15 @@ def _relink_sessions_after_index(org_id: str) -> None:
         # the SDK is journal-less and ``sdk._emit_event`` is a no-op on
         # ``EntityLinked`` (JSONL-only, absent from ``_GRAPH_EVENT_TYPES``), so
         # the edges stay live-only — the documented unconfigured-lane bound.
-        _link_sdk = _make_sdk(namespace=org_id)
         # #10047: the relink pass emits `EntityLinked` through THIS SDK on the
         # org's DEFAULT graph — the tenant must ride it, or the edges it
-        # journals are refused `no_tenant`.
-        _bind_default_graph_record_tenant(_link_sdk, org_id)
+        # journals are refused `no_tenant`. Both the name it opens and the
+        # tenant it files under come from ONE `public.graphs` read, so a
+        # promotion committing in between cannot split them (#10180 review).
+        moved, tenant = _org_default_graph(org_id)
+        _link_sdk = _org_sdk_from_name(org_id, moved)
+        _bind_default_graph_record_tenant(_link_sdk, org_id,
+                                          default_graph_id=tenant)
         proj = _link_sdk._get_proj()
         rows = proj.g.query(
             "MATCH (s:Session)-[:CONTAINS]->(t:Point) "
@@ -37969,11 +40306,16 @@ async def _run_docs_indexing(job_id: str, org_id: str, org: str,
               "blobs_skipped_oversized": 0, "repos_processed": 0,
               "repos_total": 0, "errors": [], "quota_hit": False}
     try:
-        org_sdk = _make_sdk(namespace=org_id)
+        # Same split as `_run_indexing`: the answers are read in a worker, the
+        # SDK is constructed on the loop (#7500 — see `_org_sdk_from_name`).
+        moved, tenant = await _cp_offload(
+            lambda: _org_default_graph(org_id), op="org_sdk")
+        org_sdk = _org_sdk_from_name(org_id, moved)
         # #10047: same detached-task reason as `_run_indexing` — the docs walk
         # writes the org's DEFAULT graph and carries no credential to resolve a
         # tenant from.
-        _bind_default_graph_record_tenant(org_sdk, org_id)
+        _bind_default_graph_record_tenant(org_sdk, org_id,
+                                         default_graph_id=tenant)
 
         # ── Documents gate (Task 9): the docs job gates on the DOCUMENTS
         # resource — the points gate is vacuous for docs (index_directory
@@ -41546,8 +43888,8 @@ async def webhooks_stripe(request: Request):
             # ``to_thread`` submits to the loop's SHARED default executor,
             # whose workers are NON-daemon and are JOINED at shutdown (#2850),
             # so a black-holed socket would delay uvicorn's shutdown — and a
-            # notify would park one of the six workers the /health probe and
-            # the abuse hooks also use (#3060; #4468 tracks the same residual
+            # notify would park one of the six workers the /health probe uses
+            # (#3060; #4468 tracks the same residual
             # on the capture-cost lane). The telemetry pool is a
             # process-lifetime DAEMON pool with a bounded backlog, so a wedged
             # notify is abandoned at the seam's wait bound instead of
