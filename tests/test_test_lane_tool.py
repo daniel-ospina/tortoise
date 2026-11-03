@@ -982,6 +982,77 @@ def test_start_reads_the_root_ONCE_with_the_sweep_ENABLED(monkeypatch,
         f"as ITS OWN (mine == name); it reported instead: {err}")
 
 
+@pytest.mark.parametrize("failure", ["never_ready", "no_port"])
+def test_the_FAILURE_path_cleanup_never_re_reads_the_root(monkeypatch, tmp_path,
+                                                          failure):
+    """#10712 round-5 finding 1: the single-read invariant must hold on the two
+    paths whose WHOLE JOB is not leaking a port.
+
+    `start()`'s comment says the one `repo_root()` read is "threaded into the
+    sweep and into every removal guard below". Two of the four removal-guard
+    call sites shipped WITHOUT it — the fresh-container cleanups on the
+    never-ready and no-readable-port branches — so `_remove_and_describe(name)`
+    fell back to `_assert_removal_allowed(name, root=None)` → `lane_name()` → a
+    SECOND `_lane_identity()` → a SECOND `repo_root()`.
+
+    On a host where that second read degrades (the git-timeout `Path.cwd()`
+    fallback this tool exists on), the guard compares the name against a
+    DIFFERENT worktree's name and refuses: the container this very call just
+    created is left holding a reserved port — the #8180 leak class this PR
+    exists to drain — and the report blames "a peer lane's database", sending
+    the operator to look for a lane that does not exist.
+
+    The sibling `root_ONCE` tests cannot see it: both cover the SUCCESS path,
+    and the two tests that do reach these branches use the `lane` fixture, which
+    patches `_lane_identity` — so a second read cannot disagree there and the
+    extra read is invisible to the whole suite.
+
+    Revert either `root=root` argument and this is red: the flip yields two
+    reads, a mismatched name, and a `refusing to remove` SystemExit instead of
+    the removal.
+    """
+    first, second = tmp_path / "read-one", tmp_path / "read-two"
+    first.mkdir()
+    second.mkdir()
+    mine = tl.container_name(tl.slug_for(first))
+    reads: list[Path] = []
+
+    def flipping_root():
+        reads.append(first if not reads else second)
+        return reads[-1]
+
+    monkeypatch.setattr(tl, "repo_root", flipping_root)
+    monkeypatch.setattr(tl, "container_state", lambda _n, **_k: "absent")
+    monkeypatch.setattr(tl, "pick_port", lambda *a, **k: 16399)
+    monkeypatch.setattr(tl, "_wait_ready", lambda _n, _p=None: failure != "never_ready")
+    if failure == "no_port":
+        monkeypatch.setattr(tl, "_published_port", lambda _n: (False, None))
+    monkeypatch.setattr(tl, "_ping_over_host", lambda port, timeout: False)
+    calls: list = []
+
+    def fake(*a, **k):
+        calls.append(a)
+        if a[0] == "run":
+            return _R(0, "deadbeef\n", "")
+        if a[0] == "rm":
+            return _R(0, "", "")
+        return _R(0, "", "")
+
+    monkeypatch.setattr(tl, "_docker", fake)
+    with pytest.raises(SystemExit) as exc:
+        tl.start(port=16399)
+
+    msg = str(exc.value)
+    assert len(reads) == 1, (
+        f"the cleanup on the {failure} path must reuse `start()`'s ONE "
+        f"`repo_root()` read, not take a second (it took {len(reads)}: {reads})")
+    assert ("rm", "-f", mine) in calls, (
+        f"the {failure} path must remove the container THIS call created "
+        f"({mine}); the guard refused it instead: {msg}")
+    assert "removed it" in msg, msg
+    assert "a peer lane's database is not ours to delete" not in msg, msg
+
+
 def test_the_label_writer_cannot_read_the_root_itself():
     """The single-read invariant is only true if `_label_args` cannot read the
     root itself: a root parameter is what makes "ONE `repo_root()` read" a

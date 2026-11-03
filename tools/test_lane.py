@@ -1944,7 +1944,7 @@ def start(port: int | None = None) -> tuple[str, int]:
         killed = _termination_report(name, live=False)
         logs = _docker("logs", "--tail", "20", name)
         raise SystemExit(
-            f"test-lane: {name} never answered PING; {_remove_and_describe(name)}. "
+            f"test-lane: {name} never answered PING; {_remove_and_describe(name, root=root)}. "
             f"Logs:\n{logs.stdout}{logs.stderr}{killed}"
         )
     asked, published = _published_port(name)
@@ -1957,7 +1957,7 @@ def start(port: int | None = None) -> tuple[str, int]:
                else "it publishes no port")
         raise SystemExit(
             f"test-lane: {name} answered PING but {why}; "
-            f"{_remove_and_describe(name)}"
+            f"{_remove_and_describe(name, root=root)}"
         )
     return name, published
 
