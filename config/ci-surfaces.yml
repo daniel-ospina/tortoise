@@ -5085,16 +5085,18 @@ surfaces:
   # pair at the pre-`d3f148a56` numbers while the table rows cited the current
   # ones, i.e. two coordinate systems for one construction inside one document.
   # Text-only (one file read); no DB, no graph, no network, no model.
-  # ⚠️ This row does NOT by itself catch that defect, and the comment claiming
-  # otherwise is why it is spelled out here (#10620 review, issue 5: measured with
-  # this manifest, `hosted_api.py` — the file whose movement is the whole subject
-  # of the third re-derivation — selects `api`+`onboarding`, which REPLACES the
-  # `core` fallback, so `core` is ABSENT on exactly the module diff that rots the
-  # cites). Coverage still holds, but through the `tier1` arm below: `select()`
-  # unions `tier1` into every partial selection (`tools/ci_selection.py`), and a
-  # docs-only edit of the census document selects NO surface and runs `tier1`
-  # ONLY. DUAL-REGISTERED with `tier1` for that reason — keeping only one of the
-  # two rows is what would put this guard to sleep.
+  # ⚠️ Measured with this manifest, `core` ALONE would be ASLEEP on the changes
+  # that matter here (#10620 review, issue 5: this row's comment claimed `core`
+  # "is the arm that runs on the module diffs those paths select"). Drop the
+  # `tier1` row → the guard is LOST on the docs-only diff, on `hosted_api.py` and
+  # on `selfhost_api.py`, because `hosted_api.py` selects `api`+`onboarding`,
+  # which REPLACES the `core` fallback (#2938). Drop `core` → the guard still
+  # runs on all eight cited paths. The arm that actually carries this guard is the
+  # `tier1` row below: `select()` seeds EVERY selection from `set(tier1)`
+  # (`tools/ci_selection.py`), and a docs-only diff returns tier1 wholesale. So
+  # the dual registration is not symmetric, and `tier1` is the load-bearing half —
+  # do not delete it believing this row covers the same ground. Pinned by
+  # `tests/test_ci_selection.py::test_docs_scanning_gates_stay_in_tier1`.
   - test_8447_census_citation_coordinates.py
   # #9189 (§17.2): the reconciler's PRODUCTION TRIGGER. `tortoise/reconciliation.py`
   # had a comparison and no production caller (measured at `f96a18da1` and
