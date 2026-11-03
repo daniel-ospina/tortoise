@@ -84,6 +84,23 @@ _ENV_KEY_NAMES: tuple[str, ...] = ("TORTOISE_API_KEY", "TORTOISE_MCP_API_KEY")
 #: exists to remove.
 _AUTH_REJECTION_RE = re.compile(r"\b40[13]\b|unauthorized|invalid or missing bearer", re.IGNORECASE)
 
+#: an SDK that REFUSES to follow a cross-origin redirect instead of following it
+#: and letting httpx strip the header: `Redirect to <url> not followed; use that
+#: URL as the endpoint if it is the intended server`. Two MCP SDK versions this
+#: repo runs against (1.29 follows, 1.30 refuses) reach the SAME operator problem
+#: by different routes, so both must classify to the same named refusal —
+#: otherwise a version bump silently turns a set-up gap back into an outage.
+#:
+#: Anchor on the DISCRIMINATOR (`; use that URL as the endpoint`), never on the
+#: shared prefix: the same SDK function has a second refusal, `not followed: it
+#: would downgrade this HTTPS endpoint to plain HTTP`, whose own remedy is the
+#: OPPOSITE one ("use https, or fix the proxy settings"). A prefix-only match
+#: swallowed it and told the operator to send the bearer over cleartext.
+_REDIRECT_REFUSED_RE = re.compile(
+    r"redirect to (\S+?) not followed; use that URL as the endpoint",
+    re.IGNORECASE,
+)
+
 REFUSAL_CODE = "MCP-KEY-EMPTY"
 
 #: the port a URL means when it names none, per scheme (`_same_endpoint`).
@@ -101,6 +118,31 @@ def redact(text: str, key: str | None) -> str:
     if not key:
         return text
     return text.replace(key, "<redacted>")
+
+
+def _redact_known(text: str, sent: Connection | None = None) -> str:
+    """Redact every credential VALUE this process knows, not just the one sent.
+
+    A refusal is built from SERVER text, and the server echoes whatever it was
+    given — but the credential that answers a request is not always the one a
+    caller holds in hand: a request can go out bare (a pure keyless endpoint, or a
+    withheld co-source credential) while THIS process still knows a value from the
+    environment, the store, or a previous request. Redacting only `sent.key` left
+    a server-echoed value printed verbatim on exactly those paths.
+    """
+    keys: list[str] = []
+    for connection in (sent, _LAST_SENT[0]):
+        if connection is not None and connection.key:
+            keys.append(connection.key)
+    with contextlib.suppress(Exception):
+        # A store read can fail (absent, unreadable, corrupt); that must not turn a
+        # refusal into a different exception on the failure path.
+        live = resolve_connection().key
+        if live:
+            keys.append(live)
+    for key in dict.fromkeys(keys):
+        text = redact(text, key)
+    return text
 
 #: credential stores already warned about (#5109) — one line per process.
 _WARNED_READABLE_STORES: set[str] = set()
@@ -143,9 +185,13 @@ class MCPCredentialNotCarriedError(RuntimeError):
     follows redirects (the `/mcp` → `/mcp/` hop needs it — #2864). So a 401 from
     the redirect TARGET answers a request that never had the header, and reporting
     it as a value fault sends the operator to rotate a key that was never on the
-    wire — the #10605 misdirection, mirrored. Callers branch on `.code`
-    (`"MCP-CREDENTIAL-NOT-CARRIED"`); `status()` maps it to `unconfigured`, because
-    a redirect hop is a set-up fact, not an outage.
+    wire — the #10605 misdirection, mirrored. An SDK that refuses the redirect
+    outright (#10605's CI measured mcp 1.30 doing that where 1.29 followed) lands
+    here too, with one deliberate difference in the message: there the credential
+    DID reach the first endpoint and what would go bare is the declined hop, so
+    the refusal says that instead of claiming nothing was ever sent. Callers
+    branch on `.code` (`"MCP-CREDENTIAL-NOT-CARRIED"`); `status()` maps it to
+    `unconfigured`, because a redirect hop is a set-up fact, not an outage.
     """
 
     code = "MCP-CREDENTIAL-NOT-CARRIED"
@@ -298,7 +344,7 @@ def _refusal(exc: BaseException, sent: Connection) -> MCPKeyEmptyError:
         f"unauthenticated and NO credential resolved on the client (checked "
         f"{', '.join(sent.sources)}). The credential is read on EVERY request, so "
         f"setting it now takes effect on the next call — no client rebuild and "
-        f"no session restart. Server said: {redact(str(exc), sent.key)}"
+        f"no session restart. Server said: {_redact_known(str(exc), sent)}"
     )
 
 
@@ -344,6 +390,21 @@ def _raise_if_credential_was_missing(exc: BaseException, sent: Connection | None
     raise _refusal(exc, sent) from exc
 
 
+def _redirect_refused(exc: BaseException) -> str | None:
+    """The redirect target an SDK refused to follow, or None.
+
+    Split out because it is a CLASSIFICATION, not a message format: the target is
+    the endpoint the operator must point the client at. The regex anchors on the
+    cross-origin wording, so a DOWNGRADE refusal (`not followed: it would
+    downgrade this HTTPS endpoint to plain HTTP`, whose remedy is https-or-fix-the-
+    proxy) is deliberately NOT this class: no configured endpoint is the answer to
+    it, and repeating the operator's own URL back truncated to `http` would hand a
+    bearer to a cleartext host.
+    """
+    match = _REDIRECT_REFUSED_RE.search(str(exc))
+    return match.group(1) if match else None
+
+
 def describe_failure(exc: BaseException, provider: _BearerProvider | None = None) -> str:
     """`str(exc)` with any credential VALUE redacted — for callers that PRINT it.
 
@@ -358,9 +419,10 @@ def describe_failure(exc: BaseException, provider: _BearerProvider | None = None
         keys.append(provider.sent.key)
     if _LAST_SENT[0] is not None:
         keys.append(_LAST_SENT[0].key)
-    keys.append(resolve_connection().key)
+    with contextlib.suppress(Exception):
+        keys.append(resolve_connection().key)
     text = str(exc)
-    for key in keys:
+    for key in dict.fromkeys(keys):
         text = redact(text, key)
     return text
 
@@ -374,9 +436,33 @@ def _carried_authorization(exc: BaseException) -> bool | None:
     return bool((headers.get("authorization") or "").strip())
 
 
-def _not_carried(exc: BaseException, sent: Connection) -> MCPCredentialNotCarriedError:
-    """The named refusal for a credential that resolved but was never sent."""
-    final = str(getattr(getattr(exc, "request", None), "url", "") or sent.url)
+def _not_carried(
+    exc: BaseException, sent: Connection, final: str | None = None,
+    *, hop_refused: bool = False, request_url: str | None = None,
+) -> MCPCredentialNotCarriedError:
+    """The named refusal for a credential that resolved but was never sent.
+
+    `hop_refused` is the SDK-declined-redirect shape, and it is NOT the same
+    statement as "carried none": the first request DID carry the credential — the
+    redirect answered it — and what would go bare is the HOP to `final`. Saying
+    "never sent" there asserts a falsehood the operator can check, in the same way
+    the server's message asserts one this module exists to remove.
+
+    `request_url` is where the request ACTUALLY went — the client's endpoint, not
+    `sent.url`: `sent` is the credential's provenance, and under co-source (#2369
+    D1.1) the credential may belong to a host this client never talked to. Naming
+    `sent.url` as the destination would credit the credential with a delivery that
+    never happened.
+    """
+    if final is None:
+        final = str(getattr(getattr(exc, "request", None), "url", "") or sent.url)
+    destination = request_url or sent.url
+    # The target came from SERVER text (a Location header), so it gets the same
+    # treatment as every other quoted server string: quote it, never the value —
+    # and `_redact_known` rather than `sent.key`, because the value a request
+    # leaked is not always the value a caller holds (`sent.key` is None whenever
+    # the request went out bare).
+    final = _redact_known(final, sent)
     if sent.source and ("/" in sent.source):
         # A FILE-sourced credential decides its own endpoint (co-source, #2369
         # D1.1), so telling the operator to set an env URL is advice that cannot
@@ -399,6 +485,25 @@ def _not_carried(exc: BaseException, sent: Connection) -> MCPCredentialNotCarrie
         " Then rebuild the client (`get_client()`) — an existing client's endpoint "
         "is fixed at construction, so editing the source alone changes nothing."
     )
+    if hop_refused:
+        if sent.key:
+            what_went_wrong = (
+                f"the request went to {destination} and was answered with a redirect "
+                f"to {final}, which this client's SDK declines to follow — and a "
+                f"credential is deliberately not carried across origins. The value "
+                f"resolved from {sent.source} reached {destination}, never {final}, "
+                f"so it is not what was refused."
+            )
+        else:
+            what_went_wrong = (
+                f"the request went to {destination} and was answered with a redirect "
+                f"to {final}, which this client's SDK declines to follow. No "
+                f"credential resolved either ({', '.join(sent.sources)}), so that "
+                f"request went bare — but the redirect is the fault to fix first."
+            )
+        return MCPCredentialNotCarriedError(
+            f"{MCPCredentialNotCarriedError.code}: {what_went_wrong} Fix: {remedy}"
+        )
     return MCPCredentialNotCarriedError(
         f"{MCPCredentialNotCarriedError.code}: the MCP endpoint rejected this "
         f"request as unauthenticated, and the request that failed carried NO "
@@ -505,10 +610,31 @@ def _classify_failure(exc: BaseException, provider: _BearerProvider) -> None:
     set-up-gap bucket (#3805) exactly as the server message this module removes
     moves a set-up gap into the credential-value bucket.
     """
-    if provider.withheld is not None and _AUTH_REJECTION_RE.search(str(exc)):
-        if not _is_tool_error(exc):
+    is_auth_rejection = bool(_AUTH_REJECTION_RE.search(str(exc)))
+    declined_hop = _redirect_refused(exc)
+    if provider.withheld is not None:
+        # A withheld credential explains BOTH failure shapes: an auth rejection
+        # (the request went out bare) and a declined redirect (the hop it would
+        # have taken is the one a withheld credential must never take). The
+        # redirect case has to be named here too — otherwise a co-source conflict
+        # reports as "your endpoint redirects", and the message credits a
+        # withheld value with a delivery that never happened.
+        if (is_auth_rejection or declined_hop) and not _is_tool_error(exc):
             raise _mismatch(provider.withheld, provider.url) from exc
-        return
+        if is_auth_rejection:
+            return  # a TOOL's own 401 is the tool's, whatever the credential state
+    # An SDK that REFUSES the redirect never reaches the auth check below (no
+    # 401 happened — the hop was declined), so it has to be classified here or the
+    # refusal is lost and the set-up gap reports as an outage. A TOOL error is
+    # exempt for the same reason the other classifier exempts it: a Tortoise tool
+    # that proxies another MCP server can quote a nested SDK refusal verbatim, and
+    # rewriting that into "your endpoint is misconfigured" moves a failing tool
+    # into the credential bucket.
+    if declined_hop is not None and not _is_tool_error(exc):
+        raise _not_carried(
+            exc, provider.sent or resolve_connection(), declined_hop,
+            hop_refused=True, request_url=provider.url,
+        ) from exc
     _raise_if_credential_was_missing(exc, provider.sent)
 
 
