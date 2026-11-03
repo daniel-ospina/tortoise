@@ -2961,9 +2961,124 @@ def test_the_dream_drain_carries_the_enqueueing_requests_tenant(monkeypatch):
             for k in (key, default_key):
                 hosted_api._DREAM_QUEUES.pop(k, None)
                 hosted_api._DREAM_RECORD_TENANTS.pop(k, None)
+                hosted_api._DREAM_DRAIN_GRAPHS.pop(k, None)
                 task = hosted_api._DREAM_TASKS.pop(k, None)
                 if task is not None:
                     task.cancel()
+
+    asyncio.run(_drive())
+
+
+def test_the_dream_drain_opens_the_graph_the_enqueue_resolved(monkeypatch):
+    """#10452 review P2: the drain's GRAPH and its TENANT come from one instant.
+
+    The tenant was captured at ENQUEUE time (the request's credential) while the
+    graph was resolved at DRAIN time — `_open_sdk` called `_org_sdk(org_id)`,
+    i.e. read `organizations.graph_name` again. A `promote_default_graph`
+    committing in that window made the pass write its nodes into the PROMOTED
+    graph while `_bind_dream_record_tenant` filed every record it emitted under
+    the DEMOTED one: the `derived != measured` split #10025 exists to remove,
+    and a direct contradiction of the promise `promote_graph` publishes — "an
+    in-flight capture … including the dream drain it enqueues … finishes against
+    the graph it started on".
+
+    FAIL-ON: with the graph resolved at drain time (the pre-fix shape) `opened`
+    records the RE-READ (`_org_sdk`) instead of the enqueue's own answer, i.e.
+    the pass runs against whatever the control plane says NOW.
+    """
+    from tortoise import hosted_api
+
+    opened: list[tuple[str, str | None]] = []
+    bound: list[tuple[str, str]] = []
+
+    class _FakeSDK:
+        def _mark_dirty(self, roots):
+            self.roots = roots
+
+        def dream(self, **kw):
+            self.dreamed = kw
+
+        def _bind_record_tenant(self, org_id, graph_id):
+            bound.append((org_id, graph_id))
+
+        def close(self):
+            pass
+
+    def _from_name(org_id, moved):
+        opened.append(("carried", moved))
+        return _FakeSDK()
+
+    def _org_sdk(org_id, **kw):
+        opened.append(("drain_time_read", None))
+        return _FakeSDK()
+
+    monkeypatch.setattr(hosted_api, "_org_sdk_from_name", _from_name)
+    monkeypatch.setattr(hosted_api, "_org_sdk", _org_sdk)
+    monkeypatch.setattr(hosted_api, "_make_sdk", lambda **kw: _FakeSDK())
+
+    async def _pool(fn, factory):
+        return fn(factory())
+
+    monkeypatch.setattr(hosted_api, "_run_dream_on_pool", _pool)
+
+    async def _no_webhooks(*a, **kw):
+        return None
+
+    monkeypatch.setattr(hosted_api, "_dispatch_webhooks", _no_webhooks)
+
+    # The graph the enqueueing request's own credential resolved, i.e. what
+    # `_data_sdk` opened for the write that enqueued these roots.
+    promoted = "org_org-a_g_promoted"
+    default_key = hosted_api._dream_key("org-a", None)
+    bare_key = hosted_api._dream_key("org-a", None)
+
+    async def _drive() -> None:
+        try:
+            hosted_api._enqueue_dream("org-a", ["root-1"],
+                                     record_tenant=("org-a", "g_promoted"),
+                                     default_graph_name=promoted)
+            # Take the queue away from the task `_enqueue_dream` just spawned
+            # and drive the worker directly, so the assertions see ONE pass.
+            task = hosted_api._DREAM_TASKS.pop(default_key, None)
+            if task is not None:
+                task.cancel()
+            assert hosted_api._DREAM_DRAIN_GRAPHS[default_key] == promoted
+
+            await hosted_api._dream_worker("org-a", default_key)
+            assert opened == [("carried", promoted)], (
+                "the drain re-resolved the org's default instead of opening the "
+                "graph the enqueueing request resolved — a promotion in that "
+                "window splits the pass's nodes from its records: "
+                f"{opened!r}")
+            assert bound == [("org-a", "g_promoted")], bound
+
+            # …and with NO tenant carried there is no pair to keep together, so
+            # the pre-fix fail-soft read is unchanged (the pass's records are
+            # refused `no_tenant` either way — nothing can be misfiled).
+            opened.clear()
+            bound.clear()
+            # The key is deliberately the SAME one (the org-wide key carries no
+            # graph component), so the first arm's carried answers have to go —
+            # dropping them is what a re-created queue does via the worker's own
+            # eviction.
+            hosted_api._DREAM_DRAIN_GRAPHS.pop(bare_key, None)
+            hosted_api._DREAM_RECORD_TENANTS.pop(bare_key, None)
+            hosted_api._enqueue_dream("org-a", ["root-2"], record_tenant=None)
+            task = hosted_api._DREAM_TASKS.pop(bare_key, None)
+            if task is not None:
+                task.cancel()
+            assert bare_key not in hosted_api._DREAM_DRAIN_GRAPHS
+            await hosted_api._dream_worker("org-a", bare_key)
+            assert opened == [("drain_time_read", None)], opened
+            assert bound == [], bound
+        finally:
+            for k in (default_key, bare_key):
+                hosted_api._DREAM_QUEUES.pop(k, None)
+                hosted_api._DREAM_RECORD_TENANTS.pop(k, None)
+                hosted_api._DREAM_DRAIN_GRAPHS.pop(k, None)
+                item = hosted_api._DREAM_TASKS.pop(k, None)
+                if item is not None:
+                    item.cancel()
 
     asyncio.run(_drive())
 
