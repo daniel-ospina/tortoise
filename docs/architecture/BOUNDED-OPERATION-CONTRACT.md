@@ -172,9 +172,9 @@ being tracked.
 
 ⚠️ **hosted `GET /v1/points` is NOT one of these, and is not parked on an approval.** Its body is a
 **dict**, not a list — `return {"points": results, "count": len(results)}` (`hosted_api.py:10973`) —
-and the route declares no `response_model` (`:10265-10266`), so a marker rides it **additively**,
+and the route declares no `response_model` (`:10914-10915`), so a marker rides it **additively**,
 exactly as it rides `/v1/search`: build the body, then `response.update(truncation_field(…))`
-(`:10804`, `:10813`). #10500 recorded that shape as a `response_fields` row in
+(`:11453`, `:11462`). #10500 recorded that shape as a `response_fields` row in
 `config/surface-manifest.yml` (`:121-143`), **not** as an MCP/SDK surface approval — and its own
 note draws the line there: wrapping a *list* in an object is the return-type change; adding a field
 to an object body is not. So this one is **SILENT and fixable without an approval**: recorded here
