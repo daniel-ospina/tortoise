@@ -5754,7 +5754,11 @@ surfaces:
   #
   # `core` is the right home: the subject is `tools/rail_detach.py`, and the
   # suite is hermetic (synthetic stub rail, temp dirs, no DB/network/FalkorDB),
-  # so it is deliberately NOT carve_out-registered. ⚠️ The registration alone
+  # so it is deliberately NOT carve_out-registered. ⚠️ The MODULE makes one
+  # bounded, informational `gh pr view` per launch (the artifact's `HEAD`), so
+  # the suite stubs `gh` on PATH via an autouse fixture — without it the file
+  # made 25 real API calls (~1.9 s each on a quota-exhausted box) and was
+  # neither hermetic nor fast. The registration alone
   # does NOT make the pin run on the file it guards: `tools/` is a flat
   # `NON_PYTHON_PREFIXES` entry, and `tools/rail_detach.py` matches no
   # `SOURCE_PATTERNS` row, so a tool-only diff filters to `changed == []` and
