@@ -1242,7 +1242,7 @@ def get_ask_usage(org_id: str) -> dict:
 
 
 def get_capture_usage(org_id: str) -> dict:
-    """Extraction TOKEN usage for *org_id* in its current window (#5331).
+    """Extraction TOKEN usage for *org_id* in its current window (#4051, #5331).
 
     The READ side of the ``capture_extraction`` dimension. ``record_capture_usage``
     has written ``capture_tokens_in``/``capture_tokens_out`` since #5045, and
@@ -1250,19 +1250,29 @@ def get_capture_usage(org_id: str) -> dict:
     ``cost_dimensions.capture_extraction`` WAS ``get_current_usage``, which
     returns WRITE OPS (a different dimension: ``write_ops``'s REGISTRY reader is
     ``measure_write_ops`` and ``get_current_usage`` is the unfail-closed display
-    read behind ``/v1/team``). An
-    allowance cannot be enforced against a figure nobody can read, so this is the
-    missing reader, not a new dimension: it reads the columns the writer already
-    maintains, and the registry now declares it.
+    read behind ``/v1/team``). An allowance cannot be enforced against a figure
+    nobody can read, so this is the reader, not a new dimension: it reads the
+    columns the writer already maintains, and the registry declares it.
+
+    ⚠️ ONE function, TWO landed contracts — reconciled deliberately, not merged
+    by accident (#10668 review round 12). #4051 landed this reader first
+    (PR #10640) with ``{capture_calls, capture_tokens_in, capture_tokens_out,
+    capture_cost_usd} + period trio`` and a zero-view degradation; #9567's branch
+    defined a SECOND ``def get_capture_usage`` at the same insertion point with
+    ``{measured, unmeasured_reason, capture_tokens_total, …}``. Python does not
+    error on a duplicate ``def`` — the last one silently wins — so the merge had
+    to be a decision. It is this body, which is a strict superset: every key
+    #4051's landed tests assert (``capture_cost_usd`` included) plus the two
+    facts the gate cannot work without.
 
     Returns ``{measured, unmeasured_reason, capture_calls, capture_tokens_in,
-    capture_tokens_out, capture_tokens_total, period, period_start,
-    period_end}``.
+    capture_tokens_out, capture_tokens_total, capture_cost_usd, period,
+    period_start, period_end}``.
 
     ⚠️ ``measured`` is NOT ``total > 0``. A capture whose extraction reported no
     provider usage records ZERO tokens, and #5045 states that caveat explicitly:
     a zero there is not evidence of a free capture. So a zero IS a reading. It is
-    False only when the ledger could not be read at all —
+    ``False`` only when the ledger could not be read at all —
     ``"absent"`` (no row for the window: nobody has captured yet),
     ``"read_error"`` (the store refused the query) or
     ``"period_error"`` (the billing window itself was unresolvable). The reason
@@ -1272,6 +1282,15 @@ def get_capture_usage(org_id: str) -> dict:
     declares as a zero (``allowance_gate.AllowanceDimension.absent_is_zero``,
     #9567 review round 3 — the row is MERGE-created by the capture itself, so
     refusing an absence would deadlock the window it is waiting for).
+
+    ⛔ NEVER RAISES (#923, #4051) — that half of the landed contract is kept
+    exactly: a failed read degrades to the zero view and NAMES why in
+    ``unmeasured_reason``. The gate, not this reader, turns a named fault into a
+    refusal; a reader that raised would 500 a read path that must not fail.
+
+    ``period`` is the DERIVED ``"YYYY-MM"`` label, mirroring ``get_ask_usage``;
+    the window the figure was read from is exposed as ``period_start`` /
+    ``period_end``.
     """
     zeros = {
         "measured": False,
@@ -1280,6 +1299,7 @@ def get_capture_usage(org_id: str) -> dict:
         "capture_tokens_in": 0,
         "capture_tokens_out": 0,
         "capture_tokens_total": 0,
+        "capture_cost_usd": 0.0,
     }
 
     def _view(label: str, period: MeteringPeriod | None = None,
@@ -1289,12 +1309,14 @@ def get_capture_usage(org_id: str) -> dict:
                 "period_end": period.end_iso if period else None}
 
     if not org_id:
-        return _view(_display_period_label(), unmeasured_reason="absent")
+        return _view(_display_period_label())
     try:
         period = _current_period(org_id)
     except Exception as e:
-        # #3981: an unresolvable WINDOW is a SIGNAL, not a refusal — it is
-        # reported so a gate reading it can fail closed on a NAMED reason.
+        # #923: this read never raises. An unresolvable WINDOW has no row to
+        # read, so the degradation is the zero view — never a month key — and
+        # the reason travels so a gate reading it can fail closed on a NAMED
+        # fault (#3981: an unresolvable window is a SIGNAL, not an absence).
         _logger.warning(
             "capture usage query failed (no window): team=%s error=%s",
             org_id, e,
@@ -1303,25 +1325,25 @@ def get_capture_usage(org_id: str) -> dict:
     try:
         if _supabase_mode():
             from tortoise.supabase_control import (  # noqa: I001
-                get_control_plane, metering_get_capture,
+                get_control_plane, metering_get_capture_usage,
             )
-            row = metering_get_capture(get_control_plane(), org_id,
-                                       period.start_iso)
-            if row is None:
-                return _view(period.label, period)
-            tin = int(row.get("capture_tokens_in") or 0)
-            tout = int(row.get("capture_tokens_out") or 0)
-            return _view(
-                period.label, period, measured=True, unmeasured_reason=None,
-                capture_calls=int(row.get("capture_calls") or 0),
-                capture_tokens_in=tin, capture_tokens_out=tout,
-                capture_tokens_total=tin + tout)
+            row = metering_get_capture_usage(get_control_plane(), org_id,
+                                             period.start_iso)
+            return _view(period.label, period,
+                         measured=bool(row.get("measured")),
+                         unmeasured_reason=row.get("unmeasured_reason"),
+                         capture_calls=int(row.get("capture_calls") or 0),
+                         capture_tokens_in=int(row.get("capture_tokens_in") or 0),
+                         capture_tokens_out=int(row.get("capture_tokens_out") or 0),
+                         capture_tokens_total=int(row.get("capture_tokens_in") or 0)
+                         + int(row.get("capture_tokens_out") or 0),
+                         capture_cost_usd=float(row.get("capture_cost_usd") or 0.0))
         sdk = _reg_sdk()
         reg = sdk._get_registry()
         rows = reg.query(
             "MATCH (m:MeteringRecord {org_id: $tid, period_start: $pstart}) "
             "RETURN m.capture_calls, m.capture_tokens_in, "
-            "m.capture_tokens_out",
+            "m.capture_tokens_out, m.capture_cost_usd",
             params={"tid": org_id, "pstart": period.start_iso},
         ).result_set
         if not rows:
@@ -1332,15 +1354,14 @@ def get_capture_usage(org_id: str) -> dict:
             period.label, period, measured=True, unmeasured_reason=None,
             capture_calls=int(rows[0][0] or 0),
             capture_tokens_in=tin, capture_tokens_out=tout,
-            capture_tokens_total=tin + tout)
+            capture_tokens_total=tin + tout,
+            capture_cost_usd=float(rows[0][3] or 0.0))
     except Exception as e:
         _logger.warning(
             "capture usage query failed (no reading): team=%s period=%s "
             "error=%s", org_id, period.label, e,
         )
         return _view(period.label, period, unmeasured_reason="read_error")
-
-
 # ── Stock/flow conversion: nodes per billed write op (#4495) ────────────────
 #
 # WHY. The price book publishes a monthly write-op FLOW

@@ -47,18 +47,35 @@ analytics row carries — `#5045`. The **ask** lane separately records
 token counters cannot change the cap's behaviour. That separation is deliberate: this ruling is about the **unit**,
 and the cap is a separate decision.
 
-**Token counters now have a production reader — the gate's, not a report's** (`#9567` D11/D12).
-`metering.get_capture_usage` reads `capture_tokens_in` + `capture_tokens_out` per org per window and is
-the DECLARED reader on `cost_dimensions.capture_extraction`; the allowance gate consumes it. ⚠️ It is a
-GATE reader: no reporting or dashboard surface reads it yet, so "tokens per team per month" is readable
-from code but still not published anywhere (the `#4493` lesson: a recorded dimension with no reader reads
-as a measurement that does not exist — a reader nothing reports from is the next-weakest thing). The metric set itself — the per-call metrics, the
-disclosure counters, the attribution and the derived figures — is defined in `docs/ops/extraction-cost-metrics.md`
-(`#3840`).
+**The token counters have a reader, and it is now an ENFORCEMENT reader** (`#4051`, `#9567` D11/D12).
+`metering.get_capture_usage(org_id)` returns `capture_calls` / `capture_tokens_in` / `capture_tokens_out` /
+`capture_tokens_total` / `capture_cost_usd` per org per metering window on BOTH substrates (`:MeteringRecord` in the
+registry, or `supabase.metering_records`), degrading to a zero view and never raising; `capture_extraction`'s
+declared `READER` binding in `tortoise/cost_dimensions.py` points at it. It carries the presence fact a zero VIEW
+cannot express — `measured` + `unmeasured_reason` (`absent` / `read_error` / `period_error`) — because a recorded
+ZERO is a reading (#5045) while an unreadable ledger is not.
+
+⛔ **This supersedes the scope `#4051` §1b recorded when the reader landed** (*"the reader is MEASUREMENT ONLY — no
+request path calls it"*). `allowance_gate.enforce_allowances` reads it, reached from `quota.enforce_org_limit` on both
+REST and MCP, so the `capture_extraction` allowance is enforced on the capture request path. The reopen is argued in
+`docs/architecture/CONSUMPTION-MODEL.md` §6, and
+`tests/test_metering_capture_usage_reader.py`'s scan names `allowance_gate.py` as the reader's ONE consumer. Why it
+had to move: a reader that returns a zero view for every failure cannot tell "unknown" from "nothing spent", and a
+cap enforced on it fails OPEN for exactly the tenants whose meter is broken. The spend ceiling above still cannot see
+the **token counters** (`capture_tokens_in` / `capture_tokens_out` / `ask_tokens_in` / `ask_tokens_out`) by
+construction — it sums `ask_cost_usd` + `capture_cost_usd`, so a change in capture *tokens* moves no cap while a
+change in capture *cost* does. The metric set itself — the per-call metrics, the disclosure counters, the attribution
+and the derived figures — is defined in `docs/ops/extraction-cost-metrics.md` (`#3840`); the consumption model that
+consumes the reader is `docs/architecture/CONSUMPTION-MODEL.md` (`#4051`).
 
 **⚠️ Open, and not decided here:** whether the token allowance and the storage allowance are enforced at the same
 seam, and whether an extraction allowance is a **pre-spend admission** gate (like the points estimate) or a
 **post-hoc** meter with overage. Those are pricing/enforcement questions — owner territory, post-beta calibration.
+What IS decided (by the change above, not here): the extraction dimension is checked at the **same admission seam**
+the node count uses (`quota.enforce_org_limit`, ahead of it), reading the per-window token FLOW. The gate is
+**inert until an allowance is configured** — it refuses nothing today, because no resolver emits an allowance value.
+The remaining question — whether that admission is charged against prepaid credits *at capture time* or reconciled
+per window — is not answered by an admission check and stays with the owner.
 
 > **OVERRIDES:** the **postpaid metered/auto-billing** default the field uses, and **`write_ops`** (the current
 > metered-usage unit) as the unit for extraction consumption — replaced by **prepaid credits** and per-token
