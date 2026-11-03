@@ -4851,7 +4851,14 @@ def test_every_absent_mechanism_in_the_registry_names_its_absence_pin() -> None:
         for row in load_registry()["mechanisms"]
         if row.get("state") == NOT_IMPLEMENTED
     }
-    assert absent, "no absent mechanism to pin — this test is measuring nothing"
+    # ⚠️ Assert the POPULATION, never the absence (review cycle 5, P2): an
+    # `assert absent` reds on exactly the event every pin exists to prompt — the
+    # last `not-implemented` row flipping to `implemented` — and its message
+    # ("this test is measuring nothing") tells that lane its *complete*
+    # measurement was vacuous. The real claim is that the registry is readable
+    # and this test therefore observed a non-empty population; a zero-length
+    # `absent` is the desired end state, and the loop below simply has no work.
+    assert load_registry()["mechanisms"], "the mechanism registry is empty"
     for mid, row in absent.items():
         assert row.get("pins"), f"{mid}: not-implemented row carries no `pins:`"
     # ⚠️ Guarded on PRESENCE, not asserted unconditionally (review cycle 1, P2):

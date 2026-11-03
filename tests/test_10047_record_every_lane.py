@@ -473,8 +473,11 @@ def _module_functions(tree) -> dict:
     `ast.walk`, so listing it separately would double-count. A CLASS METHOD does
     not ride anything: `tree.body` never saw it, so a `Worker.run()` that opens
     an org-scoped SDK and writes records was neither a site nor a write. That
-    was an entire blind axis (#10046 review P2) — the package has 564 classes,
-    and a worker/indexer class is the most natural shape for the next lane.
+    was an entire blind axis (#10046 review P2) — the package carries hundreds of
+    classes (566 module-level `ClassDef` over `tortoise/**.py` at fold head
+    d4ef9d9fa, 578 counting nested ones by `ast.walk` — quote the rule with the
+    figure, never a bare undated count), and a worker/indexer class is the most
+    natural shape for the next lane.
     Keyed `Class.method` so a method cannot collide with a module-level name.
 
     Measured when methods were added: 0 method-level org-scoped opener calls in
@@ -1065,10 +1068,13 @@ def _org_scoped_sdk_sites(tree) -> dict[str, int]:
     return a real org-scoped SDK a lane writes through". The exclusion is
     correct — its tenant is the request's AMBIENT scope, which no AST read can
     observe, so there is nothing here to measure — but the CONSEQUENCE is that
-    `_ORG_SCOPED_MODULES` never lists `mcp_server.py` (109 `_get_org_sdk` call
-    sites, the package's largest record-write surface) or `mcp_auth.py` (its
-    definition). Read this as "how many sites can this scan actually judge?",
-    never as a census of every org-scoped construction in the package.
+    `_ORG_SCOPED_MODULES` never lists `mcp_server.py` (109 `_get_org_sdk` AST
+    `Call` sites at fold head d4ef9d9fa — counted as `ast.Call` nodes whose
+    resolved name is `_get_org_sdk`, NOT lines containing the string, which
+    measured 118 on the same tree — the package's largest record-write surface)
+    or `mcp_auth.py` (its definition). Read this as "how many sites can this
+    scan actually judge?", never as a census of every org-scoped construction in
+    the package.
 
     Any construction helper, not the `_make_sdk` spelling only (#10380 review
     P2.1): `_open_org_graph_sdk(org_id)` is the canonical way to open the org's
@@ -1529,7 +1535,8 @@ def test_every_sdk_shaped_name_in_the_package_is_classified():
     test alone excluded the real openers `_org_sdk_from_name` and
     `_data_sdk_offloaded`), 7 of them already declared, 20 undeclared — including
     `_get_org_sdk`, which carries `tortoise/mcp_server.py`'s entire record-write
-    surface (109 call sites) and whose tenant is the request's AMBIENT scope.
+    surface (109 `ast.Call` sites at fold head d4ef9d9fa) and whose tenant is the
+    request's AMBIENT scope.
 
     Mutation this reddens on: deleting `_get_org_sdk` from `_AMBIENT_OPENERS`
     (it returns to being silently exempt), or adding an SDK-shaped helper to any
@@ -1567,6 +1574,31 @@ def test_every_sdk_shaped_name_in_the_package_is_classified():
         f"only {len(shaped)} SDK-shaped definitions found in the package — the "
         "name shape no longer describes how openers are spelled, so the "
         "classification below certifies nothing: " + _joined(sorted(shaped)))
+
+    # ⛔ THE VOCABULARIES MUST NOT DISAGREE (fold review cycle 5, P1 - a
+    # FAIL-OPEN this leg's own completeness check could not see).
+    # `_DECLARED_SDK_NAMES` contains ALL of `_SDK_OPENERS`, so a future lane that
+    # classified a new opener in `_SDK_OPENERS` ALONE passed the leg below -
+    # while `_handle_state` still answered `None` for it ("not an SDK handle at
+    # all"), and every write through it was invisible. `_SDK_OPENERS` is the set
+    # whose NAME means "the openers", so it is exactly where such a lane would
+    # classify one: the completeness leg then certifies a vocabulary that
+    # classifies nothing. Pin the subset relation in BOTH directions so a name
+    # can enter neither set alone.
+    assert not (_SDK_OPENERS - _UNBOUND_OPENERS - _INSTALLING_OPENERS
+                - {"_make_sdk"}), (
+        "these names are in `_SDK_OPENERS` but in neither vocabulary that gives "
+        "`_handle_state` a verdict, so a write through one is invisible to the "
+        "scan while the completeness leg below still passes: "
+        + _joined(sorted(_SDK_OPENERS - _UNBOUND_OPENERS
+                         - _INSTALLING_OPENERS - {"_make_sdk"}))
+        + " -- classify each in `_UNBOUND_OPENERS` (the scan judges it) or "
+        "`_INSTALLING_OPENERS` (installs before returning). `_make_sdk` is the "
+        "one member whose handle state `_namespace_is_org_scoped` decides.")
+    assert not (_UNBOUND_OPENERS - _SDK_OPENERS), (
+        "these names give `_handle_state` a verdict but are NOT in "
+        "`_SDK_OPENERS`, so the SDK-shaped census above never counts their "
+        "sites: " + _joined(sorted(_UNBOUND_OPENERS - _SDK_OPENERS)))
 
     unclassified = sorted(shaped - _DECLARED_SDK_NAMES)
     assert unclassified == [], (

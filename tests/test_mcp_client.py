@@ -456,7 +456,7 @@ class TestCredentialResolution:
         )
 
     def test_a_blank_key_is_never_sent_as_an_empty_bearer(
-        self, recorded_daemon, monkeypatch,
+        self, recorded_daemon, monkeypatch, isolated_home,
     ):
         """A whitespace credential must not become `Bearer   ` on the wire.
 
@@ -464,17 +464,38 @@ class TestCredentialResolution:
         Bearer    ` — an empty bearer the server can only answer with its own
         "invalid or missing Bearer token" message, which misdirects the reader
         onto the server's auth policy instead of the client's empty value.
+
+        ⛔ BOTH env names are cleared first (fold review cycle 5, P2). Setting
+        only the canonical `TORTOISE_API_KEY` left the fleet ALIAS
+        `TORTOISE_MCP_API_KEY` in the ambient environment — the shape this very
+        box runs — so on a fleet host `resolve_connection()` returned the alias
+        with a REAL key, the assertion below was satisfied by a non-empty header,
+        and the blank-credential path was never exercised (while the host's live
+        key went to the stub daemon). Clearing both makes the pin test what it
+        names, on every host. `isolated_home` isolates `HOME`/cwd; it does not
+        isolate the environment.
         """
         from tortoise import mcp_client
 
         url, seen = recorded_daemon
+        for name in mcp_client._ENV_KEY_NAMES:
+            monkeypatch.delenv(name, raising=False)
         monkeypatch.setenv("TORTOISE_MCP_URL", url)
         monkeypatch.setenv("TORTOISE_API_KEY", "   ")
 
         mcp_client.list_tools()
 
+        # ⛔ NO Authorization header at all — not merely "no empty one".
         assert not any(h and not h.strip().removeprefix("Bearer").strip() for h in seen), (
             f"an EMPTY Bearer reached the server: {seen!r}"
+        )
+        assert not any(
+            isinstance(entry, dict)
+            and str(entry.get("authorization", "")).strip()
+            for entry in seen
+        ), (
+            "a blank credential was replaced by a REAL one from the ambient "
+            f"environment, so this pin did not exercise the blank path: {seen!r}"
         )
 
     def test_an_unresolvable_credential_against_an_auth_endpoint_is_a_named_refusal(

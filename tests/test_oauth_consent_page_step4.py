@@ -1254,13 +1254,17 @@ def test_the_bounce_does_not_append_a_SECOND_key_when_the_flow_already_has_one()
         "the bounce emitted a SECOND attempt key beside the flow's own: "
         f"{inner[CONSENT_ATTEMPT_KEY_PARAM]}")
 
-    # …and a blank value is treated as absent, because it selects the bounce branch upstream.
+    # …and a blank value must not out-rank the mint: the pair is REMOVED, so the minted key is the
+    # only value the page sees. `start.ts` reads the FIRST value (`URLSearchParams.get`), so emitting
+    # `attempt_key=&attempt_key=<minted>` left it reading `""` and minting its own — the AS mint was
+    # inert for exactly the shape it was added for (fold review cycle 5, P2).
     blank = consent_bounce_url(APP_ORIGIN, f"client_id=c1&state=s1&{CONSENT_ATTEMPT_KEY_PARAM}=")
     inner_blank = parse_qs(urlsplit(parse_qs(urlsplit(blank).query)["next"][0]).query,
                            keep_blank_values=True)
     keys = inner_blank[CONSENT_ATTEMPT_KEY_PARAM]
-    assert len(keys) == 2 and keys[1].strip(), (
-        f"a blank key suppressed the minted one, leaving the visitor keyless: {keys}")
+    assert len(keys) == 1 and keys[0].strip(), (
+        "a blank key left more than one value (or a blank first value), which makes the "
+        f"AS-minted key inert for the page: {keys}")
 
 
 def test_the_bounce_carries_the_attempt_key_the_flow_is_bound_to(api_client) -> None:

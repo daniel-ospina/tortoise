@@ -1809,6 +1809,23 @@ def _router_importers(root: Path | None = None) -> list[str]:
         for tree in _PRODUCTION_TREES
         for path in (tree_root / tree).rglob("*.py")
     )
+    # ⚠️ A pin whose silence is evidence must PROVE it observed a surface
+    # (review cycle 5, P2): ``Path.rglob`` on a missing or renamed tree yields
+    # ``[]``, so this walk would keep returning no importers — green over a
+    # strictly smaller, or empty, surface — while the docstring's measured file
+    # count silently became false. Fail loudly instead when a declared tree is
+    # absent or when the walk observed nothing. (Skipped for a fixture ``root``,
+    # whose trees the caller builds deliberately.)
+    if root is None:
+        for tree in _PRODUCTION_TREES:
+            assert (tree_root / tree).is_dir(), (
+                f"declared production tree `{tree}` is missing under {tree_root}, "
+                "so this pin would observe less than it claims"
+            )
+        assert paths, (
+            "the production-tree walk observed no Python files, so this pin "
+            "would be green over an empty surface"
+        )
     for path in paths:
         if path.name == "sufficiency_router.py":
             continue

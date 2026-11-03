@@ -2748,12 +2748,23 @@ def consent_bounce_url(app_origin: str, raw_query: str) -> str:
       in on a DIFFERENT `/auth` entry for the same flow (the back button, a
       refresh, this bounce's own return target) came back without it and was
       refused with `403 flow_not_yours`: the row was already claimed by a key
-      nobody could present. Generating the key HERE makes it the property of the
-      flow rather than of one emitted URL — the bounce, the sign-in return, and
-      every re-entry carry the same value, so `start` ADOPTS it on the insert
-      and the insert-only row is never poisoned. It is `secrets`, not a
-      counter: it is the browser's only proof of ownership, so it must not be
-      predictable from the `state` (which is client-chosen and public).
+      nobody could present. Generating the key HERE means the key exists BEFORE
+      the first `start`, so a sign-in return through ANY `/auth` entry carries it
+      and `start` ADOPTS it on the insert — the insert-only row is never poisoned
+      by a key the browser could not present. It is `secrets`, not a counter: it
+      is the browser's only proof of ownership, so it must not be predictable
+      from the `state` (which is client-chosen and public).
+
+      ⚠️ STATED RESIDUE (fold review cycle 5, P2): this mints a FRESH value per
+      call, so it does NOT make the key "the property of the flow" for a
+      re-bounce. A second bounce for a flow whose row already exists presents a
+      key that row cannot hold (`ON CONFLICT(state)` is insert-only on
+      `attempt_key_hash`), and that entry is still refused — measured: bounce 1
+      → `start_cold_browser` 302 with row key K1; bounce 2 (K2) → `start_signed_in`
+      `403 {"error":"no_authorize_attempt","reason":"flow_not_yours"}`. So the
+      back-button/refresh re-entry is NOT closed by this change; what is closed is
+      the cold start, where no key existed at all. Recorded here rather than left
+      for the next lane to discover, and tracked as a follow-up issue.
     """
     inner = CONSENT_START_PATH + (("?" + raw_query) if raw_query else "")
     # ⛔ APPEND ONLY WHERE NONE EXISTS. There are two callers and they are NOT alike: the bounce
@@ -2765,8 +2776,30 @@ def consent_bounce_url(app_origin: str, raw_query: str) -> str:
     # presents the minted key instead of the row's and the visitor meets this very dead end again
     # (#10487). A present-but-BLANK value counts as absent: it selects the bounce branch upstream
     # (`if not key`), and start.ts reads `""` as no key at all.
-    if not any(v.strip() for v in parse_qs(raw_query, keep_blank_values=True)
-               .get(CONSENT_ATTEMPT_KEY_PARAM, [])):
+    #
+    # ⛔ A BLANK PAIR MUST BE *REMOVED*, NOT MERELY OUT-RANKED (fold review cycle 5, P2). The first
+    # revision only appended when no non-blank value existed, which left `attempt_key=&attempt_key=
+    # <minted>` on the wire — and `start.ts` reads the FIRST value (`URLSearchParams.get`), gets
+    # `""`, and mints its own. So the AS mint was INERT for exactly the shape it was added for:
+    # one character (`&attempt_key=`) suppressed it. The blank segments are dropped here, before the
+    # append, so the mint is the only value. Other segments are kept BYTE-IDENTICAL (split/join on
+    # `&`, never a re-encode) because `redirect_uri` and `client_id` are compared byte-for-byte
+    # downstream and a `+`/`%2B`/`%20` normalisation here is the silent CSRF mismatch this hop
+    # refuses everywhere else.
+    present = parse_qs(raw_query, keep_blank_values=True).get(CONSENT_ATTEMPT_KEY_PARAM, [])
+    if any(v.strip() for v in present):
+        inner = CONSENT_START_PATH + (("?" + raw_query) if raw_query else "")
+    else:
+        kept = [seg for seg in raw_query.split("&") if seg] if raw_query else []
+        kept = [
+            seg for seg in kept
+            if not (
+                seg.split("=", 1)[0] == CONSENT_ATTEMPT_KEY_PARAM
+                and not (seg.split("=", 1)[1].strip() if "=" in seg else "")
+            )
+        ]
+        base = "&".join(kept)
+        inner = CONSENT_START_PATH + (("?" + base) if base else "")
         inner += ("&" if "?" in inner else "?") + urlencode(
             {CONSENT_ATTEMPT_KEY_PARAM: secrets.token_urlsafe(32)})
     return (app_origin.rstrip("/") + CONSENT_SIGNIN_PATH + "?"
