@@ -974,8 +974,10 @@ def _test_node_names(path: Path) -> set[str] | None:
             skipping.py`), so `skipif("True")` is skipped and `xfail("False")`
             runs — quoting the condition must not defeat the gate. A string is
             therefore DECODED here, without `eval`, when it parses to a literal
-            constant; an expression like `"sys.platform == 'win32'"` stays
-            unknowable (a manifest is read, not executed — the stated limit).
+            constant, and the TRUTHINESS of that literal is the answer for EVERY
+            type (a float, a list, a non-empty string all skip: measured). An
+            EXPRESSION like `"sys.platform == 'win32'"` stays unknowable (a
+            manifest is read, not executed — the stated limit).
             """
             if not isinstance(expr, ast.Constant):
                 return None
@@ -986,9 +988,13 @@ def _test_node_names(path: Path) -> set[str] | None:
                 value = ast.literal_eval(inner)
             except (SyntaxError, ValueError, TypeError):
                 return None
-            if isinstance(value, bool | int):
-                return bool(value)
-            return None
+            # `literal_eval` yields only literals, and pytest `eval`s the same
+            # text, so the TRUTHINESS of the decoded value IS pytest's answer —
+            # for every type, not just bool/int. Keeping only bool/int discarded
+            # a value already in hand, so `skipif("'x'")` / `skipif("1.5")` /
+            # `skipif("[1]")` were accepted as pins although pytest skips them
+            # (measured, review cycle 6, P1).
+            return bool(value)
 
         def _skipif_never_reds(call: ast.expr) -> bool:
             """`@pytest.mark.skipif(...)` — pytest skips when ANY condition is true.
@@ -1003,12 +1009,16 @@ def _test_node_names(path: Path) -> set[str] | None:
             """
             conditions: list[ast.expr] = []
             if isinstance(call, ast.Call):
-                conditions.extend(call.args)
-                conditions.extend(
+                keyword_conditions = [
                     keyword.value
                     for keyword in call.keywords
                     if keyword.arg == "condition"
-                )
+                ]
+                # pytest REPLACES the positional args when `condition=` is given
+                # (measured: `skipif(True, condition=False)` RUNS and fails, while
+                # `skipif(False, condition=True)` skips), so the keyword set is
+                # used ALONE rather than unioned into one ANY-of pool (cycle 6, P2).
+                conditions.extend(keyword_conditions or call.args)
             if not conditions:
                 return True  # no condition at all: skipped unconditionally
             if any(_literal_condition_truth(expr) is True for expr in conditions):
@@ -1025,10 +1035,14 @@ def _test_node_names(path: Path) -> set[str] | None:
             if isinstance(call, ast.Call):
                 if call.args:
                     exprs.append(call.args[0])
+                # `cond=` is NOT an xfail parameter: pytest ignores it, so a call
+                # carrying only `cond=` is a BARE xfail that always applies and can
+                # never red (measured, review cycle 6, P1). Only `condition=` is a
+                # condition here — the same reading the skipif arm documents.
                 exprs.extend(
                     keyword.value
                     for keyword in call.keywords
-                    if keyword.arg in ("condition", "cond")
+                    if keyword.arg == "condition"
                 )
             if not exprs:
                 return (False, None)
@@ -6098,6 +6112,14 @@ def test_an_unconditional_skip_or_xfail_is_not_a_pin(tmp_path):
     INCLUDING A STRING, which pytest `eval()`s as an expression rather than
     reading as a boolean — is unknowable from a manifest and is kept.
 
+    The same applies to every decoded TYPE, not just bool/int (review cycle 6,
+    P1): `skipif("[1]")` and `skipif("0.0")` are decided by the truthiness of the
+    decoded literal, because that is exactly what pytest's `eval` computes. And
+    the marker's own parameter list matters: `cond=` is NOT an xfail parameter —
+    pytest ignores it, so `xfail(cond=False)` is a BARE xfail that always applies
+    and cannot red — while `skipif(condition=…)` REPLACES its positional args
+    rather than joining them (`skipif(True, condition=False)` runs and fails).
+
     Three more shapes are the same fail-open one marker over, each MEASURED
     against real pytest before being refused (review cycle 12): `skipif` with no
     condition at all (`skipif(reason=…)`, and `skipif(cond=…)` — pytest IGNORES
@@ -6158,6 +6180,26 @@ def test_an_unconditional_skip_or_xfail_is_not_a_pin(tmp_path):
         "def test_string_condition_false_skipped():\n"
         "    assert False\n"
         "\n"
+        "@pytest.mark.skipif('[1]', reason='truthy list spelling')\n"
+        "def test_string_condition_truthy_other_type():\n"
+        "    assert False\n"
+        "\n"
+        "@pytest.mark.skipif('0.0', reason='falsy float spelling')\n"
+        "def test_string_condition_falsy_float():\n"
+        "    assert False\n"
+        "\n"
+        "@pytest.mark.xfail(cond=False, reason='cond= is not an xfail parameter')\n"
+        "def test_xfail_cond_kw_is_ignored():\n"
+        "    assert False\n"
+        "\n"
+        "@pytest.mark.xfail(condition=False, reason='a real xfail condition')\n"
+        "def test_xfail_condition_kw_counts():\n"
+        "    assert False\n"
+        "\n"
+        "@pytest.mark.skipif(True, condition=False, reason='kw replaces args')\n"
+        "def test_skipif_condition_replaces_args():\n"
+        "    assert False\n"
+        "\n"
         "@pytest.mark.xfail(strict=True, run=False, reason='notrun')\n"
         "def test_strict_notrun_xfailed():\n"
         "    assert False\n"
@@ -6209,6 +6251,9 @@ def test_an_unconditional_skip_or_xfail_is_not_a_pin(tmp_path):
         "test_variably_xfailed",
         "test_string_condition_xfailed",  # pytest eval()s "False"; body runs
         "test_string_condition_false_skipped",  # "False" evals falsy: runs
+        "test_string_condition_falsy_float",  # "0.0" evals falsy: runs
+        "test_xfail_condition_kw_counts",  # condition= is a real condition
+        "test_skipif_condition_replaces_args",  # condition= replaces args
         "test_falsy_wins_over_notrun",  # literal-falsy beats run=False
         "test_conditionally_skipped",
         "test_skips_in_body",
