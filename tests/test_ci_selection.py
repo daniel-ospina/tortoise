@@ -201,6 +201,20 @@ def test_docs_scanning_gates_stay_in_tier1():
         "green while #7949/#7947 went on citing it (#4309 class, same dual "
         "registration as the sibling capstone rows above)"
     )
+    assert "test_8447_census_citation_coordinates.py" in tier1, (
+        "#10620 review (issue 5): the #8447 C1 census pin's citation "
+        "coordinates live in docs/architecture/BOUNDED-OPERATION-CONTRACT.md "
+        "— `docs/` is in NON_PYTHON_PREFIXES, so a docs-only edit of the "
+        "census selects no surface and runs tier1 ONLY. Measured with this "
+        "manifest, the `core` row alone is ASLEEP on that diff AND on "
+        "`tortoise/hosted_api.py` — the module whose movement is the whole "
+        "subject of the census's third re-derivation — because hosted_api.py "
+        "selects `api`+`onboarding`, which REPLACES the core fallback (#2938). "
+        "`select()` seeds every selection from `set(tier1)`, so tier1 is the "
+        "arm that actually carries this guard; the row comment claimed `core` "
+        "was, which is how a lane reading it deletes this one (#4309/#10108 "
+        "class, same dual registration as the sibling rows above)"
+    )
 
 
     assert "test_substrate_map.py" in tier1, (
