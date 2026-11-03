@@ -389,8 +389,16 @@ def _not_carried(exc: BaseException, sent: Connection) -> MCPCredentialNotCarrie
     else:
         remedy = (
             f"point the endpoint at {final} directly (TORTOISE_MCP_URL, or the "
-            f"store's `api_url`) so the credential goes out on the FIRST hop."
+            f"store's `api_url`) so the credential goes out on the FIRST hop"
         )
+    # A CLIENT's endpoint is fixed at construction (`_BearerProvider.url`), so a
+    # remedy that only changes the SOURCE leaves the client pointed at the old
+    # host — applying it would swap this refusal for a host-mismatch one, whose
+    # advice puts the endpoint back. Say the rebuild out loud.
+    remedy += (
+        " Then rebuild the client (`get_client()`) — an existing client's endpoint "
+        "is fixed at construction, so editing the source alone changes nothing."
+    )
     return MCPCredentialNotCarriedError(
         f"{MCPCredentialNotCarriedError.code}: the MCP endpoint rejected this "
         f"request as unauthenticated, and the request that failed carried NO "

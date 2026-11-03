@@ -907,6 +907,9 @@ class TestCredentialResolution:
 
         assert payload["status"] == "unconfigured", payload
         assert "MCP-CREDENTIAL-NOT-CARRIED" in payload["error"], payload
+        assert "rebuild the client" in payload["error"], (
+            f"the remedy cannot work for a client whose endpoint is fixed at "
+            f"construction: {payload['error']}")
         assert "tt_live_key" not in text, f"the credential value was printed: {text}"
 
     def test_a_tool_error_mentioning_401_is_not_a_credential_refusal(self, client_env):

@@ -19,9 +19,11 @@ it PER REQUEST. The harness declares a local command instead of a header:
 
 No key in the config, no `${VAR}` to expand, nothing to go stale. The bridge
 resolves the credential from the LIVE environment (`TORTOISE_API_KEY`, or the
-`TORTOISE_MCP_API_KEY` alias recorded on #5200) and then from
-`~/.tortoise/credentials.json`, on EVERY forwarded request — so a rotation, a
-refresh, or a key added after the session started takes effect on the next call.
+`TORTOISE_MCP_API_KEY` alias recorded on #5200) and then from the stored
+credentials — the PROJECT-LOCAL `./.tortoise` that `tortoise init --api-key`
+writes, then `~/.tortoise/credentials.json` (#1708 D5 order: the first key found
+wins) — on EVERY forwarded request, so a rotation, a refresh, or a key added
+after the session started takes effect on the next call.
 
 A blank resolution is never sent as an empty header. It sends nothing, and if
 the endpoint rejects the call the bridge answers with the named
@@ -40,8 +42,11 @@ generous: the bridge is a CHILD of the harness, so its `os.environ` is a snapsho
 of the harness's at spawn — a key exported in some other shell after the session
 started is not visible here. Re-reading buys two real things: a value this
 process sets mid-run, and (the case that matters for a long-lived session) the
-**credential FILE** (`~/.tortoise/credentials.json`), which is re-read from disk
-on every request and is therefore the source that genuinely rotates.
+**credential FILE** (either store — `./.tortoise`, then
+`~/.tortoise/credentials.json`), which is re-read from disk on every request and
+is therefore the source that genuinely rotates. Rotating the GLOBAL file while a
+project-local store supplies the key changes nothing: the project-local one wins
+(#1708 D5), which is why both are named here.
 
 CO-SOURCE (#2369 D1.1): a key taken from the credential file resolves its
 endpoint from that SAME file (its `api_url`), never from a `TORTOISE_MCP_URL`
