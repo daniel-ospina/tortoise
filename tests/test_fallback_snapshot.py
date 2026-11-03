@@ -844,7 +844,7 @@ def test_a_raising_build_serves_the_whole_cohort_the_legacy_path():
         try:
             start.wait()
             out[i] = fs.get_or_build(None, key, builder=raising)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001, RUF100
             errors.append(exc)
 
     threads = [threading.Thread(target=reader, args=(i,)) for i in range(4)]
@@ -862,6 +862,95 @@ def test_a_raising_build_serves_the_whole_cohort_the_legacy_path():
         "every reader gets the documented None contract"
     assert fs._store.get(key) is None, "a raise must never be cached"
     assert fs._FLIGHTS == {}, "the registry must be empty after a raising build"
+
+
+def test_a_reader_arriving_AFTER_a_write_does_not_get_pre_write_rows():
+    """Read-your-writes for the DELIVERY half (review round 6, P2).
+
+    The generation guard stopped a build overtaken by a write from being CACHED —
+    but the flight stays registered and joinable, so a reader whose own ``get``
+    missed AFTER the write could still join that build and be served rows read
+    before it. Pre-#10602 that reader ran its own build and saw the write, so
+    serving the leader's rows loses the caller's own write. Measured before the
+    fix: a reader starting after the write got the PRE-write rows.
+    """
+    import threading
+
+    fs._store.clear()
+    key = ("ryw-graph", "ryw-ns")
+    started = threading.Event()
+    release = threading.Event()
+    out = {}
+
+    def leader_builder(_proj):
+        started.set()
+        release.wait(timeout=10)
+        return _snap_stub("pre-write")
+
+    def joiner_builder(_proj):
+        return _snap_stub("fresh")
+
+    t1 = threading.Thread(
+        target=lambda: out.__setitem__(
+            "leader", fs.get_or_build(None, key, builder=leader_builder)))
+    t1.start()
+    assert started.wait(timeout=10), "the leader's build never started"
+
+    # A write lands WHILE the build runs.
+    fs._store.invalidate(key)
+
+    t2 = threading.Thread(
+        target=lambda: out.__setitem__(
+            "joiner", fs.get_or_build(None, key, builder=joiner_builder)))
+    t2.start()
+    # Deterministic (not a sleep): wait until the joiner is IN the flight, so this
+    # pins "late joiner of an overtaken build" rather than a scheduling accident.
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        fl = fs._FLIGHTS.get(key)
+        if fl is not None and fl.waiters >= 2:
+            break
+        time.sleep(0.005)
+    else:
+        raise AssertionError("the joiner never joined the in-flight build")
+
+    release.set()
+    t1.join(timeout=15)
+    t2.join(timeout=15)
+
+    assert out.get("leader") is not None and out["leader"]["tag"] == "pre-write"
+    assert out.get("joiner") is not None, "the late joiner still gets an answer"
+    assert out["joiner"]["tag"] == "fresh", (
+        f"a reader that arrived AFTER the write must not be served the leader's "
+        f"pre-write rows — got {out['joiner']['tag']!r}, i.e. read-your-writes is "
+        f"broken for the degraded tier")
+    # The joiner's fresh build is cached (it was not overtaken), the stale one is not.
+    cached = fs._store.get(key)
+    assert cached is not None and cached["tag"] == "fresh"
+    assert fs._FLIGHTS == {}, "no flight may leak"
+
+
+def test_a_raising_build_is_LOGGED(caplog):
+    """The swallow is acceptable only because it is loud (review round 6, P3).
+
+    ``except Exception`` publishes ``None`` to the cohort instead of raising; that
+    is only right if it is observable. Deleting the ``logger.exception`` call kept
+    every other test green, so the reason the swallow is safe was unpinned.
+    """
+    import logging
+
+    fs._store.clear()
+    key = ("logged-graph", "logged-ns")
+
+    def raising(_proj):
+        raise RuntimeError("boom")
+
+    with caplog.at_level(logging.ERROR):
+        assert fs.get_or_build(None, key, builder=raising) is None
+
+    assert any("corpus build raised" in r.getMessage() for r in caplog.records), (
+        "an unexpected build failure must be logged, not silently swallowed")
+    assert fs._FLIGHTS == {}
 
 
 def test_get_or_build_does_not_publish_a_build_overtaken_by_a_write():

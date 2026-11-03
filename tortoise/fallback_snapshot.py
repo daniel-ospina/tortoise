@@ -209,7 +209,7 @@ _FLIGHTS_GUARD = threading.Lock()
 class _Flight:
     """One in-flight corpus build, shared by everyone waiting on the same key."""
 
-    __slots__ = ("done", "result", "waiters")
+    __slots__ = ("done", "generation", "result", "waiters")
 
     def __init__(self) -> None:
         self.done = threading.Event()
@@ -219,6 +219,11 @@ class _Flight:
         #: P3: an uncaught raise used to reach the leader only, while every joiner
         #: read this ``None`` — one failure, two different answers).
         self.result: dict | None = None
+        #: The key's invalidation stamp captured BEFORE the build. ``None`` when the
+        #: leader was served from a warm entry (no build ran). A joiner compares it
+        #: against the store's current stamp to tell "I arrived before the write"
+        #: from "I arrived AFTER it" — see the joiner branch in ``get_or_build``.
+        self.generation: tuple[int, int] | None = None
         self.waiters = 0
 
 
@@ -278,9 +283,10 @@ def get_or_build(proj, key: tuple, *, store: FallbackSnapshotStore | None = None
             snap = store.get(key)
             if snap is None:
                 generation = store.generation(key)
+                flight.generation = generation
                 try:
                     snap = build(proj)
-                except Exception:  # noqa: BLE001
+                except Exception:  # noqa: BLE001, RUF100
                     # A raise here is NOT one of the two failures ``build_snapshot``
                     # swallows itself (over-cap, query exception) — it is an
                     # unexpected error. Uncaught, it would propagate to the LEADER
@@ -316,6 +322,32 @@ def get_or_build(proj, key: tuple, *, store: FallbackSnapshotStore | None = None
         # embedder pins every reader of this key — the same hang those readers each
         # hit individually before #10602, now shared. Do not read this wait as bounded.
         flight.done.wait()
+        if (
+            flight.result is not None
+            and flight.generation is not None
+            and store.generation(key) != flight.generation
+        ):
+            # A write landed while this build ran, and THIS reader arrived AFTER it
+            # — its own ``store.get`` above missed, so serving the leader's rows
+            # would hand the caller pre-write data after its own write committed
+            # (review round 6, P2: the generation guard stopped that result being
+            # CACHED, but not being DELIVERED to a late joiner; pre-#10602 this
+            # reader ran its own build and saw the write). Build for this reader.
+            #
+            # ⛔ NOT ``return get_or_build(...)``: the flight is still registered
+            # until the leader's ``_flight_end``, so a recursive call would re-join
+            # this completed flight and spin. The build sequence is inline instead.
+            generation = store.generation(key)
+            try:
+                fresh = build(proj)
+            except Exception:  # noqa: BLE001, RUF100
+                logger.exception(
+                    "#10602: rebuild for a late joiner raised — serving the legacy "
+                    "path (key=%r)", key)
+                return None
+            if fresh is not None:
+                store.put_if_generation(key, fresh, generation)
+            return fresh
         return flight.result
     finally:
         _flight_end(key, flight)
