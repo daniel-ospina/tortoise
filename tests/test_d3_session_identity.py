@@ -575,9 +575,10 @@ def test_field_order_tracks_the_evidence_not_the_raw_retrieval_order(
     assert sorted(pool_order) == sorted([SID_A, SID_B]), (
         f"precondition: both seeded sessions must be in the pool handed to "
         f"assemble_context, got {pool_order}")
-    # Derived, not pinned: the fused order is the id tie-break (#3019), so
-    # which session leads is a property of the ids, not of this test. What the
-    # test needs is that the pool carries both sessions and that the stub
+    # Derived, not pinned: the fused order is the shared recency-then-id tie
+    # (#10121 — newest first, id ``DESC`` as the total-order fallback), so which
+    # session leads is a property of the stamps and ids, not of this test. What
+    # the test needs is that the pool carries both sessions and that the stub
     # reversed it; the kill is the field assertion below, which compares against
     # `expected` — the order the EVIDENCE was assembled in — and not against
     # the raw `pool_order` the retrieval returned.

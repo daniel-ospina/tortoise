@@ -1880,10 +1880,11 @@ def run_bm25_query(
     document says. A family outside ``BM25_ENTITY_TYPES`` is REFUSED at entry
     rather than scanned for nothing — see that constant.
 
-    Returns ``[(id, score)]`` ranked descending, ties broken by id (#3019: RRF
-    is rank-based, so an unstable tie would make the fused order a function of
-    dict order). Empty list on every failure — the leg DEGRADES, never fails a
-    read (the ``run_*_query`` contract).
+    Returns ``[(id, score)]`` ranked descending, ties broken by RECENCY and then
+    by id (``bm25_rank``'s key; #3019 made the tie total, #10121 made it
+    newest-first — RRF is rank-based, so an unstable tie would make the fused
+    order a function of dict order). Empty list on every failure — the leg
+    DEGRADES, never fails a read (the ``run_*_query`` contract).
 
     R3 (#1542) D4: ``leg_trace`` — an entry is appended at EVERY exit branch.
     R3's reason vocabulary only uses terms the read path already declares
@@ -2960,16 +2961,20 @@ def rrf_fusion(
     #     -> {'b': 0.04098360655737705, 'a': 0.04032258064516129}
     #
     # — land 1.61% apart, ordered by whatever broke the leg's tie. In the search
-    # legs that is the leg's secondary sort on its own id field (#3019):
-    # ``url`` for source/document, ``eventId`` for events, and for points the
-    # node id — a ULID on the create paths (chronological) but
-    # ``pt_<sha256>`` on the extraction/commit paths
-    # (``commit_schema.point_content_id``), so a tie's order is chronological
-    # for one population and content-hash for the other, and the two id spaces
-    # sort as blocks ('p' after the digits). Arbitrary-but-stable, never a
-    # relevance proxy. The single-leg path does not fuse (``sdk.py``'s
-    # ``len(raw_results) == 1`` shortcut), so the same two rows keep the SAME
-    # score there: the two paths disagree about identical evidence.
+    # legs that is the leg's secondary sort — ``recency_tie_clause`` (#10121),
+    # i.e. RECENCY ``DESC`` and then the leg's own id field ``DESC``: ``url`` for
+    # source/document, ``eventId`` for events, and for points the node id — a
+    # ULID on the create paths (chronological) but ``pt_<sha256>`` on the
+    # extraction/commit paths (``commit_schema.point_content_id``), so the two
+    # id spaces sort as blocks, with the ``pt_``/``poi-`` text ABOVE the
+    # digit-prefixed ULIDs under #10121's ``DESC`` (the pre-#10121 ``id ASC``
+    # spelling put them below). Recency IS a relevance proxy here — by
+    # #10121's decision a tie must surface the LATEST REVISION — so what is
+    # "arbitrary-but-stable" is now only the id key, which remains the
+    # total-order fallback (#3019's requirement). The single-leg path does not
+    # fuse (``sdk.py``'s ``len(raw_results) == 1`` shortcut), so the same two
+    # rows keep the SAME score there: the two paths disagree about identical
+    # evidence.
     #
     # This is the mechanism behind #7704's product symptom, but the symptom is
     # NOT a property of the mechanism. The fused gap above only becomes a

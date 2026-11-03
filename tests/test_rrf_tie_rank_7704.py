@@ -3,11 +3,13 @@
 ``rrf_fusion`` ranks **positionally** (``1/(k + rank + 1)``), so when a leg
 scores two documents identically, the *leg's own* tie order becomes a fusion
 **relevance** difference between documents whose evidence is identical. On the
-search legs that tie order is the leg's secondary sort on its own id field
-(#3019) — ``url`` for source/document, ``eventId`` for events, and for points
-``id``: a ULID on the create paths (chronological) but ``pt_<sha256>`` on the
+search legs that tie order is the leg's secondary sort — RECENCY-then-id since
+#10121 (``search_engine.recency_tie_clause``; ``#3019`` is the id key it
+retains): ``url`` for source/document, ``eventId`` for events, and for points
+``id`` — a ULID on the create paths (chronological) but ``pt_<sha256>`` on the
 extraction/commit paths (``commit_schema.point_content_id``), where the order is
-content-hash and the two id spaces sort as blocks.
+content-hash and the two id spaces sort as blocks, now DESCENDING (#10121), which
+is the reverse of the pre-#10121 ``ASC`` spelling.
 
 Measured on ``origin/main`` at ``248940bf1`` (this file's red run; the same
 quantity the issue body measured at ``38c3b6ea5``)::

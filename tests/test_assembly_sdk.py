@@ -407,13 +407,16 @@ _A4_OFF_CHUNKS = {
 #: ``_assert_golden`` layer 2), i.e. re-capture territory rather than a content
 #: regression — the multiset check in the tests keeps the two distinguishable.
 #:
-#: #3019 RE-CAPTURE: the fused leg's tie-break is now the entity's ``id``, so
-#: these rows come back in id order where they previously came back in the
-#: engine's opaque row order. Three keys moved, all by the same adjacent swap
-#: (the 2026-08-10 couch row now precedes the 2026-09-01 sold row, both before
-#: ``sess-bookshelf``). No key's multiset changed — the tests assert the live
-#: sequence and the ``_A4_OFF_ROWS`` set together, so a re-capture that dropped
-#: or added a row cannot hide behind this.
+#: #10121 RE-CAPTURE (superseding the #3019 rationale that stood here): the
+#: fused leg's tie-break is RECENCY-then-id now, and recency is ``DESC``, so the
+#: 2026-09-01 rows come back AHEAD of the 2026-08-10 ones — the sold row
+#: precedes the grey-couch row, and where the sofa row is in the pool it moves
+#: up with it. Read that as the direction, not as an id sort: #3019 ordered the
+#: tie ``id ASC`` (OLDEST first) and #10121 ordered it newest-first, so these
+#: five keys moved by the same adjacent swaps as #3019's, running the other way.
+#: No key's multiset changed — the tests assert the live sequence and the
+#: ``_A4_OFF_ROWS`` set together, so a re-capture that dropped or added a row
+#: cannot hide behind this.
 _A4_OFF_ORDERED = {
     "what is the current status of the couch?": (
         _HEADER_CHUNK,
