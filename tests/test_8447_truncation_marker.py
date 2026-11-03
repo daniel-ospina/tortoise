@@ -1068,13 +1068,13 @@ class TestTheMarkerSiteRegisterIsComplete:
         return names
 
     @classmethod
-    def _scan(cls, root=None) -> set[tuple[str, int, str]]:
-        """`(module, lineno, outermost enclosing function)` per call site.
+    def _scan(cls, root=None) -> set[tuple[str, int, str, str]]:
+        """`(module, lineno, name, outermost enclosing function)` per call site.
 
-        Function granularity is what the register is written at, but the LINE is
-        what proves the scan really matched a given call: two sites in one
-        function collapse into one `_call_sites()` entry, and the aliased sites
-        all live in `tortoise_fts_query`.
+        Function granularity is what the register is written at, but the NAME
+        the marker is called under is what proves the scan matched a given
+        call: all three aliased sites live inside `tortoise_fts_query`, so the
+        coarse `_call_sites()` set is identical under a two-name filter.
         """
         import ast
         from pathlib import Path
@@ -1083,7 +1083,7 @@ class TestTheMarkerSiteRegisterIsComplete:
             root = Path(__file__).resolve().parent.parent / "tortoise"
         root = Path(root)
         assert root.is_dir(), f"the package root is missing: {root}"
-        found: set[tuple[str, int, str]] = set()
+        found: set[tuple[str, int, str, str]] = set()
         for path in sorted(root.rglob("*.py")):
             tree = ast.parse(path.read_text(encoding="utf-8"))
             names = cls._marker_aliases(tree)
@@ -1105,7 +1105,7 @@ class TestTheMarkerSiteRegisterIsComplete:
                                            ast.AsyncFunctionDef)):
                         owner = cursor.name
                 found.add((path.relative_to(root.parent).as_posix(),
-                           node.lineno, owner))
+                           node.lineno, name, owner))
         return found
 
     @classmethod
@@ -1116,7 +1116,7 @@ class TestTheMarkerSiteRegisterIsComplete:
         still belongs to the entry point a reader can find and grep for.
         """
         return {f"{module}::{owner}"
-                for module, _lineno, owner in cls._scan(root)}
+                for module, _lineno, _name, owner in cls._scan(root)}
 
     def test_the_scan_sees_every_marker_call_site_in_the_tree(self):
         """All SIX call sites, not the three a two-name filter can match.
@@ -1124,21 +1124,23 @@ class TestTheMarkerSiteRegisterIsComplete:
         The tree calls the marker under `mark_truncation`, `_mark_truncation`,
         and three further aliases introduced by
         `from .truncation import mark_truncation as …`. Pre-fix the scan matched
-        two hard-coded names, so the three aliased lines were invisible to it —
+        two hard-coded names, so the three aliased calls were invisible to it —
         the mount point for a new site that would have gone unpinned while the
-        class docstring promised it could not. Line-level on purpose: the three
-        aliased sites all live in `tortoise_fts_query`, which the coarse set
-        already contains, so a function-level assertion cannot see the escape.
+        class docstring promised it could not. Asserted by the alias NAME, not
+        by line number, because a line pin breaks on every unrelated edit to
+        `sdk.py` while an alias pin only breaks when a site is added or moved.
         """
-        seen = {(module, lineno) for module, lineno, _o in self._scan()}
-        assert seen == {
-            ("tortoise/hosted_api.py", 10295),
-            ("tortoise/sdk.py", 34655),
-            ("tortoise/sdk.py", 35496),   # as _seed_mark
-            ("tortoise/sdk.py", 35572),
-            ("tortoise/sdk.py", 35699),   # as _lost_mark
-            ("tortoise/sdk.py", 35724),   # as _lost_mark2
-        }, sorted(seen)
+        from collections import Counter
+
+        seen = Counter((module, name)
+                       for module, _lineno, name, _owner in self._scan())
+        assert seen == Counter({
+            ("tortoise/hosted_api.py", "mark_truncation"): 1,
+            ("tortoise/sdk.py", "_mark_truncation"): 2,
+            ("tortoise/sdk.py", "_seed_mark"): 1,     # as _seed_mark
+            ("tortoise/sdk.py", "_lost_mark"): 1,     # as _lost_mark
+            ("tortoise/sdk.py", "_lost_mark2"): 1,    # as _lost_mark2
+        }), sorted(seen.items())
 
     def test_a_new_site_under_an_invented_alias_is_seen(self, tmp_path):
         """A marker site in a NEW function under a THIRD alias name reds.
