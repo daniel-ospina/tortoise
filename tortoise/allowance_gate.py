@@ -26,6 +26,17 @@ that registry at import, so a renamed or removed dimension is a hard import
 failure rather than a gate that silently stops gating. A test pins the same
 invariant.
 
+**⚠️ HOW AN ALLOWANCE REACHES THE GATE (the arming seam).** The gate reads the
+limits dict it is GIVEN, so a key a surface never carried is not a warning — it
+is UNLIMITED. Two carriers, both enumerated from :data:`ALLOWANCE_KEYS`, close
+that on every surface: the MCP capture bridge carries them out of the resolved
+limits it already holds, and ``hosted_api._check_org_limit`` (the ONE REST
+convergence point) fills any key the lane's hand-assembled dict is missing from
+``quota.resolve_org_limits`` — the ONE resolver allowed to emit an allowance
+(#3874's rule: *"there is ONE resolver, so the two cannot drift"*). So arming an
+allowance in the resolver reaches BOTH lanes with no second edit, instead of
+refusing on MCP while REST silently serves past it.
+
 **Three outcomes per configured dimension, and only three:**
 
 * **under the allowance** → allowed (the write proceeds);
@@ -90,7 +101,7 @@ from __future__ import annotations
 
 import logging
 import math
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -107,6 +118,8 @@ __all__ = [
     "DIMENSIONS",
     "AllowanceDimension",
     "MeterReading",
+    "carry_allowance_keys",
+    "carry_resolved_allowances",
     "enforce_allowances",
 ]
 
@@ -399,6 +412,84 @@ DIMENSIONS: tuple[AllowanceDimension, ...] = (
 #: must not.
 ALLOWANCE_GATED_RESOURCES = frozenset().union(
     *(d.resources for d in DIMENSIONS))
+
+
+def carry_allowance_keys(target: dict, source: Mapping[str, Any],
+                         keys: Iterable[str] | None = None) -> dict:
+    """Carry every allowance key the SOURCE resolved onto ``target`` (#9567 D12).
+
+    The gate reads the dict it is GIVEN, so a key a surface fails to carry is not
+    a warning — it reads as UNLIMITED (see ``enforce_allowances``). Enumerating
+    from :data:`ALLOWANCE_KEYS` rather than hand-listing is what makes a NEW
+    declared dimension lift on every surface at once; a hand-list is how one
+    surface keeps spending past a configured allowance while another refuses
+    (#1349's silent-drop class).
+
+    ``keys`` narrows the carry (default: every declared allowance key) so a
+    caller filling only what is MISSING cannot overwrite a value the surface
+    resolved itself.
+
+    Only keys the source ACTUALLY resolved are carried: an absent key means
+    unconfigured, which is the gate's own declared default — synthesizing one
+    would invent a cap (#4051).
+    """
+    for key in (ALLOWANCE_KEYS.values() if keys is None else keys):
+        if key in source:
+            target[key] = source[key]
+    return target
+
+
+def carry_resolved_allowances(
+        limits: dict | None, *, org_id: str | None = None,
+        resolver: Callable[[str], Mapping[str, Any]] | None = None,
+) -> dict | None:
+    """Fill any MISSING allowance key from the ONE resolver (#9567 D12).
+
+    **Why this exists.** ``quota.resolve_org_limits`` is where an allowance value
+    is emitted for the MCP lane, but REST does NOT consume that resolver: every
+    REST lane hand-assembles its own limits dict from its own store read
+    (``hosted_api._get_current_org`` registry, ``supabase_control.resolve_api_key``,
+    ``_membership_org``, ``_org_limits_from_node``), and none of them reads an
+    allowance column. So an arming edit made in the resolver alone would REFUSE on
+    MCP and SERVE WITHOUT LIMIT on REST — the fail-open this closes, and the exact
+    class the MCP bridge's carry was added for one surface at a time. Resolving at
+    the seam instead of mirroring the carry into each builder is the same rule
+    #3874 applied to ``max_api_keys``: *"there is ONE resolver, so the two cannot
+    drift"*.
+
+    Only MISSING keys are filled, so a surface that already resolved them (the
+    MCP lane carries from ``resolve_org_limits`` per request) pays no read and is
+    never overridden. A resolver fault is a CONFIG read we cannot complete for a
+    cap that may be armed, so it is refused as the documented ``QuotaCheckError``
+    (fail closed, #686/#4051) rather than served — a store fault on this path is
+    the same store fault the caller's own count would hit.
+    """
+    if limits is None:
+        return None
+    org_id = org_id or limits.get("org_id")
+    if not org_id:
+        return limits  # stdio/operator — no org context, nothing to resolve
+    if all(key in limits for key in ALLOWANCE_KEYS.values()):
+        return limits  # the caller's own resolution already carried all three
+    missing = [key for key in ALLOWANCE_KEYS.values() if key not in limits]
+    if resolver is None:
+        # Local import: ``quota`` imports this module inside ``enforce_org_limit``
+        # (a function), so the cycle is closed at module level here on purpose —
+        # same shape as this module's existing ``from .quota import …`` above.
+        from .quota import resolve_org_limits as resolver
+    try:
+        resolved = resolver(org_id)
+    except QuotaCheckError:
+        raise
+    except Exception as e:  # noqa: BLE001 — mapped, never an unmapped 500
+        _logger.error(
+            "team allowances unresolvable (fail-closed): team=%s error=%r",
+            org_id, e)
+        raise QuotaCheckError(
+            f"the team allowances could not be resolved for {org_id!r} "
+            f"({type(e).__name__}: {e}) — refusing to read an uncarried "
+            f"allowance as unlimited") from e
+    return carry_allowance_keys(dict(limits), resolved or {}, keys=missing)
 
 
 def _limit(value: Any, dim: AllowanceDimension, org_id: str) -> int | None:

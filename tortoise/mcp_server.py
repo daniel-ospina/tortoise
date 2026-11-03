@@ -5997,10 +5997,25 @@ def tortoise_session_capture(conversation: list[dict],
     # reads the dict it is GIVEN, so a key this bridge drops reads as UNLIMITED.
     # Only keys the resolver actually produced are carried (absent = unlimited,
     # which is the gate's own declared default).
-    from tortoise.allowance_gate import ALLOWANCE_KEYS as _allowance_keys
-    for _key in _allowance_keys.values():
-        if _key in limits:
-            org[_key] = limits[_key]
+    # ⚠️ The import is GUARDED, for the reason `quota.enforce_org_limit` states
+    # in-line about the SAME import: the gate's own drift check is deliberately
+    # LOUD at import (a renamed/removed declared dimension raises there), and an
+    # unguarded import would let that loudness escape this tool as an unmapped
+    # 500/ImportError instead of the documented fail-closed refusal (#4051). A
+    # capture whose allowance gate cannot be loaded is REFUSED, never served —
+    # serving is what a dropped key would do.
+    try:
+        from tortoise.allowance_gate import (
+            carry_allowance_keys as _carry_allowance_keys,
+        )
+    except Exception as e:  # noqa: BLE001 — mapped, never an unmapped 500
+        logging.getLogger("tortoise.allowance_gate").error(
+            "capture allowance gate unavailable (fail-closed, capture "
+            "refused): team=%s error=%r", org_id, e)
+        return _SafeError({
+            "error": f"capture allowance gate unavailable: {e}",
+            "status": 500})
+    _carry_allowance_keys(org, limits)
     try:
         body = SessionRequest(conversation=conversation, harness=harness,
                               session_id=session_id,

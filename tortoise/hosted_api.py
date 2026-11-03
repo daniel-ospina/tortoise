@@ -7903,7 +7903,12 @@ def _check_org_limit(org: dict, resource: str, *,
     #329: delegates to the shared fail-closed quota helper.
     #683: the limits dict is the authenticated org dict (resolved once by
     get_current_org), matching MCP semantics — includes max_users/max_graphs.
-    #686: explicit decision documentation + ERROR-level alerting on failures.    """
+    #686: explicit decision documentation + ERROR-level alerting on failures.
+    #9567 D12: the dict is AUGMENTED here with the ruled-dimension allowances
+    #resolved by `quota.resolve_org_limits` — the REST lanes build their dicts
+    #from their own store reads and never read those columns, and an uncarried
+    #allowance is UNLIMITED to the gate (see `tortoise/allowance_gate.py`).
+    """
     org_id = org.get("org_id")
     if not org_id:
         return  # internal/no-org context — skip
@@ -7913,6 +7918,24 @@ def _check_org_limit(org: dict, resource: str, *,
         enforce_org_limit,
         quota_refusal_payload,
     )
+    # ── #9567 D12: the RULED-dimension allowances must reach THIS dict ──────
+    # Every REST lane assembles its own limits dict from its own store read
+    # (registry `Team`, supabase `resolve_api_key`, `_membership_org`,
+    # `_org_limits_from_node`) and none of them reads an allowance column — so a
+    # key the lane does not carry reads as UNLIMITED in the gate, and an arming
+    # edit would refuse on MCP while REST served past it. This is the ONE REST
+    # convergence point (#1828's "one place fixes every session endpoint" rule),
+    # so the fill happens HERE from the ONE resolver that may emit an allowance,
+    # never as a carry mirrored into each builder. Scoped to the doors the gate
+    # declares (`ALLOWANCE_GATED_RESOURCES`) so a users/graphs/api_keys check
+    # pays no read, and skipped entirely when the lane already carried all three
+    # (the MCP lane does).
+    from tortoise.allowance_gate import (
+        ALLOWANCE_GATED_RESOURCES,
+        carry_resolved_allowances,
+    )
+    if resource in ALLOWANCE_GATED_RESOURCES:
+        org = carry_resolved_allowances(org)
     try:
         enforce_org_limit(org, resource, slot_credit=slot_credit)
     except QuotaExceededError as e:

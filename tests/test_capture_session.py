@@ -6769,6 +6769,45 @@ def test_mcp_capture_bridge_carries_the_allowance_keys(tmp_path, monkeypatch):
     assert "capture_extraction" in str(result.get("error", "")), result
 
 
+def test_mcp_capture_bridge_refuses_when_the_allowance_gate_cannot_import(
+        tmp_path, monkeypatch):
+    """#9567 D12: a capture whose allowance gate cannot be LOADED is REFUSED in
+    the documented fail-closed shape — never served, and never an unmapped
+    ImportError/500 escaping the tool.
+
+    The gate's drift check is deliberately loud AT IMPORT (a renamed/removed
+    declared dimension raises ``_dimension()``), so the import is the one place
+    that loudness can reach a caller; `quota.enforce_org_limit` already wraps the
+    SAME import to keep it inside ``QuotaCheckError`` (#4051). The MCP bridge
+    used a bare import, which escaped as an exception out of the tool.
+
+    Mutation this REDs: drop the ``try/except`` around the bridge's
+    ``from tortoise.allowance_gate import …`` and the simulated import failure
+    propagates out of ``tortoise_session_capture`` instead of the refusal dict.
+    """
+    import sys
+
+    from tortoise.mcp_auth import _current_org_id, _current_org_limits
+    from tortoise.mcp_server import tortoise_session_capture
+    monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
+    with patched_tortoise_sdk(str(tmp_path / "mcp-gate-import.db")):
+        _provision_team("team-9567-gateimport")
+        tok_t = _current_org_id.set("team-9567-gateimport")
+        tok_l = _current_org_limits.set(
+            {"org_id": "team-9567-gateimport", "tier": "free",
+             "max_points": 100000, "max_sessions": None})
+        # A failed module load, exactly as an import-time drift raises it.
+        monkeypatch.setitem(sys.modules, "tortoise.allowance_gate", None)
+        try:
+            result = tortoise_session_capture(
+                conversation=_CONV, harness="pi", session_id="s-gateimport")
+        finally:
+            _current_org_id.reset(tok_t)
+            _current_org_limits.reset(tok_l)
+    assert result.get("status") == 500, result
+    assert "capture allowance gate unavailable" in str(result.get("error", "")), result
+
+
 def test_session_capture_tool_stdio_honest_error(tmp_path, monkeypatch):
     """Task 13: stdio (no team context / selfhost) → honest 'requires hosted
     mode' error — no local fallback that bypasses the gates."""

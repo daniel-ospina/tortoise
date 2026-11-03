@@ -473,3 +473,96 @@ def test_a_non_reading_on_an_UNLIMITED_dimension_is_logged_not_raised():
     # unlimited (observed-only): logged, never raised, meter still called
     assert _reading(bounded, ORG, {"capture_extraction": lambda _o: 5.0},
                     observed_only=True) is None
+
+
+# ── #9567 D12 (review round 9) — THE ARMING SEAM ──────────────────────────
+#
+# The gate reads the dict it is GIVEN, so a surface that does not carry an
+# allowance key reads it as UNLIMITED. The MCP lane resolves its limits through
+# `quota.resolve_org_limits` (where an allowance would be emitted) and carries
+# them; every REST lane hand-assembles its own limits dict from its own store
+# read and reads none of the allowance columns. So an arming edit made in the
+# resolver alone would REFUSE on MCP and SERVE WITHOUT LIMIT on REST — the
+# fail-open these tests pin shut at the ONE REST convergence point.
+
+def _rest_org(**extra) -> dict:
+    """A REST-shaped auth dict: the six resolved keys, no allowance key."""
+    return {"org_id": ORG, "tier": "free", "max_users": None, "max_graphs": None,
+            "max_points": None, "max_api_keys": None, "max_sessions": None,
+            **extra}
+
+
+def test_the_rest_gate_carries_an_allowance_resolved_by_the_resolver(monkeypatch):
+    """`_check_org_limit` must fill the keys a REST lane did not carry.
+
+    Mutation this REDs: drop the ``carry_resolved_allowances(org)`` call in
+    ``hosted_api._check_org_limit`` and an allowance configured through
+    ``quota.resolve_org_limits`` never reaches the REST door — the gate sees an
+    ABSENT key, reads it as UNLIMITED, and the operation is served instead of
+    refused (the exact MCP-refuses/REST-serves asymmetry this closes).
+
+    ``graph_storage`` is armed because it is BLOCKED: a configured BLOCKED
+    dimension refuses without reading a meter, so this is a pure unit assertion
+    with no store and no instrument (the enforcement paths themselves are
+    covered above).
+    """
+    from fastapi import HTTPException
+
+    from tortoise import quota
+    from tortoise.hosted_api import _check_org_limit
+
+    monkeypatch.setattr(
+        quota, "resolve_org_limits",
+        lambda org_id: {"org_id": org_id, "tier": "free",
+                        "max_graph_storage_mb": 100})
+    with pytest.raises(HTTPException) as exc:
+        _check_org_limit(_rest_org(), "points")
+    # The documented fail-closed shape, naming the dimension — a dropped key
+    # would have returned normally (max_points is None: nothing else refuses).
+    assert exc.value.status_code == 500
+    detail = str(exc.value.detail)
+    assert "graph_storage" in detail, detail
+    assert "blocked" in detail.lower(), detail
+
+
+def test_the_resolver_is_not_consulted_when_the_dict_already_carries_every_key():
+    """The MCP lane resolves these per request — carrying must not re-read.
+
+    This is what keeps the fix off the MCP hot path (and off every door that
+    already resolved its own allowances): no key is missing → NO store read.
+    """
+    from tortoise.allowance_gate import carry_resolved_allowances
+
+    def _boom(_org_id: str):
+        raise AssertionError("resolver must not be consulted")
+
+    limits = _limits(**{key: None for key in ALLOWANCE_KEYS.values()})
+    assert carry_resolved_allowances(limits, resolver=_boom) is limits
+
+
+def test_the_carry_fills_only_missing_keys_and_never_overrides_the_surface():
+    """A surface's own resolution WINS; only absent keys are filled, and the
+    caller's dict is not mutated (the REST docstring promises no side effect)."""
+    from tortoise.allowance_gate import carry_resolved_allowances
+
+    limits = _limits(max_extraction_tokens=5)
+    out = carry_resolved_allowances(
+        limits, resolver=lambda _o: {"max_extraction_tokens": 99,
+                                     "max_graph_storage_mb": 100})
+    assert out["max_extraction_tokens"] == 5, out  # never overridden
+    assert out["max_graph_storage_mb"] == 100, out  # the missing one filled
+    assert "max_graph_storage_mb" not in limits  # input untouched
+
+
+def test_a_resolver_fault_refuses_rather_than_reading_unlimited():
+    """A config read we cannot complete for a cap that MAY be armed is a
+    refusal, not a silent "unlimited" (D12; and it must be the documented
+    ``QuotaCheckError``, never an unmapped 500 — #4051)."""
+    from tortoise.allowance_gate import carry_resolved_allowances
+
+    def _broken(_org_id: str):
+        raise RuntimeError("control plane unreachable")
+
+    with pytest.raises(QuotaCheckError) as exc:
+        carry_resolved_allowances(_limits(), resolver=_broken)
+    assert "allowances could not be resolved" in str(exc.value), str(exc.value)
