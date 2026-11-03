@@ -921,6 +921,10 @@ def test_read_route_does_not_freeze_the_event_loop(client, monkeypatch):
     request: a concurrent client is SERVED DURING the read, not queued behind
     it. /health is pure in-memory (#2850), so a delay in it can only come from
     the loop being blocked, never from a saturated executor.
+
+    RESIDUAL, filed rather than silently left (#10815):
+    `test_graph_write_loop_responsiveness.py`, `test_capture_loop_responsiveness.py`
+    and `test_notify_offloop_4456.py` still count wall-clock ticks the same way.
     """
     import tortoise.hosted_api as ha_mod
     from tortoise.hosted_api import app
