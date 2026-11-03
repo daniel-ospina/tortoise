@@ -34,11 +34,25 @@ The identification is STRUCTURAL — `is_episodic = true` AND `pointKind =
 'event'` AND `id == session_id + '_t' + <all-decimal suffix>` for a
 `CONTAINS`-wired `:Session` — the same rule `sdk._capture_turn_ids` applies
 (suffix `isdecimal`, never prefix alone, so the `sec` vs `sec_t0` cross-match
-cannot admit another session's turns). No timestamp is needed to date a node:
-on an ARMED deployment the writer stops minting turn nodes (#10000), so turn
-nodes present in an armed target's graph are pre-cutover by construction — and
-the census does not need to know their age, only whether the record holds an
-equivalent copy. Nodes that look like turns but fail any leg of the shape are
+cannot admit another session's turns). No timestamp is needed to date a node,
+and nothing here dates one: the census does not need a turn's age, only
+whether the RECORD holds an equivalent copy.
+
+⚠️ An armed target's graph is NOT all pre-cutover. `#10000` makes the RECORD
+the first sink, but the writer still writes the turn to the GRAPH for every
+turn the record did not take — `capture_session` reads each write's outcome
+and sends `_unrecorded` through `_graph_write_with_retry` with the warning
+"the record did not take N of M turn(s) — writing them to the GRAPH so the
+transcript is not lost" (`tortoise/sdk.py`). So an armed graph legitimately
+holds POST-cutover turns the record declined, and they are
+`missing_in_record` **by construction** — the repair is a backfill into the
+record, never a delete. A lane that reads this contract as "every turn node in
+an armed graph is pre-cutover" would hand a #10000 fallback turn to the purge
+on an assumption about AGE that no leg of this census checks; the verdict
+stays correct because parity is by transcript text, not by age, which is
+exactly why the premise has to be stated right here.
+
+Nodes that look like turns but fail any leg of the shape are
 NOT purge candidates: they are reported as anomalies (orphans, non-decimal
 suffixes, cross-wirings, `is_operator` flags) so nothing is silently invisible
 to the gate — a census that quietly excluded what it could not classify would
@@ -236,15 +250,26 @@ THE PASS CRITERION AND THE EXIT CODES
        not place in the compared population (see the anomaly rule above).
        The gate REFUSES; the problems are listed per node and per field. Run
        the backfill / resolve the anomaly, then re-run this census.
-    3  a side could not be READ (graph unreachable, record unreachable,
-       tenant scope refused, graph read short of the store's own count). An
-       absence is NOT established — the census refuses to certify parity
-       over a side it could not see, or over part of one. This is the
+    3  the census could not ESTABLISH an absence — either a side could not
+       be READ (graph unreachable, record unreachable, tenant scope refused,
+       graph read short of the store's own count), or the COMPARISON could
+       not be completed over a side that was read fine: the record declared
+       an undeclinable field absent, declared a field this census never
+       compares, or an episodic node carries an `embeddingText` no leg
+       compares. An absence is NOT established in any of these cases — the
+       census refuses to certify parity over a side it could not see, over
+       part of one, or over a field it did not compare. This is the
        P0-shaped hole (#10024): an unscoped record read returns ZERO rows and
        would "pass" vacuously, so this tool reads through
        `record_projection.scope_connection` — the one prologue that verifies
        the tenant GUC stuck AND that the role cannot bypass RLS — and treats
        its refusal as exit 3, never as "no rows".
+
+       ⚠️ The two halves have DIFFERENT repairs, so read the message and not
+       just the code: an unreadable side is retried (reachability, IAM, RLS);
+       an uncomparable field is a CODE change to the comparison (select the
+       column and compare it). Retrying a `declared_absent`/`embeddingText`
+       refusal changes nothing, because nothing about the read was wrong.
 
 THE NEGATIVE ARM (how we know the gate refuses)
 ===============================================
@@ -548,7 +573,15 @@ _LOCAL_RECORD_GLOBS = tuple(
 
 
 class CensusError(Exception):
-    """A side could not be read — never a parity verdict (exit 3)."""
+    """The census could not establish an absence (exit 3) — never a parity
+    verdict.
+
+    Two arms, with different repairs: a side could not be READ (retry the
+    read — reachability, tenant scope, RLS), or the COMPARISON could not be
+    completed over a side that read fine (fix the comparison — an
+    undeclinable/invented `declared_absent`, or an `embeddingText` no leg
+    compares). Neither is a parity failure, so neither may be reported as one.
+    """
 
 
 def _f32(value: float) -> float:

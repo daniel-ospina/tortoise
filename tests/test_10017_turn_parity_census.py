@@ -2355,6 +2355,91 @@ def test_the_docstring_states_the_local_legs_DECLARED_ABSENT_fields():
         "the contract must qualify which leg compares kind/status/createdAt")
 
 
+def test_the_contract_states_that_an_ARMED_graph_holds_POST_cutover_turns():
+    """#10627 review (P3): the contract claimed the opposite of what the writer
+    does, on the clause a purge-scoping lane reasons from.
+
+    The old sentence was "on an ARMED deployment the writer stops minting turn
+    nodes (#10000), so turn nodes present in an armed target's graph are
+    pre-cutover by construction". The writer does no such thing: `capture_session`
+    reads each record write's OUTCOME and sends every turn the record did not
+    take through `_graph_write_with_retry` ("the record did not take N of M
+    turn(s) — writing them to the GRAPH so the transcript is not lost"). An
+    armed graph therefore holds POST-cutover turns the record DECLINED — and
+    they are `missing_in_record` by construction (backfill, never delete).
+
+    The pin is anchored to the WRITER, not to prose: it reads `tortoise/sdk.py`
+    and requires the fallback's own names to exist there, so the contract
+    cannot be corrected into a claim about code that no longer exists either.
+
+    Mutations that go RED here: restoring the old "pre-cutover by construction"
+    sentence; deleting the `_unrecorded`/`_graph_write_with_retry` sentence.
+    """
+    import tortoise.sdk as sdk
+    doc = tpc.__doc__ or ""
+    sdk_src = Path(sdk.__file__).read_text(encoding="utf-8")
+    # The code path the contract describes really exists.
+    assert "_unrecorded" in sdk_src and "_graph_write_with_retry" in sdk_src, (
+        "the writer no longer has the #10000 graph fallback this contract "
+        "describes — the contract must be re-derived, not patched")
+    assert "the record did not take" in sdk_src
+    # …and the contract states it, by name, with the repair.
+    assert "pre-cutover by construction" not in doc, (
+        "the falsified premise is back: an armed graph holds post-cutover "
+        "turns the record declined")
+    assert "_unrecorded" in doc and "_graph_write_with_retry" in doc
+    assert "missing_in_record" in doc.split("_graph_write_with_retry", 1)[1][:1200], (
+        "the contract must say where a declined turn lands and that its repair "
+        "is a backfill, never a delete")
+
+
+def test_the_exit_code_table_names_BOTH_arms_of_exit_three():
+    """#10627 review (P3): exit 3 was documented as ONE arm ("a side could not
+    be READ"), and the operator's action table therefore pointed at a retry.
+
+    `census()` raises `CensusError` on three arms where BOTH sides were read
+    fine and only the COMPARISON was incomplete — an undeclinable
+    `declared_absent` name, an invented one, and any `embeddingText`-bearing
+    episodic node. An operator (or a monitor rule) keyed on the documented
+    table retries store reachability forever on a state whose only repair is a
+    code change to the comparison.
+
+    Mutations that go RED here: restoring the one-arm row; restoring the
+    one-arm `CensusError` docstring; dropping the "different repairs" warning.
+    """
+    doc = tpc.__doc__ or ""
+    start = doc.find("\n    3  ")
+    end = doc.find("THE NEGATIVE ARM")
+    assert start != -1 and end != -1 and end > start, (
+        "the exit-code table's row 3 is not where the scan expects it — the "
+        "scan is broken, not the contract")
+    row = " ".join(doc[start:end].split())
+    assert "be READ" in row, "row 3 no longer names the unreadable-side arm"
+    assert "COMPARISON could not be completed" in row, (
+        "row 3 must name the uncompleted-comparison arm, or the operator "
+        "retries a read that was never wrong")
+    assert "DIFFERENT repairs" in row, (
+        "the two arms have different repairs and the table must say so")
+    # The exception's own contract must agree with the table it is raised under.
+    err_doc = tpc.CensusError.__doc__ or ""
+    # ⛔ ASSERT THE FRAMING, NOT ONLY THE WORDS (measured: a mutant that restored
+    # the one-arm summary left READ/COMPARISON alive in the paragraph below it and
+    # the weaker assertion stayed GREEN). The SUMMARY is the sentence a reader
+    # takes away, so the claim is scoped to it.
+    summary = err_doc.split("\n\n")[0]
+    assert "Two arms" in err_doc, (
+        "CensusError's contract no longer states that it has two arms — the "
+        "one-arm framing is back")
+    assert "a side could not be read" not in summary.lower(), (
+        f"CensusError's summary still claims a single arm: {summary.strip()!r}")
+    assert "READ" in err_doc and "COMPARISON" in err_doc, (
+        "CensusError's docstring must name both arms by their repair")
+    # …and the arms it describes are the arms the code raises.
+    src = Path(tpc.__file__).read_text(encoding="utf-8")
+    assert "declared " in src and "undeclinable" in src
+    assert "embeddingText" in src
+
+
 def test_the_CLI_prints_the_tolerated_empty_days(tmp_path, capsys, monkeypatch):
     """The tolerance must be VISIBLE on stdout, not just in the code path: an
     undisclosed skip reads exactly like a day that went missing.
