@@ -161,9 +161,10 @@ def test_a_FULL_default_graph_cannot_refuse_a_write_into_an_EMPTY_bound_graph():
                                if resource in _TENANT_GRAPH_RESOURCES else None))
 
     (`_TENANT_GRAPH_RESOURCES` is #10180's literal, which #10637 REPLACED with
-    `_GRAPH_SCOPED_QUOTA_RESOURCES = quota.TENANT_GRAPH_RESOURCES` — same
-    members. A restore must define the old name or use the new one; the run
-    reported here substituted the declaration.)
+    `_GRAPH_SCOPED_QUOTA_RESOURCES = TENANT_GRAPH_RESOURCES` — the BARE name,
+    imported from `tortoise.quota` at `hosted_api.py` line 196; same members. A
+    restore must define the old name or use the new one; the run reported here
+    substituted the bare name.)
 
     Note it PASSED an sdk — `_make_sdk(namespace=org_id)` for a graph-bound
     credential — so this class is NOT found by grepping for calls that omit the
