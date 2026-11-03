@@ -33,6 +33,90 @@ aboutObjects: ONTOLOGY.md, canonical ontology, model versions
 
 ---
 
+> **Build record for v3.31 (2026-11-02 — #9974 R1 / PR #10524 — `ONTOLOGY.md` is NOT modified; two texts are PARKED awaiting the owner's approval):**
+>
+> **What the code now does (build record, no model change).** #9974 R1 (PR #10524) moved the status fold so a
+> birth status is **DERIVED-OR-ABSENT**: `projection/entities.py` `_upsert_subject` writes `s.status=$st` and
+> `_upsert_object` writes `o.status=$st` (was `status=coalesce($st,'live')` in both), and
+> `sdk.py::_entity_door_props` no longer fabricates `out["status"] = "live"` on the create door. So a birth
+> writes the record's OWN value where the record states one, and writes nothing where it does not
+> (`SET x = NULL` REMOVES a property — the #7936 rule the same `ON MATCH` arm already carries). An absent
+> status still READS live, which is existing doctrine and unchanged: `live._terminal_excluded`'s NULL arm,
+> §11's cache rule, and the decision at
+> `docs/epics/2026-10-10-7879-postgres-record/02-identity-and-placement.md` §2.6 (*"`status` — DERIVED (a
+> cache) … projection-owned CACHE"*). **The model statement is untouched**: `status` was already ruled a
+> DERIVED cache. No version bump and no `updated:` change — no model statement moved, and (see below)
+> `ONTOLOGY.md` itself is byte-identical to `origin/main` in this PR.
+>
+> **⚠️ Deliberate consequence, stated: the projection-baseline FORMAT moves 4 → 5.**
+> `consistency.py::_PROJECTION_STATE_FORMAT_HISTORY` is now `(1, 2, 3, 4, 5)`, so `_PROJECTION_STATE_FORMAT`
+> is 5. `_entity_node_view` folds `status` into the baseline digest and the released fold seeded
+> `coalesce($st,'live')`, so every entity registered by a producer that never stated a status loses the
+> property on the first post-upgrade replay — `db_hash` moves while the journal does not. Without the bump
+> that is a sticky `unrecorded-mutation` on a healthy graph (`record_projection_state` is gated on `ok`);
+> with it, every existing `<journal>.projection-state.json` is a KNOWN predecessor that **re-baselines on the
+> next recording run**, and the operator is told so: `projection baseline MIGRATED (format 4 -> 5)`. ⛔ **The
+> cost, stated so it is not read as a free pass: `unrecorded-mutation` detection is BLIND for that one run**,
+> and a graph write that bypassed the journal before this run cannot be seen by the new baseline — so an
+> operator who suspects an out-of-band mutation must establish it by other means rather than by comparing
+> across this run. Same consequence and same remedy as v1 → v2 (`tags`), v2 → v3 (the `(label, id)` re-key)
+> and v3 → v4 (identifier aliases), all argued at `consistency.py:1056-1119`.
+>
+> **⛔ `ONTOLOGY.md` is deliberately UNMODIFIED, and this is the second ruling on the question.** Two later
+> reviewers disagreed about this file, so both judgments are recorded here rather than left for the next lane
+> to re-derive:
+>
+> 1. Review round 2 (P2) asked for `ONTOLOGY.md` to move with the change, because §2's `Procedural` row and
+>    §4.3's `Object.status` row still print `ObjectRegistered→live`, and §4.2's `Subject.status` row still
+>    prints *"SEEDS it ON CREATE (`status=coalesce($st,'live')`)"*. Those three sentences are now STALE build
+>    record — they describe the fold as it was.
+> 2. The head-`45d004b9b` review (ISSUE 1, blocking) established that **correcting them in place is not a
+>    citation fix**. Two of the three replacement clauses asserted a *semantic* proposition — *"ABSENT when the
+>    record states none and ABSENT reads LIVE"* — that appears nowhere in `ONTOLOGY.md` on `main`, i.e. new
+>    normative text, not a restatement of a stale cite. That needs the owner's explicit approval of the exact
+>    text, and no such approval is recorded anywhere reachable.
+>
+> **The second ruling governs**, so the three cells were reverted to their `origin/main` text and this entry
+> carries the build record instead of the model file. ⛔ **The consequence is stated, not hidden: those three
+> sentences in `ONTOLOGY.md` are now WRONG about the code** and stay wrong until the owner approves a
+> replacement. Per this file's routing rule the *build* record belongs here, not in the model; per
+> `ONTOLOGY.md`'s own rule the *model* text cannot be edited without that approval. Both parked texts — the
+> three cell replacements and the 37-line §4.3 consumer note (*"Querying liveness — do NOT filter the literal
+> `status:'live'`"*, withdrawn for the same reason by the previous head) — carry their exact proposed wording
+> on **#9974** (comment, 2026-11-02), so the approval question arrives with the text in hand rather than being
+> re-derived.
+>
+> ⛔ **Corrected after the 2026-11-02 delta review: an earlier version of this entry claimed "what a consumer
+> needs is already stated by the unmodified cells". That was WRONG, and it is the one part of this record a
+> reviewer had to falsify.** Those cells describe the **pre-change** fold (`ObjectRegistered→live`,
+> `status=coalesce($st,'live')`), so they are exactly where a consumer learns the OLD behaviour. The rule
+> itself is unchanged (`status` is a cache of the event stream — §2's Procedural row, the §4.2/§4.3 `status`
+> cells, §11's derived-cache rule — and an absent status READS live); what was missing is that the cells no
+> longer tell anyone **how to query it**. Publishing the trap here, because no model document can carry it
+> until the owner approves one (above), and a lane that reads only the cells will get it wrong:
+>
+> **⚠️ The consumer trap: a literal `status:'live'` filter now matches ZERO rows for a status-less birth.**
+> Cypher answers a missing property with `null`, and *"testing any value against null, either with the `=`
+> operator or with the `<>` operator, always evaluates to null … In the case of a predicate used in a `WHERE`
+> clause, anything that is not true is interpreted as being false"* (Cypher manual, *Working with null*). So
+> `MATCH (o:Object) WHERE o.status = 'live'` **silently drops the very Objects that are live** — the sharpest
+> form of the regression this change could have created, and it is why every in-repo read surface was swept
+> before this landed: the Object legs go through the NULL-tolerant predicate (`TortoiseSDK.belief_timeline`'s
+> `_terminal_excluded('o.status')` arm; `projection/entities.py`'s `_fold_object_superseded`
+> computes `WITH o, (o.status IS NULL OR NOT (o.status IN $excluded)) AS live`), `audit.py:528,539` spells the arm out (`active.status IS NULL OR active.status = 'live'`), and the
+> retrieval legs take their family vocabulary from `search_engine._status_vocab_for(label)`. None of them
+> relies on the literal. **Filter on the
+> predicate, never on the literal:** `live._terminal_excluded` (whose composition is
+> `(clause IS NULL OR clause <> '<every excluded status>')`) via `search_engine._exclude_status_clause` +
+> `search_engine._status_vocab_for(label)` (the ONE place the family → vocabulary/flag decision lives), or —
+> on a value already read out — `live.status_as_reported`, the ONE declaration for what an ABSENT status
+> reports (`'live'` for a status-carrying label, `''` for an `:Event`). **Scope of the trap:** `:Object` and
+> `:Subject` only. `Point` births keep the `#7856` born-live contract and still STORE `status='live'`, so the
+> `MATCH (p:Point {status:'live'})` idiom printed in **§5's Point Status Vocabulary**
+> (`ONTOLOGY.md:1149`) remains correct as written.
+
+---
+
 > **Changelog v3.31 (2026-10-26 — issue #9202 — the END's state is SETTLED, and the write door SHAPES or REFUSES):**
 >
 > **Owner rulings, 2026-10-26 (Daniel Ospina): the spec text approved verbatim, then the STRUCTURE of where it
