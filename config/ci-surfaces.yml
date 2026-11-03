@@ -139,6 +139,12 @@ surfaces:
   # `python-ci-gate.needs` leg) reds by name: `tools/ci_selection.py --integrity` ->
   # `manifest drift: ['test_cli_config_show.py']`. Found by fresh-context review of the folded
   # #10703 batch, NOT by CI — the gate could not see it because the file was unregistered.
+  # ⛔ ONE row, not two: #10694 reached `main` twice (its own PR and the #10703 fold), and the
+  # fold's merge carried BOTH insertions of this same row. `duplicate_entries` names the pair as
+  # `api: test_cli_config_show.py` and `--integrity` reds, so the second copy (and its comment,
+  # which stated the same `__main__.py`-EXACT-match reasoning) was folded into this one. The
+  # content it covers: the credential-provenance ladder, the masked DSN/key fingerprints and the
+  # `team info` remedy table, all in `tortoise/__main__.py`.
   - test_cli_config_show.py
   - test_9583_openapi_read_only_claim.py
   # #4282: the `api` arm of the #4860 key-limit failover guard. The file drives the
@@ -910,16 +916,6 @@ surfaces:
   - test_per_session_census.py
   - test_graph_integrity_gate.py
   - test_cli_claim.py
-  # #10655: `tortoise config show` — the credential-provenance ladder, the masked
-  # DSN/key fingerprints and the `team info` remedy table, all of which live in
-  # `tortoise/__main__.py`. Registered on `api` because that file is an EXACT `api`
-  # SOURCE_PATTERN whose match REPLACES the `core` fallback, so an
-  # `__main__.py`-only diff selects `api` and nothing else — without this row the
-  # file is classified by NO surface, reds `tools/ci_selection.py --integrity`
-  # (the required `manifest-integrity` leg) and is selected by no shard, leg or
-  # tier-2 run at all (`fast_pool()` is built from these lists, not from a
-  # `tests/**` glob).
-  - test_cli_config_show.py
   - test_cli_global_config.py
   - test_cli_context.py
   - test_cli_resolver.py
@@ -4936,12 +4932,6 @@ surfaces:
   # `core`-only registration would leave the manifest green and the file never
   # executed (the #8488 trap recorded two rows above).
   - test_10122_point_name_not_indexed.py
-  # #8488 scope 1: the context-enriched turn-embedding write path. `tortoise/
-  # context_enrich.py` is a NEW module, so it matches no SOURCE_PATTERNS entry
-  # and falls through to `core` (its lexical sibling lives here too). ALSO in
-  # `carve_out`: its `pytestmark` is `embedded_only`, so a `core`-only
-  # registration would leave the manifest green and the file never executed.
-  - test_context_enrich_8488.py
   - test_determinism_tie_order_3019.py
   # #7704: the RRF positional-rank guard — two documents a leg scored
   # IDENTICALLY must not come out of fusion with different relevance (the
@@ -7751,11 +7741,6 @@ carve_out:
 # tests/_embedded.TEST_NO_REDIRECT_STEMS and declared in the test_markers.py pin
 # (the same three-way mirror the rows above document).
 - test_10122_point_name_not_indexed.py
-# #8488 scope 1: the context-enriched turn-embedding write path. Module-level
-# `embedded_only` (its subject is the embedded lane + the dense leg's on/off
-# behaviour), so a `core`-only registration would make the manifest green and
-# run NOTHING on a docker leg. Mirrored in tests/_embedded.TEST_NO_REDIRECT_STEMS.
-- test_context_enrich_8488.py
 - test_precision_leak_4028.py  # #4028: the surface half asserts embedded brute-force floor semantics
 - test_graph_integrity_gate.py
 - test_per_session_census.py
@@ -8413,7 +8398,6 @@ durations:
   test_onboarding_state_split_patch.py: 19.5  # ci-timing junit-census+top-15 2026-11-02 (run 41375596528); was 14.2
   test_onboarding_state_split_projection.py: 3.5  # ci-timing junit-census+top-15 2026-11-02 (run 41375596528); was 3.1
   test_onboarding_truth_surface.py: 6.7  # ci-timing junit-census+top-15 2026-11-02 (run 41375596528); was 4.0
-  eval/write_path/test_write_path_benchmark.py: 290.3  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 280.5
   test_tortoise_client.py: 11.8  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 1.7 — ci-timing junit-census+top-15 2026-11-02 (run 41375596528): no declared testcase count for this file (UNKNOWN), so the reading cannot prove it saw the whole file; the reading (11.3s) is a LOWER bound; kept 11.8
   test_onboarding_state_cas.py: 120.0  # carried forward (not a full-file CI measurement) — ci-timing junit-census+top-15 2026-10-26 (run 40259128208): no declared testcase count for this file (UNKNOWN), so the reading cannot prove it saw the whole file; the reading (5.0s) is a LOWER bound; kept 120.0
   test_onboarding_state_split_init.py: 3.9  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 2.6
@@ -8521,7 +8505,6 @@ durations:
   test_ingest_v2_consolidation.py: 23.5  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 25.9
   test_metering.py: 6.4  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 6.8
   test_metering_capture_usage_reader.py: 2.0  # new in #4051 — a file a PR ADDS can never carry a CI junit reading yet (the refresher samples push-to-main runs only), so it takes the header's flat `DEFAULT_FAST_WEIGHT` and NOT this host's local reading, which the map forbids as a SHARD-LAYOUT input (#2818/#3419/#4348). The row must EXIST, not merely default (the #3400/#4348 trap). ⛔ The CASE COUNT is deliberately NOT quoted: `tools/ci_timing.py --refresh-durations` replaces this row from junit. What the weight covers: pure-unit, DB-free — the reader is a mapping over one ledger row, so the window and the registry are stubbed; no server, network or model, nothing written outside `tmp_path`.
-  eval/harness/test_harness_benchmark.py: 38.8  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 59.1
   test_epic903_scheduler.py: 20.6  # ci-timing junit-census+top-15 2026-11-02 (run 41375596528); was 21.0
   test_hosted_volunteer_context.py: 13.6  # ci-timing junit-census+top-15 2026-11-02 (run 41375596528); was 16.0
   test_tripwire.py: 15.3  # ci-timing junit-census+top-15 2026-11-02 (run 41375596528); was 15.5
@@ -9039,7 +9022,6 @@ durations:
   test_ask_shape_rate_receipt_redaction.py: 0.2  # ci-timing junit-census+top-15 2026-11-02 (run 41375596528): no declared testcase count for this file (UNKNOWN), so the reading cannot prove it saw the whole file; the reading (0.1s) is a LOWER bound; kept 0.2
   test_battery_arms_real.py: 1.8  # ci-timing junit-census+top-15 2026-11-02 (run 41375596528); was 1.4
   test_capability_catalog.py: 1.7  # ci-timing junit-census+top-15 2026-11-02 (run 41375596528); was 1.6
-  test_capture_session_supersession_e2e.py: 2.2  # ci-timing junit-census+top-15 2026-11-02 (run 41375596528); was 1.7
   test_github_connect.py: 1.9  # ci-timing junit-census+top-15 2026-11-02 (run 41375596528); was 1.8
   test_ingest_safety.py: 5.0  # ci-timing junit-census+top-15 2026-11-02 (run 41375596528); was 4.2
   test_load_test.py: 1.8  # ci-timing junit-census+top-15 2026-11-02 (run 41375596528); was 2.2
@@ -9662,7 +9644,6 @@ durations:
   test_consumed_sdk_binding_3904.py: 2.0  # carried forward (not a full-file CI measurement) — new in #3904. Without a row this file packs at the flat 2.0s default anyway, but it would count as UNCOVERED, dropping the repo-wide coverage floor (#3400) to 89.9% and redding the manifest-integrity gate. The 2.0 value is the default it would have received; it is a weight, not a measurement. — ci-timing junit-census+top-15 2026-11-02 (run 41375596528): no declared testcase count for this file (UNKNOWN), so the reading cannot prove it saw the whole file; the reading (0.4s) is a LOWER bound; kept 2.0
   bench/test_smoke_embedded.py: 38.6  # ci-timing junit-census+top-15 2026-11-02 (run 41375596528): a single-test file cannot prove full coverage from a partial reading; the reading (29.2s) is a LOWER bound; kept 38.6
   test_about_edges.py: 6.6  # ci-timing junit-census+top-15 2026-11-02 (run 41375596528); was 2.1
-  test_backfill_sources.py: 1.0  # ci-timing junit-census+top-15 2026-11-02 (run 41375596528); was 1.7
   test_billing.py: 35.3  # #9017 CI-junit 2026-10-18 (run 39165691659); was 27.8. #8946 added TEN tests (152 -> 162 at home) whose CI cost is ~0.4s, so this CI-measured weight is kept rather than replaced: the only readings available here were 137.02s and 167.49s on a loaded host, a 4x distortion of the same suite the CI run timed at 35.3s — which is exactly why this row prefers a CI junit measurement. — ci-timing junit-census+top-15 2026-11-02 (run 41375596528): no declared testcase count for this file (UNKNOWN), so the reading cannot prove it saw the whole file; the reading (25.7s) is a LOWER bound; kept 35.3
   test_cli_context.py: 6.6  # #9017 CI-junit 2026-10-18 (run 39165691659) — ci-timing junit-census+top-15 2026-11-02 (run 41375596528): no declared testcase count for this file (UNKNOWN), so the reading cannot prove it saw the whole file; the reading (6.2s) is a LOWER bound; kept 6.6
   test_fanout_cap.py: 0.3  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 0.2
@@ -9791,7 +9772,6 @@ durations:
   test_capture_redaction_sinks_5445.py: 0.1  # ci-timing junit-census+top-15 2026-11-02 (run 41375596528); was 0.2
   test_capture_secret_redaction_4911.py: 20.2  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 11.3 — ci-timing junit-census+top-15 2026-11-02 (run 41375596528): no declared testcase count for this file (UNKNOWN), so the reading cannot prove it saw the whole file; the reading (15.1s) is a LOWER bound; kept 20.2
   test_connection_url_redaction_5326.py: 0.2  # #5326: 23 tests (21 at the first cut; #5326 review added 2 that pin the authority-boundary leak). Local wall is fuzz- and box-dependent (~2.7-8 s), so the numeric value stays the pre-merge estimate; The registration is load-bearing in BOTH halves: the surface entry alone leaves durations coverage below the 90% floor and `tools/ci_selection.py --integrity` reds (#4348 trap — do not drop without re-deriving the floor at that head). The file is CPU-light (one 6,000-case in-process fuzz, no DB), so unlike the #4921 entry above it does NOT move much with box load. Refresh the value from the first post-merge run that includes it — ci-timing junit-census+top-15 2026-11-02 (run 41375596528); was 0.3
-  test_capture_validfrom_3945.py: 0.6  # ci-timing junit-census+top-15 2026-11-02 (run 41375596528); was 24.2
   test_ci_last_failed.py: 2.8  # ci-timing junit-census+top-15 2026-11-02 (run 41375596528); was 2.0
   test_ci_manifest.py: 21.3  # ci-timing junit-census+top-15 2026-11-02 (run 41375596528); was 12.5
   test_ci_verdict.py: 0.1  # ci-timing junit-census+top-15 2026-11-02 (run 41375596528); was 0.2
@@ -9923,7 +9903,6 @@ durations:
   test_secret_rule_precision_5470.py: 0.1
   test_server_hygiene_gate.py: 0.2  # ci-timing junit-census+top-15 2026-11-02 (run 41375596528): no declared testcase count for this file (UNKNOWN), so the reading cannot prove it saw the whole file; the reading (0.1s) is a LOWER bound; kept 0.2
   test_session_confirm.py: 0.8  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 0.3 — ci-timing junit-census+top-15 2026-11-02 (run 41375596528): no declared testcase count for this file (UNKNOWN), so the reading cannot prove it saw the whole file; the reading (0.6s) is a LOWER bound; kept 0.8
-  test_session_semantic_retrieval.py: 1.2  # ci-timing junit-census+top-15 2026-11-02 (run 41375596528); was 0.9
   test_source_dedup_registration.py: 1.1  # ci-timing junit-census+top-15 2026-11-02 (run 41375596528); was 0.9
   test_source_identity.py: 0.2  # ci-timing junit-census+top-15 2026-11-02 (run 41375596528): no declared testcase count for this file (UNKNOWN), so the reading cannot prove it saw the whole file; the reading (0.1s) is a LOWER bound; kept 0.2
   test_source_kind_runtime_registration.py: 0.5  # ci-timing junit-census+top-15 2026-11-02 (run 41375596528); was 0.3
@@ -9979,7 +9958,6 @@ durations:
   test_9391_replay_window_raw_query_width.py: 0.2  # #9391: Local embedded-carve-out reading at this head: 9 tests, `testcase/@time` sum 6.77 s, whole-file wall 10.1 s (each test builds its own journal-backed SDK; the rebuild-engines leg calls `rebuild_from_record`). Declared as the wall reading, the same rule the neighbouring `test_graph_census_7949.py` row states — ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 10.0
   test_9079_record_replay_declared.py: 0.1  # #9079: Four tests, each one `rebuild_from_record` round trip in an embedded SDK with NO `create_point` (so the once-per-leg embedding-model load the `test_9079_ep_epoch_declared.py` row above pays is NOT part of this weight); local readings are recorded on the `#9079` PR — ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 9.0
   test_9206_apply_first_lane.py: 0.9  # #9206: Local embedded-lane reading 16.2 s for the 16 tests on a box with the embedder warm: 11 build their own journal-backed SDK and drive REAL doors (capture_session alone issues a full capture + journal), the other 5 are pure unit/AST pins with no SDK. ⚠️ Do NOT "refresh" this row from a cold box: those same 16 tests measured 138–151 s here, ~123 s of it the FIRST `create_point`'s once-per-process embedding-model load blocked in huggingface_hub's HTTP backoff (this box has no HF egress — the same one-time load the `test_9079_ep_epoch_declared.py` row above discloses at 134 s), not the battery. Declared above the quiet reading so a cold leg cannot under-pack — ci-timing junit-census+top-15 2026-11-02 (run 41375596528); was 10.4
-  test_8501_capture_path_anchor.py: 5.6  # #8501: Local embedded-lane reading: 10 tests, `testcase/@time` sum ~7 s on a warm box (per-test bodies 0.50-1.00 s: five drive a REAL `capture_session` + journal, three run a full `rebuild_all()`); whole-file wall 10-14 s. ⚠️ Do NOT "refresh" this row from a cold box: the same file measured 191.6 s here, 185.5 s of it the FIRST test paying the once-per-process embedding-model load in huggingface_hub HTTP backoff (this box has no HF egress — the same one-time load the `test_9079_ep_epoch_declared.py` and `test_9206_apply_first_lane.py` rows above disclose), which is paid once per leg and is not what this weight packs. Required on BOTH halves: the `core` surface row alone is classification, not a durations weight (#4348) — ci-timing junit-census+top-15 2026-11-02 (run 41375596528); was 95.3
   test_graph_census_7949.py: 11.0  # #8444: Measured this turn on the private docker lane: 19 tests, `testcase/@time` sum 9.74 s (max 3.79 s), whole-file wall 10.0 s; 15 of the 19 take the `captured` fixture and drive a real `capture_session` on the embedded lane, none needs a provider key. Weight 10.0 = the wall reading, the same rule the neighbouring #8501 row states; refresh on the first post-merge sweep — ci-timing junit-census+top-15 2026-11-02 (run 41375596528); was 11.1
   test_9451_pre_existing_stub_ingest_instant.py: 3.7  # #9451: Local embedded-lane reading: 5 tests, `testcase/@time` sum ~4.5 s on a warm box (each drives a REAL `capture_session`/`create_point` + journal; three of them run a full `rebuild_all()` and two a record-by-record `rebuild()`); whole-file wall 6-8 s. ⚠️ Do NOT "refresh" this row from a cold box: the FIRST test pays the once-per-process embedding-model load in huggingface_hub HTTP backoff on a box with no HF egress (the #8501 / `test_9206_apply_first_lane.py` rows above disclose the same artefact), which is paid once per leg and is not what this weight packs. Required on BOTH halves: the `core` surface row alone is classification, not a durations weight (#4348) — ci-timing junit-census+top-15 2026-11-02 (run 41375596528); was 4.8
   test_9206_derived_recompute_lane.py: 0.1  # #9206: (#3400 trap), same class as the row above. Local embedded-lane reading 2.9 s for 5 tests (the resolver's adopt-on-touch plus the journal-bytes assertion); declared above the reading so a cold leg cannot under-pack — ci-timing junit-census+top-15 2026-11-02 (run 41375596528); was 0.2
@@ -10234,7 +10212,6 @@ durations:
   test_ci_queue_health.py: 0.2
   test_ci_runner_x64_install.py: 4.9  # ci-timing junit-census+top-15 2026-11-02 (run 41375596528); was 1.2
   test_cli_extraction.py: 2.8
-  test_commit_session_extraction_provider_6869.py: 0.7  # ci-timing junit-census+top-15 2026-11-02 (run 41375596528); was 0.3
   test_decide_direction_7813.py: 1.7  # ci-timing junit-census+top-15 2026-11-02 (run 41375596528): no declared testcase count for this file (UNKNOWN), so the reading cannot prove it saw the whole file; the reading (1.6s) is a LOWER bound; kept 1.7
   test_docs_miner.py: 0.5  # ci-timing junit-census+top-15 2026-11-02 (run 41375596528); was 0.8
   test_document_source_ingested_at_5140.py: 2.9  # ci-timing junit-census+top-15 2026-11-02 (run 41375596528); was 3.6
