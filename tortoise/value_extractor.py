@@ -480,6 +480,27 @@ def compile_value_brief(packs_dir: Path | str | None = None,
         "core:goal": "A goal state (commitment-state family)",
         "core:target": "A target state (commitment-state family)",
     }
+    # #10519 CI flake, root cause: ``pack_refs`` rows were built by extending a
+    # list per contributing pack in ``packs_dir.glob("*/manifest.yaml")`` order
+    # — i.e. in *filesystem readdir* order, which POSIX does not specify and
+    # which differs between two directories holding the same manifests. That is
+    # invisible to a dict comparison (dicts are order-insensitive) but NOT to a
+    # list comparison, so two compiles of the same catalog read from different
+    # paths produced unequal briefs. ``tests/
+    # test_investment_portfolio_manager_pack.py::TestExtractionWithThePackOff::
+    # test_gated_off_equals_a_catalog_without_the_pack`` compares exactly that
+    # pair (the repo catalog vs a `shutil.copytree` copy) and reddened on the
+    # ARM64 runner for this reason alone. Sorting each row makes the section a
+    # function of the manifests, not of the directory they live in.
+    #
+    # NOT covered by the glob-order note above (``:340-346``): that note pins
+    # byte-identity for the FLAG-OFF S2 prompt and the VERBOSE master render,
+    # and neither reads ``pack_refs`` — it reaches only compact mode's
+    # ``_select_pack_kinds``, which is documented as deliberately NOT
+    # main-identical since #9733 (``extractor_v2`` §byte-identity guarantee,
+    # non-regression (b)). So this ordering change cannot move a pinned render.
+    for _row in pack_refs.values():
+        _row.sort()
     # The core vocabulary is merged FIRST and kinds keys that would collide
     # with it are filtered out, so canonical core kinds can never be shadowed
     # by a kind key (a legacy/bypass :PackManifest node with namespace `core`
