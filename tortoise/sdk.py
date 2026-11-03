@@ -47930,3 +47930,25 @@ def _validate_extracted_from(props: dict, *, door: str) -> None:
         f"non-empty strings (got {ref!r}); a non-string scalar would mint a "
         "corrupt Source, and raising after the write would leave an "
         "un-journaled orphan (#3263/#8171)")
+
+
+# ── #10626: the run-level reader on the M2 capture lane ────────────────────
+# The v2 capture entry is wrapped where it is DEFINED (`extractor_v2`), so every
+# lane that routes through it (`sdk`, `hosted_api`, `ingest_v2`,
+# `run_v2_pipeline`) gets the #5329 census reading on its own receipt.  The
+# opt-in M2 lane (`TORTOISE_SESSION_EXTRACTOR=m2` → `_extract_session_llm`) does
+# NOT route through that entry: it folds in-capture through
+# `dedup_classify.rephrase_hit`, and a `rephrase_linked` fold there DETACH-DELETEs
+# the duplicate node — the most destructive fold in the product.  Leaving it
+# unwrapped would make the reader cover the lane that keeps both claims and skip
+# the lane that deletes one.
+#
+# Wrapped here, at module scope, rather than by inserting lines inside the method:
+# `sdk.py`'s line numbers are cited by the #7949 capstone bundle (`:15484`,
+# `:15765`, …) and a hook inside the method re-stales them.  `functools.wraps`
+# keeps the name, docstring and signature, so every `self._extract_session_llm`
+# call site and every test that inspects the method resolve to the wrapper.
+from .extractor_v2 import _run_scoped_vocabulary_gap as _run_scoped_vocab_gap_10626
+
+TortoiseSDK._extract_session_llm = _run_scoped_vocab_gap_10626(
+    TortoiseSDK._extract_session_llm)
