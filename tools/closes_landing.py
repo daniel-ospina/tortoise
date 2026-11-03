@@ -339,28 +339,84 @@ def _is_closer(rest: str, opener: tuple[str, int], content_col: int = 0) -> bool
 
 @dataclass(frozen=True)
 class _Fence:
-    """An OPEN fenced block: the four things its container needs to end it.
+    """An OPEN fenced block: the things its container needs to end it.
 
     * `prefix` — the blockquote prefix it opened under (the quote ending ends it);
-    * `item_col` — the enclosing LIST ITEM's content column (0 when none is
-      open), compared against a later line's indent to end the block. It is the
-      ITEM's column, never the fence run's own indent: §4.5 ends the block at
-      "the end of the containing block", and an item's content column is where
-      that block starts. Using the run's indent instead ended a fence on a line
-      that was still inside the item, so the block's content read as prose — a
-      `lands` (#10634 review P1);
-    * `close_base` — the CONTAINING BLOCK's content column inside `rest`, which
-      is what a closing fence is measured from (§4.5 allows a closer up to three
-      spaces past it, and its indent need not match the opener's); it is
-      `item_col` restated in `rest` coordinates;
+    * `close_base` — the CONTAINING BLOCK's content column in `rest` coordinates
+      (after the blockquote prefix). A dedent is a line whose residual indent
+      falls below it, and a closing fence is measured from it (§4.5 allows a
+      closer up to three spaces past the containing block's content column, and
+      its indent need not match the opener's). It is the ITEM's content column
+      when one is open — never the fence run's own indent: §4.5 ends the block at
+      "the end of the containing block", and an item's content line may sit BELOW
+      the opener's column and still be inside the block;
     * `in_list` — whether a list item was open, so a dedent can end the block.
+
+    There is deliberately no raw-coordinate item column: two review rounds
+    carried one alongside this field and ended up comparing a `rest` indent with
+    a raw column (and then the reverse), each time buying a false `lands`.
+    `container_col` derives the raw column from these two fields, so there is
+    only ONE number in each space and no way to mix them.
     """
 
     opener: tuple[str, int]
     prefix: str
-    item_col: int
     close_base: int
     in_list: bool
+
+    @property
+    def container_col(self) -> int:
+        """The containing block's content column in RAW coordinates — where a
+        line's content has to start to still be inside this block. A closer's
+        "up to three spaces" (§4.5) is measured from here."""
+        return len(self.prefix) + self.close_base
+
+
+def _fence_line_column(line: str, depth: int) -> tuple[int, int, int]:
+    """(markers consumed, indent after them, RAW column of the content).
+
+    A fenced block takes everything up to its closer LITERALLY, so a `>` inside
+    it is text, not a marker — the only markers that say anything about the
+    container are the ones the block itself lives under. Consuming at most
+    `depth` of them is what makes `> - ```\n>   Closes #N` (a marker-line fence
+    INSIDE a quote: the `>` is the quote's, and the item sees the two spaces
+    after it) and `- ```\n   > Closes #N` (a depth-0 item fence: no marker is
+    consumed, so the line is literal content indented 3 columns into the item)
+    BOTH come out right. Two things differ and both are returned:
+
+    * the INDENT is measured after the consumed markers, because that is the
+      only space an enclosing list item's content column is expressed in —
+      spaces BEFORE a `>` are the marker's own allowance (up to 3) and belong to
+      the quote, not to the item, which is why `   > Closes #N` inside `> - ``` `
+      ends the item (the renderer makes it a paragraph of the quote) while
+      `>   Closes #N` stays inside it;
+    * the RAW COLUMN is where content starts, because §4.5 measures a closing
+      fence's "up to three spaces" from the containing block's content column in
+      raw columns.
+
+    Reading the prefix with `_split_prefix` — which consumes every `>` it finds
+    — got one family of shapes wrong in each coordinate it was compared in, and
+    each way of getting it wrong is a false `lands` on a quoted keyword (#10634
+    review).
+    """
+    i = 0
+    consumed = 0
+    while consumed < depth:
+        j = i
+        while j < len(line) and line[j] in " \t":
+            j += 1
+        if j < len(line) and line[j] == ">":
+            j += 1
+            if j < len(line) and line[j] == " ":
+                j += 1
+            consumed += 1
+            i = j
+            continue
+        break
+    start = i
+    while i < len(line) and line[i] in " \t":
+        i += 1
+    return consumed, i - start, i
 
 
 def _fence_candidate(prefix: str, rest: str, indent: int,
@@ -393,13 +449,12 @@ def _fence_candidate(prefix: str, rest: str, indent: int,
         opener = _fence_open(rest[base:])
         if opener is None:
             return None
-        return _Fence(opener, prefix, len(prefix) + base, base, True)
+        return _Fence(opener, prefix, base, True)
     content_col = list_cols[-1] if list_cols else 0
     opener = _fence_open(rest, content_col)
     if opener is None:
         return None
-    return _Fence(opener, prefix, content_col,
-                  max(0, content_col - len(prefix)), bool(list_cols))
+    return _Fence(opener, prefix, max(0, content_col - len(prefix)), bool(list_cols))
 
 
 def strip_code(body: str, strict: bool = False) -> str:
@@ -424,12 +479,15 @@ def strip_code(body: str, strict: bool = False) -> str:
       it is re-examined as a fresh line, because it may itself open a fence
       (review c10-2);
     * a fence opened inside a LIST ITEM ends when the ITEM's content ends — a
-      non-blank line dedents below the item's CONTENT COLUMN, not below the
-      fence run's own indent (review c10-3, corrected in #10634 review P1: §4.5
-      ends the block at "the end of the containing block", and an item's content
-      line may sit BELOW the opener's column and still be inside the block) —
-      and a fence may open ON the marker line itself, at the item's content
-      column (#10634 review P1);
+      line with real content indents below the item's CONTENT COLUMN, not below
+      the fence run's own indent (review c10-3, corrected in #10634 review P1:
+      §4.5 ends the block at "the end of the containing block", and an item's
+      content line may sit BELOW the opener's column and still be inside the
+      block) — and a fence may open ON the marker line itself, at the item's
+      content column (#10634 review P1). That comparison is made in ONE space:
+      the raw line with at most the fence's OWN blockquote depth consumed, so a
+      `>` inside the block stays literal and a marker cannot move the item's
+      edge (see `_fence_line_column`);
     * containers are compared by DEPTH, never by the raw prefix string: `>`, `> `,
       `  > ` are one container to CommonMark, and comparing strings meant a legal
       closer was never recognised (review c10-1);
@@ -454,20 +512,37 @@ def strip_code(body: str, strict: bool = False) -> str:
         line = raw.expandtabs(4)
         indent = len(line) - len(line.lstrip(" "))
         prefix, rest = _split_prefix(line)
+        # The line's indent AFTER its blockquote prefix: `close_base` is measured
+        # there, which is the space the strict arm below reports in.
+        rest_indent = len(rest) - len(rest.lstrip(" "))
         if fence is not None:
             # The container can END the block: the quote it lived in closed, or
             # (for a fence opened inside a list item) the item did.
-            ended = (_quote_depth(fence.prefix) > 0
-                     and _quote_depth(prefix) < _quote_depth(fence.prefix))
-            if not ended and fence.in_list and line.strip() and indent < fence.item_col:
+            #
+            # Both tests are measured in ONE coordinate space — the RAW line,
+            # with at most the fence's own blockquote depth consumed — because
+            # that is the space `container_col` lives in. Two review cycles did
+            # this in two spaces at once (a raw indent against a `rest` column,
+            # then a `rest` indent against a raw column) and each way bought a
+            # false `lands` on one family of shapes while losing a real claim on
+            # the other (#10634 review): `> - ```\n>   Closes #N` (a marker-line
+            # fence inside a quote) read every content line as a dedent, and
+            # `- ```\n   > Closes #N` ended an item fence on literal content.
+            fence_depth = _quote_depth(fence.prefix)
+            consumed, residual, column = _fence_line_column(line, fence_depth)
+            ended = consumed < fence_depth
+            if not ended and fence.in_list and line[column:].strip() \
+                    and residual < fence.close_base:
                 ended = True
             if not ended:
-                # PREFIX BY DEPTH, not by string: `>`, `> `, `  > ` are the SAME
-                # blockquote container to CommonMark, and comparing the raw
-                # strings meant a legal closer was never recognised and the rest
-                # of the body was blanked — a silent MISS (review c10-1).
-                if _quote_depth(prefix) == _quote_depth(fence.prefix) and _is_closer(
-                        rest, fence.opener, fence.close_base):
+                # A closer is measured from the CONTAINING BLOCK's content
+                # column (§4.5: up to three spaces past it, and its indentation
+                # need not match the opener's) — so the run has to sit where the
+                # container's content starts, and the text after that column is
+                # what must be nothing but fence and whitespace.
+                past = column - fence.container_col
+                if (past <= _MAX_FENCE_INDENT
+                        and _is_closer(line[column:], fence.opener)):
                     fence = None
                 out.append("")
                 continue
@@ -491,8 +566,7 @@ def strip_code(body: str, strict: bool = False) -> str:
         if fence:
             out.append("")
             continue
-        if strict and (len(rest) - len(rest.lstrip(" ")) > _MAX_FENCE_INDENT
-                       or rest.startswith("\t")):
+        if strict and (rest_indent > _MAX_FENCE_INDENT or rest.startswith("\t")):
             out.append("")
             continue
         out.append(raw)   # prose: keep it, keywords and all
