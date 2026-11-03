@@ -2148,10 +2148,19 @@ def _instant(raw: object) -> tuple[int, object]:
     A STRING compare is not an ordering here: ``…T01:00:00+02:00`` sorts ABOVE
     ``…T00:30:00Z`` lexically while being genuinely EARLIER. The key decides both which
     receipt wins and whether an unscorable one refuses the selection, so a wrong
-    compare makes the two disagree — a false refusal one way, a reopened silent skip
-    the other. Returns ``(0, raw)`` for anything absent or unparseable (so an undated
+    returns ``(0, raw)`` for anything absent or unparseable (so an undated
     record never displaces a dated one) and ``(1, datetime)`` otherwise; the tag is
     compared first, so a datetime is never ordered against a str.
+
+    ⛔ The two tag-0 shapes are NOT the same fact, and the CALLER must separate them:
+    ``(0, "")`` is "no date recorded", which the ordering can state honestly;
+    ``(0, raw)`` is "a date is recorded and it cannot be read", which makes the
+    record's position in the order unknowable. Ranking the second as if it were the
+    first let an OLDER on-pin receipt publish E4's number while a newer measurement
+    sat unread (and silenced the would-have-won refusal when that newer one was also
+    unscorable) — so ``select_e4_receipt`` REFUSES it, on the same reasoning it
+    refuses an unreadable file: nothing can prove the newest measurement on the
+    frozen corpus is not the one whose date could not be parsed.
     """
     text = raw if isinstance(raw, str) else ""
     if not text:
@@ -2197,11 +2206,17 @@ def select_e4_receipt(repo: Path = ROOT, frozen_pin: str = "") -> tuple[str, dic
       and the winner is the last. The date is PARSED where it can be (the writer emits
       a fixed ``…Z`` stamp, but a hand-authored receipt may carry an offset —
       ``…T01:00:00+02:00`` sorts ABOVE ``…T00:30:00Z`` as a STRING while being
-      genuinely EARLIER); a receipt whose ``date`` is absent or unparseable sorts
-      first, so an undated record never displaces a dated one. One helper
-      (``_sort_key``) produces the key for BOTH the winner choice and the
-      would-have-won refusal below, because those two disagreeing is exactly how a
-      silent revert gets in;
+      genuinely EARLIER); a receipt whose ``date`` is ABSENT sorts first, so an
+      undated record never displaces a dated one. One helper (``_sort_key``) produces
+      the key for BOTH the winner choice and the would-have-won refusal below, because
+      those two disagreeing is exactly how a silent revert gets in;
+    * a receipt ON the pin whose ``date`` is PRESENT but unparseable REFUSES the
+      selection. Its position in the order is unknowable, so it can neither be ranked
+      (an older receipt would publish while a newer measurement sat unread) nor be
+      shown not to be the newest unread one (which resurrects the silent skip this
+      selector exists to close). An ABSENT date is different and stays permitted: that
+      is a recorded fact, not an unreadable one. The reason is the same one the next
+      bullet gives for an unreadable file;
     * a file in the receipts directory that cannot be read as a JSON object REFUSES
       the selection: its corpus and date are unknowable, so nothing can prove the
       newest measurement on the frozen corpus is not it;
@@ -2242,6 +2257,11 @@ def select_e4_receipt(repo: Path = ROOT, frozen_pin: str = "") -> tuple[str, dic
     #: corpus and date are unknowable, so nothing can prove the newest measurement on
     #: the frozen corpus is not one of them — a REFUSAL, never a silent skip.
     unreadable: list[str] = []
+    #: Files ON the frozen pin whose ``date`` is present but cannot be parsed. Their
+    #: position in the order is unknowable, so they neither rank nor can be shown not
+    #: to be the newest unread measurement — a REFUSAL, for the same reason an
+    #: unreadable file refuses.
+    unorderable: list[str] = []
     for path in paths:
         try:
             record = json.loads(path.read_text())
@@ -2261,6 +2281,14 @@ def select_e4_receipt(repo: Path = ROOT, frozen_pin: str = "") -> tuple[str, dic
         if not _same_corpus(corpus_hash, frozen_pin):
             skipped.append(f"{path.name} (corpus_hash {corpus_hash[:20]}…)")
             continue
+        raw_date = record.get("date")
+        if raw_date not in (None, "") and _instant(raw_date)[0] != 1:
+            # PRESENT and unreadable. Ranking it first would let an older receipt
+            # publish; ignoring it would let an unscorable newest measurement be
+            # skipped without the would-have-won refusal firing. Both are the defect
+            # this selector exists to close, so the position is unknowable ⇒ refuse.
+            unorderable.append(f"{path.name} (date {raw_date!r} is not an instant)")
+            continue
         key = _sort_key(record, path.name)
         if not isinstance(record.get("operator_audit"), dict):
             unscorable.append((key, path.name))
@@ -2273,6 +2301,14 @@ def select_e4_receipt(repo: Path = ROOT, frozen_pin: str = "") -> tuple[str, dic
             f"Every {E4_RECEIPT_GLOB} there is a candidate receipt, so nothing can "
             "prove the newest measurement on the frozen corpus is not one of them — "
             "repair or remove the file, or re-run the operator probe")
+    if unorderable:
+        raise SystemExit(
+            f"capstone-measure: REFUSED — {len(unorderable)} receipt(s) in "
+            f"{directory} ARE on the frozen corpus ({frozen_pin}) but carry a date "
+            f"that is not an instant: {sorted(unorderable)}. The newest measurement "
+            "on the frozen corpus cannot be ORDERED against them, so no scorable "
+            "receipt can be shown to be the newest one — repair the date, or re-run "
+            "the operator probe")
     if not matched:
         if unscorable:
             raise SystemExit(
