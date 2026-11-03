@@ -950,7 +950,22 @@ def classify(pr: dict, checks: list[dict], all_runs: list[Run], required: list[s
                 # NOTHING, and `queue_congested` extends the same refusal to a queue
                 # that is moving but backlogged: cancelling there discards the queue
                 # position the run had reached and re-queues it at the back.
-                if crowded and all(x.status in QUEUED_STATUSES for x in runs):
+                #
+                # ⛔ THE REFUSAL IS PER-RUN, NOT PER-CONTEXT, and it used to be the
+                # latter (`crowded and all(x.status in QUEUED_STATUSES for x in runs)`).
+                # The conjunct made every documented claim about this gate FALSE for a
+                # context carrying more than one producing run: with a `completed`
+                # sibling, `all(...)` is false and the cancel was ISSUED while the queue
+                # reading was congested — including the state where congestion was never
+                # measured at all (`--no-queue-health`, a failed read, `UNKNOWN`,
+                # `PR-UNWITNESSED`, a truncated feed), which is precisely the "silence is
+                # not permission" case `queue_congestion_gate` exists to close. Two runs
+                # of one workflow at one head are ordinary (`pull_request` plus
+                # `workflow_dispatch` on the same sha), so the hole was reachable.
+                # The HARM the refusal exists for — discarding the queue position a
+                # queued run had reached, and adding load to the wait it is stuck in —
+                # does not depend on what its SIBLINGS did, so neither may the refusal.
+                if crowded:
                     continue
                 # ⛔ THE LOOP BOUND IS STRUCTURAL, NOT AN ABSTENTION (see
                 # `ZERO_JOB_MAX_REPAIRABLE_ATTEMPT`). Cancel-then-rerun turns attempt 1

@@ -1921,6 +1921,50 @@ def test_a_backlogged_queue_names_the_zero_job_run_but_never_repairs_it():
         "be a false statement in the instrument that exists to refuse them")
 
 
+def test_a_MIXED_context_may_still_not_repair_under_a_congested_queue():
+    """⭐ P1 (review): a COMPLETED sibling must not license the cancel the gate refuses.
+
+    The refusal was conjunctive — `crowded and all(x.status in QUEUED_STATUSES for x in
+    runs)` — so a context with one completed producing run and one queued zero-job run
+    skipped it and landed in `plan.rerun`, i.e. a cancel was ISSUED while the queue
+    reading said congested. That is reachable: two runs of ONE workflow at ONE head
+    (`pull_request` + `workflow_dispatch` on the same sha, or a same-sha re-push) give
+    exactly this shape.
+
+    It matters most for the UNMEASURED pole, which is why the first case passes
+    `queue_starved=False, queue_congested=True` — the value `main()` derives from
+    `queue_congestion_gate` when nothing measured the queue (`--no-queue-health`, a
+    failed read, `UNKNOWN`, `PR-UNWITNESSED`, a truncated feed). The documented promise
+    is that silence never authorises a cancel, and the sibling's conclusion is not a
+    measurement of the queue.
+
+    Discriminating: pre-fix BOTH cases yield `plan.rerun == [12]`.
+    """
+    runs = [aged_run(11, status="completed", jobs=5, age_s=6000.0),
+            aged_run(12, jobs=0, age_s=5700.0)]
+    for label, starved, congested in (
+            ("UNMEASURED (silence is not permission)", False, True),
+            ("witnessed starvation", True, None)):
+        plan = R.classify(pr(), [], runs, ["python-ci-gate"], EMITTERS,
+                          max_attempts=3, queue_starved=starved,
+                          queue_congested=congested)
+        assert [d["run"] for d in plan.no_verdict] == [12], (
+            f"[{label}] it is still NAMED — refusing to act is not refusing to report")
+        assert plan.rerun == [], (
+            f"[{label}] the harm is discarding THIS run's queue position; what its "
+            "sibling concluded does not measure the queue")
+        assert plan.exhausted == []
+
+    # The other non-queued sibling shape: a producing run still EXECUTING at the head.
+    executing = [aged_run(11, status="in_progress", jobs=3, age_s=6000.0),
+                 aged_run(12, jobs=0, age_s=5700.0)]
+    plan = R.classify(pr(), [], executing, ["python-ci-gate"], EMITTERS,
+                      max_attempts=3, queue_starved=False, queue_congested=True)
+    assert [d["run"] for d in plan.no_verdict] == [12]
+    assert plan.rerun == [], (
+        "UNMEASURED queue + a sibling still executing: still no cancel")
+
+
 def test_an_unmeasured_queue_never_authorises_the_cancel(monkeypatch, capsys, tmp_path):
     """⭐ P1 (review): `bool(getattr(queue, "delays_pr", queue_starved))` read
     SILENCE AS PERMISSION on a DESTRUCTIVE act.
