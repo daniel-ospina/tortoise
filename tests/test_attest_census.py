@@ -816,50 +816,189 @@ def test_an_old_interpreter_is_refused_with_exit_2_and_an_attributable_message(m
     assert "uv run python tools/attest_census.py" in message, f"must name the working form: {message!r}"
 
 
+# ── MD036: the report's shape is gated by the REQUIRED `docs` check (#10687) ─────────
+#
+# `render` writes `operations/attest-census.md`, a COMMITTED artifact. It therefore sits
+# in the changed-markdown set of every PR that regenerates it, is linted WHOLE by the
+# `docs` job's pinned `markdownlint-cli2@0.23.3`, and a finding in it is `new` against
+# `config/docs-lint-baseline.json` — which under #7435's Option 1 (the snapshot is a
+# CEILING, not an amnesty) is a real failure. The totals line used to be
+# `f"**{totals}**"`, a paragraph consisting ENTIRELY of emphasis = MD036, so ANY change
+# that re-ran the census reddened a required check on a finding it did not write.
+
+# MD036's own exception: an emphasis-only paragraph whose text ends in punctuation is not
+# treated as a heading. `punctuationRe = /[.,;:!?…]$/` on the emphasis text.
+_MD036_PUNCTUATION = ".,;:!?…"
+
+
+def _emphasis_only_paragraphs(text: str) -> list[str]:
+    """Return the paragraphs in `text` that MD036 fires on.
+
+    A PROXY for the pinned linter, not a reimplementation of markdownlint: it models the
+    three conditions measured against `markdownlint v0.41.1` (the version behind
+    `markdownlint-cli2@0.23.3`) and is pinned to those measurements in
+    `test_the_md036_model_matches_the_measured_linter`. The AUTHORITY is the `docs` job —
+    if the two ever disagree, this model is what is wrong.
+
+    What it models, and why each part is load-bearing:
+      * the delimiter set includes `_`/`__`. A model that tested only `*` missed
+        `_Foo bar baz_`, which the linter DOES fire on (measured).
+      * the punctuation exception. `**Totals:**` alone is measured CLEAN, and it is the
+        shape this very fix introduces, so a model without the exception would flag the
+        house style it just created.
+      * PARAGRAPHS, not lines. `**Foo**\\nbar` is one paragraph with two inline children
+        and is measured clean; judging line-by-line flags it.
+      * non-paragraph lines are skipped: headings, blockquotes, table rows, list items
+        (`* ` with the SPACE — `*Foo*` is emphasis, not a bullet), and indented/fenced code.
+    """
+    offenders: list[str] = []
+    paragraph: list[str] = []
+    in_fence = False
+
+    def flush() -> None:
+        if not paragraph:
+            return
+        joined = "\n".join(paragraph).strip()
+        paragraph.clear()
+        for marker in ("**", "__", "*", "_"):  # longest first, so `**` wins over `*`
+            if len(joined) <= 2 * len(marker):
+                continue
+            if not (joined.startswith(marker) and joined.endswith(marker)):
+                continue
+            inner = joined[len(marker) : -len(marker)]
+            if marker in inner:
+                continue
+            if inner.strip() and not inner.rstrip().endswith(tuple(_MD036_PUNCTUATION)):
+                offenders.append(joined)
+            return
+
+    for raw in [*text.splitlines(), ""]:
+        s = raw.strip()
+        if s.startswith("```"):
+            in_fence = not in_fence
+            flush()
+            continue
+        if in_fence:
+            continue
+        is_bullet = len(s) > 1 and s[0] in "-+*" and s[1] == " "
+        indented_code = raw.startswith("    ") or raw.startswith("\t")
+        if not s or indented_code or s.startswith(("#", ">", "|")) or is_bullet:
+            flush()
+            continue
+        paragraph.append(s)
+    return offenders
+
+
+def test_the_md036_model_matches_the_measured_linter():
+    """Pin the proxy above to the pinned linter's MEASURED boundary.
+
+    Every row was measured with the `docs` job's own producer
+    (`markdownlint-cli2@0.23.3`, repo config) over a real file under `operations/`, each
+    run reporting `Linting: 1 file` — a copy outside the lint root reports
+    `Linting: 0 files` and a vacuous 0-issue "pass", which is why these are recorded from
+    in-tree runs. If markdownlint's rule changes, THIS test is what notices that the proxy
+    and the gate have parted company.
+    """
+    fired = [
+        "_Foo bar baz_",
+        "__Foo bar baz__",
+        "**Foo bar baz**",
+        "*Foo bar baz*",
+    ]
+    clean = [
+        "**Totals:**",  # punctuation exception — the shape this PR introduces
+        "**Totals:** RE-REVIEW=5",  # text outside the span
+        "**Foo bar baz...**",  # punctuation
+        "**Foo bar baz.**",  # punctuation
+        "**Foo**\nbar",  # one paragraph, two inline children
+        "    **Indented code**",  # code block
+        "> **In a quote**",  # not a paragraph
+        "- **In a list**",  # not a paragraph
+        "****",  # empty span
+    ]
+    for body in fired:
+        assert _emphasis_only_paragraphs(f"Prose.\n\n{body}\n\n|x|\n|-|\n"), f"must fire (measured): {body!r}"
+    for body in clean:
+        assert not _emphasis_only_paragraphs(f"Prose.\n\n{body}\n\n|x|\n|-|\n"), f"measured clean: {body!r}"
+
+
 def test_the_report_never_renders_an_emphasis_only_paragraph():
-    """#10687: the REQUIRED `docs` check was RED on this PR's own regenerated census.
+    """#10687: the required `docs` check was RED on this PR's own regenerated census.
 
-    The totals line used to be `f"**{totals}**"` — a paragraph consisting ENTIRELY of
-    emphasis, which is markdownlint's MD036/no-emphasis-as-heading (the `docs` job pins
-    markdownlint-cli2@0.23.3). `operations/attest-census.md` is a COMMITTED artifact, so
-    it sits in the changed-markdown set of every PR that regenerates it, is linted WHOLE,
-    and the finding is `new` against `config/docs-lint-baseline.json` — which under
-    #7435's Option 1 is a real failure, not baselined debt. Any change that re-ran the
-    census therefore reddened a required check on a finding it did not write.
-
-    Pinned as the CLASS, not the one line: `render` builds ~20 lines and a future one
-    could reintroduce MD036 without touching the totals. A rendered paragraph is
-    emphasis-only exactly when a whole line is one `*…*` / `**…**` span, which is the
-    condition the linter fires on. `**Totals:** …` is not (text follows the span), which
-    is why the label both clears the rule and says what the numbers are — they were
-    previously unlabelled totals a reader had to infer.
+    Pinned as the CLASS, not the one line that broke: `render` builds ~20 lines and a
+    future one could reintroduce MD036 without touching the totals. The summary is also
+    asserted to be LABELLED — the label is what clears the rule, and it says what the
+    numbers are (they were previously unlabelled totals a reader had to infer).
     """
     ac = _load()
-
-    def emphasis_only(line: str) -> bool:
-        s = line.strip()
-        for marker in ("**", "*"):
-            if len(s) > 2 * len(marker) and s.startswith(marker) and s.endswith(marker):
-                inner = s[len(marker) : -len(marker)]
-                # A span that closes before the line ends leaves text outside the
-                # emphasis (`**Totals:** x`), so the paragraph is not emphasis-only.
-                if marker not in inner:
-                    return True
-        return False
 
     rows = [
         ac.Row(pr=1, head=LIVE, branch="b", title="t", record=None, outcome=ac.IN_FLIGHT, why="w"),
         ac.Row(pr=2, head=LIVE, branch="b", title="t", record=None, outcome=ac.OK, why="w"),
     ]
     text = ac.render(rows, "o/r", "2026-11-03T00:00:00Z", truncated=True, limit=1)
-    offenders = [ln for ln in text.splitlines() if emphasis_only(ln)]
-    assert not offenders, f"a rendered line is an emphasis-only paragraph (MD036) — the `docs` gate reds on it: {offenders}"
+    offenders = _emphasis_only_paragraphs(text)
+    assert not offenders, f"render() emits an MD036 paragraph — the `docs` gate reds on it: {offenders}"
 
     # The summary is LABELLED, and its content is the totals it always carried.
     assert "**Totals:** IN-FLIGHT=1 · OK=1" in text, text
 
     # An empty census has no totals, and a blank `**Totals:**` is a malformed report:
-    # the run read nothing and must say so.
+    # the run read nothing and must say so rather than render a bare label.
     empty = ac.render([], "o/r", "2026-11-03T00:00:00Z")
     assert "**Totals:** no rows" in empty, empty
-    assert not [ln for ln in empty.splitlines() if emphasis_only(ln)], empty
+    assert not _emphasis_only_paragraphs(empty), empty
+
+
+def test_a_pipe_in_a_record_field_cannot_break_the_table():
+    """#10687 cycle 1: registry text reached `render` unescaped.
+
+    `evidence`, `verdict` and `mint` are read straight out of a record JSON on disk, and
+    `why` embeds `gh`'s MULTI-LINE stderr. A `|` emitted an extra table cell — measured
+    with the pinned linter, an `evidence` of `"comment:1 | injected"` produced
+    `MD056/table-column-count [Expected: 10; Actual: 11]`, the same "a regenerated census
+    reds the required `docs` check on a finding the lane did not write" class this PR
+    exists to close, plus silent column-shifting in a document lanes read to decide
+    RE-POST vs RE-REVIEW.
+    """
+    ac = _load()
+
+    rec = ac.Record(
+        path=Path("/tmp/daniel-ospina-tortoise-1.json"),
+        head_sha=LIVE,
+        mint="fresh",
+        verdict="clean | sneaky",
+        evidence="comment:1 | injected",
+    )
+    row = ac.Row(
+        pr=1,
+        head=LIVE,
+        branch="b | c",
+        title="t",
+        record=rec,
+        outcome=ac.RE_REVIEW,
+        why="check-run read failed: gh pr view\n  failed rc=1: boom | splat",
+        notes=["note with | pipe\nand a newline"],
+    )
+    text = ac.render([row], "o/r", "2026-11-03T00:00:00Z")
+
+    def cells(line: str) -> int:
+        """Count UNESCAPED pipes: `\\|` is the escaping this fix adds, and a naive
+        `line.count("|")` counts the escaped ones too and so measures nothing."""
+        return sum(1 for i, ch in enumerate(line) if ch == "|" and (i == 0 or line[i - 1] != "\\")) - 1
+
+    # No cell is injected: every table row carries the header's cell count.
+    header = next(ln for ln in text.splitlines() if ln.startswith("| PR |"))
+    width = cells(header)
+    for ln in text.splitlines():
+        if ln.startswith("| #"):
+            assert cells(ln) == width, f"row does not have {width} cells: {ln!r}"
+    # And the injected pipes survive as escaped DATA rather than becoming structure.
+    assert "comment:1 \\| injected" in text, text
+    assert "clean \\| sneaky" in text, text
+
+    # A multi-line `why`/note cannot break out of its bullet: no line in the flagged
+    # section starts with the continuation indentation of a raw newline.
+    assert "boom \\| splat" in text or "boom | splat" in text, text
+    assert "\n  failed rc=1" not in text, text
+    assert "\nand a newline" not in text, text

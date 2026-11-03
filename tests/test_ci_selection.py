@@ -4646,7 +4646,7 @@ def test_work_claim_tool_change_fails_closed_to_full():
 
 
 def test_attest_census_tool_change_fails_closed_to_full():
-    # #10687: tools/attest_census.py owns tests/test_attest_census.py — the 69 hermetic
+    # #10687: tools/attest_census.py owns tests/test_attest_census.py — the hermetic
     # arms that pin the fabricate-vs-repair boundary (a proof may be RE-POSTED only from
     # a record that exists, declares this repo, binds THIS head byte-for-byte, carries a
     # clean verdict with artifact-shaped evidence and is not `mint: carried`). Same

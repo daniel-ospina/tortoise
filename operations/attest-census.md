@@ -12,8 +12,9 @@ Repo `daniel-ospina/tortoise` · generated 2026-11-03T05:22:14Z by `tools/attest
 One row per open PR: its head, whether a review record exists on **this box**, whether that
 record's head equals the PR's head, what the record claims, and what the `ai-review-gate`
 check says. `RESTORE` is the only outcome that licenses re-posting a proof — and even then the
-verdict is quoted from the record, never synthesised. A record at any other head is not evidence of the live code: it is `RE-REVIEW` when the gate has no green verdict, and `OK`
- only because the gate itself already accepted the proof (so no re-post is owed).
+verdict is quoted from the record, never synthesised. A record at any other head is not
+evidence of the live code: it is `RE-REVIEW` when the gate has no green verdict, and `OK`
+only because the gate itself already accepted the proof (so no re-post is owed).
 
 **Totals:** RE-REVIEW=5 · NOTHING-TO-RESTORE=3 · IN-FLIGHT=11 · OK=18
 

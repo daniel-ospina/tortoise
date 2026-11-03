@@ -408,6 +408,23 @@ def read_gate(repo: str, head: str) -> tuple[str, str]:
 # ── render ───────────────────────────────────────────────────────────────────
 
 
+def _cell(value: object) -> str:
+    """Escape a value bound for a markdown TABLE cell (or for one bullet line).
+
+    Registry and `gh` text reaches `render` unescaped: `evidence`, `verdict` and `mint`
+    are read straight out of a record JSON on disk, and `why` embeds `gh`'s **multi-line**
+    stderr (`gh_json` keeps `out.stderr.strip()[:300]` of it). A `|` therefore emitted
+    extra table cells and a newline broke out of the bullet it was written into.
+
+    MEASURED (#10687 cycle 1): a record whose `evidence` is `"comment:1 | injected"`
+    rendered an 11-cell row (`Expected: 10; Actual: 11`) and the PINNED linter fired
+    MD056/table-column-count. That is the SAME class this tool had just been fixed for —
+    a regenerated census reddening the REQUIRED `docs` check on a finding the lane did
+    not write — so the escape belongs here rather than in a later repair.
+    """
+    return str(value).replace("|", "\\|").replace("\r", " ").replace("\n", " ").strip()
+
+
 def render(rows: list[Row], repo: str, generated_at: str, truncated: bool = False, limit: int = 100) -> str:
     counts: dict[str, int] = {}
     for r in rows:
@@ -439,9 +456,9 @@ def render(rows: list[Row], repo: str, generated_at: str, truncated: bool = Fals
         "One row per open PR: its head, whether a review record exists on **this box**, whether that",
         "record's head equals the PR's head, what the record claims, and what the `ai-review-gate`",
         "check says. `RESTORE` is the only outcome that licenses re-posting a proof — and even then the",
-        "verdict is quoted from the record, never synthesised. A record at any other head is not"
-        " evidence of the live code: it is `RE-REVIEW` when the gate has no green verdict, and `OK`",
-        " only because the gate itself already accepted the proof (so no re-post is owed).",
+        "verdict is quoted from the record, never synthesised. A record at any other head is not",
+        "evidence of the live code: it is `RE-REVIEW` when the gate has no green verdict, and `OK`",
+        "only because the gate itself already accepted the proof (so no re-post is owed).",
         "",
         # ⛔ LABELLED, never a bare emphasis-only paragraph (#10687). The line used to
         # be `f"**{totals}**"`, which renders as a paragraph consisting ENTIRELY of
@@ -482,17 +499,34 @@ def render(rows: list[Row], repo: str, generated_at: str, truncated: bool = Fals
         verdict = "—" if rec is None else (rec.verdict or "—")
         ev = "—" if rec is None else ("null" if rec.evidence in (None, "", False) else str(rec.evidence))
         gate = "not-read" if not r.gate_checked else (r.gate_conclusion or r.gate_status or "absent")
+        # Every cell is escaped: `rec_cell`, `verdict`, `mint` and `ev` come from a record
+        # JSON on disk, so a `|` in any of them would add a cell and break the table (#10687).
         lines.append(
-            f"| #{r.pr} | `{r.head[:12]}…` | {rec_cell} | {rhead} | {match} | {mint} | {verdict} | {ev} | {gate} | **{r.outcome}** |"
+            "| #" + " | ".join(
+                [
+                    str(r.pr),
+                    f"`{r.head[:12]}…`",
+                    _cell(rec_cell),
+                    _cell(rhead),
+                    _cell(match),
+                    _cell(mint),
+                    _cell(verdict),
+                    _cell(ev),
+                    _cell(gate),
+                    f"**{r.outcome}**",
+                ]
+            ) + " |"
         )
 
     flagged = [r for r in rows if r.outcome in (RESTORE, RE_REVIEW, NOTHING, UNREADABLE, IN_FLIGHT)]
     if flagged:
         lines += ["", "## What each flagged row needs", ""]
         for r in flagged:
-            lines.append(f"- **#{r.pr}** `{r.branch}` — {r.outcome}: {r.why}")
+            # `why` can be `gh`'s multi-line stderr and `notes` are free text: a raw newline
+            # would break out of the bullet and render the rest as a new paragraph (#10687).
+            lines.append(f"- **#{r.pr}** `{_cell(r.branch)}` — {r.outcome}: {_cell(r.why)}")
             for n in r.notes:
-                lines.append(f"  - {n}")
+                lines.append(f"  - {_cell(n)}")
     lines += [
         "",
         "## Reading rules",
