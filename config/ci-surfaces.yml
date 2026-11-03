@@ -665,6 +665,13 @@ surfaces:
   # the same reason: the file it guards is tortoise/hosted_api.py (and
   # tortoise/monitoring.py), which selects the `api` surface.
   - test_control_plane_offload_3498.py
+  # #10612: the offload seam must not re-enter a stored contextvars.Context.
+  # Same dual registration as the offload guard above and for the same reason:
+  # tortoise/hosted_api.py is an exact `api` SOURCE_PATTERN that REPLACES the
+  # `core` fallback, so this file also has an `api` row above; the other file it
+  # guards, tortoise/monitoring.py, selects `core`, so the `core` row is what
+  # delivers the guard for a monitoring.py-only diff.
+  - test_context_confinement.py
   # #7678: the org-create lane's dedicated control-plane pool + the single
   # membership read. Same dual registration as the offload guard above and for
   # the same reason: the files it guards are tortoise/hosted_api.py,
@@ -3464,6 +3471,7 @@ surfaces:
   - test_health_build_identity_10447.py
   - test_graph_write_loop_responsiveness.py  # #3718: REST graph-write off-loop (dual: api)
   - test_control_plane_offload_3498.py  # #3498: control-plane auth/session off-loop (dual: api)
+  - test_context_confinement.py  # #10612: one fresh contextvars.Context per invocation (dual: api)
   - test_org_create_pool_7678.py  # #7678: org-create control-plane pool + single membership read (dual: api)
   # #8920 (review P3): production pointers into `tests/` must resolve, and no
   # source may still name a symbol the move renamed away. DB-free and static,
@@ -8586,6 +8594,7 @@ durations:
   test_run_reaper.py: 3.4  # new file (#6868) — ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 2.0
   test_engine_probe.py: 4.6  # new file (#7017) — ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 2.0
   test_control_plane_offload_3498.py: 1.4
+  test_context_confinement.py: 6.0  # #10612: measured 4.1-4.9s on a cell (9 tests, real threads + pool submissions + a retry loop)
   test_analytics_offloop_4015.py: 1.2  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 0.6
   test_free_team_entitlement.py: 5.9  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 4.8
   test_integration_search.py: 2.8
