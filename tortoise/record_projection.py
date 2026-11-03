@@ -146,9 +146,9 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
-from functools import lru_cache
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
@@ -712,7 +712,7 @@ class RecordStatementError(RecordProjectionError):
     the driver's own exception — with its LINE/DETAIL/CONTEXT — is never lost.
     """
 
-    def __init__(self, statement: "Statement", cause: BaseException,
+    def __init__(self, statement: Statement, cause: BaseException,
                  *, index: int = -1, total: int = -1) -> None:
         self.statement = statement
         self.cause = cause
@@ -1373,8 +1373,7 @@ def _complete(path: Path) -> bool:
     return all((path / name).exists() for name in RECORD_MIGRATIONS)
 
 
-def _migrations_dir(repo_root: Path | None = None,
-                   packaged: Path | None = None) -> Path:
+def _migrations_dir() -> Path:
     """The record's schema directory — the checkout first, the wheel second.
 
     The repo checkout is the source of truth (a migration edit must be read as
@@ -1383,16 +1382,17 @@ def _migrations_dir(repo_root: Path | None = None,
     raised `RecordProjectionError` before a single statement and every armed
     live write failed — the record empty, the gate green (#9231 review P2).
 
-    The two roots are PARAMETERS (defaulting to the module globals) so a caller
-    that memoises the answer can key on them: they are what the resolution
-    depends on, and tests monkeypatch both.
+    ⛔ ZERO ARGUMENTS, deliberately: `tests/test_health_build_identity_10447.py`
+    patches this NAME with a zero-arg callable, and patch-by-name is the
+    documented seam for "the migrations moved". Giving it parameters would make
+    that seam raise `TypeError` from inside a plan build, so the freshness
+    question is answered elsewhere (see `jsonb_columns`) rather than here.
     """
-    repo = (repo_root or REPO_ROOT) / "supabase" / "migrations"
-    wheel = packaged or PACKAGED_MIGRATIONS
+    repo = REPO_ROOT / "supabase" / "migrations"
     if _complete(repo):
         return repo
-    if _complete(wheel):
-        return wheel
+    if _complete(PACKAGED_MIGRATIONS):
+        return PACKAGED_MIGRATIONS
     # Neither is complete: name the repo path so the failure reads as the
     # missing-schema case, and `table_columns()` reports BOTH locations.
     return repo
@@ -1472,25 +1472,8 @@ _ALTER_COLUMN_TYPE_RE = re.compile(
     re.S | re.I)
 
 
-@lru_cache(maxsize=8)
 def _jsonb_columns_for_dir(migrations_dir: Path) -> frozenset[str]:
-    """`jsonb_columns()` for ONE already-resolved migrations directory.
-
-    Memoised on the RESOLVED DIRECTORY, never on `None`. Every sibling schema
-    reader re-reads per call, and a cache keyed on nothing would answer from
-    whichever tree was resolved first — `_migrations_dir()` falls back from the
-    checkout to the wheel, and tests monkeypatch `REPO_ROOT`/
-    `PACKAGED_MIGRATIONS` to exercise exactly that — so a stale answer here is
-    not cosmetic: an old set silently stops encoding and #9548 returns.
-
-    ⛔ AND THE CACHE IS NOT AN OPTIMISATION, IT IS A COST BOUND THE LIVE PATH
-    NEEDS. `_jsonb_or_scalar` runs once per string parameter of EVERY statement,
-    so a whole-migrations re-parse per call measured **2.71 ms** and made a
-    50-record `replay_plan` take **1182 ms** instead of 5.8 ms — a ~200x
-    regression on the synchronous capture path, which §17 forbids the seam from
-    adding. Guarded by
-    `tests/test_9548_record_search_keys_shape.py::test_the_jsonb_map_is_not_reparsed_per_parameter`.
-    """
+    """`jsonb_columns()` for ONE already-resolved migrations directory."""
     sql = _read_migrations(migrations_dir)
     # `(table, column)` PAIRS, so a per-table narrowing cannot delete a column
     # that is `jsonb` in ANOTHER record table; flattened to names at the end.
@@ -1531,17 +1514,76 @@ def _jsonb_columns_for_dir(migrations_dir: Path) -> frozenset[str]:
     return frozenset(column for _table, column in found)
 
 
-@lru_cache(maxsize=8)
-def _jsonb_columns_for_roots(repo_root: Path,
-                            packaged: Path) -> frozenset[str]:
-    """The jsonb set for ONE `(REPO_ROOT, PACKAGED_MIGRATIONS)` pair.
+#: How long a parsed jsonb map may be reused, in seconds. `_jsonb_or_scalar`
+#: runs once per string parameter of EVERY statement, so an un-memoised parse
+#: measured 2.71 ms and made a 50-record `replay_plan` take 1182 ms instead of
+#: 5.8 ms — a ~200x regression on the SYNCHRONOUS capture path, which §17 forbids
+#: the seam from adding.
+#:
+#: ⛔ `table_columns()` IS NOT CACHED AT ALL, and this one is BOUNDED rather than
+#: exempt (#9548 review). `supabase/migrations` is applied by a workflow separate
+#: from the app deploy, so a long-lived process could otherwise keep answering a
+#: map it parsed before a migration landed: a NEW `jsonb` column would re-open the
+#: 22P02 row drops, and a `jsonb→text` NARROWING would JSON-quote strings bound to
+#: a now-`text` column with no error and no counter. A TTL bounds that window to
+#: :data:`_JSONB_CACHE_TTL_SECONDS` instead of to the process's lifetime, at a
+#: clock read per parameter rather than a file parse.
+#:
+#: ⛔ NOT A `ContextVar` PER PLAN BUILD, which would have no window at all: this
+#: module is FORBIDDEN an ambient carrier — `tests/test_record_projection.py::
+#: test_this_module_has_no_ambient_tenant_READER` reads `contextvars` itself as
+#: ambient state, because a value that outlives a call is one value for every
+#: tenant the process serves.
+_JSONB_CACHE_TTL_SECONDS = 5.0
+_JSONB_CACHE: dict = {"at": float("-inf"), "names": frozenset()}
 
-    Keeps the RESOLUTION out of the per-parameter cost as well as the parse: the
-    two roots are the whole of what `_migrations_dir()` depends on, so keying on
-    them is both sound (a monkeypatched root is a different key) and cheap (14
-    `Path.exists()` once, not per bound string).
-    """
-    return _jsonb_columns_for_dir(_migrations_dir(repo_root, packaged))
+
+def _jsonb_cache_clear() -> None:
+    """Drop the TTL memo (for a caller that changed the migrations under us)."""
+    _JSONB_CACHE.update({"at": float("-inf"), "names": frozenset()})
+
+
+def _jsonb_columns_for_dir(migrations_dir: Path) -> frozenset[str]:
+    """`jsonb_columns()` for ONE already-resolved migrations directory."""
+    sql = _read_migrations(migrations_dir)
+    # `(table, column)` PAIRS, so a per-table narrowing cannot delete a column
+    # that is `jsonb` in ANOTHER record table; flattened to names at the end.
+    found: set[tuple[str, str]] = set()
+    for table, body in _TABLE_RE.findall(sql):
+        if table not in THE_RECORD_TABLES:
+            continue
+        for _quoted, column, type_name in _COLUMN_TYPE_RE.findall(body):
+            if type_name == "jsonb":
+                found.add((table, column))
+    for table, body in _ALTER_ADD_COLUMN_RE.findall(sql):
+        if table not in THE_RECORD_TABLES:
+            continue
+        for column, type_name in _ADDED_COLUMN_TYPED_RE.findall(body):
+            if type_name.lower() == "jsonb":
+                found.add((table, column))
+    if not any(table in THE_RECORD_TABLES
+               for table, _body in _TABLE_RE.findall(sql)):
+        # ⛔ FAIL CLOSED, like `table_columns()`. An EMPTY set is the worst
+        # answer this function can give: it silently stops the #9548 encoding
+        # and the row drops come back with no signal at all. A partial tree (a
+        # migration missing) still yields a map — narrower, and the pin on
+        # #9264's narrowing is what notices — so only the "no schema at all"
+        # case is refused here.
+        raise RecordProjectionError(
+            "the record schema is not on disk — no CREATE TABLE for any record "
+            f"table was found in {migrations_dir}. The jsonb encoding rule "
+            "reads the DECLARED column types from those files, and an empty "
+            "answer would silently stop serialising a scalar bound to a jsonb "
+            "column — the row-drop class #9548 exists to end."
+        )
+    for table, column, type_name in _ALTER_COLUMN_TYPE_RE.findall(sql):
+        if table not in THE_RECORD_TABLES:
+            continue
+        found.discard((table, column))
+        if type_name.lower() == "jsonb":
+            found.add((table, column))
+    return frozenset(column for _table, column in found)
+
 
 
 def jsonb_columns(migrations_dir: Path | None = None) -> frozenset[str]:
@@ -1563,16 +1605,22 @@ def jsonb_columns(migrations_dir: Path | None = None) -> frozenset[str]:
     reader that stopped at `CREATE TABLE` would call an integer column a
     document container.
 
-    ⚠️ The PARSE is memoised on the resolved directory, and the RESOLUTION on
-    the two roots it reads, so a monkeypatched `REPO_ROOT`/
-    `PACKAGED_MIGRATIONS` is seen immediately AND a bound parameter pays
-    neither. Both halves matter: measured, an un-memoised RESOLUTION alone
-    (14 `Path.exists()` per call, once per string parameter) was ~92 % of a
-    50-record `replay_plan` costing 48 ms instead of 4.6 ms.
+    ⛔ RE-PARSING PER PARAMETER IS NOT AN OPTION: `_jsonb_or_scalar` runs once per
+    string parameter of every statement, so an un-memoised parse is the whole
+    cost of a plan build. The answer is memoised for
+    :data:`_JSONB_CACHE_TTL_SECONDS` — long enough that a plan (or a burst of
+    writes) parses once, short enough that a migration landing while the process
+    runs is seen without a restart. `table_columns()` is uncached; this one is
+    bounded, and the difference is stated at the constant rather than implied.
     """
     if migrations_dir is not None:
         return _jsonb_columns_for_dir(migrations_dir)
-    return _jsonb_columns_for_roots(REPO_ROOT, PACKAGED_MIGRATIONS)
+    now = time.monotonic()
+    if now - float(_JSONB_CACHE["at"]) < _JSONB_CACHE_TTL_SECONDS:
+        return _JSONB_CACHE["names"]
+    names = _jsonb_columns_for_dir(_migrations_dir())
+    _JSONB_CACHE.update({"at": now, "names": names})
+    return names
 
 
 def table_columns(migrations_dir: Path | None = None) -> dict[str, frozenset[str]]:
@@ -1815,7 +1863,7 @@ class Statement:
         """
         try:
             jsonb = jsonb_columns()
-        except Exception:      # noqa: BLE001 — attribution must not mask a cause
+        except Exception:
             jsonb = frozenset()
         pairs: list[str] = []
         seen: set[int] = set()

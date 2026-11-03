@@ -233,36 +233,38 @@ def test_every_statement_s_param_columns_align_with_its_params():
         f"{misaligned} — the failure attribution would name the wrong column")
 
 
-def test_the_jsonb_map_is_not_reparsed_per_parameter():
-    """`jsonb_columns()` must not re-read the migrations per bound string.
+def test_the_jsonb_map_is_not_reparsed_per_parameter(monkeypatch):
+    """ONE schema read per PLAN, not one per bound string (#9548 review).
 
-    `_jsonb_or_scalar` runs once per string parameter of EVERY statement. A
-    re-parse per call measured 2.71 ms and turned a 50-record `replay_plan` into
+    `_jsonb_or_scalar` runs once per string parameter of EVERY statement, so an
+    un-memoised parse measured 2.71 ms and turned a 50-record `replay_plan` into
     1182 ms instead of 5.8 ms — a ~200x regression on the SYNCHRONOUS capture
-    path, which §17 forbids the seam from adding. The bound is asserted as a
-    RELATIVE cost (many encodes, not many seconds) so it cannot go flaky on a
-    loaded box.
-    """
-    import time
+    path, which §17 forbids the seam from adding.
 
+    Counted, not timed: the assertion is the NUMBER of migrations reads a plan
+    build performs, so it cannot flake on a loaded box. Three are expected —
+    `table_columns()`, `refused_props_names()`, and the jsonb map itself, which
+    `replay_plan` installs in `_JSONB_PLAN_CACHE` for the length of the build.
+    A per-parameter re-parse shows up here as one read per string parameter
+    (measured on the regressed shape: ~180 for this plan).
+    """
     from tortoise import record_projection as rp
 
-    rp.jsonb_columns()  # warm: resolve + parse once
-    start = time.perf_counter()
-    for _ in range(200):
-        rp._jsonb_or_scalar("search_keys", GRAPH_KEYS)
-    per_encode = (time.perf_counter() - start) / 200
-    # Force a COLD run: both memo layers, because the fix memoises the
-    # RESOLUTION and the PARSE, and clearing only one measures the other.
-    rp._jsonb_columns_for_roots.cache_clear()
-    rp._jsonb_columns_for_dir.cache_clear()
-    start = time.perf_counter()
-    rp.jsonb_columns()
-    per_parse = time.perf_counter() - start
-    assert per_encode < per_parse / 4, (
-        f"one encode ({per_encode * 1000:.3f} ms) costs a substantial fraction "
-        f"of a whole migrations parse ({per_parse * 1000:.3f} ms) — the jsonb "
-        "map is being re-read per parameter")
+    reads: list[int] = []
+    real = rp._read_migrations
+
+    def _counting(migrations_dir=None):
+        reads.append(1)
+        return real(migrations_dir)
+
+    monkeypatch.setattr(rp, "_read_migrations", _counting)
+    tenant = _tenant()
+    record = _record(tenant, search_keys=GRAPH_KEYS)
+    rp.replay_plan([record] * 20, org_id=tenant[0], graph_id=tenant[1])
+    assert len(reads) <= 4, (
+        f"one plan build read the migrations {len(reads)} times for 20 records "
+        "— the jsonb map is being re-parsed per bound parameter instead of "
+        "once per plan")
 
 
 def test_the_replay_wrapper_attributes_a_failing_statement():
@@ -299,6 +301,7 @@ def test_the_replay_wrapper_attributes_a_failing_statement():
             return _Cursor()
 
     import pytest as _pytest
+
     from tortoise import record_projection as _rp
     original = _rp.scope_connection
     _rp.scope_connection = lambda conn, org_id: conn.cursor()
@@ -385,6 +388,11 @@ def test_no_jsonb_column_name_is_shared_with_a_non_jsonb_column():
     instead of a comment.
     """
     sql = record_projection._read_migrations()
+    # ⛔ THE SAME THREE INPUTS THE PARSER FOLDS, not `CREATE TABLE` alone: a
+    # forward `ADD COLUMN … jsonb` or an `ALTER COLUMN … TYPE` narrowing can
+    # introduce (or remove) a `jsonb` name the base shape never mentions, and a
+    # pin that read only the base would stay green through exactly the clash it
+    # exists to catch.
     typed: dict[str, set[str]] = {}
     for table, body in record_projection._TABLE_RE.findall(sql):
         if table not in record_projection.THE_RECORD_TABLES:
@@ -392,6 +400,18 @@ def test_no_jsonb_column_name_is_shared_with_a_non_jsonb_column():
         for _quoted, column, type_name in \
                 record_projection._COLUMN_TYPE_RE.findall(body):
             typed.setdefault(column, set()).add(type_name)
+    for table, body in record_projection._ALTER_ADD_COLUMN_RE.findall(sql):
+        if table not in record_projection.THE_RECORD_TABLES:
+            continue
+        for column, type_name in \
+                record_projection._ADDED_COLUMN_TYPED_RE.findall(body):
+            typed.setdefault(column, set()).add(type_name.lower())
+    for table, column, type_name in \
+            record_projection._ALTER_COLUMN_TYPE_RE.findall(sql):
+        if table not in record_projection.THE_RECORD_TABLES:
+            continue
+        typed.setdefault(column, set()).discard("jsonb")
+        typed.setdefault(column, set()).add(type_name.lower())
     jsonb = record_projection.jsonb_columns()
     clashes = {c: t for c, t in typed.items() if c in jsonb and t - {"jsonb"}}
     assert not clashes, (
@@ -481,6 +501,7 @@ def _record_db():
 def _app_role_dsn(dsn: str) -> str:
     """`dsn` connecting as the record's APPLICATION role (the gate's role)."""
     from urllib.parse import parse_qs, quote, urlencode, urlsplit, urlunsplit
+
     from test_9078_record_written_by_production_path import RECORD_APP_ROLE
     parts = urlsplit(dsn)
     query = parse_qs(parts.query)
@@ -498,8 +519,7 @@ def _app_role_dsn(dsn: str) -> str:
 
 
 def _seed(conn, tenant) -> None:
-    from test_9078_record_written_by_production_path import (
-        _ensure_record_schema, _seed_tenant)
+    from test_9078_record_written_by_production_path import _ensure_record_schema, _seed_tenant
     _ensure_record_schema(conn)
     _seed_tenant(conn, tenant)
     conn.commit()
@@ -510,7 +530,7 @@ def _failures() -> int:
 
 
 def test_the_record_applies_the_live_search_keys_shape_and_reads_it_back(
-        monkeypatch):
+        monkeypatch, caplog):
     """PRODUCTION-FIRST: `write_failed` stops climbing, `write_ok` climbs.
 
     Drives the LIVE DOOR the armed deployment drives
@@ -531,8 +551,18 @@ def test_the_record_applies_the_live_search_keys_shape_and_reads_it_back(
       what makes `after == before` mean "no row was dropped";
     * the row is REALLY there and the record's own reader gives back the graph's
       flat string.
+
+    ⚠️ A REFUSAL IS REPORTED WITH THE LOG, not just its reason code: the cause
+    lives only in `write_live_record`'s WARNING (that is the door's contract —
+    it never raises), and `refusal='write_failed'` alone is precisely the
+    unattributable string this issue exists to end. `caplog.text` is asserted
+    into only on the failure path, so a red in the gated `#9551` job carries the
+    column, the statement and the driver's own message.
     """
+    import logging
+
     from tortoise.cache_projection import node_from_row
+    caplog.set_level(logging.WARNING, logger="tortoise.record_writer")
 
     conn = _record_db()
     tenant = _tenant()
@@ -554,7 +584,9 @@ def test_the_record_applies_the_live_search_keys_shape_and_reads_it_back(
             record, seq=index + 1, tenant=tenant)
         assert write is not None, "the record was not armed — nothing attempted"
         assert write.outcome is record_writer.RecordWriteOutcome.APPLIED, (
-            f"the live shape was refused ({write.refusal!r}): {write!r}")
+            f"the live shape was refused ({write.refusal!r}): {write!r} — the "
+            f"door's WARNING is the only place the cause is carried: "
+            f"{caplog.text}")
         applied += 1
     after = _failures()
     assert applied == len(records)
