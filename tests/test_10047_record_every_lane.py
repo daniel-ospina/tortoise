@@ -576,9 +576,7 @@ def _handle_state(value) -> bool | None:
 
 
 def _assigned_handle(node):
-    """`(local name, value)` for `x = …` / `x: T = …` — else `(None, None)`."""
-def _assigned_handle(node):
-    """`(handle key, value)` for `x = …`, `self.x = …`, `x: T = …` — else `(None, None)`.
+    """`(handle key, value)` for `x = …`, `self.x = …`, `x: T = …`, `with … as x`.
 
     The key is a bare name for a local and the DOTTED spelling for an attribute
     (`self._own_sdk`), because an SDK a class OWNS is a handle too (#10046
@@ -587,7 +585,20 @@ def _assigned_handle(node):
     `run()` writing `self._own_sdk.create_point(...)` was never a write. That is
     the package's dominant class idiom — `dream.py`, `onboarding/selfhost.py`,
     `hosted_api._OrgSeedSurface`, `mcp_auth` all hold their SDK on `self`.
+
+    `with … as sdk` is here too (#10046 review round 6 P1): `TortoiseSDK`
+    implements `__enter__`/`__exit__` (`sdk.py`), so the context-manager form is
+    a SUPPORTED way to hold it and the plainest Python spelling for one — not an
+    indirect shape like a lambda or a factory, which are declared out.
     """
+    if isinstance(node, ast.With):
+        for item in node.items:
+            target = item.optional_vars
+            if isinstance(target, ast.Name):
+                return target.id, item.context_expr
+            if isinstance(target, ast.Attribute):
+                return ast.unparse(target), item.context_expr
+        return None, None
     if isinstance(node, ast.Assign) and len(node.targets) == 1:
         target = node.targets[0]
         if isinstance(target, ast.Name):
@@ -624,7 +635,7 @@ def _class_attribute_handles(tree) -> dict[str, dict[str, bool]]:
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 for key, state in _sdk_handles(node).items():
                     if "." in key:
-                        merged[key] = state
+                        merged[key] = merged.get(key, True) and state
         if merged:
             by_class[cls.name] = merged
     return by_class
@@ -647,17 +658,37 @@ def _sdk_handles(node) -> dict[str, bool]:
             continue
         state = _handle_state(value)
         if state is not None:
-            handles[name] = state
+            # WORST-WINS across assignments (#10046 review round 6 P2): keeping the
+            # last one lets `sdk = _make_sdk(org)` followed by
+            # `if not sdk: sdk = _data_sdk(org)` answer bound while an unbound
+            # path is still live — inverting the "an unbound operand wins" rule
+            # `_handle_state` already applies WITHIN one value. An explicit
+            # install below still arms the handle, which is the sequence the
+            # failure message tells a developer to write.
+            handles[name] = handles.get(name, True) and state
     for sub in ast.walk(node):
         if not isinstance(sub, ast.Call):
             continue
         called = getattr(sub.func, "id", None) or getattr(sub.func, "attr", None)
         if called not in _TENANT_INSTALLERS:
             continue
-        if sub.args and isinstance(sub.args[0], ast.Name):
-            handles[sub.args[0].id] = True
-        if isinstance(sub.func, ast.Attribute) and isinstance(sub.func.value, ast.Name):
-            handles[sub.func.value.id] = True
+        # Key on the SAME spelling `_assigned_handle` produces, or an install on
+        # an SDK held on `self` cannot mark it bound (#10046 review round 6 P1):
+        # `_bind_default_graph_record_tenant(self._sdk, org)` has an ATTRIBUTE in
+        # `args[0]`, and the method form has one as `sub.func.value` — reading
+        # only `ast.Name` silently marked `org` bound instead and left the handle
+        # False, so a developer who followed this test's own failure message
+        # ("Install one at the construction site: `_bind_default_graph_record_
+        # tenant(sdk, org_id)`") stayed RED.
+        for arg in sub.args:
+            if isinstance(arg, (ast.Name, ast.Attribute)):
+                key = arg.id if isinstance(arg, ast.Name) else ast.unparse(arg)
+                handles[key] = True
+        if isinstance(sub.func, ast.Attribute) and isinstance(
+                sub.func.value, (ast.Name, ast.Attribute)):
+            receiver = sub.func.value
+            handles[receiver.id if isinstance(receiver, ast.Name)
+                    else ast.unparse(receiver)] = True
     return handles
 
 
@@ -730,7 +761,8 @@ def _unbound_record_writes(tree) -> list[str]:
         owner = name.split(".", 1)[0]
         if "." in name and owner in class_attrs:
             for key, state in class_attrs[owner].items():
-                handles_by_lane[name].setdefault(key, state)
+                handles_by_lane[name][key] = (
+                    handles_by_lane[name].get(key, True) and state)
     # The CALLEE's parameter list maps a positional argument to the parameter
     # the helper writes through — not the caller's.
     callee_params = {name: [a.arg for a in
@@ -895,11 +927,16 @@ def test_no_lane_ANYWHERE_in_the_package_writes_records_through_an_unbound_sdk()
     blind spot (`_AMBIENT_OPENERS`). Two indirections are likewise OUT of the
     scan and are named so they are not mistaken for coverage: an SDK handed to a
     writing helper as a KEYWORD argument (`_write(sdk=_org_sdk(org))`) and one
-    reached through a lambda or local factory. An SDK handed to a writing helper
-    as an INLINE call is likewise out, in either position
-    (`_write(_org_sdk(org))` / `_write(sdk=_org_sdk(org))`) — the bound-name
-    forms of both ARE caught. What IS scanned: methods (including an SDK held on
-    `self`) and module-qualified dispatch (`_ha._make_sdk(...)`).
+    reached through a lambda or local factory. Also OUT, and listed so `0 unbound`
+    is not read as covering them: an SDK handed to a writing helper as an INLINE
+    call in either position (`_write(_org_sdk(org))` / `_write(sdk=_org_sdk(org))`
+    — the bound-name forms of both ARE caught); an SDK held on a MODULE-LEVEL
+    global and written from a function; a passing alias (`s2 = sdk`); a walrus
+    (`if (sdk := _make_sdk(...))`); `setattr(self, "_sdk", ...)`; tuple unpack;
+    and a SUBCLASS writing through a handle its base class's `__init__` opened
+    (the class map is keyed per class). What IS scanned: methods, an SDK held on
+    `self` (opened in one method, written in another), `with … as sdk`, and
+    module-qualified dispatch (`_ha._make_sdk(...)`).
     """
     modules = sorted(_PACKAGE_ROOT.rglob("*.py"))
     assert len(modules) >= 200, (
@@ -1146,14 +1183,41 @@ def test_a_CLASS_METHOD_writing_through_an_unbound_sdk_is_caught():
     `_module_functions`, or the attribute half of `_assigned_handle`.
     """
     local = '''
-def _run_method_lane(org_id: str) -> None:
-    class _W:
-        def run(self) -> None:
-            sdk = _make_sdk(namespace=org_id)
-            sdk.create_point("Subject", {})
+class _MethodLane:
+    def run(self, org_id: str) -> None:
+        sdk = _make_sdk(namespace=org_id)
+        sdk.create_point("Subject", {})
 '''
     assert _flagged(local), (
-        "a write inside a CLASS METHOD through an unbound SDK must be flagged")
+        "a write inside a CLASS METHOD through an unbound SDK must be flagged — "
+        "this class is MODULE-LEVEL on purpose: nested inside a function the "
+        "parent's `ast.walk` would reach it and the assertion would pass even "
+        "with the method walk deleted")
+
+    bind_then_write = '''
+class _BoundWorker:
+    def __init__(self, org_id: str) -> None:
+        self._sdk = _make_sdk(namespace=org_id)
+        _bind_default_graph_record_tenant(self._sdk, org_id)
+
+    def run(self) -> None:
+        self._sdk.create_point("Subject", {})
+'''
+    assert _flagged(bind_then_write) == [], (
+        "the BOUND direction: an SDK held on `self` that the class then arms — "
+        "exactly what this test's own failure message tells a developer to do — "
+        "must be silent. Without this half the guard rejects the documented fix "
+        "whenever the handle lives on `self` (#10046 review round 6 P1).")
+
+    with_form = '''
+def _run_with_lane(org_id: str) -> None:
+    with _make_sdk(namespace=org_id) as sdk:
+        sdk.create_point("Subject", {})
+'''
+    assert _flagged(with_form), (
+        "`with _make_sdk(...) as sdk:` is a SUPPORTED way to hold this SDK "
+        "(`TortoiseSDK.__enter__/__exit__`), so a write inside it must be "
+        "flagged like any other")
 
     owned = '''
 class _OwnWorker:
