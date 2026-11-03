@@ -200,10 +200,16 @@ def test_a_failed_docker_run_is_cleaned_up_by_the_id_it_printed(lane, monkeypatc
 
 
 def test_the_reaper_never_removes_a_container_no_worktree_here_claims(monkeypatch):
-    """The central report-only rule. An unowned slug may belong to a DIFFERENT
-    clone of this repo, whose live lane this tool cannot see — so nothing about
-    that container authorizes a removal, including its age (stubbed ancient here
-    precisely to prove a clock is not the trigger)."""
+    """The report-only rule, pinned EXPLICITLY — not by an accident of plumbing.
+
+    An unowned slug may belong to a DIFFERENT clone of this repo, whose live lane
+    this tool cannot see, so the age backstop must be the only thing that could
+    reach it — and it is armed here with `ORPHAN_MAX_AGE_ENV=0` so this test
+    states its rule rather than relying on `_idle_evidence` happening to read
+    "unreadable" from a stub. The positive arm has its own tests
+    (`test_age_backstop_REAPS_...`); this one exists so a future change cannot
+    silently turn an unattributable container into a deletion candidate.
+    """
     removed: list = []
 
     def fake(*a, **k):
@@ -216,6 +222,7 @@ def test_the_reaper_never_removes_a_container_no_worktree_here_claims(monkeypatc
     monkeypatch.setattr(tl, "_docker", fake)
     monkeypatch.setattr(tl, "_worktree_slugs", lambda: {})
     monkeypatch.setattr(tl, "_started_epoch", lambda _n: 0.0)
+    monkeypatch.setenv(tl.ORPHAN_MAX_AGE_ENV, "0")   # the arm cannot fire at all
     out = tl.reap_orphans()
     assert removed == [], removed
     assert "report only" in out[0], out
@@ -489,6 +496,10 @@ def test_reaper_never_reaps_a_TERMINAL_container_it_cannot_ATTRIBUTE(
     monkeypatch.setattr(tl, "_worktree_slugs", lambda: {})
     monkeypatch.setattr(tl, "_started_epoch", lambda _n: 0.0)
     monkeypatch.setattr(tl, "container_state", lambda _n: "exited")
+    # The age backstop is DISABLED: this test pins the STATE arm's
+    # `owner is not None` guard, and must not depend on the idle probe's
+    # readability to hold. (The backstop's own arm is tested separately.)
+    monkeypatch.setenv(tl.ORPHAN_MAX_AGE_ENV, "0")
     out = tl.reap_orphans()
     assert removed == [], (removed, out)
     assert all("report only" in line for line in out), out
@@ -722,14 +733,371 @@ def test_ping_over_host_is_true_when_something_answers(monkeypatch):
         worker.join(timeout=2)
 
 
-def test_no_inert_age_backstop_knob_exists():
-    """#8180 review: `ORPHAN_MAX_AGE_H` (and its
-    `TORTOISE_TEST_LANE_ORPHAN_MAX_AGE_H` knob) was read by nothing, so it
-    advertised an age bound the code deliberately does not implement — and an
-    operator setting it changed no behaviour on a DESTRUCTIVE sweep. The dead
-    knob is removed; re-adding an unread age constant fails here."""
-    assert not hasattr(tl, "ORPHAN_MAX_AGE_H"), (
-        "an age constant that nothing reads is a claim the code does not keep")
+def test_the_age_backstop_knob_is_READ_and_never_fires_alone(monkeypatch):
+    """`ORPHAN_MAX_AGE_H` must be a bound the code KEEPS.
+
+    #8180 review removed an earlier `ORPHAN_MAX_AGE_H` because nothing read it:
+    "an age constant that nothing reads is a claim the code does not keep". The
+    invariant is preserved here in the stronger form — the constant must be
+    (a) READ, (b) settable off, and (c) never sufficient on its own, since
+    #5084's recorded ruling rejects "delete by age". The behaviour pins for
+    (c) are `test_age_backstop_never_reaps_an_unownable_container_that_is_IN_USE`
+    and `..._below_the_bound`.
+    """
+    monkeypatch.delenv(tl.ORPHAN_MAX_AGE_ENV, raising=False)
+    assert tl._orphan_max_age_h() == tl.ORPHAN_MAX_AGE_H > 0, (
+        "the backstop must be armed by default with a positive bound")
+    monkeypatch.setenv(tl.ORPHAN_MAX_AGE_ENV, "0")
+    assert tl._orphan_max_age_h() == 0.0, "0 must disable the arm (report only)"
+    monkeypatch.setenv(tl.ORPHAN_MAX_AGE_ENV, "6")
+    assert tl._orphan_max_age_h() == 6.0, "the operator's value must be READ"
+    # A typo must not silently re-arm the leak this arm exists to drain.
+    for junk in ("not-a-number", "-3", "nan"):
+        monkeypatch.setenv(tl.ORPHAN_MAX_AGE_ENV, junk)
+        assert tl._orphan_max_age_h() == tl.ORPHAN_MAX_AGE_H, junk
+
+
+# ── The root fix: ownership OUTLIVES the worktree that created it ───────────
+
+def test_the_container_is_created_with_an_OWNERSHIP_LABEL(lane, monkeypatch):
+    """The name is `sha1(worktree path)[:10]` — a one-way digest of the path
+    teardown DELETES, so the name cannot answer "who owns this?" once the
+    worktree is deregistered. The owner path is therefore stamped on the
+    container, which is what makes #8180's proof reachable after teardown
+    (Ryuk / Kubernetes ownerReferences mechanism)."""
+    calls: list = []
+
+    def fake(*a, **k):
+        calls.append(a)
+        if a[0] == "inspect":
+            return _R(0, "absent\n", "")
+        if a[0] == "run":
+            return _R(0, "deadbeef\n", "")
+        if a[0] == "port":
+            return _R(0, "0.0.0.0:16390\n", "")
+        return _R(0, "PONG\n", "")
+
+    monkeypatch.setattr(tl, "_docker", fake)
+    tl.start()
+    run = [c for c in calls if c[0] == "run"]
+    assert run, calls
+    argv = list(run[0])
+    assert "--label" in argv, argv
+    joined = "\n".join(argv)
+    assert tl.LABEL_OWNER in joined, argv
+    owner = argv[argv.index("--label") + 1].split("=", 1)[1]
+    assert Path(owner).is_dir(), owner
+
+
+def test_an_ownership_LABEL_makes_a_DEREGISTERED_worktree_still_reapable(
+        monkeypatch, tmp_path):
+    """THE LEAK, closed at the root.
+
+    Measured 2026-11-03 on this box: 2 of 7 live `fdb-lane-*` containers had no
+    worktree that resolved their slug, at 6 minutes and 1.1 hours old — the
+    cell-1 population (68 containers, oldest FOUR DAYS) is that class. Nothing
+    ever reaped them, because the only armed proof was "git still lists the
+    worktree but its directory is gone", and `git worktree remove`/prune makes
+    the slug unresolvable instead.
+
+    MUTATION: drop the label read (resolve the owner from the name only) and
+    this container becomes unownable; being YOUNG and IN USE-by-evidence it is
+    kept, and this test fails — i.e. the leaked container survives.
+    """
+    gone = tmp_path / "deleted-worktree"
+    removed: list = []
+
+    def fake(*a, **k):
+        if a[0] == "ps":
+            # name \t state \t owner-label
+            return _R(0, f"fdb-lane-deadbeef01\trunning\t{gone}\n", "")
+        if a[0] == "rm":
+            removed.append(a[1:])
+            return _R(0, "", "")
+        raise AssertionError(f"unexpected docker call: {a}")
+
+    monkeypatch.setattr(tl, "_docker", fake)
+    monkeypatch.setattr(tl, "_worktree_slugs", lambda: {})   # deregistered
+    monkeypatch.setattr(tl, "lane_name", lambda: "fdb-lane-mine")
+    monkeypatch.setattr(tl, "_started_epoch", lambda _n: 0.0)  # ancient, unused
+    out = tl.reap_orphans()
+    assert ("-f", "fdb-lane-deadbeef01") in removed, out
+    assert "owning worktree" in out[0] and "is gone" in out[0], out
+
+
+def test_a_LABELLED_container_whose_owner_still_EXISTS_is_never_reaped(
+        monkeypatch, tmp_path):
+    """The label must not become a delete switch: a live owner is a live owner
+    whether the path came from the label or the name."""
+    removed: list = []
+    exists = tmp_path / "live-lane"
+    exists.mkdir()
+
+    def fake(*a, **k):
+        if a[0] == "ps":
+            return _R(0, f"fdb-lane-deadbeef02\trunning\t{exists}\n", "")
+        if a[0] == "rm":
+            removed.append(a[1:])
+        return _R(0, "", "")
+
+    monkeypatch.setattr(tl, "_docker", fake)
+    monkeypatch.setattr(tl, "_worktree_slugs", lambda: {})
+    monkeypatch.setattr(tl, "lane_name", lambda: "fdb-lane-mine")
+    monkeypatch.setattr(tl, "_started_epoch", lambda _n: 0.0)
+    out = tl.reap_orphans()
+    assert removed == [], out
+    assert "owning worktree exists" in out[0], out
+
+
+def test_the_idle_probe_costs_ONE_window_for_the_whole_population(monkeypatch):
+    """A per-candidate probe would cost `len(candidates) x IDLE_PROBE_WINDOW_S`:
+    5 s on the healthy box and ~6 MINUTES against the 68-container population
+    this arm exists to drain, on a sweep that runs on every `up`/`uri`. The
+    window is therefore shared: one sleep, however many candidates."""
+    names = ["fdb-lane-a", "fdb-lane-b", "fdb-lane-c", "fdb-lane-d"]
+    sleeps: list = []
+
+    def fake(*a, **k):
+        if a[0] == "exec" and a[2:] == ("redis-cli", "INFO", "stats"):
+            return _R(0, "total_connections_received:3\r\n"
+                         "total_net_input_bytes:7\r\n", "")
+        if a[0] == "exec" and a[2:] == ("redis-cli", "CLIENT", "LIST"):
+            return _R(0, "", "")
+        raise AssertionError(f"unexpected docker call: {a}")
+
+    monkeypatch.setattr(tl, "_docker", fake)
+    monkeypatch.setattr(tl, "IDLE_PROBE_WINDOW_S", 5.0)
+    monkeypatch.setattr(tl.time, "sleep", lambda s: sleeps.append(s))
+    verdicts = tl._idle_evidence(names)
+    assert sleeps == [5.0], f"expected exactly one window, got {sleeps}"
+    assert set(verdicts) == set(names) and all(v[0] for v in verdicts.values())
+
+
+def test_the_idle_probe_still_costs_ONE_window_with_TWENTY_candidates(
+        monkeypatch):
+    """The population is the variable, the probe window is not."""
+    names = [f"fdb-lane-{i:02d}" for i in range(20)]
+    sleeps: list = []
+
+    def fake(*a, **k):
+        if a[2:] == ("redis-cli", "INFO", "stats"):
+            return _R(0, "total_connections_received:3\r\n"
+                         "total_net_input_bytes:7\r\n", "")
+        if a[2:] == ("redis-cli", "CLIENT", "LIST"):
+            return _R(0, "", "")
+        raise AssertionError(f"unexpected docker call: {a}")
+
+    monkeypatch.setattr(tl, "_docker", fake)
+    monkeypatch.setattr(tl.time, "sleep", lambda s: sleeps.append(s))
+    tl._idle_evidence(names)
+    assert sleeps == [tl.IDLE_PROBE_WINDOW_S], sleeps
+
+
+# ── The age BACKSTOP (#8180 Outcome) — the migration population ─────────────
+
+def _backstop_harness(monkeypatch, *, age_epoch, foreign=0, foreign2=0,
+                      extra_conns=0):
+    """A fake docker speaking a REALISTIC redis transcript.
+
+    Modelled on a live `falkordb/falkordb-server:v4.20.6` probe (measured
+    2026-11-03): every `docker exec redis-cli ...` opens its own connection, so
+    the counter advances 1 per command, and `CLIENT LIST` ALWAYS includes the
+    calling client (`cmd=client|list`). A fake that omits the self line would
+    green-light an arm that is inert against the real server.
+
+    ``foreign`` / ``foreign2``: non-probe clients present at each sample.
+    ``extra_conns``: a connection that arrived between the two samples.
+    """
+    removed: list = []
+    counter = {"n": 100, "sample": 0}
+    clients = {"a": foreign, "b": foreign2}
+
+    def fake(*a, **k):
+        if a[0] == "ps":
+            return _R(0, "fdb-lane-unowned123\trunning\t\n", "")
+        if a[0] == "rm":
+            removed.append(a[1:])
+            return _R(0, "", "")
+        if a[0] == "exec" and a[2:] == ("redis-cli", "INFO", "stats"):
+            # A connection arrives between the samples (a real lane connecting).
+            if counter["sample"] == 1 and extra_conns:
+                counter["n"] += extra_conns
+            counter["n"] += 1                      # this INFO's own connection
+            counter["sample"] += 1
+            return _R(0, f"total_connections_received:{counter['n']}\r\n"
+                         f"total_net_input_bytes:{counter['n'] * 25}\r\n", "")
+        if a[0] == "exec" and a[2:] == ("redis-cli", "CLIENT", "LIST"):
+            counter["n"] += 1                      # its own connection
+            which = "a" if counter["sample"] <= 1 else "b"
+            lines = ["id=9001 addr=127.0.0.1:1 cmd=client|list tot-net-in=26"]
+            lines += [f"id={i} cmd=get" for i in range(clients[which])]
+            return _R(0, "\n".join(lines), "")
+        raise AssertionError(f"unexpected docker call: {a}")
+
+    monkeypatch.setattr(tl, "_docker", fake)
+    monkeypatch.setattr(tl, "_worktree_slugs", lambda: {})
+    monkeypatch.setattr(tl, "lane_name", lambda: "fdb-lane-mine")
+    monkeypatch.setattr(tl, "_started_epoch", lambda _n: age_epoch)
+    monkeypatch.setattr(tl, "IDLE_PROBE_WINDOW_S", 0.0)
+    monkeypatch.delenv(tl.ORPHAN_MAX_AGE_ENV, raising=False)
+    return removed
+
+
+def test_the_probe_excludes_ITSELF_from_the_client_count(monkeypatch):
+    """`CLIENT LIST` always lists the caller, so a naive line count is never 0
+    and the arm would be INERT against a real server while its unit test (with
+    a hand-written empty transcript) stayed green. Measured on a live container
+    2026-11-03: one line, `cmd=client|list`."""
+    def fake(*a, **k):
+        if a[2:] == ("redis-cli", "INFO", "stats"):
+            return _R(0, "total_connections_received:9\r\n", "")
+        if a[2:] == ("redis-cli", "CLIENT", "LIST"):
+            return _R(0, "id=1 cmd=client|list tot-net-in=26\n", "")
+        raise AssertionError(f"unexpected docker call: {a}")
+
+    monkeypatch.setattr(tl, "_docker", fake)
+    monkeypatch.setattr(tl, "IDLE_PROBE_WINDOW_S", 0.0)
+    assert tl._idle_sample("fdb-lane-x") == (9, 0), (
+        "the probe's own connection must not count as a client")
+
+
+def test_an_UNREADABLE_label_read_refuses_the_whole_sweep(monkeypatch):
+    """MUTATION GUARD (rule: unreadable != no labels).
+
+    `_ownership_labels()` returning `{}` on a FAILED read would be
+    indistinguishable from "docker answered, nothing is running": every labelled
+    container would silently be demoted to name-only resolution, and one whose
+    label names a LIVE owner (another clone's worktree) would be handed to the
+    age arm.
+
+    The fake is DISTINGUISHING on purpose — the label-projection `ps` fails,
+    while the plain fallback `ps -a` SUCCEEDS and lists an unownable container
+    that the age arm would otherwise reap (ancient + provably idle). So if the
+    `labels is None` refusal is removed, this test does not merely take a
+    different branch: a container is REMOVED and the assertion fails. A fake
+    that failed both reads would pass for the wrong reason.
+    """
+    import time as _t
+    removed: list = []
+
+    def fake(*a, **k):
+        if a[0] == "ps":
+            if any("Label" in str(arg) for arg in a):
+                return _R(1, "", "the label projection is unreadable")
+            return _R(0, "fdb-lane-unowned999\trunning\n", "")   # fallback works
+        if a[0] == "rm":
+            removed.append(a[1:])
+            return _R(0, "", "")
+        if a[0] == "exec" and a[2:] == ("redis-cli", "INFO", "stats"):
+            return _R(0, "total_connections_received:9\r\n", "")
+        if a[0] == "exec" and a[2:] == ("redis-cli", "CLIENT", "LIST"):
+            return _R(0, "id=1 cmd=client|list tot-net-in=26\n", "")
+        return _R(0, "", "")
+
+    monkeypatch.setattr(tl, "_docker", fake)
+    monkeypatch.setattr(tl, "_worktree_slugs", lambda: {})
+    monkeypatch.setattr(tl, "lane_name", lambda: "fdb-lane-mine")
+    monkeypatch.setattr(tl, "_started_epoch",
+                        lambda _n: _t.time() - 500 * 3600)
+    monkeypatch.setattr(tl, "IDLE_PROBE_WINDOW_S", 0.0)
+    monkeypatch.delenv(tl.ORPHAN_MAX_AGE_ENV, raising=False)
+    out = tl.reap_orphans()
+    assert removed == [], (
+        f"an unreadable LABEL read must not let the age arm act: {out}")
+    assert "ownership-label read" in out[0], out
+    assert "NOTHING was removed" in out[0], out
+
+
+def test_age_backstop_REAPS_an_unownable_IDLE_container_past_the_bound(
+        monkeypatch):
+    """The drain. cell-1 held 68 of these, oldest four days; a hand-reap is not
+    a fix, so the backstop must actually remove one."""
+    import time as _t
+    removed = _backstop_harness(
+        monkeypatch, age_epoch=_t.time() - (tl.ORPHAN_MAX_AGE_H + 1) * 3600,
+        foreign=0)
+    out = tl.reap_orphans()
+    assert ("-f", "fdb-lane-unowned123") in removed, out
+    assert "PROVABLY idle" in out[0], out
+
+
+def test_age_backstop_never_reaps_an_unownable_container_that_is_IN_USE(
+        monkeypatch):
+    """MUTATION GUARD (rule: positive idle evidence). Remove the `_idle_evidence`
+    call and a LIVE test run's container is SIGKILLed mid-suite — the failure
+    #5084's ruling exists to prevent. A client connected is enough to spare it,
+    at any age."""
+    import time as _t
+    removed = _backstop_harness(
+        monkeypatch, age_epoch=_t.time() - (tl.ORPHAN_MAX_AGE_H + 1) * 3600,
+        foreign=2)
+    out = tl.reap_orphans()
+    assert removed == [], out
+    assert "IN USE" in out[0] and "report only" in out[0], out
+
+
+def test_age_backstop_never_reaps_an_unownable_container_with_MOVING_TRAFFIC(
+        monkeypatch):
+    """MUTATION GUARD (rule: two-sample). A lane that opens a connection between
+    the samples is still a live lane, even if it has closed it by the second
+    sample — the connection count shows it. Removing the second sample lets it
+    die."""
+    import time as _t
+    removed = _backstop_harness(
+        monkeypatch, age_epoch=_t.time() - (tl.ORPHAN_MAX_AGE_H + 1) * 3600,
+        extra_conns=1)
+    out = tl.reap_orphans()
+    assert removed == [], out
+    assert "connections arrived between samples" in out[0], out
+
+
+def test_age_backstop_never_reaps_below_the_bound(monkeypatch):
+    """MUTATION GUARD (rule: the bound). Remove the age comparison and every
+    freshly started, not-yet-connected container is eligible — the clock alone
+    would become the trigger, which #5084 rejects."""
+    import time as _t
+    removed = _backstop_harness(
+        monkeypatch, age_epoch=_t.time() - (tl.ORPHAN_MAX_AGE_H - 1) * 3600,
+        foreign=0)
+    out = tl.reap_orphans()
+    assert removed == [], out
+    assert "inside the" in out[0] and "report only" in out[0], out
+
+
+def test_age_backstop_disabled_by_the_knob_reaps_nothing(monkeypatch):
+    """`=0` is the documented off switch and must be the pre-fix behaviour."""
+    import time as _t
+    removed = _backstop_harness(
+        monkeypatch, age_epoch=_t.time() - 500 * 3600, foreign=0)
+    monkeypatch.setenv(tl.ORPHAN_MAX_AGE_ENV, "0")
+    out = tl.reap_orphans()
+    assert removed == [], out
+    assert "DISABLED" in out[0], out
+
+
+def test_age_backstop_treats_UNREADABLE_idleness_as_in_use(monkeypatch):
+    """Fail-closed: "cannot tell" is never "idle" — the one decision that
+    deletes. An `exec` that fails (a non-redis container, a wedged daemon)
+    spares the container."""
+    import time as _t
+    removed: list = []
+
+    def fake(*a, **k):
+        if a[0] == "ps":
+            return _R(0, "fdb-lane-unowned123\trunning\t\n", "")
+        if a[0] == "rm":
+            removed.append(a[1:])
+            return _R(0, "", "")
+        return _R(1, "", "daemon wedged")
+
+    monkeypatch.setattr(tl, "_docker", fake)
+    monkeypatch.setattr(tl, "_worktree_slugs", lambda: {})
+    monkeypatch.setattr(tl, "lane_name", lambda: "fdb-lane-mine")
+    monkeypatch.setattr(tl, "_started_epoch",
+                        lambda _n: _t.time() - 500 * 3600)
+    out = tl.reap_orphans()
+    assert removed == [], out
+    assert "idleness unreadable" in out[0], out
 
 
 def test_wait_ready_does_not_overshoot_its_budget_when_the_host_probe_black_holes(
