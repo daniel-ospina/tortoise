@@ -1249,7 +1249,7 @@ def test_a_census_whose_row_classifications_disagree_with_its_counts_is_refused(
 
     Non-vacuous: with the witness disabled every test still passes, which is
     the "could be reverted with the suite still green" shape this bundle exists
-    to avoid (README:163).
+    to avoid (README:163-164).
     """
     doc = {"fingerprint": {"activate_beliefs": True},
            "outcomes": [
@@ -1379,7 +1379,7 @@ def test_committed_census_rederives_its_own_aggregate():
     ⚠️ Three published cells are RESIDUALLY un-derived, by the artifact's own
     limits rather than by choice, and this pin cannot close them:
     ``questions_in_run`` / ``questions_failed`` are checked only against each
-    other and the ratio (`:1384`), because ``per_question`` carries outcomes
+    other and the ratio (`:1456`), because ``per_question`` carries outcomes
     and never the failure ids, so a coordinated edit of both ships green; and
     the per-row shape IDENTITY — ``inert_questions[].reason`` is where the
     shape is read from, so a BALANCED swap of two rows' reasons reproduces
