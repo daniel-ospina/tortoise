@@ -1088,7 +1088,12 @@ _TURN_SHAPE_NARRATIVE_HOMES_PRESENT_TENSE_ONLY = (
 #:   explicitly not this claim. Measured: ``writes ``pointKind='claim'`` `` was
 #:   a false RED before, and is GREEN now.
 _PRESENT_TENSE_DEMO_EVENT_WRITER = re.compile(
-    r"(?:demo|dashboard|hosted|sample)[^.\n]{0,40}?seed(?:er)?\s+"
+    # The SUBJECT: the qualified seed noun, the FUNCTION name, or the bare
+    # ``the seeder``. `the ask-fixture seeder` does not match — the article has
+    # to sit directly on ``seeder`` — and that seeder really does read `event`,
+    # so it must not be swept up.
+    r"(?:(?:demo|dashboard|hosted|sample)[^.\n]{0,40}?seed(?:er)?"
+    r"|_seed_demo_graph|the\s+seeder)\s+"
     r"(?:also\s+)?(?:writes?|mints?|creates?)\b"
     # * **NEGATION** — the CORRECTED sentences say the seed "writes NO turn
     #   node at all", and a bare verb match refuses exactly the prose this pin
@@ -1125,14 +1130,30 @@ def _present_tense_writer_claim(flat: str) -> str | None:
 #: rather than circular — the alternative, spelling every sample in CAPITALS so
 #: the pattern misses its own comment, only protects the one demonstration and
 #: leaves the rest of the file's prose in the population.
-_GUARD_BLOCK = "# ── the DELETED demo turn writer"
+#: ⛔ Spelled as a CONCATENATION so this line does not contain the marker:
+#: the check below requires exactly ONE occurrence in the file, and a
+#: self-matching literal here would make a reworded header split at this
+#: assignment — reintroducing the self-grading it exists to prevent.
+_GUARD_BLOCK = "# ── the " + "DELETED demo turn writer"
 
 
 def _narrative_text(rel: str) -> str:
     """The home's text, with this guard's own commentary removed for its file."""
     raw = (_REPO / rel).read_text(encoding="utf-8")
     if rel == "tests/test_session_reinjection_rules.py":
-        raw = raw.split(_GUARD_BLOCK, 1)[0]
+        # ⛔ The excision must be VERIFIED, not assumed: `split` with a marker
+        # that no longer occurs silently returns the whole file, which puts the
+        # guard's own commentary back in the population and lets the pin grade
+        # ITSELF again (#10675 review round 11, P2). Measured: renaming the
+        # section header made the pin RED on its own CAPITALS demonstration,
+        # with nothing pointing at the real cause.
+        parts = raw.split(_GUARD_BLOCK, 1)
+        assert len(parts) == 2 and raw.count(_GUARD_BLOCK) == 1, (
+            f"the guard block marker {_GUARD_BLOCK!r} was not found in "
+            f"`{rel}` — the section header it names is what keeps this pin from "
+            "grading its own commentary, so a reworded header must update "
+            "`_GUARD_BLOCK` too")
+        raw = parts[0]
     return " ".join(raw.split())
 
 
@@ -1145,11 +1166,16 @@ def _narrative_text(rel: str) -> str:
 #: introducing it had already made stale; #10675 review round 10, P3). A
 #: file-scoped check stays GREEN whenever the marker leaves the one sentence
 #: that makes the conjunct defensible — and for THIS file it was strictly
-#: tautological, since the assertion's own message names ``#10000``. A WINDOW
-#: rather than a paragraph boundary because one home states the shape in one
-#: paragraph and the history in the next (``_create_demo_event``). Measured:
-#: stripping the marker from each home's explaining text reds this on all five.
-_MARKER_WINDOW = 400
+#: tautological, since the assertion's own message names ``#10000``.
+#: ⚠️ It is a DISTANCE heuristic (±`_MARKER_WINDOW` chars around the
+#: mention), deliberately generous: a tighter radius red a home that was merely
+#: EXPANDED — measured, 500 chars of new prose between the mention and its
+#: marker, still the same sentence (#10675 review round 11, P3) — while a
+#: paragraph-scoped or sentence-scoped window red a home whose marker sits in
+#: the sentence BEFORE its `demo-seed` mention. Its job is to tell "this home
+#: says the nodes are pre-#10000 history" from "any `#10000` anywhere in this
+#: file"; it is not a grammar.
+_MARKER_WINDOW = 800
 _SEED_MENTION = re.compile(r"demo(?:/dashboard)?[\s-]+seed", re.IGNORECASE)
 
 
@@ -1166,7 +1192,7 @@ def test_no_home_states_the_deleted_demo_turn_writer_as_current_fact():
     this round edited: that site-local shape is the failure. The same sentence
     was restated in `session_reinjection.py`, `retrieval.py` and
     `test_session_reinjection.py` and left present-tense HERE, so a pin inside
-    the one file being fixed reds on nothing when a sixth home is added.
+    the one file being fixed reds on nothing when another home is added.
     """
     missing = [rel for rel in _TURN_SHAPE_NARRATIVE_HOMES
                + _TURN_SHAPE_NARRATIVE_HOMES_PRESENT_TENSE_ONLY

@@ -23,11 +23,13 @@ never overwrite the first machine's id.
 """
 from __future__ import annotations
 
+import ast
 import contextlib
 import hashlib
 import inspect
 import re
 import sys
+import textwrap
 
 import pytest
 
@@ -518,20 +520,32 @@ def test_demo_seed_is_excluded_from_the_primitive(client):
     # nothing to serve — that refusal/contradiction is the regression the value
     # was changed to remove. Asserted by VALUE, not by parameter name, so a
     # refactor that reintroduces a declared length fails this pin.
-    # ⛔ Asserted over the CYPHER statement lines, not over `src` and not over
-    # "lines that are not full-line comments". Both weaker forms are satisfied by
-    # PROSE, measured (#10675 review P3): `_seed_demo_graph`'s `NOT RETROACTIVE`
-    # note quotes `s.turn_count=0`, and a docstring or a TRAILING comment carries
-    # the literal past a whole-line filter — so a statement rewritten to declare
-    # a length stayed green either way. Here the assignment is read from the
-    # statement itself and must be exactly 0: a param (`turn_count=$n`) or a
-    # literal fails it. Residual: a trailing Python comment mentioning a
-    # NON-zero literal would over-block this pin — it can never make it pass,
-    # which is the direction that matters.
+    # ⛔ Asserted over the CYPHER STRING CONSTANTS of the function, read through
+    # `ast` — not over `src`, not over "lines that are not full-line comments",
+    # and not over "quoted lines". Every line-level form is satisfied by PROSE,
+    # measured over three review rounds (#10675):
+    #   * `"s.turn_count=0" in src` — the `NOT RETROACTIVE` note quotes the
+    #     literal, so a statement declaring a length stayed GREEN;
+    #   * a whole-line `#` filter — a TRAILING comment or a DOCSTRING carries it;
+    #   * a "quote-prefixed line" filter — a docstring line is quote-prefixed
+    #     too, so a TRUE history sentence ("before #10000 the MERGE used to SET
+    #     `s.turn_count=3`") FALSE-RED the pin.
+    # Parsing is what separates a statement from prose about one: the docstring
+    # is excluded by identity, and the population is the string literals that
+    # contain Cypher. The only `turn_count=` assignment among them must be 0, so
+    # a param (`turn_count=$n`) or a literal fails it.
+    fn = ast.parse(textwrap.dedent(src)).body[0]
+    doc = ast.get_docstring(fn, clean=False)
     cypher = [
-        line for line in src.splitlines()
-        if ("SET " in line or "MERGE " in line)
-        and not line.lstrip().startswith("#")]
+        node.value for node in ast.walk(fn)
+        if isinstance(node, ast.Constant) and isinstance(node.value, str)
+        and node.value != doc
+        and ("SET " in node.value or "MERGE " in node.value)]
+    # ⚠️ NON-VACUITY: an empty population would make the assertion below pass for
+    # the wrong reason, and a future refactor could hand the Cypher to a helper.
+    assert cypher, (
+        "no Cypher string constants were found in `_seed_demo_graph` — this "
+        "pin's population is empty, so its verdict means nothing")
     assignments = re.findall(r"turn_count\s*=\s*([^,\)\"\s]+)",
                              "\n".join(cypher))
     assert assignments == ["0"], (

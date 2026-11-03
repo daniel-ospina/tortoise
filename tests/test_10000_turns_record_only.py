@@ -3242,7 +3242,11 @@ def test_the_repair_note_names_BOTH_halves_of_a_legacy_demo_graph():
     assert "epi_turn" in repair and "DETACH DELETE" in repair, (
         "the repair paragraph does not say which nodes go or how: "
         f"{repair!r}")
-    assert "s.turn_count=0" in repair, (
+    # ⛔ Not the bare literal: `s.turn_count=0` demands one SPELLING of the
+    # instruction, so a same-meaning rewording ("reset `s.turn_count` to 0")
+    # is refused although the purge lane is told exactly the right thing
+    # (#10675 review round 11, P3). The VALUE is what the note must pin.
+    assert re.search(r"s\.turn_count\s*=\s*0", repair), (
         "the repair paragraph names the node delete but not the counter — "
         "deleting the `epi_turn*` nodes ALONE leaves `s.turn_count=3` beside "
         "zero rows, which the read refuses (503 on an armed deployment, "
