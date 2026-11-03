@@ -110,7 +110,7 @@ being tracked.
 **dict**, not a list — the `list_points` body build — and the route declares no `response_model`
 (`@app.get("/v1/points")` carries none), so a marker rides it **additively**, exactly as it rides
 `/v1/search`: build the body, then `response.update(truncation_field(…))`. #10500 recorded that shape as a `response_fields` row in
-`config/surface-manifest.yml` (`:121-143`), **not** as an MCP/SDK surface approval — and its own
+`config/surface-manifest.yml` → `response_fields[tortoise_search].truncated`, **not** as an MCP/SDK surface approval — and its own
 note draws the line there: wrapping a *list* in an object is the return-type change; adding a field
 to an object body is not. So this one was **SILENT and fixable without an approval** — recorded here
 as **not yet done**, never as blocked — and it is **now done**: the §2 row above reads **MARKS**.

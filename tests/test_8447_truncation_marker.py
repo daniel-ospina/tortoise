@@ -43,6 +43,7 @@ warm the model once before collecting evidence.
 from __future__ import annotations
 
 import asyncio
+import re
 
 import pytest
 
@@ -977,6 +978,41 @@ class TestTheCensusNamesItsEvidenceHome:
         return text.split("## 2. The census", 1)[1].split(
             "## 3. `OVERRIDES:`", 1)[0]
 
+    #: A line coordinate in a census cell, in EITHER spelling the doc has used:
+    #: contiguous (``hosted_api.py:10209``) and split across two code spans
+    #: (```config/surface-manifest.yml` (`:121-143`)```). The filename must be
+    #: followed by the coordinate, allowing only the punctuation that separates
+    #: them — a closing backtick, whitespace, and the opening paren/bracket.
+    _LINE_CITATION = re.compile(
+        r"[\w./-]+\.(?:py|ya?ml)"
+        r"[\s`'\"]*"          # a closing code span and/or whitespace
+        r"[(\[]?"             # the split form's opening paren/bracket
+        r"[\s`'\"]*"
+        r":\d[\w-]*")        # the coordinate itself
+
+    def test_the_pin_sees_the_split_form_too(self):
+        """Positive control: the split spelling is a line coordinate TOO.
+
+        The pin above is only worth its green if it can red. Its first version
+        matched the filename and the digits as one contiguous run, so the form
+        §2a actually carried —
+        ``config/surface-manifest.yml` (`:121-143`)`` — slipped past it: the
+        digits were still in the census, and the pin still said the census
+        cited none. This asserts the pattern against that exact string (and
+        against the symbol form that replaced it, which must NOT match), so
+        narrowing the pattern reds here instead of silently reopening the hole.
+        """
+        assert self._LINE_CITATION.findall(
+            "a row in\n`config/surface-manifest.yml` (`:121-143`), **not** as an"), (
+            "the census pin no longer sees the split spelling of a line "
+            "coordinate, so it can pass over exactly the drift it exists to "
+            "catch")
+        assert not self._LINE_CITATION.findall(
+            "a row in `config/surface-manifest.yml` → "
+            "`response_fields[tortoise_search].truncated`, **not** as an"), (
+            "the census pin reds on the SYMBOL form it recommends — a pin its "
+            "own suggested fix cannot satisfy is a trap")
+
     def test_the_census_cites_symbols_not_line_numbers(self):
         """A line number in the census goes stale on the next unrelated merge.
 
@@ -990,11 +1026,16 @@ class TestTheCensusNamesItsEvidenceHome:
         The fix is the form the register in `tortoise/truncation.py` already
         uses and this PR's own scan pin already chose: cite `<module>::<name>`,
         which does not move when somebody inserts a blank line above it.
-        """
-        import re
 
-        stale = sorted(re.findall(r"[\w./-]+\.(?:py|ya?ml):\d[\w-]*",
-                                  self._census_section()))
+        ⚠️ BOTH spellings of the coordinate are caught, because the first
+        version of this pin only saw the contiguous one. A file named inside a
+        code span, with the line in its own parenthesised span —
+        ``config/surface-manifest.yml` (`:121-143`)`` — is the same stale
+        coordinate one keystroke apart, and it survived that pin while §2a
+        carried it. :meth:`test_the_pin_sees_the_split_form_too` is the
+        positive control: it reds if this pattern narrows back to contiguous.
+        """
+        stale = sorted(self._LINE_CITATION.findall(self._census_section()))
         assert not stale, (
             "the census cites absolute line numbers, which go stale on every "
             "unrelated edit to the file they point into — cite "
