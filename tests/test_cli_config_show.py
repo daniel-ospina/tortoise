@@ -45,7 +45,9 @@ HARNESS = json.dumps({
 def _isolated(monkeypatch, tmp_path):
     """Never read the developer's real stores; never resolve a stray ./.tortoise."""
     monkeypatch.setenv("HOME", str(tmp_path))
-    for var in ("TORTOISE_API_KEY", "TORTOISE_API_URL", "TORTOISE_DB_URI"):
+    for var in ("TORTOISE_API_KEY", "TORTOISE_API_URL", "TORTOISE_DB_URI",
+                "TORTOISE_DB_PATH", "FALKORDB_HOST", "FALKORDB_PORT",
+                "FALKORDB_PASSWORD"):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.chdir(tmp_path)
 
@@ -467,9 +469,9 @@ def test_a_broken_symlink_store_is_unreadable_not_absent(capsys, tmp_path):
 
 @pytest.mark.parametrize("body, expectation", [
     (json.dumps({"api_key": ""}), "empty-key"),
-    (json.dumps({"signup_token": "st_" + "b" * 64}), "invalid-key"),
-    (json.dumps({"api_key": None}), "invalid-key"),
-    (json.dumps({}), "invalid-key"),
+    (json.dumps({"signup_token": "st_" + "b" * 64}), "no-key"),
+    (json.dumps({"api_key": None}), "no-key"),
+    (json.dumps({}), "no-key"),
     (json.dumps({"api_key": 12345}), "invalid-key"),
     ("[1, 2, 3]", "corrupt"),
     ("{not json", "corrupt"),
@@ -503,7 +505,7 @@ def test_a_legacy_store_with_no_api_key_is_refused_not_called_empty(capsys, tmp_
         json.dumps({"signup_token": "st_" + "b" * 64}))
     assert _run() == 1
     out = capsys.readouterr().out
-    assert "invalid-key" in out
+    assert "no-key" in out
     assert "REFUSED" in out
 
 
@@ -559,9 +561,10 @@ def test_the_cache_graph_conventions_are_printed_for_the_resolved_org(capsys, tm
 @pytest.mark.parametrize("uri, kind, warned", [
     ("docker://:pw@localhost:16379/tortoise", "database URI", False),
     ("/var/lib/tortoise/graph.db", "embedded file path", False),
-    ("./local.db", "embedded file path", False),
-    ("bolt://localhost:7687", None, True),               # unrecognised SCHEME
     ("/tmp/me@work/db.fdb", "embedded file path", False),  # a path, not userinfo
+    # the RESOLVER decides: a RELATIVE path and a non-db scheme are both refused
+    ("./local.db", "configured-unusable", False),
+    ("bolt://localhost:7687", "configured-unusable", False),
 ])
 def test_the_graph_store_classifies_the_target_instead_of_crying_wolf(
         monkeypatch, capsys, tmp_path, uri, kind, warned):
@@ -570,7 +573,11 @@ def test_the_graph_store_classifies_the_target_instead_of_crying_wolf(
     monkeypatch.setenv("TORTOISE_DB_URI", uri)
     assert _run(("config", "show", "--json")) == 0
     store = json.loads(capsys.readouterr().out)["graph_store"]
-    assert (kind is None and "target_kind" not in store) or store.get("target_kind") == kind
+    if kind == "configured-unusable":
+        assert store["status"] == "configured but unusable"
+        assert "target" not in store
+        return
+    assert store.get("target_kind") == kind
     assert bool(store.get("warning")) is warned
     if kind == "embedded file path":
         # a filesystem path has no userinfo, so the fail-closed `@` masker must
@@ -878,14 +885,17 @@ def test_an_untrusted_store_value_cannot_forge_a_report_line(monkeypatch, capsys
         next(ln for ln in out.splitlines() if "evil" in ln)]
 
 
-def test_a_set_but_empty_db_uri_is_called_out(monkeypatch, capsys, tmp_path):
+def test_a_set_but_empty_db_uri_resolves_to_the_default(monkeypatch, capsys, tmp_path):
+    """An EMPTY string is treated as unset by the resolver (only whitespace is
+    rejected as a relative path) — so the report must say "default", not
+    "unusable", and must not claim a store it did not resolve."""
     _global(tmp_path)
     monkeypatch.setenv("TORTOISE_DB_URI", "")
     assert _run(("config", "show", "--json")) == 0
     store = json.loads(capsys.readouterr().out)["graph_store"]
-    assert store["source"] == "none"
-    assert "set but empty" in store.get("note", "")
-    assert "target" not in store
+    assert store["source"] == "default"
+    assert store["note_default"]
+    assert "status" not in store
 
 
 def test_a_whitespace_only_db_uri_is_unset_everywhere_not_half_set(
@@ -896,10 +906,9 @@ def test_a_whitespace_only_db_uri_is_unset_everywhere_not_half_set(
     monkeypatch.setenv("TORTOISE_DB_URI", "   ")
     assert _run(("config", "show", "--json")) == 0
     store = json.loads(capsys.readouterr().out)["graph_store"]
-    assert store["source"] == "none"
+    assert store["status"] == "configured but unusable"
     assert "target" not in store
     assert "target_kind" not in store
-    assert "set but empty" in store["note"]
 
 
 def test_a_key_with_surrounding_whitespace_is_reported_not_called_healthy(
@@ -1438,6 +1447,87 @@ def test_the_recovery_token_is_found_where_recover_reads_it(monkeypatch, capsys,
     assert "recovery_token_note" in cred                # the #1752 divergence
 
 
+def test_an_env_key_with_an_unresolvable_home_does_not_traceback(monkeypatch, capsys, tmp_path):
+    """The TOKEN reader calls `Path.home()` itself, and the guard is bypassed on
+    the env-key path because the resolver returns before touching home."""
+    monkeypatch.setenv("TORTOISE_API_KEY", GLOBAL_KEY)
+    monkeypatch.setenv("HOME", "~/x")
+    assert _run(("config", "show", "--json")) in (0, 1)
+    cap = capsys.readouterr()
+    assert "Traceback" not in cap.out + cap.err
+
+
+@pytest.mark.parametrize("env, source", [
+    ({"TORTOISE_DB_PATH": "/data/tortoise.db"}, "TORTOISE_DB_PATH"),
+    ({"FALKORDB_HOST": "localhost"}, "FALKORDB_* trio"),
+    ({}, "default"),
+])
+def test_the_graph_source_follows_the_resolvers_precedence(
+        monkeypatch, capsys, tmp_path, env, source):
+    _global(tmp_path)
+    for k, v in env.items():
+        monkeypatch.setenv(k, v)
+    assert _run(("config", "show", "--json")) == 0
+    store = json.loads(capsys.readouterr().out)["graph_store"]
+    assert store["source"] == source
+    assert store["target"]                     # the RESOLVED target, always
+
+
+def test_a_legacy_trio_notice_does_not_corrupt_json(monkeypatch, capsys, tmp_path):
+    """`_resolve_db_target` PRINTS its trio notice; unredirected it landed in front
+    of the JSON payload and made `--json` unparseable for a script."""
+    _global(tmp_path)
+    monkeypatch.setenv("FALKORDB_HOST", "localhost")
+    assert _run(("config", "show", "--json")) == 0
+    cap = capsys.readouterr()
+    json.loads(cap.out)                        # must be pure JSON
+    assert "legacy" in cap.err                 # the notice went to stderr
+
+
+@pytest.mark.parametrize("env, value", [
+    ({"TORTOISE_DB_URI": "relative/x.db"}, "relative"),
+    ({"TORTOISE_DB_URI": "   "}, "blank"),
+    ({"TORTOISE_DB_PATH": "relative/p.db"}, "relative"),
+])
+def test_a_configured_but_unusable_store_is_reported_as_such(
+        monkeypatch, capsys, tmp_path, env, value):
+    """Falling through to the default note claimed the variable was unset and sent
+    the user to `doctor` for a store the CLI REFUSES."""
+    _global(tmp_path)
+    for k, v in env.items():
+        monkeypatch.setenv(k, v)
+    assert _run(("config", "show", "--json")) == 0
+    store = json.loads(capsys.readouterr().out)["graph_store"]
+    assert store["status"] == "configured but unusable"
+    assert store["error"]
+    assert "target" not in store
+
+
+def test_the_harness_no_key_state_is_not_called_invalid(monkeypatch, capsys, tmp_path):
+    _global(tmp_path)
+    _harness(tmp_path, json.dumps({"apiUrl": "https://x.example"}))
+    assert _run(("config", "show", "--json")) == 0
+    harness = json.loads(capsys.readouterr().out)["harness"]
+    assert harness["state"] == "no-key"        # absent/None, not a wrong type
+    assert _run() == 0
+    out = capsys.readouterr().out
+    assert "unusable harness store" not in out
+
+
+def test_a_different_PATH_is_not_the_same_endpoint(capsys, tmp_path):
+    _write(tmp_path / ".tortoise" / "credentials.json", json.dumps({
+        "api_key": GLOBAL_KEY, "api_url": "https://api.example/v1",
+        "org_id": "00e8e36129794bcdb2c992ff47",
+    }))
+    _harness(tmp_path, json.dumps({"apiKey": GLOBAL_KEY,
+                                  "apiUrl": "https://api.example/v2"}))
+    assert _run(("config", "show", "--json")) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["identity_host_agrees"] is False
+    assert _run() == 0
+    assert "DIFFERENT endpoint" in capsys.readouterr().out
+
+
 def test_a_keyless_harness_file_is_not_called_unusable(monkeypatch, capsys, tmp_path):
     """`resolveConfig` reads a keyless harness file happily — it supplies apiUrl
     and settings while the env supplies the key. Telling the user to delete it
@@ -1646,9 +1736,9 @@ def test_a_non_string_api_url_does_not_crash_the_report(capsys, tmp_path):
 
 
 @pytest.mark.parametrize("uri, redacted", [
-    ("docker:user:S3cretPw@cache.example:6379/0", True),   # scheme dropped: FAIL CLOSED
     ("/tmp/me@work/db.fdb", False),                         # a path, no userinfo
     ("docker://:pw@localhost:16379/tortoise", True),
+    ("docker://user:pw@cache.example:6379/0", True),
 ])
 def test_the_graph_target_keeps_the_maskers_fail_closed_rule(
         monkeypatch, capsys, tmp_path, uri, redacted):
@@ -1656,12 +1746,24 @@ def test_the_graph_target_keeps_the_maskers_fail_closed_rule(
     monkeypatch.setenv("TORTOISE_DB_URI", uri)
     assert _run(("config", "show", "--json")) == 0
     cap = capsys.readouterr()
-    target = json.loads(cap.out)["graph_store"]["target"]
+    store = json.loads(cap.out)["graph_store"]
     if redacted:
-        assert "S3cretPw" not in target and "pw@" not in target
-        assert "S3cretPw" not in cap.out + cap.err
+        assert "pw@" not in store.get("target", "")
+        assert "pw@" not in cap.out + cap.err
     else:
-        assert target == uri
+        assert store["target"] == uri
+
+
+def test_a_scheme_dropped_dsn_is_refused_without_echoing_it(monkeypatch, capsys, tmp_path):
+    """The #2987 shape: a copy-paste that dropped the scheme. The RESOLVER rejects
+    it as a relative path, so the report refuses it — and must not echo it."""
+    _global(tmp_path)
+    monkeypatch.setenv("TORTOISE_DB_URI", "docker:user:S3cretPw@cache.example:6379/0")
+    assert _run(("config", "show", "--json")) == 0
+    cap = capsys.readouterr()
+    store = json.loads(cap.out)["graph_store"]
+    assert store["status"] == "configured but unusable"
+    assert "S3cretPw" not in cap.out + cap.err
 
 
 def test_a_suspended_403_without_an_appeal_url_still_explains_itself(capsys):
