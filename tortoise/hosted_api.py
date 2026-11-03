@@ -8499,21 +8499,26 @@ def _check_org_limit(org: dict, resource: str, *,
     the rotate path may pass a non-zero credit, and only after
     ``quota.api_key_occupies_slot`` proved the displaced row is counted.
     sdk (#8906): the SDK this request WRITES through. Count on it, never on a
-    fresh one — an omitted ``sdk`` made ``_count_resource`` mint
-    ``_make_sdk(namespace=org_id)``, i.e. the org's DEFAULT graph
-    ``org_{org_id}``, while a graph-bound key's data path opens its own
-    ``graph_namespace`` (``org_{org_id}_{gid}``, ``_data_graph_name``). For a
-    per-graph credential those two graphs ALWAYS differ (a graph-bound key
-    cannot even bind the default row, and `/v1/team` answers it 403
-    GRAPH_SCOPED_TEAM_SURFACE), so the gate compared the cap against a graph
-    the request never touches in either direction: a full default graph
-    refused every write to an EMPTY one (the permanent REST freeze), and a
-    full write graph was admitted because the default was small. This is the
-    house rule MCP and capture already obey (`mcp_server._enforce_quota`:
-    "Count on the SAME org SDK the tool writes to … so the count and the write
-    can never target different databases"). Registry-scoped resources
-    (api_keys/users/graphs) ignore it — they count through the registry, not a
-    tenant graph — so callers may pass ``sdk`` for every resource.
+    fresh one. The contract lives at the seam that owns the trap —
+    ``quota.enforce_org_limit``'s ``sdk:`` doc explains which graph an OMITTED
+    sdk counts; the short version is that it counts the org's DEFAULT graph
+    ``org_{org_id}``, while a CUSTOM-graph-bound key writes
+    ``_data_graph_name(org)`` = its own ``graph_namespace``
+    (``org_{org_id}_{gid}``) — two graphs that differ for that credential class
+    by construction (the mint matrix refuses a ``kind='default'`` binding, so a
+    custom binding's namespace is never ``org_{org_id}``). For such a key the
+    omitted-sdk gate therefore compared the cap against a graph the request
+    never touches, in BOTH directions: a full default graph refused every write
+    to an EMPTY one (the permanent REST freeze), and a full custom graph was
+    admitted because the default was small. This is the house rule MCP and
+    capture already obey (`mcp_server._enforce_quota`: "Count on the SAME org
+    SDK the tool writes to … so the count and the write can never target
+    different databases"). ⚠️ NOT every per-graph credential diverges: a
+    legacy/pre-guard key bound to the org's DEFAULT graph node resolves to
+    ``org_{org_id}`` and always agreed (see ``_capture_session_key``). And
+    registry-scoped resources (api_keys/users/graphs) ignore ``sdk`` — they
+    count through the registry, not a tenant graph — so callers may pass it for
+    every resource.
 
     Fail-closed decision (#686)
     ~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -10633,16 +10638,8 @@ async def create_object(body: CreateObjectRequest, request: Request,
     # #3773: the SDK open and the quota count are SYNC FalkorDB work too — both
     # go through the #3498 offload seam (graph pool) instead of running on the
     # loop before the off-loaded write below.
-    # #8906: the SDK opens FIRST because the gate now counts the graph THIS
-    # request writes (``_check_org_limit(..., sdk=sdk)``). Without the sdk the
-    # count minted ``namespace=org_id`` — the org's DEFAULT graph — while this
-    # handler's ``sdk.create_object`` writes a graph-bound key's own graph, so
-    # a full default graph refused an EMPTY write graph. The open is not new
-    # work: the count query is itself a graph read, so this is the same round
-    # trip the gate already paid, on the RIGHT graph. One consequence, by
-    # design: for a graph-bound key a vanished/unowned graph now answers its
-    # 403/404 BEFORE the quota refusal (you cannot be told about a cap on a
-    # graph you may not open).
+    # #8906: sdk FIRST, then the gate, so the count runs on the graph this
+    # request writes (see `_check_org_limit`'s `sdk:` doc).
     sdk = await _data_sdk_offloaded(org)
     await _graph_offload(lambda: _check_org_limit(org, "points", sdk=sdk),
                          op="check_org_limit.points")
@@ -10705,8 +10702,8 @@ async def create_subject(body: CreateSubjectRequest, request: Request,
     """
     _require_scope(org, "graphs:write", "create_subject")
     # #3773: same off-load of the SDK open + quota count as create_object above.
-    # #8906: same ORDER too — the sdk is opened first so the gate counts the
-    # graph ``sdk.create_subject`` writes, not the org's default graph.
+    # #8906: same ORDER too — the count must run on the graph this request
+    # writes (`_check_org_limit`'s `sdk:` doc).
     sdk = await _data_sdk_offloaded(org)
     await _graph_offload(lambda: _check_org_limit(org, "points", sdk=sdk),
                          op="check_org_limit.points")
@@ -10746,11 +10743,9 @@ async def create_point(body: CreatePointRequest, request: Request, org: dict = D
     # #3773: the SDK open and the quota count are SYNC FalkorDB work too — they
     # go through the #3498 offload seam (graph pool) instead of running on the
     # loop before the off-loaded write below.
-    # #8906: the sdk opens BEFORE the gate — the count must run on the SDK this
-    # request writes through (see create_object above for the full rationale;
-    # this is the door the P0 was measured on: the write graph held 200 Points
-    # in 48 minutes while the gate reported a frozen `used=25000` from the
-    # org's default graph).
+    # #8906: sdk BEFORE the gate — this is the door the P0 was measured on (the
+    # write graph held 200 Points in 48 minutes while the gate reported a frozen
+    # `used=25000` read from the org's default graph).
     sdk = await _data_sdk_offloaded(org)
     await _graph_offload(lambda: _check_org_limit(org, "points", sdk=sdk),
                          op="check_org_limit.points")
@@ -19637,12 +19632,9 @@ async def commit_session(request: Request, org: dict = Depends(get_current_org_g
         # budget adjudication) is unchanged, so an idempotent re-POST is still
         # never gated.
         #
-        # #8906: count on the SAME SDK this commit writes through. `sdk` was
-        # opened by the handler off-loop above and ``_commit_sync`` is a closure
-        # over it, so it is the graph the writes below land in. Omitting it
-        # counted the org's DEFAULT graph instead — a graph a graph-bound key
-        # never writes — which refused every commit to an empty key graph whose
-        # org default was full.
+        # #8906: count on the SAME SDK this commit writes through — `sdk` is the
+        # handle the handler opened off-loop above, so the count and the writes
+        # below target one graph (`_check_org_limit`'s `sdk:` doc).
         _check_org_limit(org, "points", sdk=sdk)
 
         # [4c] #4051 §3.1 — the per-ORG ingest budget. The gates above bound the
@@ -35518,11 +35510,13 @@ async def public_demo(org: dict = Depends(get_current_org_gated)):  # noqa: B008
         # 0-quota bypass (bug-hunt 2026-08-28 server P2-13). Idempotent
         # re-calls short-circuit above and skip the gate (no write).
         # #8906: this door is DEFAULT-GRAPH ONLY by construction —
-        # `_reject_graph_bound_org_surface` refuses a graph-bound key before
-        # the gate, and `_seed_demo_graph` opens ``namespace=org_id``. So its
-        # count and its write already agreed; the local `sdk` is passed anyway
-        # so the invariant is STRUCTURAL (one handle) rather than an accident
-        # of two constructions that happen to resolve alike.
+        # `_reject_graph_bound_org_surface` refuses a graph-bound key above, and
+        # `_seed_demo_graph` below opens its own ``namespace=org_id`` handle, so
+        # the count and the write already resolve alike (two constructions, same
+        # graph — NOT one shared handle). Passing the local `sdk` makes the count
+        # run on the graph `_seed_demo_sync` just probed; the structural guard
+        # that keeps this door honest is the 403 above. If `_seed_demo_graph`'s
+        # namespace ever moves, thread THIS sdk into it.
         _check_org_limit(org, "points", sdk=sdk)
         # The shared demo seeder (extracted from /internal/demo) opens its own
         # SDK and writes ~13 Points.

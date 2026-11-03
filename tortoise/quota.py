@@ -943,6 +943,10 @@ def _count_resource(org_id: str, resource: str, sdk=None) -> int:
 
         # ── Tenant-graph-scoped counts (sessions, points) ──
         if sdk is None:
+            # #8906: this fallback is the DEFAULT graph `org_{org_id}`, NOT the
+            # request's — a custom-graph-bound key writes elsewhere. Any caller
+            # reaching here for a tenant-graph resource is counting the wrong
+            # graph; see `enforce_org_limit`'s `sdk:` doc for the full contract.
             sdk = _make_sdk(namespace=org_id)
         if resource == "documents":
             # #1726 Slice 1, re-pointed by D10 (ONTOLOGY v3.15 §4.4): the
@@ -1068,7 +1072,26 @@ def enforce_org_limit(limits: dict | None, resource: str, sdk=None, *,
             `int()` refuses it and it is refused here too.
         resource: "points" | "api_keys" | "sessions" | "users" | "graphs"
             | "documents".
-        sdk: pre-built org SDK (REST callers already hold one) — optional.
+        sdk: pre-built org SDK (REST callers already hold one) — optional FOR
+            REGISTRY-SCOPED RESOURCES ONLY. ⛔ For a TENANT-GRAPH resource
+            (`points`, `sessions`, `documents`) it is effectively REQUIRED: an
+            omitted one makes ``_count_resource`` mint
+            ``_make_sdk(namespace=org_id)``, i.e. the org's DEFAULT graph
+            ``org_{org_id}`` — while a CUSTOM-graph-bound key writes its own
+            ``graph_namespace`` (``org_{org_id}_{gid}``). Those two graphs differ
+            for that credential class by construction, so an omitted sdk compares
+            the cap against a graph the request never touches: a full default
+            graph refuses writes to an EMPTY bound graph (a permanent refusal)
+            and a full bound graph is admitted while the default is small (a cap
+            hole). This was #8906, live on every REST points door. Pass the
+            request's own SDK. The invariant is MCP's house rule verbatim
+            ("count on the SAME org SDK the tool writes to … so the count and the
+            write can never target different databases"), and the omission is
+            silent — nothing fails loudly when a new door forgets it, which is
+            why the contract is stated HERE rather than at each caller.
+            A legacy/pre-guard key bound to the org's DEFAULT graph node resolves
+            to ``org_{org_id}`` and never diverged; registry resources
+            (api_keys/users/graphs) ignore this argument entirely.
         slot_credit: #4355 — how many slots this write RELEASES as part of the
             same operation, so the admission check is evaluated against the
             post-release count. It exists for exactly ONE caller: the

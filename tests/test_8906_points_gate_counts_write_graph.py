@@ -4,27 +4,41 @@ The defect (P0-blocker, verified against the deployed build): every REST
 points door called ``_check_org_limit(org, "points")``, whose
 ``enforce_org_limit(org, resource)`` took NO sdk, so ``_count_resource`` fell
 to ``_make_sdk(namespace=org_id)`` — the org's DEFAULT graph ``org_{org_id}``
-— while a graph-bound key writes the key's ``graph_namespace``
-(``_data_graph_name`` → ``org_{org_id}_{gid}``). The two never agree for a
-per-graph credential, by construction, so:
+— while a CUSTOM-graph-bound key writes the key's ``graph_namespace``
+(``_data_graph_name`` → ``org_{org_id}_{gid}``). For that credential class the
+two graphs differ BY CONSTRUCTION (the mint matrix refuses a
+``kind='default'`` binding, so a custom binding's namespace is never
+``org_{org_id}``; §Not-a-per-graph-key below covers the legacy exception), so:
 
-- a per-graph key with an EMPTY write graph is refused (402) because its
-  org's default graph is full — the false refusal that froze every REST write
-  once the counted graph reached its cap; and
-- a per-graph key whose OWN graph is full is ADMITTED (the other half of the
-  same divergence — the cap does not bite on the graph that grows).
+- a custom-graph-bound key with an EMPTY write graph is refused (402) because
+  its org's default graph is full — the false refusal that froze every REST
+  write once the counted graph reached its cap; and
+- such a key whose OWN graph is full is ADMITTED (the other half of the same
+  divergence — the cap does not bite on the graph that grows).
+
+⚠️ NOT every per-graph credential diverged: a legacy/pre-guard key bound to the
+org's DEFAULT graph node resolves to ``org_{org_id}`` and always agreed
+(``_capture_session_key``). This file therefore pins the CUSTOM-binding class,
+which is the one the mint matrix guarantees.
 
 The house rule this restores is `mcp_server.py`: *"Count on the SAME org SDK
 the tool writes to (identical connection), so the count and the write can
 never target different databases."*
 
-Both halves are asserted here, so neither "make it admit" nor "make it refuse"
-alone can turn the suite green:
+Both directives are asserted for every door, so neither "make it admit" nor
+"make it refuse" alone can turn the suite green:
 
-- ``test_default_graph_full_write_graph_empty_is_ADMITTED`` fails RED under the
-  old behaviour (402 from the wrong graph);
-- ``test_write_graph_full_default_empty_is_REFUSED`` fails RED under the old
-  behaviour (200 — the cap missed the graph that grows).
+- ADMIT arms (RED under the old behaviour — 402 from the wrong graph):
+  ``/v1/points``, ``/v1/objects``+``/v1/subjects``, ``/v1/sessions/commit``;
+- REFUSE arms (RED under the old behaviour the OTHER way — 200, the cap
+  missing the graph that grows): ``/v1/points``, ``/v1/objects``+``/v1/subjects``,
+  ``/v1/sessions/commit``;
+- the UNCHANGED branch (must pass BEFORE and after — this is what the fix must
+  not break): an org-wide key's gate still follows ``org_{org_id}`` in both
+  directions;
+- ``/v1/demo`` (default-graph-only, so it has no wrong-graph arm): its gate is
+  pinned behaviourally on the default graph, and its graph-bound refusal 403 is
+  pinned as the structural reason it can never need one.
 
 ⚠️ The cap is the Team's stored ``max_points`` (the same field production
 sets to 25000 from ``pricing.json`` solo.max_graph_nodes), held at 1–2 here so
@@ -77,12 +91,17 @@ class _Env:
         finally:
             sdk.close()
 
-    def seed(self, graph_name: str, name: str) -> None:
-        """Write ONE counted Point into a named graph (direct, no HTTP)."""
+    def seed(self, graph_name: str, label: str) -> None:
+        """Write ONE counted Point into a named graph (direct, no HTTP).
+
+        ``create_point``'s first positional arg is the KIND, not a name — the
+        label goes into ``content`` (a label in the kind slot only warns
+        ``Unrecognized pointKind`` and would break if the SDK ever refuses).
+        """
         import tortoise.hosted_api as ha_mod
         sdk = ha_mod._make_sdk(graph_name=graph_name)
         try:
-            sdk.create_point(name, content=f"{name} content")
+            sdk.create_point("statement", content=f"{label} content")
         finally:
             sdk.close()
 
@@ -122,6 +141,14 @@ def env(tmp_path):
     made: list[_Env] = []
 
     def _make(*, max_points: int) -> _Env:
+        # Single-use: `patched_tortoise_sdk` re-pins TORTOISE_DB_PATH on ENTER
+        # and closes the previous anchors, so a SECOND `env()` in one test would
+        # leave the first env measuring the second env's database — a green arm
+        # that proves nothing. Fail loudly instead.
+        assert not made, (
+            "env() is single-use per test: a second call re-pins "
+            "TORTOISE_DB_PATH and the first env's counted()/seed() would read "
+            "the second DB. Build one env and drive both arms on it.")
         db_path = os.path.join(str(tmp_path), f"gate-{len(made)}.db")
         stack.enter_context(patched_tortoise_sdk(db_path))
         reg = ha_mod._make_sdk(namespace="registry")
@@ -199,8 +226,8 @@ def test_write_graph_full_default_empty_is_REFUSED(env):
 
 def test_objects_and_subjects_doors_count_the_write_graph(env):
     """The /v1/objects and /v1/subjects doors share the defect — both counted
-    the default graph while ``sdk.create_object``/``create_subject`` write the
-    key's graph, and both are ``resource="points"`` doors (#1911)."""
+    the default graph while ``sdk.create_object``/``sdk.create_subject`` write
+    the key's graph, and both are ``resource="points"`` doors (#1911)."""
     e = env(max_points=2)
     e.seed(e.default_ns, "default-a")
     e.seed(e.default_ns, "default-b")
@@ -217,6 +244,25 @@ def test_objects_and_subjects_doors_count_the_write_graph(env):
     assert e.counted(e.write_ns) == 2, (
         "the two admitted writes must BOTH land in the key's own graph")
     assert e.counted(e.default_ns) == 2, "the default graph was written"
+
+
+def test_objects_and_subjects_doors_REFUSE_a_full_write_graph(env):
+    """The reverse arm for the same two doors — without it a must-admit-only
+    pin would also pass with the gate deleted (#8906 "do not weaken")."""
+    e = env(max_points=2)
+    e.seed(e.write_ns, "write-a")
+    e.seed(e.write_ns, "write-b")
+    assert e.counted(e.write_ns) == 2, "setup: write graph must be AT cap"
+    assert e.counted(e.default_ns) == 0, "setup: default graph must be empty"
+
+    h = e.headers()
+    for path, body in (("/v1/objects", {"name": "8906-object2"}),
+                       ("/v1/subjects", {"name": "8906-subject2"})):
+        r = e.tc.post(path, json=body, headers=h)
+        assert r.status_code == 402, (
+            f"{path} admitted a write to a FULL key graph (#8906 gate "
+            f"weakened): {r.status_code} {r.text[:300]}")
+    assert e.counted(e.write_ns) == 2, "a refused write must not land"
 
 
 def test_commit_door_counts_the_write_graph(env):
@@ -242,16 +288,75 @@ def test_commit_door_counts_the_write_graph(env):
     assert e.counted(e.write_ns) == 0
 
 
-def test_demo_door_cannot_diverge_because_it_rejects_graph_bound_keys(env):
-    """``/v1/demo`` (the 5th points door) is DEFAULT-GRAPH ONLY by design:
-    ``_reject_graph_bound_org_surface`` refuses a graph-bound key (403
-    GRAPH_SCOPED_TEAM_SURFACE) before the gate, and ``_seed_demo_graph`` opens
-    ``namespace=org_id``. Its count and its write are therefore the SAME
-    graph, so it has no wrong-graph arm to fix — this pin is what keeps that
-    true if the surface is ever opened to per-graph keys.
+def test_commit_door_REFUSES_a_full_write_graph(env):
+    """The reverse arm at the commit door (#8906 "do not weaken")."""
+    from tests.test_commit_endpoint import _finalize, _raw_payload
+
+    e = env(max_points=1)
+    e.seed(e.write_ns, "write-at-cap")
+    assert e.counted(e.write_ns) == 1, "setup: write graph must be AT cap"
+    assert e.counted(e.default_ns) == 0, "setup: default graph must be empty"
+
+    raw = _raw_payload(0, session_id="s8906b", points=[], entities=[])
+    r = e.tc.post("/v1/sessions/commit", json=_finalize(raw),
+                  headers=e.headers())
+    assert r.status_code == 402, (
+        "the commit door admitted a commit whose OWN graph is full (#8906 gate "
+        f"weakened): {r.status_code} {r.text[:300]}")
+
+
+def test_org_wide_key_is_refused_at_the_default_graph_cap(env):
+    """The branch this fix must NOT change: an org-wide key (``graph_id``
+    None) writes ``org_{tid}``, so its gate must count ``org_{tid}``."""
+    e = env(max_points=1)
+    e.seed(e.default_ns, "default-at-cap")
+    assert e.counted(e.default_ns) == 1
+    r = e.tc.post("/v1/points", json={"content": "org-wide at cap"},
+                  headers=e.headers(graph_bound=False))
+    assert r.status_code == 402, (
+        "an org-wide key must still be refused at the DEFAULT graph's cap "
+        f"(#8906): {r.status_code} {r.text[:300]}")
+    assert r.json()["detail"].get("used") == 1, r.text[:300]
+
+
+def test_org_wide_key_is_admitted_while_a_custom_graph_is_full(env):
+    """...and it must NOT be refused by a CUSTOM graph's count: the gate
+    follows the credential's own graph in both directions."""
+    e = env(max_points=1)
+    e.seed(e.write_ns, "custom-graph-full")
+    assert e.counted(e.write_ns) == 1
+    assert e.counted(e.default_ns) == 0
+    r = e.tc.post("/v1/points", json={"content": "org-wide ok"},
+                  headers=e.headers(graph_bound=False))
+    assert r.status_code in (200, 201), (
+        "an org-wide key was refused by a CUSTOM graph's count — the gate must "
+        f"follow the credential's own graph (#8906): {r.status_code} "
+        f"{r.text[:300]}")
+    assert e.counted(e.default_ns) == 1, "the org-wide write must land"
+    assert e.counted(e.write_ns) == 1, "the custom graph must be untouched"
+
+
+def test_demo_door_gates_on_the_default_graph_and_rejects_bound_keys(env):
+    """``/v1/demo`` (the 5th points door) is DEFAULT-GRAPH ONLY by design.
+
+    Two pins, because this door's count and its write are two constructions of
+    the same ``namespace=org_id`` (NOT one shared handle):
+    - an ORG-WIDE key is gated on the default graph (refused at its cap), so
+      the door's count target is asserted behaviourally, not just described;
+    - a GRAPH-BOUND key is refused 403 GRAPH_SCOPED_TEAM_SURFACE before the
+      gate — which is what keeps this door from ever needing a wrong-graph fix.
     """
     e = env(max_points=1)
     e.seed(e.default_ns, "default-at-cap")
-    r = e.tc.post("/v1/demo", headers=e.headers())
-    assert r.status_code == 403, r.text[:300]
-    assert r.json()["detail"]["error_code"] == "GRAPH_SCOPED_TEAM_SURFACE"
+    assert e.counted(e.default_ns) == 1
+    r = e.tc.post("/v1/demo", headers=e.headers(graph_bound=False))
+    assert r.status_code == 402, (
+        "the demo seed must be gated on the DEFAULT graph it writes (#8906): "
+        f"{r.status_code} {r.text[:300]}")
+    assert r.json()["detail"].get("used") == 1, r.text[:300]
+
+    r2 = e.tc.post("/v1/demo", headers=e.headers())
+    assert r2.status_code == 403, r2.text[:300]
+    assert r2.json()["detail"]["error_code"] == "GRAPH_SCOPED_TEAM_SURFACE"
+
+
