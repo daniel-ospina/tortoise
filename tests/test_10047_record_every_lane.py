@@ -372,6 +372,16 @@ _NOT_A_LANE_OPENER = frozenset({
     "_sdk_usable", "_sdk_backend_is_embedded", "sdk_reflex",
     "_probe_sdk_key", "_probe_sdk_reset",
 })
+
+#: The same, for CLASS-SCOPED opener methods. A method is scoped to its class, so
+#: it is classified here rather than in the module vocabulary — but it must be
+#: classified, because a method that RETURNS an SDK is a handle source, and when
+#: its name is in no vocabulary `_handle_state` answers `None` for the call and
+#: the write through the returned handle is skipped (#10046 review round 5 P2).
+_NOT_A_LANE_OPENER_METHODS = frozenset({
+    # `_ha._make_sdk(namespace="registry")` — the registry lane, not an org graph.
+    "OrgResolutionMiddleware._get_registry_sdk",
+})
 #: An SDK-SHAPED name — `…_sdk`, `_sdk…`, `sdk_…`. Broader than
 #: `endswith("_sdk")`, which silently excluded `_sdk_matches_env`-style helpers
 #: AND the real openers `_org_sdk_from_name` / `_data_sdk_offloaded` (their
@@ -567,13 +577,57 @@ def _handle_state(value) -> bool | None:
 
 def _assigned_handle(node):
     """`(local name, value)` for `x = …` / `x: T = …` — else `(None, None)`."""
-    if (isinstance(node, ast.Assign) and len(node.targets) == 1
-            and isinstance(node.targets[0], ast.Name)):
-        return node.targets[0].id, node.value
-    if (isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name)
+def _assigned_handle(node):
+    """`(handle key, value)` for `x = …`, `self.x = …`, `x: T = …` — else `(None, None)`.
+
+    The key is a bare name for a local and the DOTTED spelling for an attribute
+    (`self._own_sdk`), because an SDK a class OWNS is a handle too (#10046
+    review round 5 P1): reading only `ast.Name` targets meant `__init__`'s
+    `self._own_sdk = _make_sdk(namespace=org_id)` was never a handle, so a
+    `run()` writing `self._own_sdk.create_point(...)` was never a write. That is
+    the package's dominant class idiom — `dream.py`, `onboarding/selfhost.py`,
+    `hosted_api._OrgSeedSurface`, `mcp_auth` all hold their SDK on `self`.
+    """
+    if isinstance(node, ast.Assign) and len(node.targets) == 1:
+        target = node.targets[0]
+        if isinstance(target, ast.Name):
+            return target.id, node.value
+        if isinstance(target, ast.Attribute):
+            return ast.unparse(target), node.value
+    if (isinstance(node, ast.AnnAssign)
+            and isinstance(node.target, (ast.Name, ast.Attribute))
             and node.value is not None):
-        return node.target.id, node.value
+        target = node.target
+        return (target.id if isinstance(target, ast.Name)
+                else ast.unparse(target)), node.value
     return None, None
+
+
+def _class_attribute_handles(tree) -> dict[str, dict[str, bool]]:
+    """`{class: {dotted attribute: tenant installed?}}` for the whole class.
+
+    An SDK a class OWNS is opened in one method and written in another, so the
+    per-lane map cannot see it: `__init__` opens, `run` writes, and each was
+    judged alone. Unioning the ATTRIBUTE half across a class's methods is what
+    lets the write in `run` find the handle `__init__` set (#10046 review round 5
+    P1). Only attribute keys are unioned — a local of one method says nothing
+    about another — and only handles whose state is KNOWN, so an attribute
+    assigned from a parameter (`self._sdk = sdk`) stays out rather than being
+    guessed at.
+    """
+    by_class: dict[str, dict[str, bool]] = {}
+    for cls in tree.body:
+        if not isinstance(cls, ast.ClassDef):
+            continue
+        merged: dict[str, bool] = {}
+        for node in cls.body:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                for key, state in _sdk_handles(node).items():
+                    if "." in key:
+                        merged[key] = state
+        if merged:
+            by_class[cls.name] = merged
+    return by_class
 
 
 def _sdk_handles(node) -> dict[str, bool]:
@@ -667,6 +721,16 @@ def _unbound_record_writes(tree) -> list[str]:
     functions = _module_functions(tree)
     handles_by_lane = {name: _sdk_handles(node)
                        for name, node in functions.items()}
+    # An SDK a CLASS owns (`self._own_sdk`) is opened in one method and written in
+    # another, so the per-lane map cannot see it. Union the attribute half across
+    # each class's methods into the lanes that belong to it (#10046 review round 5
+    # P1: a worker class holding its handle on `self` was green).
+    class_attrs = _class_attribute_handles(tree)
+    for name in handles_by_lane:
+        owner = name.split(".", 1)[0]
+        if "." in name and owner in class_attrs:
+            for key, state in class_attrs[owner].items():
+                handles_by_lane[name].setdefault(key, state)
     # The CALLEE's parameter list maps a positional argument to the parameter
     # the helper writes through — not the caller's.
     callee_params = {name: [a.arg for a in
@@ -686,6 +750,12 @@ def _unbound_record_writes(tree) -> list[str]:
                     found.append(f"{name}:{call.lineno} writes through the "
                                  f"unbound SDK `{receiver.id}` "
                                  f"(`{receiver.id}.{call.func.attr}(…)`)")
+                elif (isinstance(receiver, ast.Attribute)
+                        and handles.get(ast.unparse(receiver)) is False):
+                    dotted = ast.unparse(receiver)
+                    found.append(f"{name}:{call.lineno} writes through the "
+                                 f"unbound SDK `{dotted}` "
+                                 f"(`{dotted}.{call.func.attr}(…)`)")
                 elif isinstance(receiver, ast.Call) and _handle_state(receiver) is False:
                     found.append(f"{name}:{call.lineno} writes through an "
                                  f"inline unbound SDK "
@@ -825,8 +895,11 @@ def test_no_lane_ANYWHERE_in_the_package_writes_records_through_an_unbound_sdk()
     blind spot (`_AMBIENT_OPENERS`). Two indirections are likewise OUT of the
     scan and are named so they are not mistaken for coverage: an SDK handed to a
     writing helper as a KEYWORD argument (`_write(sdk=_org_sdk(org))`) and one
-    reached through a lambda or local factory. (Module-qualified dispatch
-    `_ha._make_sdk(...)` is NOT in that list — it is scanned, since round 4.)
+    reached through a lambda or local factory. An SDK handed to a writing helper
+    as an INLINE call is likewise out, in either position
+    (`_write(_org_sdk(org))` / `_write(sdk=_org_sdk(org))`) — the bound-name
+    forms of both ARE caught. What IS scanned: methods (including an SDK held on
+    `self`) and module-qualified dispatch (`_ha._make_sdk(...)`).
     """
     modules = sorted(_PACKAGE_ROOT.rglob("*.py"))
     assert len(modules) >= 200, (
@@ -913,18 +986,31 @@ def test_every_sdk_shaped_name_in_the_package_is_classified():
     """
     modules = sorted(_PACKAGE_ROOT.rglob("*.py"))
     shaped: set[str] = set()
+    shaped_methods: set[str] = set()
     for path in modules:
         try:
             tree = _tree_of(path)
         except (SyntaxError, UnicodeDecodeError, OSError):
             continue  # the leg above fails LOUD on these; do not double-report
-        # MODULE-LEVEL only: the classification is a package vocabulary, and a
-        # method is scoped to its class (its writes are covered by the leg
-        # above, which now walks methods too).
+        # MODULE-LEVEL names go in the package vocabulary.
         shaped.update(
             node.name for node in tree.body
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
             and _SDK_NAME_RE.search(node.name))
+        # CLASS-SCOPED opener methods are a SEPARATE vocabulary, not an
+        # afterthought. This leg used to skip them with the justification "its
+        # writes are covered by the leg above, which now walks methods too" —
+        # which was FALSE: the write is walked, but its handle came from a name
+        # no vocabulary knew, so `_handle_state` answered `None` and the write
+        # was skipped (#10046 review round 5 P2). A handle source must be
+        # classified whichever scope it lives in.
+        for cls in tree.body:
+            if not isinstance(cls, ast.ClassDef):
+                continue
+            for node in cls.body:
+                if (isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                        and _SDK_NAME_RE.search(node.name)):
+                    shaped_methods.add(f"{cls.name}.{node.name}")
 
     assert len(shaped) >= 20, (
         f"only {len(shaped)} SDK-shaped definitions found in the package — the "
@@ -942,8 +1028,19 @@ def test_every_sdk_shaped_name_in_the_package_is_classified():
         "here) or `_NOT_A_LANE_OPENER` (not an org-scoped lane construction "
         "site):" + _joined(unclassified))
 
-    # The declaration cannot rot into a lie — checked over every vocabulary whose
-    # members are MODULE-LEVEL FUNCTIONS. The suffix-era version checked only
+    # CLASS-SCOPED opener methods, classified separately: a method returning an
+    # SDK is a handle source too, and when it is in no vocabulary `_handle_state`
+    # answers `None` for it and the write through its return value is skipped.
+    unclassified_methods = sorted(shaped_methods - _NOT_A_LANE_OPENER_METHODS)
+    assert unclassified_methods == [], (
+        "these SDK-shaped METHODS are in no declared vocabulary, so a write "
+        "through the handle one returns is invisible to the scan. Classify each "
+        "in `_NOT_A_LANE_OPENER_METHODS` (with the reason) or, if it opens an "
+        "org graph, in `_UNBOUND_OPENERS`:" + _joined(unclassified_methods))
+
+    # The declaration cannot rot into a lie — checked over every module-level
+    # vocabulary whose members are MODULE-LEVEL FUNCTIONS. The suffix-era
+    # version checked only
     # `_AMBIENT_OPENERS | _NOT_A_LANE_OPENER`, so renaming `_org_sdk_from_name`
     # would have left the stale entry standing while the new name reached
     # `_handle_state` as `None` (a silent exemption, and the very false PASS this
@@ -1034,6 +1131,71 @@ def _run_qualified_lane(org_id: str) -> None:
     assert _org_scoped_sdk_sites(ast.parse(source)), (
         "a module-qualified org-scoped opener must also be COUNTED as a site, "
         "or the census and the module inventory under-report")
+
+
+def test_a_CLASS_METHOD_writing_through_an_unbound_sdk_is_caught():
+    """Pins the method walk, and the handle a class OWNS on `self`.
+
+    Round 2 added class methods to the scan and round 5 added the handle a class
+    keeps on `self` (opened in `__init__`, written in `run`) — the package's
+    dominant class idiom. Neither had a pin, so either could be deleted silently:
+    the shipped package has 0 method-level org-scoped sites and every one of its
+    `self.*sdk` attributes comes from a parameter, so nothing exercised them.
+
+    Mutation this reddens on: dropping the `for cls in tree.body` walk from
+    `_module_functions`, or the attribute half of `_assigned_handle`.
+    """
+    local = '''
+def _run_method_lane(org_id: str) -> None:
+    class _W:
+        def run(self) -> None:
+            sdk = _make_sdk(namespace=org_id)
+            sdk.create_point("Subject", {})
+'''
+    assert _flagged(local), (
+        "a write inside a CLASS METHOD through an unbound SDK must be flagged")
+
+    owned = '''
+class _OwnWorker:
+    def __init__(self, org_id: str) -> None:
+        self._own_sdk = _make_sdk(namespace=org_id)
+
+    def run(self) -> None:
+        self._own_sdk.create_point("Subject", {})
+'''
+    assert _flagged(owned), (
+        "an SDK the class OWNS (`self._own_sdk`, opened in `__init__`, written in "
+        "`run`) must be flagged — a worker class holds its handle on `self`")
+
+    control = '''
+class _ParamWorker:
+    def __init__(self, sdk) -> None:
+        self._sdk = sdk
+
+    def run(self) -> None:
+        self._sdk.create_point("Subject", {})
+'''
+    assert _flagged(control) == [], (
+        "the control: a handle that came from a PARAMETER has an unknown state "
+        "and must NOT be flagged — guessing is the mis-filing this guard stops")
+
+
+def test_a_literal_namespace_is_not_an_org_scoped_site():
+    """Pins the round-3 predicate: `_make_sdk(namespace="registry")` is not ours.
+
+    `_make_sdk` is a member of `_SDK_OPENERS`, so the membership test in
+    `_org_scoped_sdk_sites` has to exclude it or EVERY `_make_sdk(...)` counts as
+    an org-scoped site — 94 of 175 counted sites were registry/base literals, and
+    the non-vacuity floor could be cleared by them alone. Without this pin the
+    double-count can be reinstated by a "simplification" and nothing reds: the
+    floor is a LOWER bound and the module inventory is a superset.
+    """
+    registry = 'def f():\n    return _make_sdk(namespace="registry")\n'
+    assert _org_scoped_sdk_sites(ast.parse(registry)) == {}, (
+        "a string-literal namespace is the registry/base lane, not an org graph")
+    org = 'def f(org_id):\n    return _make_sdk(namespace=org_id)\n'
+    assert _org_scoped_sdk_sites(ast.parse(org)), (
+        "the control: a non-literal namespace IS an org-scoped site")
 
 
 def test_a_lane_opening_through_open_org_graph_sdk_is_caught():
