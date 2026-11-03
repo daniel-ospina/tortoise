@@ -425,10 +425,32 @@ def test_the_v2_resolver_honours_exactly_the_provider_key_map(no_provider_keys):
             for arg in node.args:
                 if isinstance(arg, _ast.Constant) and isinstance(arg.value, str):
                     routed.add(arg.value)
-        if isinstance(node, _ast.Compare) and len(node.comparators) == 1 \
-                and isinstance(node.comparators[0], _ast.Constant) \
-                and isinstance(node.comparators[0].value, str):
-            routed.add(node.comparators[0].value)
+        # `explicit == "…"` ONLY — the selector operand is REQUIRED (review
+        # cycle 8, P3). A bare "any Compare against a single string constant"
+        # collected `if os.environ.get("X") == "anthropic": raise` as routing
+        # "anthropic" while the comment above claimed otherwise, which silently
+        # weakened `unrouted` (a provider could be "routed" by a diagnostic
+        # comparison and never actually reachable). Both operand orders are
+        # accepted, so the Yoda form `"deepseek-direct" == explicit` counts.
+        if isinstance(node, _ast.Compare) and len(node.comparators) == 1:
+            for sel, const in ((node.left, node.comparators[0]),
+                               (node.comparators[0], node.left)):
+                if isinstance(sel, _ast.Name) and sel.id == "explicit" \
+                        and isinstance(const, _ast.Constant) \
+                        and isinstance(const.value, str):
+                    routed.add(const.value)
+    # Non-vacuity of the narrowing itself: a non-selector string comparison is
+    # NOT routing. Without this the broad-collection defect could return and
+    # still read green on today's tree.
+    _probe = _ast.parse('if os.environ.get("X") == "anthropic": raise ValueError')
+    assert not any(
+        isinstance(n, _ast.Compare) and isinstance(n.comparators[0], _ast.Constant)
+        and isinstance(n.comparators[0].value, str)
+        and any(isinstance(s, _ast.Name) and s.id == "explicit"
+                for s in (n.left, n.comparators[0]))
+        for n in _ast.walk(_probe)
+    ), ("the routing scan's selector requirement does not reject a "
+        "non-selector string comparison — `routed` would over-collect again")
     unrouted = [p for p in _PROVIDER_KEY_ENV if p not in routed]
     assert not unrouted, (
         f"provider(s) {sorted(unrouted)} are registered in _PROVIDER_KEY_ENV "
@@ -545,9 +567,9 @@ def test_resolve_extractor_provider_reads_no_inline_provider_keys():
 
 def test_no_routing_lane_names_a_provider_key_literal():
     """#8133 (review cycle 1, P2 — the finding's own remedy shape): EVERY
-    module-level function in ``tortoise.model_adapters`` that reads
-    ``os.environ`` must derive provider key presence from ``_PROVIDER_KEY_ENV``
-    and never name a ``*_API_KEY`` var itself.
+    module-level function in ``tortoise.model_adapters`` must derive provider
+    key presence from ``_PROVIDER_KEY_ENV`` and never name a ``*_API_KEY`` var
+    itself.
 
     Why the scan is MODULE-WIDE rather than pinned to one symbol: when this
     guard named only ``resolve_extractor_provider``, ``resolve_reader_provider``
@@ -563,10 +585,19 @@ def test_no_routing_lane_names_a_provider_key_literal():
     lanes, so an import-time refactor that renames them cannot silently shrink
     the scan to nothing.
 
-    ⛔ RESIDUAL, stated rather than claimed closed: a key NAME that never appears
-    as a literal in the function is still invisible — a module-level constant
-    (``os.environ.get(_FOO_KEY_ENV)``) or a subscript of another mapping. This
-    scan reads literals; closing that needs operand resolution.
+    The scan is NOT gated on a textual `os.environ` substring (review cycle 8,
+    P3): that gate made the idiomatic alternative spelling
+    ``os.getenv("VENICE_API_KEY")`` — and ``os.environ["…"]``, and any future
+    accessor — invisible, i.e. a false negative in the exact direction this
+    guard exists for. Measured: an injected
+    ``def _probe(): return bool(os.getenv("VENICE_API_KEY"))`` left the gated
+    version GREEN. Every module-level function in the module is scanned; the
+    committed tree has 26 and zero offenders, so the rule costs nothing today.
+
+    ⛔ RESIDUAL, stated rather than claimed closed: a key NAME built at runtime
+    (f-string, concatenation across statements, or a module-level constant like
+    ``_FOO_KEY_ENV = "FOO_API_KEY"``) is still invisible — this scan reads
+    string literals that are present in the function body.
     """
     import ast
     import inspect
@@ -587,8 +618,6 @@ def test_no_routing_lane_names_a_provider_key_literal():
             src = textwrap.dedent(inspect.getsource(obj))
         except (OSError, TypeError):  # pragma: no cover — dynamic defs
             continue
-        if "os.environ" not in src:
-            continue
         scanned.append(name)
         literals = sorted({
             node.value
@@ -601,12 +630,13 @@ def test_no_routing_lane_names_a_provider_key_literal():
             offenders[name] = literals
 
     assert not offenders, (
-        f"function(s) in tortoise.model_adapters read a provider key env var "
-        f"INLINE instead of deriving it from _PROVIDER_KEY_ENV: "
-        f"{ {k: v for k, v in sorted(offenders.items())} }. Derive it via "
-        f"_provider_keys_present() instead — a provider added to the registry "
-        f"is otherwise invisible here and the two lists drift again, which is "
-        f"the exact #8133 root (two hand-maintained lists in one module)."
+        f"module-level function(s) in tortoise.model_adapters name a provider "
+        f"key env var as a LITERAL instead of deriving it from "
+        f"_PROVIDER_KEY_ENV: { {k: v for k, v in sorted(offenders.items())} }. "
+        f"Derive it via _provider_keys_present() instead — a provider added to "
+        f"the registry is otherwise invisible here and the two lists drift "
+        f"again, which is the exact #8133 root (two hand-maintained lists in "
+        f"one module)."
     )
 
     for lane in ("resolve_extractor_provider", "resolve_reader_provider"):
@@ -712,6 +742,76 @@ def test_dropping_a_provider_from_the_registry_is_a_routing_change_not_a_crash(
     )
     assert "venice" not in avail, (
         f"an unregistered provider must not appear in the pool, got {avail!r}"
+    )
+
+
+def test_ask_lane_provider_set_is_registered_in_the_key_registry():
+    """#8133 (review cycle 8, P3): every provider the ASK lane can route must
+    have a key env var in ``_PROVIDER_KEY_ENV``.
+
+    ``resolve_reader_provider`` now DERIVES ``keyed`` from that map, so a name in
+    ``_ASK_PROVIDERS`` the map does not carry is unkeyable by construction —
+    ``keyed`` would give it ``False`` forever and it could never be routed. This
+    pins the invariant that keeps the two ``_PROVIDER_KEY_ENV[...]`` diagnostics
+    unreachable in the committed tree, and it fails HERE (naming both sets)
+    instead of surfacing as an unexplained refusal at ask time when someone adds
+    a provider to one set only. That is the #8133 shape, so it gets a guard.
+    """
+    from tortoise.model_adapters import _ASK_PROVIDERS, _PROVIDER_KEY_ENV
+
+    missing = sorted(set(_ASK_PROVIDERS) - set(_PROVIDER_KEY_ENV))
+    assert not missing, (
+        f"ask-lane provider(s) {missing} can be selected by "
+        f"TORTOISE_ASK_PROVIDER but _PROVIDER_KEY_ENV carries no key env var "
+        f"for them, so resolve_reader_provider() can never key — and therefore "
+        f"never route — them: the #8133 divergence, on the ask lane. Register "
+        f"the provider (and its key env var) in _PROVIDER_KEY_ENV, or remove it "
+        f"from _ASK_PROVIDERS."
+    )
+
+
+def test_dropping_a_provider_from_the_registry_refuses_the_ask_lane_cleanly(
+        monkeypatch, no_provider_keys):
+    """#8133 (review cycle 8, P3): the ASK lane's mirror of
+    ``test_dropping_a_provider_from_the_registry_is_a_routing_change_not_a_crash``.
+
+    Deriving ``keyed`` from the registry put two direct ``_PROVIDER_KEY_ENV[...]``
+    lookups on the ask lane's diagnostics — the explicit-selector "but <KEY> is
+    not set" message and the auto path's ``missing=`` set. A provider removed
+    from the map is absent from BOTH, so each lookup raised a bare ``KeyError``
+    out of ``resolve_reader_provider`` instead of the ``ValueError`` the
+    docstring and the ask lane's build wrapper are written against (a
+    ``KeyError`` still becomes ``AskReaderUnavailable`` → 502, but the message
+    the operator needs is gone). Both now use ``.get``; this pins that a
+    registry edit is a clean refusal on this lane too.
+    """
+    from tortoise import model_adapters
+
+    monkeypatch.delitem(model_adapters._PROVIDER_KEY_ENV, "openrouter")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-test-8133")
+    monkeypatch.delenv("TORTOISE_ASK_PROVIDER", raising=False)
+
+    # AUTO path: a family only openrouter can serve, its provider unregistered.
+    # `qwen/…` is OpenRouter-only, so the servable set does not include the
+    # deepseek family's lenient no-key default — this takes the `missing=` path.
+    with pytest.raises(ValueError) as auto_exc:
+        model_adapters.resolve_reader_provider("qwen/qwen3.8-max")
+    assert "openrouter" in str(auto_exc.value), (
+        f"the auto-path refusal must name the provider it cannot key, got "
+        f"{str(auto_exc.value)!r}"
+    )
+
+    # EXPLICIT path: the "but <KEY> is not set" diagnostic.
+    monkeypatch.setenv("TORTOISE_ASK_PROVIDER", "openrouter")
+    with pytest.raises(ValueError) as expl_exc:
+        model_adapters.resolve_reader_provider("qwen/qwen3.8-max")
+    assert "openrouter" in str(expl_exc.value), (
+        f"the explicit-selector refusal must name the provider it cannot key, "
+        f"got {str(expl_exc.value)!r}"
+    )
+    assert "_PROVIDER_KEY_ENV" in str(expl_exc.value), (
+        f"the refusal should say the provider has no registered key env var, "
+        f"got {str(expl_exc.value)!r}"
     )
 
 

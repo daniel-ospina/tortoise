@@ -80,7 +80,7 @@ _PROVIDERS = {
     # provider is configured" means — not by a decision that venice is primary.
     # A fallback-only ruling would reopen this, and would say so on #8133.
     #
-    # That branch reads ``if _keys.get("venice"):`` since #8133 (it was
+    # That branch reads ``if _keys.get("venice", False):`` since #8133 (it was
     # ``if vz_key:`` before — the resolver now derives key presence from
     # ``model_adapters._PROVIDER_KEY_ENV``, and ``vz_key`` no longer exists in
     # either routing lane; the ask lane's hand-written ``keyed`` dict was
