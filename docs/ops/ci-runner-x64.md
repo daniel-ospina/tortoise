@@ -755,7 +755,7 @@ belongs to). It drives the script as a subprocess in a hermetic env — a temp b
    ⛔ **WHAT THE UNION DOES AND DOES NOT BUY, stated plainly so the next stall is not read as
    closed.** The repair hardening fixed the *manual* and *provisioner-adjacent* path only: a repair
    can no longer strip `ubuntu-latest`, and nothing else in this repo calls `--repair-labels`
-   (`tools/runner_autoscale.py:1202` invokes the installer as `--count … --fallback auto`, never
+   (`tools/runner_autoscale.py:1215` invokes the installer as `--count … --fallback auto`, never
    `--repair-labels`, and its own `_preserve_labels` already kept the label). It does NOT stop the
    remover above: the gate's `fallback_off` still strips `ubuntu-latest` from this pool on its next
    tick, from `scripts/ci_runner_gate.sh` in **agent-infra**, which is not in this checkout. So the
@@ -1002,16 +1002,19 @@ Two further facts measured on the canary, so the next author copies the right pr
 second.** A job that dies at setup leaves the runner idle almost all of the time, so a pool census
 built on those two booleans calls the BROKEN runner the *idlest and healthiest* one on the box.
 
-Measured 2026-11-03 on `/opt/gh-runner-x64-{4,6,7,8}`: every job died 5–21 s in, before any step,
-with
+Measured 2026-11-03 on `/opt/gh-runner-x64-{4,6,7,8}`: **16 of that run's 29 jobs** died 6–21 s in,
+before any step, with
 
 ```text
 Complete job name: <job>
 ##[error]Access to the path '/opt/gh-runner-x64-7/_work/_temp/_github_workflow' is denied.
 ```
 
-GitHub-hosted jobs in the same run went 11/11 green; the self-hosted ones went 20/21 red. Because
-`python-ci-gate` aggregates both, the required check was red on every PR while the *code* was
+The measured triple, stated ONCE here because `tools/runner_autoscale.py` and its tests quote it:
+of run `41578276118`'s **29 jobs**, 11 were GitHub-hosted (**11 green**) and 17 self-hosted
+(**16 red**), plus 1 skipped (`canary-streak`, never materialised) — so every one of the 16
+failures was a self-hosted job, and exactly one self-hosted job succeeded. Because
+`python-ci-gate` aggregates both halves, the required check was red on every PR while the *code* was
 fine, `scripts/admin-merge.sh` could not attribute the failures (they are PR-unique by
 construction), and 100 consecutive `python-ci` runs produced **zero** successes. It read as
 "main is broken" for three days.
@@ -1045,5 +1048,26 @@ and is reversible — `--repair-labels` re-derives the set from the gate's condi
 
 ```bash
 gh api -X DELETE "repos/daniel-ospina/tortoise/actions/runners/<ID>/labels/ubuntu-latest"
-uv run python tools/install-ci-runner-x64.sh --repair-labels   # restores it once the box is repaired
 ```
+
+Restore it once the box is repaired. ⛔ **Two things the restore command must get right, and the
+obvious-looking form gets both wrong:**
+
+```bash
+# The installer is BASH (`#!/usr/bin/env bash`) — invoke it DIRECTLY. `uv run python` in front of
+# a .sh is a SyntaxError, and the "fixed to bash but no --count" form is worse: a silent no-op
+# that exits 0 (see below).
+tools/install-ci-runner-x64.sh --repair-labels --count 8
+```
+
+- **`--count` must reach every instance you detached.** `--repair-labels` loops `1..COUNT` and the
+  installer's `DEFAULT_COUNT` is **2**, so a bare `--repair-labels` visits instances 1-2 only,
+  prints `skip: … is not configured` for the rest and **exits 0** — a success code over a repair
+  that touched nothing. The registrations this section tells you to detach are
+  `/opt/gh-runner-x64-{4,6,7,8}`, i.e. none of the first two. Pass a count at or above the highest
+  instance number on the box.
+- **The label comes back only while the gate still ASKS for it.** `--fallback auto` (the default)
+  computes the set from the ARM64 pool's live state and the repair only UNIONS it in, so with the
+  fallback not engaged the computed set is `self-hosted-x64` alone and `ubuntu-latest` stays off
+  until the gate attaches it again. It cannot *detach* either — an explicit `--fallback off` is
+  refused (exit 2) precisely because a repair cannot remove a label.

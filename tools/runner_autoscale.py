@@ -229,11 +229,23 @@ EXIT  0 converged / at-ceiling / over-ceiling / nothing to do / a REFUSAL (an an
         in `docs/ops/ci-runner-x64.md`. ⛔ EXIT 0 HERE WOULD BE THE FALSE-PASS CLASS THIS FILE
         EXISTS TO PREVENT: a runner that fails every job in 1 s is `busy=false` almost all the
         time, so a pool census built on `status`/`busy` calls it the IDLEST-LOOKING runner on the
-        box and reports spare capacity. Measured 2026-11-03: 20 of 29 jobs in one run died in
-        5-21 s on four registrations that each read `online, busy=false`, while the pool gate
+        box and reports spare capacity. Measured 2026-11-03 on run 41578276118 — 29 jobs: 11
+        GitHub-hosted (11 green), 17 self-hosted (16 red), 1 skipped (`canary-streak`, never
+        materialised): the 16 failures all died in 6-21 s on four registrations that each read
+        `online, busy=false`, while the pool gate
         logged "capacity ... no change" for three days and 100 consecutive runs produced ZERO
         successes. `uncertified` (also exit 2) is the sibling state: the job outcomes could not be
         READ, so capacity cannot be certified either way — never `converged`.
+        ⛔ WHICH CODE WINS when a registration is wedged AND the pass ALSO hit a failure of its
+        own: `wedged` overrides the BENIGN verdicts only. It does NOT override exit 4
+        (`under-target` with `problem_kind=no-listener` — a runner was INSTALLED and nothing came
+        up), exit 5 (`fill-refused-by-provisioner`), exit 3 (an action failure), exit 2
+        (unmeasured), exit 1 (refused) or `over-ceiling`. In each of those the pass already
+        reports a failure of its OWN, and replacing it with 6 would erase a cause a caller keys
+        on — and the co-occurrence is the NORMAL shape, not a corner: the measured box had four
+        wedged registrations WHILE the fill loop ran on the same pass. The wedged registrations
+        are still NAMED in `record["wedged"]` and in the pass note, so nothing is hidden by the
+        ordering; only the exit CODE is ordered.
 """
 
 from __future__ import annotations
@@ -649,8 +661,9 @@ def read_pool(repo: str) -> dict[str, PoolEntry]:
 #
 #   ##[error]Access to the path '/opt/gh-runner-x64-7/_work/_temp/_github_workflow' is denied.
 #
-# printed after `Complete job name:` and before any step — 20 of 29 jobs in one run, every one in
-# 5-21 s, while GitHub-hosted jobs in the SAME run went 11/11 green. Every registration read
+# printed after `Complete job name:` and before any step — 16 of 29 jobs in one run (17 of that
+# run's 29 were self-hosted, and only ONE of the 17 succeeded), every one in 6-21 s, while
+# GitHub-hosted jobs in the SAME run went 11/11 green. Every registration read
 # `online, busy=false`. The pool gate logged "capacity ... no change" for three days over it and
 # 100 consecutive `python-ci` runs produced 0 successes, so the required aggregate was red on
 # every PR and nothing could merge. A capacity model that counts these as spare capacity is a
@@ -1670,7 +1683,18 @@ def converge(
     # PASS THIS FILE EXISTS TO PREVENT, and it is the one case the counts cannot see. It overrides
     # only the BENIGN verdicts: a refusal, an unreadable pass, an action failure and `over-ceiling`
     # are each a statement about something else that a wedged registration does not make untrue.
-    if wedged and record["verdict"] in ("converged", "at-ceiling", "under-target"):
+    # ⛔ AND `under-target` IS BENIGN ONLY WITHOUT AN ATTEMPTED GROWTH. `problem_kind=no-listener`
+    # is the ONE under-target cause the EXIT block calls a failure of the guard (a runner was
+    # INSTALLED and no listener came up), and `main` reports it as exit 4 by keying on that CAUSE.
+    # Overriding it here made that arm DEAD exactly when both are true — which is the NORMAL shape,
+    # not a corner: the measured box had four wedged registrations AND the fill loop running on the
+    # same pass. So exit 4 keeps the code; the registrations are still named in `record["wedged"]`
+    # and its note, so both facts are REPORTED and only the exit CODE is ordered.
+    if (
+        wedged
+        and record["verdict"] in ("converged", "at-ceiling", "under-target")
+        and record.get("problem_kind") != "no-listener"
+    ):
         record["verdict"] = "wedged"
     elif record.get("capacity_certified") is False and record["verdict"] in (
         "converged",

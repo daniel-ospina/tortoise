@@ -2194,7 +2194,7 @@ SLOW_RED = "r1\tfailure\t2026-11-03T05:53:24Z\t2026-11-03T06:03:30Z"  # 606 s: a
 def test_a_runner_that_answers_every_job_with_a_setup_failure_is_never_capacity(env):
     """THE FALSE PASS. `online, busy=false` is what a runner whose jobs die in 1 s looks like.
 
-    Measured 2026-11-03: 20 of 29 jobs in one run died in 5–21 s on four registrations that each
+    Measured 2026-11-03: 16 of 29 jobs in one run died in 6–21 s on four registrations that each
     read `online, busy=false`, so a census built on `status`/`busy` reported spare capacity while
     the pool served nothing. The pass must name it and must not report `at-ceiling`/`converged`.
     """
@@ -2255,3 +2255,73 @@ def test_wedged_runners_is_narrow_by_construction():
         + [("slow", "failure", 900)] * 3
     )
     assert RA.wedged_runners(pool, outcomes) == ["wedged"]
+
+
+def test_a_wedged_box_that_ALSO_failed_to_grow_keeps_exit_4(env):
+    """BOTH failures at once: the growth failure keeps the CODE, and the wedged names still ride.
+
+    Exit 4 (`under-target` + `problem_kind=no-listener`) is the ONE under-target cause the EXIT
+    block calls a failure of the guard, and `main` reports it by keying on that CAUSE. The override
+    listed `under-target` among the BENIGN verdicts it replaces, so on a pass where a registration
+    was wedged AND a runner was installed with no listener coming up, `verdict=wedged` made the
+    exit-4 arm DEAD — a caller keying on 4 (as the EXIT block tells it to) lost the signal that
+    growth was ATTEMPTED and failed. The co-occurrence is the measured shape, not a corner: the
+    four wedged registrations were found by a pass whose fill loop ran on the same box.
+
+    Non-vacuity: on the pre-fix tool this case records `verdict=wedged` and `_rc=6`, so both
+    assertions below fail.
+    """
+    e = env(pool=[("r1", "online", False, "")], installs=[("gh-runner-x64-1", "r1")])
+    e.run_ids = "1\n2\n3\n"
+    e.jobs_tsv.write_text(_outcomes(SETUP_FAIL), encoding="utf-8")
+    e.provisioner_adds = 0  # installed, and NO listener came up
+    rec = e.record()
+    assert rec["problem_kind"] == "no-listener", rec
+    assert rec["verdict"] == "under-target", rec
+    assert rec["_rc"] == 4, rec
+    # ⛔ BOTH FACTS ARE STILL REPORTED — only the exit CODE is ordered, so nothing is hidden.
+    assert rec["wedged"] == ["r1"], rec
+    assert any("SETUP failure" in n and "r1" in n for n in rec["notes"]), rec["notes"]
+
+
+def test_the_measured_triple_is_stated_once_and_every_citation_agrees_with_it():
+    """The whole fix rests on ONE run's numbers, and four places used to quote four versions.
+
+    At the reviewed head the PR body's table summed to 31 while the same sentence said "29 jobs",
+    the tool quoted a fast-failure count that did not divide into that denominator, and the runbook
+    said the self-hosted ones went `20/21` red — which implies 21 self-hosted of 32. The run's own
+    job list settles it, and the runbook now states the triple ONCE. This pin requires every
+    in-tree copy to agree with that one statement: an evidence table that cannot be reproduced from
+    its own numbers reads as asserted rather than measured.
+
+    Non-vacuity: on the pre-fix tree the tool and this docstring both quoted the unreconciled
+    fast-failure count, so the `agree` arm below reds on both.
+    """
+    doc = (REPO_ROOT / "docs" / "ops" / "ci-runner-x64.md").read_text()
+    tool = TOOL.read_text()
+    here = Path(__file__).read_text()
+
+    # the ONE canonical statement — the runbook's own sentence, not a paraphrase
+    sec = doc.split("A runner can be ONLINE, IDLE and serve NOTHING", 1)[1][:3000]
+    total, hosted, self_hosted, red, skipped = 29, 11, 17, 16, 1
+    assert "**29 jobs**" in sec, "the runbook no longer states the denominator — re-anchor this pin"
+    assert "**11 green**" in sec and "**16 red**" in sec, sec
+    assert "17 self-hosted" in sec and "1 skipped" in sec, sec
+
+    # ... it adds up, and "16 red of 17" means exactly one self-hosted job succeeded
+    assert hosted + self_hosted + skipped == total, (
+        f"the stated triple does not reach its own denominator: {hosted}+{self_hosted}+{skipped} "
+        f"!= {total}"
+    )
+    assert red == self_hosted - 1, f"{red} red of {self_hosted} self-hosted means one success"
+
+    # ... and every in-tree copy quotes THAT number. Built from parts so this assertion's own
+    # source text cannot satisfy it (a literal here would be the thing it searches for).
+    agree = f"{red} of {total} jobs in one run"
+    stale = f"{20} of {total} jobs"
+    for where, text in (("tools/runner_autoscale.py", tool), (Path(__file__).name, here)):
+        assert agree in text, (
+            f"{where} quotes a fast-failure count that disagrees with the runbook's {red} of "
+            f"{total} — state the measured triple once and cite it"
+        )
+        assert stale not in text, f"{where} still quotes the unreconciled {stale!r}"
