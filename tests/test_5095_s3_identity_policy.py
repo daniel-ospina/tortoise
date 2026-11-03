@@ -573,9 +573,13 @@ class TestTheReportCannotContradictItself:
         # candidate's record; exact equality forbids that by construction, and it
         # bites on a changed numerator, denominator, state or added clause. The
         # former body closed with `assert "their record says" not in messages[0]`
-        # — a phrase no producer ever emitted, so it could never bite (the
-        # inert-assertion class removed from the arm-3 test in round 5; #10633
-        # review, non-blocking observation 1).
+        # — redundant for that same reason, NOT because the phrase is
+        # unemittable: a pre-merge revision of this lane DID emit it
+        # (`docs/plans/2026-10-31-issue-5095-s3-hold.md`, P2·R4), and a
+        # reintroduction would trip that absence check rather than slip past it,
+        # so it is exact equality — which forbids any added clause — that makes
+        # the absence assertion unnecessary (the inert-assertion class removed
+        # from the arm-3 test in round 5; #10633 review, P2).
         assert messages[0] == _identity_line(
             ident,
             f"the existing-item lookup did not run for "
