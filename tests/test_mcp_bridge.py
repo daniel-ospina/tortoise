@@ -50,6 +50,12 @@ class _Upstream:
         #: Answer with an SSE stream that carries only a NOTIFICATION — a reply
         #: with no JSON-RPC message for the id that asked.
         self.no_reply = False
+        #: Quote the REJECTED Authorization header back in the 401 body — the shape
+        #: that would carry a credential into whatever the bridge relays.
+        self.echo_credential = False
+        #: Echo the credential in a 200 body that answers NO id (the no-reply guard
+        #: quotes that body back, so it is a second place the value can surface).
+        self.echo_in_body = False
 
     async def __call__(self, scope, receive, send):
         if scope["type"] == "lifespan":
@@ -82,11 +88,27 @@ class _Upstream:
             return
 
         if self.refuse:
+            echoed = headers.get("authorization", "")
+            if self.echo_credential and echoed:
+                # A server is FREE to quote what it rejected. The bridge quotes
+                # server text into its refusal, so this is the shape that would
+                # carry a credential into a transcript or a CI log.
+                message = f"Unauthorized: the key {echoed} is invalid"
+            else:
+                message = ("Unauthorized: invalid or missing Bearer token. "
+                           "Expected format: Authorization: Bearer tt_<key>/tk_<key>")
             await _respond(send, 401, {
                 "jsonrpc": "2.0", "id": None,
+                "error": {"code": -32001, "message": message},
+            })
+            return
+
+        if self.echo_in_body:
+            # 200, echoed credential, and NOTHING for the id that asked.
+            await _respond(send, 200, {
+                "jsonrpc": "2.0", "id": None,
                 "error": {"code": -32001, "message": (
-                    "Unauthorized: invalid or missing Bearer token. Expected format: "
-                    "Authorization: Bearer tt_<key>/tk_<key>")},
+                    f"the key {headers.get('authorization', '')} is invalid")},
             })
             return
 
@@ -364,9 +386,15 @@ class TestRefusal:
         assert _auth_headers(stub) == [None]
 
     def test_auth_rejection_with_a_credential_names_the_value_fault(self, upstream, home, bridge_factory):
-        """A credential WAS sent: the message must not blame a missing key."""
+        """A credential WAS sent: the message must not blame a missing key.
+
+        The upstream here ECHOES the rejected header, which is what makes the
+        assertion below a property rather than a coincidence: a server that
+        quotes the key back must not get it relayed into the harness's error.
+        """
         _, stub = upstream
         stub.refuse = True
+        stub.echo_credential = True
         bridge = bridge_factory({"TORTOISE_API_KEY": "tt_expired"})
 
         bridge.send(_INITIALIZE)
@@ -374,7 +402,8 @@ class TestRefusal:
 
         assert not text.startswith("MCP-KEY-EMPTY"), text
         assert "TORTOISE_API_KEY" in text
-        assert "tt_expired" not in text, "the bridge echoed the credential value"
+        assert "tt_expired" not in text, f"the bridge relayed the credential value: {text}"
+        assert "<redacted>" in text, f"the echoed evidence was dropped instead of redacted: {text}"
 
     def test_a_notification_gets_no_response_line(self, upstream, home, bridge_factory):
         """A JSON-RPC notification expects no reply; emitting one breaks the peer."""
@@ -428,6 +457,29 @@ class TestFailureModes:
         stub.no_reply = False
         bridge.send({"jsonrpc": "2.0", "id": 8, "method": "tools/list"})
         assert bridge.read()["id"] == 8
+
+    def test_an_echoed_credential_is_redacted_in_the_no_reply_snippet(
+        self, upstream, home, bridge_factory,
+    ):
+        """A 200 body can quote the credential too, and this path quotes it back.
+
+        Redaction on the refusals alone left this hole: a `200` whose body carried
+        the rejected key and no reply for the id put the VALUE into the no-reply
+        error the harness logs. Redaction belongs on every server-derived string
+        that reaches output, not only on the named refusals.
+        """
+        url, stub = upstream
+        _write_credential(home, "tt_secret", url[: -len("/mcp")])
+        stub.echo_in_body = True
+        bridge = bridge_factory()
+
+        bridge.send({"jsonrpc": "2.0", "id": 9, "method": "tools/list"})
+        message = bridge.read()
+
+        text = message["error"]["message"]
+        assert message["id"] == 9 and message["error"]["code"] == -32603, message
+        assert "tt_secret" not in text, f"the snippet relayed the credential value: {text}"
+        assert "<redacted>" in text, f"the evidence was dropped instead of redacted: {text}"
 
     def test_an_expired_session_can_be_re_initialized(self, upstream, home, bridge_factory):
         """The recovery the 404 message promises must actually be possible.

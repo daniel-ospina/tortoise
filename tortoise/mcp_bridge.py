@@ -76,6 +76,7 @@ import httpx
 from tortoise.mcp_client import (
     REFUSAL_CODE,
     Connection,
+    redact,
     resolve_connection,
 )
 
@@ -125,7 +126,9 @@ def _errors_for(payload: Any, code: int, message: str) -> list[dict]:
              "error": {"code": code, "message": message}} for request_id in ids]
 
 
-def _response_messages(response: httpx.Response, expected_ids: list) -> tuple[list[Any], str]:
+def _response_messages(
+    response: httpx.Response, expected_ids: list, sent: Connection,
+) -> tuple[list[Any], str]:
     """The JSON-RPC messages the response carries, read WITHOUT waiting for EOF.
 
     The Streamable-HTTP server answers a POST with `text/event-stream` by
@@ -150,9 +153,11 @@ def _response_messages(response: httpx.Response, expected_ids: list) -> tuple[li
             body = json.loads(raw)
         except ValueError:
             _log(f"endpoint answered {response.status_code} with a non-JSON body: "
-                 f"{raw[:200]!r}")
-            return [], snippet
-        return (body if isinstance(body, list) else [body]), snippet
+                 f"{redact(raw[:200].decode('utf-8', 'replace'), sent.key)!r}")
+            return [], redact(snippet, sent.key)
+        # REDACT on this path too: the snippet is quoted into the no-reply error
+        # below, and a 200 body can quote the credential as easily as a 401 can.
+        return (body if isinstance(body, list) else [body]), redact(snippet, sent.key)
 
     messages: list[Any] = []
     pending = {request_id for request_id in expected_ids if isinstance(request_id, (str, int))}
@@ -174,7 +179,7 @@ def _response_messages(response: httpx.Response, expected_ids: list) -> tuple[li
         try:
             message = json.loads(chunk)
         except ValueError:
-            _log(f"ignoring non-JSON event-stream payload: {chunk[:120]}")
+            _log(f"ignoring non-JSON event-stream payload: {redact(chunk[:120], sent.key)}")
             continue
         messages.append(message)
         for item in (message if isinstance(message, list) else [message]):
@@ -196,7 +201,10 @@ def _refusal_message(status: int, body: str, sent: Connection) -> str:
     """
     detail = f"HTTP {status}"
     if body.strip():
-        detail += f": {body.strip()[:400]}"
+        # REDACT before quoting: a server may echo the key it rejected, and this
+        # message is written to the harness's transcript and logs. Quoting is the
+        # evidence; the VALUE is never part of it.
+        detail += f": {redact(body.strip()[:400], sent.key)}"
     if sent.key is None:
         return (
             f"{REFUSAL_CODE}: the Tortoise MCP endpoint rejected this request "
@@ -288,10 +296,10 @@ def forward(client: httpx.Client, state: dict, payload: Any) -> list[Any]:
                 return _errors_for(
                     payload, -32603,
                     f"MCP endpoint returned HTTP {response.status_code}: "
-                    f"{response.read().decode('utf-8', 'replace')[:400]}",
+                    f"{redact(response.read().decode('utf-8', 'replace')[:400], connection.key)}",
                 )
 
-            messages, snippet = _response_messages(response, expected_ids)
+            messages, snippet = _response_messages(response, expected_ids, connection)
             if expected_ids and not any(
                 isinstance(m, dict) and m.get("id") in expected_ids for m in messages
             ):
@@ -303,10 +311,13 @@ def forward(client: httpx.Client, state: dict, payload: Any) -> list[Any]:
                     payload, -32603,
                     f"the MCP endpoint answered HTTP {response.status_code} with no "
                     f"JSON-RPC reply for id(s) {expected_ids}"
-                    + (f": {snippet[:300]}" if snippet.strip() else ""),
+                    + (f": {redact(snippet[:300], connection.key)}" if snippet.strip() else ""),
                 )
     except httpx.HTTPError as exc:
-        return _errors_for(payload, -32603, f"MCP transport failure talking to {url}: {exc}")
+        return _errors_for(
+            payload, -32603,
+            f"MCP transport failure talking to {url}: {redact(str(exc), connection.key)}",
+        )
 
     for message in messages:
         if isinstance(message, dict) and "result" in message:
