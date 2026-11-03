@@ -3410,10 +3410,23 @@ def _cmd_config(args) -> int:
             )
         # Coordinates live in the FILE (an env-supplied identity has none) — the
         # gap that made `--org`/`--graph` undiscoverable.
+        unusable_fields: list[str] = []
         for field in ("org_id", "org_name"):
             value = (winner_cfg or {}).get(field)
             if isinstance(value, str) and value:
                 cred[field] = value
+            elif value is not None:
+                # Present but not a usable string. Reporting "(absent)" here was a
+                # false claim about the store twice over: the field IS there, and
+                # the "init --api-key writes only the key" hint does not describe
+                # a store that wrote a list. Same distinction `_describe_store`
+                # already draws between `no-key` and `invalid-key`.
+                unusable_fields.append(f"{field} ({type(value).__name__})")
+        if unusable_fields:
+            cred["org_field_warning"] = (
+                "the resolved store carries " + ", ".join(unusable_fields)
+                + " — not a string, so it cannot be used. Fix the field in the "
+                "store; nothing here can repair it")
         # `recover` does NOT read the token from the winning store — it scans
         # `<cwd>/.tortoise` then `~/.tor…/credentials.json` regardless of which
         # store supplied the KEY (#1752's divergence case). Asking the winner
@@ -3447,7 +3460,7 @@ def _cmd_config(args) -> int:
                 "TORTOISE_API_URL is set but blank — the CLI will send requests "
                 "to an empty base URL")
         org_id = cred.get("org_id")
-        if not org_id:
+        if not org_id and not cred.get("org_field_warning"):
             # No org_id is the documented onboarding shape, not a fault: the
             # store `tortoise init --api-key` writes persists ONLY
             # api_key/api_url, and an env key carries no file at all. Name the
@@ -3544,12 +3557,25 @@ def _cmd_config(args) -> int:
                     "unrecognised URI scheme — `tortoise doctor` reports supported "
                     "schemes and the resolved target")
         else:
-            cuts = [i for i in (uri.find("?"), uri.find("#")) if i != -1]
-            graph_store["target"] = uri[:min(cuts)] + "…" if cuts else uri
-            if ":" in uri:
-                graph_store["target"] = "<redacted: userinfo-shaped, no host>"
-                graph_store["target_kind"] = "unrecognised (redacted)"
+            # `uri` came back from a SUCCESSFUL `_resolve_db_target()`, and every
+            # path it can produce is absolute (`resolve_db_path` rejects relative
+            # values, and the scheme/trio cases took the branches above) — so this
+            # is a real filesystem path and cannot carry URI USERINFO: labelling a
+            # legal `/tmp/a:b.db` as "<redacted: userinfo-shaped>" was a false
+            # statement about a working store.
+            #
+            # A QUERY/fragment is different. `resolve_db_path`'s backward-compat
+            # branch treats the whole string as a path, so
+            # `TORTOISE_DB_URI=/tmp/x.db?password=…` resolves to that "path" — the
+            # credential is real and must not be printed. Cut it, and SAY the value
+            # is truncated rather than printing an ellipsis under an unchanged kind.
+            shown = _printable(uri)
+            cuts = [i for i in (shown.find("?"), shown.find("#")) if i != -1]
+            if cuts:
+                graph_store["target"] = shown[:min(cuts)] + "…"
+                graph_store["target_kind"] = "embedded file path (query/fragment redacted)"
             else:
+                graph_store["target"] = shown
                 graph_store["target_kind"] = "embedded file path"
     payload["graph_store"] = graph_store
 
@@ -3697,7 +3723,8 @@ def _cmd_config(args) -> int:
             # store-derived (a directory name can legally contain `;`/spaces/`|`),
             # so it is shell-quoted like the other two paste lines in this report.
             print("   The file is there but unreadable — fix its permissions "
-                  f"(`chmod 600 {_shlex.quote(str(cred['blocked_by']))}`).")
+                  f"(`chmod 600 "
+                  f"{_printable(_shlex.quote(str(cred['blocked_by'])))}`).")
             print("   ⛔ Do NOT delete it: this store may hold the signup_token that "
                   "`tortoise recover` needs.")
         else:
@@ -3731,6 +3758,8 @@ def _cmd_config(args) -> int:
             print(f"  ⚠️  {cred['recovery_token_note']}")
         if cred.get("org_id_warning"):
             print(f"  ⚠️  org_id is {cred['org_id_warning']}")
+        if cred.get("org_field_warning"):
+            print(f"  ⚠️  {cred['org_field_warning']}")
         if cred.get("org_id_hint"):
             print(f"  ·  {cred['org_id_hint']}")
         if cred.get("api_key_whitespace"):
