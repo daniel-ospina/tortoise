@@ -75,10 +75,14 @@ exactly the drift #3504 predicts, and it drifted: review finding P1 was a fence
 shape (a fence opened on a list-marker line) this copy read as prose, which
 manufactured a `lands`. The mitigation is that this copy is checked against a
 SOURCE too — a real CommonMark renderer (`markdown_it`, a test dependency),
-shape by shape, in `tests/test_closes_landing.py` — so a divergence between
-what this tool calls code and what a renderer calls code reds a test rather
-than a reader. Do not "simplify" it back to `closingIssuesReferences`: for
-this question the source is empty precisely when it matters.
+shape by shape, in `test_the_parser_agrees_with_a_real_commonmark_renderer` — so
+a divergence between what this tool calls code and what a renderer calls code
+reds a test rather than a reader. That test is the mitigation, and it is the only
+thing that is: an earlier version of this paragraph claimed the cross-check while
+no test in the file imported the renderer at all, which is the re-staleable
+"checked by hand" claim this repo keeps paying for. Do not "simplify" it back to
+`closingIssuesReferences`: for this question the source is empty precisely when it
+matters.
 
 Usage
 -----
@@ -282,17 +286,23 @@ _MAX_FENCE_INDENT = 3  # a 4+ column ``` is an INDENTED CODE BLOCK, not a fence
 _LIST_MARKER_RE = re.compile(r"^(?P<indent>[ \t]*)(?:[-*+]|\d{1,9}[.)])(?P<gap>[ \t]+)")
 
 
-def _fence_open(rest: str) -> tuple[str, int] | None:
+def _fence_open(rest: str, content_col: int = 0) -> tuple[str, int] | None:
     """(character, run length) if `rest` opens a fence — else None.
 
     CommonMark, and each clause below is a shape a review cycle found:
 
-    * an opener indented 4+ columns is not a fence at all (a tab is 4 columns,
-      hence `expandtabs`);
+    * an opener indented more than 3 columns past the CONTAINING BLOCK's content
+      column (`content_col`) is not a fence at all — §4.5: "A fenced code block
+      begins with a code fence, preceded by up to three spaces of indentation",
+      and inside a list item that budget starts at the item's content column, so
+      a four-space-from-column-0 run IS a fence there. Measuring from column 0
+      refused a real fence and blanked the block's content as prose — a `lands`
+      on a quoted keyword (#10634 review P1). A tab is 4 columns, hence
+      `expandtabs`;
     * a backtick opener whose info string CONTAINS a backtick is not a fence.
     """
     body = rest.expandtabs(4)
-    if len(body) - len(body.lstrip(" ")) > _MAX_FENCE_INDENT:
+    if len(body) - len(body.lstrip(" ")) - content_col > _MAX_FENCE_INDENT:
         return None
     s = body.lstrip(" ")
     m = re.match(r"(`{3,}|~{3,})", s)
@@ -329,8 +339,13 @@ class _Fence:
     """An OPEN fenced block: the four things its container needs to end it.
 
     * `prefix` — the blockquote prefix it opened under (the quote ending ends it);
-    * `col` — its content column in LINE coordinates, compared against a later
-      line's indent to end a fence opened inside a list item;
+    * `item_col` — the enclosing LIST ITEM's content column (0 when none is
+      open), compared against a later line's indent to end the block. It is the
+      ITEM's column, never the fence run's own indent: §4.5 ends the block at
+      "the end of the containing block", and an item's content column is where
+      that block starts. Using the run's indent instead ended a fence on a line
+      that was still inside the item, so the block's content read as prose — a
+      `lands` (#10634 review P1);
     * `base` — the column its run sits at WITHIN `rest`, which is what a closing
       fence is measured from (a closer may sit up to three columns past it);
     * `in_list` — whether a list item was open, so a dedent can end the block.
@@ -338,13 +353,13 @@ class _Fence:
 
     opener: tuple[str, int]
     prefix: str
-    col: int
+    item_col: int
     base: int
     in_list: bool
 
 
 def _fence_candidate(prefix: str, rest: str, indent: int,
-                     in_list: bool) -> _Fence | None:
+                     list_cols: list[int]) -> _Fence | None:
     """The fence `(prefix, rest)` opens, or None if the line is prose.
 
     A fence may open ON a list-marker line itself (`- ``` `, `1. ``` `):
@@ -360,6 +375,10 @@ def _fence_candidate(prefix: str, rest: str, indent: int,
     starts an INDENTED code block rather than a fence, which `_fence_open` then
     refuses on its own (a 4+ column `` ``` `` is not a fence).
     """
+    # The content column the fence is measured from: the item already open (or
+    # the one this very line opens), else column 0. It is passed INTO the opener
+    # test as well as stored, because `content_col + 3` is where CommonMark's
+    # "up to three spaces" budget ends (#10634 review P1).
     item = _LIST_MARKER_RE.match(rest) if rest.strip() else None
     if item:
         m_indent = len(item.group("indent"))
@@ -370,11 +389,12 @@ def _fence_candidate(prefix: str, rest: str, indent: int,
         if opener is None:
             return None
         return _Fence(opener, prefix, len(prefix) + base, base, True)
-    opener = _fence_open(rest)
+    content_col = list_cols[-1] if list_cols else 0
+    opener = _fence_open(rest, content_col)
     if opener is None:
         return None
-    return _Fence(opener, prefix, indent,
-                  len(rest) - len(rest.lstrip(" ")), in_list)
+    return _Fence(opener, prefix, content_col,
+                  len(rest) - len(rest.lstrip(" ")), bool(list_cols))
 
 
 def strip_code(body: str, strict: bool = False) -> str:
@@ -398,15 +418,24 @@ def strip_code(body: str, strict: bool = False) -> str:
       blank line, which ends the blockquote (review c8-1) — and the line that ends
       it is re-examined as a fresh line, because it may itself open a fence
       (review c10-2);
-    * a fence opened inside a LIST ITEM ends when the item's content ends, i.e. a
-      non-blank line dedents below the opener (review c10-3) — and a fence may
-      open ON the marker line itself, at the item's content column (#10634
-      review P1);
+    * a fence opened inside a LIST ITEM ends when the ITEM's content ends — a
+      non-blank line dedents below the item's CONTENT COLUMN, not below the
+      fence run's own indent (review c10-3, corrected in #10634 review P1: §4.5
+      ends the block at "the end of the containing block", and an item's content
+      line may sit BELOW the opener's column and still be inside the block) —
+      and a fence may open ON the marker line itself, at the item's content
+      column (#10634 review P1);
     * containers are compared by DEPTH, never by the raw prefix string: `>`, `> `,
       `  > ` are one container to CommonMark, and comparing strings meant a legal
       closer was never recognised (review c10-1);
     * `strict` (the CARRIER body, and the subject's own `lands` arm) additionally
       blanks indented lines, because there a lenient-only match would be a PASS.
+      The indentation is measured on `rest` — the line AFTER its blockquote
+      prefix — because measuring it on the raw line missed an indented code block
+      that sits inside a quote, and that body bought a `lands` (#10634 review
+      P2). A line that OPENS a fence is never blanked by this arm: a fence's
+      content column is its problem, and blanking the opener lost the whole
+      block's content as prose (#10634 review P1).
 
     What it does NOT do, deliberately: a keyword in blockquote PROSE (`> Closes
     #N`) stays a claim. GitHub acts on a closing keyword in a quoted paragraph —
@@ -420,44 +449,48 @@ def strip_code(body: str, strict: bool = False) -> str:
         line = raw.expandtabs(4)
         indent = len(line) - len(line.lstrip(" "))
         prefix, rest = _split_prefix(line)
-        marker = _LIST_MARKER_RE.match(line)
-        if marker and line.strip():
-            list_cols.append(len(marker.group(0)))
-        elif line.strip() and list_cols and indent < list_cols[-1]:
+        if fence is not None:
+            # The container can END the block: the quote it lived in closed, or
+            # (for a fence opened inside a list item) the item did.
+            ended = (_quote_depth(fence.prefix) > 0
+                     and _quote_depth(prefix) < _quote_depth(fence.prefix))
+            if not ended and fence.in_list and line.strip() and indent < fence.item_col:
+                ended = True
+            if not ended:
+                # PREFIX BY DEPTH, not by string: `>`, `> `, `  > ` are the SAME
+                # blockquote container to CommonMark, and comparing the raw
+                # strings meant a legal closer was never recognised and the rest
+                # of the body was blanked — a silent MISS (review c10-1).
+                if _quote_depth(prefix) == _quote_depth(fence.prefix) and _is_closer(
+                        rest, fence.opener, fence.base):
+                    fence = None
+                out.append("")
+                continue
+            # The container ended, so this line is FRESH: it may open a new fence
+            # (review c10-2), and — outside the block — it is also where the list
+            # item stack is tracked again.
+            fence = None
+        # LIST-ITEM TRACKING happens only on lines that are NOT inside a fence. A
+        # marker line inside the block is CONTENT; counting it as an item opened a
+        # phantom item that then "ended" the block on a dedented claim it should
+        # have blanked, and the claim became a `lands` (#10634 review P2). The
+        # dedent-pop runs FIRST, on every non-blank line, so a marker that dedents
+        # past an outer item pops it before pushing its own column.
+        if line.strip():
             while list_cols and indent < list_cols[-1]:
                 list_cols.pop()
-        if strict and (raw.startswith("    ") or raw.startswith("\t")):
+            marker = _LIST_MARKER_RE.match(line)
+            if marker:
+                list_cols.append(len(marker.group(0)))
+        fence = _fence_candidate(prefix, rest, indent, list_cols)
+        if fence:
             out.append("")
             continue
-        if fence is None:
-            fence = _fence_candidate(prefix, rest, indent, bool(list_cols))
-            if fence:
-                out.append("")
-            else:
-                out.append(raw)   # prose: keep it, keywords and all
+        if strict and (len(rest) - len(rest.lstrip(" ")) > _MAX_FENCE_INDENT
+                       or rest.startswith("\t")):
+            out.append("")
             continue
-        # The container can END the block: the quote it lived in closed, or (for a
-        # fence opened inside a list item) the item did. Either way the line that
-        # ends it is a FRESH line — it may itself open a new fence (review c10-2).
-        ended = (_quote_depth(fence.prefix) > 0
-                 and _quote_depth(prefix) < _quote_depth(fence.prefix))
-        if not ended and fence.in_list and line.strip() and indent < fence.col:
-            ended = True
-        if ended:
-            fence = _fence_candidate(prefix, rest, indent, bool(list_cols))
-            if fence:
-                out.append("")
-            else:
-                out.append(raw)   # prose again: keep it, keywords and all
-            continue
-        # PREFIX BY DEPTH, not by string: `>`, `> `, `  > ` are the SAME
-        # blockquote container to CommonMark, and comparing the raw strings meant
-        # a legal closer was never recognised and the rest of the body was
-        # blanked — a silent MISS (review c10-1).
-        if _quote_depth(prefix) == _quote_depth(fence.prefix) and _is_closer(
-                rest, fence.opener, fence.base):
-            fence = None
-        out.append("")
+        out.append(raw)   # prose: keep it, keywords and all
     return "\n".join(out)
 
 

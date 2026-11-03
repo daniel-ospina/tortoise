@@ -33,6 +33,7 @@ Run under pytest:    python3 -m pytest tests/test_closes_landing.py -q
 from __future__ import annotations
 
 import importlib.util
+import re
 import subprocess
 import sys
 import time
@@ -1484,3 +1485,142 @@ def test_a_code_block_on_a_marker_line_cannot_buy_a_lands_on_the_default_base():
 def test_container_depth_and_list_endings(body, expected, why):
     assert cl.parse_closing_refs(body) == expected, why
     assert cl.parse_closing_refs(body, None, strict=True) == expected, why
+
+
+# ── #10634 review: the CONTENT COLUMN, and a renderer as the oracle ─────────
+#
+# Three false `lands` (a claim inside a rendered code block read as prose) and
+# one lost claim, all from measuring indentation against the wrong column.
+
+@pytest.mark.parametrize("body,expected,why", [
+    # §4.5: "A fenced code block begins with a code fence, preceded by up to three
+    # spaces of indentation" — inside a list item that budget starts at the ITEM's
+    # content column, not at column 0. Measured from column 0, a real fence was
+    # refused and its content read as prose (a `lands` in BOTH parses).
+    ("- prose\n    ```\n  Closes #1001\n", [], "opener 4 cols from col 0, 2 past the item"),
+    ("1. item\n     ```\n   Closes #1001\n", [], "ordered item, opener past the absolute limit"),
+    # §4.5 ends the block at "the end of the containing block": a content line may
+    # sit BELOW the opener's own indent and still be inside the item. Using the
+    # run's column as the item's edge ended the fence early (a `lands`).
+    ("- item\n   ```\n  Closes #1001\n", [], "content line below the run, inside the item"),
+    # …and the over-report side is NOT traded away: a column-0 line really does
+    # end the item, so the claim after it is prose.
+    ("- item\n   ```\nCloses #1001\n", [1001], "a column-0 line ends the item"),
+    # A marker line INSIDE a fence is CONTENT, not a new item. Counting it pushed
+    # a phantom item whose "dedent" ended the NEXT fence early, so that block's
+    # content read as prose (a `lands`).
+    ("  ```\n- a\n  ```\n  ```\n- Closes #1002\n", [], "marker inside a fence is content"),
+])
+def test_a_fence_is_measured_from_its_items_content_column(body, expected, why):
+    assert cl.parse_closing_refs(body) == expected, why
+    assert cl.parse_closing_refs(body, None, strict=True) == expected, why
+
+
+@pytest.mark.parametrize("body,strict_expected,why", [
+    # An indented code block INSIDE a blockquote is still code, and the strict
+    # parse is the one that must refuse it: the `strict` arm was tested on the RAW
+    # line, so a `> ` prefix hid the four spaces and the body bought a `lands`.
+    ("> old version:\n>\n>     Closes #100\n", [], "indented code block inside a quote"),
+    (">     Closes #100\n", [], "indented code block, quoted, single line"),
+    # The flat form, restated: it already refused, and must keep refusing.
+    ("old version:\n\n    Closes #100\n", [], "flat indented code block (unchanged)"),
+    # …and quoted PROSE stays a claim. Only CODE is ignored by GitHub.
+    ("> Closes #5\n", [5], "a quoted paragraph is prose"),
+    (">   Closes #5\n", [5], "a quote-indented PARAGRAPH is prose, not code"),
+])
+def test_a_quoted_indented_code_block_cannot_buy_a_pass(body, strict_expected, why):
+    assert cl.parse_closing_refs(body, None, strict=True) == strict_expected, why
+
+
+def test_the_lenient_arm_still_reports_the_quoted_indented_claim_it_cannot_refuse():
+    """The documented TRADE, pinned where it is exercised: strict refuses an
+    indented line because a lenient-only match there would be a PASS, while the
+    finding arms stay lenient and over-report a quoted keyword (a false warning —
+    the safe direction). Removing the strict arm would turn this into a `lands`."""
+    body = "> old version:\n>\n>     Closes #100\n"
+    assert cl.parse_closing_refs(body) == [100]
+    assert cl.parse_closing_refs(body, None, strict=True) == []
+
+
+def test_a_carrier_that_only_quotes_the_keyword_in_a_quoted_code_block_does_not_carry_it():
+    """The `lands` direction, which is the one that must never fire: the CARRIER
+    only QUOTES `Closes #N` in an indented code block inside a blockquote, so
+    nothing will close the issue. The pre-fix tool reported `lands`."""
+    stacked = _pr(73, SIBLING, "Closes #100")
+    carrier = _pr(74, DEFAULT, "> old version:\n>\n>     Closes #100\n", head=SIBLING)
+    (finding,) = cl.classify(stacked, _by_head(stacked, carrier), DEFAULT)
+    assert finding.verdict == "inert", finding
+    assert finding.carrier == 74
+
+
+def test_a_list_item_fence_cannot_buy_a_lands_on_the_default_base():
+    pr = _pr(75, DEFAULT, "- item\n   ```\n  Closes #100\n")
+    assert cl.classify(pr, _by_head(pr), DEFAULT) == []
+
+
+# ── the RENDERER as the oracle, so a divergence reds a test, not a reader ────
+#
+# `tools/closes_landing.py` is a second copy of a grammar GitHub owns, and its
+# rationale for keeping the copy says a real CommonMark renderer checks it "shape
+# by shape … so a divergence between what this tool calls code and what a
+# renderer calls code reds a test rather than a reader". That sentence was true
+# of a MANUAL pass and of nothing in this file (a review found no `markdown_it`
+# import at all), which is precisely the re-staleable process claim this repo
+# keeps paying for. These two directions are the module's own contract:
+#
+#   * the renderer calls it CODE  → the STRICT parse must not list it (a pass may
+#     never rest on a shape the tool cannot show GitHub acts on);
+#   * the renderer calls it PROSE → the LENIENT parse must list it (a REAL claim
+#     must never be lost — an over-report costs a warning, an under-report costs
+#     a silent miss).
+
+_CODE_BLOCK_RE = re.compile(r"<pre><code\b.*?</code></pre>", re.S)
+_FIRST_REF_RE = re.compile(r"#(\d+)")
+
+_COMMONMARK_SHAPES = [
+    # fences, plain and quoted
+    ("```\nCloses #100\n```\n", "depth-0 fence"),
+    ("   ```\nCloses #100\n   ```\n", "3-space opener is a fence"),
+    ("    ```\nCloses #100\n", "4-space opener is an INDENTED code block"),
+    ("\t```\n  Closes #100\n", "tab opener is an INDENTED code block"),
+    ("> ```\n> Closes #100\n> ```\n", "quoted fence"),
+    ("> ```\n> a\n>\n> Closes #100\n> ```\n", "blank quoted line stays in the quote"),
+    ("```\n> ```\n```\nCloses #100\n", "a quoted fence line inside a fence is content"),
+    ("```\na\n``` x\n```\nCloses #100\n", "a closer with an info string is content"),
+    ("- ```\n  Closes #100\n  ```\n", "fence opened on a marker line"),
+    ("- item\n  ```\n  Closes #100\n  ```\n", "fence on the line after a marker"),
+    # the content-column shapes this fix is about
+    ("- prose\n    ```\n  Closes #100\n", "opener 4 cols from col 0, inside the item"),
+    ("- item\n   ```\n  Closes #100\n", "content below the run's own indent"),
+    ("  ```\n- a\n  ```\n  ```\n- Closes #100\n", "marker line inside a fence is content"),
+    # indented code blocks, flat and quoted
+    ("old version:\n\n    Closes #100\n", "flat indented code block"),
+    ("> old version:\n>\n>     Closes #100\n", "indented code block inside a quote"),
+    # and the claims that ARE prose
+    ("> Closes #100\n", "a quoted paragraph is prose"),
+    ("- item\n  ```\nCloses #100\n", "a column-0 line ends the item"),
+    ("- ```\n  a\n- Closes #100\n", "a new item ends a marker-line fence"),
+]
+
+
+@pytest.mark.parametrize("body,why", _COMMONMARK_SHAPES)
+def test_the_parser_agrees_with_a_real_commonmark_renderer(body, why):
+    markdown_it = pytest.importorskip(
+        "markdown_it", reason="markdown-it-py is a declared test dependency (#8379)")
+    html = markdown_it.MarkdownIt("commonmark").render(body)
+    prose = _CODE_BLOCK_RE.sub("", html)
+    match = _FIRST_REF_RE.search(body)
+    assert match, (why, body)
+    n = int(match.group(1))
+    strict = cl.parse_closing_refs(body, None, strict=True)
+    lenient = cl.parse_closing_refs(body)
+    if f"#{n}" in prose:
+        assert n in lenient, (
+            f"{why}: the renderer puts #{n} in PROSE ({html!r}) and the lenient "
+            f"parse — the FINDING arm — lost it. That is the under-report "
+            f"direction: a real closing ref produces no warning at all.")
+    else:
+        assert n not in strict, (
+            f"{why}: the renderer puts #{n} in <pre><code> ({html!r}) and the "
+            f"strict parse — the PASS arm — reported it. A keyword GitHub ignores "
+            f"cannot buy a `lands`.")
