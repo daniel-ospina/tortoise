@@ -152,17 +152,34 @@ def tenant() -> tuple[str, str]:
 #: Measured at #9200's head (`62ec432a8`) + this diff, against a real Postgres.
 #: Reported on #9200 (the producer-accuracy class it belongs to): the fix is a
 #: schema/placement decision, not a wiring one.
-_SCHEMA_DISAGREEMENTS = {
-    "search_keys": "invalid input syntax for type json",
-}
+#:
+#: EMPTY since #9548, which was the last entry. `search_keys` — an EXTRACTED
+#: point's flattened STRING (`_flatten_search_keys_prop`, #8006/#5482) landing in
+#: a `jsonb` column — is no longer a disagreement, because
+#: `_jsonb_or_scalar` now serialises a scalar for a `jsonb` COLUMN (the type read
+#: from the migrations) instead of passing the string through as TEXT. The
+#: column's shape is unchanged (it is still `jsonb`); the encoding was the
+#: defect, and 302 live rows were dropped by it. Two record types re-project the
+#: same snapshot (``PointAdded``/``PointPromoted``), so the TYPE is not the unit —
+#: which is why the detector arm went with it rather than being generalised.
+#: `_disagreement` below is therefore a constant `None` and this map is EMPTY:
+#: a future disagreement edits BOTH (and its detector test), deliberately.
+_SCHEMA_DISAGREEMENTS: dict[str, str] = {}
 
 
 def _disagreement(record: dict) -> str | None:
-    """Which declared-column disagreement this journal record carries, if any."""
-    snapshot = record.get("point") or {}
-    keys = snapshot.get("search_keys")
-    if isinstance(keys, str) and keys.strip():
-        return "search_keys"
+    """Which declared-column disagreement this journal record carries, if any.
+
+    …**NONE, today.** It returns a constant `None` because the record's declared
+    shape and its producers' shapes now agree (#9548 was the last disagreement,
+    #9264 the one before), and it is kept as a NAMED, single-place answer rather
+    than inlined for the reason the entry above gives: the residue pass's `else:`
+    arm reads it, and the empty `_SCHEMA_DISAGREEMENTS` beside it is the
+    declaration a FUTURE disagreement edits (with its own detection arm here and
+    its detector test). What it does NOT do is prove a clean record is clean —
+    a constant cannot; the pass proves that by replaying the record and
+    asserting it raised nothing.
+    """
     return None
 
 
