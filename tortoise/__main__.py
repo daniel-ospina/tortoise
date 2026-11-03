@@ -3739,10 +3739,18 @@ def _cmd_config(args) -> int:
             # when the GLOBAL candidate itself resolves. Asserting it without
             # looking told a reader to rely on transcript upload while it was
             # broken by the other store.
-            if state_global in _STORE_REFUSING or blocked_path == str(global_cfg):
+            if blocked_path == str(global_cfg) or state_global in _STORE_REFUSING:
                 print("   The transmitting verbs (`session capture/drain/import`) "
                       "FAIL TOO: they resolve the global store, which is refusing "
                       "as well.")
+            elif state_global != _STORE_OK:
+                # Only `ok` actually resolves. For absent/empty/directory/broken-
+                # symlink the verbs resolve NO identity and file nothing — and
+                # `session drain` then exits 0 with "nothing to file", so claiming
+                # "unaffected" told the reader upload was fine while it was dead.
+                print("   The transmitting verbs (`session capture/drain/import`) do "
+                      f"not resolve either: their global store is {state_global}, so "
+                      "they have no identity and file nothing.")
             else:
                 print("   The transmitting verbs (`session capture/drain/import`) are "
                       "unaffected: they skip this candidate and use the global store.")
@@ -3921,16 +3929,11 @@ def _cmd_org_info(args) -> int:
         )
         with urlopen(req, timeout=10) as resp:
             data = json.loads(resp.read())
-    except (http.client.HTTPException, ValueError, RecursionError) as e:
-        # `http.client.InvalidURL` derives from HTTPException — neither OSError nor
-        # ValueError — so it used to escape as a TRACEBACK whose message embeds the
-        # api_url (a password in its userinfo, or a "nonnumeric port" reading of
-        # one). `ValueError` covers both the header-value refusal and
-        # `json.JSONDecodeError`; `http.client` interpolates the header value into
-        # its own text, so scrub the key before it reaches the log.
-        print(f"Invalid response from API: {_printable(_scrub(str(e), api_url, api_key))}",
-              file=sys.stderr)
-        return 1
+    # ORDER MATTERS: HTTPError (an OSError) first, then the transport OSErrors,
+    # then the rest. `http.client.RemoteDisconnected` is BOTH a
+    # ConnectionResetError (OSError) and an HTTPException, and it is the shape a
+    # cold start most often produces — so it must take the RETRY path, not be
+    # reported as an invalid response.
     except HTTPError as e:
         # `errors="replace"`: a proxy/captive portal answering 4xx with a
         # latin-1 or binary body would otherwise raise UnicodeDecodeError INSIDE
@@ -4003,6 +4006,16 @@ def _cmd_org_info(args) -> int:
                   file=sys.stderr)
             return 1
 
+    except (http.client.HTTPException, ValueError, RecursionError) as e:
+        # `http.client.InvalidURL` derives from HTTPException — neither OSError nor
+        # ValueError — so it used to escape as a TRACEBACK whose message embeds the
+        # api_url (a password in its userinfo, or a "nonnumeric port" reading of
+        # one). `ValueError` covers both the header-value refusal and
+        # `json.JSONDecodeError`; `http.client` interpolates the header value into
+        # its own text, so scrub the key before it reaches the log.
+        print(f"Invalid response from API: {_printable(_scrub(str(e), api_url, api_key))}",
+              file=sys.stderr)
+        return 1
     if not isinstance(data, dict):
         # A 200 whose body is a JSON array/string (proxy, captive portal). The
         # derefs below would AttributeError — reachable twice now that the

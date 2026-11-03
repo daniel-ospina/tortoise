@@ -1518,6 +1518,55 @@ def test_the_global_store_refusing_makes_the_transmitting_verbs_fail_too(
     assert "are unaffected" not in out
 
 
+def test_an_absent_global_store_makes_the_transmitting_verbs_identity_less(
+        monkeypatch, capsys, tmp_path):
+    """Only `ok` resolves. For absent/empty/directory the verbs have NO identity
+    and file nothing (`session drain` exits 0 with "nothing to file"), so claiming
+    "unaffected" told the reader upload was fine while it was dead."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    monkeypatch.chdir(repo)                       # HOME has no store at all
+    (repo / ".tortoise").write_text("{not json")
+    assert _run() == 1
+    out = capsys.readouterr().out
+    assert "are unaffected" not in out
+    assert "do not resolve either" in out
+
+
+def test_a_transport_drop_is_reported_as_transport_not_as_an_invalid_response(
+        monkeypatch, capsys, tmp_path):
+    """`RemoteDisconnected` is both an OSError and an HTTPException. It used to be
+    caught by the HTTPException branch and reported as "Invalid response from API",
+    i.e. blamed on the SERVER's body — the diagnosis must be a transport failure.
+    (The retry stays gated on a TIMEOUT: a reset is a different failure, reported
+    plainly instead of retried.)"""
+    import http.client
+    import io
+
+    _global(tmp_path)
+    calls: list[float] = []
+
+    class _Resp(io.BytesIO):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    def _fake_urlopen(_req, timeout=None):
+        calls.append(timeout)
+        raise http.client.RemoteDisconnected("Remote end closed connection")
+
+    monkeypatch.setattr("urllib.request.urlopen", _fake_urlopen)
+    rc = main.main(["team", "info"])
+    _out, err = capsys.readouterr()
+    assert calls == [10]                            # not a timeout: no retry
+    assert rc == 1
+    assert "Cannot reach API at" in err             # a transport failure …
+    assert "Invalid response from API" not in err   # … not the server's body
+    assert "Remote end closed connection" in err
+
+
 def test_the_db_uri_log_line_does_not_print_a_query_credential(
         monkeypatch, capsys, tmp_path):
     """`resolve_db_path` logs the RAW value; a `?password=…` in a path-shaped
