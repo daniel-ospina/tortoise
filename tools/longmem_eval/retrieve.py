@@ -2319,12 +2319,15 @@ def retrieve_for_question(
     # The reader's item cap IS its window: ``reader_window_displacement``
     # measures crowding against the prefix the reader actually consumes, so
     # the window is the caller's resolved cap. The branch below is a
-    # direct-caller fallback matching ``DEFAULT_CONTEXT_ITEM_CAP`` (40) — NOT
+    # direct-caller fallback reading ``DEFAULT_CONTEXT_ITEM_CAP`` (40) — the
+    # SAME constant ``eff_item_cap`` itself falls back to above — and NOT
     # ``assemble_context``'s own default, which is ``top_k``; and it is
     # unreachable from here, because ``eff_item_cap`` is always resolved to an
-    # int above. Kept as a floor, not as a claim about the reader.
+    # int above. Kept as a floor, not as a claim about the reader. It names
+    # the constant the CODE reads: the seed window's constant is numerically
+    # 40 today too, so a comment naming it would be true only by coincidence.
     _sr_reader_window = (eff_item_cap if eff_item_cap is not None
-                         else DEFAULT_REINJECTION_SEED_WINDOW)
+                         else DEFAULT_CONTEXT_ITEM_CAP)
     # per-outcome census (§2): the OFF arm records the same zeroed shape so
     # the arm delta stays reconstructable per question. That zeroed
     # ``sessions_before``/``sessions_after`` is a DESIGN, not a measurement —
@@ -2334,6 +2337,17 @@ def retrieve_for_question(
     # base window's real counts here was considered and declined: the two arms
     # would then report DIFFERENT quantities under the same key, which is what
     # breaks the per-question arm delta this comment exists to record.
+    #
+    # ``measured`` is therefore ``False`` in this shape, and it is the ONLY key
+    # that separates it from a real zero. Every path that never reaches the
+    # census below keeps it: the whole OFF arm, a TR question, an ON-arm
+    # question where no injected group materialised, a fetch that reported
+    # not-ok, and a merge-stage failure. ``measured: True`` with zeroed counts
+    # makes "the census ran and found no crowding" indistinguishable from "no
+    # census was taken (or the arm did nothing)", so a consumer filtering on
+    # ``measured`` — the documented way to use it — silently folds half a
+    # corpus's OFF-arm questions into the crowding sample. Only the census (or
+    # its own ``except``, which writes ``None`` values) reports ``True``.
     sr_seeds: list[str] = []
     sr_seeded = 0
     sr_injected_per_session: dict[str, int] = {}
@@ -2346,7 +2360,7 @@ def retrieve_for_question(
     sr_window_displacement: dict[str, object] = {
         "window": _sr_reader_window, "injected_in_window": 0,
         "base_displaced": 0, "sessions_lost": [],
-        "sessions_before": 0, "sessions_after": 0, "measured": True}
+        "sessions_before": 0, "sessions_after": 0, "measured": False}
     sr_latency_ms = 0.0
     if reinjection_on and not is_tr and pool:
         from tortoise import session_reinjection as _sr

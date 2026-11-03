@@ -597,6 +597,17 @@ def reader_window_displacement(
     merged window has no evidence the reader can cite, whatever its rank
     was before.
 
+    The synthetic ``idx:*`` namespace is dropped from BOTH sets: it names no
+    graph session (the ``lme_session_index`` bucket, and since #3591 the
+    per-hit ``idx:point:{id}`` bucket of a hit with no session identity), so
+    a phantom must never be reported as a session PRESENT in the window nor
+    as one LOST from it — the falsest possible ``sessions_lost`` entry, since
+    the reader could not have cited it in the first place. This is the same
+    exclusion ``coverage_loop.coverage_gap`` applies to its window census,
+    and ``retrieval.session_key_of`` documents the namespace as phantom. The
+    filter is applied to the resulting SETS, not to the key function: a
+    caller-supplied ``session_key`` cannot drop a bucket, only remap one.
+
     Returns ``{"window", "injected_in_window", "base_displaced",
     "sessions_lost", "sessions_before", "sessions_after", "measured"}`` —
     ``measured`` is ``True`` on every path this function returns, and the
@@ -617,8 +628,10 @@ def reader_window_displacement(
                              if h["id"] not in base_ids)
     base_displaced = sum(1 for h in base_window
                          if h["id"] not in merged_window_ids)
-    before = {key(h) for h in base_window}
-    after = {key(h) for h in merged_window}
+    before = {k for k in (key(h) for h in base_window)
+              if k and not k.startswith("idx:")}
+    after = {k for k in (key(h) for h in merged_window)
+             if k and not k.startswith("idx:")}
     return {
         "window": window,
         "injected_in_window": injected_in_window,
