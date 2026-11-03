@@ -27,15 +27,25 @@ THE READER
 the duration of the run (`_run_scoped_vocabulary_gap`) and appends its reading to
 the run's OWN receipt:
 
-* `result["stats"]["vocabulary_gap"]` — the reading, ALWAYS present, the shape
-  `vocabulary_gap_snapshot()` reports plus `"scope": "run"`. It rides `stats`
-  because the SDK's capture fold (`sdk._capture_stats_with_step_witness`) copies
-  `out["stats"]` wholesale, so the reading reaches the product receipt
-  (`capture_session`'s `stats`) with no second seam — the #2335 WI-1a lesson
-  `error_census` taught.
-* `result["warnings"]` — ONE entry naming the absorbed tokens, only when the
-  reading recorded a loss. This is the run's alarm, and unlike the process log
-  line it cannot be spent by an earlier run.
+* `result["stats"]["vocabulary_gap"]` — the reading, present WHEN THE RUN
+  RECORDED A LOSS (a token sample, a pair-read residual, or oversize tokens) and
+  ABSENT otherwise, the shape `vocabulary_gap_snapshot()` reports plus
+  `"scope": "run"`. It rides `stats` because the SDK's capture fold
+  (`sdk._capture_stats_with_step_witness`) copies `out["stats"]` wholesale, so
+  the reading reaches the product receipt (`capture_session`'s `stats`) with no
+  second seam — the #2335 WI-1a lesson `error_census` taught.
+* `result["warnings"]` — ONE entry naming the absorbed tokens, under the SAME
+  predicate: this is the run's alarm, and unlike the process log line it cannot
+  be spent by an earlier run.
+
+⛔ ABSENT-WHEN-NO-DATA IS PART OF THE CONTRACT, not a detail. `stats` is passed
+through verbatim by the hosted receipt (`hosted_api` → `"stats": meta.get("stats")
+or {}`) and read by the cost seam, and the M2 lane documents a genuine zero-call
+path as a clean `{}`. An always-present reading made that `{}` impossible on M2,
+which reds `tests/test_capture_cost_measurement.py::
+test_emit_call_site_writes_no_cost_row_when_props_is_none` — the arm
+`test_a_zero_fold_m2_capture_leaves_stats_untouched` here pins the same fact
+hermetically.
 
 The SAME reader is wired onto the opt-in M2 capture lane
 (`sdk.TortoiseSDK._extract_session_llm`), because that lane does not route
@@ -57,7 +67,10 @@ the process-global census is a SUPERSET of the run's own folds (a concurrent
 capture may have folded inside the window). A superset is the safe direction for
 a COUNT, but not for token NAMES — a hosted process serves many tenants, so a
 receipt echoing a concurrent tenant's token would be a cross-tenant leak. The
-accumulator is thread-scoped, so a receipt names only its own run's tokens.
+accumulator is scoped to the run's own EXECUTION CONTEXT (a `ContextVar`, not a
+thread-local), so a receipt names only its own run's tokens AND a fold that runs
+on a worker carrying that context still lands on this run's reading
+(`test_a_fold_on_a_context_carried_worker_lands_on_the_run_reading`).
 
 RUNNING IT: the S3 leg must be a REAL, searchable backend (extractor_v2 skips
 the search on an embedded FalkorDBLite store), so these tests take the docker
@@ -74,8 +87,10 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from tests import _live_utils  # noqa: E402, RUF100
 from tests._live_utils import _skip_unless_live_uri  # noqa: E402, RUF100
 from tortoise import extractor_v2 as v2  # noqa: E402, RUF100
+from tortoise.search_engine import reset_circuit_breakers  # noqa: E402, RUF100
 
 #: #5329's own exemplar: a negator that appears in NO boundary vocabulary, so the
 #: boundary reads the pair as a one-sided broadening and PERMITS the fold.
@@ -128,11 +143,31 @@ def _fresh_census():
 @pytest.fixture()
 def sdk():
     """A live, SEARCHABLE graph — its own graph name, so no peer test's priors
-    can answer this run's S3 search."""
+    can answer this run's S3 search.
+
+    Teardown follows the file family's convention (`tests/test_source_fts.py`):
+    delete the per-run graph through `tests._live_utils.drop_test_graph`, then
+    close. A bare `close()` leaves the GRAPH OBJECT on the shared docker
+    instance, still counted against the server's `CACHE_SIZE` — the #8746/#7357
+    cache-eviction churn that helper exists to remove — and an unclosed client
+    leaks a redis connection per test.
+    """
     _skip_unless_live_uri()
     from tortoise.sdk import TortoiseSDK
 
-    return TortoiseSDK(graph_name=f"test_10626_{uuid.uuid4().hex[:10]}")
+    reset_circuit_breakers()
+    name = f"test_10626_{uuid.uuid4().hex[:10]}"
+    s = TortoiseSDK(graph_name=name)
+    try:
+        yield s
+    finally:
+        proj = getattr(s, "_proj", None)
+        if proj is not None:
+            # log-and-continue by contract (#8746): a teardown hiccup must not
+            # red a passing test, and the session sweep is the backstop.
+            _live_utils.drop_test_graph(proj)
+        reset_circuit_breakers()
+        s.close()
 
 
 def _run(sdk, claim: str, session_id: str) -> dict:
@@ -178,19 +213,24 @@ def test_a_run_that_absorbs_an_unlisted_marker_reports_it_in_its_own_receipt(sdk
         f"actionable; got {gap[0]!r}")
 
 
-def test_a_run_with_no_fold_reports_an_empty_reading_and_no_alarm(sdk):
-    """The control arm: this is what makes the reader a READER.
+def test_a_run_with_no_fold_reports_nothing_and_no_alarm(sdk):
+    """The control arm: this is what makes the reader a READER — and it pins
+    ABSENT-WHEN-NO-DATA.
 
-    A run whose boundary compared nothing reports an empty reading and emits no
-    gap warning, so `with a gap` and `without` are distinguishable from the
-    receipt alone."""
+    A run whose boundary compared nothing carries NO `vocabulary_gap` key and
+    emits no gap warning, so `with a gap` and `without` are distinguishable from
+    the receipt alone — and the key's absence is what keeps the M2 lane's
+    documented `stats == {}` zero-call contract intact."""
     out = _run(sdk, CLEAN_CLAIM, "gap-clean")
 
-    reading = out["stats"]["vocabulary_gap"]
-    assert reading["tokens"] == {}, reading
-    assert reading["distinct_tokens"] == 0, reading
-    assert reading["fold_decisions"] == 0, reading
+    assert "vocabulary_gap" not in (out.get("stats") or {}), (
+        "a run that recorded no loss must not carry a fabricated (empty) "
+        f"reading; stats={out.get('stats')}")
     assert _gap_warnings(out) == []
+    # The process census is the thing that DID see nothing — so the absence
+    # above is the run scope being quiet, not the boundary failing to run.
+    assert v2.vocabulary_gap_snapshot()["fold_decisions"] == 0, (
+        v2.vocabulary_gap_snapshot())
 
 
 def test_the_reading_is_this_run_not_the_process_lifetime(sdk):
@@ -205,8 +245,8 @@ def test_the_reading_is_this_run_not_the_process_lifetime(sdk):
     assert v2.vocabulary_gap_report().get(UNLISTED_MARKER, 0) >= 1
 
     second = _run(sdk, CLEAN_CLAIM, "gap-b")
-    assert second["stats"]["vocabulary_gap"]["tokens"] == {}, (
-        "a run reported a token it never absorbed — the reading is a process "
+    assert "vocabulary_gap" not in (second.get("stats") or {}), (
+        "a run reported a reading it never earned — the reading is a process "
         "lifetime total, not this run's")
     assert _gap_warnings(second) == []
 
@@ -241,13 +281,16 @@ def test_the_m2_capture_lane_reports_the_gap_on_its_own_receipt(tmp_path, monkey
     from tortoise.sdk import TortoiseSDK
 
     sdk = TortoiseSDK(str(tmp_path / "m2.db"))
-    conversation = [
-        {"role": "user", "content": PRIOR_CLAIM},
-        {"role": "assistant", "content": "noted"},
-        {"role": "user", "content": GAP_CLAIM},
-    ]
+    try:
+        conversation = [
+            {"role": "user", "content": PRIOR_CLAIM},
+            {"role": "assistant", "content": "noted"},
+            {"role": "user", "content": GAP_CLAIM},
+        ]
 
-    out = sdk.capture_session(conversation, session_id="gap-m2")
+        out = sdk.capture_session(conversation, session_id="gap-m2")
+    finally:
+        sdk.close()
 
     reading = out["stats"]["vocabulary_gap"]
     assert reading["scope"] == "run"
@@ -259,6 +302,39 @@ def test_the_m2_capture_lane_reports_the_gap_on_its_own_receipt(tmp_path, monkey
     assert len(gap) == 1 and repr(UNLISTED_MARKER) in gap[0], gap
 
 
+def test_a_zero_fold_m2_capture_leaves_stats_untouched(tmp_path, monkeypatch):
+    """ISSUE 1 (review round 4): the reader must not make `stats` non-empty on
+    EVERY M2 capture.
+
+    `sdk._extract_session_llm` documents `stats == {}` on a genuine zero-call
+    path, the hosted receipt passes `stats` through verbatim
+    (`"stats": meta.get("stats") or {}`) and
+    `tests/test_capture_cost_measurement.py::
+    test_emit_call_site_writes_no_cost_row_when_props_is_none` asserts it — so an
+    always-present reading reds a real, CI-selected test. Here the capture folds
+    NOTHING (a claim with no prior and no unlisted marker), so the reader must
+    leave `stats` exactly as the lane built it.
+    """
+    monkeypatch.setenv("TORTOISE_SESSION_EXTRACTOR", "m2")
+    monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
+    from tortoise.sdk import TortoiseSDK
+
+    sdk = TortoiseSDK(str(tmp_path / "m2-clean.db"))
+    try:
+        out = sdk.capture_session(
+            [{"role": "user", "content": CLEAN_CLAIM},
+             {"role": "assistant", "content": "noted"}],
+            session_id="gap-m2-clean")
+    finally:
+        sdk.close()
+
+    assert "vocabulary_gap" not in out["stats"], (
+        "a run that folded nothing must not carry a fabricated reading — the "
+        "M2 lane's zero-call contract is a clean stats dict; "
+        f"stats={out['stats']}")
+    assert _gap_warnings(out) == [], out.get("warnings")
+
+
 def test_the_reader_does_not_change_the_fold_decision():
     """The reader reports; it must not answer #5329's open question.
 
@@ -268,3 +344,47 @@ def test_the_reader_does_not_change_the_fold_decision():
     change makes this `False`, it decided #5329 without the owner."""
     assert v2.fold_allowed(GAP_CLAIM, PRIOR_CLAIM) is True
     assert v2.vocabulary_gap_report().get(UNLISTED_MARKER, 0) >= 1
+
+
+# ── the scope PROPAGATES, it does not merely isolate (review round 4, obs. A) ──
+
+def test_a_fold_on_a_context_carried_worker_lands_on_the_run_reading():
+    """Observation A: the run scope must follow the run, not just exclude peers.
+
+    The census's own docstring says the boundary runs on extractor worker threads
+    (`_VocabularyGapCensus`: "Thread-safe (the boundary runs on extractor worker
+    threads)"), so a `threading.local` scope would drop a fold that happened on a
+    worker: the fold happens, no counter sees it, and the run's receipt reports an
+    EMPTY reading — the "silent absence" invariant I2 forbids. The scope is a
+    `ContextVar` — the idiom the stdlib recommends for state that must not bleed
+    across concurrent code, and the one this repo already PROPAGATES into its
+    capture pool (`hosted_api._run_off_loop` copies the caller's contextvars into
+    the worker, #2185) — so a worker CARRYING the run's context lands on the
+    run's reading.
+
+    The second fold pins the honest BOUNDARY of that guarantee: a worker whose
+    context was never copied sees nothing, and must not be attributed to the run.
+    """
+    import contextvars
+    from concurrent.futures import ThreadPoolExecutor
+
+    def _run() -> dict:
+        ctx = contextvars.copy_context()
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            carried = pool.submit(ctx.run, v2.fold_allowed,
+                                  GAP_CLAIM, PRIOR_CLAIM).result()
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            bare = pool.submit(v2.fold_allowed,
+                               GAP_CLAIM, PRIOR_CLAIM).result()
+        return {"stats": {}, "warnings": [], "carried": carried, "bare": bare}
+
+    out = v2._run_scoped_vocabulary_gap(_run)()
+
+    assert out["carried"] is True and out["bare"] is True
+    reading = out["stats"]["vocabulary_gap"]
+    assert reading["tokens"].get(UNLISTED_MARKER, 0) >= 1, (
+        "a fold executed by a worker carrying the run's context was not recorded "
+        f"on the run's reading; reading={reading}")
+    assert reading["fold_decisions"] == 1, (
+        "exactly the context-carried fold belongs to this run — a worker whose "
+        f"context was never copied must not be attributed to it; reading={reading}")
