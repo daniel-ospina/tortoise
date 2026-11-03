@@ -364,9 +364,11 @@ grep -q 'export TORTOISE_API_KEY=' ~/.zshrc || echo 'export TORTOISE_API_KEY=tt_
 `TORTOISE_API_KEY` is the canonical name, and the one every recipe in this
 document uses — the MCP HTTP client (`tortoise/mcp_client.py`), the hosted SDK
 (`tortoise/sdk.py`), the CLI (`tortoise/__main__.py`), and
-`serve --http --auth static` (`tortoise/auth.py`). Since #5200 the MCP HTTP
-client **additionally accepts `TORTOISE_MCP_API_KEY` as an alias**, because the
-fleet host exports that name; the recipes below do not rely on it, so nothing
+`serve --http --auth static` (`tortoise/auth.py`). The MCP HTTP client
+**additionally accepts `TORTOISE_MCP_API_KEY` as an alias** — #5200 *proposed*
+that alias and is still OPEN, so it is landed by the #10605 fix in
+`tortoise/mcp_client.py` and not by a change of its own — because the fleet host
+exports that name; the recipes below do not rely on it, so nothing
 here changes. Giving the MCP credential a
 different name is a legitimate policy choice (#3615) — but the committable
 `.mcp.json` (project scope) expands `${TORTOISE_API_KEY}` from `process.env`, so a
