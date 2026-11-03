@@ -2369,6 +2369,15 @@ _BUNDLE_SOURCES = {
 # instead, by phrase — the same mechanism the bare `:NNNN` continuations need.
 _BUNDLE_TOOL_SOURCES = {
     "capstone_verdict_check": _REPO / "tools/capstone_verdict_check.py",
+    # #10601 review round 4 (P2): the bundle cites a PROBE by line too, and a probe
+    # was a source NO leg could read. `README.md` points at
+    # `probes/capstone_run.py:<line>` for the all-eight fallback it describes, and
+    # that number was invisible in both directions: `_BUNDLE_CITE` matches
+    # `sdk|edges|extractor_v2` only (so the sweep never SAW it) and `_BUNDLE_RULES`
+    # is keyed off `_BUNDLE_SOURCES` (so it could not be RULED ON even if it had).
+    # The probe moves with every emitter change, so a line into it is the worst
+    # kind of number to leave unwatched — hence a row below, by phrase.
+    "capstone_run": _REPO / "docs/evidence/7949-capstone/probes/capstone_run.py",
 }
 
 # `docs/00_index.md` is a shared router of ~140 table rows, so only the ROW that
@@ -2741,6 +2750,18 @@ def test_the_bare_continuation_cites_name_what_they_say():
     that pre-fix document the third row FAILS twice over: its sentence carries
     neither `:475` nor `:477`, and `:460`/`:462` carry the conditional-declaration
     refusal, not the `missing = …` line the prose names.
+
+    ⛔ The same blind spot one file over, for a PROBE (#10601 review round 4, P2).
+    `README.md` points at `probes/capstone_run.py:<line>` for the all-eight
+    fallback, and `probes/` was unreachable by BOTH legs: `_BUNDLE_CITE` spells
+    `sdk|edges|extractor_v2` only, so the sweep neither resolved it nor reported
+    it `unmatched` (the `unmatched` assertion below is why that distinction
+    matters — an unreported cite is one nothing will ever red on), and
+    `_BUNDLE_RULES` is keyed off `_BUNDLE_SOURCES`. Nothing in either test file
+    referenced the number, so it could rot for as many commits as the six the
+    sibling probe cite cost. The `capstone_run` row resolves it by content: the
+    anchor is the fallback EXPRESSION, so the row reds when an insertion moves it
+    and names the new number to write.
     """
     rows = (
         # `each VET pass is gated on the LIST` — the gate AND its call, twice.
@@ -2807,6 +2828,17 @@ def test_the_bare_continuation_cites_name_what_they_say():
             ("132", 'STEPS = ("S0", "S1", "S2.1", "S2.2", "S2.3", "S3", '
                     '"S5", "S6")'),
         ), "capstone_verdict_check"),
+        # ⛔ A PROBE CITED BY LINE (#10601 review round 4, P2). `README.md` names
+        # `probes/capstone_run.py:<line>` as the place the all-eight fallback
+        # happens, and NOTHING read that number — the sweep's pattern cannot spell
+        # `probes/`, and the rule table is keyed off `_BUNDLE_SOURCES`. So the one
+        # document whose thesis is "a claim nothing re-checks can rot silently"
+        # carried an unwatched number into the file this bundle moves most often.
+        # Verified by CONTENT, not by the number: an insertion above the fallback
+        # reds here with the line the probe now puts it on, which is the fix.
+        ("README.md", "falls back", (
+            ("813", 'required = run.get("steps_required") or list(STEPS)'),
+        ), "capstone_run"),
     )
     # The SAME document states two of its claims as the RULE's own text rather than a
     # line number — a quoted rule cannot drift by an insertion above it, which is why

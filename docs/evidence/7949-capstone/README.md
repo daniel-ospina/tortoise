@@ -85,9 +85,15 @@ measured at `e0fc940b5`, and is kept verbatim as the record of what it measured 
 replaced (#10537). The CURRENT run's numbers are in the verdict table at the top of this document and
 in `capstone-measured-9152448d.log` (E3 `157/397`, `Point` 354/150 anchored, `:Event` 7/43,
 `:Object` 64, composition `159 + 150 + 34 + 11`, derivation figure `150/161 = 0.931677`,
-`IMPL=65 INPUT=68 NAND=14`, 397 derived nodes, **8 of 8 steps** witnessed). Do not read the sections
-below as current; where the two disagree, the log at `9152448d7` wins. **The one exception is a
-passage that NAMES the shipped log while quoting it** — the E1-aux paragraph ("**64 `:Object`
+`IMPL=65 INPUT=68 NAND=14`, 397 derived nodes, **8 of 8 steps** witnessed). Do not read a
+**run-describing** section below as current — where one of those and the log at `9152448d7` disagree,
+the log wins. ⛔ Two sections below are NOT run-describing, and they are current as they stand however
+this banner reads: the **V12** section (the gate's SHIPPING arm, not a measurement of any run) and the
+**Dependency state** section (the tracker states recorded in `blocker-states.json` at its
+`checked_at`, the one table here whose freshness is the record's rather than a run's). Reading either
+as superseded would send a lane to replace live tracker state with a dead run's. Among the
+run-describing passages, **the exception is one that NAMES the shipped log while quoting it** — the
+E1-aux paragraph ("**64 `:Object`
 nodes** … 14/64 = 0.21875 … the `e1-aux` line") and the operator-triple note in "What this bundle
 does NOT establish" — which state what `9152448d7` measured and are checked against it by
 `test_no_document_quotes_the_superseded_runs_e1_aux_numbers_as_current` and
