@@ -3039,3 +3039,4 @@ if __name__ == "__main__":  # pragma: no cover
     import os
 
     os.environ.setdefault("TORTOISE_TEST_CARVE_OUT", "1")
+    raise SystemExit(pytest.main([str(Path(__file__).resolve()), "-q"]))
