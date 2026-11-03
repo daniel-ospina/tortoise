@@ -445,6 +445,20 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # leak into a later docker-lane test).
     "test_subject_binding_1370.py": [r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"'],
     # ── Mixed lanes: CLI/HTTP surfaces force BOTH lanes deliberately ────────
+    # #10655: `config show` REPORTS the graph store, so several tests feed it a
+    # credential-bearing `TORTOISE_DB_URI` and assert what the report does and
+    # does NOT print (masked DSN, no query/fragment, the #2987 scheme-less
+    # `user:password` shape, a blank/whitespace value, and the embedded-file
+    # fallback). The env control IS the test input and no lane is being forced —
+    # the suite constructs no SDK and contacts no server. Every site is the
+    # fixture-param `monkeypatch.setenv`, so pytest auto-undoes at teardown (no
+    # lane leak); the isolation fixture's `delenv(var)` loop is not censused
+    # (no literal) and is auto-undone too. Registered only after the fact: the
+    # module landed without this entry, which reds `--integrity`/this gate on
+    # the PR head (measured 2026-11-03: the only undeclared mutations in the
+    # tree, 11 sites in the one file).
+    "test_cli_config_show.py": [r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"',
+                                 r'monkeypatch\.setenv\(\s*$'],  # the multi-line form (`setenv(` then the name on the next line) is censused by its FIRST source line, so it needs the open-paren pattern
     "test_cli_context.py": [r'monkeypatch\.(?:delenv|setenv)\(\s*"TORTOISE_DB_URI"',
                             r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])'],
     "test_cli_serve.py": [r'monkeypatch\.(?:delenv|setenv)\(\s*"TORTOISE_DB_URI"'],

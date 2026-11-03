@@ -3219,6 +3219,46 @@ def _same_path(a: Path | None, b: Path | None) -> bool:
         return False
 
 
+def _blocking_directory(path: Path) -> Path | None:
+    """The SHALLOWEST directory above `path` this process cannot traverse.
+
+    `_STORE_UNREADABLE` is reached TWO ways, and only one of them is about the
+    FILE's own mode: a store behind a mode-000 PARENT DIRECTORY fails
+    `Path.is_file()`, which re-raises `EACCES` out of the resolver instead of
+    reading the file (`pathlib` swallows only ENOENT/ENOTDIR/EBADF/ELOOP). In
+    that state the file's own mode is not merely unknown — it cannot be known,
+    because `stat` on the child needs search permission on the parent.
+
+    So the remedy must name the object that actually blocks. Measured on a
+    mode-000 parent, the printed `chmod 600 <dir>/credentials.json` exits 1
+    with "Permission denied" and sends the reader back to the same refusal,
+    while `chmod 700 <dir>` succeeds — the file is fine, the DIRECTORY is not.
+
+    Walking from the ROOT down rather than testing only the immediate parent:
+    when an inaccessible ancestor is one or more levels up, the nearest parent
+    is unreachable THROUGH it, so a `chmod` on the deeper path cannot run at
+    all. The shallowest non-traversable component is the one to fix.
+
+    Returns None when every ancestor is traversable — then the file's own mode
+    is the problem and the caller's `chmod 600 <file>` is the right advice.
+    """
+    import os as _os
+    try:
+        ancestors = list(path.parents)
+    except (OSError, RuntimeError):
+        return None
+    for cand in reversed(ancestors):            # root first, nearest last
+        try:
+            if not _os.access(cand, _os.X_OK):
+                return cand
+        except OSError:
+            # The environment itself cannot answer (a deleted cwd). Claiming a
+            # directory is to blame would repeat the guessing this verb exists
+            # to replace, so decline and let the caller describe the file.
+            return None
+    return None
+
+
 def _cmd_config(args) -> int:
     """Report the credential + coordinates this shell would actually use.
 
@@ -3775,9 +3815,22 @@ def _cmd_config(args) -> int:
             # This is a line the user is told to PASTE, and the path is
             # store-derived (a directory name can legally contain `;`/spaces/`|`),
             # so it is shell-quoted like the other two paste lines in this report.
-            print("   The file is there but unreadable — fix its permissions "
-                  f"(`chmod 600 "
-                  f"{_printable(_shlex.quote(str(cred['blocked_by'])))}`).")
+            # WHICH OBJECT: `unreadable` is reached both by a mode-000 FILE and
+            # by a store behind a non-traversable DIRECTORY (see
+            # `_blocking_directory`), and the file's mode is unknowable in the
+            # second state. A single `chmod 600 <file>` line asserted a fact the
+            # tool cannot see AND printed a command that fails (measured), so the
+            # object is decided from evidence at render time.
+            blocker = _blocking_directory(Path(cred["blocked_by"]))
+            if blocker is not None:
+                print("   The DIRECTORY containing it is not traversable — fix "
+                      "that first (`chmod 700 "
+                      f"{_printable(_shlex.quote(str(blocker)))}`); the "
+                      "file's own mode cannot be checked until it is.")
+            else:
+                print("   The file is there but unreadable — fix its permissions "
+                      f"(`chmod 600 "
+                      f"{_printable(_shlex.quote(str(cred['blocked_by'])))}`).")
             print("   ⛔ Do NOT delete it: this store may hold the signup_token that "
                   "`tortoise recover` needs.")
         else:
