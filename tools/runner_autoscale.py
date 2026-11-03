@@ -1350,7 +1350,8 @@ def converge(
     # ⛔ READ WHAT THE POOL DID, NOT ONLY WHAT IT CLAIMS (see `read_job_outcomes`). Taken BEFORE
     # any action so the record describes the box as it was found, and bounded to
     # `WEDGED_PROBE_MAX_RUNS` (10) completed runs — one run-list read plus one jobs page each, so
-    # 11 API reads worst case — and the walk stops as soon as a job on THIS BOX is seen.
+    # 11 API reads worst case — and past the `WEDGED_PROBE_RUNS` (3) minimum the walk ends as soon
+    # as a job on THIS BOX is seen.
     wedged: list[str] = []
     hosted_here = {r.name for r in local}
     try:
@@ -1796,8 +1797,11 @@ def converge(
     # IS ONE OF THEM, AND SAYING IT WASN'T RE-OPENED THE BUG: it is exit **0** by the EXIT block
     # ("a live count above the measured ceiling removes nothing, so that pass has nothing it could
     # have failed at"), so it reports NO failure of its own to erase. This comment used to group it
-    # with the arms that DO report a failure (a refusal, an unreadable pass, an action failure),
-    # which is the opposite of what the tuple below now does — do not "restore" it to that list.
+    # with the arms that DO report a failure (`fill-refused-by-provisioner`, an unreadable pass, an
+    # action failure), which is the opposite of what the tuple below now does — do not "restore" it
+    # to that list. ⛔ SAY `fill-refused-by-provisioner`, NOT "a refusal": the EXIT block's own word
+    # `REFUSAL` covers exit **0**'s `fill-blocked` too, and that one IS in the tuple — the
+    # abbreviation inverted the sentence it was meant to support.
     # ⛔ AND `under-target` IS BENIGN ONLY WITHOUT AN ATTEMPTED GROWTH. `problem_kind=no-listener`
     # is the ONE under-target cause the EXIT block calls a failure of the guard (a runner was
     # INSTALLED and no listener came up), and `main` reports it as exit 4 by keying on that CAUSE.
