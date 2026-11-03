@@ -214,7 +214,17 @@ A marker is only an instrument if a caller can act on it. Therefore:
   `MUTATION-MATRIX(2/2)` (two mutants, 6 named tests red, disjoint sets) recorded on **#8447's
   2026-11-02 mutation-evidence comment**, not in a PR body: the issue is the artifact a lane
   auditing C2 reads (§2's census is written from it), and a PR body is neither durable nor the
-  pointer this census can hold. Still **SILENT**: the list-shaped surfaces in §2a
+  pointer this census can hold. The nodes that evidence names are resolvable in the tree, and are
+  pinned so a rename cannot leave the pointer naming something that does not exist:
+  `tests/test_hosted_api.py::TestBoundedPointsListBoundaries` (M1 kills all four; M2 kills only
+  `tests/test_hosted_api.py::TestBoundedPointsListBoundaries::test_limit_plus_one_is_marked_incomplete`
+  and
+  `tests/test_hosted_api.py::TestBoundedPointsListBoundaries::test_there_is_no_page_two_so_the_marker_is_the_only_instrument`)
+  and the measured cursor departure
+  `tests/test_hosted_api.py::TestBoundedEventCursorBoundaries::test_cursor_exhaustion_returns_an_empty_page_not_a_completion_signal`
+  — asserted by
+  `tests/test_8447_truncation_marker.py::TestTheCensusNamesItsEvidenceHome::test_every_test_the_contract_doc_names_exists`.
+  Still **SILENT**: the list-shaped surfaces in §2a
   (`tortoise_search`, selfhost `GET /search`, selfhost `GET /points`, `list_batches`,
   `suggest_entry_points`) — every one of them needs a return-shape decision, not a marker.
 - `docs/architecture/STORAGE-ARCHITECTURE.md` — the storage seams these bounds sit on.

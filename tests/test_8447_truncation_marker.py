@@ -1050,6 +1050,59 @@ class TestTheCensusNamesItsEvidenceHome:
             "the census cites symbols the tree does not bind (renamed, moved or "
             f"invented), so its evidence cells point at nothing: {unresolved}")
 
+    def test_every_test_the_contract_doc_names_exists(self):
+        """A pointer to a TEST is only a pointer if that test resolves.
+
+        The other half of the same defect class: §5 sent C2's mutation evidence
+        to a node id that existed nowhere in the tree, so a lane auditing C2
+        had to decide whether the evidence was fabricated. The evidence home
+        (the #8447 comment) now names the real ids, and §5 restates them — so a
+        rename has to red here rather than silently orphan the pointer.
+
+        Scoped to §5, where the evidence pointer lives: a node id is only
+        checked where it is load-bearing, and §5 carrying none reds (the
+        pre-fix state) instead of passing vacuously.
+        """
+        import ast
+        import re
+        from pathlib import Path
+
+        text = self._doc_text()
+        assert "## 5. Related" in text, "§5 (the evidence pointer) is gone"
+        section = text.split("## 5. Related", 1)[1]
+
+        cited = sorted(set(re.findall(
+            r"(tests/[\w/]+\.py)::([A-Za-z_]\w*(?:::[A-Za-z_]\w*)?)", section)))
+        assert cited, (
+            "§5 names no resolvable test node, so its evidence pointer is prose "
+            "a lane has to trust rather than grep")
+
+        root = Path(__file__).resolve().parent.parent
+        unresolved: list[str] = []
+        for module, dotted in cited:
+            path = root / module
+            if not path.is_file():
+                unresolved.append(f"{module} (module does not exist)")
+                continue
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            found: set[str] = set()
+            for node in ast.walk(tree):
+                if isinstance(node, ast.ClassDef):
+                    found.add(node.name)
+                    # a METHOD is cited `Class::method`, never as a bare name
+                    found.update(f"{node.name}::{child.name}"
+                                 for child in node.body
+                                 if isinstance(child, (ast.FunctionDef,
+                                                       ast.AsyncFunctionDef)))
+            for node in tree.body:
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    found.add(node.name)
+            if dotted not in found:
+                unresolved.append(f"{module}::{dotted}")
+        assert not unresolved, (
+            "§5 points at tests the tree does not define (renamed or "
+            f"invented), so its evidence home cannot be grepped: {unresolved}")
+
     def test_the_hosted_points_row_says_marks_and_says_the_total_is_withheld(self):
         """The census row and the tree must say the same thing.
 
