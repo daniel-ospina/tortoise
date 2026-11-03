@@ -178,17 +178,19 @@ def test_a_FULL_default_graph_cannot_refuse_a_write_into_an_EMPTY_bound_graph():
 
     GREEN after #10637, which resolves the count through the same
     `_data_graph_name(org)` the opener writes. Proved red→green rather than
-    asserted: the pre-fix body is restored with a throwaway pytest plugin
-    (`enforce_org_limit` called with no sdk/factory).
+    asserted: the pre-fix body is restored with a throwaway pytest plugin —
+    `enforce_org_limit` called with `sdk=_org_sdk_for_credential(org)`, the
+    pre-fix WRONG-GRAPH handle (NOT the no-sdk shape; see the note above).
 
     The five REST points doors (`/v1/points`, `/v1/objects`, `/v1/subjects`,
     `/v1/sessions/commit`, `/v1/demo`) are not enumerated here on purpose: the
     graph is resolved INSIDE `_check_org_limit`, so the seam is one and every
     door inherits it. A door that bypassed `_check_org_limit` for
-    `enforce_org_limit(org, "points")` with neither `sdk` nor `sdk_factory`
-    would reopen the defect. That is the same ROOT as #10725 (a call site whose
-    `sdk` is optional and whose omission is silent), so it is recorded THERE as
-    a comment rather than filed as a peer issue — one root, one ticket.
+    `enforce_org_limit(org, "points")` would reopen the defect — that is the
+    same ROOT as #10725: a call site that can silently pick a graph other than
+    the one the write opens, by omitting the argument OR by passing a
+    default-graph handle. So it is recorded THERE as a comment rather than filed
+    as a peer issue — one root, one ticket.
     (#10725 was itself CLOSED at 19:03:21Z citing #10724, which is still
     unmerged and superseded, while `hosted_api` still calls
     `_check_org_limit(org, "sessions")` with no sdk at this head — so read that
