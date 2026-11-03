@@ -85,9 +85,9 @@ a reader who finds the number has drifted should search the quoted fragment: tha
 `truncated = len(all_candidates) > limit` (`tortoise/sdk.py::get_cross_lens_candidates`), where `limit`
 derives from `max_candidates` (same symbol). Two further bounds on that same surface do not reach it at
 all: `top_k`, clamped to `CROSS_LENS_ANN_TOP_K_MAX` (`tortoise/sdk.py::CROSS_LENS_ANN_TOP_K_MAX`),
-bounds the per-point ANN pull (`limit=top_k + 1`, `tortoise/sdk.py::get_cross_lens_candidates`), and
+bounds the per-point ANN pull (`limit=top_k + 1`, `tortoise/sdk.py::_cross_lens_pairs`), and
 `CROSS_LENS_POOL_CAP = 1000` (`tortoise/sdk.py::CROSS_LENS_POOL_CAP`) cuts the eligible pool
-(`tortoise/sdk.py::get_cross_lens_candidates`). A saturated ANN window over a
+(`tortoise/sdk.py::_cross_lens_pool`). A saturated ANN window over a
 point with more above-threshold neighbours than `top_k` is precisely the *"a downstream leg lost
 rows"* case §4 item 3 requires to flip the marker — and it stays `false`. Read `truncated: false` on
 this surface as *"the candidate cut did not fire"*, never as *"nothing was lost"*: the two SILENT
