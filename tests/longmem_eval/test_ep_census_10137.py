@@ -885,3 +885,65 @@ def test_census_probe_keys_a_non_str_qid_apart_from_its_repr(tmp_path):
 
     assert out["questions_failed"] == 1        # NOT folded into the outcome
     assert out["questions_in_run"] == 2
+
+def test_committed_census_rederives_its_own_aggregate():
+    """The shipped artifact is auditable against itself: every aggregate cell
+    is what the runner's own aggregation produces from the committed
+    per-question rows — so a hand-edit to a cell, or a row that stopped
+    reconciling with the totals, reds here instead of shipping.
+
+    Distinct from ``test_census_probe_cells_match_the_committed_artifact_key_set``
+    (key set and ORDER only, never a value): keys alone let a cell carry a
+    number no row supports.
+    """
+    doc = json.loads(_ARTIFACT.read_text())
+    rows = doc["per_question"]
+    # ``error`` rides the rows and is the summarizer's FIRST failure signal
+    # (``measurement_posture._failed``), so a faithful re-projection must carry
+    # it — omitting it would red this test on a CORRECT artifact the moment a
+    # re-cut contained one failed question.
+    manifests = [{
+        "question_id": r["question_id"], "question_type": r["question_type"],
+        "belief_activation": {k: r.get(k) for k in (
+            "operators", "factor_edges", "points_with_ep", "points_unmeasured",
+            "points_off_neutral", "points_moved_off_neutral", "ep_ran",
+            "no_op_reason", "error")},
+    } for r in rows]
+    summary = mp.summarize_belief_activation(manifests, requested=True)
+
+    for key, committed in doc["cells"].items():
+        # ``key in summary`` first: a summarizer key that was renamed or
+        # removed must not compare ``None == None`` and pass.
+        assert key in summary, key
+        assert summary[key] == committed, key
+
+    # The headline cells are DERIVED from the rows, not asserted as literals.
+    assert summary["questions"] == doc["questions"]
+    assert summary["questions_with_ep"] == doc["questions_with_ep"]
+    assert summary["inert_by_reason"] == doc["inert_by_reason"]
+
+    # Reconciled on the cells the artifact rests on, NOT the bucket SHAPE:
+    # ``summarize_belief_activation`` adds keys additively by contract, so a
+    # shape pin would red an additive summarizer change that breaks nothing —
+    # and could only be repaired by re-cutting the artifact.
+    reconciled = ("questions", "questions_with_ep", "questions_off_neutral",
+                  "questions_inert", "operators", "operators_unread",
+                  "factor_edges", "factor_edges_unread",
+                  "points_off_neutral", "points_moved_off_neutral")
+    for qtype, committed in doc["by_question_type"].items():
+        derived = summary["by_question_type"][qtype]
+        assert {k: committed.get(k) for k in reconciled} == \
+            {k: derived.get(k) for k in reconciled}, qtype
+
+    # The disclosure fields describe THESE rows: nothing was unread.
+    assert doc["per_question_source"] == "outcome.belief_activation"
+    assert doc["per_question_unread"] == 0
+    for key in ("points_with_ep", "points_unmeasured", "operators",
+                "factor_edges"):
+        assert doc["cells"][f"{key}_unread"] == sum(
+            1 for r in rows if r.get(key) is None)
+
+    # ONE artifact-identity anchor: the sample this bundle was cut from.
+    # Update together with the artifact, never on its own.
+    assert (len(rows), summary["operators"]) == (24, 1710), \
+        "pinned sample — update together with the artifact"
