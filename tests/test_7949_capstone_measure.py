@@ -4380,9 +4380,14 @@ def test_the_readmes_floor_provenance_claim_matches_the_code():
     readme = (_REPO / "docs/evidence/9889/README.md").read_text()
     # The stale parenthetical is gone: `parse_bars` DOES expose the share floor
     # since this PR (#10610), so "does not expose" is refuted by the tree.
-    assert "which `parse_bars` does not expose" not in readme
     # …and the false replacement an earlier cut wrote must not come back either.
-    assert "both through `parse_bars`" not in readme
+    # Both prohibitions run against a WHITESPACE-STRIPPED copy, not the raw file:
+    # wrap position is free in Markdown, so a one-line reflow of the same sentence
+    # (`… both⏎`through …`) satisfied the raw `in` and shipped both refuted
+    # claims (measured). Prohibiting on the squashed text closes that.
+    squashed = re.sub(r"\s+", "", readme)
+    assert "which`parse_bars`doesnotexpose" not in squashed
+    assert "boththrough`parse_bars`" not in squashed
     # Prohibitions alone are satisfied by DELETING or REVERSING the sentence, so
     # the required shape is asserted too — each half against the reader the code
     # actually uses (`object_floor` → the map, `min_before_share` → the record).
