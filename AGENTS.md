@@ -35,15 +35,20 @@
 > to decide `wedged`. Two green lines read as "the harness is fine" over a fleet capping every repair
 > lane at 40 minutes.
 >
-> The grader is **agent-infra's, not this repo's** — `bash "$AGENT_INFRA_PATH/scripts/check-farm-drift.sh"`
-> (absolute: a relative `bash scripts/…` is refused by the script-indirection guard, agent-infra#3173),
-> adding `--dest`/`--pin-file` when `CELL_HOME` differs from `$HOME`. Its exits: `0` match; `1` a
-> farm-declared file differs **or a declared file never landed** — re-running the farm **is** the
-> remedy; `3` stale but **no farm array delivers it**, so a re-run is *not* the remedy (declare /
-> delete / retire); `2` UNKNOWN, cannot verify — **never** a pass. Run it before you believe the two
-> green lines above. Do **not** add a tortoise-side mirror — a second owner of that predicate was
-> refused (tortoise#10722, closed superseded); the farm arrays and `is_declared_local` live in
-> agent-infra.
+> The deployed-surface grader is **agent-infra's**, not this repo's — `scripts/check-farm-drift.sh` in
+> an agent-infra checkout (it is not itself farmed, so no copy under `~/.pi/agent/scripts` exists).
+> Do **not** read `pi-bootstrap/setup.sh`'s exit status as that verdict: an install fails only on the
+> checker's `1`, and on `2` (cannot verify) or `3` (no deploy can fix it) it prints `this is NOT a
+> pass` and still ends with `Done!` — exactly as it does, silently, when the checkout predates the
+> checker. Run `setup.sh` from a **pin-consistent** checkout; from any other tree it re-farms
+> ahead-of-pin bytes and the grader answers `COMPARING AGAINST THE WRONG TREE`, whose own next step is
+> the one that converges the box: farm from the pinned tree, **or advance the pin deliberately**
+> (`scripts/harness-apply-pass.sh`, or `scripts/cloud-cell-supervisor.sh apply` on a cell). Direct
+> invocation from a pi session is unreliable — the worktree guard intermittently refuses it as
+> `script-indirection`, with a message that never mentions drift (agent-infra#3173, the #709 false
+> positive), so **a refusal is not a clean result**. Do **not** add a tortoise-side mirror — a second
+> owner of that predicate was refused (tortoise#10722, closed superseded); the farm arrays and
+> `is_declared_local` live in agent-infra.
 
 ---
 
