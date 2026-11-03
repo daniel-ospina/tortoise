@@ -1427,16 +1427,6 @@ def test_a_keyword_inside_the_blockquote_fence_is_still_stripped():
     assert cl.parse_closing_refs(body) == []
 
 
-if __name__ == "__main__":  # the standalone form the docstring advertises
-    # This file opens no graph, so it is exactly the #1647 P4 carve-out case; the
-    # session gate otherwise refuses every test with "default pytest requires
-    # TORTOISE_DB_URI" and the standalone form would report a wall of errors.
-    import os
-
-    os.environ.setdefault("TORTOISE_TEST_CARVE_OUT", "1")
-    raise SystemExit(pytest.main([__file__, "-q"]))
-
-
 # ── cycle 8: the container ENDS the fence (blank line, or lost indent) ───────
 
 @pytest.mark.parametrize("body,expected", [
@@ -1658,6 +1648,55 @@ def test_a_quoted_marker_line_fence_cannot_buy_a_lands(body, why):
     assert cl.classify(pr, _by_head(pr), DEFAULT) == [], why
 
 
+def test_a_quote_marker_inside_an_indented_code_block_cannot_buy_a_lands():
+    r"""`    > Closes #100` is CODE, not a quote — BOTH ways a pass can be bought.
+
+    §5.1 allows a blockquote marker at most THREE columns of preceding
+    indentation; four make an INDENTED CODE BLOCK, so the renderer emits
+    `<pre><code>&gt; Closes #100</code></pre>` and GitHub fires nothing. The
+    container-prefix regex was `(?:\s*>\s?)*` — unbounded — so it absorbed the
+    four columns, `rest_indent` came out `0`, the strict arm could not fire and
+    the line was kept as PROSE. Both PASS arms then read the keyword
+    (#10634 review P2, fail-open, reproduced before the fix):
+
+    * the subject's own `lands` arm — a `main`-based PR exits 0 silently;
+    * the CARRIER arm — a stacked PR is reported `lands` while nothing closes
+      the issue, which is the silent stranding #10597 exists to surface.
+
+    `    > ...` is the sibling of the already-pinned `>     Closes #100` (four
+    columns AFTER the marker, :1596): one bound, consulted in the space the
+    strict arm measures.
+    """
+    body = "old version:\n\n    > Closes #100\n"
+    # The lenient arm still FINDS it (over-report direction, the safe one).
+    assert cl.parse_closing_refs(body) == [100]
+    # …and the strict arm — the PASS arm — refuses it.
+    assert cl.parse_closing_refs(body, None, strict=True) == []
+    pr = _pr(77, DEFAULT, body)
+    (finding,) = cl.classify(pr, _by_head(pr), DEFAULT)
+    assert finding.verdict == "unresolved", finding
+    assert "LENIENT parse" in finding.detail, finding.detail
+
+    # the CARRIER arm: the carrier only QUOTES the keyword in indented code.
+    stacked = _pr(78, SIBLING, "Closes #100")
+    carrier = _pr(79, DEFAULT, body, head=SIBLING)
+    (carried,) = cl.classify(stacked, _by_head(stacked, carrier), DEFAULT)
+    assert carried.verdict == "inert", carried
+    assert carried.carrier == 79
+
+
+def test_a_three_space_indented_quote_marker_is_still_prose():
+    """The bound is THREE, not fewer: `   > Closes #100` really is a quoted
+    paragraph (the renderer emits `<blockquote><p>`), so GitHub DOES fire it and
+    it must stay a pass. Bounding the allowance at 2 would turn a real closure
+    into a warning — the under-report direction."""
+    body = "old version:\n\n   > Closes #100\n"
+    assert cl.parse_closing_refs(body, None, strict=True) == [100]
+    pr = _pr(80, DEFAULT, body)
+    (finding,) = cl.classify(pr, _by_head(pr), DEFAULT)
+    assert finding.verdict == "lands", finding
+
+
 # ── the RENDERER as the oracle, so a divergence reds a test, not a reader ────
 #
 # `tools/closes_landing.py` is a second copy of a grammar GitHub owns, and its
@@ -1701,6 +1740,8 @@ _COMMONMARK_SHAPES = [
     ("  ```\n  a\n    ```\nCloses #100\n", "a 4-space closer at top level is CONTENT"),
     ("- item\n  ```\n  a\n    ```\nCloses #100\n",
      "a 4-space closer inside a 2-column item still closes"),
+    ("    > Closes #100\n", "4-space indent before a quote marker is an INDENTED code block"),
+    ("   > Closes #100\n", "3-space indent before a quote marker is still a quote"),
     # indented code blocks, flat and quoted
     ("old version:\n\n    Closes #100\n", "flat indented code block"),
     ("> old version:\n>\n>     Closes #100\n", "indented code block inside a quote"),
@@ -1802,8 +1843,19 @@ def test_the_ITEM_EDGE_is_measured_in_the_space_the_item_lives_in():
 
 if __name__ == "__main__":  # pragma: no cover
     # The docstring advertises `Run standalone: python3 tests/test_closes_landing.py`.
-    # Without this block that command imports the module, defines every test,
-    # invokes none and exits 0 — a green that ran nothing, which is the residue
-    # class this repo names for entry points (#10634 review P2, found twice).
-    # Peer convention: `tests/test_2350_validity_precision.py`.
+    # This is the ONE block that makes that command real — it must stay at the END
+    # of the file and be the only one. A lane left a second copy mid-file, so this
+    # one never executed and its comment claimed a fix the other block was already
+    # providing; both are now one block, here (#10634 review P2, found twice —
+    # without it the command imports the module, defines every test, invokes none
+    # and exits 0: a green that ran nothing). Peer convention:
+    # `tests/test_2350_validity_precision.py`.
+    #
+    # The carve-out is not optional: this file opens no graph, so it is exactly the
+    # #1647 P4 carve-out case, and without it the session gate refuses every test
+    # with "default pytest requires TORTOISE_DB_URI" — a standalone run that reds
+    # for a reason that has nothing to do with what it tests.
+    import os
+
+    os.environ.setdefault("TORTOISE_TEST_CARVE_OUT", "1")
     raise SystemExit(pytest.main([str(Path(__file__).resolve()), "-q"]))

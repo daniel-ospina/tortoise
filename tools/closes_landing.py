@@ -304,7 +304,15 @@ class Finding:
                 f"#{self.issue}::{msg}")
 
 
-_CONTAINER_PREFIX_RE = re.compile(r"^(?:\s*>\s?)*")
+#: A blockquote marker may be preceded by AT MOST THREE columns (§5.1), and four
+#: columns make an INDENTED CODE BLOCK — so `    > Closes #N` is not a quote at
+#: all, it is `<pre><code>&gt; Closes #N</code></pre>` and the keyword never
+#: fires. This was `\s*`, i.e. unbounded, so the prefix ate the four columns,
+#: `rest_indent` came out 0, the strict arm could not fire, and the line was
+#: emitted as PROSE — `lands`, exit 0, no annotation, on exactly the shape the
+#: module forbids a pass on (#10634 review P2, fail-open). The bound is what
+#: leaves those four columns in `rest`, where the strict arm measures them.
+_CONTAINER_PREFIX_RE = re.compile(r"^(?: {0,3}>[ \t]?)*")
 
 
 def _quote_depth(prefix: str) -> int:
@@ -313,7 +321,12 @@ def _quote_depth(prefix: str) -> int:
 
 
 def _split_prefix(line: str) -> tuple[str, str]:
-    """(blockquote prefix, the rest of the line)."""
+    """(blockquote prefix, the rest of the line).
+
+    The prefix consumes only markers a CommonMark renderer would OPEN — up to
+    three columns of allowance each — so a line too deeply indented to be a quote
+    keeps its indentation in `rest` instead of having it silently absorbed.
+    """
     m = _CONTAINER_PREFIX_RE.match(line)
     return m.group(0), line[m.end():]
 
