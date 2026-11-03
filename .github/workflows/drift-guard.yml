@@ -16,6 +16,17 @@
 # for every PR, making the gate structurally inert. Pinning `ref` to the PR
 # head is what makes the gate measure what it claims.
 # Follows redis-guard.yml conventions (checkout@v4, python3 tools/).
+#
+# ⚠️ THIS WORKFLOW IS `disabled_manually` (GitHub reports state=disabled_manually,
+# updated 2026-10-29T02:33:12Z; `finding-provenance` was disabled in the same
+# window). Nothing here runs for any PR until that is reversed by its own
+# reviewed decision — re-enabling restores a merge-path gate that was turned off
+# deliberately, so it is not a drive-by edit. Recorded here because a reader of
+# this file otherwise cannot learn it (#10634 review P1).
+# The `Closes-coherence` advisory step that #10597 added here has MOVED to
+# `.github/workflows/closes-coherence.yml` for exactly that reason; this job is
+# back to the drift measurement alone, and its `Ensure gh` step and
+# `pull-requests: read` grant went with the step (they existed only for it).
 name: drift-guard
 on:
   pull_request:
@@ -23,9 +34,6 @@ on:
 
 permissions:
   contents: read
-  # The closes-coherence step below reads the PR body and the base branch's PR.
-  # Read-only, and it never writes (no comments, no labels, no closures).
-  pull-requests: read
 
 concurrency:
   group: drift-guard-${{ github.ref }}
@@ -55,50 +63,5 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      # The #9018 contract step: the `Closes-coherence` step below reaches `gh` for
-      # every measurement. The ensure-gh subcommand fails CLOSED, so on a pool
-      # runner without it THIS step reds the job (it has no `continue-on-error`),
-      # before the advisory step could run — the same contract 17 other jobs carry
-      # (see tests/test_runner_tool_contract.py).
-      - name: Ensure gh
-        run: bash .github/scripts/runner-tools.sh ensure gh
       - name: Run drift-guard
         run: python3 tools/drift-guard.py
-      # ── A `Closes #N` on a NON-default base is INERT (#10597) ────────────────
-      # GitHub fires a closing keyword only on a merge into the DEFAULT branch,
-      # so a stacked PR's `Closes #N` closes nothing and lands nothing while the
-      # PR reads MERGED and CI is green. Measured: #10568 (base `act-10465`,
-      # `Closes #10541`) merged with a merge commit that is not an ancestor of
-      # main, and #10541 is still open — the work only lands when #10519 merges,
-      # and #10519 carries no `Closes #10541`. A one-line warning on the stacked
-      # PR while it is still open is the whole instrument (#10597: "Not a new
-      # gate"); stacking is legitimate, so this step WARNS and never refuses.
-      # `continue-on-error` is the non-blocking guarantee, not a bypass: the
-      # comment above NAMES the populating path, so the arm is never silently
-      # empty, and a `gh`/API failure surfaces as an UNMEASURED annotation
-      # instead of a green step.
-      - name: Closes-coherence (warn only)
-        continue-on-error: true
-        if: github.event_name == 'pull_request'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-        run: |
-          # `set +e` because GitHub runs `bash -e` by default: without it the
-          # tool's rc=3 (inert found) aborts the script BEFORE `rc=$?`, which
-          # made the UNMEASURED arm below dead code. The whole point of this
-          # step is to read the code, so the read has to happen.
-          set +e
-          python3 tools/closes_landing.py --pr "$PR_NUMBER" --annotate \
-            --repo "${{ github.repository }}"
-          rc=$?
-          set -e
-          # ANY code the tool did not define (0 = nothing inert, 3 = inert or
-          # unresolved) is UNMEASURED, not a pass: a traceback (rc=1) used to
-          # print nothing and go green, indistinguishable from "no inert
-          # closing refs". `rc` is named so 2 and 1 stay distinguishable.
-          if [ "$rc" -ne 0 ] && [ "$rc" -ne 3 ]; then
-            echo "::warning title=Closes-coherence UNMEASURED::rc=$rc — the closing-keyword check did not complete see the step log; this is NOT a pass"
-          fi
-          # The warnings above ARE the artifact; the step is deliberately green.
-          exit 0

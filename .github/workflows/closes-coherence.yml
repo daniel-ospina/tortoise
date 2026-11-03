@@ -1,0 +1,93 @@
+# closes-coherence — a `Closes #N` on a NON-default base is INERT (#10597)
+#
+# GitHub fires a closing keyword only on a merge into the DEFAULT branch, so a
+# stacked PR's `Closes #N` closes nothing and lands nothing while the PR reads
+# MERGED and CI is green. Measured: #10568 (base `act-10465`, `Closes #10541`)
+# merged with a merge commit that is not an ancestor of main, and #10541 is
+# still open — the work only lands when #10519 merges, and #10519 carries no
+# `Closes #10541`. A one-line warning on the stacked PR while it is still open
+# is the whole instrument (#10597: "Not a new gate"); stacking is legitimate, so
+# this job WARNS and never refuses.
+#
+# ⚠️ WHY THIS IS ITS OWN WORKFLOW rather than a step in `drift-guard.yml`, where
+# the instrument was first mounted: `drift-guard.yml` is `disabled_manually`
+# (measured 2026-11-03 — `gh api
+# repos/<owner>/<repo>/actions/workflows/drift-guard.yml` reports
+# `state=disabled_manually`, `updated_at=2026-10-29T02:33:12Z`, and the last run
+# for the workflow is `cancelled` from 2026-10-29T02:28Z, while dozens of
+# `pull_request` events have fired since). A step on a disabled workflow never
+# executes, so the instrument was inert while the PR was green — the exact
+# failure #10597 exists to remove (#10634 review P1). Re-enabling drift-guard is
+# its own reviewed decision (it restores an unrelated merge-path gate, and
+# `finding-provenance` was disabled in the same window); mounting an advisory
+# step on a workflow that RUNS is not. A newly added workflow is `active` on
+# creation, which is why the step lives here and not there.
+# The pin that keeps a future re-mount off a disabled host is
+# `tests/test_runner_tool_contract.py::test_an_advisory_mount_is_not_on_a_disabled_workflow`.
+name: closes-coherence
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  # The step reads the PR body and the PRs opened against its base branch.
+  # Read-only, and it never writes (no comments, no labels, no closures).
+  pull-requests: read
+
+concurrency:
+  group: closes-coherence-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  closes-coherence:
+    # ubuntu-latest can land on the fallback pool, so the job carries the #9018
+    # tool contract below (`tests/test_runner_tool_contract.py`).
+    runs-on: ubuntu-latest
+    # The tool bounds its own `gh` calls (60s each, 300s per run) so the run
+    # cannot outlive this cap; 10m is the runner-stall floor the rest of the tree
+    # uses (docs/ops/ci-wall-clock.md), not a measured wall clock — this job
+    # spends its time in a handful of read-only API calls.
+    timeout-minutes: 10
+    steps:
+      # The PR HEAD, not the synthetic merge ref: the tool reads the PR body
+      # through `gh` and the tool itself from this checkout, and the head is what
+      # the body describes.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      # The #9018 contract step: the advisory step below reaches `gh` for EVERY
+      # measurement. `ensure gh` fails CLOSED, so on a pool runner without it THIS
+      # step reds the job (it has no `continue-on-error`), before the advisory
+      # step could report UNMEASURED — which is why the contract step is required
+      # here rather than optional.
+      - name: Ensure gh
+        run: bash .github/scripts/runner-tools.sh ensure gh
+      - name: Closes-coherence (warn only)
+        continue-on-error: true
+        if: github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          # `set +e` because GitHub runs `bash -e` by default: without it the
+          # tool's rc=3 (inert found) aborts the script BEFORE `rc=$?`, which
+          # made the UNMEASURED arm below dead code. The whole point of this
+          # step is to read the code, so the read has to happen.
+          set +e
+          python3 tools/closes_landing.py --pr "$PR_NUMBER" --annotate \
+            --repo "${{ github.repository }}"
+          rc=$?
+          set -e
+          # ANY code the tool did not define (0 = nothing inert, 3 = inert or
+          # unresolved) is UNMEASURED, not a pass: a traceback (rc=1) used to
+          # print nothing and go green, indistinguishable from "no inert
+          # closing refs". `rc` is named so 2 and 1 stay distinguishable.
+          if [ "$rc" -ne 0 ] && [ "$rc" -ne 3 ]; then
+            echo "::warning title=Closes-coherence UNMEASURED::rc=$rc — the closing-keyword check did not complete see the step log; this is NOT a pass"
+          fi
+          # The warnings above ARE the artifact; the step is deliberately green.
+          exit 0
