@@ -5,7 +5,10 @@ Two properties, each with a falsifier that goes red on revert:
 * **Pool isolation** — every control-plane call on the Supabase create-org lane
   is routed to the dedicated ``org`` pool, never the shared ``auth`` pool that
   authentication work occupies. Revert a ``pool="org"`` argument and the
-  recording test fails.
+  recording test fails. The ONE exception is a REGISTRY read: the prior-org
+  listing probe is graph work and rides the ``graph`` pool through
+  ``_graph_offload`` (#3718/#3773), which is why the recorded op list names its
+  pool explicitly instead of asserting one pool for the whole lane.
 * **One membership read** — the creator's active memberships are read ONCE per
   request: the value the eager graph init uses is threaded into
   ``provision_org`` so the post-RPC onboarding init does not re-read it. Delete
@@ -110,10 +113,22 @@ def test_create_org_supabase_lane_routes_every_call_to_the_org_pool(monkeypatch)
     monkeypatch.setattr(sc, "get_control_plane", lambda: fake)
     monkeypatch.setattr(sc, "is_supabase_enabled", lambda: True)
 
-    eager_seen: list[list[str] | None] = []
+    eager_seen: list[tuple] = []
+    listed_stub = {"org_prior-org"}
 
-    def _eager(cp, org_id, name, uid, prior_org_ids=None):
-        eager_seen.append(prior_org_ids)
+    # #10510: the lane samples the server-wide listing off-loop too (the
+    # prior-org open is gated on it), so keep this test off a real store read.
+    monkeypatch.setattr(ha, "_registry_existing_graphs",
+                        lambda: set(listed_stub))
+    # …and the open/read it gates now happens INSIDE the graph worker
+    # (`_prior_org_onboarding_fork`), so a double for the door keeps this unit
+    # test off the store while the lane's own contract is what is measured.
+    monkeypatch.setattr(ha, "_open_org_graph_sdk",
+                        lambda org_id, **kwargs: None)
+
+    def _eager(cp, org_id, name, uid, prior_org_ids=None, prior_moved=None,
+               prior_listed=None, prior_fork=None):
+        eager_seen.append((prior_org_ids, prior_moved, prior_fork))
         return f"org_{org_id}"
 
     provision_seen: dict = {}
@@ -137,17 +152,186 @@ def test_create_org_supabase_lane_routes_every_call_to_the_org_pool(monkeypatch)
 
     assert out["name"] == "Acme" and out["tier"] == "free"
     assert seen, "no control-plane offload was recorded"
-    assert all(pool == "org" for _op, pool in seen), seen
-    assert [op for op, _pool in seen] == [
-        "membership_count_since",
-        "org_by_name",
-        "owned_free_org_ids",
-        "active_membership_org_ids",
-        "provision_org",
+    # #10452 review P2 (round 2): the two prior-org facts are resolved off-loop
+    # in TWO submissions because they ride DIFFERENT lanes — the
+    # `organizations.graph_name` read is control-plane (`org`, #7678) and the
+    # server-wide listing probe is a REGISTRY read (`graph`, #3718/#3773).
+    assert seen == [
+        ("membership_count_since", "org"),
+        ("org_by_name", "org"),
+        ("owned_free_org_ids", "org"),
+        ("active_membership_org_ids", "org"),
+        # both are handed to the eager init ONLY as the legacy arm's inputs;
+        # `organizations.graph_name` is control-plane (`org`, #7678) and the
+        # prior-org READ — probe, gated open, fork `MATCH` — is a REGISTRY/graph
+        # read (`graph`, #3718/#3773). `_eager_provision_org_graph` is sync and
+        # called directly from this coroutine, so a read it issued would have
+        # run ON THE LOOP (#4625).
+        ("org_default_namespace", "org"),
+        ("prior_org_onboarding_fork", "graph"),
+        ("provision_org", "org"),
     ], seen
-    # the one membership read is handed to BOTH consumers (no second read)
-    assert eager_seen == [["prior-org"]], eager_seen
+    # the one membership read is handed to BOTH consumers (no second read),
+    # and the fork the worker RESOLVED is threaded — the eager init neither
+    # re-reads nor re-derives it.
+    assert eager_seen == [(["prior-org"], None, None)], eager_seen
     assert provision_seen.get("prior_org_ids") == ["prior-org"], provision_seen
+
+
+# ── the listing probe's LANE CONTRACT (it is a graph read, #3718/#3773) ────
+
+
+def _lane_with_a_prior_org(monkeypatch, *, probe=None):
+    """A create-org lane whose user already owns one prior org, ready to run.
+
+    Returns ``(ha, fake, submissions)``; ``submissions`` records every
+    ``_cp_offload`` submission's kwargs, so a test can read the seam contract a
+    call actually carried rather than infer it from prose.
+    """
+    import tortoise.hosted_api as ha
+    import tortoise.supabase_control as sc
+
+    fake = FakeControlPlane(
+        {"organizations": [], "org_memberships": [], "api_keys": []})
+    fake.seed("org_memberships", [{
+        "id": "m1", "org_id": "prior-org", "user_id": _USER,
+        "role": "owner", "status": "active",
+        "created_at": "2020-01-01T00:00:00Z",
+    }])
+    monkeypatch.setattr(sc, "get_control_plane", lambda: fake)
+    monkeypatch.setattr(sc, "is_supabase_enabled", lambda: True)
+    monkeypatch.setattr(ha, "_eager_provision_org_graph",
+                        lambda cp, org_id, name, uid, **kw: f"org_{org_id}")
+    monkeypatch.setattr(sc, "provision_org", lambda cp, **kwargs: None)
+    monkeypatch.setattr(ha, "_registry_existing_graphs",
+                        probe or (lambda: {"org_prior-org"}))
+    # The gated open + fork `MATCH` live in the SUBMITTED helper, so a double
+    # for the door keeps this test on the LANE CONTRACT instead of the store.
+    monkeypatch.setattr(ha, "_open_org_graph_sdk",
+                        lambda org_id, **kwargs: None)
+
+    submissions: list[dict] = []
+    in_flight: list[str] = []
+    real = ha._cp_offload
+
+    async def _record(fn, **kwargs):
+        submissions.append(dict(kwargs))
+        in_flight.append(kwargs.get("op"))
+        try:
+            return await real(fn, **kwargs)
+        finally:
+            in_flight.pop()
+
+    monkeypatch.setattr(ha, "_cp_offload", _record)
+    return ha, fake, submissions, in_flight
+
+
+def test_the_prior_org_listing_probe_rides_the_graph_lane(monkeypatch):
+    """#10452 — the prior-org READ is a REGISTRY/graph read, and it is submitted.
+
+    FAIL-ON against the shape this replaces, which folded BOTH prior-org facts
+    into ONE ``pool="org"`` submission to save a hand-off: there the probe's
+    submission carried ``pool="org"``, ``timeout=None`` (the seam resolves
+    that to the PostgREST bound, ``CONTROL_PLANE_OFFLOAD_TIMEOUT_S`` = 10 s —
+    half the graph lane's documented cold-start allowance) and no
+    ``unavailable`` factory (so a bound miss raised ``_control_plane_unavailable``
+    — the SIGN-IN 503 body — on the org-create request path). It ALSO reds if
+    the read is moved back inline into the sync eager init (#10452 CI, #4625):
+    there is then no submission at all, which the first assertion names.
+
+    The assertion is on the SUBMISSION, not on a docstring: the finding is
+    about which seam the call entered and with what contract, and that is what
+    this reads. The probe records the op that was IN FLIGHT when it ran, so a
+    submission carrying the wrong callable cannot satisfy this by name alone.
+    """
+    import tortoise.monitoring as monitoring
+
+    ha, fake, submissions, in_flight = _lane_with_a_prior_org(monkeypatch)
+    probes: list[tuple[str | None, bool]] = []
+
+    def _probe() -> set[str]:
+        try:
+            asyncio.get_running_loop()
+            on_loop = True
+        except RuntimeError:
+            on_loop = False
+        probes.append((in_flight[-1] if in_flight else None, on_loop))
+        return {"org_prior-org"}
+
+    monkeypatch.setattr(ha, "_registry_existing_graphs", _probe)
+
+    asyncio.run(ha._create_org_supabase_lane(fake, "Acme", {"user_id": _USER}))
+
+    probe = [s for s in submissions
+             if s.get("op") == "prior_org_onboarding_fork"]
+    assert probe, (
+        "the prior-org read was not submitted at all — the #10510 gate then "
+        f"has no listing to gate on: {[s.get('op') for s in submissions]}")
+    assert probes, "the listing probe never ran — this test then proves nothing"
+    assert all(op == "prior_org_onboarding_fork" for op, _ in probes), (
+        "the listing probe ran outside the graph-lane submission: "
+        f"{probes}")
+    assert not any(on_loop for _op, on_loop in probes), (
+        "the listing probe ran ON THE EVENT LOOP — it is a graph read and "
+        f"belongs in the graph lane's worker (#3718): {probes}")
+    assert probe[0]["pool"] == "graph", (
+        f"the registry read rode the {probe[0]['pool']!r} pool — #3718/#3773 route "
+        f"registry reads to the graph lane: {probe[0]}")
+    assert probe[0]["timeout"] == pytest.approx(monitoring.graph_offload_timeout_s()), (
+        "the listing probe was budgeted at a bound other than the graph lane's "
+        f"cold-start allowance: {probe[0]['timeout']!r} vs "
+        f"{monitoring.graph_offload_timeout_s()!r} ({probe[0]})")
+    assert probe[0]["unavailable"] is ha._graph_unavailable, (
+        "a bound miss on the registry read would raise the wrong 503 body — the "
+        f"graph lane's copy is `_graph_unavailable`: {probe[0]}")
+
+    # The OTHER prior-org fact did not move pools: `organizations.graph_name` is
+    # a control-plane read and stays on this lane's `org` pool (#7678).
+    namespace = [s for s in submissions if s.get("op") == "org_default_namespace"]
+    assert namespace and namespace[0]["pool"] == "org", submissions
+    assert namespace[0].get("timeout") is None, (
+        "the control-plane read was given a foreign bound: "
+        f"{namespace[0]}")
+
+
+def test_a_bound_miss_on_the_listing_probe_is_a_graph_503_not_a_sign_in_503(monkeypatch):
+    """#10452 review P2 (round 2) — the failure MODE, executed.
+
+    The fold's own justification was that the probe is fail-soft, so folding it
+    into the ``org`` submission "adds no new failure mode". The probe's internal
+    exceptions are indeed swallowed — but a BOUND MISS is raised by the offload
+    seam, not by the callable. So a slow registry probe failed `POST
+    /v1/organizations` with the sign-in 503 body.
+
+    FAIL-ON: under the folded shape this lane submits the probe with
+    ``timeout=None`` on the ``org`` pool, so the forced 50 ms bound does not
+    apply, the probe's own ``None``/listing returns, and NO 503 is raised at all
+    — the ``pytest.raises`` reds. With the split, the graph lane's bound is the
+    one that expires and it maps to ``graph_unavailable``.
+    """
+    release = threading.Event()
+
+    def _slow_probe():
+        release.wait(timeout=5)
+        return {"org_prior-org"}
+
+    ha, fake, _submissions, _in_flight = _lane_with_a_prior_org(
+        monkeypatch, probe=_slow_probe)
+    monkeypatch.setattr(ha, "graph_offload_timeout_s", lambda: 0.05)
+
+    try:
+        with pytest.raises(ha.HTTPException) as excinfo:
+            asyncio.run(ha._create_org_supabase_lane(
+                fake, "Acme", {"user_id": _USER}))
+    finally:
+        release.set()
+
+    assert excinfo.value.status_code == 503
+    detail = excinfo.value.detail
+    assert detail["error_code"] == "graph_unavailable", (
+        "a bound miss on the registry read must carry the graph lane's body — "
+        "the sign-in copy would tell the caller to re-authenticate for a graph "
+        f"capacity problem: {detail}")
 
 
 # ── the duplicate read, removed at the hook seam ────────────────────────────
@@ -238,8 +422,13 @@ def test_org_create_active_membership_is_read_once_end_to_end(monkeypatch):
     monkeypatch.setattr(sc, "get_control_plane", lambda: fake)
     monkeypatch.setattr(sc, "is_supabase_enabled", lambda: True)
     monkeypatch.setattr(ha, "_eager_provision_org_graph",
-                        lambda cp, org_id, name, uid, prior_org_ids=None:
+                        lambda cp, org_id, name, uid, prior_org_ids=None,
+                        prior_moved=None, prior_listed=None, prior_fork=None:
                         f"org_{org_id}")
+    # the prior-org READ runs inside the graph worker; keep this count-only
+    # test off the store
+    monkeypatch.setattr(ha, "_open_org_graph_sdk",
+                        lambda org_id, **kwargs: None)
 
     calls: list[str] = []
     real_memberships = sc.active_membership_org_ids
