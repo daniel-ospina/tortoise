@@ -2119,6 +2119,7 @@ def test_a_record_of_ONLY_malformed_lines_refuses_NAMING_the_line_not_emptiness(
         tpc.read_local_record_turns(tmp_path)
     message = str(exc.value)
     assert "DROPPED every line" in message
+    assert "DAMAGED, not empty" in message
     assert "malformed 2026-11-02.jsonl:1" in message
     # …and it must NOT read as the empty-record refusal, which is a different
     # on-disk state with a different repair.
@@ -2147,6 +2148,7 @@ def test_a_record_of_ONLY_unparsable_lines_refuses_NAMING_the_line_not_emptiness
         tpc.read_local_record_turns(tmp_path)
     message = str(exc.value)
     assert "DROPPED every line" in message
+    assert "DAMAGED, not empty" in message
     assert "unparsable archive/2026-10-01.jsonl.gz:1" in message
     assert "ZERO sessions" not in message
     assert "an empty record" not in message

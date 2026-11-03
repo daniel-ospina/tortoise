@@ -1325,9 +1325,10 @@ def read_local_record_turns(directory, node_keys: Iterable[str] | None = None
                 f"the local record under {root} DROPPED every line it held — "
                 f"{len(unparsable_lines)} unparsable, {len(malformed_lines)} "
                 f"malformed, {len(torn_tail)} torn tail, ZERO placed, from "
-                f"{len(files)} file(s). The record is NOT empty: every line was "
-                "read and discarded, so none of it can be placed positionally "
-                "and an absence is NOT established. First dropped line — "
+                f"{len(files)} file(s). The record is DAMAGED, not empty: every "
+                "line was read and discarded, so none of it can be placed "
+                "positionally and an absence is NOT established. First "
+                "dropped line — "
                 f"{first_kind} {first['at']}: {first['error']}")
         raise CensusError(
             f"the local record under {root} parsed ZERO sessions from "
