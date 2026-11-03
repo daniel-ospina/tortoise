@@ -20197,11 +20197,102 @@ class TortoiseSDK:
         holders = self._find_points_by_key(key, pointKind=kind)
         return holders, self._terminal_holder_among(holders)
 
+    def _terminal_content_holders(
+        self, pairs: list[tuple[str, str]],
+    ) -> dict[tuple[str, str], str]:
+        """``{(pointKind, content_hash): terminal_holder_id}`` for the CONTENT
+        dedup identity of every ``(kind, content)`` in ``pairs``.
+
+        This is the BATCH form of the content legs
+        :meth:`_find_terminal_dedup_hit` has always run, and that helper now
+        DELEGATES here with a single pair — so the bundle-local connection leg
+        it serves and the per-``points``-item leg #9819 adds share ONE
+        implementation instead of forking into the exact class
+        ``_dedup_match_clauses``' docstring was extracted to kill
+        (#2062/#2971/#2422). Batching is not cosmetic: an ingest validates
+        EVERY ``points`` item, so the per-item shape would put up to three
+        graph reads per item on the hot path of the write it guards, where this
+        runs one query per distinct ``kind``.
+
+        The semantics are the single-item helper's, unchanged:
+
+        * the candidate predicate is the shared ``_dedup_match_clauses``, so the
+          guard resolves exactly the nodes ``create_point``'s dedup does;
+        * the #2971 A10 hash-less fallback runs for a ``(kind, content)`` whose
+          UNFILTERED ``content_hash + kind`` lookup found NOTHING — the
+          WRITER's own gating (``create_point`` / ``_find_point_by_content``
+          reach their fallback only on a complete hash miss, so a hash-present
+          sibling, live or terminal, means the writer never consults a
+          hash-less point). Running the fallback on the terminal-filtered miss
+          alone would falsely reject a bundle whose fold legally lands on a
+          LIVE hash-present duplicate (review of #2971 caught it). It is
+          therefore per-item by nature, and fires only on a complete miss;
+        * when several hash-less duplicates share the content+kind the writer's
+          own pick carries no ORDER BY, so ANY terminal candidate is reported —
+          over-rejecting an ambiguous pair is the safe direction;
+        * terminality is the shared ``_terminal_expression`` builder, never a
+          re-listing of the vocabulary.
+
+        A row counts as PRESENT whatever its terminality (that is the writer's
+        gating input) and is reported only when the shared predicate says
+        TERMINAL. Presence and terminality therefore come from ONE round trip,
+        the same reason :meth:`_key_holder_state` returns both for the key leg.
+        """
+        out: dict[tuple[str, str], str] = {}
+        by_kind: dict[str, dict[str, str]] = {}
+        for kind, content in pairs:
+            if not isinstance(content, str):
+                continue
+            by_kind.setdefault(kind, {}).setdefault(_content_hash(content),
+                                                    content)
+        if not by_kind:
+            return out
+        proj = self._get_proj()
+        for kind, by_hash in by_kind.items():
+            base_clauses, base_params = self._dedup_match_clauses(
+                point_kind=kind)
+            rows = proj.g.query(
+                "MATCH (n:Point) WHERE "
+                f"{' AND '.join([*base_clauses, 'n.content_hash IN $hashes'])} "
+                f"RETURN n.id, n.content_hash, "
+                f"{_terminal_expression('n')} AS term",
+                params={**base_params, "hashes": sorted(by_hash)},
+            ).result_set
+            present: set[str] = set()
+            for node_id, ch, term in rows:
+                present.add(ch)
+                # First terminal candidate wins the message; ANY of them
+                # refuses (the writer's pick among duplicates has no ORDER BY).
+                if term and (kind, ch) not in out:
+                    out[(kind, ch)] = node_id
+            for ch, content in by_hash.items():
+                if ch in present:
+                    continue
+                fallback_clauses, fallback_params = self._dedup_match_clauses(
+                    point_kind=kind,
+                    extra_clauses=("n.content_hash IS NULL",
+                                   "n.content = $content"))
+                fallback_clauses = [*fallback_clauses, _terminal_expression("n")]
+                fb_rows = proj.g.query(
+                    "MATCH (n:Point) WHERE "
+                    f"{' AND '.join(fallback_clauses)} RETURN n.id LIMIT 1",
+                    params={**fallback_params, "content": content},
+                ).result_set
+                if fb_rows:
+                    out[(kind, ch)] = fb_rows[0][0]
+        return out
+
     def _find_terminal_dedup_hit(self, content: str, kind: str,
                                  key: str | None = None) -> str | None:
         """Read-only NFC-keyed dedup MATCH (mirrors create_point's dedup key)
         restricted to TERMINAL hits — the Phase-1 mechanism behind the
         bundle-local-refs-resolving-to-terminal-points guard (cycle-17/18).
+
+        #9819: since the `points` section is validated item-by-item too, the
+        CONTENT legs below are no longer private to the bundle-local connection
+        guard. They live in :meth:`_terminal_content_holders` — the BATCH form —
+        and this method is its single-pair caller, so the two entry points
+        cannot disagree about which node a content fold lands on.
 
         The candidate predicate is the SAME ``_dedup_match_clauses`` the
         writer's resolution uses — a single definition, so the guard and
@@ -20223,7 +20314,8 @@ class TortoiseSDK:
         hash on replay, so a rebuilt graph keeps its hashes.
 
         The fallback is gated on the WRITER's own hash-first condition (see
-        the query below): it runs only when the UNFILTERED
+        :meth:`_terminal_content_holders`, which owns that gating): it runs
+        only when the UNFILTERED
         ``content_hash + kind`` lookup is EMPTY, because that is the only
         state in which ``create_point`` / ``_find_point_by_content`` ever
         reach their A10 fallback — a hash-present sibling is what the writer
@@ -20272,7 +20364,6 @@ class TortoiseSDK:
         the writer's pick among them carries no ORDER BY, so the guard rejects
         when ANY key holder is terminal rather than betting on which one the
         writer folds onto."""
-        proj = self._get_proj()
         if isinstance(key, str) and key.strip():
             # #8400: key-first, exactly as the writer resolves. A key HIT is
             # the dedup resolution (whatever the content), so return from here
@@ -20286,48 +20377,13 @@ class TortoiseSDK:
             key_hits, terminal = self._key_holder_state(kind, key)
             if key_hits:
                 return terminal
-        base_clauses, base_params = self._dedup_match_clauses(point_kind=kind)
-        status_clauses = (_terminal_expression("n"),)
-        rows = proj.g.query(
-            "MATCH (n:Point {content_hash:$ch}) WHERE "
-            f"{' AND '.join([*base_clauses, *status_clauses])} "
-            "RETURN n.id LIMIT 1",
-            params={**base_params, "ch": _content_hash(content)},
-        ).result_set
-        if not rows:
-            # #2971 A10 CONTENT+KIND FALLBACK SCAN, gated on the WRITER's own
-            # hash-first ordering: `create_point` / `_find_point_by_content`
-            # reach their A10 fallback ONLY when the UNFILTERED
-            # content_hash+kind lookup finds NOTHING — a hash-present sibling
-            # (live or terminal) means the writer resolves there and never
-            # consults a hash-less point. Running this fallback on the
-            # terminal-filtered miss alone would falsely reject a bundle whose
-            # edge legally lands on a LIVE hash-present duplicate (review of
-            # #2971 caught it). `any_hash` mirrors the writer's hash query
-            # exactly: the same shared clauses, no status scoping.
-            any_hash = proj.g.query(
-                "MATCH (n:Point {content_hash:$ch}) WHERE "
-                f"{' AND '.join(base_clauses)} RETURN n.id LIMIT 1",
-                params={**base_params, "ch": _content_hash(content)},
-            ).result_set
-            if not any_hash:
-                # A partial create_point write (crash between the node CREATE
-                # and the props SET) or a graph written before #2795 D2
-                # leaves the terminal point hash-less — without this scan the
-                # cycle-17/18 guard cannot see it. (#2795 D2 now recomputes
-                # the hash on replay, so a rebuild no longer produces this
-                # state.)
-                fallback_clauses, fallback_params = self._dedup_match_clauses(
-                    point_kind=kind,
-                    extra_clauses=("n.content_hash IS NULL",
-                                   "n.content = $content"))
-                fallback_clauses = [*fallback_clauses, *status_clauses]
-                rows = proj.g.query(
-                    "MATCH (n:Point) WHERE "
-                    f"{' AND '.join(fallback_clauses)} RETURN n.id LIMIT 1",
-                    params={**fallback_params, "content": content},
-                ).result_set
-        return rows[0][0] if rows else None
+        # The content legs are the BATCH form (#9819), called here with ONE
+        # pair: the per-item guard added for the `points` section of an ingest
+        # and this bundle-local connection leg ask the same question, and a
+        # second copy of the statement is the fork class
+        # ``_dedup_match_clauses`` exists to prevent (#2062/#2971/#2422).
+        return self._terminal_content_holders([(kind, content)]).get(
+            (kind, _content_hash(content)))
 
     def _entity_name_holders(
         self, label: str, name: str,
@@ -21309,55 +21365,135 @@ class TortoiseSDK:
         # `_bundle_entity_name_outcomes` already uses for name-merged entities
         # (a record of what the ORDERED items will have written, not a graph
         # read).
+        # #9819: the CONTENT identity is the SAME question on the same axis.
+        # #9173 deliberately made a content dedup-hit onto a terminal point
+        # legal, because the pair is promoted to the operator route and an
+        # operator MAY wire a terminal point — sound for an EDGE, and that
+        # scoping is untouched above. It never covered the POINT WRITE, and
+        # this leg is about the point write: `create_point(dedup=True)`
+        # resolves content unconditionally, so a `points` item whose content
+        # matches a retracted/superseded point FOLDS onto it. Measured on this
+        # tree (fresh embedded DB, terminal point with `batch_id=None`):
+        #
+        #   fold                              batch_id  updatedAt  key
+        #   content, bare item                  stamped    -        -
+        #   content, fresh key                   stamped  moved   WRITTEN
+        #   content + props                      stamped  moved     -
+        #   intra-bundle (item 0 mints terminal, item 1 same content)
+        #                                        stamped  moved     -
+        #
+        # So the `legal no-op` reading this issue weighed is refuted by
+        # measurement: it is not bookkeeping-only. `batch_id` re-parents a dead
+        # claim into a bundle that did not author it (`_stamp_batch_id`'s own
+        # contract: "a re-ingest must not reparent an existing point"), the
+        # fresh key is written ONTO the terminal point — which then makes that
+        # key permanently un-ingestable, since the #8400 key guard refuses any
+        # key a terminal point holds — and the window-bearing items move
+        # `updatedAt`. A fold that mutates is the #8400 hazard, not a no-op.
+        #
+        # So the content leg gets the SAME unconditional per-item treatment the
+        # key leg has, over every `points` item, connection or not: step 3
+        # writes all of them. One batched read per distinct kind
+        # (`_terminal_content_holders`), which is where the content predicate
+        # already lived.
+        content_pairs = [
+            (pitem.get("kind") or "statement", pitem.get("content"))
+            for pitem in (bundle.get("points") or [])
+            if isinstance(pitem, dict)
+            and isinstance(pitem.get("content"), str)
+        ]
+        terminal_content = self._terminal_content_holders(content_pairs)
         _points_depth = _POINT_ITEM_FLATTEN_DEPTH
         minted_terminal: dict[tuple[str, str], tuple[int, object]] = {}
+        minted_terminal_content: dict[tuple[str, str], tuple[int, object]] = {}
         for j, pitem in enumerate(bundle.get("points") or []):
             if not isinstance(pitem, dict):
                 continue
-            pkey = _item_dedup_key(pitem)
-            if not (isinstance(pkey, str) and pkey.strip()):
-                continue
             pkind = pitem.get("kind") or "statement"
-            holders, holder = self._key_holder_state(pkind, pkey)
-            if holder:
+            pkey = _item_dedup_key(pitem)
+            if isinstance(pkey, str) and pkey.strip():
+                holders, holder = self._key_holder_state(pkind, pkey)
+                if holder:
+                    violations.append({
+                        "section": "points", "index": j,
+                        "message": f"ingest: points[{j}] (ref {pitem.get('ref')!r}) "
+                                   f"key {pkey!r} is held by terminal point "
+                                   f"{holder!r} (dedup hit) — create_point resolves "
+                                   f"a key BEFORE content, so this write would "
+                                   f"fold onto a terminal point and MUTATE it; a "
+                                   f"bundle cannot turn that fold off (its "
+                                   f"points are written with dedup=True, and a "
+                                   f"nested 'dedup' spelling is shadowed and "
+                                   f"dropped). Supersede-transfer the key first, "
+                                   f"or mint the second point OUTSIDE the bundle "
+                                   f"with create_point(..., key=<a FRESH key>, "
+                                   f"dedup=False) — the same key with dedup=False "
+                                   f"would create a second CARRIER of one key "
+                                   f"(#6110) (#8400)",
+                    })
+                    continue
+                earlier = minted_terminal.get((pkind, pkey))
+                if earlier is not None:
+                    violations.append({
+                        "section": "points", "index": j,
+                        "message": f"ingest: points[{j}] (ref {pitem.get('ref')!r}) "
+                                   f"reuses key {pkey!r}, which points[{earlier[0]}] "
+                                   f"in THIS bundle mints with status "
+                                   f"{earlier[1]!r} — the key-first fold would land "
+                                   f"on a point this same bundle creates terminal "
+                                   f"and stamp it, so the bundle is rejected at "
+                                   f"validation (bundle-order, not a graph read): "
+                                   f"mint the second point under a FRESH key "
+                                   f"(#8400)",
+                    })
+                    continue
+                if holders:
+                    # A key HIT means the writer folds onto an existing point
+                    # and the declared status is popped before the dedup branch
+                    # is taken — so this item does not MINT anything terminal,
+                    # and later items under the key land on that live holder.
+                    # It also never reaches the content legs: key-first, then
+                    # content (#6110).
+                    continue
+            content = pitem.get("content")
+            if not isinstance(content, str):
+                # Shape already reported (check 1); nothing to resolve.
+                continue
+            ch = _content_hash(content)
+            content_hit = terminal_content.get((pkind, ch))
+            if content_hit:
                 violations.append({
                     "section": "points", "index": j,
                     "message": f"ingest: points[{j}] (ref {pitem.get('ref')!r}) "
-                               f"key {pkey!r} is held by terminal point "
-                               f"{holder!r} (dedup hit) — create_point resolves "
-                               f"a key BEFORE content, so this write would "
-                               f"fold onto a terminal point and MUTATE it; a "
-                               f"bundle cannot turn that fold off (its "
-                               f"points are written with dedup=True, and a "
-                               f"nested 'dedup' spelling is shadowed and "
-                               f"dropped). Supersede-transfer the key first, "
-                               f"or mint the second point OUTSIDE the bundle "
-                               f"with create_point(..., key=<a FRESH key>, "
-                               f"dedup=False) — the same key with dedup=False "
-                               f"would create a second CARRIER of one key "
-                               f"(#6110) (#8400)",
+                               f"content resolves to terminal point "
+                               f"{content_hit!r} (dedup hit) — create_point's "
+                               f"content dedup folds onto it unconditionally, so "
+                               f"this write would MUTATE a retracted/superseded "
+                               f"point (stamp `batch_id`, write `key`, move "
+                               f"`updatedAt`) rather than wire an edge to it, and "
+                               f"a bundle cannot turn that fold off (its points "
+                               f"are written with dedup=True). Drop the item, or "
+                               f"re-assert the content OUTSIDE the bundle with "
+                               f"create_point(..., dedup=False) — an explicit "
+                               f"fresh CARRIER — after deciding, deliberately, "
+                               f"that the dead claim stays dead (#9819)",
                 })
                 continue
-            earlier = minted_terminal.get((pkind, pkey))
-            if earlier is not None:
+            earlier_content = minted_terminal_content.get((pkind, ch))
+            if earlier_content is not None:
                 violations.append({
                     "section": "points", "index": j,
                     "message": f"ingest: points[{j}] (ref {pitem.get('ref')!r}) "
-                               f"reuses key {pkey!r}, which points[{earlier[0]}] "
-                               f"in THIS bundle mints with status "
-                               f"{earlier[1]!r} — the key-first fold would land "
-                               f"on a point this same bundle creates terminal "
-                               f"and stamp it, so the bundle is rejected at "
-                               f"validation (bundle-order, not a graph read): "
-                               f"mint the second point under a FRESH key "
-                               f"(#8400)",
+                               f"has the same content as points[{earlier_content[0]}] "
+                               f"in THIS bundle, which mints it with status "
+                               f"{earlier_content[1]!r} — the content fold would "
+                               f"land on a point this same bundle creates "
+                               f"terminal and stamp it, so the bundle is rejected "
+                               f"at validation (bundle-order, not a graph read): "
+                               f"give the live item its own content, or mint it "
+                               f"OUTSIDE the bundle with create_point(..., "
+                               f"dedup=False) (#9819)",
                 })
-                continue
-            if holders:
-                # A key HIT means the writer folds onto an existing point and
-                # the declared status is popped before the dedup branch is
-                # taken — so this item does not MINT anything terminal, and
-                # later items under the key land on that live holder.
                 continue
             declared = _item_effective_status(pitem, _points_depth)
             # Conservative in the FAIL-CLOSED direction, stated so it is not
@@ -21368,7 +21504,14 @@ class TortoiseSDK:
             # key which content-folds onto a live point and then reuses the key —
             # is preferred to letting a fold land on a terminal mint.
             if isinstance(declared, str) and declared in TERMINAL_EXCLUDED_STATUSES:
-                minted_terminal[(pkind, pkey)] = (j, declared)
+                if isinstance(pkey, str) and pkey.strip():
+                    minted_terminal[(pkind, pkey)] = (j, declared)
+                # Same posture for the CONTENT identity: an item that mints this
+                # content terminal is the node a later item's content fold lands
+                # on (measured: item 0 `status=retracted`, item 1 same content,
+                # one statement apart, `batch_id` stamped on the born-terminal
+                # node and `validate` returned []).
+                minted_terminal_content[(pkind, ch)] = (j, declared)
 
     def _check_endpoint_race(self, index: int, conn: dict,
                              refs: dict[str, str], violations: list[dict],
