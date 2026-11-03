@@ -287,6 +287,7 @@ import subprocess
 import time
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import NamedTuple
 
 #: The lane's engine. Overridable so a lane can name a DIGEST or another
 #: EXPLICIT version — never a floating tag (``assert_pinned_image`` refuses one;
@@ -400,17 +401,47 @@ LABEL_CREATED = "tortoise.test-lane.created"
 #: container being reaped, and the longest plausible agent pause with a lane
 #: container started but unused is hours, not a day — 24 h is 6x above the next
 #: plausible value and still below every measured leak (cell-1: 33 h, 2 d, 3 d,
-#: 4 d), so the whole accumulated population drains within a day. (c) A test
-#: session that legitimately holds a container for >24 h also holds it CONNECTED,
-#: so it never presents as idle. Set `TORTOISE_TEST_LANE_ORPHAN_MAX_AGE_H=0` to
-#: disable the arm entirely (report only), which is the pre-fix behaviour.
+#: 4 d). (c) A test session that legitimately holds a container for >24 h also
+#: holds it CONNECTED, so it never presents as idle.
+#:
+#: ⛔ THE BOUND IS NOT THE ARMING. Past this bound an unownable container is
+#: REPORTED; removing it additionally requires `ORPHAN_REAP_ENV` (`=1`), because
+#: #8180's recorded ruling answers this population BOTH ways — "the age backstop
+#: applies *only* to owner-INDETERMINATE containers" AND "fail-closed: if
+#: ownership cannot be determined, do NOT delete — report only" — and the reopen
+#: asking for the default is unanswered. `PR #10693` carries the same question
+#: with the opposite default, so a default here would settle an open owner
+#: decision with no operator action. `=0` disables even the report's candidacy
+#: (pre-fix behaviour).
 ORPHAN_MAX_AGE_H = 24.0
 ORPHAN_MAX_AGE_ENV = "TORTOISE_TEST_LANE_ORPHAN_MAX_AGE_H"
+#: Opt-in that lets the age backstop REMOVE an unownable, provably idle
+#: container past the bound. OFF by default for the reason stated above (the
+#: #8180 ruling disagrees with itself about this population, and the reopen is
+#: unanswered) — the same shape `STOPPED_REAP_ENV` already uses for the other
+#: unruled deletion arm: an env opt-in is a deliberate operator action, a
+#: default is not. Strict "1": any other spelling is not consent to delete.
+#: Recorded on #8180 as the arm that flips when the owner rules.
+ORPHAN_REAP_ENV = "TORTOISE_TEST_LANE_REAP_OWNER_INDETERMINATE"
 #: Two-sample window for the idle probe: ALL candidates are sampled, ONE window
-#: elapses, then all are sampled again — so the cost is one constant window
-#: regardless of population size (see `_idle_evidence`). On a healthy box there
-#: are no candidates, so the probe costs nothing on the `up`/`uri` hot path.
+#: elapses, then all are sampled again. ⛔ WHAT IS CONSTANT IS THE SLEEP, NOT THE
+#: COST: `_idle_evidence` issues one or two `docker exec` subprocesses PER
+#: CANDIDATE (three per removal, with the removal-time re-check), so the exec
+#: count is LINEAR in the candidate set. `IDLE_PROBE_TIMEOUT` bounds each exec
+#: and `IDLE_PROBE_BUDGET_S` bounds the WHOLE probe, so a wedged PID 1 (the
+#: measured #2653 zombie shape) can never turn the sweep into a 60 s-per-exec
+#: block on the `start()` hot path. On a healthy box there are no candidates, so
+#: the probe costs nothing at all.
 IDLE_PROBE_WINDOW_S = 5.0
+#: Per-exec bound for the idle samples: DOCKER_TIMEOUT (60 s) is the bound for a
+#: call whose answer decides a lane's fate; an idle sample only decides whether a
+#: container may be REAPED, and "cannot tell" already means KEEP, so it must not
+#: be worth a minute of the lane's start-up.
+IDLE_PROBE_TIMEOUT = 5
+#: Wall-clock budget for the WHOLE probe, both passes. Candidates not reached
+#: inside it are not sampled at all and are reported as not reaped (#10712
+#: review: "a sweep that cannot run must not stop a lane from starting").
+IDLE_PROBE_BUDGET_S = 20.0
 PORT_RANGE = (16390, 16499)
 DEFAULT_GRAPH = "tortoise_test_matrix"
 #: Docker calls are bounded: this tool exists for an overloaded host, so a
@@ -1916,6 +1947,9 @@ def _orphan_max_age_h() -> float:
     ``0`` is the documented off switch. Every other unparseable value (a typo,
     a negative, NaN) falls back to the DEFAULT rather than to "off": an operator
     typo must not silently re-arm the leak this arm exists to drain.
+
+    ⛔ THE BOUND IS NOT THE ARMED ARM: past it the container is REPORTED, and
+    removing it also requires `_orphan_reap_enabled()`.
     """
     raw = os.environ.get(ORPHAN_MAX_AGE_ENV)
     if raw is None or raw.strip() == "":
@@ -1927,6 +1961,21 @@ def _orphan_max_age_h() -> float:
     if value != value or value < 0:      # NaN or negative: a typo, not consent
         return ORPHAN_MAX_AGE_H
     return value
+
+
+def _orphan_reap_enabled() -> bool:
+    """Whether the OPERATOR asked the age backstop to DELETE (#8180 reopen).
+
+    Strict ``"1"``, exactly like `_stopped_reap_enabled()`: any other spelling
+    is not consent for a deletion whose authority is an open owner question.
+    OFF by default, and that default is the decision, not caution — #8180's
+    ruling says both "the age backstop applies only to owner-INDETERMINATE
+    containers" and "if ownership cannot be determined, do NOT delete — report
+    only", and the reopen asking which one wins is unanswered. A lane may not
+    settle that with a default: a default needs no operator action to destroy
+    another clone's database.
+    """
+    return os.environ.get(ORPHAN_REAP_ENV, "0") == "1"
 
 
 def _label_args() -> list[str]:
@@ -1950,10 +1999,18 @@ def _label_args() -> list[str]:
 
 
 def _ownership_labels() -> dict[str, dict[str, str]] | None:
-    """``name -> {state, owner}`` for every managed container, in ONE read.
+    """``name -> {state, owner, slug}`` for every managed container, in ONE read.
 
     `docker ps --format '{{.Label "key"}}'` is one subprocess for the whole
     population, which is why the label read is not a per-container `inspect`.
+
+    BOTH label keys are read, not just the deciding one. `LABEL_OWNER` alone is
+    UNCORROBORATED: nothing ties the stamped path to the container it sits on, so
+    a label pointing at `/tmp` keeps a container forever while asserting a false
+    fact, and a label left over from a reused name describes a different owner.
+    `LABEL_SLUG` is the independent second half written by the same
+    `_label_args()` call — ``slug_for(owner)`` — so the caller can check that the
+    pair agrees with the container it is reading before trusting either.
 
     ``None`` is "the read FAILED" and ``{}`` is "docker answered, nothing is
     running". They must not collapse: a failed label read that returned ``{}``
@@ -1964,7 +2021,8 @@ def _ownership_labels() -> dict[str, dict[str, str]] | None:
     """
     listed = _docker("ps", "-a", "--filter", f"name={NAME_PREFIX}",
                      "--format",
-                     '{{.Names}}\t{{.State}}\t{{.Label "' + LABEL_OWNER + '"}}')
+                     '{{.Names}}\t{{.State}}\t{{.Label "' + LABEL_OWNER
+                     + '"}}\t{{.Label "' + LABEL_SLUG + '"}}')
     if listed.returncode != 0:
         return None
     out: dict[str, dict[str, str]] = {}
@@ -1974,8 +2032,9 @@ def _ownership_labels() -> dict[str, dict[str, str]] | None:
             continue
         name, state = parts[0].strip(), parts[1].strip().lower() or "unknown"
         owner = parts[2].strip() if len(parts) > 2 else ""
+        slug = parts[3].strip() if len(parts) > 3 else ""
         if name:
-            out[name] = {"state": state, "owner": owner}
+            out[name] = {"state": state, "owner": owner, "slug": slug}
     return out
 
 
@@ -2003,8 +2062,15 @@ def _idle_sample(name: str) -> tuple[int, int] | None:
        is compared, and against the probe's own known overhead.
 
     ``None`` is "cannot tell" — never "idle".
+
+    Every exec is bounded by ``IDLE_PROBE_TIMEOUT``, NOT by ``DOCKER_TIMEOUT``:
+    an idle sample only decides whether a container may be REAPED, and an
+    unreadable answer already means KEEP, so it must never be worth a minute of
+    the lane's start-up. Against the measured `#2653` zombie shape (a PID 1 that
+    cannot answer) the 60 s default turned one sample into a full-minute block.
     """
-    r = _docker("exec", name, "redis-cli", "INFO", "stats")
+    r = _docker("exec", name, "redis-cli", "INFO", "stats",
+                timeout=IDLE_PROBE_TIMEOUT)
     if r.returncode != 0:
         return None
     conns = None
@@ -2014,7 +2080,8 @@ def _idle_sample(name: str) -> tuple[int, int] | None:
             conns = int(value.strip())
     if conns is None:
         return None
-    clients = _docker("exec", name, "redis-cli", "CLIENT", "LIST")
+    clients = _docker("exec", name, "redis-cli", "CLIENT", "LIST",
+                      timeout=IDLE_PROBE_TIMEOUT)
     if clients.returncode != 0:
         return None
     lines = [ln for ln in (clients.stdout or "").splitlines() if ln.strip()]
@@ -2022,19 +2089,50 @@ def _idle_sample(name: str) -> tuple[int, int] | None:
     return conns, others
 
 
-def _idle_evidence(names: list[str]) -> dict[str, tuple[bool, str]]:
+class IdleVerdict(NamedTuple):
+    """One candidate's idleness verdict.
+
+    Field access is by name; the TUPLE SHAPE is what callers have always read
+    (``verdict[0]`` is `idle`), so this stays a tuple rather than a dataclass.
+    ``last`` is the second sample (or the terminal-state reading) and is what the
+    removal-time re-check compares against — discarding it would let a
+    connection that came and went between the window and the `rm` leave no trace.
+    """
+    idle: bool
+    detail: str
+    last: tuple[int, int] | None = None
+
+
+def _idle_evidence(names: list[str],
+                   states: dict[str, str] | None = None
+                   ) -> dict[str, IdleVerdict]:
     """Positive evidence that NOTHING is using each of ``names`` right now.
 
-    The test is: NO client other than the probe is connected at either sample,
-    and the server accepted no connections beyond the probe's own overhead
-    between them (``PROBE_CONNECTIONS_PER_SAMPLE``).
+    The test for a READABLE server is: NO client other than the probe is
+    connected at either sample, and the server accepted no connections beyond
+    the probe's own overhead between them (``PROBE_CONNECTIONS_PER_SAMPLE``).
+
+    **A TERMINAL container is idle BY CONSTRUCTION** (`states[name]` in
+    ``_TERMINAL_STATES``): nothing can be connected to a server that is not
+    running, and `docker exec` into it fails by definition — so probing it can
+    only ever produce "unreadable", which this function reads as KEEP. That made
+    the arm INERT for the population it exists to drain (the measured migration
+    population is entirely stopped: "2 NO-WORKTREE … both Exited") AND made the
+    report assert a falsehood ("IN USE" about a container doing nothing).
+    Docker's own state is the evidence here; it is derived from the SAME
+    `docker ps` snapshot the caller already holds. The per-sample ``None``
+    fail-closed rule is unchanged for a RUNNING container whose probe is
+    unreadable.
 
     **ONE probe window for the WHOLE candidate set**, not one per container: a
-    per-container window would cost ``len(names) x IDLE_PROBE_WINDOW_S`` — 5 s on
-    the healthy box and ~6 minutes against the 68-container population this
-    exists to drain — on a sweep that runs on every `up`/`uri`. Sampling all
-    candidates, sleeping ONCE, then sampling all again makes the added cost one
-    constant window regardless of population size.
+    per-container window would cost ``len(names) x IDLE_PROBE_WINDOW_S``. ⛔ What
+    is constant is the SLEEP, not the cost — the exec count is LINEAR in the
+    candidate set (one or two per candidate, three per removal). So the probe is
+    ALSO bounded in wall time by ``IDLE_PROBE_BUDGET_S``: a candidate reached
+    after the budget is spent is not sampled at all and is reported as not
+    reaped, because the sweep runs synchronously inside `start()` and its
+    contract there is "a sweep that cannot run must not stop a lane from
+    starting".
 
     A candidate whose first sample already shows a foreign client is dropped
     from the second sample: it is in use and the answer is already known.
@@ -2042,31 +2140,53 @@ def _idle_evidence(names: list[str]) -> dict[str, tuple[bool, str]]:
     Unreadable is ``False`` — "cannot tell" is never read as "idle", the
     module's absent-vs-unreadable rule applied to the one decision that deletes.
     """
-    out: dict[str, tuple[bool, str]] = {}
+    states = states or {}
+    out: dict[str, IdleVerdict] = {}
     first: dict[str, tuple[int, int]] = {}
+    deadline = time.monotonic() + IDLE_PROBE_BUDGET_S
     for name in names:
+        state = states.get(name, "unknown")
+        if state in _TERMINAL_STATES:
+            out[name] = IdleVerdict(
+                True,
+                f"docker reports it {state} — a stopped server serves and holds "
+                f"no client, so it is idle by construction",
+                None)
+            continue
+        if time.monotonic() > deadline:
+            out[name] = IdleVerdict(
+                False, "the probe's wall-clock budget ran out before it could "
+                       "be sampled — not reaped")
+            continue
         sample = _idle_sample(name)
         if sample is None:
-            out[name] = (False, "idleness unreadable (exec/INFO failed) — "
-                                "not reaped")
+            out[name] = IdleVerdict(False, "idleness unreadable (exec/INFO "
+                                            "failed) — not reaped")
         elif sample[1]:
-            out[name] = (False, f"{sample[1]} client(s) connected")
+            out[name] = IdleVerdict(False, f"{sample[1]} client(s) connected",
+                                    sample)
         else:
             first[name] = sample
     if not first:
         return out
     time.sleep(IDLE_PROBE_WINDOW_S)
     for name, one in first.items():
+        if time.monotonic() > deadline:
+            out[name] = IdleVerdict(
+                False, "the probe's wall-clock budget ran out before its second "
+                       "sample — not reaped", one)
+            continue
         two = _idle_sample(name)
         if two is None:
-            out[name] = (False, "idleness unreadable on the second sample — "
-                                "not reaped")
+            out[name] = IdleVerdict(False, "idleness unreadable on the second "
+                                           "sample — not reaped")
         elif two[1]:
-            out[name] = (False, f"{two[1]} client(s) connected")
+            out[name] = IdleVerdict(False, f"{two[1]} client(s) connected", two)
         elif (delta := two[0] - one[0]) > PROBE_CONNECTIONS_PER_SAMPLE:
-            out[name] = (False, "connections arrived between samples "
-                                f"({one[0]}->{two[0]}, more than the probe's own "
-                                f"{PROBE_CONNECTIONS_PER_SAMPLE})")
+            out[name] = IdleVerdict(
+                False, "connections arrived between samples "
+                       f"({one[0]}->{two[0]}, more than the probe's own "
+                       f"{PROBE_CONNECTIONS_PER_SAMPLE})", two)
         elif delta < 0:
             # A DECREASING counter means the server restarted inside the window:
             # the graphs were just reloaded and clients are about to attach, so
@@ -2074,52 +2194,188 @@ def _idle_evidence(names: list[str]) -> dict[str, tuple[bool, str]]:
             # OPERATING the container. Treating it as "idle" would delete the
             # container at the worst possible moment. Uninterpretable evidence
             # is KEEP, exactly like unreadable evidence.
-            out[name] = (False, "the connection counter went BACKWARDS "
-                                f"({one[0]}->{two[0]}), so the server restarted "
-                                "inside the window — not idle")
+            out[name] = IdleVerdict(
+                False, "the connection counter went BACKWARDS "
+                       f"({one[0]}->{two[0]}), so the server restarted "
+                       "inside the window — not idle", two)
         else:
-            out[name] = (True, "no foreign client connected and no connection "
-                               f"beyond the probe's own across "
-                               f"{IDLE_PROBE_WINDOW_S:.0f}s")
+            out[name] = IdleVerdict(
+                True, "no foreign client connected and no connection "
+                      f"beyond the probe's own across "
+                      f"{IDLE_PROBE_WINDOW_S:.0f}s", two)
+    return out
+
+
+def _idle_recheck(name: str, state: str, prior: tuple[int, int] | None
+                  ) -> tuple[bool, str]:
+    """Re-confirm idleness IMMEDIATELY before a removal.
+
+    Two facts the earlier version threw away:
+
+    1. **The COUNTER the re-sample reads is now used, not just the client
+       count.** A connection that came and went between the probe window and the
+       `rm` leaves the client list empty at the re-sample but moves
+       ``total_connections_received`` — so the delta since the last sample is
+       compared against the probe's own overhead, and a decreasing counter still
+       means "the server restarted, graphs reloading, clients about to attach".
+    2. **A terminal container is idle by construction, but its STATE is re-read
+       rather than assumed**: a lane restarting its own container reuses the
+       SAME name, so the sweep's snapshot can be stale by the time the `rm`
+       lands. A container that is no longer terminal is kept (fail-closed).
+    """
+    if state in _TERMINAL_STATES:
+        now_state = container_state(name)
+        if now_state not in _TERMINAL_STATES:
+            return (False, f"it read {state} in the sweep but is {now_state} at "
+                           f"removal time (fail-closed)")
+        return True, ""
+    now = _idle_sample(name)
+    if now is None:
+        return (False, "idleness could not be re-confirmed at removal time "
+                       "(fail-closed)")
+    if now[1]:
+        return (False, f"{now[1]} client(s) connected at removal time "
+                       "(fail-closed)")
+    if prior is not None:
+        delta = now[0] - prior[0]
+        if delta > PROBE_CONNECTIONS_PER_SAMPLE:
+            return (False, "connections arrived between the probe window and the "
+                           f"removal ({prior[0]}->{now[0]}, more than the "
+                           f"probe's own {PROBE_CONNECTIONS_PER_SAMPLE}) "
+                           "(fail-closed)")
+        if delta < 0:
+            return (False, "the connection counter went BACKWARDS "
+                           f"({prior[0]}->{now[0]}) between the probe window and "
+                           "the removal, so the server restarted (fail-closed)")
+    return True, ""
+
+
+def _drain_owner_gone(pending: list[tuple[str, str, str]],
+                      states: dict[str, str],
+                      verdicts: dict[str, IdleVerdict]) -> list[str]:
+    """Reap containers whose OWNING WORKTREE IS GONE — one proof, two arms.
+
+    "The owning worktree is gone" is #8180's authorisation, and it is decided by
+    OWNERSHIP alone (a peer lane can never reach this branch; `is_managed()` and
+    the `name == mine` check run first). But ownership is not LIVENESS: the
+    owner path is written from a `repo_root()` read with a documented degraded
+    `Path.cwd()` mode, and the test is a filesystem `is_dir()` — so a mount that
+    goes away, a path on another filesystem, or a worktree removed under a
+    still-running lane all convert "owner path gone" into a `rm -f` of a
+    container a test is USING. That is the same class the module already refuses
+    for the clock ("a clock alone authorises nothing"), so this arm now demands
+    the same positive idle evidence the age arm does:
+
+    * a RUNNING container must be provably idle (`_idle_evidence`, two samples,
+      one shared window for the whole pending set);
+    * a TERMINAL one is idle by construction, and its state is re-read at the
+      moment of action.
+
+    Split out of the scan so the probe window is ONE event for the whole set
+    instead of one window per container.
+    """
+    if not pending:
+        return []
+    out: list[str] = []
+    for name, owner, state in pending:
+        verdict = verdicts.get(name, IdleVerdict(False, "no verdict — not reaped"))
+        idle, detail = verdict.idle, verdict.detail
+        if idle:
+            # The re-check's detail is used only when it REFUSES; on a pass the
+            # evidence worth reporting is the probe's (or docker's own state).
+            ok, why = _idle_recheck(name, state, verdict.last)
+            if not ok:
+                idle, detail = False, why
+        if not idle:
+            out.append(f"reap: kept {name} — its owning worktree {owner} is gone, "
+                       f"but idleness is NOT proven: {detail}. Ownership alone "
+                       f"authorises nothing")
+            continue
+        # #7357: the facts are read BEFORE the removal — `rm -f` destroys the
+        # only evidence of WHY it stopped, and nobody else will report it now
+        # that its owner is gone.
+        #
+        # The facts are a claim about WHY it stopped, so they may only be read
+        # for a container docker actually reports as STOPPED: this path also
+        # fires for a RUNNING container whose owner worktree was deleted (a lane
+        # container outlives its worktree by design), and a previous OOM kill
+        # reported there is HISTORY, not this failure —
+        # `_termination_report(live=False)` states "it did not hang, it was
+        # terminated", the false diagnosis its own `live` flag exists to
+        # prevent. An unreadable state asserts nothing at all.
+        prior = ("" if states.get(name) not in _TERMINAL_STATES
+                 else _termination_report(name, live=False))
+        rm = _docker("rm", "-f", name)
+        out.append(f"reap: {'removed' if rm.returncode == 0 else 'FAILED to remove'} "
+                   f"{name} — its owning worktree {owner} is gone and it is "
+                   f"PROVABLY idle: {detail}"
+                   + (f"; it was {prior}" if prior else ""))
     return out
 
 
 def _drain_age_candidates(age_candidates: list[tuple[str, str]],
-                          states: dict[str, str]) -> list[str]:
-    """Reap the unownable-and-idle-past-the-bound set (#8180 backstop).
+                          states: dict[str, str],
+                          verdicts: dict[str, IdleVerdict] | None = None
+                          ) -> list[str]:
+    """The unownable-and-idle-past-the-bound SET (#8180 backstop).
 
-    Split out so the ONE probe window is visible as a single event: this
-    function probes the whole candidate set once and only then removes.
+    REPORT-ONLY BY DEFAULT. Removal additionally requires `ORPHAN_REAP_ENV=1`
+    (`_orphan_reap_enabled()`), because #8180's ruling answers this population
+    both ways and the reopen is unanswered. Until an operator opts in, this
+    function does not even PROBE: it prints one line per candidate naming the
+    bound, the reason it is a candidate, and the opt-in — which is the same
+    shape `STOPPED_REAP_ENV` already uses for the other unruled deletion arm.
+
+    Split out so the ONE probe window is visible as a single event: the caller
+    probes the whole candidate set once (and the same window is shared with the
+    owner-gone arm) and only then removes.
     """
     if not age_candidates:
         return []
     bound = _orphan_max_age_h()
-    verdicts = _idle_evidence([name for name, _ in age_candidates])
+    if not _orphan_reap_enabled():
+        out: list[str] = []
+        for name, age_txt in age_candidates:
+            out.append(
+                f"reap: kept {name} — no owner here and it is {age_txt} (past "
+                f"the {bound:g}h backstop), so it holds a port from "
+                f"{PORT_RANGE[0]}-{PORT_RANGE[1]} until someone removes it. "
+                f"REPORT ONLY: #8180's ruling does not authorise deleting an "
+                f"owner-INDETERMINATE container — it says both 'apply the "
+                f"backstop' and 'fail-closed: if ownership cannot be "
+                f"determined, do NOT delete', and the reopen asking which "
+                f"wins is unanswered — so the arm is behind an operator opt-in "
+                f"(`{ORPHAN_REAP_ENV}=1`) exactly like `{STOPPED_REAP_ENV}`. "
+                f"`docker rm -f {name}` removes this one now.")
+        return out
+    if verdicts is None:
+        verdicts = _idle_evidence([name for name, _ in age_candidates], states)
     out: list[str] = []
     for name, age_txt in age_candidates:
-        idle, detail = verdicts.get(name, (False, "no verdict — not reaped"))
+        verdict = verdicts.get(
+            name, IdleVerdict(False, "no verdict — not reaped"))
+        idle, detail = verdict.idle, verdict.detail
+        if idle:
+            # RE-VERIFY AT THE MOMENT OF ACTION. `_idle_evidence` finishes every
+            # second sample before ANY removal, so on a large population this
+            # candidate's verdict is seconds old by the time its turn comes. The
+            # module already applies this discipline to its other destructive arm
+            # ("the state is re-read IMMEDIATELY before the removal"); the same
+            # staleness applies to idleness, and the cost of trusting a stale
+            # verdict is deleting the container a lane just started using.
+            #
+            # The re-check's own detail is used only when it REFUSES: on a pass
+            # the evidence worth reporting is the probe window's, not "looked
+            # again and still nothing" (a removal line ending in an empty
+            # justification is how an unreviewed delete reads).
+            ok, why = _idle_recheck(name, states.get(name, "unknown"),
+                                    verdict.last)
+            if not ok:
+                idle, detail = False, why
         if not idle:
             out.append(f"reap: kept {name} — no owner here and it is {age_txt}, "
-                       f"but IN USE: {detail}; report only (a clock alone "
-                       f"authorises nothing)")
-            continue
-        # RE-VERIFY AT THE MOMENT OF ACTION. `_idle_evidence` finishes every
-        # second sample before ANY removal, so on a large population this
-        # candidate's verdict is seconds old by the time its turn comes. The
-        # module already applies this discipline to its other destructive arm
-        # ("the state is re-read IMMEDIATELY before the removal"); the same
-        # staleness applies to idleness, and the cost of trusting a stale
-        # verdict is deleting the container a lane just started using.
-        now = _idle_sample(name)
-        if now is None:
-            out.append(f"reap: kept {name} — no owner here and it is {age_txt}, "
-                       f"but idleness could not be re-confirmed at removal time "
-                       f"(fail-closed)")
-            continue
-        if now[1]:
-            out.append(f"reap: kept {name} — no owner here and it is {age_txt}, "
-                       f"but {now[1]} client(s) connected at removal time "
-                       f"(fail-closed)")
+                       f"but idleness is NOT proven: {detail}; report only (a "
+                       f"clock alone authorises nothing)")
             continue
         prior = ("" if states.get(name) not in _TERMINAL_STATES
                  else _termination_report(name, live=False))
@@ -2195,15 +2451,25 @@ def reap_orphans() -> list[str]:
        the container's own label (``tortoise.test-lane.worktree``), stamped at
        creation so it SURVIVES the `git worktree remove`/prune that destroys
        the name's resolvability; the name (`slug_for()` of the worktree) is the
-       fallback for containers created before the label existed. So the reaping
-       decision is a lookup rather than a guess. This tool
-       can therefore only ever remove a container whose owner it has
-       POSITIVELY established is gone — never a peer lane's, and never this
-       worktree's own (`stop()` is the only thing that removes that one). It
-       does not consult the container's STATE at all: an owner that is gone
-       means nothing will start that container again, whatever docker last said
-       about it (`paused`/`restarting`/`created` included — ``_LIVE_ISH_STATES``
-       gates only the state arm below, not this one).
+       fallback for containers created before the label existed — and the label
+       must CORROBORATE itself against the container it sits on through
+       ``LABEL_SLUG`` before it counts as evidence at all. So the reaping
+       decision is a lookup rather than a guess, and it can only ever remove a
+       container whose owner it has POSITIVELY established is gone — never a
+       peer lane's, and never this worktree's own (`stop()` is the only thing
+       that removes that one).
+
+       ⛔ OWNERSHIP IS NOT LIVENESS. The owner test is a filesystem `is_dir()`,
+       written from a `repo_root()` read with a documented degraded `Path.cwd()`
+       mode, so a mount that goes away, a path on another filesystem, or a
+       worktree removed under a STILL-RUNNING lane all read as "owner gone". The
+       removal therefore also requires positive idle evidence — the same proof
+       the age arm needs, from the same probe window (`_drain_owner_gone`): a
+       running container must show no foreign client and no connection beyond
+       the probe's own; a terminal one is idle by construction and its state is
+       re-read at the moment of action; anything we cannot prove (a
+       `paused`/`restarting`/`created` container, an unreadable probe) is KEPT
+       and reported.
 
     A second proof — **the container is in a TERMINAL state** (`exited`/`dead`,
     ``_TERMINAL_STATES``) — is **WITHHELD BY DEFAULT** (`STOPPED_REAP_ENV`),
@@ -2250,12 +2516,32 @@ def reap_orphans() -> list[str]:
     than the probe itself is connected at either end of one probe window, and
     the server accepts no connection beyond the probe's own overhead. (Not "an
     empty ``CLIENT LIST``" — it always lists the caller; see `_idle_sample`.)
+    A **terminal** container (`exited`/`dead`) is idle BY CONSTRUCTION — nothing
+    can be connected to a server that is not running — and is not probed, because
+    `docker exec` into it fails and reading that as "in use" left the measured
+    migration population ("2 NO-WORKTREE … both Exited") unreapable forever.
+
+    ⛔ AND THE BACKSTOP IS REPORT-ONLY BY DEFAULT: past the bound the container
+    is REPORTED, and removing it also requires ``ORPHAN_REAP_ENV=1``. #8180's
+    recorded ruling answers this population BOTH ways ("the backstop applies
+    only to owner-INDETERMINATE containers" and "fail-closed: if ownership
+    cannot be determined, do NOT delete — report only"), the reopen asking which
+    wins is unanswered, and a second implementation (PR #10693) carries the
+    opposite default on the same hunks. A default would settle that with no
+    operator action, so the default reports — the same shape ``STOPPED_REAP_ENV``
+    already uses for the other unruled deletion arm.
 
     A clock alone still
     authorises nothing, and this arm can never reach a container whose owner is
     determined, live or not: that is #5084's recorded ruling ("delete BY age"
     rejected), and it is why the bound is a backstop for the unownable
     population rather than a policy.
+
+    Ownership, too, is not LIVENESS: proof 1 is decided by a filesystem
+    `is_dir()`, which cannot tell a deleted worktree from a worktree removed
+    under a still-running lane, or from a path on a mount that went away — so the
+    owner-gone removal asks for the same positive idle evidence as the age arm
+    (`_drain_owner_gone`), from the SAME probe window.
 
     A clock firing on a LIVE owner's database would be a far worse bug than the
     leak it fixes — the rule the whole module defends. `paused`/`restarting`/
@@ -2299,6 +2585,9 @@ def reap_orphans() -> list[str]:
     #: idle probe's single window covers all of them (and costs nothing when
     #: there are none, which is the case on a healthy box).
     age_candidates: list[tuple[str, str]] = []
+    #: Containers whose owning worktree is GONE, resolved after the scan for the
+    #: same reason (one probe window for all of them). `(name, owner, state)`.
+    pending: list[tuple[str, str, str]] = []
     for name in sorted(states):
         if not is_managed(name):
             continue
@@ -2327,6 +2616,24 @@ def reap_orphans() -> list[str]:
         # owner is gone; keep when ANY says it is present; keep when any of them
         # is unreadable. A record that resolves to nothing (`None`) abstains.
         records = [r for r in (stamped or None, slugs.get(slug)) if r]
+        # ── THE LABEL MUST CORROBORATE ITSELF ────────────────────────────────
+        # `LABEL_OWNER` on its own asserts a fact about an UNNAMED container: a
+        # label pointing at `/tmp` keeps a container forever, and one left on a
+        # name that was since reused describes a DIFFERENT owner. `LABEL_SLUG` is
+        # the independent second half written by the same `_label_args()` call,
+        # so a mismatch means the pair does not describe THIS container and the
+        # label is not evidence of anything. Fail-closed: keep it and say so.
+        # A container created before the pair existed carries no slug (empty),
+        # which reads as "uncorroborated", not as "mismatched" — that legacy
+        # population is what the name record and the age report are for.
+        stamped_slug = (labels.get(name) or {}).get("slug", "")
+        if stamped and stamped_slug and stamped_slug != slug:
+            out.append(f"reap: kept {name} — its ownership label disagrees with "
+                       f"the container it sits on (label slug "
+                       f"{stamped_slug!r} vs name {slug!r}), so the label is not "
+                       f"evidence about this container (fail-closed, report "
+                       f"only)")
+            continue
         verdicts: list[tuple[str, bool | None]] = []
         for record in records:
             try:
@@ -2354,27 +2661,19 @@ def reap_orphans() -> list[str]:
                        f"could not be examined (fail-closed, report only)")
             continue
         if owner is not None and present is False:
-            # Proof 1, the ONLY armed proof: the worktree that owns this
-            # container is gone, so this is what #8180 authorises. #7357: the
-            # facts are read BEFORE the removal — `rm -f` destroys the only
-            # evidence of WHY it stopped, and nobody else will report it now
-            # that its owner is gone.
+            # Proof 1: the worktree that owns this container is gone, so this is
+            # what #8180 authorises. Ownership is NOT liveness, though: the
+            # owner path comes from a `repo_root()` read with a documented
+            # degraded `Path.cwd()` mode, and the test is a filesystem
+            # `is_dir()`, which is exactly what a worktree REMOVED UNDER A
+            # STILL-RUNNING LANE looks like — the same class of false proof the
+            # clock arm refuses ("a clock alone authorises nothing"). So the
+            # removal is deferred to the shared probe below, which requires the
+            # same positive idle evidence the age arm does.
             #
-            # The facts are a claim about WHY it stopped, so they may only be
-            # read for a container docker actually reports as STOPPED: this
-            # path also fires for a RUNNING container whose owner worktree was
-            # deleted (a lane container outlives its worktree by design), and a
-            # previous OOM kill reported there is HISTORY, not this failure —
-            # `_termination_report(live=False)` states "it did not hang, it was
-            # terminated", the false diagnosis its own `live` flag exists to
-            # prevent. An unreadable state asserts nothing at all, exactly as
-            # `start()` already refuses to append a report to `unknown`.
-            prior = ("" if state not in _TERMINAL_STATES
-                     else _termination_report(name, live=False))
-            rm = _docker("rm", "-f", name)
-            out.append(f"reap: {'removed' if rm.returncode == 0 else 'FAILED to remove'} "
-                       f"{name} — its owning worktree {owner} is gone"
-                       + (f"; it was {prior}" if prior else ""))
+            # Deferred rather than removed here so ONE probe window covers the
+            # whole pending set instead of one window per container.
+            pending.append((name, owner, state))
             continue
         if owner is not None and state in _TERMINAL_STATES:
             # The WITHHELD arm (`STOPPED_REAP_ENV`): a TERMINAL container whose
@@ -2464,11 +2763,25 @@ def reap_orphans() -> list[str]:
             continue
         age_candidates.append((name, age_txt))
 
-    # ── The age BACKSTOP, after the scan so ONE probe window covers ALL ───
-    # Never entered on a healthy box: the candidate set is empty unless a
-    # container is BOTH unownable AND past the bound, so the hot path pays
-    # nothing for this arm.
-    out.extend(_drain_age_candidates(age_candidates, states))
+    # ── ONE probe window covers BOTH destructive arms ─────────────────────
+    # The ownership arm needs liveness evidence (not merely "the owner path is
+    # gone") and the age arm needs idleness; both are answered by the SAME two
+    # samples, so they are taken together — a per-arm window would double the
+    # sweep's cost. A TERMINAL container is idle by construction and is NOT
+    # probed at all (`_idle_evidence`), which is what keeps the probe at zero
+    # `docker exec` calls on the population that actually accumulates (the
+    # measured migration population is entirely stopped).
+    #
+    # The age arm is skipped entirely while the operator has not opted in: it
+    # reports, and a report is worth no docker exec at all.
+    probe_names = [n for n, _o, _s in pending]
+    if _orphan_reap_enabled():
+        probe_names += [n for n, _t in age_candidates]
+    verdicts = _idle_evidence(probe_names, states) if probe_names else {}
+    # Never entered on a healthy box: both candidate sets are empty unless a
+    # container's owner is gone or it is unownable AND past the bound.
+    out.extend(_drain_owner_gone(pending, states, verdicts))
+    out.extend(_drain_age_candidates(age_candidates, states, verdicts))
     return out
 
 
