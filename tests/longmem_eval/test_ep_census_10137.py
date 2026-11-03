@@ -908,12 +908,11 @@ def _unread_shapes(doc, source=None) -> dict:
     (``probes/census.py:245-258``), so an outcome carrying NO
     ``belief_activation`` and one carrying ``"belief_activation": {}`` produce
     a byte-identical all-null row — the probe's own ``_census_unread`` calls
-    BOTH unread (``census.py:52-66``), while
+    BOTH unread (``census.py:52-68``), while
     ``measurement_posture._classify_question`` classifies them DIFFERENTLY:
     ``no_manifest`` for a non-dict (``:235``) and ``activation_failed`` for a
     manifest that carries none of the census cells, e.g. the empty dict
     (``:237``, through ``_failed``'s ``ep_ran is not True``).
-
     The probe does not leave the reader without the answer, though: it ALSO
     publishes ``inert_questions``, one entry per inert question carrying the
     classification ``reason`` (``measurement_posture:533-545``). That reason
@@ -942,48 +941,63 @@ def _unread_shapes(doc, source=None) -> dict:
     if not null_rows:
         return {}
 
-    reasons_by_qid = {}
+    # Per qid: how many ``inert_questions`` entries carry each shape reason.
+    # Counted from the RAW entries (never a last-wins map, which hides a
+    # conflict) and keyed by ``_qid_key`` so a non-str qid stays hashable.
+    entry_counts = {}
     for iq in (doc.get("inert_questions") or []):
-        if isinstance(iq, dict) and "question_id" in iq:
-            reasons_by_qid.setdefault(key(iq["question_id"]), set()).add(
-                iq.get("reason"))
-    # One qid the artifact classifies BOTH ways cannot be attributed to a row,
-    # and a duplicate qid is not something this function may silently collapse:
-    # last-wins would hide the conflict entirely.
-    ambiguous = sorted(str(qid) for qid in
-                       (iq.get("question_id")
-                        for iq in (doc.get("inert_questions") or [])
-                        if isinstance(iq, dict) and "question_id" in iq)
-                       if len(reasons_by_qid[key(qid)]) > 1)
-    ambiguous = sorted(set(ambiguous))
-    assert not ambiguous, (
-        f"{source}: inert_questions gives the duplicated question_id(s) "
-        f"{ambiguous} more than one classification "
-        f"({ {q: sorted(reasons_by_qid[key(q)]) for q in ambiguous} }), so a "
-        f"never-read row cannot be attributed to a manifest shape — this pin "
-        f"refuses to guess which row is which")
-
-    reason_of = {k: next(iter(v)) for k, v in reasons_by_qid.items()
-                 if len(v) == 1}
-    # ONE shape per never-read ROW, kept in a list as well as the qid map: a
-    # duplicate ``question_id`` is a shape this file pins as supported (foreign
-    # JSON), and counting the map would collapse two rows into one and refuse a
-    # correct artifact as "hand-edited".
-    shapes, row_shapes, unresolved = {}, [], []
+        if not (isinstance(iq, dict) and "question_id" in iq):
+            continue
+        entry = entry_counts.setdefault(
+            key(iq["question_id"]),
+            {"qid": iq["question_id"], mp.INERT_NO_MANIFEST: 0,
+             mp.INERT_ACTIVATION_FAILED: 0})
+        if iq.get("reason") in (mp.INERT_NO_MANIFEST,
+                                mp.INERT_ACTIVATION_FAILED):
+            entry[iq["reason"]] += 1
+    null_counts = {}
     for row in null_rows:
-        qid = row.get("question_id")
-        reason = reason_of.get(key(qid))
-        if reason not in _UNREAD_SHAPES:
-            unresolved.append((qid, reason))
+        k = key(row.get("question_id"))
+        null_counts[k] = null_counts.get(k, 0) + 1
+
+    # Resolve ONE shape per never-read ROW, from the ROW COUNTS rather than
+    # from the reason set. One qid legitimately carries BOTH reasons at once —
+    # a READ fail-open row is ``activation_failed`` while a never-read row
+    # under the same id is absent — so "this qid has two reasons" refuses
+    # correct artifacts. A qid's never-read rows are all ABSENT when its
+    # ``no_manifest`` entries cover them, and all the EMPTY-manifest shape when
+    # it has no ``no_manifest`` entry and enough ``activation_failed`` entries
+    # to cover them. A qid that would need BOTH shapes for its never-read rows
+    # cannot be expressed per row and is refused by name.
+    shapes, row_shapes = {}, []
+    unresolvable = []          # (qid_key, qid_for_display)
+    for k, n in null_counts.items():
+        counts = entry_counts.get(k)
+        if counts is None:
+            unresolvable.append((k, k))
+        elif counts[mp.INERT_NO_MANIFEST] == n:
+            shapes[k] = _UNREAD_ABSENT
+            row_shapes.extend([_UNREAD_ABSENT] * n)
+        elif (not counts[mp.INERT_NO_MANIFEST]
+              and counts[mp.INERT_ACTIVATION_FAILED] >= n):
+            shapes[k] = _UNREAD_EMPTY
+            row_shapes.extend([_UNREAD_EMPTY] * n)
         else:
-            row_shapes.append(_UNREAD_SHAPES[reason])
-            shapes[key(qid)] = _UNREAD_SHAPES[reason]
-    assert not unresolved, (
-        f"{source}: {len(null_rows)} never-read per_question row(s), but "
-        f"inert_questions does not classify {unresolved!r} as one of "
-        f"{sorted(_UNREAD_SHAPES)}. A never-read row cannot say which manifest "
-        f"shape it came from, so the artifact must — otherwise this pin is "
-        f"guessing, which is the defect it exists to prevent")
+            unresolvable.append((k, counts["qid"]))
+    if unresolvable:
+        detail = ", ".join(
+            f"{str(q)!r}: never_read={null_counts[k]}, "
+            f"no_manifest={(entry_counts.get(k) or {}).get(mp.INERT_NO_MANIFEST, 0)}, "
+            f"activation_failed="
+            f"{(entry_counts.get(k) or {}).get(mp.INERT_ACTIVATION_FAILED, 0)}"
+            for k, q in unresolvable)
+        raise AssertionError(
+            f"{source}: {len(null_rows)} never-read per_question row(s), but "
+            f"inert_questions cannot place "
+            f"{sorted({str(q) for _, q in unresolvable})!r} as one manifest "
+            f"shape ({detail}). A never-read row cannot say which shape it "
+            f"came from, so the artifact must — otherwise this pin is "
+            f"guessing, which is the defect it exists to prevent")
 
     # The counts are cross-checked against the RUN-LEVEL witness, NOT against
     # ``inert_by_reason`` (see the docstring).
@@ -1335,8 +1349,69 @@ def test_a_duplicate_qid_classified_two_ways_is_refused(tmp_path):
     assert "a doubly-classified census" in message, message
     assert "'q1'" in message, (
         f"the refusal must name the duplicated qid; got: {message}")
-    assert "more than one classification" in message, (
+    assert "cannot place" in message, (
         f"the refusal must say why; got: {message}")
+
+
+def test_one_qid_with_a_failed_read_row_and_a_never_read_row_is_not_red(tmp_path):
+    """A READ fail-open row and a never-read row under the SAME ``question_id``
+    must not be read as an ambiguous qid (#10678 review 5, P2).
+
+    ``inert_questions`` then holds BOTH reasons for that id, and a guard keyed
+    on the reason SET refuses a correct artifact — even though the never-read
+    row is unambiguous (a ``no_manifest`` row is always all-null, and there is
+    exactly one never-read row). The resolution must use the ROW counts.
+    """
+    doc = {"fingerprint": {"activate_beliefs": True},
+           "outcomes": [
+               {"question_id": "q1", "question_type": "t",
+                "belief_activation": {"ep_ran": False, "error": "boom"}},
+               {"question_id": "q1", "question_type": "t"},
+           ],
+           "failures": []}
+    cut = _probe().cells(_write(tmp_path, doc))
+
+    assert cut["inert_by_reason"] == {mp.INERT_ACTIVATION_FAILED: 1,
+                                     mp.INERT_NO_MANIFEST: 1}, (
+        f"the fixture must give ONE qid both reasons; got "
+        f"{cut['inert_by_reason']!r}")
+    shapes = _unread_shapes(cut, source="one qid, two populations")
+    derived = mp.summarize_belief_activation(
+        [_rebuild_outcome(r, _shape_of(shapes, r)) for r in cut["per_question"]],
+        requested=True)
+
+    assert derived["measured"] == cut["cells"]["measured"], (
+        f"measured={cut['cells']['measured']!r} but the rows re-derive "
+        f"{derived['measured']!r} — the never-read row was mistaken for the "
+        f"failed one")
+    assert derived["inert_by_reason"] == cut["inert_by_reason"], (
+        f"inert_by_reason={cut['inert_by_reason']!r} but the rows re-derive "
+        f"{derived['inert_by_reason']!r}")
+
+
+def test_an_unplaceable_non_str_qid_refuses_with_a_message(tmp_path):
+    """An unhashable qid must produce the REFUSAL message, never a bare
+    ``KeyError`` (#10678 review 5, P3) — the "a message, not a traceback"
+    contract ``_qid_key`` exists for.
+
+    The duplicate here is a LIST qid carrying both shapes, so it is genuinely
+    unplaceable and must say so by name.
+    """
+    doc = {"fingerprint": {"activate_beliefs": True},
+           "outcomes": [
+               {"question_id": ["q1"], "question_type": "t"},
+               {"question_id": ["q1"], "question_type": "t",
+                "belief_activation": {}},
+           ],
+           "failures": []}
+    cut = _probe().cells(_write(tmp_path, doc))
+
+    with pytest.raises(AssertionError) as refused:
+        _unread_shapes(cut, source="a list-qid census")
+    message = str(refused.value)
+    assert "a list-qid census" in message, message
+    assert "cannot place" in message, f"must say why; got: {message}"
+    assert "q1" in message, f"must name the qid; got: {message}"
 
 
 def test_a_census_that_cannot_place_its_never_read_rows_is_refused(tmp_path):
@@ -1376,9 +1451,9 @@ def test_committed_census_rederives_its_own_aggregate():
     (key set and ORDER only, never a value): keys alone let a cell carry a
     number no row supports.
 
-    ⚠️ Three published cells are RESIDUALLY un-derived, by the artifact's own
-    limits rather than by choice, and this pin cannot close them:
-    ``questions_in_run`` / ``questions_failed`` are checked only against each
+    ⚠️ Three things are RESIDUALLY un-derived, by the artifact's own limits
+    rather than by choice, and this pin cannot close them: the
+    ``questions_in_run`` / ``questions_failed`` pair, checked only against each
     other and the ratio (`:1456`), because ``per_question`` carries outcomes
     and never the failure ids, so a coordinated edit of both ships green; and
     the per-row shape IDENTITY — ``inert_questions[].reason`` is where the
