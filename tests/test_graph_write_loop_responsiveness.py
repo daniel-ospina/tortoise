@@ -442,17 +442,18 @@ def test_graph_write_does_not_freeze_the_event_loop(
         f"trip (the /v1/search precedent off-loads it; #3718)")
 
     if label.startswith("dream"):
-        # The long pass must not ride the SHARED default executor, whose
-        # workers also carry the auth middleware's per-request abuse hooks
-        # (`_abuse_post_auth`) — the #3060 starvation path the first review
-        # cycle caught in this change.
+        # The long pass must not ride the SHARED default executor — the #3060
+        # starvation path the first review cycle caught in this change. (#10618
+        # moved the auth path's per-request hooks off that pool, which removes
+        # the sharpest example, not the hazard: a burst of dream passes would
+        # still park every worker and stall unrelated tenants before their
+        # handlers, with /health still green.)
         assert not str(state.get("thread")).startswith(
             _SHARED_POOL_THREAD_PREFIX), (
             f"[{label}] sdk.dream ran on {state.get('thread')!r} — the shared "
-            f"default executor, whose workers the auth path's abuse hooks also "
-            f"need: a burst of dream passes would park every worker and stall "
-            f"unrelated tenants before their handlers, with /health still green "
-            f"(#3060 / #3718)")
+            f"default executor, whose unbounded queue a burst of dream passes "
+            f"would fill, stalling unrelated tenants before their handlers "
+            f"with /health still green (#3060 / #3718)")
 
     entered, exited = state["entered"], state["exited"]
 
