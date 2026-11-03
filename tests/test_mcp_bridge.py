@@ -861,6 +861,50 @@ class TestFailureModes:
             f"an answered id was reported as unanswered: {named}")
 
 
+    def test_a_partially_answered_batch_still_captures_the_protocol_version(self):
+        """The early return must not drop the tail's `initialize` side effect.
+
+        `forward()` records the negotiated protocol version from any relayed
+        `initialize` result. The partial-batch guard returns EARLY, so without an
+        explicit capture a batched `initialize` whose sibling id went unanswered
+        would negotiate a version and then never send `MCP-Protocol-Version` again
+        for the life of the session.
+        """
+        import httpx
+
+        from tortoise.mcp_bridge import forward
+
+        body = json.dumps([{"jsonrpc": "2.0", "id": 1, "result": {
+            "protocolVersion": "2025-06-18", "capabilities": {},
+            "serverInfo": {"name": "stub", "version": "0"}}}])
+        response = httpx.Response(
+            200, content=body.encode(),
+            headers={"content-type": "application/json"},
+        )
+
+        class _Client:
+            def stream(self, *_a, **_k):
+                class _Ctx:
+                    def __enter__(self_inner):
+                        return response
+
+                    def __exit__(self_inner, *_exc):
+                        return False
+
+                return _Ctx()
+
+        state: dict = {"session_id": None, "protocol_version": None}
+        messages = forward(_Client(), state, [
+            {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
+            {"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
+        ])
+
+        assert state["protocol_version"] == "2025-06-18", (
+            "the negotiated protocol version was dropped on the partial-batch path: "
+            f"state={state}")
+        # ...and the silence for id 2 is still answered.
+        assert [m["id"] for m in messages] == [1, 2], messages
+
     def test_a_partially_answered_batch_does_not_leak_the_credential(self, home):
         """The answered message on the partial-batch path must be redacted too.
 
