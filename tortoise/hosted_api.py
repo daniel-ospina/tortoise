@@ -8691,8 +8691,8 @@ async def _emit_capture_ledger(org_id: str, session_id: str, meta: dict,
     blocking I/O, and this API runs a single uvicorn worker (the #2988 / #3498
     class). The analytics emit goes through the SHARED off-loop entry point
     (``_emit_analytics_off_loop`` → ``_cp_offload`` on the dedicated
-    ``telemetry`` pool, #4468) rather than the loop's SHARED default executor,
-    which the abuse hooks compete on — #4015 moved every other hosted funnel
+    ``telemetry`` pool, #4468) rather than the loop's SHARED default executor
+    — #4015 moved every other hosted funnel
     emit there and left this lane for #4468. The ledger write stays on
     ``asyncio.to_thread`` deliberately: it is a DIFFERENT op (the durable
     per-period row the spend cap reads, not the analytics row), it has no
@@ -8751,20 +8751,25 @@ def _suspended_detail() -> dict:
 # the pool full, ``await _abuse_post_auth(...)`` does not return.
 #
 # Both hooks are BEST-EFFORT TELEMETRY whose contract is "this must never gate
-# the request path", so they move to the bounded control-plane lane the repo
-# already uses for exactly this (``_cp_offload(..., best_effort=True)`` → the
-# ``telemetry`` pool, #3498/#3669) — the #3060 pattern applied to the last two
-# per-request tenants of the shared pool.
+# the request path", so they move to a bounded control-plane pool — the #3060
+# pattern applied to the last two per-request tenants of the shared pool. They
+# get their OWN pool (``monitoring.CONTROL_PLANE_ABUSE_*``, ``pool="abuse"``)
+# rather than riding ``telemetry``: that pool also carries the UNRECOVERABLE
+# ``billing_notify`` (its ``WebhookEvent`` marker is already committed, so a
+# refused submission is a notification lost for good), and ``check_new_country``
+# holds a PROCESS-GLOBAL lock across a PostgREST round trip, so a cold geo cache
+# — the first request after every restart — could have offered that stall the
+# capacity a billing notify needs. On their own pool the hooks can only ever
+# starve themselves.
 #
 # Delivery is PRESERVED, not traded: ``cancel_on_timeout=False`` (#4456) makes
 # the bound abandon only the AWAIT, so a submission still QUEUED when the bound
 # expires STILL RUNS, and the record lands later instead of vanishing. The only
 # real drop left is a genuinely REFUSED submission (the pool's backlog is
-# full), which ``_cp_offload`` reports as :data:`OFFLOAD_REFUSED` and this
-# module escalates to a rate-limited ERROR line (``_log_abuse_offload_refused``)
-# so a suppression is ATTRIBUTABLE — never silent. That is deliberate: an
-# attacker who can saturate the pool must not be able to suppress their own
-# velocity accounting INVISIBLY.
+# full), which is escalated to a rate-limited ERROR line
+# (``_log_abuse_offload_refused``) so a suppression is ATTRIBUTABLE — never
+# silent. That is deliberate: an attacker who can saturate the pool must not be
+# able to suppress their own velocity accounting INVISIBLY.
 #
 # The bound is short on purpose. These hooks are bookkeeping; a request must not
 # pay seconds for them, and because the bound is delivery-preserving a short one
@@ -8772,10 +8777,10 @@ def _suspended_detail() -> dict:
 _ABUSE_OFFLOAD_TIMEOUT_S = 1.0
 
 #: Rate limit for the ``ABUSE_OFFLOAD_REFUSED`` ERROR floor (#10618, the #4456
-#: shape). The telemetry pool is reachable by any tenant, so ONE saturation
-#: refuses a hook per request for EVERY tenant — the repo already ruled against
-#: per-drop alert amplification (``operator_alert._log_shed``), so the line is
-#: shed-logged: one per window is enough to see it.
+#: shape). ONE saturation refuses a hook per request for EVERY tenant — the repo
+#: already ruled against per-drop alert amplification
+#: (``operator_alert._log_shed``), so the line is shed-logged: one per window is
+#: enough to see it.
 _ABUSE_REFUSED_LOG_INTERVAL_S = 60.0
 #: ``None`` = never logged (NOT ``0.0`` — ``time.monotonic()``'s reference point
 #: is undefined, so a fresh-boot clock would suppress every line).
@@ -8784,10 +8789,10 @@ _ABUSE_REFUSED_LOG_LOCK = threading.Lock()
 
 
 def _log_abuse_offload_refused(op: str) -> None:
-    """The rate-limited ERROR floor for a REFUSED best-effort hook (#10618).
+    """The rate-limited ERROR floor for a REFUSED hook (#10618).
 
     Without it a refused submission is indistinguishable from routine
-    best-effort telemetry noise — ``_cp_offload`` logs it at WARNING and
+    best-effort telemetry noise — a WARNING at most, and
     ``record_control_plane_offload`` counts it on the ``bound_miss_refused``
     outcome, neither of which says an abuse record was LOST for a request the
     caller got a 200 for. Never raises (a reporting path must not become the
@@ -8805,27 +8810,60 @@ def _log_abuse_offload_refused(op: str) -> None:
         _logger.error(
             "ABUSE_OFFLOAD_REFUSED: %s was REFUSED by the control-plane "
             "offload seam — the abuse/activation record for this request was "
-            "DROPPED (telemetry pool backlog full), so velocity accounting is "
-            "missing a request it served. One line per %.0fs window.",
+            "DROPPED (the abuse pool's backlog is full), so velocity "
+            "accounting is missing a request it served. One line per %.0fs "
+            "window.",
             op, _ABUSE_REFUSED_LOG_INTERVAL_S)
 
 
 async def _telemetry_hook_off_loop(fn, *, op: str) -> None:
-    """Run ONE per-request telemetry hook on the BOUNDED telemetry lane.
+    """Run ONE per-request telemetry hook on the BOUNDED ``abuse`` lane.
 
-    #10618: never the loop's shared default executor. ``best_effort=True``
-    keeps the hooks' never-raise contract at the hand-off (the seam swallows a
-    bound miss / saturated pool); ``cancel_on_timeout=False`` makes the short
-    bound delivery-preserving; a genuine REFUSAL is escalated rather than
-    swallowed. A raise from the callable ITSELF still propagates to the
-    caller's own guard — same as the direct ``to_thread``/``await`` it
-    replaces. ``CancelledError`` is a ``BaseException`` and is untouched.
+    #10618: never the loop's shared default executor (``min(32, cpu+4)``,
+    unbounded wait — a stalled tenant there parks a request BEFORE its
+    handler). Three properties are deliberate:
+
+    * ``cancel_on_timeout=False`` (#4456) makes the short bound
+      DELIVERY-preserving: the bound abandons only the AWAIT, so a submission
+      still QUEUED when it expires STILL RUNS. A saturated pool delays the
+      record; it does not drop it.
+    * A REFUSAL (backlog full — the callable never ran) is the ONE real drop,
+      and it is reported through ``_log_abuse_offload_refused`` (rate-limited)
+      instead of being swallowed.
+    * A BOUND MISS is NOT logged per call. ``_cp_offload(best_effort=True)``
+      emits an unthrottled WARNING on every miss, and this hook runs on EVERY
+      authenticated request — under saturation that would be one WARNING per
+      request, exactly the per-drop amplification the refusal line sheds, and
+      it would bury the one line worth reading. ``run_control_plane_call``
+      still records the miss on the ``bound_miss_running`` outcome and
+      attributes the abandoned work's eventual result (#4456), so nothing is
+      invisible — it is simply metered instead of shouted.
+
+    ⛔ CONTEXT: a pool thread is process-lifetime, so each invocation runs
+    under a FRESH COPY of the submitting context (``monitoring.confine_context``,
+    wrapped per submission because the wrapper binds the context it was created
+    with — #10612/#10642). That reproduces the ``asyncio.to_thread`` copy the
+    hooks relied on (a request's ContextVars are still visible inside the hook)
+    and guarantees a ContextVar set there cannot leak into the NEXT request the
+    worker serves — the same rule ``_graph_offload`` follows. None of today's
+    hook callables touches a ContextVar; this keeps that from becoming a silent
+    trap if one ever does.
+
+    A raise from the callable ITSELF still propagates to the caller's own guard
+    — same as the direct ``to_thread``/``await`` it replaces.
+    ``CancelledError`` is a ``BaseException`` and is untouched.
     """
-    result = await _cp_offload(
-        fn, op=op, best_effort=True, cancel_on_timeout=False,
-        timeout=_ABUSE_OFFLOAD_TIMEOUT_S)
-    if result is OFFLOAD_REFUSED:
-        _log_abuse_offload_refused(op)
+    from tortoise.monitoring import ControlPlaneOffloadError
+    try:
+        await run_control_plane_call(
+            confine_context(fn), op=op, pool="abuse",
+            timeout=_ABUSE_OFFLOAD_TIMEOUT_S, cancel_on_timeout=False)
+    except ControlPlaneOffloadError as exc:
+        if exc.refused:
+            _log_abuse_offload_refused(op)
+        # A bound miss is not a drop: the queued submission still runs and the
+        # seam meters its outcome (``bound_miss_running`` + the abandoned-result
+        # callback). Deliberately no per-call line (#10618 review P2).
 
 
 def _abuse_post_auth_sync(method: str, headers: dict, org: dict) -> None:
@@ -16664,11 +16702,14 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
             # ALL traffic ("no known healthy instances for route tcp/443") — one
             # slow model call took down the whole product, not just the capture.
             # `to_thread`-style context propagation, but on the CAPTURE pool:
-            # a stalled extraction must not be able to starve the auth
-            # middleware's abuse hooks or the other `to_thread` call sites out
-            # of the shared default executor (#3060). /health is no longer one
-            # of those tenants — since #2850 it reads in-memory state and takes
-            # no thread hand-off (see the pool notes at the top of the file).
+            # a stalled extraction must not be able to starve the other
+            # `to_thread` call sites out of the shared default executor
+            # (#3060) — that pool is 6 workers with an unbounded wait. (#10618
+            # moved the auth path's per-request hooks off it; the hazard this
+            # comment guards is the pool's, not theirs.) /health is no longer
+            # one of those tenants — since #2850 it reads in-memory state and
+            # takes no thread hand-off (see the pool notes at the top of the
+            # file).
             # `_run_off_loop` copies the caller's contextvars into the worker,
             # which is what `_call_once`'s own `copy_context()` snapshot
             # depends on (#2185).
@@ -37331,9 +37372,9 @@ async def _emit_analytics_off_loop(org_id: str, event_name: str,
     ``_cp_offload``, and since #4468 it is also the capture-cost lane's
     (``_emit_capture_ledger``) off-loop path: that lane used to keep its own
     ``asyncio.to_thread`` call — still off-loop, but on the loop's SHARED
-    default executor, which the abuse hooks and the selfhost readiness probe
-    also use, so it was not isolated the way this pool is. ``mcp_server`` keeps
-    its own retained emitter.
+    default executor, shared with the selfhost readiness probe and every other
+    ``to_thread`` site, so it was not isolated the way this pool is.
+    ``mcp_server`` keeps its own retained emitter.
 
     ``_track_analytics_event`` is a synchronous ``httpx.Client`` POST and
     ``hosted_api`` runs a SINGLE uvicorn worker, so calling it inline from an
@@ -43111,8 +43152,8 @@ async def webhooks_stripe(request: Request):
             # ``to_thread`` submits to the loop's SHARED default executor,
             # whose workers are NON-daemon and are JOINED at shutdown (#2850),
             # so a black-holed socket would delay uvicorn's shutdown — and a
-            # notify would park one of the six workers the /health probe and
-            # the abuse hooks also use (#3060; #4468 tracks the same residual
+            # notify would park one of the six workers the /health probe uses
+            # (#3060; #4468 tracks the same residual
             # on the capture-cost lane). The telemetry pool is a
             # process-lifetime DAEMON pool with a bounded backlog, so a wedged
             # notify is abandoned at the seam's wait bound instead of

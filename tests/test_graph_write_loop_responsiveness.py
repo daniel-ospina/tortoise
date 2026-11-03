@@ -30,11 +30,11 @@ through `asyncio.to_thread`, the file's house style — the same pattern
 (`sdk.dream`, seconds) and the `_dream_worker` drain go through the dedicated
 `_DREAM_EXECUTOR` via `_run_dream_on_pool`: the module's own #3060 criterion
 reserves a dedicated pool for long/stallable work, because the shared default
-executor also carries the auth middleware's per-request abuse hooks. WHICH
+executor is `min(32, cpu+4)` with an unbounded wait. WHICH
 executor the short calls land on is not asserted (that would freeze the
 trade-off into the suite); what IS asserted is that no call runs on the loop,
 and — for the dream sites only — that the pass is not on the SHARED default
-pool (the `asyncio_*` worker threads the abuse hooks ride), which is a real
+pool (the `asyncio_*` worker threads), which is a real
 regression the first revision of this change introduced.
 
 FLAKE NOTE — the embedded-redislite test fixture is NOT hermetic under this
@@ -690,7 +690,8 @@ def test_enqueued_dream_worker_does_not_freeze_the_event_loop(
     assert not str(state.get("thread")).startswith(
         _SHARED_POOL_THREAD_PREFIX), (
         f"the worker's sdk.dream ran on {state.get('thread')!r} — the shared "
-        f"default executor, whose workers the auth path's abuse hooks also need "
+        f"default executor, which a burst of dream passes would fill and so "
+        f"stall unrelated tenants before their handlers "
         f"(#3060 / #3718)")
 
     entered, exited = state["entered"], state["exited"]

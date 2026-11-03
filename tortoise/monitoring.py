@@ -1980,7 +1980,9 @@ async def run_on_daemon_worker(fn, *, name: str, timeout: float | None = None):
 # construction, so every async handler that needs it bridges to a blocking
 # API. ``asyncio.to_thread`` submits to the loop's SHARED default executor
 # (``min(32, cpu+4)`` = 6 workers on the 2-vCPU production machine) which
-# ``/health``'s DB probe and the abuse hooks also use — the #3060 lesson.
+# ``/health``'s DB probe also uses — the #3060 lesson. (#10618 moved the
+# per-request abuse hooks OFF that pool; the lesson is unchanged, because the
+# shared pool is still 6 workers with an unbounded wait.)
 # The existing ``run_on_daemon_worker`` is dedicated but SINGLE-SLOT, so a
 # 2–6-round-trip-per-request auth path on it would collapse auth concurrency
 # to roughly one request and convert a stall into fail-fast 503s.
@@ -2019,6 +2021,33 @@ CONTROL_PLANE_BACKLOG = 128
 #: Best-effort backlog — larger, because best-effort submissions that are
 #: refused are simply dropped (never a user-visible failure).
 CONTROL_PLANE_TELEMETRY_BACKLOG = 256
+
+#: #10618: a DEDICATED pool for the per-request ``#308`` telemetry hooks
+#: (``hosted_api._abuse_post_auth`` and its two siblings, plus
+#: ``first_api_call``), which are awaited on EVERY authenticated request.
+#:
+#: They are not on ``telemetry`` because that pool also carries the
+#: **unrecoverable** ``billing_notify`` (its ``WebhookEvent`` marker is already
+#: committed, so a refused submission is a notification lost for good — see
+#: ``hosted_api._log_billing_notify_refused``). ``check_new_country`` holds a
+#: PROCESS-GLOBAL lock across a PostgREST round trip (``abuse.py``, a
+#: pre-existing defect), so a cold geo cache — i.e. the first request after
+#: every process restart, which #10602's own evidence shows happens every
+#: ~5–20 min in production — can stall every worker of whichever pool it rides.
+#: Putting the hooks on ``telemetry`` would have offered that stall the
+#: capacity a permanently-lost billing notify needs; on their OWN pool they can
+#: only ever starve themselves (#3060's rule).
+CONTROL_PLANE_ABUSE_WORKER_NAME = "tortoise-abuse"
+
+#: Hook pool size. Each call is microseconds of accounting plus, on a cold geo
+#: cache, one country lookup; four is the same order as the telemetry pool and
+#: keeps parked threads off a 2-vCPU machine.
+CONTROL_PLANE_ABUSE_WORKERS = 4
+
+#: Hook backlog — the same size as ``telemetry``'s. A refusal here is a real
+#: drop, so it is REPORTED (``hosted_api._log_abuse_offload_refused``) rather
+#: than swallowed.
+CONTROL_PLANE_ABUSE_BACKLOG = 256
 
 #: #3669: a THIRD pool, for the OAuth client-resolution lane. A CIMD fetch is
 #: attacker-reachable (an unauthenticated ``client_id`` URL), so sharing the
@@ -2481,7 +2510,10 @@ def control_plane_worker(pool: str = "auth") -> _SingleSlotWorker:
 
     ``pool="auth"`` (default) is the AUTH-CRITICAL pool; ``pool="telemetry"``
     is a SEPARATE pool for best-effort work, so telemetry can never park the
-    auth slots (#3498 review P1); ``pool="oauth"`` (#3669) is a separate pool
+    auth slots (#3498 review P1); ``pool="abuse"`` (#10618) is the per-request
+    ``#308`` hook lane — kept OUT of ``telemetry`` because that pool carries the
+    unrecoverable ``billing_notify``, and kept out of the shared default
+    executor (unbounded wait) entirely; ``pool="oauth"`` (#3669) is a separate
     for the attacker-reachable OAuth client-resolution lane, so a CIMD fetch
     flood cannot park the auth slots either; ``pool="graph"`` (#3773) is the
     graph-lane pool — FalkorDB work, data-plane AND registry reads (#3718) —
@@ -2515,6 +2547,10 @@ def control_plane_worker(pool: str = "auth") -> _SingleSlotWorker:
         return daemon_worker(CONTROL_PLANE_TELEMETRY_WORKER_NAME,
                              workers=CONTROL_PLANE_TELEMETRY_WORKERS,
                              max_backlog=CONTROL_PLANE_TELEMETRY_BACKLOG)
+    if pool == "abuse":
+        return daemon_worker(CONTROL_PLANE_ABUSE_WORKER_NAME,
+                             workers=CONTROL_PLANE_ABUSE_WORKERS,
+                             max_backlog=CONTROL_PLANE_ABUSE_BACKLOG)
     if pool == "auth":
         return daemon_worker(CONTROL_PLANE_WORKER_NAME,
                              workers=CONTROL_PLANE_WORKERS,
