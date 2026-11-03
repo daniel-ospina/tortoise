@@ -34,10 +34,13 @@ either way).
 """
 from __future__ import annotations
 
+import importlib.util as _ilu
+import json
 import os
 import shutil
 import sys
 import tempfile
+from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(
     os.path.abspath(__file__)))))
@@ -47,6 +50,8 @@ import pytest  # noqa: I001
 from tortoise.sdk import TortoiseSDK
 from tools.longmem_eval import ep_activation as epa
 from tools.longmem_eval import measurement_posture as mp
+from tools.longmem_eval import run as lme_run
+from tools.longmem_eval.dataset_audit import audit_dataset
 
 
 @pytest.fixture
@@ -323,3 +328,164 @@ def test_the_census_agrees_with_the_canonical_read(sdk):
     assert manifest["points_off_neutral"] == len(off) == 3
     # `b` was already off-neutral before the pass; only `a`/`c` are its doing.
     assert manifest["points_moved_off_neutral"] == 2
+
+
+# ── the PROBE (docs/evidence/10137-corpus-ep-census/probes/census.py) ──────
+#
+# The artifact's per-question block was the one thing the aggregate could not
+# stand in for, and it was carried ONLY by the checkpoint outcome
+# (`run.py:5115-5116`): `outcomes_to_report`'s Layer-1 projection is an
+# explicit whitelist and dropped `belief_activation`, so reading a REPORT —
+# the shape every FINALISED run writes — gave a correct aggregate over 192 of
+# 192 null per-question cells, and a null `ep_ran` is indistinguishable from a
+# measured one (#10137 review, P2). These pins hold both halves: the
+# projection must carry the manifest under the arm, and the probe must never
+# publish null rows as if they were measurements.
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_PROBE = (_REPO_ROOT / "docs" / "evidence" / "10137-corpus-ep-census"
+          / "probes" / "census.py")
+_CENSUS = _REPO_ROOT / "docs" / "evidence" / "10137-corpus-ep-census" / "census.json"
+
+
+def _probe():
+    spec = _ilu.spec_from_file_location("census_probe_10137", str(_PROBE))
+    mod = _ilu.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _manifest(**over) -> dict:
+    manifest = {"ep_ran": True, "operators": 7, "factor_edges": 0,
+                "points_with_ep": 5, "points_unmeasured": 10,
+                "points_off_neutral": 3, "points_moved_off_neutral": 2,
+                "no_op_reason": None, "factors": 0}
+    manifest.update(over)
+    return manifest
+
+
+def _armed_outcome(qid: str, qtype: str = "single-session-user",
+                   manifest: dict | None = None) -> dict:
+    return {
+        "question_id": qid, "question_type": qtype,
+        "question_date": "2024-01-15", "label": True, "hypothesis": "h",
+        "session_recall@k": {"5": 1.0}, "turn_recall@k": {"5": 1.0},
+        "evidence_recall@k": {"5": 1.0}, "chunk_evidence_recall@k": {"5": 1.0},
+        "n_ingest_errors": 0,
+        "belief_activation": _manifest() if manifest is None else manifest,
+    }
+
+
+def _audit():
+    return audit_dataset([{
+        "question_id": "q1", "haystack_session_ids": ["s0"],
+        "answer_session_ids": ["s0"],
+        "haystack_sessions": [[{"role": "user", "content": "x",
+                                "has_answer": True}]]}])
+
+
+def _report(outcomes: list[dict]) -> dict:
+    """The report a run writes — built by the shipped aggregation, with the
+    posture block the runner itself forwards (`run.py:5691-5698`)."""
+    summary = mp.summarize_belief_activation(outcomes, requested=True)
+    return lme_run.outcomes_to_report(
+        outcomes, belief_activation=summary, reader_model="r",
+        judge_model="j", ks=(5,), top_k=20, split="s",
+        dataset_semantics_audit=_audit())
+
+
+def test_report_path_publishes_the_per_question_census(tmp_path):
+    """A REPORT must carry the manifests its aggregate is summed from.
+
+    Non-vacuous by construction: before the projection carried
+    ``belief_activation`` the report's outcomes had no manifest at all, so the
+    probe below returned ``per_question: None`` while `cells` still read
+    correctly — the exact silent loss this pins.
+    """
+    outcomes = [_armed_outcome("q1"),
+                _armed_outcome("q2", "multi-session",
+                               _manifest(operators=11, points_with_ep=4))]
+    report = _report(outcomes)
+    assert isinstance(report["outcomes"][0]["belief_activation"], dict)
+    # The aggregate still rides the methodology (the two paths agree).
+    assert report["methodology"]["measurement_posture"]["activation"][
+        "questions_with_ep"] == 2
+
+    path = tmp_path / "report.json"
+    path.write_text(json.dumps(report))
+    out = _probe().cells(str(path))
+
+    assert out["source"] == "report"
+    assert out["per_question_source"] == "outcome.belief_activation"
+    assert out["per_question_unread"] == 0
+    assert out["per_question"] is not None
+    assert [(r["question_id"], r["question_type"], r["operators"],
+             r["points_with_ep"], r["ep_ran"]) for r in out["per_question"]] == [
+        ("q1", "single-session-user", 7, 5, True),
+        ("q2", "multi-session", 11, 4, True),
+    ]
+    # …and the aggregate agrees with the rows it was summed from.
+    assert out["cells"]["operators"] == 18
+    assert out["cells"]["points_with_ep"] == 9
+    assert out["cells"]["points_with_ep_unread"] == 0
+    assert out["cells"]["points_unmeasured_unread"] == 0
+
+
+def test_probe_fails_closed_when_no_manifest_reaches_it(tmp_path):
+    """No manifest anywhere ⇒ publish the ABSENCE, never rows of nulls.
+
+    24 null rows under a correct aggregate is the fail-open shape
+    ``measurement_posture`` refuses for the summed cells: the reader cannot
+    tell "measured, and null" from "never measured". A partial population is
+    NOT this case — its rows are real and ``per_question_unread`` says how
+    partial it is.
+    """
+    report = _report([_armed_outcome("q1"), _armed_outcome("q2")])
+    for outcome in report["outcomes"]:
+        outcome.pop("belief_activation", None)      # the pre-fix report shape
+
+    path = tmp_path / "legacy-report.json"
+    path.write_text(json.dumps(report))
+    out = _probe().cells(str(path))
+
+    assert out["per_question"] is None
+    assert out["per_question_unread"] == 2
+    assert out["per_question_source"].startswith("absent")
+    assert "belief_activation" in out["per_question_source"]
+    # The aggregate is still published — the absence is scoped to the block.
+    assert out["cells"]["points_with_ep"] == 10
+    assert out["belief_layer"] == mp.BELIEF_LAYER_ACTIVATED
+
+
+def test_committed_census_rederives_its_own_aggregate():
+    """The shipped artifact is auditable against itself: every aggregate cell
+    (including the two ``*_unread`` companions) is what the runner's own
+    aggregation produces from the committed per-question rows — so a hand-edit
+    to any cell, or a row that stopped reconciling with the totals, reds here
+    instead of shipping."""
+    doc = json.loads(_CENSUS.read_text())
+    rows = doc["per_question"]
+    assert len(rows) == 24
+    manifests = [{
+        "question_id": r["question_id"], "question_type": r["question_type"],
+        "belief_activation": {k: r[k] for k in (
+            "operators", "factor_edges", "points_with_ep", "points_unmeasured",
+            "points_off_neutral", "points_moved_off_neutral", "ep_ran",
+            "no_op_reason")},
+    } for r in rows]
+    summary = mp.summarize_belief_activation(manifests, requested=True)
+
+    for key, committed in doc["cells"].items():
+        assert summary.get(key) == committed, key
+    assert summary["operators"] == 1710
+    assert summary["by_question_type"] == doc["by_question_type"]
+    assert summary["inert_by_reason"] == doc["inert_by_reason"] == {}
+    assert doc["questions_with_ep"] == doc["questions"] == 24
+
+    # The disclosure fields describe THESE rows: nothing was unread.
+    assert doc["per_question_source"] == "outcome.belief_activation"
+    assert doc["per_question_unread"] == 0
+    for key in ("points_with_ep", "points_unmeasured", "operators",
+                "factor_edges"):
+        assert doc["cells"][f"{key}_unread"] == sum(
+            1 for r in rows if r.get(key) is None)
