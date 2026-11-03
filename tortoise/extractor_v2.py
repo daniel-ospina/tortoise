@@ -10638,8 +10638,9 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
                            for section in _failure_policy.LEG_BY_SECTION)
         _reason = f" ({_id['reason']})" if _id["reason"] else ""
         if _id["unresolved_total"]:
-            # ⛔ One sentence per FACT — two below, plus the residual arm for a
-            # state nobody wrote one for (three facts in all, this one counted)
+            # ⛔ One sentence per FACT — two below, plus the residual arm — for a
+            # state nobody wrote one for, OR whose own sentence its counters
+            # refuse (three facts in all, this one counted)
             # — and NONE of them asserts what a
             # candidate's own `link_before_create` says: a candidate whose query
             # was cut can still be folded onto a prior by S5 (`found: true`), so
@@ -10677,8 +10678,8 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
             # "failed": []}`), so this is the invariant held locally rather than
             # a behaviour change: every reachable arm-3 run already has a zero
             # denominator, which the arm's own tests assert. A contradictory
-            # input now falls to the residual arm, which claims only the state
-            # and the counter.
+            # input now falls to the residual arm, which claims the state, the
+            # counter, and that no arm covers that state with those counters.
             #
             # ⛔ `unresolved` with a ZERO numerator is a THIRD fact, and it is
             # reachable on the main path: the lookup did not run AT ALL (no graph
@@ -10706,8 +10707,8 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
             # sentences above: a state added to `failure_policy.LOOKUP_STATES`
             # later would inherit a claim about a check nobody wrote for it, with
             # nothing to notice it — the defect class this whole change removes.
-            # This arm claims only what it was handed and is LOUD rather than
-            # silent, per I2.
+            # This arm claims only what it was handed, PLUS the fact that no arm
+            # covers it, and is LOUD rather than silent, per I2.
             # ⛔ The counter is reported as PROVENANCE, never as coverage. Arm 1
             # above consumes every non-zero numerator, so reaching this arm
             # IMPLIES `unresolved_total == 0` — a "0 of N were not checked

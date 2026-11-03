@@ -983,7 +983,8 @@ class TestIdentityOnTheResult:
         `search`; both `search_graph` degrade paths pin `query_results` empty), so
         this pins the INVARIANT rather than a live failure: `_denominator == 0`
         is in the guard, and a contradictory input falls to the residual arm,
-        which claims nothing. Without this test the clause would be protected by
+        which claims the state, the counter, and that no arm covers that state
+        with those counters. Without this test the clause would be protected by
         a comment alone — the shape this file exists to remove.
         """
         contradictory = {
