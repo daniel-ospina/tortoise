@@ -12836,7 +12836,7 @@ def _vocabulary_gap_run_warning(reading: dict[str, Any]) -> str:
 
     ⛔ ONE CLAUSE PER SHAPE, because the predicate that attaches this alarm
     (`_vocabulary_gap_recorded_a_loss`) fires on THREE — and only the FIRST is an
-    UNNAMED token (#10626 review round 5):
+    UNNAMED token:
 
     * the token SAMPLE — unlisted, so each reached NO identity dimension;
     * the PAIR-READ residual — a token a CLOSED connective/state list DOES name
