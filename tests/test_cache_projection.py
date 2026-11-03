@@ -39,6 +39,7 @@ reachable rather than passing vacuously.
 
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 
@@ -2617,6 +2618,42 @@ def test_the_birth_event_labels_are_the_one_home_creation_map():
         )
 
 
+def test_the_creation_record_journals_the_status_the_birth_leg_reads():
+    """#9974 — the birth leg's INPUT SHAPE, which every other leg takes for granted.
+
+    Every leg above builds its row by hand (`_birth_row` puts `status` in the
+    payload), so ALL of them stay green if the record ever stops KEEPING that
+    key. `record_projection._journal_row` is the one door that decides what the
+    durable `public.journal_event.payload` holds, and it filters the record
+    through `ENVELOPE_KEYS` — the journal's ENVELOPE, not its props. If `status`
+    were ever added there (it is a §2.6 cache name, and `_RECORD_ONLY_KEYS` is
+    the set that strips props), the birth leg's `payload ->> 'status'` would
+    select NULL for a REAL record while every DB-free leg kept passing: the node
+    rebuilds with no status and reads LIVE — #9974's harm, restored by a
+    one-line change nothing in this file would notice.
+
+    FAILS IF: `status` joins `ENVELOPE_KEYS`, or `_journal_row` starts filtering
+    more than that set, or the snapshot key `id` stops surviving (the id is what
+    the single-row narrowing targets). ⚠️ Measured: adding `"status"` to
+    `record_projection.ENVELOPE_KEYS` reds this leg and leaves the rest green.
+    """
+    stmt = rp._journal_row(
+        {"type": "ObjectRegistered", "id": "o-1", "name": "Acme",
+         "status": "superseded"},
+        seq=1, org_id="o", graph_id="g",
+    )
+    journaled = json.loads(stmt.params[4])
+    assert journaled.get("status") == "superseded", (
+        "the record's own journal DROPPED the birth status "
+        f"({journaled!r}) — the birth leg selects `payload ->> 'status'`, so a "
+        "born-terminal node would rebuild with no status and read LIVE"
+    )
+    assert journaled.get("id") == "o-1", (
+        "the record's journal dropped the snapshot key the birth leg targets by "
+        f"({journaled!r}) — the id narrowing would then select no row"
+    )
+
+
 def test_a_silent_birth_record_derives_no_status_rather_than_live():
     """#9974 — the OTHER half: where the derivation cannot know, it says NOTHING.
 
@@ -2728,8 +2765,9 @@ def test_the_birth_status_is_on_create_only_like_the_live_fold():
         # so only the "earliest creation record speaks" rule suppresses it.
         # Measured: with `birth_seen` removed this case folds
         # `archived`, a TERMINAL status the graph never held (create #1 stored
-        # `coalesce(NULL,'live')='live'` and ON MATCH never replaced it) —
-        # `live._terminal_excluded` would then hide a live name.
+        # NO status — `status=$st` with a NULL `$st` REMOVES the property, the
+        # derived-or-absent fold #9974 R1 landed — and ON MATCH never wrote one)
+        # — `live._terminal_excluded` would then hide a live name.
         cp.LifecycleEvent(seq=1, event_kind="", is_birth=True,
                           birth_status=None,
                           target_id="o-1", target_label="Object"),

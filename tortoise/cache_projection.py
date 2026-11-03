@@ -271,7 +271,7 @@ ADDITIONAL_PRIMARY_COLUMNS: dict[str, dict[str, str]] = {
 #: EXCLUDED, each with its reason — the fold's OTHER `ON CREATE` defaults are
 #: not applied here, and the reasons are not all "it is not a constant":
 #:
-#: * `status` (`'live'` on Subject/Object) — PROJECTION-OWNED CACHE (§2.6/
+#: * `status` — PROJECTION-OWNED CACHE (§2.6/
 #:   `record_projection.OpDispatch.never_store`); the schema has no column for it.
 #:   It is NOT a constant this table may fill, because it is not a DEFAULT here:
 #:   it is DERIVED from another column the record does hold, and that derivation
@@ -1436,8 +1436,9 @@ _LIFECYCLE_EVENTS_SQL = (
     "           AND jsonb_typeof(payload -> 'state' -> 'status') = 'string')"
     # #9974: the CREATION records. Selected from the same stream, in the same
     # `seq` order, for the same reason as the two legs above — the value they
-    # carry is real graph state (`_upsert_object`'s ON CREATE `coalesce($st,
-    # 'live')`) and no layer row can place it. ⛔ The label is decided by the
+    # carry is real graph state (`_upsert_object`'s ON CREATE `status=$st`, and
+    # since #9974 R1 that is DERIVED-OR-ABSENT, not `coalesce($st, 'live')`) and
+    # no layer row can place it. ⛔ The label is decided by the
     # EVENT TYPE, not by a payload field: these records predate the
     # `eventKind`/`label` keys, and inventing one here would let a birth record
     # impersonate a connector fold.
