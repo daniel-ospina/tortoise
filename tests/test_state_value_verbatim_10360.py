@@ -1003,18 +1003,26 @@ def test_the_registry_row_names_the_residual_that_still_stands():
     # only the two assertions above, flipping `is CLOSED` to `is still OPEN`
     # stayed GREEN — the header and the word ADJACENCY survive any rewording of
     # the verdict). The closed half must be stated as closed...
-    assert "ADJACENCY half" in after and "CLOSED" in after.upper(), (
+    #
+    # ⛔ AND A BARE `CLOSED` SUBSTRING IS STILL HALF-VACUOUS (review cycle 4,
+    # MEASURED: `is not closed:` contains `CLOSED`, so the gap could be asserted
+    # OPEN while this passed). So the verdict is matched as the PHRASE
+    # `is closed` over whitespace-normalised lowercase text — `is not closed` /
+    # `is no longer closed` do not contain that phrase — and the negation list
+    # below is the belt to that brace.
+    flat = " ".join(after.split()).lower()
+    assert "adjacency half" in flat and "is closed" in flat, (
         "the row no longer states the adjacency gap as CLOSED — this table "
         "closed it; if it was reopened, say so AND delete that claim")
-    # ...and must not be described as open anywhere in the same breath.
-    for open_claim in ("is still open", "is not judged on adjacency",
+    for open_claim in ("is still open", "is not closed", "no longer closed",
+                       "unclosed", "is not judged on adjacency",
                        "never fused"):
-        assert open_claim not in after.lower(), (
+        assert open_claim not in flat, (
             f"the row still says {open_claim!r} of the adjacency class, which "
             "this table closed")
     # positive control: the RATE class IS still open, so the check above cannot
     # have been satisfied by a row that says nothing at all.
-    assert "not judged" in after.lower(), after
+    assert "not judged" in flat, after
 
 
 def test_the_suffix_comes_from_the_last_digit_run():
