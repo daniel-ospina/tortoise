@@ -172,10 +172,28 @@ def test_a_record_with_no_head_sha_is_unreadable_with_an_honest_reason():
 
 
 def test_empty_container_evidence_is_not_evidence():
+    """The COLON rule is what refuses a stringified empty — not a nullish list.
+
+    (Cycle 3 measured the previous `_NULLISH_EVIDENCE` set to be unreachable behind the colon
+    requirement, and therefore a guard that could never fire.)
+    """
     for bogus in ([], {}, "null", "   ", "None", "none", "n/a", "undefined"):
         r = ac.Record(path=Path("/x.json"), head_sha=LIVE, mint="fresh", verdict="clean", evidence=bogus)
         assert r.real_evidence is False, bogus
         assert ac.classify(LIVE, r, *RED)[0] != ac.RESTORE, bogus
+
+
+def test_mint_is_normalised_the_carried_guard_must_not_miss_a_variant():
+    """This guard is FAIL-OPEN if it misses: a carried record reaching RESTORE is fabrication.
+
+    Cycle 3 measured `"Carried"` / `"CARRIED"` / `" carried"` / `"carried "` all reaching
+    RESTORE before normalisation.
+    """
+    for variant in ("Carried", "CARRIED", " carried", "carried ", "Carried\t"):
+        r = ac.Record(path=Path("/x.json"), head_sha=LIVE, mint=variant, verdict="clean", evidence="comment:1")
+        assert r.real_evidence is False, variant
+        outcome, why = ac.classify(LIVE, r, *RED)
+        assert outcome == ac.RE_REVIEW, (variant, outcome, why)
 
 
 def test_evidence_must_be_artifact_shaped():
@@ -278,11 +296,111 @@ def test_main_returns_2_on_a_CORRUPT_record_row(monkeypatch, tmp_path):
 
 
 def test_main_returns_2_when_the_check_run_read_fails(monkeypatch, tmp_path):
-    def boom(args):
-        raise RuntimeError("rate limited")
+    """The RATE-LIMIT path: `gh pr list` succeeds, the per-PR check-run read is throttled.
 
-    monkeypatch.setattr(ac, "gh_json", boom)
+    Cycle 3 measured that the previous version patched every call to raise, so it returned 2 from
+    the PR-list failure and never reached `read_gate` — deleting that handler left the suite green.
+    """
+    def gh(args):
+        if args[0] == "pr":
+            return [{"number": 1, "headRefOid": LIVE, "headRefName": "b", "title": "t"}]
+        raise RuntimeError("HTTP 403: API rate limit exceeded")
+
+    monkeypatch.setattr(ac, "gh_json", gh)
     assert ac.main(["--reviews-dir", str(tmp_path), "--out", str(tmp_path / "o.md")]) == 2
+
+
+def test_main_returns_2_when_a_pr_row_has_no_integer_number(monkeypatch, tmp_path):
+    monkeypatch.setattr(ac, "gh_json", lambda args: [{"headRefOid": LIVE, "headRefName": "b"}])
+    assert ac.main(["--reviews-dir", str(tmp_path), "--no-gate", "--out", str(tmp_path / "o.md")]) == 2
+
+
+def test_main_returns_2_when_the_registry_becomes_unreadable_mid_run(monkeypatch, tmp_path):
+    """The pre-loop probe passes, then the loop's own call raises (dir removed / perms changed)."""
+    calls = {"n": 0}
+
+    def flaky(d, o, r, p):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return None  # the probe
+        raise ac.RegistryUnreadable("registry disappeared")
+
+    monkeypatch.setattr(ac, "load_record", flaky)
+    monkeypatch.setattr(
+        ac, "gh_json", lambda args: [{"number": 1, "headRefOid": LIVE, "headRefName": "b", "title": "t"}]
+    )
+    assert ac.main(["--reviews-dir", str(tmp_path), "--no-gate", "--out", str(tmp_path / "o.md")]) == 2
+
+
+def test_an_invalid_utf8_record_is_unreadable_not_a_crash(tmp_path):
+    # UnicodeDecodeError is a ValueError, not an OSError (cycle 3: it escaped as rc 1).
+    (tmp_path / "daniel-ospina-tortoise-4.json").write_bytes(b'{"head_sha":"\xff\xfe"}')
+    got = ac.load_record(tmp_path, "daniel-ospina", "tortoise", 4)
+    assert got is not None and got.error.startswith("unreadable:")
+
+
+def test_read_gate_refuses_a_malformed_payload_as_a_transport_failure(monkeypatch):
+    for payload in ([], None, "ok", {"check_runs": ["x"]}, {"check_runs": {"id": 1}}):
+        monkeypatch.setattr(ac, "gh_json", lambda args, p=payload: p)
+        try:
+            ac.read_gate("o/r", "a" * 40)
+        except RuntimeError as exc:
+            assert "shape" in str(exc)
+        else:
+            raise AssertionError(f"payload {payload!r} must be a transport failure, not a verdict")
+
+
+def test_gh_json_wraps_a_missing_gh_binary_as_runtime_error(monkeypatch):
+    def boom(*a, **k):
+        raise FileNotFoundError(2, "No such file or directory", "gh")
+
+    monkeypatch.setattr(ac.subprocess, "run", boom)
+    try:
+        ac.gh_json(["pr", "list"])
+    except RuntimeError as exc:
+        assert "could not run gh" in str(exc)
+    else:
+        raise AssertionError("a missing gh must be RuntimeError (contract: never exit 1)")
+
+
+def test_an_unwritable_out_path_is_rc_2_not_a_traceback(monkeypatch, tmp_path):
+    monkeypatch.setattr(ac, "gh_json", lambda args: [])
+    blocker = tmp_path / "file-not-dir"
+    blocker.write_text("x")
+    assert ac.main(["--reviews-dir", str(tmp_path), "--out", str(blocker / "o.md")]) == 2
+
+
+def test_no_gate_does_not_overwrite_a_record_present_reason(monkeypatch, tmp_path):
+    """A record-present NOTHING row keeps its own reason (evidence-less), not "no record".
+
+    Cycle 3 measured the previous rewrite firing for every NOTHING row, so the row asserted the
+    opposite of its own mint/verdict/evidence columns.
+    """
+    (tmp_path / "daniel-ospina-tortoise-2.json").write_text(
+        '{"repo":"daniel-ospina/tortoise","pr":2,"head_sha":"' + LIVE + '","mint":"recovered-body",'
+        '"verdict":"clean","evidence":null}'
+    )
+    monkeypatch.setattr(
+        ac, "gh_json", lambda args: [{"number": 2, "headRefOid": LIVE, "headRefName": "b", "title": "t"}]
+    )
+    assert ac.main(["--reviews-dir", str(tmp_path), "--no-gate", "--out", str(tmp_path / "o.md")]) == 0
+    text = (tmp_path / "o.md").read_text()
+    assert "record carries no evidence" in text
+    assert "no record on this box at any head; the published-marker surface was NOT" not in text
+
+
+def test_an_absent_gate_run_is_not_reported_as_a_marker_absence(monkeypatch, tmp_path):
+    """No check-run on the head is not a read of the marker surface (cycle 3, finding 4)."""
+    monkeypatch.setattr(
+        ac, "gh_json",
+        lambda args: [{"number": 3, "headRefOid": LIVE, "headRefName": "b", "title": "t"}]
+        if args[0] == "pr"
+        else {"check_runs": []},
+    )
+    assert ac.main(["--reviews-dir", str(tmp_path), "--out", str(tmp_path / "o.md")]) == 0
+    text = (tmp_path / "o.md").read_text()
+    assert "gate reported nothing readable on this head" in text
+    assert "and no head-bound published marker" not in text
 
 
 def test_a_directory_named_like_a_record_is_unreadable_not_a_crash(tmp_path):

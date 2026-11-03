@@ -78,10 +78,15 @@ GATE_CHECK = "ai-review-gate"
 # of vocabulary accident.
 CLEAN_VERDICTS = {"clean", "clean-micro", "clean-low"}
 
-# Producers stringify their empties — `"null"`, `"None"`, `"undefined"`. None of these is an
-# artifact reference, and each one, if accepted, would let an evidence-less record reach RESTORE
-# (measured by review cycle 2: `"None"`/`"none"`/`"n/a"`/`"undefined"` all returned RESTORE).
-_NULLISH_EVIDENCE = {"", "null", "none", "n/a", "na", "undefined", "false"}
+
+def _is_carried(mint: str) -> bool:
+    """Normalised, because this guard is FAIL-OPEN if it ever misses.
+
+    Measured by review cycle 3: `mint` = `"Carried"` / `"CARRIED"` / `" carried"` / `"carried "`
+    all reached `RESTORE` — a restorable proof manufactured from a pointer to ANOTHER review
+    (#10177). Everything else in this file normalises; this did not.
+    """
+    return mint.strip().lower() == "carried"
 
 RESTORE = "RESTORE"
 RE_REVIEW = "RE-REVIEW"
@@ -116,21 +121,23 @@ class Record:
     def real_evidence(self) -> bool:
         """The record attests that a reviewer actually reported something.
 
-        Requires ALL of: a verdict in the clean allow-list, an evidence reference that
-        is a NON-EMPTY STRING (an empty list/dict/`"null"` is not an artifact), and
-        `mint != "carried"`. The mint exclusion is deliberate: #10177 measured a carry
-        re-binding an older `clean` onto a head whose own review found a P1 — a carried
-        record is a *pointer to another review*, and re-posting it as proof of this head
-        is the laundering this tool exists to refuse.
+        Requires ALL of: a verdict in the clean allow-list, an evidence reference that is an
+        ARTIFACT SHAPE (`<kind>:<id>` or a URL containing one), and `mint` not carried. The mint
+        exclusion is deliberate: #10177 measured a carry re-binding an older `clean` onto a head
+        whose own review found a P1 — a carried record is a *pointer to another review*, and
+        re-posting it as proof of this head is the laundering this tool exists to refuse.
+
+        The colon requirement is what refuses a stringified empty (`"null"`, `"None"`, `"n/a"`,
+        `"undefined"`): each is colon-free, so no separate nullish list is needed — and a list
+        that can never be the deciding test is worse than none (it reads as protection; cycle 3
+        found exactly that, unreachable behind this rule).
         """
         return (
             bool(self.verdict)
             and self.verdict in CLEAN_VERDICTS
             and isinstance(self.evidence, str)
-            and self.evidence.strip().lower() not in _NULLISH_EVIDENCE
-            # an artifact reference is `<kind>:<id>` or a URL to one (`https://…#issuecomment-…`)
             and ":" in self.evidence
-            and self.mint != "carried"
+            and not _is_carried(self.mint)
         )
 
 
@@ -172,7 +179,8 @@ def classify(
             return OK, "gate green; no local record (evidence lives on GitHub only)"
         if gate_in_flight:
             return IN_FLIGHT, "gate has not concluded"
-        return NOTHING, "no record on this box at any head, and no head-bound published marker"
+        # The marker half of the story depends on what was ACTUALLY read, so `main` appends it.
+        return NOTHING, "no record on this box at any head"
 
     rec_head = record.head_sha
     if not SHA_RE.match(rec_head or ""):
@@ -201,7 +209,7 @@ def classify(
         return OK, "gate green"
     if gate_in_flight:
         return IN_FLIGHT, "gate has not concluded"
-    if record.mint == "carried":
+    if _is_carried(record.mint):
         return RE_REVIEW, "record is mint:\"carried\" — a pointer to an older review, not evidence of this head (#10177)"
     if record.evidence in (None, "", False):
         return NOTHING, "record carries no evidence (evidence: null) — nothing to restore"
@@ -247,7 +255,9 @@ def load_record(
 
     try:
         raw = chosen.read_text()
-    except OSError as exc:  # permission denied, dangling link, a directory, ...
+    except (OSError, ValueError) as exc:
+        # OSError: permission denied, dangling link, a DIRECTORY named *.json.
+        # ValueError: invalid UTF-8 (`UnicodeDecodeError`) — cycle 3 measured it escaping as rc 1.
         return Record(path=chosen, error=f"unreadable: {exc}")
     try:
         data = json.loads(raw)
@@ -277,9 +287,13 @@ def load_record(
 
 
 def gh_json(args: list[str]) -> object:
-    """Run `gh` and parse JSON. A non-JSON answer is a TRANSPORT failure (RuntimeError),
-    never an uncaught ValueError — the exit-code contract (0/2, never 1) depends on it."""
-    out = subprocess.run(["gh", *args], capture_output=True, text=True)
+    """Run `gh` and parse JSON. Every failure mode — gh missing, non-zero rc, non-JSON body —
+    becomes a RuntimeError, never an uncaught OSError/ValueError: the exit-code contract
+    (0/2, never 1) depends on it (cycle 3 measured `FileNotFoundError` escaping as rc 1)."""
+    try:
+        out = subprocess.run(["gh", *args], capture_output=True, text=True)
+    except OSError as exc:  # gh not installed / not executable
+        raise RuntimeError(f"could not run gh ({' '.join(args[:2])}…): {exc}") from exc
     if out.returncode != 0:
         raise RuntimeError(f"gh {' '.join(args[:3])}… failed rc={out.returncode}: {out.stderr.strip()[:300]}")
     try:
@@ -304,7 +318,16 @@ def read_gate(repo: str, head: str) -> tuple[str, str]:
             "filter=all",
         ]
     )
-    runs = [r for r in payload.get("check_runs", []) if r.get("name") == GATE_CHECK]
+    # Shape-validate: a valid-JSON-but-wrong-payload must be a TRANSPORT verdict (RuntimeError →
+    # UNREADABLE → rc 2), never an AttributeError escaping as rc 1 (cycle 3, measured five shapes).
+    runs_raw = payload.get("check_runs", []) if isinstance(payload, dict) else None
+    if (
+        not isinstance(payload, dict)
+        or not isinstance(runs_raw, list)
+        or not all(isinstance(r, dict) for r in runs_raw)
+    ):
+        raise RuntimeError(f"check-runs payload for {head[:12]}… has an unexpected shape: {type(payload).__name__}")
+    runs = [r for r in runs_raw if r.get("name") == GATE_CHECK]
     if not runs:
         return "", ""
     # ⛔ NEWEST BY `id`, never by list position: the endpoint answers newest-first, so
@@ -328,6 +351,13 @@ def render(rows: list[Row], repo: str, generated_at: str) -> str:
         "# Attestation census — open PRs",
         "",
         f"Repo `{repo}` · generated {generated_at} by `tools/attest_census.py`.",
+        "",
+        "> ⚠️ **SNAPSHOT, NOT A LIVE VERDICT.** This file is machine-generated from *one box's*",
+        "> registry at the timestamp above, and every push, review and gate re-run invalidates it.",
+        "> Re-run `uv run python tools/attest_census.py` before acting on any row — in particular,",
+        "> an `OK` or `NOTHING-TO-RESTORE` row from this snapshot is **not** evidence about the",
+        "> PR's current head, and `NOTHING-TO-RESTORE` never means \"nobody reviewed this\"",
+        "> fleet-wide: `~/.pi/agent/reviews/` is per-machine.",
         "",
         "One row per open PR: its head, whether a review record exists on **this box**, whether that",
         "record's head equals the PR's head, what the record claims, and what the `ai-review-gate`",
@@ -436,14 +466,16 @@ def main(argv: list[str] | None = None) -> int:
             row.outcome, row.why = UNREADABLE, f"PR head {head!r} is not a 40-char sha"
         elif args.no_gate:
             row.outcome, row.why = classify(head, rec, "", "", gate_known=False)
-            if row.outcome == NOTHING:
-                # ⛔ Do not assert a GitHub-side absence this run never read: the marker
-                # surface is exactly what `--no-gate` skipped (measured by review cycle 2).
+            # ⛔ Only the GITHUB half of the sentence may be replaced, and only when there is no
+            # record at all: a record-present NOTHING row has its own reason (evidence-less /
+            # non-clean verdict) and overwriting it would contradict the same row's own table
+            # columns (measured by review cycle 3).
+            if row.outcome == NOTHING and rec is None:
                 row.why = (
                     "no record on this box at any head; the published-marker surface was NOT "
                     "read (--no-gate), so this is not a statement about GitHub"
                 )
-            else:
+            elif row.outcome != NOTHING:
                 row.why += " (gate NOT read: --no-gate)"
         else:
             try:
@@ -453,6 +485,17 @@ def main(argv: list[str] | None = None) -> int:
                 row.outcome, row.why = UNREADABLE, f"check-run read failed: {exc}"
         if row.gate_checked:
             row.outcome, row.why = classify(head, rec, row.gate_status, row.gate_conclusion)
+            # ⛔ The marker clause is a claim about a surface the GATE reads. Only a gate that
+            # actually RAN AND REPORTED can support it: an absent check-run, or a non-red,
+            # non-green attempt (`cancelled`/`stale`), is not a read of the marker surface.
+            if row.outcome == NOTHING and rec is None:
+                gate_verdict = row.gate_conclusion in ("failure", "timed_out", "action_required")
+                row.why += (
+                    "; the gate ran and found no head-bound published marker"
+                    if gate_verdict
+                    else f"; the gate reported nothing readable on this head ({row.gate_conclusion or 'no run'}), "
+                    "so the published-marker surface was not judged"
+                )
         # ⛔ ONE increment site. A row the tool itself calls UNREADABLE is a surface it could
         # not read, so the run must not report 0 ("complete census") while displaying one.
         # (A second increment in the bad-head branch made the rc-2 test pass even when this
@@ -490,8 +533,12 @@ def main(argv: list[str] | None = None) -> int:
 
     text = render(rows, args.repo, generated_at)
     out = Path(args.out)
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(text)
+    try:
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(text)
+    except OSError as exc:  # unwritable --out is a surface we could not write, not a finding
+        print(f"attest_census: could not write {out}: {exc}", file=sys.stderr)
+        return 2
     print(text)
     print(f"attest_census: wrote {out}", file=sys.stderr)
     return 0 if unreadable == 0 else 2
