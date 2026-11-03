@@ -26,7 +26,7 @@ import pytest
 # no longer silently degrade into an O(whole-host) scan that also matches
 # another test's (or another session's) redis.socket / redis.pid.
 from tests._signal_hygiene import harness_relinquish_sigalrm
-from tests._tmpdir_hygiene import scan_root
+from tests._tmpdir_hygiene import SessionRedisResidue, scan_root
 from tortoise.embedded_reaper import (
     _parse_min_uptime,
     discover,
@@ -157,59 +157,15 @@ def _clean_redislite_residue():
     them order-flaky. Clean only the DELTA the test introduced — never pkill
     pre-existing servers (session-shared fixtures, local dev daemons) or
     delete their socket dirs (#493, code-review #803).
-    """
-    def _snapshot() -> tuple[set[int], set[str]]:
-        pids: set[int] = set()
-        try:
-            out = subprocess.run(
-                ["pgrep", "-f", "redislite/bin/redis-server"],
-                capture_output=True, text=True, timeout=10,
-            ).stdout
-            pids = {int(p) for p in out.split() if p.strip().isdigit()}
-        except Exception:
-            pass
-        dirs: set[str] = set()
-        tmp = scan_root()  # #3752: private root, never the shared temp dir
-        try:
-            for entry in os.scandir(tmp):
-                if entry.is_dir() and (
-                    os.path.exists(os.path.join(entry.path, "redis.socket")) or
-                    os.path.exists(os.path.join(entry.path, "redis.pid"))
-                ):
-                    dirs.add(entry.path)
-        except Exception:
-            pass
-        return pids, dirs
 
-    before_pids, before_dirs = _snapshot()
-    yield
-    try:
-        after_pids, after_dirs = _snapshot()
-        for pid in after_pids - before_pids:
-            try:  # noqa: SIM105
-                os.kill(pid, 15)  # SIGTERM
-            except (ProcessLookupError, PermissionError):
-                pass
-        # Poll briefly so the rmtree below does not race a dying server.
-        for _ in range(6):
-            if not (after_pids - before_pids):
-                break
-            alive = set()
-            for pid in after_pids - before_pids:
-                try:
-                    os.kill(pid, 0)
-                    alive.add(pid)
-                except (ProcessLookupError, PermissionError):
-                    pass
-            after_pids = alive
-            if alive:
-                time.sleep(0.1)
-        time.sleep(0.2)
-        import shutil
-        for d in after_dirs - before_dirs:
-            shutil.rmtree(d, ignore_errors=True)
-    except Exception:
-        pass
+    The population is SESSION-scoped (`SessionRedisResidue`, above): the old
+    snapshot was a HOST-WIDE `pgrep` whose delta therefore also held every
+    server a concurrent CI job on this shared runner started while the test
+    ran, so the teardown SIGTERMed other runs' servers (#7522) — and a `pgrep`
+    that TIMED OUT collapsed to an empty baseline, which turned the same
+    teardown into the host-wide `pkill` its docstring says is lethal.
+    """
+    yield SessionRedisResidue()
 
 
 @pytest.fixture(scope="module", autouse=True)

@@ -7,6 +7,7 @@ teardown having run).
 from __future__ import annotations
 
 import errno
+import inspect
 import logging
 import os
 import re
@@ -24,16 +25,20 @@ from tests._tmpdir_hygiene import (
     _ZERO_CLIENT_STATE_PATH_ENV,
     HOST_TMPDIR,
     ROOT_BASE,
+    SessionRedisResidue,
     SharedTmpdirScanError,
     TrackedTempfileArtifacts,
     _discard_tolerated_leaks,
     _is_shared_temp_scope,
     _live_server_in_root,
     _marker_owner_provably_dead,
+    _pid_running,
     _protected_reason,
     _read_marker,
+    _terminate_pid,
     install_scan_guard,
     scan_root,
+    session_redis_pids,
     session_tmpdir,
     sweep_stale_session_roots,
     tolerated_cleanup_leaks,
@@ -1298,3 +1303,178 @@ def test_actions_typing_matches_the_runner_not_yaml_1_1():
     assert yaml.load("if: true", Loader=loader)["if"] is True
     assert yaml.load("if: false", Loader=loader)["if"] is False
     assert yaml.load("if: always()", Loader=loader)["if"] == "always()"
+
+
+# ── #7522: the teardown KILL is session-scoped, like #3752's scan ─────────
+# The two embedded modules' autouse teardown fixtures snapshot the live
+# redislite servers before a test and kill the delta after it (#493/#1365).
+# The population they snapshotted was HOST-WIDE `pgrep`, so on the fleet's
+# shared self-hosted runner the delta also held every server a CONCURRENT
+# CI job started while that test ran — and the teardown SIGTERMed them.
+# Measured 2026-11-03 on PR #10640's shard `test-carve-out (c)`:
+# ``Error 2 connecting to .../redis.socket. No such file or directory`` in
+# tests/test_10122_point_name_not_indexed.py (x2) and
+# tests/test_cli_extraction.py, plus
+# ``test_parallel_single_writer_multi_reader`` missing every key because its
+# writer's server was killed mid-write (that test never checks the writer's
+# exit code). Both fixtures now use `SessionRedisResidue`.
+
+
+def _fake_argv_probe(cmds, monkeypatch):
+    """Install a fake host-wide pid population + argv table on the reaper.
+
+    `probe` stays HOST-WIDE on purpose — it is the real `pgrep` shape, so the
+    assertions below exercise the filter rather than a pre-filtered stub.
+    """
+    from tortoise import embedded_reaper
+
+    monkeypatch.setattr(embedded_reaper, "_pgrep_redis_servers_or_none",
+                        lambda: list(cmds))
+    monkeypatch.setattr(embedded_reaper, "_batch_cmdlines_or_none",
+                        lambda pids: {pid: cmds[pid] for pid in pids})
+    return cmds
+
+
+def test_session_redis_pids_are_scoped_to_this_sessions_root(monkeypatch):
+    """A sibling run's server is NOT attributed to us, and the filter is
+    load-bearing: the same population unfiltered contains it."""
+    root = os.path.realpath(scan_root())
+    cmds = _fake_argv_probe({
+        101: f"/x/redislite/bin/redis-server unixsocket:{root}/tmpaaaa/redis.socket",
+        102: "/x/redislite/bin/redis-server unixsocket:/tmp/tt_other/tmpbbbb/redis.socket",
+        # a DIFFERENT root that merely shares the prefix — a path-prefix test
+        # without the trailing separator would call this one ours
+        103: f"/x/redislite/bin/redis-server unixsocket:{root}_sibling/redis.socket",
+        104: "/usr/bin/postgres -D /var/lib/postgres",
+    }, monkeypatch)
+
+    assert session_redis_pids() == {101}
+    # non-vacuity: the pre-fix population (host-wide pgrep) held 102 and 103,
+    # so an unscoped delta would have SIGTERMed both.
+    assert {102, 103} <= set(cmds)
+
+
+def test_session_redis_pids_is_unmeasured_when_a_probe_fails(monkeypatch):
+    """None — never an empty set: a delta against an unmeasured baseline is
+    the whole process table (the fail-open that made the old test_reaper
+    fixture degenerate into the host-wide pkill its docstring forbids)."""
+    from tortoise import embedded_reaper
+
+    monkeypatch.setattr(embedded_reaper, "_pgrep_redis_servers_or_none",
+                        lambda: None)
+    assert session_redis_pids() is None
+
+    root = os.path.realpath(scan_root())
+    monkeypatch.setattr(embedded_reaper, "_pgrep_redis_servers_or_none",
+                        lambda: [7])
+    monkeypatch.setattr(embedded_reaper, "_batch_cmdlines_or_none",
+                        lambda pids: None)
+    assert session_redis_pids() is None
+
+    # a COMPLETED probe that found nothing is a measurement, not a failure
+    monkeypatch.setattr(embedded_reaper, "_pgrep_redis_servers_or_none",
+                        lambda: [])
+    assert session_redis_pids() == set()
+    assert root  # the private root is what the filter is keyed on
+
+
+def test_session_residue_reaps_only_this_sessions_servers(monkeypatch):
+    """End-to-end through the fixture's own path (`_redis_residue_snapshot`,
+    which goes through `session_redis_pids`): a FOREIGN pid that appeared
+    during the test is not signalled, even though the host-wide delta holds it."""
+    root = os.path.realpath(scan_root())
+    population = {
+        101: f"/x/redislite/bin/redis-server unixsocket:{root}/tmpbefore/redis.socket",
+    }
+    _fake_argv_probe(population, monkeypatch)
+    killed: list[int] = []
+    residue = SessionRedisResidue(
+        kill=killed.append,
+        alive=lambda pid: False,
+    )
+    assert residue.measurable
+    population.update({
+        201: f"/x/redislite/bin/redis-server unixsocket:{root}/tmpours/redis.socket",
+        202: "/x/redislite/bin/redis-server unixsocket:/tmp/tt_other/tmptheirs/redis.socket",
+    })
+    residue.reap()
+    assert killed == [201], (
+        "only pid 201 (this session's new server) may be signalled — 202 is a "
+        "concurrent run's server that appeared in the same window, and 101 "
+        "predates the test. The pre-fix host-wide delta signalled {201, 202}."
+    )
+
+
+def test_session_residue_reaps_nothing_when_the_baseline_is_unmeasured():
+    """An unmeasurable baseline cleans NOTHING (fail-CLOSED).
+
+    The pre-fix test_reaper fixture swallowed the probe error into an empty
+    baseline, so a `pgrep` timeout on a loaded runner turned that test's
+    teardown into a SIGTERM of every redislite server on the host.
+    """
+    killed: list[int] = []
+    residue = SessionRedisResidue(
+        snapshot=lambda: None,
+        kill=killed.append,
+        alive=lambda pid: False,
+    )
+    assert not residue.measurable
+    residue.reap()
+    assert killed == []
+
+
+def test_session_residue_reaps_nothing_when_the_reread_is_unmeasured():
+    """A failed AFTER read must not be read as "everything went away"."""
+    reads = [({1}, set()), None]
+    killed: list[int] = []
+    residue = SessionRedisResidue(
+        snapshot=lambda: reads.pop(0),
+        kill=killed.append,
+        alive=lambda pid: False,
+    )
+    residue.reap()
+    assert killed == []
+
+
+def test_session_residue_invokes_the_kill_hook_with_exactly_one_argument(
+        monkeypatch):
+    """The hook contract is ``kill(pid)``, pinned with a STRICT one-parameter
+    callable — the shape both real injections have.
+
+    Why this is not pedantry: `reap()` runs from a fixture's FINALISER, so a
+    mismatched arity is not a skipped cleanup — it raises `TypeError` after
+    every test in the module, turning the whole file into errors. And why the
+    hook is a plain `def` rather than a `lambda pid, sig: ...`: a permissive
+    two-parameter lambda would ACCEPT a two-argument caller and hide exactly
+    the breakage this pins.
+    """
+    root = os.path.realpath(scan_root())
+    population = {
+        101: f"/x/redislite/bin/redis-server unixsocket:{root}/tmpbefore/redis.socket",
+    }
+    _fake_argv_probe(population, monkeypatch)
+    calls: list[tuple[int, ...]] = []
+
+    def kill(*args):  # records the arity the caller used
+        calls.append(args)
+
+    residue = SessionRedisResidue(kill=kill, alive=lambda pid: False)
+    population[201] = (
+        f"/x/redislite/bin/redis-server unixsocket:{root}/tmpours/redis.socket")
+    residue.reap()
+    assert calls == [(201,)], (
+        f"reap() called the kill hook as {calls}; the contract both real "
+        "injections implement is kill(pid) — one positional argument"
+    )
+
+    # the DEFAULT hook must satisfy the same contract, or the two fixtures that
+    # take the default (test_reaper, and any future caller) break the same way
+    for hook in (_terminate_pid, _pid_running):
+        params = [
+            p for p in inspect.signature(hook).parameters.values()
+            if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)
+        ]
+        assert len(params) == 1, (
+            f"{hook.__name__} must take exactly one positional argument "
+            f"(got {[p.name for p in params]}) so it fits reap()'s contract"
+        )
