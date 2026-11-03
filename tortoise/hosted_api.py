@@ -5908,10 +5908,11 @@ async def health():
     counter snapshot, or an unread tenancy resolution degrades ``status``.
 
     Build check (#10447): ``build`` names the build that is SERVING — commit,
-    package version, whether the tree was dirty at build time (`null` until the
-    deploy stamps `TORTOISE_GIT_DIRTY`; see `_build_identity`), process start
-    time, and the highest schema migration this image carries. It is the same
-    VALUE ``/v1/version`` returns (one resolver, ``_build_identity``), because
+    package version, whether the tree was dirty at build time (stamped by
+    ``deploy-hosted.yml`` from the build tree's own ``git status --porcelain``;
+    see `_build_identity`), process start time, and the highest schema migration
+    this image carries. It is the same VALUE ``/v1/version`` returns (one
+    resolver, ``_build_identity``), because
     "is this deployed?" was previously unanswerable from this endpoint: a stale
     build served ``status: ok`` and every other block happily. Like
     ``change_feed`` and ``record`` it does NOT fold into ``status`` — a stale
@@ -6044,13 +6045,16 @@ async def health_security():
 #: can see a restart (a deploy that landed) without a log grep — and can see that
 #: a build is OLD by comparing it to the deploy it was supposed to pick up.
 #:
-#: `commit_dirty` is published but is NULL on every real deployment today:
-#: nothing stamps `TORTOISE_GIT_DIRTY`. The deploy workflow's propagation block is
-#: pinned by `tests/test_fly_secret_drift.py` (whose harness stubs PATH to
-#: fly/flyctl only) and a new stamp would also need a declaration in
-#: `.github/scripts/fly-managed-secrets.txt` or the drift check blocks every later
-#: deploy — a deploy-surface change, filed separately rather than smuggled in here.
-#: A `null` here is the honest reading; it must not be read as "clean".
+#: `commit_dirty` is MEASURED, not asserted: `deploy-hosted.yml` stamps
+#: `TORTOISE_GIT_DIRTY` from the build tree's own `git status --porcelain` in the
+#: same propagation block that stamps `TORTOISE_GIT_SHA`, and declares it in
+#: `.github/scripts/fly-managed-secrets.txt` (`workflow` source) so
+#: `check-fly-secret-drift.py` does not block later deploys as undeclared. It was
+#: published-but-unstamped until #10447's second pass — no producer existed, so
+#: `commit_dirty` was `null` on every deployment and `build_identified`, which is
+#: `sha is a commit AND not dirty`, answered `true` for a build off a dirty tree.
+#: `null` still means NOT STAMPED (selfhost, local dev) and must never be read as
+#: "clean".
 _PROCESS_STARTED_AT: str = datetime.now(UTC).isoformat(timespec="seconds")
 
 
@@ -6179,8 +6183,11 @@ def _build_identity() -> dict:
 
     ``commit_sha`` comes from the DEPLOY (``TORTOISE_GIT_SHA``, stamped by
     ``deploy-hosted.yml`` from ``GITHUB_SHA``) — never from a constant an agent
-    can edit, because a version string a human can change is not a version. When
-    nothing stamped it (selfhost, local dev, a stripped deploy) the field is
+    can edit, because a version string a human can change is not a version. Its
+    companion ``commit_dirty`` comes from the SAME block, measured off the tree
+    the remote builder uploads (``git status --porcelain``), so "is this THE
+    commit" and "which commit is it" are answered by the same producer. When
+    nothing stamped them (selfhost, local dev, a stripped deploy) the field is
     ``None`` and ``build_identified`` is ``False``: an ABSENCE that says so,
     which a probe can refuse on, instead of a value that looks current.
 

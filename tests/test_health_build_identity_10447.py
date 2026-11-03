@@ -23,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -126,10 +127,10 @@ def sha_env(monkeypatch):
     """Set the build identity the way the DEPLOY would.
 
     `TORTOISE_GIT_SHA` IS staged by `deploy-hosted.yml`
-    (`ARGS+=(TORTOISE_GIT_SHA="${GITHUB_SHA}")`). `TORTOISE_GIT_DIRTY` is NOT
-    staged by anything yet — see the note beside `_PROCESS_STARTED_AT` in
-    `tortoise/hosted_api.py` — so the dirty cases below pin what the payload does
-    with a stamp the deploy HANDS it, not a claim that a stamp exists.
+    (`ARGS+=(TORTOISE_GIT_SHA="${GITHUB_SHA}")`), and so is `TORTOISE_GIT_DIRTY`
+    (`ARGS+=(TORTOISE_GIT_DIRTY="$(if [ -n "$(git status --porcelain)" …")`) —
+    see `test_the_deploy_measures_the_dirty_marker_from_the_build_tree`, which
+    EXECUTES that expression rather than taking this fixture's word for it.
     """
     def _set(sha: str | None, dirty: str | None = None) -> None:
         if sha is None:
@@ -275,6 +276,148 @@ def test_a_full_sha_and_a_short_sha_are_both_identified(sha_env):
     for good in ("a" * 40, "b" * 7, "1234567890abcdef1234567890abcdef12345678"):
         sha_env(good)
         assert _health()["build"]["build_identified"] is True, good
+
+
+# ── the dirty marker: a PRODUCER, measured from the build tree (#10447) ─────
+#
+# `_build_identity` reading `TORTOISE_GIT_DIRTY` was never the gap: the marker
+# had NO PRODUCER, so `commit_dirty` published `null` on every deployment and
+# `build_identified` — which is `sha is a commit AND not dirty` — answered `true`
+# for a build off a dirty tree. The one question #10447 asked this field to
+# settle ("is this THE commit, or a modified tree?") was the one it could not
+# answer, and the wrong answer was the ISSUE'S OWN FAILURE CLASS: a plausible
+# PASS.
+#
+# These pins therefore read the DEPLOY, not the reader: they extract the stamp
+# expression out of `deploy-hosted.yml`, RUN it against a real git tree, and
+# assert the result arrives at `GET /health`'s published `build` block. A stamp
+# that is a constant, that reads a different tree, or that is deleted outright
+# cannot satisfy them — and a test on `_build_identity(...)` alone could, which
+# is why none of these calls a helper.
+
+_STAMP_PREFIX = 'ARGS+=(TORTOISE_GIT_DIRTY="$('
+
+
+def _dirty_stamp_expression() -> str:
+    """The shell expression `deploy-hosted.yml` uses to stamp the dirty marker.
+
+    Extracted from the workflow rather than restated here, so the pin tracks the
+    real producer: a change to the command is measured by what it DOES, not by
+    whether it still looks like the string this file expected.
+    """
+    workflow = (REPO / ".github" / "workflows" / "deploy-hosted.yml").read_text(
+        encoding="utf-8"
+    )
+    lines = [ln for ln in workflow.splitlines() if ln.lstrip().startswith(_STAMP_PREFIX)]
+    assert len(lines) == 1, (
+        "deploy-hosted.yml no longer stamps `TORTOISE_GIT_DIRTY` in the secrets "
+        "propagation block (found {n} matching line(s)). Without a producer "
+        "`commit_dirty` is `null` on every deployment and `build_identified` "
+        "reports `true` for a build off a DIRTY tree — the false PASS #10447 "
+        "exists to close, not an absence that says so.".format(n=len(lines))
+    )
+    line = lines[0]
+    start = line.index(_STAMP_PREFIX) + len(_STAMP_PREFIX)
+    # The suffix is `)")` — the `)` that closes `$(`, then the closing quote and
+    # the `)` that closes `ARGS+=(`. Cut at the FIRST of those three, or the
+    # extracted expression carries a stray `)` and bash rejects it (measured:
+    # `bash: syntax error near unexpected token ')'`).
+    end = line.rindex(')")')
+    expr = line[start:end]
+    assert expr.strip(), "the dirty stamp is an empty command — it would always read 'clean'"
+    return expr
+
+
+def _run_stamp(expr: str, repo: Path) -> str:
+    """Run the deploy's own stamp expression against `repo` and return its output.
+
+    `_git_env()` strips `GIT_*` so the measurement is of `repo`'s tree and not of
+    whatever repository the runner happens to be inside (the #4203 shape).
+    """
+    result = subprocess.run(
+        ["bash", "-c", expr], cwd=str(repo), capture_output=True, text=True,
+        env=_git_env(),
+    )
+    assert result.returncode == 0, (
+        f"the deploy's dirty stamp FAILED (rc={result.returncode}): {result.stderr}"
+        " — a stamp that errors is not a stamp"
+    )
+    return result.stdout.strip()
+
+
+def test_the_deploy_measures_the_dirty_marker_from_the_build_tree(tmp_path):
+    """THE PRODUCER, measured. The same expression must answer BOTH ways.
+
+    A constant cannot: `true` fails the clean case, `false` fails the dirty one,
+    and a stamp that measured a different tree (an ambient `GIT_DIR`, the parent
+    checkout) fails the dirty case too. This is the discriminator the previous
+    round lacked — it pinned what the payload DOES with a stamp, never that a
+    stamp existed.
+    """
+    expr = _dirty_stamp_expression()
+    repo = tmp_path / "history"
+    _scratch_repo_with_two_commits(tmp_path)
+    assert _run_stamp(expr, repo) == "false", (
+        "a tree that matches its commit was stamped dirty — every deploy would "
+        "report `build_identified: false` and the field would be useless"
+    )
+    (repo / "f.txt").write_text("uncommitted\n")
+    assert _run_stamp(expr, repo) == "true", (
+        "a MODIFIED tracked file was stamped clean — the false PASS is still "
+        "open: a dirty tree would publish the commit it merely names"
+    )
+
+
+def test_a_measured_dirty_tree_publishes_an_unidentified_build(sha_env, tmp_path):
+    """END TO END, asserted on the PUBLISHED payload — producer to reader.
+
+    The stamp's output is handed to the endpoint exactly as the deploy hands it
+    over (env), and the assertion is on `GET /health`'s `build` block. Neither
+    half can be satisfied by editing the other: a constant in the workflow fails
+    the dirty half, and a reader that dropped `not dirty_flag` from
+    `build_identified` fails it too.
+    """
+    expr = _dirty_stamp_expression()
+    repo = tmp_path / "history"
+    _scratch_repo_with_two_commits(tmp_path)
+    sha = "d" * 40
+
+    sha_env(sha, dirty=_run_stamp(expr, repo))
+    clean = _health()["build"]
+    assert clean["commit_dirty"] is False, clean
+    assert clean["build_identified"] is True, clean
+    assert clean["commit_sha"] == sha, clean
+
+    (repo / "f.txt").write_text("uncommitted\n")
+    sha_env(sha, dirty=_run_stamp(expr, repo))
+    dirty = _health()["build"]
+    assert dirty["commit_dirty"] is True, dirty
+    assert dirty["commit_sha"] == sha, dirty
+    assert dirty["build_identified"] is False, (
+        "a build off a dirty tree published `build_identified: true` — it names "
+        "a commit its tree did not match, which is a false PASS on the exact "
+        "question this block exists to answer"
+    )
+
+
+def test_the_dirty_marker_is_declared_so_the_drift_gate_does_not_block_deploys():
+    """A stamp with no manifest declaration is not a stamp — it is a blocked deploy.
+
+    `check-fly-secret-drift.py` fails any name the deploy assigns that the
+    manifest does not declare (`test_workflow_assigned_name_not_declared_is_
+    undeclared`). Declaring it HERE keeps that gate's two owners in lockstep: the
+    workflow line above proves the value is produced, this proves the deploy is
+    allowed to keep it.
+    """
+    manifest = (REPO / ".github" / "scripts" / "fly-managed-secrets.txt").read_text(
+        encoding="utf-8"
+    )
+    assert re.search(r"^TORTOISE_GIT_DIRTY\s+workflow\b", manifest, re.M), (
+        "`.github/scripts/fly-managed-secrets.txt` does not declare "
+        "`TORTOISE_GIT_DIRTY workflow` — the deploy would be blocked as "
+        "undeclared the first time the stamp is used, so the marker would be "
+        "published as `null` forever"
+    )
 
 
 # ── the migration head: "has step 7 landed in prod", from a curl ─────────────

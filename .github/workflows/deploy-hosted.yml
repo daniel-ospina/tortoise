@@ -902,6 +902,30 @@ jobs:
           # GITHUB_SHA is the checked-out commit on push AND workflow_dispatch
           # (the ref head), so it always matches what this run deploys.
           ARGS+=(TORTOISE_GIT_SHA="${GITHUB_SHA}")
+          # #10447: TORTOISE_GIT_DIRTY — was the tree this build ships THE COMMIT,
+          # or a modification of it? `_build_identity` (tortoise/hosted_api.py)
+          # already READS this marker, but until now nothing STAMPED it, so
+          # `commit_dirty` published `null` on every deployment and
+          # `build_identified` (which is `sha is a hex commit AND not dirty`)
+          # answered `true` for a build off a dirty tree. That is the false PASS
+          # this issue exists to close: the field's whole job is to distinguish
+          # "the commit named" from "a modified tree that names it".
+          #
+          # MEASURED FROM THE TREE, never asserted: `git status --porcelain` on
+          # the checkout `flyctl deploy --remote-only` uploads is the actual
+          # answer, and a constant here would be the hand-editable "version"
+          # the issue forbids. Untracked files ARE included (porcelain default)
+          # because the remote builder uploads the working directory, so an
+          # untracked non-ignored file really does ship. Nothing before this
+          # step writes to the tree (the two preceding steps are read-only
+          # guards), so a clean CI checkout stamps `false`; if that ever stops
+          # being true the build reports itself as not-the-commit — a visible
+          # refusal, which is the safe direction.
+          #
+          # A `workflow` source needs a matching declaration in
+          # .github/scripts/fly-managed-secrets.txt or
+          # check-fly-secret-drift.py blocks every later deploy as undeclared.
+          ARGS+=(TORTOISE_GIT_DIRTY="$(if [ -n "$(git status --porcelain 2>/dev/null)" ]; then echo true; else echo false; fi)")
           # #1703: SUPABASE_ANON_KEY — public client key the OAuth consent page
           # embeds (supabase-js createClient). Was never synced to Fly, so the
           # page rendered with an empty key ('supabaseKey is required').
