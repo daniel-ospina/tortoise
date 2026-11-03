@@ -425,7 +425,7 @@ def render(rows: list[Row], repo: str, generated_at: str, truncated: bool = Fals
         " evidence of the live code: it is `RE-REVIEW` when the gate has no green verdict, and `OK`",
         " only because the gate itself already accepted the proof (so no re-post is owed).",
         "",
-        f"**{totals}**",
+        f"### Snapshot counts: {totals}",
         "",
         "| PR | head | record | record head | match | mint | verdict | evidence | gate | outcome |",
         "|---|---|---|---|---|---|---|---|---|---|",
