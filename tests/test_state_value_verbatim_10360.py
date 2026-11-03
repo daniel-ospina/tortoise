@@ -984,10 +984,20 @@ def test_the_carve_outs_own_ADJACENT_time_units_are_judged():
 #: `test_the_registry_row_names_the_residual_that_still_stands` must red on.
 #: Deliberately narrow: each one names a REOPENING, so a truthful rewording of
 #: "this gap is closed" passes, and `fails open` (true of the SPELLING case) is
-#: not matched (review cycle 6, measured against 4 reopenings and 4 paraphrases).
+#: not matched (review cycles 5 and 6, measured).
+#: ⛔ WHAT THIS CANNOT CATCH, stated rather than implied: it is a pattern list, so
+#: a reopening phrased with none of these words ("`minute` is back in the open
+#: set") passes. The pin's job is to catch the shapes a lane actually writes —
+#: the six below covered every one produced by three review cycles — not to be a
+#: semantic reader of English. Closing that gap needs a human or a different
+#: instrument, not a longer regex.
 _ADJACENCY_REOPENING = (
-    r"\bnot\s+closed\b",
-    r"\bno\s+longer\s+closed\b",
+    # `not closed`, allowing an adverb inside the negation (`is not yet / not
+    # fully / not really closed`) — the adverb-free form was the whole class
+    # one word away (review cycle 6, MEASURED: all three PASSED before this).
+    r"\bnot\b[^.;]{0,30}\bclosed\b",
+    r"\bisn'?t\b[^.;]{0,30}\bclosed\b",
+    r"\bno\s+longer\s+(closed|fuses|judged|caught|compared|enforced|retained)\b",
     r"\bunclosed\b",
     r"\bre-?open",
     r"\b(is|are|remains|remain|stays?|was|were)\s+(still\s+|now\s+)?open\b",
@@ -1032,33 +1042,37 @@ def test_the_registry_row_names_the_residual_that_still_stands():
     #   (b) the guard read `[:1200]` while residual (d) runs 1339 chars, so a
     #       reopening note appended where a lane APPENDS it was invisible EVEN
     #       with a phrase from the list ("no longer closed").
-    # So: scope to the WHOLE (d) block (up to `(e) the`), take every SENTENCE
-    # that makes an adjacency claim, and require that sentence to say `closed`
-    # and to carry NO reopening word — the check is per-sentence, so an appended
-    # contradiction lands in its own sentence and reds, and the window cannot
-    # truncate it. Verified against 4 reopening mutations (all FAIL) and 7
+    # So: scope to the WHOLE (d) block (up to `(e) the`), scan EVERY sentence for
+    # a reopening, and separately require the block to still NAME the adjacency
+    # claim as closed — the scan is not limited to sentences that say
+    # `adjacency`, because a reopening that names the gap another way
+    # ("`minute` no longer fuses", "the time-unit half is no longer closed",
+    # "except `minute`, which is open again") is the likeliest edit of all
+    # (review cycle 6, MEASURED: with the scan gated on `adjacency`, all five of
+    # those PASSED). Verified against 6 reopening mutations (all FAIL) and 4
     # truthful paraphrases ("is now CLOSED", "has been CLOSED", "We have closed
     # the ADJACENCY half", "the ADJACENCY gap is closed" — all PASS).
     block = row.split("(d) a RATE unit", 1)[1].split("(e) the", 1)[0]
     flat = " ".join(block.split()).lower()
-    claims = [s for s in re.split(r"(?<=[.!?;])\s+", flat) if "adjacency" in s]
-    assert claims, (
+    sentences = re.split(r"(?<=[.!?;])\s+", flat)
+    assert [s for s in sentences if "adjacency" in s], (
         "the row no longer makes any ADJACENCY claim in residual (d) — this "
         "table closed that gap; if it was reopened, say so AND delete this pin")
-    for sentence in claims:
-        assert "closed" in sentence, (
-            f"the row does not state the ADJACENCY gap as CLOSED: {sentence!r}")
-        # ⛔ MATCH THE ASSERTION OF OPENNESS, NOT BARE WORDS (review cycle 6,
-        # MEASURED): banning `not`/`never`/`still` outright over-blocked truthful
-        # paraphrases, because the sentence window can merge an adjacent clause
-        # (`… is CLOSED: … per day` is `not judged` → tripped on `not`). These
-        # patterns name reopening and nothing else, and `fails open` (a truthful
-        # thing to write about the SPELLING case) is deliberately not matched.
+    assert "closed" in flat, (
+        "the row does not state the ADJACENCY gap as CLOSED — this table "
+        "closed it; if it was reopened, say so AND delete that claim")
+    # ⛔ MATCH THE ASSERTION OF OPENNESS, NOT BARE WORDS (review cycle 6,
+    # MEASURED): banning `not`/`never`/`still` outright over-blocked truthful
+    # paraphrases, because the sentence window can merge an adjacent clause
+    # (`… is CLOSED: … per day` is `not judged` → tripped on `not`). These
+    # patterns name reopening and nothing else, and `fails open` (a truthful
+    # thing to write about the SPELLING case) is deliberately not matched.
+    for sentence in sentences:
         for pattern in _ADJACENCY_REOPENING:
             m = re.search(pattern, sentence)
             assert m is None, (
-                f"the row's adjacency claim says {m.group(0)!r}, which this "
-                f"table closed: {sentence!r}")
+                f"the row says {m.group(0)!r}, which reopens the adjacency gap "
+                f"this table closed: {sentence!r}")
     # positive control: the RATE class IS still open, and it must stay NAMED, or
     # the assertions above could be satisfied by a row that says nothing at all.
     assert "not judged" in flat, block
