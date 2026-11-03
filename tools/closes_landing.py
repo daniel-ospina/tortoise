@@ -758,7 +758,17 @@ def strip_code(body: str, strict: bool = False) -> str:
                 # need not match the opener's) — so the run has to sit where the
                 # container's content starts, and the text after that column is
                 # what must be nothing but fence and whitespace.
-                past = column - fence.container_col
+                #
+                # ⚠️ BOTH sides are in ONE space. `residual` is the indent after
+                # this line's own markers, which is the space `close_base` holds
+                # (the item's column past the prefix). Subtracting a RAW column
+                # (`column - container_col`) instead charged the MARKER'S allowance
+                # twice — the opener's `  > ` is 4 raw columns, the closer's `> `
+                # only 2, so a 4-space-indented run `>     ``` ` came out 2 columns
+                # past the container and closed a fence the renderer keeps open:
+                # `lands`, exit 0, no annotation (#10634, found by a sweep against
+                # the CommonMark reference implementation, not by a reviewer).
+                past = residual - fence.close_base
                 if (past <= _MAX_FENCE_INDENT
                         and _is_closer(line[column:], fence.opener)):
                     fence = None
