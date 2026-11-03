@@ -180,7 +180,7 @@ class FallbackSnapshotStore:
 
 _store = FallbackSnapshotStore()
 
-# ── #10602: SINGLE-FLIGHT build (one whole-corpus fetch per key, not one per reader) ──
+# ── #10602: SINGLE-FLIGHT build (one whole-corpus fetch per in-flight generation) ──
 #
 # The degraded read used to go ``get(key)`` → miss → ``build_snapshot(proj)`` → ``put``
 # with NOTHING serialising the build. Every concurrent reader therefore ran its own
@@ -281,11 +281,18 @@ def _flight_end(key: tuple, generation: tuple[int, int], flight: _Flight) -> Non
 
 def get_or_build(proj, key: tuple, *, store: FallbackSnapshotStore | None = None,
                  builder=None) -> dict | None:
-    """Cached snapshot for ``key``, building it at most ONCE per key at a time.
+    """Cached snapshot for ``key``, building it at most once per IN-FLIGHT GENERATION.
 
-    Behaviourally identical to the read path's ``get``/``build_snapshot``/``put``
-    sequence — same entry, same ``None``-on-too-big / ``None``-on-failed contract, same
-    write-side invalidation — except that concurrent readers COALESCE onto one build.
+    Same entry, same ``None``-on-too-big / ``None``-on-failed contract, same write-side
+    invalidation, and concurrent readers on one generation COALESCE onto one build —
+    but this is **NOT result-identical to the read path's ``get``/``build_snapshot``/
+    ``put`` sequence**, and that sentence must not be restored (review round 11, P2: it
+    survived here after round 10 had already forbidden the same claim 20 lines above).
+    Two documented differences: a reader racing a write's commit→invalidate tail can be
+    served that cohort's pre-commit rows (see the COMMIT→INVALIDATE WINDOW note), and an
+    overtaken build is no longer cached, so on a graph written to faster than a build
+    completes this LOSES cache hits the pre-change code had (see THE COST OF THAT
+    GUARD).
 
     STALENESS, stated exactly (review round 2 corrected an overstatement here). A build
     can be OVERTAKEN by a write: rows are read at t1, ``_mark_dirty`` →
@@ -371,7 +378,7 @@ def get_or_build(proj, key: tuple, *, store: FallbackSnapshotStore | None = None
     # round 10, P2: this comment previously claimed "read-your-writes, structurally: no
     # result can cross a write boundary", which is FALSE and was measured false). The
     # stamp only moves when ``invalidate()`` runs, and ``_mark_dirty`` calls it at the
-    # TAIL of each write surface, AFTER the graph commit (``sdk.py:17589`` →
+    # TAIL of each write surface, AFTER the graph commit (``sdk.py:17590`` →
     # ``:17594``, retract ``:20191``, promote ``:20346``). So there is a window between a
     # write COMMITTING and its invalidate landing. A reader whose ``store.get`` misses in
     # that window samples the PRE-write stamp and joins the pre-write flight, so it can be
@@ -381,7 +388,12 @@ def get_or_build(proj, key: tuple, *, store: FallbackSnapshotStore | None = None
     #
     #   1. A WRITER's own read-your-writes holds: every write surface invalidates before
     #      it returns, so by the time the caller can issue a search the stamp has moved
-    #      and the pre-write flight is unjoinable.
+    #      and the pre-write flight is unjoinable. ⛔ BEST-EFFORT, stated so it is not
+    #      read as a hard guarantee: the hook swallows its own failure
+    #      (``sdk.py:29896`` ``except Exception: pass``) and ``update_point``'s tag sync
+    #      can abort after the promote ``SET`` landed and before ``_mark_dirty``
+    #      (``sdk.py:17075``), so the stamp moves on every write that REACHES
+    #      ``_mark_dirty`` — not on one whose hook raised.
     #   2. An unrelated reader racing a write's commit→invalidate tail gets the cohort's
     #      pre-commit rows, exactly as it would have got them from a cache hit; pre-#10602
     #      it built its own rows and saw the write. That is a real, narrow difference from

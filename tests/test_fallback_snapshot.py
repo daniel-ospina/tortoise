@@ -1136,10 +1136,14 @@ def test_a_reader_racing_the_commit_invalidate_tail_gets_the_cohorts_rows():
     t1.start()
     assert built.wait(timeout=10), "the leader's build never started"
 
-    # The write COMMITS here (a fresh MATCH would see it) …
-    committed = True
-    # … but its ``_mark_dirty`` -> ``invalidate`` has NOT run yet. A reader arriving in
-    # this window samples the pre-write stamp and joins the pre-write flight.
+    # The write COMMITS here (a fresh MATCH would see it) … its ``_mark_dirty`` →
+    # ``invalidate`` has NOT run yet. A reader arriving in this window samples the
+    # pre-write stamp and joins the pre-write flight. The commit is modelled as a flag
+    # the leader's rows predate, NOT as ``fs._store.invalidate`` — modelling the write AS
+    # the invalidate is exactly what hid this window from the round-9 tests.
+    committed = threading.Event()
+    committed.set()
+    assert committed.is_set(), "the write committed before the racing reader arrives"
     heard: list[dict] = []
     t2 = threading.Thread(
         target=lambda: heard.append(
@@ -1162,7 +1166,7 @@ def test_a_reader_racing_the_commit_invalidate_tail_gets_the_cohorts_rows():
     t1.join(timeout=20)
     t2.join(timeout=20)
 
-    assert committed
+    assert committed.is_set()
     assert rows and rows[0].get("tag") == "pre-commit"
     assert heard and heard[0].get("tag") == "pre-commit", (
         "the documented behaviour: a reader racing the commit->invalidate tail is served "
@@ -1203,7 +1207,9 @@ def test_a_write_opens_a_concurrent_build_which_is_the_stated_concurrency_bound(
     builds: list[str] = []
     lock = threading.Lock()
     g0_started = threading.Event()
+    g0_done = threading.Event()
     release_g0 = threading.Event()
+    release_g1 = threading.Event()
 
     def builder(tag):
         def _b(_proj):
@@ -1211,7 +1217,18 @@ def test_a_write_opens_a_concurrent_build_which_is_the_stated_concurrency_bound(
                 builds.append(tag)
             if tag == "g0":
                 g0_started.set()
-                release_g0.wait(timeout=10)
+                try:
+                    release_g0.wait(timeout=10)
+                finally:
+                    g0_done.set()
+            else:
+                # ⛔ The g1 leader BLOCKS until released, so ``count("g1") == 1`` below
+                # can only be reached by the other three SHARING this flight. Without
+                # this the count also reads 1 when every late reader simply hits the
+                # cache, or when several sequential flights each re-check the cache —
+                # i.e. it would pass with ZERO coalescing (review round 11, P3: measured
+                # 19/20 trials with 2-4 non-coalescing leaders while the count was 1).
+                release_g1.wait(timeout=10)
             return _snap_stub(tag)
         return _b
 
@@ -1229,25 +1246,36 @@ def test_a_write_opens_a_concurrent_build_which_is_the_stated_concurrency_bound(
         threading.Thread(target=lambda: fs.get_or_build(None, key, builder=builder("g1")))
         for _ in range(4)
     ]
-    g1_started = threading.Event()
     for t in late:
         t.start()
+    # Deterministic: wait until the four late readers are SHARING the g1 flight, so the
+    # coalescing assertion below cannot be satisfied by cache hits or by sequential
+    # flights. The g1 leader is blocking in the builder, so no read can finish early.
+    g1 = fs._store.generation(key)
     deadline = time.monotonic() + 10
     while time.monotonic() < deadline:
-        with lock:
-            if builds.count("g1") >= 1:
-                g1_started.set()
-                break
+        fl = fs._FLIGHTS.get((key, g1))
+        if fl is not None and fl.waiters >= 4:
+            break
         time.sleep(0.005)
-    assert g1_started.is_set(), "the post-write cohort never started its own build"
+    else:
+        raise AssertionError(
+            f"the four same-stamp readers never shared one flight "
+            f"(waiters={getattr(fs._FLIGHTS.get((key, g1)), 'waiters', None)}) — "
+            f"they are not coalescing")
 
     with lock:
-        concurrent = "g0" in builds and "g1" in builds and not release_g0.is_set()
+        # ⛔ ``not g0_done`` — the EVENT that says the g0 build has returned, not
+        # ``not release_g0.is_set()``, which is True even after the builder's timeout
+        # fired (review round 11, P3: the event was never set on timeout, so the proxy
+        # was true when g0 had already finished).
+        concurrent = builds.count("g0") == 1 and builds.count("g1") == 1 and not g0_done.is_set()
     assert concurrent, (
         "the stated bound: a newer generation builds CONCURRENTLY with an in-flight "
         "older one. If this fails, generations were serialised — a real change, and "
         "the BANNER note must be updated to say so")
 
+    release_g1.set()
     release_g0.set()
     for t in [t0, *late]:
         t.join(timeout=20)
