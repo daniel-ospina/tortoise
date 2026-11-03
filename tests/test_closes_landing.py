@@ -1427,16 +1427,6 @@ def test_a_keyword_inside_the_blockquote_fence_is_still_stripped():
     assert cl.parse_closing_refs(body) == []
 
 
-if __name__ == "__main__":  # the standalone form the docstring advertises
-    # This file opens no graph, so it is exactly the #1647 P4 carve-out case; the
-    # session gate otherwise refuses every test with "default pytest requires
-    # TORTOISE_DB_URI" and the standalone form would report a wall of errors.
-    import os
-
-    os.environ.setdefault("TORTOISE_TEST_CARVE_OUT", "1")
-    raise SystemExit(pytest.main([__file__, "-q"]))
-
-
 # ── cycle 8: the container ENDS the fence (blank line, or lost indent) ───────
 
 @pytest.mark.parametrize("body,expected", [
@@ -1801,9 +1791,17 @@ def test_the_ITEM_EDGE_is_measured_in_the_space_the_item_lives_in():
 
 
 if __name__ == "__main__":  # pragma: no cover
-    # The docstring advertises `Run standalone: python3 tests/test_closes_landing.py`.
-    # Without this block that command imports the module, defines every test,
-    # invokes none and exits 0 — a green that ran nothing, which is the residue
-    # class this repo names for entry points (#10634 review P2, found twice).
-    # Peer convention: `tests/test_2350_validity_precision.py`.
+    # The module docstring advertises `Run standalone: python3 tests/test_closes_landing.py`.
+    # This is the ONE block that makes that command real — it must stay at the END
+    # of the file and be the only one. A lane left a second copy mid-file, so this
+    # one never executed and its comment claimed a fix that the other block was
+    # already providing; both are now one block, here.
+    #
+    # The carve-out is not optional: this file opens no graph, so it is exactly the
+    # #1647 P4 carve-out case, and without it the session gate refuses every test
+    # with "default pytest requires TORTOISE_DB_URI" — a standalone run that reds
+    # for a reason that has nothing to do with what it tests.
+    import os
+
+    os.environ.setdefault("TORTOISE_TEST_CARVE_OUT", "1")
     raise SystemExit(pytest.main([str(Path(__file__).resolve()), "-q"]))
