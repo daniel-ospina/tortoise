@@ -332,6 +332,26 @@ def load_blocker_states(path: Path) -> dict:
         if value.get("state") not in BLOCKER_STATE_WORDS:
             raise ValueError(f"blocker {key} state is {value.get('state')!r}, not "
                              f"one of {BLOCKER_STATE_WORDS}")
+        # ⛔ ONE FIELD CANNOT SAY BOTH (#10601 review P2). The vocabulary above
+        # guards the WORD; `closed_at` was never read, so flipping the shipped
+        # `"CLOSED"` to `"OPEN"` — one edit, the close instant left in place —
+        # satisfied V12 while the same entry went on recording WHEN the issue
+        # closed (measured: exit 0, OK line "every cited blocker verified").
+        # That is precisely the one-character disarm this loader must never
+        # permit, so the record's internal consistency is checked here: the
+        # record is V12's ONLY input, and its self-consistency is the one thing
+        # the check can verify without the network.
+        closed_at = value.get("closed_at")
+        # ABSENT and `null` both mean "no close instant" — an entry may omit the
+        # key, and that must read the same as the shipped `null`.
+        if value.get("state") == "OPEN" and closed_at is not None:
+            raise ValueError(f"blocker {key} is OPEN but carries closed_at "
+                             f"{closed_at!r} — a state record cannot say both "
+                             "that an issue is live and when it closed")
+        if value.get("state") == "CLOSED" and not closed_at:
+            raise ValueError(f"blocker {key} is CLOSED with no closed_at — a "
+                             "CLOSED entry that does not say when it closed "
+                             "cannot be told from an unread one")
         states[key] = value
     return states
 
@@ -946,9 +966,26 @@ def check(record: dict, *, repo: Path,
                           "that no longer blocks. Re-measure the row at a head "
                           "where that work landed, or name the blocker that "
                           "still holds")
-                # V12 EVALUATED this row and found the blocker live.
-                else:
+                elif state.get("state") == "OPEN":
+                    # V12 EVALUATED this row and found the blocker live.
                     pass
+                else:
+                    # ⛔ "NOT THE WORD `CLOSED`" IS NOT "OPEN" (#10601 review P2).
+                    # The polarity here used to be `== "CLOSED"` … `else: pass`,
+                    # so every state that was not exactly `CLOSED` — a lowercase
+                    # `closed`, an empty string, `None` — resolved to a PASS at
+                    # the layer that DECIDES the verdict. `main()` guards this
+                    # through `load_blocker_states`, but `check()` is the
+                    # module's documented verdict engine ("Apply V1-V12 to a
+                    # parsed verdict table"), so the guard cannot be the only
+                    # one: an UNREADABLE state is exactly the class this arm
+                    # exists to refuse. Only the two words the schema defines can
+                    # clear a row; anything else is a finding.
+                    f.add("V12", where,
+                          f"blocked_by {blocker} state is "
+                          f"{state.get('state')!r}, not one of "
+                          f"{BLOCKER_STATE_WORDS} — an unrecognised state is "
+                          "not an OPEN blocker, so it cannot clear this row")
             elif blocker_states is not None and _blocker_exempt(
                     run, kind, num, den):
                 # Exempt, and COUNTED so the OK line cannot claim a
