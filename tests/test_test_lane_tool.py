@@ -208,10 +208,16 @@ def test_a_failed_docker_run_is_cleaned_up_by_the_id_it_printed(lane, monkeypatc
 
 
 def test_the_reaper_never_removes_a_container_no_worktree_here_claims(monkeypatch):
-    """The central report-only rule. An unowned slug may belong to a DIFFERENT
-    clone of this repo, whose live lane this tool cannot see — so nothing about
-    that container authorizes a removal, including its age (stubbed ancient here
-    precisely to prove a clock is not the trigger)."""
+    """The central report-only rule, and the DEFAULT. An unowned slug may belong
+    to a DIFFERENT clone of this repo, whose live lane this tool cannot see — so
+    nothing about that container authorizes a removal, including its age (stubbed
+    ancient here precisely to prove a clock is not the trigger).
+
+    #10693 review F2: this docstring and `test_ORPHAN_MAX_AGE_H_gates_the_unowned_arm`
+    used to contradict each other — that test removed the container on age alone.
+    The ruling's letter is the default again: age+no-client only makes a container
+    a CANDIDATE, and the removal additionally needs an explicit operator opt-in
+    (`OWNER_INDETERMINATE_REAP_ENV`), which is the armed path that test exercises."""
     removed: list = []
 
     def fake(*a, **k):
@@ -926,8 +932,87 @@ def test_a_STOPPED_ownerless_orphan_is_reclaimed(monkeypatch):
     monkeypatch.setattr(tl, "container_state", lambda _n: "exited")
     monkeypatch.setattr(tl, "_started_epoch", lambda _n: time.time() - 40 * 3600)
     monkeypatch.setattr(tl, "_unused_gap", lambda _n: 40.0)
+    # The removal itself is an operator opt-in (#10693 review F2): the default
+    # REPORTS this container (see test_arm_3_defaults_to_REPORT_ONLY).
+    monkeypatch.setenv(tl.OWNER_INDETERMINATE_REAP_ENV, "1")
     out = tl.reap_orphans()
     assert removed == [("-f", "fdb-lane-0fedcba987")], (removed, out)
+
+
+def test_arm_3_defaults_to_REPORT_ONLY_and_names_the_opt_in(monkeypatch):
+    """#10693 review F2, the DEFAULT half. The evidence is complete — no owner in
+    this clone, no live process, no client, unused 40 h > the 24 h backstop — and
+    the container is still NOT removed, because #8180's ruling says both "an age
+    backstop for owner-INDETERMINATE containers" (the issue's Outcome) and "if
+    ownership cannot be determined, do NOT delete — report only" (the owner's
+    boundaries) about this exact population. A lane does not pick between two
+    owner sentences; the report tells the operator what it may release.
+
+    Mutation: drop the `_env_consent(OWNER_INDETERMINATE_REAP_ENV)` gate and this
+    container is removed — the unruled departure the review refused."""
+    removed: list = []
+
+    def fake(*a, **k):
+        if a[0] == "ps":
+            return _R(0, "fdb-lane-0123456789\trunning\n", "")
+        if a[0] == "rm":
+            removed.append(a[1:])
+        return _R(0, "", "")
+
+    monkeypatch.delenv(tl.OWNER_INDETERMINATE_REAP_ENV, raising=False)
+    monkeypatch.setattr(tl, "_docker", fake)
+    monkeypatch.setattr(tl, "lane_name", lambda: "fdb-lane-mine")
+    monkeypatch.setattr(tl, "_worktree_slugs", lambda: {})
+    monkeypatch.setattr(tl, "_live_lane_paths", lambda: set())
+    monkeypatch.setattr(tl, "_container_in_use", lambda _n: False)
+    monkeypatch.setattr(tl, "container_state", lambda _n: "running")
+    monkeypatch.setattr(tl, "_started_epoch", lambda _n: time.time() - 40 * 3600)
+    monkeypatch.setattr(tl, "_unused_gap", lambda _n, **k: 40.0)
+    out = tl.reap_orphans()
+    joined = "\n".join(out)
+    assert removed == [], (removed, out)
+    assert tl.OWNER_INDETERMINATE_REAP_ENV in joined, out
+    assert "40.0h" in joined and "report only" in joined, out
+
+
+def test_arm_2_defaults_to_REPORT_ONLY_and_names_the_remedy(tmp_path, monkeypatch):
+    """#10693 review F2, the DEFAULT half of arm 2. Every positive proof is in
+    place — the owner worktree exists, no live process names it, no client, the
+    lease is 3 h old — and the container is STILL kept, because #8180 authorises a
+    reap "when the worktree that owns it is gone" and this worktree is not.
+
+    The report is the deliverable here: it carries the evidence chain and the ONE
+    command that releases the container from its own worktree, so an operator does
+    not have to re-derive the attribution by hand.
+
+    Mutation: drop the `_env_consent(LANE_GONE_REAP_ENV)` gate and the container
+    is removed — the departure from the recorded ruling the review refused."""
+    owner = tmp_path / "stranded-lane"
+    owner.mkdir()
+    removed: list = []
+
+    def fake(*a, **k):
+        if a[0] == "ps":
+            return _R(0, "fdb-lane-strand0001\trunning\n", "")
+        if a[0] == "rm":
+            removed.append(a[1:])
+        return _R(0, "", "")
+
+    monkeypatch.delenv(tl.LANE_GONE_REAP_ENV, raising=False)
+    monkeypatch.setattr(tl, "_docker", fake)
+    monkeypatch.setattr(tl, "lane_name", lambda: "fdb-lane-mine")
+    monkeypatch.setattr(tl, "_worktree_slugs",
+                        lambda: {"strand0001": str(owner)})
+    monkeypatch.setattr(tl, "_live_lane_paths", lambda: set())
+    monkeypatch.setattr(tl, "_container_in_use", lambda _n: False)
+    monkeypatch.setattr(tl, "_started_epoch", lambda _n: time.time() - 9 * 3600)
+    monkeypatch.setattr(tl, "_unused_gap", lambda _n, **k: 3.0)
+    out = tl.reap_orphans()
+    joined = "\n".join(out)
+    assert removed == [], (removed, out)
+    assert f"cd {owner} && uv run python tools/test_lane.py down" in joined, out
+    assert tl.LANE_GONE_REAP_ENV in joined, out
+    assert "still EXISTS" in joined, out
 
 
 def test_worktree_of_extracts_the_root_from_a_shell_wrapper_cmdline(tmp_path):
@@ -1091,6 +1176,10 @@ def test_the_age_backstop_is_READ_not_an_inert_claim(tmp_path, monkeypatch):
     monkeypatch.setattr(tl, "_container_in_use", lambda _n: False)
     monkeypatch.setattr(tl, "OWNER_GRACE_H", 2.0)
     monkeypatch.setattr(tl, "_started_epoch", lambda _n: time.time() - 3 * 3600)
+    # The bound is proven on the ARMED path: removing this container is an
+    # operator opt-in (#10693 review F2), so the removal case sets it. The
+    # default keeps it and reports (test_arm_2_defaults_to_REPORT_ONLY).
+    monkeypatch.setenv(tl.LANE_GONE_REAP_ENV, "1")
 
     # 1 h of the gap, grace 2 h -> KEPT. Proves OWNER_GRACE_H gates the removal.
     monkeypatch.setattr(tl, "_unused_gap", lambda _n, **k: 1.0)
@@ -1205,6 +1294,9 @@ def test_ORPHAN_MAX_AGE_H_gates_the_unowned_arm(tmp_path, monkeypatch):
     monkeypatch.setattr(tl, "_container_in_use", lambda _n: False)
     monkeypatch.setattr(tl, "container_state", lambda _n: "running")
     monkeypatch.setattr(tl, "ORPHAN_MAX_AGE_H", 24.0)
+    # Removal is an operator opt-in (#10693 review F2); the default for this
+    # population is the report, pinned by test_arm_3_defaults_to_REPORT_ONLY.
+    monkeypatch.setenv(tl.OWNER_INDETERMINATE_REAP_ENV, "1")
 
     monkeypatch.setattr(tl, "_started_epoch", lambda _n: time.time() - 25 * 3600)
     monkeypatch.setattr(tl, "_unused_gap", lambda _n, **k: 1.0)

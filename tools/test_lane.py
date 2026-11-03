@@ -396,6 +396,23 @@ NAME_PREFIX = "fdb-lane-"
 #: age backstop for containers whose owner can no longer be determined"); it is
 #: never the proof, and it can never fire on a live owner.
 #:
+#: ⛔ WHAT THE **DEFAULT** AUTHORISES (#10693 review F2) — the ownership evidence
+#: above is necessary and NOT sufficient. #8180's owner ruling is the operative
+#: text: "a `fdb-lane-*` container MAY be reaped **when the worktree that owns it
+#: is gone**", "the age backstop applies only to owner-INDETERMINATE containers",
+#: "fail-closed: if ownership cannot be determined, do NOT delete — report only",
+#: "reap only what is *yours*". Those sentences do not agree about the
+#: owner-indeterminate population, and they do not reach a container whose
+#: owning worktree STILL EXISTS. A lane picking a side is not a decision, so the
+#: two proofs built on top of that evidence are **armed machinery behind an
+#: explicit operator action** (`LANE_GONE_REAP_ENV` / `OWNER_INDETERMINATE_REAP_ENV`)
+#: and the DEFAULT is the ruling's letter plus a report that carries the whole
+#: evidence chain and the one command that releases each container. Only the
+#: worktree-gone proof fires unconditionally, because it is the one #8180
+#: authorises. The reopen carrying cell-1's census, the `/proc` blind-spot
+#: closure and the 15.6 h-vs-24 h bound is on #8180: if the owner rules for either
+#: arm, that ruling becomes the default and the switch disappears.
+#:
 #: WHY 2 h — `OWNER_GRACE_H`: the owning worktree exists but nothing holds it.
 #: A lane shells out per step, so the container is legitimately unheld only
 #: BETWEEN two processes of the same lane: a single model turn, minutes. The
@@ -1524,14 +1541,40 @@ _TERMINAL_STATES = frozenset({"exited", "dead"})
 #: module already uses for the team-namespace sweep (#1884 / #4128).
 STOPPED_REAP_ENV = "TORTOISE_TEST_LANE_REAP_STOPPED"
 
+#: Operator opt-ins for the two ownership proofs #8180's recorded ruling does NOT
+#: settle (#10693 review F2). OFF by default, and the default is the ruling:
+#:
+#:   * the automatic delete is authorised "when the worktree that owns it is
+#:     gone", so removing a container whose worktree STILL EXISTS (arm 2) is
+#:     outside it by the ruling's own words;
+#:   * the ruling says both "the age backstop applies only to
+#:     owner-INDETERMINATE containers" and "if ownership cannot be determined,
+#:     do NOT delete — report only" about the SAME population (arm 3), so a
+#:     lane's pick between two contradictory owner sentences is not a decision.
+#:
+#: Both arms are therefore ARMED MACHINERY BEHIND AN EXPLICIT OPERATOR ACTION, and
+#: the default REPORTS each candidate with the evidence it gathered and the one
+#: command that releases it from its own worktree. This is the same shape — and
+#: for the same ruling — as ``STOPPED_REAP_ENV`` above (#9338): the measured relief
+#: is preserved, and nothing is adopted over the decision. The reopen carrying
+#: cell-1's census, the /proc blind-spot closure and the 15.6 h-vs-24 h bound is on
+#: #8180; if the owner rules for either arm, the default becomes that ruling and
+#: these variables disappear.
+LANE_GONE_REAP_ENV = "TORTOISE_TEST_LANE_REAP_LANE_GONE"
+OWNER_INDETERMINATE_REAP_ENV = "TORTOISE_TEST_LANE_REAP_OWNER_INDETERMINATE"
+
+
+def _env_consent(var: str) -> bool:
+    """Whether the OPERATOR asked for a deletion that crosses a recorded boundary.
+
+    Strict ``"1"``: any other spelling is not consent for a destructive default.
+    """
+    return os.environ.get(var, "0") == "1"
+
 
 def _stopped_reap_enabled() -> bool:
-    """Whether the OPERATOR asked for the withheld proof-2 reap (#8180).
-
-    Strict ``"1"``: any other spelling is not consent for a deletion that
-    crosses a recorded ownership boundary.
-    """
-    return os.environ.get(STOPPED_REAP_ENV, "0") == "1"
+    """Whether the OPERATOR asked for the withheld proof-2 reap (#8180)."""
+    return _env_consent(STOPPED_REAP_ENV)
 
 
 def _graph_count(name: str) -> int | None:
@@ -2389,23 +2432,37 @@ def reap_orphans() -> list[str]:
     the same way (``_LIVE_ISH_STATES``) and never reach the STATE arm, which fires
     only on ``_TERMINAL_STATES``.
 
-    THREE proofs are armed, and every one of them is ownership of a LANE:
+    THREE proofs are built, and every one of them is ownership of a LANE. Only
+    proof 1 fires by default: #8180's ruling authorises a deletion "when the
+    worktree that owns it is gone" and does not settle the other two (#10693
+    review F2), so 2 and 3 are ARMED MACHINERY BEHIND AN EXPLICIT OPERATOR
+    ACTION (``LANE_GONE_REAP_ENV`` / ``OWNER_INDETERMINATE_REAP_ENV``) and their
+    default is a report carrying the whole evidence chain and the one command
+    that releases the container.
 
     2. **The owning worktree exists but its LANE is gone** (``OWNER_GRACE_H``).
        Positive evidence, all of it: no live process on this host holds that
        worktree (cwd **or** command line — ``_live_lane_paths``), the container
        reports no client activity (``_container_in_use``), and nothing has held
-       it for ``OWNER_GRACE_H``. This is the arm the measured leak needed: the
+       it for ``OWNER_GRACE_H``. This is the arm the measured leak needs: the
        worktree SURVIVES `cmux workspace close`, so "the directory is still
-       there" was being read as "the lane is still alive" for days.
+       there" was being read as "the lane is still alive" for days. Removal
+       needs ``LANE_GONE_REAP_ENV=1`` — WITHOUT IT this arm reports the whole
+       evidence chain plus the `down` command that releases the container from
+       its own worktree, because the ruling's authority is scoped to a GONE
+       worktree and this one exists.
 
     3. **Ownership cannot be determined from this clone, and the container is
        cold for ``ORPHAN_MAX_AGE_H``.** The `git worktree list` blind spot: the
        container may belong to another clone on the box. ``_live_lane_paths``
        reads ``/proc``, so a live cross-clone lane is still seen and spared; only
        a container that no process names AND that has served no client for the
-       whole bound is returned. Unresolvable owner with a live process, or with
-       unreadable evidence, is still REPORTED and never destroyed.
+       whole bound is a candidate. Unresolvable owner with a live process, or with
+       unreadable evidence, is still REPORTED and never destroyed. Removal needs
+       ``OWNER_INDETERMINATE_REAP_ENV=1``: the ruling says both "the age backstop
+       applies only to owner-INDETERMINATE containers" and "if ownership cannot
+       be determined, do NOT delete", so the default reports and the owner's
+       ruling (reopened on #8180) decides.
 
     Fail-closed: if the worktree list or `docker ps` cannot be read, nothing is
     removed and the reason is reported; a state this module does not recognise
@@ -2629,6 +2686,24 @@ def reap_orphans() -> list[str]:
                            f"re-established at the moment of action, or the "
                            f"container became live mid-sweep")
                 continue
+            if not _env_consent(LANE_GONE_REAP_ENV):
+                # The proof is complete and the lane really is gone — but #8180
+                # authorises a deletion only "when the worktree that owns it is
+                # gone", and this worktree still exists. A lane may not widen
+                # that on its own (review F2), so the DEFAULT is the report: it
+                # carries the whole evidence chain and the one command that
+                # releases the container from its own worktree, and the armed
+                # switch names the reopen that would make removal the default.
+                out.append(
+                    f"reap: kept {name} — nothing holds {owner} (no live process "
+                    f"names it, no client attached within "
+                    f"{ACTIVE_CLIENT_IDLE_S}s, unused {gap_h:.1f}h > "
+                    f"{OWNER_GRACE_H:g}h), but its owning worktree still EXISTS "
+                    f"and #8180 authorises a reap only when that worktree is "
+                    f"gone. Release it from its own worktree: `cd {owner} && uv "
+                    f"run python tools/test_lane.py down` (or rule on #8180 to "
+                    f"arm `{LANE_GONE_REAP_ENV}=1`)")
+                continue
             rm = _docker("rm", "-f", name)
             _drop_lease(name)
             out.append(
@@ -2727,6 +2802,23 @@ def reap_orphans() -> list[str]:
             out.append(f"reap: kept {name} — it became LIVE at the moment of "
                        f"action (a lane appeared mid-sweep), or liveness could "
                        f"not be re-established (fail-closed)")
+            continue
+        if not _env_consent(OWNER_INDETERMINATE_REAP_ENV):
+            # #8180's ruling is self-contradictory on exactly this population —
+            # "the age backstop applies only to owner-INDETERMINATE containers"
+            # and "if ownership cannot be determined, do NOT delete — report
+            # only" — so the DEFAULT cannot be a lane's pick between them
+            # (review F2). Report the whole chain instead: an operator can act
+            # on it, and the armed switch is the operator's explicit widening.
+            out.append(
+                f"reap: kept {name} — no worktree in this clone names it, no "
+                f"live process on this host owns it, no client attached within "
+                f"{ACTIVE_CLIENT_IDLE_S}s, and it has done no work for "
+                f"{gap_h:.1f}h (> {ORPHAN_MAX_AGE_H:g}h) — but its owner cannot "
+                f"be determined HERE (#8180: report only, fail-closed). It may "
+                f"belong to another clone/CELL_HOME on this box; remove it only "
+                f"if you can attribute it, or rule on #8180 to arm "
+                f"`{OWNER_INDETERMINATE_REAP_ENV}=1`")
             continue
         rm = _docker("rm", "-f", name)
         _drop_lease(name)
