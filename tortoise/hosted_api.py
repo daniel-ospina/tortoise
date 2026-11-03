@@ -12224,11 +12224,15 @@ async def org_info(org: dict = Depends(get_current_org_session_ungated)):  # noq
     sdk = await _graph_offload(
         lambda: _org_sdk_for_credential(org), op="org_sdk")
     # Count REAL Points in default graph. #2360: demo/sample Points
-    # (_seed_demo_graph: the 12 sample Points + _demo_sentinel) are EXCLUDED
+    # (_seed_demo_graph: the 9 sample Points + _demo_sentinel) are EXCLUDED
     # — the Overview memory digest (this count) presents the user's own
     # filings, never opt-in/legacy sample content masquerading as user data.
-    # The exclusion set is the same constant the demo seeder writes from, so
-    # it can never drift. #1591: FAIL SOFT — a missing/broken org graph
+    # The exclusion set is the same constant the demo seeder declares, so it
+    # can never drift. Since #10000 the set is a SUPERSET of what the seeder
+    # writes: the three `epi_turn*` ids no longer name a node (§9.1/D1 — the
+    # demo's episodic layer is the Session), and they stay in the set so the
+    # count keeps excluding a graph seeded before that change.
+    # #1591: FAIL SOFT — a missing/broken org graph
     # (half-failed provisioning, restores) must not dead-end the dashboard
     # with a hard 500; the client renders the empty state and a write
     # recreates the graph. SCOPE (#3718): the SDK construction above is a
@@ -13754,7 +13758,19 @@ _DEMO_SEMANTIC_POINTS = [
      ["tortoise", "ontology"]),
 ]
 
-# (pid, content) — episodic turns (pointKind 'event', no tags)
+# (pid, content) — the demo's SAMPLE TRANSCRIPT: DECLARED, NOT WRITTEN.
+# ⛔ Since #10000 these carry NO graph node. §9.1/D1 puts raw turn text in
+# Postgres ("not in the graph, not a `Document`, not a `Point`"), so
+# `_seed_demo_graph` writes only the demo `:Session` FOR THIS LAYER — whose
+# `turn_count` is **0**, because it stores no turn — and reports this list's
+# LENGTH as the
+# response's `sample_turns`, NEVER as `turn_count` (which is a completeness
+# claim the session read acts on; see the note at the write site). The ids are still
+# declared here because `_DEMO_POINT_IDS` names them: a graph seeded BEFORE
+# #10000 holds those nodes, and `org.point_count` must keep excluding them.
+# Read the texts as the sample transcript the demo DESCRIBES — nothing writes
+# them to a store, and `tests/test_10000_turns_record_only.py` reads them to
+# assert exactly that.
 _DEMO_EPISODIC_TURNS = [
     ("epi_turn1", "[user] Let's set up our agent memory system with Tortoise."),
     ("epi_turn2", "[assistant] I'll initialize the graph and configure the ontology layers. "
@@ -13794,9 +13810,12 @@ _DEMO_PROCEDURAL_POINTS = [
      ["workflow", "review"]),
 ]
 
-# Every demo/sample Point the seeder can write, incl. the sentinel. The
-# Overview digest (org.point_count) excludes exactly this set — sample
-# content never counts as the user's own filings (#2360).
+# Every demo/sample Point the seeder can write, incl. the sentinel — PLUS the
+# `epi_turn*` ids it no longer writes (see `_DEMO_EPISODIC_TURNS`). The
+# Overview digest (org.point_count) excludes this set — sample content never
+# counts as the user's own filings (#2360) — and a graph seeded before #10000
+# still holds those three, so the set is deliberately a SUPERSET of what the
+# seeder writes today.
 _DEMO_POINT_IDS: frozenset[str] = frozenset(
     pid for pid, *_ in (
         _DEMO_SEMANTIC_POINTS + _DEMO_EPISODIC_TURNS
@@ -13864,24 +13883,54 @@ def _seed_demo_graph(org_id: str) -> dict:
     # #3554: the id comes from the ONE declaration (`session_schema.demo_session_id`),
     # not a local f-string, so the writer and any future exclusion cannot drift.
     session_id = demo_session_id(org_id)
+    # ⛔ `turn_count` is 0, NOT the sample transcript's length. `turn_count` is a
+    # COMPLETENESS CLAIM the capture path earns by storing the turns it counts
+    # (`record_read.served_turn_count` refuses a copy that holds fewer than the
+    # declared count, and the capture writer sets it to the length it actually
+    # wrote). This seed stores no turn anywhere, so declaring 3 would
+    # be the one shape the product never produces: measured on an armed,
+    # journaling deployment the demo session's read refused with
+    # `record_unavailable` (503), and on an unarmed one it served
+    # `{"turns": 3, "turn_points": []}` — two numbers in one body contradicting
+    # each other, the exact class #10021-P2 added that guard to eliminate.
+    # The sample transcript's LENGTH is reported as `sample_turns` in the
+    # response instead, where no read treats it as a promise about stored rows.
     proj.g.query(
         "MERGE (s:Session {id:$sid}) "
-        "SET s.created_at=$now, s.turn_count=3",
+        "SET s.created_at=$now, s.turn_count=0",
         params={"sid": session_id, "now": now},
     )
-    episodic_turns = _DEMO_EPISODIC_TURNS
-    for pid, content in episodic_turns:
-        proj.g.query(
-            "MERGE (t:Point {id:$id}) "
-            "SET t.content=$c, t.pointKind='event', t.is_operator=false, "
-            "t.status='live', t.createdAt=$now, t.updatedAt=$now",
-            params={"id": pid, "c": content, "now": now},
-        )
-        proj.g.query(
-            "MATCH (s:Session {id:$sid}), (t:Point {id:$pid}) "
-            "MERGE (s)-[:CONTAINS]->(t)",
-            params={"sid": session_id, "pid": pid},
-        )
+    # ── §9.1/D1: the demo's episodic layer is the SESSION, never turn nodes ──
+    # `STORAGE-ARCHITECTURE.md` §9.1 (D1), under §2.0's authority split, puts raw
+    # turn text in Postgres — "not in the graph, not a `Document`, not a
+    # `Point`". This seeder wrote one `:Point {pointKind:'event'}` per demo turn
+    # carrying that turn's literal text, `CONTAINS`-wired to the Session: the
+    # per-turn-text-node shape `#10000` removed from the capture path, and the
+    # last PRODUCT/RUNTIME writer producing it unconditionally. THREE residuals
+    # still write that shape and are deliberate, so they are named rather than
+    # left to be rediscovered — this enumeration is the book a §9.1/D1 audit
+    # would close on: the capture path keeps it as its record-incapable
+    # fallback; both offline eval-corpus ingest legs (`tools/longmem_eval/
+    # ingest.py`, `ingest_v2.py`) mint it ungated for the corpus graphs they
+    # build; and `tools/ask_spotcheck.py::seed_capture_turn_store` mints it
+    # (raw Cypher, no gate) for every ask fixture since #3914 — the copy this
+    # module's capture-side NOTE calls the THIRD. It is
+    # not a captured transcript, so there is no record row it duplicates —
+    # which made the graph the only RUNTIME store of text §2.0 says the graph
+    # may not authoritatively hold.
+    #
+    # The demo now writes the shape the product produces: the Session with its
+    # counter and no turn text on any node.
+    #
+    # ⚠️ NOT RETROACTIVE, the same posture as the `tags` note above: the sentinel
+    # short-circuits before any write, so a demo graph seeded BEFORE this keeps
+    # its `epi_turn*` nodes. ⛔ RE-SEEDING DOES NOT REPAIR THEM — a re-seed
+    # writes nothing for those ids and deletes nothing (unlike the `tags` case,
+    # whose `MERGE` re-writes `p.tags`). Deleting those three nodes is the
+    # graph-side repair, and it is destructive, so it is out of this change's
+    # scope. Blast radius: opt-in sample content that `org.point_count`
+    # excludes — but the demo `:Session` is still returned by the session reads,
+    # so the pre-existing nodes stay reachable there and in search.
 
     # ── Epistemic Layer — claims with evidence ───────────────────
     epistemic_points = _DEMO_EPISTEMIC_POINTS
@@ -13941,18 +13990,32 @@ def _seed_demo_graph(org_id: str) -> dict:
         params={"now": now},
     )
 
+    # `points` is a `:Point` CENSUS of what this call writes (the sentinel
+    # excluded — `public_demo` adds it), not a description of the sample
+    # content: its only consumer meters a write op — `public_demo` calls
+    # `_record_write_op(org, nodes_written=created["points"] + 1)`, whose
+    # contract is "net-new non-episodic nodes written by this call". The
+    # episodic layer now writes NO node (its text would be a §9.1/D1
+    # violation), so counting it here would bill three nodes that do not
+    # exist. The declared transcript LENGTH is reported separately as
+    # `sample_turns`, so nothing that wants the demo's shape has to read the
+    # census, and nothing that bills has to read the declaration.
     total_points = (
-        len(semantic_points) + len(episodic_turns)
-        + len(epistemic_points) + len(procedural_points)
+        len(semantic_points) + len(epistemic_points) + len(procedural_points)
     )
     return {
         "status": "demo_created",
         "org_id": org_id,
         "session_id": session_id,
         "points": total_points,
+        #: The declared length of the sample transcript. Survives the removal
+        #: of the turn nodes because the DECLARATION survives; the Session
+        #: states 0 — the number of turns it actually stores.
+        "sample_turns": len(_DEMO_EPISODIC_TURNS),
         "layers": {
             "semantic": len(semantic_points),
-            "episodic": len(episodic_turns),
+            # 0 NODES: the episodic layer is the Session, per §9.1/D1.
+            "episodic": 0,
             "epistemic": len(epistemic_points),
             "procedural": len(procedural_points),
         },
@@ -13963,7 +14026,9 @@ def _seed_demo_graph(org_id: str) -> dict:
 
 @app.post("/internal/demo")
 async def create_demo_graph(request: Request):
-    """Create an OPT-IN demo graph with sample Points across all 4 ontology
+    """Create an OPT-IN demo graph with sample Points across the semantic,
+    epistemic and procedural layers, plus the demo `:Session` (the episodic
+    layer carries no Point since #10000, §9.1/D1), across the 4 ontology
     layers.
 
     #2360 (re-spec): this is NO LONGER auto-called by the tenant-provision
@@ -36131,7 +36196,7 @@ async def public_demo(org: dict = Depends(get_current_org_gated)):  # noqa: B008
     Reuses the same seeding logic as /internal/demo but requires a Bearer
     tt_ key instead of the internal key. Idempotent (sentinel check).
     """
-    # C5 #2114 (code-review P1): the demo seed writes ~13 Points into the
+    # C5 #2114 (code-review P1): the demo seed writes ~10 Points into the
     # org's DEFAULT graph — a graph-bound key seeding it would be a
     # cross-graph write; a graphs:read-only key seeding it would be a
     # read→write scope bypass. Demo is a default-graph org surface.
@@ -36140,7 +36205,7 @@ async def public_demo(org: dict = Depends(get_current_org_gated)):  # noqa: B008
     # #3718 residual (DATA plane): every step of the seed region below is SYNC
     # FalkorDB socket I/O — `_make_sdk` (in embedded mode it probes the anchor
     # and can open the DB), the projection attach, the sentinel read, the quota
-    # count and the ~13-Point seed. They run as ONE worker hand-off, so the
+    # count and the ~10-Point seed. They run as ONE worker hand-off, so the
     # region's statements stay uninterleaved WITHIN the request.
     #
     # ⚠️ ONE HAND-OFF IS NOT MUTUAL EXCLUSION: `asyncio.to_thread` submits to
@@ -36161,13 +36226,13 @@ async def public_demo(org: dict = Depends(get_current_org_gated)):  # noqa: B008
             return {"existing": True, "created": None}
         # #1922: quota-gate the seed like the MCP twin
         # (tortoise_onboarding_demo_create → _enforce_quota("points")). The
-        # demo seed writes ~13 Points, so it must consume the points quota
+        # demo seed writes ~10 Points, so it must consume the points quota
         # like any other Point-creating write — the REST surface was the
         # 0-quota bypass (bug-hunt 2026-08-28 server P2-13). Idempotent
         # re-calls short-circuit above and skip the gate (no write).
         _check_org_limit(org, "points")
         # The shared demo seeder (extracted from /internal/demo) opens its own
-        # SDK and writes ~13 Points.
+        # SDK and writes ~10 Points.
         return {"existing": False, "created": _seed_demo_graph(org["org_id"])}
 
     async with await _demo_seed_lock(org["org_id"]):
@@ -36178,13 +36243,15 @@ async def public_demo(org: dict = Depends(get_current_org_gated)):  # noqa: B008
         # worker hand-off too (the probe in the lane guard finds it otherwise).
         await asyncio.to_thread(
             _update_onboarding_state, org["org_id"], demo_created=True)
+        # 10 = the 9 seeded `:Point` nodes + `_demo_sentinel` (was a stale 15
+        # that never matched the seed; corrected with the #10000 census).
         await _track_onboarding_event(org, "first_memory_created",
-                                      source="demo", point_count=15)
+                                      source="demo", point_count=10)
         return {"status": "already_seeded", "org_id": org["org_id"]}
 
     created = out["created"]
 
-    # #1922: meter the seed that actually ran — one write op billing 12
+    # #1922: meter the seed that actually ran — one write op billing the 9
     # seeded points + the _demo_sentinel Point (net-new non-episodic nodes,
     # the value-first commit cost driver epic #909 §4.4). A concurrent
     # request may have completed the seed first (sentinel now present) —
