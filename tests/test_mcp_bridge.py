@@ -807,6 +807,108 @@ class TestFailureModes:
             served.close()
 
 
+    def test_a_partially_answered_batch_reports_the_MISSING_ids(self):
+        """One answered id is not a complete answer to a batch.
+
+        The guard used `not any(id in expected_ids)`, so a batch of two where the
+        server answered id 1 and never answered id 2 passed the guard and wrote
+        NOTHING for id 2 — the harness then waits on that id forever, which is the
+        silence the guard exists to prevent.
+
+        Driven through `forward` with a stubbed transport rather than through the
+        bridge subprocess: a PARTIAL answer is by definition one the stream does
+        not end on, so the end-to-end shape waits for the read timeout and the
+        test would measure the clock instead of the guard. Nothing about the
+        decision is mocked — the real guard, `_response_messages` and
+        `_errors_for_ids` all run.
+        """
+        import httpx
+
+        from tortoise.mcp_bridge import forward
+
+        body = json.dumps({"jsonrpc": "2.0", "id": 11,
+                           "result": {"tools": [{"name": "tortoise_search"}]}})
+        response = httpx.Response(
+            200, content=body.encode(),
+            headers={"content-type": "application/json"},
+        )
+
+        class _Client:
+            def stream(self, *_a, **_k):
+                class _Ctx:
+                    def __enter__(self_inner):
+                        return response
+
+                    def __exit__(self_inner, *_exc):
+                        return False
+
+                return _Ctx()
+
+        messages = forward(_Client(), {}, [
+            {"jsonrpc": "2.0", "id": 11, "method": "tools/list"},
+            {"jsonrpc": "2.0", "id": 12, "method": "tools/call"},
+        ])
+
+        ids = [m["id"] for m in messages]
+        assert ids == [11, 12], f"expected the answer AND an error, got ids {ids}"
+        assert messages[0]["result"]["tools"] == [{"name": "tortoise_search"}], messages[0]
+        assert messages[1]["error"]["code"] == -32603, messages[1]
+        named = messages[1]["error"]["message"]
+        # Compare the id LIST, not a bare substring: the message also quotes the
+        # server body as a snippet, and that body legitimately contains `"id": 11`.
+        assert "id(s) [12]" in named, named
+        assert "id(s) [11" not in named, (
+            f"an answered id was reported as unanswered: {named}")
+
+
+    def test_a_partially_answered_batch_does_not_leak_the_credential(self, home):
+        """The answered message on the partial-batch path must be redacted too.
+
+        `forward()` ends with a `_redact_message` sweep precisely because a relayed
+        reply may quote the credential the server rejected. The partial-batch guard
+        returns EARLY, so it bypasses that sweep — and before the guard existed this
+        path relayed nothing at all, so re-instating the relay without redaction
+        traded a silence for a leak on the busiest relay path.
+        """
+        import httpx
+
+        from tortoise.mcp_bridge import forward
+
+        # The credential must RESOLVE for the redaction sweep to have something to
+        # remove: with no key there is nothing to leak, and the test would pass
+        # vacuously.
+        key = "tt" + "_batch_leak_guard"
+        _write_credential(home, key, "http://127.0.0.1:9")
+        # The server quotes the key inside the ANSWERED message for id 11.
+        body = json.dumps({"jsonrpc": "2.0", "id": 11,
+                           "error": {"code": -32000,
+                                     "message": f"bad request, key {key} rejected"}})
+        response = httpx.Response(
+            200, content=body.encode(),
+            headers={"content-type": "application/json"},
+        )
+
+        class _Client:
+            def stream(self, *_a, **_k):
+                class _Ctx:
+                    def __enter__(self_inner):
+                        return response
+
+                    def __exit__(self_inner, *_exc):
+                        return False
+
+                return _Ctx()
+
+        messages = forward(_Client(), {}, [
+            {"jsonrpc": "2.0", "id": 11, "method": "tools/list"},
+            {"jsonrpc": "2.0", "id": 12, "method": "tools/call"},
+        ])
+
+        relayed = json.dumps(messages)
+        assert key not in relayed, f"the credential value was relayed verbatim: {relayed}"
+        assert "<redacted>" in relayed, f"no redaction marker on the answered message: {relayed}"
+        assert [m["id"] for m in messages] == [11, 12], messages
+
 # ── Interop: the real MCP daemon, through the bridge ────────────────────────
 
 
