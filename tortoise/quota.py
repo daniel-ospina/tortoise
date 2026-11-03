@@ -1183,10 +1183,14 @@ def enforce_org_limit(limits: dict | None, resource: str, sdk=None, *,
             the fallback reads the graph promotion DEMOTED. #8906 is that
             divergence: the counted graph being full REFUSES a write into a
             target graph with room, and the counted graph being empty ADMITS a
-            write into a full target. Pass this or `sdk_factory` for those
-            three. Every current caller passes one of the two — measured, 4
-            call sites, 0 omissions (`rg -n 'enforce_org_limit[(]' tortoise/`):
-            `hosted_api._check_org_limit` supplies
+            write into a full target. Pass the SDK whose graph this request will
+            WRITE (or an `sdk_factory` returning it) for those three. A
+            non-`None` `sdk` is NOT sufficient: the pre-#10637 call passed one
+            — `_org_sdk_for_credential(org)`, a default-graph handle — and still
+            counted another graph. Every current caller passes the right one —
+            measured, 4 executable call sites, 0 omissions (`rg -n
+            'enforce_org_limit[(]' tortoise/` also prints the `def` line and two
+            prose mentions): `hosted_api._check_org_limit` supplies
             `sdk_factory=_gate_sdk_for(org, resource)`, `mcp_server` supplies
             `sdk=_get_org_sdk()`, and the two `/v1/index/docs` gates supply
             `sdk=org_sdk` — correct there, because their write target IS the
