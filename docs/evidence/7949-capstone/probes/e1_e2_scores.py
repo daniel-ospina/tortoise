@@ -54,7 +54,9 @@ denominator (an inert counter), when the ON arm and the E2a counts come from
 different graphs (two populations in one record), when the falsifier's SCORED
 `with_anchor` block is not the very run the E2a record was taken on — the same
 head is not the same run, because a graph is `capstone_on_<head>_<stamp>`, and
-naming the head is not enough — when a `with_anchor` block is PRESENT but EMPTY
+naming the head is not enough — when the TWO before artifacts name the SAME graph
+(two copies of one run are one realization, not two, so the pairing set they
+produce can only ever agree), when a `with_anchor` block is PRESENT but EMPTY
 (a record that never wrote its counter is not the flat shape), when its
 `as_written` block carries no graph (an
 absent provenance is not an inherited one), sits on another run, or reads counts
@@ -306,6 +308,19 @@ def read_off_arms(repo: Path, floors: dict) -> list[dict]:
     returns `None`, which stringifies to `"none"` — a token of the OFF
     vocabulary — so a block that wrote nothing would certify the arm it is
     supposed to prove.
+
+    ⛔ And the FOURTH refusal is the one every other guard in this file cannot
+    reach, because it is the only place the mirror rule has to be INVERTED. The
+    rest of the file refuses records that come from *different* runs ("the same
+    head is not the same run"); the before pair is the one pair that must NOT be
+    the same run, and nothing enforced it (#10610 review P2). `decidable` is
+    computed from the SET of pairings, so two copies of a single OFF reading can
+    only ever agree — they make E1 look DECIDED off one realization, which is
+    the pseudoreplication the two-realization design exists to rule out. The
+    producers mint a fresh `capstone_off_<head8>_<stamp>` per run, so identical
+    graphs are a duplicated record, not a replicate; and an artifact that names
+    no graph at all cannot be told apart from a duplicated one, so it is refused
+    as an absent provenance on the same rule as `as_written`'s.
     """
     arms: list[dict] = []
     for name in OFF_ARMS:
@@ -349,9 +364,29 @@ def read_off_arms(repo: Path, floors: dict) -> list[dict]:
                     f"{name} was measured with {var}={state!r}, so it is not a "
                     "before arm — scoring it as one compares a treatment against "
                     "itself and still reports a decided E1")
+        graph = record.get("graph")
+        if not isinstance(graph, str) or not graph.strip():
+            raise _refuse(
+                f"{name} carries no `graph`, so nothing in it shows it is a "
+                "SECOND realization of the before arm — an absent run cannot be "
+                "told apart from a duplicated one")
+        # INVERTED, deliberately: everywhere else in this file a shared graph is
+        # the proof two records are the same run. Here that is the defect. Two
+        # copies of one OFF realization pair identically, so `decidable` comes
+        # back True ("every before realization agrees") over ONE realization — a
+        # DECIDED row asserted from the replication the design requires and never
+        # got, and the `before_spread_pp: 0.0` that follows reads as perfect
+        # agreement rather than as the absent-replication it is.
+        duplicate = next((prior for prior in arms if prior["graph"] == graph), None)
+        if duplicate is not None:
+            raise _refuse(
+                f"{name} and {duplicate['artifact']} were both taken on graph "
+                f"{graph!r} — the same run is not a second realization, and "
+                "`decidable` is the SET of pairings, so two copies of one "
+                "reading can only ever agree; the before arm still has n=1")
         arms.append({
             "artifact": f"{EVIDENCE / name}",
-            "graph": record.get("graph"),
+            "graph": graph,
             "objects": objects,
             "bare_definite": record.get("bare_definite"),
             "share": share,

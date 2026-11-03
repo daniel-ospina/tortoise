@@ -314,7 +314,12 @@ GRAPHS (the ON log's own `# graph:` line — its `# head:` is equal either way, 
 the head cannot catch it), when the falsifier's SCORED `with_anchor` block is
 not the run the E2a record was taken on (a graph is `capstone_on_<head>_<stamp>`,
 so a SIBLING run of the same head is a different run, and naming the head is not
-enough), when a `with_anchor` block is present but EMPTY (a record that never
+enough), when the TWO before artifacts name the SAME graph (two copies of one
+run are one realization, not two — and `decidable` is the SET of pairings, so
+two copies of one reading can only ever agree and would report a DECIDED E1 off
+the replication the design requires and never got), when a before artifact
+carries no graph at all (an absent run cannot be told apart from a duplicated
+one), when a `with_anchor` block is present but EMPTY (a record that never
 wrote its counter is not the flat shape that has no block), when its `as_written`
 block carries no graph — an absent provenance is not an inherited one — sits on another run, or reads counts other than the E2a
 record's (that block IS the E2a reading), when the value-gate positive controls
@@ -327,7 +332,10 @@ record did not freeze, or a population from another run.
 (0.3590, 0.5652) and one ON realization (0.2131) can be paired two ways, and the
 two pairings give different verdicts. At n=1 per arm the verdict would depend on
 which before run is chosen, so the aggregate is `REFUSED` with both pairings
-printed. The next requirement is **n >= 2 per arm**.
+printed. The next requirement is **n >= 2 per arm** — and the two realizations
+have to BE two runs: the driver refuses a before pair taken on the same graph,
+because two copies of one OFF record pair identically, which would turn this
+refusal into a decided `FAIL` off a single realization.
 
 **The counts reach the rows.** The capstone's E2 row now carries E2a's count over
 the FROZEN 14 (`8 of 14` today; the bar is `>= 13 of 14`), and E1's carries the

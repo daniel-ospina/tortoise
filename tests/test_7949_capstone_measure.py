@@ -4552,6 +4552,77 @@ def test_a_before_arm_missing_one_arm_key_is_refused(key, tmp_path, capsys):
     assert scores_probe.score(repo)["e1"]["outcome"] in ("REFUSED", "PASS", "FAIL")
 
 
+def test_the_two_before_arms_must_be_two_RUNS_not_two_copies(tmp_path, capsys):
+    """#10610 review P2: the before pair is the ONE place the run rule inverts.
+
+    Every other record class in the driver refuses a record from a DIFFERENT run
+    ("the same head is not the same run"). The before pair is the one pair that
+    must not be the same run, and nothing enforced it: `decidable` is computed
+    from the SET of pairings, so two copies of a single OFF reading pair
+    identically and come back `decidable: True` — "every before realization
+    agrees" over ONE realization, plus a `before_spread_pp: 0.0` that reads as
+    perfect agreement rather than as the absent replication it is. The row then
+    drops its honest REFUSED for a decided FAIL, and `e1_row_note` narrates
+    agreement between realizations that never happened.
+
+    The producers mint a fresh `capstone_off_<head8>_<stamp>` per run, so an
+    identical graph is a duplicated record, not a replicate — which also makes
+    this the cheapest way to fake #9889's own next requirement (n >= 2 per arm).
+
+    Non-vacuity, measured: at the pre-fix head this exact bundle SCORES a decided
+    `FAIL` (exit 0, `before_spread_pp: 0.0`, both pairings on
+    `capstone_off_54922a800_1793378986`), so the `pytest.raises` arm reds.
+    """
+    repo = _bundle(tmp_path)
+    first = repo / "docs/evidence/9889/e1-paired-off-arm-1.json"
+    second = repo / "docs/evidence/9889/e1-paired-off-arm-2.json"
+    graph = json.loads(first.read_text())["graph"]
+    whole = second.read_text()
+    assert graph != json.loads(whole)["graph"], (
+        "the SHIPPED before arms already share a graph — re-derive this pin")
+    second.write_text(first.read_text())              # the same run, copied
+    with pytest.raises(SystemExit) as refused:
+        scores_probe.score(repo)
+    assert refused.value.code == 2, refused.value
+    err = capsys.readouterr().err
+    assert "the same run is not a second realization" in err, err
+    assert graph in err, err
+    assert "e1-paired-off-arm-1.json" in err, err
+    assert "e1-paired-off-arm-2.json" in err, err
+
+    # …and the shipped bundle (TWO graphs, 20.6 pp apart) still scores, so this
+    # discriminates a duplicated record from the pair that ships rather than
+    # refusing the form.
+    second.write_text(whole)
+    assert scores_probe.score(repo)["e1"]["decidable"] is False
+
+
+def test_a_before_arm_with_no_graph_is_refused(tmp_path, capsys):
+    """An ABSENT run is not a second realization either.
+
+    The duplicate check compares graphs, so an artifact that names none compares
+    equal to any other artifact that names none — the refusal would fire for the
+    wrong reason (or, one arm later, not at all). Refused as an absent provenance,
+    the same rule the falsifier's `as_written` block is held to: "an absent
+    provenance is not an inherited one".
+
+    Non-vacuity: at the pre-fix head the bundle scores (the head check downstream
+    is the only reader of `graph`, and it runs after this pair is assembled).
+    """
+    repo = _bundle(tmp_path)
+    path = repo / "docs/evidence/9889/e1-paired-off-arm-2.json"
+    record = json.loads(path.read_text())
+    assert record["graph"] == "capstone_off_54922a800_1793379347"   # ships with one
+    record.pop("graph")
+    path.write_text(json.dumps(record))
+    with pytest.raises(SystemExit) as refused:
+        scores_probe.score(repo)
+    assert refused.value.code == 2, refused.value
+    err = capsys.readouterr().err
+    assert "carries no `graph`" in err, err
+    assert "SECOND realization" in err, err
+
+
 def test_the_arm_key_sets_are_the_producers():
     """The driver's three key sets must BE the producer's, not restatements.
 
@@ -4947,10 +5018,14 @@ def test_a_graph_naming_the_head_under_the_producers_eight_chars_scores(tmp_path
     assert 'capstone_measure_{head[:8]}_' in declared, (
         "the probe no longer builds its own graph from head[:8] — this pin's "
         "claim about the producers is stale")
-    for arm in ("e1-paired-off-arm-1.json", "e1-paired-off-arm-2.json"):
+    # A distinct EPOCH per arm: the two before artifacts must be two RUNS, so
+    # spelling them with one stamp would trip the duplicate-run guard and red this
+    # pin on a defect that is not the one it is about.
+    for arm, stamp in (("e1-paired-off-arm-1.json", 1793378986),
+                       ("e1-paired-off-arm-2.json", 1793379347)):
         path = repo / "docs/evidence/9889" / arm
         record = json.loads(path.read_text())
-        record["graph"] = f"capstone_off_{head[:8]}_1793378986"   # the DOCUMENTED form
+        record["graph"] = f"capstone_off_{head[:8]}_{stamp}"   # the DOCUMENTED form
         assert head[:9] not in record["graph"]     # …nine would fail, which was the bug
         path.write_text(json.dumps(record))
     assert scores_probe.score(repo)["e1"]["outcome"] == "REFUSED"
