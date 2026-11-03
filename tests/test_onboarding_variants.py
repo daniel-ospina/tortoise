@@ -18,6 +18,7 @@ these outlived the variants they were born with).
 """
 from __future__ import annotations
 
+import ast
 import json
 import os
 import re
@@ -560,20 +561,90 @@ def test_4365_served_document_sends_chatgpt_to_a_path_that_exists():
         "the served document must still point at the reference copy of those steps")
 
 
+def _is_environ(node: ast.AST) -> bool:
+    """True for `os.environ` / `environ` — the object, not a call on it."""
+    if isinstance(node, ast.Attribute):
+        return node.attr == "environ"
+    return isinstance(node, ast.Name) and node.id == "environ"
+
+
+def _loop_reads_environ(loop: ast.For) -> bool:
+    """True when a loop's body consults the environment (`get` or subscript)."""
+    for inner in ast.walk(loop):
+        if (isinstance(inner, ast.Call)
+                and isinstance(inner.func, ast.Attribute)
+                and inner.func.attr == "get"
+                and _is_environ(inner.func.value)):
+            return True
+        if isinstance(inner, ast.Subscript) and _is_environ(inner.value):
+            return True
+    return False
+
+
+def _env_names_the_client_reads() -> set[str] | None:
+    """The env-var names `tortoise/mcp_client.py` actually READS, or None.
+
+    A DECLARED name is not a read (#10727 review, F2): `_ENV_KEY_NAMES` is a
+    tuple, so a pin that asks whether a name is IN it stays green when the loop
+    consuming that tuple is deleted — the client would then read no environment
+    at all, which is exactly the empty-Bearer class #5153 exists to catch (the
+    tuple survives as a dead constant AND as prose in the module's docstrings).
+
+    Parsed, not pattern-matched, so a later refactor that grows the tuple or moves
+    the loop keeps working, while the property under test stays the real one: a
+    declared name is looked up in `os.environ`.
+    """
+    source = (REPO_ROOT / "tortoise" / "mcp_client.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+
+    declared: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.Assign, ast.AnnAssign)):
+            continue
+        targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+        if not any(isinstance(t, ast.Name) and t.id == "_ENV_KEY_NAMES"
+                   for t in targets):
+            continue
+        value = node.value
+        if isinstance(value, ast.Tuple):
+            declared = {
+                element.value for element in value.elts
+                if isinstance(element, ast.Constant) and isinstance(element.value, str)
+            }
+    if not declared:
+        return None
+    reads = any(
+        isinstance(node, ast.For)
+        and isinstance(node.iter, ast.Name)
+        and node.iter.id == "_ENV_KEY_NAMES"
+        and _loop_reads_environ(node)
+        for node in ast.walk(tree)
+    )
+    return declared if reads else None
+
+
 def test_5153_served_document_pins_the_canonical_mcp_key_variable():
-    """#5153: the served document's Pi step must state that `TORTOISE_API_KEY`
-    is the only name any code path reads, and that a differently-named MCP
-    credential — a #3615 policy difference, not a defect — must therefore be
-    aliased. Without that, a profile following the doc exports only its own
-    name, the committed `.mcp.json` expands `${TORTOISE_API_KEY}` to an empty
-    Bearer, and the server answers 401 while the CLI/SDK/static-auth paths go
-    unauthenticated: the config-name mismatch this issue reports.
+    """#5153: the served document's Pi step must name the CANONICAL key variable
+    and say that a differently-named MCP credential — a #3615 policy difference,
+    not a defect — must therefore be aliased. Without that, a profile following
+    the doc exports only its own name, the committed `.mcp.json` expands
+    `${TORTOISE_API_KEY}` to an empty Bearer, and the server answers 401 while
+    the CLI/SDK/static-auth paths go unauthenticated: the config-name mismatch
+    this issue reports.
+
+    ⚠️ What this pin does NOT claim, because it is no longer true: the document
+    must not say `TORTOISE_API_KEY` is "the only name ANY code path reads". The
+    MCP HTTP client accepts the `TORTOISE_MCP_API_KEY` alias (proposed by #5200,
+    landed by the #10605 fix — see the assertions below), so an absolute "only
+    one name" would be false, and the alias disclosure is what keeps a reader
+    from renaming the key and getting an empty Bearer.
 
     The variable name is pinned against the CODE, not against itself — every
     `Bearer ${VAR}` snippet the document carries must name a variable that
-    `tortoise/mcp_client.py` (the MCP HTTP client) actually reads, so a snippet
+    `tortoise/mcp_client.py` (the MCP HTTP client) actually READS, so a snippet
     repointed at an unread name — exactly the issue's proposed "fix option 1"
-    — fails here.
+    — fails here. "Reads" is proved by parsing the client's resolution loop, not
+    by finding the name somewhere in the file (see `_env_names_the_client_reads`).
 
     Canonical only: the mirror is pinned byte-identical by
     `test_m8_deploy_mirror_matches_canonical`, so this covers both copies.
@@ -619,17 +690,22 @@ def test_5153_served_document_pins_the_canonical_mcp_key_variable():
         re.findall(r'"Authorization":\s*"Bearer \$\{([A-Z0-9_]+)\}', skill))
     assert referenced, (
         "the served document must carry an env-indirect Bearer snippet")
-    # Ask the CLIENT what it reads, rather than pattern-matching its source. The
-    # precedence loop (a names tuple consulted with `os.environ.get(name)`) has no
-    # per-variable literal for a shape-pin to find — pinning one redded a correct
-    # fix (#10727) — while "the name merely appears somewhere in mcp_client.py"
-    # would pass on a docstring or a comment, which is exactly the #5153 false
-    # PASS this guard exists to prevent. `_ENV_KEY_NAMES` is the declaration the
-    # resolution loop consumes, so it is shape-independent AND discriminating.
-    sys.path.insert(0, str(REPO_ROOT))
-    from tortoise import mcp_client as _client_module
-
-    read_names = set(_client_module._ENV_KEY_NAMES)
+    # ASK THE CLIENT WHAT IT READS, and prove it READS. The precedence loop (a
+    # names tuple consulted with `os.environ.get(name)`) has no per-variable
+    # literal for a shape-pin to find — pinning one redded a correct fix
+    # (#10727) — while "the name merely appears somewhere in mcp_client.py" would
+    # pass on a docstring or a comment, which is exactly the #5153 false PASS
+    # this guard exists to prevent. A `_ENV_KEY_NAMES` MEMBERSHIP check is the
+    # same hole one level up: the tuple is a DECLARATION, so deleting the read
+    # and leaving a dead constant stays green (#10727 review, F2). What this
+    # asserts instead is a READ: a loop over the declared names whose body
+    # consults `os.environ`.
+    read_names = _env_names_the_client_reads()
+    assert read_names is not None, (
+        "`tortoise/mcp_client.py` no longer READS `_ENV_KEY_NAMES` from the "
+        "environment — the tuple is a dead constant, so every name the served "
+        "document tells an operator to export is one nothing looks up (the #5153 "
+        "empty-Bearer defect). This pin checks for a READ, not a mention")
     unread = sorted(v for v in referenced if v not in read_names)
     assert not unread, (
         "the served Bearer snippet references a variable the MCP HTTP client "

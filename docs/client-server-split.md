@@ -111,7 +111,9 @@ tree exactly as before — `from tortoise.mcp_client import ...` keeps working
 | `tortoise-client` (client) | `fastmcp-slim[client]==3.4.6`, `httpx>=0.27` |
 
 - `fastmcp-slim[client]` provides the exact `fastmcp.client` import surface
-  `mcp_client.py` uses (Client + BearerAuth + StreamableHttpTransport)
+  `mcp_client.py` uses (Client + StreamableHttpTransport, with the Bearer supplied
+  by a per-request `httpx.Auth` provider — never `BearerAuth`, which CAPTURES the
+  string; §8a)
   **without** the server extra (uvicorn/websockets/cyclopts) and without
   fastapi/numpy/scipy/falkordb. The pin `==3.4.6` matches the server's
   `fastmcp==3.4.6` — protocol/API lockstep.

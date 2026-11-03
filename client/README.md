@@ -110,10 +110,14 @@ never re-mints.
 
 `status_vocabulary.LEGACY_WORDS` publishes only the words a flat lookup can
 answer (`ok` → `available`, `not_configured` → `unconfigured`).
-`tortoise_unavailable` is deliberately **not** in that table: the driver reports
-it for *any* failure to answer and has no notion of a missing endpoint, so its
-term depends on whether an endpoint was ever declared and a table cannot carry
-it. Resolve it with the configuration fact (`LEGACY_WORDS_NEEDING_CONFIGURATION`
+`tortoise_unavailable` is deliberately **not** in that table: the driver emits
+it for the failures it cannot classify (an endpoint that answers nothing), and it
+has no notion of a missing endpoint — an unset `TORTOISE_MCP_URL` falls back to
+the self-host default — so its term depends on whether an endpoint was ever
+declared and a table cannot carry it. (The one failure the driver DOES classify
+by name is the credential-less auth refusal, which arrives as `unconfigured`
+already, #10605 — it is not one of this word's causes.) Resolve it with the
+configuration fact (`LEGACY_WORDS_NEEDING_CONFIGURATION`
 names it): the same word is `unconfigured` (exit `4`) when no endpoint is
 declared and `degraded` (exit `3`) when one is — the never-configured vs
 configured-but-down split this contract exists to keep, and the reason a bare

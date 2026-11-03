@@ -267,3 +267,37 @@ class TestProbeExecutesTheContract:
         assert cli._exit_code(DEGRADED) == 3
         assert cli._exit_code(UNCONFIGURED) == 4
         assert cli._exit_code("wat") == 3  # fail loud, never silently success
+
+
+def test_the_artifacts_no_longer_call_the_driver_a_one_word_failure_reporter():
+    """#10727 review (F3): three artifacts still described the PRE-#10605 driver.
+
+    `tortoise/mcp_client.status()` now classifies a credential-less auth rejection
+    as `unconfigured` (#10605), so "the driver emits `tortoise_unavailable` for
+    ANY failure to answer" became false — the sentence points the next reader at a
+    driver that no longer exists. The dependency line went the same way: it named
+    `BearerAuth`, which CAPTURES the string, while the client now supplies a
+    per-request `httpx.Auth` provider (the whole of #10605).
+
+    The conclusion those sentences support — `tortoise_unavailable` stays OUT of
+    `LEGACY_WORDS`, because its term needs the configuration fact — is still
+    right, which is why the stale CLAUSE is re-cut instead of the paragraph being
+    deleted. Pinned so the tidy-but-wrong version cannot come back, and so a later
+    edit cannot leave the three artifacts disagreeing with each other.
+    """
+    stale_clause = "for *any* failure to answer"
+    for name in ("client/README.md", "tortoise/status_vocabulary.py"):
+        text = (REPO_ROOT / name).read_text(encoding="utf-8")
+        assert stale_clause not in text, (
+            f"{name} still claims the driver reports `tortoise_unavailable` for "
+            "ANY failure to answer — a credential-less auth rejection is "
+            "`unconfigured` (#10605)")
+        assert "#10605" in text, (
+            f"{name} must name the failure the driver DOES classify "
+            "(the credential-less refusal, #10605) so the exclusion reads as "
+            "deliberate rather than as an oversight")
+    split = (REPO_ROOT / "docs" / "client-server-split.md").read_text(encoding="utf-8")
+    assert "Client + BearerAuth" not in split, (
+        "docs/client-server-split.md still says the MCP client uses `BearerAuth`, "
+        "which CAPTURES the credential at construction — the #10605 defect. It "
+        "supplies a per-request `httpx.Auth` provider (§8a)")
