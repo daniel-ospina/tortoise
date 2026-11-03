@@ -18,6 +18,7 @@ says, and the launcher never resolves a repo it was given.
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import signal
@@ -451,3 +452,44 @@ def test_cli_collect_exit_codes(tmp_path, capsys):
     assert rd.main(["collect", "42", "--repo", "o/r", "--state-dir", str(sd),
                     "--assert-merged"]) == 0
     capsys.readouterr()
+
+
+def test_a_missing_gh_degrades_the_head_annotation_instead_of_killing_the_launch(
+        tmp_path, monkeypatch):
+    """⛔ AN ABSENT `gh` IS A SOFT MISS, NOT A CRASH (#10620 required check `test (a)`).
+
+    `_head_sha` is a best-effort annotation on the artifact — the rail's verdict is
+    parsed from the rail's own log, never from `HEAD=`. Before this pin, a `gh` that
+    was not on PATH raised `FileNotFoundError` out of `launch()` BEFORE the spawn, so
+    every `collect` reported `lost`. Measured on a self-hosted runner with no `gh`:
+    21 of this module's tests failed with `FileNotFoundError: ... 'gh'`.
+
+    The PATH is rebuilt from this box's own executables with every `gh` dropped, so
+    the pin cannot pass by finding a real `gh` — it fails on the pre-fix code on ANY
+    box, including one that has `gh` installed.
+    """
+    shim = tmp_path / "nogh"
+    shim.mkdir()
+    for d in os.environ.get("PATH", "").split(os.pathsep):
+        if not d or not Path(d).is_dir():
+            continue
+        for exe in Path(d).iterdir():
+            if exe.name.startswith("gh"):
+                continue
+            link = shim / exe.name
+            if link.exists() or not os.access(exe, os.X_OK) or exe.is_dir():
+                continue
+            with contextlib.suppress(OSError):
+                link.symlink_to(exe)
+    monkeypatch.setenv("PATH", str(shim))
+    assert not any(p.name.startswith("gh") for p in shim.iterdir())
+
+    assert rd._head_sha(tmp_path, "o/r", 99) == "unreadable"
+
+    # ...and the launch still happens: the annotation miss is recorded, not raised.
+    co = make_checkout(tmp_path)
+    sd = tmp_path / "state"
+    ln = launch(sd, co, pr=99)
+    assert ln.pid > 0
+    assert "HEAD=unreadable" in Path(ln.artifact).read_text()
+    assert wait_state(sd, 99, rd.MERGED, timeout=20).state == rd.MERGED

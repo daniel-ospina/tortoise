@@ -397,11 +397,29 @@ def _resolve_repo(cwd: Path) -> str:
 
 
 def _head_sha(cwd: Path, repo: str, pr: int) -> str:
-    out = subprocess.run(
-        ["gh", "pr", "view", str(pr), "--repo", repo, "--json", "headRefOid",
-         "-q", ".headRefOid"],
-        cwd=str(cwd), capture_output=True, text=True,
-    )
+    """The PR's head sha as a BEST-EFFORT annotation on the artifact.
+
+    ⛔ A MISSING `gh` IS THE SAME SOFT MISS AS A FAILED `gh`. This is an
+    annotation, not a verdict: the rail's verdict is parsed from the rail's own
+    log, and `HEAD=` is never what `collect` reads to decide merged/refused/lost.
+    So an absent `gh` must degrade to `unreadable` exactly like a non-zero exit
+    does — not raise out of `launch`, where it would kill the launch BEFORE the
+    spawn and turn every `collect` into `lost`.
+
+    The crash was measured on a runner with no `gh` on PATH: `launch()` reached
+    `_head_sha` and died with `FileNotFoundError: No such file or directory: 'gh'`
+    (21 failures in `tests/test_rail_detach.py`, which its own docstring declares
+    to be "no database, no network"). The launcher must not depend on a binary it
+    only uses to label a field.
+    """
+    try:
+        out = subprocess.run(
+            ["gh", "pr", "view", str(pr), "--repo", repo, "--json", "headRefOid",
+             "-q", ".headRefOid"],
+            cwd=str(cwd), capture_output=True, text=True,
+        )
+    except (FileNotFoundError, OSError):
+        return "unreadable"
     return out.stdout.strip() if out.returncode == 0 else "unreadable"
 
 
