@@ -1812,8 +1812,7 @@ def test_a_journal_replaced_during_a_fold_is_not_memoised(tmp_path, monkeypatch)
                 self.resume_offset = getattr(inner, 'resume_offset', start)
 
             def __iter__(self):
-                for line in self._inner:
-                    yield line
+                yield from self._inner
                 self.resume_offset = self._inner.resume_offset
                 # every old record HAS been folded and the path has not been
                 # observed since — the exact seam this guard is about
