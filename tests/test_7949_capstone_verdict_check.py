@@ -14,7 +14,7 @@ assertion below is one of the shapes that failure takes — a missing row, a
 green row on a file that does not exist, a denominator inherited from a
 different corpus, a green row whose evidence predates the thresholds it claims
 to validate, a red row with no named cause. Each one has a stable finding code
-(V1–V11) and a test that reds if the gate stops catching it.
+(V1–V12) and a test that reds if the gate stops catching it.
 """
 from __future__ import annotations
 
@@ -3120,6 +3120,40 @@ def test_the_record_itself_decides_and_an_open_blocker_passes():
     assert "V12" in _codes(record, blocker_states=closed)
 
 
+def test_an_unrecognised_state_cannot_clear_a_row():
+    """⛔ "NOT THE WORD `CLOSED`" IS NOT "OPEN" (#10601 review P2).
+
+    V12's polarity was `== "CLOSED"` … `else: pass`, so at the layer that
+    DECIDES the verdict every state that was not exactly `CLOSED` resolved to a
+    PASS. `main()` guards this through `load_blocker_states`, but `check()` is
+    the module's documented verdict engine ("Apply V1-V12 to a parsed verdict
+    table") and takes `blocker_states` from any caller — so the loader cannot be
+    the only guard, and an UNREADABLE state is exactly the class the arm exists
+    to refuse. Measured pre-fix on this fixture: `{"state": "closed"}`,
+    `{"state": ""}` and `{"state": None}` each returned NO V12 for a row whose
+    blocker is not shown open, while the same row with `{"state": "CLOSED"}`
+    produced its finding.
+
+    Non-vacuity: reds on the pre-fix tool for every word in the loop below.
+    """
+    record = _live_record()
+    for word in ("closed", "", None, "Open", "merge"):
+        codes = _codes(record, blocker_states=_states(**{"#9075": {"state": word}}))
+        assert "V12" in codes, (
+            f"state {word!r} cleared the row — an unrecognised state is not an "
+            f"OPEN blocker, so it cannot certify one (codes: {codes})")
+    # …and the two words the schema DOES define still behave as before, so this
+    # pins the POLARITY rather than blanket-redding the arm: OPEN clears the
+    # row, CLOSED is the finding.
+    assert "V12" not in _codes(
+        record, blocker_states=_states(**{"#9075": {"state": "OPEN",
+                                                  "closed_at": None}}))
+    assert "V12" in _codes(
+        record, blocker_states=_states(
+            **{"#9075": {"state": "CLOSED",
+                         "closed_at": "2026-10-21T21:49:13Z"}}))
+
+
 def test_a_refused_run_that_measured_nothing_is_exempt():
     """`capstone.log` is a refusal: its rows record WHY the run stopped.
 
@@ -3198,6 +3232,49 @@ def test_an_unparseable_checked_at_is_a_usage_error_not_a_verification(tmp_path)
     # The shipped record still loads, and its stamp still parses.
     good = cvc.load_blocker_states(_REPO / cvc.BLOCKER_STATES_DEFAULT)
     assert _instant(good["_checked_at"]) is not None
+
+
+def test_a_state_record_that_contradicts_itself_is_a_usage_error(tmp_path):
+    """One entry cannot say both "live" and "closed at <stamp>" (#10601 review P2).
+
+    The loader guarded the WORD and never read `closed_at`, so flipping the
+    shipped `"CLOSED"` to `"OPEN"` — one edit, leaving the close instant in
+    place — satisfied V12 while the same entry went on recording WHEN the issue
+    closed. Measured pre-fix: exit 0, OK line "every cited blocker verified".
+    That is the one-character disarm this loader exists to prevent (see its own
+    docstring), so the record's self-consistency is checked here — the record is
+    V12's only input, and its consistency is the one thing the check can verify
+    without the network.
+
+    Non-vacuity: both shapes below loaded and exited 0 on the pre-fix loader.
+    """
+    import json
+
+    import pytest
+
+    for state, closed_at in (("OPEN", "2026-11-02T08:53:06Z"),
+                             ("CLOSED", None)):
+        bad = tmp_path / "states.json"
+        record = json.loads((_REPO / cvc.BLOCKER_STATES_DEFAULT).read_text())
+        record["blockers"]["#9738"] = dict(record["blockers"]["#9738"],
+                                           state=state, closed_at=closed_at)
+        bad.write_text(json.dumps(record))
+        with pytest.raises(ValueError, match="#9738"):
+            cvc.load_blocker_states(bad)
+        code = cvc.main([str(LOG), "--repo", str(_REPO),
+                         "--blocker-states", str(bad)])
+        assert code == 2, (f"{state} with closed_at={closed_at!r} was accepted "
+                           f"as a consistent record (exit {code})")
+    # The SHIPPED record satisfies both invariants, so this changes no committed
+    # state: every OPEN entry carries `null`, every CLOSED entry a stamp.
+    shipped = json.loads((_REPO / cvc.BLOCKER_STATES_DEFAULT).read_text())
+    assert shipped["blockers"], "the shipped record must still carry entries"
+    for key, value in shipped["blockers"].items():
+        if value["state"] == "OPEN":
+            assert value.get("closed_at") is None, key
+        else:
+            assert value.get("closed_at"), key
+    cvc.load_blocker_states(_REPO / cvc.BLOCKER_STATES_DEFAULT)
 
 
 def test_the_ok_line_names_the_blocker_verification():
