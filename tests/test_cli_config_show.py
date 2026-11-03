@@ -1452,6 +1452,51 @@ def test_the_chmod_remedy_is_quoted(capsys, tmp_path):
         del target
 
 
+def test_a_present_but_unusable_org_field_is_not_called_absent(capsys, tmp_path):
+    """Reporting "(absent)" plus the `init --api-key` hint was a false claim twice
+    over: the field IS there, and that hint does not describe such a store."""
+    _write(tmp_path / ".tortoise" / "credentials.json", json.dumps({
+        "api_key": GLOBAL_KEY, "api_url": "https://api.premiselabs.co",
+        "org_id": 12345,
+    }))
+    assert _run(("config", "show", "--json")) == 0
+    cred = json.loads(capsys.readouterr().out)["credential"]
+    assert "org_field_warning" in cred
+    assert "int" in cred["org_field_warning"]
+    assert "org_id_hint" not in cred          # the hint would be a false explanation
+    assert _run() == 0
+    out = capsys.readouterr().out
+    assert "not a string" in out
+
+
+def test_the_chmod_remedy_is_display_escaped_too(monkeypatch, capsys, tmp_path):
+    """`shlex.quote` is shell-safe but passes control characters through raw, so a
+    newline in the path forged a report line."""
+    evil = tmp_path / "x\n  FAKE  ok  \u2190  USED"
+    evil.mkdir()
+    target = evil / ".tortoise"
+    target.write_text(GLOBAL)
+    target.chmod(0o000)
+    try:
+        monkeypatch.chdir(evil)
+        assert _run() == 1
+        out = capsys.readouterr().out
+        assert not any(ln.strip().startswith("FAKE") for ln in out.splitlines())
+    finally:
+        target.chmod(0o600)
+
+
+def test_a_resolved_path_with_a_colon_is_still_a_path(monkeypatch, capsys, tmp_path):
+    """`_resolve_db_target` only returns absolute paths here, so a colon is legal —
+    calling it "userinfo-shaped" was a false statement about a working store."""
+    _global(tmp_path)
+    monkeypatch.setenv("TORTOISE_DB_PATH", str(tmp_path / "a:b.db"))
+    assert _run(("config", "show", "--json")) == 0
+    store = json.loads(capsys.readouterr().out)["graph_store"]
+    assert store["target_kind"] == "embedded file path"
+    assert store["target"].endswith("a:b.db")
+
+
 def test_the_whitespace_relation_carries_the_endpoint_verdict(
         monkeypatch, capsys, tmp_path):
     """The `same-modulo-whitespace` branch used to drop the different-endpoint
