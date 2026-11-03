@@ -702,7 +702,12 @@ def strip_code(body: str, strict: bool = False) -> str:
         if fence:
             out.append("")
             continue
-        if strict and (rest_indent > _MAX_FENCE_INDENT or rest.startswith("\t")):
+        # `rest_indent` is the ONLY indentation test: `line` was `expandtabs(4)`d
+        # a few lines up, so a tab can never survive into `rest` — the
+        # `rest.startswith("\t")` this clause used to carry was unreachable and
+        # read as a live guard (#10634 review P3, twice). A tab-indented line is
+        # already a `rest_indent >= 4` line by the time it gets here.
+        if strict and rest_indent > _MAX_FENCE_INDENT:
             out.append("")
             continue
         out.append(raw)   # prose: keep it, keywords and all
