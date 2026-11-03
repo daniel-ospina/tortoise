@@ -143,16 +143,11 @@ def test_a_FULL_default_graph_cannot_refuse_a_write_into_an_EMPTY_bound_graph():
     graph does to a write into an EMPTY bound graph — and that is the direction
     that froze the fleet.
 
-    #8906 measured it in production: the org's DEFAULT graph sat at
-    `max_points`, so every REST write behind it was refused, while the
-    graph-bound key's OWN graph was still absorbing ~200 counted Points in 48
-    minutes. The refusal body was `Team points limit reached`, so writes stopped
-    for a reason that had nothing to do with the graph they were writing into.
-    (The freeze was not literally undeletable — `SDK.delete_point` and the MCP
-    `tortoise_delete_point` tool exist; only REST has no Point DELETE. It was
-    worse than that: a graph-bound credential can never reach `org_<tid>` —
-    `_ensure_graph_exists` refuses a mint against a `kind='default'` graph — so
-    nothing the refused credential could do would lower the count.)
+    #8906 measured it in production: the counted graph sat at `max_points`, so
+    every REST write behind it was refused, while the graph-bound key's OWN
+    graph was still absorbing ~200 counted Points in 48 minutes. The refusal
+    body was `Team points limit reached`, so writes stopped for a reason that
+    had nothing to do with the graph they were writing into.
 
     DISCRIMINATION: SAME credential, SAME limit; only the two graphs'
     populations are swapped. Only a gate that counts the graph the request
@@ -160,9 +155,20 @@ def test_a_FULL_default_graph_cannot_refuse_a_write_into_an_EMPTY_bound_graph():
     BOTH phases — it raises 402 where admission is required (phase 1: default 5,
     bound 0) and admits where 402 is required (phase 2: default 0, bound 5).
 
-    RED pre-fix, measured against the pre-#10637 gate BODY (not a patched
-    resolver: `enforce_org_limit(org, resource, slot_credit=…)`, no `sdk` and no
-    `sdk_factory`, which is what the call site actually said):
+    RED pre-fix, measured against the pre-#10637 `_check_org_limit` BODY **as
+    `hosted_api.py` actually carried it** (restored with a throwaway pytest
+    plugin):
+
+        enforce_org_limit(org, resource, slot_credit=slot_credit,
+                          sdk=(_org_sdk_for_credential(org)
+                               if resource in _TENANT_GRAPH_RESOURCES else None))
+
+    Note the pre-fix call PASSED an sdk; it was the wrong graph's.
+    `_org_sdk_for_credential` answers `_make_sdk(namespace=org_id)` for a
+    graph-bound credential (`_default_graph_name(org)` is None there by
+    construction), so the count read the historical `org_<tid>` graph — the
+    same wrong-graph outcome as omitting the argument, which is why "no `sdk=`"
+    is NOT the shape to grep for when auditing this class. Measured:
 
     - this arm: `QuotaExceededError: Team points limit reached (5)` from the
       FULL DEFAULT graph — `_check_org_limit` wraps it as `HTTPException 402`,
@@ -183,10 +189,10 @@ def test_a_FULL_default_graph_cannot_refuse_a_write_into_an_EMPTY_bound_graph():
     would reopen the defect. That is the same ROOT as #10725 (a call site whose
     `sdk` is optional and whose omission is silent), so it is recorded THERE as
     a comment rather than filed as a peer issue — one root, one ticket.
-    (#10725 was then CLOSED at 19:03:21Z citing #10724, which is still
-    unmerged and superseded, so that comment is now the residual's only
-    record — and `hosted_api.py` still calls `_check_org_limit(org,
-    "sessions")` with no sdk at this head.)
+    (#10725 was itself CLOSED at 19:03:21Z citing #10724, which is still
+    unmerged and superseded, while `hosted_api` still calls
+    `_check_org_limit(org, "sessions")` with no sdk at this head — so read that
+    ticket's comments, not its state.)
 
     No RUNTIME guard is added here. #8906's recorded decision (alternative 4)
     chose a DOC contract on `quota.enforce_org_limit`'s `sdk:` argument "so the
