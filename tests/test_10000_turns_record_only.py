@@ -3181,6 +3181,64 @@ def test_the_demo_seed_declares_NO_length_it_cannot_serve(monkeypatch):
     assert out["points"] == 9, out
 
 
+def test_the_repair_note_names_BOTH_halves_of_a_legacy_demo_graph():
+    """P2 (#10000 review): the NOT RETROACTIVE note named a NODE-ONLY delete.
+
+    A demo graph seeded before this change keeps the three `epi_turn*` nodes
+    AND `s.turn_count=3`, and the two are undone by DIFFERENT statements. The
+    node delete alone leaves `declared=3, served=0`: on an armed, journaling
+    deployment the demo session's read refuses with `record_unavailable` (503);
+    on an unarmed one it serves `{"turns": 3, "turn_points": []}` — the exact
+    split the counter note beside the `:Session` write exists to eliminate. So
+    the note a destructive purge lane reads must name the counter as part of the
+    repair instead of presenting the node delete alone as it, and it must name
+    the lane that owns the destructive step (§9.1 residual (a), `#10017`).
+
+    Fails without the fix: the pre-fix note says "Deleting those three nodes is
+    the graph-side repair" and mentions neither `turn_count`, `DETACH DELETE`
+    nor `#10017`.
+    """
+    from pathlib import Path
+
+    src = (Path(sdk_mod.__file__).resolve().parent / "hosted_api.py").read_text(
+        encoding="utf-8")
+    lines = src.splitlines()
+    # Located by its own opening clause: `hosted_api.py` carries a SECOND
+    # `NOT RETROACTIVE` note (the `tags` one this paragraph is modelled on), and
+    # that one is about a property `MERGE` rewrites — not this repair.
+    starts = [i for i, line in enumerate(lines)
+              if "NOT RETROACTIVE, the same posture as the `tags` note" in line]
+    assert len(starts) == 1, (
+        "expected exactly ONE demo-seed `NOT RETROACTIVE` note in "
+        f"hosted_api.py (found {len(starts)}) — this pin locates it by that "
+        "clause, so a re-spelling silently drops the coverage")
+
+    block: list[str] = []
+    for line in lines[starts[0]:]:
+        if not line.lstrip().startswith("#"):
+            break
+        block.append(line)
+    note = " ".join(" ".join(block).split())
+    # ⛔ NON-VACUITY: the extraction must have found the PARAGRAPH. One line
+    # would satisfy nothing below, and an empty block would pass an `in` test
+    # for the wrong reason.
+    assert "epi_turn" in note and "RE-SEEDING" in note, (
+        f"the repair-note extraction found the wrong span: {note!r}")
+
+    assert "s.turn_count=0" in note, (
+        "the repair note names the node delete but not the counter — deleting "
+        "the `epi_turn*` nodes ALONE leaves `s.turn_count=3` beside zero rows, "
+        "which the read refuses (503 on an armed deployment, "
+        "`{\"turns\": 3, \"turn_points\": []}` on an unarmed one), so it "
+        f"instructs a destructive lane to re-create the defect: {note}")
+    assert "DETACH DELETE" in note, (
+        "the repair note does not say HOW the nodes go, so the half it does "
+        f"name is still not executable: {note}")
+    assert "#10017" in note, (
+        "the note describes a destructive graph-side repair without naming the "
+        f"lane that owns it (§9.1 residual (a), `#10017`): {note}")
+
+
 def test_the_shared_read_predicate_accepts_0_and_rejects_a_short_claim():
     """The predicate both session doors call must accept 0 and reject a short claim.
 

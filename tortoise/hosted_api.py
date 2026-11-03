@@ -13255,13 +13255,27 @@ def _seed_demo_graph(org_id: str) -> dict:
     #
     # ⚠️ NOT RETROACTIVE, the same posture as the `tags` note above: the sentinel
     # short-circuits before any write, so a demo graph seeded BEFORE this keeps
-    # its `epi_turn*` nodes. ⛔ RE-SEEDING DOES NOT REPAIR THEM — a re-seed
-    # writes nothing for those ids and deletes nothing (unlike the `tags` case,
-    # whose `MERGE` re-writes `p.tags`). Deleting those three nodes is the
-    # graph-side repair, and it is destructive, so it is out of this change's
-    # scope. Blast radius: opt-in sample content that `org.point_count`
-    # excludes — but the demo `:Session` is still returned by the session reads,
-    # so the pre-existing nodes stay reachable there and in search.
+    # its `epi_turn*` nodes AND its `s.turn_count=3` — the two are removed by
+    # DIFFERENT statements, and only the node delete is irreversible-safe.
+    # ⛔ RE-SEEDING DOES NOT REPAIR THEM — a re-seed writes nothing for those
+    # ids and deletes nothing (unlike the `tags` case, whose `MERGE` re-writes
+    # `p.tags`). Deleting the sentinel and re-seeding, the idiom the note above
+    # documents, is WORSE than a no-op here: the seed then reaches the
+    # `:Session` write, sets `s.turn_count=0`, and leaves the three nodes — a
+    # Session declaring 0 that still serves 3, which the read refuses.
+    #
+    # The graph-side repair is BOTH halves in ONE step: `DETACH DELETE` the
+    # three `epi_turn*` nodes AND reset `s.turn_count=0` — or retire the demo
+    # `:Session` along with them. The node delete ALONE is not the repair: it
+    # leaves `declared=3, served=0`, so on an armed, journaling deployment the
+    # demo session's read refuses with `record_unavailable` (503), and on an
+    # unarmed one it serves `{"turns": 3, "turn_points": []}` — the exact split
+    # the counter note above exists to eliminate. Destructive, so it is out of
+    # this change's scope and belongs to the graph-side purge of §9.1's
+    # residual (a), `#10017`. Blast radius: opt-in sample content that
+    # `org.point_count` excludes — but the demo `:Session` is still returned by
+    # the session reads, so the pre-existing nodes stay reachable there and in
+    # search (with their counter, which is why the repair must move both).
 
     # ── Epistemic Layer — claims with evidence ───────────────────
     epistemic_points = _DEMO_EPISTEMIC_POINTS

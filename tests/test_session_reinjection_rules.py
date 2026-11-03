@@ -804,6 +804,14 @@ _TURN_SHAPE_NARRATIVE_HOMES = (
     "tortoise/retrieval.py",
     "tests/test_session_reinjection.py",
     "tests/test_session_reinjection_rules.py",
+    # The eval census's own residual note: it names `_TURN_SHAPE_FILTER` by
+    # name and states that excluding a flagless `pointKind='event'` demo node
+    # is the repo's decision rather than a local predicate — the same narrative
+    # this tuple exists to keep honest. It was corrected by this change for
+    # exactly that reason, so it is a home and belongs in the population. Its
+    # pre-fix wording (`the demo seed, tortoise/hosted_api.py:12173`) carries
+    # no `#10000`, so this entry is not vacuous: it reds on that text.
+    "tools/longmem_eval/ep_activation.py",
 )
 
 #: The PRESENT-TENSE form: the demo/dashboard seed named as the WRITER of
