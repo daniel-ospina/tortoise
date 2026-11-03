@@ -1035,29 +1035,56 @@ _TURN_SHAPE_NARRATIVE_HOMES = (
     # The eval census's own residual note: it names `_TURN_SHAPE_FILTER` by
     # name and states that excluding a flagless `pointKind='event'` demo node
     # is the repo's decision rather than a local predicate — the same narrative
-    # this tuple exists to keep honest. It was corrected by this change for
-    # exactly that reason, so it is a home and belongs in the population. Its
-    # pre-fix wording (`the demo seed, tortoise/hosted_api.py:12173`) carries
-    # no `#10000`, so this entry is not vacuous: it reds on that text.
+    # this tuple exists to keep honest, so it is a home. ⚠️ Its presence here
+    # is COVERAGE, not a correction this change makes at this base: it already
+    # carries #10000 (it is byte-identical on origin/main), so the two halves
+    # below pass there too and this entry is vacuous AGAINST THIS BASE. The
+    # earlier wording (`the demo seed, tortoise/hosted_api.py:12173`, no
+    # `#10000`) exists only on this branch's own prior commits — which is why
+    # the entry was added, and is not a claim about the base.
     "tools/longmem_eval/ep_activation.py",
 )
 
-#: The PRESENT-TENSE form: the demo/dashboard seed named as the WRITER of
-#: ``pointKind='event'``. The corrected sentences all say the opposite ("writes
-#: no turn node at all"), which this deliberately does not match — note the
-#: stored form is spelled out here as prose precisely so this comment is not
-#: itself a hit.
-_PRESENT_TENSE_DEMO_EVENT_WRITER = re.compile(
-    r"seed\s+writes?\s+(?:``)?pointKind")
+#: Homes that name the demo/sample seed for OTHER reasons and so cannot carry the
+#: marker-beside-the-mention invariant — `session_schema.py`'s inventory mentions
+#: it for the `demo_session_id` prefix (#3554) and for the three-shapes history,
+#: neither of which is about `#10000` — but that still must never state the
+#: DELETED writer as current fact. Present-tense half ONLY, on purpose: pinning
+#: the marker there would either force an unrelated note to name #10000 or
+#: demand an exception carved inside the window loop, and an exception is how a
+#: population pin stops being one (#10675 review P3).
+_TURN_SHAPE_NARRATIVE_HOMES_PRESENT_TENSE_ONLY = (
+    "tortoise/session_schema.py",
+)
 
-#: How far from a seed mention the ``#10000`` history marker may sit and still
+#: The PRESENT-TENSE form: the demo/dashboard seed named as the WRITER of
+#: ``pointKind='event'``. The corrected sentences all say the opposite ("since
+#: #10000 it writes no turn node at all"), which this deliberately does not
+#: match — note the stored form is spelled out here as prose precisely so this
+#: comment is not itself a hit.
+#: ⛔ ``seed(?:er)?`` is load-bearing: "the demo seeder" is this tree's own
+#: vocabulary (`session_schema.py`, `tools/turn_parity_census.py`,
+#: `ep_activation.py`) and a bare ``seed`` misses every one of those spellings —
+#: measured: injecting "the demo SEEDER WRITES ``pointKind='event'``" left the
+#: ``seed\s+writes?`` form GREEN (#10675 review P2). The qualifier and the
+#: bounded window keep it from firing on an unrelated seed ("the demo seed
+#: writes ~10 Points") or on the corrected prose ("a graph seeded BEFORE
+#: #10000 … the seed holds ``pointKind``"). ⚠️ The demonstration above is
+#: spelled in CAPITALS on purpose: this file is itself one of the homes below,
+#: so a lower-case sample here would make the pin red on its own comment.
+_PRESENT_TENSE_DEMO_EVENT_WRITER = re.compile(
+    r"(?:demo|dashboard|hosted|sample)[^.\n]{0,40}?seed(?:er)?\s+"
+    r"(?:also\s+)?(?:writes?|mints?|creates?)\b[^.\n]{0,160}?pointKind")
+
+#: HOW far from a seed mention the ``#10000`` history marker may sit and still
 #: be read as annotating it. The POSITIVE half below is a WINDOW, not a
-#: file-scoped ``"#10000" in flat``: those five homes carry 6, 4, 3, 10 and 1
-#: other ``#10000`` mentions between them (#10675 review P3), so the file-scoped
-#: form stays GREEN when the marker leaves the one sentence that makes the
-#: conjunct defensible — and for THIS file it was strictly tautological, since
-#: the assertion's own message names ``#10000``. Measured: stripping the marker
-#: from each home's explaining sentence reds this window on all five.
+#: file-scoped ``"#10000" in flat``: those five homes carry 6, 4, 5, 17 and 1
+#: ``#10000`` mentions between them (``grep -c '#10000'``, measured at THIS head
+#: — the counts move as lanes correct the prose), so the file-scoped form stays
+#: GREEN when the marker leaves the one sentence that makes the conjunct
+#: defensible — and for THIS file it was strictly tautological, since the
+#: assertion's own message names ``#10000``. Measured: stripping the marker from
+#: each home's explaining sentence reds this window on all five.
 _MARKER_WINDOW = 400
 _SEED_MENTION = re.compile(r"demo(?:/dashboard)?[\s-]+seed", re.IGNORECASE)
 
@@ -1075,15 +1102,16 @@ def test_no_home_states_the_deleted_demo_turn_writer_as_current_fact():
     this round edited: that site-local shape is the failure. The same sentence
     was restated in `session_reinjection.py`, `retrieval.py` and
     `test_session_reinjection.py` and left present-tense HERE, so a pin inside
-    the one file being fixed reds on nothing when a fifth home is added.
+    the one file being fixed reds on nothing when a sixth home is added.
     """
     missing = [rel for rel in _TURN_SHAPE_NARRATIVE_HOMES
+               + _TURN_SHAPE_NARRATIVE_HOMES_PRESENT_TENSE_ONLY
                if not (_REPO / rel).is_file()]
     assert not missing, (
         "a narrative home moved or was deleted, so this pin no longer covers "
         f"the claim it exists for: {missing}")
 
-    for rel in _TURN_SHAPE_NARRATIVE_HOMES:
+    for rel in _TURN_SHAPE_NARRATIVE_HOMES + _TURN_SHAPE_NARRATIVE_HOMES_PRESENT_TENSE_ONLY:
         flat = " ".join((_REPO / rel).read_text(encoding="utf-8").split())
         assert not _PRESENT_TENSE_DEMO_EVENT_WRITER.search(flat), (
             f"`{rel}` says the demo/dashboard seed WRITES ``pointKind='event'`` "
@@ -1091,6 +1119,8 @@ def test_no_home_states_the_deleted_demo_turn_writer_as_current_fact():
             "(§9.1/D1). Restate it as history (the clause is kept because a "
             "graph seeded BEFORE #10000 still holds those nodes) rather than "
             "leaving a claim about a writer that no longer exists")
+        if rel in _TURN_SHAPE_NARRATIVE_HOMES_PRESENT_TENSE_ONLY:
+            continue
         # The positive half: the HISTORY MARKER is what makes the surviving
         # conjunct defensible. Without it the clause reads as dead weight and
         # the next reader deletes it — and legacy demo graphs lose the only

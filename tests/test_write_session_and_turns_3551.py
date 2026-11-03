@@ -517,8 +517,16 @@ def test_demo_seed_is_excluded_from_the_primitive(client):
     # nothing to serve — that refusal/contradiction is the regression the value
     # was changed to remove. Asserted by VALUE, not by parameter name, so a
     # refactor that reintroduces a declared length fails this pin.
-    assert "s.turn_count=0" in src
-    assert "s.turn_count=3" not in src
+    # ⛔ Asserted over CODE only: `inspect.getsource` keeps interior COMMENTS,
+    # and `_seed_demo_graph`'s `NOT RETROACTIVE` note quotes this very literal
+    # in prose — so a raw `in src` test is satisfied BY THE COMMENT while the
+    # Cypher declares a length. Measured (#10675 review P3): rewriting the
+    # statement to `SET s.created_at=$now, s.turn_count=$n` with `params={"n": 3}`
+    # left the wording in the comment and this pin GREEN.
+    code = "\n".join(line for line in src.splitlines()
+                     if not line.lstrip().startswith("#"))
+    assert "s.turn_count=0" in code
+    assert "s.turn_count=3" not in code
 
     demo_org = "demo-3551-org"
     ha_mod._seed_demo_graph(demo_org)

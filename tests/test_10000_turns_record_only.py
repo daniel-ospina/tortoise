@@ -3295,12 +3295,17 @@ def test_the_shared_read_predicate_accepts_0_and_rejects_a_short_claim():
 
     # The ARMED arm refuses rather than publishing the contradiction, which is
     # the 503 the demo session produced before the count was set to 0.
+    # ⛔ Asserted BY VALUE like its sibling above, not by `!= (3, "")`: that
+    # form is satisfied by `(0, "")` — a PUBLISHED count beside zero rows,
+    # i.e. exactly the non-refusal this arm's docstring says cannot happen
+    # (#10675 review P3). `None` is the refusal; the reason names the shape.
     armed, armed_reason = served_turn_count(
         answer=TurnAnswer(answered=False, kind=TurnAnswer.NO_ACCOUNT),
         served=0, declared=3,
         read_failed=False)
-    assert (armed, armed_reason) != (3, ""), (
-        "the armed arm published a count its rows do not back: "
+    assert armed is None and "short copy" in armed_reason, (
+        "the armed arm no longer REFUSES the contradiction — it must return no "
+        "published count and say the served copy is short. Got "
         f"({armed!r}, {armed_reason!r})")
 
     # ── the HALF-REPAIRED legacy state the seeder's `NOT RETROACTIVE` note
