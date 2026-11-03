@@ -61,6 +61,18 @@ GH_FAKE = textwrap.dedent("""\
     # assumed.
     set -uo pipefail
     if [ "$1" = "api" ] && [ "${2:-}" = "-X" ]; then printf 'TOKEN-FROM-FAKE-GH\\n'; exit 0; fi
+    # ⛔ THE JOB-OUTCOME PROBE IS DISPATCHED BEFORE THE POOL-READ BUDGET AND BEFORE THE RESTART
+    # MARKER. It is a DIFFERENT read (run history, not pool registrations), so counting it against
+    # `POOL_FAIL_AFTER` would shorten the budget every case measures, and it must not be served the
+    # pool TSV — the parser would read runner rows as jobs. Empty by default, so every pre-existing
+    # case keeps its meaning: no outcomes means nothing can be called wedged.
+    # ⛔ JOBS FIRST. In a bash `case` pattern `?` matches ANY single character INCLUDING `/`, so
+    # `*/actions/runs?*` also matches `.../actions/runs/<id>/jobs?per_page=100` — the run-list arm
+    # swallowed every jobs read and the probe saw zero outcomes while looking like it had worked.
+    case "${2:-}" in
+      */jobs?*) cat "${JOBS_TSV:-/dev/null}"; exit $? ;;
+      */actions/runs?*) printf '%s' "${RUN_IDS:-}"; exit 0 ;;
+    esac
     # POOL_FAIL_AFTER=<n>: the first n pool reads succeed, every later read FAILS. That is the
     # "restart succeeded, then the API went away" window, which must not become a --replace.
     if [ -n "${POOL_FAIL_AFTER:-}" ]; then
@@ -271,6 +283,11 @@ class Env:
         )
         self.meminfo = _meminfo(tmp / "meminfo", mem_mb, omit=omit_memavailable)
         self.pool_tsv = _pool(tmp / "pool.tsv", pool or [])
+        # Job-outcome probe inputs (see GH_FAKE). Empty by default: the probe then finds no
+        # outcomes, which is the shape every case written before it assumes.
+        self.run_ids = ""
+        self.jobs_tsv = tmp / "jobs.tsv"
+        self.jobs_tsv.write_text("", encoding="utf-8")
         self.restart_marker = tmp / "restarted"
         self.provisioner_log = tmp / "provisioner.log"
         self.config_log = tmp / "config.log"
@@ -352,6 +369,8 @@ class Env:
                 "RUNNER_AUTOSCALE_ONLINE_WAIT_S": "0",  # no real sleeping in the suite
                 "RUNNER_AUTOSCALE_POLL_S": "1",
                 "POOL_TSV": str(self.pool_tsv),
+                "RUN_IDS": self.run_ids,
+                "JOBS_TSV": str(self.jobs_tsv),
                 "RESTART_MARKER": str(self.restart_marker),
                 "SYSTEMCTL_RC": str(self.systemctl_rc),
                 "SYSTEMCTL_ENABLE_RC": str(self.enable_rc),
@@ -2159,3 +2178,80 @@ def test_a_FAILED_restart_is_MEASURED_before_anything_is_re_registered(env):
     )
     assert any("came back online after restart" in a for a in rec.get("actions", [])), rec
     assert not any("still offline after restart" in a for a in rec.get("actions", [])), rec
+
+
+# ── wedged: a registration that answers every job with a SETUP failure is not capacity ────────
+def _outcomes(*rows: str, runs: int = 3) -> str:
+    """One page of jobs, served for each of `runs` completed runs (the fake serves one file)."""
+    return "".join(f"{row}\n" for row in rows)
+
+
+SETUP_FAIL = "r1\tfailure\t2026-11-03T05:53:24Z\t2026-11-03T05:53:27Z"  # 3 s, no step ran
+GREEN = "r1\tsuccess\t2026-11-03T05:53:24Z\t2026-11-03T05:58:30Z"  # 306 s
+SLOW_RED = "r1\tfailure\t2026-11-03T05:53:24Z\t2026-11-03T06:03:30Z"  # 606 s: a suite DID run
+
+
+def test_a_runner_that_answers_every_job_with_a_setup_failure_is_never_capacity(env):
+    """THE FALSE PASS. `online, busy=false` is what a runner whose jobs die in 1 s looks like.
+
+    Measured 2026-11-03: 20 of 29 jobs in one run died in 5–21 s on four registrations that each
+    read `online, busy=false`, so a census built on `status`/`busy` reported spare capacity while
+    the pool served nothing. The pass must name it and must not report `at-ceiling`/`converged`.
+    """
+    e = env(pool=[("r1", "online", False, "")], installs=[("gh-runner-x64-1", "r1")])
+    e.run_ids = "1\n2\n3\n"
+    e.jobs_tsv.write_text(_outcomes(SETUP_FAIL), encoding="utf-8")
+    rec = e.record()
+    assert rec["wedged"] == ["r1"], rec
+    assert rec["verdict"] == "wedged", rec
+    assert rec["_rc"] == 6, rec
+    assert any("SETUP failure" in n and "r1" in n for n in rec["notes"]), rec["notes"]
+    # Nothing was restarted, relabelled or removed: the tool's prohibitions are untouched.
+    assert not any("restart" in a for a in rec["actions"]), rec["actions"]
+
+
+def test_one_green_job_proves_the_work_dir_is_writable(env):
+    """Zero successes is part of the predicate — a runner that served ONE job is not wedged."""
+    e = env(pool=[("r1", "online", False, "")], installs=[("gh-runner-x64-1", "r1")])
+    e.run_ids = "1\n2\n3\n"
+    e.jobs_tsv.write_text(_outcomes(GREEN), encoding="utf-8")
+    rec = e.record()
+    assert "wedged" not in rec, rec
+    assert rec["verdict"] in ("at-ceiling", "converged"), rec
+
+
+def test_a_slow_red_job_is_a_red_suite_not_a_wedged_box(env):
+    """The predicate must not swallow a genuine red: a suite that ran takes minutes, not seconds."""
+    e = env(pool=[("r1", "online", False, "")], installs=[("gh-runner-x64-1", "r1")])
+    e.run_ids = "1\n2\n3\n"
+    e.jobs_tsv.write_text(_outcomes(SLOW_RED), encoding="utf-8")
+    rec = e.record()
+    assert "wedged" not in rec, rec
+    assert rec["verdict"] != "wedged", rec
+
+
+def test_unreadable_job_outcomes_certify_nothing(env):
+    """"We could not look" is not "the pool is fine" — never `at-ceiling` over an unread history."""
+    e = env(pool=[("r1", "online", False, "")], installs=[("gh-runner-x64-1", "r1")])
+    e.run_ids = "1\n"
+    e.jobs_tsv = e.root / "missing-jobs.tsv"  # the fake's `cat` exits non-zero
+    rec = e.record()
+    assert rec["verdict"] == "uncertified", rec
+    assert rec["capacity_certified"] is False, rec
+    assert rec["_rc"] == 2, rec
+
+
+def test_wedged_runners_is_narrow_by_construction():
+    """A spread of fast failures with no success, per registration — nothing else."""
+    pool = {
+        k: RA.PoolEntry(name=k, status="online", busy=False)
+        for k in ("wedged", "flaky", "mixed", "slow")
+    }
+    outcomes = (
+        [("wedged", "failure", 6)] * 3
+        + [("flaky", "failure", 6)] * 2
+        + [("mixed", "failure", 6)] * 3
+        + [("mixed", "success", 300)]
+        + [("slow", "failure", 900)] * 3
+    )
+    assert RA.wedged_runners(pool, outcomes) == ["wedged"]
