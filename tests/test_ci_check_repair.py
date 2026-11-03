@@ -21,7 +21,6 @@ import os
 import re
 import subprocess
 import sys
-
 from pathlib import Path
 
 import pytest
@@ -244,7 +243,7 @@ def test_a_zero_job_run_is_still_in_flight_so_the_deferral_is_unchanged():
 
 
 def test_an_unmeasurable_job_count_is_never_reported_as_unexpanded():
-    """NEGATIVE CONTROL: `None` is not zero — fail closed, as `run_is_unexpanded` does."""
+    """NEGATIVE CONTROL: `None` is not zero — fail closed, as `is_unexpanded` does."""
     checks = [check(c) for c in REQUIRED if c != "python-ci-gate"]
     for jobs in (None, 1, 26):
         runs = [unexpanded(7, "python-ci.yml", jobs=jobs)]
@@ -312,6 +311,104 @@ def test_run_job_count_fails_closed(monkeypatch):
 
     monkeypatch.setattr(R, "gh_api", lambda path: {"jobs": []})
     assert R.run_job_count("o/r", 1) is None, "a payload without total_count is not zero"
+
+
+def test_main_names_unexpanded_under_JSON_which_is_how_production_runs(monkeypatch,
+                                                                        capsys, tmp_path):
+    """The state must reach a caller that passes `--json` — both prod callers do.
+
+    The scheduled workflow and the local fallback both invoke with `--json`, so a
+    note that only prints in the human-format branch is a note nobody sees. This
+    pins BOTH the summary counter and the stderr line on the `--json` path; a
+    mutant that drops either must fail here.
+    """
+    monkeypatch.setattr(R, "read_queue_health", lambda repo: None)
+    monkeypatch.setattr(R, "open_prs", lambda repo, include_drafts: [pr(1)])
+    monkeypatch.setattr(R, "check_runs_at", lambda repo, head: [])
+    monkeypatch.setattr(R, "runs_at_head",
+                        lambda repo, head: [run(10, "python-ci.yml", "queued")])
+    monkeypatch.setattr(R, "run_job_count", lambda repo, run_id: 0)
+
+    # A record that requires `python-ci-gate` from python-ci.yml, so the run under
+    # test is the producing run for an ABSENT context.
+    rec = tmp_path / "required-contexts.json"
+    rec.write_text(json.dumps({
+        "required_contexts": ["python-ci-gate"],
+        "emitters": {"python-ci-gate": [["python-ci.yml", "gate"]]},
+    }))
+
+    assert R.main(["--repo", "o/r", "--no-live", "--json", "--record", str(rec)]) == 0
+    cap = capsys.readouterr()
+    summary = json.loads(cap.out)
+    assert summary["unexpanded"] == 1, "the counter must reach the JSON summary"
+    assert summary["prs"][0]["unexpanded"] == [10], "and the run id must be named"
+    assert "UNEXPANDED" in cap.err, (
+        "the named state and its reason must print on the --json path, which is "
+        "the only path production uses")
+    assert "re-trigger" in cap.err and "cancel" in cap.err, (
+        "the note must carry WHY no re-trigger is attempted (that it would cancel "
+        "CI that was about to report)")
+    # REPORT-ONLY: nothing may be escalated or acted on for this state.
+    assert summary["needing_repair"] == 0
+    assert summary["prs"][0]["needs_user_actor"] is False
+    assert summary["unresolved"] == 0
+
+
+# ── 3c. WIRING — `classify` is PURE, so the probe is proven to reach it ─────
+#
+# Every test above builds `Run(job_count=...)` by hand and calls `classify`, so
+# DELETE the `probe_job_counts` call in `build_plans` and the whole file still
+# passes: the tool would silently stop naming anything, which is the exact
+# silence #10753 is about. These two drive the real entry point instead.
+
+def test_build_plans_wires_the_probe_so_an_unexpanded_head_is_named(monkeypatch):
+    """The probe must run for the in-flight run, and its count must reach classify."""
+    probed = []
+
+    monkeypatch.setattr(R, "open_prs", lambda repo, drafts: [pr(9)])
+    monkeypatch.setattr(R, "check_runs_at",
+                        lambda repo, sha: [check(c) for c in REQUIRED
+                                           if c != "python-ci-gate"])
+    monkeypatch.setattr(R, "runs_at_head", lambda repo, sha: [
+        run(101, "python-ci.yml", "queued"),
+        run(102, "ci.yml", "completed", "success"),
+    ])
+
+    def fake_count(repo, run_id):
+        probed.append(run_id)
+        return 0 if run_id == 101 else 26
+
+    monkeypatch.setattr(R, "run_job_count", fake_count)
+
+    plans = R.build_plans("o/r", REQUIRED, EMITTERS,
+                          include_drafts=False, max_attempts=3)
+
+    assert probed == [101], (
+        f"ONLY the non-completed run may be probed, got {probed}")
+    assert plans[0].unexpanded == [101], (
+        "the probed count must reach classify — unprobed is never named")
+    assert plans[0].needs_report is True, "and a stuck head must not be silent"
+
+
+def test_build_plans_probes_nothing_when_every_run_has_completed(monkeypatch):
+    """The ordinary merge path spends ZERO extra API calls."""
+    probed = []
+    monkeypatch.setattr(R, "open_prs", lambda repo, drafts: [pr(9)])
+    monkeypatch.setattr(R, "check_runs_at",
+                        lambda repo, sha: [check(c) for c in REQUIRED])
+    monkeypatch.setattr(R, "runs_at_head", lambda repo, sha: [
+        run(201, "python-ci.yml", "completed", "success"),
+        run(202, "ci.yml", "completed", "success"),
+    ])
+    monkeypatch.setattr(R, "run_job_count",
+                        lambda repo, run_id: probed.append(run_id) or 0)
+
+    plans = R.build_plans("o/r", REQUIRED, EMITTERS,
+                          include_drafts=False, max_attempts=3)
+
+    assert probed == [], f"a finished run must never be probed, got {probed}"
+    assert plans[0].unexpanded == []
+    assert plans[0].pending == []
 
 
 # ── report(): who is allowed to act ────────────────────────────────────────
@@ -1703,6 +1800,10 @@ def test_main_threads_a_measured_flood_into_the_report(monkeypatch, capsys, tmp_
     monkeypatch.setattr(R, "open_prs", lambda repo, include_drafts: [pr(1)])
     monkeypatch.setattr(R, "check_runs_at", lambda repo, head: [])
     monkeypatch.setattr(R, "runs_at_head", lambda repo, head: [run(10, "ci.yml", "queued")])
+    # #10753: this head's only run is NOT completed, so `probe_job_counts` would
+    # otherwise shell out to a real `gh` — these tests are hermetic by design, and
+    # an unpatchable probe made their result depend on this box's gh auth/network.
+    monkeypatch.setattr(R, "run_job_count", lambda repo, run_id: None)
 
     assert R.main(["--repo", "o/r", "--no-live", "--json",
                    "--record", str(_flood_record(tmp_path))]) == 0
@@ -1748,6 +1849,10 @@ def test_main_reports_a_PR_STARVED_reading_as_starved_too(monkeypatch, capsys, t
     monkeypatch.setattr(R, "open_prs", lambda repo, include_drafts: [pr(1)])
     monkeypatch.setattr(R, "check_runs_at", lambda repo, head: [])
     monkeypatch.setattr(R, "runs_at_head", lambda repo, head: [run(10, "ci.yml", "queued")])
+    # #10753: this head's only run is NOT completed, so `probe_job_counts` would
+    # otherwise shell out to a real `gh` — these tests are hermetic by design, and
+    # an unpatchable probe made their result depend on this box's gh auth/network.
+    monkeypatch.setattr(R, "run_job_count", lambda repo, run_id: None)
 
     seen: list[bool] = []
     real_classify = R.classify
@@ -1775,6 +1880,10 @@ def test_main_reports_starvation_not_witnessed_when_the_queue_is_unreadable(
     monkeypatch.setattr(R, "open_prs", lambda repo, include_drafts: [pr(1)])
     monkeypatch.setattr(R, "check_runs_at", lambda repo, head: [])
     monkeypatch.setattr(R, "runs_at_head", lambda repo, head: [run(10, "ci.yml", "queued")])
+    # #10753: this head's only run is NOT completed, so `probe_job_counts` would
+    # otherwise shell out to a real `gh` — these tests are hermetic by design, and
+    # an unpatchable probe made their result depend on this box's gh auth/network.
+    monkeypatch.setattr(R, "run_job_count", lambda repo, run_id: None)
     # The seam itself: what `classify` is actually TOLD. Without this the assertion
     # would only be that no flood was reported, which is also what a hard-wired
     # `queue_starved=False` produces.

@@ -350,10 +350,14 @@ def run_job_count(repo: str, run_id: int) -> int | None:
     `is_unexpanded`.
 
     ⚠️ `filter=latest`, NOT `all`, is correct here: a RE-RUN creates a new attempt
-    whose jobs do not exist yet, so `latest` answers "has THIS attempt been given
-    a job". Counting jobs from earlier attempts would make a fresh re-run attempt
-    look expanded (#10753 review, verified on run 41650707145: attempt 2 started
-    15:44:29 with the run's `created_at` still 14:08:08 — 96 minutes earlier).
+    whose jobs do not exist yet, so `latest` answers "has THIS attempt been given a
+    job". Counting jobs from earlier attempts would make a fresh re-run attempt
+    look expanded, and the ghost-after-rerun would become invisible again.
+    Verified live on runs that DO have a prior attempt with jobs: `41651342587`
+    and `41650433805` read 1 (latest) vs 2 (all), and `41639561830` reads 26 vs 55
+    with 29 jobs on attempt 1. ⛔ Do NOT cite run 41650707145 for this point —
+    its attempt 1 created ZERO jobs, so latest and all agree there; that run is
+    evidence for the `run_started_at`/age argument, not for the filter.
     """
     try:
         data = gh_api(f"repos/{repo}/actions/runs/{run_id}/jobs?per_page=1&filter=latest")
@@ -505,7 +509,7 @@ def producing_runs(ctx: str, all_runs: list[Run], emitters: dict[str, list[str]]
 
 def classify(pr: dict, checks: list[dict], all_runs: list[Run], required: list[str],
              emitters: dict[str, list[str]], max_attempts: int,
-             queue_starved: bool = False, now: float | None = None) -> PrPlan:
+             queue_starved: bool = False) -> PrPlan:
     """The whole decision, PURE — no API calls — so it is unit-testable.
 
     For each required context absent from the head's check runs, the producing
@@ -538,7 +542,7 @@ def classify(pr: dict, checks: list[dict], all_runs: list[Run], required: list[s
     plan = PrPlan(number=int(pr["number"]), head=pr["headRefOid"],
                   in_flight=sorted({r.name or r.path for r in all_runs
                                     if r.status != "completed"}))
-    ages = [a for a in (age_seconds(r.created_at, now) for r in all_runs
+    ages = [a for a in (age_seconds(r.created_at) for r in all_runs
                         if r.status != "completed") if a is not None]
     plan.oldest_pending_age_seconds = max(ages) if ages else None
     seen = {c.get("name") for c in checks if c.get("name")}
@@ -1143,23 +1147,6 @@ def main(argv: list[str] | None = None) -> int:
                   f"rerun={[x['run'] for x in r['rerun']]} missing_run={r['missing_run']} "
                   f"reopened={r['reopened']} reopen_attempts={r['reopen_attempts']} "
                   f"needs_user_actor={r['needs_user_actor']}")
-        if summary["unexpanded"]:
-            # Named state, and HONESTLY no per-PR remedy — the same doctrine as
-            # STARVED below, with the reason a re-trigger is not offered: the
-            # unexpanded class and the legitimately-queued class overlap in
-            # duration (78 min legitimate vs 63 min ghost, both measured), so a
-            # re-trigger would also hit a run that was about to report and
-            # `cancel-in-progress` would use it to cancel that run.
-            print("ci-check-repair: UNEXPANDED — a required check's producing run exists "
-                  "at the head but holds ZERO jobs, so it has been given no runner and "
-                  "cannot report yet. This is NOT distinguishable from a run that is "
-                  "merely queued behind a saturated pool (a measured legitimate run "
-                  "waited 78 min before its jobs appeared), so no per-PR re-trigger is "
-                  "attempted here: it would cancel CI that was about to report. While it "
-                  "is queued the remedy is capacity (`uv run python "
-                  "tools/ci_queue_health.py`); once it terminates without running, the "
-                  "existing rerun path re-runs it at the SAME head sha (never move the "
-                  "head — that would unbind the review record).", file=sys.stderr)
         if summary["starved"]:
             # Named state, named remedy. A starved head is not repaired by anything
             # this tool can do: the missing resource is a runner slot.
@@ -1171,6 +1158,25 @@ def main(argv: list[str] | None = None) -> int:
             print("ci-check-repair: some repairs need a credential that can trigger events "
                   "(the local fallback covers this) — see --json for per-PR detail",
                   file=sys.stderr)
+    # ⛔ OUTSIDE the `--json` branch on purpose. BOTH production callers pass
+    # `--json` (the scheduled workflow and the local fallback), so a note left
+    # inside the human-format branch never prints where the tool actually runs —
+    # the state would be visible only as `"unexpanded": N` in a JSON blob. Named
+    # state, and HONESTLY no per-PR remedy: the unexpanded class and the
+    # legitimately-queued class OVERLAP in duration (78 min legitimate vs 63 min
+    # ghost, both measured), so a re-trigger would also hit a run that was about
+    # to report, and `cancel-in-progress` would use the new run to cancel it.
+    if summary["unexpanded"]:
+        print("ci-check-repair: UNEXPANDED — a required check's producing run exists "
+              "at the head but holds ZERO jobs, so it has been given no runner and "
+              "cannot report yet. This is NOT distinguishable from a run that is "
+              "merely queued behind a saturated pool (a measured legitimate run "
+              "waited 78 min before its jobs appeared), so no per-PR re-trigger is "
+              "attempted here: it would cancel CI that was about to report. While it "
+              "is queued the remedy is capacity (`uv run python "
+              "tools/ci_queue_health.py`); once it terminates without running, the "
+              "existing rerun path re-runs it at the SAME head sha (never move the "
+              "head — that would unbind the review record).", file=sys.stderr)
     return code
 
 
