@@ -481,7 +481,7 @@ def carry_resolved_allowances(
         resolved = resolver(org_id)
     except QuotaCheckError:
         raise
-    except Exception as e:  # noqa: BLE001 — mapped, never an unmapped 500
+    except Exception as e:  # mapped below, never an unmapped 500
         _logger.error(
             "team allowances unresolvable (fail-closed): team=%s error=%r",
             org_id, e)

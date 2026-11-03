@@ -7912,12 +7912,6 @@ def _check_org_limit(org: dict, resource: str, *,
     org_id = org.get("org_id")
     if not org_id:
         return  # internal/no-org context — skip
-    from tortoise.quota import (
-        QuotaCheckError,
-        QuotaExceededError,
-        enforce_org_limit,
-        quota_refusal_payload,
-    )
     # ── #9567 D12: the RULED-dimension allowances must reach THIS dict ──────
     # Every REST lane assembles its own limits dict from its own store read
     # (registry `Team`, supabase `resolve_api_key`, `_membership_org`,
@@ -7933,6 +7927,12 @@ def _check_org_limit(org: dict, resource: str, *,
     from tortoise.allowance_gate import (
         ALLOWANCE_GATED_RESOURCES,
         carry_resolved_allowances,
+    )
+    from tortoise.quota import (
+        QuotaCheckError,
+        QuotaExceededError,
+        enforce_org_limit,
+        quota_refusal_payload,
     )
     if resource in ALLOWANCE_GATED_RESOURCES:
         org = carry_resolved_allowances(org)
