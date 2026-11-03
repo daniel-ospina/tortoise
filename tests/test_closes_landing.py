@@ -1924,6 +1924,877 @@ def test_the_ITEM_EDGE_is_measured_in_the_space_the_item_lives_in():
     assert cl.parse_closing_refs(marker_line_fence_in_quote) == []
 
 
+# ── MERGED-BUT-OPEN (#10698): from the merge to the issue's own state ────────
+#
+# The question these pin is NOT "will the keyword fire". It is: the merge already
+# happened — did anything close the issue, and what is the evidence allowed to say?
+#
+# Measured on this repository on 2026-11-03 (43 open P0-blocker/P1-severe issues,
+# 200 merged PRs): 0 had a closure record, 0 had even a firing `Closes` on the
+# default branch — every "closure" a naive parse found was a QUOTED keyword
+# (`PR #10519` says `` `Closes #10541` `` in a code span) or a keyword stranded on a
+# sibling base (`PR #10568`, base `act-10465`). So the two directions that matter
+# here are: a `done` may never rest on a keyword at all, and a reference inside a
+# code span is not a reference.
+
+def _mpr(n, base=DEFAULT, body="", sha=None, merged="2026-11-03T00:00:00Z",
+         closes=()):
+    return cl.MergedPR(number=n, base=base, body=body,
+                       merge_sha=sha if sha is not None else f"sha{n:040d}",
+                       merged_at=merged, closing_issues=tuple(closes))
+
+
+def _issue(n, body="", state="OPEN"):
+    return cl.IssueRecord(number=n, state=state, body=body)
+
+
+def test_a_merge_with_GITHUBS_OWN_closure_record_is_done():
+    link = cl.judge_issue(_issue(7), [_mpr(10, closes=(7,))],
+                          default_branch=DEFAULT, repo="owner/name",
+                          timeline=cl.Timeline())
+    assert link.verdict == "done"
+    assert link.reason == cl.REASON_CLOSURE
+    assert link.pr == 10
+    assert link.sha == f"sha{10:040d}"
+
+
+def test_a_closing_keyword_that_DID_NOT_FIRE_cannot_buy_done():
+    """The whole point: `lands` is a claim about the keyword, not about the issue.
+
+    A body that says `Closes #7` and merged into `main` while `#7` is still open
+    is GitHub having ignored the shape (keyword edited in after the merge) or a
+    repo with automatic closing off — NOT evidence of completion. It must never
+    report `done`.
+    """
+    link = cl.judge_issue(_issue(7), [_mpr(10, body="Closes #7")],
+                          default_branch=DEFAULT, repo="owner/name",
+                          timeline=cl.Timeline())
+    assert link.verdict == "partial"
+    assert link.reason == cl.REASON_CLOSES_DID_NOT_FIRE
+
+
+def test_a_claim_stranded_on_a_NON_default_base_is_named_as_that():
+    """#10597's measured shape, reported at this layer: PR #10568 carried
+    `Closes #10541` into base `act-10465`, so the keyword never fired and the
+    work only rides to main through a carrier that names a different issue."""
+    link = cl.judge_issue(_issue(10541),
+                          [_mpr(10568, base=SIBLING, body="Closes #10541")],
+                          default_branch=DEFAULT, repo="owner/name",
+                          timeline=cl.Timeline())
+    assert link.verdict == "partial"
+    assert link.reason == cl.REASON_CLOSES_NON_DEFAULT
+
+
+def test_a_refs_only_merge_is_partial_and_NEVER_done():
+    link = cl.judge_issue(_issue(7), [_mpr(10, body="Refs #7")],
+                          default_branch=DEFAULT, repo="owner/name",
+                          timeline=cl.Timeline())
+    assert link.verdict == "partial"
+    assert link.reason == cl.REASON_REFS_ONLY
+
+
+def test_a_QUOTED_closing_keyword_is_not_even_a_reference():
+    """The measured false positive that motivated reusing this module's parser.
+
+    `PR #10519`'s prose contains `` `Closes #10541` `` inside a backtick span. A
+    naive `Closes|Fixes|Resolves` regex reads that as a claim; the renderer calls
+    it code. Here it must produce NOTHING — not `done`, not a `partial` reason.
+    """
+    body = "rows 1 and 2 re-scored`Closes #10541` is claimed under, and the fork"
+    link = cl.judge_issue(_issue(10541), [_mpr(10519, body=body)],
+                          default_branch=DEFAULT, repo="owner/name",
+                          timeline=cl.Timeline())
+    assert link.verdict == "not-done"
+    assert cl.parse_closing_refs(body, "owner/name", strict=True) == []
+
+
+def test_a_quoted_REFS_is_not_a_reference_either():
+    body = "the `Refs #7` this body used to carry was inherited"
+    assert cl.parse_reference_refs(body) == []
+
+
+def test_a_reference_only_in_the_issue_TIMELINE_is_a_mention():
+    link = cl.judge_issue(_issue(7), [_mpr(10)], default_branch=DEFAULT,
+                          repo="owner/name",
+                          timeline=cl.Timeline(refs=(_mpr(11, body="nothing in the body"),)))
+    assert link.verdict == "partial"
+    assert link.reason == cl.REASON_MENTION_ONLY
+    assert link.pr == 11
+
+
+def test_no_reference_anywhere_is_not_done_and_says_WHICH_window():
+    link = cl.judge_issue(_issue(7), [_mpr(10)], default_branch=DEFAULT,
+                          repo="owner/name", timeline=cl.Timeline())
+    assert link.verdict == "not-done"
+    # The reason carries the window qualifier: `not-done` is a claim about the
+    # merges that were READ, and a bare "no-merge-ref" reads as "never merged".
+    assert link.reason == cl.REASON_NO_MERGE_REF == "no-merge-ref-in-window"
+
+
+def test_done_outranks_a_refs_only_merge_on_an_older_PR():
+    link = cl.judge_issue(
+        _issue(7),
+        [_mpr(10, body="Refs #7", merged="2026-11-01T00:00:00Z"),
+         _mpr(12, closes=(7,), merged="2026-11-02T00:00:00Z")],
+        default_branch=DEFAULT, repo="owner/name", timeline=cl.Timeline())
+    assert (link.verdict, link.pr) == ("done", 12)
+
+
+def test_the_NEWEST_merge_is_the_sha_cited():
+    link = cl.judge_issue(
+        _issue(7),
+        [_mpr(10, body="Refs #7", merged="2026-11-01T00:00:00Z"),
+         _mpr(11, body="Refs #7", merged="2026-11-02T00:00:00Z")],
+        default_branch=DEFAULT, repo="owner/name", timeline=cl.Timeline())
+    assert (link.verdict, link.pr, link.sha) == ("partial", 11, f"sha{11:040d}")
+
+
+def test_an_UNREAD_timeline_never_produces_not_done():
+    """`not-done` is a claim about an ABSENCE. With no timeline read there is no
+    absence to claim, so the honest answer is the WEAKER `partial`."""
+    prs = [_mpr(10)]
+    for timelines in (None, {}):
+        links = cl.judge_population([_issue(7)], prs, default_branch=DEFAULT,
+                                    repo="owner/name", timelines=timelines)
+        assert links[0].verdict == "partial", timelines
+        assert links[0].reason == cl.REASON_UNMEASURED_TIMELINE
+
+
+def test_a_READ_timeline_with_no_reference_does_produce_not_done():
+    links = cl.judge_population([_issue(7)], [_mpr(10)], default_branch=DEFAULT,
+                                repo="owner/name", timelines={7: cl.Timeline()})
+    assert links[0].verdict == "not-done"
+
+
+# ── the acceptance annotation (never a gate) ─────────────────────────────────
+
+@pytest.mark.parametrize("body,expected", [
+    ("- [x] a\n- [ ] b\n- [X] c", (3, 2)),
+    ("* [x] a\n+ [ ] b\n1. [x] c", (3, 2)),      # every task-list marker GitHub renders
+    ("- [x] a\n", (1, 1)),
+    ("no list here", (0, 0)),
+    ("- a plain bullet\n- another", (0, 0)),
+])
+def test_acceptance_counts_every_task_list_marker(body, expected):
+    got = cl.acceptance_from_body(body)
+    assert (got.total, got.checked) == expected
+
+
+def test_a_QUOTED_checklist_is_not_acceptance():
+    body = "this is the template:\n\n```\n- [ ] do the thing\n```\n"
+    assert cl.acceptance_from_body(body) == cl.Acceptance(0, 0)
+
+
+def test_acceptance_all_checked_requires_AT_LEAST_ONE_box():
+    """An empty list is not "all checked": `total > 0` is what stops an empty
+    denominator from reading as complete."""
+    assert cl.Acceptance(0, 0).all_checked is False
+    assert cl.Acceptance(2, 2).all_checked is True
+    assert cl.Acceptance(2, 1).all_checked is False
+    assert cl.Acceptance(0, 0).label() == "none"
+    assert cl.Acceptance(2, 1).label() == "1/2"
+
+
+# ── the report line, and the exit map ────────────────────────────────────────
+
+def test_the_merged_line_is_the_documented_format():
+    line = cl.MergeLink(issue=5, verdict="partial", reason="refs-only",
+                        pr=10, sha="abc123").line()
+    assert line == ("MERGED-BUT-OPEN(abc123 10 -> #5 verdict=partial "
+                    "reason=refs-only acceptance=none)")
+    assert "\n" not in line
+
+
+def test_a_not_done_line_never_claims_a_merge():
+    """A `not-done` issue has no merge, so printing a sha and a PR number would
+    assert one that never happened — and a `grep MERGED-BUT-OPEN` would then
+    collect rows nothing backs."""
+    line = cl.MergeLink(issue=5, verdict="not-done",
+                        reason="no-merge-ref-in-window").line()
+    assert line.startswith("NO-MERGE-REF(#5 ")
+    assert "MERGED-BUT-OPEN" not in line
+    assert "verdict=not-done" in line
+
+
+def test_merge_link_worst_is_its_OWN_vocabulary():
+    """`worst_verdict` iterates the STACK vocabulary and returns `none` for every
+    `partial`/`not-done` link — reusing it would exit 0 on a report that is
+    entirely drift. This pins the separation in both directions."""
+    partial = [cl.MergeLink(issue=1, verdict="partial", reason="refs-only")]
+    not_done = [cl.MergeLink(issue=2, verdict="not-done", reason="no-merge-ref-in-window")]
+    done = [cl.MergeLink(issue=3, verdict="done", reason="closure-record")]
+    assert cl.merge_link_worst(partial) == "partial"
+    assert cl.merge_link_worst(not_done) == "not-done"
+    assert cl.merge_link_worst(done) == "done"
+    assert cl.merge_link_worst([]) == "none"
+    assert cl.merge_link_worst(partial + done) == "partial"      # worst wins
+    assert cl.merge_link_worst(done + not_done) == "not-done"
+    assert cl.worst_verdict([]) == "none"
+
+
+# ── the live layer, stubbed at `_gh` (the same seam the suite already uses) ──
+
+def _merged_gh(default=DEFAULT, opening=(), merged_rows=(), timeline=()):
+    """A `_gh` stub answering the three calls this mode makes."""
+    import json as _json
+
+    by_number = {row["number"]: row for row in opening}
+
+    def fake(args):
+        if args[:2] == ["pr", "list"]:
+            return _json.dumps(list(merged_rows))
+        if args[:2] == ["issue", "list"]:
+            return _json.dumps(list(opening))
+        if args[:2] == ["issue", "view"]:
+            return _json.dumps(by_number[int(args[2])])
+        if args[:1] == ["api"]:
+            return _json.dumps([list(timeline)])
+        if args[:2] == ["repo", "view"]:
+            return _json.dumps({"defaultBranchRef": {"name": default},
+                                "nameWithOwner": "owner/name"})
+        raise AssertionError(f"unexpected gh call: {args}")
+
+    return fake
+
+
+def test_cli_merged_but_open_exits_3_on_drift(monkeypatch, capsys):
+    monkeypatch.setattr(cl, "_gh", _merged_gh(
+        opening=[{"number": 7, "state": "OPEN", "body": ""}],
+        merged_rows=[{"number": 10, "baseRefName": DEFAULT, "body": "Refs #7",
+                      "mergedAt": "2026-11-02T00:00:00Z",
+                      "mergeCommit": {"oid": "a" * 40},
+                      "closingIssuesReferences": []}]))
+    code = cl.main(["--merged-but-open", "--repo", "owner/name",
+                    "--default-branch", DEFAULT])
+    out = capsys.readouterr().out
+    assert code == 3
+    assert "MERGED-BUT-OPEN(" in out
+    assert "reason=refs-only" in out
+    assert "population=1" in out            # the denominator is always printed
+
+
+def test_cli_merged_but_open_exits_0_when_everything_has_a_closure_record(
+        monkeypatch, capsys):
+    monkeypatch.setattr(cl, "_gh", _merged_gh(
+        opening=[{"number": 7, "state": "OPEN", "body": ""}],
+        merged_rows=[{"number": 10, "baseRefName": DEFAULT, "body": "Closes #7",
+                      "mergedAt": "2026-11-02T00:00:00Z",
+                      "mergeCommit": {"oid": "a" * 40},
+                      "closingIssuesReferences": [{"number": 7, "repository": {"id": "R", "name": "name", "owner": {"id": "U", "login": "owner"}}, "url": "https://github.com/owner/name/issues/7"}]}]))
+    code = cl.main(["--merged-but-open", "--repo", "owner/name",
+                    "--default-branch", DEFAULT])
+    out = capsys.readouterr().out
+    assert code == 0
+    # The WHOLE census prints, `done` rows included: the line format carries
+    # `verdict=done`, so a reader must be able to grep it.
+    assert "verdict=done" in out
+    assert "population=1 done=1" in out
+
+
+def test_cli_merged_but_open_exits_2_when_gh_cannot_answer(monkeypatch, capsys):
+    def boom(_args):
+        raise cl.Unmeasurable("gh is down")
+    monkeypatch.setattr(cl, "_gh", boom)
+    code = cl.main(["--merged-but-open", "--repo", "owner/name",
+                    "--default-branch", DEFAULT])
+    assert code == 2
+    assert "UNMEASURED" in capsys.readouterr().err
+
+
+def test_a_FOREIGN_repos_closure_record_cannot_mint_done_here(monkeypatch):
+    """`#7` in another repository is not `#7` here, and this arm decides whether
+    an issue may be CLOSED. GitHub's `closingIssuesReferences` carries the owning
+    repository; comparing only the number let `Closes other/repo#7` mark local
+    open #7 as `done`."""
+    rows = [{"number": 10, "baseRefName": DEFAULT, "body": "",
+             "mergedAt": "2026-11-02T00:00:00Z",
+             "mergeCommit": {"oid": "a" * 40},
+             # ⛔ the REAL shape: `gh pr view --json closingIssuesReferences`
+             # emits `repository:{id,name,owner:{login}}` + a github.com `url`.
+             # It carries NO `nameWithOwner` and NO `repository_url` — a first
+             # version of the guard read only those two, so it was INERT in
+             # production while this test (built from a shape production never
+             # produces) passed.
+             "closingIssuesReferences": [{
+                 "number": 7,
+                 "repository": {"id": "R_x", "name": "other",
+                                "owner": {"id": "U_x", "login": "someone-else"}},
+                 "url": "https://github.com/someone-else/other/issues/7"}]},
+            {"number": 11, "baseRefName": DEFAULT, "body": "",
+             "mergedAt": "2026-11-02T00:00:00Z",
+             "mergeCommit": {"oid": "b" * 40},
+             "closingIssuesReferences": [{
+                 "number": 8,
+                 "repository": {"id": "R_y", "name": "name",
+                                "owner": {"id": "U_y", "login": "owner"}},
+                 "url": "https://github.com/owner/name/issues/8"}]}]
+    monkeypatch.setattr(cl, "_gh",
+                        _merged_gh(opening=[{"number": 7, "state": "OPEN", "body": ""},
+                                            {"number": 8, "state": "OPEN", "body": ""}],
+                                   merged_rows=rows))
+    prs = cl.fetch_merged_prs("owner/name", 48)
+    assert prs[0].closing_issues == ()          # the foreign ref is dropped
+    assert prs[1].closing_issues == (8,)        # the local one survives
+    links = {lk.issue: lk for lk in cl.merged_but_open(
+        "owner/name", DEFAULT, labels=["P1-severe"], since_hours=48, prs=prs,
+        timelines=False)}
+    assert links[7].verdict != "done"
+
+
+@pytest.mark.parametrize("node,repo,expected", [
+    # the exact payload `gh pr view 8174 --json closingIssuesReferences` emitted
+    ({"number": 7, "repository": {"id": "R", "name": "tortoise",
+                                  "owner": {"id": "U", "login": "daniel-ospina"}},
+      "url": "https://github.com/daniel-ospina/tortoise/issues/7"},
+     "daniel-ospina/tortoise", True),
+    ({"number": 7, "repository": {"id": "R", "name": "other",
+                                  "owner": {"id": "U", "login": "someone-else"}},
+      "url": "https://github.com/someone-else/other/issues/7"},
+     "daniel-ospina/tortoise", False),
+    # a foreign repo whose NAME is a suffix of ours must not pass on the name
+    ({"number": 7, "repository": {"name": "tortoise", "owner": {"login": "x"}}},
+     "daniel-ospina/tortoise", False),
+    ({"number": 7, "repository": {"nameWithOwner": "owner/name"}},
+     "owner/name", True),
+    ({"number": 7, "repository_url": "https://api.github.com/repos/owner/name"},
+     "owner/name", True),
+    # NO identification at all: fail CLOSED, because this arm decides `done`
+    ({"number": 7}, "owner/name", False),
+    # …unless there is no repo to compare against, where local is the default
+    ({"number": 7}, None, True),
+    ("not a dict", "owner/name", False),
+])
+def test_a_reference_is_scoped_by_REPOSITORY_not_only_by_number(
+        node, repo, expected):
+    """`#7` in another repository is not `#7` here, and this arm decides whether
+    an issue may be CLOSED.
+
+    The parametrisation is deliberately built from the payload shapes MEASURED
+    against the live API — an earlier version of this guard read only
+    `repository.nameWithOwner` / `repository_url`, neither of which `gh` emits for
+    `closingIssuesReferences`, so it was inert in production while a test built
+    from an invented shape passed.
+    """
+    assert cl.ref_is_local(node, repo) is expected
+
+
+def test_a_trailing_foreign_closing_ref_cannot_mint_done_end_to_end():
+    foreign = {"number": 7,
+               "repository": {"id": "R", "name": "other",
+                              "owner": {"id": "U", "login": "someone-else"}},
+               "url": "https://github.com/someone-else/other/issues/7"}
+    pr = cl._to_merged_pr({"number": 9001, "baseRefName": DEFAULT, "body": "",
+                           "mergedAt": "2026-11-02T00:00:00Z",
+                           "mergeCommit": {"oid": "c" * 40},
+                           "closingIssuesReferences": [foreign]},
+                          "owner/name")
+    assert pr.closing_issues == ()
+    link = cl.judge_issue(_issue(7), [pr], default_branch=DEFAULT,
+                          repo="owner/name", timeline=cl.Timeline())
+    assert link.verdict != "done"
+
+
+def test_step_two_reads_Closes_STRICTLY_so_a_broken_claim_is_not_a_claim():
+    """`Closes` on its own line with the number after a blank line does NOT parse
+    strictly. Step 2 must use the strict grammar: reporting `closes-did-not-fire`
+    for something that is not a claim is a false warning, and it is the arm the
+    lenient grammar would silently upgrade. Mutation-tested: flipping
+    `strict=True` to the lenient default left every other test passing."""
+    body = "Closes\n\n#7"
+    assert cl.parse_closing_refs(body, "owner/name", strict=True) == []
+    assert cl.parse_closing_refs(body, "owner/name") == [7]
+    pr = cl.MergedPR(number=10, base=DEFAULT, body=body, merge_sha="a" * 40,
+                     merged_at="2026-11-02T00:00:00Z")
+    link = cl.judge_issue(_issue(7), [pr], default_branch=DEFAULT,
+                          repo="owner/name", timeline=cl.Timeline())
+    assert link.reason != "closes-did-not-fire"
+
+
+@pytest.mark.parametrize("call", [
+    lambda: cl.fetch_merged_prs("owner/name", 24),
+    lambda: cl.fetch_open_issues(["P1-severe"], "owner/name"),
+    lambda: cl.fetch_issues_by_number([7], "owner/name"),
+])
+@pytest.mark.parametrize("payload", ['{"message": "Bad credentials"}', "null"])
+def test_a_200_that_is_not_a_json_ARRAY_is_UNMEASURABLE_not_a_traceback(
+        monkeypatch, call, payload):
+    """`_gh` raises on a non-zero exit, but a 200 carrying an error object is the
+    same failure and must land on the documented exit 2. It used to escape
+    `main()` as an `AttributeError`/`TypeError` traceback — exit 1, which the
+    header does not define."""
+    monkeypatch.setattr(cl, "_gh", lambda _args: payload)
+    with pytest.raises(cl.Unmeasurable):
+        call()
+
+
+def test_a_FOREIGN_repos_timeline_cross_reference_is_not_attributed(monkeypatch):
+    """The timeline arm has the same hole: `cross-referenced` carries
+    `source.issue.repository_url`, and matching only `number` credits OUR PR #10
+    with a mention that came from another repository."""
+    timeline = [
+        {"event": "cross-referenced",
+         "source": {"issue": {"number": 10,
+                              "repository_url": "https://api.github.com/repos/x/y"}}},
+        {"event": "cross-referenced",
+         "source": {"issue": {"number": 11,
+                              "repository_url": "https://api.github.com/repos/owner/name"}}},
+    ]
+    monkeypatch.setattr(cl, "_gh", lambda _a: __import__("json").dumps([timeline]))
+    tl = cl.fetch_timeline(7, "owner/name", {10: _mpr(10), 11: _mpr(11)})
+    assert [r.number for r in tl.refs] == [11]
+
+
+def test_the_no_timeline_FLAG_says_partial_not_not_done(monkeypatch, capsys):
+    """`--no-timeline` is the only way a caller can produce an unmeasured census,
+    so it must print `partial`/`unmeasured-timeline` -- NOT `not-done`, which is a
+    claim about an absence nobody measured.
+
+    Two rows on purpose: `#7` is settled by its BODY (it stays `refs-only`
+    whatever the flag says), and `#8` is settled by nothing, so it is the row the
+    flag actually moves. With one row only, mutating
+    `timelines=not args.no_timeline` to `timelines=True` left every test passing.
+    """
+    def fake(args):
+        if args[:2] == ["pr", "list"]:
+            return "[]"
+        if args[:1] == ["api"]:            # a READ timeline that found nothing
+            return "[[]]"
+        if args[:2] == ["repo", "view"]:
+            return '{"defaultBranchRef": {"name": "main"}, "nameWithOwner": "owner/name"}'
+        raise AssertionError(f"unexpected gh call: {args}")
+
+    monkeypatch.setattr(cl, "_gh", fake)
+    monkeypatch.setattr(cl, "fetch_open_issues",
+                        lambda _l, _r: [_issue(7), _issue(8)])
+    monkeypatch.setattr(cl, "fetch_merged_prs", lambda _r, _h: [
+        cl.MergedPR(number=10, base=DEFAULT, body="Refs #7",
+                    merge_sha="a" * 40, merged_at="2026-11-02T00:00:00Z")])
+
+    code = cl.main(["--merged-but-open", "--repo", "owner/name",
+                    "--default-branch", DEFAULT, "--label", "P1-severe",
+                    "--no-timeline"])
+    out = capsys.readouterr().out
+    assert code == 3                        # drift is still drift
+    assert "reason=refs-only" in out        # the body settled #7
+    assert "reason=unmeasured-timeline" in out
+    assert "verdict=not-done" not in out    # nothing was measured as absent
+
+    # ...and WITHOUT the flag the same row IS measured, so the flag is load-bearing
+    capsys.readouterr()
+    code = cl.main(["--merged-but-open", "--repo", "owner/name",
+                    "--default-branch", DEFAULT, "--label", "P1-severe"])
+    assert code == 3
+    assert "NO-MERGE-REF(#8 verdict=not-done reason=no-merge-ref-in-window" \
+        in capsys.readouterr().out
+
+
+def test_the_open_issue_population_FULL_is_UNMEASURABLE(monkeypatch):
+    """A FULL `issue list` page is a TRUNCATED population, and a truncated
+    population cannot report `not-done` over the rows it never read. Deleting
+    this guard left every test passing."""
+    import json as _json
+
+    def fake(args):
+        if args[:2] == ["issue", "list"]:
+            return _json.dumps([{"number": n, "state": "OPEN", "body": ""}
+                                for n in range(5)])
+        return "[]"
+
+    monkeypatch.setattr(cl, "_gh", fake)
+    with pytest.raises(cl.Unmeasurable) as exc:
+        cl.fetch_open_issues(["P1-severe"], "owner/name", limit=5)
+    assert "FULL" in str(exc.value)
+
+
+def test_an_EMPTY_merged_window_is_UNMEASURABLE(monkeypatch):
+    """No merged PRs in the window is a question the tool did not answer, not a
+    clean census. Deleting this guard left every test passing."""
+    def fake(_args):
+        return "[]"
+
+    monkeypatch.setattr(cl, "_gh", fake)
+    with pytest.raises(cl.Unmeasurable) as exc:
+        cl.merged_but_open("owner/name", DEFAULT, labels=["P1-severe"],
+                           since_hours=48)
+    assert "empty window is UNMEASURED" in str(exc.value)
+
+
+def test_the_merged_window_is_pinned_to_MERGE_TIME_not_created_order(monkeypatch):
+    """`gh pr list --state merged` orders by `createdAt`. A mutant that drops the
+    `merged:` qualifier silently samples created-order, so a PR opened a week ago
+    and merged an hour ago falls out of a 48 h window — the argv has to be pinned
+    or the mutation survives."""
+    calls = []
+
+    def fake(args):
+        calls.append(list(args))
+        return "[]"
+
+    monkeypatch.setattr(cl, "_gh", fake)
+    assert cl.fetch_merged_prs("owner/name", 48) == []
+    argv = calls[0]
+    assert "--search" in argv
+    assert argv[argv.index("--search") + 1].startswith("merged:2")
+    assert ".." in argv[argv.index("--search") + 1]      # a bounded RANGE, not `>=`
+    assert "--state" in argv and argv[argv.index("--state") + 1] == "merged"
+
+
+def test_a_FULL_merged_window_is_unmeasurable_not_a_shorter_report(monkeypatch):
+    """Reaching `--limit` cannot tell "nothing references this issue" from "the
+    reference is in the part I did not read"."""
+    def fake(_args):
+        import json as _json
+        return _json.dumps([{"number": n, "baseRefName": DEFAULT, "body": "",
+                             "mergedAt": "2026-11-02T00:00:00Z",
+                             "mergeCommit": {"oid": "a" * 40},
+                             "closingIssuesReferences": []}
+                            for n in range(5)])
+
+    monkeypatch.setattr(cl, "_gh", fake)
+    with pytest.raises(cl.Unmeasurable) as exc:
+        cl.fetch_merged_prs("owner/name", 48, limit=5)
+    assert "FULL" in str(exc.value)
+
+
+def test_the_window_is_PAGED_by_day_so_a_week_never_becomes_one_payload(monkeypatch):
+    """`--since-hours 168` used to be a single 157-row body query that blew the
+    60 s per-call bound (measured twice). It is paged now, and the pages must be
+    bounded ranges or the fix is cosmetic."""
+    calls = []
+
+    def fake(args):
+        calls.append(list(args))
+        return "[]"
+
+    monkeypatch.setattr(cl, "_gh", fake)
+    cl.fetch_merged_prs("owner/name", 168)
+    assert len(calls) == 7, f"expected 7 day-sized pages, got {len(calls)}"
+    for argv in calls:
+        window = argv[argv.index("--search") + 1].split(" sort=")[0]
+        lo, _, hi = window.partition("merged:")[2].partition("..")
+        assert lo and hi and lo < hi, window
+
+
+def test_a_PR_appearing_in_two_overlapping_pages_is_counted_ONCE(monkeypatch):
+    """Datetime ranges do not overlap, but the dedupe is what makes that a
+    property of the CODE rather than of the query string."""
+    def fake(_args):
+        import json as _json
+        return _json.dumps([{"number": 10, "baseRefName": DEFAULT,
+                             "body": "Closes #7", "state": "MERGED",
+                             "mergedAt": "2026-11-02T00:00:00Z",
+                             "mergeCommit": {"oid": "a" * 40},
+                             "closingIssuesReferences": [{"number": 7, "repository": {"id": "R", "name": "name", "owner": {"id": "U", "login": "owner"}}, "url": "https://github.com/owner/name/issues/7"}]}])
+
+    monkeypatch.setattr(cl, "_gh", fake)
+    prs = cl.fetch_merged_prs("owner/name", 48)
+    assert [p.number for p in prs] == [10]
+
+
+def test_the_timeline_read_needs_a_slug():
+    """No slug ⇒ no timeline ⇒ no `not-done`. Fail closed, never guess."""
+    with pytest.raises(cl.Unmeasurable):
+        cl.fetch_timeline(7, "", {})
+
+
+def test_the_timeline_reads_EVERY_page(monkeypatch):
+    """One measured issue carried 63 `referenced` + 27 `cross-referenced` events;
+    a first-page-only read would answer `not-done` over references it never saw."""
+    calls = []
+
+    def fake(args):
+        import json as _json
+        calls.append(list(args))
+        return _json.dumps([[{"event": "cross-referenced",
+                              "source": {"issue": {
+                                  "number": 10,
+                                  "repository_url":
+                                      "https://api.github.com/repos/owner/name"}}}]])
+
+    monkeypatch.setattr(cl, "_gh", fake)
+    tl = cl.fetch_timeline(7, "owner/name", {10: _mpr(10)})
+    assert [r.number for r in tl.refs] == [10]
+    assert "--paginate" in calls[0] and "--slurp" in calls[0]
+
+
+@pytest.mark.parametrize("payload", [
+    '{"message": "Bad credentials", "status": "401"}',   # an error OBJECT
+    "null",                                              # no body at all
+    '[{"event": "reopened"}]',                           # events, but no PAGES
+    '[[{"event": "reopened"}], {"event": "reopened"}]',  # one page is not a list
+])
+def test_a_timeline_payload_this_code_cannot_parse_FAILS_CLOSED(
+        monkeypatch, payload):
+    """An empty `Timeline` means "read it, found nothing" — and that is the only
+    state `not-done` is allowed to rest on. So a body the parser does not
+    understand must raise, exactly as the module's own doctrine says
+    ("An unreadable timeline is UNMEASURABLE, never 'no references'").
+
+    It previously fell through to `events = []`, which made a 200 carrying an
+    error object indistinguishable from a complete read, and produced
+    `verdict=not-done reason=no-merge-ref-in-window` from a document never read.
+    """
+    monkeypatch.setattr(cl, "_gh", lambda _args: payload)
+    with pytest.raises(cl.Unmeasurable) as exc:
+        cl.fetch_timeline(7, "owner/name", {})
+    assert "unreadable timeline is UNMEASURED" in str(exc.value)
+
+
+def test_the_two_documented_line_kinds_are_the_two_lines_PRINTED():
+    """The module header calls these "the fleet-readable contract", and a
+    consumer implements against THAT text. The `NO-MERGE-REF` shape drifted from
+    it once — documented `reason=no-merge-ref`, emitted
+    `reason=no-merge-ref-in-window acceptance=none` — and only one of the two
+    kinds was pinned, so nothing caught it."""
+    merged = cl.MergeLink(issue=7, verdict="partial", reason="refs-only",
+                          pr=10, sha="a" * 40,
+                          acceptance=cl.Acceptance(2, 1))
+    bare = cl.MergeLink(issue=7, verdict="not-done",
+                        reason=cl.REASON_NO_MERGE_REF)
+    assert merged.line() == (
+        f"MERGED-BUT-OPEN({'a' * 40} 10 -> #7 verdict=partial reason=refs-only "
+        f"acceptance=1/2)")
+    assert bare.line() == (
+        "NO-MERGE-REF(#7 verdict=not-done reason=no-merge-ref-in-window "
+        "acceptance=none)")
+
+    header = (Path(cl.__file__).read_text())
+    for line in (merged.line(), bare.line()):
+        kind = line.split("(")[0]
+        shape = [ln.strip() for ln in header.splitlines()
+                 if ln.strip().startswith(f"{kind}(")]
+        assert shape, f"{kind} is not documented in the module header"
+        documented = shape[0]
+        # every field the code prints must be in the documented contract — and
+        # where the contract states a LITERAL (not a `<placeholder>`), the code
+        # must print that literal. A name-only check would have passed
+        # `reason=no-merge-ref` against a printed `no-merge-ref-in-window`.
+        for field in line[line.index("(") + 1:-1].split():
+            if "=" not in field:
+                continue
+            key, _, value = field.partition("=")
+            pieces = [p.partition("=")[2] for p in documented.split()
+                      if p.startswith(key + "=")]
+            assert pieces, f"{kind}: documented shape omits `{key}=`"
+            for stated in pieces:
+                if "<" not in stated:
+                    assert stated == value, (
+                        f"{kind}: contract says `{key}={stated}`, code prints "
+                        f"`{key}={value}`")
+
+
+def test_a_reference_in_the_timeline_from_a_NON_default_base_PR_is_not_counted(
+        monkeypatch):
+    def fake(_args):
+        import json as _json
+        return _json.dumps([[{"event": "cross-referenced",
+                              "source": {"issue": {
+                                  "number": 10,
+                                  "repository_url":
+                                      "https://api.github.com/repos/owner/name"}}}]])
+
+    monkeypatch.setattr(cl, "_gh", fake)
+    sibling = _mpr(10, base=SIBLING)
+    link = cl.judge_issue(_issue(7), [sibling], default_branch=DEFAULT,
+                          repo="owner/name",
+                          timeline=cl.fetch_timeline(7, "owner/name",
+                                                     {10: sibling}))
+    assert link.verdict == "not-done"
+
+
+
+def test_an_EMPTY_census_is_unmeasurable_not_a_clean_sweep(monkeypatch, capsys):
+    """`--label P9-nonsense` must not exit 0: an empty population is UNMEASURED,
+    and a 0 exit over nothing at all is the false PASS this module refuses."""
+    monkeypatch.setattr(cl, "_gh", _merged_gh(
+        opening=[],
+        merged_rows=[{"number": 10, "baseRefName": DEFAULT, "body": "Refs #7",
+                      "mergedAt": "2026-11-02T00:00:00Z",
+                      "mergeCommit": {"oid": "a" * 40},
+                      "closingIssuesReferences": []}]))
+    code = cl.main(["--merged-but-open", "--repo", "owner/name",
+                    "--default-branch", DEFAULT, "--label", "P9-nonsense"])
+    assert code == 2
+    assert "EMPTY" in capsys.readouterr().err
+
+
+def test_the_annotation_arm_stays_drift_only(monkeypatch, capsys):
+    """A `done` row is not a warning. If it were annotated, a repo that is fine
+    would emit one ::warning per healthy issue."""
+    monkeypatch.setattr(cl, "_gh", _merged_gh(
+        opening=[{"number": 7, "state": "OPEN", "body": ""}],
+        merged_rows=[{"number": 10, "baseRefName": DEFAULT, "body": "Closes #7",
+                      "mergedAt": "2026-11-02T00:00:00Z",
+                      "mergeCommit": {"oid": "a" * 40},
+                      "closingIssuesReferences": [{"number": 7, "repository": {"id": "R", "name": "name", "owner": {"id": "U", "login": "owner"}}, "url": "https://github.com/owner/name/issues/7"}]}]))
+    code = cl.main(["--merged-but-open", "--repo", "owner/name",
+                    "--default-branch", DEFAULT, "--annotate"])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "::warning" not in out
+    assert out.strip() == ""      # nothing to warn about, and no prose either
+
+
+def test_an_UNMERGED_pr_cannot_have_failed_to_close_anything():
+    """A keyword on an OPEN PR has not failed to fire — it has not fired YET, and
+    `closes-did-not-fire` would tell a reader a merge happened and lost the
+    closure. The pure function must refuse the claim for an unmerged PR."""
+    open_pr = cl.MergedPR(number=10, base=DEFAULT, body="Closes #7",
+                          merge_sha="", merged_at=None)
+    assert open_pr.merged is False
+    link = cl.judge_issue(_issue(7), [open_pr], default_branch=DEFAULT,
+                          repo="owner/name", timeline=cl.Timeline())
+    assert link.verdict == "not-done"
+    # ...and an unmerged PR on a sibling base is #10597's LIVE case, not a claim
+    # about a merge that already happened.
+    live_sibling = cl.MergedPR(number=11, base=SIBLING, body="Closes #7",
+                               merge_sha="", merged_at=None)
+    link = cl.judge_issue(_issue(7), [live_sibling], default_branch=DEFAULT,
+                          repo="owner/name", timeline=cl.Timeline())
+    assert link.verdict == "not-done"
+
+
+def test_a_merged_sibling_branch_PR_IS_a_named_claim():
+    merged_sibling = cl.MergedPR(number=10568, base=SIBLING,
+                                 body="Closes #7", merge_sha="b" * 40,
+                                 merged_at="2026-11-02T00:00:00Z")
+    link = cl.judge_issue(_issue(7), [merged_sibling], default_branch=DEFAULT,
+                          repo="owner/name", timeline=cl.Timeline())
+    assert (link.verdict, link.reason) == ("partial", cl.REASON_CLOSES_NON_DEFAULT)
+
+
+def test_a_COMMIT_MENTION_in_the_timeline_is_attributed_by_merge_sha(monkeypatch):
+    """The documented squash/merge-commit path: a `referenced` event carries only
+    `commit_id`, so it is attributed through the PR's `merge_commit_sha`. Without
+    this the commit-message keyword path is fetched and silently dropped."""
+    def fake(_args):
+        import json as _json
+        return _json.dumps([[{"event": "referenced", "commit_id": "c" * 40,
+                              "source": None}]])
+
+    monkeypatch.setattr(cl, "_gh", fake)
+    tl = cl.fetch_timeline(7, "owner/name",
+                           {10: _mpr(10, sha="c" * 40,
+                                     merged="2026-11-02T00:00:00Z")})
+    assert [r.number for r in tl.refs] == [10]
+
+
+def test_a_commit_mention_that_matches_NO_merge_sha_is_not_attributed(monkeypatch):
+    """A branch commit (not the merge commit) cannot be mapped to a PR without a
+    lookup per event. Missing it costs a `mention-only`; it must never manufacture
+    a claim about some other PR."""
+    def fake(_args):
+        import json as _json
+        return _json.dumps([[{"event": "referenced", "commit_id": "d" * 40,
+                              "source": None}]])
+
+    monkeypatch.setattr(cl, "_gh", fake)
+    tl = cl.fetch_timeline(7, "owner/name", {10: _mpr(10, sha="c" * 40)})
+    assert tl.refs == ()
+
+
+# ── the reopen guard: the ONE way a closure record must not become `done` ────
+#
+# Measured on this repository 2026-11-03 over 1000 merged PRs (back to
+# 2026-10-12): exactly TWO of the 43 open P0/P1 issues appear in a merged PR's
+# `closingIssuesReferences` — `#9548 <- PR #9585` and `#10000 <- PR #10011`.
+# Both are OPEN. The keyword fired, the issue closed, a human reopened it.
+#
+# So the naive rule ("closure record ⇒ done") has two live false positives in the
+# population this lane reports on, and closing them would override a human's
+# judgement — the single most expensive thing this tool could do.
+
+def test_a_closure_record_over_a_REOPENED_issue_is_not_done():
+    reopened = cl.Timeline(last_reopened_at="2026-11-02T12:00:00Z")
+    link = cl.judge_issue(_issue(9548), [_mpr(9585, closes=(9548,),
+                                              merged="2026-11-01T00:00:00Z")],
+                          default_branch=DEFAULT, repo="owner/name",
+                          timeline=reopened)
+    assert link.verdict == "partial"
+    assert link.reason == cl.REASON_REOPENED
+    # ...and the row still cites the merge that fired, so a reader can go look.
+    assert (link.pr, link.sha) == (9585, f"sha{9585:040d}")
+
+
+def test_a_reopen_BEFORE_the_merge_does_not_block_done():
+    """An issue reopened LAST MONTH and closed correctly by this merge is done."""
+    old_reopen = cl.Timeline(last_reopened_at="2026-10-01T00:00:00Z")
+    link = cl.judge_issue(_issue(7), [_mpr(10, closes=(7,),
+                                           merged="2026-11-01T00:00:00Z")],
+                          default_branch=DEFAULT, repo="owner/name",
+                          timeline=old_reopen)
+    assert link.verdict == "done"
+
+
+def test_a_closure_record_with_NO_timeline_read_withholds_done():
+    """A reopen can only be ruled out from a timeline that was read. This is the
+    guard that makes the two measured reopens impossible to mistake for `done`
+    even when the caller skips the timeline (`--no-timeline`)."""
+    link = cl.judge_issue(_issue(7), [_mpr(10, closes=(7,))],
+                          default_branch=DEFAULT, repo="owner/name",
+                          timeline=None)
+    assert link.verdict == "partial"
+    assert link.reason == cl.REASON_UNMEASURED_TIMELINE
+
+
+def test_a_reopen_with_no_comparable_merge_stamp_counts_as_AFTER():
+    """Conservative by design: an unorderable pair must not buy a `done`."""
+    tl = cl.Timeline(last_reopened_at="2026-11-02T12:00:00Z")
+    assert tl.reopened_after(None) is True
+    assert tl.reopened_after("2026-11-01T00:00:00Z") is True
+    assert tl.reopened_after("2026-11-03T00:00:00Z") is False
+    assert cl.Timeline().reopened_after("2026-11-01T00:00:00Z") is False
+
+
+def test_the_timeline_read_records_the_LAST_reopen(monkeypatch):
+    def fake(_args):
+        import json as _json
+        return _json.dumps([[
+            {"event": "reopened", "created_at": "2026-11-01T00:00:00Z"},
+            {"event": "closed", "created_at": "2026-11-01T06:00:00Z"},
+            {"event": "reopened", "created_at": "2026-11-02T00:00:00Z"},
+            {"event": "referenced", "commit_id": "c" * 40, "source": None},
+        ]])
+
+    monkeypatch.setattr(cl, "_gh", fake)
+    tl = cl.fetch_timeline(7, "owner/name", {10: _mpr(10, sha="c" * 40)})
+    assert tl.last_reopened_at == "2026-11-02T00:00:00Z"
+    assert [r.number for r in tl.refs] == [10]
+
+
+def test_a_DONE_row_is_cited_with_its_merge_and_reverifies_end_to_end(monkeypatch, capsys):
+    """The integration shape of the whole mode: one issue whose closure record
+    fired after the last reopen must print `verdict=done` with a real sha."""
+    monkeypatch.setattr(cl, "_gh", _merged_gh(
+        opening=[{"number": 7, "state": "OPEN", "body": "- [x] shipped"}],
+        merged_rows=[{"number": 10, "baseRefName": DEFAULT, "body": "Closes #7",
+                      "mergedAt": "2026-11-02T00:00:00Z",
+                      "mergeCommit": {"oid": "a" * 40},
+                      "closingIssuesReferences": [{"number": 7, "repository": {"id": "R", "name": "name", "owner": {"id": "U", "login": "owner"}}, "url": "https://github.com/owner/name/issues/7"}]}],
+        timeline=[{"event": "reopened", "created_at": "2026-11-01T00:00:00Z"}]))
+    code = cl.main(["--merged-but-open", "--repo", "owner/name",
+                    "--default-branch", DEFAULT])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "MERGED-BUT-OPEN(" + "a" * 40 + " 10 -> #7 verdict=done" in out
+    assert "population=1 done=1" in out
+
+
+def test_a_REOPENED_issue_prints_partial_and_exits_3(monkeypatch, capsys):
+    monkeypatch.setattr(cl, "_gh", _merged_gh(
+        opening=[{"number": 9548, "state": "OPEN", "body": ""}],
+        merged_rows=[{"number": 9585, "baseRefName": DEFAULT, "body": "Closes #9548",
+                      "mergedAt": "2026-11-01T00:00:00Z",
+                      "mergeCommit": {"oid": "b" * 40},
+                      "closingIssuesReferences": [{"number": 9548, "repository": {"id": "R", "name": "name", "owner": {"id": "U", "login": "owner"}}, "url": "https://github.com/owner/name/issues/9548"}]}],
+        timeline=[{"event": "reopened", "created_at": "2026-11-02T00:00:00Z"}]))
+    code = cl.main(["--merged-but-open", "--repo", "owner/name",
+                    "--default-branch", DEFAULT])
+    out = capsys.readouterr().out
+    assert code == 3
+    assert "reason=reopened" in out
+
+
 if __name__ == "__main__":  # pragma: no cover
     # The module docstring advertises `Run standalone: python3 tests/test_closes_landing.py`.
     # This is the ONE block that makes that command real — it must stay at the END
