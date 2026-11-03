@@ -1557,7 +1557,9 @@ def _graph_disclosure(graph_ref: str | None,
     DEFAULT graph (`GRAPH_ARGUMENT_EXCLUDED_DEFAULT_TARGET`) — a
     workspace-level write for which `graph` is not a parameter at all. The
     resolution is the same fact, but the prose must not offer `graph` as a way
-    to re-target a call that refuses it.
+    to re-target a call that refuses it — in EVERY arm, including
+    `server-configured`, where "this write named no `graph`" is the false
+    implication that one could have been named (review P3).
 
     ⛔ `graph="default"` takes the OMITTED arm, not the named one. It is the
     resolver's own no-op — `plan_graph_target` short-circuits it BEFORE any lane
