@@ -713,13 +713,22 @@ mechanisms:
       and neither is a colon-form value that happens to be a valid clock shape
       without being a clock (`4:32` read as a marathon time) — the two are the
       same token shape and nothing in the text separates them;
-      (d) a unit WORD the engine's own `_UNIT_WORDS` vocabulary does not carry
-      (`seconds`, `minute`, `hour`, `day`, `mile`, …) is never fused into the
-      value token — apart or not — so a minutes→seconds rewrite is not judged:
-      an ENGINE VOCABULARY limit, not a tolerance of this rule (the units it
-      does fuse are compared); a unit SPELLING outside `_UNIT_EQUIV` fails open
-      on purpose, because refusing `800millis`/`800ms` is the false-accusation
-      direction this rule must never take; (e) the S5
+      (d) a RATE unit written as `per <unit>` (`forty thousand requests per
+      day` against `… per week`) is not judged: no unit is ADJACENT to the
+      number, so `_value_bindings` fuses nothing and the pair fails open. That
+      is the carve-out's own fifth example. ⛔ The ADJACENCY half that used to
+      stand here is CLOSED: `_UNIT_WORDS` now carries the duration/distance
+      spellings the carve-out names (`second(s)`, `minute`, `hour`, the
+      millisecond family, `day(s)`, `week(s)`, `month(s)`, `year(s)`,
+      `mile(s)`, `percent`/`pct`), so `back under 800 seconds` against
+      `back under 800 milliseconds` and `a ten minute TTL` against
+      `a ten hour TTL` are REFUSED — pinned by
+      `tests/test_state_value_verbatim_10360.py::test_the_carve_outs_own_ADJACENT_time_units_are_judged`,
+      whose spelling controls (`3 days`/`3 d`, `5 years`/`5 yr`) pin the
+      false-accusation direction for every identity added. What SURVIVES of the
+      old (d) is the SPELLING case — a unit outside `_UNIT_EQUIV` (`800millis`)
+      still fails open on purpose, because refusing `800millis`/`800ms` is the
+      false-accusation direction this rule must never take; (e) the S5
       minted-endpoint site is not judged against its own quote — there `quote` is
       the point's OWN text, cut with the module's one truncation helper
       (`_write_span`), so a rewrite is impossible by construction and a rule
@@ -892,7 +901,8 @@ mechanisms:
       `we have 12 billion events` returns NO divergence, likewise `5 million`
       against `5 thousand` and `12 million` against `12` (pinned by
       `test_a_scale_WORD_rewrite_is_unjudged_because_the_engine_fuses_none`).
-      ⛔ A DIFFERENT CLASS from (d): (d) is a unit SPELLING the tables lack, this
+      ⛔ A DIFFERENT CLASS from (d): (d) is a RATE unit with no number adjacent
+      (or a unit SPELLING the tables lack), this
       is a MAGNITUDE the engine never multiplies, so closing it belongs in
       `_value_bindings` and would be its own change; a second scale reading inside
       this seam is the parallel-classifier shape the review P2 rejected. Stated
@@ -907,7 +917,8 @@ mechanisms:
       UNJUDGEABLE and fails OPEN. Before this the pair was REFUSED, withholding a
       truthful point — "we have 12000000 events" against "we have 12 million
       events" is ONE value in two forms, the same tolerance this seam applies to
-      `20%`/`20 percent`. Reading a scale is `value_normalizer`'s territory and
+      a unit it cannot read (`800millis` against `800ms`). Reading a scale is
+      `value_normalizer`'s territory and
       #2817's "no magnitude table" ruling is NOT reopened here (the `OVERRIDES:`
       on #10360 covers the `k` unit identity only), so the class is outside the
       judged set rather than scaled. The scale is COMPARED, not dropped: a
