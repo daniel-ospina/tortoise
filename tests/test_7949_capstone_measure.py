@@ -416,6 +416,104 @@ def test_e3_zero_one_whole_derived_node_must_be_anchored():
     assert result["outcome"] == "FAIL", result
 
 
+def test_e3_cannot_pass_on_a_registered_class_leg_that_is_empty():
+    """#9736: `= 1.000` is a claim about the REGISTERED class set, and an empty leg did not pass it.
+
+    Measured FALSE GREEN on this probe before the fix: with `Event` and `Document` carrying zero
+    nodes and every node of the classes that DO exist anchored, the row read
+    `e3 numerator=30 denominator=30 … outcome=PASS` — verdict GREEN — because `e3_outcome` only
+    ever sees two summed integers. `e3_blocks` selects `per_label[label] for label in
+    DERIVED_LABELS`, so a registered class the graph holds none of contributes `0/0` and vanishes
+    from both halves of the ratio.
+
+    That is not hypothetical: `:Document` is a RETIRED label — the writer remaps `Document` onto
+    `:Source` (`tortoise/projection/edges.py:2765-2769`, D10) — and §10.1 of the pre-registration
+    records that the scored run wrote no `Document` at all. So the vacuous leg is the PRODUCTION
+    shape, and only the owner's §9736 ruling can change which spelling E3 names.
+
+    The rule this pins is the ruling-free one the issue's own decision card declares
+    (`NOT-A-DECISION(9736-gate-empty-leg)`): an empty registered leg must FAIL rather than pass by
+    arithmetic. It does not pick a spelling, move a threshold, or re-cut the denominator.
+    """
+    green = measure.e3_outcome(anchored=30, derived=30, bars=BARS)
+    assert green["outcome"] == "PASS", green
+    blocked = measure.e3_outcome(anchored=30, derived=30, bars=BARS,
+                                 unmeasured_legs=("Document", "Event"))
+    assert blocked["outcome"] == "FAIL", blocked
+    assert measure.verdict_word(blocked) == "RED", blocked
+    assert blocked["unmeasured_legs"] == ("Document", "Event"), blocked
+    assert "Document" in blocked["bar"] and "empty" in blocked["bar"].lower(), blocked["bar"]
+    # NO SOFTENING and NO NEW RED: the shipped reading (148/383) was already RED and stays RED,
+    # with the empty leg disclosed rather than silently folded in.
+    shipped = measure.e3_outcome(anchored=148, derived=383, bars=BARS,
+                                 unmeasured_legs=("Document",))
+    assert shipped["outcome"] == "FAIL", shipped
+    # the floor still wins where it applies — a too-small population is REFUSED, never a verdict
+    below = measure.e3_outcome(anchored=5, derived=20, bars=BARS,
+                              unmeasured_legs=("Document",))
+    assert below["outcome"] == "REFUSED", below
+
+
+def test_e3_unmeasured_legs_reads_the_census_and_never_counts_object():
+    """The empty-leg detector reads the CENSUS, so it sees what the run measured — not the row.
+
+    `:Object` is the class #5199 option A leaves unanchored BY DESIGN and #10525 dropped from E3, so
+    it must never come back as a "missing" leg (that would re-red the row for the recorded
+    decision). An ABSENT block counts as empty: a census that never enumerated a registered class
+    did not measure it, and "absent" must not read as "fine".
+    """
+    census = {"Point": {"nodes": 10, "anchored": 8},
+              "Document": {"nodes": 0, "anchored": 0},
+              "Object": {"nodes": 50, "anchored": 0},
+              "Event": {"nodes": 1, "anchored": 1}}
+    assert measure.e3_unmeasured_legs(census) == ("Document",), measure.e3_unmeasured_legs(census)
+    assert measure.e3_unmeasured_legs({"Point": {"nodes": 10, "anchored": 10}}) == (
+        "Document", "Event")
+    full = {"Point": {"nodes": 10, "anchored": 10},
+            "Document": {"nodes": 1, "anchored": 1},
+            "Event": {"nodes": 1, "anchored": 1}}
+    assert measure.e3_unmeasured_legs(full) == ()
+
+
+def test_main_feeds_the_census_legs_into_e3_and_renders_them():
+    """The empty-leg rule is only real if PRODUCTION asks the census for the legs.
+
+    `e3_outcome`'s guard is a pure function, so an unwired rule is indistinguishable from no rule:
+    `main` would keep summing the totals and a class the run never wrote would keep disappearing.
+    This reads `main`'s own AST and requires (a) `e3_outcome` to be called with an
+    `unmeasured_legs=` argument built from `e3_unmeasured_legs(census_data[...])`, and (b)
+    `render_log` to read that key back for the log's own `e3 unmeasured_legs=` line — because the
+    defect this closes was `0/0` being invisible in both places at once.
+    """
+    tree = ast.parse(PROBE.read_text())
+    main = next(node for node in tree.body
+                if isinstance(node, ast.FunctionDef) and node.name == "main")
+    call = next(node for node in ast.walk(main)
+                if isinstance(node, ast.Call)
+                and getattr(node.func, "id", None) == "e3_outcome")
+    kwargs = {kw.arg: kw.value for kw in call.keywords}
+    assert "unmeasured_legs" in kwargs, (
+        "main calls e3_outcome without unmeasured_legs — a registered class the run wrote zero of "
+        "is dropped from both halves of the ratio again, and the row can report 1.000 over a "
+        "strict subset of the registered population (#9736)")
+    wired = kwargs["unmeasured_legs"]
+    assert isinstance(wired, ast.Call) and getattr(wired.func, "id", None) == (
+        "e3_unmeasured_legs"), ast.dump(wired)
+    # the argument is the CENSUS, not a typed tuple: a hardcoded class list would be the very
+    # narrowing this rule exists to refuse, and would re-stale with the class set.
+    assert "census_data" in ast.dump(wired), ast.dump(wired)
+
+    render = next(node for node in tree.body
+                  if isinstance(node, ast.FunctionDef) and node.name == "render_log")
+    rendered = [n for n in ast.walk(render)
+                if isinstance(n, ast.Constant) and isinstance(n.value, str)
+                and "e3 unmeasured_legs=" in n.value]
+    assert rendered, (
+        "render_log no longer prints `e3 unmeasured_legs=` — the log's per-label lines show a 0-node "
+        "leg as `nodes=0 anchored=0 unanchored=0`, which reads as a clean class rather than an "
+        "unmeasured one")
+
+
 def test_e4_is_scored_over_the_frozen_fifteen():
     red = measure.e4_outcome(edge_correct=2, planted=15, bars=BARS)
     assert red["outcome"] == "FAIL" and measure.verdict_word(red) == "RED"
