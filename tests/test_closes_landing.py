@@ -32,6 +32,7 @@ Run under pytest:    python3 -m pytest tests/test_closes_landing.py -q
 """
 from __future__ import annotations
 
+import ast
 import importlib.util
 import re
 import subprocess
@@ -881,6 +882,50 @@ def test_a_code_span_that_crosses_a_LINE_BREAK_cannot_buy_a_pass():
     # arm never pairs across a line break, so an indented-code tick cannot blank
     # the paragraph below it (the direction that loses a real closure).
     assert cl.parse_closing_refs("    a `b\nprose `c Closes #100\n") == [100]
+
+
+def test_no_module_level_constant_is_DEAD_because_a_dead_one_reads_as_live():
+    r"""#10634 review P3 at `241bd0007`: `_BLANK_LINE_RE = re.compile(r"\n[ \t]*\n")`
+    was defined, NEVER read, and its own comment claimed it is "where the STRICT
+    inline scan stops looking for a closing backtick run" — with a second comment
+    ("needed this as well as `_BLANK_LINE_RE`") pointing a maintainer at it as the
+    live half of the paragraph bound.
+
+    ⚠️ That is not tidy-up. `_span_limit` takes the strict bound from
+    `_paragraph_end`, which ends the paragraph on its OWN blank-line test
+    (`if not line.strip()`). A maintainer who believes the comment has a
+    documented reason to "restore" the constant as the span bound — and a
+    blank-line-ONLY bound is exactly the fail-open shape this PR removed: an
+    unmatched backtick run then pairs with the OPENER of a real span in a later
+    block and exposes the keyword that span held (`lands`, exit 0, no annotation).
+
+    So the constant is DELETED and this guard keeps the CLASS from returning: a
+    name defined at module level and never loaded is a false claim of liveness,
+    because a prose mention is not a reference. That is why the check is AST-based
+    and not a `grep`: a `grep` finds the dead comment (and this docstring) and
+    calls the constant alive, while the AST sees only `LOAD`s — what the module
+    actually reads.
+    """
+    tree = ast.parse(MODULE_PATH.read_text())
+    defined, loaded = set(), set()
+    for node in tree.body:
+        if isinstance(node, ast.Assign):
+            targets = node.targets
+        elif isinstance(node, ast.AnnAssign):
+            targets = [node.target]
+        else:
+            continue
+        for target in targets:
+            if isinstance(target, ast.Name) and target.id.upper() == target.id:
+                defined.add(target.id)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load):
+            loaded.add(node.id)
+    # A scan that finds nothing proves nothing — this asserts the guard MEASURES.
+    assert defined, "no module-level constants found: the scan is not measuring"
+    assert not defined - loaded, (
+        f"module-level constant(s) {sorted(defined - loaded)} are never loaded: a dead "
+        f"name whose comment can claim it is the live mechanism (#10634 review P3)")
 
 
 def test_a_closed_unmerged_subject_on_a_sibling_base_is_not_promised_a_carrier():
