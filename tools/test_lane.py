@@ -2145,11 +2145,18 @@ def _container_in_use(name: str) -> bool | None:
 #:     real-container proof, not by a unit test).
 #:
 #: What is implemented is a LEASE the LANE writes: `<container id> <epoch>`,
-#: refreshed by `_touch_lease` at every successful `start()` and at the end of
-#: `cmd_run`. The clock is the wall time since that lease. During a long `run`
-#: the lane's own process holds the worktree, which is `_holds`' spare; the lease
-#: covers the between-steps gaps. Keyed to the INSTANCE id, so a replaced
-#: container is a first sighting and never inherits a dead one's gap.
+#: refreshed by `_touch_lease` at every successful `start()` (which `cmd_run`
+#: goes through once, at its start) and at a first sighting. The clock is the wall
+#: time since that lease. During a long `run` the lane's own process holds the
+#: worktree, which is `_holds`' spare; the lease covers the between-steps gaps.
+#: Keyed to the INSTANCE id, so a replaced container is a first sighting and never
+#: inherits a dead one's gap.
+#:
+#: The uncovered class, stated as a MECHANISM rather than an instance: a container
+#: that (a) no process on this host names, (b) no `start()` has run against for
+#: the grace, and (c) has no client attached — is reaped by design. A `run`
+#: invoked from OUTSIDE its worktree for longer than the grace is one instance of
+#: it.
 #:
 #: RESIDUAL (documented, not hidden): the lease lives under this box's
 #: `CELL_HOME`, so a lane running under a DIFFERENT `CELL_HOME` writes its lease
@@ -2189,6 +2196,19 @@ def _container_id(name: str) -> str | None:
     if r.returncode != 0:
         return None
     return (r.stdout or "").strip()[:12] or None
+
+
+def _ancestors(path: str):
+    """Every ancestor of a live path, so a lane in `<WT>/tools` still names `<WT>`.
+
+    A worktree need not live under `/.worktrees/` at all (a cross-clone lane at
+    `/tmp/cell-t3/wt-a`), so ancestors are walked to the filesystem root. An extra
+    slug can only SPARE a container, never remove one.
+    """
+    cur = path.rstrip("/")
+    while cur and cur != "/":
+        yield cur
+        cur = os.path.dirname(cur)
 
 
 def _unused_gap(name: str) -> float | None:
@@ -2388,12 +2408,7 @@ def reap_orphans() -> list[str]:
     # extra slug can only SPARE a container, never remove one.
     live_slugs = None
     if live_paths is not None:
-        live_slugs = set()
-        for p in live_paths:
-            cur = p.rstrip("/")
-            while cur and cur != "/":
-                live_slugs.add(slug_for(cur))
-                cur = os.path.dirname(cur)
+        live_slugs = {slug_for(a) for p in live_paths for a in _ancestors(p)}
     listed = _docker("ps", "-a", "--filter", f"name={NAME_PREFIX}",
                      "--format", "{{.Names}}\t{{.State}}")
     if listed.returncode != 0:
@@ -2667,12 +2682,27 @@ def reap_orphans() -> list[str]:
                        f"only {gap_h:.1f}h of the {ORPHAN_MAX_AGE_H:g}h backstop "
                        f"has passed")
             continue
-        # Re-read the STATE at the moment of action: the `docker ps` snapshot can
-        # be stale, and a lane restarting its own container reuses the SAME name.
+        # Moment of action: re-read the STATE *and* the LIVENESS. The `docker ps`
+        # snapshot and the `/proc` scan were both taken at the top of this sweep,
+        # which on a loaded host is many seconds of docker calls — and arm 3 is
+        # the arm a cross-CELL_HOME lane depends on, because its lease lives
+        # elsewhere. Re-reading only the state (what this arm used to do) carries
+        # no liveness at all: a lane that appeared since the snapshot, or whose
+        # client attached since the last probe, would never be seen.
         now_state = container_state(name)
         if now_state != state and now_state not in _TERMINAL_STATES:
             out.append(f"reap: kept {name} — it read {state} in the sweep but is "
                        f"{now_state} at removal time (fail-closed)")
+            continue
+        now_live = _live_lane_paths()
+        now_busy = (False if now_state in _TERMINAL_STATES
+                    else _container_in_use(name))
+        if now_live is None or now_busy is not False \
+                or slug_for_name in {slug_for(a) for p in now_live
+                                     for a in _ancestors(p)}:
+            out.append(f"reap: kept {name} — it became LIVE at the moment of "
+                       f"action (a lane appeared mid-sweep), or liveness could "
+                       f"not be re-established (fail-closed)")
             continue
         rm = _docker("rm", "-f", name)
         _drop_lease(name)

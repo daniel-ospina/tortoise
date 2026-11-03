@@ -805,6 +805,45 @@ def test_unused_gap_reads_a_TERMINAL_container(monkeypatch):
     assert gap is not None and gap > 29, gap
 
 
+def test_arm_3_re_checks_liveness_at_the_moment_of_action(tmp_path, monkeypatch):
+    """Review cycle 5, P1: arm 3 re-read only docker's STATE, which carries no
+    liveness. The sweep-wide `/proc` scan is taken at the TOP of a sweep that on
+    a loaded host is many seconds of docker calls, so a lane appearing mid-sweep
+    was invisible — and arm 3 is the arm a cross-`CELL_HOME` lane depends on,
+    because its lease lives elsewhere.
+
+    Mutation: drop the `now_live` re-read in arm 3 and this container is removed
+    while a fresh `/proc` scan names the lane that just took it."""
+    wt = tmp_path / ".worktrees" / "late-lane"
+    wt.mkdir(parents=True)
+    slug = tl.slug_for(wt)
+    removed: list = []
+    reads = {"n": 0}
+
+    def fake(*a, **k):
+        if a[0] == "ps":
+            return _R(0, f"fdb-lane-{slug}\trunning\n", "")
+        if a[0] == "rm":
+            removed.append(a[1:])
+        return _R(0, "", "")
+
+    def live():
+        reads["n"] += 1
+        return set() if reads["n"] == 1 else {str(wt)}   # lane appears mid-sweep
+
+    monkeypatch.setattr(tl, "_docker", fake)
+    monkeypatch.setattr(tl, "lane_name", lambda: "fdb-lane-mine")
+    monkeypatch.setattr(tl, "_worktree_slugs", lambda: {})   # owner indeterminate
+    monkeypatch.setattr(tl, "_live_lane_paths", live)
+    monkeypatch.setattr(tl, "_container_in_use", lambda _n: False)
+    monkeypatch.setattr(tl, "container_state", lambda _n: "running")
+    monkeypatch.setattr(tl, "_started_epoch", lambda _n: time.time() - 40 * 3600)
+    monkeypatch.setattr(tl, "_unused_gap", lambda _n: 40.0)
+    out = tl.reap_orphans()
+    assert removed == [], (removed, out)
+    assert "became LIVE" in "\n".join(out), out
+
+
 def test_a_STOPPED_ownerless_orphan_is_reclaimed(monkeypatch):
     """The population that exhausts the port range: a STOPPED container nobody
     owns keeps its published port reserved (measured: 67 of 110 ports held by
