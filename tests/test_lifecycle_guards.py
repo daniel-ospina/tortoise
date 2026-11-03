@@ -1054,9 +1054,11 @@ def test_a_terminal_fold_journals_no_pointrevised(tmp_path, kwargs):
     `updatedAt` not moving is only half of it: a `PointRevised` appended for the
     dead id is replayed into one by `rebuild_all`, so a journal entry is the
     same mutation one rebuild later (#7951's outbox ordering). Pinned on a
-    LOGGED SDK for every ruled-leg shape, including the two that carry no
-    generic prop — those were the shapes cycle 2 of the #10368 review found
-    still stamping the dead claim.
+    LOGGED SDK for every ruled-leg shape. The `word` and `evidence+word` arms
+    are the two cycle 2 of the #10368 review measured still stamping the dead
+    claim; the `evidence`-only arm already wrote no stamp before the fix (the
+    fold pops `extractedFrom` before the write leg), so it stands here as the
+    anti-over-reach mirror rather than as a reproduction.
     """
     from tortoise.log import EventLog
     from tortoise.sdk import TortoiseSDK

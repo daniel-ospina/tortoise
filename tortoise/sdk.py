@@ -12198,23 +12198,30 @@ class TortoiseSDK:
         content-dedup hit on a point that already holds a DIFFERENT key keeps
         that key and warns.
 
-        A dedup hit NEVER REVISES A TERMINAL CLAIM (#10368): the content
-        identity is resolved unconditionally, so a re-assertion can land on a
-        retracted/superseded point — and a CONTENT-only match does not name a
-        target, so it must not settle a new revision onto one. On a terminal
-        target the fold writes NO revision at all: its generic metadata props
-        are dropped (never silently: the reply carries a transient
-        `metadata_not_applied` advisory naming them), its `updatedAt` stamp is
-        not written — so no `PointRevised` is journaled against the dead id —
-        and a fold carrying a temporal prop is dropped whole with
+        A CONTENT-RESOLVED dedup hit NEVER REVISES A TERMINAL CLAIM (#10368):
+        the content identity is resolved unconditionally, so a re-assertion can
+        land on a retracted/superseded point — and a CONTENT-only match does
+        not name a target, so it must not settle a new revision onto one. On a
+        terminal target such a fold writes NO revision at all: its generic
+        metadata props are dropped (never silently: the reply carries a
+        transient `metadata_not_applied` advisory naming them), its `updatedAt`
+        stamp is not written — so no `PointRevised` is journaled against the
+        dead id — and a fold carrying a temporal prop is dropped whole with
         `temporal_not_applied` (#7819). What STILL applies is EVIDENCE — the
         `extractedFrom` source fold and the authored `credibility` word, which
         #7704's owner ruling ("a dedup hit KEEPS the new evidence") and #398
         make an addition to a claim's support rather than a revision of it;
         both write their own server-owned state and neither touches
-        `updatedAt`. To revise a terminal claim deliberately, name it by id
-        with ``update_point`` (a METADATA revision lands; its temporal props
-        are still refused, #7819).
+        `updatedAt`.
+
+        ⚠️ The qualification is not decoration: a hit resolved by the caller's
+        ``key`` is NOT content-resolved, and keeps the pre-#10368 behaviour in
+        full — it revises the terminal claim (props stored, `updatedAt` moved,
+        a `PointRevised` journaled) and reports no advisory, because a key is a
+        caller-declared IDENTITY (#6110): that caller DID name the point. So to
+        revise a terminal claim deliberately, name it — by id with
+        ``update_point`` (a METADATA revision lands; its temporal props are
+        still refused, #7819), or by ``key`` through this door.
 
         LIVE is the default (#1088): a point created WITHOUT an explicit
         ``status`` is live — not draft — whatever its kind. Draft is opt-in:

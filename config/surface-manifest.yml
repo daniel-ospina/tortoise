@@ -506,10 +506,12 @@ response_fields:
     `extractedFrom` source fold and the authored `credibility` word, #7704/#398), so this leg alone is dropped
     prop-by-prop. All of these ride the SAME key on the dedup-hit return, so a re-run reports them together rather
     than dropping one'
-  unchanged_when_off: n/a — not flag-gated; the key is ABSENT on a purely sourced or word-bearing write and on
-    every write whose fold applied in full, so those responses stay byte-identical. It is PRESENT whenever a leg was
-    dropped — the temporal drop (#7819), the terminal content-fold metadata drop (#10368) — including on a
-    word-bearing fold, because the word legs and the metadata leg are decided separately
+  unchanged_when_off: n/a — not flag-gated; the key is ABSENT on a purely word-only write and on every write whose
+    fold applied in full, so those responses stay byte-identical. It is PRESENT when either of the two legs that
+    ADVISES a drop was refused — the temporal leg (#7819) or the terminal content-fold metadata leg (#10368) —
+    including on a word-bearing fold, because the word legs and the metadata leg are decided separately. ⚠️ NOT a
+    guarantee that every refusal is advised — the (#7980) first-writer-wins credibility drop and the (#6110)
+    "key not applied" drop are LOG-ONLY and leave this key absent
 - response: tortoise_check_structure
   field: _meta.tortoise_error
   emitted_when: 'only for the transport wait-bound refusal — the ONE producer whose failure payload is a `{code,
