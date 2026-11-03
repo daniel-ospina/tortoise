@@ -1248,7 +1248,9 @@ def get_capture_usage(org_id: str) -> dict:
     has written ``capture_tokens_in``/``capture_tokens_out`` since #5045, and
     nothing read them back per org until #9567 D11/D12 — the DECLARED reader on
     ``cost_dimensions.capture_extraction`` WAS ``get_current_usage``, which
-    returns WRITE OPS (a different dimension; it is ``write_ops``'s reader). An
+    returns WRITE OPS (a different dimension: ``write_ops``'s REGISTRY reader is
+    ``measure_write_ops`` and ``get_current_usage`` is the unfail-closed display
+    read behind ``/v1/team``). An
     allowance cannot be enforced against a figure nobody can read, so this is the
     missing reader, not a new dimension: it reads the columns the writer already
     maintains, and the registry now declares it.

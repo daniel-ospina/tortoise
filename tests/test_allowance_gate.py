@@ -437,3 +437,11 @@ def test_an_unrecognised_unmeasured_reason_is_refused_not_treated_as_absent(
     with pytest.raises(QuotaCheckError):
         enforce_allowances(_limits(max_extraction_tokens=10),
                            resource="sessions")
+
+
+def test_a_meter_returning_a_non_MeterReading_is_refused_not_an_AttributeError():
+    """A meter that returns a bare number used to escape as a bare
+    ``AttributeError`` (``.used`` on a float) — an unmapped 500 (review round 6)."""
+    with pytest.raises(QuotaCheckError):
+        enforce_allowances(_limits(max_extraction_tokens=10), resource="sessions",
+                           meters={"capture_extraction": lambda _o: 100.0})

@@ -524,8 +524,10 @@ DIMENSIONS: tuple[Dimension, ...] = (
             # #9567 D11/D12: the TOKEN reader, and the row's FIRST reader — the
             # reader a consumer taking "read via" from this row gets.
             # ``get_current_usage`` used to hold that slot and returns WRITE OPS
-            # (a different dimension; it is declared as ``write_ops``'s reader
-            # below), so the row sanctioned a reader that answers a different
+            # (a different dimension — ``write_ops``'s REGISTRY reader is
+            # ``measure_write_ops``; ``get_current_usage`` is the unfail-closed
+            # display read reached from ``/v1/team`` and is bound to no declared
+            # dimension), so the row sanctioned a reader that answers a different
             # question — and no per-org TOKEN figure was readable at all, which
             # is why the token allowance had no meter to gate on. It is REMOVED
             # from this row, not merely joined (review round 2).

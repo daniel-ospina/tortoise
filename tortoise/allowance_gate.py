@@ -65,6 +65,17 @@ mint (``api_keys``), a seat (``users``) or a graph create (``graphs``) moves no
 meter, so gating them would refuse an operation that cannot cross the cap — the
 cap that blocks a fix, which this module refuses to build.
 
+⚠️ **BOUNDARY 3 — a failed meter WRITE looks like an empty window.**
+``record_capture_usage`` swallows a write failure (the capture is served, #3981)
+and records ``drop_class="increment_write_unconfirmed"``; no ledger row is
+created, so ``get_capture_usage`` answers ``"absent"`` — which this dimension
+admits as a real zero. During such an outage the allowance reads a genuine zero
+and the tenant keeps spending, i.e. the write-side mirror of the read fault this
+module refuses on. ``get_unmetered_increments`` cannot close it as-is (it is
+org-CUMULATIVE with no window, so gating on it would refuse forever after one past
+drop); closing it needs a WINDOW-scoped drop counter, which is a follow-up and is
+declared here rather than left to be discovered.
+
 ⚠️ **RESIDUAL, named rather than hidden:** the ``sessions`` door is
 ``_check_org_limit(org, "sessions")`` in ``hosted_api._capture_session_impl``,
 and it runs unconditionally — including the store-only lanes (keyless #3892,
@@ -202,8 +213,11 @@ class MeterUnavailable(RuntimeError):
     measured yet). This carries the ones that DO have something to say — chiefly
     that the fault is OURS (an unresolvable metering window, a store error), which
     a refusal must not present to the tenant as their usage. It is still a
-    REFUSAL (fail closed, #686) and it is reported on the #3981/#4779 surface, so
-    the operator's bookkeeping fault is disclosed rather than absorbed.
+    REFUSAL (fail closed, #686), and it is LOGGED AT ERROR with the org and the
+    reason: the durable disclosure needs its own ``served=False`` surface and
+    drop class on #4779 — reusing the swallow-site reporter would assert the
+    opposite of what happened — and that is a follow-up, not something this gate
+    may fake.
     """
 
 
@@ -273,8 +287,9 @@ def _extraction_tokens(org_id: str) -> MeterReading | None:
             # Folding an unknown reason into "absent" would silently disarm a
             # configured allowance the day `get_capture_usage` grows a reason.
             # ⚠️ OUR fault, not the tenant's: the ledger or the billing window
-            # failed. The gate still REFUSES (#686 fail-closed), but the refusal
-            # names the fault and is disclosed on the #3981/#4779 surface —
+            # failed. The gate still REFUSES (#686 fail-closed), the refusal
+            # names the fault, and it is logged at ERROR for the operator (the
+            # durable #4779 surface is a follow-up — see `_disclose_unmeasured`) —
             # ``metering._current_period``'s own docstring records the opposing
             # ruling ("refusing a paying org over our own bookkeeping fault is
             # exactly the #3981 ruling forbids"), and this is the reconciliation:
@@ -555,15 +570,16 @@ def enforce_allowances(
         # NON-NUMERIC reading (``None``, ``"5"``, a Decimal) would raise a bare
         # TypeError at the comparison. So the figure is COERCED once, here, and
         # every shape that is not a finite number is REFUSED.
+        raw_used = getattr(reading, "used", None)
         try:
-            used = float(reading.used)
+            used = float(raw_used)
         except (TypeError, ValueError):
             _logger.error(
                 "allowance reading non-numeric (fail-closed): team=%s "
-                "dimension=%s used=%r", org_id, dim.dimension, reading.used)
+                "dimension=%s used=%r", org_id, dim.dimension, raw_used)
             raise QuotaCheckError(
                 f"{dim.dimension} usage reading for team {org_id!r} is not a "
-                f"number ({reading.used!r}) — refusing to enforce "
+                f"number ({raw_used!r}) — refusing to enforce "
                 f"{dim.limit_key} from it") from None
         if not math.isfinite(used):
             _logger.error(

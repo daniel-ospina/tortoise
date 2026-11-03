@@ -47,9 +47,12 @@ analytics row carries — `#5045`. The **ask** lane separately records
 token counters cannot change the cap's behaviour. That separation is deliberate: this ruling is about the **unit**,
 and the cap is a separate decision.
 
-**⚠️ Residual — the token counters have no production reader.** `get_current_usage` reads write-ops only, so
-"tokens per team per month" is written but not readable from code (the `#4493` lesson: a recorded dimension
-with no reader reads as a measurement that does not exist). The metric set itself — the per-call metrics, the
+**Token counters now have a production reader — the gate's, not a report's** (`#9567` D11/D12).
+`metering.get_capture_usage` reads `capture_tokens_in` + `capture_tokens_out` per org per window and is
+the DECLARED reader on `cost_dimensions.capture_extraction`; the allowance gate consumes it. ⚠️ It is a
+GATE reader: no reporting or dashboard surface reads it yet, so "tokens per team per month" is readable
+from code but still not published anywhere (the `#4493` lesson: a recorded dimension with no reader reads
+as a measurement that does not exist — a reader nothing reports from is the next-weakest thing). The metric set itself — the per-call metrics, the
 disclosure counters, the attribution and the derived figures — is defined in `docs/ops/extraction-cost-metrics.md`
 (`#3840`).
 
