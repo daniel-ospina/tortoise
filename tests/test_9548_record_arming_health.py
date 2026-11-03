@@ -155,6 +155,27 @@ def test_the_dsn_value_is_never_published_only_its_fingerprint(monkeypatch):
     assert RECORD_DSN not in payload
 
 
+def test_the_record_block_states_when_it_was_read(monkeypatch):
+    """`fetched_at` — the age of the arming claim, as a fact of the artefact.
+
+    #10017's purge guard refuses to delete a turn the record cannot serve back,
+    and one of its preconditions is "the record is armed" (`/health` reports
+    it). A captured body with NO read instant satisfies that precondition for
+    ever; before this field the guard demanded `org_id`/`graph_id` instead —
+    which this endpoint cannot state (a multi-tenant process serves several),
+    so every real body was refused and hand-authoring was the only passing
+    input (#10483 review round 4, P1). The endpoint CAN state this one.
+    """
+    import datetime as _dt
+
+    record = _health(monkeypatch)["record"]
+
+    stamp = _dt.datetime.fromisoformat(record["fetched_at"])
+    assert stamp.tzinfo is not None, "the stamp must be timezone-aware (UTC)"
+    age = (_dt.datetime.now(_dt.UTC) - stamp).total_seconds()
+    assert 0 <= age < 60, age
+
+
 def test_the_fingerprint_convention_has_one_definition(monkeypatch):
     """`dsn_fingerprint` is the seam's own; the health block must not re-derive it.
 

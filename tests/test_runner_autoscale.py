@@ -881,7 +881,7 @@ def test_preserve_labels_drops_the_version_pinned_class_and_the_arch_marker():
     it wants GitHub-hosted. The arch MARKER is re-derived from this box instead — a mis-registered
     runner can carry the other arch's marker, and passing it straight back is the false PASS (an
     arm64 job built on x86) this function exists to prevent — GitHub derives the marker from the
-    host at registration and it cannot be set by hand, so the ARM64 VMs register their own markers (`:52-53`, `docs/ops/ci-runner-x64.md`) and this box registers its own.
+    host at registration and it cannot be set by hand, so the ARM64 VMs register their own markers (`:54-55`, `docs/ops/ci-runner-x64.md`) and this box registers its own.
     """
     for label in ("ubuntu-24.04", "ubuntu-24.04-arm"):
         assert RA._preserve_labels(["self-hosted-x64", label], "x86_64") == (

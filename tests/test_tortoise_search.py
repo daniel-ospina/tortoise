@@ -354,7 +354,15 @@ def test_sdk_fts_query_baked_floor_candidate_window(sdk=None):
     def _fake(graph, query, struct_kind, query_vec, strategies, *, limit=None,
               **kw):
         captured["limit"] = limit
-        return []
+        # ⛔ ``{}``, not ``[]``: ``degradation_chain`` returns
+        # ``dict[str, list[tuple[str, float]]]`` and the caller reads it as a
+        # dict (``raw_results.values()`` for the #8447 per-leg window). A
+        # list-typed double models a return the real function cannot produce,
+        # so it only ever exercised the pre-#8447 "falsy ⇒ return early" path
+        # and turned the marker's per-leg read into an AttributeError (#10500
+        # CI: `'list' object has no attribute 'values'`). An empty DICT is the
+        # falsy value that means what this test wants: no leg produced rows.
+        return {}
 
     search_engine.degradation_chain = _fake
     try:

@@ -84,14 +84,24 @@ forced True, which removes exactly the one `continue` #2978 added).
 | `post_2978_assembly_value_marked` | 14 | 0 | 2 | 4/4 (value-mark census: 4 packages) |
 | `provenance_free_assembly` (**#8658** — pre-fix product lane / today's degraded fallback) | 24 | 0 | **12** | 4/4 |
 
-Control: a duplicate-free, provenance-bearing pool of 8 **statement** facts
-comes back **byte-identical** from the arm (0 collapsed, same ids, same
-order) — the no-regression leg for statement-only pools. ⚠️ Scope (D3 #9092):
-this pool is `_point`-only, so it cannot observe the hit-type regroup — a
-pool that ranks a raw chunk above a statement IS reordered by tier, by
-design, and the tier-scoped clause plus the ordering pins live in
-`tests/test_evidence_assembly.py`. Widening this control needs a re-cut
-receipt (#9114).
+Controls — **two** of them, because one pool cannot exercise both clauses
+(#9114):
+
+* `no_dupe_no_regression` — a duplicate-free, provenance-bearing pool of 8
+  **statement** facts comes back **byte-identical** from the arm (0 collapsed,
+  same ids, same order). Byte-identity is the right assertion *here* precisely
+  because every hit shares one hit-type tier.
+* `no_dupe_tier_boundary` — the same duplicate-free pool with a raw **chunk**
+  ranked **above** the statements. Under D3 (#9092) the chunk (tier 2) is
+  demoted behind every statement (tier 0), so `ids_identical` is **false by
+  design** and blanket byte-identity would assert the wrong clause. The two
+  assertions this pool *can* falsify are `tier_regroup_matches_key` (the
+  packaged order equals the stable `_package_type_tier` projection — it fails
+  if the tier key leaves the sort) and `ids_identical_within_tier` (the
+  regroup disturbs no tier peer). Both are **true** on the shipped code, and
+  `test_tier_control_fails_when_the_tier_key_leaves_the_sort` executes the
+  falsification. Hermetic pin of the same clause:
+  `tests/test_evidence_assembly.py::test_unmarked_mixed_type_pool_regroups_by_hit_type`.
 
 ### What the numbers say
 
@@ -120,6 +130,30 @@ receipt (#9114).
 > not a QA result. The old T wanted "the 2 C2 flooding regressions recover" — an
 > **answer-accuracy** delta under a frozen reader. Nothing here substitutes for
 > it, and no reader/judge number may be derived from this receipt.
+
+### Instrument soundness — the receipt states only what it measures
+
+Defects in the *instrument* (not in the product) were found after this receipt
+was first cut, and every one listed below is repaired here. None of them moved a
+product number; each moved what the receipt may be quoted for.
+
+| Defect | What it was | Repair |
+|---|---|---|
+| **#8945** — a comparison nothing ran | The `value_safety` verdict's leading clause was built **unconditionally**: it printed *"pairs sit below the 0.90 collapse threshold"* for any input, including a run whose overlap was 0.99. And the one number it named (`overlap`) was the **quote** overlap, while 0.90 (`DEFAULT_PACKAGE_VERBATIM_OVERLAP`) governs **content** — two quantities under one label. | The receipt now emits `content_overlap` and `quote_overlap` **separately**, each beside its own threshold (0.90 near-verbatim / 0.75 same-turn), each with a **computed** `*_below_threshold` and `*_leg_reachable`. The sentence is composed from those fields by `_value_pairs_sentence`, so it cannot outrun them; `test_value_pairs_sentence_is_composed_not_fixed` feeds a forced-above pair and fails if the wording does not flip. The `hasattr(retrieval, "_pkg_overlap")` guard was also removed — it degraded a rename to a plausible `null`. |
+| **#9114** — a control that could not fail | `controls.no_dupe_no_regression` was built from `_point` only, so every hit shared one D3 tier and `ids_identical` was **trivially true**: it measured "statement-only pools are untouched", never the tier boundary. | A second control, `no_dupe_tier_boundary`, ranks a raw **chunk above** the statements (0 duplicates). Under D3 that pool **is** regrouped, by design — so it asserts `tier_regroup_matches_key` (packaged order == the stable `_package_type_tier` projection) and `ids_identical_within_tier`, with `ids_identical` recorded as the **false-by-design** value it is. `test_tier_control_fails_when_the_tier_key_leaves_the_sort` removes the tier key from the sort and asserts the control reds. |
+| **A split nothing could falsify, and a precondition re-derived** (found reviewing this PR) | The repaired receipt emits two quantities, but the fixture gave every statement `content == quote`, so both calls at the `value_pairs` site received the **same** arguments: the two numbers were identical by construction and re-introducing #8945's swap (quote ratio under the content label) left the entire suite green. Separately, the same-turn reachability field used **raw equality** on the raw `source_turn_id`, where `_same_fact` gates on `_pkg_turn_key` **presence + equality** — so `None/None` read "same turn" (the leg is inert) and `0` vs `"0"` read "distinct" (it is reachable). | v3/v4 now carry a paraphrase **wrapper** the quote lacks (the production shape: *whole-quote similarity carries provenance text the values do not*), so their content overlaps (0.7778) differ from their quote overlaps (0.60) and `test_content_and_quote_overlaps_are_measured_from_different_strings` reds on the swap. Reachability is computed by `_shares_source_turn`, which calls the product's own `_pkg_turn_key` and is asserted against `_same_fact` itself in `test_same_turn_leg_precondition_is_the_products_predicate` — both pins were verified to red on the pre-fix code. |
+| **One label over two quantities, one field lower** (found reviewing the repair above) | `refused_pairs[]` published a single ratio as `quote_overlap`, but `_pkg_differ_value_critical` has **two call sites** in `_same_fact` — the near-verbatim leg passes normalized **CONTENT** (0.90) and the same-turn leg passes verbatim **QUOTE** spans (0.75). A content-leg refusal therefore published a content ratio under a quote label: the surviving half of **#8945 item 2**. The pair's hits were also resolved from a **quote-keyed** pool index, which cannot resolve a content argument at all and answers with an arbitrary member among shared quotes. | The probe registers the two **hits** `_same_fact` compared, and `_refused_leg` names which leg refused (read off the strings each site passes; where a statement's content and quote are byte-identical, the product's branch order decides — the content leg returns at its own branch, so the quote leg is only reached below 0.90). Each record now carries `leg`, `a_id`/`b_id`, and **both** `content_overlap` and `quote_overlap`, each measured from its own leg's strings; `same_source_turn` comes from the compared hits. No number changed (the fixture's only refusal is a quote-leg one, `0.0`/`same turn`), so the receipt was re-cut and `--check` reproduces. `test_a_content_leg_refusal_is_published_as_the_content_quantity` drives the real guard with a content-only pair and reds on the pre-fix shape; `test_refused_pairs_name_the_leg_and_its_own_quantity` pins the receipt and forbids the quote-keyed index from returning. |
+
+What the corrected figures showed on the existing fixture: the 300/400 pair's
+**quote** overlap is **0.80 — above the 0.75 same-turn threshold**, a fact the
+old single mis-labelled number concealed (it was reported as sitting below
+0.90). The pair is still not a collapse candidate, because that leg also
+requires a shared `source_turn_id` and the two hits sit on **distinct turns**.
+So the conclusion is unchanged, but it is now reached from a checked
+precondition rather than from a threshold the leg does not use. The two
+quantities are also now **separable on this fixture** (content 0.7778 vs quote
+0.60 on the 12/60 pair), which is what makes a silent re-merge of them red
+rather than green.
 
 ---
 
@@ -167,7 +201,7 @@ The wave doc's §6 acceptance line and §8 status are marked accordingly (§9 of
 
 | Leg | Statement | State |
 |---|---|---|
-| **T-1** *(structural)* | On a **provenance-bearing** C2-shaped pool, the shipped window admits **no** content-less slot; the A6/A8 assembly holds any one fact to `≤ 1 + max_verbatim` slots; **no** value-critical claim is lost; a duplicate-free pool is returned byte-identically **when it is already ordered by hit type** (D3 #9092 — a mixed pool is regrouped by tier by design, and this receipt is order-blind; the ordering pins are hermetic, #9114 owns widening the control). (The provenance-free shape — the PRE-#8658 product ask lane, and still the shape a DEGRADED fallback read has — is measured separately at 12 slots.) | **RUN** — this document + the receipt + `tests/longmem_eval/test_slice_a_flood_bound.py`. |
+| **T-1** *(structural)* | On a **provenance-bearing** C2-shaped pool, the shipped window admits **no** content-less slot; the A6/A8 assembly holds any one fact to `≤ 1 + max_verbatim` slots; **no** value-critical claim is lost; a duplicate-free pool is returned byte-identically **when it is already ordered by hit type**, and the tier boundary itself is asserted by `no_dupe_tier_boundary` (a raw chunk ranked above the statements is regrouped by tier **by design**, so that control asserts the tier-key projection and within-tier identity rather than blanket byte-identity — D3 #9092, #9114; hermetic pin `tests/test_evidence_assembly.py::test_unmarked_mixed_type_pool_regroups_by_hit_type`). (The provenance-free shape — the PRE-#8658 product ask lane, and still the shape a DEGRADED fallback read has — is measured separately at 12 slots.) | **RUN** — this document + the receipt + `tests/longmem_eval/test_slice_a_flood_bound.py`. |
 | **T-2** *(end-to-end, post-#2978)* | Same frozen reader + judge on the frozen 50 qids: the A6 arm **ON vs OFF**, reported as an **ON/OFF delta against the post-#2978 OFF arm** (never against C1's 0.780). | **NOT RUN here** — re-homed, §4.4. |
 
 **Why T-1 is the right re-specification and not a substitute dressed up as

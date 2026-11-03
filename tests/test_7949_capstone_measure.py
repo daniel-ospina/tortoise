@@ -8,8 +8,19 @@ graph — cannot run here, so this module pins the half that CAN: the bar arithm
 measurement is not a RED row), the table shape the gate parses, and the two rules
 that stop a row from claiming a number its artifact does not carry.
 
-Every assertion is DB-free, network-free and LLM-free: the module imports no
-``tortoise`` symbol at import time, and the files it reads are the shipped
+Every assertion is DB-free, network-free and LLM-free — and that is MEASURED, not
+asserted from memory (#10525 review P3). ⛔ Importing this module DOES pull in
+``tortoise.projection.edges`` (27 ``tortoise.*`` modules, measured): ``measure =
+_load()`` at the bottom of the header executes the probe, which derives its class
+set from the writer's own constant at ITS import time (``DERIVED_LABELS``, #9736).
+What it pulls in NOTHING of is a driver, client or model SDK — no ``falkordb``, no
+``redis``, no ``psycopg2``, no ``httpx``, no ``openai``, no ``anthropic`` (all
+measured absent), so the slice is DB/network/LLM-free on the axis that matters to
+how this file is selected and weighted. The earlier wording claimed "the module
+imports no ``tortoise`` symbol at import time", which the tree refuted while no
+test could see it; ``test_the_import_claim_is_what_importing_actually_does`` now
+measures BOTH halves in a subprocess and requires this docstring to agree with the
+measurement, so the claim cannot re-stale silently. The files it reads are the shipped
 pre-registration, the landed E1/E2 log, the log the probe itself wrote, and —
 for the cite-resolution legs — the documents that print the bundle's
 ``file:line`` cites (`README.md`, both probes, the `docs/00_index.md` row) plus
@@ -23,6 +34,7 @@ import importlib.util as _ilu
 import json
 import os
 import re
+import subprocess
 import sys
 import tempfile
 import types
@@ -144,6 +156,25 @@ def _extractor_range(code: str) -> str:
     """``:START-END`` for the brace block opened on `code`'s line."""
     start, end = _extractor_block(_extractor_lineno(code))
     return f":{start}-{end}"
+
+
+def _extractor_fail_open_except(append_code: str) -> str:
+    """``:LINE`` of the `except` that swallows the classify pass naming `append_code`.
+
+    The document cites the FAIL-OPEN `except` (not the `errors.append` one line below
+    it), so the pin derives the clause from the append rather than typing the number:
+    `except` alone is not uniquely searchable — every fail-open arm in the extractor
+    carries one — and a bare `except Exception as e:` search would pin whichever arm
+    happened to come first. Walking back from the message that names the pass ties the
+    cite to the pass it is about.
+    """
+    lines = (_REPO / _EXTRACTOR).read_text().splitlines()
+    for n in range(_extractor_lineno(append_code) - 1, 0, -1):
+        if lines[n - 1].strip().startswith("except "):
+            return f":{n}"
+    raise AssertionError(
+        f"no `except` above extractor_v2.py:{_extractor_lineno(append_code)} "
+        f"for {append_code!r}")
 
 
 def _extractor_items_gate(gate_code: str) -> str:
@@ -736,6 +767,178 @@ def test_the_e3_census_counts_references_inbound_and_extractedfrom_outbound():
     assert "SOURCE of at least one extractedFrom" in measure.E3_RULE
 
 
+# ── the census's per-label set is NOT the E3 row selector (#10525 review P1) ──
+
+#: The shipped log's own per-label block, re-used as canned Cypher rows
+#: (`capstone-measured-e0fc940b.log:32-34` + `:Point` composition).
+_CENSUS_ROWS = {
+    "Point": (338, 141, 141, 0),
+    "Object": (50, 0, 0, 0),
+    "Event": (45, 7, 0, 7),
+    "Document": (0, 0, 0, 0),
+}
+
+
+class _CannedQuery:
+    """A census-shaped fake: the REAL statements, answered per statement."""
+
+    def __init__(self, cypher: str) -> None:
+        if "UNWIND labels(n)" in cypher:
+            rows = [["Point", 338], ["Object", 50], ["Event", 45]]
+        elif "RETURN n.name" in cypher:                                    # object_names
+            rows = [["the quarry"]]
+        elif "eventId IS NOT NULL" in cypher:                              # event_stamped
+            rows = [[159]]
+        elif "type(r) AS t" in cypher:                                     # relationships
+            # The log's own `e3_census.relationship_counts` / `.relationship_anchored`
+            # (`capstone-measured-e0fc940b.log:250-260`): `extractedFrom` carries **141**
+            # links, all 141 anchored — the same 141 claims, one link each. A 150 here
+            # was the writer-class size (`extraction_claims` + `other`) written into the
+            # LINK slot, and the 9 `other` Points are defined by `deriv = 0`, i.e. by
+            # carrying no link at all, so 150 links is not a shape that graph can have.
+            # `test_the_canned_census_transcribes_the_committed_log_it_cites` checks
+            # every one of these numbers against the artifact.
+            rows = [["extractedFrom", 141, 141], ["references", 7, 7],
+                    ["aboutObject", 211, 0]]
+        elif "AS points" in cypher:                                        # composition
+            # Columns, in `census()`'s own unpack order (#10525 review):
+            #   points=turn_rows=operator_points=extraction_claims=other_points=
+            #   extraction_claims_anchored=turn_rows_anchored=
+            #   operator_points_anchored=other_points_anchored
+            # The shipped log's own composition line
+            # (`capstone-measured-e0fc940b.log:37`) is
+            # `turn_rows=159 (anchored 0) extraction_claims=141 (anchored 141)
+            #  operator_points=29 (anchored 0) other=9 (anchored 0) (total=338)`,
+            # and it PARTITIONS 338 (159 + 29 + 141 + 9). The 150 that sits one
+            # column to the left here is the `extractedFrom` LINK count
+            # (`["extractedFrom", 150, 141]` above: 141 claims + 9 `other`, one
+            # each) — not a claim count. Transcribing it into the claim slot made
+            # the fixture's own partition impossible (347 ≠ 338) and pinned a
+            # value the artifact it cites cannot produce.
+            rows = [[338, 159, 29, 141, 9, 141, 0, 0, 0]]
+        else:                                                             # anchor census
+            label = re.match(r"MATCH \(n:(\w+)\)", cypher).group(1)
+            rows = [list(_CENSUS_ROWS[label])]
+        self.result_set = rows
+
+
+class _CannedGraph:
+    def query(self, cypher: str) -> _CannedQuery:
+        return _CannedQuery(cypher)
+
+
+def _canned_census(monkeypatch) -> dict:
+    """Run the REAL `census()` against canned rows, with no database anywhere."""
+    projection = types.ModuleType("tortoise.projection")
+    projection.FalkorProjection = type(
+        "FalkorProjection", (),
+        {"from_uri": staticmethod(lambda uri: types.SimpleNamespace(g=_CannedGraph()))},
+    )
+    monkeypatch.setitem(sys.modules, "tortoise", types.ModuleType("tortoise"))
+    monkeypatch.setitem(sys.modules, "tortoise.projection", projection)
+    return measure.census("fake://canned")
+
+
+def test_the_census_enumerates_object_even_though_e3_no_longer_does(monkeypatch):
+    """#10525 review P1 — a SILENT ZERO on a sibling instrument, from an E3-only change.
+
+    `tools/s3_prior_ablation.py`'s `created_counts` reads `per_label["Object"]["nodes"]` as the
+    `objects` numerator of `extraction_nodes = claims + objects + events` (#10463), on live data
+    three times per run. Enumerating `per_label` with `DERIVED_LABELS` deleted that key when #9736
+    narrowed E3 to the anchored classes, so every future ablation run printed `objects=0` while the
+    graph held Objects — and `git grep` found no test anywhere that could see it.
+
+    Non-vacuity: at the pre-fix head `per_label` carries Point/Document/Event only, so the first
+    assertion reds (and `created_counts` in the sibling test returns 0 objects).
+    """
+    data = _canned_census(monkeypatch)
+    assert "Object" in data["per_label"], sorted(data["per_label"])
+    assert data["per_label"]["Object"]["nodes"] == 50, data["per_label"]["Object"]
+    # The row SELECTOR is unchanged and still names what #9736 registered: `:Object` is not in it.
+    assert "Object" not in measure.DERIVED_LABELS, measure.DERIVED_LABELS
+    assert set(measure.DERIVED_LABELS) <= set(measure.CENSUS_LABELS)
+    # …and E3's totals stay on the ROW's classes: 338 + 45 + 0, never 433.
+    assert data["derived_total"] == 383, data["derived_total"]
+    assert data["anchored_total"] == 148, data["anchored_total"]
+
+
+def test_the_sibling_ablation_instrument_still_counts_objects(monkeypatch):
+    """The consumer of the census, called as it calls itself (`created_counts`).
+
+    This is the end the P1 was measured from: the census's shape is only worth pinning because
+    `extraction_nodes` — #10463's primary denominator/numerator, published as `ratio=0.870` — is
+    `extraction_claims + objects + events`. A census that drops `Object` narrows a published ratio
+    with no error, no refusal and no log line.
+    """
+    spec = _ilu.spec_from_file_location("s3_prior_ablation_pure",
+                                        str(_REPO / "tools/s3_prior_ablation.py"))
+    assert spec and spec.loader
+    s3 = _ilu.module_from_spec(spec)
+    spec.loader.exec_module(s3)
+    counts = s3.created_counts(_canned_census(monkeypatch))
+    assert counts["objects"] == 50, counts
+    # Read off the log's own composition line, never off the link count:
+    # `extraction_claims=141 (anchored 141)` (`capstone-measured-e0fc940b.log:37`).
+    assert counts["extraction_claims"] == 141, counts
+    assert counts["events"] == 45, counts
+    # 141 + 50 + 45, which is what #10463's committed log can produce; the 245
+    # this pin used to assert came from the mis-transcription above.
+    assert counts["extraction_nodes"] == 236, counts
+    # The partition the fixture must satisfy to be a transcription at all: the
+    # composition's classes sum to the `Point` total the census reports.
+    composition = _canned_census(monkeypatch)["point_composition"]
+    assert (composition["turn_rows"] + composition["operator_points"]
+            + composition["extraction_claims"]
+            + composition["other_points"]) == composition["points"], composition
+
+
+def test_the_canned_census_transcribes_the_committed_log_it_cites(monkeypatch):
+    """The fixture SAYS it is the shipped log's block; check that against the artifact.
+
+    Round 4 of this PR found the claim unchecked in three columns at once — the
+    composition row carried the `extractedFrom` LINK count in the extraction-CLAIM
+    slot (so its own classes summed to 347, not the 338 the census reports), and the
+    relationship row carried the writer-class total in the link slot. A fixture whose
+    provenance is asserted in a comment rather than read from the file it cites can
+    pin any number at all — which is the defect class this whole PR is about, turned
+    on the very test that was supposed to catch it.
+
+    So: parse the committed log's own machine record (`=== CAPSTONE-VERDICT-BEGIN/END
+    ===`, the same block `capstone_verdict_check.extract_block` reads) and require the
+    fixture to match it field for field. The fake is a REDUCED census — it answers the
+    statements these tests exercise, not every one — so each field it DOES answer must
+    be the log's.
+    """
+    text = (_REPO / "docs/evidence/7949-capstone"
+            / "capstone-measured-e0fc940b.log").read_text()
+    begin, end = "=== CAPSTONE-VERDICT-BEGIN ===", "=== CAPSTONE-VERDICT-END ==="
+    assert begin in text and end in text, "the shipped log lost its verdict block"
+    record = json.loads(text.split(begin, 1)[1].split(end, 1)[0])
+    block = record["run"]["e3_census"]
+
+    data = _canned_census(monkeypatch)
+
+    # 1. The composition row, column for column (`census()`'s own unpack order).
+    assert data["point_composition"] == block["point_composition"], (
+        data["point_composition"], block["point_composition"])
+
+    # 2. The per-label block — and `Document` is a real 0, not a dropped key.
+    for label, expected in block["per_label"].items():
+        got = data["per_label"][label]
+        assert (got["nodes"], got["anchored"], got["anchored_out"],
+                got["anchored_in"]) == (
+                    expected["nodes"], expected["anchored"],
+                    expected["anchored_out"], expected["anchored_in"]), (label, got)
+    assert "Document" not in block["per_label"], block["per_label"]
+    assert data["per_label"]["Document"]["nodes"] == 0, data["per_label"]
+
+    # 3. Every relationship the fake answers carries the log's count AND anchor count.
+    for name, count in data["relationship_counts"].items():
+        assert count == block["relationship_counts"][name], (name, count)
+        assert (data["relationship_anchored"][name]
+                == block["relationship_anchored"][name]), (name, count)
+
+
 # ── the eight steps: measured, derived, never assigned (#9089 round 5 F3) ─
 
 _FULL_STATS = {
@@ -746,9 +949,15 @@ _FULL_STATS = {
                           "s2": {"p": {"m": {"calls": 1}}}}},
 }
 
+#: A census with the REAL key shape: `per_label` is the WIDER instrument census (it
+#: carries `:Object` for `s3_prior_ablation`, see `CENSUS_LABELS`), while `derived_total`
+#: is E3's row — `Point` + the link-anchored classes. So the blocks sum to 12 and the
+#: total is 11 (#10525 review P2). A fixture whose two halves agree cannot catch a
+#: witness that renders one beside the other.
 _FULL_CENSUS = {
-    "derived_total": 12,
+    "derived_total": 11,
     "per_label": {"Point": {"nodes": 10, "anchored": 8},
+                  "Document": {"nodes": 0, "anchored": 0},
                   "Object": {"nodes": 1, "anchored": 0},
                   "Event": {"nodes": 1, "anchored": 1}},
     "operator_relationships": {"IMPL": 1},
@@ -783,6 +992,53 @@ def test_a_witnessed_vet_surface_makes_s2_2_observed():
     assert "S2.3" in observed and "S2.3" not in unobserved, observed
     assert list(observed) == list(measure.STEPS), observed
     assert not unobserved, unobserved
+
+
+def test_the_s5_bracket_sums_to_the_total_the_line_names():
+    """A witness whose parts sum to a different total than its own is not a witness.
+
+    `derived_total` is E3's row (`Point` + the link-anchored classes). `per_label` is the
+    wider instrument census — it carries `:Object` for `tools/s3_prior_ablation.py`'s
+    `created_counts` (see `CENSUS_LABELS`) — so rendering EVERY block beside the narrower
+    total prints two irreconcilable numbers on one line. That is what this PR's own
+    narrowing left behind: the shipped log's S5 line is
+    `… 433 … [Point 338, Object 50, Event 45]` (`capstone-measured-e0fc940b.log:26`), and
+    after the E3 re-registration the same graph emits
+    `… 383 … [Document 0, Event 45, Object 50, Point 338]` — parts summing to 433 beside a
+    total of 383, in the bundle whose entire subject is that a number must be carried by
+    what backs it.
+
+    Non-vacuity: at the pre-fix head the census below renders
+    `11 derived node(s) … [Point 10 (8 anchored), Object 1 (0 anchored), Event 1 (1
+    anchored)]` — three labels where E3's set has three but a different one, and parts
+    summing to 12 beside a total of 11 — so both the label-set assertion and the sum
+    assertion fail there.
+    """
+    observed, _unobserved = measure.observe_steps([_run()], _FULL_CENSUS)
+    line = observed["S5"]
+    total = int(re.match(r"the graph write landed: (\d+) derived", line).group(1))
+    bracket = re.search(r"\[([^\]]*)\]", line).group(1)
+    counts = {label: int(n) for label, n in
+              re.findall(r"(\w+) (\d+) \(\d+ anchored\)", bracket)}
+    assert set(counts) == set(measure.DERIVED_LABELS), (counts, line)
+    assert sum(counts.values()) == total, (
+        f"the S5 bracket sums to {sum(counts.values())} beside a total of {total}: {line}")
+    # and the class the row excludes is NAMED as excluded, not silently dropped: a reader
+    # not told `:Object` is outside the total reads its absence as "the graph held none".
+    assert "outside E3's row" in line, line
+    outside = line.split("outside E3's row", 1)[1]
+    assert "Object 1 (0 anchored)" in outside, line
+    assert "Object" not in counts, counts
+
+
+def test_the_unobserved_s5_names_the_current_class_set():
+    """The negative arm carried the RETIRED set long after the positive one moved."""
+    empty = {"derived_total": 0, "per_label": {}, "operator_relationships": {},
+             "points": 0, "event_stamped_points": 0, "graph_events": 0}
+    _observed, unobserved = measure.observe_steps([_run()], empty)
+    cause = unobserved["S5"]
+    assert "/".join(measure.DERIVED_LABELS) in cause, cause
+    assert "Point/Object/Event" not in cause, cause
 
 
 def test_a_stats_home_for_the_classify_surface_also_counts():
@@ -1110,6 +1366,190 @@ def test_every_step_is_witnessed_or_given_a_cause():
     assert not set(observed) & set(unobserved)
 
 
+# ── the conditional step, ACCOUNTED on the SCORING path (#10215 review P1) ──
+#
+# `capstone_run.py`'s G5 learned #10215's rule; THIS probe — the one that produces
+# the E1–E5 numbers — kept emitting neither `steps_required` nor
+# `steps_conditional`, so V5 read every log it writes as the pre-#10215 "all eight
+# required" shape and refused a GREEN row for S2.3. The restatement reached one of
+# the two places its logs come from, which is why #10215's own symptom was still
+# live on the scoring path.
+
+_RECORD_ARTIFACT = "docs/evidence/7949-capstone/preregistration.json"
+
+
+def _idle_run(session_id: str = "wp01_quarry_debug", **overrides) -> dict:
+    """One measured session holding the classify surface ENABLED with no work.
+
+    Carries a POSITIVE candidate count on the receipt's own witness, because the
+    idle predicates require it: an empty candidate list skips the pass's `try` and
+    leaves the same `enabled=true`/`s2={}`/`union={}` shape, which is why
+    `observe_idle` has four predicates rather than three.
+    """
+    run = _run(session_id=session_id,
+               stats={**_FULL_STATS,
+                      "step_witness": {"map": {"items": {"entities": 4,
+                                                          "events": 1}}}},
+               surfaces={"classify_later": {"enabled": True, "s2": {},
+                                            "union": {}}})
+    run.update(overrides)
+    return run
+
+
+def _with_head() -> str:
+    """The commit under test — `_record_conditional` reads the record FROM git.
+
+    Derived, never typed: the gate resolves the frozen `steps` block out of
+    ``git show <sha>:<artifact>``, so this arm only has teeth against a real
+    commit, and a typed one would re-stale on the next push.
+    """
+    return cvc._git(_REPO, "rev-parse", "HEAD").stdout.strip()
+
+
+def _seven_observed() -> dict:
+    """What a post-seam run witnesses on this corpus: seven, S2.3 absent."""
+    return {step: f"witnessed ({step})" for step in measure.STEPS if step != "S2.3"}
+
+
+def test_the_scoring_probe_emits_the_split_v5_reads_and_the_old_shape_is_what_reds():
+    """The finding, end to end: a GREEN row's step half now passes V5.
+
+    Non-vacuity is the second half of this test, and it IS the finding: the same
+    seven observed steps under the PRE-FIX run block — no `steps_required`, no
+    `steps_conditional` — are refused by the shipped gate for exactly the reason
+    #10215 was filed about. Asserted, not described, so the arm cannot regress to
+    "the gate says it accepts the accounting" on this probe's logs.
+    """
+    required, accounts, gap = measure.step_accounting(
+        measure.read_conditional(_prereg()), [_idle_run()], _seven_observed())
+    assert gap == "", gap
+    assert required == [s for s in cvc.STEPS if s != "S2.3"], required
+    assert [entry["step"] for entry in accounts] == ["S2.3"], accounts
+    assert accounts[0]["state"] == "idle", accounts[0]
+    assert "EMPTY ITEM SET" in accounts[0]["basis"], accounts[0]
+
+    run = {"status": "COMPLETED", "steps_required": required,
+           "steps_conditional": accounts,
+           "steps_observed": [s for s in cvc.STEPS if s != "S2.3"]}
+    assert cvc._step_accounting(_REPO, run, tuple(run["steps_observed"]),
+                                _with_head(), _RECORD_ARTIFACT) == []
+    # ... and the PRE-FIX shape of the same run, which is what this probe emitted:
+    prefix = {"status": "COMPLETED",
+              "steps_observed": [s for s in cvc.STEPS if s != "S2.3"]}
+    assert [(code, msg.split(" — ")[0]) for code, msg in
+            cvc._step_accounting(_REPO, prefix, tuple(prefix["steps_observed"]),
+                                 _with_head(), _RECORD_ARTIFACT)] == [
+        ("V5", "GREEN with steps not observed in the run: S2.3")]
+
+
+def test_the_log_prints_the_split_it_emitted_and_the_gap_when_it_could_not():
+    """The rendering arm, not just the record: a reader sees the same claim V5 reads.
+
+    A log that prints only "6 of 8" hands its reader the pre-#10215 reading of the
+    same numbers. An unaccounted conditional step must print the FALLBACK it
+    actually emitted, or the log and the machine block disagree about the table.
+    """
+    conditional = measure.read_conditional(_prereg())
+    required, accounts, gap = measure.step_accounting(
+        conditional, [_idle_run()], _seven_observed())
+    lines = measure.step_accounting_lines(required, accounts, gap)
+    assert lines[0].startswith("steps required: S0 S1 S2.1 S2.2 S3 S5 S6"), lines
+    assert lines[0].endswith("|  conditional: S2.3=idle"), lines
+    assert lines[1].startswith("conditional S2.3: idle — every one of the 1 "), lines
+    assert len(lines) == 2, lines
+    # the refusal side: all eight required, the step named with its own cause
+    required, accounts, gap = measure.step_accounting(
+        conditional, [_idle_run(errors=["classify(S2) failed: boom"])],
+        _seven_observed())
+    lines = measure.step_accounting_lines(required, accounts, gap)
+    assert lines[0].startswith("steps required: " + " ".join(cvc.STEPS))
+    assert lines[0].endswith("|  conditional: none"), lines
+    assert lines[1].startswith("steps accounting: NOT CLAIMED — "), lines
+    assert "neither observed nor witnessed idle: S2.3" in lines[1], lines
+
+
+def test_the_split_is_the_frozen_records_not_this_probes_choice():
+    """Direction matters: a step is conditional because the RECORD says so.
+
+    A probe that decided its own conditional set could hand itself an accounting it
+    was never granted, and `capstone_run.G5` refuses exactly that. A malformed
+    declaration refuses the RUN too — degrading it to "all eight required" would
+    look identical to correct behaviour.
+    """
+    # the real frozen record declares S2.3 conditional
+    assert set(measure.read_conditional(_prereg())) == {"S2.3"}
+    # a record that declares NOTHING conditional leaves all eight required
+    assert measure.read_conditional({}) == {}
+    required, accounts, gap = measure.step_accounting({}, [_idle_run()],
+                                                     _seven_observed())
+    assert required == list(cvc.STEPS) and accounts == [] and gap == ""
+    # a malformed declaration is a REFUSAL, never a silent "all eight"
+    for broken in ({"steps": []},
+                   {"steps": {"conditional": "S2.3"}},
+                   {"steps": {"conditional": [{"step": "S4"}]}}):
+        try:
+            measure.read_conditional(broken)
+        except SystemExit as exc:
+            assert "unreadable" in str(exc), exc
+            continue
+        raise AssertionError(f"{broken}: a malformed declaration did not refuse")
+
+
+def test_a_failed_classify_pass_is_never_accounted_idle_by_this_probe():
+    """The fail-open `except` leaves the SAME empty counters as an idle pass.
+
+    The receipt says which one it was in `errors` / `diagnostics` (the raw string
+    rides `diagnostics` on the real receipt), so a crashed pass must fall back to
+    the pre-#10215 shape instead of handing the run an idle basis. Without this arm
+    `#10215`'s restatement would make a CRASH look like "nothing to do".
+    """
+    for failure in ({"errors": ["classify(S2) failed: RuntimeError: boom"]},
+                    {"diagnostics": ["classify(union) failed: TimeoutError: slow"]},
+                    {"warnings": ["classify-later init failed"]}):
+        required, accounts, gap = measure.step_accounting(
+            measure.read_conditional(_prereg()), [_idle_run(**failure)],
+            _seven_observed())
+        assert required == list(cvc.STEPS), (failure, required)
+        assert accounts == [], (failure, accounts)
+        assert "neither observed nor witnessed idle: S2.3" in gap, gap
+
+
+def test_an_idle_claim_is_run_wide_so_one_session_can_refute_it():
+    """Seven sessions, one number: an idle step must be idle on ALL of them.
+
+    `observe_idle` grades a single receipt, and this probe measures a corpus. One
+    session's idle block beside another's flag-off (or zero-candidate, or failed)
+    block is not a run-wide idle — and the fallback is the strict direction: the
+    gate then refuses the step for the fact that is true.
+    """
+    conditional = measure.read_conditional(_prereg())
+    idle = _idle_run("wp01_quarry_debug")
+    # two idle sessions: accounted, and the basis names the surface it read
+    required, accounts, gap = measure.step_accounting(
+        conditional, [idle, _idle_run("wp03_ember_design")], _seven_observed())
+    assert gap == "" and accounts[0]["state"] == "idle", (gap, accounts)
+    assert "2 measured session(s)" in accounts[0]["basis"], accounts[0]["basis"]
+    # one flag-off session in the run refutes it
+    flag_off = _idle_run("wp05_retro_writeup",
+                         surfaces={"classify_later": {"enabled": False,
+                                                      "s2": {}, "union": {}}})
+    required, accounts, gap = measure.step_accounting(
+        conditional, [idle, flag_off], _seven_observed())
+    assert accounts == [] and required == list(cvc.STEPS), accounts
+    assert "wp05_retro_writeup" in gap, gap
+    # a session with NO surface at all is the #9116 gap, not a contradiction, and
+    # does not by itself make the run idle either
+    silent = _run(session_id="wp06_bare")
+    required, accounts, gap = measure.step_accounting(
+        conditional, [silent], _seven_observed())
+    assert accounts == [] and "INSTRUMENT gap" in gap, (accounts, gap)
+    # an OBSERVED conditional step is accounted as observed, never as idle
+    observed = dict(_seven_observed(), **{"S2.3": "the pass assigned 3 kinds"})
+    required, accounts, gap = measure.step_accounting(conditional, [idle], observed)
+    assert gap == "" and accounts == [{"step": "S2.3", "state": "observed",
+                                       "basis": "the pass assigned 3 kinds"}], accounts
+
+
 # ── E3's Point denominator is disclosed, not silently mixed (F4) ──────────
 
 def test_the_derivation_figure_divides_by_the_writer_class_not_the_link():
@@ -1277,6 +1717,66 @@ def test_the_e3_note_never_splices_this_runs_counts_into_a_historical_ratio():
     assert "7 extraction claims (3 anchored)" in custom, custom
     assert "4 other (0 anchored)" in custom, custom
     assert "3/11 = 0.272727" in custom, custom
+
+
+def test_the_e3_narration_never_claims_the_amended_denominator_counts_object():
+    """#10525 review P2, MEASURED: the instrument kept printing the claim this PR falsifies.
+
+    §10.1 re-registered E3's class set to `Point` + `Event` + `Document`, so the frozen denominator
+    NO LONGER counts `:Object`. The SET was moved (`DERIVED_LABELS` follows
+    `_DERIVATION_REFERENCES_LABELS`); the NARRATION of the set was not, and it is EMITTED —
+    `e3_row_note` into both copies of the log's E3 row, `point_composition_line` into the
+    `e3 point composition:` line. So every future scored run would have written, beside the amended
+    total, prose asserting the denominator counts `:Object` and that no choice had been made.
+
+    Three sentences carried it:
+
+    * ``the frozen denominator counts them anyway … a lane cannot pick`` (`e3_row_note`)
+    * ``#9736 must choose between re-registering the metric and reopening the model``
+      (`e3_row_note`) — the choice §10.1 makes, under #9736's own ruling
+    * ``The frozen 'all derived nodes' reading above is unchanged`` (`point_composition_line`) —
+      the reading MOVED, which is the whole point of the amendment
+
+    Non-vacuity: on the pre-fix probe every fragment in `falsified` is PRESENT in both rendered
+    strings, so each `not in` below reds; and ``grep`` over the two test files returned NOTHING for
+    any of them, which is why no pin caught it (the existing E3-note pins hold the SPLICE defect
+    and the two log copies, both orthogonal to these sentences).
+    """
+    graph, corpus_sha = "capstone_measure_test_1", "sha256:" + "e" * 64
+    note = measure.e3_row_note(composition=_shipped_composition(),
+                               e3_result=_e3_result(), graph=graph, corpus_sha=corpus_sha)
+    line = measure.point_composition_line(_shipped_composition())
+    falsified = ("counts them anyway", "a lane cannot pick", "must choose between",
+                 "frozen 'all derived nodes' reading")
+    for where, rendered in (("e3_row_note", note), ("point_composition_line", line)):
+        for fragment in falsified:
+            assert fragment not in rendered, (where, fragment, rendered)
+
+    # Both readings are still reported — that part of the narration was right and must survive —
+    # and the amendment is named where a reader can follow it, rather than asserted as a fact the
+    # owner has not ruled on.
+    assert "BOTH readings" in note, note
+    assert "§10.1" in note, note
+    assert "no longer count" in note, note
+    assert "PRE-AMENDMENT" in line, line
+    assert "§10.1" in line, line
+    assert "no longer counts" in line, line
+    # and the splice guard this note has always had stays green on the rewritten text
+    assert not re.search(r"\d+/\d+ = 1\.000000", note), note
+
+    # ⛔ #10525 review ROUND 2, P1 — MEASURED: two of these sentences asserted their own arithmetic
+    # falsely. The 'all derived nodes' figure had been called "the PRE-AMENDMENT reading" and said to
+    # be WIDER than "the figure above", while after the amendment that figure IS the registered one
+    # (383 = Point 338 + Event 45 + Document 0) — so the line called 383 pre-amendment and then said
+    # the registered reading is narrower than 383. And the row claimed to report "BOTH readings"
+    # while its value carries only `148/383` (`"433" in note` is False). Both are now stated where
+    # the pre-amendment figure actually lives — §10.1's table — and the claims are pinned as the
+    # true ones, not as fragments that merely rhyme with them.
+    assert "narrower than the figure above" not in line, line
+    assert "PRE-AMENDMENT reading and is retained" not in line, line
+    assert "this row reports BOTH readings" not in note, note
+    assert "which §9's provenance table states" in line, line
+    assert "§10.1 reports BOTH readings" in note, note
 
 
 def test_the_shipped_log_states_the_e3_note_the_same_way_in_both_copies():
@@ -1509,6 +2009,15 @@ _BUNDLE_SOURCES = {
     "sdk": _REPO / "tortoise/sdk.py",
     "edges": _REPO / "tortoise/projection/edges.py",
     "extractor_v2": _REPO / "tortoise/extractor_v2.py",
+}
+
+# The GATE the bundle audits, which the bundle also cites by number. Kept OUT of
+# `_BUNDLE_SOURCES` on purpose: `_BUNDLE_CITE` matches `sdk|edges|extractor_v2`
+# only, so putting a key here would imply the sweep proper reads it when it
+# cannot. These are read by `test_the_bare_continuation_cites_name_what_they_say`
+# instead, by phrase — the same mechanism the bare `:NNNN` continuations need.
+_BUNDLE_TOOL_SOURCES = {
+    "capstone_verdict_check": _REPO / "tools/capstone_verdict_check.py",
 }
 
 # `docs/00_index.md` is a shared router of ~140 table rows, so only the ROW that
@@ -1871,43 +2380,96 @@ def test_the_bare_continuation_cites_name_what_they_say():
     `:9044` for the early return and `:8781` for the `_edus_from_conversation`
     call: every one of those rows FAILS the two checks below (the number is not
     on the phrase's line, and the old number carries other code).
+
+    A row may name a SOURCE outside the bundle's own three (`_BUNDLE_TOOL_SOURCES`)
+    — the `E1-E5-PROOFS.md` rows read `tools/capstone_verdict_check.py`, which
+    `_BUNDLE_CITE` cannot match at all. Those numbers had NO reader: the document
+    said so in its own words ("re-checked BY HAND at the audit head") and then
+    went stale within one commit — `#10509` review (P2) found its required-step
+    refusal cited at the lines rule 4 (the frozen-record refusal) occupies. On
+    that pre-fix document the third row FAILS twice over: its sentence carries
+    neither `:475` nor `:477`, and `:460`/`:462` carry the conditional-declaration
+    refusal, not the `missing = …` line the prose names.
     """
     rows = (
         # `each VET pass is gated on the LIST` — the gate AND its call, twice.
         ("docs/00_index.md", "each VET pass is gated on the LIST", (
-            ("9194", "if vet_enabled and embed_list:"),
-            ("9195", "vet_s2_stats, _w, vet_s2_pool = _run_vet_pass("),
-            ("9316", "if vet_enabled and complete_list:"),
-            ("9317", "vet_union_stats, _w, _ = _run_vet_pass("),
+            ("10295", "if vet_enabled and embed_list:"),
+            ("10296", "vet_s2_stats, _w, vet_s2_pool = _run_vet_pass("),
+            ("10417", "if vet_enabled and complete_list:"),
+            ("10418", "vet_union_stats, _w, _ = _run_vet_pass("),
         )),
-        # the VET block's start; its three lines of keys close on line 9446
+        # the VET block's start; its three lines of keys (10587-10589) close on
+        # line 10590 — DERIVED by content, not by arithmetic: `result["vet"] = {`
+        # opens at 10586 and the block's `}` is 10590. ⚠️ The base head's number
+        # was 9446, which pointed at an unrelated comment about
+        # `_value_verbatim_span`, so a mechanical +1101 lands on `try:`; a COMMENT
+        # is not an asserted number and nothing reds on it, which is why the two
+        # sides' bump disagreed here and why every ASSERTED number in this table
+        # is verified by content instead.
         ("docs/00_index.md", "emitted unconditionally at", (
-            ("9475", 'result["classify_later"] = {'),
-            ("9485", 'result["vet"] = {'),
+            ("10576", 'result["classify_later"] = {'),
+            ("10586", 'result["vet"] = {'),
         )),
         # `_IDLE_CITES["vet"]`: the early return and the surface it emits
         ("probes/capstone_measure.py", "its vet surface", (
-            ("9103", "if not edus:"),
-            ("9119", '"vet": {"enabled": vet_enabled, "s2": {}, "union": {}},'),
+            ("10204", "if not edus:"),
+            ("10220", '"vet": {"enabled": vet_enabled, "s2": {}, "union": {}},'),
         )),
         # ...and the same claim in the rule's own docstring
         ("probes/capstone_measure.py", "with the flag ON", (
-            ("9119", '"vet": {"enabled": vet_enabled, "s2": {}, "union": {}},'),
+            ("10220", '"vet": {"enabled": vet_enabled, "s2": {}, "union": {}},'),
         )),
         ("probes/capstone_measure.py", "follows at", (
-            ("9102", "edus = _edus_from_conversation(conversation)"),
+            ("10203", "edus = _edus_from_conversation(conversation)"),
         )),
         # the S2.2/S2.3 block this probe names as the #9116 seam's subject
         ("probes/capstone_measure.py", 'result["vet"]`` at', (
-            ("9485", 'result["vet"] = {'),
-            ("9489", ("exact", "}")),
+            ("10586", 'result["vet"] = {'),
+            ("10590", ("exact", "}")),
         )),
+        # The E-row audit's cites on the GATE ITSELF. `_BUNDLE_CITE` matches only
+        # `sdk|edges|extractor_v2`, so a `tools/*.py` number is invisible to the
+        # sweep proper — and until these rows existed the document said so in its
+        # own words ("re-checked BY HAND at the audit head"). It then went stale
+        # in the very commit whose message claimed to fix a stale V5 cite pair:
+        # `#10509` review (P2) found `:460`/`:462` landing on rule 4, the
+        # frozen-record refusal, instead of rule 2, the unobserved-required-step
+        # refusal. A hand-recheck did not hold across one commit, so the numbers
+        # are pinned here instead. The sentence wraps over three lines and a row
+        # scopes to ONE line, so the claim takes three rows.
+        ("E1-E5-PROOFS.md", 'declares `STEPS = ("S0"', (
+            ("118", 'STEPS = ("S0", "S1", "S2.1", "S2.2", "S2.3", "S3", '
+                    '"S5", "S6")'),
+        ), "capstone_verdict_check"),
+        ("E1-E5-PROOFS.md", "_step_accounting` (`:379`) refuses a GREEN row whose", (
+            ("379", "def _step_accounting("),
+        ), "capstone_verdict_check"),
+    )
+    # The SAME document states two of its claims as the RULE's own text rather than a
+    # line number — a quoted rule cannot drift by an insertion above it, which is why
+    # #10215's review moved those two numbers twice inside one PR. A quote still rots
+    # if the gate renames the message, so each quote is held against the gate's text
+    # as well: the doc must carry it (markdown wraps it, so whitespace is normalised)
+    # and the gate must still say it.
+    quotes = (
+        ("E1-E5-PROOFS.md",
+         "missing = [s for s in required if s not in observed]",
+         "capstone_verdict_check"),
+        ("E1-E5-PROOFS.md",
+         "GREEN with steps not observed in the run:",
+         "capstone_verdict_check"),
     )
     docs = dict(_BUNDLE_DOCS)
     sources = {name: path.read_text(encoding="utf-8").splitlines()
-               for name, path in _BUNDLE_SOURCES.items()}
+               for name, path in (*_BUNDLE_SOURCES.items(),
+                                  *_BUNDLE_TOOL_SOURCES.items())}
     failures: list[str] = []
-    for doc_label, phrase, cites in rows:
+    for row in rows:
+        doc_label, phrase, cites = row[0], row[1], row[2]
+        # a row may name its SOURCE; the bundle's own three are the default
+        source_key = row[3] if len(row) > 3 else "extractor_v2"
+        source_label = f"{source_key}.py"
         lines = docs[doc_label].read_text(encoding="utf-8").splitlines()
         hits = [ln for ln in lines if phrase in ln]
         if len(hits) != 1:
@@ -1925,16 +2487,29 @@ def test_the_bare_continuation_cites_name_what_they_say():
                     f"cite :{number} — a bare continuation is invisible to "
                     f"_BUNDLE_CITE, so this pin is the only thing reading it")
                 continue
-            got = sources["extractor_v2"][int(number) - 1]
+            got = sources[source_key][int(number) - 1]
             if isinstance(anchor, tuple):
                 if got.strip() != anchor[1]:
                     failures.append(
-                        f"extractor_v2.py:{number} (cited by {doc_label}) reads "
+                        f"{source_label}:{number} (cited by {doc_label}) reads "
                         f"{got.strip()!r}, not exactly {anchor[1]!r}")
             elif anchor not in got:
                 failures.append(
-                    f"extractor_v2.py:{number} (cited by {doc_label}) reads "
+                    f"{source_label}:{number} (cited by {doc_label}) reads "
                     f"{got.strip()!r}, which carries no {anchor!r}")
+    for doc_label, quoted, source_key in quotes:
+        source_label = f"{source_key}.py"
+        doc_text = " ".join(docs[doc_label].read_text(encoding="utf-8").split())
+        if " ".join(quoted.split()) not in doc_text:
+            failures.append(
+                f"{doc_label} no longer carries the rule text {quoted!r} this pin "
+                f"holds {source_label} to — re-quote the rule from the gate rather "
+                f"than dropping the claim")
+        if not any(quoted in ln for ln in sources[source_key]):
+            failures.append(
+                f"{doc_label} quotes {quoted!r} as the rule, but {source_label} no "
+                f"longer says it — re-quote from the gate, do not leave a quote the "
+                f"code has moved past")
     assert not failures, (
         "a bare `:NNNN` continuation names code it does not name — re-derive the "
         "number from the tree before changing this pin:\n  " + "\n  ".join(failures))
@@ -2089,6 +2664,137 @@ def test_the_per_surface_prose_cites_are_the_probe_tables_own_numbers():
                     f"tree-derived table have drifted apart. Re-derive the "
                     f"document's cites; do not relax this leg. "
                     f"cited spans: {sorted(spans)}")
+
+
+#: The documents that carry §11's BY-DESIGN argument and are read by NO sweep:
+#: `_BUNDLE_DOCS` covers README / E1-E5-PROOFS / the probes / the index / the
+#: architecture doc, and `_BARE_CITE_DOCS` only the two that print the per-surface
+#: numbers. That gap was measured: `#10513`/`#10360` inserted 1,101 lines into
+#: `tortoise/extractor_v2.py`, the foreward merge re-pointed 99 cites in four
+#: bundle files — and left these two behind, so §11 argued its whole "not a
+#: relaxation" case from `:8666` (payload-event assembly) and `:9209` (a
+#: `refused_value_contents` lookup) while `README.md` carried the correct derived
+#: `:10310`/`:10442` two files over, i.e. ONE PR shipping two documents that
+#: disagree about where its own load-bearing code lives. The record is the
+#: hash-pinned artifact the gate revises itself by (`RECORD_ARTIFACT`), so a wrong
+#: cite there is inside the one file the epic treats as change-controlled.
+_PREREG_STEP_CITE_DOCS = (
+    ("PRE-REGISTRATION.md",
+     _REPO / "docs/evidence/7949-capstone/PRE-REGISTRATION.md"),
+    ("preregistration.json",
+     _REPO / "docs/evidence/7949-capstone/preregistration.json"),
+)
+
+
+def test_the_pre_registration_cites_the_classify_sites_the_tree_actually_has():
+    """§11's five code sites are DERIVED from the tree, never typed twice.
+
+    A typed number can only be repaired by another hand re-derivation — the class
+    this bundle has already filed twice (`#10377`, `#5095`) and re-derived by hand
+    once more at `68b2e617d`. The numbers here come out of `_extractor_lineno` /
+    `_EXTRACTOR_SITES`, the same readers the rest of this file resolves cites with,
+    so moving the classifier in `extractor_v2.py` moves the document with it.
+
+    The two FAIL-OPEN `except` cites are here because they were the pair the earlier
+    re-derivations left behind while every neighbour moved: `#10513`/`#10360`'s
+    +1,101-line insert carried the collector and both `if items:` gates forward and
+    left `:9223`/`:9353` (comment lines at the head) in the sentence that argues why
+    an idle step is distinguishable from a crashed one — the sentence this section's
+    whole honesty case rests on. Nothing read them, so nothing red-ed.
+
+    Non-vacuity: at `68b2e617d` the pre-registration cited `:8666`/`:8666-8690`/
+    `:9209`/`:9341` while the tree carried `:9767`/`:9767-9789`/`:10310`/`:10442`,
+    and at `c3612c299` it still cited `:9223`/`:9353` for the fail-open `except`
+    arms the tree carries at `:10323`/`:10453` — this leg reds on every one of them.
+    """
+    collector = _extractor_lineno("def _collect_classify_items(")
+    # The collector's EXTENT is read, not assumed: the cited end is a claim too, and
+    # the pre-#10215 range ran two lines past `return items` into the blank lines
+    # before the next `def`. `ast` is what knows where a function ends.
+    end = next(
+        node.end_lineno for node in ast.walk(
+            ast.parse((_REPO / _EXTRACTOR).read_text()))
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "_collect_classify_items")
+    gates = (_EXTRACTOR_SITES["classify_later"]["items_s2"],
+             _EXTRACTOR_SITES["classify_later"]["items_union"])
+    # §11.3's "a crash cannot impersonate an idle pass" argument cites both
+    # fail-open `except` arms by their own lines; derive them the same way.
+    fail_opens = (
+        _extractor_fail_open_except('errors.append(f"classify(S2) failed'),
+        _extractor_fail_open_except('errors.append(f"classify(union) failed'),
+    )
+    for doc_name, path in _PREREG_STEP_CITE_DOCS:
+        text = path.read_text(encoding="utf-8")
+        assert f"tortoise/extractor_v2.py:{collector}" in text, (
+            f"{doc_name} does not cite the collector at "
+            f"tortoise/extractor_v2.py:{collector} — §11's argument rests on "
+            f"`_collect_classify_items`, so a cite that points anywhere else is an "
+            "argument from code the classify pass never reaches")
+        if doc_name == "preregistration.json":
+            # the record states the condition in one folded scalar; the RANGE and
+            # the two gates are the document's table/text, not the record's.
+            continue
+        assert f"tortoise/extractor_v2.py:{collector}-{end}" in text, (
+            f"{doc_name} does not cite the collector's extent as "
+            f"tortoise/extractor_v2.py:{collector}-{end} (the `def` through "
+            f"`return items`) — a range that runs past the body names the next "
+            "function's lines")
+        for gate in gates:
+            assert f"`{gate}`" in text, (
+                f"{doc_name} does not cite the `if items:` gate at {gate} — the "
+                f"classify passes are gated on the collector's list being "
+                f"non-empty, which is the whole of S2.3's conditionality")
+        for fail_open in fail_opens:
+            assert f"`{fail_open}`" in text, (
+                f"{doc_name} does not cite the fail-open `except` at {fail_open} — "
+                "the idle witness is only distinguishable from a CRASHED pass "
+                "because this `except` writes a marker, so a cite landing on any "
+                "other line is an argument from code that never runs")
+
+
+def test_the_pre_registration_cites_the_state_value_carve_out_extent():
+    """§7 argues E2a's two exclusions from the carve-out's own text — so ITS cite is derived too.
+
+    The same merge that re-pointed this bundle's cites left this one behind: `:278`
+    was the carve-out's opening COMMENT before the merge and is a BLANK LINE at the
+    head, so the audit trail for the two exclusions pointed at nothing while the
+    clauses the sentence quotes live eight lines below it. Nothing pinned it — the
+    leg above reads §11's three classify sites only — and this is the same class
+    (`#10377`, `#5095`): a typed number is repaired only by another hand
+    re-derivation. The constant's extent comes from `ast`, and the quoted clauses are
+    required to fall INSIDE it, so a cite that resolves to the wrong neighbours reds
+    even when the number happens to exist in the file.
+
+    Non-vacuity: at `68b2e617d` the document cited `:278` while the constant begins at
+    `:294`, and this leg reds on it.
+    """
+    node = next(
+        node for node in ast.walk(
+            ast.parse((_REPO / _EXTRACTOR).read_text()))
+        if isinstance(node, ast.Assign)
+        and any(isinstance(target, ast.Name)
+                and target.id == "STATE_VALUE_CARVE_OUT"
+                for target in node.targets))
+    start, end = node.lineno, node.end_lineno
+    # The constant is an implicitly concatenated literal, so a clause can straddle
+    # a source line ("ids, hashes, and " / "ephemeral counters"). Compare against
+    # the VALUE, whitespace-collapsed and case-folded — that is what the sentence
+    # quotes, and reading the source text instead would red on a line wrap.
+    value = " ".join(str(node.value.value).split()).lower()
+    for quoted in ("measurements, deadlines/freezes, thresholds/ttls, versions, "
+                   "and counts",
+                   "ids, hashes, and ephemeral counters"):
+        assert quoted in value, (
+            f"the carve-out at tortoise/extractor_v2.py:{start}-{end} no longer "
+            f"carries the clause §7 quotes as its authority: {quoted!r}")
+    text = (_REPO / "docs/evidence/7949-capstone/PRE-REGISTRATION.md").read_text(
+        encoding="utf-8")
+    assert f"tortoise/extractor_v2.py:{start}-{end}" in text, (
+        f"PRE-REGISTRATION.md does not cite the carve-out as "
+        f"tortoise/extractor_v2.py:{start}-{end} — §7's two E2a exclusions are "
+        "argued against that text, so a cite that lands anywhere else hands the "
+        "auditor a rule it cannot find")
 
 
 #: A bare CONTINUATION cite in either backtick spelling: the probes are
@@ -2261,3 +2967,78 @@ def test_the_bundle_names_the_live_e2_blocker_and_no_closed_render_absence():
             "an index row still routes a reader to `#9775` as E2's blocker — "
             "#9775's render half is CLOSED (PR #10382), so the live blocker is "
             f"`#10360`: {row[:400]}")
+
+
+# ── the header's import claim, MEASURED (#10525 review P3) ───────────────────────────────────
+
+#: Modules a DB/network/LLM-free slice must never pull in. A driver, client or model SDK at import
+#: time is what would make this file's selection and shard weight a lie; the pure-Python `tortoise`
+#: package the probe derives its class set FROM is not (it opens no connection and calls no model).
+_FORBIDDEN_IMPORTS = ("falkordb", "redis", "psycopg2", "psycopg", "httpx", "requests",
+                      "openai", "anthropic")
+
+
+def _import_this_module_in_a_subprocess() -> dict:
+    """Import THIS module in a fresh interpreter and report what it pulled in.
+
+    A subprocess is the only honest instrument here: `sys.modules` in the running session already
+    carries whatever the other ~59 pin functions loaded, so an in-process read cannot tell this
+    module's own imports from its neighbours'.
+    """
+    code = (
+        "import importlib.util as ilu, json, sys\n"
+        f"spec = ilu.spec_from_file_location('t10525_import_probe', {str(Path(__file__).resolve())!r})\n"
+        "module = ilu.module_from_spec(spec)\n"
+        "sys.modules['t10525_import_probe'] = module\n"
+        "spec.loader.exec_module(module)\n"
+        "print(json.dumps({\n"
+        "  'tortoise': sorted(k for k in sys.modules if k.split('.')[0] == 'tortoise'),\n"
+        f"  'forbidden': [d for d in {list(_FORBIDDEN_IMPORTS)!r} if d in sys.modules],\n"
+        "}))\n"
+    )
+    proc = subprocess.run([sys.executable, "-c", code], cwd=str(_REPO),
+                          capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr[-2000:]
+    return json.loads(proc.stdout)
+
+
+def test_the_import_claim_is_what_importing_actually_does():
+    """The header's import claim must agree with an executed import (#10525 review P3, MEASURED).
+
+    The docstring used to say *"the module imports no ``tortoise`` symbol at import time"* — the
+    file's whole justification for sitting in a DB-free slice. This module executes
+    ``measure = _load()`` in its own header, and the probe derives ``DERIVED_LABELS`` from
+    ``tortoise.projection.edges`` at import (``_derivation_label_classes``, #9736), so the claim
+    had been false since that amendment landed and nothing referenced it
+    (``grep "imports no"`` returned only the sentence itself).
+
+    This is the class the bundle exists to refuse — a committed claim the tree refutes, with no
+    number moving and no test revealing it. Both halves are measured rather than restated: what
+    DOES arrive (27 ``tortoise.*`` modules, ``projection.edges`` among them) and what does NOT
+    (every driver/client/model SDK), so the wording is pinned to the tree, not to memory.
+
+    Non-vacuity: at the pre-fix head the docstring names none of ``tortoise.projection.edges``,
+    ``falkordb`` or ``#10525``, and carries the bare stale sentence with nothing signalling it
+    is refuted, so all three assertions red.
+    """
+    payload = _import_this_module_in_a_subprocess()
+    assert "tortoise.projection.edges" in payload["tortoise"], (
+        "the probe's class set no longer comes from `tortoise.projection.edges` "
+        f"(#9736) — the docstring states it does, so one of the two moved: {payload['tortoise']}")
+    assert payload["forbidden"] == [], (
+        "importing this module now pulls in a DB/network/LLM dependency, which the slice's "
+        f"selection and shard weight assume it does not: {payload['forbidden']}")
+
+    doc = sys.modules[__name__].__doc__ or ""
+    assert "tortoise.projection.edges" in doc, (
+        "the docstring must state the import this module ACTUALLY performs, or a reader (and "
+        "the next lane) is told a DB-free slice imports nothing at all")
+    assert "falkordb" in doc and "redis" in doc, (
+        "the driver-free half is the load-bearing half now that a `tortoise` import is real — "
+        "the docstring must name what it checked for")
+    assert "#10525" in doc, "the corrected claim must name the finding that corrected it"
+    stale = "imports no ``tortoise`` symbol at import time"
+    if stale in doc:
+        assert "refuted" in doc or "earlier" in doc, (
+            "the stale claim is restated as current fact — if it is kept at all it must be "
+            "marked as the wording that was refuted")

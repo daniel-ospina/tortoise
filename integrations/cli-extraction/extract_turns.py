@@ -23,7 +23,7 @@ Configuration (env vars; all optional):
 
 Example:
   python3 extract_turns.py dump
-  python3 extract_turns.py run --transcript 01a1102f --out ex.json   # defaults: claude-haiku-5-5 @ high
+  python3 extract_turns.py run --transcript <session-id> --out ex.json  # defaults: claude-haiku-5-5 @ high
   python3 extract_turns.py write --extraction ex.json \
       --source session://extraction-2026-10-24-haiku-high-thread-01a1102f --domain my-project
 
@@ -115,14 +115,318 @@ def state_dir() -> Path:
 
 # ── dump ─────────────────────────────────────────────────────────────
 
+#: The predicate `dump` reads: the CAPTURE lane's real shape (#9932).
+#:
+#: `sdk._TURN_WRITE_CYPHER` — the ONE turn store, called by both capture lanes
+#: (SDK `capture_session` and the hosted commit path) — MERGEs each turn as a
+#: `:Point` carrying `content`, `pointKind`, `is_episodic`, `speaker` and
+#: wires it `(s:Session)-[:CONTAINS]->(t)`. It sets **no** `extractedFrom`
+#: property, so an `extractedFrom STARTS WITH …` predicate matched ZERO rows
+#: against every session this repo captures, and `authoredBy` (the human-author
+#: property) is absent too — the role lives on `speaker`. Reading those two
+#: names is what broke the documented dump→run→write workflow.
+#:
+#: The `session://` prefix makes a transcript key the CAPTURE session id — the
+#: id the operator passed to `capture_session`. `build_transcripts` keys a
+#: `session://` source by the WHOLE remainder (never a tail split, which would
+#: merge `teamA/run-7` and `teamB/run-7`).
+_DUMP_QUERY = (
+    "MATCH (s:Session)-[:CONTAINS]->(t:Point) "
+    "WHERE t.is_episodic = true AND t.pointKind = 'event' "
+    # No ORDER BY: the graph's order is discarded — `dump` re-sorts by the
+    # integer turn index (`_turn_order`), because the server's lexicographic
+    # order puts `t10` before `t2`.
+    #
+    # ⛔ THE LAST TWO COLUMNS ARE WHAT MAKES A PARTIAL DUMP DETECTABLE. The
+    # `:Session` states, in the SAME MERGE that wires these turns, how many
+    # turns it holds (`turn_count`, a WINDOW length) and where its id space
+    # ENDS (`turn_max_index`, the live inclusive end — `sdk._write_session_and_
+    # turns`). Without them a graph holding only PART of a session is
+    # indistinguishable from a complete one, and `dump` reported success over a
+    # truncated transcript (#10574 review P1). Column order is load-bearing:
+    # `_is_turn_of` reads 0 and 5, `_turn_record` reads 0-4, so the marks are
+    # APPENDED and never inserted.
+    "RETURN 'session://' + s.id, t.pointKind, t.speaker, t.content, t.createdAt, "
+    "t.id, s.turn_count, s.turn_max_index"
+)
 
-def dump(out: Path, allow_empty: bool = False):
-    """Pull captured turn Points (codex:// thread sources) from the container.
 
-    This is the integration's ONE private graph read (a prefix query —
-    `STARTS WITH` — has no public equivalent); everything else goes through
-    public SDK doors. Fails loudly on zero rows unless --allow-empty: an
-    empty capture usually means capture is off or the schema moved.
+def _is_turn_of(row) -> bool:
+    """`{session}_t{i}` — the id shape the one turn store derives.
+
+    The suffix must be DECIMAL, mirroring `sdk._capture_turn_ids`' own
+    `isdecimal()` guard, so this filter admits exactly what that sweep admits.
+
+    It is NOT an exact equivalence with `_turn_order`, and must not be
+    described as one: `isdecimal()` is True for a suffix longer than `int()`'s
+    4300-digit limit, which `_turn_order` then refuses with a `ValueError`
+    (`dump` does not catch it, so it surfaces as a traceback). No writer mints
+    such an id — `_capture_turn_id` emits a plain running index — so this is a
+    documented edge rather than a reachable state.
+    """
+    sid = str(row[0]).split("://", 1)[-1]
+    tail = str(row[5])[len(sid) + 2:]
+    return (str(row[5]).startswith(f"{sid}_t") and tail.isdecimal())
+
+#: The capture store's own frame (`_capture_turn_frame`, ``"[role] body"``).
+#: The turn's `content` property holds the FRAMED text and `speaker` holds the
+#: un-bracketed role, so a transcript line built verbatim from `content` says
+#: the speaker twice. This mirrors `_capture_turn_role_text` EXACTLY (including
+#: `*` rather than `+` for the role, so an EMPTY role still unframes) — a local
+#: copy because `dump` maps rows on the HOST, where `tortoise` is not
+#: necessarily importable (the whole lane talks to the container).
+_FRAME_RE = re.compile(r"^\[([^\]]*)\]\s*")
+
+
+def _turn_order(row) -> tuple:
+    """Sort key: (session, turn index).
+
+    `createdAt` CANNOT order a session's turns: the writer stamps the whole
+    batch with one `$now` (`coalesce(t.createdAt,$now)`), so every turn in a
+    capture carries the SAME timestamp and the graph returns them in arbitrary
+    order — a scrambled transcript that reds nothing. The turn index in the
+    deterministic id (`_capture_turn_id` -> `{session}_t{i}`) is the order, and
+    it is parsed as an INTEGER because a lexicographic sort puts `t10` before
+    `t2`.
+    """
+    sid = str(row[0])
+    m = re.search(r"_t(\d+)$", str(row[5]))
+    if m is None:
+        # An id that carries no turn index is not a turn: it cannot be
+        # ordered, and defaulting to 0 would splice it in front of turn 0.
+        raise ValueError(f"turn id carries no index: {row[5]!r}")
+    try:
+        index = int(m.group(1))
+    except (TypeError, ValueError) as exc:      # >4300 digits: not an index
+        raise ValueError(f"turn id index is not an integer: {row[5]!r}") from exc
+    return (sid, index)
+
+
+#: One graph row -> one turns-file record. `by` carries the turn ROLE
+#: (`speaker`), which is what `build_transcripts` renders as the prompt's
+#: per-line speaker and what lets the engine separate user text from assistant
+#: text. `kind` mirrors the point's `pointKind`; it is informational only (no
+#: reader consumes it, and the query pins `pointKind = 'event'`).
+def _turn_record(row) -> dict:
+    role, text = row[2], row[3] or ""
+    framed = _FRAME_RE.match(text)
+    if framed:
+        role = role or framed.group(1)
+        text = text[framed.end():]
+    return {"src": row[0], "kind": row[1], "by": role,
+            "content": text, "at": str(row[4])}
+
+
+#: How many gap indices a refusal NAMES — the bound `record_read` uses, for the
+#: same reason: the diagnosis is the arithmetic, this is only how much text it
+#: prints (so the gap walk can stop early).
+_SHORTFALL_GAPS_NAMED = 5
+
+
+def _session_of(row) -> str:
+    """The capture session id a dump row belongs to (`session://` stripped)."""
+    return str(row[0]).split("://", 1)[-1]
+
+
+def _row_index(row) -> int | None:
+    """The turn index a row's id carries (`{session}_t{i}`), or `None`.
+
+    `None` means the row cannot be PLACED in the id space, and every check
+    below abstains on it instead of inventing an index — the same degradation
+    `record_read.merge_turn_payloads`' `_is_residue` applies to an id it cannot
+    place. (`_turn_order` stays stricter and still refuses one: an unplaceable
+    row has no position to keep in the file, which is not a check that can
+    degrade.)
+    """
+    match = re.search(r"_t(\d+)$", str(row[5]))
+    if match is None:
+        return None
+    try:
+        return int(match.group(1))
+    except (TypeError, ValueError):       # >4300 digits: not an index
+        return None
+
+
+def _as_int(value) -> int | None:
+    """A declared count/mark as an int, or `None` when this read cannot tell."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    try:
+        return int(str(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def _session_marks(turns) -> dict[str, tuple[int | None, int | None]]:
+    """{session: (turn_count, turn_max_index)} — what each `:Session` DECLARES.
+
+    Both are written by the ONE turn store's MERGE (`sdk._write_session_and_
+    turns`): `turn_count` is the WINDOW length, `turn_max_index` the session's
+    LIVE inclusive id-space end (lowered by a shorter re-capture, never a peak).
+    `None` on either means this dump cannot read it — a row carrying an older
+    column set, or a session captured before the mark existed (#10000) — and
+    the checks that need it then degrade rather than invent a defect, exactly
+    as `record_read._shortfall` degrades on a `None` mark.
+    """
+    marks: dict[str, tuple[int | None, int | None]] = {}
+    for row in turns:
+        session = _session_of(row)
+        count = _as_int(row[6]) if len(row) > 6 else None
+        mark = _as_int(row[7]) if len(row) > 7 else None
+        prior_count, prior_mark = marks.get(session, (None, None))
+        marks[session] = (prior_count if count is None else count,
+                          prior_mark if mark is None else mark)
+    return marks
+
+
+def _split_residue(turns):
+    """(this session's live turns, rows ABOVE its live id-space end).
+
+    The mirror of `record_read.merge_turn_payloads`' `_is_residue`: a row above
+    `turn_max_index` is RESIDUE from a shorter re-capture whose surplus sweep
+    did not land (the delete is journal-emitted and can be refused). An APPEND
+    can never produce one — it writes `turn_max_index = turn_offset + count - 1`
+    — so serving it would publish turns the session no longer owns.
+
+    ⛔ DETECTION IS NOT A GUARD (#10021 review P3): reporting the residue and
+    writing it anyway is the shape that finding rejected on the read door. The
+    rows are DROPPED, and the operator is told how many.
+    """
+    marks = _session_marks(turns)
+    live, residue = [], []
+    for row in turns:
+        mark = marks.get(_session_of(row), (None, None))[1]
+        index = _row_index(row)
+        if mark is not None and index is not None and index > mark:
+            residue.append(row)
+        else:
+            live.append(row)
+    return live, residue
+
+
+def _dump_shortfall(turns) -> tuple[str, bool] | None:
+    """`(why, split_witness)` these rows are not the whole transcript — or `None`.
+
+    A mirror of `tortoise/record_read.py::_shortfall`'s MISSING arms, applied to
+    the graph copy this lane reads. It is a LOCAL copy for the same reason
+    `_FRAME_RE` is: `dump` maps rows on the HOST, where `tortoise` is not
+    necessarily importable (the whole lane talks to the container). The three
+    facts are each decidable from the rows already in hand:
+
+    * FEWER turns than the `turn_count` the session itself declares — the shape
+      a mid-capture refusal leaves, where the refused turns stayed in the
+      record;
+    * the ids do not cover ``0 .. max(index)`` — the `turn_offset` append shape
+      (`_t2`/`_t3` here, `_t0`/`_t1` still in the record), where `turn_count`
+      is a WINDOW length and cannot see the gap, or a hole a purge, a backfill
+      copy or a hand edit left;
+    * the ids stop BELOW `turn_max_index` — a refused HIGHEST turn, which is
+      invisible to the other two (a missing tail sits above `max(held)`, and
+      the run stays contiguous with `len(rows) >= turn_count`).
+
+    ⛔ THE SECOND ELEMENT IS `turn_max_index is not None`, AND IT IS NOT
+    DECORATION. `dump` composes its cause clause from it: the SPLIT STORE needs
+    a record to split with, so a session carrying NO mark (a pre-#10000
+    capture) cannot have hit it — and naming it there would send the operator
+    to `TORTOISE_RECORD_DSN`/`get_session()` for a cause that cannot apply,
+    which is #9932's defect in the message that reports #9932's fix. It is an
+    ADMISSION, not a verdict: a mark does not prove the record was armed, so
+    `dump` names the split store as ONE admitted cause beside the refused turn
+    write and the removed row, never as "the" cause.
+
+    ⛔ THE GAP CHECK IS ARITHMETIC, NOT A WALK OF THE ID SPACE (CWE-407, the
+    lesson #10021 review P2 records in `record_read`): `turn_max_index` is a
+    STORED integer, so walking `range(0, max+1)` would cost O(stored value) on
+    a legacy row. The subtraction says WHETHER there is a gap and the walk is
+    over the rows already held, stopping at `_SHORTFALL_GAPS_NAMED`.
+    """
+    marks = _session_marks(turns)
+    held: dict[str, list[int]] = {}
+    for row in turns:
+        index = _row_index(row)
+        if index is not None:
+            held.setdefault(_session_of(row), []).append(index)
+    for session, indexes in sorted(held.items()):
+        declared_count, turn_max_index = marks.get(session, (None, None))
+        unique = set(indexes)
+        if declared_count is not None and len(indexes) < declared_count:
+            return (f"the session {session!r} declares {declared_count} turn(s) "
+                    f"but the graph holds only {len(indexes)} of them",
+                    turn_max_index is not None)
+        span = max(unique) + 1            # the index space 0 .. max(held)
+        missing_count = span - len(unique)   # whether there is a gap, no scan
+        if missing_count:
+            gaps: list[int] = []
+            expected = 0
+            for index in sorted(unique):
+                while expected < index and len(gaps) < _SHORTFALL_GAPS_NAMED:
+                    gaps.append(expected)
+                    expected += 1
+                if len(gaps) >= _SHORTFALL_GAPS_NAMED:
+                    break
+                expected = index + 1
+            shown = ", ".join(str(i) for i in gaps)
+            if missing_count > len(gaps):
+                shown += f" (+{missing_count - len(gaps)} more)"
+            return (f"the session {session!r} holds {len(indexes)} turn(s) but "
+                    f"not the whole run — no turn for index {shown}",
+                    turn_max_index is not None)
+        if turn_max_index is not None and max(unique) < turn_max_index:
+            return (f"the session {session!r}'s turn rows stop at index "
+                    f"{max(unique)} while its turn ids reach {turn_max_index} — "
+                    "the TAIL is missing", True)
+    return None
+
+
+def dump(out: Path, allow_empty: bool = False, allow_partial: bool = False):
+    """Pull the captured session turns out of the container.
+
+    This is the integration's ONE private graph read. A public session-id route
+    does exist (`sdk.get_events(eventKind="sessionCaptured")` -> `get_session`),
+    but the Event index is best-effort (its write is non-fatal and minted only
+    on a fresh capture, so it silently misses sessions) and `get_session`'s
+    graph arm serves turns `ORDER BY t.id`, i.e. lexicographically (`t10`
+    before `t2`). The `CONTAINS` read is chosen for completeness and one round
+    trip, not because no public route exists. Everything else goes through
+    public SDK doors.
+
+    THREE outcomes, and the two refusals are DIFFERENT defects (#9932,
+    #10574 review P1):
+
+    * an EMPTY dump fails unless `--allow-empty` — capture was off, the schema
+      moved, or the turn nodes do not carry the names this read queries;
+    * a PARTIAL dump fails unless `--allow-partial` — the graph holds only some
+      of the turns its `:Session` declares. THREE causes are admitted and this
+      read cannot choose between them:
+
+      1. the SPLIT STORE — with the Postgres record armed
+         (`TORTOISE_RECORD_DSN`, #10000) the writer decides **per turn** which
+         store takes it while this read covers the graph for **the whole
+         session**, so a mid-capture refusal leaves part of the transcript in
+         each store. `sdk.get_session()` serves the union of both, but ONLY
+         where that record is armed;
+      2. a capture whose turn write was refused AFTER the `:Session` MERGE —
+         the session then declares turns that never landed, and the writer's
+         own comment names that residual (`sdk._write_session_and_turns`: the
+         MERGE precedes the turn write);
+      3. a turn row a purge, a backfill copy or a hand edit removed.
+
+      Causes 2 and 3 leave ONE store, and `get_session()` reconciles against
+      the same `:Session` marks this read already has, so it cannot settle
+      them. The file is NOT written on this path, so `run` cannot consume a
+      transcript THIS RUN would have produced — but an EXISTING
+      `turns_raw.jsonl` (from an earlier dump, possibly an `--allow-partial`
+      one) is left untouched, and `run` reads the default path with no
+      freshness check;
+    * a COMPLETE dump writes every turn, in turn-index order, and reports the
+      count it measured in the file.
+
+    Rows ABOVE the session's live id-space end (`turn_max_index`) are residue
+    from a shorter re-capture whose surplus sweep did not land (#10000). They
+    are DROPPED and reported, never written as this session's transcript — the
+    same rule `record_read.merge_turn_payloads` applies on the read door.
     """
     ns = _cfg("TORTOISE_NAMESPACE", "selfhost")
     log = _cfg("TORTOISE_EVENT_LOG", f"/data/events/{ns}.jsonl")
@@ -131,11 +435,10 @@ def dump(out: Path, allow_empty: bool = False):
         "from tortoise.sdk import TortoiseSDK\n"
         f"sdk = TortoiseSDK(namespace={ns!r}, event_log_path={log!r})\n"
         "g = sdk._get_proj().g\n"
-        "rows = g.query(\"MATCH (p:Point) WHERE p.extractedFrom STARTS WITH 'codex://' \"\n"
-        "               \"RETURN p.extractedFrom, p.pointKind, p.authoredBy, p.content, p.createdAt \"\n"
-        "               \"ORDER BY p.createdAt\").result_set\n"
+        f"rows = g.query({_DUMP_QUERY!r}).result_set\n"
         "for r in rows:\n"
-        "    print(json.dumps({'src': r[0], 'kind': r[1], 'by': r[2], 'content': r[3], 'at': str(r[4])}))\n"
+        "    print(json.dumps([r[0], r[1], r[2], r[3], str(r[4]), str(r[5]), "
+        "r[6], r[7]]))\n"
         "sdk.close()\n"
     )
     try:
@@ -145,27 +448,167 @@ def dump(out: Path, allow_empty: bool = False):
     except subprocess.TimeoutExpired as exc:
         raise SystemExit(f"dump: docker exec timed out after {DOCKER_TIMEOUT}s "
                          "— is the container healthy?") from exc
-    out.write_text(r.stdout)
+    rows = [json.loads(ln) for ln in r.stdout.splitlines() if ln.strip()]
+    turns = [row for row in rows if _is_turn_of(row)]
+    rejected = len(rows) - len(turns)
+    turns, residue = _split_residue(turns)
+    if not turns and not allow_empty:
+        # The two empty cases have DIFFERENT causes and the old one-line
+        # message named neither of them: it sent every operator to their
+        # capture setting (#9932), which is the wrong cause in both. NEITHER
+        # branch below may name a SINGLE cause — every branch names what it can
+        # measure and then every cause that measurement admits.
+        # `rows` is what the query actually returned, so the split below is
+        # measured rather than guessed: rows>0 means the predicate MATCHED and
+        # something below it rejected every row; rows==0 means the predicate
+        # matched nothing at all — which has THREE causes, not two (a message
+        # that offers two and omits the third repeats #9932's own defect: it
+        # sent every operator to a setting that was not the cause).
+        if rows:
+            # ⛔ EVERY MATCHED ROW IS ACCOUNTED FOR BY A COUNT, AND EACH COUNT
+            # NAMES ONLY THE CAUSES IT ADMITS. `rejected` and `residue` are two
+            # DIFFERENT measurements — `_is_turn_of` refusing a row says it does
+            # not carry this session's turn id; `_split_residue` dropping one
+            # says it DOES and sits above the session's live id-space end. A
+            # message built on `rejected` alone therefore lies about a MIXED
+            # case (its own numbers say one row carried the id) and omits the
+            # residue cause — the #9932 class, inside the message that reports
+            # the #9932 fix. The CAUSE of a rejection is still not measured:
+            # `_is_turn_of` proves only that the row is not a turn of this
+            # session, never WHY. `pointKind` cannot settle it either: its
+            # vocabulary is OPEN (`create_point` accepts any registered kind),
+            # so a caller-minted `is_episodic` `event` Point wired under a
+            # Session matches `_DUMP_QUERY` and is rightly rejected here for not
+            # being a turn — the same reason the repo's own
+            # `session_reinjection._TURN_SHAPE_FILTER` refuses to trust
+            # `pointKind` alone (#2517 review).
+            causes = []
+            if residue:
+                causes.append(
+                    f"{len(residue)} DID carry a turn id but sit ABOVE their "
+                    "session's `turn_max_index` — RESIDUE from a shorter "
+                    "re-capture whose surplus sweep did not land (#10000), "
+                    "which this lane will not write as the transcript")
+            if rejected:
+                causes.append(
+                    f"{rejected} did not carry the `{{session}}_t<i>` id this "
+                    "lane reads (`_is_turn_of`): either the ID DERIVATION has "
+                    "moved (`sdk._capture_turn_id`), or they are NOT turns at "
+                    "all — `pointKind` is an open vocabulary, so a "
+                    "caller-minted `is_episodic` `event` Point under the "
+                    "Session matches the predicate and is not a turn "
+                    "(`session_reinjection._TURN_SHAPE_FILTER`)")
+            raise SystemExit(
+                f"dump: 0 turns captured — the query MATCHED {len(rows)} "
+                "point(s) under a :Session and none of them is written as a "
+                "turn: " + "; ".join(causes) + ". Capture is therefore ON. "
+                "(pass --allow-empty to accept an empty dump)")
+        raise SystemExit(
+            "dump: 0 turns captured — the query matched NO point at all, so this is "
+            "not the id filter. Any of three causes applies: TORTOISE_CAPTURE was "
+            "off for the sessions you expect; the turns live in the Postgres RECORD "
+            "(with TORTOISE_RECORD_DSN armed, #10000, capture is ON and this lane's "
+            "graph-only read legitimately finds nothing — `sdk.get_session()` "
+            "serves those); or the turn nodes do not carry the names/values "
+            "`_DUMP_QUERY` reads — pre-#947 captures wrote turn Points with NO "
+            "`is_episodic` flag (`graph-scripts/backfill_is_episodic.py` backfills "
+            "it, and its scope covers exactly `(s:Session)-[:CONTAINS]->(:Point)`), "
+            "and a writer that has moved past these property names matches nothing "
+            "either. (pass --allow-empty to accept an empty dump)")
+    if residue:
+        # The complement of the refusal below, and reported for the same reason
+        # it is DROPPED: a guard whose output does not change is a log line, and
+        # a deletion the operator cannot see is not a report (#10021 review P3).
+        print(f"dump: dropped {len(residue)} row(s) ABOVE their session's "
+              "`turn_max_index` — residue from a shorter re-capture whose "
+              "surplus sweep did not land (#10000)")
+    if turns:
+        shortfall = _dump_shortfall(turns)
+        if shortfall is not None:
+            why, split_witness = shortfall
+            # ⛔ THE CAUSE CLAUSE IS COMPOSED FROM WHAT WAS MEASURED, AND IT
+            # NEVER NAMES ONE CAUSE AS *THE* CAUSE (#9932). The SPLIT STORE needs
+            # a record to split WITH, and its witness is the session's own
+            # `turn_max_index`; a session carrying no mark (a pre-#10000 capture)
+            # cannot have hit it, so naming it there would send the operator to
+            # `TORTOISE_RECORD_DSN` / `get_session()` for a cause that cannot
+            # apply. The CONVERSE is charged too: a mark being READ is not proof
+            # the store split, so the marked branch names EVERY cause its
+            # measurement admits — never one — and says the read door cannot
+            # separate them.
+            if split_witness:
+                cause = (
+                    "Three causes produce this shape and none is measurable "
+                    "from the rows. (a) The SPLIT STORE: with "
+                    "TORTOISE_RECORD_DSN armed the writer's store decision is "
+                    "PER TURN (`sdk._write_capture_turns` writes a refused "
+                    "turn to the GRAPH) while this read's is PER SESSION, so a "
+                    "mid-capture refusal leaves part of the transcript in each "
+                    "store (#10000) — `sdk.get_session()` serves the UNION of "
+                    "both stores, but only where that record is armed. (b) A "
+                    "capture whose TURN write failed AFTER the `:Session` "
+                    "MERGE on a deployment with NO record: "
+                    "`sdk._write_session_and_turns` MERGEs the Session first, "
+                    "so the marks declare a window the graph never received — "
+                    "and `get_session()` cannot separate this one either, "
+                    "because with no record it serves this same graph copy. "
+                    "(c) A turn row a purge, a backfill copy or a hand edit "
+                    "removed: the marks still declare it and no store ever "
+                    "held it — one store means there is nothing to reconcile "
+                    "against.")
+            else:
+                cause = (
+                    "This session carries NO `turn_max_index` (a pre-#10000 "
+                    "capture), so the split-store witness does not exist for "
+                    "it — there was no record to split with. "
+                    "`sdk.get_session()` reconciles against the SAME marks, so "
+                    "it cannot settle this either: with no record armed it "
+                    "serves these same graph rows, and with a record that "
+                    "never held them it reports the same shortfall. The causes "
+                    "this measurement admits are a turn the graph never "
+                    "stored (a capture whose turn write failed after the "
+                    "`:Session` MERGE — the MERGE precedes the turn write, "
+                    "`sdk._write_session_and_turns`) or a row a purge, a "
+                    "backfill copy or a hand edit removed.")
+            message = (
+                f"dump: the transcript is PARTIAL — {why}. "
+                "Refusing by default: `run` would extract claims from a "
+                "truncated session and `write` would land them as that "
+                f"session's durable output. {cause} (pass --allow-partial to "
+                "accept the graph's rows anyway)")
+            # ⛔ THE CHECK RUNS *BEFORE* THE WRITE, and the file is not touched:
+            # a refusal must not leave a truncated `turns_raw.jsonl` behind for
+            # the next `run` of the documented `dump && run && write` chain — or
+            # for a human who retries `run` alone — to consume as a transcript.
+            if not allow_partial:
+                raise SystemExit(message)
+            print(f"dump: WARNING — {message}")
+    out.write_text("".join(json.dumps(_turn_record(row)) + "\n"
+                           for row in sorted(turns, key=_turn_order)))
     with out.open() as fh:
         n = sum(1 for _ in fh)
-    if n == 0 and not allow_empty:
-        raise SystemExit(
-            "dump: 0 turns captured — is TORTOISE_CAPTURE on and are there captured "
-            "sessions? (pass --allow-empty to accept an empty dump)")
     keys = ", ".join(build_transcripts(out)) or "(none)"
     print(f"dumped {n} turns -> {out}")
     print(f"transcripts: {keys}")
 
 
 def build_transcripts(turns_path: Path):
-    """Group turns by codex thread -> {full_thread_id: transcript}.
+    """Group turns into transcripts: `{key: transcript}`.
 
-    Keys are the FULL thread id (a truncated key would merge distinct
-    threads: the fixtures are UUIDv7, whose first hex characters encode a
-    ~65-second timestamp window, so parallel runs collide — measured risk,
-    not theoretical). `resolve_transcript` accepts unambiguous prefixes.
-    A src that starts with codex:// but does not name a thread is a schema
-    surprise: raise rather than silently mis-group.
+    Two keyings, one per source shape. A `session://<id>` source (what `dump`
+    emits from the capture lanes) keys by the **capture session id**, so
+    `--transcript <session-id>` works — in EITHER spelling, `session://<id>` or
+    the canonical single-colon `session:<id>`. A `codex://threads/<id>` source
+    keys by the FULL thread id and raises on any other `codex://` shape. Any
+    other src (a hand-built turns file) keeps its full tail id with the
+    fragment stripped.
+
+    For the `codex://` and hand-built shapes the key is the FULL thread id (a
+    truncated key would merge distinct threads: the fixtures are UUIDv7, whose
+    first hex characters encode a ~65-second timestamp window, so parallel runs
+    collide — measured risk, not theoretical). `resolve_transcript` accepts
+    unambiguous prefixes. A src that starts with `codex://` but does not name a
+    thread is a schema surprise: raise rather than silently mis-group.
     """
     groups = {}
     with turns_path.open() as fh:
@@ -178,6 +621,26 @@ def build_transcripts(turns_path: Path):
                 key = m.group(1)
             elif t["src"].startswith("codex://"):
                 raise ValueError(f"unexpected codex source shape: {t['src']!r}")
+            elif t["src"].startswith("session:"):
+                # A CAPTURE-turn source (what `dump` emits): the key is the
+                # session id itself, so `--transcript <session-id>` works.
+                # Never a tail split — truncating would collapse
+                # `teamA/run-7` and `teamB/run-7` into one transcript. The
+                # `#message=` fragment is the HAND-BUILT file form and is
+                # stripped (one session, many message fragments) — the capture
+                # writer never appends one.
+                #
+                # BOTH spellings must key to the same session id: `dump`
+                # emits `session://<id>`, while the repo's canonical identity
+                # is the SINGLE-colon `session:<session_id>`
+                # (`derive_session_source_url`, ONTOLOGY §4.6) — a hand-built
+                # turns file uses that one. Splitting on `://` alone left
+                # `session:abc123` keyed as `session:abc123`, so
+                # `--transcript abc123` reported `have: ['session:abc123']`.
+                raw = t["src"].split(":", 1)[-1]
+                if raw.startswith("//"):
+                    raw = raw[2:]
+                key = raw.split("#message=", 1)[0]
             else:
                 # hand-built turns files: full tail id, fragment stripped —
                 # no truncation (a length cut would silently re-introduce the
@@ -467,23 +930,42 @@ sdk = TortoiseSDK(namespace=ns, event_log_path=log)
 # stripped keys, provenance drops) are exactly the silent-drift class this
 # writer must not absorb. WARNING+ records NEW SINCE A BASELINE (a warm-up
 # read through the same SDK) from the write doors' loggers fail the write.
-# The one sanctioned exception is the dedup-hit fold report (classified in
-# the handler below). Other tortoise warnings — e.g. this deployment's
+# There is NO sanctioned exception — the dedup-hit fold is classified from the
+# write's RESULT (the survivor it returns), never from a log line, so a
+# WARNING+ record from any write door still fails the write. Other tortoise
+# warnings — e.g. this deployment's
 # pack-registry declaration complaints, which fire on every create_point —
 # are environmental noise: recorded in the receipt, never fatal, so a
 # noisy-but-healthy deployment still writes.
 warnings_seen = []
-folded = []   # pids of existing points a dedup hit folded onto: the SDK's
-              # dedup-hit warning is a REPORT of correct behavior (content
-              # already known under another source), not drift. Classified
-              # by the unformatted template (record.msg): an upstream reword
-              # degrades LOUD — unrecognized warnings go back to fatal —
-              # never silent.
+# pids of existing points this run FOLDED onto — read off the WRITE'S RESULT,
+# never off a log line (#7704). The SDK reports a fold at INFO now (it is
+# correct behaviour, not drift), and an earlier revision of this writer parsed
+# the WARNING that preceded it: when #7704 moved that report to INFO the
+# classifier saw nothing, `folded_onto_other_sources` vanished from the receipt
+# and CI reddened on the missing key. The durable signal is the survivor the
+# write RETURNS. A dedup hit returns the existing point's id, and the fold
+# carries WHAT it folded in `extractedFromAll` (a list) while `extractedFrom`
+# stays the survivor's OWN creating source — a scalar, so the equality-filtered
+# read door keeps answering for it (#7704 review P1). Two shapes on that result
+# mean "this write FOLDED, it did not mint":
+#   * CROSS-SOURCE fold — the returned `extractedFrom` is a SCALAR naming a
+#     source that is not ours: the survivor was created under another source and
+#     this fold wired ours beside it. This is what
+#     `folded_onto_other_sources` is named for.
+#   * ARRAY prop — `extractedFrom` came back a LIST: the survivor was born from a
+#     ref SEQUENCE (a caller passing a list — ingest bundles do) or holds a
+#     prop-only ref no edge addresses. The point EXISTS already, no
+#     equality-matched read can see it, and the all-fold branch below would
+#     otherwise refuse the batch as "SDK drift" (the #10010 review P2 false
+#     failure: sticky, and it names the wrong component). Counted here, so
+#     `written` and `new`/`folded` still describe the same batch.
+# A point this run MINTED carries the SCALAR this writer passed (line above) and
+# `query()` matches it, so a mint can never be mistaken for a fold here.
+# No message template involved.
+folded = []
 class _Collect(logging.Handler):
     def emit(self, record):
-        if isinstance(record.msg, str) and record.msg.startswith('create_point dedup hit on '):
-            folded.append(str(record.args[0]) if record.args else '?')
-            return
         warnings_seen.append((record.name, record.getMessage()))
 _handler = _Collect()
 _handler.setLevel(logging.WARNING)   # collect WARNING+ only: an INFO-tuned
@@ -511,6 +993,17 @@ try:
             non_live.append(r['id'])   # reported, never force-promoted: a retracted
                                        # or draft point is someone else's decision
         made.append(r['id'])
+        # A dedup FOLD, read off the RESULT (#7704): the write returns the
+        # survivor, whose `extractedFrom` is its OWN creating source — a SCALAR
+        # — or an ARRAY when the survivor was born from a ref sequence. A point
+        # this run minted carries the SCALAR passed above. So: names another
+        # source ⇒ cross-source fold; array ⇒ survivor this read cannot match
+        # (both are folds, never mints — #10010 review P2).
+        _refs = r.get('extractedFrom')
+        if isinstance(_refs, (list, tuple)):
+            folded.append(r['id'])
+        elif isinstance(_refs, str) and _refs != source:
+            folded.append(r['id'])
     _new_warnings = warnings_seen[_baseline:]
     _fatal = [f'{name}: {msg}' for name, msg in _new_warnings
               if name.startswith(_WRITE_PATH_LOGGERS)]
@@ -525,7 +1018,19 @@ try:
         raise RuntimeError(f'inconsistent write: before={before} after={after}')
     _noise = [f'{name}: {msg}' for name, msg in _new_warnings
               if not name.startswith(_WRITE_PATH_LOGGERS)]
-    receipt = {'written': len(made), 'new': after - before, 'total_for_source': after,
+    # `new` counts points that are under this source and were not before. A
+    # survivor FOLDED from another source is NOT among them: the fold keeps the
+    # `extractedFrom` property the survivor's OWN creating source — a scalar, so
+    # `query(extractedFrom=…)`'s EQUALITY match still answers for it — and
+    # carries the folded set on `extractedFromAll` (#7704 review P1). This
+    # source's ref therefore lives on the EDGES, never in the equality-matched
+    # property. ⚠️ DEPENDS ON #10063: once a read can ask for the folded set (the
+    # edges, or `extractedFromAll`), a folded survivor WILL count as `new` here
+    # and `after - before` stops excluding folds. Until then the `:Source` EDGES
+    # are the authoritative provenance (#3263), this read sees the creating
+    # source only, and `folded_onto_other_sources` is what reports the folds.
+    receipt = {'written': len(made), 'new': after - before,
+               'total_for_source': after,
                'non_live_hits': non_live, 'ids': made[:5]}
     if folded:
         receipt['folded_onto_other_sources'] = len(folded)
@@ -533,19 +1038,33 @@ try:
         receipt['env_warnings'] = {'count': len(_noise),
                                    'sample': [n[:150] for n in _noise[:2]]}
     if after == 0:
-        # Every claim folded onto existing points under OTHER sources (dedup
-        # drops extractedFrom): a legitimate all-fold run, not a failure —
-        # nothing new under this source, so nothing to tier or propagate.
-        # The guard is a drift tripwire: create_point calls succeeded yet
-        # query() finds nothing under the source AND the SDK reported no
-        # folds — the write path has drifted (e.g. extractedFrom stopped
-        # being a queryable property), which must fail, never exit 0.
+        # Nothing is queryable under this source after the loop. Two shapes reach
+        # here and they must not be confused:
+        #   * ALL-FOLD — every call folded onto a point that already existed under
+        #     OTHER sources, or onto a survivor whose `extractedFrom` is an ARRAY
+        #     this equality-matched read cannot see at all. The fold KEEPS the
+        #     evidence now (it wires this source onto the survivor, #7704), but a
+        #     survivor CREATED under another source keeps that source as its
+        #     scalar `extractedFrom` (deliberately equality-matchable — #7704
+        #     review P1) and carries the folded set on `extractedFromAll`, so
+        #     `query(extractedFrom=<this source>)` does not return it.
+        #     ⚠️ DEPENDS ON #10063: this branch is CORRECT only while the
+        #     population read is the equality property; a read over the folded set
+        #     would make an all-fold run report points, and this `after == 0` arm
+        #     would stop firing for it. A legitimate all-fold run today: nothing
+        #     NEW under this source, so nothing to tier or propagate. Every fold
+        #     that can reach this arm is counted above — including the array-prop
+        #     survivor — which is what keeps a healthy batch from being refused as
+        #     drift.
+        #   * DRIFT — create_point calls succeeded, the SDK reported no folds, and
+        #     the read-back still finds nothing (e.g. `extractedFrom` stopped
+        #     being a queryable property). That must fail, never exit 0.
         if len(folded) != len(made):
             raise RuntimeError(
                 f'inconsistent write: {len(made)} create_point calls succeeded but '
                 f'query() finds 0 points under the source with only {len(folded)} '
                 'dedup folds reported — SDK drift, not an all-fold run')
-        receipt['folded_onto_existing'] = len(made)
+        receipt['folded_onto_existing'] = len(folded)
         print(json.dumps(receipt))
         sdk.close()
         sys.exit(0)   # SystemExit is a BaseException: not caught below
@@ -554,8 +1073,7 @@ try:
     # catches silent drift (a renamed kwarg becomes a stale property, not an
     # error). Every Point currently under this source must carry this domain —
     # new ones because this loop just wrote them, old ones because a rerun uses
-    # the same arguments. Points that dedup-folded onto OTHER sources are not
-    # under this source and do not participate (their domain is theirs).
+    # the same arguments.
     _bad = [p.get('id') for p in pts if p.get('domain') != domain]
     if _bad:
         raise RuntimeError('read-back failed: points under source missing domain '
@@ -652,21 +1170,32 @@ def main():
     d = sub.add_parser("dump", help="pull captured turns from the container")
     d.add_argument("--out", default=str(state_dir() / "turns_raw.jsonl"))
     d.add_argument("--allow-empty", action="store_true",
-                   help="exit 0 on an empty dump (default: fail — usually capture is off)")
+                   help="exit 0 on an empty dump (default: fail — an empty dump "
+                        "has several causes: TORTOISE_CAPTURE was off, the turns "
+                        "live in the Postgres RECORD (#10000, sdk.get_session() "
+                        "serves them), or the turn nodes lack the names/values "
+                        "the read queries, e.g. pre-#947 captures with no "
+                        "is_episodic flag)")
+    d.add_argument("--allow-partial", action="store_true",
+                   help="write a PARTIAL transcript (default: fail — the graph "
+                        "holds only some of the turns the session declares, "
+                        "which is what a split store leaves when TORTOISE_RECORD_DSN "
+                        "is armed and a record write was refused mid-capture, #10000)")
     r = sub.add_parser("run", help="extract claims with one CLI engine")
     r.add_argument("--engine", default="claude", choices=["claude", "glm", "codex"])
     r.add_argument("--model", default="claude-haiku-5-5")
     r.add_argument("--effort", default="high")
     r.add_argument("--turns-file", default=str(state_dir() / "turns_raw.jsonl"))
     r.add_argument("--transcript", required=True,
-                   help="full thread id or an unambiguous prefix")
+                   help="capture session id (or a codex thread id from a "
+                        "hand-built turns file) — exact or unambiguous prefix")
     r.add_argument("--out", required=True)
     w = sub.add_parser("write", help="write an extraction into the graph")
     w.add_argument("--extraction", required=True)
     w.add_argument("--source", required=True, help="extractedFrom URL for the new points")
     w.add_argument("--domain", required=True)
     args = ap.parse_args()
-    {"dump": lambda: dump(Path(args.out), args.allow_empty),
+    {"dump": lambda: dump(Path(args.out), args.allow_empty, args.allow_partial),
      "run": lambda: run(args),
      "write": lambda: write(args)}[args.phase]()
 

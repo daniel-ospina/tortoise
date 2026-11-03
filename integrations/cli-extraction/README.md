@@ -10,17 +10,58 @@ turns into tiered graph Points using subscriptions you already have.
 No SDK or MCP surface changes: this is a client-side integration. Its writes
 go through public SDK doors (`create_point`, `set_source_tier`,
 `get_source_reliability`, `compute_confidence`, `query`); `dump` uses one
-private read (`sdk._get_proj().g`) because no public API offers a
-`STARTS WITH` prefix query — that is the only private surface, it is
-read-only, and it is documented here rather than glossed.
+private read (`sdk._get_proj().g`) — not because no public route to a session's
+turns exists (there is one: `sdk.get_events(eventKind="sessionCaptured")` →
+`sdk.get_session()`), but because the Event index is best-effort (its write is
+non-fatal, minted only on a fresh capture, so it silently misses sessions) and
+`get_session`'s graph arm orders turns lexicographically (`t10` before `t2`).
+The `CONTAINS` read buys completeness and one round trip. It is the only
+private surface, it is read-only, and it is documented here rather than
+glossed.
+
+`dump` reads the turns the capture lane actually writes (the ONE turn store,
+`tortoise/sdk.py`'s `_TURN_WRITE_CYPHER`, used by both the SDK and the hosted
+capture path): the `:Point` nodes wired to a `:Session`, with the role taken
+from `t.speaker`. It no longer reads `codex://`-tagged Points — no capture lane
+in this repo ever wrote one (`#9932`). A hand-built turns *file* in the
+`codex://threads/<id>#message=<id>` shape is still accepted. A deployment whose
+turns live in the Postgres record rather than the graph (record armed,
+`#10000`) has no turn nodes for this graph-only read to find — use
+`sdk.get_session()`, which serves record-held turns.
+
+⚠️ **"The turns live in the record" is not all-or-nothing.** With
+`TORTOISE_RECORD_DSN` armed the writer decides **per turn** which store takes it
+(`sdk._write_capture_turns` writes a refused record turn to the GRAPH) while
+this read covers the graph for **the whole session**, so a mid-capture refusal
+leaves part of the transcript in each store. `dump` therefore reads the
+`:Session`'s own account of what it holds (`turn_count`, `turn_max_index`) and
+a PARTIAL transcript **fails instead of being written** — `run` would otherwise
+extract claims from a truncated session and `write` would land them as that
+session's durable output. The refusal writes nothing; an existing
+`turns_raw.jsonl` from an earlier dump (possibly an `--allow-partial` one) is
+left as it is, and `run` reads it without a freshness check, so delete it when
+the dump refuses.
+
+A partial dump has **three admitted causes** and the message does not pick one
+for you: the split store above (`sdk.get_session()` serves the UNION of both
+stores **when the record is armed**); a capture whose turn write was refused
+**after** the `:Session` MERGE, so the session declares turns that never landed
+(the writer's MERGE precedes its turn write, `sdk._write_session_and_turns`);
+or a turn row a purge, a backfill copy or a hand edit removed. The last two
+leave one store, so `get_session()` cannot settle them either — it reconciles
+against the same marks this read already has.
+
+`--allow-partial` writes what the graph holds when that is what you want. Rows
+ABOVE `turn_max_index` are residue from a shorter re-capture whose surplus
+sweep did not land: they are dropped and reported, never written.
 
 ## How it works
 
 ```text
-capture (per-turn hook, #3963)      codex://threads/<id>#message=<id>
-        │                                   │
-        ▼                                   ▼
-   dump: turn Points out of the graph  ──►  turns_raw.jsonl   (~/.tortoise/cli-extraction/)
+capture (tortoise/sdk.py: _TURN_WRITE_CYPHER)  (s:Session)-[:CONTAINS]->(t:Point)
+        │                                      │   {speaker, content, is_episodic}
+        ▼                                      ▼
+   dump: session turn Points out of the graph ──►  turns_raw.jsonl   (~/.tortoise/cli-extraction/)
         │
         ▼
    run: one CLI engine extracts durable claims (fixed prompt, JSON-only, transcript as data)
@@ -32,18 +73,23 @@ capture (per-turn hook, #3963)      codex://threads/<id>#message=<id>
 Three composable phases, one file:
 
 ```bash
-python3 extract_turns.py dump                       # turns -> turns_raw.jsonl (fails on 0 rows; --allow-empty to accept)
-python3 extract_turns.py run --transcript 01a1102f --out ex.json
+python3 extract_turns.py dump                       # turns -> turns_raw.jsonl (fails on 0 rows, and on a PARTIAL one; --allow-empty / --allow-partial to accept)
+python3 extract_turns.py run --transcript <session-id> --out ex.json
                                                     # prefix is fine if unambiguous; defaults: claude-haiku-5-5 @ high
 python3 extract_turns.py write --extraction ex.json \
     --source session://extraction-2026-10-24-haiku-high-thread-01a1102f \
     --domain my-project
 ```
 
-Transcripts are keyed by the **full** thread id (a truncated key would merge
-distinct threads: UUIDv7 ids share their leading hex across a ~65-second
-window, so parallel agent runs collide). `--transcript` accepts an exact id
-or an unambiguous prefix, and errors with the candidate list otherwise.
+Transcripts are keyed by the **capture session id** — the id passed to
+`capture_session`, read from the `(s:Session)-[:CONTAINS]->(t:Point)` wiring
+that `tortoise/sdk.py`'s `_TURN_WRITE_CYPHER` (the ONE turn store, used by
+both capture lanes) writes, with the turn role taken from `t.speaker`. A
+hand-built `codex://threads/<id>#message=<id>` turns file is still accepted
+and keyed by its **full** thread id: a truncated key would merge distinct
+threads, because UUIDv7 ids share their leading hex across a ~65-second
+window, so parallel agent runs collide. `--transcript` accepts an exact id or
+an unambiguous prefix, and errors with the candidate list otherwise.
 Outputs default to the state dir (`~/.tortoise/cli-extraction/`,
 `TORTOISE_STATE_DIR`), never the repo tree.
 
@@ -127,8 +173,10 @@ The transcript is captured user text and is treated as **data**, end to end:
   carry the domain, `set_source_tier(source, "T2")` must actually tier
   (checked via `get_source_reliability`), and any warning from the
   write-path loggers (`tortoise.sdk`/`projection`/`ingest`) during the loop
-  fails the write — except the SDK's dedup-hit fold report, which is
-  classified as a fold and counted, not failed (see idempotency below). With
+  fails the write. The dedup fold is no longer an EXCEPTION to that rule: the
+  SDK reports a fold at INFO (#7704), so it can never reach the WARNING+
+  tripwire, and the fold is counted from the write's own result instead (see
+  idempotency below). With
   a `**props` API, read-back is the only loud failure mode for silent
   signature drift (cf. the removed `context` kwarg, #49).
 - **Write failures propagate.** Container exit != 0 fails the command.
@@ -150,12 +198,30 @@ The transcript is captured user text and is treated as **data**, end to end:
   `(pointKind, content_hash)` — rerunning `write` with the SAME extraction
   file reports `new: 0`. A *reworded* claim (a fresh `run`) is new content
   and will create a new point; a claim whose exact content already exists
-  under a different source folds onto the existing point — the SDK's
-  dedup-hit warning is classified as a fold and counted
-  (`folded_onto_other_sources`; `new` counts only genuinely new points).
+  under a different source FOLDS onto the existing point — the fold now WIRES
+  this source onto the survivor (#7704: one claim with N sources), and the
+  writer classifies the fold from the point the write RETURNS, never from a log
+  line. Two returned shapes mean "folded, not minted": a SCALAR
+  `extractedFrom` naming a source that is not this one (the survivor was created
+  under another source and this fold wired ours beside it — the fold keeps
+  `extractedFrom` the survivor's OWN creating source, a scalar, so the
+  equality-filtered read door keeps answering, and the wired set rides the
+  `extractedFromAll` property), and an ARRAY `extractedFrom` (the survivor was
+  born from a ref SEQUENCE, or holds a prop-only ref no edge addresses). A point
+  this run MINTED carries the scalar ref the writer passed. Counted
+  as `folded_onto_other_sources`; `new` counts points that are under this source
+  and were not before. A fold onto a survivor that had NO provenance of its own
+  adopts this source, so it is reported as `new` rather than as a fold.
   An all-fold batch exits 0 with `folded_onto_existing` and leaves the
-  source untiered (nothing new to tier); an all-empty read-back with **no**
-  fold reports is treated as SDK drift and fails. A write that dies
+  source untiered (nothing new to tier). Note the read-back cannot SEE a
+  survivor created under ANOTHER source: its `extractedFrom` stays that source
+  and `query()` matches that property by equality, so this source's own count
+  does not include it (the `:Source` EDGES are the authoritative provenance,
+  #3263; the general read-surface gap is #10063).
+  An all-empty read-back with **no** fold reports is treated as SDK drift and
+  fails. A fold can never be mistaken for a minted point by that guard: a mint
+  stores the scalar ref, which `query()` matches, and an ARRAY prop — the one
+  fold shape the read cannot see — is counted as a fold above. A write that dies
   mid-loop prints a partial receipt (`{"partial": true, "made_ids": [...]}`)
   on stdout before raising, so already-created ids are never lost.
 

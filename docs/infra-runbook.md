@@ -176,11 +176,13 @@ the ruling for the first):
 `fly-only:<issue>` names are out-of-band **by recorded decision** —
 `REGISTRY_STREAM_KEY` (`fly-only:#661`) must never be present in GitHub;
 `fly-toml-env` names are applied from the versioned `fly.toml [env]`; and
-`workflow` names have no GitHub secret *as their declared source*. Two of them
+`workflow` names have no GitHub secret *as their declared source*. Three of them
 are re-staged on **every** run — `TORTOISE_GIT_SHA` from non-secret context
-(`${GITHUB_SHA}`) and `TORTOISE_SESSION_LLM_MODEL` from its GitHub secret when
-one is present, else the versioned default (§4.6) — so a Fly-only value for
-either is reverted by the next deploy exactly like a `gh-secret:` one.
+(`${GITHUB_SHA}`), `TORTOISE_GIT_DIRTY` from the build's own working tree
+(`git status --porcelain`, #10447), and `TORTOISE_SESSION_LLM_MODEL` from its
+GitHub secret when one is present, else the versioned default (§4.6) — so a
+Fly-only value for any of them is reverted by the next deploy exactly like a
+`gh-secret:` one.
 `BACKUP_SWEEP_ENABLED` is the exception: it is staged to `true` **only when**
 the whole backup/R2/DR secret set is present, and otherwise the assignment is
 skipped and any Fly-side value is left as it was (the fail-closed default —
@@ -1015,8 +1017,10 @@ curl -s https://tortoise-y4mjjq.fly.dev/health | python3 -m json.tool | sed -n '
 |---|---|
 | `version` | `tortoise.__version__` — the package version, mirrors `pyproject.toml`. Same value `/v1/version` publishes, from the same resolver |
 | `commit_sha` | the commit the **deploy** was told to build (`TORTOISE_GIT_SHA`, stamped by `deploy-hosted.yml` from `GITHUB_SHA`) — never a hand-edited constant. `null` = nothing stamped it (selfhost / local dev / a stripped deploy), which is an absence that says so, not a value that looks current. Identical to `/v1/version`'s `commit_sha`; the two surfaces cannot disagree |
-| `commit_dirty` | `true` / `false` / **`null`**. ⚠️ `null` means **NOT STAMPED** — nothing sets `TORTOISE_GIT_DIRTY` on this deployment today (declared in #10467's `## PARTIAL`: the stamp needs its own gated deploy change). Read it as "clean" and you have read a fact nobody published. `tortoise/env_truthy.py` is the vocabulary: `1`/`true`/`yes`/`on` → `true`, `0`/`false`/`no`/`off` → `false`, anything else (including unset and blank) → `null`, never `false` |
-| `build_identified` | `true` only for a well-formed 7-40 lowercase-hex `commit_sha` **that is not known-dirty**. `false` is the "cannot check" refusal — `unknown`, `main`, a literally unexpanded `${GITHUB_SHA}`, or a dirty tree. Key a staleness probe on THIS, not on `commit_sha != null` |
+| `commit_dirty` | `true` / `false` / **`null`**. `true` = the image was built from a working tree that DIFFERED from `commit_sha` (the deploy stamps `TORTOISE_GIT_DIRTY` from `git status --porcelain` over the same tree `flyctl deploy` uploads as its build context, declared `workflow` in `.github/scripts/fly-managed-secrets.txt`). `false` is a positive claim — staged only when the tree is provably clean, meaning **no tracked modification and no untracked non-ignored file** (⚠️ narrower than "the image equals the commit": the build context is filtered by `.dockerignore`, not `.gitignore`, so a *gitignored* artefact under a `COPY`'d path is not seen — no step in the deploy job creates one, so it is a declared residual). ⚠️ `null` means **NOT STATED** (selfhost / local dev, or an image built before #10447's reopen): read it as "clean" and you have read a fact nobody published. `tortoise/env_truthy.py` is the vocabulary: `1`/`true`/`yes`/`on` → `true`, `0`/`false`/`no`/`off` → `false`, anything else (including unset and blank) → `null`, never `false` |
+| `build_identified` | `true` only for a well-formed 7-40 lowercase-hex `commit_sha` **with an explicitly clean tree stamp** (`commit_dirty: false`). `false` is the "cannot check" refusal — an unstamped deployment, `unknown`, `main`, a literally unexpanded `${GITHUB_SHA}`, a dirty tree, or a tree whose dirtiness was never stated. Key a staleness probe on THIS, not on `commit_sha != null` |
+| `build_identified_reason` | WHY `build_identified` is `false` — `null` when it is `true`, otherwise one of `no_commit_stamp` (nothing deployed a sha: selfhost/local dev), `commit_stamp_not_a_sha` (a stamp that cannot be compared to `origin/main`), `tree_dirty` (real dirty build), `tree_dirt_unstated` (the deploy never said). Four different worlds, four answers: without this a reader has to guess whether "false" means "we do not know" or "we know it is not clean" |
+| `image` | the image (build artefact) this process was **started from** — Fly injects `FLY_IMAGE_REF` into every Machine, so the runtime names the artefact that created it (`registry.fly.io/tortoise-y4mjjq:deployment-…`). `TORTOISE_IMAGE_REF` is the non-Fly spelling and is read first. ⛔ It is the **artefact**, not the commit: `commit_sha` says which commit was built, `image` says which build is running — for a source-built deploy they correspond, but only this field names the thing that would be rolled back. `null` = nothing stated one (a local run), never a placeholder |
 | `started_at` | ISO-8601 UTC timestamp of process start — restart-loop detection (a value that keeps moving means the machine is being recycled, cf. §6) |
 | `migrations_head` | the highest numeric-prefixed `supabase/migrations/*.sql` file **this IMAGE CARRIES**, ordered numerically (`999_b` < `1000_a`), so a stray `seed.sql` cannot publish itself as the head. ⛔ **It is NOT "which migration has been APPLIED to the database".** This process applies no schema migrations (`entrypoint.sh` has no migration step; `supabase-deploy.yml` applies them) and the deploy gate classes index-only drift as WARN (exit 0, `.github/scripts/check-migration-drift:25-26`), so the image can carry a migration prod has not applied. The applied set is a database fact — read `supabase_migrations.schema_migrations`, not this endpoint. `null` has **two** causes and `migrations_source` names which: no migration-shaped file was found in the image (`null`), or the resolver RAISED (`error` — the image may carry everything and the reading is broken) |
 | `migrations_source` | which population `migrations_head` was read from: `checkout` = the schema tree was chosen (what the deployed image COPYs) or `package` = only the record lineage a wheel ships. The packaged answer is plausible and wrong for the inventory question, and without this field the two are indistinguishable. `error` = the resolver raised, so the head above is a failed reading and **not** an empty image. `null` = the two paths could not be compared. ⚠️ `checkout` means *the checkout tree was selected*, not *all 77 files were present in it* — neither answers "were they applied" |
@@ -1029,10 +1033,7 @@ degrading `status` over it would make Fly restart a healthy process forever
 is liveness-healthy", **never** "this is the build I expected"; §4.1's client
 contract is unchanged and `deploy-health-gate.sh` still reads `db.ok` by value.
 
-⛔ **The operator misread this section exists to prevent:** a stale deploy with
-`build_identified: true` and `commit_dirty: null` is **stale and unstamped**,
-not clean. Read `commit_sha` against the expected commit, then read
-`commit_dirty` only as far as it goes (`null` ≠ clean).
+⛔ **The operator misread this section exists to prevent:** `build_identified: false` with `build_identified_reason: tree_dirt_unstated` is **unstamped**, not clean; and `commit_dirty: null` on any deployment still answers nothing about the tree. Read `commit_sha` against the expected commit, then read `commit_dirty` only as far as it goes (`null` ≠ clean).
 
 ## 4.5 Local Development — Local Stays Local
 
@@ -3284,9 +3285,39 @@ operator who read the line above as "CI defends this" would never run it.
 | RESEND_FROM_EMAIL | ✅ (single managed sender identity — #1136; default `noreply@premiselabs.co`) | — | ✅ |
 | BILLING_FROM_EMAIL | optional (distinct billing sender override — #1136) | — | ✅ |
 | BILLING_NOTIFY_TO | ✅ (ops inbox for billing email) | — | ✅ |
-| TORTOISE_RECORD_DSN | — (**not on Fly yet** — the secret is the operator's act; absent ⇒ `NOT_ARMED` and the record writes nothing). Setting it **arms the Postgres record** (epic #7879 R1) via GitHub secret → Fly ⚠️ Its **user must be `tortoise_record_app`** (R6, #9554), never `postgres`/`service_role` — see [The record's connecting role](#the-records-connecting-role-r6-decision-2026-10-22-9554) below | — (the record is a Supabase Postgres project, not FalkorDB) | ✅ **declared, value NOT created yet** — the operator act is [Arming the Postgres record](#arming-the-postgres-record--tortoise_record_dsn-epic-7879-r1-9548) (no such GitHub secret exists today; the ✅ is the *home* the deploy reads, not a provisioned value) |
+| TORTOISE_RECORD_DSN | ⛔ **POSTPONED — do not arm, provision or re-point it** (owner ruling 2026-11-01, quoted in [Arming the Postgres record](#arming-the-postgres-record--tortoise_record_dsn-epic-7879-r1-9548) below). The value **is already on Fly**: `GET /health` (`api.premiselabs.co`) read `"record":{"armed":true,…,"record_write_failures":{"write_failed":32},…}` on 2026-11-02 (**measured by another lane and recorded on #9548** — quoted here, not re-measured). Setting it **arms the Postgres record** (epic #7879 R1) via GitHub secret → Fly ⚠️ Its **user must be `tortoise_record_app`** (R6, #9554), never `postgres`/`service_role` — see [The record's connecting role](#the-records-connecting-role-r6-decision-2026-10-22-9554) below | — (the record is a Supabase Postgres project, not FalkorDB) | ✅ **set** — the GitHub secret and the Fly secret both exist; the app has reported `armed: true` continuously since at least 2026-10-26 (**measured on #9548**, quoted here, not re-measured — the row's former "value NOT created yet / no such GitHub secret exists today" was measured false). The *arming* procedure is [Arming the Postgres record](#arming-the-postgres-record--tortoise_record_dsn-epic-7879-r1-9548) and is ⛔ postponed above |
 
 ### Arming the Postgres record — `TORTOISE_RECORD_DSN` (epic #7879 R1, #9548)
+
+> ⛔ **POSTPONED BY OWNER RULING — this section's command is not to be run.** The owner postponed the
+> hosted deployment setup on **2026-11-01T05:58:03Z**, in a comment on `#9548` headed
+> `## Owner decision — the hosted setup is POSTPONED` (the issue carries the `owner-decision` label;
+> the [comment](https://github.com/daniel-ospina/tortoise/issues/9548#issuecomment-6554166515) itself is
+> the ruling's home), verbatim:
+>
+> > **The hosted deployment setup is postponed until the storage-architecture work and the
+> > extractor-architecture work are complete — otherwise we risk filling the hosted store with noise.**
+> >
+> > **Do not arm, provision, or point anything at the hosted store.** That explicitly covers `#9548`
+> > ("arm the record in the hosted deployment — `TORTOISE_RECORD_DSN`") — it is **not** work to pick
+> > up; it is gated behind this ruling.
+>
+> **`OVERRIDES:`** epic #7879 **R1** — this section's own objective, "arm the record in the hosted
+> deployment" — and the provisioning steps further down (`gh secret set TORTOISE_RECORD_DSN`, the
+> deploy, `fly secrets list`). The owner postponed that act, so **this section is reference, not a task
+> list**: read it for the DSN's shape, its role rule and the verify reads; do not execute the
+> provisioning block. ⚠️ **The store is already armed** (`armed: true`) and already failing writes
+> (`write_failed: 32`, measured 2026-11-02 and recorded on `#9548`), so "finish what was started" is
+> *also* a resumption of the postponed act — the live state is evidence to report, never a licence.
+> Until the ruling lifts, the authority for captured sessions is the **local** record under
+> `~/.tortoise/session-events/`, never the hosted store.
+>
+> **The reopening route — where it lives, and what would lift it.** The ruling lives on `#9548`, in
+> that `Owner decision` comment, and nowhere else. Its own words for the bar: *"The ruling lifts when the
+> **storage architecture** work and the **extractor architecture** work are complete — not on a date,
+> and not because a quota became available"*, and **the lifting is the owner's call, not a lane's**. So a lane
+> that believes both are complete states that on the respective epic **with evidence**, and asks the
+> owner there; it does not re-decide it here, and it does not soften it into "optional".
 
 **What the variable is.** The Postgres record's own connection string, read by
 `tortoise/record_writer.py` (`RECORD_DSN_ENV`). The seam is **presence-based**:
@@ -3317,6 +3348,13 @@ tenant-scoped rows**, so this is the existing Supabase project — *not* a secon
 database per team (refused on cost grounds).
 
 **Provisioning — one operator act, then the deploy does the rest.**
+
+⛔ **DO NOT RUN THESE UNTIL `#9548`'s RULING LIFTS.** Every command in the block below performs, or confirms, the
+postponed act (see the POSTPONED note at the top of this section, which quotes the
+ruling and names where it lives). They are written down so a *future*, un-postponed arming is not
+improvised, **not because they are scheduled**. Nothing about the arming being partly done makes any
+step below safe to resume: `armed: true` with `write_failed: 32` is a state to report on `#9548`, not
+a step to complete.
 
 ```bash
 # 1. the value's ONLY home (never a file, never a shell history):
@@ -3684,6 +3722,15 @@ pooler value §"The value" prescribes for the app.
 
 ### The record's connecting role (R6 decision, 2026-10-22, #9554)
 
+> ⛔ **Its steps 1 and 2 (granting the role `LOGIN` with a credential, and arming the DSN) are
+> postponed** by the `#9548` owner ruling of 2026-11-01, quoted
+> (its headline and operational point 3) in [Arming the Postgres record](#arming-the-postgres-record--tortoise_record_dsn-epic-7879-r1-9548)
+> above — read that note before acting on anything here. The **role** decision (`tortoise_record_app`,
+> `NOBYPASSRLS`, never `postgres`/`service_role`) stands and is what a future arming must obey; the
+> **arming** does not happen until the ruling lifts — and **step 1 is provisioning too**
+> (`ALTER ROLE … LOGIN` + `\password` are run against the hosted project, which is exactly what the
+> ruling's "do not arm, provision, or point anything at the hosted store" forbids).
+
 The Postgres record's tenancy boundary is **row-level security**, and it is enforceable only if the
 application path connects as a role that does not bypass it. The role, the policies and the reason
 are decided in
@@ -3704,13 +3751,20 @@ in git, re-minted on every deploy.
 **1. Give the role a login credential, once, out of band** (SQL editor as `postgres`; `\password`
 keeps the plaintext out of the statement and off the logs):
 
+⛔ **Do not run this until `#9548`'s ruling lifts** (quoted at the head of this section): `ALTER ROLE …
+LOGIN` plus a credential is a *provisioning* act on the hosted store, which the ruling names explicitly.
+The step is kept because the role rule still governs a future arming; it is not scheduled.
+
 ```sql
 ALTER ROLE tortoise_record_app LOGIN;
 \password tortoise_record_app      -- psql; or set it from the dashboard/your password manager
 ```
 
 **2. Arm the DSN** (R1) with that role — for the shared pooler this is
-`<role>.<project-ref>` as the user:
+`<role>.<project-ref>` as the user. ⛔ **Do not do this until `#9548`'s ruling lifts** (2026-11-01;
+quoted in [Arming the Postgres record](#arming-the-postgres-record--tortoise_record_dsn-epic-7879-r1-9548)):
+this text is the DSN's *shape*, which the ruling does not change — the act it describes is what the
+ruling postpones:
 
 ```text
 TORTOISE_RECORD_DSN=postgresql://tortoise_record_app.<ref>:<password>@aws-0-<region>.pooler.supabase.com:5432/postgres?sslmode=require

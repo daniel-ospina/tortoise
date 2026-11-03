@@ -1,0 +1,59 @@
+=== s3-ablation (#10463) — does telling extraction what exists reduce what it creates? ===
+
+prereg=a1075dfc2a964a6e9e1a49ec990ebadf8c9a180a (bars read from the COMMIT, not the worktree)
+source_sha=718ee3b497539540ea10269e7ccfe9b0867d010f head=a1075dfc2a964a6e9e1a49ec990ebadf8c9a180a
+source_sha..head changed files (3, all evidence/tooling): ['docs/evidence/5087-hypothesis/PRE-REGISTRATION.md', 'docs/evidence/5087-hypothesis/preregistration.json', 'tools/s3_prior_ablation.py']
+corpus=tests/eval/write_path sessions=7 fixtures_hash=sha256:dd7e85200f4809f701b9e9c11816b541acea63afd0b2472998975e2ebcb035dc
+bars: primary_ratio_max=0.75 guard_ratio_min=1.0 arm_integrity_required=14 concentration_max=0.6 cost_ratio_max=2.0
+floors: {'created_nodes_off': 30, 'real_facts_off': 20, 'sessions': 7}
+queries_failed: the receipt carries no such field at this head; search_graph degrades the WHOLE search on the first query failure, so queries_failed==0 is asserted as degraded==False (stated here, not implied)
+S3 WITNESS: the `capture_session` lane's receipt carries NO `search` block (only `_commit_session_v2` surfaces one), so each session's S3 state is asserted from the value the S3 function ACTUALLY RETURNED during that session — recorded by the probe's wrapper around the real function (ON) / stub (OFF), never from a flag. This is a disclosed deviation from the pre-registration's wording 'asserted from the run receipt' and an instrument finding for #5087 indicator 3.
+--- ARM OFF — fresh graph s3ablate_a1075dfc_1793492224_off ---
+  [OFF] wp01_quarry_debug: created=45 (claims=32 objects=8 events=5) s3=suppressed (OFF-ARM) llm_calls=3 ok=True (28.2s)
+  [OFF] wp02_lumen_refactor: created=51 (claims=31 objects=10 events=10) s3=suppressed (OFF-ARM) llm_calls=3 ok=True (30.2s)
+  [OFF] wp03_ember_design: created=43 (claims=22 objects=11 events=10) s3=suppressed (OFF-ARM) llm_calls=3 ok=True (25.1s)
+  [OFF] wp04_aurora_perf: created=42 (claims=20 objects=14 events=8) s3=suppressed (OFF-ARM) llm_calls=3 ok=True (22.1s)
+  [OFF] wp05_retro_writeup: created=34 (claims=17 objects=9 events=8) s3=suppressed (OFF-ARM) llm_calls=3 ok=True (22.0s)
+  [OFF] wp06_quarry_rollout: created=42 (claims=24 objects=12 events=6) s3=suppressed (OFF-ARM) llm_calls=3 ok=True (25.2s)
+  [OFF] wp07_bluepeak_followup: created=27 (claims=13 objects=8 events=6) s3=suppressed (OFF-ARM) llm_calls=3 ok=True (17.3s)
+  [OFF] real search_graph calls: 0 (OFF arm must be 0)
+  [OFF] created extraction nodes: 284 | aside Σlabel_counts delta: 953
+  [OFF] real facts: 47/90 planted units recovered
+  [OFF] operator edges: 171 (graph-wide IMPL/NAND/SUPPORTS/MITIGATES/NEGATE/SUPERSEDE/INPUT)
+  [OFF] model calls: 21
+
+--- ARM ON — fresh graph s3ablate_a1075dfc_1793492224_on ---
+  [ON] wp01_quarry_debug: created=39 (claims=25 objects=9 events=5) s3=resolved llm_calls=3 ok=True (27.4s)
+  [ON] wp02_lumen_refactor: created=36 (claims=23 objects=9 events=4) s3=resolved llm_calls=4 ok=True (24.0s)
+  [ON] wp03_ember_design: created=34 (claims=20 objects=10 events=4) s3=resolved llm_calls=4 ok=True (25.6s)
+  [ON] wp04_aurora_perf: created=41 (claims=22 objects=15 events=4) s3=resolved llm_calls=4 ok=True (27.5s)
+  [ON] wp05_retro_writeup: created=35 (claims=16 objects=11 events=8) s3=resolved llm_calls=4 ok=True (23.7s)
+  [ON] wp06_quarry_rollout: created=35 (claims=21 objects=8 events=6) s3=resolved llm_calls=4 ok=True (24.4s)
+  [ON] wp07_bluepeak_followup: created=27 (claims=18 objects=4 events=5) s3=resolved llm_calls=4 ok=True (22.5s)
+  [ON] real search_graph calls: 7 (OFF arm must be 0)
+  [ON] created extraction nodes: 247 | aside Σlabel_counts delta: 871
+  [ON] real facts: 40/90 planted units recovered
+  [ON] operator edges: 139 (graph-wide IMPL/NAND/SUPPORTS/MITIGATES/NEGATE/SUPERSEDE/INPUT)
+  [ON] model calls: 27
+
+--- per-session table (created extraction nodes) ---
+session                         OFF     ON   delta     OFF s3      ON s3
+wp01_quarry_debug                45     39      -6 suppressed (OFF-ARM)   resolved
+wp02_lumen_refactor              51     36     -15 suppressed (OFF-ARM)   resolved
+wp03_ember_design                43     34      -9 suppressed (OFF-ARM)   resolved
+wp04_aurora_perf                 42     41      -1 suppressed (OFF-ARM)   resolved
+wp05_retro_writeup               34     35       1 suppressed (OFF-ARM)   resolved
+wp06_quarry_rollout              42     35      -7 suppressed (OFF-ARM)   resolved
+wp07_bluepeak_followup           27     27       0 suppressed (OFF-ARM)   resolved
+per-session ratio range: 0.706 .. 1.029 (over 7 of 7 sessions with a non-zero OFF denominator)
+concentration (largest session's share of the total reduction): 0.395 (reduction total 38, largest 15)
+
+COUNTS: created extraction nodes OFF=284 ON=247
+RATIO: 0.8697
+ARM INTEGRITY: OFF 7/7 proven (real search_graph calls 0), ON 7/7 resolved (real search_graph calls 7)
+REAL FACTS: OFF 47/90 ON 40/90
+OPERATOR EDGES: OFF 171 ON 139
+COST: model calls OFF 21 ON 27 (ratio 1.2857142857142858)
+FAILED SESSIONS: OFF 0 ON 0
+VERDICT: HYPOTHESIS-FALSIFIED
+WHY: E1 not met: ratio 0.870 > 0.75 — telling extraction what exists does not reduce what it creates

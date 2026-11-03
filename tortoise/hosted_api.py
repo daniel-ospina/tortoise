@@ -17,7 +17,6 @@ from __future__ import annotations
 import asyncio
 import atexit
 import contextlib
-import contextvars
 import functools
 import hmac
 import inspect
@@ -107,6 +106,15 @@ from tortoise.env_truthy import (  # #4097: the declared truthy contract
     env_flag,
     is_truthy,
 )
+
+# #8447 row #6: the ONE page bound `event_store.read_after` REFUSES outside of.
+# Imported here (module level, not lazily like this file's other event_store
+# reaches) because `Query(..., le=…)` is evaluated once at import: deriving the
+# route's declared maximum from the enforcing seam is what keeps the two from
+# drifting into "the validator accepts 1000, the seam raises" (#1178 — one
+# instrument, not two literals). `event_store` imports stdlib only, so this
+# adds no cycle and no DSN cost.
+from tortoise.event_store import MAX_PAGE as _MAX_EVENT_PAGE
 from tortoise.file_indexer import (  # #4005 shared identity primitives
     derive_session_source_url,
     provenance_basename,
@@ -149,11 +157,14 @@ from tortoise.monitoring import (  # #2850/2953 liveness-readiness decouple
     PROBE_HARD_TIMEOUT,
     ControlPlaneOffloadError,
     HealthProbe,
+    _ContextNotReproduced,  # #10612: …and the callable provably did not run
+    confine_context,  # #10612: re-entry-proof contextvar confinement
     event_retention_interval,
     graph_offload_timeout_s,
     heartbeat_record,
     loop_heartbeat_info,
     loop_heartbeat_task,
+    note_heartbeat_task,
     record_analytics_outcome,  # #3820 analytics-sink outcome counter
     record_telemetry_drop,  # #4095 allowlist-drop counter (the /metrics seam)
     run_control_plane_call,
@@ -214,6 +225,7 @@ from tortoise.sdk import (
     UnapprovedKindNamespace,  # #5475: the named pack-approved refusal, mapped to 422 too
     _apply_capture_ingest_ep,  # W5 Phase C (#2104): live-at-capture + ingest EP pass
     _attach_source_change_notices,  # #5516: the ONE home for the capture receipt's source-change notice
+    _capture_enriched_texts,  # #8488 scope 1: the enriched embeddingText (gate OFF → None)
     _capture_ep_target_ids,  # W5 Phase D (#2104): EP pass targets (minted + first-time folds)
     _capture_extraction_window,  # #6246: the shared extraction view (both lanes)
     _capture_gate_window,  # #4897: strip synthetic markers before the empty/blank gate
@@ -431,9 +443,16 @@ def _submit_off_loop(executor: ThreadPoolExecutor, fn, /, *args, **kwargs):
     Returns the CONCURRENT future. Callers needing a completion hook (the
     in-flight accounting below) attach it there: a loop-side callback would
     fire on cancellation while the worker is still parked.
+
+    #10612 P1: the copy is taken per INVOCATION by ``monitoring.confine_context``
+    rather than once as ``partial(copy_context().run, fn)``. The one-shot idiom
+    is a trap the moment the SAME wrapped callable is submitted twice — a
+    ``Context`` is single-entry, so the second run raises ``RuntimeError:
+    cannot enter context ... already entered``, and a bounded offload produces
+    exactly that overlap (a bound miss cancels the AWAIT, never the running
+    thread). See ``monitoring.confine_context`` for the mechanism.
     """
-    ctx = contextvars.copy_context()
-    return executor.submit(ctx.run, functools.partial(fn, *args, **kwargs))
+    return executor.submit(confine_context(fn), *args, **kwargs)
 
 
 async def _run_off_loop(executor: ThreadPoolExecutor, fn, /, *args, **kwargs):
@@ -1937,9 +1956,12 @@ def _start_liveness(app) -> None:
     (proving it is scheduling before the watchdog exists to judge it), then
     the heartbeat task, then the listener, then the watchdog. Starting the
     watchdog before the heartbeat would let it fire on a loop that simply had
-    not ticked yet. The watchdog additionally refuses to judge until at least
+    not ticked yet. The SOFT path additionally refuses to judge until at least
     one REAL tick has landed (``LOOP_STALL_EXIT_MIN_TICKS``), so the slow-
-    starting part of the startup half cannot be mistaken for a wedge.
+    starting part of the startup half cannot be mistaken for a wedge. The HARD
+    ceiling (#10585 review P2) is exempt from that gate: past
+    ``TORTOISE_LOOP_STALL_HARD_EXIT_S`` a boot that never ticked again IS the
+    wedge, and holding the ceiling off for it means hanging indefinitely.
     """
     loop = asyncio.get_running_loop()
     # A previous lifespan of the SAME app instance (in-process restart,
@@ -1957,15 +1979,29 @@ def _start_liveness(app) -> None:
             prev.cancel()
     heartbeat_record()
     app.state._loop_heartbeat_task = loop.create_task(loop_heartbeat_task())
+    # #2850: record that ticker's death, so the hard stall ceiling can tell a
+    # wedged LOOP from a dead TICKER and never restart-loop a healthy process.
+    note_heartbeat_task(app.state._loop_heartbeat_task)
     # #3944: the analytics canary heartbeat. Armed with the liveness block
     # (cheap, synchronous, no I/O at arm time — the coroutine sleeps first).
     app.state._analytics_canary_task = loop.create_task(_analytics_canary_loop())
     app.state._healthz_server = start_health_listener()
     app.state._loop_watchdog_stop = threading.Event()
-    # DISABLED BY DEFAULT (#2850 review P0): with TORTOISE_LOOP_STALL_EXIT_S
-    # unset this returns None — the /healthz listener is the signal and the
-    # destructive action lives in the out-of-band watchdog. Enabling it here
-    # also requires 3 consecutive stale windows and an idle workload.
+    # DISABLED BY DEFAULT (#2850 review P0): the SOFT, idle-gated self-kill is
+    # what this comment used to describe. TORTOISE_LOOP_STALL_EXIT_S is unset,
+    # so THAT path stays off: the /healthz listener is the signal and the
+    # destructive action lives in the out-of-band watchdog. When armed it
+    # requires 3 consecutive stale windows AND an idle workload.
+    #
+    # The HARD ceiling (#10585) is the exception, and it is the one the HOSTED
+    # deployment actually runs: fly.toml [env] arms
+    # TORTOISE_LOOP_STALL_HARD_EXIT_S=600 while leaving its sibling unset, so
+    # this call does NOT return None in production. That branch deliberately
+    # bypasses the idle gate and the hysteresis — the in-flight gauge is TRUE by
+    # construction during the wedge it guards (an open `GET /mcp` SSE stream is
+    # an in-flight request), so an idle-gated exit could never fire. It keeps
+    # only the dead-TICKER disarm, and relies on fly.toml's [[restart]] block
+    # (policy `on-failure`) to turn the non-zero exit into a RESTART.
     app.state._loop_watchdog = start_stall_watchdog(
         stop_event=app.state._loop_watchdog_stop)
 
@@ -5736,6 +5772,15 @@ def _record_health() -> dict:
         publishing it for a read that failed would render a broken safety check
         as a pass — the same fail-open shape as an unread counter, one field
         over (#9548 review P2).
+      * ``fetched_at`` — WHEN this block was read, ISO-8601 UTC. It exists
+        because the block is EVIDENCE that is meant to be kept: #10017's purge
+        guard refuses to delete a turn the record cannot serve back, and one of
+        its preconditions is "the record is armed" (``/health`` reports it).
+        A captured body with no read instant satisfies that precondition for
+        ever, so the age has to be a fact of the artefact. ⚠️ It is the only
+        address-adjacent fact available: the block states the record's ``dsn``
+        FINGERPRINT and cannot state the tenant, because a multi-tenant process
+        serves several.
 
     ``ok`` is False when the value was SET and refused, when the counters could
     not be read, and when the tenancy resolution could not be read — a
@@ -5767,6 +5812,7 @@ def _record_health() -> dict:
                 "record_non_journal_skips": None,
                 "record_position_unproven": None,
                 "counters_error": reason, "tenancy_error": reason,
+                "fetched_at": datetime.now(UTC).isoformat(),
                 "error": reason}
     # NOTE the shape: keys are assigned, never `**counters`-spread. A spread
     # placed after `"error": None` silently OVERWROTE the record-level error
@@ -5783,6 +5829,14 @@ def _record_health() -> dict:
         "counters_error": None,
         "tenancy_error": None,
         "error": None,
+        # WHEN this block was read. A consumer that keeps the body (an operator
+        # capturing the arming evidence for a destructive run, #10017's purge
+        # guard) otherwise holds only the capturer's word for the age of the
+        # claim, and an artefact with no age satisfies its reader for ever. The
+        # endpoint can state this one fact; it CANNOT state the tenant, which is
+        # why the purge guard binds the record by `dsn` and not by org/graph
+        # (#10483 review round 4, P1).
+        "fetched_at": datetime.now(UTC).isoformat(),
     }
     try:
         block["record_write_failures"] = record_write_failure_counts()
@@ -5890,9 +5944,10 @@ async def health():
     counter snapshot, or an unread tenancy resolution degrades ``status``.
 
     Build check (#10447): ``build`` names the build that is SERVING — commit,
-    package version, whether the tree was dirty at build time (`null` until the
-    deploy stamps `TORTOISE_GIT_DIRTY`; see `_build_identity`), process start
-    time, and the highest schema migration this image carries. It is the same
+    whether the tree was dirty at build time (stamped by the deploy; `null` means
+    NOT STATED, never "clean" — see `_build_identity`), the image reference the
+    Machine was created from, process start time, and the highest schema
+    migration this image carries. It is the same
     VALUE ``/v1/version`` returns (one resolver, ``_build_identity``), because
     "is this deployed?" was previously unanswerable from this endpoint: a stale
     build served ``status: ok`` and every other block happily. Like
@@ -6026,13 +6081,22 @@ async def health_security():
 #: can see a restart (a deploy that landed) without a log grep — and can see that
 #: a build is OLD by comparing it to the deploy it was supposed to pick up.
 #:
-#: `commit_dirty` is published but is NULL on every real deployment today:
-#: nothing stamps `TORTOISE_GIT_DIRTY`. The deploy workflow's propagation block is
-#: pinned by `tests/test_fly_secret_drift.py` (whose harness stubs PATH to
-#: fly/flyctl only) and a new stamp would also need a declaration in
-#: `.github/scripts/fly-managed-secrets.txt` or the drift check blocks every later
-#: deploy — a deploy-surface change, filed separately rather than smuggled in here.
-#: A `null` here is the honest reading; it must not be read as "clean".
+#: #10447 (reopen): `commit_dirty` NOW HAS A PRODUCER. `deploy-hosted.yml`
+#: stamps `TORTOISE_GIT_DIRTY` from the build's own `git status --porcelain`
+#: (declared `workflow` in `.github/scripts/fly-managed-secrets.txt`, which the
+#: drift gate requires before the name can be staged at all). Before that stamp
+#: existed the field was published and permanently `null` on production — and
+#: because the identified predicate treated an unstated flag as "not dirty", a
+#: build from a modified tree still claimed `build_identified: true`. An unstamped
+#: deployment is now read as UNSTATED (see `build_identified_reason`), never as
+#: clean: a `null` here is silence, and silence is not the claim "this is the
+#: commit".
+#:
+#: The image identity is published the same way, from the platform rather than
+#: from a constant: Fly injects `FLY_IMAGE_REF` (the image reference the Machine
+#: was created from) into every Machine's environment, so the artefact is named
+#: by the runtime that chose it — no deploy step has to learn the digest after the
+#: fact, and there is no second rollout to carry it.
 _PROCESS_STARTED_AT: str = datetime.now(UTC).isoformat(timespec="seconds")
 
 
@@ -6194,13 +6258,50 @@ def _build_identity() -> dict:
     # which is what the pin's own title claims and what a reader keyed on
     # `build_identified` alone must not be told the opposite of. `commit_sha` stays
     # RAW so `/v1/version`'s two-key contract carries exactly what the deploy staged.
-    identified = (bool(re.fullmatch(r"[0-9a-f]{7,40}", sha or ""))
-                  and not dirty_flag)
+    # ⛔ SILENCE IS NOT "CLEAN" (the #10447 reopen). The predicate used to be
+    # `not dirty_flag`, and `not None` is True — so a build from a MODIFIED tree,
+    # on any deployment that had not stamped the flag, published
+    # `build_identified: true`. That is the false PASS this whole block exists to
+    # refuse: "is this the commit, or a modified tree?" was answered "the commit"
+    # by an absent reading. Production now stamps the flag, and an unstamped one
+    # is reported as UNSTATED.
+    sha_is_commit = bool(re.fullmatch(r"[0-9a-f]{7,40}", sha or ""))
+    identified = sha_is_commit and dirty_flag is False
+    # WHY, not just "false" (reopen: "unknown with a reason"). Four different
+    # worlds produce the same `false` and a reader must not have to guess which:
+    # nothing deployed a stamp (selfhost/local dev), the stamp is not a commit
+    # (`main`, `unknown`, an unexpanded `${GITHUB_SHA}`), the tree really was
+    # dirty, or the deploy did not say whether it was.
+    if identified:
+        reason = None
+    elif sha is None:
+        reason = "no_commit_stamp"
+    elif not sha_is_commit:
+        reason = "commit_stamp_not_a_sha"
+    elif dirty_flag is True:
+        reason = "tree_dirty"
+    else:
+        reason = "tree_dirt_unstated"
+    # THE ARTEFACT, FROM THE PLATFORM. `flyctl deploy --remote-only` builds the
+    # image during the deploy, so a digest CANNOT be staged into the environment
+    # beforehand — a deploy that read `flyctl image show` and re-staged it would
+    # restart the fleet a second time to publish the id of the image it had just
+    # started. Fly injects `FLY_IMAGE_REF` into every Machine instead, which names
+    # the image the machine was CREATED FROM: the artefact->runtime link the issue
+    # asked for, with no deploy-order dance and no value a human can edit.
+    # `TORTOISE_IMAGE_REF` is the non-Fly (selfhost/container) spelling; it is
+    # read first so a deployment that knows its own ref can state it.
+    image = ((os.environ.get("TORTOISE_IMAGE_REF") or "").strip()
+             or (os.environ.get("FLY_IMAGE_REF") or "").strip() or None)
     return {
         "version": tortoise.__version__,
         "commit_sha": sha,
         "commit_dirty": dirty_flag,
         "build_identified": identified,
+        "build_identified_reason": reason,
+        # The image (build artefact) the serving process was started from —
+        # `null` when nothing stated one (a local run), never a placeholder.
+        "image": image,
         "started_at": _PROCESS_STARTED_AT,
         # CARRIED by this image, never "applied in the database" — see
         # `_migrations_head`'s docstring for why the two diverge and why the
@@ -8839,8 +8940,10 @@ class _OffloadRefused:
     """Sentinel for a REFUSED best-effort offload (#4456).
 
     ``_cp_offload(..., best_effort=True)`` returns THIS instead of ``None``
-    when the pool refused the submission (backlog full — or, on a cancellable
-    lane, cancelled before any worker ran it): the work did NOT happen. A
+    when the offload never ran the callable — the pool refused the submission
+    (backlog full), the bound cancelled it before any worker picked it up, or
+    the context wrapper could not build the invocation's context before
+    running it (#10612, ``_ContextNotReproduced``): the work did NOT happen. A
     plain bound miss still returns ``None``, because the worker that picked
     the submission up runs it to completion (the seam abandons only the
     await). Callers that ignore the return value are unaffected; a
@@ -8904,7 +9007,9 @@ async def _cp_offload(fn, *, op: str, best_effort: bool = False,
 
     Thin hosted-side wrapper over ``monitoring.run_control_plane_call``. For
     an AUTH-CRITICAL call it owns the FAIL-CLOSED ERROR MAPPING: an offload
-    that misses its wait bound — or a saturated worker pool — becomes the
+    that misses its wait bound, a saturated worker pool, or the SUBMITTED
+    wrapper failing before it ran its callable (#10612, ``_ContextNotReproduced``
+    whose ``origin`` is that wrapper — so no work was done) becomes the
     repo-standard 503 ``control_plane_unavailable`` the client already renders,
     never a hang and never a silent pass-through. Domain errors raised by the
     helper itself propagate UNCHANGED, so each caller's existing error mapping
@@ -8971,6 +9076,39 @@ async def _cp_offload(fn, *, op: str, best_effort: bool = False,
                 "control-plane offload %r failed (best-effort, swallowed): %s",
                 op, exc)
             return OFFLOAD_REFUSED if exc.refused else None
+        if unavailable is not None:
+            raise unavailable() from None
+        raise _control_plane_unavailable() from None
+    except _ContextNotReproduced as exc:
+        # ⚠️ Ownership, not type: map it only when the wrapper that raised it IS
+        # the one this call submitted. A NESTED confine_context that fails while
+        # an OUTER confined callable is already executing raises the same
+        # subclass — after that outer callable has done work — and must
+        # propagate as a domain error, not become a retryable "nothing
+        # happened" 503 a mutating client would replay.
+        if getattr(exc, "origin", None) is not fn:
+            raise
+        # #10612 P1: the wrapper could not build THIS invocation's context, so
+        # the callable NEVER RAN — the same "no work was done" outcome a
+        # refused submission has, and the same honest, retryable 503. Without
+        # this arm the error (a RuntimeError, not a ``ControlPlaneOffloadError``)
+        # escapes to each route's blanket ``except Exception`` and becomes a
+        # bare 500 with no ``error_code``: the exact unretryable status this
+        # closes. It is never swallowed into a plausible answer — running the
+        # callable under the worker's AMBIENT context would answer another
+        # tenant.
+        #
+        # ⚠️ Deliberately the PRIVATE subclass, not ``ContextConfinementError``:
+        # only the wrapper's pre-run arm proves "nothing happened". The same
+        # type raised from INSIDE the callable (a nested ``confine_context``, or
+        # any helper that uses one) is a DOMAIN error and keeps propagating
+        # unchanged — claiming "no work was done" about a half-executed write
+        # would hand the client a retry that duplicates it.
+        logging.getLogger("tortoise.api").warning(
+            "control-plane offload %r could not build the request context: %s",
+            op, exc)
+        if best_effort:
+            return OFFLOAD_REFUSED
         if unavailable is not None:
             raise unavailable() from None
         raise _control_plane_unavailable() from None
@@ -9084,6 +9222,18 @@ async def _graph_offload(fn, *, op: str, timeout: float | None = None):
     the only place the copy is applied, callers must reach the graph pool
     THROUGH this wrapper, never ``_cp_offload(pool="graph")`` directly.
 
+    #10612 P1: the copy is ``monitoring.confine_context``'s — a FRESH context
+    per invocation, not one ``Context`` captured once. A bound miss abandons the
+    await while the worker keeps running (CPython #87185), so a caller that
+    re-submits a one-shot ``partial(copy_context().run, fn)`` re-enters a
+    context that is already entered: ``RuntimeError``, which is not a
+    ``ControlPlaneOffloadError``, so it escapes this seam's fail-closed mapping
+    and surfaces on the caller's route as a bare unlabelled 500 the client
+    cannot retry. That is a LATENT trap today — this wrapper submits ONCE, so
+    it cannot fire — and a MEASURED one on #10612's branch, whose #4055
+    cold-setup re-arm re-submits one wrapped callable (blast radius there:
+    ``/v1/search`` and ``/v1/topics/{t}/summary``).
+
     Telemetry: graph ops land in the seam's SHARED offload-record buffer under
     graph-specific op names (``data_sdk``, ``check_org_limit.points``), so they
     are identifiable by op — but they share the 512-entry buffer, so a graph
@@ -9097,9 +9247,8 @@ async def _graph_offload(fn, *, op: str, timeout: float | None = None):
     graph worker for the lane's full cold-start allowance. Callers that write
     leave it unset.
     """
-    ctx = contextvars.copy_context()
     return await _cp_offload(
-        functools.partial(ctx.run, fn), op=op, pool="graph",
+        confine_context(fn), op=op, pool="graph",
         timeout=graph_offload_timeout_s() if timeout is None else timeout,
         unavailable=_graph_unavailable)
 
@@ -9834,8 +9983,9 @@ class CreateObjectRequest(BaseModel):
     # stored ``capability`` to ``other`` on a re-create. The ``'other'`` default
     # is the fold's ON CREATE arm.
     objectKind: str | None = Field(default=None)
-    # lifecycle status rides props (create_entity splats **props over the
-    # 'live' default) — the onboarding STATE seed passes in_progress.
+    # lifecycle status rides props (``create_entity`` carries only what the
+    # caller NAMES — there is no 'live' default to splat over since #9974 R1)
+    # — the onboarding STATE seed passes in_progress.
     status: str | None = None
 
 
@@ -10068,7 +10218,7 @@ async def create_point(body: CreatePointRequest, request: Request, org: dict = D
 async def events_poll(
     after: str | None = None,
     types: str | None = None,
-    limit: int = Query(100, ge=1, le=1000),
+    limit: int = Query(100, ge=1, le=_MAX_EVENT_PAGE),
     org: dict = Depends(get_current_org_gated),  # noqa: B008
 ):
     """Poll graph/claim events after an opaque cursor (at-least-once contract).
@@ -10591,6 +10741,7 @@ async def search(q: str, limit: int = Query(10, ge=1, le=100), org: dict = Depen
     from tortoise.read_status import read_status_enabled as _read_status_enabled
     from tortoise.residency import residency_enabled as _residency_enabled
     from tortoise.status_vocabulary import STATUS_DEGRADED as _STATUS_DEGRADED
+    from tortoise.truncation import truncation_field
 
     # The sink is the READ PATH's carrier for both fields; each field is
     # emitted only under its own flag. The ONE exception is the impairment
@@ -10600,6 +10751,12 @@ async def search(q: str, limit: int = Query(10, ge=1, le=100), org: dict = Depen
     _status_on = _read_status_enabled()
     _residency_on = _residency_enabled()
     status_out: dict | None = {} if (_status_on or _residency_on) else None
+    # #8447: the TRUNCATION marker. Always on — unlike ``status`` / ``residency``
+    # it costs two ``len()`` calls over lists the read already holds, so gating it
+    # off by default would preserve exactly the defect it fixes (a caller who did
+    # not know to pass a flag still gets a silent subset). See
+    # ``tortoise/truncation.py`` for the two fields and the three states.
+    trunc_out: dict = {}
     # #3718 (construction half of #4660, second batch): the SDK is BUILT off the
     # loop, not just used off it. In embedded mode `_make_sdk` probes the
     # keepalive anchor (`_anchor_usable`) and may eagerly connect with the
@@ -10628,7 +10785,7 @@ async def search(q: str, limit: int = Query(10, ge=1, le=100), org: dict = Depen
         # asyncio.to_thread pattern used throughout this file).
         results = await asyncio.to_thread(
             sdk.tortoise_fts_query, q, limit=limit,
-            read_status_out=status_out)
+            read_status_out=status_out, _truncation_out=trunc_out)
     except Exception:
         import logging
         logging.getLogger("tortoise.api").exception("search failed")
@@ -10645,6 +10802,15 @@ async def search(q: str, limit: int = Query(10, ge=1, le=100), org: dict = Depen
             props["kind"] = "statement"
         out.append(props)
     response = {"results": out, "count": len(out)}
+    # #8447: say so when this read did not deliver everything it MATCHED — the
+    # ``limit`` cap cut rows, or a downstream stage dropped them — so
+    # ``count: 5`` on a 20-match
+    # query is never indistinguishable from a complete 5-match answer. Lives on
+    # the response because that is where the caller is — a log line would only
+    # tell a developer. This path has no offset and no cursor, so a dropped row
+    # is unreachable by any follow-up call: exempted pagination (which reports
+    # ``total``/``hasMore``) is a different surface, see ``truncation.py``.
+    response.update(truncation_field(trunc_out))
     if status_out is not None:
         # The SDK sets `status` on every return path; a missing term is a bug,
         # not a reason to emit null under a vocabulary of exactly four terms.
@@ -15452,7 +15618,10 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         actor_user_id=_actor_uid, machine_id=body.machine_id,
         model=body.model, session_existed=session_existed,
         embed_fn=lambda texts: _capture_turn_embeddings(
-            texts, proj.required_embedding_dim))
+            texts, proj.required_embedding_dim),
+        # #8488 scope 1: the enriched ``embeddingText`` (owner ruling #8932),
+        # kept in parity with ``sdk.capture_session`` (the ONE shared writer).
+        enrich_fn=_capture_enriched_texts)
     _turn_texts = _capture_write["turn_texts"]
     _capture_redactions = _capture_write["redacted_total"]
 

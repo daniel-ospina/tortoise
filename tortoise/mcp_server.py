@@ -2663,6 +2663,11 @@ _SERVER_MANAGED_PROPS = frozenset({  # #3947: envelope capture directive (not a 
     # stored verbatim; the writer marks it `embedding_verbatim` instead.
     "embedding_model", "embedding_revision", "embedding_text_hash",
     "embedding_verbatim", "embedding_preserved",
+    # #8488 scope 1: the enriched text a turn's vector describes (schema A′ on
+    # #8932) is writer-minted by the capture path and replayed from the
+    # journaled snapshot; no `PointRevised` arm carries a caller-set value, so
+    # accepting it here would persist live and vanish on a rebuild.
+    "embeddingText",
     # #3998 (D30): the absent-raw state is server-managed — minted only by
     # `_upsert_source`'s fixed clauses and validated by `validate_raw_state`.
     # The SDK rejects these on a `:Source` through the generic entity route
@@ -2678,6 +2683,20 @@ _SERVER_MANAGED_PROPS = frozenset({  # #3947: envelope capture directive (not a 
     # provenance and break live/replay parity. Rejected on ALL spellings, at
     # this boundary AND in `sdk._sanitize_props` (the fail-closed backstop).
     "sourceVersion", "sourceVersions", "sourceVersionTransit",
+    # #7704: the fold's accumulated ref SET is the same class of record —
+    # server-minted by `_fold_source_evidence`, journalled on the Point's
+    # snapshot, and re-derived into `extractedFrom` edges on replay. A tenant
+    # setting it would put the payload's edges ahead of its writes. Entered here
+    # as the fail-closed boundary IN FRONT of `sdk._sanitize_props` (its
+    # backstop), matching the sibling keys' registration at every home.
+    "extractedFromAll",
+    # #10010: the FOLD's record FLAG is the same class of record — server-minted
+    # by `_fold_source_evidence` onto the snapshot it re-emits, and read by the
+    # replay's recreate anchor (`projection.record_is_evidence_fold`) to tell a
+    # fold from a creation. A caller value would be a forged replay decision; the
+    # entry here is the fail-closed boundary in front of `sdk._sanitize_props`
+    # (its backstop), matching the sibling keys' registration at every home.
+    "evidence_fold",
     # #3644 / PR #8016 code-review ISSUE 1: the version's TRANSITION facts are
     # server-minted/journalled and name a `:Source` transition — they can never
     # be a legitimate caller prop on ANY entity, so they belong in this

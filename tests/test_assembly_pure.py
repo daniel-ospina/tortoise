@@ -3444,6 +3444,139 @@ def test_both_halves_ok_is_all_terms_for_the_nary_width():
     ).both_halves_ok(AssemblyShape.ORDERING) is True
 
 
+def test_render_nary_dropped_subject_keeps_the_chain_not_the_binary_claim():
+    """#2653 review finding: the arm is chosen by the QUESTION's term count
+    ALONE, never by how many subjects survived resolution.
+
+    A three-way question whose third subject resolved but contributed no
+    state/spine row (`len(order) < 3`) used to fall through to the TWO-subject
+    arm, which states one sentence — "couch came first on …" — and silently
+    withholds the second subject of a comparison the question asked about
+    three. The N-ary arm stays selected, so the line is the CHAIN of the
+    subjects that did resolve, both of them dated, and the dropped subject
+    contributes nothing (never a fabricated row).
+    """
+    dated = [("obj-a", "couch", _D(2026, 8, 10)),
+             ("obj-b", "dog bed", _D(2026, 8, 14))]
+    cands = [_cand("obj-a", "couch", 0), _cand("obj-b", "dog bed", 1),
+             # resolved, then dropped: no timeline row, no state row
+             _cand("obj-c", "phantom shelf", 2)]
+    hits = synthesize_hits(_nary_slices(dated),
+                           shape=AssemblyShape.ORDERING, candidates=cands,
+                           halves=_THREE_TERMS)
+    chain = [h for h in hits if h.get("kind") == "ordering"]
+    assert len(chain) == 1, hits
+    assert chain[0]["content"] == (
+        "couch came first on 2026-08-10, then dog bed on 2026-08-14"), \
+        f"a dropped subject must keep the chain, not the binary claim: " \
+        f"{chain[0]['content']!r}"
+    # …and the dropped subject contributes NOTHING AT ALL: not the chain line
+    # and not a section of its own either. Both the chain and the sections
+    # below iterate `order`, which excludes an oid with no rows and no state
+    # name — so "carried by its own section" would be a false claim, and this
+    # pins the true one (no fabricated row, no section, no mention).
+    assert not [h for h in hits if "phantom shelf" in str(h.get("content"))], \
+        hits
+    assert len(hits) == 3, hits        # chain + one section per SURVIVOR
+
+
+def test_render_nary_first_day_group_of_three_says_all_three():
+    """#2653 review finding: "both" is a TWO-subject word. The first day of
+    an N>=3 chain can hold three or more subjects, and "couch and dog bed and
+    bookshelf both appeared on …" is simply wrong — the count picks the word.
+    (The two-subject tie keeps "both":
+    ``test_render_nary_ordering_tie_group_then_rest``.)"""
+    same_day = [("obj-a", "couch", _D(2026, 8, 10)),
+                ("obj-b", "dog bed", _D(2026, 8, 10)),
+                ("obj-c", "bookshelf", _D(2026, 8, 10))]
+    cands = [_cand(o, n, i) for i, (o, n, _d) in enumerate(same_day)]
+    hits = synthesize_hits(_nary_slices(same_day),
+                           shape=AssemblyShape.ORDERING, candidates=cands,
+                           halves=_THREE_TERMS)
+    assert hits[0]["content"] == (
+        "couch and dog bed and bookshelf all three appeared on 2026-08-10"), \
+        f"tie-group phrasing drifted: {hits[0]['content']!r}"
+
+
+def test_nary_colon_list_rejects_a_fragment_of_a_quoted_option():
+    """#2653 review finding: a colon INSIDE a quoted option must not mint a
+    fragment as the first list member. Splitting "'Live: My Cousin Vinny',
+    the chair, or the lamp" at the inner colon leaves "My Cousin Vinny'" — a
+    term that closes a quote it never opened — and the original list only
+    survives whole if the colon is not read as the introducer at all.
+
+    The tell is the PREFIX, which still holds the unmatched delimiter.
+
+    ⛔ THE CONTROLS MUST REACH THE BRANCH. The new decision is the value
+    returned when ``opts[1]`` does NOT re-open ``opts[0]``'s quote, so a
+    control only exercises it when ``opts[0]`` itself ENDS in the delimiter
+    (``the girls'`` / ``a 5"``) — an option that merely CONTAINS an inch mark
+    or a possessive (``a 5" screen`` / ``the girls' room``) returns at the
+    earlier ``first[-1:] not in ("'", '"')`` guard and proves nothing about
+    it. Both kinds are pinned below, labelled for which one they cover.
+    """
+    fragment = ("Which came first: 'Live: My Cousin Vinny', the chair, "
+                "or the lamp?")
+    terms = extract_subject_terms(fragment)
+    assert not [t for t in terms if t.endswith("'") and not t.startswith("'")], \
+        f"a fragment closing an unopened quote was minted as an option: {terms}"
+    # the whole quoted option survives as option 1 (the fragment is not a
+    # list member, so the colon is not an introducer)
+    assert terms == ["'Live: My Cousin Vinny'", "the chair", "the lamp"], terms
+    assert classify_question(fragment) is AssemblyShape.ORDERING
+    # POSITIVE CONTROL, ACCEPTANCE SIDE — these two options END in the
+    # delimiter, so they reach `prefix.rfind(closer) < 0` (the branch-level
+    # pin for that side is `test_reads_as_list_...` below; through
+    # `extract_subject_terms` the non-explicit fallback reaches the same
+    # answer, so the extraction assertion alone would NOT discriminate).
+    assert extract_subject_terms(
+        "which came first: the girls', the chair, or the lamp?") == [
+            "the girls'", "the chair", "the lamp"]
+    assert extract_subject_terms(
+        'which came first: a 5", the chair, or the lamp?') == [
+            'a 5"', "the chair", "the lamp"]
+    # POSITIVE CONTROL — a genuine quoted option list (every option re-opens
+    # its quote, so this takes the OTHER branch and pins that it still reads
+    # as a list)
+    assert extract_subject_terms(
+        "Which came first: 'Star Wars: A New Hope', 'Empire', or the lamp?") == [
+            "'Star Wars: A New Hope'", "'Empire'", "the lamp"]
+    # NOT a branch control: these merely CONTAIN the delimiter inside a
+    # longer option, so they never reach the new decision — kept as ordinary
+    # extraction assertions (an inch mark / possessive mid-option).
+    assert extract_subject_terms(
+        'which came first: a 5" screen, the chair, or the lamp?') == [
+            'a 5" screen', "the chair", "the lamp"]
+    assert extract_subject_terms(
+        "which came first: the girls' room, the chair, or the lamp?") == [
+            "the girls' room", "the chair", "the lamp"]
+
+
+def test_reads_as_list_pins_both_sides_of_the_quote_branch():
+    """#2653 review finding — the BRANCH-LEVEL pin for the one decision
+    ``_reads_as_list`` gained: what to answer when ``opts[1]`` does NOT
+    re-open the quote ``opts[0]`` ends with.
+
+    Both polarities are pinned here because neither is observable end-to-end:
+    through ``extract_subject_terms`` a rejected introducer colon falls back
+    to the marker-word span and reaches the SAME options, so an extraction
+    assertion cannot tell ``True`` from ``False`` at this line. A `return
+    False` mutation fails the first two assertions; the pre-fix `return True`
+    fails the third.
+    """
+    from tortoise.assembly import _reads_as_list
+    # ACCEPT: a possessive / an inch mark before the colon leaves no unmatched
+    # delimiter in the prefix, so the colon IS an introducer.
+    assert _reads_as_list(["the girls'", "the chair", "the lamp"],
+                          "which came first") is True
+    assert _reads_as_list(['a 5"', "the chair", "the lamp"],
+                          "which came first") is True
+    # REJECT: the prefix holds the delimiter that opened the quote opts[0]
+    # closes — opts[0] is a FRAGMENT cut out of a quoted option, not a member.
+    assert _reads_as_list(["Tonight'", "the chair", "the lamp"],
+                          "Which came first: 'Live") is False
+
+
 def test_render_interval_diff_via_shared_helper():
     """interval: the diff line uses the SHARED _norm_date helper (same date
     semantics as the as-of boundary): buying (2026-08-10) -> selling

@@ -12,6 +12,7 @@ import json
 import logging
 import os
 import re
+from pathlib import Path
 from urllib.parse import urlparse
 
 import pytest
@@ -22,6 +23,7 @@ from tests._provider_env import pin_provider_routing_env, provider_routing_env_n
 from tests._verdict import verdict_client
 from tortoise import hosted_api as _ha
 from tortoise.hosted_api import app, get_current_org
+from tortoise.live import _live_only
 from tortoise.sdk import TortoiseSDK
 
 # #2242 concurrency test docker-lane guard — mirrors
@@ -219,6 +221,112 @@ def test_capture_session_module_isolates_real_home(tmp_path):
         "capture-consent-notice")
 
 
+def test_the_isolated_home_does_not_isolate_the_model_cache(tmp_path):
+    """#10010: the HOME isolation above must not take the MODEL cache with it.
+
+    ``huggingface_hub`` reads ``HF_HOME`` (default ``~/.cache/huggingface``) at
+    IMPORT time, and ``sentence_transformers`` is imported lazily — inside the
+    first test that needs an embedding. With only ``HOME`` redirected, that
+    first import freezes the cache inside a per-test tmp dir, so the load finds
+    an EMPTY cache and pays the cold path instead of using the copy CI
+    provisioned (``Cache HF embedding model`` + ``Embedding model REQUIRED``).
+
+    Measured on test-slow (e) at 2feca037f (run 41183376264): 120 of 857 items
+    in 2405 s, watchdog-killed with zero failures — a red check no failure
+    identity could explain. Pinned here because the isolation lives HERE; its
+    counterpart that keeps the cache outside it is ``tests/conftest.py``'s
+    ``HF_HOME`` pin, assigned at conftest import (too late for a per-test flag,
+    per the vendor's own "read at import time" contract).
+    """
+    hf_home = os.environ.get("HF_HOME")
+    assert hf_home, (
+        "the suite must pin HF_HOME at conftest import (tests/conftest.py) — a "
+        "lazily imported huggingface_hub would otherwise freeze the model "
+        "cache inside this test's redirected $HOME and every load pays cold")
+    cache = Path(hf_home)
+    assert cache.is_absolute(), f"HF_HOME must be absolute, got {cache}"
+    # The exact shape the leak took: `~/.cache/huggingface` re-resolved under
+    # the isolated HOME.
+    assert cache != Path(os.environ["HOME"]) / ".cache" / "huggingface", (
+        "HF_HOME resolves under the isolated $HOME — the model cache is "
+        "per-test again, which is what made the leg cold-load per test")
+    assert Path(tmp_path) not in cache.parents and cache != Path(tmp_path), (
+        f"HF_HOME ({cache}) must not live in the per-test tmp dir")
+
+
+def test_the_pinned_cache_is_the_one_huggingface_hub_froze():
+    """#10010: the pin must land BEFORE the vendor constants freeze.
+
+    ``huggingface_hub`` documents that its environment is read at import time and
+    "any modification made afterwards will not be taken into account", so an
+    ``HF_HOME`` set per-test would be inert. This asserts the constant the loader
+    actually uses is the pinned one — the difference between a pin and a wish.
+
+    ``importorskip``, not a bare import (#10010 review F5): ``huggingface_hub``
+    arrives only through the ``embeddings`` extra, plain ``uv sync`` is a
+    documented supported state (``AGENTS.md`` → *"Plain ``uv sync`` (no extras)
+    yields a KEYWORD-ONLY product"*), and this file imports nothing
+    embedder-related at module level so it otherwise runs there. In a bare dev
+    env this must SKIP, not ERROR — the rule this repo already wrote down for
+    this package in ``tests/test_sdk_group3.py`` (#880).
+    """
+    pytest.importorskip("huggingface_hub")
+    from huggingface_hub import constants
+
+    hf_home = Path(os.environ["HF_HOME"])
+    assert Path(constants.HF_HOME) == hf_home, (
+        f"huggingface_hub froze HF_HOME={constants.HF_HOME}, not the pinned "
+        f"{hf_home} — the pin happened after the import, so it is inert")
+    assert Path(constants.HF_HUB_CACHE) == hf_home / "hub", (
+        f"the hub cache ({constants.HF_HUB_CACHE}) is not under the pinned "
+        f"HF_HOME ({hf_home})")
+
+
+def test_the_default_hf_home_is_the_one_the_vendor_would_resolve(tmp_path):
+    """#10010 review F4: the pin must name the cache the VENDOR would pick.
+
+    The pin's own justification used to be "identical value" to the vendor's
+    default, but it hardcoded the no-XDG arm: `huggingface_hub` resolves
+    ``$XDG_CACHE_HOME/huggingface`` when that variable is set, so on any such
+    host the pin REDIRECTED the suite away from the cache the loader would have
+    used — silently, because ``test_the_pinned_cache_is_the_one_huggingface_hub_
+    froze`` only compares the pinned env value to the frozen constant, which is
+    equal by construction once the pin has landed.
+
+    Discriminating, not self-referential: the vendor's OWN constant is built in
+    a subprocess from the same environment, for both arms of the fallback, and
+    the pin's helper must agree with it. The old hardcoded
+    ``~/.cache/huggingface`` disagrees on the XDG arm — which is what this test
+    would have caught.
+    """
+    import subprocess
+    import sys
+
+    from tests.conftest import _default_hf_home
+
+    base = {k: v for k, v in os.environ.items() if k not in ("HF_HOME", "XDG_CACHE_HOME")}
+    xdg = str(tmp_path / "xdg")
+
+    for label, extra in (("XDG unset", {}), ("XDG set", {"XDG_CACHE_HOME": xdg})):
+        env = {**base, **extra}
+        probe = subprocess.run(
+            [sys.executable, "-c",
+             "from huggingface_hub import constants; print(constants.HF_HOME)"],
+            env=env, capture_output=True, text=True, timeout=300)
+        if probe.returncode != 0:
+            pytest.skip(f"huggingface_hub not importable in this env: {probe.stderr[-300:]}")
+        vendor = probe.stdout.strip()
+        ours = _default_hf_home(extra)
+        assert ours == vendor, (
+            f"[{label}] the HF_HOME pin resolves to {ours!r} but "
+            f"huggingface_hub resolves {vendor!r} from the same environment — "
+            f"the pin must name the cache the loader would use, or the suite "
+            f"cold-loads on every test")
+
+    # The XDG arm is not decorative: it moves the answer.
+    assert _default_hf_home({"XDG_CACHE_HOME": xdg}) == str(Path(xdg) / "huggingface")
+
+
 # Legacy predicate name for negative-direction tests (#281). Kept as a
 # constant so no edge-syntax literal appears in source (Task 5 sweep requires
 # zero hits) — same pattern as tests/test_ranking.py.
@@ -268,6 +376,11 @@ def _isolated_home(monkeypatch, tmp_path):
     that file's decline matrix), so the consented control test is unaffected.
     """
     monkeypatch.setenv("HOME", str(tmp_path))
+    # #10010: the MODEL cache is deliberately NOT isolated with it — `HF_HOME` is
+    # pinned to the pre-isolation cache root at conftest import (see
+    # `test_the_isolated_home_does_not_isolate_the_model_cache` for why: the
+    # lazily imported huggingface_hub froze this cache inside this per-test tmp
+    # dir and every load paid the cold path).
 
 
 @pytest.fixture()
@@ -1699,10 +1812,25 @@ def test_capture_session_long_turn_extracts_only_stored_text(sdk, monkeypatch):
     # decision/claim regex so the past-cut claim is the only candidate for the
     # claims patterns (the per-turn cap would otherwise eat it — #721).
     lead = "I believe the root cause is known. "
-    pad = "plain filler text without triggers. "
+    # The filler carries NO sentence break ON PURPOSE. The extractor emits one
+    # candidate per sentence and every candidate costs a point write (and, on
+    # the dense lane, an embedding), so the previous "plain filler text without
+    # triggers. " x 145 shape minted **138 points** for a test that inspects two
+    # of them — measured 11.3 s wall on the keyword-only local lane vs 4.5 s for
+    # the shape below, and on the CI pool runners that multiplier put this test
+    # on the 300 s per-test budget, where it tripped it: test-slow (c) and (e)
+    # both red with "Failed: Timeout (>300.0s) from pytest-timeout" (#10010 CI
+    # run 40861737614), and the same nodeid times out on `main` (run 40796571501).
+    # One period-free filler crosses the same 5000-char cap with **2** candidate
+    # points and every assertion below is unchanged — so keep it period-free.
+    pad = "plain filler text without triggers "
     assert not re.search(r"(?:let'?s|we will|we should|I will|I'm going to|decided|decision|I think|I believe|my understanding is|the problem is|the key insight|evidence suggests|data shows|we found that|this means|plan is|next steps?:|action item:)", pad, re.I)
-    before = lead + pad * 145  # past the cap, see the assert below
+    before = lead + pad * ((5000 + 200) // len(pad) + 1)  # past the cap, see the assert below
     assert len(before) > 5000
+    assert "." not in pad, (
+        "the filler must stay a SINGLE sentence — a period splits it into one "
+        "candidate per repetition and puts this test back on the 300 s budget"
+    )
     past_cut = "evidence suggests the fix landed."
     content = before + past_cut
     res = sdk.capture_session([{"role": "user", "content": content}])
@@ -2630,7 +2758,10 @@ def test_extract_session_v2_supersession_meta_warnings(sdk, monkeypatch):
     rows = sdk._get_proj().g.query(
         "MATCH (o:Object {name:$n}) RETURN o.status",
         params={"n": "approach-A"}).result_set
-    assert rows and rows[0][0] == "live", \
+    # #9974 R1: no fold fired, so no status was written at all — an absent
+    # status READS live via `live._terminal_excluded`, and `is None` is the
+    # precise form (a fold would have stored `'superseded'`).
+    assert rows and rows[0][0] is None, \
         (f"fold must never fire for a dangling successor: {rows!r}")
 
 
@@ -2887,7 +3018,7 @@ def test_extract_session_v2_pt_ref_meta_warnings(sdk, monkeypatch):
         params={"old": old}).result_set
     assert rows and rows[0][0] == "live", \
         ("old point must stay live — a CORRECTS edge to a nonexistent "
-         f"successor would be dangling: {rows!r}")
+         f"successor would be dangling: {rows!r}")  # :Point keeps its seed
 
 
 def test_apply_supersessions_legacy_idless_object_is_refused_not_folded(sdk):
@@ -2941,6 +3072,9 @@ def test_apply_supersessions_legacy_idless_object_is_refused_not_folded(sdk):
         session_id="sess_legacy", warn=warns.append)
     assert applied == 0, \
         "an id-less target has no id to address — the record is refused"
+    # NOTE (#9974 R1 review P2-2): this fixture raw-writes `status:'live'`, so the
+    # literal is the honest expectation here — a lenient `or "live"` would stop
+    # discriminating the value this leg asserts about.
     assert _entity_fold_state(proj, "legacy-X") == ("live", None), \
         ("the target must be left untouched: a fold with no journal line is "
          "not restorable by a rebuild")
@@ -3054,6 +3188,8 @@ def test_apply_supersessions_prefers_id_match_over_same_string_name(sdk):
     n = proj.g.query(
         "MATCH (o:Object {name:$n}) RETURN o.status",
         params={"n": oid}).result_set
+    # The fixture writes this carrier with an explicit `status:'live'`, so the
+    # literal is honest here (a fold would store `'superseded'`).
     assert n and n[0][0] == "live", \
         f"name-match Object wrongly folded instead of the id match: {n!r}"
 
@@ -3200,7 +3336,10 @@ def test_apply_supersessions_divergent_successor_keeps_first(sdk):
     assert _object_superseded_events(proj) == 1, \
         "rejected conflict must not journal a second event"
     c_state = _entity_fold_state(proj, "successor-C")
-    assert c_state is not None and (c_state[0] or "live") == "live", c_state
+    # #9974 R1: STRICT — `(x or "live") == "live"` passes under the very
+    # defect this PR removes (a re-fabricated birth stores `'live'`); the
+    # absent birth is `None`, and a fold would store `'superseded'`.
+    assert c_state is not None and c_state[0] is None, c_state
     assert c_state[1] is None, f"successor-C must never be folded: {c_state}"
 
 
@@ -3328,7 +3467,7 @@ def test_apply_supersessions_chain_converges_both_orders(sdk):
             f"[{prefix}] payload-literal A.supersededBy=B: {a}"
         assert b == ("superseded", prefix + "-C"), \
             f"[{prefix}] B.supersededBy=C: {b}"
-        assert c is not None and (c[0] or "live") == "live" \
+        assert c is not None and c[0] is None \
             and c[1] is None, f"[{prefix}] C must stay live: {c}"
     # journal parity: both arms journaled exactly one ObjectSuperseded per
     # fold (fold-A/rev-A then fold-B/rev-B — no skip line for either).
@@ -3374,7 +3513,7 @@ def test_apply_supersessions_chain_three_link_reverse(sdk):
     assert _entity_fold_state(proj, "t3-B") == ("superseded", "t3-C")
     assert _entity_fold_state(proj, "t3-C") == ("superseded", "t3-D")
     d = _entity_fold_state(proj, "t3-D")
-    assert d is not None and (d[0] or "live") == "live" and d[1] is None, d
+    assert d is not None and d[0] is None and d[1] is None, d  # #9974 R1
 
 
 def test_apply_supersessions_chain_mixed_id_name_forms(sdk):
@@ -3478,7 +3617,7 @@ def test_apply_supersessions_inpayload_identical_to_guard_h(sdk):
     assert applied == 0, \
         f"A must stay live (gate is the discriminator): {warns}"
     a = _entity_fold_state(proj, "gh-A")
-    assert a is not None and (a[0] or "live") == "live" and a[1] is None, a
+    assert a is not None and a[0] is None and a[1] is None, a  # #9974 R1
     assert _entity_fold_state(proj, "gh-B") == ("superseded", "gh-C")
     assert _object_superseded_events(proj) == 1, \
         "no second journal — B→C deduped silently, A→B skipped"
@@ -3515,10 +3654,10 @@ def test_apply_supersessions_cycle_deterministic(sdk):
     ])
     assert _entity_fold_state(proj, "c1-A") == ("superseded", "c1-B")
     c1b = _entity_fold_state(proj, "c1-B")
-    assert c1b is not None and (c1b[0] or "live") == "live", c1b
+    assert c1b is not None and c1b[0] is None, c1b  # #9974 R1
     assert _entity_fold_state(proj, "c2-B") == ("superseded", "c2-A")
     c2a = _entity_fold_state(proj, "c2-A")
-    assert c2a is not None and (c2a[0] or "live") == "live", c2a
+    assert c2a is not None and c2a[0] is None, c2a  # #9974 R1
 
 
 def test_apply_supersessions_same_ref_stability(sdk):
@@ -3628,7 +3767,7 @@ def test_apply_supersessions_cycle_predecessor_hoisted(sdk):
     assert _entity_fold_state(proj, "h3-C") == ("superseded", "h3-A")
     assert _entity_fold_state(proj, "h3-A") == ("superseded", "h3-B")
     b = _entity_fold_state(proj, "h3-B")
-    assert b is not None and (b[0] or "live") == "live", b
+    assert b is not None and b[0] is None, b  # #9974 R1
 
 
 def test_apply_supersessions_chain_idless_target_is_refused(sdk):
@@ -3672,6 +3811,7 @@ def test_apply_supersessions_chain_idless_target_is_refused(sdk):
     assert len(warns) == 1 and "it-mid" in warns[0] and "#3590" in warns[0], \
         warns
     # the refusal is LOCAL: the id-less head is untouched...
+    # The fixture raw-writes `it-mid` with `status:'live'` — the literal holds.
     assert _entity_fold_state(proj, "it-mid") == ("live", None), \
         _entity_fold_state(proj, "it-mid")
     # ...and the addressable link in the same chain still lands.
@@ -3761,7 +3901,7 @@ def test_apply_supersessions_cycle_and_entangled_reverse_emission_literal(sdk):
     assert c == ("superseded", "cy3-A"), c
     assert _entity_fold_state(proj, "cy3-A") == ("superseded", "cy3-B")
     b_live = _entity_fold_state(proj, "cy3-B")
-    assert b_live is not None and (b_live[0] or "live") == "live", b_live
+    assert b_live is not None and b_live[0] is None, b_live  # #9974 R1
 
     # (b) entangled reverse [B→C, B→A, A→B] — A stays live (emission-literal)
     _seed("re1")
@@ -3776,7 +3916,7 @@ def test_apply_supersessions_cycle_and_entangled_reverse_emission_literal(sdk):
     b = _entity_fold_state(proj, "re1-B")
     assert b == ("superseded", "re1-C"), b
     a_b = _entity_fold_state(proj, "re1-A")
-    assert a_b is not None and (a_b[0] or "live") == "live", a_b
+    assert a_b is not None and a_b[0] is None, a_b  # #9974 R1
 
     # (c) entangled [B→A, B→C, A→B] — garbage claim wins the middle (literal)
     _seed("re2")
@@ -3791,7 +3931,7 @@ def test_apply_supersessions_cycle_and_entangled_reverse_emission_literal(sdk):
     b2 = _entity_fold_state(proj, "re2-B")
     assert b2 == ("superseded", "re2-A"), b2
     a_c = _entity_fold_state(proj, "re2-A")
-    assert a_c is not None and (a_c[0] or "live") == "live", a_c
+    assert a_c is not None and a_c[0] is None, a_c  # #9974 R1
 
 
 def test_apply_supersessions_self_supersession_skipped(sdk):
@@ -3821,7 +3961,12 @@ def test_apply_supersessions_self_supersession_skipped(sdk):
     assert applied == 0, "self-supersession must never apply"
     assert any("self-supersession" in w for w in warns), warns
     state = _entity_fold_state(proj, "plan-X")
-    assert state == ("live", None), \
+    # #9974 R1: ``plan-X`` was created with no status, so its birth status is
+    # ABSENT, not the fabricated ``'live'`` the fold used to seed. ``(None,
+    # None)`` keeps BOTH claims of this leg discriminating: a self-fold reads
+    # ``('superseded', 'plan-X')``, and a reinstated fabrication reads
+    # ``('live', None)``.
+    assert state == (None, None), \
         f"self-supersession folded plan-X onto itself: {state!r}"
     assert _object_superseded_events(proj) == 0, \
         "no ObjectSuperseded may be journaled for a self-supersession"
@@ -3853,7 +3998,7 @@ def test_apply_supersessions_pt_self_supersession_skipped(sdk):
         "MATCH (p:Point {id:$id}) RETURN p.status",
         params={"id": pid}).result_set
     assert rows and rows[0][0] == "live", \
-        "the self-referencing point must stay live"
+        "the self-referencing point must stay live"  # :Point keeps its seed
 
 
 def test_apply_supersessions_mixed_id_name_self_alias_skipped(sdk):
@@ -3886,7 +4031,9 @@ def test_apply_supersessions_mixed_id_name_self_alias_skipped(sdk):
     assert applied == 0, "id/name-aliased self-supersession must never apply"
     assert any("self-supersession" in w for w in warns), warns
     state = _entity_fold_state(proj, "plan-X")
-    assert state == ("live", None), \
+    # #9974 R1: absent birth status (see the self-supersession leg above) —
+    # ``(None, None)`` reds both on a fold and on a reinstated fabrication.
+    assert state == (None, None), \
         f"mixed alias folded plan-X onto itself: {state!r}"
 
 
@@ -3932,6 +4079,7 @@ def test_apply_supersessions_dup_name_successor_not_self(sdk):
     by_id = {r[0]: (r[1], r[2]) for r in rows}
     assert by_id[id_a] == ("superseded", "plan-X"), \
         f"A must fold to superseded by plan-X: {by_id}"
+    # `obj-planx-dup-b` is raw-written with `status:'live'` — the literal holds.
     assert by_id["obj-planx-dup-b"] == ("live", None), \
         f"B (the distinct successor) must stay live: {by_id}"
 
@@ -3968,7 +4116,9 @@ def test_apply_supersessions_dead_dup_candidate_skipped(sdk):
     rows = proj.g.query(
         "MATCH (o:Object {name:'plan-X'}) RETURN o.id, o.status").result_set
     by_id = {r[0]: r[1] for r in rows}
-    assert by_id[id_a] == "live", \
+    # #9974 R1: `A` is born status-less (derived-or-absent) and an absent
+    # status READS live; a fold would store `'superseded'` and red here.
+    assert by_id[id_a] is None, \
         f"A must stay live — its only successor carrier is dead: {by_id}"
     assert by_id["obj-planx-dead"] == "superseded", by_id
 
@@ -4002,7 +4152,8 @@ def test_apply_supersessions_deprecated_carrier_skipped(sdk):
     rows = proj.g.query(
         "MATCH (o:Object {name:'plan-X'}) RETURN o.id, o.status").result_set
     by_id = {r[0]: r[1] for r in rows}
-    assert by_id[id_a] == "live", \
+    # #9974 R1: derived-or-absent — absent READS live; a fold still reds.
+    assert by_id[id_a] is None, \
         f"A must stay live — its only other carrier is deprecated: {by_id}"
 
 
@@ -4035,7 +4186,8 @@ def test_apply_supersessions_idless_live_carrier_skipped(sdk):
     rows = proj.g.query(
         "MATCH (o:Object {name:'plan-X'}) RETURN o.id, o.status").result_set
     by_id = {r[0]: r[1] for r in rows}
-    assert by_id[id_a] == "live", \
+    # #9974 R1: derived-or-absent — absent READS live; a fold still reds.
+    assert by_id[id_a] is None, \
         f"A must stay live — its only other carrier is id-less: {by_id}"
 
 
@@ -7797,16 +7949,27 @@ def test_apply_supersessions_concurrent_divergent_fold_one_wins(
         # premise assert turns any aliasing into a deterministic pre-race
         # failure instead of a ~4% post-race flake. If the redirect ever
         # splits, every run fails HERE loudly.
+        #
+        # ⚠️ The liveness half goes through `live._live_only`, the product's OWN
+        # NULL-tolerant predicate — NOT the literal `{status:'live'}` this leg
+        # used to spell. Since #9974 R1 an Object is born with NO stored status
+        # (derived-or-absent) and an absent status READS live, so a literal
+        # equality matches ZERO rows for every newborn entity (`null` is never
+        # `= 'live'`; a WHERE that is not `true` is false). The literal form was
+        # a second, divergent copy of the liveness rule that silently stopped
+        # agreeing with the product's.
         for label, proj in (("proj1", proj1), ("proj2", proj2)):
             n = proj.g.query(
                 "MATCH (o:Object {name:'race-O'}) RETURN count(o)",
             ).result_set[0][0]
             assert n == 1, f"{label} must see exactly ONE race-O: {n}"
         n1 = proj1.g.query(
-            "MATCH (o:Object {name:'race-O', status:'live'}) RETURN count(o)",
+            "MATCH (o:Object {name:'race-O'}) "
+            f"WHERE {_live_only('o.status')} RETURN count(o)",
         ).result_set[0][0]
         n2 = proj2.g.query(
-            "MATCH (o:Object {name:'race-O', status:'live'}) RETURN count(o)",
+            "MATCH (o:Object {name:'race-O'}) "
+            f"WHERE {_live_only('o.status')} RETURN count(o)",
         ).result_set[0][0]
         assert n1 == 1 and n2 == 1, (
             f"both projs must see the SAME live race-O: proj1={n1} "

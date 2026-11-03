@@ -373,6 +373,50 @@ def vector_search(sdk: TortoiseSDK, query: str, limit: int) -> list[tuple[str, f
 #: ~40k-token floods despite sr@5=1.0). Knob-exposed via ``--tr-top-k``.
 DEFAULT_TR_TOP_K = 12
 
+#: #10538: the temporal leg's PLACEMENT knob — ``temporal_leg_fusion_order``
+#: has always accepted ``placement`` (``"tail"`` shipped, ``"head"`` the
+#: rank-0 counterfactual) but this module never forwarded it, so the
+#: counterfactual ``tortoise/temporal_leg.py``'s own docstring declares
+#: reproducible for the eval lane — *"`--placement head` on the replay keeps
+#: the counterfactual reproducible for the eval lane, where the base is not
+#: near-ceiling — that A/B belongs there, not in this default"* — was
+#: UNREACHABLE on the eval lane. Measured geometry at #10538
+#: (``/tmp/probe_10538_geom.py``, 2026-11-02, ``window=12``/``limit=2``):
+#: ``tail`` puts the picks at fused ranks **10–11**, ``head`` at **0–1** —
+#: so ``recall_all@5`` (graded on ``hits[:5]``) is structurally unreachable
+#: under ``tail`` and reachable under ``head``. Which of the two ships is an
+#: OPEN decision (#10538 comment 6574199000); this knob only makes the A/B
+#: RUNNABLE, it does not answer it. Default is ``"tail"``, so every existing
+#: number is produced by the unchanged path.
+TEMPORAL_LEG_PLACEMENTS = ("tail", "head")
+DEFAULT_TEMPORAL_LEG_PLACEMENT = "tail"
+
+
+def resolve_temporal_leg_placement(explicit: str | None = None,
+                                   env: str | None = None) -> str:
+    """Resolve the temporal leg's placement: explicit arg > env > ``"tail"``.
+
+    Fail-safe by construction: anything that is not one of
+    :data:`TEMPORAL_LEG_PLACEMENTS` (case/space-insensitive) collapses to the
+    SHIPPED ``"tail"`` — a typo in a run's env must never silently switch the
+    shipped arm to the rank-0 counterfactual, because that would make the
+    run's receipt attribute a head-placement number to the shipped path.
+    """
+    for candidate in (explicit, env):
+        if candidate is None:
+            continue
+        value = str(candidate).strip().lower()
+        if value in TEMPORAL_LEG_PLACEMENTS:
+            return value
+        if candidate is explicit:
+            # An INVALID explicit value is a caller bug, not a request to
+            # consult the environment: falling through would let a stale
+            # exported ``TORTOISE_LME_TEMPORAL_LEG_PLACEMENT`` silently
+            # decide the arm for a call that explicitly named a placement it
+            # got wrong. Fail safe to the shipped default instead.
+            return DEFAULT_TEMPORAL_LEG_PLACEMENT
+    return DEFAULT_TEMPORAL_LEG_PLACEMENT
+
 #: #2976: TR session-COMPLETION budget (the granularity half). An admitted
 #: session must be the WHOLE session the oracle serves, not the fragments
 #: retrieval happened to surface — the measured evidence is that even the arm
@@ -403,8 +447,9 @@ class TimeConstraint:
     shape compares ("the dog bed for Max", "the training pads for Luna").
     Additive — the pre-#2976 consumers read only kind/start/end, so every
     existing shape is unchanged. An empty tuple means no comparison anchor
-    was recovered; the #2976 temporal leg REQUIRES a matched anchor and
-    stays inert in that case (it never promotes on date-spread alone).
+    was recovered; the #2976 temporal leg then promotes on session clustering
+    inside the resolved date window (#10538), and stays inert when there is
+    no window either — it never promotes on date-spread alone.
     """
     kind: str | None
     start: str | None = None
@@ -501,8 +546,11 @@ def _extract_anchors(t: str) -> tuple[str, ...]:
     single content token and are DROPPED — a one-token anchor is claimed by
     any candidate carrying that word (noise). A phrase whose tokens are ALL
     stopwords (deictics like "today") is dropped for the same reason.
-    Returns ``()`` when nothing usable remains — the leg then stays inert
-    (it requires a matched anchor; it never promotes on date-spread alone).
+    Returns ``()`` when nothing usable remains. With no anchors the leg is
+    inert UNLESS the caller also supplies a ``date_window`` AND the visible
+    slots are session-clustered (#10538) — a date-range question promotes on
+    that widened gate. Anchors alone, with no window, never promote on
+    date-spread alone (the #2976 no-harm property).
     """
     from tortoise.temporal_leg import content_tokens
 
@@ -855,8 +903,11 @@ def _annotate_hits(hits: list[dict], props: dict, dates: list[str]) -> list[dict
             # un-datable END (``END_UNKNOWN`` — the owner ruling of
             # 2026-10-25, ONTOLOGY §4.7), and the search payload already
             # normalises absence to ``None``/an omitted key
-            # (``search_engine.fetch_point_epistemic_state`` uses ``or None``
-            # and emits ``end_state`` only for a real window). Coercing here
+            # (``search_engine.fetch_point_epistemic_state`` normalises an
+            # ABSENT bound to ``None`` — only absence and the blank "no bound"
+            # spelling collapse, a stored number is kept at any value (#9741
+            # review P3-2) — and emits ``end_state`` only for a real window).
+            # Coercing here
             # minted an end nobody wrote, which ``is_stale_entry`` then reads
             # as ENDED at every ``question_date`` — every undated eval hit
             # ranked stale and the C6 ``prefer_latest_order`` arm degraded to
@@ -1398,9 +1449,16 @@ def retrieve_for_question(
     # ``temporal_leg_weight`` / ``temporal_leg_limit`` override the leg's
     # fusion weight and depth (env ``TORTOISE_LME_TEMPORAL_LEG_WEIGHT`` /
     # ``TORTOISE_LME_TEMPORAL_LEG_LIMIT``).
+    # ``temporal_leg_placement`` (#10538) selects ``"tail"`` (shipped,
+    # structural no-harm) or ``"head"`` (the rank-0 counterfactual) via
+    # :func:`resolve_temporal_leg_placement` (env
+    # ``TORTOISE_LME_TEMPORAL_LEG_PLACEMENT``); the resolved value is echoed
+    # in ``temporal_leg_stats`` because a head run and a tail run that are
+    # not distinguishable in the receipt are not comparable numbers.
     temporal_leg: bool | None = None,
     temporal_leg_weight: float | None = None,
     temporal_leg_limit: int | None = None,
+    temporal_leg_placement: str | None = None,
     # R6 (#1545): rerank knobs — the post-fusion cross-encoder + MMR stage,
     # OFF by default (the V3 baseline path is byte-identical; no rerank keys
     # off-path, D2). ``rerank`` tri-state: True/False explicit, None = env
@@ -1930,7 +1988,10 @@ def retrieve_for_question(
     #
     # Fail-safe OFF: explicit flag > env ``TORTOISE_LME_TEMPORAL_LEG`` >
     # OFF; a question with no temporal constraint, a non-TR question, or a
-    # pool with no dated/anchor-relevant candidates leaves the fused order
+    # pool with no dated candidates (or no anchor-relevant candidates AND no
+    # date window -- #10538's window arm promotes anchor-less pools whose
+    # visible slots are session-clustered, see
+    # tests/test_temporal_leg_date_window_10538.py) leaves the fused order
     # byte-identical. ──
     if temporal_leg is not None:
         temporal_leg_on = temporal_leg
@@ -1978,11 +2039,51 @@ def retrieve_for_question(
         # stats block is the ON/OFF reconstruction surface — never report a
         # knob value that was silently clamped away).
         _tl_limit = effective_promotion_budget(effective_top_k, _tl_limit)
+        # #10538: a question that names a DATE RANGE instead of comparison
+        # anchors targets the pool by that range. Resolve the SAME inclusive
+        # ISO bounds the filter above resolved (one arithmetic, one resolver),
+        # and hand them to the leg, which then promotes on session clustering
+        # inside the range.
+        #
+        # ⚠️ HONEST NOTE (review cycle 2): because these bounds are the ones
+        # ``_apply_time_window`` already filtered on, every surviving hit is
+        # in-window, so this window does NOT select a subset here — the
+        # clustering condition inside ``temporal_leg_order`` is the sole
+        # targeting signal on the wired path. That holds for the
+        # ``tr_window_fallback`` pool as well, which is why it is NOT a second
+        # place the window selects: that pool is unfiltered because the filter
+        # EMPTIED it (``tr_window_fallback`` is set only when
+        # ``_apply_time_window`` returned ``[]``, i.e. no DATED hit was
+        # in-window), and both seams resolve their bounds from the same
+        # ``facet_window_bounds`` call with the same anchor — so
+        # ``_in_date_window`` is false for every promotable candidate there
+        # too and the arm cannot fire on it by construction (review cycle 6,
+        # #10549: the earlier text claimed reachability here that does not
+        # exist; pinned by
+        # ``test_the_fallback_pool_cannot_fire_the_window_arm``). The window
+        # carries reach only for a caller that passes a span the filter has
+        # not already applied.
+        # ``ordering`` has no computable bound (`facet_window_bounds` returns
+        # ``None``) → ``None`` → byte-identical to the pre-#10538 leg.
+        _tl_date_window = None
+        if tr_constraint.kind in ("interval", "recency"):
+            _tl_date_window = facet_window_bounds(
+                tr_constraint.kind, tr_constraint.start, tr_constraint.end,
+                None, anchor=question_date)
+        # #10538: forward the placement knob so the rank-0 counterfactual the
+        # module docstring parks on the eval lane is actually reachable here
+        # (it needs no new code there — ``temporal_leg_fusion_order`` already
+        # implements it — only this forward). Resolved fail-safe to the
+        # shipped ``"tail"``, so the default path is byte-identical.
+        _tl_placement = resolve_temporal_leg_placement(
+            temporal_leg_placement,
+            os.environ.get("TORTOISE_LME_TEMPORAL_LEG_PLACEMENT"))
         _tl_order, _tl_picks = temporal_leg_fusion_order(
             annotated, anchors=tr_constraint.anchors,
             window=effective_top_k, limit=_tl_limit,
             bucket_cap=DEFAULT_TEMPORAL_LEG_BUCKET_CAP,
-            weight=_tl_weight)
+            weight=_tl_weight, date_window=_tl_date_window,
+            placement=_tl_placement)
         _tl_dated = sum(1 for h in annotated if h.get("session_date"))
         temporal_leg_stats = {
             "on": True,
@@ -1990,10 +2091,23 @@ def retrieve_for_question(
             "kind": tr_constraint.kind,
             "anchors": list(tr_constraint.anchors),
             "picks": len(_tl_picks),
-            "ceiling": max(effective_top_k - _tl_limit, 0),
+            # #10538: the ceiling the fused caller ACTUALLY used — ``0`` on
+            # the head arm, because that arm fuses the picks at leg ranks
+            # 0..N by passing ``head_excl = 0`` (``tortoise/temporal_leg.py``).
+            # Reporting the tail ceiling on a head row would put two
+            # contradicting fields on exactly the row the ``placement`` key
+            # exists to disambiguate, and would break this block's own rule
+            # (report the effective value, never a knob the caller overrode).
+            "ceiling": 0 if _tl_placement == "head"
+                       else max(effective_top_k - _tl_limit, 0),
             "dated": _tl_dated,
             "leg": list(_tl_picks),
             "weight": _tl_weight,
+            # #10538: which arm produced this row. A ``head`` run and a
+            # ``tail`` run are not comparable numbers, so the receipt must
+            # carry the arm (the same reason the CLAMPED budget above is
+            # reported rather than the knob value).
+            "placement": _tl_placement,
         }
         if _tl_picks:
             _tl_by_id = {h["id"]: h for h in annotated}
@@ -2002,14 +2116,16 @@ def retrieve_for_question(
             legs.append({"leg": "temporal", "ran": True, "degraded": False,
                          "reason": None, "count": len(_tl_picks)})
         else:
-            # honest trace reason — the five distinct empty-leg causes
+            # honest trace reason — the six distinct empty-leg causes
+            # (``no_window_candidates`` is the #10538 windowed miss)
             # (never launder a budget/anchor/weight miss as "no dates").
             legs.append({"leg": "temporal", "ran": True, "degraded": False,
                          "reason": temporal_leg_empty_reason(
                              dated=_tl_dated,
                              anchors=len(tr_constraint.anchors),
                              weight=_tl_weight,
-                             budget=_tl_limit),
+                             budget=_tl_limit,
+                             date_window=bool(_tl_date_window)),
                          "count": 0})
 
     # ── deduped pool (the retrieval contract: ret["hits"] == pool) ──

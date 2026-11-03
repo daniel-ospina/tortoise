@@ -1061,7 +1061,11 @@ class _RlsCursor:
             self._rows = list(self._conn.narrative)
         elif "FROM public.point" in flat and "is_episodic IS TRUE" in flat:
             self._rows = list(self._conn.turn_rows)
-        elif "SELECT node_key, content, embedding, created_at, status" in flat:
+        elif ("SELECT node_key, content, embedding, created_at, status"
+              in flat):
+            # #8488 scope 1: the prior read also carries ``props->>'embeddingText'``
+            # (the enriched text the vector describes), so the configured rows
+            # carry it as their sixth column.
             self._rows = list(self._conn.prior_rows)
         else:
             self._rows = []
@@ -1515,6 +1519,177 @@ def test_the_prior_vector_read_is_scoped_and_returns_what_the_record_holds():
         created_at="2026-01-01T00:00:00+00:00", status="established")}, got
     # The scope is what the read asked for, and it asked on ITS OWN connection.
     assert any("set_config" in s for s in conn.statements), conn.statements
+
+
+def test_the_prior_read_carries_the_enriched_text_the_vector_describes():
+    """#8488 scope 1 (review round 3, P1): the OTHER half of the preserve rule.
+
+    ``_TURN_WRITE_CYPHER``'s preserve arm compares ``coalesce(prior_et,'')`` as
+    well as ``prior_ch``, because since schema A′ the vector is a function of
+    ``embeddingText`` when the row holds one. The record lane reads its prior
+    values instead of reading them back, so this read is the only source of
+    ``prior_et`` there — without it the record lane can compare content alone
+    and keep a vector for a text it no longer stores.
+    """
+    rows = (("sess_t0", "[user] hi", [0.5, 0.5], "T", "established",
+             "[user] the auth flow broke"),)
+    got = record_read.turn_prior_vectors(
+        _RlsConn(org_id="org-1", prior_rows=rows),
+        org_id="org-1", graph_id="g-1", session_id="sess",
+        turn_ids=["sess_t0"])
+    assert got["sess_t0"].embedding_text == "[user] the auth flow broke", got
+    # A row that carries none (the flag was off) is ``None``, never ``""`` —
+    # the writer distinguishes them exactly as the Cypher's coalesce does.
+    erased = record_read.turn_prior_vectors(
+        _RlsConn(org_id="org-1",
+                 prior_rows=(("sess_t0", "[user] hi", None, "T", "draft",
+                              None),)),
+        org_id="org-1", graph_id="g-1", session_id="sess",
+        turn_ids=["sess_t0"])
+    assert erased["sess_t0"].embedding_text is None, erased
+
+
+def test_a_record_recapture_with_a_different_rewrite_clears_the_vector(
+        sdk, monkeypatch):
+    """#4194 on the RECORD lane: a vector for a text the row no longer holds is
+    the dense-leg lie — the record is the system of record, so it may not keep
+    what the graph lane clears (review round 3, P1).
+
+    Reachable exactly as the graph-lane twin is: ``content`` unchanged, the
+    embedder unavailable for the re-capture, and the rewrite DIFFERENT. Pre-fix
+    the record arm compared content alone, so it preserved the stored vector
+    beside a NEW ``embeddingText`` — and ``embedding_preserved`` then withholds
+    the identity stamps, so nothing downstream could notice.
+    """
+    monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://unused/record")
+    seam = _RecordSeam(_APPLIED)
+    monkeypatch.setattr("tortoise.record_writer.write_live_record", seam)
+    monkeypatch.setattr(
+        sdk_mod, "_record_prior_vectors",
+        lambda *a, **k: {"kept_t0": record_read.PriorTurn(
+            content="[user] same text", embedding=[0.1, 0.2, 0.3],
+            created_at="2026-01-01T00:00:00+00:00", status="established",
+            embedding_text="[user] rewrite A")})
+    _bind_tenant(sdk)
+    _capture(sdk, "kept", [{"role": "user", "content": "same text"}],
+             turn_embs=[None],
+             enrich_fn=lambda texts: ["[user] rewrite B"])
+    snapshot = seam.snapshots()
+    assert snapshot and snapshot[0]["embeddingText"] == "[user] rewrite B"
+    assert snapshot[0]["embedding"] is None, (
+        "the record kept a vector computed from the PREVIOUS rewrite beside the "
+        "new embeddingText — the #4194 lie (prior_et half missing from the "
+        "record arm)")
+    assert snapshot[0].get("embedding_preserved") is None
+
+
+def test_the_record_preserve_arm_still_holds_when_BOTH_halves_are_unchanged(
+        sdk, monkeypatch):
+    """The other direction of the same guard: identical rewrite ⇒ PRESERVE.
+
+    Without this, the leg above is satisfied by clearing unconditionally — which
+    would throw away a perfectly valid vector on every keyword-only install.
+    """
+    monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://unused/record")
+    seam = _RecordSeam(_APPLIED)
+    monkeypatch.setattr("tortoise.record_writer.write_live_record", seam)
+    monkeypatch.setattr(
+        sdk_mod, "_record_prior_vectors",
+        lambda *a, **k: {"kept_t0": record_read.PriorTurn(
+            content="[user] same text", embedding=[0.1, 0.2, 0.3],
+            created_at="2026-01-01T00:00:00+00:00", status="established",
+            embedding_text="[user] rewrite A")})
+    _bind_tenant(sdk)
+    _capture(sdk, "kept", [{"role": "user", "content": "same text"}],
+             turn_embs=[None],
+             enrich_fn=lambda texts: ["[user] rewrite A"])
+    snapshot = seam.snapshots()
+    assert snapshot and snapshot[0]["embedding"] == [0.1, 0.2, 0.3], snapshot
+    assert snapshot[0].get("embedding_preserved") is True
+
+
+def test_a_record_ON_to_OFF_recapture_journals_the_enriched_texts_REMOVAL(
+        sdk, monkeypatch):
+    """#10523 review round 4 (P1): the record lane must be able to REMOVE it.
+
+    The graph lane is absolute — `t.embeddingText = turn.et` with `et` NULL
+    removes the property — so an ON→OFF re-capture reverts the node to the
+    raw-only shape. The record's upsert MERGES its `props` tail
+    (`point.props || EXCLUDED.props`), and an ABSENT key leaves the left value
+    intact, so OMITTING `embeddingText` (what this arm used to do) cannot
+    remove it: the row kept the previous capture's enriched text beside a
+    vector computed from the raw `content`, which is the #4194 lie the whole
+    schema A′ design exists to prevent — on the store that IS the system of
+    record for these turns.
+
+    So the writer journals the key EXPLICITLY as JSON null for a turn whose row
+    holds one: `jsonb ||` overrides a present key with null, and
+    `props->>'embeddingText'` then reads SQL NULL, which the replay's
+    `n.embeddingText=$et` treats as a removal — the same absolute shape the
+    graph lane's `SET …=NULL` has.
+
+    Pre-fix this is red with no such key in the snapshot at all, and the row
+    keeps text no vector describes.
+    """
+    monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://unused/record")
+    seam = _RecordSeam(_APPLIED)
+    monkeypatch.setattr("tortoise.record_writer.write_live_record", seam)
+    monkeypatch.setattr(
+        sdk_mod, "_record_prior_vectors",
+        lambda *a, **k: {"kept_t0": record_read.PriorTurn(
+            content="[user] same text", embedding=[0.1, 0.2, 0.3],
+            created_at="2026-01-01T00:00:00+00:00", status="established",
+            embedding_text="[user] rewrite A")})
+    _bind_tenant(sdk)
+    # ON → OFF: the gate is off (or the extractor model could not be built and
+    # `_capture_enriched_texts` answered ``None``) while the row holds the
+    # previous capture's enriched text. The embedder is gone too, so the write's
+    # preserve arm is the one that decides the vector.
+    _capture(sdk, "kept", [{"role": "user", "content": "same text"}],
+             turn_embs=[None], enrich_fn=lambda texts: None)
+    snapshot = seam.snapshots()
+    assert snapshot, "the capture journalled no turn at all — not a test"
+    assert "embeddingText" in snapshot[0], (
+        "the OFF snapshot OMITTED embeddingText, and the record's tail is "
+        "MERGED — so the previous capture's enriched text survives beside a "
+        "vector computed from the raw content (the #4194 lie the graph lane "
+        "clears)")
+    assert snapshot[0]["embeddingText"] is None, snapshot[0]
+    # …and the vector half agrees: the stored vector described a text the row
+    # no longer claims, so it is CLEARED rather than preserved.
+    assert snapshot[0]["embedding"] is None, snapshot[0]
+    assert snapshot[0].get("embedding_preserved") is None, snapshot[0]
+
+
+def test_a_record_OFF_capture_emits_no_embeddingText_for_a_row_with_none(
+        sdk, monkeypatch):
+    """The other half of the same arm: OFF stays byte-identical when the row
+    never carried an enriched text.
+
+    Without this, the leg above is satisfied by journalling `embeddingText:
+    null` unconditionally — which would put a key on the OFF snapshot that
+    pre-#8488 never had, in the exact shape this writer's OFF path promises to
+    keep byte-identical (`TURNS_SNAPSHOT_OPTIONAL_KEYS`).
+    """
+    monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://unused/record")
+    seam = _RecordSeam(_APPLIED)
+    monkeypatch.setattr("tortoise.record_writer.write_live_record", seam)
+    monkeypatch.setattr(
+        sdk_mod, "_record_prior_vectors",
+        lambda *a, **k: {"kept_t0": record_read.PriorTurn(
+            content="[user] same text", embedding=[0.1, 0.2, 0.3],
+            created_at="2026-01-01T00:00:00+00:00", status="established",
+            embedding_text=None)})
+    _bind_tenant(sdk)
+    _capture(sdk, "kept", [{"role": "user", "content": "same text"}],
+             turn_embs=[None], enrich_fn=lambda texts: None)
+    snapshot = seam.snapshots()
+    assert snapshot, "the capture journalled no turn at all — not a test"
+    assert "embeddingText" not in snapshot[0], (
+        "the OFF snapshot named embeddingText for a row that never held one — "
+        "the record lane's OFF shape is no longer the pre-#8488 key set")
+    # The vector is still preserved: nothing about it changed.
+    assert snapshot[0]["embedding"] == [0.1, 0.2, 0.3], snapshot[0]
 
 
 def _imported_from(target: str) -> dict[str, set[str]]:
@@ -2181,23 +2356,84 @@ class _RecordingSeam:
         return out
 
 
+_TEXT_PROPERTIES = ("c", "content", "text", "embeddingText", "payload", "props")
+# ONE list, used to BUILD the query below, so the scan cannot drift from the
+# population it claims. `tests/test_10017_record_carrier.py::_TEXT_SCAN` is the
+# second copy; a change here has to reach both.
+_TEXT_SCAN = (
+    "MATCH (n) WHERE "
+    + " OR ".join(f"n.{prop} CONTAINS $needle" for prop in _TEXT_PROPERTIES)
+    + " RETURN labels(n)[0], coalesce(n.id, '')")
+
+#: Every property `_TURN_WRITE_CYPHER` fills FROM the turn row, and the turn-row
+#: field it is filled from. `_turn_text_properties` compares against THIS map as
+#: an EQUALITY, so a new or renamed turn-sourced assignment has to be classified
+#: here (does it carry the turn's text?) before it can land. Without that, the
+#: classification below is a hardcoded allow-list a new text carrier slips past.
+_TURN_WRITE_FIELDS = {
+    "content": "c",         # the turn's transcript
+    "embeddingText": "et",  # the enriched text the vector describes
+    "pointKind": "k",
+    "speaker": "speaker",
+    "content_hash": "ch",
+}
+
+#: The turn-row fields that carry TEXT — the others are kind/speaker/bookkeeping,
+#: so theirs are not properties the text scan owes coverage for.
+_TURN_TEXT_SOURCES = frozenset({"c", "et"})
+
+
+def _turn_text_properties(cypher: str) -> set[str]:
+    """The graph properties `cypher` fills from a turn-row field that carries TEXT.
+
+    ⛔ THE EQUALITY IS THE GUARD, NOT THE SUBSET. `set() <= anything` is `True`,
+    so a subset check over a REGEX-EXTRACTED population passes whenever the
+    regex stops matching — and that is not hypothetical, it is measured: with
+    `_TURN_WRITE_CYPHER`'s `SET t.content=turn.c` respaced to `t.content =
+    turn.c` the pre-equality guard went GREEN (`1 passed`), i.e. the scan's tie
+    to the writer was gone and nothing said so. The same holds for a `SET t +=
+    $row` rebuild, for the SET list moving behind a helper, or for a text
+    carrier named `t.rawText=turn.raw` (filtered out by the source allow-list
+    before the comparison). A guard that reads as coverage and cannot fire is
+    the defect this one exists to catch, one level up — so the extracted pairs
+    must equal `_TURN_WRITE_FIELDS` EXACTLY: an empty extraction reddens, and so
+    does a turn-sourced property the map does not name.
+    """
+    pairs = set(re.findall(r"t\.(\w+)=turn\.(\w+)", cypher))
+    classified = set(_TURN_WRITE_FIELDS.items())
+    assert pairs == classified, (
+        "`_TURN_WRITE_CYPHER`'s turn-sourced SET list no longer matches the "
+        "classification this guard is built on, so it can no longer say which "
+        "of its properties carry the turn's TEXT: extracted "
+        f"{sorted(pairs)}, classified {sorted(classified)}. Re-read the "
+        "statement and classify the new/renamed assignment — if it carries "
+        "text, add its property to `_TEXT_PROPERTIES` (and to "
+        "`tests/test_10017_record_carrier.py::_TEXT_SCAN`, the second copy).")
+    return {prop for prop, src in pairs if src in _TURN_TEXT_SOURCES}
+
+
 def _graph_text_hits(proj, needle: str) -> list[tuple[str, str]]:
     """Every node whose stored text contains `needle`, with its label and id.
 
     The POPULATION is the point (acceptance bullet 5 — *"the property, not the
     call site"*): the scan is over every node, in every property the writers use
-    to carry text (`c` on a Point, `content`, `text`, and the JSON carriers
-    `payload`/`props` a `:GraphEvent` holds). It therefore does not depend on the
-    turn id derivation, the `:Point` label, `is_episodic`, or the `CONTAINS`
-    wiring — so a second write path that invents its own shape is inside the
-    population. `sdk._capture_turn_ids` (the sibling assertion) is not: it asks
-    one id space on one edge.
+    to carry text (`c` on a Point, `content`, `text`, `embeddingText` — the
+    enriched text the turn's vector describes, which `enrich_turn_texts`
+    falls back to the RAW stored text for — the JSON `payload` a `:GraphEvent`
+    holds, and `props` — which no turn writer emits but which a
+    caller-supplied props map can land, see the six-name note below). It does
+    not depend on the turn id derivation, the `:Point` label, `is_episodic`, or
+    the `CONTAINS` wiring: a write path that carries the text under one of those
+    six property NAMES is inside the population whatever label or wiring it
+    invents, and one that spells it under a SEVENTH name is outside it.
+
+    ⚠️ Read the population as six names, never as "any shape" —
+    `_assert_the_text_is_in_exactly_one_store` states it and names the escape.
+    `sdk._capture_turn_ids` (the sibling assertion) is not in the population at
+    all: it asks one id space on one edge.
     """
     return [tuple(row) for row in proj.g.query(
-        "MATCH (n) WHERE n.c CONTAINS $needle OR n.content CONTAINS $needle "
-        "OR n.text CONTAINS $needle OR n.payload CONTAINS $needle "
-        "OR n.props CONTAINS $needle "
-        "RETURN labels(n)[0], coalesce(n.id, '')",
+        _TEXT_SCAN,
         params={"needle": needle}).result_set]
 
 
@@ -2205,9 +2441,11 @@ def test_an_armed_capture_puts_the_turn_text_in_no_node_at_all(sdk, monkeypatch)
     """#10000 acceptance bullet 5 — the property, not the call site.
 
     The record is armed, so the graph must hold no node carrying a turn's text —
-    by ANY route: a new label, a different wiring, a `pointKind` of its own. The
-    sibling pin asserts the id space this writer uses is empty, which a second
-    writer with its own shape would not redden; this one scans the graph.
+    by any label, wiring or `pointKind` of its own, **among the six text
+    properties the helper below scans**. A seventh property name is outside that
+    population, and the helper says so; it is not extended here. The sibling pin
+    asserts the id space this writer uses is empty, which a second writer with
+    its own shape would not redden; this one scans the graph.
 
     Non-vacuity is the record half: the capture must hand the text to the record
     seam, or "nothing in the graph" would be satisfied by a capture that stored
@@ -2234,8 +2472,217 @@ def test_an_armed_capture_puts_the_turn_text_in_no_node_at_all(sdk, monkeypatch)
         "the armed capture handed no turn to the record — the graph is not "
         "carrying it either, so this assertion would prove nothing")
     proj = sdk._get_proj()
-    assert _graph_text_hits(proj, needle) == [], (
-        "a turn's text is in the graph while the record was armed")
+    _assert_the_text_is_in_exactly_one_store(proj, needle, in_graph=False)
+
+
+def _assert_the_text_is_in_exactly_one_store(proj, needle: str, *, in_graph: bool):
+    """The invariant EVERY arm shares: never two stores, and never none.
+
+    `test_an_armed_capture_puts_the_turn_text_in_no_node_at_all` states one
+    half — armed ⇒ the graph holds no node carrying the text. Stated alone that
+    is satisfiable by a capture that stored the transcript NOWHERE, which is
+    why it carries a non-vacuity leg for the record half.
+
+    ⛔ THE POPULATION SCAN IS THE SAME ON EVERY ARM, and that is the point. The
+    sibling arms are pinned by id space (`_capture_turn_ids`), which asks one id
+    derivation on one edge: a writer that invents its own shape would pass them
+    while putting prose in the graph. The scan is a `CONTAINS` over EVERY NODE —
+    the properties it searches are the six named below — so it does not care
+    which arm ran or who wrote the node.
+
+    ⛔ IT TAKES NO SEAM, AND THAT IS NOT AN OMISSION. A seam's
+    `point_contents()` reports what the record was **offered**, not what it
+    **committed** — `_RecordSeam(None)` appends the record and then refuses it.
+    So the record half is asserted by the CALLER, and it asserts one of THREE
+    things: the PRESENCE or the ABSENCE of the `TurnsRecorded` carrier, or a
+    specific `point_contents()` value. ⛔ The seam's `outcome` is its CONSTRUCTOR
+    ARGUMENT (`_RecordSeam.__init__`), so no caller can assert anything with it;
+    asserting on it proves nothing about the code under test.
+
+    ⚠️ **The population is SIX PROPERTY NAMES, not "every property"**: `c`,
+    `content`, `text`, `embeddingText`, `payload`, `props`. `embeddingText` is
+    the one this scan MISSED until the rebase that brought #8488/#10523 in:
+    `_TURN_WRITE_CYPHER` writes it (`t.embeddingText=turn.et`), and `turn.et`
+    is **the raw stored turn text** whenever enrichment had nothing to rewrite
+    with — `enrich_turn_texts` returns `list(windowed_texts)` for
+    `complete_fn is None`, and `_rewrite_one` falls back to the raw text on
+    every failure path. So on the arms that run this Cypher the transcript's
+    own text lands under a name the scan before this one did not look at;
+    measured at this head, a node written through the real writer path with
+    `embedding_texts=[<the needle>]` was invisible to the old query and is
+    found by this one.
+
+    `props` is the weakest of the six and it is in the list for a different
+    reason than the rest: **no turn writer emits it**, but a writer CAN land
+    text there — the caller-supplied props map is written as given
+    (`create_point` folds it into the CREATE's property map, `update_point`
+    merges it with `SET n += $props`), and `_coerce_props` re-stores a SCALAR
+    `props` value as a literal property named `props`. Measured on this host at
+    this head: `create_point("statement", "hello", props={"props":
+    "needle-in-props"})` → `MATCH (n {id}) RETURN n.props` = `needle-in-props`,
+    and the scan below finds it. So it is searched because a caller-named
+    property can carry prose, not because a writer does. A writer that carried
+    turn text under a SEVENTH name (`body`, `summary`, `raw`…) would be outside
+    this population. That is not hypothetical: this tree derives the session's first
+    substantive utterance into a `summary` (`sdk._session_source_metadata`) and
+    writes it on the session `:Source` (`s.summary=$sum`), so a `:Source.summary`
+    hit is a route this scan cannot see. The scan therefore guards against a
+    changed label, id space or wiring — the shapes the sibling id-space
+    assertions cannot see — and not against a renamed property. Read the claim no
+    wider than that.
+
+    ⚠️ `tests/test_10017_record_carrier.py::_text_hits` is a SECOND copy of this
+    same query, and this diff widens BOTH: two scans that disagree about the
+    population are how a renamed property stays invisible to one of them. A
+    further change to the property list has to reach both.
+
+    `in_graph=False` asserts the text is absent from the graph, `in_graph=True`
+    that it is present — a capture that lost the transcript reddens on both
+    arms, from opposite sides, which is the property acceptance bullet 5 asks
+    for. Both branches are LIVE: the armed pin uses the `False` arm.
+    """
+    graph_hits = _graph_text_hits(proj, needle)
+    if in_graph:
+        assert graph_hits, (
+            "the graph is the store on this arm and no node carries the turn's "
+            "text: the capture LOST the transcript while reporting success")
+    else:
+        assert graph_hits == [], (
+            f"a turn's text is in the graph while the record held it: "
+            f"{graph_hits!r}")
+
+
+def test_an_unarmed_capture_puts_the_turn_text_in_the_graph(sdk, monkeypatch):
+    """The capability fallback, stated as a PRESENCE, not as an absence.
+
+    ⛔ THIS IS THE TRIPWIRE FOR THE `#9548` DELETION, and the mutations that
+    prove it are the two stated below — measured, not asserted.
+
+    ⚠️ **BOTH mutations redden this test, for DIFFERENT reasons — and the
+    reason depends on the stub.** Deleting the graph write (`if not
+    _record_first:` → `if False:`, `_record_first` left REAL) reddens it at
+    `assert graph_hits` with `[]`. Forcing `_record_first` TRUE also reddens it,
+    but at the CARRIER assertion below: the seam stub on this arm reports
+    `APPLIED`, so `_landed` is True and the `#10000` outcome fallback never
+    reaches `_TURN_WRITE_CYPHER`.
+
+    ⛔ Keep the stub in view when editing this test: it is what gives the carrier
+    guard in the body below its population on the forced arm. Unstubbed, the seam
+    on this DSN-less arm is the REAL `write_live_record`, which returns `None`;
+    `_landed` reads `None` as unrecorded, so the `#10000` outcome fallback writes
+    the graph and the forced-arm run reaches `assert graph_hits` satisfied — while
+    the carrier guard observes nothing, because no carrier ever reaches this
+    test's `seam`. Delete the stub and the test passes under the mutation it
+    exists to catch.
+
+    ⛔ THE RECORD HALF **IS** ASSERTED, and only the ROW half is unassertable.
+    With no DSN there are no record rows to inspect, but the JOURNAL is readable
+    and the carrier is what turns into rows on an armed replay: an unarmed
+    capture that journalled a `TurnsRecorded` would ship the transcript to the
+    graph AND to record rows — the double store D1 forbids — and would be
+    invisible to a text-only assertion. So the carrier's ABSENCE is asserted
+    here, in the idiom the sibling arms already use. What is genuinely
+    unassertable is the rows, and it is named rather than pretended.
+
+    The sibling `test_unarmed_record_keeps_turns_in_the_graph` pins the same arm
+    by id space; this one pins it by the TEXT, so it is the arm that can tell a
+    transcript that moved from a transcript that vanished.
+    """
+    monkeypatch.delenv("TORTOISE_RECORD_DSN", raising=False)
+    seam = _RecordSeam(_APPLIED)
+    monkeypatch.setattr("tortoise.record_writer.write_live_record", seam)
+    needle = "the unarmed transcript line that the graph must still hold"
+    _capture(sdk, "unarmed-property", [{"role": "user", "content": needle},
+                                       {"role": "assistant", "content": "ok"}])
+    assert [r for r in seam.records if r.get("type") == "TurnsRecorded"] == [], (
+        "the record cannot hold the turns on this arm, yet the capture "
+        "journalled a `TurnsRecorded` carrier — an armed replay would turn it "
+        "into record rows while the graph keeps the turns, which is the double "
+        "store D1 forbids")
+    # ⚠️ THE POPULATION IS CHECKED AGAINST THE WRITER, not trusted to a list a
+    # later lane edits on its own: this arm is the one that runs
+    # `_TURN_WRITE_CYPHER`, so every property that statement writes a turn's
+    # text into must be a property the scan searches. `embeddingText` is the
+    # entry this check exists for — #8488/#10523 writes `turn.et` there, and on
+    # the enrichment fallback path (`enrich_turn_texts` with no complete_fn, or
+    # a rewrite that fails) `turn.et` IS the turn's raw stored text, so a
+    # five-name population was blind to the transcript in the one statement
+    # this test exists to watch.
+    text_from_turn = _turn_text_properties(sdk_mod._TURN_WRITE_CYPHER)
+    assert text_from_turn <= set(_TEXT_PROPERTIES), (
+        "`_TURN_WRITE_CYPHER` writes the turn's text into a property this scan "
+        f"does not search: {sorted(text_from_turn - set(_TEXT_PROPERTIES))}")
+    _assert_the_text_is_in_exactly_one_store(
+        sdk._get_proj(), needle, in_graph=True)
+
+
+def test_the_population_guard_reddens_when_the_writer_changes_shape():
+    """The guard above is coverage only if it CAN fire — pin that it does.
+
+    The guard extracts the writer's turn-sourced properties by regex over its
+    Cypher, so its natural failure mode is going SILENT rather than loud: it
+    observes nothing, `set() <= set(...)` is `True`, and a green run reads as
+    "the scan still covers the writer" when it says nothing at all. Measured on
+    the pre-equality version of the guard: respacing `SET t.content=turn.c` to
+    `t.content = turn.c` in `tortoise/sdk.py` left this file's unarmed test
+    GREEN (`1 passed`) with the scan's tie to the writer gone.
+
+    Both shapes are pinned here against synthetic statements, which states them
+    without mutating `sdk.py` — an empty (`[]`) extraction and a turn-sourced
+    property the classification does not name.
+    """
+    real = sdk_mod._TURN_WRITE_CYPHER
+    assert _turn_text_properties(real) == {"content", "embeddingText"}, (
+        "the classification no longer finds the two text carriers in the real "
+        "statement — every assertion below would then be about a synthetic "
+        "string, not about the writer")
+
+    respaced = real.replace("t.content=turn.c", "t.content = turn.c")
+    assert respaced != real, "the respacing this case pins no longer applies"
+    with pytest.raises(AssertionError, match="turn-sourced SET list"):
+        _turn_text_properties(respaced)
+
+    unclassified = real.replace(
+        "t.content=turn.c,", "t.content=turn.c, t.rawText=turn.raw,")
+    assert unclassified != real
+    with pytest.raises(AssertionError, match="turn-sourced SET list"):
+        _turn_text_properties(unclassified)
+
+
+def test_a_refused_record_write_puts_the_turn_text_in_the_graph_not_in_neither(
+        sdk, monkeypatch):
+    """The arm where a turn is most likely to be lost, pinned by its text.
+
+    The record was available to the preflight and REFUSED this write, so the
+    graph write — already skipped on the strength of that preflight — is the
+    only thing standing between the turn and no store at all. The sibling
+    `test_a_refused_record_write_falls_back_to_the_graph` pins the ids; this
+    pins the bytes, because the failure this guards is a fallback that runs,
+    writes a node, and carries no text.
+
+    ⛔ THE ARM IS ISOLATED BY THE CARRIER, NOT BY `seam.records`. "The seam saw
+    something" is true on the UNARMED branch too (it is handed the session and
+    per-turn `PointAdded`s when the preflight says the record cannot hold the
+    turns), so a `records`-only guard would let this test silently degenerate
+    into a second copy of the unarmed arm if `_bind_tenant` ever went missing —
+    leaving the refusal fallback with no text pin and nothing reddening. The
+    record-first lane emits ONE `TurnsRecorded` carrier; only this arm has it.
+    """
+    monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://unused/record")
+    seam = _RecordSeam(None)
+    monkeypatch.setattr("tortoise.record_writer.write_live_record", seam)
+    _bind_tenant(sdk)
+    needle = "the refused transcript line the graph must not drop"
+    _capture(sdk, "refused-property", [{"role": "user", "content": needle},
+                                       {"role": "assistant", "content": "ok"}])
+    assert any(r.get("type") == "TurnsRecorded" for r in seam.records), (
+        "the record-first carrier was never emitted, so this capture took the "
+        "UNARMED branch and this is not the refusal arm at all")
+    assert seam.point_contents() == [f"[user] {needle}", "[assistant] ok"], (
+        "the refusal arm exists to put these turns IN THE GRAPH, so the seam "
+        "handing them over is what establishes the fallback was needed")
+    _assert_the_text_is_in_exactly_one_store(
+        sdk._get_proj(), needle, in_graph=True)
 
 
 def test_an_armed_record_that_cannot_name_a_tenant_keeps_the_turns_in_the_graph(

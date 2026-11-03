@@ -69,7 +69,17 @@ argument should treat E1's bar as **unconfirmed**, which is exactly how `#9110` 
 |---|---|---|
 | **E1**, **E1b** | **yes** — `e1-e2.log` | a threshold for the **re-run**, disclosed as post-visible (§0 above) |
 | **E2a**, **E2b** | **yes** — `e1-e2.log` | same |
-| **E3**, **E4**, **E5** | **no** — no measurement exists anywhere | a genuine pre-registration, prior to its first run |
+| ~~**E3**, **E4**, **E5**~~ | ~~**no** — no measurement exists anywhere~~ | ~~a genuine pre-registration, prior to its first run~~ |
+| **E3** | **no at registration** — no measurement existed when this record was written (§10.1, §10.3: a POST-registration run measures it) | a genuine pre-registration, prior to its first run; E3's class set re-registered to follow #5199 (§10.1) |
+| **E4** | **no measurement was *visible* at registration** — ⛔ not "no measurement existed": the operator audit **ran** `2026-10-19T01:39:26Z`, two days BEFORE this record, and its **artefact** landed after it (`d50217273`, 2026-10-22), so nothing it measured was in the tree this row's author wrote (§10.3, §10.4) | a genuine pre-registration, prior to its first run — and the visibility claim states WHICH of the two facts makes it `false` |
+| **E5** | **yes** — `#7947`: `EXTRACTOR-V4-ARCHITECTURE.md` §10, committed `ecc7bc8ca` (2026-10-19) | a threshold for the **re-run**, disclosed as post-visible (§10.2): the measurement predates this record and sits BELOW the bar |
+
+**⇒ §0's table was wrong about E5, and had been since this file was written.** The struck row above
+is the original, preserved rather than edited; it claimed no measurement existed anywhere for E5,
+while `#7947`'s measurement had landed two days *before* this registration. §10.2 records the
+correction, the sentence that was false, the figures, and the ordering — the correction is an
+amendment appended here, never a quiet rewrite. An artefact whose whole value is that it hides
+nothing cannot be the one artefact that hides a prior measurement.
 
 **What it forbids, mechanically.** The pre-existing log can **never** be scored against these
 thresholds: §7 grants the exemption only to a log that declares itself `UNPREREGISTERED`, carries no
@@ -257,9 +267,12 @@ reporting one is the defect, not the small number.
 | **E1b** | anti-gaming control: planted units that **strictly** survive (`grading.strict_survival_counts`) on the deterministic `m2` lane (seed 42, judge pin `w2-write-path-mechanical-v2`) | the **90** planted units | `>= 90 of 90` |
 | **E2a** | value-bearing planted units that **strictly** survive, each named by id if lost | the **14** value-bearing units (§3.3) | `>= 13 of 14` |
 | **E2b** | surviving planted units whose matched `Point` **also** matches at least one **other** distinct surviving unit (a fused claim) | the planted units that survived (floor ≥ 30) | `<= 0.05` |
-| **E3** | derived nodes written by the run (`Point` + `Object` + `Event`) carrying a version anchor | **all** derived nodes written by the run (floor ≥ 30 nodes) | `= 1.000` (zero unanchored) |
+| **E3** | derived nodes written by the run (`Point` + `Event` + `Document`) carrying a version anchor | **all** derived nodes written by the run — `Point` + `Event` + `Document` (the classes the model anchors: `Point` on the node, `Event`/`Document` on their derivation link; floor ≥ 30 nodes) | `= 1.000` (zero unanchored) |
 | **E4** | planted operator edges **wired AND persisted** with endpoint refs remapped | the **15** planted operator edges of the full 7-session corpus | `= 15 of 15` |
 | **E5** | hedge/scope/stance-bearing claims recovered as claims in the **narrative** arm | the same claims recovered in the **raw** arm of the same run, both over the **29** marker-bearing sentences (the ratio's denominator); the raw arm's absolute recovery is reported too | `>= 0.90` ratio `and >= 0.80` raw absolute |
+
+⚠️ The **step set** these rows are measured over is not all-unconditional: §11 records which of §4.1's
+eight steps are required and which is conditional on the pipeline having work for it (`#10215`).
 
 ### 3.2 E1 — volume falls, and the bar is bounded by the shipped detector
 
@@ -291,8 +304,9 @@ just E1b.
 **E2a, the value-bearing class (14 units).** The gold has no `state_value` kind, so the class is
 **derived by rule, not by hand**: a planted unit is value-bearing iff its `verbatim_anchor` contains a
 digit (**16** units), **minus two exclusions**, each argued against `STATE_VALUE_CARVE_OUT`'s own text
-(`tortoise/extractor_v2.py:278`, which keeps *"measurements, deadlines/freezes, thresholds/TTLs,
-versions, and counts"* and drops only *"ids, hashes, and ephemeral counters"*):
+(`tortoise/extractor_v2.py:294-310`, the constant's own extent, which keeps *"measurements,
+deadlines/freezes, thresholds/TTLs, versions, and counts"* and drops only *"ids, hashes, and
+ephemeral counters"*):
 
 | excluded unit id | anchor | why it is not a state value |
 |---|---|---|
@@ -319,12 +333,26 @@ units, with the denominator floored at 30 so a single fused claim cannot *be* 5%
 
 ### 3.4 E3 — provenance is anchored
 
-The epic requires **every derived node** to carry its version anchor — `:Object`/`:Event` included,
-not just `Point`s. The corpus lane already computes `provenance_accuracy` over **`Point`s only**; that
+The epic requires **every derived node** to carry its version anchor — ~~`:Object`/`:Event` included,
+not just `Point`s~~ **(amended, §10.1: `:Event`/`:Document` included, `:Object` NOT — the anchor sits
+on the derivation link, and `:Object` reaches its source through a **mention** link that carries none
+by design)**. The corpus lane already computes `provenance_accuracy` over **`Point`s only**; that
 is this row's **sub-denominator and first reporter, not its denominator**. E3's denominator is every
 derived node the run writes, and the threshold is **exactly 1.000 with zero tolerance**: an
 unanchored derivation is a structural defect, not a rate to be traded, so there is no percentage
 budget to spend. Floor 30 nodes, so a three-node run cannot certify itself.
+
+**Mentions are out of scope, by decision, not by convenience (§10.1, #9736).** `#5199`'s owner-approved
+option A (2026-09-25) put the version anchor on the **derivation** link, and the writer's own constant
+names those classes: `_DERIVATION_REFERENCES_LABELS = frozenset({"Event", "Document"})`
+(`tortoise/projection/edges.py:747`) — `:Object` links are identity/mention links and are pinned
+property-free by `tests/test_source_version_references_5199.py::test_identity_link_stays_property_free`
+(`tortoise/projection/edges.py:721-723`, `docs/architecture/STORAGE-ARCHITECTURE.md:763`). Counting `:Object` mentions in
+E3's denominator therefore made `= 1.000` **unreachable as registered**: every mention link is
+unanchored by rule, so a run would have reported the decision as a defect. `:Point` carries the anchor
+on the node itself (`#5038`), which is why the derivation set is those two link labels **plus**
+`Point`. §7 item 6 re-derives that set from the constant on every run, so this row cannot drift from
+the model it follows.
 
 ### 3.5 E4 — operator edges wired and persisted
 
@@ -387,8 +415,8 @@ losing a value is acceptable*.
 - **It does not authorise a delete.** The salience labels are a **detection** spec (§1.3); 4 of the
   25 are owner-ruled must-keeps, and `DESTRUCTIVE_DISPOSITIONS` is empty by construction. E1 moves a
   **share of what is written**, never a row that already exists.
-- **It does not decide the v4 design.** §10's Option 4 stays provisional until E5 reports; this file
-  scores it, it does not settle it.
+- **It does not decide the v4 design.** `EXTRACTOR-V4-ARCHITECTURE.md` §10's Option 4 stays
+  provisional until E5 reports; this file scores it, it does not settle it.
 - **It does not authorise a diagnostic run on the held-out half** (§2.2).
 - **It does not permit a rate on a refused denominator**: below a floor, the answer is REFUSED.
 
@@ -487,6 +515,66 @@ Exit 0 only when **all** of these hold:
    or a unit whose anchor carries no digit (so it excludes nothing), is a stale pin; and the split is
    a true partition of the 7 sessions. A corpus change therefore fails this check instead of silently
    re-basing the thresholds.
+6. **No criterion claims to be unmeasured while a measurement for it is cited.** The record's
+   `measurement_visible_to_author` field is a claim about **history**, and a history claim is the one
+   kind a registry can get wrong without any number changing — which is exactly what happened to E5
+   (§10.2): the field read `false` for a metric whose measurement had landed two days before this
+   file. So the record must carry `prior_measurements` (criterion id → `{artifact, commit, date}`),
+   and the two are held to each other in **both** directions: an id in `prior_measurements` whose
+   criterion says `false` **fails** (the falsified claim), and a criterion saying `true` with no
+   entry **fails** too (a visibility claim no artefact backs is uncheckable, not harmless). The
+   pins block restates the id→commit mapping and the two must agree, so the argument and the record
+   cannot drift apart.
+
+   **E3's class set is re-derived, not read from this prose.** The same rule parses
+   `tortoise/projection/edges.py`'s `_DERIVATION_REFERENCES_LABELS` and requires E3's metric and
+   denominator — **each cell on its own, not their union** — to name `Point`, `Event`, and the
+   document-derivation class. That last class may be spelled **either** `Document` (the writer's
+   retained relation spelling) **or** `Source` (the node label the document is stored on once the
+   `Document` label retires), and accepting both is deliberate: **which spelling is honest is
+   #9736's owner-gated question, not this rule's**, so the rule refuses a cell that names NEITHER
+   and settles nothing. ⛔ **What this rule cannot do is check the instrument.** Nothing in
+   `tools/capstone_preregistration_check.py` reads `probes/capstone_measure.py`, and the probe's set
+   is derived from the same writer constant (`("Point", *sorted(_derivation_label_classes()))`), so
+   it tracks the **writer**, not this record: no sentence written here can move it. Spelling the
+   class `Source` is therefore an obligation **on the amendment** — move the probe in the same
+   change — and not something §7 item 6 enforces, so reading it as enforcement would be reading a
+   check that does not exist. The writer's `Document` spelling is what the record uses today (§10.1),
+   so the registration and the probe agree by construction right now. What the gate *does* do is
+   **declare** the divergence it can see: a row spelled `Source` carries a `registry arm NOT
+   applied`-class declaration naming the probe, so a registration and its instrument can never part
+   company silently.
+   Today's cost of the gap is zero nodes, and it is disclosed rather than hidden: the third class
+   contributes **0 to E3 in either spelling** — no `Document` label is written (post-D10 a document
+   is a `:Source`, §10.1), and the probe enumerates no `Source` — so a run that wrote
+   `(Source)-[:references]->(Source)` would have its document derivations counted **nowhere** in
+   E3. Closing that is part of #9736's ruling; this record does not pre-empt it.
+   A denominator naming a class the model
+   leaves unanchored by design (`:Object`, #5199 option A) **fails** — that is an unreachable
+   `= 1.000`, and it would report the decision as a defect (§10.1) — and a denominator that *omits*
+   a class the model does anchor fails too, because it would score with a numerator that cannot reach
+   its own denominator. The rule reads the constant with `ast`, so it runs in every job including the
+   one that does not install the package; a constant it cannot find is exit `2`, never a pass.
+
+   **Both arms are asked only of a bundle that makes the claim.** The step that runs this gate
+   checks TWO bundles in one invocation (`--dir docs/evidence/7949-capstone --dir
+   docs/evidence/5087-hypothesis`, #10468), and these two arms were written for this one. Applied
+   unconditionally they red-ed the sibling for seven things it never said (measured at the merged
+   head, #10525): its record predates `measurement_visible_to_author` entirely — no field on any
+   criterion and no `prior_measurements` block — so it makes no visibility claim to contradict, and
+   its E3 is a session-arm receipt check that names no graph class at all, which the anchor model
+   never scored. So the visibility arm is asked of a record that carries the schema (and such a
+   record still owes the field on **every** criterion, so deleting one does not opt out), the
+   class-set arm of an E3 row that names at least one graph class, and an arm that is not applied is
+   **printed** (`registry arm NOT applied — …`) and carried in the JSON as `registry_scopes`. An
+   undeclared skip would be the silent-green shape this very section exists to refuse.
+
+7. **The step set is a partition, and it is the one the record declares.** The `steps:` block
+   (§11) must split §4.1's eight ids into `unconditional` and `conditional` with **no id missing, none
+   in both, none invented**, and `preregistration.json` must restate it byte-identically. Every
+   conditional entry must carry a `condition`, the `idle_evidence` a run has to show, and the
+   `evidence_issue` that measured it — an entry without them is a waiver with no content. This is the
+   rule that stops a step being quietly dropped from the capstone's gate (`#10215`).
 
 The pins block below is the machine-readable copy; the prose in §1–§3 is the argument. Both are
 checked, so neither can rot alone.
@@ -545,6 +633,30 @@ split:
   held_out_counts: {units: 37, operator_edges: 8, value_bearing_units: 9, hedge_scope_sentences: 8}
 criteria: [E1, E1b, E2a, E2b, E3, E4, E5]
 required_criteria_rows: [E1, E2, E3, E4, E5]
+steps:
+  source: "EXTRACTOR-V4-ARCHITECTURE.md §4.1 — the eight top-level steps"
+  unconditional: [S0, S1, S2.1, S2.2, S3, S5, S6]
+  conditional:
+    - step: S2.3
+      condition: >-
+        the S2 map left at least one candidate's kind missing or `unclassified`, so
+        `_collect_classify_items` (tortoise/extractor_v2.py:9767, `def _collect_classify_items`) had an item to hand the classifier;
+        when the map types every candidate the pass has no work and neither classify pass runs
+      idle_evidence: >-
+        the run's own classify surface reads enabled=true with empty s2/union, the receipt's
+        error/warning surfaces carry no `classify(S2) failed` / `classify(union) failed` /
+        `classify-later init failed` — the fail-open path leaves the SAME empty counters, so the
+        absence of a failure marker is what separates 'nothing to do' from 'crashed' — AND the
+        receipt's `step_witness` carries a POSITIVE candidate count for the map: an absent or zero
+        count is the shape an EMPTY item set leaves when it skips the pass's `try`, so it cannot
+        support an idle claim (#10215 review r2 P2)
+      evidence_issue: 10215
+prior_measurements:
+  E1: bc547406f     # e1-e2.log, 2026-10-19 — measured, never scored (§0)
+  E1b: bc547406f
+  E2a: bc547406f
+  E2b: bc547406f
+  E5: ecc7bc8ca     # EXTRACTOR-V4-ARCHITECTURE.md §10, 2026-10-19 — PREDATES this record (§10.2)
 e4_denominator: 15
 denominator_floors:
   e1_objects: 30
@@ -593,7 +705,13 @@ changes a pin or a threshold must state the reason in its message.
 **After the first scored evidence log,** any change to a metric, a denominator or a threshold is a
 **protocol deviation**. It is recorded in a `## Deviations` section appended below — with the date,
 the original value, the new value, and the reason — and the *original* rows are struck through rather
-than edited. A silently edited threshold after an evidence log is the failure this whole artefact
+than edited. **One exception, because the alternative is worse:** the **criteria table in §3.1 is
+machine-parsed** (§7 item 6 reads E3's two cells to check them against the writer's constant), and a
+`~~struck~~` cell would either red that check or require the parser to un-strike text it is judging.
+Those rows are therefore **amended in place** — the original value and the reason live in the
+`## Deviations` entry (§10.1), which is where a reader and the blame trail both find them. Struck
+prose outside that table (§3.4) still carries its own inline `(amended, §10.1: …)` marker, so an
+amendment is never invisible either way. A silently edited threshold after an evidence log is the failure this whole artefact
 exists to make impossible, and it is visible to review because the file's blame shows an edit after a
 log's add-commit.
 
@@ -614,3 +732,339 @@ stops being true is visible as a log that does not carry `UNPREREGISTERED`.
 | 90 of 90 m2 baseline | `tests/eval/write_path/baselines/m2.json` at this `fixtures_hash` |
 | 53/37, 7/8, 5/9, 21/8 split counts | the per-session sums above, partitioned by §2.1 |
 | 9 of 15 shape coverage (60%) | §1.3, `is_positively_bare_definite_description` |
+| 7 unconditional / 1 conditional step (§11) | `tortoise/extractor_v2.py:9767-9789` (`_collect_classify_items`, the collector's item set), `:10310` and `:10442` (the two `if items:` gates, one per classify pass) |
+| 148 / 433 (0.34180), 148 / 383 (0.38642) | `capstone-measured-e0fc940b.log`'s `E3 census` block: `e3 label=Point nodes=338 anchored=141`, `Object 50/0`, `Event 45/7`, no `Document` written (§10.1) |
+| 141/150 (0.940000), 159 turn rows, 29 operator Points | the same census block's `point composition` line — reported, NOT adopted as E3's denominator (§10.1) |
+| 5/25 (20%) vs 13/25 (52%) recovered; 0.4800 raw absolute on n=25 | §10 @ `ecc7bc8ca` (run 1 losses 80.0%/48.0%) and `capstone-measured-e0fc940b.log`'s E5 row (§10.2) |
+
+---
+
+## 10. Deviations — the three amendments recorded after this registration was written
+
+**What this section is.** §8's own convention: a change to this registration is recorded **here**,
+with the date, the original value, the new value and the reason, and **the original text is preserved**
+(the criteria rows this section amends are shown struck where they are still readable as prose; the
+criteria table in §3.1 carries the amended cells, and this section quotes what they used to say,
+verbatim, because a table cell cannot hold two versions and still be parsed by the gate).
+
+**Why an amendment and not a new registration.** The convergent practice — PROSPERO (*"the published
+version is not deleted, while amendments are submitted as new versions"*), CONSORT/SPIRIT 2025
+(disclose every post-registration change **with its timing and reason**, alongside the registration
+date), the Center for Open Science (*"if a measurement already exists before registration, it should
+not be presented as newly preregistered … create a transparent-changes document and clearly disclose
+what was known and when"*), and the registered-reports norm that later decisions be **timestamped
+rather than obscured** — is the same shape: **do not rewrite the claim; append a dated, reasoned
+disclosure that names what was known and when.** A fresh registration would have abandoned the four
+untouched criteria's frozen bars to correct one class set and one history claim, which buys nothing a
+preserved original plus this section does not already buy, and loses the E1–E4 provenance.
+
+**Ordering, stated once and binding on every entry below.** This registration was added by `a6085af84`
+(**2026-10-21**, #9507). **A scored evidence log already exists**: `capstone-measured-e0fc940b.log`
+(head `e0fc940b`, generated **2026-10-23T23:16:55Z**, landed by `260903907`) — so §8's **protocol
+deviation** rule is the one that governs this section, not the pre-scored revision rule. That is why
+the original values are quoted and struck rather than overwritten, and why the dates below run
+*registration (10-21) → measurement (10-23) → amendment (11-01)*. **§10.4 is the exception to that
+chain and says so in its own first sentence:** it corrects a DISCLOSURE about E4 rather than a value,
+no bar moves, and its ordering runs *measurement (10-19) → registration (10-21) → artefact (10-22) →
+disclosure corrected (11-01)*.
+
+**⇒ And the disclosure that ordering forces, stated plainly and not softened: the author of these
+two amendments had SEEN both numbers before writing them.** The E3 census (`148/433`, RED) and the E5
+re-score (`raw 0.4800`, RED) were in the tree, from a committed scored run, nine days before this
+commit. A reader should apply that discount exactly as §0 asks them to apply E1's — with the concrete
+counter-evidence that neither amendment rescues its criterion: **E3 under the amended denominator is
+re-derived below at `148/383 = 0.38642`, still RED**, and E5's threshold is untouched and its cited
+re-score still FAILS. A change made after seeing the number, that leaves the criterion red, is a
+correction of a defect in the registration and not a re-cut of a bar.
+
+### 10.1 E3 — the denominator counted a class the model leaves unanchored BY DESIGN (#9736)
+
+**Old value (verbatim, as landed by `a6085af84`):**
+
+- metric: `derived nodes written by the run (Point + Object + Event) carrying a version anchor`
+- denominator: `**all** derived nodes written by the run (floor ≥ 30 nodes)`
+
+**New value (§3.1, both cells, because the class set IS the definition):**
+
+- metric: `derived nodes written by the run (Point + Event + Document) carrying a version anchor`
+- denominator: `**all** derived nodes written by the run — Point + Event + Document (the classes the model anchors: Point on the node, Event/Document on their derivation link; floor ≥ 30 nodes)`
+
+**Threshold: `= 1.000` — UNCHANGED.** No threshold moved for any measurement; nothing here was
+fitted to a number (the one measurement that exists is reported below, and it does not reach the bar
+under either class set).
+
+**The measurement / decision this cites, and its date.** The **recorded decision**, not a measurement:
+**#5199's owner-approved option A (2026-09-25)**, CLOSED 2026-10-21, comment `2026-10-21T02:27Z` — the
+version anchor sits on the **derivation link**, and `:Object` reaches its source through an
+identity/mention link that carries **no** `sourceVersion` **by design**. Pinned in the tree, not in
+prose: `_DERIVATION_REFERENCES_LABELS = frozenset({"Event", "Document"})`
+(`tortoise/projection/edges.py:747`), `edges.py:721-723`'s statement of the rule, and
+`tests/test_source_version_references_5199.py::test_identity_link_stays_property_free`.
+
+**Why the old denominator was a defect and not a bar.** Counted over `Point` + `Object` + `Event`, E3's
+numerator could never equal its denominator: every `:Object` mention link is unanchored *by rule*, so
+`= 1.000` was **unreachable as registered**, and a run reporting E3 red would have been reporting the
+decision, not a defect. The narrowing **follows** #5199 — it is the pre-registration catching up to a
+recorded decision, which is the only direction a denominator may move without fitting a number.
+
+**Finding — the number, re-derived on the AMENDED denominator, from the committed census (no new
+run, no re-scoring).** `capstone-measured-e0fc940b.log`'s `E3 census` block reports, per label:
+`Point` **338** nodes (141 anchored), `Object` **50** (0 anchored), `Event` **45** (7 anchored), and
+**no `Document` label was written** (post-D10 a document is a `:Source`; the run wrote none). So:
+
+- **as registered on 2026-10-21** (Point+Object+Event): `(141 + 0 + 7) / (338 + 50 + 45)` =
+  **148/433 = 0.34180** → RED (the log's own figure);
+- **under the denominator this amendment registers** (Point+Event+Document):
+  `(141 + 7 + 0) / (338 + 45 + 0)` = **148/383 = 0.38642** → **still RED**, and NOT close to `= 1.000`.
+
+**⇒ The narrowing does not rescue the bar, and that is the honest result — reported, not adjusted.**
+The residual is a *second* contradiction inside `Point`, already measured in the same log and **not**
+resolved by #9736: of the 338 `Point`s, 159 are mechanical **turn rows** (no `extractedFrom` link by
+construction — `_TURN_WRITE_CYPHER`, `tortoise/sdk.py:2408`) and 29 are **operator Points** (written by
+`create_operator`, which never writes `extractedFrom`); 188 of 338 `Point`s are therefore *structurally
+incapable* of carrying the anchor this row demands, and no denominator can make `= 1.000` reachable
+while they are counted as derivations. The same log computes the writer-class figure — anchored / the
+class that is *expected to* derive — at **141/150 = 0.940000**. **This amendment does NOT adopt that
+denominator**: `Point` is in the class set by the issue's own resolution, and switching to a
+"expected-to-derive" subset would be exactly the re-definition §7 item 6 refuses (it requires every
+cell to name **every** anchored class — `Point`, `Event`, and the document class in either
+spelling — so a subset fails the rule rather than satisfying it). It is recorded as the
+finding that #9736's remaining attribution — *lost link, or a writer that never derives?* — still owns.
+`measurement_visible_to_author` for E3 therefore stays **`false`**: the field asks whether the
+measurement was visible to the **registration's** author, and this one postdates the registration by two
+days. Its existence is disclosed here and in the record's `post_registration_measurement`, which is
+what a reader needs and what the field name alone cannot carry.
+
+### 10.2 E5 — the record said "no measurement exists anywhere" for a metric measured two days EARLIER (#9738)
+
+**Old value (verbatim, as landed by `a6085af84`):**
+
+- `preregistration.json`: `"measurement_visible_to_author": false` for `E5`.
+- §0's table: `| **E3**, **E4**, **E5** | **no** — no measurement exists anywhere | a genuine pre-registration, prior to its first run |`
+
+**New value:** `"measurement_visible_to_author": true` for `E5`, with a
+`measurement_visible_to_author_basis` naming the artefact; §0's row is **struck, not deleted**, and
+replaced by three rows — `E3` (no measurement at registration: the census postdates this record),
+`E4` (measured `2026-10-19T01:39:26Z`, its artefact only landed `d50217273` on 2026-10-22, so nothing
+was *visible* to this record's author — §10.4) and `E5` (measured, post-visible).
+
+The measurement: `docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md` §10 — *the
+raw-vs-narrative measurement* — landed in **`ecc7bc8ca`, 2026-10-19** ("… (#7947) (#9071)"; #7947 CLOSED
+COMPLETED 2026-10-19T12:54Z). Its receipt, run 1: **raw loss 80.0% (20/25)** vs **narrative loss 48.0%
+(12/25; 7 absent, 5 flattened)** of bound qualifiers — i.e. **recovered** 5/25 vs 13/25. (The
+`8 absent, 4 flattened` figure quoted elsewhere is the 2026-10-18 **replication**'s narrative row, whose
+raw arm is 52.0% = 13/25; the two runs are cited apart so neither is paired with the other's receipt.)
+
+**Ordering — the direction that makes the original text false.** The measurement (2026-10-19)
+**PRECEDES** this registration (`a6085af84`, 2026-10-21) by two days. So this is not a metric that
+became measurable after registration: it was measurable **before**, and the record said the opposite.
+The amendment is **2026-11-01**, i.e. after **both**, and it corrects a claim about history rather
+than a value — no threshold moved.
+
+**Why the prior is alarming and the bar is NOT retro-fitted — and which figure is which.** E5 registers
+the ratio of **recovered** claims (narrative over raw), not the loss. §10's receipt states **loss**:
+narrative loses **48.0%** (12/25) and raw loses **80.0%** (20/25), so the recovered figures are
+**13/25 = 52%** and **5/25 = 20%** — a ratio of **2.6**, which PASSES `>= 0.90` with margin. What the
+prior falsifies is the **raw absolute floor**: `0.20 < 0.80`. (An earlier draft of this section
+divided the losses and called it a `0.60` ratio — the arithmetic was right and the quantity was wrong,
+and it is corrected here rather than left to flatter the record in the alarming direction.)
+
+**And the populations still do not match, so §10 is NOT a verdict on E5.** §10's denominator is **25
+*bound* qualifiers**, while E5 is registered over the **29 marker-bearing sentences**
+(`hedge_scope_sentences: 29`, pins). Mixing them would be the numerator/denominator mismatch §1.2
+refuses. **⇒ E5 must be re-measured on its own 29-sentence population — but the raw absolute failure
+on the prior population is now alarming rather than neutral, and the record stops telling readers it
+had no prior at all.** Recorded as a finding; the threshold is untouched.
+
+**And the post-registration re-score, disclosed here rather than only in a log.**
+`capstone-measured-e0fc940b.log` (2026-10-23) re-scored the #7947 arm receipts against **this corpus's**
+gold: `ratio=1.0833` (passes `>= 0.90`) with `raw_absolute=0.4800` (FAILS `>= 0.80`), `n=25` sentences,
+and a disclosed incomplete raw receipt (`wp07_bluepeak_followup:raw partial=True`). So E5 is **RED on the
+registered bar** as of that run — on **25** sentences, not the registered **29**. Both numbers are
+quoted because neither may be called final until the populations are reconciled, and the reconciliation
+is not a reason to move the bar.
+
+**Not a duplicate of any earlier amendment.** `git log -S'measurement_visible_to_author'` over
+`preregistration.json` returns **exactly one hit *before* this amendment — `a6085af84`, the
+original**; the second hit is this commit, which introduces `measurement_visible_to_author_basis` —
+a string that carries the search term, so any count written as a bare total moves the moment the
+amendment lands. The claim is scoped to the history it is about; and the two files'
+history holds **no earlier `## Deviations` entry at all**: before this one, the only change to either
+file after its add-commit was `ef231735b` (2026-10-29, #5087 / PR #10072), which touched §3's
+CONTROL/TREATMENT arm paragraph and re-cut `document_sha256` **once** — a re-cut of the digest, not an
+amendment of a criteria row, a denominator, or a disclosure claim. (`#10215` is an unrelated OPEN
+finding about S2.3 idling on the pre-registered corpus; it is not a revision of this file.)
+
+**What enforces both, mechanically.** `tools/capstone_preregistration_check.py` → §7 item 6: a
+`measurement_visible_to_author: false` contradicted by a cited `prior_measurements` entry **fails**; a
+`true` with nothing cited **fails**; a `false` that states **no** `measurement_visible_to_author_basis`
+**fails** (§10.4: the ground a `false` rests on cannot be checked, so an unstated one is refused rather
+than trusted); and E3's metric and denominator — **each cell on its own, not their union** — must name
+`Point`, `Event`, and the document-derivation class. That last class may be spelled **either**
+`Document` or `Source`, because **which spelling is honest is #9736's owner-gated question and not
+this rule's**: the rule refuses a cell that names NEITHER and settles nothing (§7 item 6 carries the
+same sentence, deliberately — a reader who arrives here instead of there must not be told a
+`Source`-spelled row is refused when the gate accepts it). Mutation-checked in
+`tests/test_capstone_preregistration_9075.py`, including the node `#9738` names — flip E5's field back
+to `false` and the gate goes red — and the `false`-without-a-ground arm, where deleting E4's basis (or
+blanking it to whitespace) reds the same way.
+
+### 10.3 The post-registration measurements — disclosed, NOT re-scored
+
+`capstone-measured-e0fc940b.log` (head `e0fc940b`, generated **2026-10-23T23:16:55Z**, landed by
+`260903907`) is the first **scored** run against this registration, and it measures **more than the two
+criteria amended above**. Its verdict table reads: `E1 BLOCKED`, `E2 BLOCKED`, `E3 RED 148/433`,
+`E4 RED 2/15`, `E5 RED 12/25`. That is disclosed here so no reader concludes from §0's
+"no at registration" and "no measurement was *visible* at registration" rows that E3 and E4 remain
+unmeasured today — they do not, and the distinction between *"unmeasured when registered"* and
+*"unmeasured"* is the whole subject of this section.
+
+**E4 is not amended, and this section says why.** The run scores E4 at **2 of 15** — `edge_correct=2`
+on receipt `tests/eval/write_path/receipts/w2b-operator-2026-10-19.json` — and the log's own E4 note
+records the caveat that matters: the *file* postdates this registration but the *measurement* does not,
+and its `corpus_hash` (`sha256:943a99ec…`) is **not** the frozen `fixtures_hash`
+(`sha256:dd7e8520…`), so it is scored on **its own corpus revision**. E4's denominator (**15**), its
+threshold (`= 15 of 15`) and its row are unchanged: nothing in #9736 or #9738 asks to move them, and a
+bar that fails on a non-frozen corpus is a reason to re-run, never a reason to re-cut the bar. The
+figure is recorded in the record's `post_registration_measurement` for E4 so a machine consumer meets it
+too.
+
+**Neither `measurement_visible_to_author` field changes for this**, but they stay `false` for **two
+DIFFERENT reasons**, and conflating them is the defect §10.4 fixes. The field asks whether the
+measurement was visible to the **registration's** author at `a6085af84` (2026-10-21). **The 2026-10-23
+run** postdates it by two days, so the existence of a later measurement is stated here and in the
+record, and neither field is retroactively rewritten. But that run is not what makes E4's field
+`false`: **E4's measurement ran on 2026-10-19**, before the record — its *artefact* landed after it — so
+E4's `false` rests on the artefact's absence from the tree at `a6085af84`, not on the run's date. §7
+item 6 enforces that separation in both directions: it refuses a `false` contradicted by a
+**pre-registration** citation, and it now also refuses a `false` that states **no ground at all**,
+because a bare `false` cannot be told apart from a stale one.
+
+### 10.4 E4 — the `false` was right and its ground was stated NOWHERE (#10525 review)
+
+**What was wrong, stated as the contradiction it was.** §0's replacement row read
+`**E3**, **E4** | **no at registration** — no measurement existed when this record was written`, and
+§10.3 — ten lines after quoting the log's own caveat — kept E4 `false` on the ground that *"this run
+postdates it by two days"*. Both cannot be true of E4: its **measurement** (`operator_audit` on
+`tests/eval/write_path/receipts/w2b-operator-2026-10-19.json`: `edge_correct=2`, `planted=15`) carries
+the receipt's own `date=2026-10-19T01:39:26Z`, **two days BEFORE** `a6085af84` (2026-10-21T21:49:11Z).
+What is true is narrower and was stated nowhere: the **artefact** landed at **`d50217273`
+(2026-10-22T05:34Z)**, *after* the registration, so no number from that row was in the tree its author
+wrote. `false` is therefore correct — as a claim about **visibility**, which is what the field is
+named — and it was unfalsifiable, because `prior_measurements` is the only table the gate reads and E4
+was not cited in it.
+
+**What changed, and what did NOT.** *Changed:* E4's `false` now carries a
+`measurement_visible_to_author_basis` naming all three facts (when the measurement ran, when its
+artefact landed, when this record was added), and §0's row was corrected from *"no measurement
+existed"* to *"no measurement was **visible**"* — the sentence, not the verdict. *Not changed:* E4's
+metric, its **15**-edge denominator, its `= 15 of 15` threshold, its `post_registration_measurement`,
+and the field itself. **No bar moved and no measurement is re-scored**; the amendment is to the
+DISCLOSURE of a claim that was already there, which is why it is a correction and not a re-registration.
+
+**⇒ The general rule this leaves behind.** §7 item 6 now refuses *any* `false` that states no ground.
+The reason is measurable rather than stylistic: E4's field was **right**, and it took a fresh-context
+reviewer reading three files to establish that — with the reason unstated, no reader and no arm could
+tell it from a `false` nobody had revalidated. A claim about history has to carry its evidence in the
+place a machine reads it.
+
+### 10.5 — the step set: "all eight observed" became "seven required + S2.3 conditional" (2026-11-01, `#10215`)
+
+- **Original rule** (§4.1 as V5/G5 read it): *"ALL eight steps observed in one pass"* —
+  `tools/capstone_verdict_check.py`'s V5 and `probes/capstone_run.py`'s G5 both required the eight
+  step ids in `steps_observed`, with no state other than observed.
+- **New rule** (§11 below, `steps` in `preregistration.json`, the `steps:` pins block): seven steps
+  are **unconditional** and must be observed; `S2.3` is **conditional on the candidate set** and must
+  be either observed or witnessed **idle** with a basis. The conditional set is read from this record
+  at the pre-registration commit; a run log may not declare it.
+- **Why it is not a relaxation**: `S2.3` structurally cannot run on a corpus whose S2 map types every
+  candidate — `_collect_classify_items` (`tortoise/extractor_v2.py:9767-9789`) collects only
+  kind-missing/`unclassified` candidates and both passes sit behind `if items:` (`:10310`, `:10442`).
+  The old rule therefore could not be satisfied by **any** legitimate run of the registered corpus,
+  so the gate could not return a verdict at all (§11.2's four ordered refusals). Every one of the
+  eight still has to be accounted for, and an idle claim needs the run's own four facts — flag ON,
+  no activity, **no fail-open marker**, and a positive candidate count.
+- **Why it is honest to change it now**: the numbers are unaffected. No E1–E5 threshold, denominator
+  or evidence row moves; `capstone.log` keeps its `GREEN=0, RED=0, BLOCKED=3, UNPREREGISTERED=2`
+  census, and the epic is still not closeable until five measured rows exist.
+- **The claim this entry corrects**: `written_before_any_scored_run: true` describes this record's
+  ORIGINAL freeze, and it remains true of it — but the `steps` block is **not** original. It was
+  authored while `capstone-measured-e0fc940b.log` (a COMPLETED run carrying E3/E4/E5 rows, added on
+  `main` by `260903907`, 2026-10-23) already existed. A blanket pre-scored claim cannot cover content
+  added after the number was seen — so the deviation is recorded **here**, and
+  `tools/capstone_preregistration_check.py` now closes it mechanically on AUTHORING ORDER rather than
+  on an attestation: it dates the commit that first carried the record's CURRENT `steps` block
+  (content-compared, because a key that is merely present tells you nothing about when the rule was
+  written, and an already-pinned block EDITED after a scored log never moves a key's first
+  appearance) and refuses when that commit postdates a scored log while this section is absent or
+  empty. Where the checkout is too shallow to establish the order it returns no verdict at all
+  rather than falling back to asking the record to assert it.
+
+## 11. The step set V5 gates over — seven unconditional, one conditional (`#10215`)
+
+**Why this section exists.** `tools/capstone_verdict_check.py`'s V5 and `probes/capstone_run.py`'s G5
+both required **all eight** steps of §4.1 in one pass. One of the eight cannot always run, so that
+requirement was **false by construction** — no run of any corpus could satisfy it — and a gate that
+can never pass is not a gate. This section records which steps are unconditional, which is not, and
+the condition; the gate reads the declaration below instead of asserting eight.
+
+### 11.1 The finding, and what it is not
+
+`_collect_classify_items` (`tortoise/extractor_v2.py:9767-9789`) collects only candidates whose kind
+is **missing or the `unclassified` sentinel**. Both classify passes are gated on that list being
+non-empty — `if items:` at `:10310` (the S2 pass) and `:10442` (the post-S4 pass). So S2.3 has work **iff the S2 map left
+something untyped** — and that is a property of the candidate set, not of the pipeline's health. A
+corpus whose map assigns a concrete kind to every candidate legitimately idles the pass.
+
+**Measured** (`#10215`, at `a2e80adb2` — PR `#10214`'s head, i.e. with the `#9116` witness surface
+present): one hand-written conversation and three pre-registered fixtures (`wp01`, `wp03`, `wp05`) all
+reported **7/8**, S2.3 missing, with the classify block reading
+`{"enabled": true, "s2": {}, "union": {}}`. `wp05` reported 6/8 for a second, unrelated reason
+(S5). That measurement is **not re-taken here** — it needs a provider key and a live lane graph, and it
+is an observation about a model output; the **structural** half above is what makes the conclusion
+independent of it, and it is re-derivable from the two code sites cited.
+
+**What this is not.** It is not `#9116` (the surface is present and says what it saw), not `#9823`
+(the flag-on/no-activity distinction, which this section *uses*), and not a proposal to change S2.3's
+gating (`#1695` — deliberate, and out of scope here).
+
+### 11.2 The declaration
+
+| step | kind | why |
+|---|---|---|
+| `S0`, `S1`, `S2.1`, `S2.2`, `S3`, `S5`, `S6` | **unconditional** | each has an input-independent trigger: the reader segments, the first LLM stage is called, the map emits candidates, the VET gate reports a pass, a query is spent, the merge accounts items, a payload is produced. A run in which one of these does not happen is a failing run. |
+| `S2.3` | **conditional** | its trigger is `_collect_classify_items(...) != []`, i.e. a candidate the map could not type. Zero candidates ⇒ the pass has nothing to do, and §4.1's own framing (*"assign each SURVIVING candidate its pack kind"*) is satisfied vacuously. |
+
+The machine-readable form is the `steps:` block in the pins fence above, restated byte-identically in
+`preregistration.json`, and `tools/capstone_preregistration_check.py` fails if the two disagree, if the
+split is not a strict partition of the eight, or if the conditional entry loses its condition, its idle
+evidence or its evidence issue.
+
+### 11.3 The restated requirement — and why it is not a relaxation
+
+**V5 / G5 now require every one of the eight steps to be ACCOUNTED FOR, not all eight to be observed:**
+
+1. every **unconditional** step is observed in the one pass (unchanged);
+2. every **conditional** step is either observed, or declared **idle** with its basis, where *idle* is a
+   **witnessed** state: the pass's flag was **ON**, its `s2`/`union` counters are **empty**, the
+   receipt's own error/warning surfaces carry **no failure marker** for it, and the receipt's
+   `step_witness` carries a **positive candidate count** for the map (an absent or zero count is the
+   shape an EMPTY item set leaves when it skips the pass's `try`, so it cannot support an idle claim);
+3. a step may not leave the gate by being omitted from both lists — required ∪ conditional must be
+   exactly the eight (§4.1), and the two must be disjoint;
+4. the conditional **set** is read from the record **at the pre-registration commit**, never from the
+   run log, so making a step conditional is a reviewed edit to a hash-pinned artefact rather than a
+   lane's local choice. A log whose declaration the frozen record does not confirm is **refused**.
+
+**Why (2) is a witness and not a loophole.** The extractor's fail-open `except` (`:10323`, `classify(S2) failed` / `:10453`, `classify(union) failed`) leaves
+the *same* empty `s2`/`union` block as an idle pass — `#9823` measured that. Accepting a bare empty
+block would therefore hand a **crashed** classify pass the same verdict as a pass with nothing to do,
+which is the fail-open shape a gate may not have. The failure is visible: the extractor appends
+`classify(S2) failed: …` / `classify(union) failed: …` to `errors` and the raw list to the receipt's
+`diagnostics` (`tortoise/sdk.py`'s `_capture_resp_error_split`), plus the `classify_error` census. So
+"enabled, no activity, no failure marker" is a positive state and a crash cannot impersonate it.
+
+⚠️ **What this section does NOT do.** It does not move any E-row, does not weaken E1–E5's thresholds,
+and does not make the epic closeable: a run still has to produce five measured rows. It removes one
+**impossible** requirement from the step gate so that the gate can answer the question it was built
+to answer.

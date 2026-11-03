@@ -5481,6 +5481,109 @@ class TestIssueInsightAPI:
         assert payload["repo_not_indexed"] is False
         assert payload["data_points"] == []
         assert "no prior knowledge" in payload["insight"]
+        # #8447 — the route RELAYS the SDK's marker. `config/surface-manifest.yml`
+        # declares `truncated` ALWAYS present on this body, so a route that
+        # dropped it would break a declared contract field while every
+        # SDK-level test stayed green (review round 4, P2: this arm ran no
+        # route assertion at all, so the `api` registration guarded nothing).
+        assert payload["truncated"] is False
+        assert "total_available" not in payload
+
+    def test_the_route_relays_a_truncated_verdict(self, client, monkeypatch):
+        """#8447 — a cut read reaches the BODY with its exact total.
+
+        A marker written on a sink is a developer fact; the contract is about
+        what the caller receives. Driving the real route is what proves the
+        relay rather than the SDK's internal bookkeeping.
+
+        ⛔ The fixture must be a body the PRODUCER can emit (#10570 review, P3
+        note). It was not: it paired `"at least 20 graph hit(s)"` with
+        `total_available: 20`, and the producer never writes both —
+        `sdk.py:34085` prefixes `"at least "` only when `_exact` is False, and
+        `truncation.py:196` sets `total_available` only when it is True. An
+        impossible pair cannot catch a relay that mixed the two. This arm is now
+        the EXACT case (20 matches at `limit=2`, pool bound 20 — the boundary
+        `tests/test_8447_issue_insight_truncation.py::
+        test_a_pool_at_exactly_its_bound_is_not_marked_cut` pins); its qualified
+        sibling is the test below.
+
+        ⛔ GREEN on the pre-fix tree — a RELAY guard, not a red→green leg
+        (#10570 review P3-1). Measured: both `-k route_relays` arms pass against
+        base `origin/main` = `6b8793351` (`2 passed, 479 deselected`), because
+        the route already returns the SDK dict verbatim, so a fake SDK that
+        carries the marker itself needs nothing from this diff. What it pins is
+        that the route does not WHITELIST or re-shape the body. The red→green
+        arm on this route is the marker assertion block at the end of
+        `test_authed_call_returns_fail_closed_shape`, which reads the real SDK.
+        """
+        import tortoise.hosted_api as hosted_api
+
+        class _FakeSDK:
+            def issue_insight(self, title, body=None, repo=None, limit=2):
+                return {
+                    "has_prior": True, "no_prior_knowledge": False,
+                    "repo_not_indexed": False,
+                    "data_points": [{"kind": "statement", "content": "alpha"}],
+                    "insight": "20 graph hit(s) relate to this issue "
+                               "— check the graph before filing.",
+                    "more_in_graph": "alpha",
+                    "repo_stats": None,
+                    "truncated": True, "total_available": 20,
+                }
+
+        monkeypatch.setattr(hosted_api, "_data_sdk",
+                            lambda org: _FakeSDK())
+
+        r = client.get("/v1/issue-insight", params={"title": "anything"})
+
+        assert r.status_code == 200
+        payload = r.json()
+        assert payload["truncated"] is True
+        assert payload["total_available"] == 20
+        assert not payload["insight"].startswith("at least "), (
+            "an EXACT total beside a qualified count is a pair the producer "
+            "cannot emit — the fixture drifted off the contract")
+
+    def test_the_route_relays_a_floor_without_inventing_a_total(
+            self, client, monkeypatch):
+        """The qualified arm: a saturated pool relays `at least N` and NO total.
+
+        This is the pair that makes the relay's absence handling observable. A
+        route that dropped `truncated`, or that filled a missing
+        `total_available` with the floor it was handed, would pass the exact arm
+        above and fail here.
+
+        ⛔ Also GREEN on the pre-fix tree, for the same reason as its sibling:
+        a relay guard, not a red→green leg (measured with it, `-k route_relays`
+        → `2 passed` at base `6b8793351`).
+        """
+        import tortoise.hosted_api as hosted_api
+
+        class _FakeSDK:
+            def issue_insight(self, title, body=None, repo=None, limit=2):
+                return {
+                    "has_prior": True, "no_prior_knowledge": False,
+                    "repo_not_indexed": False,
+                    "data_points": [{"kind": "statement", "content": "alpha"}],
+                    "insight": "at least 25 graph hit(s) relate to this issue "
+                               "— check the graph before filing.",
+                    "more_in_graph": "alpha",
+                    "repo_stats": None,
+                    "truncated": True,
+                }
+
+        monkeypatch.setattr(hosted_api, "_data_sdk",
+                            lambda org: _FakeSDK())
+
+        r = client.get("/v1/issue-insight", params={"title": "anything"})
+
+        assert r.status_code == 200
+        payload = r.json()
+        assert payload["truncated"] is True
+        assert "total_available" not in payload, (
+            "a floor never wears a total's clothes — the route must relay the "
+            "ABSENCE, not fill it")
+        assert payload["insight"].startswith("at least ")
 
     def test_cross_team_isolation(self, client):
         """Team B cannot see Team A's repo stats via the REST mirror."""
@@ -8321,7 +8424,10 @@ class TestSearchOffloadConcurrency:
                                             org=TEST_TEAM))
                 # Empty temp DB -> FTS finds nothing; the meaningful assert is
                 # 200-shaped (no HTTPException) + count == 0.
-                assert result == {"results": [], "count": 0}
+                # #8447: `truncated` is always on the body — an empty read of a
+                # reachable store is COMPLETE, so it says so.
+                assert result == {"results": [], "count": 0,
+                                  "truncated": False}
             finally:
                 _restore_tortoise_sdk_init(_orig_init)
 

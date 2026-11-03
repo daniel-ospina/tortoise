@@ -503,7 +503,7 @@ def test_a_version_pinned_hosted_label_is_dropped_never_made_permanent(tmp_path:
     """⛔ THE UNION'S NAMED CARVE-OUT (a): `ubuntu-<version>` is DROPPED, not carried forward.
 
     A literal union makes every out-of-band version pin PERMANENT, and that reverses a recorded
-    decision (not just a style choice): `docs/ops/ci-runner-x64.md:92-96` —
+    decision (not just a style choice): `docs/ops/ci-runner-x64.md:95-99` —
     "`_preserve_labels` DROPS the whole class on re-registration … so an attachment survives a
     repair that re-applies it (`--repair-labels` keeps only the box's own label, and only where
     **this run's resolution** claims it — `on`, or `auto` on a host whose `/etc/os-release` reports
@@ -548,9 +548,9 @@ def test_a_foreign_arch_marker_is_dropped_so_the_repair_still_heals(tmp_path: Pa
 
     `is_host_label` deliberately excludes `self-hosted-x64`/`self-hosted-arm64` (they are CUSTOM
     labels GitHub lets you remove), so a literal union leaves `self-hosted-arm64` on an x86 box —
-    the measured pre-#2327 stamp (`docs/ops/ci-runner-x64.md:590-592`) — and the runbook still sells
+    the measured pre-#2327 stamp (`docs/ops/ci-runner-x64.md:593-595`) — and the runbook still sells
     `--repair-labels` as the manual heal that "re-applies this arch's marker"
-    (`docs/ops/ci-runner-x64.md:746-747`). Keeping
+    (`docs/ops/ci-runner-x64.md:749-750`). Keeping
     the alien marker makes an arm64-specific job routable to an x86 box and produce a wrong
     artifact: a false PASS, not a queue delay (this file's own header).
     `tools/runner_autoscale.py::_preserve_labels` re-derives the arch marker rather than preserving
@@ -3322,6 +3322,11 @@ def test_the_label_assertion_other_files_cite_lands_on_it():
     comments) plus the mirror test — globbing every file under `tests/` for this class would read
     ~48 MB per run and cover nothing further.
 
+    ⚠️ The mirror test cites the assertion by SYMBOL, not by line (it was re-pointed in #10525's
+    "two more unpinned tree cites made symbol-form" commit, because a `:NNNN` cite here re-staled the
+    moment this module's docstring grew). It is therefore still SCANNED — a new `:NNNN` from it reds
+    `unknown` — but it is not in `known`, because there is no number left for this pin to land.
+
     Non-vacuity (measured): the pre-fix refs red on the landing check — the old number is an empty
     line — and re-pointing only SOME of the five reds on the agreement check.
     """
@@ -3333,11 +3338,16 @@ def test_the_label_assertion_other_files_cite_lands_on_it():
         ".github/workflows/availability-watchdog.yml",
         ".github/workflows/ci-check-repair.yml",
         ".github/workflows/ci-queue-health.yml",
-        "tests/test_reporting_workflow_concurrency.py",
     }
     scanned = [
         *(REPO_ROOT / ".github" / "workflows").glob("*.yml"),
         *(REPO_ROOT / ".github" / "workflows").glob("*.yaml"),
+        # ⛔ THE MIRROR IS STILL SCANNED BUT NO LONGER IN `known`: it cites this file by
+        # SYMBOL now (`::test_the_os_label_is_opt_in_and_no_fallback_arm_can_drop_it`), which
+        # cannot re-stale, so there is no number here for this pin to check — and requiring it in
+        # `known` made the pin over a citation that no longer exists (#10525, the `stale` arm
+        # redded). Keeping it in `scanned` is what keeps that true: re-introducing a `:NNNN` cite
+        # from the mirror lands in `unknown` and forces a decision instead of drifting quietly.
         REPO_ROOT / "tests" / "test_reporting_workflow_concurrency.py",
     ]
     ref = re.compile(r"tests/test_ci_runner_x64_install\.py:(\d+)")
@@ -3393,12 +3403,12 @@ def test_every_runbook_citation_in_this_file_lands_on_what_it_names():
 
     # cited start line -> a regex the CITED RANGE must match, i.e. the sentence quoted here
     anchors: dict[int, str] = {
-        92: r"DROPS the whole class on re-registration",
-        590: r"A foreign arch marker",
-        746: r"install-ci-runner-x64\.sh --repair-labels` re-applies\s+this arch's marker",
+        95: r"DROPS the whole class on re-registration",
+        593: r"A foreign arch marker",
+        749: r"install-ci-runner-x64\.sh --repair-labels` re-applies\s+this arch's marker",
         # 8g's docstring quotes the phantom-test-name relay; anchored on the TEST NAME it names,
         # so a future shift of that sentence reds here instead of leaving the quotation adrift.
-        866: r"test_the_changes_job_carries_no_job_scope_env",
+        869: r"test_the_changes_job_carries_no_job_scope_env",
         # 8h-bis quotes the label-contract table for the pre-mitigation absolute it pins: the two
         # rows a comment about what the pool CLAIMS must land on (the pair, and `:26` alone).
         25: r"\*\*GitHub-hosted, plus — as a temporary mitigation",
@@ -3450,7 +3460,7 @@ _RUNBOOK_TEST_REF = re.compile(r"(tests/[A-Za-z0-9_/]+\.py)::(test_[A-Za-z0-9_]+
 def test_every_test_name_the_runbook_names_exists():
     """⛔ A RUNBOOK REFERENCE TO A TEST THAT DOES NOT EXIST READS AS CONFIRMATION.
 
-    `docs/ops/ci-runner-x64.md:866` told the operator the job-scope lever is a red check
+    `docs/ops/ci-runner-x64.md:869` told the operator the job-scope lever is a red check
     "`tests/test_ci_selection.py::test_the_changes_job_carries_no_job_scope_env`" — and no test of
     that name existed in the tree (the guard was
     `test_the_opt_in_is_step_scoped_so_no_env_sits_above_the_capstone_gate`). Nothing redded: the
@@ -3510,8 +3520,8 @@ _TOOLS_RUNBOOK_ANCHORS: dict[int, str] = {
     13: r"^# x86_64 CI runners",
     25: r"\*\*GitHub-hosted, plus — as a temporary mitigation",
     26: r"^\| `ubuntu-24\.04` \| 9 \| \*\*GitHub-hosted, plus — as a temporary mitigation",
-    87: r"still does \*\*not\*\* claim any",
-    92: r"DROPS the whole class on re-registration",
+    90: r"still does \*\*not\*\* claim any",
+    95: r"DROPS the whole class on re-registration",
 }
 
 
@@ -3997,8 +4007,8 @@ def test_the_runbook_inventory_matches_the_tree_and_says_the_read_refuses(tmp_pa
     `runs-on: ${{ fromJSON(matrix.runner) }}` in `python-ci.yml`. Two consequences, neither
     re-derived against the tree the merge produced:
 
-      1. the inventory is **76** `ubuntu-latest` jobs, not the 77 the page states (a number this PR
-         added itself);
+      1. the inventory was **76** `ubuntu-latest` jobs at that head, not the 77 the page stated then
+         (a number this PR added itself);
       2. that one non-static block makes `--status`' `label-coverage` read refuse with `exit 4`
          BEFORE it verdicts any label — so the page's *Verify it* section told the operator to
          confirm the mitigation with a read that prints the header, the refusal, and ZERO
@@ -4044,7 +4054,7 @@ def test_the_runbook_inventory_matches_the_tree_and_says_the_read_refuses(tmp_pa
         "the `ubuntu-24.04` job count moved — re-derive the runbook's table with this pin: "
         f"{counts}"
     )
-    assert counts["ubuntu-latest"] == 76, (
+    assert counts["ubuntu-latest"] == 75, (
         "the `ubuntu-latest` job count moved (the runbook states it as a dated measurement, and "
         "this arm is what makes 'dated' honest) — re-derive the table and this number together, do "
         f"not assume {counts['ubuntu-latest']} is right: {counts}"
@@ -4591,6 +4601,15 @@ def test_the_relays_a_sibling_test_file_makes_land_on_what_they_name():
     concurrency.py`'s citation at a line that does not carry the inventory row reds with `cites
     docs/ops/ci-runner-x64.md:<n>, but that line is …`; with this pin absent the same edit is
     silent, because no other surface reads that file.
+
+    ⛔ AND A CITE INTO A FILE THIS BRANCH EDITS IS ANCHORED BY SENTENCE, NOT BY LINE NUMBER. The
+    capstone relay below was re-derived seven times and falsified an eighth by the commit that
+    inserted 56 lines above it — a number is asserted by nothing between edits, so it decays
+    silently, which is the exact defect this pin exists to refuse one level up. `symbol_citations`
+    holds those anchors: the target must carry the sentence exactly once, so the relay is verified
+    while the address can never go stale. ⛔ What is NOT asserted is that the citing paragraph still
+    points at the target — the block below records why that check was written, measured DEAD and
+    removed rather than shipped; read it before adding that clause back.
     """
     # (target file, cited line) -> a regex the CITED LINE ITSELF must match
     anchors: dict[tuple[str, int], str] = {
@@ -4598,14 +4617,57 @@ def test_the_relays_a_sibling_test_file_makes_land_on_what_they_name():
         ("tests/test_website_docs_consistency.py", 56):
             r"from tortoise\.commit_schema import Point, point_content_id",
         # the reference-surface relay that drifted: the runbook sentence naming the test
-        ("docs/ops/ci-runner-x64.md", 866): r"test_the_changes_job_carries_no_job_scope_env",
-        # the capstone pin's re-cut history, which names it too
-        ("tests/test_capstone_preregistration_9075.py", 1590):
-            r"test_the_changes_job_carries_no_job_scope_env",
+        # ⛔ 869, not 866: this merge took `main`'s CORRECTED prose in that bullet (#10237's
+        # canary really does name the class, `ci.yml:1473 repo-harnesses`) and this branch's
+        # python-ci.yml line pins (1903 / 1875-1877 — true on the merged tree, since this branch
+        # inserts 12 lines the other side does not have). Both sides moved this relay, so the
+        # number was re-derived from the merged head rather than taken from either side.
+        ("docs/ops/ci-runner-x64.md", 869): r"test_the_changes_job_carries_no_job_scope_env",
+        # ⛔ the capstone pin's re-cut history is NOT here, and its absence is the fix, not a gap:
+        # it used to be ("tests/test_capstone_preregistration_9075.py", 1703), and that number was
+        # re-derived SEVEN times (1590 → 1596 → 1673 → 1682 → 1693 → 1701 → 1703) because the
+        # target is a file this branch edits. The eighth falsification needed no edit at all: the
+        # commit that added the paragraph arguing against re-deriving numbers inserted 56 lines
+        # above the sentence and left the cite pointing at an unrelated `#:` line, redding this
+        # pin. Re-deriving to 1759 would only re-arm that decay. It is a SYMBOL citation now —
+        # see `symbol_citations` below, which anchors on the SENTENCE the target must carry.
+        # The ninth re-derivation is why the number is gone rather than bumped one more time:
+        # `origin/main` carried it to 1687 (#10525's E3 class-set arms) while this branch was
+        # removing it, so the merge of those two heads is exactly the shape a number cannot
+        # survive. The symbol citation is the only form that is true on BOTH sides.
         # the four fleet observers' prose (`:25-26`): the inventory row it contrasts — the
         # moving alias the observers must NOT pin to, which the version pin below it replaces
         ("docs/ops/ci-runner-x64.md", 25): r"^\| `ubuntu-latest` \|",
+        # the POOL-ONLY class rule: the vocabulary `tests/test_runner_tool_contract.py`'s new
+        # `_POOL_ONLY_LABEL` arm is written against (#10511 review)
+        ("docs/ops/ci-runner-x64.md", 62): r"not a spelling but a CLASS",
     }
+
+    # (citing file, target file, sentinel regex) — citations written WITHOUT a line number.
+    # ⛔ THE LINE NUMBER IS THE PART THAT DECAYS, so for a relay into a file this branch EDITS the
+    # number is not the assertion: the SENTENCE is. Each sentinel must match EXACTLY ONE line of
+    # the target, so a deleted sentence (no relay left) and a duplicated one (no single landing
+    # site) both red. The `path:line` half above keeps discovering every NUMERIC citation —
+    # including any new one somebody adds to these files — so dropping this one number does not
+    # open a hole in the two-way scan.
+    #
+    # ⛔ DELIBERATELY NOT CHECKED: whether the CITING paragraph still points at the target. A
+    # version of that check was written and measured DEAD — the citing file names the target twice
+    # and the symbol five times, so "the target appears near the symbol" stays true after the
+    # parenthetical is deleted. A check that cannot fail reads as coverage it does not provide,
+    # which is the defect this whole pin exists to refuse, so it was removed rather than shipped.
+    # Its absence loses no verdict: if that parenthetical is dropped, no relay is wrong — the
+    # sentence still exists, still names the test, and the other two anchors still land.
+    symbol_citations: list[tuple[str, str, str]] = [
+        (
+            # the capstone pin's re-cut history, which advertises this test's name (#10186). Cited
+            # by symbol because the line was re-derived seven times and falsified an eighth by a
+            # commit that inserted 56 lines above it (see `anchors`).
+            _CITING_TEST_FILE,
+            "tests/test_capstone_preregistration_9075.py",
+            r"and job scope is now forbidden by `test_the_changes_job_carries_no_job_scope_env`",
+        ),
+    ]
 
     ref = re.compile(r"((?:tests/[A-Za-z0-9_/]+\.py)|(?:docs/ops/ci-runner-x64\.md)):(\d+)")
     runbook_ref = re.compile(r"(docs/ops/ci-runner-x64\.md):(\d+)")
@@ -4655,3 +4717,18 @@ def test_the_relays_a_sibling_test_file_makes_land_on_what_they_name():
         "a citation names a line that does not say it — re-derive the number at this head: "
         + "; ".join(wrong)
     )
+
+    # ── the symbol citations: no number, so nothing to re-derive ────────────────────────────
+    for citer, target, sentinel in symbol_citations:
+        target_path = REPO_ROOT / target
+        assert target_path.is_file(), f"symbol citation names a missing file: {target}"
+        hits = [
+            n for n, line in enumerate(target_path.read_text().splitlines(), 1)
+            if re.search(sentinel, line)
+        ]
+        assert len(hits) == 1, (
+            f"{citer} cites {target} by SYMBOL, so the sentence it anchors on must exist exactly "
+            f"once in that file — found {len(hits)} match(es) at {hits}. A deleted sentence is a "
+            "relay that no longer says what the citing paragraph claims; a duplicated one no "
+            "longer identifies a single landing site. Re-anchor on the sentence the tree carries."
+        )

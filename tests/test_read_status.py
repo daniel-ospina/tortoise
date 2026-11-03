@@ -664,9 +664,15 @@ class TestHostedSearchRoute:
         import tortoise.hosted_api as hosted_api
 
         class _FakeSDK:
-            def tortoise_fts_query(self, q, limit=10, read_status_out=None, **_ignored):
+            def tortoise_fts_query(self, q, limit=10, read_status_out=None,
+                                   _truncation_out=None, **_ignored):
                 if read_status_out is not None:
                     read_status_out["status"] = term
+                # #8447: the real read path records the truncation verdict on
+                # EVERY return path, so a faithful fake does too — a mock that
+                # stays silent here would be modelling the silent-subset bug.
+                if _truncation_out is not None:
+                    _truncation_out["truncated"] = False
                 return [{"id": "p1", "content": "alpha", "pointKind": "statement"}]
 
             def close(self):
@@ -681,7 +687,11 @@ class TestHostedSearchRoute:
         monkeypatch.delenv("TORTOISE_READ_STATUS", raising=False)
         body = asyncio.run(hosted_api.search(q="alpha", limit=5, org={}))
         assert body == {"results": [{"id": "p1", "content": "alpha",
-                                     "kind": "statement"}], "count": 1}
+                                     "kind": "statement"}], "count": 1,
+                        # #8447: `truncated` is NOT flag-gated, so it is
+                        # present even here. That is the point — a marker that
+                        # defaults off preserves the silent subset.
+                        "truncated": False}
         assert "status" not in body  # byte-identical when off
 
     def test_field_rides_the_response_when_enabled(self, monkeypatch):

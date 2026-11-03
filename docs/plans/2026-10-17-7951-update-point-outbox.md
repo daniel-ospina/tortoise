@@ -119,8 +119,16 @@ each docstring rather than implied.
    `update_point(status='live')` replays as `draft`). Pre-existing live-vs-replay parity gaps, unchanged and
    not claimed closed here. The RECORD (Postgres) lane does apply the promote's `status` — `PointRevised`
    is a flat `NodePatch` and `Point.status` is a primary column (#9255).
-6. **A revision for a NON-EXISTENT id is still journalled** (the `MATCH … SET` matches nothing, the call
-   returns `{}`). Pre-existing; this increment moves *when* the record is written, not *whether*.
+6. **A revision for a NON-EXISTENT id is no longer journalled** — **DISCHARGED by #10119** (the ABSENT
+   early return in `update_point`, `tortoise/sdk.py:16584-16588`, landed by PR #10470 via batch PR
+   #10495): an id absent at the door's presence read returns `{}` BEFORE the `PointRevised` append
+   (`:16819` promote / `:16827` non-promote) and before `_mark_dirty`, so it journals no row, advances
+   no epoch and strands no dirty root. The ONLY absent shape that still issues a statement is the
+   **status-carrying** one (`status='live'` → the promote arm), which raises `ValueError('No point …')`
+   and journals nothing either way. ⛔ Do **not** "restore" journal-first ordering for absent ids to
+   recover the #7405 rebuild window: that trade is stated and deliberate at `tortoise/sdk.py:16569-16579`,
+   and its other half — a LEGITIMATE mid-rebuild revision is now lost in silence — is carried by
+   **#10515**, not by this residual.
 7. **The tag half of a stranded promote replays in the OPPOSITE direction** (#9255). The record carries
    `tags`, and the graph fold DOES apply them (`n.tags = $tags` + `_sync_tags`), so a `rebuild_all` over the
    window increment 2b closes (`update_point(status='live', tags=[…])` whose TAGGED `MERGE` cannot land)
