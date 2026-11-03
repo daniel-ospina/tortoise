@@ -768,11 +768,25 @@ def test_the_e1_e2_record_refuses_a_corpus_off_the_frozen_pin(tmp_path):
 
 # ── the table shape, and the two rules that keep a row honest ────────────
 
-def _rows(out_path: str = "docs/evidence/9889/e1-e2-scores.json",
-          *, e2_verdict: str = "RED") -> list[dict]:
+#: The E4 row fixture's artifact: a receipt ON the run's own corpus, because
+#: `build_e4_row` REFUSES anything else — handing E4 the retired off-pin constant here
+#: would re-assert the defect this fixture is meant to model (a row whose note says
+#: "the SAME receipt, on the SAME corpus" while its fields declare another revision).
+_E4_ON_PIN = "tests/eval/write_path/receipts/w2b-operator-2026-10-24-8503-b.json"
+
+
+def _rows(out_path: str = measure.E1_E2_SCORES, *,
+          e2_verdict: str = "RED",
+          log_corpus_sha: str = "sha256:" + "d" * 64,
+          e4: dict | None = None) -> list[dict]:
+    """REBASE UNION (#10679 × #10610): #10610 moved E1/E2 onto the `#9889` record
+    (`E1_E2_SCORES`) and deleted `E1E2_LOG`; #10679 added the `log_corpus_sha` / `e4`
+    seams and the ON-PIN E4 fixture. Both are kept: the E1/E2 arms come from the record,
+    and the corpus/E4 operands are overridable so the off-pin shape stays covered.
+    """
     parsed = measure.measure_e1_e2(_REPO)
     return measure.build_rows(
-        head="a" * 40, out_path=out_path, log_corpus_sha="sha256:" + "d" * 64,
+        head="a" * 40, out_path=out_path, log_corpus_sha=log_corpus_sha,
         e1={"verdict": measure.verdict_word(measure.e1_outcome(**_e1_kwargs())),
             "sha": "c" * 40, "corpus_sha256": "e" * 64,
             "numerator": measure.e1_pass_objects(parsed),
@@ -783,9 +797,9 @@ def _rows(out_path: str = "docs/evidence/9889/e1-e2-scores.json",
             "numerator": 8, "denominator": 14, "note": "E2 note"},
         e3={"verdict": "RED", "numerator": 23, "denominator": 70,
             "note": "E3 note"},
-        e4={"verdict": "RED", "numerator": 2, "denominator": 15,
-            "sha": "6164c683c", "corpus_sha256": "sha256:" + "f" * 64,
-            "evidence": measure.E4_RECEIPT, "note": "E4 note"},
+        e4={"verdict": "RED", "numerator": 5, "denominator": 15,
+            "sha": "a999be41e", "corpus_sha256": log_corpus_sha,
+            "evidence": _E4_ON_PIN, "note": "E4 note"} if e4 is None else e4,
         e5={"verdict": "RED", "numerator": 12, "denominator": 25,
             "note": "E5 note"})
 
@@ -842,7 +856,7 @@ def test_a_row_cites_the_artifact_it_was_written_to():
     rows = {row["criterion"]: row for row in _rows(out_path=out)}
     assert rows["E3"]["evidence"] == out
     assert rows["E1"]["evidence"] == measure.E1_E2_SCORES
-    assert rows["E4"]["evidence"] == measure.E4_RECEIPT
+    assert rows["E4"]["evidence"] == _E4_ON_PIN
     assert rows["E5"]["evidence"] == measure.E5_RESCORE
 
 
@@ -854,19 +868,53 @@ def test_a_row_measured_on_another_corpus_declares_it(tmp_path):
     declaration nothing needs is a claim the gate would then check). E4 does
     still cite a receipt from another revision, and must declare it.
     """
+    log_corpus = "sha256:" + "d" * 64
     rows = {row["criterion"]: row for row in _rows()}
     for criterion in ("E1", "E2"):
         row = rows[criterion]
-        # E1/E2 now measure the FROZEN corpus, so their artifact digest IS the
-        # run's — the V7 declaration is no longer needed and must not appear.
-        assert "artifact_corpus_sha256" not in row, criterion
-    row = rows["E4"]
+    # Neither row takes the declaration arm any more: #10610 moved E1/E2 onto the
+    # frozen `#9889` record and #10679 selects E4's receipt BY the frozen pin, so both
+    # rows carry the run's OWN corpus and `artifact_corpus_sha256` must be ABSENT.
+    for criterion in ("E1", "E2", "E4"):
+        assert "artifact_corpus_sha256" not in rows[criterion], criterion
+    for criterion in ("E3", "E5"):
+        assert rows[criterion]["corpus_sha256"] == "sha256:" + "d" * 64, criterion
+
+    # The off-pin shape the arm exists for is still covered — by the OPERANDS, not by a
+    # hard `None`: hand `build_rows` an off-pin E4 and the declaration must appear.
+    off_pin_corpus = "sha256:" + "f" * 64
+    off = _rows(e4={"verdict": "RED", "numerator": 2, "denominator": 15,
+                    "sha": "a999be41e", "corpus_sha256": off_pin_corpus,
+                    "evidence": "tests/eval/write_path/receipts/off-pin.json",
+                    "note": "off-pin"})
+    row = off["E4"]
     assert measure.normalise_corpus(row["corpus_sha256"]) != \
         measure.normalise_corpus("sha256:" + "d" * 64), "E4"
     assert row.get("artifact_corpus_sha256") == row["corpus_sha256"], "E4"
-    for criterion in ("E3", "E5"):
-        assert rows[criterion]["corpus_sha256"] == "sha256:" + "d" * 64, criterion
-        assert "artifact_corpus_sha256" not in rows[criterion], criterion
+
+
+def test_the_real_e4_row_declares_no_other_corpus_revision():
+    """The row ``main`` actually builds carries NO ``artifact_corpus_sha256``.
+
+    That field told a machine consumer (``run.rows[E4].artifact_corpus_sha256``) that
+    E4's artifact measured a different corpus revision than the run froze, while the
+    note beside it said the two ARE the same — and V7 could never catch it, because
+    ``_same_corpus`` short-circuits before the declaration is read. So the arm went
+    from VERIFIED (pre-fix: an off-pin constant whose digest had to appear in the
+    artifact) to an unverified, redundant claim on the one row that cannot be scored
+    off the pin at all. This drives the real selector -> row -> table path, so a
+    reversion reds here and not only in a fixture.
+
+    Non-vacuity: at the previous head ``build_rows`` stamped the field unconditionally
+    from ``e4["corpus_sha256"]``, so the first assertion is red there; the fixture case
+    above is what reds if the condition becomes a blanket removal.
+    """
+    pin = _prereg()["corpus"]["fixtures_hash"]
+    e4 = measure.build_e4_row(measure.load_e4(_REPO, frozen_pin=pin),
+                              bars=measure.parse_bars(_prereg()), corpus_sha=pin)
+    rows = {row["criterion"]: row for row in _rows(log_corpus_sha=pin, e4=e4)}
+    assert "artifact_corpus_sha256" not in rows["E4"], rows["E4"]
+    assert measure._same_corpus(rows["E4"]["corpus_sha256"], pin), rows["E4"]
 
 
 def test_the_e1_and_e2_rows_carry_the_counts_their_criteria_are_written_over():

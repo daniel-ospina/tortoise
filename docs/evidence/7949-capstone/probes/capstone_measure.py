@@ -894,6 +894,14 @@ def build_rows(*, head: str, out_path: str, log_corpus_sha: str,
     the corpus THIS run froze, the row also carries ``artifact_corpus_sha256`` and
     ``tools/capstone_verdict_check.py``'s V7 requires that digest to appear in the
     artifact's own text — a declaration nothing supports is a finding.
+
+    ⛔ E4 is the row where the two are the SAME, so it declares nothing: since the
+    selector landed, ``build_e4_row`` REFUSES a receipt whose ``corpus_hash`` is not
+    the frozen pin, so ``e4["corpus_sha256"]`` is this run's corpus by construction.
+    It carried ``artifact_corpus_sha256`` unconditionally anyway — a declaration that
+    told a machine consumer "a different revision" about the one row whose own note
+    says the opposite, and that V7 could never verify, because its same-corpus arm
+    short-circuits before it reads the field.
     """
     def row(criterion: str, *, verdict: str, evidence: str, sha: str | None,
             numerator: int | None, denominator: int | None,
@@ -924,6 +932,13 @@ def build_rows(*, head: str, out_path: str, log_corpus_sha: str,
             built["artifact_corpus_sha256"] = artifact_corpus_sha256
         return built
 
+    # The docstring's rule, applied to E4's operands rather than hard-coded to
+    # "no declaration": on the real path this is False (`build_e4_row` refused an
+    # off-pin receipt before we got here), and an `e4` handed in from another
+    # revision still declares itself.
+    e4_off_this_corpus = not _same_corpus(e4["corpus_sha256"] or "",
+                                         log_corpus_sha or "")
+
     return [
         # E1 and E2 carry the counts their OWN criteria are written over — E2 the
         # E2a count over the FROZEN 14 value-bearing units (8/14, bar >= 13 of 14),
@@ -953,8 +968,9 @@ def build_rows(*, head: str, out_path: str, log_corpus_sha: str,
         row("E4", verdict=e4["verdict"], evidence=e4["evidence"], sha=e4["sha"],
             numerator=e4["numerator"], denominator=e4["denominator"],
             corpus_sha256=e4["corpus_sha256"],
-            artifact_corpus_sha256=e4["corpus_sha256"], blocked_by="#8503",
-            note=e4["note"]),
+            artifact_corpus_sha256=(e4["corpus_sha256"] if e4_off_this_corpus
+                                    else None),
+            blocked_by="#8503", note=e4["note"]),
         row("E5", verdict=e5["verdict"], evidence=E5_RESCORE, sha=head,
             numerator=e5["numerator"], denominator=e5["denominator"],
             corpus_sha256=log_corpus_sha, blocked_by="#9738", note=e5["note"]),
