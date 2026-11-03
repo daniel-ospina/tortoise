@@ -819,6 +819,61 @@ def test_a_keyword_inside_a_WIDER_backtick_span_is_a_quotation_not_a_claim():
     assert "this tool can show fires" in blank.detail, blank.detail
 
 
+def test_a_code_span_that_crosses_a_LINE_BREAK_cannot_buy_a_pass():
+    r"""#10634 review P2 (fail-open): a span's closer search stopped at the END OF
+    ITS LINE, so a code span whose opener and closer sit on two lines of the SAME
+    paragraph was never blanked — and CommonMark §6.1 says a span contains line
+    endings ("line endings are converted to spaces"), so the renderer puts the
+    keyword inside `<code>`:
+
+        "Example: `Closes\n#10541` is the quoted form."
+        -> <p>Example: <code>Closes #10541</code> is the quoted form.</p>
+
+    Both PASS arms read `strict`, so both reported `lands` over a keyword GitHub
+    ignores — the one outcome this module forbids. The boundary is now the BLANK
+    LINE (a span cannot cross a paragraph), and the two arms keep their asymmetry:
+    `strict` searches to the end of the paragraph, the FINDING arms keep the
+    per-line bound and OVER-REPORT the multi-line span — a false warning, never a
+    lost closure.
+    """
+    multiline = "Example: `Closes\n#10541` is the quoted form.\n"
+    wide = "The body used ``Closes\n#10541`` in a quoted example.\n"
+    in_item = "- item `Closes\n  #100` here\n"
+    for body, n in ((multiline, 10541), (wide, 10541), (in_item, 100)):
+        # the FINDING arm keeps the claim (documented over-report) …
+        assert cl.parse_closing_refs(body) == [n], body
+        # … and the PASS arm refuses it.
+        assert cl.parse_closing_refs(body, None, strict=True) == [], body
+
+    # The subject's own `lands` arm refuses the pass, and says WHICH parse saw it
+    # (the resolution the body has to be fixed for is spelled out, not guessed).
+    pr = _pr(170, DEFAULT, multiline)
+    (finding,) = cl.classify(pr, _by_head(pr), DEFAULT)
+    assert finding.verdict == "unresolved", finding
+    assert "LENIENT parse" in finding.detail, finding.detail
+
+    # …and the CARRIER arm, which is the silent-stranding case the tool exists
+    # for: a stacked PR whose carrier only QUOTES the keyword in such a span.
+    subject = _pr(171, SIBLING, "Closes #100")
+    carrier = _pr(172, DEFAULT, wide.replace("10541", "100"), head=SIBLING)
+    (carried,) = cl.classify(subject, _by_head(subject, carrier), DEFAULT)
+    assert carried.verdict == "inert", carried
+    assert "Re-state the keyword" in carried.detail, carried.detail
+
+    # The controls — the shapes that were ALREADY right must stay right, so the
+    # new boundary cannot be satisfied by blanking more: a one-line span is code
+    # in both arms, and a one-line claim still lands.
+    assert cl.parse_closing_refs("Example: `Closes #100` quoted") == []
+    assert cl.parse_closing_refs("Example: `Closes #100` quoted", None, strict=True) == []
+    ok = _pr(173, DEFAULT, "fix: the thing\n\nCloses #100\n")
+    (landed,) = cl.classify(ok, _by_head(ok), DEFAULT)
+    assert landed.verdict == "lands"
+    # …and a stray run may not swallow the claim on the NEXT line: the lenient
+    # arm never pairs across a line break, so an indented-code tick cannot blank
+    # the paragraph below it (the direction that loses a real closure).
+    assert cl.parse_closing_refs("    a `b\nprose `c Closes #100\n") == [100]
+
+
 def test_a_closed_unmerged_subject_on_a_sibling_base_is_not_promised_a_carrier():
     """#10634 cycle 2 (P2): the sibling-base arm said "#100's work only lands when
     PR #carrier merges" for a subject that was CLOSED WITHOUT MERGING — its
@@ -1619,7 +1674,12 @@ def test_a_quoted_marker_line_fence_cannot_buy_a_lands(body, why):
 #     must never be lost — an over-report costs a warning, an under-report costs
 #     a silent miss).
 
-_CODE_BLOCK_RE = re.compile(r"<pre><code\b.*?</code></pre>", re.S)
+# Both forms of CODE the renderer can produce: a BLOCK (`<pre><code>`, which
+# `strip_code` owns) and an INLINE SPAN (`<code>`, which `_strip_inline_code`
+# owns). Only the block form was removed here, so an inline-span shape read as
+# PROSE and the oracle could not discriminate on the span grammar at all — which
+# is how a span that crosses a line break bought a `lands` (#10634 review P2).
+_CODE_BLOCK_RE = re.compile(r"<pre><code\b.*?</code></pre>|<code\b.*?</code>", re.S)
 _FIRST_REF_RE = re.compile(r"#(\d+)")
 
 _COMMONMARK_SHAPES = [
@@ -1664,7 +1724,18 @@ _COMMONMARK_SHAPES = [
     # Consuming the `>` before measuring the dedent kept the block open over it.
     ("- item\n  > ```\n> > Closes #100\n",
      "a RAW dedent ends the item and the fence it contains"),
-    # and the claims that ARE prose
+    # a code span CROSSES A SOFT LINE BREAK: §6.1 converts line endings to
+    # spaces, so opener and closer on two lines of ONE paragraph are one span.
+    # A per-line closer search left these unstripped and both PASS arms read the
+    # keyword — `lands` on a body whose keyword GitHub renders into <code>
+    # (#10634 review P2, fail-open).
+    ("Example: `Closes\n#10541` is the quoted form.\n",
+     "a code span across a soft line break"),
+    ("The body used ``Closes\n#10541`` in a quoted example.\n",
+     "a two-backtick span across a soft line break"),
+    ("- item `Closes\n  #100` here\n",
+     "a span inside a list item across a soft line break"),
+    # …and the claims that ARE prose
     ("> Closes #100\n", "a quoted paragraph is prose"),
     ("- item\n  ```\nCloses #100\n", "a column-0 line ends the item"),
     ("- ```\n  a\n- Closes #100\n", "a new item ends a marker-line fence"),
@@ -1727,3 +1798,12 @@ def test_the_ITEM_EDGE_is_measured_in_the_space_the_item_lives_in():
     marker_line_fence_in_quote = "> - ```\n>   Closes #100\n"
     assert cl.parse_closing_refs(marker_line_fence_in_quote, None, strict=True) == []
     assert cl.parse_closing_refs(marker_line_fence_in_quote) == []
+
+
+if __name__ == "__main__":  # pragma: no cover
+    # The docstring advertises `Run standalone: python3 tests/test_closes_landing.py`.
+    # Without this block that command imports the module, defines every test,
+    # invokes none and exits 0 — a green that ran nothing, which is the residue
+    # class this repo names for entry points (#10634 review P2, found twice).
+    # Peer convention: `tests/test_2350_validity_precision.py`.
+    raise SystemExit(pytest.main([str(Path(__file__).resolve()), "-q"]))

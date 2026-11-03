@@ -68,7 +68,7 @@ MARKER = "RUNNER-TOOL-CONTRACT-UNSATISFIED"
 #: `auto-file-issue.sh` (`e2e-live-reconcile`, `prod-csp-monitor`,
 #: `tenant-provision-monitor`), `welcome-e2e-monitor.sh` (`welcome-e2e-monitor`),
 #: `mergify_config_guard.py` (`mergify-guard-recut`), `inbound_relay_sweep.py`
-#: (`inbound-relay-sweep`). The set is 17 jobs across 15 workflows; count it from
+#: (`inbound-relay-sweep`). The set is 18 jobs across 16 workflows; count it from
 #: the literal, not from this sentence.
 GH_JOBS = {
     "python-ci.yml": ["canary-streak"],
