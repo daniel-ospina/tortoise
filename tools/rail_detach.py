@@ -64,13 +64,24 @@ Stdlib only (this runs on the plain `python3` of a cell).
 """
 from __future__ import annotations
 
+import sys
+
+# #5128: refuse a <3.12 interpreter BEFORE the imports below — a module-level
+# 3.12-only construct would fail first, with an error that blames the import
+# rather than the interpreter (the D9 shape).
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        f"tools/rail_detach.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python tools/rail_detach.py`"
+    )
+
 import argparse
 import fcntl
 import json
 import os
 import re
 import subprocess
-import sys
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
