@@ -3488,13 +3488,18 @@ def test_an_unparseable_date_off_the_pin_is_ignored():
 
 
 def test_a_missing_receipts_directory_refuses_differently_from_an_empty_one():
-    """An ABSENT receipts directory is not an EMPTY one.
+    """An ABSENT receipts directory is not an EMPTY one — nor one that is a FILE.
 
     Both produced the identical "none present" refusal, so a wrong root or a partial
     checkout pointed the reader at a missing receipt when the real cause was a missing
     tree — the mirror of the case where "none present" was printed about a directory
-    that did hold an on-pin candidate. Both arms are pinned here, because the point is
-    the DISTINCTION, not either message on its own.
+    that did hold an on-pin candidate. All three arms are pinned here, because the
+    point is the DISTINCTION, not any one message on its own.
+
+    The third arm (a path that EXISTS as a regular file) is the one `is_dir()` made
+    invisible: it is False for a file, so the absent-tree refusal fired and asserted
+    "does not exist" about a path that was plainly there — a refusal naming a false
+    reason, which is the single failure mode a refusal must not have.
     """
     pin = "sha256:" + "d" * 64
     absent = Path(tempfile.mkdtemp())
@@ -3516,6 +3521,25 @@ def test_a_missing_receipts_directory_refuses_differently_from_an_empty_one():
     assert "candidate(s) were scanned" in scanned, scanned
     assert "none present" in scanned, scanned
     assert "does not exist" not in scanned, scanned
+
+    # ── third arm: the path EXISTS, as a regular FILE ──────────────────────────
+    # `is_dir()` is False for a file, so this used to fall into the absent-tree
+    # refusal and claim the directory did not exist. The message must now say what
+    # is actually true, and must NOT send the reader to check the root.
+    notadir = Path(tempfile.mkdtemp())
+    occupied = notadir / measure.E4_RECEIPT_DIR
+    occupied.parent.mkdir(parents=True, exist_ok=True)  # E4_RECEIPT_DIR is multi-level
+    occupied.write_text("not a receipts directory")
+    with pytest.raises(SystemExit) as exc:
+        measure.select_e4_receipt(notadir, frozen_pin=pin)
+    as_file = str(exc.value)
+    assert "REFUSED" in as_file, as_file
+    assert str(occupied) in as_file, as_file
+    assert "NOT a" in as_file, as_file
+    assert "does not exist" not in as_file, (
+        "the path exists as a file — asserting it does not exist is a refusal naming "
+        f"a false reason: {as_file}")
+    assert "candidate(s) were scanned" not in as_file, as_file
 
 
 def test_e4_refuses_rather_than_falling_back_to_another_corpus():

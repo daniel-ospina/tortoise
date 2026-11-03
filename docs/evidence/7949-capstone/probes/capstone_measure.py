@@ -2010,13 +2010,25 @@ def select_e4_receipt(repo: Path = ROOT, frozen_pin: str = "") -> tuple[str, dic
                          "corpus cannot be checked is not evidence for a bar "
                          "written over the pre-registered corpus")
     directory = repo / E4_RECEIPT_DIR
-    if not directory.is_dir():
+    if not directory.exists():
         raise SystemExit(
             f"capstone-measure: REFUSED — the receipts directory {directory} does "
             "not exist, so E4's artifact cannot be looked for. Check the root this "
             "probe was pointed at; an ABSENT directory is a different failure from "
             "an empty one, and reporting both as 'none present' points the reader "
             "at a missing receipt when the real cause is a missing tree")
+    if not directory.is_dir():
+        # ⛔ `is_dir()` IS False FOR A PATH THAT EXISTS AS A FILE. Falling into the
+        # absent-tree refusal above would then assert "does not exist" about a path
+        # that IS there — and a refusal that names a false reason is the one failure
+        # mode a refusal must not have (the same rule `_same_corpus` states). The
+        # sibling commit that split absent-vs-empty made this exact distinction; this
+        # is its third arm, so the reader is never sent to check a root that is fine.
+        raise SystemExit(
+            f"capstone-measure: REFUSED — {directory} exists but is NOT a "
+            "directory, so E4's artifact cannot be looked for. An ABSENT directory "
+            "is a different failure from one that is present but unusable; this one "
+            "is present, so check what occupies that path rather than the root")
     paths = sorted(directory.glob(E4_RECEIPT_GLOB))
     matched: list[tuple[tuple, Path, dict]] = []
     skipped: list[str] = []
