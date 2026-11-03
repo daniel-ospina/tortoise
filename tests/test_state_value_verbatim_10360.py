@@ -220,8 +220,9 @@ def test_a_scale_WORD_rewrite_is_unjudged_because_the_engine_fuses_none():
     #10513 review cycle-13 P2, measured: `_value_bindings` fuses no scale word,
     so `million`/`billion`/`thousand` are IGNORED and both sides bind the same
     core — a 10^3..10^9 rewrite is written as verbatim. This is a different class
-    from residual (d) (a unit word outside `_UNIT_WORDS`): it is not a spelling
-    the table lacks, it is a MAGNITUDE the engine never multiplies, so the fix
+    from residual (d) (a RATE unit with no number adjacent, or a unit SPELLING
+    the tables lack): it is not a unit adjacency the engine never fuses and not a
+    spelling, it is a MAGNITUDE the engine never multiplies, so the fix
     belongs in `_value_bindings` and would be its own change — a second scale
     reading here is the parallel-classifier shape that killed the previous
     attempt at this issue.
@@ -998,6 +999,22 @@ def test_the_registry_row_names_the_residual_that_still_stands():
     after = residual[1][:1200]
     assert "per\n      day" in after or "per day" in after, after
     assert "ADJACENCY" in after.upper(), after
+    # ⛔ BOTH HALVES, or the pin is half-vacuous (review cycle 3, MEASURED: with
+    # only the two assertions above, flipping `is CLOSED` to `is still OPEN`
+    # stayed GREEN — the header and the word ADJACENCY survive any rewording of
+    # the verdict). The closed half must be stated as closed...
+    assert "ADJACENCY half" in after and "CLOSED" in after.upper(), (
+        "the row no longer states the adjacency gap as CLOSED — this table "
+        "closed it; if it was reopened, say so AND delete that claim")
+    # ...and must not be described as open anywhere in the same breath.
+    for open_claim in ("is still open", "is not judged on adjacency",
+                       "never fused"):
+        assert open_claim not in after.lower(), (
+            f"the row still says {open_claim!r} of the adjacency class, which "
+            "this table closed")
+    # positive control: the RATE class IS still open, so the check above cannot
+    # have been satisfied by a row that says nothing at all.
+    assert "not judged" in after.lower(), after
 
 
 def test_the_suffix_comes_from_the_last_digit_run():
