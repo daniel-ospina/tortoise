@@ -1048,6 +1048,76 @@ def test_emit_manifest_passes_ignore_flags(tmp_path):
     assert "tests/test_a.py::test_x" in out.read_text()
 
 
+def test_emit_manifest_pins_confcutdir_to_the_invocation_tree_in_repo(tmp_path):
+    # The pin must NOT narrow the repo-wide chain the run step uses: a
+    # repo-relative selection keeps `--confcutdir` at the invocation directory,
+    # so `tests/conftest.py` still loads even when $FILES is made only of DEEP
+    # files (pinning to the files' own deepest common ancestor would drop it
+    # and make the manifest disagree with the run).
+    captured = {}
+
+    def fake_runner(cmd):
+        captured["cmd"] = list(cmd)
+        return 0, "tests/eval/retrieval/test_x.py::test_y\n1 tests collected in 0.00s\n"
+
+    out = tmp_path / "expected-nodeids.txt"
+    rc = _skip_guard.emit_manifest(
+        ["tests/eval/retrieval/test_x.py"], "not track_b", out,
+        runner=fake_runner)
+    assert rc == 0
+    pins = [a for a in captured["cmd"] if a.startswith("--confcutdir=")]
+    assert pins == [f"--confcutdir={os.path.abspath(os.getcwd())}"], pins
+
+
+def test_emit_manifest_pins_confcutdir_to_an_out_of_tree_selection(tmp_path):
+    # An out-of-tree selection (a temp tree, a fixture) must bound the conftest
+    # chain to ITS OWN tree. pytest walks every ancestor of the selected path
+    # and only skips dirs in `confcutdir.parents`, so without this pin a
+    # `conftest.py` sitting in a shared ancestor (`/tmp`) is imported into the
+    # manifest's collect-only run.
+    captured = {}
+
+    def fake_runner(cmd):
+        captured["cmd"] = list(cmd)
+        return 0, "test_a.py::test_x\n1 tests collected in 0.00s\n"
+
+    case = tmp_path / "case"
+    case.mkdir()
+    out = tmp_path / "expected-nodeids.txt"
+    rc = _skip_guard.emit_manifest([str(case / "test_a.py")], "not track_b", out,
+                                   runner=fake_runner)
+    assert rc == 0
+    pins = [a for a in captured["cmd"] if a.startswith("--confcutdir=")]
+    assert pins == [f"--confcutdir={case}"], pins
+
+
+def test_emit_manifest_does_not_inherit_a_conftest_above_the_selection(tmp_path):
+    # The CI shape that redded PR #10636's `test-slow (d)` shard (2026-11-02):
+    # the self-hosted runner's shared `/tmp` carried a leaked `conftest.py`, and
+    # the fixture files these tests hand `emit_manifest` live under `/tmp/tt_*`
+    # — so pytest imported the foreign conftest and every collect-only died
+    # ("ImportError while loading conftest '/tmp/conftest.py'", `rc=4`).
+    #
+    # A conftest ABOVE the selection is not part of the selection's tree. The
+    # probe is the shape a shared ancestor presents: a raising conftest in the
+    # fixture's PARENT (the local stand-in for `/tmp`), never in the case dir
+    # itself — a conftest in the case dir is deliberately refused, which
+    # `test_emit_manifest_refuses_a_conftest_that_raises` pins.
+    (tmp_path / "conftest.py").write_text(
+        "raise RuntimeError('a conftest above the selection must not be "
+        "imported')\n",
+        encoding="utf-8")
+    case = tmp_path / "case"
+    case.mkdir()
+    (case / "test_ok.py").write_text(
+        "def test_ok():\n    assert True\n", encoding="utf-8")
+    out = tmp_path / "expected-nodeids.txt"
+    rc = _skip_guard.emit_manifest([str(case / "test_ok.py")], "not track_b", out)
+    assert rc == 0, rc
+    assert out.exists(), "the collection completed — the manifest must be written"
+    assert "test_ok.py::test_ok" in out.read_text(encoding="utf-8")
+
+
 def test_emit_manifest_empty_files_writes_nothing(tmp_path):
     out = tmp_path / "expected-nodeids.txt"
     rc = _skip_guard.emit_manifest([], "not track_b", out,
@@ -1951,6 +2021,10 @@ class TestGuardFailsOnModuleLevelCollectionSkip:
         proc = subprocess.run(
             [sys.executable, "-m", "pytest", str(tests_dir / "test_modskip.py"),
              "-p", "no:cacheprovider", "-o", "junit_family=xunit1",
+             # A conftest ABOVE the fixture tree must never be imported (a
+             # shared /tmp carries one on the self-hosted runners; it made
+             # this spawn die at import — the PR #10636 `test-slow (d)` red).
+             f"--confcutdir={tests_dir}",
              f"--junitxml={junit}"],
             capture_output=True, text=True, cwd=str(tmp_path),
         )
