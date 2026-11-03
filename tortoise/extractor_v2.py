@@ -12942,6 +12942,17 @@ def _vocabulary_gap_run_warning(reading: dict[str, Any]) -> str:
             f"{reading['oversize_observations']} oversize token(s) counted but "
             f"never retained (over the {_VOCABULARY_GAP_MAX_TOKEN}-char cap, so "
             "never sampled)")
+    # The SAMPLE cap, not the token-size cap (review P2): `distinct_tokens` stops
+    # being the count of distinct tokens once `_VOCABULARY_GAP_CAP` is hit, and the
+    # reading carries `truncated_observations` for exactly that. Silent, a run that
+    # absorbed 5,000 distinct tokens shipped "512 unlisted token(s)" with no sign
+    # the rest were dropped — and this is a customer-visible receipt field.
+    if reading["truncated_observations"]:
+        parts.append(
+            f"{reading['truncated_observations']} further observation(s) were "
+            f"counted but not retained (the {_VOCABULARY_GAP_CAP}-distinct-token "
+            "sample cap), so this list is not complete")
+
     if not parts:  # unreachable through `_attach`, kept so no caller ships a hole
         parts.append("no readable loss (the reading recorded none of the three "
                      "shapes)")

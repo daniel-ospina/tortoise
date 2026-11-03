@@ -251,6 +251,45 @@ def test_the_reading_is_this_run_not_the_process_lifetime(sdk):
     assert _gap_warnings(second) == []
 
 
+def test_a_peer_fold_outside_the_run_window_cannot_earn_it_a_reading():
+    """This is what separates a RUN-SCOPED accumulator from a SNAPSHOT DELTA.
+
+    `test_the_reading_is_this_run_not_the_process_lifetime` above only reds a
+    reader that reports an UNDELTED process total: its second run's window
+    contains no fold at all, so a `before/after` delta reader also reports
+    nothing there and passes identically (review P2). A delta reader is the
+    cheap wrong answer — it needs no propagation, no `ContextVar`, and no
+    per-run accumulator, and it *is* wrong: any fold landing on a bare worker
+    between the two snapshots is attributed to whatever run is open.
+
+    So this arm folds from a context that does NOT carry the run's scope, INSIDE
+    the window, and requires the receipt to stay empty. A delta reader inherits
+    the token and reds here; the run-scoped accumulator does not see it and
+    stays quiet.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    def _run() -> dict:
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            # No `contextvars.copy_context()` — this worker is a PEER of the
+            # run, exactly like the bare arm in the propagation test above.
+            pool.submit(v2.fold_allowed, GAP_CLAIM, PRIOR_CLAIM).result()
+        return {"stats": {}, "warnings": []}
+
+    out = v2._run_scoped_vocabulary_gap(_run)()
+
+    # The fold really happened, and the PROCESS census really saw it — so the
+    # silence below is the run scope, not a fold that never ran.
+    assert v2.vocabulary_gap_report().get(UNLISTED_MARKER, 0) >= 1, (
+        "fixture: the bare-worker fold must reach the process census, otherwise "
+        "this arm proves nothing")
+    assert "vocabulary_gap" not in (out.get("stats") or {}), (
+        "a peer's fold outside the run window was attributed to this run — "
+        "that is a snapshot DELTA, not a run-scoped accumulator; "
+        f"stats={out.get('stats')}")
+    assert _gap_warnings(out) == []
+
+
 def test_the_per_process_log_cap_cannot_spend_the_run_level_record(sdk, monkeypatch):
     """The defect #10626 names: after 32 distinct tokens the WARNING is spent for
     the life of the process. The run-level reading must survive that."""
