@@ -3481,7 +3481,53 @@ def test_an_unreadable_record_at_the_default_path_is_exit_2_not_an_absent_one(tm
         f"record' and the gate exited {code}: {out}")
     record.unlink()
 
-    # 3. CONTROL — genuinely nothing at the path is still the documented arm.
+    # 3. ⛔ AN UNREADABLE ANCESTOR IS NOT AN ABSENT RECORD (#10601 review round
+    # 4, P1). `os.path.lexists` swallowed every OSError from `lstat`, so one
+    # `chmod 000` on the enclosing DIRECTORY made a valid on-disk record read as
+    # "no record": V12 disarmed, exit 0, and a sentence asserting the file is
+    # absent over a file that was right there — the round-3 class, one
+    # indirection lower. Only ENOENT may take the absent arm.
+    (record.parent).chmod(0o000)
+    try:
+        code, out, err = gate()
+    finally:
+        record.parent.chmod(0o755)
+    assert code == 2, (
+        "an UNREADABLE ANCESTOR directory was read as 'no record' and the gate "
+        f"exited {code} — V12 was disarmed by a permission bit one level up: "
+        f"{out}{err}")
+    assert "NOT verified" not in out, out
+
+    # 4. ⛔ A NON-REGULAR FILE MUST NOT BE OPENED (#10601 review round 5, P2).
+    # A FIFO at the record path made `read_text()` BLOCK with no writer: no exit
+    # code, no output, a CI job wedged until its timeout — while the comment
+    # beside the arm claimed the whole class exits 2. No pipe writer is created
+    # here on purpose: if the guard regresses, this test hangs rather than
+    # failing a string compare, which is the honest signal for a hang.
+    os.mkfifo(record)
+    try:
+        code, out, err = gate()
+    finally:
+        record.unlink()
+    assert code == 2, (
+        "a FIFO at the record path was opened instead of refused: "
+        f"exit {code}, {out}{err}")
+    assert "not a regular file" in err, err
+
+    # 5. ⛔ AN EMPTY --blocker-states IS NOT AN ABSENT ONE (#10601 review round
+    # 5, P3). `args.blocker_states` was tested for truthiness, so
+    # `--blocker-states "$RECORD"` with RECORD unset silently fell back to the
+    # COMMITTED DEFAULT and the OK line claimed a verification of a file the
+    # caller never named.
+    buf, err = io.StringIO(), io.StringIO()
+    with redirect_stdout(buf), redirect_stderr(err):
+        code = cvc.main([str(LOG), "--repo", str(tmp_path), "--blocker-states", ""])
+    assert code == 2, (
+        "an EMPTY --blocker-states fell back to the committed record instead of "
+        f"failing closed: exit {code}, {buf.getvalue()}")
+    assert "every cited blocker verified" not in buf.getvalue(), buf.getvalue()
+
+    # 6. CONTROL — genuinely nothing at the path is still the documented arm.
     assert not os.path.lexists(record), "the control needs the path to be empty"
     code, out, _ = gate()
     assert code == 0 and "NOT verified" in out, (

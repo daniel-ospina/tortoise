@@ -124,6 +124,7 @@ import json
 import os
 import posixpath
 import re
+import stat
 import subprocess
 from datetime import datetime
 from pathlib import Path
@@ -1400,10 +1401,18 @@ def main(argv: list[str] | None = None) -> int:
 
     repo = Path(args.repo).resolve()
     blocker_states = None
-    states_path = (Path(args.blocker_states) if args.blocker_states
+    #: ⛔ THE OPTION'S PRESENCE, NOT ITS TRUTHINESS (#10601 review round 5, P3).
+    #: `args.blocker_states` was tested for truthiness twice — for the path and
+    #: for "load it" — so `--blocker-states ""` (a `$RECORD` that is unset, the
+    #: realistic trigger) silently fell back to the COMMITTED DEFAULT and the OK
+    #: line went on saying "every cited blocker verified" about a file the caller
+    #: never named. `is not None` is the honest test for "the caller supplied
+    #: this", and an empty path then loads `Path("")` and fails closed at exit 2.
+    explicit_states = args.blocker_states is not None
+    states_path = (Path(args.blocker_states) if explicit_states
                    else repo / BLOCKER_STATES_DEFAULT)
     # ⛔ `is_file()` IS NOT "IS THE PATH FREE" (#10601 review round 3, P1).
-    # The presence test was `states_path.is_file()`, so a DIRECTORY, a FIFO or a
+    # The presence test was `states_path.is_file()`, so a DIRECTORY or a
     # DANGLING SYMLINK at the same path made it False — the loader was never
     # called, `blocker_states` stayed None, V12 did not apply, and the gate
     # exited 0 printing "no …blocker-states.json" over a path that EXISTS.
@@ -1413,23 +1422,33 @@ def main(argv: list[str] | None = None) -> int:
     # ANCESTOR directory — or an ancestor symlink into `/proc/1/root/...`, or a
     # symlink loop, both of which git can carry — made a record that is on disk
     # and valid read as "no record": V12 disarmed, exit 0, and a sentence
-    # asserting the file is absent over a file that is right there. The class
-    # the round-3 fix claimed to close, one indirection lower.
+    # asserting the file is absent over a file that is right there.
     #
     # `lstat` is asked directly instead, because only ONE errno means "nothing
-    # is at this path": ENOENT. Anything else (EACCES, ELOOP, ENOTDIR, a FIFO
-    # that will block forever) is a record somebody put there and this tool
-    # cannot read — the loader raises and this exits 2, exactly as the arm's
-    # docstring promises. A `--blocker-states` argument is always loaded, so an
-    # explicit path never falls back either.
+    # is at this path": ENOENT. Anything else (EACCES, ELOOP, ENOTDIR) is a
+    # record somebody put there and this tool cannot read, so it is loaded, the
+    # loader raises, and the gate exits 2.
+    #
+    # ⛔ AND A NON-REGULAR FILE IS NOT LOADED (round 5, P2). Round 4's comment
+    # claimed a FIFO "exits 2"; measured, `read_text()` BLOCKS on a FIFO with no
+    # writer (no exit code, no output, a CI job wedged until its timeout). The
+    # `lstat` result is therefore inspected: anything that is not a regular file
+    # (and not a symlink, which `read_text` follows) is a present-but-unreadable
+    # record and exits 2 like the rest of that class, without ever opening it.
     absent = False
-    if not args.blocker_states:
+    if not explicit_states:
         try:
-            os.lstat(states_path)
+            mode = os.lstat(states_path).st_mode
         except FileNotFoundError:
             absent = True
         except OSError:
-            absent = False  # present but unreadable -> let the loader say so
+            mode = None  # present but unreadable -> let the loader say so
+        else:
+            if not (stat.S_ISREG(mode) or stat.S_ISLNK(mode)):
+                print(f"capstone-verdict-check: cannot use blocker states "
+                      f"{states_path}: not a regular file (mode {mode:#o})",
+                      file=sys.stderr)
+                return 2
     if not absent:
         # A record that is PRESENT but unreadable is exit 2, never "no V12".
         # Downgrading a malformed record to "not applicable" would make
