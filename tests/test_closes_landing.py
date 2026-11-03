@@ -1606,6 +1606,16 @@ def test_a_fence_is_measured_from_its_items_content_column(body, expected, why):
     (">     Closes #100\n", [], "indented code block, quoted, single line"),
     # The flat form, restated: it already refused, and must keep refusing.
     ("old version:\n\n    Closes #100\n", [], "flat indented code block (unchanged)"),
+    # …and the TAB-indented form, which is where the removed `rest.startswith("\\t")`
+    # clause claimed to act. It never could: `strip_code` runs `expandtabs(4)` on
+    # every line first, so a tab arrives here as FOUR SPACES and this arm already
+    # fired on `rest_indent`. Pinned because the dead clause read as a live guard
+    # (#10634 review P3, flagged twice); a renderer agrees it is `<pre><code>`.
+    ("old version:\n\n\tCloses #100\n", [], "tab-indented code block"),
+    # …and the mirror, which the same removal had to keep: a TAB after a quote
+    # marker is ONE space of the blockquote's own indentation (§5.1), not four,
+    # so the renderer emits `<blockquote><p>Closes #100` and GitHub fires it.
+    ("> a\n>\tCloses #100\n", [100], "a tab after the quote marker is quoted prose"),
     # …and quoted PROSE stays a claim. Only CODE is ignored by GitHub.
     ("> Closes #5\n", [5], "a quoted paragraph is prose"),
     (">   Closes #5\n", [5], "a quote-indented PARAGRAPH is prose, not code"),
