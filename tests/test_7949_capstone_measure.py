@@ -3802,7 +3802,9 @@ def test_the_bare_entry_point_call_cite_resolves_to_the_call_it_names():
 # PR #10382 closed #9775's render half: every path that builds a prompt now
 # carries `STATE_VALUE_CARVE_OUT`, the compact render included. What still blocks
 # E2 is the OTHER half — nothing in the write path ENFORCES retention — plus the
-# 1-of-14 value loss that sits upstream of the filter, and both are #10360. Until
+# value loss (13 of 14 lost when #10382's round landed; 6 of 14 lost on the
+# `#9889` record, `docs/evidence/9889/e1-e2-scores.json`) that sits upstream of the
+# filter, and both are #10360. Until
 # this pin, four routes still sent a reader to #9775 as an OPEN blocker, i.e. to a
 # lane that had LANDED — and the fourth (the `#9080` capstone row of
 # `docs/00_index.md`, which is a DIFFERENT line of the same file from the
@@ -3824,6 +3826,15 @@ _RETRACTED_E2_RENDER_ABSENCE = (
     "| `#9775` the state-value carve-out on one render path |",
     "the carve-out is absent on the compact render path",
 )
+
+
+#: The BOLD verdict token the `#9080` row states E2 under. A selector keyed on one
+#: literal word (`BLOCKED`) went stale the moment #10610 review issue 1 moved the
+#: row to `E2 RED` — and it stayed green, because the same line still carries E1's
+#: `BLOCKED`. Reading the token rather than the word keeps the leg's subject alive
+#: across a verdict change (a verdict moves by re-running the probe, not by editing
+#: this regex).
+_E2_VERDICT_ROW = re.compile(r"\*\*E2 (?:BLOCKED|RED|GREEN)\*\*")
 
 
 def test_the_bundle_names_the_live_e2_blocker_and_no_closed_render_absence():
@@ -3881,14 +3892,20 @@ def test_the_bundle_names_the_live_e2_blocker_and_no_closed_render_absence():
     #    itself on E2's blocker and every gate was green.
     #
     #    The rule is over rows, not over the `#9775` spellings found today: a row
-    #    that marks E2 BLOCKED must name the live blocker and must not name the
-    #    closed one, whichever words it uses to do it.
-    e2_blocked_rows = [line for line in index.splitlines()
-                       if "E2" in line and "BLOCKED" in line]
-    assert e2_blocked_rows, (
-        "no line of docs/00_index.md marks E2 blocked — this leg is vacuous "
-        "(it would pass on an index that stopped routing E2 at all)")
-    for row in e2_blocked_rows:
+    #    that states E2's verdict must name the live blocker and must not name the
+    #    closed one, whichever words it uses to do it — AND whichever verdict word
+    #    it uses. The selector below reads the BOLD verdict token (`**E2 <WORD>**`),
+    #    not one literal: #10610 review issue 1 moved this row from `E2 BLOCKED`
+    #    to `E2 RED` (the `#9889` record scores the row), and a selector keyed on
+    #    `BLOCKED` would have dropped the row out of this leg's subject while the
+    #    leg went on passing on E1's own verdict word in the same line.
+    e2_verdict_rows = [line for line in index.splitlines()
+                       if _E2_VERDICT_ROW.search(line)]
+    assert e2_verdict_rows, (
+        "no line of docs/00_index.md states E2's verdict (`**E2 BLOCKED**` / "
+        "`**E2 RED**` / `**E2 GREEN**`) — this leg is vacuous (it would pass on "
+        "an index that stopped routing E2 at all)")
+    for row in e2_verdict_rows:
         assert "`#10360`" in row, (
             "an index row marks E2 blocked without naming the live blocker "
             f"`#10360`: {row[:400]}")
@@ -3896,6 +3913,140 @@ def test_the_bundle_names_the_live_e2_blocker_and_no_closed_render_absence():
             "an index row still routes a reader to `#9775` as E2's blocker — "
             "#9775's render half is CLOSED (PR #10382), so the live blocker is "
             f"`#10360`: {row[:400]}")
+
+
+# ── the three routes to E1/E2's verdict state the RECORD's verdict (#10610 issue 1) ──────────
+
+#: `capstone_measure.verdict_word`'s vocabulary, keyed by the record's own outcome word: a
+#: REFUSED measurement is BLOCKED (neither a pass nor a fail), a FAIL over a decided
+#: population is RED, a PASS is GREEN.
+_ROW_VERDICT = {"REFUSED": "BLOCKED", "FAIL": "RED", "PASS": "GREEN"}
+
+#: The bundle's verdict column — `⛔ **BLOCKED** (n=1 per arm …)`, `⛔ **RED** (8 of 14)`.
+_README_VERDICT = re.compile(r"(?:⛔|✅)\s*\*\*(BLOCKED|RED|GREEN)\b")
+
+#: The claim #10610 review issue 1 found in TWO documents after both rows moved off
+#: `e1-e2.log`: that the frozen 14-unit denominator "is carried by no committed artifact".
+#: The premise is CHECKED below (the record names the artifact, the artifact exists, and its
+#: denominator IS the frozen 14), so these are REFUTED phrases, not merely unwelcome ones —
+#: if the artifact were ever withdrawn the pin reds on its premise instead of banning truth.
+_UNCARRIED_DENOMINATOR = (
+    "carried by no committed artifact",
+    "no committed artifact carries the registered denominators",
+)
+
+
+def test_the_three_routes_to_the_e1_e2_verdict_state_the_records_verdict():
+    """A document that routes a reader to E1/E2 must state the verdict the record gives.
+
+    #10610 review issue 1 (P2): the change re-pointed both rows at
+    `docs/evidence/9889/e1-e2-scores.json` and moved E2 from BLOCKED to RED, and the two
+    documents a reader is routed to kept asserting the superseded reading IN THE PRESENT
+    TENSE — `docs/00_index.md`'s `#9080` row (`3 RED + 2 BLOCKED`, "E1 … its only artifact
+    is 25 Objects … with no before arm", "E2 … carried by no committed artifact") and
+    `E1-E5-PROOFS.md`'s E2a/E2b rows ("the bundle's README marks the row BLOCKED because
+    the frozen 14-unit denominator is carried by no committed artifact"), whose
+    `README.md:65` pointer now lands on a row reading `RED (8 of 14)`. Nothing read that
+    prose, so the suite stayed green while the bundle's own entry point told a reader the
+    opposite of the table beside it.
+
+    Every leg is DERIVED: the verdict from the record's `outcome`, the counts from the
+    record's own pairings and E2a block, and the headline (`N RED + M BLOCKED`) from the
+    bundle README's five verdict rows. Nothing here is a typed expectation, so a re-run
+    that flips an outcome either moves the documents or reds this pin.
+
+    Non-vacuity, measured at `e989c6449` (the head this pin was written against): the index
+    row carries `**E2 BLOCKED**` against a record that says FAIL, the proofs E2a row carries
+    `**BLOCKED**` as well, and all three `_UNCARRIED_DENOMINATOR`-class phrases are present
+    in those two files — so legs 3, 4 and 5 each red on the pre-fix tree. Leg 1 makes the
+    phrase ban honest rather than rhetorical: at that head the record carries two before
+    arms and the E2a artifact carries the frozen 14.
+    """
+    record = json.loads((_REPO / "docs/evidence/9889/e1-e2-scores.json")
+                        .read_text(encoding="utf-8"))
+
+    # 1. The PREMISE, measured: two before arms exist, and the denominator the two
+    #    documents called "uncarried" is carried by the artifact the record names.
+    pairings = record["e1"]["pairings"]
+    assert len(pairings) == 2, (
+        "the record no longer carries two before arms — `with no before arm` would stop "
+        "being a refuted claim, so the ban below would be redding on a TRUE sentence")
+    e2a = record["e2"]["e2a"]
+    denominator = record["denominators"]["e2a_units"]
+    assert (e2a["value_units"], e2a["frozen_units"], denominator) == (14, 14, 14), (
+        "the E2a block and the frozen denominator disagree — reconcile them before the "
+        f"documents can be held to either: {(e2a['value_units'], e2a['frozen_units'], denominator)}")
+    for rel in (e2a["artifact"], e2a["falsifier_artifact"]):
+        assert (_REPO / rel).is_file(), (
+            f"{rel} is missing, so the frozen denominator is uncarried again — this pin "
+            "would now be banning a true sentence, not a refuted one")
+
+    # 2. The bundle's own table is where the record's outcomes become row verdicts, and it
+    #    is the surface the other two documents describe. Read it, do not restate it.
+    listed = [ln for ln in (_REPO / "docs/evidence/7949-capstone/README.md")
+              .read_text(encoding="utf-8").splitlines()
+              if re.match(r"^> \| \*\*E[1-5]\*\* ", ln)]
+    assert len(listed) == 5, (
+        f"the README's verdict table lists {len(listed)} rows, not 5 — the headline this "
+        "pin derives has no subject until the table is whole")
+    table = {ln.split("**")[1]: _README_VERDICT.findall(ln)[0] for ln in listed}
+    assert table["E1"] == _ROW_VERDICT[record["e1"]["outcome"]], (
+        f"README says E1 is {table['E1']}, the record's outcome {record['e1']['outcome']!r} "
+        "maps to a different verdict")
+    assert table["E2"] == _ROW_VERDICT[record["e2"]["outcome"]], (
+        f"README says E2 is {table['E2']}, the record's outcome {record['e2']['outcome']!r} "
+        "maps to a different verdict")
+    headline = (f"{sum(1 for w in table.values() if w == 'RED')} RED + "
+                f"{sum(1 for w in table.values() if w == 'BLOCKED')} BLOCKED")
+
+    # 3. The `#9080` row — the route a reader meets first — states E2's verdict, the
+    #    headline the table gives, and the numbers the record measured.
+    index = (_REPO / "docs/00_index.md").read_text(encoding="utf-8")
+    route = next(line for line in index.splitlines() if "#9080" in line)
+    assert f"**E2 {table['E2']}**" in route, (
+        f"the `#9080` row does not state E2's verdict as `**E2 {table['E2']}**` — the "
+        f"record's own outcome is {record['e2']['outcome']!r}: {route[:400]}")
+    assert f"E1 {record['e1']['outcome']}" in route or f"E1 {table['E1']}" in route, (
+        f"the `#9080` row states neither the record's own word ({record['e1']['outcome']!r}) "
+        f"nor the row verdict ({table['E1']!r}) for E1: {route[:400]}")
+    assert headline in route, (
+        f"the `#9080` row's headline is not the verdict table's own count ({headline!r}) — "
+        f"the README lists {' / '.join(f'{k}:{v}' for k, v in table.items())}")
+    for value in [p["before_share"] for p in pairings] + [pairings[0]["after_share"]]:
+        assert f"{value:.4f}" in route, (
+            f"the `#9080` row does not carry the record's measured share {value:.4f} — a row "
+            "that prints the superseded run's numbers describes a population the record "
+            f"does not: {route[:400]}")
+
+    # 4. The audit's per-row table carries the same verdict, and no rival one.
+    proofs = (_REPO / "docs/evidence/7949-capstone/E1-E5-PROOFS.md").read_text(
+        encoding="utf-8")
+    e2_rows = [ln for ln in proofs.splitlines() if re.match(r"^\| \*\*E2[ab]\*\*", ln)]
+    assert len(e2_rows) == 2, (
+        f"the audit's E2a + E2b rows are {len(e2_rows)}, not 2 — the audit stopped "
+        "auditing one half of E2, so this leg has no subject")
+    for row in e2_rows:
+        rival = set(re.findall(r"\*\*(BLOCKED|RED|GREEN)\b", row)) - {table["E2"]}
+        assert not rival, (
+            f"an audit row still states {sorted(rival)} for E2, but the record scores it "
+            f"{table['E2']}: {row[:400]}")
+    survived = f"{e2a['value_survived']} of {e2a['frozen_units']}"
+    assert table["E2"] in set(re.findall(r"\*\*(BLOCKED|RED|GREEN)\b", e2_rows[0])), (
+        f"the audit's E2a row states no verdict — the record's is {table['E2']}")
+    assert survived in e2_rows[0] and e2a["artifact"] in e2_rows[0], (
+        f"the audit's E2a row does not carry the record's own count ({survived!r}) and "
+        f"artifact ({e2a['artifact']!r}): {e2_rows[0][:400]}")
+
+    # 5. The refuted absence claim, in every routing surface.
+    for name, text in (("docs/00_index.md", index), ("E1-E5-PROOFS.md", proofs)):
+        assert "with no before arm" not in text, (
+            f"{name} still says E1 measured `with no before arm` — the record carries two "
+            "before arms (78 and 69 Objects) on the frozen corpus")
+        for phrase in _UNCARRIED_DENOMINATOR:
+            assert phrase not in text, (
+                f"{name} still asserts the frozen 14-unit denominator is {phrase!r}, which "
+                f"{e2a['artifact']} refutes — the row it describes reads "
+                f"{table['E2']} ({survived})")
 
 
 # ── the header's import claim, MEASURED (#10525 review P3) ───────────────────────────────────
