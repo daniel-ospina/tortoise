@@ -17,10 +17,13 @@ snapshot warning marks as per-box and short-lived.)
 """
 from __future__ import annotations
 
+import ast
 import importlib.util
 import json
 import sys
 from pathlib import Path
+
+import pytest
 
 TOOL = Path(__file__).resolve().parent.parent / "tools" / "attest_census.py"
 
@@ -389,8 +392,6 @@ def test_the_filename_lookup_is_case_insensitive_like_gh(tmp_path):
 
 
 def test_an_unreadable_registry_raises_instead_of_reporting_absence(tmp_path):
-    import pytest
-
     with pytest.raises(ac.RegistryUnreadable):
         ac.load_record(tmp_path / "does-not-exist", "daniel-ospina", "tortoise", 1)
 
@@ -784,3 +785,32 @@ def test_gh_json_wraps_a_non_json_answer_as_runtime_error(monkeypatch):
         assert "non-JSON" in str(exc)
     else:
         raise AssertionError("a non-JSON answer must raise RuntimeError (contract: never exit 1)")
+
+
+def test_an_old_interpreter_is_refused_with_exit_2_and_an_attributable_message(monkeypatch, capsys):
+    """The #5128 guard's CODE, which the class-wide gate (`test_entry_point_python_guard.py`)
+    deliberately does not decide per tool.
+
+    Its shape and message are gated there; its exit code is this file's own contract. `classify`
+    publishes 0 completed / 2 unreadable — "never 1, so a caller cannot mistake 'unreadable' for
+    'found a problem'" — and `raise SystemExit(<str>)` exits 1. So the guard is compiled from the
+    tool's own AST and EXECUTED at a simulated 3.9, asserting the code and the attribution: it
+    refuses rc-1 and a silent refusal, the two ways an old interpreter could read as a verdict.
+    """
+    tree = ast.parse(TOOL.read_text())
+    guard = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.If) and "version_info" in ast.unparse(node.test)
+    )
+    module = ast.Module(body=[guard], type_ignores=[])
+    ast.fix_missing_locations(module)
+    code = compile(module, "tools/attest_census.py", "exec")
+
+    monkeypatch.setattr(sys, "version_info", (3, 9, 6))
+    with pytest.raises(SystemExit) as refusal:
+        exec(code, {"__name__": "__main__", "sys": sys})
+    message = str(refusal.value) + capsys.readouterr().err
+    assert refusal.value.code == 2, f"must not exit 1 (rc 1 is the tool's forbidden status): {message!r}"
+    assert ">= 3.12" in message and "(got 3.9)" in message, f"unattributable refusal: {message!r}"
+    assert "uv run python tools/attest_census.py" in message, f"must name the working form: {message!r}"
