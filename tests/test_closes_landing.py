@@ -1520,6 +1520,24 @@ def test_container_depth_and_list_endings(body, expected, why):
     # is content column + 3. Both directions, or the fix is a coin flip.
     ("- item\n  ```\n  a\n    ```\nCloses #1001\n", [1001],
      "a 4-space closer inside a 2-column item still closes"),
+    # A marker-line fence INSIDE a quote (`> - ``` `): the item's edge is measured
+    # past the quote's own marker, so its content lines are NOT dedents. Reading
+    # the raw indent against that column ended the block on its own first line
+    # and the quoted keyword bought a `lands` — live at ca92b373f.
+    ("> - ```\n>   Closes #1001\n", [], "marker-line fence inside a quote"),
+    # …including after a BLANK quoted line, which does not end a list item and
+    # whose `>` carries no content: treating it as a dedent blanked the rest.
+    ("> - ```py\n>\n>   Closes #1001\n", [], "blank quoted line in a quoted item fence"),
+    # A `>` inside a depth-0 item fence is LITERAL content (`_split_prefix` would
+    # read it as a marker and lose the item's edge).
+    ("- ```\n   > Closes #1001\n", [], "a literal `>` inside a depth-0 item fence"),
+    # …and the over-report side of the same rule: at depth 0 a quote line starts at
+    # column 0, which really does end the item, so that claim IS prose.
+    ("- ```\n>   Closes #1001\n", [1001], "a blockquote line ends a depth-0 item fence"),
+    # Spaces BEFORE a quote marker are the marker's allowance, not the item's
+    # content: they end a quoted item, and the line becomes a paragraph of the
+    # quote — prose, so it is still a claim (over-report direction, correct).
+    ("> - ```\n   > Closes #1001\n", [1001], "indented quote marker ends a quoted item"),
 ])
 def test_a_fence_is_measured_from_its_items_content_column(body, expected, why):
     assert cl.parse_closing_refs(body) == expected, why
@@ -1568,6 +1586,23 @@ def test_a_list_item_fence_cannot_buy_a_lands_on_the_default_base():
     assert cl.classify(pr, _by_head(pr), DEFAULT) == []
 
 
+@pytest.mark.parametrize("body,why", [
+    ("> - ```\n>   Closes #100\n", "marker-line fence opened inside a blockquote"),
+    ("> - ```py\n>\n>   Closes #100\n", "…after a blank quoted line (no content to dedent)"),
+    ("> - ```\n>   Closes #100\n> ```\n", "…with its own quoted closer"),
+])
+def test_a_quoted_marker_line_fence_cannot_buy_a_lands(body, why):
+    """The `lands` direction at its narrowest: a fenced block opened ON the list
+    marker of an item that lives inside a blockquote. The item's content column
+    is measured PAST the quote's marker, so a naive raw-indent comparison reads
+    every one of the block's own content lines as a dedent, ends the block on
+    the first, and reports `lands` for a keyword the renderer puts in
+    `<pre><code>` — measured live at `ca92b373f`, fixed here. A pass may never
+    rest on a shape the tool cannot show GitHub acts on."""
+    pr = _pr(76, DEFAULT, body)
+    assert cl.classify(pr, _by_head(pr), DEFAULT) == [], why
+
+
 # ── the RENDERER as the oracle, so a divergence reds a test, not a reader ────
 #
 # `tools/closes_landing.py` is a second copy of a grammar GitHub owns, and its
@@ -1609,6 +1644,13 @@ _COMMONMARK_SHAPES = [
     # indented code blocks, flat and quoted
     ("old version:\n\n    Closes #100\n", "flat indented code block"),
     ("> old version:\n>\n>     Closes #100\n", "indented code block inside a quote"),
+    # a marker-line fence inside a quote, where the item's edge sits past the
+    # quote marker and a blank quoted line carries no content
+    ("> - ```\n>   Closes #100\n", "marker-line fence inside a quote"),
+    ("> - ```py\n>\n>   Closes #100\n", "blank quoted line in a quoted item fence"),
+    ("- ```\n   > Closes #100\n", "a literal `>` inside a depth-0 item fence"),
+    ("- ```\n>   Closes #100\n", "a blockquote line ends a depth-0 item fence"),
+    ("> - ```\n   > Closes #100\n", "indented quote marker ends a quoted item"),
     # and the claims that ARE prose
     ("> Closes #100\n", "a quoted paragraph is prose"),
     ("- item\n  ```\nCloses #100\n", "a column-0 line ends the item"),
