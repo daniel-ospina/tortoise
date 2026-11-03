@@ -669,15 +669,22 @@ class TestDistinguishingDifference:
         # the other `hangul`, and the same claim refuses to fold with itself.
         assert v2.fold_allowed(
             "\ud55c\uad6d\uc5b4", unicodedata.normalize("NFD", "\ud55c\uad6d\uc5b4"))
-        # Latin letters that are NOT in the ASCII range and NOT accented: a
-        # micro sign (`µ`, the unit in "5 µm"), an IPA letter, a PDF ligature
-        # and a fullwidth letter are all `latin`, so none of them reads as a
-        # LANGUAGE difference.  (They can still be a content substitution —
-        # "µm"/"m" differ on both sides — which is a different dimension.)
-        for surface in ("\u00b5", "\u0283", "\ufb01", "\uff21"):
+        # Latin letters that are NOT in the ASCII range and NOT accented: the
+        # `ª` at the RANGE'S LOWER EDGE (0x00AA), a micro sign (`µ`, the unit in
+        # "5 µm"), an IPA letter, a PDF ligature and a fullwidth letter are all
+        # `latin`, so none of them reads as a LANGUAGE difference.  (They can
+        # still be a content substitution — "µm"/"m" differ on both sides —
+        # which is a different dimension.)
+        for surface in ("\u00aa", "\u00b5", "\u0283", "\ufb01", "\uff21"):
             assert v2._script_of(surface) == "latin", surface
             assert v2.fold_allowed(f"we ship {surface}", f"we ship {surface}")
         assert "latin" in v2._scripts("5 \u00b5m \u0283 \ufb01 \uff21")
+        # A MODIFIER letter (category Lm, e.g. `ʰ`) is not script-bearing on its
+        # own, so it contributes nothing — the same as before this reading.  Four
+        # of them sit in a tests/fixtures file; refusing those folds as a
+        # `language` difference would have been a pure regression.
+        assert v2._script_of("\u02b0") is None
+        assert v2.fold_allowed("we ship the \u02b0 build", "we ship the \u02b0")
         # A precomposed letter belongs to its BASE letter's script, searched one
         # NFD level deeper: polytonic Greek (U+1F00-U+1FFF) is in no block, but
         # it is GREEK, so dropping its accents still folds.

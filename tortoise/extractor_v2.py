@@ -5803,15 +5803,6 @@ def _apostrophe_free(t: str) -> str:
     """
     return t.replace("'", "")
 # Non-Latin scripts, by the codepoint block that identifies them.
-#
-# SEMANTICS: any code point inside a range contributes the script — NOT only
-# letters.  That is deliberate and pinned: Arabic-Indic and Devanagari DIGITS,
-# Hebrew points and marks carry their script, and reading only letters here
-# turned `we have ١٢٣ pages` / `we have 123 pages` from a refused identity
-# difference into a permitted `number` SUPERSEDE — a destroyed prior claim
-# (review round 1, finding 2).  Accented LATIN is the exception and lives in
-# `_LATIN_SUPPLEMENT_BLOCKS`, where only letters count (its ranges carry `×`
-# and `÷`).
 _SCRIPT_BLOCKS = (
     ("greek", 0x0370, 0x03FF),
     ("cyrillic", 0x0400, 0x04FF),
@@ -5823,63 +5814,7 @@ _SCRIPT_BLOCKS = (
     ("hangul", 0xAC00, 0xD7AF),
 )
 
-#: Accented LATIN, which the ASCII branch above cannot see.
-#:
-#: ⛔ LETTERS ONLY, and separate from `_SCRIPT_BLOCKS` for that reason: Latin-1
-#: Supplement also holds `U+00D7` (`×`) and `U+00F7` (`÷`), which are MATHS
-#: SYMBOLS.  Contributing `latin` for them reads a symbol as a language and
-#: refused `得る ×` against `得る` — a fold between two Japanese claims that
-#: merely lost a multiplication sign (review finding, pinned in the tests).
-#: Without these ranges an accented letter is in NO block, so dropping an accent
-#: (`café`/`cafe`) would refuse a fold that has nothing to do with language.
-_LATIN_SUPPLEMENT_BLOCKS = (
-    (0x00AA, 0x02AF),   # Latin-1 Supplement, Latin Ext-A/B, IPA Extensions
-    (0x1E00, 0x1EFF),   # Latin Extended Additional
-    (0xFB00, 0xFB06),   # Latin ligatures (`ﬁ` `ﬂ` — routine in PDF extraction)
-    (0xFF21, 0xFF5A),   # FULLWIDTH LATIN A-Z / a-z (the gap between them is
-                        # punctuation, excluded by the letters-only test)
-)
 
-
-#: The script a letter belongs to when no block names it.
-#:
-#: ⛔ The blocks are FINITE, and they used to be the whole reading: a letter in
-#: a block they did not name contributed NOTHING to ``_scripts``, so a claim
-#: carrying one was never compared for language at all, its word read as a
-#: one-sided broadening, and the pair FOLDED — the silent memory loss of #5329
-#: in its script form (Armenian `ը`, Georgian, Thai, Ethiopic …).
-#:
-#: The list cannot be completed (a longer list only moves where the miss
-#: happens), so the miss no longer has to be CLOSED for the reading to be safe:
-#: a letter in no block is an UNKNOWN script, which is an identity difference,
-#: so the fold is REFUSED and both claims survive.  Incompleteness now costs
-#: NOISE — a refused fold — instead of a deleted claim (#5080's asymmetry).
-#:
-#: The "no block" test is searched one level deeper before it gives up: a
-#: precomposed letter decomposes under NFD into a base letter plus marks, and a
-#: letter belongs to its BASE's script — so polytonic `ἀ` (U+1F00, unlisted) is
-#: GREEK `α` + a mark, which keeps `ἐν ἀρχῇ`/`εν αρχη` folding and keeps a claim
-#: captured NFC from refusing to fold with the same claim captured NFD.  Only a
-#: base that is ITSELF unlisted is an unknown script.
-#:
-#: ⚠️ Declared residual, so it is not mistaken for coverage: this closes the
-#: LETTER case only. A DIGIT or MARK in an unlisted script reaches no dimension
-#: (Thai `๑๒๓` against `123` reads as a `number` difference, which permits a
-#: SUPERSEDE), because a non-letter in no block is not a script — narrowing that
-#: to treat non-letters as script-bearing would need `Script=Unknown` properties
-#: this stdlib does not expose, and the value dimension already owns the
-#: digit case for every script that IS listed.
-#:
-#: Non-letters are not a script: `×`, `÷`, an emoji and a currency symbol stay
-#: one-sided content tokens, exactly as they were before this reading existed.
-_UNLISTED_SCRIPT = "unlisted"
-
-
-# Differences that make two claims RIVALS rather than one claim in two
-# spellings.  The value dimensions (number, date) are absent by design: a
-# differing value is a new value for the same attribute, which is exactly what
-# UPDATE exists to record.  These are the differences where nothing may be
-# destroyed — neither a fold nor a supersede.
 _IDENTITY_DIMENSIONS = frozenset({
     "negation", "condition", "scope", "language", "substituted_content",
     "unreadable",
@@ -7082,47 +7017,18 @@ def _marker_scope(content: str) -> tuple[str, ...]:
     return tuple(out)
 
 
-def _script_of(ch: str) -> str | None:
-    """The script one character belongs to, or ``None`` when it is not script-bearing.
-
-    Order matters and each step is pinned: ASCII letters are latin; accented
-    LATIN letters (letters only — see `_LATIN_SUPPLEMENT_BLOCKS`); anything in
-    a `_SCRIPT_BLOCKS` range, letters, digits and marks alike; and finally a
-    LETTER that no block names, which is searched one level deeper under NFD —
-    a precomposed letter belongs to its BASE's script — before it is an
-    unknown script.  A non-letter that no block names is not a script at all.
-    """
-    if ch.isascii():
-        return "latin" if ch.isalpha() else None
-    cp = ord(ch)
-    for lo, hi in _LATIN_SUPPLEMENT_BLOCKS:
-        if lo <= cp <= hi:
-            return "latin" if ch.isalpha() else None
-    for name, lo, hi in _SCRIPT_BLOCKS:
-        if lo <= cp <= hi:
-            return name
-    if not ch.isalpha():
-        return None
-    base = unicodedata.normalize("NFD", ch)[0]
-    if base != ch:
-        # One level is enough in practice (a starter does not decompose again),
-        # and the recursion is idempotent if it does.
-        return _script_of(base)
-    return _UNLISTED_SCRIPT
-
-
 def _scripts(content: str) -> frozenset[str]:
     """Scripts the claim's characters are drawn from — a language difference in
     the one form decidable without a model.
 
-    ⚠️ A letter in no known block is `_UNLISTED_SCRIPT`, NOT nothing:
-    contributing nothing meant the claim was never compared for language and an
-    unlisted script silently folded (#5329).  See the comment on that constant.
+    ⚠️ A letter in no known block is `_UNLISTED_SCRIPT` (defined at the END of
+    this module with `_script_of` — new code goes below the #7949 capstone
+    marker, and an insertion HERE re-stales every live cite above it), NOT
+    nothing: contributing nothing meant the claim was never compared for
+    language and an unlisted script silently folded (#5329).  The input is
+    NFC-folded first, as every other boundary input is.
 
-    The input is NFC-folded first, exactly as every other boundary input is
-    (`_fold_unicode`): read raw, a claim captured precomposed and the same claim
-    captured decomposed produced DIFFERENT script sets, so `ἀρχή` stopped
-    folding with its own NFD spelling (review round 1, finding 1).
+    That is #5329's script share, as far as a finite list can be made safe.
     """
     found: set[str] = set()
     for ch in _fold_unicode(content).translate(_APOSTROPHES):
@@ -12554,13 +12460,18 @@ def _compact_guarantee_tail(master: dict, lines: list[str]) -> str:
 #
 # ⛔ It is left out of this census's population, and that is NOT because "a
 # script token is never absorbed" — that would be false, and subtractive
-# reasoning is how a residual reports as healthy (review ISSUE 2). Two things
-# still absorb a script token and ARE counted here: a one-sided token in a
-# script already present on BOTH sides (the usual broadening direction), and a
-# MARKS-and-DIGITS-only script difference, which reaches no dimension at all
-# because a non-letter in no block is not a script. The script POPULATION is
-# excluded because the letter case — the one this issue named — no longer
-# folds, not because the census cannot see it.
+# reasoning is how a residual reports as healthy (review ISSUE 2). A one-sided
+# token in a script already present on BOTH sides is still absorbed and IS
+# counted here ({"ըը": 2} for a one-sided Armenian token), and that is the
+# usual broadening direction. The script POPULATION is excluded because the
+# letter case — the one this issue named — no longer folds, not because the
+# census cannot see a script.
+#
+# ⚠️ And one population this census provably CANNOT see, stated so it is not
+# assumed covered: a MARKS-or-DIGITS-only script difference (Thai `๑๒๓` against
+# `123`) never reaches a `_content_token`, so it is absorbed silently and
+# counted nowhere — it is a `number` difference, which permits a SUPERSEDE.
+# That residual is declared on `_UNLISTED_SCRIPT`; it is not this census's.
 #
 # The lists are not the bug: closing the class needs a model, not a longer list
 # (#5329's own recommendation), and failing closed on any unknown token would
@@ -13243,3 +13154,86 @@ def _run_scoped_vocabulary_gap(run):
 # #7949 bundle cite typed against this file's line numbers resolving (measured:
 # a hook at the top of that function shifts eight of them).
 extract_session_v2 = _run_scoped_vocabulary_gap(extract_session_v2)
+
+
+# ── The script reading (#5329) — appended AFTER the #7949 marker on purpose ───
+#
+# `_scripts` (above, unshifted) calls these.  Definition order does not matter
+# for a function body, and it matters a lot for the capstone's live cites: an
+# insertion ABOVE the marker re-stales every one of them, which is how this
+# change put five capstone tests red before it was moved down here.
+
+#: Accented and compatibility LATIN, which the ASCII branch in `_script_of`
+#: cannot see.  Without these ranges an accented letter is in NO block, so
+#: dropping an accent (`café`/`cafe`) would refuse a fold that has nothing to do
+#: with language.
+#:
+#: ⛔ LETTERS ONLY, and separate from `_SCRIPT_BLOCKS` for that reason: Latin-1
+#: Supplement also holds `U+00D7` (`×`) and `U+00F7` (`÷`), which are MATHS
+#: SYMBOLS.  Contributing `latin` for them reads a symbol as a language and
+#: refused `得る ×` against `得る` (review finding, pinned in the tests).
+_LATIN_SUPPLEMENT_BLOCKS = (
+    (0x00AA, 0x02AF),   # Latin-1 Supplement, Latin Ext-A/B, IPA Extensions
+    (0x1E00, 0x1EFF),   # Latin Extended Additional
+    (0xFB00, 0xFB06),   # Latin ligatures (`ﬁ` `ﬂ` — routine in PDF extraction)
+    (0xFF21, 0xFF5A),   # FULLWIDTH LATIN A-Z / a-z (the gap between them is
+                        # punctuation, excluded by the letters-only test)
+)
+
+#: The script a letter belongs to when no block names it.
+#:
+#: ⛔ The blocks are FINITE, and they used to be the whole reading: a letter in
+#: a block they did not name contributed NOTHING to `_scripts`, so a claim
+#: carrying one was never compared for language at all, its word read as a
+#: one-sided broadening, and the pair FOLDED — the silent memory loss of #5329
+#: in its script form (Armenian `ը`, Georgian, Thai, Ethiopic …).
+#:
+#: The list cannot be completed (a longer list only moves where the miss
+#: happens), so the miss no longer has to be CLOSED for the reading to be safe:
+#: a letter in no block is an UNKNOWN script, which is an identity difference,
+#: so the fold is REFUSED and both claims survive.  Incompleteness now costs
+#: NOISE — a refused fold — instead of a deleted claim (#5080's asymmetry).
+#:
+#: The "no block" test is searched one level deeper before it gives up: a
+#: precomposed letter decomposes under NFD into a base letter plus marks, and a
+#: letter belongs to its BASE's script — so polytonic `ἀ` (U+1F00, unlisted) is
+#: GREEK `α` + a mark, which keeps `ἐν ἀρχῇ`/`εν αρχη` folding and keeps a claim
+#: captured NFC from refusing to fold with the same claim captured NFD.
+#:
+#: ⚠️ Declared residuals, so they are not mistaken for coverage: this closes the
+#: LETTER case only.  A DIGIT or MARK in an unlisted script reaches no dimension
+#: (Thai `๑๒๓` against `123` reads as a `number` difference, which permits a
+#: SUPERSEDE), and a MODIFIER letter (category Lm, e.g. `ʰ` U+02B0) is treated
+#: as not script-bearing, which is what it was before this reading existed.
+_UNLISTED_SCRIPT = "unlisted"
+
+
+def _script_of(ch: str) -> str | None:
+    """The script one character belongs to, or ``None`` when it is not script-bearing.
+
+    Order matters and every step is pinned: ASCII letters are latin; accented
+    LATIN letters (letters only — see `_LATIN_SUPPLEMENT_BLOCKS`); anything in a
+    `_SCRIPT_BLOCKS` range, letters, digits and marks alike (Arabic-Indic and
+    Devanagari digits carry their script, and reading only letters there turned
+    a refused identity difference into a permitted `number` SUPERSEDE); and
+    finally a LETTER that no block names, which is searched one level deeper
+    under NFD — a precomposed letter belongs to its BASE's script — before it is
+    an unknown script.  A non-letter, or a modifier letter, is not a script.
+    """
+    if ch.isascii():
+        return "latin" if ch.isalpha() else None
+    cp = ord(ch)
+    for lo, hi in _LATIN_SUPPLEMENT_BLOCKS:
+        if lo <= cp <= hi:
+            return "latin" if ch.isalpha() else None
+    for name, lo, hi in _SCRIPT_BLOCKS:
+        if lo <= cp <= hi:
+            return name
+    if not ch.isalpha() or unicodedata.category(ch) == "Lm":
+        return None
+    base = unicodedata.normalize("NFD", ch)[0]
+    if base != ch:
+        # One level is enough in practice (a starter does not decompose again),
+        # and the recursion is idempotent if it does.
+        return _script_of(base)
+    return _UNLISTED_SCRIPT
