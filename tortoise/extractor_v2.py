@@ -4206,16 +4206,19 @@ _UNIT_EQUIV = {
     "s": "s", "sec": "s", "secs": "s", "second": "s", "seconds": "s",
     "min": "min", "mins": "min", "minute": "min", "minutes": "min",
     "h": "h", "hr": "h", "hrs": "h", "hour": "h", "hours": "h",
-    # The rest of the DURATION family (#10360 residual (d)): the carve-out states
-    # its own operational examples in these units ("back under 800
-    # milliseconds", "a ten minute TTL"), and a unit WORD the engine does not
-    # FUSE binds a value with NO unit, which `_value_identity_matches` reads as
-    # the deliberate "one side omits the unit" tolerance — so `800 seconds`
-    # against `800 milliseconds` was WRITTEN as verbatim. `d`/`y` ARE keys here
-    # (and in `_UNIT_WORDS`), so an ATTACHED `3d`/`5y` becomes a COMPARED
-    # day/year identity rather than an unmapped suffix — measured: `3d` against
-    # `3 hours` is refused. That is the same class as `800ms`/`800s`, and the
-    # false-accusation direction is pinned by the spelling controls in
+    # The rest of the DURATION family (#10360 residual (d)). `_UNIT_WORDS` is
+    # what makes a unit FUSABLE; this table is what makes it COMPARABLE, and a
+    # unit the engine does not FUSE binds a value with NO unit, which
+    # `_value_identity_matches` reads as the deliberate "one side omits the
+    # unit" tolerance — so `800 seconds` against `800 milliseconds` was WRITTEN
+    # as verbatim. Two of the carve-out's OWN examples are that class ("back
+    # under 800 milliseconds", "a ten minute TTL"); the rest of the family is
+    # here because a duration table with a hole in it is how the gap survived
+    # review. `d`/`y` ARE keys here (and in `_UNIT_WORDS`), so an ATTACHED
+    # `3d`/`5y` becomes a COMPARED day/year identity rather than an unmapped
+    # suffix — measured: `3d` against `3 hours` is refused. That is the same
+    # class as `800ms`/`800s`, and the false-accusation direction is pinned by
+    # the spelling controls in
     # `test_the_carve_outs_own_ADJACENT_time_units_are_judged` (`3 days`/`3 d`).
     "d": "d", "day": "d", "days": "d",
     "wk": "wk", "wks": "wk", "week": "wk", "weeks": "wk",
@@ -6050,9 +6053,9 @@ _UNIT_WORDS = frozenset({
     # `set(_UNIT_WORDS) <= set(_UNIT_EQUIV)` was already true, but the table
     # carried `minutes`/`hours` and NOT `minute`, `second(s)`, `hour`, the
     # millisecond family, or the day/week/month/year and mile spellings — so a
-    # space-separated unit the carve-out itself names was never FUSED, its value
-    # bound with no unit, and the pair failed OPEN. `back under 800 seconds`
-    # against `back under 800 milliseconds` was written as verbatim.
+    # space-separated unit was never FUSED, its value bound with no unit, and the
+    # pair failed OPEN. `back under 800 seconds` against
+    # `back under 800 milliseconds` was written as verbatim.
     "ms", "msec", "msecs", "millisecond", "milliseconds",
     "second", "seconds", "minute", "hour",
     "d", "day", "days", "wk", "wks", "week", "weeks",
