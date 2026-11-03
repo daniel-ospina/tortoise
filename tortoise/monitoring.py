@@ -1883,17 +1883,24 @@ class _SingleSlotWorker:
         without bound.
         """
         future: concurrent.futures.Future = concurrent.futures.Future()
+        # ⛔ REGISTER BEFORE ENQUEUE. The reverse order loses a race it cannot
+        # survive: a free worker can dequeue, run and settle the callable before
+        # this line runs, so `_settle` discards nothing and the future is added
+        # AFTERWARDS — a settled entry sitting in the in-flight register forever,
+        # which makes every later ``drain()`` wait for work that already
+        # finished. Nothing can settle a future before it is enqueued, so
+        # registering first closes the window entirely.
+        with self._drain_cond:
+            self._inflight.add(future)
         try:
             self._queue.put_nowait((fn, future))
         except queue.Full:
             future.set_exception(
                 _WorkerBacklogFull(
                     f"{self._name} backlog full ({self._max_backlog}) — worker wedged"))
-            return future
-        # Registered only for ACCEPTED work: a refused submission never reaches a
-        # worker, so it can never run late and must not hold a drainer open.
-        with self._drain_cond:
-            self._inflight.add(future)
+            # A refused submission never reaches a worker, so it can never run
+            # late: unregister it rather than hold a drainer open.
+            self._settle(future)
         return future
 
 

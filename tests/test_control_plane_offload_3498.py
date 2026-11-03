@@ -176,6 +176,34 @@ def test_drain_waits_for_running_work_not_for_free_workers():
         "that hangs is worse than none")
 
 
+def test_drain_cannot_be_left_waiting_by_a_fast_completing_submission():
+    """The in-flight register is populated BEFORE the enqueue.
+
+    The reverse order loses a race with a FREE worker: it can dequeue, run and
+    settle the callable before ``submit`` registers it, so ``_settle`` discards
+    nothing and the settled future is added afterwards — it then sits in the
+    register forever and every later ``drain()`` waits for work that already
+    finished (a teardown hang, not a slow test).
+
+    The race is forced deterministically here by completing the submission from
+    inside ``put_nowait`` — the exact instant a worker that won the race would —
+    without leaving it on the queue for `_loop` to trip over.
+    """
+    pool = monitoring._SingleSlotWorker("test-drain-race", workers=1)
+
+    def _racing_put(item):
+        fn, future = item
+        future.set_result(fn())
+        pool._settle(future)
+
+    pool._queue.put_nowait = _racing_put
+    pool.submit(lambda: None)
+    assert pool.drain(timeout=2.0), (
+        "a submission that settled before `submit` returned stayed in the "
+        "in-flight register — every later drain() would wait for work that had "
+        "already finished")
+
+
 def test_drain_is_not_held_open_by_a_refused_submission():
     """A REFUSED submission never reaches a worker, so it can never run late —
     it must not hold a drainer open (that would turn fail-fast refusal into a
