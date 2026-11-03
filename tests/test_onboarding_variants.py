@@ -605,14 +605,18 @@ def test_5153_served_document_pins_the_canonical_mcp_key_variable():
         re.findall(r'"Authorization":\s*"Bearer \$\{([A-Z0-9_]+)\}', skill))
     assert referenced, (
         "the served document must carry an env-indirect Bearer snippet")
-    client = (REPO_ROOT / "tortoise" / "mcp_client.py").read_text(encoding="utf-8")
-    # NAME-PRESENCE, not a fixed call shape. The client reads the environment
-    # through a precedence loop (`os.environ.get(name)` over a names tuple) since
-    # #10605's per-request resolution, which leaves the variable READ while the
-    # literal `os.environ.get("VAR"` shape disappears. Pinning the literal form
-    # redded a correct fix (#10727) while its intent — "the doc names a variable
-    # the client actually reads" — still held.
-    unread = sorted(v for v in referenced if v not in client)
+    # Ask the CLIENT what it reads, rather than pattern-matching its source. The
+    # precedence loop (a names tuple consulted with `os.environ.get(name)`) has no
+    # per-variable literal for a shape-pin to find — pinning one redded a correct
+    # fix (#10727) — while "the name merely appears somewhere in mcp_client.py"
+    # would pass on a docstring or a comment, which is exactly the #5153 false
+    # PASS this guard exists to prevent. `_ENV_KEY_NAMES` is the declaration the
+    # resolution loop consumes, so it is shape-independent AND discriminating.
+    sys.path.insert(0, str(REPO_ROOT))
+    from tortoise import mcp_client as _client_module
+
+    read_names = set(_client_module._ENV_KEY_NAMES)
+    unread = sorted(v for v in referenced if v not in read_names)
     assert not unread, (
         "the served Bearer snippet references a variable the MCP HTTP client "
         f"never reads ({', '.join('$' + v for v in unread)}) — the 401 in #5153")

@@ -165,13 +165,21 @@ class Connection:
     sources: tuple[str, ...]
 
 
-def _credential_path() -> Path:
-    """The stored credential the onboarding CLI writes (#1708 D4).
+def _credential_paths() -> tuple[Path, ...]:
+    """The credential stores, in the recorded precedence (#1708 D4/D5).
 
-    A PATH FUNCTION, never a module constant: a `Path.home()` captured at import
-    is the same capture-at-start bug this module exists to remove (#10605).
+    PATH FUNCTIONS, never module constants: a `Path.home()` or `Path.cwd()`
+    captured at import is the same capture-at-start bug this module exists to
+    remove (#10605).
+
+    BOTH stores the onboarding CLI writes are read, project-local first:
+    `tortoise init --api-key` saves `./.tortoise` (`_cmd_init`), and the #1708
+    global store is `~/.tortoise/credentials.json`. Reading only the global one
+    made the client blind to the store the hosted onboarding actually creates —
+    no credential, the default endpoint, and a `MCP-KEY-EMPTY` naming stores the
+    user never wrote.
     """
-    return Path.home() / ".tortoise" / "credentials.json"
+    return (Path.cwd() / ".tortoise", Path.home() / ".tortoise" / "credentials.json")
 
 
 def _warn_if_store_is_readable(path: Path) -> None:
@@ -225,35 +233,43 @@ def resolve_connection() -> Connection:
         if value and value.strip():
             return Connection(env_url or _DEFAULT_URL, value.strip(), name, tuple(sources))
 
-    path = _credential_path()
-    label = str(path)
-    sources.append(label)
-    try:
-        config = json.loads(path.read_text())
-    except FileNotFoundError:
-        return Connection(env_url or _DEFAULT_URL, None, None, tuple(sources))
-    except (OSError, ValueError) as exc:
-        sources[-1] = f"{label} ({type(exc).__name__}: {exc})"
-        return Connection(env_url or _DEFAULT_URL, None, None, tuple(sources))
+    for path in _credential_paths():
+        label = str(path)
+        sources.append(label)
+        if not path.is_file():
+            # Absent, or a DIRECTORY at the project-local path (a repo's own
+            # `./.tortoise` state dir) — "no config here", so the next candidate
+            # wins (#1708 D5). Reading it would raise IsADirectoryError and be
+            # reported as a CORRUPT store.
+            continue
+        try:
+            config = json.loads(path.read_text())
+        except (OSError, ValueError) as exc:
+            # Named, not erased (#1708 D6): the label carries the failure, so a
+            # later refusal shows the real state instead of "no key anywhere".
+            sources[-1] = f"{label} ({type(exc).__name__}: {exc})"
+            continue
 
-    key = config.get("api_key") if isinstance(config, dict) else None
-    if not (isinstance(key, str) and key.strip()):
-        return Connection(env_url or _DEFAULT_URL, None, None, tuple(sources))
+        key = config.get("api_key") if isinstance(config, dict) else None
+        if not (isinstance(key, str) and key.strip()):
+            continue  # an empty key is "no config here": the next candidate wins
 
-    _warn_if_store_is_readable(path)
-    api_url = config.get("api_url")
-    if isinstance(api_url, str) and api_url.strip():
-        url = api_url.strip().rstrip("/") + "/mcp/"
-    else:
-        # #2369 D1.1, strictly: the store's own identity, or the BUILT-IN DEFAULT —
-        # never the environment. A harness config is committable, so a
-        # `TORTOISE_MCP_URL` it carries must not be able to aim a stored
-        # credential at a host of its choosing; a store that records no api_url
-        # therefore resolves to the default, not to whatever the env says. (An
-        # operator who does want a stored key at a non-default host records that
-        # host IN the store — `tortoise init` writes it.)
-        url = _DEFAULT_URL
-    return Connection(url, key.strip(), label, tuple(sources))
+        _warn_if_store_is_readable(path)
+        api_url = config.get("api_url")
+        if isinstance(api_url, str) and api_url.strip():
+            url = api_url.strip().rstrip("/") + "/mcp/"
+        else:
+            # #2369 D1.1, strictly: the store's own identity, or the BUILT-IN
+            # DEFAULT — never the environment. A harness config is committable, so
+            # a `TORTOISE_MCP_URL` it carries must not be able to aim a stored
+            # credential at a host of its choosing; a store that records no
+            # api_url therefore resolves to the default, not to whatever the env
+            # says. (An operator who does want a stored key at a non-default host
+            # records that host IN the store — `tortoise init` writes it.)
+            url = _DEFAULT_URL
+        return Connection(url, key.strip(), label, tuple(sources))
+
+    return Connection(env_url or _DEFAULT_URL, None, None, tuple(sources))
 
 
 def mcp_url() -> str:
