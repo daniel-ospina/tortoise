@@ -1,0 +1,1561 @@
+#!/usr/bin/env python3
+"""closes_landing — a `Closes #N` on a PR whose base is NOT the default branch is
+INERT: it closes nothing and lands nothing, while every surface says it did
+(#10597).
+
+Why this exists
+---------------
+GitHub interprets a closing keyword (`Closes`/`Fixes`/`Resolves #N`) **only when
+the pull request targets the repository's default branch**
+(https://docs.github.com/en/issues/tracking-your-work-with-issues/linking-a-pull-request-to-an-issue).
+When the base is another lane's branch — a stacked PR, which is the *correct* way
+to keep a reviewable, non-overlapping diff — the keyword is ignored. Two things
+then go wrong at once, and neither is visible from outside:
+
+1. the issue is never closed. It keeps a `Closes` in its timeline and stays
+   `open`, so the next reader sees it as unstarted work;
+2. the work is not on the default branch. It lives on the sibling branch and
+   only lands when *that* branch's own PR merges — and that PR may carry no
+   closing keyword at all.
+
+Measured on 2026-11-02 (#10597, re-measured at `origin/main`
+`63981d1529e1c2dbea0db3ffe22f675bfd9e32d7`): `PR #10568` (base `act-10465`,
+body `Closes #10541`) merged at 14:07:51Z, `merge_commit_sha`
+`ebea1fe84f193a78009d8faa6bf4bead345499db` — which is **not** an ancestor of
+main — while `#10541` is still `open` with `closed_at: null`. `act-10465` is the
+head of `PR #10519`, whose base IS `main` and whose body has **no** `Closes
+#10541`. So `#10541`'s work rides `#10519` to main and the issue stays open
+anyway: two lanes of work, and the issue looks unstarted.
+
+What this tool answers
+----------------------
+The question no existing surface asked: **for every closing keyword in this PR's
+body, which PR will actually carry it to the default branch, and does THAT PR
+carry the same keyword?**
+
+* base is the default branch            -> `lands`     (GitHub fires on merge)
+* base is a sibling branch, and the PR that terminates the stack carries the
+  same closing ref                      -> `lands`     (it rides in and closes)
+* base is a sibling branch, and the terminating PR does NOT carry it
+                                        -> `inert`     (nothing will close it)
+* the base branch has no PR at all      -> `unresolved` (cannot be measured)
+
+`unresolved` is deliberately NOT `lands` and NOT `inert`: a base branch with no
+PR is a stack whose carrier has not been opened yet, and calling that a pass is
+how the silent case was manufactured in the first place.
+
+The check walks the WHOLE stack (`a <- b <- c`), not one hop: the keyword only
+fires on the PR whose base is the default branch, so a two-hop chain with the
+keyword on the middle PR is just as inert as a one-hop one.
+
+Scope — what this is NOT
+------------------------
+It is a **warning**, not a gate (#10597: "Not a new gate"). Stacking is
+legitimate and blocking a legitimately-stacked PR would be worse than the defect;
+so the caller decides what to do with exit 3. `--annotate` emits plain GitHub
+Actions `::warning` lines for a warn-only workflow step, and the JSON output is
+for anything that wants to reason instead of read prose.
+
+It never writes: no comments, no labels, no closures. Reading is the whole
+surface.
+
+Why a regex, when this repo already ruled to prefer the source
+--------------------------------------------------------------
+`tools/collision_preflight.py` records this repo's ruling on exactly this
+grammar (#3504): **"prefer the source over the regex"** — it reads GitHub's own
+`closingIssuesReferences` rather than re-deriving which issues a PR closes.
+This tool deliberately does NOT, and the reason is the question it asks. That
+field is GitHub's answer to *"what WILL this PR close"*, and for the shape this
+tool exists for it is **empty**: `#10568` (base `act-10465`, body `Closes
+#10541`) reports `closingIssuesReferences: []`, because GitHub has already
+decided the keyword will not fire. What is needed here is the opposite query —
+*what does this PR CLAIM to close* — and no API surface answers it, so the
+grammar is parsed. That is a second copy of a grammar GitHub owns, which is
+exactly the drift #3504 predicts, and it drifted: review finding P1 was a fence
+shape (a fence opened on a list-marker line) this copy read as prose, which
+manufactured a `lands`. The mitigation is that this copy is checked against a
+SOURCE too — a real CommonMark renderer (`markdown_it`, a test dependency),
+shape by shape, in `test_the_parser_agrees_with_a_real_commonmark_renderer` — so
+a divergence between what this tool calls code and what a renderer calls code
+reds a test rather than a reader. That test is the mitigation, and it is the only
+thing that is: an earlier version of this paragraph claimed the cross-check while
+no test in the file imported the renderer at all, which is the re-staleable
+"checked by hand" claim this repo keeps paying for. Do not "simplify" it back to
+`closingIssuesReferences`: for this question the source is empty precisely when it
+matters.
+
+Usage
+-----
+    uv run python tools/closes_landing.py --pr 10568                # one PR
+    uv run python tools/closes_landing.py --sweep                   # every open PR on a non-default base
+    uv run python tools/closes_landing.py --pr 10568 --annotate     # ::warning:: lines
+    uv run python tools/closes_landing.py --body-file body.md --base act-10465 \
+        --carrier-body-file carrier.md          # offline: no network at all
+
+Exit codes: 0 = nothing inert · 3 = at least one inert OR unresolved closing
+ref · 2 = the question could not be measured at all (gh/API failed).
+"""
+
+from __future__ import annotations
+
+import sys
+
+# #5128: refuse a <3.12 interpreter BEFORE the imports below — a module-level
+# 3.12-only construct would fail first, with an error that blames the import
+# rather than the interpreter (the D9 shape).
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        f"tools/closes_landing.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python tools/closes_landing.py`"
+    )
+
+import argparse
+import json
+import re
+import subprocess
+import time
+from dataclasses import asdict, dataclass
+from itertools import pairwise
+from pathlib import Path
+
+# ── core: pure, network-free, and the part the tests drive ────────────────────
+
+# GitHub's closing keywords, in the spelling that actually fires:
+#   close/closes/closed · fix/fixes/fixed (and the common "fixe"? no) ·
+#   resolve/resolves/resolved
+# The optional `:`, one space, and the optional `owner/repo` prefix are GitHub's
+# own accepted forms.
+#
+# ⚠️ TWO separator spellings, because the two parses ask DIFFERENT questions
+# (#10634 review P3):
+#
+# * LENIENT (`\s*`) backs the FINDING arms, where a missed claim is a closure
+#   that silently does not fire — the defect this tool exists to catch — so a
+#   keyword one paragraph away from its reference is still worth reporting.
+# * STRICT (`[ \t]*`) backs every PASS (`lands`). `\s` matches a BLANK LINE, so
+#   `"Closes\n\n#100"` used to be a claim there and the `lands` arm passed on a
+#   keyword whose reference is a SEPARATE PARAGRAPH — a shape no GitHub doc
+#   shows and this tool cannot demonstrate fires. Same rule as the indented
+#   case (cycle 5): a pass may not rest on a shape the tool cannot show GitHub
+#   acts on. A blank-line-separated claim is still REPORTED (lenient arm), it
+#   just cannot buy a pass, so nothing real is dropped by the narrowing. ONE
+#   line break is allowed — that is not a paragraph break, and only the BLANK
+#   line is the undemonstrable shape (`\n?`, never `\n\n`).
+_CLOSING_SEPARATORS = {
+    "lenient": r"\s*:?\s*",
+    "strict": r"[ \t]*:?[ \t]*\n?[ \t]*",
+}
+
+
+def _closing_re(sep: str) -> re.Pattern[str]:
+    """The keyword pattern with ONE separator spelling (`lenient`/`strict`)."""
+    return re.compile(
+        r"(?i)\b(?P<keyword>close[sd]?|fix(?:es|ed)?|resolve[sd]?)"
+        + sep
+        + r"(?:(?P<slug>[A-Za-z0-9._-]+/[A-Za-z0-9._-]+))?"
+        r"#(?P<number>\d+)\b"
+    )
+
+
+_CLOSING_RE = _closing_re(_CLOSING_SEPARATORS["lenient"])
+_CLOSING_RE_ONELINE = _closing_re(_CLOSING_SEPARATORS["strict"])
+
+#: A BLANK line, i.e. the end of a paragraph. An inline code span cannot cross
+#: it (§6.1 keeps a span inside one paragraph), so it is where the STRICT inline
+#: scan stops looking for a closing backtick run (`_span_limit`).
+_BLANK_LINE_RE = re.compile(r"\n[ \t]*\n")
+
+#: A line that STARTS a new block, tested on the line's text AFTER its blockquote
+#: prefix. A span is inline content and cannot cross a block boundary, and most
+#: blocks end the paragraph WITHOUT a blank line — which is why the strict scan
+#: needed this as well as `_BLANK_LINE_RE` (see `_paragraph_end`).
+_BLOCK_START_RE = re.compile(
+    r"(?: {0,3}(?:[-*+]|\d{1,9}[.)])(?:[ \t]|$)"          # a list item marker
+    r"| {0,3}#{1,6}(?:[ \t]|$)"                             # an ATX heading
+    r"| {0,3}(?:(?:\*[ \t]*){3,}|(?:-[ \t]*){3,}|(?:_[ \t]*){3,})$"  # thematic break
+    r"| {0,3}<)"                                            # an HTML block
+)
+
+
+def _paragraph_end(text: str, start: int) -> int:
+    """Where the PARAGRAPH containing `start` ends, per CommonMark's block rules.
+
+    This is the STRICT arm's bound for a span's closing run, and it must be the
+    renderer's own: a code span is INLINE content, so it cannot cross a block
+    boundary — and a blockquote line, a list item, an ATX heading, a thematic
+    break or an HTML block all end the paragraph WITHOUT a blank line. Bounding
+    the search at the next blank line alone therefore let an unmatched backtick
+    pair with the OPENER of a genuine span in a later block, blank the wrong
+    region, and expose the keyword that span held:
+
+        Use `foo in the old version
+        > note
+        `Closes #100`
+
+    renders `<p>Use `foo in the old version</p><blockquote><p>note
+    <code>Closes #100</code></p></blockquote>`, i.e. CODE — and the carrier arm
+    read it as carrying the keyword: `lands`, exit 0, no annotation, on the arm
+    the whole tool exists to protect (#10634 review P2, fail-open).
+
+    Stopping EARLY can only cost a pass that was never demonstrable (a warning),
+    never a false closure, so the boundary tests err toward stopping: the
+    container is compared by DEPTH (never by prefix string) and any line that
+    could start a block ends the span.
+    """
+    line_start = text.rfind("\n", 0, start) + 1
+    first_end = text.find("\n", start)
+    if first_end < 0:
+        return len(text)
+    # The opener's own container: a span MAY cross lines inside ONE block (a
+    # continuation of the same quote or list item), and must not cross into
+    # another — `> a `Closes\n> #100` b` is one span, `a `x\n> `Closes #100``
+    # is not.
+    depth = _quote_depth(_split_prefix(text[line_start:first_end])[0])
+    pos = first_end + 1
+    while pos < len(text):
+        end = text.find("\n", pos)
+        if end < 0:
+            end = len(text)
+        line = text[pos:end]
+        if not line.strip():
+            return pos                      # a blank line ends the paragraph
+        prefix, rest = _split_prefix(line)
+        if _quote_depth(prefix) != depth:
+            return pos                      # a different container
+        if _BLOCK_START_RE.match(rest):
+            return pos                      # a new block type
+        pos = end + 1
+    return len(text)
+
+
+def _span_limit(text: str, start: int, strict: bool) -> int:
+    """Where the search for a code span's CLOSING run stops.
+
+    §6.1: a code span is INLINE, and "line endings are converted to spaces" —
+    so a span whose opener and closer sit on two lines of the SAME paragraph is
+    ONE span, and the renderer agrees:
+
+        "Example: `Closes\n#10541` is the quoted form."
+        -> <p>Example: <code>Closes #10541</code> is the quoted form.</p>
+
+    A span cannot cross a BLANK line (§6.1's content stays inside one paragraph)
+    or any other BLOCK boundary (§6.1: a span is inline content), so the strict
+    scan stops at `_paragraph_end` — the renderer's own boundary. Bounding it at
+    the next blank line alone paired a stray run with the opener of a real span
+    in a later block and exposed the keyword that span held (#10634 review P2).
+    The two callers want OPPOSITE things from an unsure case, and this is the one
+    place the module's asymmetry has to be spelled out in code:
+
+    * `strict` is the PASS arms (the carrier body, and the subject's own `lands`
+      arm). Under-stripping there is a `lands` on a shape GitHub ignores — the
+      one outcome this module forbids — so it searches to the end of the
+      PARAGRAPH: an over-strip only costs a pass that was never demonstrable
+      (`unresolved`, a warning), never a false closure.
+    * lenient is the FINDING arms. Blanking between two stray runs that a
+      renderer keeps literal (an indented code line pairing with a tick in a
+      later paragraph, `    a `b\nprose `c Closes #100`) would LOSE a real
+      closure — the harmful direction for a warning — so it refuses to pair
+      across a line break at all and over-reports the multi-line span instead.
+      For the shapes in `_COMMONMARK_SHAPES` that costs a false warning and was
+      measured to cost a claim in none: the renderer's CODE shapes here are all
+      reported by the strict arm's paragraph bound below.
+    """
+    if strict:
+        return _paragraph_end(text, start)
+    line_end = text.find("\n", start)
+    return len(text) if line_end < 0 else line_end
+
+
+def _strip_inline_code(text: str, *, strict: bool = False) -> str:
+    """Blank every INLINE code span, whatever the delimiter's run length.
+
+    CommonMark opens a code span with a run of N backticks and closes it with a
+    run of exactly N, so a two-backtick delimited keyword is code exactly as a
+    one-backtick delimited keyword is. A single-backtick pattern left the wider
+    delimiters intact, so a QUOTED `Closes #N` written between two backticks on
+    each side counted as a claim — and on the CARRIER side that buys a `lands`
+    (#10634 review P3-2).
+
+    An unmatched run is literal text (CommonMark, not a span). How far the closer
+    search may travel is `_span_limit`'s question, and it differs per arm: a
+    span that crosses a SOFT LINE BREAK (one paragraph, §6.1) was left unstripped
+    by a per-line bound, so `` `Closes\n#10541` `` bought a `lands` in both pass
+    arms (#10634 review P2, fail-open).
+    """
+    out: list[str] = []
+    i, n = 0, len(text)
+    while i < n:
+        if text[i] != "`":
+            out.append(text[i])
+            i += 1
+            continue
+        opener = i
+        while i < n and text[i] == "`":
+            i += 1
+        run = i - opener
+        limit = _span_limit(text, i, strict)
+        closer = -1
+        j = i
+        while j < limit:
+            if text[j] != "`":
+                j += 1
+                continue
+            k = j
+            while k < limit and text[k] == "`":
+                k += 1
+            if k - j == run:
+                closer = j
+                break
+            j = k
+        if closer < 0:
+            out.append(text[opener:i])  # unmatched: a literal run, not a span
+            continue
+        # Replace the span with spaces, keeping NEWLINES so the line structure
+        # the strict parse reasons about is untouched.
+        out.append("".join(
+            ch if ch == "\n" else " "
+            for ch in text[opener:closer + run]
+        ))
+        i = closer + run
+    return "".join(out)
+
+MAX_STACK_DEPTH = 20
+
+
+@dataclass(frozen=True)
+class PullRequest:
+    """The four fields the question needs. Anything else is not read."""
+
+    number: int
+    base: str
+    body: str = ""
+    head: str = ""
+    state: str = "OPEN"
+    merged_at: str | None = None
+
+    @property
+    def merged(self) -> bool:
+        return bool(self.merged_at) or self.state.upper() == "MERGED"
+
+    @property
+    def closed_unmerged(self) -> bool:
+        """Closed WITHOUT ever merging. Such a PR can never carry anything, so
+        it must not be confused with an open one — see `_pick_carrier`."""
+        return self.state.upper() == "CLOSED" and not self.merged
+
+
+@dataclass(frozen=True)
+class Finding:
+    issue: int
+    pr: int
+    base: str
+    verdict: str  # lands | inert | unresolved
+    carrier: int | None
+    detail: str
+
+    def as_dict(self) -> dict:
+        return asdict(self)
+
+    def annotation(self) -> str:
+        """A GitHub Actions `::warning` line. Newlines are percent-escaped
+        because an annotation is ONE line — a raw newline truncates it."""
+        msg = self.detail.replace("%", "%25").replace("\r", "").replace("\n", "%0A")
+        # The TITLE states the actual verdict: `unresolved` is not `inert` (it is
+        # "could not be measured"), and the title is the only text a reader sees
+        # before opening the log.
+        return (f"::warning title={self.verdict.capitalize()} Closes "
+                f"#{self.issue}::{msg}")
+
+
+#: A blockquote marker may be preceded by AT MOST THREE columns (§5.1), and four
+#: columns make an INDENTED CODE BLOCK — so `    > Closes #N` is not a quote at
+#: all, it is `<pre><code>&gt; Closes #N</code></pre>` and the keyword never
+#: fires. This was `\s*`, i.e. unbounded, so the prefix ate the four columns,
+#: `rest_indent` came out 0, the strict arm could not fire, and the line was
+#: emitted as PROSE — `lands`, exit 0, no annotation, on exactly the shape the
+#: module forbids a pass on (#10634 review P2, fail-open). The bound is what
+#: leaves those four columns in `rest`, where the strict arm measures them.
+_CONTAINER_PREFIX_RE = re.compile(r"^(?: {0,3}>[ \t]?)*")
+
+
+def _quote_depth(prefix: str) -> int:
+    """How many blockquote markers (`>`) a CONTAINER PREFIX carries."""
+    return prefix.count(">")
+
+
+def _split_prefix(line: str) -> tuple[str, str]:
+    """(blockquote prefix, the rest of the line).
+
+    The prefix consumes only markers a CommonMark renderer would OPEN — up to
+    three columns of allowance each — so a line too deeply indented to be a quote
+    keeps its indentation in `rest` instead of having it silently absorbed.
+    """
+    m = _CONTAINER_PREFIX_RE.match(line)
+    return m.group(0), line[m.end():]
+
+
+_MAX_FENCE_INDENT = 3  # a 4+ column ``` is an INDENTED CODE BLOCK, not a fence
+
+# A list item's content column, so a fence opened inside one can END when the
+# item ends. Without it, `- item\n  ```\nCloses #N\n` blanked the column-0 prose
+# and the tool reported nothing at all (review c10-3).
+_LIST_MARKER_RE = re.compile(r"^(?P<indent>[ \t]*)(?:[-*+]|\d{1,9}[.)])(?P<gap>[ \t]+)")
+
+
+def _fence_open(rest: str, content_col: int = 0) -> tuple[str, int] | None:
+    """(character, run length) if `rest` opens a fence — else None.
+
+    CommonMark, and each clause below is a shape a review cycle found:
+
+    * an opener indented more than 3 columns past the CONTAINING BLOCK's content
+      column (`content_col`) is not a fence at all — §4.5: "A fenced code block
+      begins with a code fence, preceded by up to three spaces of indentation",
+      and inside a list item that budget starts at the item's content column, so
+      a four-space-from-column-0 run IS a fence there. Measuring from column 0
+      refused a real fence and blanked the block's content as prose — a `lands`
+      on a quoted keyword (#10634 review P1). A tab is 4 columns, hence
+      `expandtabs`;
+    * a backtick opener whose info string CONTAINS a backtick is not a fence.
+    """
+    body = rest.expandtabs(4)
+    if len(body) - len(body.lstrip(" ")) - content_col > _MAX_FENCE_INDENT:
+        return None
+    s = body.lstrip(" ")
+    m = re.match(r"(`{3,}|~{3,})", s)
+    if not m:
+        return None
+    ch, n = m.group(1)[0], len(m.group(1))
+    if ch == "`" and "`" in s[n:]:
+        return None
+    return (ch, n)
+
+
+def _is_closer(rest: str, opener: tuple[str, int]) -> bool:
+    """A closer carries the same character, a run at least as long, and NOTHING
+    but whitespace after it (an "info string" on a closing fence is content).
+
+    `rest` is the line from the CONTAINING BLOCK's content column — the caller
+    slices there and enforces §4.5's "up to three spaces of indentation" itself:
+    "The closing code fence may be preceded by up to three spaces of indentation,
+    and may be followed only by spaces or tabs … their indentation need not match
+    that of the opening fence". The allowance belongs to the CONTENT COLUMN, NEVER
+    to the opening run's own indent: a top-level fence opened at two columns does
+    not license a four-space closer (the renderer keeps both lines inside
+    `<pre><code>`), while a fence inside a list item whose content column is 2
+    does. Measuring from the run's indent accepted a closer the renderer calls
+    CONTENT, which left the block open exactly one line too few — a `lands` on a
+    quoted keyword.
+    """
+    ch, n = opener
+    m = re.match(r"(`{3,}|~{3,})\s*$", rest.expandtabs(4))
+    return bool(m) and m.group(1)[0] == ch and len(m.group(1)) >= n
+
+
+@dataclass(frozen=True)
+class _Fence:
+    """An OPEN fenced block: the things its container needs to end it.
+
+    * `prefix` — the blockquote prefix it opened under (the quote ending ends it);
+    * `close_base` — the CONTAINING BLOCK's content column in `rest` coordinates
+      (after the blockquote prefix). A dedent is a line whose residual indent
+      falls below it, and a closing fence is measured from it (§4.5 allows a
+      closer up to three spaces past the containing block's content column, and
+      its indent need not match the opener's). It is the ITEM's content column
+      when one is open — never the fence run's own indent: §4.5 ends the block at
+      "the end of the containing block", and an item's content line may sit BELOW
+      the opener's column and still be inside the block;
+    * `in_list` — whether a list item was open, so a dedent can end the block.
+
+    There is deliberately no raw-coordinate item column: two review rounds
+    carried one alongside this field and ended up comparing a `rest` indent with
+    a raw column (and then the reverse), each time buying a false `lands`.
+    `container_col` derives the raw column from these two fields, so there is
+    only ONE number in each space and no way to mix them.
+
+    `item_col_raw` is the enclosing item's content column in RAW coordinates,
+    and is set ONLY when that item sits OUTSIDE the fence's blockquote (its
+    content column is at or before the quote's markers). CommonMark matches the
+    OUTER container first, so such an item ends on a RAW dedent — consuming a
+    `>` marker before measuring it read a column-0 `>` as the container's own,
+    missed the dedent, and kept the fence open over top-level prose (#10634
+    review). A marker-line fence has its item INSIDE the quote, so it leaves
+    this 0 and is measured after the prefix via `close_base`.
+    """
+
+    opener: tuple[str, int]
+    prefix: str
+    close_base: int
+    in_list: bool
+    item_col_raw: int = 0
+
+    @property
+    def container_col(self) -> int:
+        """The containing block's content column in RAW coordinates — where a
+        line's content has to start to still be inside this block. A closer's
+        "up to three spaces" (§4.5) is measured from here."""
+        return len(self.prefix) + self.close_base
+
+
+def _fence_line_column(line: str, depth: int) -> tuple[int, int, int]:
+    """(markers consumed, indent after them, RAW column of the content).
+
+    A fenced block takes everything up to its closer LITERALLY, so a `>` inside
+    it is text, not a marker — the only markers that say anything about the
+    container are the ones the block itself lives under. Consuming at most
+    `depth` of them is what makes `> - ```\n>   Closes #N` (a marker-line fence
+    INSIDE a quote: the `>` is the quote's, and the item sees the two spaces
+    after it) and `- ```\n   > Closes #N` (a depth-0 item fence: no marker is
+    consumed, so the line is literal content indented 3 columns into the item)
+    BOTH come out right. Two things differ and both are returned:
+
+    * the INDENT is measured after the consumed markers, because that is the
+      only space an enclosing list item's content column is expressed in —
+      spaces BEFORE a `>` are the marker's own allowance (up to 3) and belong to
+      the quote, not to the item, which is why `   > Closes #N` inside `> - ``` `
+      ends the item (the renderer makes it a paragraph of the quote) while
+      `>   Closes #N` stays inside it;
+    * the RAW COLUMN is where content starts, because §4.5 measures a closing
+      fence's "up to three spaces" from the containing block's content column in
+      raw columns.
+
+    Reading the prefix with `_split_prefix` — which consumes every `>` it finds
+    — got one family of shapes wrong in each coordinate it was compared in, and
+    each way of getting it wrong is a false `lands` on a quoted keyword (#10634
+    review).
+    """
+    i = 0
+    consumed = 0
+    while consumed < depth:
+        j = i
+        while j < len(line) and line[j] in " \t":
+            j += 1
+        if j < len(line) and line[j] == ">":
+            j += 1
+            if j < len(line) and line[j] == " ":
+                j += 1
+            consumed += 1
+            i = j
+            continue
+        break
+    start = i
+    while i < len(line) and line[i] in " \t":
+        i += 1
+    return consumed, i - start, i
+
+
+def _fence_candidate(prefix: str, rest: str,
+                     list_cols: list[int]) -> _Fence | None:
+    """The fence `(prefix, rest)` opens, or None if the line is prose.
+
+    A fence may open ON a list-marker line itself (`- ``` `, `1. ``` `):
+    CommonMark puts the code block at the item's CONTENT column and the marker
+    is not part of it. Emitting such a line as prose made every line of the
+    block prose too, so a QUOTED `Closes #N` inside it became a claim — and on a
+    default base a `lands`, the one outcome this module forbids (#10634 review
+    P1: `- ```\n  Closes #100\n  ``` ` reported `lands` for a block the renderer
+    shows as `<pre><code>`).
+
+    The content column is CommonMark's: the marker's width plus the spaces after
+    it — or ONE column when that gap is wider than four, because such a line
+    starts an INDENTED code block rather than a fence, which `_fence_open` then
+    refuses on its own (a 4+ column `` ``` `` is not a fence).
+    """
+    # The content column the fence is measured from: the item already open (or
+    # the one this very line opens), else column 0. It is passed INTO the opener
+    # test as well as stored, because `content_col + 3` is where CommonMark's
+    # "up to three spaces" budget ends (#10634 review P1).
+    item = _LIST_MARKER_RE.match(rest) if rest.strip() else None
+    if item:
+        m_indent = len(item.group("indent"))
+        gap = len(item.group("gap"))
+        marker_w = len(item.group(0)) - m_indent - gap
+        base = m_indent + marker_w + (gap if gap <= 4 else 1)
+        opener = _fence_open(rest[base:])
+        if opener is None:
+            return None
+        return _Fence(opener, prefix, base, True)
+    content_col = list_cols[-1] if list_cols else 0
+    residual_col = max(0, content_col - len(prefix))
+    opener = _fence_open(rest, residual_col)
+    if opener is None:
+        return None
+    return _Fence(opener, prefix, residual_col, bool(list_cols),
+                  content_col if list_cols else 0)
+
+
+def strip_code(body: str, strict: bool = False) -> str:
+    """Blank out the parts of a PR body that are CODE, not prose.
+
+    ONLY fenced blocks are stripped. An INDENTED block is deliberately NOT: where
+    a 4-space line is code and where it is a list item's continuation or a
+    multi-paragraph bullet depends on the enclosing container's content column,
+    and getting that wrong in the stripping direction loses a REAL claim — a
+    false pass, the worst class here (two review cycles found it: first every
+    indented line, then every indented line after a blank line). A warn-only
+    instrument loses nothing by over-reporting a quoted keyword; it loses the
+    reader by under-reporting a real one.
+
+    A fence belongs to its CONTAINER, and ends when that container ends:
+
+    * a depth-0 fence has no container, so nothing but a matching closer (or EOF)
+      ends it — a `> ``` ` line inside it is CONTENT, and treating it as a closer
+      blanked the prose after the block (review c9-2(i));
+    * a QUOTED fence ends as soon as a line drops below its depth — including on a
+      blank line, which ends the blockquote (review c8-1) — and the line that ends
+      it is re-examined as a fresh line, because it may itself open a fence
+      (review c10-2);
+    * a fence opened inside a LIST ITEM ends when the ITEM's content ends — a
+      line with real content indents below the item's CONTENT COLUMN, not below
+      the fence run's own indent (review c10-3, corrected in #10634 review P1:
+      §4.5 ends the block at "the end of the containing block", and an item's
+      content line may sit BELOW the opener's column and still be inside the
+      block) — and a fence may open ON the marker line itself, at the item's
+      content column (#10634 review P1). That comparison is made in ONE space:
+      the raw line with at most the fence's OWN blockquote depth consumed, so a
+      `>` inside the block stays literal and a marker cannot move the item's
+      edge (see `_fence_line_column`);
+    * containers are compared by DEPTH, never by the raw prefix string: `>`, `> `,
+      `  > ` are one container to CommonMark, and comparing strings meant a legal
+      closer was never recognised (review c10-1);
+    * `strict` (the CARRIER body, and the subject's own `lands` arm) additionally
+      blanks indented lines, because there a lenient-only match would be a PASS.
+      The indentation is measured on `rest` — the line AFTER its blockquote
+      prefix — because measuring it on the raw line missed an indented code block
+      that sits inside a quote, and that body bought a `lands` (#10634 review
+      P2). A line that OPENS a fence is never blanked by this arm: a fence's
+      content column is its problem, and blanking the opener lost the whole
+      block's content as prose (#10634 review P1).
+
+    What it does NOT do, deliberately: a keyword in blockquote PROSE (`> Closes
+    #N`) stays a claim. GitHub acts on a closing keyword in a quoted paragraph —
+    only CODE is ignored — so blanking it would be the under-reporting direction
+    that loses real closures.
+    """
+    out: list[str] = []
+    fence: _Fence | None = None
+    list_cols: list[int] = []
+    for raw in body.splitlines():
+        line = raw.expandtabs(4)
+        indent = len(line) - len(line.lstrip(" "))
+        prefix, rest = _split_prefix(line)
+        # The line's indent AFTER its blockquote prefix: `close_base` is measured
+        # there, which is the space the strict arm below reports in.
+        rest_indent = len(rest) - len(rest.lstrip(" "))
+        if fence is not None:
+            # The container can END the block: the quote it lived in closed, or
+            # (for a fence opened inside a list item) the item did.
+            #
+            # Both tests are measured in ONE coordinate space — the RAW line,
+            # with at most the fence's own blockquote depth consumed — because
+            # that is the space `container_col` lives in. Two review cycles did
+            # this in two spaces at once (a raw indent against a `rest` column,
+            # then a `rest` indent against a raw column) and each way bought a
+            # false `lands` on one family of shapes while losing a real claim on
+            # the other (#10634 review): `> - ```\n>   Closes #N` (a marker-line
+            # fence inside a quote) read every content line as a dedent, and
+            # `- ```\n   > Closes #N` ended an item fence on literal content.
+            fence_depth = _quote_depth(fence.prefix)
+            consumed, residual, column = _fence_line_column(line, fence_depth)
+            ended = consumed < fence_depth
+            if not ended and fence.in_list and line.strip():
+                if fence.item_col_raw:
+                    # The item is OUTSIDE the fence's blockquote (its content
+                    # column sits at or before the quote's markers), so the item
+                    # is matched BEFORE them and its edge is the RAW column.
+                    # Measuring this dedent after consuming a `>` marker read a
+                    # column-0 `>` as the container's own and missed the dedent:
+                    # the item (and its fence) stayed "open" over top-level
+                    # prose, losing a real claim (#10634 review).
+                    ended = indent < fence.item_col_raw
+                elif line[column:].strip():
+                    ended = residual < fence.close_base
+            if not ended:
+                # A closer is measured from the CONTAINING BLOCK's content
+                # column (§4.5: up to three spaces past it, and its indentation
+                # need not match the opener's) — so the run has to sit where the
+                # container's content starts, and the text after that column is
+                # what must be nothing but fence and whitespace.
+                past = column - fence.container_col
+                if (past <= _MAX_FENCE_INDENT
+                        and _is_closer(line[column:], fence.opener)):
+                    fence = None
+                out.append("")
+                continue
+            # The container ended, so this line is FRESH: it may open a new fence
+            # (review c10-2), and — outside the block — it is also where the list
+            # item stack is tracked again.
+            fence = None
+        # LIST-ITEM TRACKING happens only on lines that are NOT inside a fence. A
+        # marker line inside the block is CONTENT; counting it as an item opened a
+        # phantom item that then "ended" the block on a dedented claim it should
+        # have blanked, and the claim became a `lands` (#10634 review P2). The
+        # dedent-pop runs FIRST, on every non-blank line, so a marker that dedents
+        # past an outer item pops it before pushing its own column.
+        if line.strip():
+            while list_cols and indent < list_cols[-1]:
+                list_cols.pop()
+            marker = _LIST_MARKER_RE.match(line)
+            if marker:
+                list_cols.append(len(marker.group(0)))
+        fence = _fence_candidate(prefix, rest, list_cols)
+        if fence:
+            out.append("")
+            continue
+        if strict and (rest_indent > _MAX_FENCE_INDENT or rest.startswith("\t")):
+            out.append("")
+            continue
+        out.append(raw)   # prose: keep it, keywords and all
+    return "\n".join(out)
+
+
+def parse_closing_refs(body: str, repo: str | None = None,
+                       strict: bool = False) -> list[int]:
+    """Issue numbers this body claims to close, in body order, deduped.
+
+    Code spans and fenced blocks (``` and `~~~`) are stripped first, because a
+    keyword inside one is a *quotation* of a keyword, not a claim (GitHub does
+    not act on it either, so treating it as a claim would manufacture a finding).
+    Indented blocks are stripped ONLY when `strict` — see `strip_code`. Two
+    callers use it, and both for the same reason (a lenient-only match there
+    would be a PASS): the CARRIER body when asking whether it restates the
+    keyword, and the subject's OWN `lands` arm in `classify` (which refuses to
+    pass on a ref that survives only the lenient parse). Finding arms stay
+    lenient, where the cost of leniency is a false warning, not a pass.
+
+    `repo` (``owner/name``) decides what an `owner/repo#N` reference means. A
+    slug naming a DIFFERENT repo is a closure elsewhere, not a claim about an
+    issue here — but a slug naming THIS repo is exactly as much a claim as the
+    bare `#N` form, and dropping it would be a false pass by non-detection
+    (#10597 review P2-3). With no `repo`, a slug is treated as foreign: the
+    function cannot tell, and inventing a finding is worse than missing one.
+    """
+    text = _strip_inline_code(strip_code(body or "", strict), strict=strict)
+    seen: list[int] = []
+    # The separator spelling follows the QUESTION: a pass (strict) refuses a
+    # keyword whose reference sits across a blank line; a finding (lenient)
+    # still reports it (see `_CLOSING_SEPARATORS`).
+    pattern = _CLOSING_RE_ONELINE if strict else _CLOSING_RE
+    for m in pattern.finditer(text):
+        slug = m.group("slug")
+        if slug and (repo is None or slug.lower() != repo.lower()):
+            continue
+        n = int(m.group("number"))
+        if n not in seen:
+            seen.append(n)
+    return seen
+
+
+def resolve_carrier(pr: PullRequest, by_head: dict[str, PullRequest],
+                    default_branch: str) -> PullRequest | None:
+    """The PR that will actually land this stack on the default branch.
+
+    Returns `pr` itself when it already targets the default branch. Returns
+    None when the stack cannot be followed to a default-branch PR (a base
+    branch with no PR, a cycle, or a stack deeper than MAX_STACK_DEPTH) — the
+    caller reports that as `unresolved`, never as a pass.
+    """
+    path = carrier_path(pr, by_head, default_branch)
+    return path[-1] if path else None
+
+
+def carrier_path(pr: PullRequest, by_head: dict[str, PullRequest],
+                 default_branch: str) -> list[PullRequest] | None:
+    """`resolve_carrier`, but keeping EVERY hop: [pr, …, the default-base PR].
+
+    `classify` needs the intermediate links, not just the top: a subject's
+    commits reach the default branch only THROUGH them, so "the work did land"
+    cannot be judged from the two endpoints alone (#10634 cycle 3).
+    """
+    seen: set[int] = {id(pr)}
+    path = [pr]
+    cur = pr
+    for _ in range(MAX_STACK_DEPTH):
+        if cur.base == default_branch:
+            return path
+        nxt = by_head.get(cur.base)
+        if nxt is None:
+            return None
+        # IDENTITY, not the PR number: the offline mode's records carry no
+        # number (they are all 0), so a number comparison would report a cycle
+        # on the very first hop and turn every offline judgement into
+        # `unresolved`. Identity is also the correct cycle test in the live
+        # mode, where every record comes from `by_head` and is therefore stable.
+        if id(nxt) in seen:
+            return None  # a cycle: no PR in it targets the default branch
+        seen.add(id(nxt))
+        path.append(nxt)
+        cur = nxt
+    return None
+
+
+def classify(pr: PullRequest, by_head: dict[str, PullRequest],
+             default_branch: str, repo: str | None = None) -> list[Finding]:
+    """Every closing ref in `pr`'s body, judged against where it will land."""
+    refs = parse_closing_refs(pr.body, repo)
+    if not refs:
+        return []
+    path = carrier_path(pr, by_head, default_branch)
+    carrier = path[-1] if path else None
+    # Only the `lands` arm needs this, and it is the SAME body for every ref, so
+    # it is computed once (review c6).
+    strict_refs = set(parse_closing_refs(pr.body, repo, strict=True))
+    findings: list[Finding] = []
+    for issue in refs:
+        if carrier is None:
+            findings.append(Finding(
+                issue=issue, pr=pr.number, base=pr.base, verdict="unresolved",
+                carrier=None,
+                detail=(f"PR #{pr.number} says `Closes #{issue}` but targets "
+                        f"`{pr.base}`, and no PR with that head branch exists — "
+                        f"nothing can be shown to carry #{issue} to "
+                        f"`{default_branch}` yet."),
+            ))
+            continue
+        # A SUBJECT that was CLOSED WITHOUT MERGING never fired the keyword — but
+        # ONLY when its base IS the default branch: on a sibling base the question
+        # is whether the CARRIER carries the keyword, which the arms below answer,
+        # and claiming the subject "targets main" would be false (review c3-1).
+        if pr.closed_unmerged and pr.base == default_branch:
+            findings.append(Finding(
+                issue=issue, pr=pr.number, base=pr.base, verdict="unresolved",
+                carrier=pr.number,
+                detail=(f"PR #{pr.number} says `Closes #{issue}` and targets "
+                        f"`{default_branch}`, but it was CLOSED WITHOUT "
+                        f"MERGING — GitHub never fired the keyword, so "
+                        f"#{issue} stays open and its work is not on "
+                        f"`{default_branch}`. Re-open it, or carry the change "
+                        f"(and the keyword) on the PR that does land."),
+            ))
+            continue
+        # IDENTITY, not the PR number: the offline mode has no numbers, and a
+        # number comparison would make 0 == 0 read as "this PR lands" — a false
+        # pass on exactly the shape this tool exists to catch.
+        if carrier is pr:
+            # A PASS may not rest on a lenient-only match: `strict_refs` is the
+            # same body parsed strictly, so a claim at column 0 passes and an
+            # ambiguous one downgrades to a warning (review c5-2).
+            if issue not in strict_refs:
+                # The message must not assert WHAT GitHub thinks, and it must not
+                # name a CAUSE it cannot distinguish. The strict parse refuses THREE
+                # shapes and the reader can see none of them from here: a keyword on
+                # a four-space-indented line, a keyword separated from its `#N` by a
+                # blank line (#10634 review), and a keyword inside a code span that
+                # crosses a soft line break (added by the span fix). Naming two of
+                # the three told the third body's author that a cause was present
+                # that was not (#10634 review P3) — so the requirement is stated in
+                # a form ALL of them can act on. The indented case is still a CODE
+                # BLOCK in one context and a list item's continuation — where GitHub
+                # DOES fire — in another (see `strip_code`, and the list-item cases
+                # pinned below), so this states what THIS tool can show, not a fact
+                # it cannot.
+                #
+                # The remedy must also not CREATE a closure. A body that QUOTES the
+                # keyword (the multi-line code span above is exactly that) is being
+                # ignored CORRECTLY, and telling its author to "state `Closes #N` at
+                # column 0" would talk a quotation into becoming a real closure.
+                findings.append(Finding(
+                    issue=issue, pr=pr.number, base=pr.base, verdict="unresolved",
+                    carrier=pr.number,
+                    detail=(f"PR #{pr.number} targets `{default_branch}`, but its "
+                            f"`Closes #{issue}` survives only the LENIENT parse: "
+                            f"the reference is there in the body, but on a shape "
+                            f"this tool cannot show GitHub acts on — inside a code "
+                            f"span, on a four-space-indented line (a code block in "
+                            f"one context, a list item's continuation in "
+                            f"another), or across a blank line. None of those is "
+                            f"counted as a pass. If the reference is a "
+                            f"QUOTATION, it is being ignored correctly and there "
+                            f"is nothing to fix; if it is meant as a claim, state "
+                            f"`Closes #{issue}` on one line, in plain prose at "
+                            f"column 0, outside any backticks."),
+                ))
+                continue
+            findings.append(Finding(
+                issue=issue, pr=pr.number, base=pr.base, verdict="lands",
+                carrier=pr.number,
+                detail=(f"PR #{pr.number} says `Closes #{issue}` and targets "
+                        f"`{default_branch}` — GitHub fires the keyword on merge."),
+            ))
+            continue
+        # A CARRIER that was CLOSED WITHOUT MERGING can never carry anything.
+        # Reporting `lands` here would be the worst failure this tool has: the
+        # remedy it itself printed ("re-state the keyword on PR #X") produces
+        # exactly this state when #X is later closed or superseded, so the tool
+        # would then bless every stacked PR on that base for ever.
+        if carrier.closed_unmerged:
+            findings.append(Finding(
+                issue=issue, pr=pr.number, base=pr.base, verdict="unresolved",
+                carrier=carrier.number,
+                detail=(f"PR #{pr.number} says `Closes #{issue}` with base "
+                        f"`{pr.base}`; PR #{carrier.number} targets "
+                        f"`{default_branch}` but was CLOSED WITHOUT MERGING, so "
+                        f"nothing will carry #{issue} to `{default_branch}`. "
+                        f"Re-state the keyword on whatever PR now targets "
+                        f"`{default_branch}` for this work."),
+            ))
+            continue
+        carried = issue in parse_closing_refs(carrier.body, repo, strict=True)
+        broken_below = _path_break(path)
+        if carried and broken_below:
+            # The keyword FIRES, but the work does not ride: `lands` means "it
+            # rides in and closes" (module docstring), so a closure over a stranded
+            # branch is not a pass — it is the silent case this tool exists to
+            # catch, with a green exit code on top (#10634 cycle 8).
+            findings.append(Finding(
+                issue=issue, pr=pr.number, base=pr.base, verdict="unresolved",
+                carrier=carrier.number,
+                detail=(f"PR #{pr.number} says `Closes #{issue}` with base "
+                        f"`{pr.base}`; PR #{carrier.number} targets "
+                        f"`{default_branch}` and carries the same keyword, so "
+                        f"{_closure_tense(carrier, issue)} — but {broken_below}. "
+                        f"{_closure_consequence(pr, carrier, issue, default_branch)}"
+                        ),
+            ))
+            continue
+        if carried and pr.closed_unmerged:
+            # The keyword FIRES on the carrier, but the subject was CLOSED WITHOUT
+            # MERGING, so its own commits are in no branch the carrier carries up
+            # (#10634 cycle 10). `lands` means the work rides in as well, so this
+            # cannot be a pass — and `_path_break` cannot see it, because the
+            # subject is only ever a LOWER link and the carrier link is the one
+            # being skipped while the carrier is open.
+            findings.append(Finding(
+                issue=issue, pr=pr.number, base=pr.base, verdict="unresolved",
+                carrier=carrier.number,
+                detail=(f"PR #{pr.number} says `Closes #{issue}` with base "
+                        f"`{pr.base}`; PR #{carrier.number} targets "
+                        f"`{default_branch}` and carries the same keyword, so "
+                        f"{_closure_tense(carrier, issue)} — but PR #{pr.number} "
+                        f"was CLOSED WITHOUT MERGING, so its own work is in no "
+                        f"branch PR #{carrier.number} carries up. "
+                        f"{_closure_consequence(pr, carrier, issue, default_branch)}"
+                        ),
+            ))
+            continue
+        if carried:
+            findings.append(Finding(
+                issue=issue, pr=pr.number, base=pr.base, verdict="lands",
+                carrier=carrier.number,
+                detail=(f"PR #{pr.number} says `Closes #{issue}` with base "
+                        f"`{pr.base}`; PR #{carrier.number} targets "
+                        f"`{default_branch}` and carries the same keyword, so "
+                        f"{_closure_tense(carrier, issue)}."),
+            ))
+        else:
+            # A broken LINK blocks the ride even while the carrier is still OPEN
+            # (#10634 cycles 4-7): an intermediate that was CLOSED WITHOUT MERGING,
+            # or a hop that merged BEFORE the PR whose base it carries up, means
+            # the subject's commits never reached the branch the carrier merges —
+            # so "only lands when PR #N merges" promises a ride the record set
+            # refutes. `unresolved` (nothing CAN carry it), never a pass.
+            #
+            # The remedy names ONLY what the record set supports. Re-opening a
+            # closed link restores the path ABOVE it, not the commits below it, so
+            # it is offered as a partial repair rather than "the repair"; editing
+            # an OPEN carrier's body cannot help (the arm's premise is that the
+            # commits are not in the branch it merges), and a MERGED carrier cannot
+            # be updated at all — both were prescribed here before this cycle.
+            closed_links = [link for link in path[1:-1] if link.closed_unmerged]
+            if closed_links or (not carrier.merged and _path_break(path)):
+                tail = _reopen_tail(pr, path, closed_links, issue,
+                                    default_branch)
+                findings.append(Finding(
+                    issue=issue, pr=pr.number, base=pr.base,
+                    verdict="unresolved", carrier=carrier.number,
+                    detail=(f"PR #{pr.number} says `Closes #{issue}` with base "
+                            f"`{pr.base}`; PR #{carrier.number} targets "
+                            f"`{default_branch}`, but "
+                            f"{_not_landed_why(pr, carrier, path)} — so #{issue}'s "
+                            f"work is not on `{default_branch}`, and nothing in "
+                            f"this stack AS IT STANDS will carry it there. "
+                            f"{tail}"),
+                ))
+                continue
+            # The remedy depends on a state the reader cannot see from the
+            # finding alone: an OPEN carrier can still be amended, a MERGED one
+            # cannot — telling a lane to "re-state the keyword on" an already
+            # merged PR prescribes an impossible action and hides the real one.
+            #
+            # ⚠️ "the work did land" is a claim about the SUBJECT, and a merged
+            # CARRIER does not establish it (#10634 review P1). A carrier merges
+            # the branch it was opened from, so a subject that is still OPEN has
+            # no work in it — and one that merged into its sibling base AFTER the
+            # carrier landed is stranded there. Telling that reader to "Close #N
+            # by hand" marks an issue done whose work is nowhere near the default
+            # branch: the exact silent-stranding this tool exists to surface.
+            subject_landed = _subject_landed(pr, path)
+            if carrier.merged and not subject_landed:
+                findings.append(Finding(
+                    issue=issue, pr=pr.number, base=pr.base,
+                    verdict="unresolved", carrier=carrier.number,
+                    detail=(f"PR #{pr.number} says `Closes #{issue}` with base "
+                            f"`{pr.base}`; PR #{carrier.number} targets "
+                            f"`{default_branch}` and has ALREADY merged, but "
+                            f"{_not_landed_why(pr, carrier, path)} — so #{issue}'s work "
+                            f"is NOT on `{default_branch}`. GitHub has not fired "
+                            f"the keyword, and nothing in the current stack "
+                            f"will: {_stranded_remedy(pr, issue, default_branch)}"),
+                ))
+                continue
+            # A SUBJECT closed WITHOUT merging can never put its own work in the
+            # base branch, so the sibling-base arm must not promise that the
+            # carrier lands it (#10634 cycle 2, P2). GitHub still does not fire
+            # the keyword, so the verdict stays `inert`; only the CLAIM and the
+            # remedy change. The `carried` arm above is deliberately untouched: a
+            # carrier that restates the keyword is right whatever the subject did.
+            if pr.closed_unmerged:
+                findings.append(Finding(
+                    issue=issue, pr=pr.number, base=pr.base, verdict="inert",
+                    carrier=carrier.number,
+                    detail=(f"PR #{pr.number} says `Closes #{issue}` but its base "
+                            f"is `{pr.base}`, NOT `{default_branch}` — GitHub "
+                            f"will NOT close #{issue}. PR #{pr.number} was "
+                            f"CLOSED WITHOUT MERGING, so nothing this tool can "
+                            f"show puts its work in `{pr.base}`, and PR "
+                            f"#{carrier.number} carries no `Closes #{issue}` this "
+                            f"tool can show fires. {_stranded_remedy(pr, issue, default_branch)}"),
+                ))
+                continue
+            if carrier.merged:
+                remedy = (f"PR #{carrier.number} has ALREADY merged, so the "
+                          f"work did land — only the closure did not fire. "
+                          f"Close #{issue} by hand, citing PR "
+                          f"#{carrier.number}.")
+                lands = (f"#{issue}'s work already landed with PR "
+                         f"#{carrier.number}")
+            else:
+                remedy = (f"Re-state the keyword on PR #{carrier.number}.")
+                lands = (f"#{issue}'s work only lands when PR #{carrier.number} "
+                         f"merges")
+            findings.append(Finding(
+                issue=issue, pr=pr.number, base=pr.base, verdict="inert",
+                carrier=carrier.number,
+                detail=(f"PR #{pr.number} says `Closes #{issue}` but its base is "
+                        f"`{pr.base}`, NOT `{default_branch}` — GitHub will NOT "
+                        f"close #{issue}, and {lands}, which carries no `Closes "
+                        f"#{issue}` this tool can show fires. {remedy}"),
+            ))
+    return findings
+
+
+def _closure_tense(carrier: PullRequest, issue: int) -> str:
+    """The closure in the tense the record set supports (#10634 cycle 9).
+
+    A MERGED carrier already fired the keyword, so "it closes #N when it lands"
+    promises an event in the past. When the path is healthy that is simply the
+    truth (the issue closed); when it is broken the consequence below says what to
+    do about a CLOSED issue.
+    """
+    if carrier.merged:
+        return (f"the closure ALREADY FIRED when PR #{carrier.number} merged, so "
+                f"#{issue} is closed")
+    return f"it closes #{issue} when it lands"
+
+
+def _closure_consequence(pr: PullRequest, carrier: PullRequest, issue: int,
+                         default_branch: str) -> str:
+    """What to DO when the closure fired (or will) over stranded work."""
+    if carrier.merged:
+        return (f"#{issue} is therefore closed even though its work is not on "
+                f"`{default_branch}`: re-open #{issue} first, then carry the "
+                f"stranded commits to `{default_branch}`, and close it when they "
+                f"land.")
+    return (f"So #{issue} would be closed over work that is not on "
+            f"`{default_branch}`. {_stranded_remedy(pr, issue, default_branch)}")
+
+
+def _reopen_tail(pr: PullRequest, path: list[PullRequest],
+                 closed_links: list[PullRequest], issue: int,
+                 default_branch: str) -> str:
+    """The trailing text of the blocked arm: the repair, exactly once.
+
+    When the first closed LINK's head branch already holds the subject's commits —
+    which `_subject_landed` decides over the links BELOW it, so an OPEN link between
+    the subject and the closed one correctly fails the test — re-opening that link
+    and retargeting it at the default branch IS the repair, and saying "that only
+    restores the path above it" contradicts the remedy in the same sentence
+    (#10634 cycle 11). When the links below it DID break, the weaker wording is the
+    true one and `_stranded_remedy` supplies the action. With no closed link the
+    remedy is simply `_stranded_remedy`.
+    """
+    if not closed_links:
+        return _stranded_remedy(pr, issue, default_branch)
+    link = closed_links[0]
+    # IDENTITY, like every other comparison in the walk: offline records all carry
+    # number=0, so value equality can resolve to the wrong index.
+    at = next(i for i, hop in enumerate(path) if hop is link)
+    if _subject_landed(pr, path[:at]):
+        return (f"PR #{link.number} can be re-opened and retargeted at "
+                f"`{default_branch}` — that carries #{pr.number}'s commits up with "
+                f"it, and `Closes #{issue}` still has to be stated on the PR that "
+                f"lands.")
+    return (f"PR #{link.number} can be re-opened and retargeted at "
+            f"`{default_branch}`, but that only restores the path above it: the "
+            f"commits must reach `{link.head}` too. "
+            f"{_stranded_remedy(pr, issue, default_branch)}")
+
+
+def _path_break(path: list[PullRequest]) -> str | None:
+    """The FIRST link BELOW the carrier that provably breaks the ride, or None.
+
+    ONE predicate for the whole question, because a broken path means the same
+    thing whether it is used to REFUSE a `lands` or to explain a remedy (#10634
+    cycle 8). Three shapes, each provable from the record set and none needing
+    ancestry:
+
+    * an intermediate that was never merged (its branch's commits were not carried
+      up at all);
+    * an upper link merged while the PR BELOW it never merged — the lower PR's
+      commits enter a branch that had ALREADY been carried up, so they are on
+      neither side (this is the shape a timestamp test cannot see: an OPEN hop has
+      no `merged_at`);
+    * an upper link that merged BEFORE the lower one (the same harm, by ORDER).
+
+    The carrier's own link is skipped ONLY while the carrier is unmerged: an open
+    stack is in progress, not broken, and an open carrier is never blamed for a
+    break below it. Once the carrier HAS merged its link counts like any other —
+    excluding it let a merged, keyword-carrying carrier pass `lands` over work that
+    never rode in (#10634 cycle 9: 18 configurations were false passes, all of them
+    this one link).
+    """
+    carrier = path[-1]
+    for lower, upper in pairwise(path):
+        if upper is carrier and not carrier.merged:
+            # "The carrier has not merged yet" is the normal, healthy state of an
+            # open stack — never a break, and never blamed on the carrier.
+            #
+            # ⚠️ BELT-AND-BRACES: the `not upper.merged` branch below reaches the
+            # same verdict whenever the carrier is unmerged, so deleting this block
+            # changes no verdict and no text (only the discarded
+            # `carrier.closed_unmerged` edge differs, and `classify` answers that
+            # earlier). Kept as an explicit statement of the healthy case (#10634
+            # cycle 10).
+            continue
+        if not upper.merged:
+            # A CLOSED-unmerged link will never merge, so it is a break whatever the
+            # carrier is doing.
+            if upper.closed_unmerged:
+                return (f"PR #{upper.number} (base `{upper.base}`) was CLOSED "
+                        f"WITHOUT MERGING, so nothing from PR #{path[0].number} "
+                        f"ever reached `{carrier.base}`, the branch PR "
+                        f"#{carrier.number} "
+                        f"{'merged' if carrier.merged else 'merges'} into")
+            # An OPEN intermediate is only a break once the carrier has landed
+            # WITHOUT it: while the carrier is still open the stack is simply in
+            # progress, which is the normal state of a live stack — refusing that
+            # would turn every multi-hop PR into a warning (cycle 8).
+            if not carrier.merged:
+                continue
+            return (f"PR #{upper.number} (base `{upper.base}`) was not merged, so "
+                    f"nothing from PR #{path[0].number} ever reached "
+                    f"`{carrier.base}`, the branch PR #{carrier.number} merged "
+                    f"into")
+        if not lower.merged:
+            return (f"PR #{upper.number} (base `{upper.base}`) has ALREADY merged "
+                    f"while PR #{lower.number} is {_state_words(lower)}, so "
+                    f"#{lower.number}'s commits were never in the branch "
+                    f"#{upper.number} carried up")
+        if upper.merged_at and lower.merged_at and upper.merged_at < lower.merged_at:
+            return (f"PR #{upper.number} (base `{upper.base}`) merged at "
+                    f"{upper.merged_at}, BEFORE PR #{lower.number} merged into "
+                    f"`{lower.base}` at {lower.merged_at}, so #{lower.number}'s "
+                    f"commits were never in the branch PR #{upper.number} "
+                    f"carried up")
+    return None
+
+
+def _state_words(pr: PullRequest) -> str:
+    """The module's own wording for a PR's own state."""
+    if pr.closed_unmerged:
+        return "CLOSED WITHOUT MERGING"
+    return f"still {pr.state.upper()}"
+
+
+def _subject_landed(pr: PullRequest, path: list[PullRequest]) -> bool:
+    """Whether the SUBJECT's own work rode the carrier to the default branch.
+
+    Neither fact needed here is ancestry, so this is deliberately conservative:
+    `merged` says each PR merged into ITS OWN base, and the `merged_at` stamps
+    say in which ORDER — checked PAIRWISE up the stack, because a PR's commits
+    reach the default branch only through every hop above it (#10634 cycles 3-4).
+    Both weaker versions claimed "the work did land" for work that was stranded:
+    judging the two ENDPOINTS alone passed a stack whose middle never merged, and
+    comparing every link with the CARRIER alone passed a subject that merged into
+    its base AFTER that base had already been carried up (12:00 subject, 11:00
+    mid, 14:00 carrier). A hop that merged later than the PR it carries is the
+    same harm as a hop that never merged. With no stamps (offline records) the
+    merged states are all there is.
+    """
+    carrier = path[-1]
+    if not (carrier.merged and pr.merged):
+        return False
+    for lower, upper in pairwise(path):
+        if not upper.merged:
+            return False
+        if lower.merged_at and upper.merged_at and upper.merged_at < lower.merged_at:
+            return False
+    return True
+
+
+def _stranded_remedy(pr: PullRequest, issue: int, default_branch: str) -> str:
+    """The action that actually EXISTS for the subject's own state.
+
+    One arm, three states, and "re-open PR #N" is only possible for one of them
+    (#10634 cycle 2, P2): an OPEN PR has nothing to re-open — it needs its BASE
+    retargeted, and the keyword then fires normally — and a MERGED one cannot be
+    re-opened at all. Prescribing either is the impossible-action class this whole
+    branch exists to avoid, and it reads as the tool being broken.
+    """
+    if pr.closed_unmerged:
+        return (f"Re-open PR #{pr.number}, retarget it at `{default_branch}`, "
+                f"and state `Closes #{issue}` on it")
+    if pr.merged:
+        return (f"PR #{pr.number} has merged and cannot be re-opened: open a PR "
+                f"from `{pr.base}`'s current tip that targets "
+                f"`{default_branch}` for the stranded commits, and state "
+                f"`Closes #{issue}` on it")
+    return (f"Retarget PR #{pr.number}'s base at `{default_branch}` and state "
+            f"`Closes #{issue}` on it — it is still open, so there is nothing "
+            f"to re-open")
+
+
+def _not_landed_why(pr: PullRequest, carrier: PullRequest,
+                    path: list[PullRequest]) -> str:
+    """The LINK that breaks the chain, in the words the reader can check.
+
+    The link half is `_path_break` — the SAME predicate the `lands` arm refuses on,
+    so the diagnosis and the refusal cannot disagree (#10634 cycle 8). When no link
+    below the carrier is broken, the SUBJECT's own state is the reason; a
+    closed-unmerged subject is reported in the module's OWN wording for that state
+    ("CLOSED WITHOUT MERGING", see the carrier arm above), because "still CLOSED"
+    describes a transient state when it is a final one and it hides that re-opening
+    is an option (#10634 review).
+    """
+    link = _path_break(path)
+    if link:
+        return link
+    if not pr.merged:
+        return (f"PR #{pr.number} itself is {_state_words(pr)}, so its commits "
+                f"were not in the branch PR #{carrier.number} "
+                f"{'merged' if carrier.merged else 'merges'} into")
+    # Only a BREAK at a link reaches here now that the predicate sees every pair —
+    # and it may name an ORDER only when the stamps show one (#10634 cycle 9: the
+    # unguarded version printed "AFTER" over a LATER carrier stamp, and over two
+    # identical stamps).
+    #
+    # ⚠️ BELT-AND-BRACES, and the one documented exception to "a guard must be seen
+    # to fail" in this module: `_path_break` now evaluates every pair, so no stamp
+    # comparison can reach this line with a NON-increasing order — mutating the
+    # condition away leaves the suite green, because the shape is unreachable, not
+    # because the guard is wrong. It is kept so the sentence cannot start lying if
+    # `_path_break` ever narrows again (it did, twice, in cycles 8 and 9).
+    if pr.merged_at and carrier.merged_at and pr.merged_at > carrier.merged_at:
+        return (f"PR #{pr.number} merged into `{pr.base}` at {pr.merged_at}, AFTER "
+                f"PR #{carrier.number} merged at {carrier.merged_at}, so its "
+                f"commits landed on the sibling branch too late to ride it")
+    # Unreachable in principle (the predicate sees every pair), and phrased so it
+    # stays TRUE if it ever is reached: it asserts only what put us in this
+    # function, never a state word that could read "is still MERGED".
+    return (f"PR #{pr.number} did not ride PR #{carrier.number} to "
+            f"`{carrier.base}`")
+
+
+def worst_verdict(findings: list[Finding]) -> str:
+    """The single verdict for a set of findings, order worst-first."""
+    for verdict in ("inert", "unresolved", "lands"):
+        if any(f.verdict == verdict for f in findings):
+            return verdict
+    return "none"
+
+
+# ── live layer: `gh`, no writes, each call self-describing ────────────────────
+
+class Unmeasurable(RuntimeError):
+    """The question could not be answered. Never degraded into a pass."""
+
+
+_GH_FIELDS = "number,baseRefName,body,headRefName,state,mergedAt"
+
+#: A `gh` call that never returns must not hang the run (#10634 review P2). This
+#: tool runs inside an always-on drift-guard job, and a job-level timeout kills
+#: the WHOLE job — `continue-on-error: true` covers a step's exit status, not a
+#: step that never finishes — so an unreachable API would take the rest of the
+#: drift guard down with it instead of reporting UNMEASURED. Bounded here, at the
+#: one place every live call goes through.
+_GH_TIMEOUT_SECONDS = 60
+
+#: …and the bound is PER CALL, which is not enough for the run (#10634 review P2):
+#: one `--pr` run issues `2 + L` sequential calls (identity, the PR, one per base
+#: branch up the stack) and `collect_stack` follows the stack as far as it goes,
+#: so `L` is not capped by `MAX_STACK_DEPTH` — thirteen calls at the per-call cap
+#: already reach the job's `timeout-minutes: 15`. So there is also an aggregate
+#: budget: once it is gone the run reports UNMEASURED instead of spending the
+#: job, which is the same contract the per-call bound has (exit 2, never a pass,
+#: never a red the advisory step cannot cover).
+_GH_RUN_BUDGET_SECONDS = 300
+
+_run_budget_started: float | None = None
+
+
+def _reset_run_budget() -> None:
+    """Start a fresh aggregate deadline (called by `main`, and by tests)."""
+    global _run_budget_started
+    _run_budget_started = None
+
+
+def _budget_remaining() -> float:
+    """Seconds left in the run's budget; the first call starts the clock."""
+    global _run_budget_started
+    now = time.monotonic()
+    if _run_budget_started is None:
+        _run_budget_started = now
+    return _GH_RUN_BUDGET_SECONDS - (now - _run_budget_started)
+
+
+def _gh(args: list[str]) -> str:
+    budget = _budget_remaining()
+    if budget <= 0:
+        # The run has already spent its whole budget: no further call can
+        # change the answer, and making one would spend the job instead.
+        raise Unmeasurable(
+            f"the run exceeded its {_GH_RUN_BUDGET_SECONDS}s budget before "
+            f"`gh {' '.join(args)}` could be asked")
+    timeout = min(_GH_TIMEOUT_SECONDS, budget)
+    try:
+        out = subprocess.run(["gh", *args], capture_output=True, text=True,
+                             check=False, timeout=timeout)
+    except FileNotFoundError as exc:
+        raise Unmeasurable(f"`gh` is not installed: {exc}") from exc
+    except subprocess.TimeoutExpired as exc:
+        # UNMEASURED, never a pass and never a hang: the caller's exit 2 is the
+        # contract the workflow's dead-man reads.
+        raise Unmeasurable(
+            f"`gh {' '.join(args)}` did not answer within {timeout:.0f}s"
+            f"{' (the run\'s remaining budget)' if timeout < _GH_TIMEOUT_SECONDS else ''}"
+        ) from exc
+    if out.returncode != 0:
+        raise Unmeasurable(
+            f"`gh {' '.join(args)}` exited {out.returncode}: "
+            f"{(out.stderr or out.stdout).strip()[:400]}")
+    return out.stdout
+
+
+def _to_pr(raw: dict) -> PullRequest:
+    return PullRequest(
+        number=int(raw["number"]),
+        base=raw.get("baseRefName") or "",
+        body=raw.get("body") or "",
+        head=raw.get("headRefName") or "",
+        state=raw.get("state") or "OPEN",
+        merged_at=raw.get("mergedAt"),
+    )
+
+
+def fetch_identity(repo: str | None) -> tuple[str, str]:
+    """(default branch, ``owner/name``) in ONE read.
+
+    The second half is not decoration: when `--repo` is omitted the caller has no
+    repo string, and `parse_closing_refs` treats every `owner/repo#N` as foreign
+    without one — so a same-repo QUALIFIED claim was silently dropped and the
+    sweep reported "nothing to report" over a real offender (review cycle 2,
+    finding 5). `gh repo view` already knows the name; this keeps it.
+
+    `gh repo view` takes the repo POSITIONALLY (it has no `--repo` flag), which
+    also stops the read answering for a selector it was not asked about.
+    """
+    raw = _gh(["repo", "view", *([repo] if repo else []), "--json",
+               "defaultBranchRef,nameWithOwner"])
+    try:
+        payload = json.loads(raw)
+        name = payload["defaultBranchRef"]["name"]
+        slug = payload.get("nameWithOwner") or ""
+    except (KeyError, TypeError, ValueError) as exc:
+        raise Unmeasurable(f"the repo identity could not be read: {raw[:200]}") from exc
+    if not name:
+        raise Unmeasurable("the repo reported an empty default branch name")
+    # An EMPTY slug must not degrade quietly into `None`: that would drop every
+    # same-repo qualified claim as foreign, with no signal — the exact false pass
+    # this read exists to remove, and the module's doctrine is Unmeasurable, never
+    # a quiet pass (review c3-5).
+    if not slug:
+        raise Unmeasurable("the repo reported no nameWithOwner")
+    return name, slug
+
+
+def fetch_pr(number: int, repo: str | None) -> PullRequest:
+    repo_args = ["--repo", repo] if repo else []
+    raw = _gh(["pr", "view", str(number), *repo_args, "--json", _GH_FIELDS])
+    try:
+        return _to_pr(json.loads(raw))
+    except (KeyError, TypeError, ValueError) as exc:
+        raise Unmeasurable(f"PR #{number} could not be read: {raw[:200]}") from exc
+
+
+def fetch_prs_by_head(branch: str, repo: str | None) -> list[PullRequest]:
+    """Every PR whose HEAD is `branch` — the candidates for a stack carrier."""
+    repo_args = ["--repo", repo] if repo else []
+    raw = _gh(["pr", "list", *repo_args, "--state", "all", "--head", branch,
+               "--json", _GH_FIELDS, "--limit", "50"])
+    try:
+        return [_to_pr(r) for r in json.loads(raw)]
+    except (KeyError, TypeError, ValueError) as exc:
+        raise Unmeasurable(
+            f"the PRs with head `{branch}` could not be read: {raw[:200]}") from exc
+
+
+def _pick_carrier(cands: list[PullRequest]) -> PullRequest | None:
+    """The carrier candidate for one base branch.
+
+    OPEN outranks MERGED — an open carrier can still be amended with the
+    keyword and is the one that will land next — and a CLOSED-WITHOUT-MERGING
+    PR ranks LAST, not first. `not pr.merged` was the original test and it was
+    wrong: `merged` is False for a CLOSED PR, so a closed-and-abandoned PR was
+    picked ahead of a real carrier and `classify` then reported `lands` over an
+    issue nothing would ever close (#10597 review P0-1).
+    """
+    if not cands:
+        return None
+    for pr in cands:
+        if pr.state.upper() == "OPEN":
+            return pr
+    for pr in cands:
+        if pr.merged:
+            return pr
+    return cands[0]  # closed-unmerged: `classify` reports it as `unresolved`
+
+
+def collect_stack(roots: list[PullRequest], repo: str | None,
+                  default_branch: str) -> dict[str, PullRequest]:
+    """Resolve the stack above each root, fetching each base branch's PR once."""
+    by_head: dict[str, PullRequest] = {}
+    pending: list[str] = []
+    for pr in roots:
+        if pr.head:
+            by_head.setdefault(pr.head, pr)
+        if pr.base and pr.base != default_branch:
+            pending.append(pr.base)
+    resolved: set[str] = set()
+    while pending:
+        branch = pending.pop()
+        if branch in resolved or branch in by_head:
+            continue
+        resolved.add(branch)
+        pr = _pick_carrier(fetch_prs_by_head(branch, repo))
+        if pr is None:
+            continue
+        by_head[branch] = pr
+        if pr.base and pr.base != default_branch and pr.base not in resolved:
+            pending.append(pr.base)
+    return by_head
+
+
+def sweep(repo: str | None, default_branch: str) -> list[Finding]:
+    """Every OPEN PR whose base is not the default branch, classified.
+
+    This is the population #10597 was measured in: the offending PR is visible
+    here for as long as it is open — which is the whole window in which the
+    keyword can still be fixed.
+    """
+    repo_args = ["--repo", repo] if repo else []
+    raw = _gh(["pr", "list", *repo_args, "--state", "open", "--limit", "1000",
+               "--json", _GH_FIELDS])
+    try:
+        prs = [_to_pr(r) for r in json.loads(raw)]
+    except (KeyError, TypeError, ValueError) as exc:
+        raise Unmeasurable(f"the open PRs could not be read: {raw[:200]}") from exc
+    roots = [p for p in prs if p.base and p.base != default_branch
+             and parse_closing_refs(p.body, repo)]
+    if not roots:
+        return []
+    by_head = collect_stack(roots, repo, default_branch)
+    findings: list[Finding] = []
+    for pr in roots:
+        findings.extend(classify(pr, by_head, default_branch, repo))
+    return findings
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(
+        description="Report `Closes #N` refs that will never fire because the PR's "
+                    "base is not the default branch (#10597).")
+    which = ap.add_mutually_exclusive_group(required=True)
+    which.add_argument("--pr", type=int, help="classify one PR by number")
+    which.add_argument("--sweep", action="store_true",
+                       help="classify every open PR on a non-default base")
+    which.add_argument("--body-file", type=Path,
+                       help="offline: read the PR body from a file")
+    ap.add_argument("--repo", default=None, help="owner/name (default: ambient)")
+    ap.add_argument("--base", default=None,
+                    help="offline/--body-file only: the PR's base branch")
+    ap.add_argument("--head", default=None, help="offline/--body-file only: the PR's head branch")
+    ap.add_argument("--default-branch", default=None,
+                    help="the default branch (measured when omitted)")
+    ap.add_argument("--carrier-body-file", type=Path, default=None,
+                    help="offline/--body-file only: the body of the PR at the top of the stack")
+    ap.add_argument("--annotate", action="store_true",
+                    help="emit GitHub Actions ::warning lines instead of prose")
+    ap.add_argument("--json", action="store_true", help="emit JSON")
+    args = ap.parse_args(argv)
+    _reset_run_budget()
+
+    try:
+        if args.body_file is not None:
+            if not args.base:
+                ap.error("--body-file needs --base (the question is meaningless without it)")
+            default_branch = args.default_branch or "main"
+            pr = PullRequest(number=0, base=args.base,
+                             body=args.body_file.read_text(encoding="utf-8"),
+                             head=args.head or "")
+            by_head: dict[str, PullRequest] = {}
+            # No `--carrier-body-file` means the caller knows of NO PR at the top
+            # of the stack. That is `unresolved`, not `inert`: inventing an empty
+            # carrier would report a fact about a PR that was never described.
+            if args.base != default_branch and args.carrier_body_file:
+                carrier = PullRequest(
+                    number=0, base=default_branch,
+                    body=args.carrier_body_file.read_text(encoding="utf-8"))
+                by_head[args.base] = carrier
+            findings = classify(pr, by_head, default_branch, args.repo)
+        else:
+            measured_default, slug = fetch_identity(args.repo)
+            default_branch = args.default_branch or measured_default
+            # Fall back to the repo gh just named: with no `--repo` the caller had
+            # no string, and a same-repo `owner/repo#N` claim would be dropped as
+            # foreign — a false pass by non-detection (review cycle 2, finding 5).
+            classify_repo = args.repo or slug or None
+            if args.sweep:
+                findings = sweep(classify_repo, default_branch)
+            else:
+                pr = fetch_pr(args.pr, args.repo)
+                by_head = collect_stack([pr], args.repo, default_branch)
+                findings = classify(pr, by_head, default_branch, classify_repo)
+    except Unmeasurable as exc:
+        print(f"closes_landing: UNMEASURED — {exc}", file=sys.stderr)
+        return 2
+
+    verdict = worst_verdict(findings)
+    if args.json:
+        print(json.dumps({"default_branch": default_branch, "verdict": verdict,
+                          "findings": [f.as_dict() for f in findings]}, indent=2))
+    elif args.annotate:
+        for f in findings:
+            if f.verdict != "lands":
+                print(f.annotation())
+    else:
+        if not findings:
+            # NOT "on a non-default base": this branch is also reached by `--pr` on
+            # a PR whose base IS the default branch, and claiming otherwise puts a
+            # false statement about the PR in front of the reader.
+            print(f"closes_landing: no closing refs to judge — nothing to report "
+                  f"(default branch: {default_branch})")
+        for f in findings:
+            print(f"[{f.verdict:10s}] #{f.issue} via PR #{f.pr} (base {f.base}) "
+                  f"-> carrier #{f.carrier}")
+            print(f"             {f.detail}")
+
+    return 3 if verdict in ("inert", "unresolved") else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

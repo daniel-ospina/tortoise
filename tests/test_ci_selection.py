@@ -4402,6 +4402,22 @@ def test_drift_guard_tool_change_selects_core_not_tier1():
     assert set(r["test_files"]) != _tier1()
 
 
+def test_closes_landing_tool_change_selects_core_not_tier1():
+    # #10597 review c7-4: tools/closes_landing.py owns
+    # tests/test_closes_landing.py. The flat "tools/" NON_PYTHON_PREFIXES entry
+    # swallows the path, so without the CORE_ALSO row a tool-only change selects
+    # NO surface and falls back to tier-1 smoke — the suite pinning the
+    # instrument never runs on the PR that changes the instrument. Same
+    # silent-drop class as the drift-guard peer above; every other CORE_ALSO row
+    # in that tuple is pinned the same way. Mutation check: removing the row
+    # filters the path out and fails every assert below.
+    r = _sel(["tools/closes_landing.py"])
+    assert r["full"] is False, r
+    assert "core" in r["surfaces"], r
+    assert "test_closes_landing.py" in r["test_files"], r
+    assert set(r["test_files"]) != _tier1()
+
+
 def test_surface_tools_change_selects_core_not_tier1():
     # PR #8986 review (P1/P2, four independent reviews): the lockstep net for
     # the served-identity helpers is
