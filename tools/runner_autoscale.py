@@ -749,7 +749,7 @@ def read_job_outcomes(
     repo: str,
     runs: int = WEDGED_PROBE_RUNS,
     *,
-    pool: dict[str, "PoolEntry"] | None = None,
+    pool: dict[str, PoolEntry] | None = None,
     max_runs: int = WEDGED_PROBE_MAX_RUNS,
 ) -> tuple[list[tuple[str, str, int]], int]:
     """`(runner_name, conclusion, seconds)` for the jobs of the last completed runs.
