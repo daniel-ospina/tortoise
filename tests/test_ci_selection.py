@@ -13398,6 +13398,23 @@ def test_lane_stash_guard_runs_on_a_tools_only_change():
     assert "test_lane_stash.py" in r["test_files"], r
 
 
+def test_rail_pin_runs_on_a_tools_only_change():
+    # #2148: `tests/test_rail_detach.py` (registered `core`) pins the merge
+    # rail's DURABILITY — the detached session that lets `admin-merge.sh`
+    # outlive the lane, the fail-closed verdict vocabulary, and the `flock`
+    # duplicate-rail guard. `tools/` is a flat NON_PYTHON_PREFIXES entry and
+    # `tools/rail_detach.py` matches no SOURCE_PATTERNS row, so before the
+    # CORE_ALSO entry a tools-only diff was filtered out BEFORE the
+    # "not matched -> core" fallback: the pin never ran on the file it exists
+    # to hold (the #1349/#3332/#3616 silent-drop class). Mutation check:
+    # removing the CORE_ALSO entry fails the arm below (surfaces == [] and the
+    # guard absent from test_files).
+    r = _sel(["tools/rail_detach.py"])
+    assert r["full"] is False, r
+    assert r["surfaces"] == ["core"], r
+    assert "test_rail_detach.py" in r["test_files"], r
+
+
 def test_turn_parity_census_guard_runs_on_a_tools_only_change():
     # #10017: `tests/test_10017_turn_parity_census.py` (registered `core`)
     # pins the refusal arms of `tools/turn_parity_census.py` — the purge gate
