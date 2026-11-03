@@ -2200,7 +2200,14 @@ def select_e4_receipt(repo: Path = ROOT, frozen_pin: str = "") -> tuple[str, dic
                          "corpus cannot be checked is not evidence for a bar "
                          "written over the pre-registered corpus")
     directory = repo / E4_RECEIPT_DIR
-    paths = sorted(directory.glob(E4_RECEIPT_GLOB)) if directory.is_dir() else []
+    if not directory.is_dir():
+        raise SystemExit(
+            f"capstone-measure: REFUSED — the receipts directory {directory} does "
+            "not exist, so E4's artifact cannot be looked for. Check the root this "
+            "probe was pointed at; an ABSENT directory is a different failure from "
+            "an empty one, and reporting both as 'none present' points the reader "
+            "at a missing receipt when the real cause is a missing tree")
+    paths = sorted(directory.glob(E4_RECEIPT_GLOB))
     matched: list[tuple[tuple, Path, dict]] = []
     skipped: list[str] = []
     #: Candidates that ARE on the frozen pin but carry no ``operator_audit``, so they
