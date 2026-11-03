@@ -8814,10 +8814,17 @@ def _check_org_limit(org: dict, resource: str, *,
     counts lives at the seam that owns the trap
     (``quota.enforce_org_limit``'s ``sdk:``/``sdk_factory:`` docs) — at this
     seam the fallback is ``_gate_sdk_for(org, resource)``, which mirrors the
-    OPENER's own two call forms: a graph-BOUND credential's ``graph_namespace``
+    OPENER's own call forms: a graph-BOUND credential's ``graph_namespace``
     (so the count follows the BINDING), an org-wide credential's promotion-aware
     default (#10180 — so the count follows a PROMOTION), and ``None`` for the
-    registry-scoped resources. That fallback is what #10637 landed and what
+    registry-scoped resources. ⚠️ It ALSO answers ``None`` for the second of its
+    two deliberate non-uses — an UNRESOLVED binding (``_data_graph_name`` →
+    ``None``) — and that arm is not a wrong-graph count: no write can occur
+    either way (``_data_sdk`` refuses 403), so substituting a graph would be a
+    fail-open widening. Its only cost is ordering (at the three
+    ``/v1/{points,objects,subjects}`` sites a 402 can pre-empt that 403); both
+    non-uses are recorded in ``_gate_sdk_for``'s own docstring. That fallback is
+    what #10637 landed and what
     makes this keyword an optimisation rather than the whole fix; before it, an
     omitted sdk made ``_count_resource`` mint ``_make_sdk(namespace=org_id)`` —
     the org's DEFAULT graph ``org_{org_id}`` — while a custom-graph-bound key

@@ -59,8 +59,10 @@ the PR body measured.
 ``/v1/points``, ``/v1/objects``, ``/v1/subjects``, ``/v1/sessions/commit``,
 ``/v1/demo`` and the capture ``/v1/sessions`` gate): **behaviour** is pinned at
 all six by the arms below, but **one-handle identity is pinned structurally at
-two** — ``/v1/demo`` and the capture ``sessions`` gate. The four
-``resource="points"`` doors are NOT pinned for identity: deleting ``sdk=sdk``
+two** — ``/v1/demo`` and the capture ``sessions`` gate. The OTHER four
+``resource="points"`` doors (``/v1/points``, ``/v1/objects``, ``/v1/subjects``,
+``/v1/sessions/commit``; ``/v1/demo`` is the fifth and IS pinned) are NOT pinned
+for identity: deleting ``sdk=sdk``
 there now leaves this suite green, because ``#10637``'s fallback resolves the
 same graph for those credentials (that is the double-handle cost, not a wrong
 count). Identity is pinned where behaviour CANNOT see it at all — the demo

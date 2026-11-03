@@ -1005,10 +1005,13 @@ def _count_resource(org_id: str, resource: str, sdk=None) -> int:
         # ── Tenant-graph-scoped counts (sessions, points) ──
         if sdk is None:
             # #8906: this fallback is the DEFAULT graph `org_{org_id}`, NOT the
-            # request's — a custom-graph-bound key writes elsewhere. A caller
+            # request's — a custom-graph-bound key writes elsewhere. So a caller
             # reaching here for a tenant-graph resource with a RESOLVED request
-            # SDK absent is therefore counting a graph the request does not
-            # write; see `enforce_org_limit`'s `sdk:`/`sdk_factory:` docs for the
+            # SDK absent is counting a graph the request MAY NOT WRITE — for a
+            # graph-bound key, and for a promoted default; for the bound-DEFAULT
+            # and org-wide classes whose default IS ``org_{org_id}`` the graph
+            # coincides, and the cost there is a SECOND HANDLE, not a wrong
+            # count. See `enforce_org_limit`'s `sdk:`/`sdk_factory:` docs for the
             # full contract. ⚠️ The ONE deliberate exception is
             # `hosted_api._gate_sdk_for`'s unresolved-binding arm, which answers
             # `None` ON PURPOSE (no write can occur — `_data_sdk` refuses 403 —
@@ -1232,9 +1235,14 @@ def enforce_org_limit(limits: dict | None, resource: str, sdk=None, *,
             building a graph handle to prove it). Mutually exclusive with `sdk`:
             a non-None `sdk` wins and the factory is never called.
             ``hosted_api._gate_sdk_for`` is that factory, and it mirrors the
-            OPENER's own two call forms — a bound key's own binding, a promoted
-            default's namespace — so an omitted sdk still counts the graph the
-            write lands in. The REST doors pass `sdk=` anyway, for identity (one
+            OPENER's own call forms — a bound key's own binding, a promoted
+            default's namespace — so an omitted sdk counts the graph the write
+            lands in for every credential that HAS a write graph. Two arms are
+            the deliberate exceptions, both recorded in ``_gate_sdk_for``'s
+            docstring: the registry-scoped resources and an UNRESOLVED binding
+            answer ``None`` (for the latter no write can occur — ``_data_sdk``
+            refuses 403 — so substituting a graph would be a fail-open
+            widening). The REST doors pass `sdk=` anyway, for identity (one
             handle for the count and the write) rather than because the fallback
             is wrong.
         slot_credit: #4355 — how many slots this write RELEASES as part of the
