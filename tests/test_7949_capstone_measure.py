@@ -3635,6 +3635,152 @@ def test_main_binds_every_name_it_hands_render_log_and_load_e4_carries_its_keys(
         "corpus run, after the work and before the log is written")
 
 
+#: One canned receipt in `load_e4`'s own shape — the ONLY field the E4 narration
+#: branches on is `corpus_hash`, so the rest exist to be formatted.
+_E4_RECEIPT_FIXTURE = {
+    "evidence": "tests/eval/write_path/receipts/w2b-operator-2026-01-01.json",
+    "planted": 15, "edge_correct": 5, "content_ok": 11, "operators_total": 33,
+    "operators_provenanced": 33, "run_id": "w2b-canned",
+    "date": "2026-01-01T00:00:00Z", "commit": "a" * 9,
+    "corpus_hash": "sha256:" + "d" * 64,
+    "judge_pin": "w2-write-path-mechanical-v2", "verdict": "regression",
+    "failure_origin": "gate_regression",
+}
+
+
+def _render_a_log(monkeypatch, *, receipt: dict, corpus_sha: str) -> str:
+    """One REAL `render_log` call over canned data — no DB, no network, no model.
+
+    `render_log` takes dicts and scalars only, so the whole renderer executes here;
+    everything it formats is either derived from the frozen record (`parse_bars`) or
+    the canned census the sibling cases already use.
+    """
+    return measure.render_log(
+        head="a" * 40, prereg_sha="b" * 40,
+        bars=measure.parse_bars(_prereg()), corpus_sha=corpus_sha,
+        graph="canned",
+        runs=[{"session_id": "wp01", "ok": True, "extraction_mode": "mechanical",
+               "extracted": 1, "errors": 0, "elapsed_s": 0.5, "turns": 1,
+               "stats": {}}],
+        observed={}, unobserved={},
+        census_data=_canned_census(monkeypatch),
+        e1={"before_share": 0.6, "after_share": 0.6, "objects_numerator": 15,
+            "objects_total": 25, "sha": "c" * 40, "corpus": "corpus",
+            "corpus_sha256": "sha256:" + "e" * 64, "declared_prereg": "no",
+            "declared_result": "UNPREREGISTERED", "real_facts": 90,
+            "state_values": 42, "fused": 7, "atomic_points": 9},
+        e1_aux={"bare_definite": 0, "share": 0.0},
+        e1_out={"outcome": "REFUSED", "value": "15/25", "bar": "x"},
+        e1b_out={"outcome": "CONTROL", "value": "90", "bar": "x"},
+        e2a_out={"outcome": "BLOCKED", "value": "42", "bar": "x"},
+        e2b_out={"outcome": "BLOCKED", "value": "9", "bar": "x"},
+        e3={"numerator": 148, "denominator": 383, "below_floor": False,
+            "outcome": "RED", "bar": "= 1.000"},
+        e3_out={"outcome": "RED", "value": "148/383", "bar": "= 1.000"},
+        e4=receipt,
+        e4_out=measure.e4_outcome_for(receipt, measure.parse_bars(_prereg())),
+        e5={"arms_dir": "d", "artifact": "a.json", "raw_loss": 0.52,
+            "raw_loss_count": 13, "raw_n": 25, "narrative_loss": 0.48,
+            "narrative_loss_count": 12, "narrative_n": 25,
+            "recall": {"raw": {"recalled": 12, "planted": 25},
+                       "narrative": {"recalled": 13, "planted": 25}},
+            "warning": [], "partial_receipts": []},
+        e5_out={"ratio": 1.0833, "ratio_ok": True, "raw_recovery": 0.48,
+                "raw_ok": False, "narrative_recovery": 0.52,
+                "outcome": "RED", "bar": "x"},
+        rows=[], out_path="canned.log")
+
+
+def test_the_e4_narration_says_which_corpus_the_receipt_was_scored_on(monkeypatch):
+    """`render_log`'s `on_pin` branch — the sentence EVERY future scored log prints.
+
+    The scanned receipt is now selected BY the frozen pin, so the renderer's sentence
+    must say so. It printed the opposite unconditionally: *"Its corpus_hash … is NOT
+    the frozen corpus … scored as a NON-GREEN measurement on ITS OWN corpus revision"* —
+    true of the pre-fix constant, false of every receipt `load_e4` can now return, and
+    printed into the log of the very run that fixed it.
+
+    Nothing pinned either sentence (`git grep render_log tests/ tools/` found only the
+    AST wiring pin, which reads the call site and never executes the renderer), so a
+    reversion to the unconditional sentence left every case green.
+
+    Non-vacuity: the pre-fix renderer prints the off-pin sentence for BOTH receipts, so
+    the first two assertions red ("IS the frozen corpus" absent, "is NOT the frozen"
+    present). The two receipts differ ONLY in `corpus_hash`, so nothing else can decide
+    which sentence is emitted.
+    """
+    pin = _prereg()["corpus"]["fixtures_hash"]
+    on_pin = dict(_E4_RECEIPT_FIXTURE, corpus_hash=pin)
+    off_pin = dict(_E4_RECEIPT_FIXTURE, corpus_hash="sha256:" + "9" * 64)
+
+    rendered_on = _render_a_log(monkeypatch, receipt=on_pin, corpus_sha=pin)
+    assert f"Its corpus_hash={pin} IS the frozen corpus ({pin})" in rendered_on, \
+        "an on-pin receipt must be narrated as on the frozen corpus"
+    assert "selected BY that hash" in rendered_on, rendered_on[-2000:]
+    assert "V7's declared-mismatch arm is not taken for it" in rendered_on
+    assert "is NOT the frozen corpus" not in rendered_on, (
+        "a receipt selected BY the frozen pin must never be narrated as off it — this "
+        "is the sentence the fix exists for")
+
+    rendered_off = _render_a_log(monkeypatch, receipt=off_pin, corpus_sha=pin)
+    assert f"Its corpus_hash={off_pin['corpus_hash']} is NOT the frozen corpus ({pin})" \
+        in rendered_off, "an off-pin receipt must still be narrated as off the pin"
+    assert "NON-GREEN measurement on ITS OWN corpus revision" in rendered_off
+    assert "IS the frozen corpus" not in rendered_off, (
+        "an off-pin receipt must never be handed the on-pin sentence")
+
+
+def test_the_frozen_records_stale_E4_sentence_is_disclosed_and_not_edited():
+    """The record a MACHINE consumer reads still says 2/15 — and must NOT be edited.
+
+    `PRE-REGISTRATION.md` §10.3 ends *"E4's denominator (15), its threshold (= 15 of 15)
+    and its row are unchanged"* and `preregistration.json`'s
+    `criteria[E4].post_registration_measurement` still hands a consumer
+    `edge_correct=2 of 15 … so it measures its own corpus revision`. "its row are
+    unchanged" is no longer true of the row the probe builds, so the bundle would
+    publish a current number and a frozen record that contradicts it — the defect
+    class this change exists to close — in the one file no human reads.
+
+    The fix is NOT to edit the record: `preregistration.json` pins the document by
+    BYTES (`document_sha256`) and the `#10463` ruling this bundle records says an
+    amendment is a NEW linked record, never an edit to the frozen one. So this pin
+    holds BOTH halves: the record still carries the 2/15 sentence (an edit reds here
+    as well as in `test_capstone_preregistration_9075.py`), and the README DISCLOSES
+    it — naming §10.3, the machine record, the `document_sha256`/`#10463` reason it is
+    untouched, and the selector that makes the current row 5/15.
+
+    Non-vacuity: the pre-fix README carries no disclosure at all, so the README
+    assertions red.
+    """
+    doc = (PREREG.parent / "PRE-REGISTRATION.md").read_text()
+    record = json.loads(PREREG.read_text())
+    readme = README_DOC.read_text()
+
+    # (a) the frozen record is UNEDITED — asserted, so this cannot drift silently.
+    assert "and its row are unchanged" in doc, (
+        "PRE-REGISTRATION.md §10.3 no longer states the frozen sentence this bundle "
+        "discloses; re-cut the disclosure, do NOT edit the hash-pinned record")
+    e4 = next(c for c in record["criteria"] if c["id"] == "E4")
+    assert "edge_correct=2 of 15" in e4["post_registration_measurement"], e4
+
+    # (b) the bundle discloses it, in the section a reader of that E4 row lands in.
+    section = readme.split("## E4 — the committed operator receipt", 1)[1]
+    section = section.split("## E5 —", 1)[0]
+    assert "The frozen record still publishes the pre-fix figure for E4" in section, (
+        "README §E4 must disclose that the frozen record still carries 2/15")
+    assert "its row are unchanged" in section, (
+        "the disclosure must quote the sentence that went stale, so a reader who "
+        "meets it in the record knows which one this refers to")
+    assert "criteria[E4].post_registration_measurement" in section, (
+        "the disclosure must name the machine-readable copy, not only the prose")
+    assert "document_sha256" in section and "#10463" in section, (
+        "the disclosure must state WHY the record is not edited (byte-pinned; the "
+        "#10463 new-record rule), not merely that it is not")
+    assert "5/15 via `select_e4_receipt`" in section, (
+        "the disclosure must hand the reader the CURRENT row and the selector that "
+        "produced it, or it only moves the contradiction one paragraph down")
+
+
 def test_a_row_cites_the_receipt_the_selector_chose():
     """The evidence path on the ROW follows the selection, not the constant."""
     rows = measure.build_rows(
