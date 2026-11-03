@@ -15,6 +15,7 @@ import time
 
 os.environ.setdefault("TORTOISE_SECRET_PEPPER", "test-static-pepper")
 
+import httpx
 import pytest
 
 
@@ -143,6 +144,21 @@ def refusing_daemon(monkeypatch, tmp_path):
     monkeypatch.setenv("TORTOISE_DB_URI", "")
     monkeypatch.setenv("TORTOISE_DB_PATH", str(tmp_path / "daemon.db"))
     yield from _serve(_refuses_every_request)
+
+
+@pytest.fixture(autouse=True)
+def _no_ambient_store(monkeypatch, tmp_path):
+    """No test in this module may read the REAL `~/.tortoise/credentials.json`.
+
+    `resolve_connection` falls back to that store (#1708 D5), so on a box that has
+    run `tortoise init` a stored key wins over the fixture's env AND takes the
+    endpoint with it (#2369 D1.1): the suite would pass on a machine with no
+    store and quietly call a live host on one that has it. Isolating HOME makes
+    the module's result independent of who ran it.
+    """
+    home = tmp_path / "ambient-home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
 
 
 @pytest.fixture
@@ -484,6 +500,133 @@ class TestCredentialResolution:
         message = str(caught.value)
         assert caught.value.code == "MCP-CREDENTIAL-HOST-MISMATCH"
         assert "other.example" in message and "127.0.0.1:9" in message
+
+    def test_the_same_endpoint_spelled_with_a_trailing_slash_is_not_another_host(
+        self, recorded_daemon, isolated_home, monkeypatch,
+    ):
+        """Co-source equality is about the ENDPOINT, never the spelling.
+
+        `resolve_connection` builds a store endpoint as `api_url + "/mcp/"` while
+        an env URL (and the built-in default) carries `/mcp`. Raw string equality
+        therefore called ONE endpoint two hosts, withheld the credential, and
+        blamed the operator for a conflict that did not exist — silently losing
+        the very property #10605 is about.
+        """
+        import asyncio
+
+        from tortoise import mcp_client
+
+        url, seen = recorded_daemon
+        monkeypatch.setenv("TORTOISE_MCP_URL", url)  # this form carries "/mcp"
+        monkeypatch.setenv("TORTOISE_API_KEY", "tt_env")
+        client = mcp_client.get_client()  # endpoint fixed while the env key is live
+        store = isolated_home / ".tortoise" / "credentials.json"
+        store.parent.mkdir()
+
+        async def _swap_to_the_store():
+            async with client:
+                await client.list_tools()
+                monkeypatch.delenv("TORTOISE_API_KEY")
+                # Same host, base form — resolve_connection appends "/mcp/".
+                store.write_text(json.dumps(
+                    {"api_key": "tt_stored", "api_url": url[: -len("/mcp")]}))
+                await client.list_tools()
+
+        asyncio.run(_swap_to_the_store())
+
+        sent = [h for h in seen if h]
+        assert sent[0] == "Bearer tt_env", sent
+        assert sent[-1] == "Bearer tt_stored", (
+            f"the SAME endpoint's stored credential was withheld: {sent}")
+
+    def test_the_mismatch_message_names_the_value_the_store_must_record(
+        self, isolated_home, monkeypatch,
+    ):
+        """The prescribed remedy must actually work (#10727 review).
+
+        The store builds its endpoint as `api_url + "/mcp/"`, so telling the
+        operator to record the ENDPOINT produces `/mcp/mcp/` and breaks it. The
+        message has to name the BASE.
+        """
+        from tortoise import mcp_client
+
+        store = isolated_home / ".tortoise" / "credentials.json"
+        store.parent.mkdir()
+        store.write_text(json.dumps(
+            {"api_key": "tt_store", "api_url": "https://other.example"}))
+        provider = mcp_client._BearerProvider("http://127.0.0.1:9/mcp")
+        next(provider.auth_flow(httpx.Request("POST", "http://127.0.0.1:9/mcp")))
+
+        with pytest.raises(mcp_client.MCPCredentialHostMismatchError) as caught:
+            mcp_client._classify_failure(RuntimeError("401 Unauthorized"), provider)
+
+        message = str(caught.value)
+        assert "record http://127.0.0.1:9 as `api_url`" in message, message
+        assert "record http://127.0.0.1:9/mcp" not in message, message
+        assert mcp_client._store_base("https://h.example/mcp/") == "https://h.example"
+        assert mcp_client._store_base("https://h.example/") == "https://h.example"
+        assert mcp_client._store_base("https://h.example/mcp") == "https://h.example"
+
+    def test_a_transport_fault_is_not_reported_as_a_credential_mismatch(
+        self, isolated_home, monkeypatch,
+    ):
+        """A down daemon is an OUTAGE even while a credential is withheld.
+
+        Reporting a refused connection as `MCP-CREDENTIAL-HOST-MISMATCH` moved an
+        outage into the set-up-gap bucket (#3805) — the same misdirection as the
+        server's `invalid or missing Bearer token`, in the other direction.
+        """
+        from tortoise import mcp_client
+
+        store = isolated_home / ".tortoise" / "credentials.json"
+        store.parent.mkdir()
+        store.write_text(json.dumps(
+            {"api_key": "tt_store", "api_url": "https://other.example"}))
+        provider = mcp_client._BearerProvider("http://127.0.0.1:1/mcp")
+
+        async def _probe():
+            async with mcp_client._client(provider) as client:
+                await client.list_tools()
+
+        with pytest.raises(Exception) as caught:
+            mcp_client._run_guarded(_probe(), provider)
+
+        assert provider.withheld is not None, "this test needs the withheld path"
+        assert not isinstance(caught.value, mcp_client.MCPCredentialHostMismatchError), (
+            "a transport fault was reported as a credential conflict: "
+            f"{type(caught.value).__name__}: {caught.value}")
+
+    def test_a_withheld_credential_is_announced_when_the_call_succeeds(
+        self, recorded_daemon, isolated_home, monkeypatch, capsys,
+    ):
+        """Withholding must not be SILENT when the call still succeeds.
+
+        A keyless endpoint accepts the unauthenticated request, so there is no
+        failure to classify — but the operator is running on a misconfiguration
+        that will bite the moment auth is required. The warning names the sources
+        and never the credential VALUE.
+        """
+        from tortoise import mcp_client
+
+        url, seen = recorded_daemon
+        store = isolated_home / ".tortoise" / "credentials.json"
+        store.parent.mkdir()
+        store.write_text(json.dumps(
+            {"api_key": "tt_store", "api_url": "https://other.example"}))
+        mcp_client._WARNED_TOPICS.clear()
+        provider = mcp_client._BearerProvider(url)
+
+        async def _list():
+            async with mcp_client._client(provider) as client:
+                return await client.list_tools()
+
+        assert mcp_client._run_guarded(_list(), provider), "the call must succeed"
+        assert [h for h in seen if h] == [], "a withheld credential reached the server"
+
+        err = capsys.readouterr().err
+        assert "was NOT sent" in err, err
+        assert "other.example" in err and url in err, err
+        assert "tt_store" not in err, f"the credential VALUE leaked to stderr: {err}"
 
     def test_a_tool_error_mentioning_401_is_not_a_credential_refusal(self, client_env):
         """A TOOL's 401 is the tool's, not the client's — never rewritten.

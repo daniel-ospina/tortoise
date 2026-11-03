@@ -49,6 +49,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -86,6 +87,17 @@ REFUSAL_CODE = "MCP-KEY-EMPTY"
 
 #: credential stores already warned about (#5109) — one line per process.
 _WARNED_READABLE_STORES: set[str] = set()
+
+#: one-off operator warnings already emitted, keyed by topic — never repeated.
+_WARNED_TOPICS: set[str] = set()
+
+
+def _warn_once(topic: str, message: str) -> None:
+    """Write a one-off operator warning to stderr (never raises, never repeats)."""
+    if topic in _WARNED_TOPICS:
+        return
+    _WARNED_TOPICS.add(topic)
+    print(f"[tortoise-mcp] {message}", file=sys.stderr)
 
 
 class MCPCredentialHostMismatchError(RuntimeError):
@@ -297,11 +309,38 @@ class _BearerProvider(httpx.Auth):
         connection = resolve_connection()
         self.sent = connection
         self.withheld = None
-        if connection.key and connection.url != self.url:
+        if connection.key and not _same_endpoint(connection.url, self.url):
             self.withheld = connection
         elif connection.key:  # a blank resolution is absent, never `Bearer ` + nothing
             request.headers["Authorization"] = f"Bearer {connection.key}"
         yield request
+
+
+def _same_endpoint(a: str, b: str) -> bool:
+    """True when two endpoint strings name the same URL, ignoring cosmetics.
+
+    A store records a BASE (`api_url`) and `resolve_connection` appends `/mcp/`,
+    while an env URL and the built-in default carry `/mcp`. Raw string equality
+    therefore read the SAME endpoint as two different hosts whenever a store
+    credential met a client built from the env — and withheld the credential
+    with a message that blamed the wrong thing.
+    """
+    def parts(url: str) -> tuple[str, str, str]:
+        split = urlsplit(url)
+        return (split.scheme.lower(), split.netloc.lower(), split.path.rstrip("/"))
+
+    return parts(a) == parts(b)
+
+
+def _store_base(client_url: str) -> str:
+    """The `api_url` a store must record for `client_url` to resolve to it.
+
+    `resolve_connection` builds a store endpoint as `api_url + "/mcp/"`, so
+    naming the endpoint itself as the value produces `/mcp/mcp/`. The base is
+    what the message must tell the operator to record.
+    """
+    base = client_url.rstrip("/")
+    return base[: -len("/mcp")] if base.endswith("/mcp") else base
 
 
 def _mismatch(connection: Connection, client_url: str) -> MCPCredentialHostMismatchError:
@@ -310,15 +349,25 @@ def _mismatch(connection: Connection, client_url: str) -> MCPCredentialHostMisma
         f"to {connection.url}, but this client talks to {client_url} (#2369 D1.1). The "
         f"credential was NOT sent — an environment-supplied URL must never be able to "
         f"aim a stored credential at a host of its choosing. Fix the source: record "
-        f"{client_url} as `api_url` in the store, use the env key for this host, or "
-        f"build the client for {connection.url}."
+        f"{_store_base(client_url)} as `api_url` in the store, use the env key for this "
+        f"host, or build the client for {connection.url}."
     )
 
 
 def _classify_failure(exc: BaseException, provider: _BearerProvider) -> None:
-    """Raise the named refusal this failure actually is (no-op otherwise)."""
-    if provider.withheld is not None:
-        raise _mismatch(provider.withheld, provider.url) from exc
+    """Raise the named refusal this failure actually is (no-op otherwise).
+
+    A withheld credential explains an AUTH REJECTION (the request went out bare
+    because the credential belonged elsewhere). It does not explain a transport
+    fault: a daemon that is down is an outage whatever the credential situation,
+    and reporting it as a co-source conflict would move an outage into the
+    set-up-gap bucket (#3805) exactly as the server message this module removes
+    moves a set-up gap into the credential-value bucket.
+    """
+    if provider.withheld is not None and _AUTH_REJECTION_RE.search(str(exc)):
+        if not _is_tool_error(exc):
+            raise _mismatch(provider.withheld, provider.url) from exc
+        return
     _raise_if_credential_was_missing(exc, provider.sent)
 
 
@@ -353,12 +402,24 @@ def _run(coro):
 def _run_guarded(coro, provider: _BearerProvider):
     """`_run`, with a credential fault re-raised as its NAMED refusal."""
     try:
-        return _run(coro)
+        result = _run(coro)
     except (MCPKeyEmptyError, MCPCredentialHostMismatchError):
         raise
     except Exception as exc:  # noqa: BLE001, RUF100
         _classify_failure(exc, provider)
         raise
+    if provider.withheld is not None:
+        # The call SUCCEEDED with no credential attached, so nothing failed and
+        # there is no refusal to raise — but the operator is running on a
+        # misconfiguration that will bite the moment the endpoint demands auth.
+        _warn_once(
+            "withheld",
+            f"MCP credential from {provider.withheld.source} was NOT sent: it belongs "
+            f"to {provider.withheld.url}, and this client talks to {provider.url}. "
+            f"This call succeeded unauthenticated; it will fail as soon as the "
+            f"endpoint requires a key.",
+        )
+    return result
 
 
 def get_client():
