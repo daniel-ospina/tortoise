@@ -2395,6 +2395,24 @@ def retrieve_for_question(
     # 40 today too, so a comment naming it would be true only by coincidence.
     _sr_reader_window = (eff_item_cap if eff_item_cap is not None
                          else DEFAULT_CONTEXT_ITEM_CAP)
+    # …with ONE exception, and it is a narrowing, not a widening: on the
+    # POOL-ONLY isolation arm (``--rerank off --rerank-pool N``) this lane
+    # truncates the delivered pool to ``top_k`` BEFORE assembly
+    # (``pool = pool[:top_k]`` below — the OQ5 reader invariant), while the
+    # assembled item cap stays ``eff_item_cap``. A window of
+    # ``eff_item_cap`` there would census items the reader never received and
+    # over-report crowding — injected items AND displaced base items alike —
+    # on exactly the arm a pool-depth sweep reads. ``min(cap, top_k)`` is the
+    # tightest window that arm admits: nothing below the cut can reach the
+    # reader, so the count is a CEILING there, while the skip mechanism inside
+    # the prefix still over-counts it (never under-counts — the cut is below
+    # the reader's walk, not inside it). The R6 rerank arm below cannot be
+    # narrowed this way: it re-SELECTS from the whole pool instead of cutting
+    # a prefix. ``top_k`` (not ``effective_top_k``) is the value the
+    # truncation site reads, and the census excludes TR questions anyway,
+    # where the two differ.
+    if (rerank_pool is not None) and not rerank_on:
+        _sr_reader_window = min(_sr_reader_window, top_k)
     # per-outcome census (§2): the OFF arm records the same zeroed shape so
     # the arm delta stays reconstructable per question. That zeroed
     # ``sessions_before``/``sessions_after`` is a DESIGN, not a measurement —
