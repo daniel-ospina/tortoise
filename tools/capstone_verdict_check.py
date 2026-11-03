@@ -1406,14 +1406,31 @@ def main(argv: list[str] | None = None) -> int:
     # The presence test was `states_path.is_file()`, so a DIRECTORY, a FIFO or a
     # DANGLING SYMLINK at the same path made it False — the loader was never
     # called, `blocker_states` stayed None, V12 did not apply, and the gate
-    # exited 0 printing "no …blocker-states.json" over a path that EXISTS. The
-    # SAME path named via `--blocker-states` exited 2, so one unreadable record
-    # got two verdicts decided by how the path was spelled. `os.path.lexists`
-    # is the honest test for "something is at this path": a dangling symlink is
-    # still a thing someone put there, and the loader's `OSError` turns it into
-    # the exit 2 this arm's docstring promises. Only a path with NOTHING at it
-    # is the "no record on disk" arm.
-    if args.blocker_states or os.path.lexists(states_path):
+    # exited 0 printing "no …blocker-states.json" over a path that EXISTS.
+    #
+    # ⛔ AND `lexists()` IS NOT EITHER (round 4, P1). `os.path.lexists` swallows
+    # EVERY OSError from `lstat` and answers False, so one `chmod 000` on an
+    # ANCESTOR directory — or an ancestor symlink into `/proc/1/root/...`, or a
+    # symlink loop, both of which git can carry — made a record that is on disk
+    # and valid read as "no record": V12 disarmed, exit 0, and a sentence
+    # asserting the file is absent over a file that is right there. The class
+    # the round-3 fix claimed to close, one indirection lower.
+    #
+    # `lstat` is asked directly instead, because only ONE errno means "nothing
+    # is at this path": ENOENT. Anything else (EACCES, ELOOP, ENOTDIR, a FIFO
+    # that will block forever) is a record somebody put there and this tool
+    # cannot read — the loader raises and this exits 2, exactly as the arm's
+    # docstring promises. A `--blocker-states` argument is always loaded, so an
+    # explicit path never falls back either.
+    absent = False
+    if not args.blocker_states:
+        try:
+            os.lstat(states_path)
+        except FileNotFoundError:
+            absent = True
+        except OSError:
+            absent = False  # present but unreadable -> let the loader say so
+    if not absent:
         # A record that is PRESENT but unreadable is exit 2, never "no V12".
         # Downgrading a malformed record to "not applicable" would make
         # `{"blockers": []}` a way to disarm the arm the bundle depends on.
