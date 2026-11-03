@@ -10677,7 +10677,8 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
             # "failed": []}`), so this is the invariant held locally rather than
             # a behaviour change: every reachable arm-3 run already has a zero
             # denominator, which the arm's own tests assert. A contradictory
-            # input now falls to the residual arm, which claims nothing.
+            # input now falls to the residual arm, which claims only the state
+            # and the counter.
             #
             # ⛔ `unresolved` with a ZERO numerator is a THIRD fact, and it is
             # reachable on the main path: the lookup did not run AT ALL (no graph
@@ -10717,9 +10718,18 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
             # is printed as the value that was handed in and nothing more — the
             # same distinction Prometheus/Grafana draw between a measured `0` and
             # *no data* (#10633 review, P3).
+            # ⛔ The clause says "for THAT STATE WITH THESE COUNTERS", not "for
+            # that state": this arm serves TWO populations — a state nothing was
+            # written for, and a state whose own sentence exists but whose
+            # counters contradict it (`unresolved` with a zero numerator over a
+            # NON-zero denominator, which arm 3's guard refuses). Saying "no
+            # sentence for that state" is false for the second, because arm 3 IS
+            # that state's sentence and both artifacts this PR edits say so — a
+            # false claim about the code itself, in the arm written to avoid
+            # false claims (#10633 review round 9, P2).
             result.setdefault("warnings", []).append(
                 f"S3 identity {_id['state']}{_reason}: this warning describes no "
-                f"sentence for that state; the run carries "
+                f"sentence for that state with these counters; the run carries "
                 f"unresolved_total={_id['unresolved_total']} of "
                 f"{_denominator} candidate(s)")
     result["errors"] = errors

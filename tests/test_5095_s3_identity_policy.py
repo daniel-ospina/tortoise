@@ -1004,10 +1004,14 @@ class TestIdentityOnTheResult:
         messages = [w for w in out["warnings"] if "S3 identity" in w]
         assert len(messages) == 1, out["warnings"]
         # The vacancy sentence is NOT reachable here; the residual arm names the
-        # state and the counter and claims nothing else.
+        # state and the counter, and its clause is scoped to "this state WITH
+        # these counters" precisely so it stays TRUE here — `unresolved` does have
+        # a sentence (arm 3); what is missing is a sentence for `unresolved` with a
+        # non-zero denominator over a zero numerator (#10633 review round 9, P2).
         assert messages[0] == _identity_line(
             block,
-            "this warning describes no sentence for that state; the run carries "
+            "this warning describes no sentence for that state with these "
+            "counters; the run carries "
             f"unresolved_total={block['unresolved_total']} of "
             f"{_denominator(block)} candidate(s)"), messages[0]
 
@@ -1036,7 +1040,8 @@ class TestIdentityOnTheResult:
         # review, P3).
         assert messages[0] == _identity_line(
             block,
-            f"this warning describes no sentence for that state; the run carries "
+            f"this warning describes no sentence for that state with these "
+            f"counters; the run carries "
             f"unresolved_total={block['unresolved_total']} of "
             f"{_denominator(block)} candidate(s)"), messages[0]
 
