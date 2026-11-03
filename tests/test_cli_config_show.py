@@ -1324,6 +1324,41 @@ def test_endpoint_comparison_is_normalised_like_the_hook(
     assert payload["identity_relation"] == ("same" if agree else "same-key-different-host")
 
 
+@pytest.mark.parametrize("bad_url", [
+    "https://localhost:abc", "https://h:99999", "https://h:-1", "https://a:b:c",
+])
+def test_a_malformed_port_does_not_crash_the_endpoint_comparison(capsys, tmp_path, bad_url):
+    """`urlsplit` is lazy: `.port` re-parses the authority and raises ValueError
+    for a non-numeric/out-of-range port — hostile-store reachable."""
+    _write(tmp_path / ".tortoise" / "credentials.json", json.dumps({
+        "api_key": GLOBAL_KEY, "api_url": bad_url,
+    }))
+    _harness(tmp_path, json.dumps({"apiKey": GLOBAL_KEY,
+                                  "apiUrl": "https://api.premiselabs.co"}))
+    assert _run(("config", "show", "--json")) in (0, 1)
+    cap = capsys.readouterr()
+    assert "Traceback" not in cap.out + cap.err
+
+
+def test_no_cli_identity_makes_no_host_claim(capsys, tmp_path):
+    """`identity_host_agrees: false` about a comparison that never happened
+    contradicts the same report's text mode ("nothing to compare")."""
+    _harness(tmp_path)
+    assert _run(("config", "show", "--json")) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["identity_agrees"] is None
+    assert payload["identity_host_agrees"] is None
+
+
+def test_a_whitespace_only_api_url_env_is_disclosed(monkeypatch, capsys, tmp_path):
+    _global(tmp_path)
+    monkeypatch.setenv("TORTOISE_API_KEY", GLOBAL_KEY)
+    monkeypatch.setenv("TORTOISE_API_URL", "   ")
+    assert _run(("config", "show", "--json")) == 0
+    cred = json.loads(capsys.readouterr().out)["credential"]
+    assert "blank" in cred["api_url_note"]
+
+
 def test_a_keyless_harness_file_is_not_called_unusable(monkeypatch, capsys, tmp_path):
     """`resolveConfig` reads a keyless harness file happily — it supplies apiUrl
     and settings while the env supplies the key. Telling the user to delete it
@@ -1346,7 +1381,7 @@ def test_an_empty_api_url_env_is_disclosed(monkeypatch, capsys, tmp_path):
     assert _run(("config", "show", "--json")) == 0
     cred = json.loads(capsys.readouterr().out)["credential"]
     assert cred["api_url"] == ""
-    assert "EMPTY" in cred["api_url_note"]
+    assert "blank" in cred["api_url_note"]
 
 
 @pytest.mark.parametrize("uri", [

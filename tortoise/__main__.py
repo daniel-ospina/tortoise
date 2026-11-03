@@ -3082,14 +3082,18 @@ def _same_endpoint(a: object, b: object) -> bool:
     def parts(value: object) -> tuple[str, int] | None:
         if not isinstance(value, str) or not value.strip():
             return None
+        # `urlsplit` is LAZY about the authority: `.port` re-parses the netloc and
+        # raises ValueError for a non-numeric, negative or >65535 port, so the read
+        # must sit INSIDE the guard (the same hazard `_cmd_doctor` wraps, #720).
         try:
             split = urlsplit(value.strip())
+            host = split.hostname
+            if not host:
+                return None
+            default = 443 if split.scheme in ("https", "") else 80
+            return (host.lower(), split.port or default)
         except ValueError:
             return None
-        if not split.hostname:
-            return None
-        default = 443 if split.scheme in ("https", "") else 80
-        return (split.hostname.lower(), split.port or default)
 
     left, right = parts(a), parts(b)
     return left is not None and left == right
@@ -3397,9 +3401,9 @@ def _cmd_config(args) -> int:
             cred["api_url_note"] = (
                 "TORTOISE_API_URL is set but IGNORED: the key came from a file, "
                 "and one identity uses one source chain (#2369)")
-        elif raw_env_url == "":
+        elif raw_env_url is not None and not raw_env_url.strip():
             cred["api_url_note"] = (
-                "TORTOISE_API_URL is set but EMPTY — the CLI will send requests "
+                "TORTOISE_API_URL is set but blank — the CLI will send requests "
                 "to an empty base URL")
         org_id = cred.get("org_id")
         if not org_id:
@@ -3552,7 +3556,10 @@ def _cmd_config(args) -> int:
     hosts_agree = bool(api_key) and bool(harness_effective) and _same_endpoint(
         api_url, harness.get("api_url"))
     if api_key and harness_effective:
-        if _key_fingerprint(harness_effective) == _key_fingerprint(api_key):
+        # Compare the VALUES, not the published 48-bit labels: `_key_fingerprint`
+        # is a display label ("never used as an authenticator"), and deciding "the
+        # SAME key" on a truncated digest is a collision away from a false claim.
+        if harness_effective == api_key:
             same_identity = True
             relation = "same" if hosts_agree else "same-key-different-host"
         elif isinstance(api_key, str) and api_key.strip() == harness_effective:
@@ -3566,7 +3573,8 @@ def _cmd_config(args) -> int:
             same_identity, relation = False, "different"
     payload["identity_agrees"] = same_identity
     payload["identity_relation"] = relation
-    payload["identity_host_agrees"] = hosts_agree if harness_effective else None
+    payload["identity_host_agrees"] = (hosts_agree if (api_key and harness_effective)
+                                       else None)
 
     if payload.get("message"):
         # The message goes to stderr in BOTH modes. The two failure payloads
