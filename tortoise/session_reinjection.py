@@ -86,10 +86,11 @@ ONE bounded graph pass:
 
    **Turn-shape constraint.** ``pointKind``'s vocabulary is open
    (``create_point`` accepts any registered kind), so ``pointKind='event'``
-   alone does not prove a TURN: the hosted demo/dashboard seed writes
-   ``pointKind='event'`` points with NO ``is_episodic`` — their body IS
-   ``[role]``-tagged, so the ``is_episodic`` conjunct is what excludes them
-   (``hosted_api.py:~6243``) — and any SDK/API caller can mint one.
+   alone does not prove a TURN: a graph seeded before #10000 by the hosted
+   demo/dashboard seed holds ``pointKind='event'`` points with NO
+   ``is_episodic`` (``hosted_api._seed_demo_graph``; since #10000 it writes no
+   turn node at all) — their body IS ``[role]``-tagged, so the ``is_episodic``
+   conjunct is what excludes them — and any SDK/API caller can mint one.
    ``_TURN_SHAPE_FILTER`` therefore requires the shape EVERY product and
    eval turn writer emits and no non-turn ``event`` writer does:
    ``is_episodic=true`` plus a ``[...]``-prefixed body.
@@ -205,10 +206,13 @@ DEFAULT_REINJECTION_TOTAL_ITEMS = 10
 #:     `ingest.py:~207` / `ingest_v2.py:~543`) writes ``is_episodic=true``
 #:     AND a body of the deterministic form ``f"[{role}] {content}"`` — so
 #:     the body always STARTS WITH ``[``;
-#:   * the NON-turn ``pointKind='event'`` writer in the tree — the
-#:     hosted demo/dashboard seed (`hosted_api.py:~6243`) — writes no
-#:     ``is_episodic`` (its body IS ``[role]``-tagged, so the shape
-#:     predicate excludes it on the ``is_episodic`` conjunct alone);
+#:   * ⚠️ the hosted demo/dashboard seed (`hosted_api.py` `_seed_demo_graph`)
+#:     USED to be the NON-turn ``pointKind='event'`` writer here — it wrote no
+#:     ``is_episodic``, and its body was ``[role]``-tagged, so the predicate
+#:     excluded it on the ``is_episodic`` conjunct alone. Since #10000 it
+#:     writes no turn node at all (§9.1/D1), so that clause now describes no
+#:     writer in the tree; it is kept because a graph seeded BEFORE #10000
+#:     still holds those nodes and they must stay excluded;
 #:   * so this predicate excludes it and any caller-minted bare ``event``
 #:     Point, while holding for every legitimate turn.
 #:
