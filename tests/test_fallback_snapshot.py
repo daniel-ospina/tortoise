@@ -894,12 +894,17 @@ def test_degraded_read_path_goes_through_get_or_build(sdk, monkeypatch):
 def test_put_if_generation_refuses_a_write_that_landed_after_the_read():
     """A write landing between the caller's ``generation()`` and its ``put`` must win.
 
-    Review round 2: the first version compared the generation, RELEASED the lock,
-    then inserted — so a write whose ``invalidate()`` landed in that gap was
-    silently undone and the pre-write snapshot served for the whole TTL. The
-    compare and the insert now share one hold of the store lock, which is what
-    ``put_if_generation`` pins: the generation passed in is the one the BUILD
-    started under, and any invalidation after it makes the insert a no-op.
+    WHAT THIS PINS: the refused-insert contract — a snapshot whose build started
+    under generation N is not cached once a write has invalidated, and a put under
+    an unchanged generation still caches (the guard is not a veto).
+
+    WHAT THIS DOES NOT PIN (review round 3, and the reason this note exists): the
+    ATOMICITY of the compare+insert. This test is sequential, so it passes
+    identically against a two-critical-section implementation that re-opens the
+    window between the compare and the insert. That atomicity is enforced by
+    construction — ``put_if_generation`` does both inside ONE ``with self._lock``
+    hold — and is verified by READING that method, not by this test. Do not treat a
+    green run here as coverage of it.
     """
     fs._store.clear()
     key = ("atomic-graph", "atomic-ns")
