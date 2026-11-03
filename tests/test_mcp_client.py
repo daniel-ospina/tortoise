@@ -190,6 +190,10 @@ def _no_ambient_store(monkeypatch, tmp_path):
     home = tmp_path / "ambient-home"
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
+    # …and for the PROJECT-LOCAL store `tortoise init --api-key` writes
+    # (`./.tortoise`), which is a candidate too (#1708 D5).
+    (tmp_path / "cwd").mkdir()
+    monkeypatch.chdir(tmp_path / "cwd")
 
 
 @pytest.fixture
@@ -787,6 +791,52 @@ class TestCredentialResolution:
             RuntimeError("rejected credential Bearer tt_sent_key_0123456789abcdef"))
         assert "tt_sent_key_0123456789abcdef" not in text, text
         assert "<redacted>" in text, text
+
+    def test_the_project_local_store_is_read(
+        self, recorded_daemon, isolated_home, monkeypatch, tmp_path,
+    ):
+        """`tortoise init --api-key` saves `./.tortoise` — the client must read it.
+
+        The hosted onboarding writes the PROJECT-LOCAL store, and the recorded
+        chain is env → cwd/.tortoise → ~/.tortoise/credentials.json (#1708 D5).
+        Reading only the global store made the client blind to the file the user
+        was actually given: no credential, the default endpoint, and a refusal
+        naming stores they never wrote.
+        """
+        from tortoise import mcp_client
+
+        url, seen = recorded_daemon
+        work = tmp_path / "project"
+        work.mkdir()
+        monkeypatch.chdir(work)
+        (work / ".tortoise").write_text(json.dumps(
+            {"api_key": "tt_project_local", "api_url": url[: -len("/mcp")]}))
+
+        connection = mcp_client.resolve_connection()
+        assert connection.key == "tt_project_local", connection
+        assert connection.source == str(work / ".tortoise"), connection
+
+        assert mcp_client.list_tools()
+        assert set(h for h in seen if h) == {"Bearer tt_project_local"}, seen
+
+    def test_a_directory_named_tortoise_is_not_a_corrupt_store(
+        self, isolated_home, monkeypatch, tmp_path,
+    ):
+        """A repo's own `./.tortoise` STATE DIR is "no config here", not corrupt.
+
+        Several repos keep `.tortoise` as a directory of state files; reading it
+        would raise `IsADirectoryError` and be reported as an unreadable store,
+        which is the misdirection this module exists to remove.
+        """
+        from tortoise import mcp_client
+
+        work = tmp_path / "repo"
+        (work / ".tortoise").mkdir(parents=True)
+        monkeypatch.chdir(work)
+
+        connection = mcp_client.resolve_connection()
+        assert connection.key is None, connection
+        assert not any("IsADirectoryError" in s for s in connection.sources), connection.sources
 
     def test_a_tool_error_mentioning_401_is_not_a_credential_refusal(self, client_env):
         """A TOOL's 401 is the tool's, not the client's — never rewritten.

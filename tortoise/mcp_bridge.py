@@ -54,8 +54,9 @@ Named limitations (deliberate, not accidental):
   (sampling/elicitation/logging notifications) are not surfaced. Tortoise's tool
   surface is request/response, so this is a non-issue today; a server that starts
   pushing would need a second stream wired to stdout.
-* A tool result that arrives as a batch is emitted element-by-element, one line
-  each — the stdio transport is one message per line.
+* A batch reply is emitted element-by-element, one line each, whichever media
+  type carried it (a JSON body or an event-stream `data:` frame) — the stdio
+  transport is one message per line.
 
 Redirects are followed (the endpoint answers `/mcp` with `/mcp/` — #2864), and a
 request that comes back with no JSON-RPC reply is answered with a named error

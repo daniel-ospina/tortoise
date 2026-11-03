@@ -213,7 +213,9 @@ useless: it points at the credential's VALUE when the client never looked again
 1. `tortoise/mcp_client.py` resolves the Bearer value **per request** (an httpx
    `auth_flow` provider — the `token()`-callback shape the MCP SDKs converge on,
    rather than a captured string), reading `TORTOISE_API_KEY`, then the fleet
-   alias `TORTOISE_MCP_API_KEY`, then `~/.tortoise/credentials.json`. A rotation
+   alias `TORTOISE_MCP_API_KEY`, then the stored credentials in the recorded
+   #1708 D5 order: the PROJECT-LOCAL `./.tortoise` that `tortoise init --api-key`
+   writes, then `~/.tortoise/credentials.json`. A rotation
    therefore reaches the wire on the next call with no rebuild and no restart. A
    blank value is "no credential", never `Authorization: Bearer ` with nothing
    after it; if the endpoint then rejects the call, the client raises
@@ -252,7 +254,9 @@ started is not visible to it. Re-reading the environment helps a process that
 sets its own `os.environ` mid-run (a notebook, a login flow); the source that
 genuinely rotates under a long-lived session — and the one a hosted user has on
 disk, written by `tortoise init` — is the **credential file**, re-read per
-request. The env leg is precedence, not liveness.
+request. The env leg is precedence, not liveness. Both stores are read: a user
+who onboarded through the CLI has the project-local one, and a client that read
+only the global file would report "no credential" for a key sitting on disk.
 
 **CO-SOURCE (#2369 D1.1).** When the key comes from the credential file, the
 endpoint comes from that SAME file (`api_url`), never from a `TORTOISE_MCP_URL`
