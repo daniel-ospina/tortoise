@@ -1784,12 +1784,13 @@ def aged_run(rid, status="pending", jobs=0, age_s=1800.0, attempt=1,
 
 
 def test_aged_zero_job_pending_run_is_named_no_verdict_will_arrive(capsys):
-    runs = [aged_run(41480218593, jobs=0, age_s=1320.0)]
+    runs = [aged_run(41480218593, jobs=0, age_s=5700.0)]
     plan = R.classify(pr(), [], runs, ["python-ci-gate"], EMITTERS, max_attempts=3)
 
     assert [d["run"] for d in plan.no_verdict] == [41480218593]
     assert plan.no_verdict[0]["jobs"] == 0
-    assert plan.no_verdict[0]["age_seconds"] >= 900
+    assert plan.no_verdict[0]["age_seconds"] >= 5400, (
+        "the reported age is past the MEASURED max first-job wait (81.9 min)")
     # It stays PENDING as well: a reopen must remain deferred while a run sits there.
     assert "python-ci-gate" in plan.pending
     # And it is ACTED on with this module's own primitive, not waited on.
@@ -1821,20 +1822,103 @@ def test_unreadable_job_count_is_an_abstention_never_a_zero():
     assert plan.no_verdict == [] and plan.rerun == []
 
 
-def test_zero_job_run_that_spent_its_attempt_budget_escalates():
-    # The attempt's own start is stamped (a re-run that never got stamped abstains —
-    # see `test_a_queued_rerun_without_a_stamped_start_abstains`), so this is the
-    # in-class shape with its budget spent.
-    plan = R.classify(pr(), [],
-                      [aged_run(1, jobs=0, age_s=3600.0, attempt=3,
-                                started_age_s=3600.0)],
-                      ["python-ci-gate"], EMITTERS, max_attempts=3)
+def test_a_configured_budget_of_one_still_escalates_the_repair_it_forbids():
+    """`max_attempts` is honoured for the attempt this tool WOULD have repaired.
+
+    The structural bound (`ZERO_JOB_MAX_REPAIRABLE_ATTEMPT`) caps the ACT at attempt 1;
+    `max_attempts` still decides whether attempt 1 may be spent at all. A caller who
+    configures a budget of 1 gets the escalation, not a silent no-op.
+    """
+    plan = R.classify(pr(), [], [aged_run(1, jobs=0, age_s=5700.0, attempt=1)],
+                      ["python-ci-gate"], EMITTERS, max_attempts=1)
     assert plan.rerun == [], "the budget is spent — re-running again is a loop"
     assert "python-ci-gate" in plan.exhausted
 
 
+def test_the_zero_job_floor_is_past_the_measured_queue_wait():
+    """⭐ P1 (review): the floor must sit PAST the measured-normal population.
+
+    `docs/ops/ci-wall-clock.md` §1 (54 `python-ci` runs) measures the wait for a run's
+    FIRST job: p50 29.9 min, p95 77.0 min, max 81.9 min — and §6 derives the repo's
+    queue-wait budget from that max *"so it fires past the measured-normal population
+    rather than on it"*. The floor was 1200 s, i.e. it selected the MEDIAN wait, and
+    the repair for this class is cancel-then-rerun: at the median it makes the median
+    run slower and adds one more run to the queue it is starved behind.
+
+    Discriminating: at the pre-fix 1200 s this assertion is red.
+    """
+    assert R.ZERO_JOB_MIN_AGE_S >= 81.9 * 60, (
+        f"the floor is {R.ZERO_JOB_MIN_AGE_S:.0f}s, INSIDE the measured max first-job "
+        "wait (81.9 min) — a run flagged there is the measured-NORMAL pre-start state")
+
+
+def test_a_run_at_the_measured_median_queue_wait_is_not_cancelled():
+    """The population pin in the direction that matters: 29.9 min, zero jobs.
+
+    This is the measured p50 pre-start wait (the MAJORITY state at this age — 11 of 16
+    `pending` runs sat at zero jobs at 11-22 min). Waiting is the repair.
+
+    Discriminating: at the pre-fix floor this run is named, cancelled and re-run.
+    """
+    plan = R.classify(pr(), [], [aged_run(9, jobs=0, age_s=29.9 * 60)],
+                      ["python-ci-gate"], EMITTERS, max_attempts=3)
+    assert plan.no_verdict == [], "the median wait is not 'no verdict will arrive'"
+    assert plan.rerun == [], "so nothing is destroyed to 'repair' it"
+    assert "python-ci-gate" in plan.pending
+
+
+def test_a_second_attempt_zero_job_run_is_named_and_never_cancelled():
+    """⭐ P1 (review): the LOOP BOUND must be structural, not an abstention.
+
+    `attempt_age_seconds` abstaining on a null `run_started_at` was described as the
+    bound on cancel→rerun→cancel. MEASURED 2026-11-03 on this repo (run 41585740714:
+    `run_attempt` 2, created 05:45:16Z, `run_started_at` 05:54:22Z, still `queued`),
+    queued re-run attempts DO carry a stamped start, so they are ageable and the loop
+    is reachable: attempt 2 (queued, zero jobs) → cancelled → attempt 3 → EXHAUSTED,
+    i.e. exit 1 "a human is needed" for a run that was only waiting for a slot.
+
+    A queued zero-job run at a LATER attempt IS the fresh attempt the repair produced,
+    so it is NAMED and left to the queue — never cancelled, never escalated.
+
+    Discriminating: pre-fix `plan.rerun == [run 2]` and, at `max_attempts=2`, the
+    context is in `exhausted`.
+    """
+    from datetime import UTC, datetime
+    run_ = aged_run(41480218593, jobs=0, age_s=6000.0, attempt=2)
+    run_.started_at = datetime.fromtimestamp(
+        R.time.time() - 5700.0, UTC).strftime("%Y-%m-%dT%H:%M:%SZ")  # a LATER attempt
+    plan = R.classify(pr(), [], [run_], ["python-ci-gate"], EMITTERS, max_attempts=2)
+    assert [d["run"] for d in plan.no_verdict] == [41480218593], "it is still NAMED"
+    assert plan.rerun == [], (
+        "cancelling the attempt the previous window created is the loop, not a repair")
+    assert plan.exhausted == [], (
+        "a queue wait is not 'a repair this credential cannot perform' — the governor "
+        "owns it and #9115 says nothing per-PR may act")
+
+
+def test_a_backlogged_queue_names_the_zero_job_run_but_never_repairs_it():
+    """⭐ P1 (review): the #9115 guard could not fire in the state the report cites.
+
+    `starves_pr` is False for `PR-BACKLOGGED` BY DESIGN — it asserts an ABSENCE ("no
+    PR-event run is executing"), which a queue that IS executing falsifies — so guarding
+    the destructive act on `starves_pr` alone let a cancel through under
+    `CI: OK(queued=60, pr_running=2, pr_queued=56)`, the very state this tool's own
+    body names. The REPAIR question is congestion, which is the wider `delays_pr`,
+    threaded as `queue_congested`.
+    """
+    runs = [aged_run(11, jobs=0, age_s=5700.0, path="ci.yml", name="CI")]
+    plan = R.classify(pr(), [], runs, ["docs"], EMITTERS, max_attempts=3,
+                      queue_starved=False, queue_congested=True)
+    assert [d["run"] for d in plan.no_verdict] == [11], "it is still NAMED"
+    assert plan.rerun == [], "a congested queue is repaired by NOTHING"
+    assert plan.exhausted == []
+    assert plan.starved == [], (
+        "and it is NOT called starved — PR CI is executing, so naming it that would "
+        "be a false statement in the instrument that exists to refuse them")
+
+
 def test_the_same_run_shared_by_two_contexts_is_named_once():
-    runs = [aged_run(7, path="ci.yml", name="CI", jobs=0, age_s=1800.0)]
+    runs = [aged_run(7, path="ci.yml", name="CI", jobs=0, age_s=5700.0)]
     plan = R.classify(pr(), [], runs, ["docs", "test-isolation"], EMITTERS, max_attempts=3)
     assert len(plan.no_verdict) == 1 and [r.id for r in plan.rerun] == [7]
 
@@ -2055,7 +2139,7 @@ def test_a_starved_zero_job_run_is_named_but_never_rerun():
     "re-run them": that adds load to the flood they are starving behind, and it burns
     the attempt budget the post-flood repair needs (leaving the context EXHAUSTED).
     """
-    runs = [aged_run(10, jobs=0, age_s=3600.0, path="ci.yml", name="CI")]
+    runs = [aged_run(10, jobs=0, age_s=5700.0, path="ci.yml", name="CI")]
     plan = R.classify(pr(), [], runs, ["docs"], EMITTERS, max_attempts=3,
                       queue_starved=True)
     assert [d["run"] for d in plan.no_verdict] == [10], "it is still NAMED"
@@ -2126,16 +2210,23 @@ def test_a_fresh_rerun_attempt_is_not_aged_by_the_runs_creation():
 
 
 def test_a_rerun_attempt_past_its_OWN_floor_is_still_named():
-    """The other direction: attempt 2 that really is old is still named."""
+    """The other direction: an attempt 2 that really is old is still NAMED.
+
+    Its age is the ATTEMPT's (a stamped `run_started_at` later than `created_at`),
+    never the run's creation. It is named so the no-verdict state is not silent — and
+    NOT repaired: a queued zero-job re-run IS the fresh attempt the previous window
+    created, so cancelling it is the loop (`ZERO_JOB_MAX_REPAIRABLE_ATTEMPT`).
+    """
     from datetime import UTC, datetime
-    run_ = aged_run(41480218593, jobs=0, age_s=60.0, attempt=2)
+    run_ = aged_run(41480218593, jobs=0, age_s=6000.0, attempt=2)
     run_.started_at = datetime.fromtimestamp(
-        R.time.time() - 1800.0, UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+        R.time.time() - 5700.0, UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
     plan = R.classify(pr(), [], [run_], ["python-ci-gate"], EMITTERS, max_attempts=3)
     assert [d["run"] for d in plan.no_verdict] == [41480218593]
-    assert plan.no_verdict[0]["age_seconds"] >= 1200, (
+    assert plan.no_verdict[0]["age_seconds"] >= 5400, (
         "the reported age must be the ATTEMPT's, not the run's creation")
-    assert [r.id for r in plan.rerun] == [41480218593]
+    assert plan.rerun == [], (
+        "the repair is attempt-1 only: this IS the attempt it produced")
 
 
 def test_a_queued_rerun_without_a_stamped_start_abstains():
@@ -2255,18 +2346,98 @@ def test_a_refused_cancel_does_not_spend_the_rerun(monkeypatch):
     verbs: list[str] = []
     monkeypatch.setattr(R, "_run", _verbs(verbs, cancel_rc=1))
     assert R._rerun("o/r", run(1, "ci.yml", "pending"), 1,
-                    expected_head="a" * 40) == "failed"
+                    expected_head="a" * 40) == "deferred"
     assert verbs == ["cancel"], "no rerun may be issued after a refused cancel"
 
 
+def test_a_PERMISSION_denied_cancel_is_TERMINAL_and_never_a_deferral(monkeypatch):
+    """⭐ P1 #10763: a 403 is the ONE cancel refusal no next window can repair.
+
+    `_cancel` mapped every non-`not_queued` POST failure to 'refused', `_rerun`
+    mapped 'refused' to 'deferred', `report` excludes 'deferred' from the escalation
+    predicate — so a token without `actions:write` made the tool exit 0 with the
+    required check still absent, indefinitely, and nothing ever escalated. That is a
+    no-op gate: an empty repair that is indistinguishable from a performed one.
+
+    Discriminating: pre-fix this returns 'deferred' (measured before the fix).
+    """
+    monkeypatch.setattr(R, "gh_json", _api())
+    monkeypatch.setattr(R, "_sleep",
+                        lambda s: pytest.fail("a refused cancel has no settle loop"))
+    verbs: list[str] = []
+    monkeypatch.setattr(R, "_run", _verbs(
+        verbs, cancel_rc=1,
+        cancel_stderr="gh: Resource not accessible by integration (HTTP 403)"))
+    assert R._rerun("o/r", run(1, "ci.yml", "pending"), 1,
+                    expected_head="a" * 40) == "denied", (
+        "a permission refusal is terminal — deferring it promises a window that can "
+        "never succeed, and the caller then reports the window as discharged")
+    assert verbs == ["cancel"], "a denied cancel must not be followed by a rerun"
+
+
+def test_a_rate_limited_403_cancel_is_STILL_a_deferral(monkeypatch):
+    """The trap in the other direction: the secondary rate limiter ALSO answers 403.
+
+    `_RATE_LIMIT_RE` exists because that wording must not be read as a token problem.
+    The mirror is just as load-bearing here: escalating a rate-limited 403 every
+    window would spam a human for a condition that clears itself, which is the
+    over-reporting `deferred` was introduced to stop.
+
+    ⭐ P2 (review): the stub must match BOTH regexes — `_CANCEL_DENIED_RE` *and*
+    `_RATE_LIMIT_RE` — or the `and not _RATE_LIMIT_RE.search(detail)` guard is never
+    the deciding operand: `…secondary rate limit (HTTP 403)` matches the rate-limit
+    pattern ONLY, so deleting the guard left this test green. The input below is the
+    real overlapping shape, and with it the guard is load-bearing (verified: drop the
+    guard and this test fails).
+    """
+    monkeypatch.setattr(R, "gh_json", _api())
+    monkeypatch.setattr(R, "_sleep",
+                        lambda s: pytest.fail("a refused cancel has no settle loop"))
+    verbs: list[str] = []
+    monkeypatch.setattr(R, "_run", _verbs(
+        verbs, cancel_rc=1,
+        cancel_stderr="gh: Forbidden (HTTP 403): You have exceeded a secondary "
+                      "rate limit — please wait before retrying"))
+    detail = "gh: Forbidden (HTTP 403): You have exceeded a secondary rate limit"
+    assert R._CANCEL_DENIED_RE.search(detail), "the stub must look like a denial …"
+    assert R._RATE_LIMIT_RE.search(detail), "… AND like a rate limit, or the guard is inert"
+    assert R._rerun("o/r", run(1, "ci.yml", "pending"), 1,
+                    expected_head="a" * 40) == "deferred", (
+        "a rate-limited 403 clears itself; it is a deferral, not a credential defect")
+    assert verbs == ["cancel"]
+
+
+def test_a_denied_cancel_ESCALATES_and_is_named_in_the_record(monkeypatch):
+    """⭐ P1 #10763, the half that actually fails open: the exit code.
+
+    `deferred` is exempted by the escalation predicate in `report`, so the state must
+    NOT carry that exemption. 'denied' carries its own `credential_denied` flag
+    instead — nameable in `--json`, and not exempt — so the pass exits 1 and
+    `ci-check-repair-local.sh` takes over.
+    """
+    monkeypatch.setattr(R, "_rerun", lambda *a, **k: "denied")
+    plan = _plan(absent=["docs"], rerun=[run(42, "ci.yml", "completed", "failure")])
+    code, recs = R.report([plan], apply=True, trigger_ok=True, repo="o/r", cooldown_min=60)
+    row = recs[0]["rerun"][0]
+    assert code == 1, "a permission refusal must escalate, not report a discharged window"
+    assert row["ok"] is False
+    assert row.get("credential_denied") is True, "the cause must be named in the record"
+    assert "deferred" not in row, "'denied' must never be filed as a skip"
+
+
 def test_a_cancel_that_never_settles_is_not_followed_by_a_rerun(monkeypatch):
-    """The settle wait is bounded, and an unsettled run is a failure, not a guess."""
+    """The settle wait is bounded, and an unsettled run is SKIPPED, not guessed.
+
+    ⭐ P2 (review): 'unsettled' used to fall through to 'failed', which `report`
+    escalates to exit 1 — "a PR needs a repair this credential cannot perform". An
+    observation that never landed is a deferral to the next window.
+    """
     monkeypatch.setattr(R, "_sleep", lambda s: None)
     verbs: list[str] = []
     monkeypatch.setattr(R, "_run", _verbs(verbs))
     monkeypatch.setattr(R, "gh_json", _api(settle="in_progress"))
     assert R._rerun("o/r", run(1, "ci.yml", "pending"), 1,
-                    expected_head="a" * 40) == "failed"
+                    expected_head="a" * 40) == "deferred"
     assert verbs == ["cancel"], "an unsettled run must not be re-run blindly"
 
 
@@ -2320,7 +2491,7 @@ def test_an_unreadable_pre_act_read_refuses_the_cancel(monkeypatch):
     monkeypatch.setattr(R, "gh_json", raise_it)
     monkeypatch.setattr(R, "_run", _verbs(verbs))
     assert R._rerun("o/r", run(1, "ci.yml", "pending"), 1,
-                    expected_head="a" * 40) == "failed"
+                    expected_head="a" * 40) == "deferred"
     assert verbs == [], "an unreadable safety surface must not authorise a cancel"
 
 
@@ -2460,6 +2631,42 @@ def test_a_409_cancel_is_named_in_the_record(monkeypatch):
     assert code == 0
 
 
+def test_a_cancel_skipped_for_want_of_budget_defers_the_rerun(monkeypatch):
+    """⭐ P2 (review): the half the suite never covered — `_cancel` → `_rerun`.
+
+    `_cancel`'s own contract calls 'no_budget' a SKIP (*"Skip; the next window has a
+    fresh budget"*), but `_rerun` folded it — with 'unsettled', 'refused' and
+    'unreadable' — into 'failed'. With the shipped budgets a pass whose settles run to
+    their bound exhausts the cancel budget on its SECOND run, so every later run was
+    reported as needing a human.
+    """
+    monkeypatch.setattr(R, "_sleep", lambda s: pytest.fail("must not sleep"))
+    verbs: list[str] = []
+    monkeypatch.setattr(R, "_run", _verbs(verbs))
+    monkeypatch.setattr(R, "gh_json", _api())
+    monkeypatch.setattr(R, "_CANCEL_SETTLE_SPENT_S", R.CANCEL_SETTLE_PASS_BUDGET_S)
+    assert R._rerun("o/r", run(1, "ci.yml", "pending"), 1,
+                    expected_head="a" * 40) == "deferred"
+    assert verbs == [], "nothing may be cancelled with no budget to re-establish a verdict"
+
+
+def test_a_deferred_repair_is_recorded_as_a_skip_and_does_not_escalate(monkeypatch):
+    """... and the report half: a deferral must not become exit 1.
+
+    Exit 1's documented meaning is *"some PR needs a repair this credential cannot
+    perform … or a repair has spent its attempt budget and must be escalated to a
+    human"*. 'Nothing was done this window' is neither, and it is reachable in the
+    shipped configuration.
+    """
+    monkeypatch.setattr(R, "_rerun", lambda *a, **k: "deferred")
+    plan = _plan(absent=["python-ci-gate"],
+                 rerun=[run(41523739094, "python-ci.yml", "pending")])
+    code, recs = R.report([plan], apply=True, trigger_ok=True, repo="o/r", cooldown_min=60)
+    entry = recs[0]["rerun"][0]
+    assert entry["ok"] is False and entry["deferred"] is True
+    assert code == 0, "a skip must stay a skip: nothing was done, so nothing escalated"
+
+
 # ── 16. the two per-pass resets and the `no_verdict` record key are load-bearing ──
 #
 # MUTATION-MEASURED: deleting `_READ_CACHE.clear()`, deleting `_JOB_READ_FAILURES = 0`,
@@ -2492,7 +2699,7 @@ def test_the_json_record_carries_no_verdict_for_machine_readers(monkeypatch, cap
     monkeypatch.setattr(R, "open_prs", lambda repo, include_drafts: [pr(1)])
     monkeypatch.setattr(R, "check_runs_at", lambda repo, head: [])
     monkeypatch.setattr(R, "runs_at_head",
-                        lambda repo, head: [aged_run(41480218593, jobs=0, age_s=1800.0)])
+                        lambda repo, head: [aged_run(41480218593, jobs=0, age_s=5700.0)])
     rec = tmp_path / "required-contexts.json"
     rec.write_text(json.dumps({
         "required_contexts": ["python-ci-gate"],

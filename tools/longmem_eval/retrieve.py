@@ -2312,8 +2312,11 @@ def retrieve_for_question(
         loop_latency_ms = (time.monotonic() - _t_loop) * 1000.0
     coverage_loop_stats = {
         "on": coverage_loop_on,
-        # #2513: the arm THIS composition spent, not the arm the run declared
-        # — the two are the same only because both come from ``_guard_arm``.
+        # #2513: the arm the RUN resolved (one value, shared by both
+        # compositions through ``_guard_arm``), recorded beside this
+        # composition's ``on`` — this composition SPENDS it only when ``on``
+        # is true; the value is stamped either way so a receipt reader never
+        # has to guess which arm produced the pool.
         "floor_term": floor_term_on,
         "guard_per_session_cap": _guard_arm["per_session_cap"],
         "loop_iterations": loop_iterations,
@@ -2615,7 +2618,9 @@ def retrieve_for_question(
         sr_latency_ms = (time.monotonic() - _t_sr) * 1000.0
     session_reinjection_stats = {
         "on": reinjection_on,
-        # #2513: the arm THIS composition spent (see coverage_loop_stats).
+        # #2513: the arm the RUN resolved — the same value as
+        # ``coverage_loop_stats``, spent here only when ``on`` is true (see
+        # the note there).
         "floor_term": floor_term_on,
         "guard_per_session_cap": _guard_arm["per_session_cap"],
         "seed_window": _sr_seed_window,

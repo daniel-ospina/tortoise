@@ -60,7 +60,9 @@ what survives both the SIGKILL to the lane's group and the lane process exiting.
 `tests/test_rail_detach.py` proves the difference by re-running the SAME launch
 with detachment off and killing the launcher's group.
 
-Stdlib only (this runs on the plain `python3` of a cell).
+Stdlib only, and Python >= 3.12 (the repo contract — the module-level
+`from datetime import UTC` is 3.11+, so the #5128 guard below refuses an older
+interpreter by NAME instead of dying on that import).
 """
 from __future__ import annotations
 

@@ -2860,12 +2860,14 @@ def _mask_secret_tail(value: str) -> str:
 #: with the resolver is worse than no reporter: `empty-key` FALLS THROUGH to the
 #: next candidate, while `invalid-key`/`corrupt` make the resolver raise
 #: `_ConfigError` and refuse every command. `unreadable` is deliberately split
-#: from that pair: a mode-000 store escapes the resolver as an `OSError` from its
-#: `is_file()` PROBE (that probe sits outside the resolver's own try, so it never
-#: becomes `_ConfigError`) — which is why `_cmd_config` handles
-#: `(OSError, RuntimeError)` and attributes the offender from `exc.filename`. A
-#: BROKEN SYMLINK merely makes the resolver SKIP the candidate, so it never
-#: licenses naming the row as the refuser.
+#: from that pair, and it is reached TWO ways: a store behind an inaccessible
+#: (e.g. mode-000) PARENT DIRECTORY fails `Path.is_file()`, which sits outside the
+#: resolver's own `try`, so it escapes as a bare `OSError` — which is why
+#: `_cmd_config` handles `(OSError, RuntimeError)` and attributes the offender from
+#: `exc.filename`; a mode-000 FILE passes `is_file()` and fails `read_text()`
+#: INSIDE the try, arriving as `_ConfigError`. Both render `unreadable`. A BROKEN
+#: SYMLINK merely makes the resolver SKIP the candidate, so it never licenses
+#: naming the row as the refuser.
 #:
 #: The Pi harness store is described by the same helper but resolved by
 #: `pi-hooks/tortoise-capture.ts::resolveConfig`, which treats a non-string
@@ -2898,12 +2900,11 @@ def _describe_store(path: Path, key_field: str = "api_key") -> tuple[str, dict |
     import json as _json
 
     # `Path.is_dir()`/`is_file()` re-raise a non-ENOENT OSError — EACCES on a
-    # mode-000 store or an inaccessible parent directory (a self-referential
-    # `ELOOP` is swallowed by pathlib and lands in the `is_file()` branch
-    # below). This verb's whole purpose is to survive the state that made
-    # someone run it, so the boundary is wrapped: #3963 recorded the same
-    # lesson twice in this file (`_cmd_session_drain_best_effort`,
-    # `_cmd_store_sync`).
+    # PARENT DIRECTORY, or an inaccessible path in general (a self-referential
+    # `ELOOP` is swallowed by pathlib and lands in the `is_file()` branch below).
+    # This verb's whole purpose is to survive the state that made someone run it,
+    # so the boundary is wrapped: #3963 recorded the same lesson twice in this file
+    # (`_cmd_session_drain_best_effort`, `_cmd_store_sync`).
     try:
         if path.is_dir():
             # The resolver SKIPS a directory at a candidate path (D5). Saying
@@ -3203,6 +3204,7 @@ def _cmd_config(args) -> int:
     off a configuration no command can use.
     """
     import os as _os
+    import shlex as _shlex
     import sys as _sys
 
     from tortoise.config import is_db_uri
@@ -3498,7 +3500,12 @@ def _cmd_config(args) -> int:
         db_source = "FALKORDB_* trio"
     elif (_os.environ.get("TORTOISE_DB_PATH") or "").strip():
         db_source = "TORTOISE_DB_PATH"
-    elif (raw_uri or "").strip():
+    elif raw_uri:
+        # `resolve_db_path`'s branch 3 tests TRUTHINESS (`if uri and not
+        # is_db_uri(uri)`), so a whitespace-only value takes that rung and is then
+        # REFUSED as a relative path — it does not reach the default. Reporting
+        # `default` beside `status: configured but unusable` made one payload say
+        # both "nothing is configured" and "the configured store is unusable".
         db_source = "TORTOISE_DB_URI (file path)"
     else:
         db_source = "default"
@@ -3548,15 +3555,18 @@ def _cmd_config(args) -> int:
 
     org_id = cred.get("org_id")
     if isinstance(org_id, str) and org_id:
+        # BOTH lines are SHELL-QUOTED, and for the same reason: `<cwd>/.tortoise` is
+        # attacker-controllable by this file's own threat model, and both are
+        # presented as things to paste into a `record-*` command (`--cache-graph`
+        # takes no derived default, so this line is the ONLY place its name is
+        # printed — and `record-restore` against a wrong cache graph wipes a graph
+        # nobody reads). Quoting `--org` and not the cache-graph token left the
+        # worse hole open: pasting `--cache-graph org_$(…)` executes it. The raw
+        # value is still shown on the `org_id` line, which is not shell-shaped.
+        q_org = _shlex.quote(str(org_id))
         graph_store["cache_graph_convention"] = (
-            f"org_{org_id} (org SDK) or org_{org_id}_<graph_id> (registry/ACL)"
+            f"org_{q_org} (org SDK) or org_{q_org}_<graph_id> (registry/ACL)"
         )
-        # SHELL-QUOTED: `<cwd>/.tortoise` is attacker-controllable by this file's
-        # own threat model, this line is presented as the arguments to paste into
-        # the `record-*` verbs, and `quickstart-cloud.md` now tells users to run
-        # this verb first — an unquoted `$(…)` in org_id would RUN. The value is
-        # still shown real on the `org_id` line, which is not shell-shaped.
-        import shlex as _shlex
         graph_store["record_scope"] = (
             f"--org {_shlex.quote(str(org_id))} --graph <graph_id>")
     payload["graph_store"] = graph_store
@@ -3637,7 +3647,9 @@ def _cmd_config(args) -> int:
             # `identity_agrees` answers "is this one credential?" — yes — and
             # `identity_relation` carries the caveat. Reporting `false` here made
             # the payload's two fields disagree about the same question.
-            same_identity, relation = True, "same-modulo-whitespace"
+            same_identity = True
+            relation = ("same-modulo-whitespace" if hosts_agree
+                        else "same-modulo-whitespace-different-host")
         else:
             same_identity, relation = False, "different"
     payload["identity_agrees"] = same_identity
@@ -3675,8 +3687,29 @@ def _cmd_config(args) -> int:
     if blocked_path:
         print(f"\n⛔ the resolver REFUSED {_printable(cred['blocked_by'])} "
               f"({_printable(cred['blocked_reason'])}).")
-        print("   Every hosted command will fail until that store is fixed or removed.")
-        print("   Fix: repair or delete it, or set TORTOISE_API_KEY to override.")
+        blocked_states = {r["state"] for r in ladder if r["blocks"]}
+        if _STORE_UNREADABLE in blocked_states:
+            # NEVER offer deletion as an equal-looking option here: the file is
+            # intact, and this store may hold the `signup_token` — a full credential
+            # in its own right, and the only way back into the org (`tortoise
+            # recover`). The right fix is a permission change.
+            # This is a line the user is told to PASTE, and the path is
+            # store-derived (a directory name can legally contain `;`/spaces/`|`),
+            # so it is shell-quoted like the other two paste lines in this report.
+            print("   The file is there but unreadable — fix its permissions "
+                  f"(`chmod 600 {_shlex.quote(str(cred['blocked_by']))}`).")
+            print("   ⛔ Do NOT delete it: this store may hold the signup_token that "
+                  "`tortoise recover` needs.")
+        else:
+            print("   The commands that resolve through this store (`team info`, "
+                  "`team keys …`, `init`) will fail until it is fixed.")
+            print("   Repair it; if you delete it, SAVE any `signup_token` from it "
+                  "first — `tortoise recover` needs it.")
+        print("   Or set TORTOISE_API_KEY to override for one shell.")
+        if blocked_path and cwd_cfg is not None and _same_path(
+                Path(blocked_path), cwd_cfg):
+            print("   The transmitting verbs (`session capture/drain/import`) are "
+                  "unaffected: they skip this candidate.")
     if cwd is None:
         print("\n· the current directory could not be resolved — the `./.tortoise` "
               "candidate was not evaluated. Re-run from a directory that exists.")
@@ -3790,7 +3823,8 @@ def _cmd_config(args) -> int:
             print("  → the CLI has no identity — nothing to compare")
         elif harness_state in (_STORE_ABSENT, _STORE_EMPTY) or not harness_effective:
             print("  → the harness has no identity — it will run unauthenticated")
-    elif relation == "same-modulo-whitespace":
+    elif relation in ("same-modulo-whitespace",
+                      "same-modulo-whitespace-different-host"):
         harness_ok = ("the harness's copy works"
                       if not harness.get("api_key_unsendable")
                       else "the harness's copy cannot be sent either")
@@ -3798,6 +3832,9 @@ def _cmd_config(args) -> int:
               " CLI's copy is sent verbatim (surrounding whitespace is normally"
               " stripped in transit, so it usually still works; CR/LF would make"
               f" it unsendable), {harness_ok}")
+        if relation == "same-modulo-whitespace-different-host":
+            print("     …but a DIFFERENT endpoint — a refusal on one says nothing"
+                  " about the other")
     elif relation == "same-key-different-host":
         print("  → the SAME key as the CLI but a DIFFERENT endpoint — a refusal on"
               " one says nothing about the other")

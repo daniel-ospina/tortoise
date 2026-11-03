@@ -907,6 +907,7 @@ def test_a_whitespace_only_db_uri_is_unset_everywhere_not_half_set(
     assert _run(("config", "show", "--json")) == 0
     store = json.loads(capsys.readouterr().out)["graph_store"]
     assert store["status"] == "configured but unusable"
+    assert store["source"] == "TORTOISE_DB_URI (file path)"   # SET, and refused
     assert "target" not in store
     assert "target_kind" not in store
     assert _run() == 0
@@ -987,6 +988,7 @@ def test_a_hostile_org_id_cannot_forge_a_cache_graph_line(capsys, tmp_path):
     assert _run() == 0
     out = capsys.readouterr().out
     assert not any(ln.strip().startswith("PWNED") for ln in out.splitlines())
+    assert "org_'00e8e3\n" in out or "org_'00e8e3" in out     # quoted, not bare
 
 
 def test_a_control_character_in_a_path_cannot_forge_a_ladder_rung(
@@ -1407,6 +1409,98 @@ def test_a_whitespace_only_api_url_env_is_disclosed(monkeypatch, capsys, tmp_pat
     assert "blank" in cred["api_url_note"]
 
 
+def test_a_shell_metacharacter_is_quoted_in_the_CACHE_GRAPH_line_too(
+        capsys, tmp_path):
+    """`--cache-graph` takes no derived default, so this line is the only place the
+    name is printed — and it is pasted. Quoting `--org` and not this token left the
+    worse hole open."""
+    _write(tmp_path / ".tortoise" / "credentials.json", json.dumps({
+        "api_key": GLOBAL_KEY, "api_url": "https://api.premiselabs.co",
+        "org_id": "$(touch${IFS}/tmp/PWNED_BY_CONFIG_SHOW)",
+    }))
+    assert _run(("config", "show", "--json")) == 0
+    convention = json.loads(capsys.readouterr().out)["graph_store"][
+        "cache_graph_convention"]
+    import shlex
+    # the first shell token must be the LITERAL name, quotes stripped
+    token = shlex.split(convention.split(" (org SDK)")[0])[0]
+    assert token == "org_$(touch${IFS}/tmp/PWNED_BY_CONFIG_SHOW)"
+
+
+def test_the_chmod_remedy_is_quoted(capsys, tmp_path):
+    """It is a line the user is told to PASTE, and the path is store-derived — a
+    directory name can legally contain `;`."""
+    evil_dir = tmp_path / "x; touch MARKER"
+    evil_dir.mkdir()
+    target = evil_dir / ".tortoise"        # the resolver's CWD candidate IS this file
+    target.write_text(GLOBAL)
+    # mode-000 FILE: `is_file()` passes and `read_text()` fails inside the
+    # resolver's try, so it arrives as `_ConfigError` (deterministic on every
+    # platform — a mode-000 PARENT is swallowed by pathlib's `is_file()` in 3.12)
+    target.chmod(0o000)
+    try:
+        import os
+        os.chdir(evil_dir)
+        assert _run() == 1
+        out = capsys.readouterr().out
+        line = next(ln for ln in out.splitlines() if "chmod 600" in ln)
+        inside = line.split("chmod 600 ", 1)[1].rstrip("`).")
+        import shlex
+        assert shlex.split(inside) == [str(target)]
+    finally:
+        target.chmod(0o600)
+        del target
+
+
+def test_the_whitespace_relation_carries_the_endpoint_verdict(
+        monkeypatch, capsys, tmp_path):
+    """The `same-modulo-whitespace` branch used to drop the different-endpoint
+    clause its sibling carries."""
+    _global(tmp_path)                                    # api_url https://api.premiselabs.co
+    monkeypatch.setenv("TORTOISE_API_KEY", GLOBAL_KEY + " ")
+    monkeypatch.setenv("TORTOISE_API_URL", "")
+    assert _run(("config", "show", "--json")) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["identity_host_agrees"] is False
+    assert payload["identity_relation"].endswith("different-host")
+    assert _run() == 0
+    out = capsys.readouterr().out
+    assert "DIFFERENT endpoint" in out
+
+
+def test_an_unreadable_store_is_not_offered_for_deletion(capsys, tmp_path):
+    """The file is INTACT and may hold the signup_token — a full credential and the
+    only way back into the org. "repair or delete it" made deletion the
+    actionable-sounding option."""
+    d = tmp_path / ".tortoise"
+    d.mkdir()
+    (d / "credentials.json").write_text(GLOBAL)
+    d.chmod(0o000)
+    try:
+        assert _run() == 1
+        out = capsys.readouterr().out
+        assert "Do NOT delete it" in out
+        assert "chmod 600" in out
+        assert "repair or delete it" not in out
+    finally:
+        d.chmod(0o700)
+
+
+def test_the_refusal_does_not_claim_every_hosted_command_fails(
+        monkeypatch, capsys, tmp_path):
+    """With a corrupt `./.tortoise` and a healthy global store the transmitting
+    verbs still work — and the row note right above says so."""
+    _global(tmp_path)                                  # HOME/tmp_path: the global store
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    monkeypatch.chdir(repo)
+    (repo / ".tortoise").write_text("{not json")
+    assert _run() == 1
+    out = capsys.readouterr().out
+    assert "Every hosted command will fail" not in out
+    assert "transmitting verbs" in out
+
+
 def test_a_shell_metacharacter_in_org_id_is_quoted_in_the_record_scope(
         monkeypatch, capsys, tmp_path):
     """`./.tortoise` is attacker-controllable, the line is presented as the
@@ -1701,14 +1795,25 @@ def test_a_deeply_nested_store_is_corrupt_not_a_recursion_crash(capsys, tmp_path
     assert [r["state"] for r in payload["credential"]["ladder"] if r["blocks"]] == ["corrupt"]
 
 
-def test_a_scheme_less_user_password_dsn_is_not_printed(monkeypatch, capsys, tmp_path):
-    """The #2987 shape: a copy-paste that dropped the `@host` tail."""
+def test_a_scheme_less_user_password_dsn_is_not_printed(
+        monkeypatch, capsys, tmp_path):
+    """The #2987 shape: a copy-paste that dropped the `@host` tail.
+
+    The URI value IS the input under test, so `monkeypatch.setenv` is the right
+    form: pytest auto-undoes it at teardown. The raw `os.environ[...] = ...` +
+    `finally: del os.environ[...]` this replaced is the shape the second guard in
+    `tests/test_uri_env_mutations_declared.py` reds (the #2062
+    pop-without-restore class): a `del` is a DELETE, not a restore, so the site
+    itself never puts an ambient value back.
+
+    ⚠️ Not a measured lane flip HERE, and do not cite it as one: this module's
+    autouse `_isolated` fixture removes `TORTOISE_DB_URI` with
+    `monkeypatch.delenv` before every test — recording the ambient value — so
+    its teardown restores the URI whatever this test does. The red was the
+    mutation SHAPE (an unrestored raw write), not a leak that reached a later
+    test; the `monkeypatch` form is what makes the site self-describing.
+    """
     _global(tmp_path)
-    # `monkeypatch`, not a raw os.environ set/`del`: the raw form restores the
-    # variable to ABSENT, which is not where it started when the caller runs this
-    # on a URI-carrying lane — `tests/test_uri_env_mutations_declared.py`'s #2084
-    # restoration guard reds on that class (it is the #2062 pop-without-restore
-    # shape one `del` over), and the fixture-param monkeypatch auto-restores.
     monkeypatch.setenv("TORTOISE_DB_URI", "dockeruser:S3cretPw")
     assert _run(("config", "show", "--json")) == 0
     cap = capsys.readouterr()

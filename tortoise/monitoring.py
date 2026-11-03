@@ -722,6 +722,31 @@ RECORD_WRITE_FAILURE_COUNT = Counter(
     "Armed record writes that did not happen (#9188)",
     ["reason"],
 )
+
+#: How long a recorded refusal counts as "happening NOW" (#10185, direction 1).
+#:
+#: The counter above is CUMULATIVE since process start and is never reset — that
+#: is deliberate (a total that resets cannot be alerted on), but it means the
+#: counter can never answer "is the record refusing writes at this moment?".
+#: #10185 measured the two ways a cumulative answer is wrong: one transient
+#: refusal during a failover pins a deployment `degraded` for the life of the
+#: process (an operator who learns the flag is always red ignores the next real
+#: one), and a restart silently clears it while the rows are still missing. The
+#: issue's own constraint is verbatim: *"Do not simply fold
+#: any(record_write_failures) ⇒ ok = False"*.
+#:
+#: So the refusal state is TIME-BOUNDED and the counters stay untouched: a stamp
+#: beside the counter, read as a verdict only inside this window. Nothing is
+#: reset and nothing is hidden — a quiet window clears the signal with no
+#: restart, and the cumulative totals keep the history.
+RECORD_REFUSAL_WINDOW_SECONDS = 300.0
+
+#: ``(monotonic_ts, reason)`` of the most recent counted refusal, or ``None``.
+#: Process memory on purpose — the same lifetime as the counter it annotates;
+#: persisting it would need a store the health path may not touch (#2850: no I/O
+#: on ``/health``). A single tuple assignment is atomic under the GIL, so the
+#: read below can never see a torn value.
+_RECORD_LAST_REFUSAL: tuple[float, str] | None = None
 # #9231 review P2: an armed record write into a lane whose log is NOT a journal.
 # SEPARATE from ``RECORD_WRITE_FAILURE_COUNT`` on purpose: this is a DECLINE, not
 # a loss. The record is ``replay(journal)``, and these lanes have no journal at
@@ -1443,6 +1468,54 @@ def record_record_write_failure(reason: str) -> None:
     same reason the journal append's is: the capture already committed.
     """
     RECORD_WRITE_FAILURE_COUNT.labels(reason=reason).inc()
+    # #10185: the CUMULATIVE counter above can never answer "refusing now", so
+    # every counted refusal also stamps WHEN and WHY. `monotonic` (not wall
+    # clock) because only the AGE is published: a wall-clock read would report a
+    # negative age across an NTP step and read as "not refusing" — the one
+    # direction this signal must never fail in.
+    global _RECORD_LAST_REFUSAL
+    _RECORD_LAST_REFUSAL = (time.monotonic(), reason)
+
+
+def record_last_refusal() -> tuple[float, str] | None:
+    """``(monotonic_ts, reason)`` of the most recent counted refusal (#10185).
+
+    The RAW stamp, not a verdict — callers that want ``refusing-now`` semantics
+    use :func:`record_refusing`, which applies the window.
+    """
+    return _RECORD_LAST_REFUSAL
+
+
+def clear_record_last_refusal() -> None:
+    """Forget the refusal stamp. TEST ISOLATION ONLY — no production caller.
+
+    Production must never call this: the stamp is what makes a refusal
+    OBSERVABLE, so clearing it in-process would recreate the silent-drop shape
+    this signal exists to remove. It exists so a test leg can start from "no
+    refusal yet" without reaching into the module's private state.
+    """
+    global _RECORD_LAST_REFUSAL
+    _RECORD_LAST_REFUSAL = None
+
+
+def record_refusing() -> dict[str, object] | None:
+    """The record's CURRENT refusal state, or ``None`` if it is not refusing.
+
+    ``{"reason": <the newest counted reason>, "age_s": <seconds since it was
+    counted>}`` inside :data:`RECORD_REFUSAL_WINDOW_SECONDS`, else ``None``.
+
+    This is the signal #10185 asks for: it CLEARS on a quiet window with no
+    restart and without resetting or hiding any cumulative counter (indicator
+    2). It is read from memory only, so ``/health`` keeps collecting no I/O
+    (#2850 P0).
+    """
+    stamp = _RECORD_LAST_REFUSAL
+    if stamp is None:
+        return None
+    age = time.monotonic() - stamp[0]
+    if age > RECORD_REFUSAL_WINDOW_SECONDS:
+        return None
+    return {"reason": stamp[1], "age_s": round(age, 1)}
 
 
 def record_non_journal_skip(reason: str = "no_durable_journal") -> None:
@@ -2042,7 +2115,9 @@ async def run_on_daemon_worker(fn, *, name: str, timeout: float | None = None):
 # construction, so every async handler that needs it bridges to a blocking
 # API. ``asyncio.to_thread`` submits to the loop's SHARED default executor
 # (``min(32, cpu+4)`` = 6 workers on the 2-vCPU production machine) which
-# ``/health``'s DB probe and the abuse hooks also use — the #3060 lesson.
+# ``/health``'s DB probe also uses — the #3060 lesson. (#10618 moved the
+# per-request abuse hooks OFF that pool; the lesson is unchanged, because the
+# shared pool is still 6 workers with an unbounded wait.)
 # The existing ``run_on_daemon_worker`` is dedicated but SINGLE-SLOT, so a
 # 2–6-round-trip-per-request auth path on it would collapse auth concurrency
 # to roughly one request and convert a stall into fail-fast 503s.
@@ -2081,6 +2156,33 @@ CONTROL_PLANE_BACKLOG = 128
 #: Best-effort backlog — larger, because best-effort submissions that are
 #: refused are simply dropped (never a user-visible failure).
 CONTROL_PLANE_TELEMETRY_BACKLOG = 256
+
+#: #10618: a DEDICATED pool for the per-request ``#308`` telemetry hooks
+#: (``hosted_api._abuse_post_auth`` and its two siblings, plus
+#: ``first_api_call``), which are awaited on EVERY authenticated request.
+#:
+#: They are not on ``telemetry`` because that pool also carries the
+#: **unrecoverable** ``billing_notify`` (its ``WebhookEvent`` marker is already
+#: committed, so a refused submission is a notification lost for good — see
+#: ``hosted_api._log_billing_notify_refused``). ``check_new_country`` holds a
+#: PROCESS-GLOBAL lock across a PostgREST round trip (``abuse.py``, a
+#: pre-existing defect), so a cold geo cache — i.e. the first request after
+#: every process restart, which #10602's own evidence shows happens every
+#: ~5–20 min in production — can stall every worker of whichever pool it rides.
+#: Putting the hooks on ``telemetry`` would have offered that stall the
+#: capacity a permanently-lost billing notify needs; on their OWN pool they can
+#: only ever starve themselves (#3060's rule).
+CONTROL_PLANE_ABUSE_WORKER_NAME = "tortoise-abuse"
+
+#: Hook pool size. Each call is microseconds of accounting plus, on a cold geo
+#: cache, one country lookup; four is the same order as the telemetry pool and
+#: keeps parked threads off a 2-vCPU machine.
+CONTROL_PLANE_ABUSE_WORKERS = 4
+
+#: Hook backlog — the same size as ``telemetry``'s. A refusal here is a real
+#: drop, so it is REPORTED (``hosted_api._log_abuse_offload_refused``) rather
+#: than swallowed.
+CONTROL_PLANE_ABUSE_BACKLOG = 256
 
 #: #3669: a THIRD pool, for the OAuth client-resolution lane. A CIMD fetch is
 #: attacker-reachable (an unauthenticated ``client_id`` URL), so sharing the
@@ -2690,7 +2792,10 @@ def control_plane_worker(pool: str = "auth") -> _SingleSlotWorker:
 
     ``pool="auth"`` (default) is the AUTH-CRITICAL pool; ``pool="telemetry"``
     is a SEPARATE pool for best-effort work, so telemetry can never park the
-    auth slots (#3498 review P1); ``pool="oauth"`` (#3669) is a separate pool
+    auth slots (#3498 review P1); ``pool="abuse"`` (#10618) is the per-request
+    ``#308`` hook lane — kept OUT of ``telemetry`` because that pool carries the
+    unrecoverable ``billing_notify``, and kept out of the shared default
+    executor (unbounded wait) entirely; ``pool="oauth"`` (#3669) is a separate
     for the attacker-reachable OAuth client-resolution lane, so a CIMD fetch
     flood cannot park the auth slots either; ``pool="graph"`` (#3773) is the
     graph-lane pool — FalkorDB work, data-plane AND registry reads (#3718) —
@@ -2731,6 +2836,10 @@ def control_plane_worker(pool: str = "auth") -> _SingleSlotWorker:
         return daemon_worker(CONTROL_PLANE_TELEMETRY_WORKER_NAME,
                              workers=CONTROL_PLANE_TELEMETRY_WORKERS,
                              max_backlog=CONTROL_PLANE_TELEMETRY_BACKLOG)
+    if pool == "abuse":
+        return daemon_worker(CONTROL_PLANE_ABUSE_WORKER_NAME,
+                             workers=CONTROL_PLANE_ABUSE_WORKERS,
+                             max_backlog=CONTROL_PLANE_ABUSE_BACKLOG)
     if pool == "auth":
         return daemon_worker(CONTROL_PLANE_WORKER_NAME,
                              workers=CONTROL_PLANE_WORKERS,

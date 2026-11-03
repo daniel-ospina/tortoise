@@ -10664,8 +10664,14 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
             # ⛔ `unresolved` with a ZERO numerator is a THIRD fact, and it is
             # reachable on the main path: the lookup did not run AT ALL (no graph
             # client, an embedded backend, a first query that raised) and the run
-            # proposed no candidate whose own identity it could have established
-            # (an empty S2/S4 list, or one carrying only operators/retractions).
+            # proposed no candidate whose own identity it could have established —
+            # an empty S2/S4 list, a list carrying only operators/retractions, or
+            # one whose entities/events/points all carry blank or whitespace-only
+            # text (`_identity_report` does not count those: `if not raw: continue`
+            # at :3135, S5's own admission test, so the most reachable SHAPE of
+            # this arm is a run that did propose candidates and had none of them
+            # checkable; omit that shape from this list and the comment reads as
+            # though only an empty run can get here — #10633 review, P3).
             # The `partial` sentence above would then assert two things that
             # never happened — that the budget cut something, and that a
             # candidate's own query ran — i.e. exactly the
@@ -10681,12 +10687,23 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
             # sentences above: a state added to `failure_policy.LOOKUP_STATES`
             # later would inherit a claim about a check nobody wrote for it, with
             # nothing to notice it — the defect class this whole change removes.
-            # This arm claims only what it was handed (the state and the counter)
-            # and is LOUD rather than silent, per I2.
+            # This arm claims only what it was handed and is LOUD rather than
+            # silent, per I2.
+            # ⛔ The counter is reported as PROVENANCE, never as coverage. Arm 1
+            # above consumes every non-zero numerator, so reaching this arm
+            # IMPLIES `unresolved_total == 0` — a "0 of N were not checked
+            # against the graph" clause would therefore assert UNIVERSAL coverage
+            # about a check this block never ran, for a state that is by
+            # construction not `resolved`. For a state nobody wrote a sentence
+            # for, a zero can equally mean "nothing was computed", so the number
+            # is printed as the value that was handed in and nothing more — the
+            # same distinction Prometheus/Grafana draw between a measured `0` and
+            # *no data* (#10633 review, P3).
             result.setdefault("warnings", []).append(
                 f"S3 identity {_id['state']}{_reason}: this warning describes no "
-                f"sentence for that state — {_id['unresolved_total']} of "
-                f"{_denominator} candidate(s) were not checked against the graph")
+                f"sentence for that state; the run carries "
+                f"unresolved_total={_id['unresolved_total']} of "
+                f"{_denominator} candidate(s)")
     result["errors"] = errors
     if resolution_records:
         result["resolution"] = resolution_records   # D3 evidence surface
