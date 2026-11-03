@@ -3197,6 +3197,115 @@ def test_the_committed_blocker_record_covers_every_cited_blocker():
             "blocker that still holds")
 
 
+def _citation_findings(record: dict) -> list[str]:
+    """Check every `cited_by` cell against the artifact it names.
+
+    Returns a finding per untrue cell, and nothing for a record whose prose is
+    carried by its artifacts. Two artifacts are readable from the tree — the
+    shipped scored log and the refusal log — so their cells are checked in
+    full: the criteria an entry names must be EXACTLY the rows of that log
+    whose `blocked_by` is that blocker, and a verdict word it writes next to a
+    criterion must be that row's verdict. Cells describing the SUPERSEDED
+    table name a file this bundle deletes by its own supersede rule, so they are
+    checked for identity only: they must say so, and name the deleted file,
+    rather than pass themselves off as rows of a log that still ships (their
+    content is unverifiable here — a shallow CI clone cannot read the deleted
+    blob, which `README.md` records by sha).
+    """
+    logs = sorted((_REPO / "docs/evidence/7949-capstone").glob(
+        "capstone-measured-*.log"))
+    scored = cvc.extract_block(logs[0].read_text())["rows"] if logs else []
+    refusal = cvc.extract_block(LOG.read_text())["rows"]
+    findings: list[str] = []
+    for issue, entry in record["blockers"].items():
+        cite = entry["cited_by"]
+        named = {f"E{n}" for n in re.findall(r"\bE([1-5])\b", cite)}
+        if not named:
+            findings.append(f"{issue}: cited_by names no criterion — {cite!r}")
+            continue
+        if "SUPERSEDED" in cite:
+            if "capstone-measured-e0fc940b.log" not in cite:
+                findings.append(
+                    f"{issue}: a SUPERSEDED-table cell has to name the deleted "
+                    f"log it describes — {cite!r}")
+            continue
+        rows = refusal if "REFUSAL record" in cite else scored
+        actual = {r["criterion"] for r in rows if r.get("blocked_by") == issue}
+        if named != actual:
+            findings.append(
+                f"{issue}: cited_by names {sorted(named)}, but the rows citing "
+                f"it are {sorted(actual)} — {cite!r}")
+        for criterion, word in re.findall(r"\b(E[1-5])\s*\(([A-Z][A-Z_]+)\)",
+                                         cite):
+            row = next((r for r in rows if r["criterion"] == criterion), None)
+            if row is None:
+                continue
+            if row["verdict"] != word:
+                findings.append(
+                    f"{issue}: cited_by calls {criterion} {word}, the log "
+                    f"records {row['verdict']} — {cite!r}")
+    return findings
+
+
+def test_the_blocker_record_s_citations_resolve_to_the_row_they_name():
+    """`cited_by` is a claim about an artifact, so it is CHECKED against it.
+
+    ⛔ #10601 review round 8 (F1, F2): TWO cells of the shipped record were
+    untrue, and nothing could see it — `git grep cited_by -- '*.py'` found no
+    pin at all, so the one file in the bundle whose whole job is to be the
+    authority V12 reads was also the one file quoting history without being
+    checked against it. `#5199` claimed "E3/E4 of the REFUSAL record" while
+    `capstone.log` cites it on E3 ONLY (`#9077` owns E4) — all three occurrences
+    of `#5199` in that log sit inside E3 — and the same cell called its row
+    UNPREREGISTERED when the log's own tally reads BLOCKED=3,
+    UNPREREGISTERED=2. `#9075` claimed "four UNPREREGISTERED rows" while it is
+    the `blocked_by` of E1/E2 (UNPREREGISTERED) and E5 (BLOCKED): two rows,
+    three citations, and "four" counted STRING OCCURRENCES in the file
+    (2 markdown cells + 2 JSON verdicts), a count that was never true of any
+    committed revision of the artifact.
+
+    That is the stale-inference class #10537 exists to close, one level up from
+    the table V12 checks: a lane reads this record to decide whether a row can
+    move. So each entry is held by the log it names.
+    """
+    record = json.loads((_REPO / cvc.BLOCKER_STATES_DEFAULT).read_text())
+    findings = _citation_findings(record)
+    assert not findings, "the shipped record's citations do not match:" + "\n  " + (
+        "\n  ".join(findings))
+    assert len(record["blockers"]) == 11, sorted(record["blockers"])
+
+
+def test_the_citation_pin_reds_on_the_two_cells_round_8_found():
+    """NON-VACUITY: the pre-fix cells must fail `_citation_findings`.
+
+    The shipped record is clean now, so a pin that only reads it cannot show it
+    would ever have caught these. Both strings below are the cells as they
+    shipped at `7ad066bfa`, applied to a copy of the record; each must produce a
+    finding NAMING its issue, and neither may pass on the other's shape.
+    """
+    shipped = json.loads((_REPO / cvc.BLOCKER_STATES_DEFAULT).read_text())
+    cases = {
+        "#5199": ("E3/E4 of the REFUSAL record (capstone.log) — an "
+                  "UNPREREGISTERED row names the HISTORICAL cause of the "
+                  "refusal, which V12 exempts by construction"),
+        "#9075": ("the REFUSAL record's four UNPREREGISTERED rows — the cause "
+                  "of that refusal"),
+    }
+    for issue, old in cases.items():
+        broken = json.loads(json.dumps(shipped))
+        broken["blockers"][issue]["cited_by"] = old
+        findings = _citation_findings(broken)
+        assert any(issue in f for f in findings), (issue, findings)
+    # The `#5199` cell also claims a row `#9077` owns, which is what makes the
+    # two cells contradict each other; that leg is asserted separately so the
+    # count alone cannot be the only thing standing between them.
+    claimed = json.loads(json.dumps(shipped))
+    claimed["blockers"]["#5199"]["cited_by"] = cases["#5199"]
+    assert any("E4" in f for f in _citation_findings(claimed)), (
+        "a cell claiming another blocker's row must red on the ownership leg",
+        _citation_findings(claimed))
+
+
 def test_a_malformed_blocker_record_is_a_usage_error_not_a_disarm(tmp_path):
     """A present-but-broken record must not answer "no V12".
 

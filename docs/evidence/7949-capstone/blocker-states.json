@@ -57,13 +57,13 @@
       "state": "CLOSED",
       "closed_at": "2026-10-21T05:06:42Z",
       "title": "ontology: the version anchor stops at Points — :Object / :Event provenance is not version-scoped (the #5038 gap)",
-      "cited_by": "E3/E4 of the REFUSAL record (capstone.log) — an UNPREREGISTERED row names the HISTORICAL cause of the refusal, which V12 exempts by construction (see the tool's docstring)"
+      "cited_by": "E3 of the REFUSAL record (capstone.log) — a BLOCKED refusal row names the HISTORICAL cause of the refusal, which V12 exempts by construction (see the tool's docstring)"
     },
     "#9075": {
       "state": "CLOSED",
       "closed_at": "2026-10-21T21:49:13Z",
       "title": "measure(extractor-v4): pre-register the capstone corpus, split and scoring BEFORE any E1–E5 run (#7949)",
-      "cited_by": "the REFUSAL record's four UNPREREGISTERED rows — the cause of that refusal, frozen in a record whose whole content is 'the pre-registration did not exist yet'"
+      "cited_by": "the REFUSAL record's rows E1 (UNPREREGISTERED), E2 (UNPREREGISTERED) and E5 (BLOCKED) — the cause of that refusal, frozen in a record whose whole content is 'the pre-registration did not exist yet'"
     },
     "#9077": {
       "state": "CLOSED",
