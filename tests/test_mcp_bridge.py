@@ -904,6 +904,50 @@ class TestFailureModes:
         answered = next(m for m in messages if isinstance(m, dict) and m.get("id") == 11)
         assert answered.get("result") == {"tools": [{"name": "tortoise_search"}]}, answered
 
+    def test_an_unhashable_REQUEST_id_is_answered_or_refused_never_silent(self):
+        """The silence guarantee must survive an id a set cannot key.
+
+        `id` may be an array or an object, and filtering those out of the
+        comparison entirely left the request with NO reply and NO error — the one
+        outcome `forward()` promises never to produce ("a bridge that writes
+        nothing leaves the harness waiting forever").
+        """
+        import httpx
+
+        from tortoise.mcp_bridge import forward
+
+        def _forward(body: bytes, payload):
+            response = httpx.Response(
+                200, content=body, headers={"content-type": "application/json"})
+
+            class _Client:
+                def stream(self, *_a, **_k):
+                    class _Ctx:
+                        def __enter__(self_inner):
+                            return response
+
+                        def __exit__(self_inner, *_exc):
+                            return False
+
+                    return _Ctx()
+
+            return forward(_Client(), {}, payload)
+
+        request = [{"jsonrpc": "2.0", "id": [1, 2], "method": "tools/call"}]
+
+        # (a) The server answered NOTHING: the request must still be answered.
+        silent = _forward(json.dumps([]).encode(), request)
+        assert [m.get("id") for m in silent] == [[1, 2]], (
+            f"a request with an unhashable id was left unanswered: {silent}")
+        assert silent[0]["error"]["code"] == -32603, silent
+
+        # (b) The server DID answer it: relay the result, fabricate nothing.
+        answered = _forward(
+            json.dumps([{"jsonrpc": "2.0", "id": [1, 2], "result": {"ok": True}}]).encode(),
+            request,
+        )
+        assert len(answered) == 1 and answered[0].get("result") == {"ok": True}, answered
+
     def test_a_partially_answered_batch_still_captures_the_protocol_version(self):
         """The early return must not drop the tail's `initialize` side effect.
 

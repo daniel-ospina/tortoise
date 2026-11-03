@@ -109,6 +109,26 @@ def _emit(message: Any) -> None:
     sys.stdout.flush()
 
 
+def _id_key(value: Any) -> str:
+    """A hashable, type-preserving key for a JSON-RPC id.
+
+    JSON-RPC 2.0 says String/Number/NULL, but a peer may send an array or an
+    object, and those are UNHASHABLE — so any set/dict-keyed comparison over ids
+    raises `TypeError`, which `main()` turns into a fabricated "internal failure"
+    that discards answers the server did give. Worse, filtering such ids out of
+    the comparison entirely (as `isinstance(i, (str, int))` did) leaves a request
+    with no answer and no error: the silence this module promises never to emit.
+
+    `json.dumps` keeps `1` and `"1"` distinct while making every JSON value usable
+    as a key, so ONE helper serves `pending`, the answered-set and the relay
+    filter instead of three hand-rolled conventions.
+    """
+    try:
+        return json.dumps(value, sort_keys=True)
+    except (TypeError, ValueError):  # pragma: no cover - non-JSON value from a bug
+        return repr(value)
+
+
 def _request_ids(payload: Any) -> list[Any]:
     """The ids an error response must be correlated to — REQUESTS only.
 
@@ -184,7 +204,7 @@ def _response_messages(
         return (body if isinstance(body, list) else [body]), snippet
 
     messages: list[Any] = []
-    pending = {request_id for request_id in expected_ids if isinstance(request_id, (str, int))}
+    pending = {_id_key(request_id) for request_id in expected_ids}
     if not pending:
         # Nothing to correlate: a notification/response POST is answered 202, and
         # reading an event stream we can stop at no event would block until the
@@ -215,7 +235,7 @@ def _response_messages(
         messages.extend(message if isinstance(message, list) else [message])
         for item in (message if isinstance(message, list) else [message]):
             if isinstance(item, dict) and "id" in item:
-                pending.discard(item["id"])
+                pending.discard(_id_key(item["id"]))
         if not pending:
             break
     return messages, ""
@@ -434,19 +454,27 @@ def forward(client: httpx.Client, state: dict, payload: Any) -> list[Any]:
             # id as a complete answer, so a BATCH whose second id went unanswered
             # produced no output for it at all — the harness then waits on that id
             # forever, which is the exact silence this guard exists to prevent.
-            # HASHABLE IDS ONLY. A JSON-RPC `id` may legitimately be an array or an
-            # object, and those are unhashable — a set/dict-keyed lookup over them
-            # raises `TypeError`, which `main()` turns into a fabricated
-            # "internal failure" for BOTH ids, discarding an answer the server DID
-            # give. `_response_messages` already filters this way for `pending`
-            # (`isinstance(request_id, (str, int))`); this guard follows the same
-            # convention rather than departing from it.
-            answered = {m["id"] for m in messages
-                        if isinstance(m, dict)
-                        and isinstance(m.get("id"), (str, int))}
-            missing = [i for i in dict.fromkeys(
-                i for i in expected_ids if isinstance(i, (str, int)))
-                if i not in answered]
+            # HASHABLE IDS, WITHOUT DROPPING ANY. A JSON-RPC `id` may be an array or
+            # an object; a set-keyed comparison over those raises `TypeError` (a
+            # fabricated "internal failure" that discards real answers), and
+            # filtering them out of the comparison leaves the request with no
+            # answer AND no error — the silence this guard exists to prevent.
+            # `_id_key` makes every JSON value a key and keeps `1` distinct from
+            # `"1"`, so no id can fall through either hole.
+            answered = {_id_key(m["id"]) for m in messages
+                        if isinstance(m, dict) and m.get("id") is not None}
+            expected_keys = {_id_key(i) for i in expected_ids}
+            # Dedupe on the KEY, not the raw id: `dict.fromkeys(expected_ids)`
+            # raises on exactly the unhashable ids this helper exists to support.
+            seen: set[str] = set()
+            missing: list[Any] = []
+            for request_id in expected_ids:
+                key = _id_key(request_id)
+                if key in seen:
+                    continue
+                seen.add(key)
+                if key not in answered:
+                    missing.append(request_id)
             if missing:
                 # A request MUST be answered. A reply with no JSON-RPC message for
                 # it (odd status, unparseable body, an SSE stream carrying only a
@@ -466,7 +494,8 @@ def forward(client: httpx.Client, state: dict, payload: Any) -> list[Any]:
                 # rejected. Applying the guard without it traded a silence for a
                 # leak on the busiest relay path, which is strictly worse.
                 relayed = [_redact_message(m, connection.key) for m in messages
-                           if isinstance(m, dict) and m.get("id") in expected_ids]
+                           if isinstance(m, dict) and m.get("id") is not None
+                           and _id_key(m["id"]) in expected_keys]
                 # ⛔ AND SO IS THE PROTOCOL-VERSION CAPTURE. It lives in the tail,
                 # which this return skips, so a batched `initialize` whose sibling
                 # id went unanswered would negotiate a version and then never send
