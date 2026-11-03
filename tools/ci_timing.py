@@ -2134,7 +2134,7 @@ def _balance_cut_parens(text: str) -> str:
 #
 # `_DURATION_LINE_RE` reads a row's note as the tail on its own line, but a
 # note CAN wrap: an indented `#` line under a row can continue THAT row's note
-# (measured at this head: 1 row of 1222 does — `test_source_staleness_
+# (measured at this head: 1 row of 1225 does — `test_source_staleness_
 # sweep_5038.py` — and re-derive it, do not trust the figure, because a refresh
 # re-emits notes and moves it). The guard that judges the written map joins a
 # row's tail with its continuations before it judges a note

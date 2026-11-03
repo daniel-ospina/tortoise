@@ -6119,7 +6119,7 @@ def test_a_stripped_basis_clause_does_not_orphan_a_parenthesis() -> None:
 # ── a WRAPPED note is ONE note (the 2026-11-02 refresh's half-parenthesis) ────
 #
 # A row's note is not the tail on its row line: a note CAN wrap across indented `#`
-# continuation lines (measured at this head: 1 row of 1222 — the block's
+# continuation lines (measured at this head: 1 row of 1225 — the block's
 # dominant shape is the PREAMBLE for the row below, 73 of its 74 indented blocks),
 # and the guard that judges a written map joins them before judging
 # (`tests/test_ci_selection.py`
@@ -6295,7 +6295,7 @@ def test_a_registered_row_is_appended_after_the_last_rows_wrapped_note() -> None
 # the real map at this head, every row re-based once: **36 rows lost their block,
 # 349 lines folded into row lines**. The committed instance is the
 # `355.0 IS A DELIBERATE CAP … #9172` block: it lies directly under
-# `test_work_claim.py: 3.8` and documents `test_lane_stash.py: 25.4`.
+# `test_work_claim.py: 3.8` and documents `test_lane_stash.py: 355.0`.
 _NOTE_BLOCK_FOR_THE_ROW_BELOW_MANIFEST = """\
 surfaces:
   core:
