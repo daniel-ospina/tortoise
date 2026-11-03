@@ -1107,6 +1107,21 @@ def test_emit_manifest_does_not_inherit_a_conftest_above_the_selection(tmp_path)
         "raise RuntimeError('a conftest above the selection must not be "
         "imported')\n",
         encoding="utf-8")
+    # ⚠️ The conftest ALONE does not reproduce the red, and a version of this
+    # test carrying only the conftest was non-discriminating: it passed on the
+    # PRE-fix tool. pytest's `confcutdir` is not unset when `--confcutdir` is
+    # absent — `Config.parse` defaults it to `inipath.parent` else `rootpath`
+    # (pytest 9.1.1, `_pytest/config/__init__.py:1598-1603`), and for an
+    # out-of-tree arg with no ini above it the `rootpath` is already the case
+    # dir, so nothing above it loads anyway. The runner's `/tmp` leaked BOTH
+    # files: the ini is what lifts the default cutoff above the selection (a
+    # `pyproject.toml` counts as `inipath` only when it carries
+    # `[tool.pytest.ini_options]`), and the conftest is then imported through
+    # it. MEASURED against the pre-fix tool with both files present: `rc=4`,
+    # `ImportError while loading conftest '<tmp>/conftest.py'`, no manifest —
+    # the `test-slow (d)` red. With the pin: `rc=0` and the manifest written.
+    (tmp_path / "pyproject.toml").write_text(
+        "[tool.pytest.ini_options]\n", encoding="utf-8")
     case = tmp_path / "case"
     case.mkdir()
     (case / "test_ok.py").write_text(
