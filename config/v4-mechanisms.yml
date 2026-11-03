@@ -717,10 +717,12 @@ mechanisms:
       day` against `… per week`) is not judged: no unit is ADJACENT to the
       number, so `_value_bindings` fuses nothing and the pair fails open. That
       is the carve-out's own fifth example. ⛔ The ADJACENCY half that used to
-      stand here is CLOSED: `_UNIT_WORDS` now carries the duration/distance
-      spellings the carve-out names (`second(s)`, `minute`, `hour`, the
-      millisecond family, `day(s)`, `week(s)`, `month(s)`, `year(s)`,
-      `mile(s)`, `percent`/`pct`), so `back under 800 seconds` against
+      stand here is CLOSED: `_UNIT_WORDS` now carries the spellings the
+      carve-out names (`second(s)`, the millisecond family, `minute`, `day(s)`)
+      **plus their conventional siblings** (`hour`, `week(s)`, `month(s)`,
+      `year(s)`, `mile(s)`, `percent`/`pct` — the carve-out names none of those
+      six, they are here because a duration family with a hole in it is how the
+      original gap survived review), so `back under 800 seconds` against
       `back under 800 milliseconds` and `a ten minute TTL` against
       `a ten hour TTL` are REFUSED — pinned by
       `tests/test_state_value_verbatim_10360.py::test_the_carve_outs_own_ADJACENT_time_units_are_judged`,
