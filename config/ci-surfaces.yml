@@ -1326,6 +1326,22 @@ surfaces:
   # selecting `api` with this guard never run (the #1349 class), the
   # same reason tests/test_quota.py is registered here.
   - test_4503_edge_relationship_accounting.py
+  # #10668 review P1: the #9567 D11/D12 allowance-gate evidence.
+  # DUAL-REGISTERED with `core` (below). Two modules carry this subject and
+  # they classify DIFFERENTLY: `tortoise/quota.py` (`enforce_org_limit`, the
+  # gate's primary door) is an EXACT `api` SOURCE_PATTERN match, while
+  # `tortoise/allowance_gate.py` (the gate itself) matches none and falls
+  # through to the `core` fallback. Because a match REPLACES the fallback in
+  # `select()`, neither surface alone covers both diff classes. Measured before
+  # this entry: `--integrity` printed `❌ manifest drift:
+  # ['test_allowance_gate.py']` and exited 1 (redding the REQUIRED
+  # `manifest-integrity` leg), `classify_test_file` returned None, and
+  # `select(['tortoise/quota.py'])` -> surfaces ['api'] / `select([
+  # 'tortoise/allowance_gate.py'])` -> ['core'], both with this file ABSENT —
+  # i.e. the 28 tests that ARE the evidence for D11/D12 ran on no leg on any
+  # diff, so the suite would have stayed green if the gate were deleted. That is
+  # the #10513 / #1349 silent-drop class. Keep BOTH arms.
+  - test_allowance_gate.py
   # #4010: the session-cap removal — drives the hosted capture path + the
   # registry resolver, so it belongs with the quota/api surface.
   - test_issue_4010_sessions_unlimited.py
@@ -1764,6 +1780,15 @@ surfaces:
   # it guards span `tortoise/` — a battery-only or sdk-only change must run it.
   - test_vector_write_seam_4520.py
   core:
+  # #10668 review P1: the `core` arm of the #9567 D11/D12 allowance-gate
+  # evidence. `tortoise/allowance_gate.py` matches NO `SOURCE_PATTERNS` entry,
+  # so an allowance_gate.py-only diff falls through to the `core` fallback and
+  # the `api` row (above, beside `test_quota.py`) never applies — measured:
+  # `select(['tortoise/allowance_gate.py'])` -> surfaces ['core']. That is the
+  # mirror of the #9583/#10156 dual-registration idiom: one module the test
+  # guards is an exact `api` match, the other is a `core` fallback, and both
+  # diffs must select the evidence.
+  - test_allowance_gate.py
   - test_10000_narrative_record_home.py
   - test_10017_cache_tier.py
   - test_10017_purge_guard.py
