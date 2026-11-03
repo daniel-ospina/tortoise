@@ -213,7 +213,12 @@ class TestPublicDemo:
         assert rows, "expected a MeteringRecord after demo seed"
         write_ops, nodes_written = int(rows[0][0]), int(rows[0][1])
         assert write_ops == 1
-        assert nodes_written == 13  # 12 seeded points + _demo_sentinel
+        # The metered value is the NODE census the seed actually wrote.
+        # ⛔ Was 13 (12 + _demo_sentinel) before #10000; the three `epi_turn*`
+        # turn nodes are gone (§9.1/D1 — the demo's episodic layer is its
+        # Session, and `_seed_demo_graph` reports `points` as nodes written,
+        # precisely so this meter cannot bill nodes that do not exist).
+        assert nodes_written == 10  # 9 seeded points + _demo_sentinel
 
 
 # ── Session recording toggle ────────────────────────────────────

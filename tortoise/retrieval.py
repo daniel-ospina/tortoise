@@ -665,9 +665,10 @@ SESSION_TRANSCRIPT_KIND = "session-transcript"
 #: product writer. The literal is a product constant here so the READ side
 #: (``session_reinjection``'s default fetch kind, :func:`_is_turn_point`)
 #: has one home. The TURN literal is the one that is HARDCODED: ``sdk``'s
-#: capture turn loop, the hosted turn loop, the hosted demo seed, and both
-#: eval ingest legs all write ``"event"`` literally, so this constant is a
-#: read-side home, not a single source. ``SESSION_TRANSCRIPT_KIND`` is
+#: capture turn loop, the hosted turn loop, and both eval ingest legs all
+#: write ``"event"`` literally, so this constant is a read-side home, not a
+#: single source. ⚠️ NOT the hosted demo seed: since #10000 it writes no turn
+#: node at all (§9.1/D1), so it is no longer a writer of this literal. ``SESSION_TRANSCRIPT_KIND`` is
 #: imported by the two eval ingest legs and has a derivation pin
 #: (``tests/test_session_reinjection_rules.py::
 #: test_chunk_kind_is_single_sourced_across_all_four_consumers``) — that pin

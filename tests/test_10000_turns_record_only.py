@@ -3022,3 +3022,112 @@ def test_the_write_path_vocabulary_names_every_refusal_the_door_returns():
     assert not unwritten, (
         f"`RecordWrite.status` is the authoritative enumeration (the map says "
         f"so) and it does not name refusal={unwritten}")
+
+
+# ── the demo seeders are writers too (the population, not the capture path) ──
+def _seeded_statements(monkeypatch, org_id="demo-seed-10000"):
+    """Every ``(cypher, params)`` `hosted_api._seed_demo_graph` issues.
+
+    The seeder builds its own SDK through `_make_sdk`, so this stubs that
+    constructor with a projection recorder — the statements the seeder WOULD
+    issue are then an assertable artefact, with no database and no tenant.
+    """
+    from tortoise import hosted_api
+
+    issued: list[tuple[str, dict]] = []
+
+    class _G:
+        def query(self, cypher, params=None):
+            issued.append((cypher, dict(params or {})))
+
+            class _R:
+                def __init__(self):
+                    self.result_set: list = []
+            return _R()
+
+    class _Proj:
+        g = _G()
+
+    class _Sdk:
+        def _get_proj(self):
+            return _Proj()
+
+    monkeypatch.setattr(hosted_api, "_make_sdk", lambda **_kw: _Sdk())
+    out = hosted_api._seed_demo_graph(org_id)
+    assert out.get("status") == "demo_created", out
+    return issued, hosted_api
+
+
+def test_the_demo_seed_writes_no_turn_text_into_the_graph(monkeypatch):
+    """`hosted_api._seed_demo_graph` put the sample transcript on TURN NODES.
+
+    It wrote one `:Point {pointKind:'event'}` per demo turn carrying the turn's
+    literal text, `CONTAINS`-wired to the demo `:Session` — the per-turn-text
+    shape §9.1/D1 forbids and the shape `#10000` removed from the capture path
+    (`sdk._write_capture_turns` keeps only `_SESSION_REDACTIONS_CYPHER` when the
+    record holds the turns). It was reachable on `main` through the MCP demo tool
+    (`mcp_server` → `hosted_api._seed_demo_graph`) and the `/demo-graph` route.
+
+    A POPULATION assertion, not a call-site one: it reads the text from
+    `_DEMO_EPISODIC_TURNS` (the constant survives on purpose — it still names the
+    ids `_DEMO_POINT_IDS` excludes from `org.point_count`) and asserts no
+    statement the seeder issues binds any of it to a node, whatever property name
+    a re-spelling would use.
+
+    Fails without the change: the seeder's three `SET t.content=$c` statements
+    each bind exactly this text.
+    """
+    issued, hosted_api = _seeded_statements(monkeypatch)
+
+    texts = [text for _pid, text in hosted_api._DEMO_EPISODIC_TURNS]
+    assert len(texts) == 3, texts  # the declaration under test is the 3-turn one
+
+    for cypher, params in issued:
+        for text in texts:
+            assert text not in repr(params), (
+                "the demo seed bound a turn's text into a graph write "
+                f"(§9.1/D1: the transcript is Postgres', not the graph's):\n"
+                f"  {cypher.strip()[:200]}\n  params={params!r}")
+        # An ALIAS-NARROW backstop, kept because it can see a re-spelled turn
+        # write whose text no longer comes from the declaration. It is narrow on
+        # purpose: `p.content=$c` on a semantic Point is legitimate, so this
+        # matches only the `t.` alias the demo's turn writer used.
+        assert "t.content=$c" not in cypher, (
+            f"the demo seed still sets a node's content from a param: {cypher!r}")
+
+    # ⛔ NON-VACUITY, and the reason this file's docstring calls a bare
+    # "no turn node" assertion vacuous: the recorder only sees statements that
+    # reach `proj.g.query`. A refactor that wrote through `sdk.create_point` (or
+    # any helper holding its own projection) would record NOTHING and the
+    # assertions above would pass on an empty list. So the seed's OWN known
+    # writes must be visible — if they are not, the population is wrong, not
+    # clean.
+    recorded_ids = {p.get("id") for _c, p in issued if p.get("id")}
+    assert {"sem_fact_tortoise", "sem_fact_layers", "epis_claim1",
+            "epis_claim2", "epis_claim3"} <= recorded_ids, (
+        "the recorder saw none of the seed's known Point writes, so the "
+        f"population under test is wrong: {sorted(recorded_ids)}")
+    assert any("_demo_sentinel" in c for c, _p in issued), (
+        "the sentinel write — the seed's LAST statement — was not recorded, so "
+        "the seed did not run to completion under this recorder")
+
+
+def test_the_demo_seed_still_states_the_sample_transcripts_LENGTH(monkeypatch):
+    """Removing the text must not remove the demo's episodic COUNTER.
+
+    The Session is what the episodic layer keeps under §9.1/D1 — a length, not a
+    transcript — so the seeded `:Session` still declares `turn_count`, read from
+    the same `_DEMO_EPISODIC_TURNS` declaration the nodes used to be built from.
+    """
+    issued, hosted_api = _seeded_statements(monkeypatch)
+
+    declared = len(hosted_api._DEMO_EPISODIC_TURNS)
+    counters = [(c, p) for c, p in issued if "turn_count" in c]
+    assert counters, "the seeded Session no longer declares a turn count"
+    # The PROPERTY is "the Session states the declared length", not "$turns is
+    # bound": a refactor may inline the literal or rename the parameter and
+    # still satisfy it, so both shapes are accepted. Only a count that is
+    # neither bound to the declaration nor equal to it fails.
+    assert any(p.get("turns") == declared
+               or re.search(rf"turn_count\s*=\s*{declared}\b", c)
+               for c, p in counters), counters

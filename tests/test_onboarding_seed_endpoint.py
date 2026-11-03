@@ -569,12 +569,15 @@ class TestDigestExcludesDemo:
         try:
             # a fresh org starts at 0 real Points
             assert tc.get("/v1/team").json()["point_count"] == 0
-            # opt-in / legacy demo seed writes the 12 sample Points + sentinel
+            # opt-in / legacy demo seed writes the 9 sample Points + sentinel.
+            # ⛔ Was 12 + sentinel = 13 before #10000: the three `epi_turn*`
+            # turn nodes are gone (§9.1/D1 — the demo's episodic layer is the
+            # Session, and raw turn text is not a graph node).
             r = tc.post("/internal/demo", json={"org_id": org_id},
                         headers=_internal_headers())
             assert r.status_code == 200, r.text
             assert r.json()["status"] == "demo_created"
-            assert _point_count(org_id) == 13  # 12 + _demo_sentinel (graph)
+            assert _point_count(org_id) == 10  # 9 + _demo_sentinel (graph)
             # ...but the digest count EXCLUDES them — still 0
             assert tc.get("/v1/team").json()["point_count"] == 0
             # a real user filing counts normally
@@ -603,7 +606,15 @@ class TestDigestExcludesDemo:
             from tortoise.hosted_api import _DEMO_POINT_IDS, _DEMO_SENTINEL_ID
             assert _DEMO_SENTINEL_ID == "_demo_sentinel"
             assert written <= _DEMO_POINT_IDS
-            assert len(written) == 13
+            assert len(written) == 10
+            # The set is a deliberate SUPERSET since #10000: it still names the
+            # three `epi_turn*` ids the seeder no longer writes, so a graph
+            # seeded before that change keeps them excluded from the digest.
+            # Asserted HERE so a later reader does not "fix" the constant down
+            # to 10 and silently start counting a legacy demo graph.
             assert len(_DEMO_POINT_IDS) == 13
+            assert written == _DEMO_POINT_IDS - {
+                pid for pid, _c in __import__(
+                    "tortoise.hosted_api", fromlist=["x"])._DEMO_EPISODIC_TURNS}
         finally:
             tc.__exit__(None, None, None)

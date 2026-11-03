@@ -205,10 +205,13 @@ DEFAULT_REINJECTION_TOTAL_ITEMS = 10
 #:     `ingest.py:~207` / `ingest_v2.py:~543`) writes ``is_episodic=true``
 #:     AND a body of the deterministic form ``f"[{role}] {content}"`` — so
 #:     the body always STARTS WITH ``[``;
-#:   * the NON-turn ``pointKind='event'`` writer in the tree — the
-#:     hosted demo/dashboard seed (`hosted_api.py:~6243`) — writes no
-#:     ``is_episodic`` (its body IS ``[role]``-tagged, so the shape
-#:     predicate excludes it on the ``is_episodic`` conjunct alone);
+#:   * ⚠️ the hosted demo/dashboard seed (`hosted_api.py` `_seed_demo_graph`)
+#:     USED to be the NON-turn ``pointKind='event'`` writer here — it wrote no
+#:     ``is_episodic``, and its body was ``[role]``-tagged, so the predicate
+#:     excluded it on the ``is_episodic`` conjunct alone. Since #10000 it
+#:     writes no turn node at all (§9.1/D1), so that clause now describes no
+#:     writer in the tree; it is kept because a graph seeded BEFORE #10000
+#:     still holds those nodes and they must stay excluded;
 #:   * so this predicate excludes it and any caller-minted bare ``event``
 #:     Point, while holding for every legitimate turn.
 #:
