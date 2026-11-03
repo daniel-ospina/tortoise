@@ -161,15 +161,11 @@ def _closing_re(sep: str) -> re.Pattern[str]:
 _CLOSING_RE = _closing_re(_CLOSING_SEPARATORS["lenient"])
 _CLOSING_RE_ONELINE = _closing_re(_CLOSING_SEPARATORS["strict"])
 
-#: A BLANK line, i.e. the end of a paragraph. An inline code span cannot cross
-#: it (§6.1 keeps a span inside one paragraph), so it is where the STRICT inline
-#: scan stops looking for a closing backtick run (`_span_limit`).
-_BLANK_LINE_RE = re.compile(r"\n[ \t]*\n")
-
 #: A line that STARTS a new block, tested on the line's text AFTER its blockquote
 #: prefix. A span is inline content and cannot cross a block boundary, and most
 #: blocks end the paragraph WITHOUT a blank line — which is why the strict scan
-#: needed this as well as `_BLANK_LINE_RE` (see `_paragraph_end`).
+#: needs this as well as `_paragraph_end`'s own blank-line test (see that
+#: function).
 _BLOCK_START_RE = re.compile(
     r"(?: {0,3}(?:[-*+]|\d{1,9}[.)])(?:[ \t]|$)"          # a list item marker
     r"| {0,3}#{1,6}(?:[ \t]|$)"                             # an ATX heading
