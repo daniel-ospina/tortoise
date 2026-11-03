@@ -16,9 +16,25 @@ and never once per client. A credential captured at construction or start-up is
 sent forever: a long-lived process keeps replaying the value it happened to hold
 when it was built, so a rotated, refreshed, or later-added key never reaches the
 wire — and the failure looks intermittent because it only reproduces on sessions
-old enough. `_BearerProvider.auth_flow()` reads the live environment and the
-stored credential file on EVERY request, which is the shape the MCP SDKs converge
-on (a `token()`/`auth_flow` provider callback, not a captured string).
+old enough. `_BearerProvider` reads the live environment and the stored
+credential file on EVERY request — through `auth_flow` on a sync client and
+`async_auth_flow` on an `AsyncClient` (the one fastmcp's client drives), both
+funnelling into ONE `_resolve_and_stamp` — which is the shape the MCP SDKs
+converge on (a `token()`/`auth_flow` provider callback, not a captured string).
+
+⛔ THE TRANSMITTING POSTURE EXCLUDES THE PROJECT-LOCAL STORE (#2369 D1.2,
+mirrored from `tortoise/__main__.py::_resolve_config_path(global_only=True)`).
+`<cwd>/.tortoise` is COMMITTABLE, and this module is reached by a harness that
+runs with cwd = the project (the stdio bridge): whoever controls the repository
+would otherwise choose both the Bearer key AND the host it is sent to, and would
+shadow whatever credential the user has stored. Measured on this module (#10605
+review, P0): a cloned repo shipping
+`./.tortoise = {"api_key": "tt_repo_controlled", "api_url": …}` made
+`list_tools()`, `call_tool()` and `tortoise/mcp_bridge.py` all contact the
+repo's own endpoint with the repo's own key. Every entry point that puts the
+credential on the wire resolves `resolve_connection(global_only=True)`; the
+project store is still read by non-transmitting callers (redaction) and can be
+opted back in deliberately with `TORTOISE_MCP_ALLOW_PROJECT_STORE=1`.
 
 WHICH LEG IS ACTUALLY LIVE, stated rather than implied: re-reading the
 environment helps a process that sets its own `os.environ` after import (a
@@ -66,6 +82,17 @@ _DEFAULT_URL = "http://localhost:8000/mcp"
 #: configured=…)` is what translates it. Only the credential-less REFUSAL is
 #: reported as the recorded `unconfigured` term — a set-up gap, not an outage.
 _UNAVAILABLE = "tortoise_unavailable"
+
+#: The opt-in that lets a TRANSMITTING path read the project-local store.
+#:
+#: Off by default, and it has to be a deliberate act: the project-local store is
+#: committable, so whoever controls the repository controls the key AND the host
+#: an OPT-OUT would send them to (#2369 D1.2, mirrored from
+#: `tortoise/__main__.py::_resolve_config_path(global_only=True)`). `tortoise init
+#: --api-key` writes exactly that file, so a user who deliberately keeps their
+#: credential in the project sets this to say so — rather than every cloned repo
+#: silently inheriting the right to choose the endpoint.
+_PROJECT_STORE_OPT_IN = "TORTOISE_MCP_ALLOW_PROJECT_STORE"
 
 #: Env names a credential may arrive through, in precedence order.
 #:
@@ -152,8 +179,17 @@ _WARNED_TOPICS: set[str] = set()
 
 #: provenance of the most recent request this process made. Used ONLY as a
 #: redaction fallback by `describe_failure`: a caller that prints an error after
-#: a rotation must still strip the key that was actually on the wire.
+#: a rotation must still strip the key that was actually on the wire. An unlocked
+#: last-write-wins slot is deliberate — redaction is the one consumer, and a lost
+#: update can only make it strip a key that was not this request's (a superset of
+#: `<redacted>`s), never leak one. It is NEVER consulted for classification.
 _LAST_SENT: list[Connection | None] = [None]
+
+#: The httpx `Request.extensions` key carrying `(Connection, withheld)` for ONE
+#: request. This is how a failure is classified from what ITS OWN request
+#: resolved: one `_BearerProvider` is shared by every request on a client, so its
+#: `sent`/`withheld` attributes describe whichever request resolved last.
+_PROVENANCE_EXT = "tortoise_mcp_connection"
 
 
 def _warn_once(topic: str, message: str) -> None:
@@ -226,8 +262,8 @@ class Connection:
     sources: tuple[str, ...]
 
 
-def _credential_paths() -> tuple[Path, ...]:
-    """The credential stores, in the recorded precedence (#1708 D4/D5).
+def _credential_paths(*, global_only: bool = False) -> tuple[Path, ...]:
+    """The credential stores to READ, in the recorded precedence (#1708 D4/D5).
 
     PATH FUNCTIONS, never module constants: a `Path.home()` or `Path.cwd()`
     captured at import is the same capture-at-start bug this module exists to
@@ -239,8 +275,29 @@ def _credential_paths() -> tuple[Path, ...]:
     made the client blind to the store the hosted onboarding actually creates —
     no credential, the default endpoint, and a `MCP-KEY-EMPTY` naming stores the
     user never wrote.
+
+    `global_only=True` is the TRANSMITTING posture (#2369 D1.2), and it omits
+    the project-local candidate. A `./.tortoise` is COMMITTABLE, so whoever
+    controls the repository controls both the key AND the endpoint a request
+    goes to: MEASURED on this module (#10605 review, P0), a cloned repo shipping
+    `./.tortoise = {"api_key": "tt_repo_controlled", "api_url": "http://…"}`
+    made `resolve_connection()` return THAT endpoint, and `list_tools()`,
+    `call_tool()` and `tortoise/mcp_bridge.py` (which a harness launches with
+    cwd = the project) all contacted it — the repo choosing both halves of the
+    identity, and additionally SHADOWING the user's own stored credential. This
+    mirrors `_resolve_config_path(global_only=True)`, the posture the engine's
+    transmitting surfaces already carry. A NON-transmitting read (redaction)
+    still wants every store, which is why the default is unchanged.
+
+    The escape hatch is `TORTOISE_MCP_ALLOW_PROJECT_STORE=1`: a user who
+    deliberately keeps their credential in the project (the file
+    `tortoise init --api-key` writes) says so once, instead of a clone getting
+    that say silently.
     """
-    return (Path.cwd() / ".tortoise", Path.home() / ".tortoise" / "credentials.json")
+    global_store = Path.home() / ".tortoise" / "credentials.json"
+    if global_only and not os.environ.get(_PROJECT_STORE_OPT_IN):
+        return (global_store,)
+    return (Path.cwd() / ".tortoise", global_store)
 
 
 def _warn_if_store_is_readable(path: Path) -> None:
@@ -266,7 +323,7 @@ def _warn_if_store_is_readable(path: Path) -> None:
           f"credential stored in it. Fix: chmod 600 {path}", file=sys.stderr)
 
 
-def resolve_connection() -> Connection:
+def resolve_connection(*, global_only: bool = False) -> Connection:
     """Resolve the endpoint + credential NOW.
 
     Precedence: env (`TORTOISE_API_KEY`, then the `TORTOISE_MCP_API_KEY` alias)
@@ -274,6 +331,14 @@ def resolve_connection() -> Connection:
     `tortoise/__main__.py::_resolve_config_path` uses (#1708 D1/D4/D5), reproduced
     here rather than imported because this module ships in the client-only wheel
     (it cannot depend on the engine's `__main__`).
+
+    `global_only=True` (the #2369 D1.2 TRANSMITTING posture, mirrored from
+    `_resolve_config_path(global_only=True)`) SKIPS the project-local
+    `<cwd>/.tortoise` candidate: every entry point that puts the credential on
+    the wire passes it, because a repo-committed store must never choose the
+    host a Bearer key is sent to. The skipped store is still NAMED in `sources`,
+    so a refusal tells the operator the file was there and why it was not read,
+    instead of claiming they never wrote one.
 
     A blank/whitespace value is treated as ABSENT (never as an empty credential).
     A store that exists but cannot be parsed or read is NOT reported as absent
@@ -294,8 +359,20 @@ def resolve_connection() -> Connection:
         if value and value.strip():
             return Connection(env_url or _DEFAULT_URL, value.strip(), name, tuple(sources))
 
+    read_paths = _credential_paths(global_only=global_only)
     for path in _credential_paths():
         label = str(path)
+        if path not in read_paths:
+            # NAMED, never silent: an operator whose key IS in `./.tortoise` must
+            # not read "no credential anywhere" and go hunting — the refusal has
+            # to say the file exists, was deliberately not read on a transmitting
+            # path, and which switch says otherwise.
+            sources.append(
+                f"{label} (SKIPPED: not read on a transmitting path — a committed "
+                f"store may not choose the host a credential is sent to; set "
+                f"{_PROJECT_STORE_OPT_IN}=1 to read it deliberately)"
+            )
+            continue
         sources.append(label)
         if not path.is_file():
             # Absent, or a DIRECTORY at the project-local path (a repo's own
@@ -334,8 +411,14 @@ def resolve_connection() -> Connection:
 
 
 def mcp_url() -> str:
-    """The endpoint the next request will use."""
-    return resolve_connection().url
+    """The endpoint the next request will use.
+
+    Resolved with the TRANSMITTING posture, because that is what the sentence
+    says: a caller asking "where will this request go?" must not be told the
+    project-local store's endpoint when the request itself skips that store
+    (#2369 D1.2).
+    """
+    return resolve_connection(global_only=True).url
 
 
 def _refusal(exc: BaseException, sent: Connection) -> MCPKeyEmptyError:
@@ -376,8 +459,10 @@ def _raise_if_credential_was_missing(exc: BaseException, sent: Connection | None
         return
     if sent is None:
         # The request never reached the point of attaching a credential (a
-        # connect failure), so the live resolution is the only evidence there is.
-        sent = resolve_connection()
+        # connect failure), so the live resolution is the only evidence there is
+        # — resolved with the TRANSMITTING posture, because the refusal claims
+        # which stores were checked for a credential that was about to be sent.
+        sent = resolve_connection(global_only=True)
     elif sent.key is not None:
         # A credential RESOLVED — but did the failed request actually carry it?
         # httpx drops `Authorization` across a cross-origin redirect, so a 401 can
@@ -468,7 +553,7 @@ def _not_carried(
         # D1.1), so telling the operator to set an env URL is advice that cannot
         # work: the store's `api_url` wins. Name the value to record instead.
         remedy = (
-            f"record {_store_base(final)} as `api_url` in {sent.source} — a stored "
+            f"record {store_base(final)} as `api_url` in {sent.source} — a stored "
             f"credential takes its endpoint from that same file, so an environment "
             f"URL cannot aim it at {final}."
         )
@@ -528,6 +613,19 @@ class _BearerProvider(httpx.Auth):
     is fixed at construction, so a credential that now resolves to a DIFFERENT
     host is not this request's credential — it is withheld (never handed to a
     host the environment chose) and reported by name on the failure path.
+
+    ⛔ `sent`/`withheld` are BOOKKEEPING FOR THE LAST REQUEST, not per-request
+    state — one provider is shared by every request on one client. So the
+    failure path does NOT read them back: `_resolve_and_stamp` also writes the
+    pair onto the request itself (`_PROVENANCE_EXT`), which is what
+    `_provenance` prefers. Reading the attributes after the fact attributed a
+    PEER request's credential to this failure — a withheld-credential rejection
+    reported as a generic value fault, or the reverse (review, P2). The
+    attributes stay because two best-effort readers need a last-known value
+    (`_url` names the endpoint of the last attempt, and the success-path
+    `_announce_withheld` has no failing request to key on), and because
+    losing a race there can only misdescribe a warning, never misclassify a
+    refusal.
     """
 
     def __init__(self, url: str) -> None:
@@ -535,15 +633,48 @@ class _BearerProvider(httpx.Auth):
         self.sent: Connection | None = None
         self.withheld: Connection | None = None
 
-    def auth_flow(self, request):
-        connection = resolve_connection()
+    def _resolve_and_stamp(self, request) -> None:
+        """Resolve the credential for THIS request and record it ON the request.
+
+        `global_only=True`: this is the step that actually puts the credential on
+        the wire, so it is the transmitting posture by definition — a
+        project-local store must not decide the header here even if some caller
+        resolved its endpoint with the default posture (#2369 D1.2).
+        """
+        connection = resolve_connection(global_only=True)
+        withheld = None
         self.sent = connection
         _LAST_SENT[0] = connection
         self.withheld = None
         if connection.key and not _same_endpoint(connection.url, self.url):
+            withheld = connection
             self.withheld = connection
         elif connection.key:  # a blank resolution is absent, never `Bearer ` + nothing
             request.headers["Authorization"] = f"Bearer {connection.key}"
+        # The per-request record a failure is classified from: the provider's own
+        # attributes are overwritten by whichever request resolved last.
+        request.extensions[_PROVENANCE_EXT] = (connection, withheld)
+
+    def auth_flow(self, request):
+        self._resolve_and_stamp(request)
+        yield request
+
+    async def async_auth_flow(self, request):
+        """The ASYNC variant, because this scheme performs FILE I/O.
+
+        httpx's own `Auth` docstring says to override `async_auth_flow` when the
+        scheme does I/O, and it is not a hint: the base implementation drains the
+        SYNC generator, so `resolve_connection()` — a `stat`, a `read_text` and a
+        `json.loads`, on EVERY request — ran ON the event loop. Every async client
+        in the tree (fastmcp's, and `status()`/`list_tools()`/`call_tool()` ride
+        it) would stall the whole loop for a disk read per request, which shows
+        up as latency under concurrency rather than as an error.
+
+        `asyncio.to_thread` moves exactly that call off the loop — the credential
+        is still resolved immediately before the request is sent (the #10605
+        property), only not on the loop thread.
+        """
+        await asyncio.to_thread(self._resolve_and_stamp, request)
         yield request
 
 
@@ -578,12 +709,19 @@ def _same_endpoint(a: str, b: str) -> bool:
     return parts(a) == parts(b)
 
 
-def _store_base(client_url: str) -> str:
+def store_base(client_url: str) -> str:
     """The `api_url` a store must record for `client_url` to resolve to it.
 
     `resolve_connection` builds a store endpoint as `api_url + "/mcp/"`, so
     naming the endpoint itself as the value produces `/mcp/mcp/`. The base is
     what the message must tell the operator to record.
+
+    PUBLIC (no leading underscore) because `tortoise/mcp_bridge.py` imports it:
+    a cross-module API spelled `_store_base` reads as private, so the next
+    author needing it either re-implements the `/mcp` trimming (and gets
+    `/mcp/mcp/` back) or imports a name the module's author believed was
+    internal. Its siblings in that same import (`resolve_connection`, `redact`,
+    `Connection`, `REFUSAL_CODE`) are all public, so this one is too.
     """
     base = client_url.rstrip("/")
     return base[: -len("/mcp")] if base.endswith("/mcp") else base
@@ -595,9 +733,34 @@ def _mismatch(connection: Connection, client_url: str) -> MCPCredentialHostMisma
         f"to {connection.url}, but this client talks to {client_url} (#2369 D1.1). The "
         f"credential was NOT sent — an environment-supplied URL must never be able to "
         f"aim a stored credential at a host of its choosing. Fix the source: record "
-        f"{_store_base(client_url)} as `api_url` in the store, use the env key for this "
+        f"{store_base(client_url)} as `api_url` in the store, use the env key for this "
         f"host, or build the client for {connection.url}."
     )
+
+
+def _provenance(
+    exc: BaseException, provider: _BearerProvider,
+) -> tuple[Connection | None, Connection | None]:
+    """`(sent, withheld)` for the request that FAILED, not for the last one.
+
+    The pair is stamped onto the request by `_BearerProvider._resolve_and_stamp`
+    (`_PROVENANCE_EXT`) and read back off the exception's request, so a refusal
+    can never be classified from a PEER request's resolution: one provider is
+    shared by everything the client sends, and concurrent requests overwrite its
+    `sent`/`withheld` attributes. Reading those after the fact reported a
+    withheld-credential rejection as a generic value fault, or the reverse.
+
+    Falls back to the provider's last values when the exception carries no
+    request (`httpx` sets one on every transport error, but a wrapper from the
+    MCP layer need not): a best-effort answer beats no refusal, and the withheld
+    leg still fails CLOSED — the credential was withheld from the wire either
+    way, so the only thing a stale record can affect is which message names it.
+    """
+    extensions = getattr(getattr(exc, "request", None), "extensions", None)
+    record = extensions.get(_PROVENANCE_EXT) if isinstance(extensions, dict) else None
+    if record is not None:
+        return record
+    return provider.sent, provider.withheld
 
 
 def _classify_failure(exc: BaseException, provider: _BearerProvider) -> None:
@@ -609,10 +772,15 @@ def _classify_failure(exc: BaseException, provider: _BearerProvider) -> None:
     and reporting it as a co-source conflict would move an outage into the
     set-up-gap bucket (#3805) exactly as the server message this module removes
     moves a set-up gap into the credential-value bucket.
+
+    The credential facts come from `_provenance`, i.e. from THIS failure's own
+    request — see that function for why the provider's attributes are not read
+    back here.
     """
+    sent, withheld = _provenance(exc, provider)
     is_auth_rejection = bool(_AUTH_REJECTION_RE.search(str(exc)))
     declined_hop = _redirect_refused(exc)
-    if provider.withheld is not None:
+    if withheld is not None:
         # A withheld credential explains BOTH failure shapes: an auth rejection
         # (the request went out bare) and a declined redirect (the hop it would
         # have taken is the one a withheld credential must never take). The
@@ -620,7 +788,7 @@ def _classify_failure(exc: BaseException, provider: _BearerProvider) -> None:
         # reports as "your endpoint redirects", and the message credits a
         # withheld value with a delivery that never happened.
         if (is_auth_rejection or declined_hop) and not _is_tool_error(exc):
-            raise _mismatch(provider.withheld, provider.url) from exc
+            raise _mismatch(withheld, provider.url) from exc
         if is_auth_rejection:
             return  # a TOOL's own 401 is the tool's, whatever the credential state
     # An SDK that REFUSES the redirect never reaches the auth check below (no
@@ -632,10 +800,10 @@ def _classify_failure(exc: BaseException, provider: _BearerProvider) -> None:
     # into the credential bucket.
     if declined_hop is not None and not _is_tool_error(exc):
         raise _not_carried(
-            exc, provider.sent or resolve_connection(), declined_hop,
+            exc, sent or resolve_connection(global_only=True), declined_hop,
             hop_refused=True, request_url=provider.url,
         ) from exc
-    _raise_if_credential_was_missing(exc, provider.sent)
+    _raise_if_credential_was_missing(exc, sent)
 
 
 def _client(provider: _BearerProvider):
@@ -769,7 +937,7 @@ def get_client():
     host is no longer this client's — the provider withholds it and the failure is
     reported as `MCPCredentialHostMismatchError` rather than sent.
     """
-    return _client(_BearerProvider(resolve_connection().url))
+    return _client(_BearerProvider(resolve_connection(global_only=True).url))
 
 
 def status() -> dict[str, Any]:
@@ -781,7 +949,7 @@ def status() -> dict[str, Any]:
     `unconfigured` term — a set-up gap, not an outage, #3805), else
     {"status": "tortoise_unavailable", "url": ..., "error": ...}.
     """
-    provider = _BearerProvider(resolve_connection().url)
+    provider = _BearerProvider(resolve_connection(global_only=True).url)
 
     async def _probe() -> dict[str, Any]:
         async with _client(provider) as client:
@@ -813,7 +981,7 @@ def available() -> bool:
 
 def list_tools() -> list[str]:
     """Names of the tools exposed by the daemon (registry surface)."""
-    provider = _BearerProvider(resolve_connection().url)
+    provider = _BearerProvider(resolve_connection(global_only=True).url)
 
     async def _list() -> list[str]:
         async with _client(provider) as client:
@@ -830,7 +998,7 @@ def call_tool(name: str, arguments: dict[str, Any] | None = None) -> Any:
     should check `available()` first (or catch exceptions). An auth rejection
     with no credential resolved raises `MCPKeyEmptyError`.
     """
-    provider = _BearerProvider(resolve_connection().url)
+    provider = _BearerProvider(resolve_connection(global_only=True).url)
 
     async def _call() -> Any:
         async with _client(provider) as client:

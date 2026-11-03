@@ -82,9 +82,9 @@ import httpx
 from tortoise.mcp_client import (
     REFUSAL_CODE,
     Connection,
-    _store_base,
     redact,
     resolve_connection,
+    store_base,
 )
 
 #: the named code for "a credential resolved but this request carried none".
@@ -296,10 +296,18 @@ def _redirect_refusal(response: httpx.Response, body: str, sent: Connection) -> 
         # A FILE-sourced credential decides its OWN endpoint (co-source, #2369
         # D1.1), so "point TORTOISE_MCP_URL at it" is advice that cannot work: the
         # store's `api_url` wins and the operator repeats the failure forever.
+        # The old tail of this message offered "run the bridge from a directory
+        # whose store already names {final}" — DEAD ADVICE once the bridge carries
+        # the transmitting posture (#2369 D1.2): a `<cwd>/.tortoise` is not read
+        # here at all, so the only file that can satisfy it is the user-global
+        # one, which does not depend on the directory. Name the switch instead of
+        # sending the operator to a file this process will never open.
         remedy = (
-            f"record {_store_base(final)} as `api_url` in {sent.source} — a stored "
-            f"credential takes its endpoint from that same file — or run the bridge "
-            f"from a directory whose store already names {final}."
+            f"record {store_base(final)} as `api_url` in {sent.source} — a stored "
+            f"credential takes its endpoint from that same file. A repo-committed "
+            f"`./.tortoise` cannot supply it (the bridge reads the user-global "
+            f"store only): if the credential is deliberately project-local, set "
+            f"TORTOISE_MCP_ALLOW_PROJECT_STORE=1 for the bridge process."
         )
     else:
         remedy = (
@@ -396,9 +404,16 @@ def forward(client: httpx.Client, state: dict, payload: Any) -> list[Any]:
     The credential is resolved ONCE per forwarded message and used for that whole
     exchange — the header AND the refusal's evidence — so the two can never
     describe different resources.
+
+    `global_only=True`: this is the TRANSMITTING posture (#2369 D1.2). A harness
+    launches the bridge as a stdio command with cwd = the project, so the
+    project-local `./.tortoise` would otherwise be BOTH the credential and the
+    endpoint for every forwarded message — a cloned repo choosing the host the
+    harness's memory traffic goes to (measured, #10605 review P0: the repo store
+    supplied `Bearer tt_repo_controlled` to the repo's own endpoint).
     """
     expected_ids = _request_ids(payload)
-    connection = resolve_connection()
+    connection = resolve_connection(global_only=True)
     url = connection.url
     try:
         with client.stream(
@@ -527,7 +542,11 @@ def main(argv: list[str] | None = None) -> int:
         timeout = float(os.environ.get("TORTOISE_MCP_BRIDGE_TIMEOUT", _DEFAULT_TIMEOUT))
     except ValueError:
         timeout = _DEFAULT_TIMEOUT
-    connection = resolve_connection()
+    # TRANSMITTING posture, and for the same reason as `forward`: the endpoint
+    # logged here is the one every message will be sent to, and a repository
+    # must not be able to choose it (#2369 D1.2). Non-transmitting readers
+    # (redaction, below) deliberately keep reading every store.
+    connection = resolve_connection(global_only=True)
     state: dict[str, Any] = {"session_id": None, "protocol_version": None}
     _log(f"forwarding stdio → {connection.url}")
     _log(
@@ -557,7 +576,11 @@ def main(argv: list[str] | None = None) -> int:
                 # on a bad frame leaves the harness waiting with no diagnosis, and
                 # the exit is indistinguishable from a crash loop.
                 # The START key and the LIVE one: a rotation between the
-                # send and the fault means either could be in the text.
+                # send and the fault means either could be in the text. These
+                # two resolutions deliberately keep the DEFAULT posture: they
+                # feed redaction, where every known value is wanted — a value
+                # from a store the request would not read is still a value a
+                # server might echo.
                 detail = _redact_any(repr(exc), connection.key,
                                      resolve_connection().key)
                 # REDACT FIRST, TRUNCATE SECOND — the sibling line below already

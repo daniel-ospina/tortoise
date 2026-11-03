@@ -212,7 +212,8 @@ useless: it points at the credential's VALUE when the client never looked again
 
 1. `tortoise/mcp_client.py` resolves the Bearer value **per request** (an httpx
    `auth_flow` provider — the `token()`-callback shape the MCP SDKs converge on,
-   rather than a captured string), reading `TORTOISE_API_KEY`, then the fleet
+   rather than a captured string — with the `async_auth_flow` twin an
+   `AsyncClient` drives), reading `TORTOISE_API_KEY`, then the fleet
    alias `TORTOISE_MCP_API_KEY`, then the stored credentials in the recorded
    #1708 D5 order: the PROJECT-LOCAL `./.tortoise` that `tortoise init --api-key`
    writes, then `~/.tortoise/credentials.json`. A rotation
@@ -224,6 +225,19 @@ useless: it points at the credential's VALUE when the client never looked again
    `unconfigured` term (a set-up gap, not an outage, #3805). The named refusals
    hold on the PUBLIC constructor too (`get_client()` returns a guarded client),
    not only on `status`/`available`/`list_tools`/`call_tool`.
+
+   ⛔ **The PROJECT-LOCAL `./.tortoise` is read for NON-transmitting callers
+   only.** Every entry point that puts the credential on the wire resolves
+   `resolve_connection(global_only=True)`, which reads env plus
+   `~/.tortoise/credentials.json` and SKIPS `<cwd>/.tortoise` — the same posture
+   `tortoise/__main__.py::_resolve_config_path(global_only=True)` has carried
+   since #2369 D1.2, because that file is COMMITTABLE: a cloned repo would
+   otherwise choose both the Bearer key and the host it is sent to (and shadow
+   the credential the user actually stored), and the bridge is launched with
+   cwd = the project. A skipped store is still NAMED in the refusal's source
+   list. A user who deliberately keeps a project-local credential sets
+   `TORTOISE_MCP_ALLOW_PROJECT_STORE=1`; a directory whose `./.tortoise` merely
+   exists does not, by itself, authorize transmission.
 
    A credential whose CO-SOURCED host is not this client's endpoint is
    **withheld**, never sent, and reported as `MCPCredentialHostMismatchError`

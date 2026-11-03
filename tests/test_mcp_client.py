@@ -138,6 +138,51 @@ async def _refuses_every_request(scope, receive, send):
     await send({"type": "http.response.body", "body": body})
 
 
+def _records_the_header_and_refuses(record: list):
+    """A bare endpoint that records what it was sent and 401s.
+
+    Deliberately NOT an MCP daemon: this app answers ONE question — "did anything
+    reach this host, and with which credential?" — so it must not pay a second
+    embedded-SDK build to answer it.
+    """
+    async def app(scope, receive, send):
+        if scope["type"] == "lifespan":
+            while True:
+                message = await receive()
+                if message["type"] == "lifespan.startup":
+                    await send({"type": "lifespan.startup.complete"})
+                elif message["type"] == "lifespan.shutdown":
+                    await send({"type": "lifespan.shutdown.complete"})
+                    return
+        record.append(next(
+            (v.decode() for k, v in scope.get("headers") or () if k == b"authorization"),
+            None,
+        ))
+        body = json.dumps(_REFUSAL).encode()
+        await send({"type": "http.response.start", "status": 401, "headers": [
+            (b"content-type", b"application/json"),
+            (b"content-length", str(len(body)).encode()),
+        ]})
+        await send({"type": "http.response.body", "body": body})
+
+    return app
+
+
+@pytest.fixture
+def repo_aimed_endpoint(monkeypatch, tmp_path):
+    """(url, record) — an endpoint a repo-committed `./.tortoise` points at.
+
+    It stands in for the host a CLONED repository would like the client's traffic
+    sent to. A transmitting path that reaches it has handed the repo both the
+    key and the destination (#2369 D1.2).
+    """
+    monkeypatch.setenv("TORTOISE_DB_URI", "")
+    monkeypatch.setenv("TORTOISE_DB_PATH", str(tmp_path / "aimed.db"))
+    record: list = []
+    for url in _serve(_records_the_header_and_refuses(record)):
+        yield url, record
+
+
 @pytest.fixture
 def refusing_daemon(monkeypatch, tmp_path):
     """An MCP endpoint that rejects every request as unauthenticated."""
@@ -645,9 +690,9 @@ class TestCredentialResolution:
         message = str(caught.value)
         assert "record http://127.0.0.1:9 as `api_url`" in message, message
         assert "record http://127.0.0.1:9/mcp" not in message, message
-        assert mcp_client._store_base("https://h.example/mcp/") == "https://h.example"
-        assert mcp_client._store_base("https://h.example/") == "https://h.example"
-        assert mcp_client._store_base("https://h.example/mcp") == "https://h.example"
+        assert mcp_client.store_base("https://h.example/mcp/") == "https://h.example"
+        assert mcp_client.store_base("https://h.example/") == "https://h.example"
+        assert mcp_client.store_base("https://h.example/mcp") == "https://h.example"
 
     def test_an_explicit_default_port_is_the_same_endpoint(self):
         """`http://h:80/mcp` and `http://h/mcp` are ONE endpoint, not two.
@@ -842,16 +887,52 @@ class TestCredentialResolution:
         assert "tt_sent_key_0123456789abcdef" not in text, text
         assert "<redacted>" in text, text
 
-    def test_the_project_local_store_is_read(
-        self, recorded_daemon, isolated_home, monkeypatch, tmp_path,
+    def test_the_project_local_store_is_read_by_a_non_transmitting_caller(
+        self, isolated_home, monkeypatch, tmp_path,
     ):
-        """`tortoise init --api-key` saves `./.tortoise` — the client must read it.
+        """`tortoise init --api-key` saves `./.tortoise` — a READER still sees it.
 
         The hosted onboarding writes the PROJECT-LOCAL store, and the recorded
         chain is env → cwd/.tortoise → ~/.tortoise/credentials.json (#1708 D5).
         Reading only the global store made the client blind to the file the user
         was actually given: no credential, the default endpoint, and a refusal
         naming stores they never wrote.
+
+        That precedence is NOT deleted — it is kept off the WIRE. Every
+        transmitting entry point resolves `global_only=True` (#2369 D1.2), so the
+        project store is read by the non-transmitting callers that want it
+        (redaction, `describe_failure`) and skipped by the ones that send. The
+        skipped store is NAMED in `sources`, so a refusal cannot tell an operator
+        with a key in `./.tortoise` that they have none anywhere.
+        """
+        from tortoise import mcp_client
+
+        work = tmp_path / "project"
+        work.mkdir()
+        monkeypatch.chdir(work)
+        (work / ".tortoise").write_text(json.dumps(
+            {"api_key": "tt_project_local", "api_url": "http://127.0.0.1:9"}))
+
+        connection = mcp_client.resolve_connection()
+        assert connection.key == "tt_project_local", connection
+        assert connection.source == str(work / ".tortoise"), connection
+
+        transmitting = mcp_client.resolve_connection(global_only=True)
+        assert transmitting.key is None, transmitting
+        assert transmitting.source is None, transmitting
+        assert transmitting.url == mcp_client._DEFAULT_URL, transmitting.url
+        skipped = [s for s in transmitting.sources if str(work / ".tortoise") in s]
+        assert skipped and "SKIPPED" in skipped[0], transmitting.sources
+
+    def test_an_operator_can_deliberately_keep_the_credential_in_the_project(
+        self, recorded_daemon, isolated_home, monkeypatch, tmp_path,
+    ):
+        """The opt-in restores transmission from `./.tortoise` — deliberately.
+
+        `tortoise init --api-key` writes the project store, so the transmitting
+        posture cannot skip it with NO way back: a user who means to keep the
+        credential there sets `TORTOISE_MCP_ALLOW_PROJECT_STORE=1` once. Pinned
+        as a test because an escape hatch nothing exercises rots into a lie.
         """
         from tortoise import mcp_client
 
@@ -859,15 +940,59 @@ class TestCredentialResolution:
         work = tmp_path / "project"
         work.mkdir()
         monkeypatch.chdir(work)
+        monkeypatch.setenv("TORTOISE_MCP_ALLOW_PROJECT_STORE", "1")
         (work / ".tortoise").write_text(json.dumps(
             {"api_key": "tt_project_local", "api_url": url[: -len("/mcp")]}))
 
-        connection = mcp_client.resolve_connection()
+        connection = mcp_client.resolve_connection(global_only=True)
         assert connection.key == "tt_project_local", connection
         assert connection.source == str(work / ".tortoise"), connection
 
         assert mcp_client.list_tools()
         assert set(h for h in seen if h) == {"Bearer tt_project_local"}, seen
+
+    def test_a_repo_committed_store_cannot_aim_a_transmitting_path(
+        self, repo_aimed_endpoint, isolated_home, monkeypatch, tmp_path,
+    ):
+        """#2369 D1.2 mirrored: a repo-committed `./.tortoise` decides NOTHING.
+
+        MEASURED BEFORE THIS PIN (#10605 review, P0): with `TORTOISE_MCP_URL` and
+        both key names unset, a cloned repo shipping
+        `./.tortoise = {"api_key": "tt_repo_controlled", "api_url": …}` made
+        `resolve_connection()` return THAT endpoint — and the transmitting paths
+        (`list_tools`, `call_tool`, and `tortoise/mcp_bridge.py`, which a harness
+        launches with cwd = the project) sent to it with the repo's own key. The
+        repository chose both halves of the identity, and shadowed whatever
+        credential the user actually had stored.
+
+        The pin is on the WIRE: the endpoint the transmitting path contacted must
+        be the one an operator configured, never the repo's.
+        """
+        from tortoise import mcp_client
+
+        aimed_url, aimed_record = repo_aimed_endpoint
+        work = tmp_path / "cloned-repo"
+        work.mkdir()
+        monkeypatch.chdir(work)
+        monkeypatch.delenv("TORTOISE_MCP_URL", raising=False)
+        for name in mcp_client._ENV_KEY_NAMES:
+            monkeypatch.delenv(name, raising=False)
+        (work / ".tortoise").write_text(json.dumps(
+            {"api_key": "tt_repo_controlled", "api_url": aimed_url[: -len("/mcp")]}))
+
+        local = mcp_client.resolve_connection()
+        assert local.source == str(work / ".tortoise"), local
+        assert local.url == aimed_url + "/", local.url
+
+        transmit = mcp_client.resolve_connection(global_only=True)
+        assert transmit.url == mcp_client._DEFAULT_URL, transmit.url
+        assert mcp_client.mcp_url() == transmit.url
+
+        payload = mcp_client.status()
+        assert payload["url"] == transmit.url, payload
+        assert aimed_record == [], (
+            f"the repo-committed store aimed a transmitting path at {aimed_url}: "
+            f"{aimed_record!r}")
 
     def test_a_directory_named_tortoise_is_not_a_corrupt_store(
         self, isolated_home, monkeypatch, tmp_path,
@@ -996,6 +1121,60 @@ class TestCredentialResolution:
         # No raise: this is a proxy/scheme fault, and the SDK's own message is the
         # honest one. The credential classification must stay out of it.
         mcp_client._classify_failure(downgrade, provider)
+
+    def test_a_failure_is_classified_from_ITS_OWN_request_not_the_providers(
+        self, isolated_home,
+    ):
+        """The provider's `sent`/`withheld` are LAST-REQUEST bookkeeping (#10605 P2).
+
+        ONE provider is shared by every request a client sends, so those two
+        attributes describe whichever request resolved last. Reading them back on
+        the failure path attributed a PEER request's credential to this failure —
+        a withheld-credential rejection reported as a generic value fault, or the
+        reverse — with no cross-request token LEAK (each request carries its own
+        header), only a wrong refusal. The pair is therefore stamped onto the
+        REQUEST (`_PROVENANCE_EXT`) and read from there.
+
+        Both directions are pinned, because fixing only one of them leaves the
+        other misreporting: the provider saying "withheld" while this request sent
+        bare, and the provider saying "nothing" while this request withheld.
+        """
+        import httpx
+
+        from tortoise import mcp_client
+
+        client_url = "https://mcp.example.com/mcp"
+        elsewhere = mcp_client.Connection(
+            "https://elsewhere.example/mcp", "tt_other_key",
+            "~/.tortoise/credentials.json", ("store",))
+        bare = mcp_client.Connection(client_url, None, None, ("env",))
+
+        def _rejection(connection, withheld) -> httpx.HTTPStatusError:
+            request = httpx.Request("GET", client_url)
+            request.extensions[mcp_client._PROVENANCE_EXT] = (connection, withheld)
+            return httpx.HTTPStatusError(
+                "401 Unauthorized", request=request,
+                response=httpx.Response(401, request=request))
+
+        # (a) a PEER request's withheld credential must not explain this failure.
+        provider = mcp_client._BearerProvider(client_url)
+        provider.sent = elsewhere
+        provider.withheld = elsewhere
+        with pytest.raises(mcp_client.MCPKeyEmptyError) as raised:
+            mcp_client._classify_failure(_rejection(bare, None), provider)
+        assert mcp_client.REFUSAL_CODE in str(raised.value), raised.value
+        assert mcp_client.MCPCredentialHostMismatchError.code not in str(raised.value), (
+            f"a peer request's withheld credential was blamed for this one: "
+            f"{raised.value}")
+        assert "tt_other_key" not in str(raised.value), raised.value
+
+        # (b) …and THIS request's own withholding must not be reported as a value
+        # fault just because the provider has since moved on to a clean request.
+        provider.sent = bare
+        provider.withheld = None
+        with pytest.raises(mcp_client.MCPCredentialHostMismatchError) as raised:
+            mcp_client._classify_failure(_rejection(elsewhere, elsewhere), provider)
+        assert "~/.tortoise/credentials.json" in str(raised.value), raised.value
 
     def test_a_tool_error_quoting_the_redirect_refusal_is_not_a_credential_refusal(
         self, monkeypatch, isolated_home,

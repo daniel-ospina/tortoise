@@ -104,6 +104,41 @@ def test_status_forwards_driver_not_configured(monkeypatch, capsys):
     assert json.loads(capsys.readouterr().out)["status"] == "unconfigured"
 
 
+def test_a_missing_key_refusal_keeps_the_endpoint_it_probed(monkeypatch, capsys):
+    """The driver's `unconfigured` is passed through VERBATIM (#10605 review, P1).
+
+    MEASURED BEFORE THIS PIN: the driver refusing for a MISSING KEY reports its
+    refusal under the recorded `unconfigured` term — `{"status": "unconfigured",
+    "url": "http://localhost:8000/mcp/", "error": "MCP-KEY-EMPTY: …"}` — and with
+    `TORTOISE_MCP_URL` unset this probe rewrote it to `{"status":
+    "unconfigured", "url": null, "configured": false, …}`. An endpoint WAS
+    resolved and CONTACTED and the gap was the credential, so a caller branching
+    on `configured` was told to declare an endpoint it already had: exactly the
+    misattribution #10605 exists to remove, and the opposite of what this
+    module's own docstring promised.
+
+    The rewrite is therefore keyed on the driver's word being OUTSIDE the
+    recorded term set — only the two-outcome outage word needs `configured`.
+    """
+    monkeypatch.delenv("TORTOISE_MCP_URL", raising=False)
+    refusal = {
+        "status": "unconfigured",
+        "url": "http://localhost:8000/mcp/",
+        "error": ("MCP-KEY-EMPTY: the MCP endpoint rejected this request as "
+                  "unauthenticated and NO credential resolved on the client"),
+    }
+    monkeypatch.setattr(cli, "status", lambda: dict(refusal))
+
+    assert cli.main(["status"]) == 4  # still a SET-UP gap, not an outage
+    out = json.loads(capsys.readouterr().out)
+    assert out["status"] == "unconfigured"
+    assert out["url"] == "http://localhost:8000/mcp/", (
+        f"the endpoint the driver actually probed was discarded: {out}")
+    assert "configured" not in out, (
+        "a missing credential was re-reported as a missing endpoint: "f"{out}")
+    assert "MCP-KEY-EMPTY" in out["error"]
+
+
 def test_call_failure_keeps_exit_one(monkeypatch, capsys):
     """1 is KEPT for a query that genuinely fails — the supersede is narrow."""
 

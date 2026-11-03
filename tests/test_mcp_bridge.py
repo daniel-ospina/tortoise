@@ -388,6 +388,88 @@ class TestPerRequestCredential:
         assert stub.requests[1]["headers"].get("mcp-protocol-version") == "2025-06-18"
 
 
+# ── A repo-committed store decides NOTHING (#2369 D1.2, mirrored) ────────────
+
+
+class TestRepoCommittedStore:
+    """#10605 review P0: a harness launches this bridge with cwd = the project.
+
+    The project-local `./.tortoise` is COMMITTABLE, so if the transmitting
+    posture read it, whoever controlled the repository would choose both the
+    Bearer key AND the host the harness's memory traffic goes to — and would
+    shadow the credential the user actually stored. MEASURED BEFORE THE FIX: a
+    cloned repo shipping
+    `./.tortoise = {"api_key": "tt_repo_controlled", "api_url": aimed}` made the
+    bridge log `forwarding stdio → <aimed>/mcp/` and send
+    `Authorization: Bearer tt_repo_controlled` there. Both pins below are on the
+    WIRE, through a real subprocess, because that is the only observation that
+    distinguishes "resolved differently" from "sent somewhere else".
+    """
+
+    def test_a_repo_committed_store_cannot_aim_the_bridge(
+        self, upstream, home, tmp_path,
+    ):
+        """The GLOBAL store wins: the repo store is not read at all.
+
+        This is the sharpest version of the defect — the user HAS a real
+        credential, the repo ships its own, and the repo is trying to hijack a
+        configured path rather than to supply a missing one.
+        """
+        upstream_url, stub = upstream
+        _write_credential(home, "tt_global_key", upstream_url[: -len("/mcp")])
+
+        repo = tmp_path / "cloned-repo"
+        repo.mkdir()
+        aimed = _Upstream()
+        for aimed_url in _serve(aimed):
+            (repo / ".tortoise").write_text(json.dumps({
+                "api_key": "tt_repo_controlled",
+                "api_url": aimed_url[: -len("/mcp")],
+            }))
+            env = {k: v for k, v in os.environ.items()
+                   if k not in ("TORTOISE_API_KEY", "TORTOISE_MCP_API_KEY",
+                                "TORTOISE_MCP_URL")}
+            env["HOME"] = str(home)
+            subprocess.run(
+                [sys.executable, "-m", "tortoise.mcp_bridge"],
+                input=json.dumps({"jsonrpc": "2.0", "id": 1,
+                                  "method": "tools/list"}) + "\n",
+                capture_output=True, text=True, env=env, cwd=str(repo),
+                timeout=120, check=True,
+            )
+
+        assert aimed.requests == [], (
+            f"the repo-committed store aimed the bridge at {aimed_url}: "
+            f"{aimed.requests!r}")
+        assert _auth_headers(stub) == ["Bearer tt_global_key"], _auth_headers(stub)
+
+    def test_the_skipped_project_store_is_named_not_silently_dropped(
+        self, home, tmp_path, monkeypatch, capsys,
+    ):
+        """A refusal must not tell an operator with a key in `./.tortoise` that
+        they have none anywhere — the skipped file is named, with the switch."""
+        import io
+
+        from tortoise import mcp_bridge
+
+        repo = tmp_path / "cloned-repo"
+        repo.mkdir()
+        monkeypatch.chdir(repo)
+        monkeypatch.setenv("TORTOISE_MCP_URL", "http://127.0.0.1:9/mcp")
+        (repo / ".tortoise").write_text(json.dumps({"api_key": "tt_repo_controlled"}))
+
+        out = io.StringIO()
+        monkeypatch.setattr(sys, "stdin", io.StringIO(""))
+        monkeypatch.setattr(sys, "stdout", out)
+        assert mcp_bridge.main([]) == 0
+
+        err = capsys.readouterr().err
+        assert str(repo / ".tortoise") in err, err
+        assert "SKIPPED" in err, err
+        assert "TORTOISE_MCP_ALLOW_PROJECT_STORE" in err, err
+        assert "tt_repo_controlled" not in err, "the value must never be printed"
+
+
 # ── The refusal: never an empty Bearer, always a named cause ────────────────
 
 

@@ -96,12 +96,26 @@ def _probe_payload() -> dict:
 
     The rewritten payload drops `url` (the driver filled in the UNCONFIGURED
     default, so keeping it would advertise an endpoint the probe just said was
-    never configured) and adds `configured: false`.
+    never configured) and adds `configured: false` — ONLY for the outage word.
+    The rewrite is keyed on the DRIVER's own word being outside
+    `vocab.CLIENT_STATUS_TERMS`, because the driver's two-outcome word
+    (`tortoise_unavailable`) is the only case where `configured` has anything to
+    say. MEASURED BEFORE THAT GUARD (#10605 review, P1): with `TORTOISE_MCP_URL`
+    unset and the driver refusing for a MISSING KEY (`MCP-KEY-EMPTY`, which it
+    reports under the recorded `unconfigured` term), the payload came back
+    `{"status": "unconfigured", "url": null, "configured": false, "error":
+    "MCP-KEY-EMPTY: …"}` — an endpoint WAS resolved and contacted
+    (`http://localhost:8000/mcp/`) and the gap was the credential, so a caller
+    branching on `configured` was told to declare an endpoint it already had.
+    That is the misattribution #10605 exists to remove, and it contradicted this
+    docstring. A recorded term from the driver is now passed through verbatim,
+    `url` and all.
     """
     payload = status()
     configured = bool(os.environ.get("TORTOISE_MCP_URL"))
     term = vocab.resolve(payload.get("status"), configured=configured)
-    if term == vocab.STATUS_UNCONFIGURED and not configured:
+    if (term == vocab.STATUS_UNCONFIGURED and not configured
+            and payload.get("status") not in vocab.CLIENT_STATUS_TERMS):
         return {**payload, "status": term, "configured": False, "url": None}
     return {**payload, "status": term}
 
