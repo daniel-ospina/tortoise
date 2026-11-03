@@ -41,6 +41,7 @@ Seeds #526 (thin driver package — this client is the future pip surface).
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -84,6 +85,22 @@ _ENV_KEY_NAMES: tuple[str, ...] = ("TORTOISE_API_KEY", "TORTOISE_MCP_API_KEY")
 _AUTH_REJECTION_RE = re.compile(r"\b40[13]\b|unauthorized|invalid or missing bearer", re.IGNORECASE)
 
 REFUSAL_CODE = "MCP-KEY-EMPTY"
+
+#: the port a URL means when it names none, per scheme (`_same_endpoint`).
+_DEFAULT_PORTS = {"http": 80, "https": 443}
+
+
+def redact(text: str, key: str | None) -> str:
+    """Remove a credential VALUE from text that came from OUTSIDE this process.
+
+    A server is free to echo what it rejected (`key tt_… is invalid`), and this
+    module quotes server text into refusals the harness logs. Quoting is right —
+    it is the evidence — but the VALUE must never travel with it: the refusal is
+    not a place a credential may leak into a transcript, a CI log or a file.
+    """
+    if not key:
+        return text
+    return text.replace(key, "<redacted>")
 
 #: credential stores already warned about (#5109) — one line per process.
 _WARNED_READABLE_STORES: set[str] = set()
@@ -245,7 +262,7 @@ def _refusal(exc: BaseException, sent: Connection) -> MCPKeyEmptyError:
         f"unauthenticated and NO credential resolved on the client (checked "
         f"{', '.join(sent.sources)}). The credential is read on EVERY request, so "
         f"setting it now takes effect on the next call — no client rebuild and "
-        f"no session restart. Server said: {exc}"
+        f"no session restart. Server said: {redact(str(exc), sent.key)}"
     )
 
 
@@ -324,10 +341,25 @@ def _same_endpoint(a: str, b: str) -> bool:
     therefore read the SAME endpoint as two different hosts whenever a store
     credential met a client built from the env — and withheld the credential
     with a message that blamed the wrong thing.
+
+    The same reasoning covers an EXPLICIT DEFAULT PORT (`http://h:80/mcp` and
+    `http://h/mcp` are one endpoint) and host case / IPv6 brackets. It does NOT
+    loosen the security property: scheme, host and path must all still match, so
+    no spelling can make a credential for one host look like another's.
     """
-    def parts(url: str) -> tuple[str, str, str]:
+    def parts(url: str) -> tuple[str, str, int | None, str]:
         split = urlsplit(url)
-        return (split.scheme.lower(), split.netloc.lower(), split.path.rstrip("/"))
+        scheme = split.scheme.lower()
+        try:
+            port = split.port
+        except ValueError:  # malformed port: compare it as text, never crash
+            port = None
+        return (
+            scheme,
+            (split.hostname or "").lower(),
+            port if port is not None else _DEFAULT_PORTS.get(scheme),
+            split.path.rstrip("/"),
+        )
 
     return parts(a) == parts(b)
 
@@ -374,6 +406,12 @@ def _classify_failure(exc: BaseException, provider: _BearerProvider) -> None:
 def _client(provider: _BearerProvider):
     """A fastmcp Client wired to the resolved endpoint and the live provider.
 
+    The client is wrapped (`_GuardedClient`) so the NAMED-refusal contract holds
+    on the PUBLIC constructor too, not only inside this module's helpers: a
+    consumer that builds its own client with `get_client()` and drives it in an
+    `async with` gets `MCP-KEY-EMPTY` / `MCP-CREDENTIAL-HOST-MISMATCH`, never the
+    library's raw transport error.
+
     Lazy imports keep the module importable when fastmcp is unavailable
     (graceful degradation for scripts).
     """
@@ -381,12 +419,62 @@ def _client(provider: _BearerProvider):
     from fastmcp.client.transports.http import StreamableHttpTransport
 
     transport = StreamableHttpTransport(url=provider.url)
-    return Client(
+    raw = Client(
         transport,
         auth=provider,
         client_info={"name": "tortoise-mcp-client", "version": "0.1.0"},
         auto_initialize=True,
     )
+    return _GuardedClient(raw, provider)
+
+
+class _GuardedClient:
+    """A fastmcp Client whose failures come back as this module's named refusals.
+
+    Classification happens on the way OUT of the session (where the exception is
+    known), and so does the withheld-credential warning for a call that
+    SUCCEEDED — the two states a caller cannot otherwise tell apart.
+    """
+
+    def __init__(self, client, provider: _BearerProvider) -> None:
+        self._client = client
+        self._provider = provider
+
+    def __getattr__(self, name):
+        return getattr(self._client, name)
+
+    async def __aenter__(self):
+        # `auto_initialize=True` means the FIRST request happens HERE, so this is
+        # where a rejected credential surfaces — not in `__aexit__`.
+        try:
+            await self._client.__aenter__()
+        except BaseException as raised:
+            # A failed enter has nothing to close; the refusal is what matters.
+            with contextlib.suppress(BaseException):
+                await self._client.__aexit__(type(raised), raised, raised.__traceback__)
+            _classify_failure(raised, self._provider)
+            raise
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        result = False
+        if exc is None:
+            try:
+                result = await self._client.__aexit__(exc_type, exc, tb)
+            except BaseException as raised:
+                exc = raised
+        else:
+            # The library re-raises the body's error here; whichever instance
+            # arrives, it is the one that must be classified.
+            try:
+                await self._client.__aexit__(exc_type, exc, tb)
+            except BaseException as raised:
+                exc = raised
+        if exc is not None:
+            _classify_failure(exc, self._provider)
+        else:
+            _announce_withheld(self._provider)
+        return result
 
 
 def _url(provider: _BearerProvider) -> str:
@@ -399,6 +487,24 @@ def _run(coro):
     return asyncio.run(coro)
 
 
+def _announce_withheld(provider: _BearerProvider) -> None:
+    """Warn once when a call SUCCEEDED with a credential that was withheld.
+
+    Nothing failed, so there is no refusal to raise — but the operator is running
+    on a misconfiguration that bites the moment the endpoint requires a key. The
+    message names the sources and both endpoints, never the credential VALUE.
+    """
+    if provider.withheld is None:
+        return
+    _warn_once(
+        "withheld",
+        f"MCP credential from {provider.withheld.source} was NOT sent: it belongs "
+        f"to {provider.withheld.url}, and this client talks to {provider.url}. "
+        f"This call succeeded unauthenticated; it will fail as soon as the "
+        f"endpoint requires a key.",
+    )
+
+
 def _run_guarded(coro, provider: _BearerProvider):
     """`_run`, with a credential fault re-raised as its NAMED refusal."""
     try:
@@ -408,17 +514,7 @@ def _run_guarded(coro, provider: _BearerProvider):
     except Exception as exc:  # noqa: BLE001, RUF100
         _classify_failure(exc, provider)
         raise
-    if provider.withheld is not None:
-        # The call SUCCEEDED with no credential attached, so nothing failed and
-        # there is no refusal to raise — but the operator is running on a
-        # misconfiguration that will bite the moment the endpoint demands auth.
-        _warn_once(
-            "withheld",
-            f"MCP credential from {provider.withheld.source} was NOT sent: it belongs "
-            f"to {provider.withheld.url}, and this client talks to {provider.url}. "
-            f"This call succeeded unauthenticated; it will fail as soon as the "
-            f"endpoint requires a key.",
-        )
+    _announce_withheld(provider)
     return result
 
 

@@ -219,7 +219,16 @@ useless: it points at the credential's VALUE when the client never looked again
    after it; if the endpoint then rejects the call, the client raises
    `MCPKeyEmptyError` (code `MCP-KEY-EMPTY`) naming every source it read instead
    of relaying the server's wording. `status()` reports that as the recorded
-   `unconfigured` term (a set-up gap, not an outage, #3805).
+   `unconfigured` term (a set-up gap, not an outage, #3805). The named refusals
+   hold on the PUBLIC constructor too (`get_client()` returns a guarded client),
+   not only on `status`/`available`/`list_tools`/`call_tool`.
+
+   A credential whose CO-SOURCED host is not this client's endpoint is
+   **withheld**, never sent, and reported as `MCPCredentialHostMismatchError`
+   (`MCP-CREDENTIAL-HOST-MISMATCH`) — and only for an auth rejection: a daemon
+   that is down is an outage whatever the credential situation. Endpoints are
+   compared as endpoints (scheme, host, default port, path without a trailing
+   slash), so one endpoint spelled two ways never reads as two hosts.
 2. `tortoise/mcp_bridge.py` is a local **stdio ↔ Streamable-HTTP** bridge, so a
    harness can declare a command instead of a header:
 
@@ -232,7 +241,9 @@ useless: it points at the credential's VALUE when the client never looked again
    No key in the config, no `${VAR}` to expand, nothing to go stale. Its auth
    refusals are named too, and split by cause: `MCP-KEY-EMPTY` when nothing
    resolved (fixable without a restart) versus a value-fault message when a
-   credential WAS sent and the server refused it.
+   credential WAS sent and the server refused it. Server text is quoted as
+   evidence, but a credential VALUE echoed back by the server is redacted before
+   it reaches the harness's transcript or logs.
 
 **WHICH SOURCE IS ACTUALLY LIVE — stated, because "reads the live environment" is
 too generous.** The bridge is a CHILD process, so its environment is a snapshot

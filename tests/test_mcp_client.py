@@ -564,6 +564,52 @@ class TestCredentialResolution:
         assert mcp_client._store_base("https://h.example/") == "https://h.example"
         assert mcp_client._store_base("https://h.example/mcp") == "https://h.example"
 
+    def test_an_explicit_default_port_is_the_same_endpoint(self):
+        """`http://h:80/mcp` and `http://h/mcp` are ONE endpoint, not two.
+
+        Same false-withhold class as the trailing slash, minus the slash: an
+        operator who writes the default port explicitly would otherwise lose the
+        credential and be told a conflict exists that does not.
+        """
+        from tortoise import mcp_client
+
+        assert mcp_client._same_endpoint("http://h/mcp", "http://h:80/mcp")
+        assert mcp_client._same_endpoint("https://h/mcp", "https://h:443/mcp/")
+        assert mcp_client._same_endpoint("http://H.example/mcp", "http://h.example:80/mcp")
+        assert mcp_client._same_endpoint("http://[::1]:80/mcp", "http://[::1]/mcp")
+        # …and the property it must never loosen: a real difference still differs.
+        assert not mcp_client._same_endpoint("http://h/mcp", "http://h:8080/mcp")
+        assert not mcp_client._same_endpoint("http://h/mcp", "https://h/mcp")
+        assert not mcp_client._same_endpoint("http://h/mcp", "http://other/mcp")
+        assert not mcp_client._same_endpoint("http://h/a", "http://h/b")
+
+    def test_get_client_raises_the_named_refusal(
+        self, refusing_daemon, isolated_home, monkeypatch,
+    ):
+        """`get_client()` is PUBLIC, so the contract must hold there too.
+
+        A consumer builds its own client and drives it in an `async with`; with
+        no guard it would get fastmcp's raw transport error and lose the named
+        refusal this issue is about. Measured through the public constructor,
+        not through the module's own wrappers.
+        """
+        import asyncio
+
+        from tortoise import mcp_client
+
+        monkeypatch.setenv("TORTOISE_MCP_URL", refusing_daemon)
+        monkeypatch.delenv("TORTOISE_API_KEY", raising=False)
+        client = mcp_client.get_client()
+
+        async def _call():
+            async with client:
+                await client.list_tools()
+
+        with pytest.raises(mcp_client.MCPKeyEmptyError) as caught:
+            asyncio.run(_call())
+        assert caught.value.code == "MCP-KEY-EMPTY"
+        assert "credentials.json" in str(caught.value)
+
     def test_a_transport_fault_is_not_reported_as_a_credential_mismatch(
         self, isolated_home, monkeypatch,
     ):
