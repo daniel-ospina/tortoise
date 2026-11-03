@@ -49,7 +49,7 @@ import re
 import secrets
 from datetime import datetime, timedelta, timezone
 from typing import NoReturn
-from urllib.parse import parse_qs, urlencode, urlparse, urlsplit, urlunsplit  # noqa: F401
+from urllib.parse import parse_qs, urlencode, urlparse, urlsplit, urlunsplit
 
 # #8218 — the client-identity decision (SCOPE §9 class 4(i)) is its own module so
 # the invariant has ONE enumerable home; the consent page only renders it.
@@ -2756,8 +2756,19 @@ def consent_bounce_url(app_origin: str, raw_query: str) -> str:
       predictable from the `state` (which is client-chosen and public).
     """
     inner = CONSENT_START_PATH + (("?" + raw_query) if raw_query else "")
-    inner += ("&" if "?" in inner else "?") + urlencode(
-        {CONSENT_ATTEMPT_KEY_PARAM: secrets.token_urlsafe(32)})
+    # ⛔ APPEND ONLY WHERE NONE EXISTS. There are two callers and they are NOT alike: the bounce
+    # (`hosted_api.oauth_authorize`) carries no key, but the page's own sign-in link
+    # (`consent_page_html` → SIGNIN_URL) is rendered ONLY for a keyed flow, so ITS raw_query always
+    # carries one. Appending unconditionally emitted `…&attempt_key=K&attempt_key=<minted>`, which
+    # is benign today only because every reader takes the FIRST value — i.e. correctness would rest
+    # on a detail no consumer promises, and the day one takes the last, the page's sign-in leg
+    # presents the minted key instead of the row's and the visitor meets this very dead end again
+    # (#10487). A present-but-BLANK value counts as absent: it selects the bounce branch upstream
+    # (`if not key`), and start.ts reads `""` as no key at all.
+    if not any(v.strip() for v in parse_qs(raw_query, keep_blank_values=True)
+               .get(CONSENT_ATTEMPT_KEY_PARAM, [])):
+        inner += ("&" if "?" in inner else "?") + urlencode(
+            {CONSENT_ATTEMPT_KEY_PARAM: secrets.token_urlsafe(32)})
     return (app_origin.rstrip("/") + CONSENT_SIGNIN_PATH + "?"
             + urlencode({"next": inner}))
 
