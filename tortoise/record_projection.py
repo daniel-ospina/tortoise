@@ -5027,6 +5027,23 @@ _CONTENT_COLUMNS: frozenset[str] = frozenset({
     # operator log (#10620 review cycle 5, P2). The line still NAMES the column
     # and its length, which is what makes a refusal diagnosable.
     "search_keys",
+    # ⛔ …and the IDENTITY-NAME columns, which the OTHER half of the same log line
+    # ALREADY withheld — so the withhold read as true of each half and false of
+    # the line (#10648 review P2). `record_writer._IDENTITY_CONTENT_KEYS` rules
+    # that a `source`'s `name` is its document title — the same datum `title`
+    # above is withheld as — and prints `name=<N chars withheld>`; the
+    # attribution half then printed the SAME string as `name=Q3 pricing memo`, in
+    # one warning line, for a `SourceCreated`/`SourceAdded` whose insert failed
+    # (`test_the_same_document_title_is_withheld_by_BOTH_halves_of_the_line`).
+    # `canonical_name` is that datum's home on `object`; `event.subject` /
+    # `event.object` are an event's own text describing its participants, the
+    # same class on `event`.
+    # NOT hand-maintained prose: `record_writer._IDENTITY_CONTENT_KEYS` is now a
+    # SUBSET of this set, asserted by
+    # `tests/test_record_searchkeys_10620.py::test_the_identity_withhold_list_is_
+    # a_subset_of_the_attribution_list`, so the two halves of one line cannot
+    # disagree again.
+    "name", "canonical_name", "subject", "object",
 })
 
 #: How much of the DRIVER's message a failure line carries. The driver names the

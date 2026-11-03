@@ -920,6 +920,73 @@ def test_content_columns_are_named_but_never_quoted():
     )
 
 
+def test_the_same_document_title_is_withheld_by_BOTH_halves_of_the_line():
+    """⛔ ONE log line, ONE withhold rule — the halves must not disagree.
+
+    `record_writer._IDENTITY_CONTENT_KEYS` rules that a `source`'s `name` is its
+    document title and prints only `name=<N chars withheld>`. Two clauses later
+    on the SAME line, the attribution printed the string verbatim
+    (`name=Q3 pricing memo`), because `name` was never added to
+    `record_projection._CONTENT_COLUMNS` — a withhold true of each half and false
+    of the line (#10648 review P2). The column is still NAMED with its length;
+    `node_key`/`url` is what an operator chases, and those are printed.
+    """
+    from tortoise import record_writer
+
+    node = record_projection.Node("source", "Source", "node_key")
+    col_values, tail = record_projection._split_properties(
+        "source",
+        {"name": "Q3 pricing memo", "url": "https://example.test/memo",
+         "title": "Q3 pricing memo"},
+        columns=record_projection.table_columns(),
+        refused=record_projection.refused_props_names(),
+    )
+    assert "name" in col_values, (
+        "the premise: a source snapshot's `name` reaches the `name` COLUMN "
+        f"(got {sorted(col_values)})")
+
+    statement = record_projection._upsert_statement(
+        "o", "g", node, "https://example.test/memo", col_values, tail)
+    attribution = record_projection._statement_attribution(statement, 2, 2)
+    assert "INSERT INTO public.source" in attribution, attribution
+    assert "name=<15 chars withheld>" in attribution, (
+        "the attribution half still prints the datum the identity half "
+        f"withholds: {attribution}")
+    assert "name=Q3 pricing memo" not in attribution, attribution
+
+    # …and on the whole line the operator reads, both halves together: the
+    # identity clause, then the statement attribution.
+    identity = record_writer._record_identity(
+        {"type": "SourceCreated", "source": {"name": "Q3 pricing memo"}})
+    line = record_projection._failure_line(
+        attribution, record_projection._driver_fault(
+            _DriverError("permission denied for table source", code="42501")))
+    whole = f"record=SourceCreated {identity}: {line}"
+    assert "source.name=<15 chars withheld>" in whole, whole
+    assert "Q3 pricing memo" not in whole, (
+        f"a document title reached the one warning line: {whole}")
+
+
+def test_the_identity_withhold_list_is_a_subset_of_the_attribution_list():
+    """The two withhold lists are ONE rule, pinned mechanically (#10648 P2).
+
+    `_CONTENT_COLUMNS` is a maintained list (no schema can say whether a column's
+    value is the user's text), so a name added to `_IDENTITY_CONTENT_KEYS` for
+    the identity half can silently stay printable in the attribution half — which
+    is exactly how `name` was withheld on one side of a line and printed on the
+    other. The subset relation is the invariant: an identity key is content, so
+    the attribution must withhold the column of the same name.
+    """
+    from tortoise import record_writer
+
+    missing = sorted(record_writer._IDENTITY_CONTENT_KEYS
+                     - record_projection._CONTENT_COLUMNS)
+    assert not missing, (
+        f"identity field(s) {missing} are withheld by `_record_identity` but "
+        "PRINTED by `_statement_attribution` — the same value would appear twice "
+        "on one failure line, once withheld and once quoted")
+
+
 def test_content_columns_are_real_record_columns():
     """The withhold list may not rot into names no table has (#10620 cycle 3).
 
@@ -944,7 +1011,13 @@ def test_content_columns_are_real_record_columns():
         f"withheld name(s) that are not a column of any record table: {unknown} — "
         "a stale entry protects nothing")
     for required in ("content", "quote", "props", "_search_text", "title",
-                     "topics", "search_keys"):
+                     "topics", "search_keys",
+                     # #10648 review P2: the identity-NAME columns. `name` is
+                     # ruled content by `record_writer._IDENTITY_CONTENT_KEYS`
+                     # (a source's `name` IS its title); `canonical_name` is the
+                     # same datum on `object`, and `event.subject` /
+                     # `event.object` are an event's own participant text.
+                     "name", "canonical_name", "subject", "object"):
         assert required in record_projection._CONTENT_COLUMNS, (
             f"{required!r} carries the user's own text and must be withheld")
 

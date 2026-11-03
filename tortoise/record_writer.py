@@ -1197,6 +1197,16 @@ _RECORD_IDENTITY_KEYS: tuple[str, ...] = (
 #: document title — the same datum `record_projection._CONTENT_COLUMNS` withholds
 #: as ``title`` — so its value is withheld exactly as that attribution withholds
 #: it, and only its presence and length are logged (#10648 review P3).
+#:
+#: ⛔ THE TWO HALVES OF ONE LOG LINE MUST AGREE (#10648 review P2). Withholding it
+#: HERE while `record_projection._CONTENT_COLUMNS` printed the same string as
+#: ``name=Q3 pricing memo`` two clauses later was a withhold true of each half and
+#: false of the line. `name` (with ``canonical_name``/``subject``/``object``) is
+#: therefore in that list too, and
+#: `tests/test_record_searchkeys_10620.py::test_the_identity_withhold_list_is_
+#: a_subset_of_the_attribution_list` pins :data:`_IDENTITY_CONTENT_KEYS` as a
+#: SUBSET of it — a new content-bearing identity key here goes red there until the
+#: attribution half withholds it too.
 _IDENTITY_CONTENT_KEYS: frozenset[str] = frozenset({"name"})
 
 #: How much of ONE identity value the log line carries. An ``eventId`` is bounded
