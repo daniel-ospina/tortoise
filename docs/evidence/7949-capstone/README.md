@@ -115,10 +115,13 @@ whose `document_sha256` was
 `sha256:e8b838724a344251d5a8ef51a641e097b97f18319d03a82f1c8de714ad6ddb45`, because `8bc2fbed1`
 (`#10215` / PR `#10509`, merged 2026-11-02T12:22:19Z) amended it: the step set is restated as **all
 eight ACCOUNTED** — seven observed plus the one the record declares conditional. That amendment is
-the same DISCLOSED class of revision the record's own §0 discount rule covers, but it is **post-run**,
-so the document this run was measured against is `5ff05906…` and **not** `e8b83872…`. Neither the
-artifact nor the gate can show a reader this — the gate compares the tree's bytes with the
-tree's record, so each version passes in its own tree — which is why it is stated here instead of
+the same DISCLOSED class of revision the record's §8 change-control protocol covers, but it is
+**post-run**, so the document this run was measured against is `5ff05906…` and **not** `e8b83872…`.
+**The artifact does not STATE this, and the gate CANNOT see it.** The shipped log's machine block
+names the commit it read the record from (`read_from: git show
+9152448d7:docs/evidence/7949-capstone/preregistration.json`), so the difference is one `git show`
+away — but the log asserts no hash of its own, and the gate compares the tree's bytes with the
+tree's record, so each version passes in its own tree. That is why it is stated here instead of
 being left to be inferred.
 
 ---
@@ -187,9 +190,14 @@ them.** That log renders, for the capture path's `proj.link_source_to_event` cal
 `tortoise/sdk.py` line 15506, and for `_TURN_WRITE_CYPHER` the number `tortoise/sdk.py` line 2408
 — written here WITHOUT the `file:line` form on purpose, because these are not live cites and must
 not be read as such. At the base it ships from (`9152448d7`) those lines are exactly those symbols;
-at THIS head they are a comment and a different statement, because the `#10215` integration on this
-branch moved `sdk.py` around them. Neither number is a defect and the log is not edited for it — a
-log is the record of what the run rendered — but do NOT follow them as pointers at this head.
+at THIS head they are a **blank line** and a line **inside a docstring**, because six commits merged
+to `main` after the run moved `sdk.py` around them (`a33af140f`, `c833c41cd`, `62e3f2f61`,
+`5028881f8`, `63981d152`, `2180f0054` — `git log 9152448d7..HEAD -- tortoise/sdk.py`). ⛔ **Not
+`#10215` and not this branch:** `8bc2fbed1` touches no `tortoise/` file at all, and neither does
+this PR, so the movers are `main`'s — which is why the symbols now sit at `_TURN_WRITE_CYPHER` and
+the `proj.link_source_to_event` call site instead of at those numbers. Neither number is a defect
+and the log is not edited for it — a log is the record of what the run rendered — but do NOT
+follow them as pointers at this head.
 
 The **SUPERSEDED** `capstone-measured-e0fc940b.log` carried the cites **as-of its own
 stamp**, and those are the numbers listed here — the ones that log rendered, exactly as it
@@ -651,9 +659,15 @@ pins the document by BYTES (`document_sha256`), asserted for **this** bundle by
 `tests/test_capstone_preregistration_9075.py::test_the_real_record_pins_the_real_document` (its
 `PREREG_DIR` is `docs/evidence/7949-capstone`, so an edited registration reds there at any checkout
 depth — the test reads no history), and enforced in the required CI step by the gate's own
-`DOCUMENT_SHA_PIN` arm in `tools/capstone_preregistration_check.py::check_machine_record`. An
-amendment is a NEW linked record — never an edit to the frozen one, which is the `#10463` ruling and the reason a
-silent edit is the failure the gate exists to catch in the first place. Leaving item 2 as the only
+`DOCUMENT_SHA_PIN` arm in `tools/capstone_preregistration_check.py::check_machine_record`.
+⛔ **Scoped, because the record's own change control is narrower than "never edit":** §8 permits a
+post-log change, but only as a RECORDED one — a `## Deviations` entry carrying the date, the original
+value, the new value and the reason, with `document_sha256` re-cut in the SAME commit. That is not
+hypothetical: this record has been amended in place three times after its first cut (`eb9fd644…` →
+`e8a74aaf…` → `5ff05906…` → `e8b83872…`, the last being `8bc2fbed1`), which is what the pin makes
+REVIEWABLE rather than what it prevents. A NEW linked record is the other permitted route (the
+`#10463` ruling this paragraph follows). Either way, the failure the gate exists to catch is the
+SILENT edit. Leaving item 2 as the only
 statement of the rule is the other failure: a lane that reads the authoritative protocol, orders its
 two commits inside one PR exactly as criterion 2 asks, and lands is refused by a requirement the
 registration never states. **This section is the changes record that closes that gap** — item 2 is
