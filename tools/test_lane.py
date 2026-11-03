@@ -395,10 +395,11 @@ NAME_PREFIX = "fdb-lane-"
 #: BACKSTOP on top of that evidence, exactly as #8180's Outcome specifies ("an
 #: age backstop for containers whose owner can no longer be determined"); it is
 #: never the proof, and it can never fire on an owner this host can OBSERVE is
-#: alive: every observed use (a live process holding the owning worktree, or an
-#: attached client — both positive reads) refreshes the lease, so a live lane's
-#: container is spared at any age (#10693 review F1). The lease itself is stated
-#: in full on `REAP_STATE_DIR`.
+#: alive: a live process holding the owning worktree, or an attached client (both
+#: positive reads), keeps the container AND refreshes the lease, so a lane a
+#: sweep can see alive is spared at any age (#10693 review F1). The lease marks
+#: the last OBSERVED use, not the last use — `REAP_STATE_DIR` states the one
+#: population that leaves uncovered. The lease itself is stated in full there.
 #:
 #: ⛔ WHAT THE **DEFAULT** AUTHORISES (#10693 review F2) — the ownership evidence
 #: above is necessary and NOT sufficient. #8180's owner ruling is the operative
@@ -2346,7 +2347,14 @@ def _touch_lease(name: str) -> None:
     What it deliberately does NOT claim: that the lease follows every step of a
     live lane. No sweep can see a lane that names nothing on this host, so a
     container whose lane is invisible to `/proc` ages from its last observation —
-    which is exactly what the age backstop is for.
+    which is exactly what the age backstop is for. The same holds for a lane that
+    keeps using an ALREADY-started container without a `run`-end stamp (the
+    documented `uri` / `eval "$uri"` form): its lease advances only when some
+    sweep OBSERVES that use, so if no sweep runs during the lane's final
+    `OWNER_GRACE_H` the gap over-reports by the unobserved stretch. That is a
+    report-and-grace precision limit, never a live-lane removal: a sweep that can
+    see the lane keeps it outright (`held` / `live_slugs`), and both reads are
+    re-taken at the moment of action.
 
     RESIDUAL (documented in the PR): a `run` invoked from OUTSIDE its worktree is
     covered by the lease while it runs, and by nothing afterwards if the lane's
@@ -2453,8 +2461,10 @@ def reap_orphans() -> list[str]:
     Age is a BACKSTOP, never the proof (see ``OWNER_GRACE_H`` /
     ``ORPHAN_MAX_AGE_H``). A runnable lane container is only ever removed after
     POSITIVE evidence its lane is gone; a clock can never fire on an owner THIS
-    HOST CAN OBSERVE alive — every observed hold or attached client refreshes the
-    lease (``_touch_lease``), so a live lane's database is spared at any age,
+    HOST CAN OBSERVE alive — an observed hold or an attached client keeps the
+    container and refreshes the lease (``_touch_lease``), so a live lane's
+    database is spared at any age, and for ``OWNER_GRACE_H`` after its last
+    OBSERVED use (the uncovered population is stated on ``REAP_STATE_DIR``),
     which would be a far worse bug than the leak it fixes — the rule the whole
     module defends. `paused`/`restarting`/`created` are live-ish in exactly
     the same way (``_LIVE_ISH_STATES``) and never reach the STATE arm, which fires
@@ -2763,8 +2773,8 @@ def reap_orphans() -> list[str]:
                     # container can have a 3 h unused gap (#10693 review, P3).
                     f"reap: kept {name} — nothing holds {owner} (no live process "
                     f"names it, no client attached within "
-                    f"{ACTIVE_CLIENT_IDLE_S}s, {age_h:.1f}h old, unused "
-                    f"{gap_h:.1f}h > "
+                    f"{ACTIVE_CLIENT_IDLE_S}s, {age_h:.1f}h old, no OBSERVED "
+                    f"use for {gap_h:.1f}h > "
                     f"{OWNER_GRACE_H:g}h), but its owning worktree still EXISTS "
                     f"and #8180 authorises a reap only when that worktree is "
                     f"gone. Release it from its own worktree: `cd {owner} && uv "
@@ -2777,7 +2787,7 @@ def reap_orphans() -> list[str]:
                 f"reap: {'removed' if rm.returncode == 0 else 'FAILED to remove'} "
                 f"{name} — the lane that owns {owner} is GONE (no live process "
                 f"holds it, no client attached within "
-                f"{ACTIVE_CLIENT_IDLE_S}s, and it has done no work for "
+                f"{ACTIVE_CLIENT_IDLE_S}s, and it shows no OBSERVED use across "
                 f"{gap_h:.1f}h > {OWNER_GRACE_H:g}h). The worktree still exists, "
                 f"which is why this used to survive")
             continue
@@ -2896,8 +2906,8 @@ def reap_orphans() -> list[str]:
                 # (#10693 review, P3).
                 f"reap: kept {name} — no worktree in this clone names it, no "
                 f"live process on this host owns it, no client attached within "
-                f"{ACTIVE_CLIENT_IDLE_S}s, it is {age_txt}, and it has done no "
-                f"work for {gap_h:.1f}h (> {ORPHAN_MAX_AGE_H:g}h) — but its "
+                f"{ACTIVE_CLIENT_IDLE_S}s, it is {age_txt}, and it shows no "
+                f"OBSERVED use for {gap_h:.1f}h (> {ORPHAN_MAX_AGE_H:g}h) — but its "
                 f"owner cannot "
                 f"be determined HERE (#8180: report only, fail-closed). It may "
                 f"belong to another clone/CELL_HOME on this box; remove it only "
@@ -2910,7 +2920,7 @@ def reap_orphans() -> list[str]:
             f"reap: {'removed' if rm.returncode == 0 else 'FAILED to remove'} "
             f"{name} — no worktree in this clone or live process on this host "
             f"owns it, it has no client attached within "
-            f"{ACTIVE_CLIENT_IDLE_S}s, and it has done no work for "
+            f"{ACTIVE_CLIENT_IDLE_S}s, and it shows no OBSERVED use across "
             f"{gap_h:.1f}h (> {ORPHAN_MAX_AGE_H:g}h backstop)")
     return out
 

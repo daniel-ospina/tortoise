@@ -139,7 +139,8 @@ resources make results non-deterministic through "data corruption and configurat
 (Testcontainers, *What problems does Testcontainers solve?*). Note the container is **not
 self-cleaning**: `tools/test_lane.py down` when the batch is over.
 
-**A stranded container is REPORTED by default, not deleted (#5084, #10693).** Every
+**A stranded container whose owning worktree still EXISTS is REPORTED by default, not
+deleted (#5084, #10693).** Every
 `up`/`uri`/`run` (`start()`) sweeps the box's `fdb-lane-*` containers and classifies each by
 **ownership**, never by age alone. Three ownership proofs exist; the default **removes exactly one** of
 them:
@@ -147,15 +148,16 @@ them:
 | proof | default behaviour |
 |---|---|
 | the worktree that owns it is **GONE** | removed — this is the only proof #8180's ruling authorises outright |
-| the owning worktree **exists but nothing holds it** (no live process names it, no Redis client, unused past `OWNER_GRACE_H` = 2 h) | **reported**, with the evidence chain and the release command; removal needs `TORTOISE_TEST_LANE_REAP_LANE_GONE=1` |
-| the owner cannot be determined **from this clone** (unused past `ORPHAN_MAX_AGE_H` = 24 h, and the name carries a 10-hex worktree slug) | **reported**; removal needs `TORTOISE_TEST_LANE_REAP_OWNER_INDETERMINATE=1` |
+| the owning worktree **exists but nothing holds it** (no live process names it, no Redis client, no observed use past `OWNER_GRACE_H` = 2 h) | **reported**, with the evidence chain and the release command; removal needs `TORTOISE_TEST_LANE_REAP_LANE_GONE=1` |
+| the owner cannot be determined **from this clone** (no observed use past `ORPHAN_MAX_AGE_H` = 24 h, and the name carries a 10-hex worktree slug) | **reported**; removal needs `TORTOISE_TEST_LANE_REAP_OWNER_INDETERMINATE=1` |
 
 Both switches are strict `"1"` (any other spelling is not consent for a destructive default) and
 **nothing in this repo sets them** — #8180's owner ruling scopes deletion to "when the worktree that
 owns it is gone" and to owner-**determinate** containers, and the reopen asking for the other two arms
-is pending on that issue. So do not expect `up` to reclaim a peer's stranded container on its own:
-read the `reap:` lines it prints — the evidence-chain lines name the owner, the container's age, the
-measured unused gap and why it was kept, and where a read FAILED the line names the fact that could not
+is pending on that issue. So do not expect `up` to reclaim a peer's stranded container whose owning
+worktree still exists, on its own: read the `reap:` lines it prints — the evidence-chain lines name the
+owner, the container's age, the measured gap since its last observed use and why it was kept, and where
+a read FAILED the line names the fact that could not
 be read rather than stating a conclusion that read never produced. To release one container, do it
 from **its own** worktree:
 
