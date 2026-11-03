@@ -137,73 +137,43 @@ def test_a_FULL_default_graph_cannot_refuse_a_write_into_an_EMPTY_bound_graph():
 
     #8906's Test section asks for TWO directions. The cap-hole one IS covered
     above: `test_gate_counts_the_custom_graph_a_bound_key_writes_into` seeds the
-    BOUND graph at `max_points` and requires 402, so a gate reading the default
+    BOUND graph at `max_points` and requires 402, so a gate reading the other
     graph admits and reds there. The false-refusal one is NOT: every case above
-    seeds the DEFAULT graph with 0, so none of them can say what a FULL default
+    seeds the DEFAULT graph with 0, so none of them can say what a FULL counted
     graph does to a write into an EMPTY bound graph — and that is the direction
-    that froze the fleet.
+    that froze the fleet (the counted graph sat at `max_points`, so every REST
+    write behind it was refused, while the bound graph kept absorbing ~200
+    counted Points in 48 minutes; the refusal body was `Team points limit
+    reached`).
 
-    #8906 measured it in production: the counted graph sat at `max_points`, so
-    every REST write behind it was refused, while the graph-bound key's OWN
-    graph was still absorbing ~200 counted Points in 48 minutes. The refusal
-    body was `Team points limit reached`, so writes stopped for a reason that
-    had nothing to do with the graph they were writing into.
-
-    DISCRIMINATION: SAME credential, SAME limit; only the two graphs'
-    populations are swapped. Only a gate that counts the graph the request
-    WRITES yields both verdicts. A gate that counts the DEFAULT graph inverts
-    BOTH phases — it raises 402 where admission is required (phase 1: default 5,
+    DISCRIMINATION: SAME credential, SAME limit, and only the two graphs'
+    populations swapped — so only a gate that counts the graph the request
+    WRITES yields both verdicts. A gate counting the OTHER graph inverts both
+    phases: it raises 402 where admission is required (phase 1: default 5,
     bound 0) and admits where 402 is required (phase 2: default 0, bound 5).
 
-    RED pre-fix, measured against the pre-#10637 `_check_org_limit` BODY **as
-    `hosted_api.py` actually carried it** (restored with a throwaway pytest
-    plugin):
+    RED pre-fix, measured against the pre-#10637 `_check_org_limit` body as
+    `hosted_api.py` actually carried it, restored with a throwaway pytest
+    plugin:
 
         enforce_org_limit(org, resource, slot_credit=slot_credit,
                           sdk=(_org_sdk_for_credential(org)
                                if resource in _TENANT_GRAPH_RESOURCES else None))
 
-    Note the pre-fix call PASSED an sdk; it was the wrong graph's.
-    `_org_sdk_for_credential` answers `_make_sdk(namespace=org_id)` for a
-    graph-bound credential (`_default_graph_name(org)` is None there by
-    construction), so the count read the historical `org_<tid>` graph — the
-    same wrong-graph outcome as omitting the argument, which is why "no `sdk=`"
-    is NOT the shape to grep for when auditing this class. Measured:
+    Note it PASSED an sdk — `_make_sdk(namespace=org_id)` for a graph-bound
+    credential — so this class is NOT found by grepping for calls that omit the
+    argument. (The module docstring above describes the ORIGINAL #4051 shape,
+    which did omit it; #10452 later passed a default-graph handle, and THAT is
+    the revision measured here. Same wrong graph, two mechanisms.) Measured: this arm raised `QuotaExceededError: Team points limit
+    reached (5)` from the full counted graph (`_check_org_limit` wraps it as
+    `HTTPException 402`), and the cap-hole arm above reported
+    `Failed: DID NOT RAISE HTTPException`.
 
-    - this arm: `QuotaExceededError: Team points limit reached (5)` from the
-      FULL DEFAULT graph — `_check_org_limit` wraps it as `HTTPException 402`,
-      so the "must NOT raise" line errors;
-    - the cap-hole arm above: `Failed: DID NOT RAISE HTTPException` against the
-      FULL BOUND graph.
+    GREEN after #10637, which counts through the same `_data_graph_name(org)`
+    the opener writes.
 
-    GREEN after #10637, which resolves the count through the same
-    `_data_graph_name(org)` the opener writes. Proved red→green rather than
-    asserted: the pre-fix body is restored with a throwaway pytest plugin —
-    `enforce_org_limit` called with `sdk=_org_sdk_for_credential(org)`, the
-    pre-fix WRONG-GRAPH handle (NOT the no-sdk shape; see the note above).
-
-    The five REST points doors (`/v1/points`, `/v1/objects`, `/v1/subjects`,
-    `/v1/sessions/commit`, `/v1/demo`) are not enumerated here on purpose: the
-    graph is resolved INSIDE `_check_org_limit`, so the seam is one and every
-    door inherits it. A door that bypassed `_check_org_limit` for
-    `enforce_org_limit(org, "points")` would reopen the defect — that is the
-    same ROOT as #10725: a call site that can silently pick a graph other than
-    the one the write opens, by omitting the argument OR by passing a
-    default-graph handle. So it is recorded THERE as a comment rather than filed
-    as a peer issue — one root, one ticket.
-    (#10725 was itself CLOSED at 19:03:21Z citing #10724, which is still
-    unmerged and superseded, while `hosted_api` still calls
-    `_check_org_limit(org, "sessions")` with no sdk at this head — so read that
-    ticket's comments, not its state.)
-
-    No RUNTIME guard is added here. #8906's recorded decision (alternative 4)
-    chose a DOC contract on `quota.enforce_org_limit`'s `sdk:` argument "so the
-    next door cannot omit it unknowingly" — and that half was NOT shipped by
-    #10637: the argument still read "— optional." with no warning. THIS PR
-    ships it (see `quota.enforce_org_limit`'s `sdk:`/`sdk_factory:` doc), which
-    is implementing the decision rather than adopting anything over it. A
-    fail-closed REFUSAL would be the stronger mechanism the decision did not
-    choose, so it stays an owner question.
+    The five REST points doors are not enumerated here: the graph is resolved
+    INSIDE `_check_org_limit`, so the seam is one and every door inherits it.
     """
     # Direction 1 (#8906's false refusal): default FULL, write graph EMPTY.
     _seed(DEFAULT_GRAPH, 5)  # GRAPH_BOUND_ORG's max_points == 5
