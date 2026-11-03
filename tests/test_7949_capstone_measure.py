@@ -4329,6 +4329,87 @@ def test_a_before_arm_with_no_arm_block_is_refused(tmp_path, capsys):
     assert "provenance cannot" in err, err
 
 
+def test_a_before_arm_with_an_empty_arm_block_is_refused(tmp_path, capsys):
+    """#10610 review P2: a block that is PRESENT but EMPTY is not proof either.
+
+    The absent-block guard closed one half of the provenance gap; a block that
+    exists and wrote nothing closed the other half open, because `arm.get(var)`
+    on a key that was never written returns `None` — and `str(None).strip()` is
+    `"none"`, a token of the OFF vocabulary the value check accepts. So
+    `"arm": {}` certified an arm nothing in the record establishes, which is the
+    same fail-open the falsifier's `with_anchor` block is refused on ("an empty
+    one is not the flat shape").
+
+    Non-vacuity: at the pre-fix head this bundle SCORES (every later check —
+    head, graph, E2a, corpus — is satisfied by the shipped bundle), so the
+    `pytest.raises` arm reds without the presence check.
+    """
+    repo = _bundle(tmp_path)
+    path = repo / "docs/evidence/9889/e1-paired-off-arm-1.json"
+    record = json.loads(path.read_text())
+    assert set(record["arm"]) == set(scores_probe._ARM_VARS), record["arm"]
+    record["arm"] = {}                               # present, writes nothing
+    path.write_text(json.dumps(record))
+    with pytest.raises(SystemExit) as refused:
+        scores_probe.score(repo)
+    assert refused.value.code == 2, refused.value
+    err = capsys.readouterr().err
+    assert "`arm` block carries no TORTOISE_VET" in err, err
+    assert "missing key is not an unset one" in err, err
+
+
+@pytest.mark.parametrize("key", ["TORTOISE_VET", "TORTOISE_CLASSIFY_LATER",
+                                  "TORTOISE_VALUE_GATE",
+                                  "TORTOISE_S2_DECISION_SEAM"])
+def test_a_before_arm_missing_one_arm_key_is_refused(key, tmp_path, capsys):
+    """#10610 review P2: a block that lost ONE key is the same gap, one key at a time.
+
+    A partially-written block (`{"TORTOISE_VET": null}`) is neither absent nor
+    complete, and the value check alone reads the three missing switches as
+    `"none"` — OFF. Each key is popped ALONE so a presence check narrowed to one
+    variable cannot stay green: the refusal names only the first missing var, so
+    popping all four together would let a one-key check pass.
+
+    Non-vacuity: at the pre-fix head each of these four bundles scores.
+    """
+    repo = _bundle(tmp_path)
+    path = repo / "docs/evidence/9889/e1-paired-off-arm-2.json"
+    record = json.loads(path.read_text())
+    assert record["arm"][key] is None                 # the shipped arm is OFF
+    record["arm"].pop(key)                            # …and now key is not written
+    path.write_text(json.dumps(record))
+    with pytest.raises(SystemExit) as refused:
+        scores_probe.score(repo)
+    assert refused.value.code == 2, refused.value
+    err = capsys.readouterr().err
+    assert f"`arm` block carries no {key}" in err, err
+    assert "missing key is not an unset one" in err, err
+
+    # …and the shipped record (key present as JSON null) still scores, so this
+    # discriminates a never-written key from the `null` the producer writes.
+    record["arm"][key] = None
+    path.write_text(json.dumps(record))
+    assert scores_probe.score(repo)["e1"]["outcome"] in ("REFUSED", "PASS", "FAIL")
+
+
+def test_the_arm_key_sets_are_the_producers():
+    """The driver's three key sets must BE the producer's, not restatements.
+
+    `e1_paired_arm.py` owns the OFF arm (`(*ARM_KEYS, SEAM_KEY)`) and
+    `capstone_measure.py` owns both measured-arm sets (`ARM_ON` / `ARM_OFF`). The
+    driver keeps literals so it can be loaded before either module, which is how
+    the before side once ran one key short of the producer's four — and how the
+    after side came to assert none of the two switches its arm pins OFF. Holding
+    the tuples EQUAL is what stops the next switch from widening the gap
+    silently: it reds here rather than certifying an arm nobody defined.
+    """
+    producer = _load_probe("e1_paired_arm")
+    assert scores_probe._ARM_VARS == (*producer.ARM_KEYS, producer.SEAM_KEY), (
+        scores_probe._ARM_VARS, producer.ARM_KEYS, producer.SEAM_KEY)
+    assert scores_probe._ARM_ON_VARS == tuple(measure.ARM_ON), measure.ARM_ON
+    assert scores_probe._ARM_OFF_VARS == tuple(measure.ARM_OFF), measure.ARM_OFF
+
+
 def test_an_e2b_population_under_its_floor_is_REFUSED_not_FAILED(tmp_path):
     """#10610 review P2: the artifact may not agree with the row that reads it.
 
@@ -4475,4 +4556,76 @@ def test_the_seam_switch_counts_as_ON_for_a_before_arm(tmp_path, capsys):
     err = capsys.readouterr().err
     assert "not a before arm" in err, err
     assert "TORTOISE_S2_DECISION_SEAM='1'" in err, err
+
+
+@pytest.mark.parametrize("key", ["TORTOISE_VALUE_GATE",
+                                  "TORTOISE_S2_DECISION_SEAM"])
+def test_the_measured_arm_must_pin_its_off_switches_off(key, tmp_path, capsys):
+    """#10610 review P3: the AFTER arm is checked for ON, never for its OFF pair.
+
+    The measured arm is two keys ON **and two OFF** — `capstone_measure.ARM_OFF`,
+    whose own comment says the value gate "also switches S2.2 on" and the seam
+    "would arm a network call and a spend inside an arm this file declares OFF".
+    The driver asserted only the ON half, so a log measured with the value gate
+    armed — the value-gate arm `E1-E2.md` reports SEPARATELY — was accepted as the
+    ON half of E1's pair and its after share credited to a bar that arm never
+    measured. The before side refuses that key; the asymmetry inside one file is
+    the defect.
+
+    Non-vacuity: the shipped log carries both as `<unset>`, so refusing an armed
+    value cannot reject it — and the pre-fix driver scores this bundle (measured:
+    the record it writes is the committed one).
+    """
+    repo = _bundle(tmp_path)
+    log = repo / "docs/evidence/9889/on-arm.log"
+    text = log.read_text()
+    arm_line = [ln for ln in text.splitlines() if ln.startswith("# arm: ")]
+    assert len(arm_line) == 1, arm_line
+    # ONE key at a time, for the same reason the ON pin is parametrized: the
+    # refusal names the first failing var, so arming both together could keep a
+    # one-key check green.
+    armed = arm_line[0].replace(f"{key}=<unset>", f"{key}=1")
+    assert armed != arm_line[0], (key, arm_line[0])
+    log.write_text(text.replace(arm_line[0], armed))
+    with pytest.raises(SystemExit) as refused:
+        scores_probe.score(repo)
+    assert refused.value.code == 2, refused.value
+    err = capsys.readouterr().err
+    assert "pins it OFF" in err, err
+    assert f"{key}='1'" in err, err
+
+    # …and the shipped log still scores, with both switches carried into the
+    # record so the OFF half of the arm travels with the number.
+    log.write_text(text)
+    record = scores_probe.score(repo)
+    assert record["after_arm"][key] == "<unset>", record["after_arm"]
+
+
+def test_the_measured_arm_readback_must_CARRY_its_off_switches(tmp_path, capsys):
+    """An absent OFF switch is not an unset one — the same rule, after side.
+
+    Dropping `TORTOISE_VALUE_GATE=<unset>` from the readback was read as `"none"`
+    by the value check, i.e. as consent: a log that stopped writing the switch
+    certified the arm the switch's absence was supposed to be evidence about.
+    Presence is required for exactly the reason it is required on the before
+    side — `capstone_measure.arm_header` writes all four keys on every run, so a
+    line that omits one was edited, not measured.
+
+    Non-vacuity: at the pre-fix head this bundle scores (measured: the record it
+    writes is the committed one).
+    """
+    repo = _bundle(tmp_path)
+    log = repo / "docs/evidence/9889/on-arm.log"
+    text = log.read_text()
+    arm_line = [ln for ln in text.splitlines() if ln.startswith("# arm: ")]
+    assert len(arm_line) == 1, arm_line
+    stripped = arm_line[0].replace(" TORTOISE_VALUE_GATE=<unset>", "")
+    assert stripped != arm_line[0], arm_line[0]
+    log.write_text(text.replace(arm_line[0], stripped))
+    with pytest.raises(SystemExit) as refused:
+        scores_probe.score(repo)
+    assert refused.value.code == 2, refused.value
+    err = capsys.readouterr().err
+    assert "carries no TORTOISE_VALUE_GATE" in err, err
+    assert "missing key is not an unset one" in err, err
 

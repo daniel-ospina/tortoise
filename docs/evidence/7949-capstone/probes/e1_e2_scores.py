@@ -59,7 +59,11 @@ naming the head is not enough — when a `with_anchor` block is PRESENT but EMPT
 `as_written` block carries no graph (an
 absent provenance is not an inherited one), sits on another run, or reads counts
 that are not the E2a record's (that block IS the E2a reading), when the
-value-gate positive controls are dead, or when a before/after share is absent —
+value-gate positive controls are dead, when a before arm's `arm` block is
+absent, PRESENT but EMPTY, or missing one of its four switches (a key that was
+never written is not a key that was written as unset), when the after arm's own
+`# arm:` readback does not show the two measured passes ON or does not show the
+two switches that must stay OFF, or when a before/after share is absent —
 because a score computed over an unproven counter is the exact failure mode this
 bundle exists to stop.
 """
@@ -98,6 +102,16 @@ _ARM_OFF_STATES = ("none", "null", "", "0", "false", "unset", "<unset>")
 # writes that readback onto the log this driver already parses (`# arm: …`), so
 # nothing about the after side needs to be assumed either.
 _ARM_ON_VARS = ("TORTOISE_VET", "TORTOISE_CLASSIFY_LATER")
+# …and the same arm PINS two switches OFF: `capstone_measure.ARM_OFF`, whose own
+# comment says the value gate "also switches S2.2 on … an ambient value would
+# silently change the arm between two runs of the same probe" and the seam "would
+# arm a network call and a spend inside an arm this file declares OFF". Checking
+# only the ON half accepts a log measured with `TORTOISE_VALUE_GATE=1` — the
+# value-gate arm `E1-E2.md` measures separately — as the ON half of E1's pair.
+# Kept as a literal rather than an import because this module is loaded before
+# `capstone_measure`; `test_the_arm_key_sets_are_the_producers` holds the two
+# definitions equal, so they cannot drift apart silently.
+_ARM_OFF_VARS = ("TORTOISE_VALUE_GATE", "TORTOISE_S2_DECISION_SEAM")
 
 
 def _read_json(path: Path) -> dict:
@@ -222,7 +236,11 @@ def read_off_arms(repo: Path, floors: dict) -> list[dict]:
     that measured nothing: the inert counter #9889's own O/I/T forbids. A
     missing `arm` is refused rather than inherited, on the same rule the
     falsifier's `as_written` block is refused on — an absent provenance is not a
-    default one.
+    default one. An EMPTY block (or one missing a switch) is refused on the
+    sibling half of that rule: `arm.get(var)` on a key that was never written
+    returns `None`, which stringifies to `"none"` — a token of the OFF
+    vocabulary — so a block that wrote nothing would certify the arm it is
+    supposed to prove.
     """
     arms: list[dict] = []
     for name in OFF_ARMS:
@@ -243,6 +261,19 @@ def read_off_arms(repo: Path, floors: dict) -> list[dict]:
                           "the passes were OFF — a before arm's provenance cannot "
                           "be assumed")
         for var in _ARM_VARS:
+            # PRESENCE first, then value. `arm.get(var)` on a block that never
+            # wrote the key returns `None`, which stringifies to "none" — a token
+            # of the OFF vocabulary — so an EMPTY (or partially-keyed) block would
+            # certify an arm nothing in it establishes. That is the same
+            # fail-open the falsifier's `with_anchor` block is refused on
+            # ("an empty one is not the flat shape"), applied to the field that
+            # says which population a share came from: a key that was never
+            # written is not a key that was written as unset.
+            if var not in arm:
+                raise _refuse(
+                    f"{name}'s `arm` block carries no {var}, so it does not show "
+                    "the passes were OFF — a missing key is not an unset one, "
+                    "and a before arm's provenance cannot be assumed")
             state = arm.get(var)
             if str(state).strip().lower() not in _ARM_OFF_STATES:
                 raise _refuse(
@@ -305,6 +336,26 @@ def read_on_arm(repo: Path) -> dict:
                 f"{after_arm.get(var)!r}, so the measured passes were not ON — "
                 "an after arm that never enabled the treatment cannot be the "
                 "ON half of a before/after pair")
+    # …and the other direction. The measured arm is two keys ON and TWO OFF
+    # (`capstone_measure.ARM_OFF`), so a log measured with the value gate armed is
+    # a DIFFERENT arm — the one `E1-E2.md` reports separately — and crediting its
+    # after-share to E1 scores a bar over a treatment this driver's arm never
+    # declared. Presence is required here for the same reason as on the before
+    # side: an absent key stringifies to "none" and would read as consent.
+    for var in _ARM_OFF_VARS:
+        if var not in after_arm:
+            raise _refuse(
+                f"{EVIDENCE / ON_ARM_LOG}'s arm readback carries no {var}, so it "
+                "does not show the switch was pinned OFF — a missing key is not "
+                "an unset one, and the measured arm is only the ON half of a "
+                "before/after pair while its OFF switches are declared")
+        if str(after_arm.get(var)).strip().lower() not in _ARM_OFF_STATES:
+            raise _refuse(
+                f"{EVIDENCE / ON_ARM_LOG}'s arm readback has {var}="
+                f"{after_arm.get(var)!r}, but the measured arm pins it OFF — "
+                "that is a different arm (the value-gate/seam pass), and "
+                "crediting its after share to E1 would score a treatment this "
+                "pair never declared")
     return {
         "artifact": f"{EVIDENCE / ON_ARM_LOG}",
         "head": head,
