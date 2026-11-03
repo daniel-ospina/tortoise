@@ -88,6 +88,20 @@ REFUSAL_CODE = "MCP-KEY-EMPTY"
 _WARNED_READABLE_STORES: set[str] = set()
 
 
+class MCPCredentialHostMismatchError(RuntimeError):
+    """A credential exists, but it belongs to a DIFFERENT host than this client's.
+
+    Raised instead of putting the header on the wire. Co-source (#2369 D1.1) ties
+    a stored credential to its endpoint, and a client object fixes its endpoint at
+    construction; when the two disagree the credential does not apply to THIS
+    request, and sending it would hand it to a host chosen by whatever set the
+    environment. Callers branch on `.code`
+    (`"MCP-CREDENTIAL-HOST-MISMATCH"`).
+    """
+
+    code = "MCP-CREDENTIAL-HOST-MISMATCH"
+
+
 class MCPKeyEmptyError(RuntimeError):
     """No MCP credential resolved, and the endpoint refused the request.
 
@@ -223,6 +237,15 @@ def _refusal(exc: BaseException, sent: Connection) -> MCPKeyEmptyError:
     )
 
 
+def _is_tool_error(exc: BaseException) -> bool:
+    """True for a failed TOOL RESULT — the tool's error, not the client's auth."""
+    try:
+        from fastmcp.exceptions import ToolError
+    except ImportError:  # pragma: no cover - fastmcp absent: nothing can be one
+        return False
+    return isinstance(exc, ToolError)
+
+
 def _raise_if_credential_was_missing(exc: BaseException, sent: Connection | None) -> None:
     """Translate an auth rejection into the named refusal when NO key was sent.
 
@@ -232,6 +255,13 @@ def _raise_if_credential_was_missing(exc: BaseException, sent: Connection | None
     during the round trip must not make us relay the server's message unchanged.
     """
     if not _AUTH_REJECTION_RE.search(str(exc)):
+        return
+    if _is_tool_error(exc):
+        # A TOOL's error is not evidence about the client's credential: fastmcp
+        # raises `ToolError` carrying the tool's own text, which may legitimately
+        # mention `401`/`Unauthorized` for an upstream provider. Rewriting that
+        # into "your client has no key" would misdirect exactly as badly as the
+        # server message this module removes.
         return
     if sent is None:
         # The request never reached the point of attaching a credential (a
@@ -249,19 +279,47 @@ class _BearerProvider(httpx.Auth):
     captured-credential shape #10605 measures. This provider is attached
     UNCONDITIONALLY (also when nothing resolves at build time), so a key that
     appears later is used by the very next request: "with auth or without" is
-    never decided once. `sent` is the provenance of the last request, which is
-    what the refusal is classified from.
+    never decided once.
+
+    `sent` is the provenance of the last request, which is what a refusal is
+    classified from. `withheld` records a CO-SOURCE conflict: a client's endpoint
+    is fixed at construction, so a credential that now resolves to a DIFFERENT
+    host is not this request's credential — it is withheld (never handed to a
+    host the environment chose) and reported by name on the failure path.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, url: str) -> None:
+        self.url = url
         self.sent: Connection | None = None
+        self.withheld: Connection | None = None
 
     def auth_flow(self, request):
         connection = resolve_connection()
         self.sent = connection
-        if connection.key:  # a blank resolution is absent, never `Bearer ` + nothing
+        self.withheld = None
+        if connection.key and connection.url != self.url:
+            self.withheld = connection
+        elif connection.key:  # a blank resolution is absent, never `Bearer ` + nothing
             request.headers["Authorization"] = f"Bearer {connection.key}"
         yield request
+
+
+def _mismatch(connection: Connection, client_url: str) -> MCPCredentialHostMismatchError:
+    return MCPCredentialHostMismatchError(
+        f"MCP-CREDENTIAL-HOST-MISMATCH: the credential from {connection.source} belongs "
+        f"to {connection.url}, but this client talks to {client_url} (#2369 D1.1). The "
+        f"credential was NOT sent — an environment-supplied URL must never be able to "
+        f"aim a stored credential at a host of its choosing. Fix the source: record "
+        f"{client_url} as `api_url` in the store, use the env key for this host, or "
+        f"build the client for {connection.url}."
+    )
+
+
+def _classify_failure(exc: BaseException, provider: _BearerProvider) -> None:
+    """Raise the named refusal this failure actually is (no-op otherwise)."""
+    if provider.withheld is not None:
+        raise _mismatch(provider.withheld, provider.url) from exc
+    _raise_if_credential_was_missing(exc, provider.sent)
 
 
 def _client(provider: _BearerProvider):
@@ -273,7 +331,7 @@ def _client(provider: _BearerProvider):
     from fastmcp.client import Client
     from fastmcp.client.transports.http import StreamableHttpTransport
 
-    transport = StreamableHttpTransport(url=resolve_connection().url)
+    transport = StreamableHttpTransport(url=provider.url)
     return Client(
         transport,
         auth=provider,
@@ -293,19 +351,25 @@ def _run(coro):
 
 
 def _run_guarded(coro, provider: _BearerProvider):
-    """`_run`, with a credential-less auth rejection re-raised as the refusal."""
+    """`_run`, with a credential fault re-raised as its NAMED refusal."""
     try:
         return _run(coro)
-    except MCPKeyEmptyError:
+    except (MCPKeyEmptyError, MCPCredentialHostMismatchError):
         raise
     except Exception as exc:  # noqa: BLE001, RUF100
-        _raise_if_credential_was_missing(exc, provider.sent)
+        _classify_failure(exc, provider)
         raise
 
 
 def get_client():
-    """Build a fastmcp Client bound to the resolved endpoint, with live auth."""
-    return _client(_BearerProvider())
+    """Build a fastmcp Client bound to the resolved endpoint, with live auth.
+
+    The ENDPOINT is fixed for this client's life (a transport takes a URL); the
+    CREDENTIAL is not. When the two stop agreeing — the credential's co-sourced
+    host is no longer this client's — the provider withholds it and the failure is
+    reported as `MCPCredentialHostMismatchError` rather than sent.
+    """
+    return _client(_BearerProvider(resolve_connection().url))
 
 
 def status() -> dict[str, Any]:
@@ -317,7 +381,7 @@ def status() -> dict[str, Any]:
     `unconfigured` term — a set-up gap, not an outage, #3805), else
     {"status": "tortoise_unavailable", "url": ..., "error": ...}.
     """
-    provider = _BearerProvider()
+    provider = _BearerProvider(resolve_connection().url)
 
     async def _probe() -> dict[str, Any]:
         async with _client(provider) as client:
@@ -326,10 +390,10 @@ def status() -> dict[str, Any]:
 
     try:
         return _run_guarded(_probe(), provider)
-    except MCPKeyEmptyError as exc:
-        # The refusal is a CONFIGURATION fact, not an outage: report it under the
-        # recorded `unconfigured` term so a caller's exit code (4 — a set-up gap)
-        # cannot read as "the store is down" (3).
+    except (MCPKeyEmptyError, MCPCredentialHostMismatchError) as exc:
+        # Both are CONFIGURATION facts, not outages: report them under the recorded
+        # `unconfigured` term so a caller's exit code (4 — a set-up gap) cannot
+        # read as "the store is down" (3).
         _logger.debug("tortoise unconfigured: %s", exc)
         return {"status": STATUS_UNCONFIGURED, "url": _url(provider), "error": str(exc)}
     except Exception as exc:  # noqa: BLE001, RUF100
@@ -344,7 +408,7 @@ def available() -> bool:
 
 def list_tools() -> list[str]:
     """Names of the tools exposed by the daemon (registry surface)."""
-    provider = _BearerProvider()
+    provider = _BearerProvider(resolve_connection().url)
 
     async def _list() -> list[str]:
         async with _client(provider) as client:
@@ -361,7 +425,7 @@ def call_tool(name: str, arguments: dict[str, Any] | None = None) -> Any:
     should check `available()` first (or catch exceptions). An auth rejection
     with no credential resolved raises `MCPKeyEmptyError`.
     """
-    provider = _BearerProvider()
+    provider = _BearerProvider(resolve_connection().url)
 
     async def _call() -> Any:
         async with _client(provider) as client:
