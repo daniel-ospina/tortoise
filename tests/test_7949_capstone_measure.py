@@ -509,10 +509,21 @@ def test_main_feeds_the_census_legs_into_e3_and_renders_them():
     assert "census_data" in ast.dump(wired), ast.dump(wired)
     # ...and the class set must not be NARROWED at the call site: `labels=("Document",)` would keep
     # this AST pin green while a run that wrote no `Event` scored PASS over a narrower population —
-    # the same defect, one layer up from the pure rule.
+    # the same defect, one layer up from the pure rule. Neither spelling of the narrowing may pass:
+    # the keyword is refused here, and `labels` is KEYWORD-ONLY in the signature so a second
+    # positional argument cannot slip past it either (round 3 measured exactly that mutation green).
     assert not [kw for kw in wired.keywords if kw.arg == "labels"], (
         "main narrows e3_unmeasured_legs' class set at the call site — the registered set must come "
         "from DERIVED_LABELS, or the wiring re-creates the hole the rule closes: " + ast.dump(wired))
+    assert not wired.args[1:], (
+        "main passes e3_unmeasured_legs a second POSITIONAL argument (a class tuple) — the registered "
+        "set must come from DERIVED_LABELS: " + ast.dump(wired))
+    sig = next(node for node in tree.body
+               if isinstance(node, ast.FunctionDef) and node.name == "e3_unmeasured_legs")
+    names = [a.arg for a in sig.args.args]
+    assert sig.args.kwonlyargs and not sig.args.defaults, (
+        "e3_unmeasured_legs' `labels` is no longer keyword-only — a positional class tuple at the "
+        "call site would then be unpinnable: args=" + repr(names))
 
     render = next(node for node in tree.body
                   if isinstance(node, ast.FunctionDef) and node.name == "render_log")
