@@ -32,8 +32,9 @@ Hermetic contract proven here (docker lane, dense leg pinned out):
   * (i) the PRODUCT turn shape: a turn Point written the way
         ``capture_session`` writes it (no ``session_id`` property, linked
         ``Session-[:CONTAINS]->Point``) is injected and grouped under its
-        ``:Session`` id, and a non-turn ``pointKind='event'`` point (the
-        hosted demo seed's shape) is NOT — the fixture's ``CONTAINS``
+        ``:Session`` id, and a non-turn ``pointKind='event'`` point (a LEGACY
+        demo-seed node, which the seeder has not written since #10000) is NOT —
+        the fixture's ``CONTAINS``
         membership is per session, so a cross-session leak is visible here.
 
 Requires the docker lane's FTS backend — skips when unavailable.
@@ -260,10 +261,14 @@ def _create_product_turn(sdk, pid: str, content: str) -> None:
 
 
 def _create_demo_event(sdk, pid: str, content: str) -> None:
-    """The hosted demo/dashboard seed's shape: ``pointKind='event'`` with
-    NO ``is_episodic``. Its body IS role-tagged (``hosted_api.
-    _DEMO_EPISODIC_TURNS``), so ``is_episodic`` is the conjunct that
-    excludes it — not the ``[``-prefix test."""
+    """A LEGACY demo-seed shape: ``pointKind='event'`` with NO
+    ``is_episodic``. Its body IS role-tagged, so ``is_episodic`` is the
+    conjunct that excludes it — not the ``[``-prefix test.
+
+    ⛔ This synthesizes a node a graph seeded BEFORE #10000 still holds. Since
+    #10000 the hosted demo/dashboard seed writes no turn node at all (§9.1/D1:
+    the transcript is Postgres'), so this helper describes no current writer —
+    it exists to pin that a legacy graph's nodes stay excluded."""
     sdk._get_proj().g.query(
         "MERGE (t:Point {id:$id}) "
         "SET t.content=$c, t.pointKind='event', t.is_operator=false, "
