@@ -144,11 +144,15 @@ def test_a_FULL_default_graph_cannot_refuse_a_write_into_an_EMPTY_bound_graph():
     that froze the fleet.
 
     #8906 measured it in production: the org's DEFAULT graph sat at
-    `max_points` (every REST write behind it refused, with no delete path to
-    lower it) while the graph-bound key's OWN graph was still absorbing ~200
-    counted Points in 48 minutes. The refusal body was
-    `Team points limit reached`, so writes stopped for a reason that had nothing
-    to do with the graph they were writing into.
+    `max_points`, so every REST write behind it was refused, while the
+    graph-bound key's OWN graph was still absorbing ~200 counted Points in 48
+    minutes. The refusal body was `Team points limit reached`, so writes stopped
+    for a reason that had nothing to do with the graph they were writing into.
+    (The freeze was not literally undeletable — `SDK.delete_point` and the MCP
+    `tortoise_delete_point` tool exist; only REST has no Point DELETE. It was
+    worse than that: a graph-bound credential can never reach `org_<tid>` —
+    `_ensure_graph_exists` refuses a mint against a `kind='default'` graph — so
+    nothing the refused credential could do would lower the count.)
 
     DISCRIMINATION: SAME credential, SAME limit; only the two graphs'
     populations are swapped. Only a gate that counts the graph the request
@@ -178,11 +182,20 @@ def test_a_FULL_default_graph_cannot_refuse_a_write_into_an_EMPTY_bound_graph():
     `enforce_org_limit(org, "points")` with neither `sdk` nor `sdk_factory`
     would reopen the defect. That is the same ROOT as #10725 (a call site whose
     `sdk` is optional and whose omission is silent), so it is recorded THERE as
-    a comment rather than filed as a peer issue — one root, one ticket. A
-    runtime guard is not added here: #8906's recorded decision chose a DOC
-    contract on `quota.enforce_org_limit`'s `sdk:` argument (which #10637
-    shipped) over a fail-closed refusal, so strengthening it is an owner
-    question, not an adoption this lane may take.
+    a comment rather than filed as a peer issue — one root, one ticket.
+    (#10725 was then CLOSED at 19:03:21Z citing #10724, which is still
+    unmerged and superseded, so that comment is now the residual's only
+    record — and `hosted_api.py` still calls `_check_org_limit(org,
+    "sessions")` with no sdk at this head.)
+
+    No RUNTIME guard is added here. #8906's recorded decision (alternative 4)
+    chose a DOC contract on `quota.enforce_org_limit`'s `sdk:` argument "so the
+    next door cannot omit it unknowingly" — and that half was NOT shipped by
+    #10637: the argument still read "— optional." with no warning. THIS PR
+    ships it (see `quota.enforce_org_limit`'s `sdk:`/`sdk_factory:` doc), which
+    is implementing the decision rather than adopting anything over it. A
+    fail-closed REFUSAL would be the stronger mechanism the decision did not
+    choose, so it stays an owner question.
     """
     # Direction 1 (#8906's false refusal): default FULL, write graph EMPTY.
     _seed(DEFAULT_GRAPH, 5)  # GRAPH_BOUND_ORG's max_points == 5
