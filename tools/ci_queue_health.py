@@ -523,6 +523,38 @@ class QueueHealth:
         """
         return self.starves_pr or self.verdict == PR_BACKLOGGED
 
+    @property
+    def congests_pr(self) -> bool | None:
+        """Is PR work waiting behind the QUEUE? THREE-VALUED — for a DESTRUCTIVE gate.
+
+        `delays_pr` answers the REPORTING question, two-valued, and that polarity is
+        right there: an unmeasured wait is not a measured-congested one, so a state
+        line never claims a congestion it did not read. It is the WRONG polarity for a
+        gate on an act that cannot be undone. `tools/ci_check_repair.py` cancels a
+        queued run and re-runs it, which discards the queue position the run had
+        reached and spends an attempt of its budget — so on THAT question "congestion
+        was never measured" must not read as "the queue is clear".
+
+        * ``True``  — congestion is WITNESSED: `FLOOD`, `PR-STARVED`, `PR-BACKLOGGED`.
+        * ``False`` — a MEASURED, UNCUT reading found none: `OK` off an untruncated
+          feed, which is only emitted once the PR wait was read and found inside the
+          budget (see `healthy()`), or where no PR run is queued at all.
+        * ``None``  — NOT MEASURED: `UNKNOWN`, `PR-UNWITNESSED`, or ANY verdict carried
+          by a truncated feed. A gate must refuse rather than consume that silence.
+
+        Truncation is `None` and not `False` because the runs feed is NEWEST-FIRST and
+        ignores `sort`/`direction` (see the module docstring): a capped read drops the
+        OLDEST runs, and the oldest queued PR run is the wait clause's only witness. A
+        truncated `OK` therefore cannot rule a backlog out. That is the same refusal
+        `OK` makes when nothing is executing and the feed was cut — applied here to the
+        GATE, so the verdict keeps saying exactly what it measured.
+        """
+        if self.delays_pr:
+            return True
+        if self.verdict == OK and not self.truncated:
+            return False
+        return None
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "verdict": self.verdict,
@@ -538,6 +570,11 @@ class QueueHealth:
             "pr_wait_budget_seconds": self.pr_wait_budget_seconds,
             "starves_pr": self.starves_pr,
             "delays_pr": self.delays_pr,
+            # Three-valued: `null` here means congestion was NOT measured, which is a
+            # different fact from "measured clear" and is what a destructive gate
+            # reads (see `congests_pr`). Additive key; the reader is this tool's own
+            # JSON emit.
+            "congests_pr": self.congests_pr,
             "truncated": self.truncated,
             "reasons": list(self.reasons),
             "trimmable": [run.id for run in self.trimmable],
