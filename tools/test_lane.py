@@ -2056,6 +2056,13 @@ def _idle_sample(name: str) -> tuple[int, int] | None:
        the calling client (``cmd=client|list``), so a naive line count is never
        0 and the arm could never fire — the exact "inert enforcer" defect.
        Lines whose command is our own ``client|list`` are subtracted.
+       ⛔ The exclusion is COMMAND-SHAPED on purpose, and narrowing it is not a
+       fix: a concurrent peer sweep's ``cmd=info`` connections do read as
+       clients here, so a busy box reports "not proven idle" and KEEPS — the
+       fail-closed direction. Excluding every probe-like command instead would
+       have to recognise our own two commands by their arguments, and getting
+       that wrong re-creates the round-1 defect (a probe that counts itself can
+       never fire) while adding the one failure that matters (a delete).
     2. **Not use a byte/op counter as its own evidence.** `total_net_input_bytes`
        moves by the probe's own commands (~25 bytes per `INFO`), so it cannot
        distinguish a peer's traffic from the probe's. Only the CONNECTION count
