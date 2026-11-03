@@ -16395,6 +16395,15 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
             # #2335 WI-1a: the hosted receipt carries the extractor
             # telemetry (sdk meta stats - real on v2, {} on replayed/M2).
             "stats": meta.get("stats") or {},
+            # ⛔ #9116: the extractor's per-stage evidence blocks for S2.2
+            # (VET) and S2.3 (classify-later) — byte-parity with the SDK
+            # receipt (the shared-surface rule above), always present, and on
+            # the flag-off arm exactly the empty block the extractor emits.
+            # Read from the SAME meta the SDK lane reads, so the two lanes can
+            # never disagree about which steps a capture ran (hosted and
+            # selfhost share `_extract_session_v2`).
+            "vet": meta.get("vet") or {},
+            "classify_later": meta.get("classify_later") or {},
             # #4911: credential-shaped spans redacted from this capture's turn
             # text before persistence — always present (0 when nothing
             # matched), byte-parity with the SDK receipt.

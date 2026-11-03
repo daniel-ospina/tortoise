@@ -11974,6 +11974,18 @@ class TortoiseSDK:
             # capture, {"unattributed": N} on an M2 capture that reached the
             # provider, #3824). Additive.
             "stats": meta.get("stats") or {},
+            # ⛔ #9116: the extractor's per-stage evidence blocks for S2.2 (VET)
+            # and S2.3 (classify-later), carried with the receipt the caller
+            # actually holds. Before this they existed only on
+            # `extract_session_v2`'s return and were dropped at the meta fold,
+            # so `TortoiseSDK.capture_session` — the entry point the capstone
+            # probe drives, and the ONE entry point E4's no-monkeypatch clause
+            # allows — could not witness two of the eight steps it requires.
+            # Additive and always present (the empty block on the flag-off arm,
+            # exactly what the extractor emits), byte-parity with the hosted
+            # receipt (`hosted_api._capture_session_impl`).
+            "vet": meta.get("vet") or {},
+            "classify_later": meta.get("classify_later") or {},
             # #4911: how many credential-shaped spans this capture redacted
             # before the turn text was persisted. Always present (0 when
             # nothing matched) so "we checked and found nothing" is
@@ -13284,6 +13296,26 @@ class TortoiseSDK:
             # (sibling of stats) — folded alongside so the observation leg
             # and diagnostics can read it from the meta contract.
             "error_census": out.get("error_census") or {},
+            # ⛔ #9116: the extractor's TWO per-stage evidence blocks, folded
+            # for exactly the reason `stats`/`error_census` are — they are
+            # TOP-LEVEL `extract_session_v2` keys that this fold dropped, so
+            # nothing above it could tell "the pass ran", "the flag was on and
+            # the pass idled", and "the flag was off" apart. The capstone's G5
+            # step-observation gate needs that distinction for S2.2/S2.3: a run
+            # whose receipt carries neither block cannot observe the steps it
+            # requires, so it refused for EVERY input (#9116's defect).
+            #
+            # Copied VERBATIM, never summarised (#9116 owner comment: "a
+            # one-line-per-key copy, not an instrumentation redesign"): the
+            # reader that consumes these — `capstone_measure._pass_ran` — needs
+            # the `s2`/`union` ACTIVITY counters to claim a step, because
+            # `enabled` alone is the flag read before the pass is reached, and a
+            # summary invented here would be a second surface to keep true. A
+            # flag-off capture still carries the extractor's own empty block
+            # (`{"enabled": False, "s2": {}, "union": {}}`), so this adds no
+            # telemetry growth on the default arm — only the truthful shape.
+            "vet": out.get("vet") or {},
+            "classify_later": out.get("classify_later") or {},
             # #5516: this capture's write-time source-change notices — the
             # capture RECEIPT is the write result its caller sees.
             "source_change_notices": source_change_notices,

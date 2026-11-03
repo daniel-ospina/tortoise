@@ -69,20 +69,29 @@ must not wrap the pipeline to watch it — a wrapper is the evidence-destroying
 move the row is guarding against. The probe READS the pipeline's own returned
 surface; it never installs a spy.
 
-⚠️ **That surface is only half-reachable, and the half that is not is #9116.**
+⚠️ **That surface was only half-reachable, and #9116 closed the gap.**
 `extract_session_v2` returns the full per-stage block (``vet``,
 ``classify_later``, ``search``, ``payload``, ``embed_list``, ``story_arc``), but
 `capture_session` — the entry point this probe drives — assembles its receipt
-from ``extracted`` + ``meta``, and `_extract_session_v2` forwards only
+from ``extracted`` + ``meta``, and `_extract_session_v2` used to forward only
 ``stats``/``error_census``/``errors``/``warnings``/``mode``/``operator_ids``/
-``provider``/``route``/``failover_used``/``source_change_notices``. So the four
-keys in ``WITNESS_KEYS_OFF_RECEIPT`` are **structurally unobservable on the
-object the probe holds**, and G5 refuses for EVERY input until the seam lands.
-The refusal is attributed to that INSTRUMENT gap (#9116) — never to "the
-pipeline did not run VET/classify/search/commit", which is the one wrong
-reading a bundle like this must not produce. Where the surface cannot witness a
-step, the step is reported **unobserved** — an honest finding for #7949, never
-a guess.
+``provider``/``route``/``failover_used``/``source_change_notices``. The two
+sibling blocks the extractor builds UNCONDITIONALLY (``vet`` for S2.2,
+``classify_later`` for S2.3) were dropped at that fold, so four of the eight
+steps were structurally unobservable on the object the probe holds and G5
+refused for EVERY input — an INSTRUMENT gap, never "the pipeline did not run
+VET/classify/search/commit".
+
+#9116 fixed it where the drop was: both blocks now ride the meta and both
+receipts (`sdk.capture_session`, and `hosted_api._capture_session_impl` for
+the shared-surface rule), and S3/S6 are witnessed from the receipt's own
+``stats`` (``search_queries``/``search_degraded``, and `execute_embed`'s
+payload counts). No witness is read off a wrapper — E4's row forbids the
+instrumentation — and no step is claimed from a block that merely EXISTS: a
+block saying ``enabled`` but carrying empty ``s2``/``union`` did no work and
+is not a witness (see :func:`observe_steps`). Where a pass genuinely does not
+run, G5 reports that step UNOBSERVED with its own cause
+(:func:`unobserved_cause`) — never a guess, and never an instrument excuse.
 
 Run:
     python docs/evidence/7949-capstone/probes/capstone_run.py \\
@@ -141,27 +150,40 @@ STEPS = ("S0", "S1", "S2.1", "S2.2", "S2.3", "S3", "S5", "S6")
 #: provenance chain rest on free text.
 HEAD_SHA_RE = re.compile(r"^[0-9a-f]{7,40}$")
 
-#: Every key ``observe_steps`` reads off the object it is handed. Declared so a
-#: witness can never be added silently: the contract test
-#: ``test_every_witness_observe_steps_reads_is_on_the_receipt_or_declared``
-#: derives the READ set from this module's source and the RECEIPT set from
-#: ``tortoise/sdk.py``'s ``resp = {...}`` literal, then requires
-#: ``WITNESS_KEYS - receipt == WITNESS_KEYS_OFF_RECEIPT`` exactly. Drop a key
-#: from the receipt, or read an undeclared one, and it reds.
-WITNESS_KEYS = ("stats", "story_arc", "embed_list", "vet",
-                "classify_later", "search", "payload")
+#: Every key ``observe_steps`` reads off the object it is handed — i.e. every
+#: surface it can name a step from. Declared so a witness can never be added
+#: silently: the contract test
+#: ``test_every_witness_observe_steps_reads_is_on_the_receipt`` derives the READ
+#: set from this module's source and the RECEIPT set from ``tortoise/sdk.py``'s
+#: ``resp = {...}`` literal, then requires the two to AGREE — the read set equals
+#: this tuple, and every key in it is on the receipt. Drop a key from the
+#: receipt, or read an undeclared one, and it reds.
+#:
+#: ⛔ It is deliberately a SUBSET of ``extract_session_v2``'s return, not a
+#: copy of it (#9116): the probe holds ``capture_session``'s receipt, so naming
+#: ``story_arc``/``embed_list``/``search``/``payload`` as witnesses would be the
+#: same defect this issue fixed one layer down — reading keys the object in hand
+#: does not carry. S1/S2.1 are witnessed from ``stats.llm.by_stage``, S3 from
+#: ``stats.search_queries``/``search_degraded`` and S6 from the payload counts
+#: ``execute_embed`` writes into ``stats`` — all of which the receipt carries.
+WITNESS_KEYS = ("stats", "vet", "classify_later")
 
-#: The subset of ``WITNESS_KEYS`` that ``TortoiseSDK.capture_session``'s receipt
-#: does NOT carry (#9116). ``stats`` is the receipt's only pipeline surface, so
-#: every step whose witness lives in here is unobservable through this entry
-#: point — the run refuses at G5 and says so, attributed to the instrument.
-WITNESS_KEYS_OFF_RECEIPT = ("story_arc", "embed_list", "vet",
-                            "classify_later", "search", "payload")
-
-#: The steps with NO witness on the receipt at all. S1/S2.1 survive without
-#: their ``story_arc``/``embed_list`` fallbacks because ``stats.llm.by_stage``
-#: carries them; these four have no other witness.
-UNOBSERVABLE_STEPS = ("S2.2", "S2.3", "S3", "S6")
+#: Witness keys that are NOT on ``capture_session``'s receipt.
+#:
+#: ⛔ EMPTY, and it must STAY empty (#9116 landed the fold: the extractor's
+#: ``vet``/``classify_later`` blocks ride the receipt in ``tortoise/sdk.py`` and
+#: ``tortoise/hosted_api.py``). An entry appearing here means the observer has
+#: gone back to naming a witness the entry point cannot deliver — which is
+#: exactly how four of the eight steps became unobservable while the table said
+#: nothing about why. The contract test refuses a non-empty value rather than
+#: tolerating it, so the regression cannot be re-introduced by declaration.
+WITNESS_KEYS_OFF_RECEIPT: tuple[str, ...] = ()
+#: Steps with NO witness on the receipt. EMPTY for the same reason: all eight
+#: are observable in ONE pass on a keyed + searchable lane, which is #9116's
+#: target. A step can still be UNOBSERVED on a given pass — the arm may leave a
+#: pass off, or the pass may idle — and G5 then reports it with that cause
+#: (:func:`unobserved_cause`), never as an instrument gap.
+UNOBSERVABLE_STEPS: tuple[str, ...] = ()
 
 # Each criterion's OWNER — the issue that must land for the row to be
 # measurable at all. The table's non-green rows cite these, so a red row always
@@ -239,44 +261,125 @@ def observe_steps(result: dict) -> dict[str, str]:
     absence is the signal. Each witness is read off the pipeline's own returned
     surface (never a wrapper), so the observation cannot alter what it watches.
 
-    ⚠️ The keys in ``WITNESS_KEYS_OFF_RECEIPT`` are not on the object the
-    shipped caller can pass (#9116): ``capture_session``'s receipt carries
-    ``stats`` only. They are read anyway so that the day the seam lands the
-    observation is already complete — and ``UNOBSERVABLE_STEPS`` names which
-    steps that costs today, so G5's refusal is attributed to the instrument
-    rather than to the pipeline.
+    ⛔ EVERY key read here is on ``capture_session``'s receipt (#9116). Before
+    the fix the extractor's per-stage blocks were dropped at the meta fold, so
+    S2.2/S2.3 had no witness and G5 refused for every input; the fix copies
+    ``vet``/``classify_later`` onto the receipt, and this observer reads them
+    there. S3 and S6 are witnessed from the receipt's OWN ``stats`` —
+    ``search_queries``/``search_degraded`` (the queried-backend counts
+    ``execute_embed`` reads off the S3 result) and the payload's own counts —
+    rather than from ``result["search"]``/``result["payload"]``, which the
+    receipt has never carried.
+
+    ⛔ A SURFACE EXISTING IS NOT THE STEP RUNNING. ``extract_session_v2`` emits
+    both blocks UNCONDITIONALLY, so a flag-off capture carries
+    ``{"enabled": False, "s2": {}, "union": {}}`` and a flag-ON capture whose
+    pass was gated out (empty list) or failed (fail-open) carries
+    ``{"enabled": True, "s2": {}, "union": {}}``. Neither is a witness: the
+    step is claimed only on non-empty ``s2``/``union`` ACTIVITY, which is the
+    rule ``capstone_measure._pass_ran`` applies to the same two blocks.
     """
     stats = result.get("stats") or {}
     llm = stats.get("llm") or {}
     by_stage = llm.get("by_stage") or {}
-    embed = result.get("embed_list") or {}
-    items = sum(len(embed.get(k) or [])
-                for k in ("entities", "events", "points", "operators"))
     vet = result.get("vet") or {}
     classify = result.get("classify_later") or {}
+    queries = stats.get("search_queries")
+    payload_counts = {k: stats.get(k) for k in
+                      ("entities", "events", "points", "operators")}
 
     seen: dict[str, str] = {}
     if stats.get("edus") or stats.get("chunks"):
         seen["S0"] = (f"reader segmented the source: edus={stats.get('edus')} "
                       f"chunks={stats.get('chunks')}")
-    if by_stage.get("s1") or result.get("story_arc"):
-        seen["S1"] = (f"first LLM call reached: by_stage.s1="
-                      f"{bool(by_stage.get('s1'))} story_arc="
-                      f"{bool(result.get('story_arc'))}")
-    if by_stage.get("s2") or items:
-        seen["S2.1"] = f"S2 map produced {items} candidate item(s)"
+    if by_stage.get("s1"):
+        seen["S1"] = f"the first LLM stage ran: by_stage.s1={bool(by_stage.get('s1'))}"
+    if by_stage.get("s2"):
+        seen["S2.1"] = (f"the S2 map ran: by_stage.s2={bool(by_stage.get('s2'))}, "
+                        f"payload carried {payload_counts.get('points')} "
+                        f"point(s)")
     if vet.get("s2") or vet.get("union"):
-        seen["S2.2"] = "the VET gate reported a pass (result['vet'])"
+        seen["S2.2"] = ("the VET gate reported a pass (receipt['vet'] carries "
+                        f"activity: enabled={vet.get('enabled')})")
     if classify.get("s2") or classify.get("union"):
-        seen["S2.3"] = "a classify pass reported assignments (result['classify_later'])"
-    if result.get("search"):
-        seen["S3"] = "S3 search surface present (result['search'])"
+        seen["S2.3"] = ("a classify pass reported assignments "
+                        "(receipt['classify_later'] carries activity: "
+                        f"enabled={classify.get('enabled')})")
+    if queries and not stats.get("search_degraded"):
+        seen["S3"] = (f"the real backend was searched: search_queries={queries} "
+                      "and search_degraded=false")
     if (stats.get("s4_merge") or {}).get("merged_items") is not None:
         seen["S5"] = (f"S5 merged {stats['s4_merge'].get('merged_items')} item(s) "
                       f"into the commit list")
-    if result.get("payload") is not None:
-        seen["S6"] = "the Layer-1 commit payload was produced (result['payload'])"
+    produced = sum(int(v or 0) for v in payload_counts.values())
+    if produced:
+        seen["S6"] = ("the Layer-1 commit payload was produced and committed: "
+                      f"entities={payload_counts.get('entities')} "
+                      f"events={payload_counts.get('events')} "
+                      f"points={payload_counts.get('points')} "
+                      f"operators={payload_counts.get('operators')}")
     return seen
+
+
+def unobserved_cause(result: dict, step: str) -> str:
+    """WHY ``step`` is not in ``observe_steps(result)`` — as a fact, not a guess.
+
+    G5's refusal used to attribute every missing step to the instrument
+    ("the receipt carries no step surface, #9116"). That was true once and is
+    false now: the surfaces are delivered, so a step that is still unobserved
+    was not run by THIS pass — and the four distinct ways that happens point a
+    reader at four different places (an arm with the pass OFF, a pass gated out
+    or failed, a degraded/absent search, no payload). One message for all of
+    them is how #9116 was mis-blamed the first time, so the distinction is made
+    here from the same blocks :func:`observe_steps` reads.
+    """
+    stats = result.get("stats") or {}
+    by_stage = (stats.get("llm") or {}).get("by_stage") or {}
+    if step == "S2.2":
+        vet = result.get("vet") or {}
+        if not vet:
+            return ("no `vet` block on the receipt — the capture did not reach "
+                    "extract_session_v2 (a replay, a keyless capture, or an "
+                    "M2-lane pass)")
+        if vet.get("enabled") is False:
+            return ("the VET pass was OFF for this run (`vet.enabled=false`) — "
+                    "the arm did not enable S2.2, so the step did not run")
+        return ("the VET pass was enabled but did NO work (`vet.s2` and "
+                "`vet.union` are both empty — an empty candidate list, or a "
+                "pass that failed and fell open)")
+    if step == "S2.3":
+        cls = result.get("classify_later") or {}
+        if not cls:
+            return ("no `classify_later` block on the receipt — the capture did "
+                    "not reach extract_session_v2 (a replay, a keyless "
+                    "capture, or an M2-lane pass)")
+        if cls.get("enabled") is False:
+            return ("the classify pass was OFF for this run "
+                    "(`classify_later.enabled=false`) — the arm did not enable "
+                    "S2.3, so the step did not run")
+        return ("the classify pass was enabled but did NO work"
+                "(`classify_later.s2` and `.union` are both empty — no "
+                "unclassified items, or a pass that failed and fell open)")
+    if step == "S3":
+        if stats.get("search_degraded"):
+            return ("S3 search DEGRADED on this run "
+                    "(`stats.search_degraded=true`) — a degraded search is not "
+                    "S3, which needs the real backend")
+        return ("the pass reported no search queries "
+                f"(`stats.search_queries={stats.get('search_queries')}`) — the "
+                "S3 leg did not run against a searchable backend")
+    if step == "S6":
+        return ("`stats` carried no payload counts — `execute_embed` did not "
+                "produce a Layer-1 commit payload on this pass (S5 failed, or "
+                "the embed list was empty)")
+    if step in ("S0", "S1", "S2.1"):
+        return (f"the reader/LLM stage is missing from `stats` "
+                f"(edus={stats.get('edus')}, chunks={stats.get('chunks')}, "
+                f"by_stage={sorted(by_stage)})")
+    if step == "S5":
+        return ("`stats.s4_merge` carried no `merged_items` — the S4 merge did "
+                "not report its accounting on this pass")
+    return "no witness for this step on the object the entry point returned"
 
 
 def e4_receipt(stats: dict) -> dict:
@@ -916,25 +1019,21 @@ def main(argv: list[str] | None = None) -> int:
     observed = observe_steps(result)
     missing = [s for s in STEPS if s not in observed]
     if missing:
-        unobservable = [s for s in missing if s in UNOBSERVABLE_STEPS]
-        # Attribute an unobservable step to the INSTRUMENT. The receipt carries
-        # `stats` only (#9116), so a bare "steps not observed" reads as "the
-        # pipeline never ran VET/classify/search/commit" — a product finding
-        # this surface cannot support, and the one wrong reading that would
-        # send the epic's readers to the wrong issue.
-        if unobservable:
-            return refuse(
-                "steps not observed in the pass: " + ", ".join(missing)
-                + f" — {', '.join(unobservable)} have NO witness on "
-                "capture_session's receipt (#9116: the receipt carries `stats` "
-                "only, and vet/classify_later/search/payload never leave "
-                "extract_session_v2), so this is an INSTRUMENT gap and NOT the "
-                "pipeline skipping those steps; §4.4 forbids a table from a "
-                "subset, so the epic stays open until #9116 lands",
-                prereg_ok=True, code=5, corpus=corpus)
+        # ⛔ #9116 LANDED the surface, so a missing step is no longer an
+        # instrument gap: `vet`/`classify_later` ride the receipt and S3/S6 are
+        # witnessed from `stats`. Each missing step is therefore reported with
+        # ITS OWN cause (pass off / gated out / degraded search / no payload),
+        # which sends a reader to the arm, not to a phantom missing key. The
+        # refusal is still a refusal: §4.4 forbids a table from a subset.
+        causes = "; ".join(f"{s}: {unobserved_cause(result, s)}"
+                           for s in missing)
         return refuse(
             "steps not observed in the pass: " + ", ".join(missing)
-            + " — §4.4 forbids a table assembled from a subset",
+            + f" — {causes}. §4.4 forbids a table assembled from a subset, so "
+            "the epic stays open until a pass runs all eight. This is a finding "
+            "about THIS pass and its arm, not about the receipt's surface "
+            "(#9116 landed: `vet`/`classify_later` are carried on the receipt "
+            "and S3/S6 are witnessed from `stats`)",
             prereg_ok=True, code=5, corpus=corpus)
 
     # G6 — per-criterion evidence
