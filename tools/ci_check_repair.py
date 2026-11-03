@@ -203,6 +203,15 @@ QUEUED_STATUSES = frozenset({"queued", "waiting", "requested", "pending"})
 #:
 #: Below the floor a zero-job run is indistinguishable from ordinary lag, and
 #: reporting it every window is the noise that gets a repair report muted.
+#:
+#: ⛔ WHAT THIS CLASS DOES NOT SELECT, stated so that the floor's justification cannot
+#: be read as covering it: a run whose jobs have all CONCLUDED but which never reports
+#: `completed` (the 93-minute instance that motivated this work carried 15 CANCELLED
+#: jobs) has `job_count != 0`, so `_zero_job_stalled` excludes it and no age makes it
+#: enter this class. It is not repairable by this tool either — there is no unstarted
+#: attempt to re-create — so it needs its own diagnosis rather than a wider floor.
+#: Naming it here is the honest half: the class above is the pre-start transient, and
+#: nothing in this file claims the concluded-jobs shape.
 ZERO_JOB_MIN_AGE_S = float(os.environ.get("CI_REPAIR_ZERO_JOB_MIN_AGE_S") or 5400)
 
 #: ⛔ THE LOOP BOUND IS STRUCTURAL: THIS TOOL REPAIRS THE FIRST ATTEMPT ONLY.
