@@ -3178,6 +3178,77 @@ def test_a_truncated_receipt_refuses_rather_than_letting_an_older_one_win():
     assert "unreadable" in message, message
 
 
+def test_a_non_utf8_receipt_refuses_instead_of_tracebacks():
+    """A non-UTF-8 file raises ``UnicodeDecodeError`` — a ``ValueError``, NOT a
+    ``JSONDecodeError`` — so a guard catching only the latter let the traceback escape
+    instead of the documented refusal naming the file.
+    """
+    pin = "sha256:" + "d" * 64
+    root = Path(tempfile.mkdtemp())
+    receipts = root / measure.E4_RECEIPT_DIR
+    receipts.mkdir(parents=True)
+    _receipt(receipts / "w2b-operator-2026-01-01.json", corpus_hash=pin,
+             edge_correct=5, date="2026-01-01T00:00:00Z")
+    (receipts / "w2b-operator-latin1.json").write_bytes(
+        '{"run_id": "caf\u00e9"}'.encode("latin-1"))
+
+    with pytest.raises(SystemExit) as exc:
+        measure.select_e4_receipt(root, frozen_pin=pin)
+    message = str(exc.value)
+    assert "REFUSED" in message, message
+    assert "w2b-operator-latin1.json" in message, message
+
+
+def test_a_directory_whose_only_on_pin_receipt_is_unscorable_names_that_cause():
+    """When nothing matches because every on-pin receipt is unscorable, say THAT.
+
+    The generic no-match refusal claimed no receipt "was measured on the frozen
+    corpus" (one was), printed "none present" about a directory that holds a
+    candidate, and blamed "scoring it from another revision" — three false statements
+    in one message, with the actual cause (no ``operator_audit``) never named. A
+    refusal that names a false reason is the failure mode this family exists to
+    remove, so this arm is the reason the branch exists at all.
+    """
+    pin = "sha256:" + "d" * 64
+    root = Path(tempfile.mkdtemp())
+    receipts = root / measure.E4_RECEIPT_DIR
+    receipts.mkdir(parents=True)
+    _receipt(receipts / "w2b-operator-2026-01-01.json", corpus_hash=pin,
+             edge_correct=5, date="2026-01-01T00:00:00Z", audit=False)
+
+    with pytest.raises(SystemExit) as exc:
+        measure.select_e4_receipt(root, frozen_pin=pin)
+    message = str(exc.value)
+    assert "operator_audit" in message, message
+    assert "w2b-operator-2026-01-01.json" in message, message
+    assert "none present" not in message, message
+    assert "another revision" not in message, message
+
+
+def test_build_e4_row_refuses_a_receipt_off_the_pin():
+    """The note says "Its corpus_hash IS the frozen corpus", so it must BE that.
+
+    ``build_e4_row`` rendered that sentence unconditionally, so any caller passing an
+    off-pin receipt emitted a claim the row's own fields refute — and ``build_rows``
+    then stamped ``artifact_corpus_sha256`` from it, so nothing downstream re-checked.
+    Both operands are guarded: a mismatch refuses, and an EMPTY pin refuses too,
+    because ``_same_corpus("", "")`` is ``True`` and the both-empty shape would
+    otherwise slip through the very check that exists to make the sentence true.
+    """
+    bars = measure.parse_bars(_prereg())
+    receipt = {"evidence": "x.json", "planted": 15, "edge_correct": 5,
+               "content_ok": 11, "operators_total": 33, "date": "d",
+               "commit": "abc", "corpus_hash": "sha256:" + "9" * 64,
+               "verdict": "regression", "failure_origin": "gate_regression"}
+    with pytest.raises(SystemExit) as exc:
+        measure.build_e4_row(receipt, bars=bars, corpus_sha="sha256:" + "d" * 64)
+    assert "REFUSED" in str(exc.value), str(exc.value)
+    with pytest.raises(SystemExit) as exc:
+        measure.build_e4_row({**receipt, "corpus_hash": ""}, bars=bars,
+                             corpus_sha="")
+    assert "REFUSED" in str(exc.value), str(exc.value)
+
+
 def test_the_newest_frozen_pin_receipt_wins_because_the_ordering_is_the_property():
     """`matched[-1]` is a claim the docs make; pin it or `matched[0]` stays green.
 
@@ -3429,6 +3500,26 @@ def test_main_binds_every_name_it_hands_render_log_and_load_e4_carries_its_keys(
         f"render_log reads key(s) {missing} off `e4`, but main hands it the load_e4() "
         f"mapping whose keys are {sorted(supplied)} — a KeyError on the render path, "
         "which nothing executes")
+
+    # (c) `e4=` must be the load_e4() MAPPING, not the built row. Arm (b) proves the
+    # keys render_log reads exist in load_e4's return; it says nothing about WHAT main
+    # hands over, so swapping `e4=receipt` for `e4=e4` (the row `main` also binds) left
+    # it green while render_log raised `KeyError` on 11 of its 13 reads. The row is the
+    # table shape (`corpus_sha256`, `citations`); the mapping is the receipt's fields.
+    e4_kwarg = next(kw for kw in calls[0].keywords if kw.arg == "e4")
+    assert isinstance(e4_kwarg.value, ast.Name), (
+        "main must pass a plain name as e4=, so this pin can follow it")
+    from_loader = {target.id for node in [main, *_own_scope(main)]
+                   if isinstance(node, ast.Assign)
+                   and isinstance(node.value, ast.Call)
+                   and isinstance(node.value.func, ast.Name)
+                   and node.value.func.id in {"load_e4", "select_e4_receipt"}
+                   for target in node.targets if isinstance(target, ast.Name)}
+    assert e4_kwarg.value.id in from_loader, (
+        f"main hands render_log e4={e4_kwarg.value.id}, which is not the value of a "
+        "load_e4()/select_e4_receipt() call — render_log reads the RECEIPT's fields "
+        "off it, so handing it the built row is a KeyError at the END of a full "
+        "corpus run, after the work and before the log is written")
 
 
 def test_a_row_cites_the_receipt_the_selector_chose():
