@@ -8,8 +8,8 @@ to ``_make_sdk(namespace=org_id)`` — the org's DEFAULT graph ``org_{org_id}``
 (``_data_graph_name`` → ``org_{org_id}_{gid}``). For that credential class the
 two graphs differ BY CONSTRUCTION (the mint matrix refuses a
 ``kind='default'`` binding, so a custom binding's namespace is never
-``org_{org_id}``; the lane-dependent bound-DEFAULT caveat is in that seam doc,
-not here), so:
+``org_{org_id}``; the bound-DEFAULT caveat lives in the ``sdk:`` seam doc of
+``quota.enforce_org_limit``, not here), so:
 
 - a custom-graph-bound key with an EMPTY write graph is refused (402) because
   its org's default graph is full — the false refusal that froze every REST
@@ -17,9 +17,10 @@ not here), so:
 - such a key whose OWN graph is full is ADMITTED (the other half of the same
   divergence — the cap does not bite on the graph that grows).
 
-⚠️ NOT every per-graph credential diverged, and which ones did is
-lane-dependent — the one authoritative statement (and the reason it is not
-restated here) lives in ``quota.enforce_org_limit``'s ``sdk:`` doc.
+⚠️ NOT every per-graph credential diverged, and which ones did follows the org's
+STORAGE KEY rather than the lane — the one authoritative statement (and the
+reason it is not restated here) lives in ``quota.enforce_org_limit``'s ``sdk:``
+doc.
 
 The house rule this restores is `mcp_server.py`: *"Count on the SAME org SDK
 the tool writes to (identical connection), so the count and the write can
