@@ -3153,6 +3153,24 @@ def test_the_demo_seed_declares_NO_length_it_cannot_serve(monkeypatch):
     pre-#10000 writer (`turn_count=3`) and on the round-1 parameterised form
     (`turn_count=$turns` with turns=3). The sibling test above is the falsifier
     of the TEXT removal; these two fail for different reasons.
+
+    ⛔ AND IT IS THE ONLY PREDICATE-LEVEL PIN HERE, DELIBERATELY (#10692 review
+    P2). This file used to also carry
+    `test_the_shared_read_predicate_accepts_0_and_rejects_a_short_claim`, which
+    called `record_read.served_turn_count` with literals (`0`, `3`). It passed
+    VERBATIM on the pre-#10000 tree — the predicate and its literals are
+    untouched by this change — so it falsified nothing here while reading, in
+    the PR's own account, as one of the two independent falsifiers of "the seed
+    may not declare a length". The semantics it named are already pinned twice,
+    each time by a pin that CAN fail: at the door,
+    `tests/test_hosted_api.py::TestSessionDetailRecordAnswers::
+    test_detail_refuses_a_short_record_answer_instead_of_a_contradicting_body` (the
+    503 refusal of a short transcript, mutation stated in its docstring), and
+    through the real seed on a real graph,
+    `tests/test_onboarding_seed_endpoint.py::TestDigestExcludesDemo::
+    test_point_count_excludes_demo_points` (`GET /v1/sessions/{demo_session_id}`
+    -> `turns == 0` and `turn_points == []`). A third, non-discriminating copy
+    is not coverage; re-adding one needs a mutation that reds it.
     """
     issued, hosted_api = _seeded_statements(monkeypatch)
     declared = len(hosted_api._DEMO_EPISODIC_TURNS)
@@ -3181,49 +3199,13 @@ def test_the_demo_seed_declares_NO_length_it_cannot_serve(monkeypatch):
     assert out["points"] == 9, out
 
 
-def test_the_shared_read_predicate_accepts_0_and_rejects_a_short_claim():
-    """The predicate both session doors call must accept 0 and reject a short claim.
 
-    ⚠️ SCOPE, stated because its own earlier docstring overclaimed it: this is a
-    pin on `record_read.served_turn_count` — the predicate `hosted_api`'s
-    `GET /v1/sessions/{id}` and `sdk.get_session_detail` both delegate to — and
-    NOT on either door, and NOT on the seeder. A seeder that regressed to a
-    declared 3 would still pass THIS test; that regression is caught by the
-    counter pin above and by
-    `tests/test_write_session_and_turns_3551.py::test_demo_seed_is_excluded_from_the_primitive`.
-    What this test buys is the other half: it proves the semantic the seeder's 0
-    relies on — that 0 is an honest answer and a non-zero count with nothing
-    behind it is not.
-
-    Asserted at the predicate rather than through HTTP, so it holds on the
-    record-armed and the graph lane alike with no database:
-      * declared 0, served 0 — the honest pair the seed now writes: no refusal,
-        and the published count is the served count;
-      * declared 3, served 0 — the pair the seed used to write: the published
-        count DISAGREES with the rows (or the read refuses). Pinned so this test
-        guards the real defect rather than a tautology.
-    """
-    from tortoise.record_read import TurnAnswer, served_turn_count
-
-    published, reason = served_turn_count(
-        answer=None, served=0, declared=0, read_failed=False)
-    assert reason == "", f"declaring 0 and serving 0 was refused: {reason!r}"
-    assert published == 0, f"published {published!r} beside 0 rows"
-
-    published3, reason3 = served_turn_count(
-        answer=None, served=0, declared=3, read_failed=False)
-    assert (published3, reason3) != (0, ""), (
-        "declaring 3 while serving 0 must NOT read as an honest answer — "
-        "either the count disagrees with the rows or the read refuses. Got "
-        f"({published3!r}, {reason3!r}); if this abstains, the completeness "
-        "guard is not armed and the counter's value stops mattering")
-
-    # The ARMED arm refuses rather than publishing the contradiction, which is
-    # the 503 the demo session produced before the count was set to 0.
-    armed, armed_reason = served_turn_count(
-        answer=TurnAnswer(answered=False, kind=TurnAnswer.NO_ACCOUNT),
-        served=0, declared=3,
-        read_failed=False)
-    assert (armed, armed_reason) != (3, ""), (
-        "the armed arm published a count its rows do not back: "
-        f"({armed!r}, {armed_reason!r})")
+# ⛔ REMOVED (#10692 review P2): `test_the_shared_read_predicate_accepts_0_and
+# _rejects_a_short_claim`. It called `record_read.served_turn_count` with
+# literals and passed VERBATIM on the pre-#10000 tree (the predicate is not in
+# this diff), so it discriminated nothing while being presented as one of the
+# two independent falsifiers of the seeder's declared length. The semantics it
+# asserted stay pinned by pins that CAN fail — see the note at the end of
+# `test_the_demo_seed_declares_NO_length_it_cannot_serve` above, which names
+# them (`test_hosted_api.py`'s short-transcript 503 and
+# `test_onboarding_seed_endpoint.py`'s read-door assertion).

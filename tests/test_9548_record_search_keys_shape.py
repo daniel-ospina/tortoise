@@ -499,6 +499,67 @@ def test_a_failed_statement_names_the_column_the_value_type_and_the_sql():
         f"the cause's own text was discarded, which is defect 2 itself: {text}")
 
 
+def test_the_pre_fix_binding_shape_is_still_readable_when_built_by_hand(
+        monkeypatch):
+    """`value_types()` is READABLE in all three shapes, incl. the map MISS.
+
+    ⛔ WHY A HAND-BUILT `Statement` (#10692 review P2). The
+    `→jsonb(NOT a JSON document)` arm of `Statement.value_types()` is
+    UNREACHABLE for every statement this module builds — `_jsonb_or_scalar`
+    `json.dumps`-es each `str` bound to a `jsonb` column, and the only other
+    `str` parameters (`org_id`, `graph_id`, `node_key`, `id`, `url`) are not
+    `jsonb` columns — so before this test NOTHING exercised it, while the method
+    sold it as the read-out that "identifies #9548". A diagnostic that cannot
+    fire reads as coverage that is not there. It is kept (a repair script or a
+    backfill builds its own `Statement`), so it is pinned here as the
+    DEFENSIVE-ONLY branch it is.
+
+    The three shapes are the whole vocabulary, and the THIRD is the one a stale
+    `jsonb_columns()` map produces — the encoder reads the SAME map, so the
+    ABSENCE of `→jsonb` (not the NOT-a-document arm) is that miss's signal.
+    Also pins the "never raises" clause: a map that cannot be read must not
+    replace the driver's cause with its own exception.
+    """
+    from tortoise.record_projection import Statement
+
+    def _types(*, value: str, columns: tuple[str, ...] = ("search_keys",)):
+        return Statement(
+            "INSERT INTO public.point (search_keys) VALUES (%s)",
+            (value,), columns).value_types()
+
+    # 1. The GOOD binding: a `str` the map calls `jsonb` whose value IS a
+    #    JSON document — what `_jsonb_or_scalar` now emits for the graph's
+    #    space-joined string.
+    assert _types(value=json.dumps(GRAPH_KEYS)) == "search_keys=str→jsonb"
+
+    # 2. DEFENSIVE ONLY: the PRE-FIX binding shape (a bare graph string on a
+    #    `jsonb` column) is still NAMED rather than printed as an opaque `str`.
+    #    No builder in this module can produce it — this hand-built statement is
+    #    the only way in, which is exactly the point.
+    assert _types(value=GRAPH_KEYS) == (
+        "search_keys=str→jsonb(NOT a JSON document)"), (
+        "the pre-fix binding shape must stay readable — it is the read-out a "
+        "hand-built statement (repair script, backfill) needs")
+
+    # 3. A map MISS (stale/partial migrations parse): the column is bound
+    #    VERBATIM — the shape the encoder cannot see either, because it asks the
+    #    same map — and it reads as NO suffix. That absence is the signal; a
+    #    reader must not take `search_keys=str` as a clean binding.
+    monkeypatch.setattr(record_projection, "jsonb_columns",
+                        lambda *a, **k: frozenset())
+    assert _types(value=GRAPH_KEYS) == "search_keys=str", (
+        "an un-suffixed string parameter on a column the migrations declare "
+        "`jsonb` is the #9548 condition, not a clean binding")
+
+    # 4. A schema read that RAISES must degrade to no attribution, never
+    #    replace the driver's cause with its own exception.
+    def _boom(*_a, **_k):
+        raise OSError("migrations unreadable")
+
+    monkeypatch.setattr(record_projection, "jsonb_columns", _boom)
+    assert _types(value=GRAPH_KEYS) == "search_keys=str"
+
+
 def test_the_write_error_no_longer_discards_the_cause(monkeypatch):
     """`RecordWriter.write` reports the cause text, not only its class name."""
     def _boom(*_args, **_kwargs):

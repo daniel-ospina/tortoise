@@ -1810,15 +1810,44 @@ class Statement:
     def value_types(self) -> str:
         """`column=python_type[→jsonb(shape)]` for every parameter it binds.
 
-        Two halves, and the SECOND is the one that identifies #9548. The Python
-        type alone stopped being diagnostic the moment this fix landed: a `str`
-        bound to a `jsonb` column IS the correct shape now (the column takes a
-        JSON scalar), so `search_keys=str` reads identically for a good binding
-        and for the defect it was added for. So a `jsonb`-column `str` parameter
+        Two halves, and the SECOND is the one built for #9548. The Python type
+        alone stopped being diagnostic the moment this fix landed: a `str` bound
+        to a `jsonb` column IS the correct shape now (the column takes a JSON
+        scalar), so `search_keys=str` reads identically for a good binding and
+        for the defect it was added for. So a `jsonb`-column `str` parameter
         also reports whether it IS a JSON document: `→jsonb` when it parses,
-        `→jsonb(NOT a JSON document)` when it does not — which is exactly the
-        pre-fix binding, visible in the log line. Never raises: a schema that
-        cannot be read must not replace the driver's cause with its own.
+        `→jsonb(NOT a JSON document)` when it does not. Never raises: a schema
+        that cannot be read must not replace the driver's cause with its own.
+
+        ⛔ WHAT THE THREE SHAPES MEAN, and the one that carries a MAP miss
+        (#10692 review P2 — the earlier version of this docstring sold
+        `→jsonb(NOT a JSON document)` as "exactly the pre-fix binding, visible
+        in the log line", which overstated it):
+
+          * `search_keys=str→jsonb` — the good binding: a `str` the map says is
+            a `jsonb` column, and whose value parses as a JSON document.
+          * `search_keys=str` — **NO `→jsonb` suffix at all**. This is the one a
+            stale/partial `jsonb_columns()` map produces, and it is the miss
+            the encoder cannot see either (the encoder reads the SAME map), so
+            the ABSENCE of the suffix is the signal: the parameter was bound to
+            a column this module does not believe is `jsonb`, i.e. it went to
+            the driver VERBATIM. Read it that way — an un-suffixed string
+            parameter on a column the migrations declare `jsonb` is the #9548
+            condition, not a clean binding.
+          * `search_keys=str→jsonb(NOT a JSON document)` — a `str` bound to a
+            column the map DOES call `jsonb` whose value is not JSON. ⚠️
+            DEFENSIVE ONLY: no statement builder in this module can produce it
+            today, because `_jsonb_or_scalar` `json.dumps`-es every `str` bound
+            to a `jsonb` column before it becomes a parameter, and the only
+            other `str` parameters here (`org_id`, `graph_id`, `node_key`, `id`,
+            `url`) are not `jsonb` columns. It stays because it is the read-out
+            for the shape #9548 shipped — a caller that builds a `Statement`
+            OUTSIDE these builders (a repair script, a hand-written backfill)
+            gets the shape named rather than an opaque `str` — and it is PINNED
+            as that by `tests/test_9548_record_search_keys_shape.py::
+            test_the_pre_fix_binding_shape_is_still_readable_when_built_by_hand`
+            (a hand-built `Statement`, labelled defensive-only), so this is a
+            tested branch rather than claimed coverage.
         """
         try:
             jsonb = jsonb_columns()
