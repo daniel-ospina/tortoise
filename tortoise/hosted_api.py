@@ -17,7 +17,6 @@ from __future__ import annotations
 import asyncio
 import atexit
 import contextlib
-import contextvars
 import functools
 import hmac
 import inspect
@@ -158,6 +157,8 @@ from tortoise.monitoring import (  # #2850/2953 liveness-readiness decouple
     PROBE_HARD_TIMEOUT,
     ControlPlaneOffloadError,
     HealthProbe,
+    _ContextNotReproduced,  # #10612: …and the callable provably did not run
+    confine_context,  # #10612: re-entry-proof contextvar confinement
     event_retention_interval,
     graph_offload_timeout_s,
     heartbeat_record,
@@ -445,9 +446,16 @@ def _submit_off_loop(executor: ThreadPoolExecutor, fn, /, *args, **kwargs):
     Returns the CONCURRENT future. Callers needing a completion hook (the
     in-flight accounting below) attach it there: a loop-side callback would
     fire on cancellation while the worker is still parked.
+
+    #10612 P1: the copy is taken per INVOCATION by ``monitoring.confine_context``
+    rather than once as ``partial(copy_context().run, fn)``. The one-shot idiom
+    is a trap the moment the SAME wrapped callable is submitted twice — a
+    ``Context`` is single-entry, so the second run raises ``RuntimeError:
+    cannot enter context ... already entered``, and a bounded offload produces
+    exactly that overlap (a bound miss cancels the AWAIT, never the running
+    thread). See ``monitoring.confine_context`` for the mechanism.
     """
-    ctx = contextvars.copy_context()
-    return executor.submit(ctx.run, functools.partial(fn, *args, **kwargs))
+    return executor.submit(confine_context(fn), *args, **kwargs)
 
 
 async def _run_off_loop(executor: ThreadPoolExecutor, fn, /, *args, **kwargs):
@@ -9015,8 +9023,10 @@ class _OffloadRefused:
     """Sentinel for a REFUSED best-effort offload (#4456).
 
     ``_cp_offload(..., best_effort=True)`` returns THIS instead of ``None``
-    when the pool refused the submission (backlog full — or, on a cancellable
-    lane, cancelled before any worker ran it): the work did NOT happen. A
+    when the offload never ran the callable — the pool refused the submission
+    (backlog full), the bound cancelled it before any worker picked it up, or
+    the context wrapper could not build the invocation's context before
+    running it (#10612, ``_ContextNotReproduced``): the work did NOT happen. A
     plain bound miss still returns ``None``, because the worker that picked
     the submission up runs it to completion (the seam abandons only the
     await). Callers that ignore the return value are unaffected; a
@@ -9080,7 +9090,9 @@ async def _cp_offload(fn, *, op: str, best_effort: bool = False,
 
     Thin hosted-side wrapper over ``monitoring.run_control_plane_call``. For
     an AUTH-CRITICAL call it owns the FAIL-CLOSED ERROR MAPPING: an offload
-    that misses its wait bound — or a saturated worker pool — becomes the
+    that misses its wait bound, a saturated worker pool, or the SUBMITTED
+    wrapper failing before it ran its callable (#10612, ``_ContextNotReproduced``
+    whose ``origin`` is that wrapper — so no work was done) becomes the
     repo-standard 503 ``control_plane_unavailable`` the client already renders,
     never a hang and never a silent pass-through. Domain errors raised by the
     helper itself propagate UNCHANGED, so each caller's existing error mapping
@@ -9147,6 +9159,39 @@ async def _cp_offload(fn, *, op: str, best_effort: bool = False,
                 "control-plane offload %r failed (best-effort, swallowed): %s",
                 op, exc)
             return OFFLOAD_REFUSED if exc.refused else None
+        if unavailable is not None:
+            raise unavailable() from None
+        raise _control_plane_unavailable() from None
+    except _ContextNotReproduced as exc:
+        # ⚠️ Ownership, not type: map it only when the wrapper that raised it IS
+        # the one this call submitted. A NESTED confine_context that fails while
+        # an OUTER confined callable is already executing raises the same
+        # subclass — after that outer callable has done work — and must
+        # propagate as a domain error, not become a retryable "nothing
+        # happened" 503 a mutating client would replay.
+        if getattr(exc, "origin", None) is not fn:
+            raise
+        # #10612 P1: the wrapper could not build THIS invocation's context, so
+        # the callable NEVER RAN — the same "no work was done" outcome a
+        # refused submission has, and the same honest, retryable 503. Without
+        # this arm the error (a RuntimeError, not a ``ControlPlaneOffloadError``)
+        # escapes to each route's blanket ``except Exception`` and becomes a
+        # bare 500 with no ``error_code``: the exact unretryable status this
+        # closes. It is never swallowed into a plausible answer — running the
+        # callable under the worker's AMBIENT context would answer another
+        # tenant.
+        #
+        # ⚠️ Deliberately the PRIVATE subclass, not ``ContextConfinementError``:
+        # only the wrapper's pre-run arm proves "nothing happened". The same
+        # type raised from INSIDE the callable (a nested ``confine_context``, or
+        # any helper that uses one) is a DOMAIN error and keeps propagating
+        # unchanged — claiming "no work was done" about a half-executed write
+        # would hand the client a retry that duplicates it.
+        logging.getLogger("tortoise.api").warning(
+            "control-plane offload %r could not build the request context: %s",
+            op, exc)
+        if best_effort:
+            return OFFLOAD_REFUSED
         if unavailable is not None:
             raise unavailable() from None
         raise _control_plane_unavailable() from None
@@ -9260,6 +9305,18 @@ async def _graph_offload(fn, *, op: str, timeout: float | None = None):
     the only place the copy is applied, callers must reach the graph pool
     THROUGH this wrapper, never ``_cp_offload(pool="graph")`` directly.
 
+    #10612 P1: the copy is ``monitoring.confine_context``'s — a FRESH context
+    per invocation, not one ``Context`` captured once. A bound miss abandons the
+    await while the worker keeps running (CPython #87185), so a caller that
+    re-submits a one-shot ``partial(copy_context().run, fn)`` re-enters a
+    context that is already entered: ``RuntimeError``, which is not a
+    ``ControlPlaneOffloadError``, so it escapes this seam's fail-closed mapping
+    and surfaces on the caller's route as a bare unlabelled 500 the client
+    cannot retry. That is a LATENT trap today — this wrapper submits ONCE, so
+    it cannot fire — and a MEASURED one on #10612's branch, whose #4055
+    cold-setup re-arm re-submits one wrapped callable (blast radius there:
+    ``/v1/search`` and ``/v1/topics/{t}/summary``).
+
     Telemetry: graph ops land in the seam's SHARED offload-record buffer under
     graph-specific op names (``data_sdk``, ``check_org_limit.points``), so they
     are identifiable by op — but they share the 512-entry buffer, so a graph
@@ -9273,9 +9330,8 @@ async def _graph_offload(fn, *, op: str, timeout: float | None = None):
     graph worker for the lane's full cold-start allowance. Callers that write
     leave it unset.
     """
-    ctx = contextvars.copy_context()
     return await _cp_offload(
-        functools.partial(ctx.run, fn), op=op, pool="graph",
+        confine_context(fn), op=op, pool="graph",
         timeout=graph_offload_timeout_s() if timeout is None else timeout,
         unavailable=_graph_unavailable)
 
@@ -10010,8 +10066,9 @@ class CreateObjectRequest(BaseModel):
     # stored ``capability`` to ``other`` on a re-create. The ``'other'`` default
     # is the fold's ON CREATE arm.
     objectKind: str | None = Field(default=None)
-    # lifecycle status rides props (create_entity splats **props over the
-    # 'live' default) — the onboarding STATE seed passes in_progress.
+    # lifecycle status rides props (``create_entity`` carries only what the
+    # caller NAMES — there is no 'live' default to splat over since #9974 R1)
+    # — the onboarding STATE seed passes in_progress.
     status: str | None = None
 
 
