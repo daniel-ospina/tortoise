@@ -484,6 +484,28 @@ def _reading(dim: AllowanceDimension, org_id: str,
         raise QuotaCheckError(
             f"{dim.dimension} usage could not be measured for team {org_id!r}: "
             f"{e!r}") from e
+    if reading is not None and reading is not ABSENT \
+            and not isinstance(reading, MeterReading):
+        # ONE type gate, here, instead of validating each field where it is read
+        # (`.used`, `.measured_at`, `.note`, `.estimated`): a meter returning
+        # anything else — a bare number, a SimpleNamespace missing a field —
+        # would otherwise escape as a bare AttributeError, i.e. an unmapped 500
+        # (review rounds 6-7).
+        if observed_only:
+            _logger.warning(
+                "allowance meter returned %s, not a reading (dimension "
+                "unlimited, no refusal): team=%s dimension=%s",
+                type(reading).__name__, org_id, dim.dimension)
+            reading = None
+        else:
+            _logger.error(
+                "allowance meter returned a non-reading (fail-closed): "
+                "team=%s dimension=%s type=%s", org_id, dim.dimension,
+                type(reading).__name__)
+            raise QuotaCheckError(
+                f"{dim.dimension} usage reading for team {org_id!r} is not a "
+                f"reading ({type(reading).__name__}) — refusing to enforce "
+                f"{dim.limit_key} from it")
     if reading is ABSENT and dim.absent_is_zero:
         # The per-dimension FLOW semantics: for a cumulative flow, "no ledger row
         # for this window" is a real ZERO (nobody has done it yet) — not an

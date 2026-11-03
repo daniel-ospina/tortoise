@@ -809,10 +809,10 @@ rows:
     for a single known ID use tortoise_get_point.'
   dependency: declares TortoiseSDK.query (resolves)
   lifecycle: active
-  used_by: never called, tooling, docs
+  used_by: agents, tooling, docs
   recommendation: keep
   basis: observed
-  reason: not called over MCP, but used by tooling — removing it would break that
+  reason: called by agents
   recommended_family: null
   proposed: false
   exemption: false
@@ -974,10 +974,10 @@ rows:
     omit query, set kind → all Points of kind.'
   dependency: declares TortoiseSDK.tortoise_fts_query (resolves)
   lifecycle: active
-  used_by: never called, eval-harness, tooling, docs
+  used_by: agents, eval-harness, tooling, docs
   recommendation: keep
   basis: observed
-  reason: not called over MCP, but used by eval-harness, tooling — removing it would break that
+  reason: called by agents
   recommended_family: null
   proposed: false
   exemption: false
@@ -1062,10 +1062,10 @@ rows:
     is REFUSED, naming the fault and the accepted forms (#9202).'
   dependency: declares TortoiseSDK.create_point (resolves)
   lifecycle: active
-  used_by: agents, tooling, docs
+  used_by: never called, tooling, docs
   recommendation: keep
   basis: observed
-  reason: called by agents
+  reason: not called over MCP, but used by tooling — removing it would break that
   recommended_family: null
   proposed: false
   exemption: false

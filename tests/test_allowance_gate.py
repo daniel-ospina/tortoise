@@ -440,8 +440,24 @@ def test_an_unrecognised_unmeasured_reason_is_refused_not_treated_as_absent(
 
 
 def test_a_meter_returning_a_non_MeterReading_is_refused_not_an_AttributeError():
-    """A meter that returns a bare number used to escape as a bare
-    ``AttributeError`` (``.used`` on a float) — an unmapped 500 (review round 6)."""
-    with pytest.raises(QuotaCheckError):
-        enforce_allowances(_limits(max_extraction_tokens=10), resource="sessions",
-                           meters={"capture_extraction": lambda _o: 100.0})
+    """A non-``MeterReading`` used to escape as a bare ``AttributeError`` — on
+    ``.used`` over the cap, and on ``.measured_at``/``.note``/``.estimated``
+    elsewhere — an unmapped 500 (review rounds 6-7)."""
+    from types import SimpleNamespace
+
+    for bad in (lambda _o: 100.0, lambda _o: SimpleNamespace(used=11),
+                lambda _o: SimpleNamespace(used=1, measured_at="x")):
+        with pytest.raises(QuotaCheckError):
+            enforce_allowances(_limits(max_extraction_tokens=10),
+                               resource="sessions",
+                               meters={"capture_extraction": bad})
+
+
+def test_a_non_reading_on_an_UNLIMITED_dimension_is_logged_not_raised():
+    """The observed-only path promises a broken meter cannot refuse a write
+    nobody capped — even a non-``MeterReading`` (review round 7)."""
+    with pytest.raises(QuotaCheckError):  # bounded dimension: still a refusal
+        enforce_allowances(_limits(max_graph_storage_mb=10),
+                           meters={"graph_storage": lambda _o: 5.0})
+    enforce_allowances(_limits(max_graph_storage_mb=None),
+                       meters={"graph_storage": lambda _o: 5.0})
