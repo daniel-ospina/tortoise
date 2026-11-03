@@ -473,10 +473,13 @@ def client():
         app.dependency_overrides[get_current_org] = lambda: dict(TEST_TEAM)
         with patched_tortoise_sdk(db_path), TestClient(app) as tc:
             # #9567 D12: STORE-BACK the stubbed org dict. Production's
-            # `get_current_org` resolves it from the store; the commit lane's
-            # points door now fills missing ALLOWANCE keys from
-            # `quota.resolve_org_limits`, and that resolver REFUSES a missing
-            # `:Team` row (fail-closed) rather than reading it as unlimited.
+            # `get_current_org` resolves it from the store, and the commit
+            # lane's points door fills missing ALLOWANCE keys from
+            # `quota.resolve_org_limits`, so a store-backed org is the branch
+            # production takes. (A MISSING `:Team` row is NOT a refusal: since
+            # review round 11 the fill leaves the dict unarmed on
+            # `quota.OrgNotFoundError` — a cap cannot be armed from a record
+            # that does not exist.)
             # `MERGE` with no properties (the `tests/test_hosted_api.py`
             # shape) leaves the resolved dict's caps untouched — the resolver
             # emits no allowance key — so what these tests assert still binds.
