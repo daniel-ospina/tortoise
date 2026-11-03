@@ -60,6 +60,9 @@ import contextlib
 import json
 import os
 import re
+import subprocess
+import sys
+import textwrap
 import types
 import uuid
 from pathlib import Path
@@ -4676,3 +4679,69 @@ def test_the_presence_fold_cites_the_projection_by_symbol_not_by_line():
         "`plan_point_restamp_folds` folds every merged id to NOT-present; the "
         "projection's pending-delete fold is gone — re-derive the claim, do not "
         "delete the assertion")
+
+
+def test_a_fifo_at_the_journal_path_cannot_park_the_presence_scan(tmp_path):
+    """#10702 review (non-blocking 1): the ABSENT-write scan must never WAIT.
+
+    ``MentionScan.__iter__`` opened the journal with a plain ``open``, while its
+    sibling :func:`tortoise.log._read_regular_range` is hardened with
+    ``O_NONBLOCK | S_ISREG`` because it too runs on ``update_point``'s
+    ABSENT-write path. A FIFO left at the configured journal path therefore
+    PARKED ``open`` until a writer appeared — synchronously, inside an
+    HTTP-exposed call — where the seam read makes the same file a MISS.
+
+    ⛔ RUN IN A SUBPROCESS, deliberately. Pre-fix the failure mode is a permanent
+    WAIT, so an in-process assertion would HANG the suite rather than fail it; a
+    subprocess with a timeout turns "parked" into the failure this case reports.
+    """
+    from tortoise.log import MentionScan
+
+    fifo = tmp_path / "journal.fifo"
+    os.mkfifo(fifo)
+    code = textwrap.dedent(
+        """
+        import sys
+        from pathlib import Path
+        from tortoise.log import MentionScan
+        try:
+            lines = list(MentionScan(Path(sys.argv[1])))
+        except OSError as exc:
+            print(f"refused: {type(exc).__name__}")
+            raise SystemExit(0)
+        print(f"scanned: {len(lines)}")
+        raise SystemExit(3)
+        """)
+    try:
+        done = subprocess.run([sys.executable, "-c", code, str(fifo)],
+                             capture_output=True, text=True, timeout=120)
+    except subprocess.TimeoutExpired:
+        pytest.fail(
+            "the presence scan PARKED on a FIFO at the journal path: the scan's "
+            "open waited for a writer, so an absent write on this lane never "
+            "returns — the failure `_read_regular_range`'s O_NONBLOCK exists to "
+            "prevent")
+    assert done.returncode == 0, (
+        "a non-regular journal must be REFUSED promptly, never scanned as "
+        f"garbage and never waited on: rc={done.returncode} "
+        f"out={done.stdout!r} err={done.stderr[-800:]!r}")
+    assert "refused" in done.stdout, done.stdout
+
+
+def test_the_presence_scan_still_follows_a_symlinked_journal(tmp_path):
+    """Why the hardening above must NOT reach for ``O_NOFOLLOW``.
+
+    ``test_a_seam_that_cannot_be_read_drops_the_map_instead_of_trusting_it``
+    depends on this asymmetry: the SEAM read refuses a symlinked journal
+    (``O_NOFOLLOW`` ⇒ ``ELOOP`` ⇒ unreadable ⇒ re-fold) while this scan FOLLOWS
+    it, so the memo stays live and only the guard dies — the combination that
+    makes the unreadable-seam branch reachable. A scan that refused symlinks
+    would make that state impossible and silently retire the guard.
+    """
+    from tortoise.log import MentionScan
+
+    real = tmp_path / "real-journal.jsonl"
+    real.write_bytes(b'{"id": "a"}\n{"id": "b"}\n')
+    link = tmp_path / "journal.jsonl"
+    os.symlink(real, link)
+    assert list(MentionScan(link)) == [b'{"id": "a"}', b'{"id": "b"}']
