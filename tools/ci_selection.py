@@ -1910,11 +1910,14 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # above. Pinned by
              # tests/test_ci_selection.py::test_record_schema_pin_runs_on_migration_or_doc_change.
              "docs/00_index.md",
-             # #10704 review P2: the census doc those pins READ. Every claim in
+             # #10704 review P2: the census doc those pins READ. Every claim
+             # ABOUT THE CENSUS in
              # `tests/test_8447_truncation_marker.py::TestTheCensusNamesItsEvidenceHome`
              # is bound to `docs/architecture/BOUNDED-OPERATION-CONTRACT.md` (§2's
              # citation form and cited symbols, §2a's parked-set summary, §5's
-             # mutation-evidence home, the hosted `/v1/points` MARKS row). That path
+             # mutation-evidence home, the hosted `/v1/points` MARKS row; the
+             # class's index-row pin binds `docs/00_index.md` instead, which has
+             # its own entry above). That path
              # is under `docs/` (a NON_PYTHON_PREFIXES entry) and matches no
              # SOURCE_PATTERNS row, so a census-only edit filtered to
              # `changed == []` and took the docs-only early return: the pins that

@@ -2279,17 +2279,24 @@ def test_the_8447_census_pins_run_on_a_census_doc_only_diff():
 
     `tests/test_8447_truncation_marker.py::TestTheCensusNamesItsEvidenceHome`
     binds claims to `docs/architecture/BOUNDED-OPERATION-CONTRACT.md` (§2's
-    citation form, §2a's parked-set summary, §5's mutation-evidence home, the
-    hosted `/v1/points` MARKS row) and, since the same commit, to the
-    `docs/00_index.md` row that routes a reader into that census. `docs/` is in
-    NON_PYTHON_PREFIXES and matches no SOURCE_PATTERNS row, so before the
-    `CORE_ALSO` entries a doc-only edit selected `surfaces=[]` and took the
-    docs-only early return — the pins never ran on the artifact they guard, so
-    the very regression the last commit fixes (an over-claiming summary, a
-    re-staling coordinate in the front door) could be restored green. Measured
-    pre-fix: `_sel(["docs/architecture/BOUNDED-OPERATION-CONTRACT.md"])` ->
-    `surfaces=[]`, 8447 pin ABSENT. Non-vacuity: removing either `CORE_ALSO`
-    entry fails its arm below (`surfaces == []` for the doc path).
+    citation form and cited symbols, §2a's parked-set summary, §5's
+    mutation-evidence home, the hosted `/v1/points` MARKS row) and — since
+    `160d16d6e` — to the `docs/00_index.md` row that routes a reader into that
+    census. `docs/` is in `NON_PYTHON_PREFIXES` and matches no SOURCE_PATTERNS
+    row, so a **census-doc-only** edit filtered to `changed == []` and took the
+    docs-only early return: the pins never ran on the artifact they guard, so
+    an over-claiming §2a summary could be restored green. Measured pre-fix:
+    `_sel(["docs/architecture/BOUNDED-OPERATION-CONTRACT.md"])` -> `surfaces=[]`,
+    8447 pin ABSENT. Non-vacuity: removing that `CORE_ALSO` entry fails the
+    first arm below (`surfaces == []`).
+
+    The `docs/00_index.md` arm is NOT that same hole and this pin does not buy
+    it: `#9638` (`6429a14b4`) already armed the front door for
+    `test_record_schema_placement.py`, and `160d16d6e` added the index-row pin
+    on top of it (measured: `surfaces=['core']`, 8447 pin selected). The arm is
+    here so the class's SECOND artifact stays armed — a silent deletion of the
+    pre-existing entry would otherwise red only via an unrelated pin, in a
+    different file, whose message names a different reader.
     """
     root = Path(__file__).resolve().parents[1]
     for changed in (
