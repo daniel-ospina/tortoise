@@ -12833,26 +12833,55 @@ def _vocabulary_gap_run_warning(reading: dict[str, Any]) -> str:
     count alone names nothing a reader can curate (the same trade `record()`'s
     WARNING documents).  Unlike that WARNING it is bounded per RUN rather than
     per process, so the 32-token cap cannot spend it.
+
+    ⛔ ONE CLAUSE PER SHAPE, because the predicate that attaches this alarm
+    (`_vocabulary_gap_recorded_a_loss`) fires on THREE — and only the FIRST is an
+    UNNAMED token (#10626 review round 5):
+
+    * the token SAMPLE — unlisted, so each reached NO identity dimension;
+    * the PAIR-READ residual — a token a CLOSED connective/state list DOES name
+      (`_pair_read_bucket`), so its appearance means the guard did not fire on
+      THIS pair, not that a marker was lost;
+    * OVERSIZE tokens — counted, never retained, so no vocabulary can name them.
+
+    A single trailing sentence describing all three as "reached NO identity
+    dimension" is FALSE for the residual, and an enumeration that covered only
+    the first two rendered an oversize-only loss as the literal sentence "this
+    run's folds absorbed .".  This is a CUSTOMER-VISIBLE receipt field on both
+    capture lanes, so it names the shape it actually recorded.
     """
     named = list(reading["tokens"].items())[:_VOCABULARY_GAP_WARN_NAMES]
+    distinct = reading["distinct_tokens"]
     parts: list[str] = []
-    if named:
+    if distinct:
         shown = ", ".join(f"{token!r} x{count}" for token, count in named)
-        hidden = reading["distinct_tokens"] - len(named)
+        hidden = distinct - len(named)
         if hidden > 0:
-            shown += f", +{hidden} more"
-        parts.append(f"{reading['distinct_tokens']} unlisted one-sided "
-                     f"token(s) no boundary vocabulary names ({shown})")
+            shown = f"{shown}, +{hidden} more" if shown else f"+{hidden} more"
+        sample = f" ({shown})" if shown else ""
+        parts.append(
+            f"{distinct} unlisted one-sided token(s) no boundary vocabulary "
+            f"names{sample} — each reached NO identity dimension, so a marker "
+            "among them lost its difference")
     if reading["pair_read_residual"]:
-        parts.append(f"{reading['pair_read_residual']} named-but-unread "
-                     "pair-read token(s) (one-sided connective/state)")
+        parts.append(
+            f"{reading['pair_read_residual']} named-but-unread pair-read "
+            "token(s) (one-sided connective/state) — NAMED by a closed list, so "
+            "the guard did not fire on THIS pair; not an unnamed marker")
+    if reading["oversize_observations"]:
+        parts.append(
+            f"{reading['oversize_observations']} oversize token(s) counted but "
+            f"never retained (over the {_VOCABULARY_GAP_MAX_TOKEN}-char cap, so "
+            "never sampled)")
+    if not parts:  # unreachable through `_attach`, kept so no caller ships a hole
+        parts.append("no readable loss (the reading recorded none of the three "
+                     "shapes)")
     return (
         "boundary vocabulary gap (#5329): this run's folds absorbed "
         + "; ".join(parts)
-        + ". Each reached NO identity dimension, so a marker among them lost "
-        "its difference. The fold decision is UNCHANGED — this is the record, "
-        "not a gate; the reading is at stats.vocabulary_gap and the cure is "
-        "curating the vocabulary from it (#5329)."
+        + ". The fold decision is UNCHANGED — this is the record, not a gate; "
+        "the reading is at stats.vocabulary_gap and the cure is curating the "
+        "vocabulary from it (#5329)."
     )
 
 

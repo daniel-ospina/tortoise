@@ -388,3 +388,94 @@ def test_a_fold_on_a_context_carried_worker_lands_on_the_run_reading():
     assert reading["fold_decisions"] == 1, (
         "exactly the context-carried fold belongs to this run — a worker whose "
         f"context was never copied must not be attributed to it; reading={reading}")
+
+
+# ── the alarm NAMES the shape it recorded (review round 5, non-blocking) ──────
+#
+# `_vocabulary_gap_recorded_a_loss` attaches the reading on THREE shapes, and
+# only the first is an UNNAMED token: the token sample; the PAIR-READ residual (a
+# token a CLOSED connective/state list does name, so the guard did not fire on
+# this pair); and oversize tokens (counted, never retained). The alarm's trailing
+# sentence described all three as having "reached NO identity dimension", which is
+# FALSE for the residual, and it enumerated only the first two — so an
+# oversize-only loss rendered as "this run's folds absorbed ." Both strings ship
+# on a CUSTOMER-VISIBLE receipt field (`stats` / `warnings`) on every capture
+# lane, so the alarm must name the shape it actually recorded.
+
+
+def _run_recording(*absorbed_tokens: str) -> dict:
+    """One wrapped run whose boundary records exactly ``absorbed_tokens``."""
+    def _run() -> dict:
+        for token in absorbed_tokens:
+            v2._record_vocabulary_gap([token])
+        return {"stats": {}, "warnings": []}
+
+    return v2._run_scoped_vocabulary_gap(_run)()
+
+
+def test_an_oversize_only_loss_alarms_in_a_sentence_and_names_its_shape():
+    """Reachable: `_recorded_a_loss` fires on `oversize_observations` ALONE.
+
+    Pre-fix this produced the literal sentence "this run's folds absorbed .",
+    with the oversize count nowhered in the alarm (it was only on the reading).
+    """
+    oversize = "z" * (v2._VOCABULARY_GAP_MAX_TOKEN + 1)
+
+    out = _run_recording(oversize)
+
+    reading = out["stats"]["vocabulary_gap"]
+    assert reading["oversize_observations"] == 1, reading
+    assert reading["tokens"] == {} and reading["pair_read_residual"] == 0, reading
+
+    warning = _gap_warnings(out)[0]
+    assert "absorbed ." not in warning, f"empty enumeration: {warning!r}"
+    assert "absorbed ;" not in warning, f"dangling separator: {warning!r}"
+    assert "1 oversize token(s)" in warning, (
+        f"the alarm must NAME the oversize shape it recorded; got {warning!r}")
+
+
+def test_a_pair_read_only_loss_does_not_claim_an_unnamed_marker_was_lost():
+    """`because` IS named — by a closed connective list (`_PAIR_READ_BUCKETS`).
+
+    The flat trailing sentence told the reader the opposite ("Each reached NO
+    identity dimension"), which is the residual's whole reason for being kept out
+    of `tokens` (`_pair_read_bucket`'s docstring)."""
+    out = _run_recording("because")
+
+    reading = out["stats"]["vocabulary_gap"]
+    assert reading["tokens"] == {} and reading["pair_read_residual"] == 1, reading
+
+    warning = _gap_warnings(out)[0]
+    assert "absorbed ." not in warning, f"empty enumeration: {warning!r}"
+    assert "1 named-but-unread pair-read token(s)" in warning, warning
+    assert "NO identity dimension" not in warning, (
+        "a NAMED connective must not be reported as an unnamed marker that "
+        f"reached no identity dimension; got {warning!r}")
+    assert "NAMED by a closed list" in warning, (
+        f"the alarm must say the residual IS named; got {warning!r}")
+
+
+def test_a_mixed_loss_scopes_the_unnamed_claim_to_the_unlisted_sample():
+    """Both shapes at once: the "no identity dimension" claim belongs to the
+    unlisted sample, so it must not blanket the named residual."""
+    out = _run_recording(UNLISTED_MARKER, "because")
+
+    reading = out["stats"]["vocabulary_gap"]
+    assert reading["tokens"] == {UNLISTED_MARKER: 1}, reading
+    assert reading["pair_read_residual"] == 1, reading
+
+    warning = _gap_warnings(out)[0]
+    assert repr(UNLISTED_MARKER) in warning, warning
+    assert "1 named-but-unread pair-read token(s)" in warning, warning
+    assert warning.index("NO identity dimension") < warning.index(
+        "named-but-unread"), (
+        f"the unnamed claim must stay with the unlisted sample; got {warning!r}")
+
+
+def test_the_alarm_is_never_malformed_even_for_an_empty_reading():
+    """Defensive: `_attach` never calls this on a zero reading, but a caller that
+    did would otherwise ship "this run's folds absorbed ." to a receipt."""
+    warning = v2._vocabulary_gap_run_warning(
+        v2._VocabularyGapRunAccumulator().reading())
+    assert "absorbed ." not in warning, warning
+    assert "absorbed ;" not in warning, warning
