@@ -161,6 +161,10 @@ kept. To release one container, do it from **its own** worktree:
 cd <the owning worktree> && uv run python tools/test_lane.py down
 ```
 
+The sweep itself is gated on `TORTOISE_TEST_LANE_REAP` being `"1"` (the default) — set it to
+anything else and the sweep does not run at all, so the stranded containers are neither reported nor
+reclaimed.
+
 A container a **live** lane is using is never a candidate: the sweep probes a process holding the
 worktree (via `/proc`, so a cross-clone lane is visible too) and asks the container itself for an
 attached client. Unreadable evidence (`/proc` unreadable, `docker` refusing, a non-listing reply) is
