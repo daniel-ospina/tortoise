@@ -785,7 +785,7 @@ def _rows(out_path: str = "docs/evidence/9889/e1-e2-scores.json",
             "note": "E3 note"},
         e4={"verdict": "RED", "numerator": 2, "denominator": 15,
             "sha": "6164c683c", "corpus_sha256": "sha256:" + "f" * 64,
-            "note": "E4 note"},
+            "evidence": measure.E4_RECEIPT, "note": "E4 note"},
         e5={"verdict": "RED", "numerator": 12, "denominator": 25,
             "note": "E5 note"})
 
@@ -4675,3 +4675,231 @@ def test_the_measured_arm_readback_must_CARRY_its_off_switches(tmp_path, capsys)
     assert "carries no TORTOISE_VALUE_GATE" in err, err
     assert "missing key is not an unset one" in err, err
 
+
+# ── E4's artifact is selected by its OWN corpus hash, never by a filename ──────
+
+
+def _receipt(path: Path, *, corpus_hash: str, edge_correct: int, date: str,
+             planted: int = 15, audit: bool = True) -> Path:
+    record = {"run_id": path.stem, "date": date, "commit": "a" * 9,
+              "corpus_hash": corpus_hash, "verdict": "regression",
+              "failure_origin": "gate_regression"}
+    if audit:
+        record["operator_audit"] = {"planted": planted, "edge_correct": edge_correct,
+                                    "content_ok": 8, "operators_total": 27,
+                                    "operators_provenanced": 27}
+    path.write_text(json.dumps(record))
+    return path
+
+
+def test_e4_is_selected_by_the_receipts_own_corpus_hash_not_by_its_filename():
+    """The E4 row's artifact is the receipt MEASURED ON THE FROZEN CORPUS.
+
+    Non-vacuity, and the defect this pins. The probe used to read one hard-coded
+    filename — ``w2b-operator-2026-10-19.json`` — whose own ``corpus_hash`` is
+    ``943a99ec…``, not the frozen ``dd7e8520…``, and scored E4 at **2/15** from it
+    while three later receipts written AFTER ``#8503``'s fix, all five-on-fifteen and
+    all on the frozen corpus, sat unread in the same directory. Before the fix this
+    test's NEWER, other-corpus receipt is what the row would have carried had anyone
+    edited the constant; a filename constant cannot tell the two apart.
+
+    Constructed so the WRONG choice is the appealing one: the other-corpus receipt is
+    the newest and carries the best number, so "newest file" and "best number" both
+    select it. Only the corpus hash selects correctly.
+    """
+    pin = "sha256:" + "d" * 64
+    root = Path(tempfile.mkdtemp())
+    receipts = root / measure.E4_RECEIPT_DIR
+    receipts.mkdir(parents=True)
+    _receipt(receipts / "w2b-operator-2026-01-01.json", corpus_hash=pin,
+             edge_correct=5, date="2026-01-01T00:00:00Z")
+    _receipt(receipts / "w2b-operator-2026-02-01.json",
+             corpus_hash="sha256:" + "9" * 64, edge_correct=99,
+             date="2026-02-01T00:00:00Z")
+    _receipt(receipts / "w2b-operator-2026-03-01.json", corpus_hash=pin,
+             edge_correct=99, date="2026-03-01T00:00:00Z", audit=False)
+
+    rel, record = measure.select_e4_receipt(root, frozen_pin=pin)
+    assert rel == f"{measure.E4_RECEIPT_DIR}/w2b-operator-2026-01-01.json", rel
+    assert record["operator_audit"]["edge_correct"] == 5
+    assert record["corpus_hash"] == pin
+
+
+def test_e4_refuses_rather_than_falling_back_to_another_corpus():
+    """No receipt on the pin = no measurement, named — never "the newest file".
+
+    A fallback would report a number this run's corpus cannot support, which is the
+    whole class of defect the row had. The refusal names the pin and every candidate
+    it scanned, so an artifact that is missing or unreadable cannot read as "none
+    present".
+    """
+    pin = "sha256:" + "d" * 64
+    root = Path(tempfile.mkdtemp())
+    receipts = root / measure.E4_RECEIPT_DIR
+    receipts.mkdir(parents=True)
+    _receipt(receipts / "w2b-operator-2026-02-01.json",
+             corpus_hash="sha256:" + "9" * 64, edge_correct=99,
+             date="2026-02-01T00:00:00Z")
+    with pytest.raises(SystemExit) as exc:
+        measure.select_e4_receipt(root, frozen_pin=pin)
+    message = str(exc.value)
+    assert pin in message, message
+    assert "w2b-operator-2026-02-01.json" in message, message
+    assert str(receipts) in message, (
+        "the refusal must name the directory it actually scanned, not the module "
+        f"constant: {message}")
+
+
+def test_a_receipt_not_named_w2b_operator_is_still_found():
+    """The name is not trusted to say which files are receipts.
+
+    A frozen-pin receipt whose filename does not match the old glob was invisible, so
+    the refusal printed "none present" about a directory that held a valid artifact.
+    """
+    pin = "sha256:" + "d" * 64
+    root = Path(tempfile.mkdtemp())
+    receipts = root / measure.E4_RECEIPT_DIR
+    receipts.mkdir(parents=True)
+    _receipt(receipts / "operator-2026-10-24.json", corpus_hash=pin,
+             edge_correct=5, date="2026-10-24T06:10:47Z")
+    rel, record = measure.select_e4_receipt(root, frozen_pin=pin)
+    assert rel.endswith("operator-2026-10-24.json"), rel
+    assert record["operator_audit"]["edge_correct"] == 5
+
+
+def test_a_pin_spelled_without_the_sha256_prefix_still_matches():
+    """Two spellings of the same hash name the same corpus (a false refusal is a bug)."""
+    pin = "dd7e85200f4809f701b9e9c11816b541acea63afd0b2472998975e2ebcb035dc"
+    root = Path(tempfile.mkdtemp())
+    receipts = root / measure.E4_RECEIPT_DIR
+    receipts.mkdir(parents=True)
+    _receipt(receipts / "w2b-operator-x.json", corpus_hash=f"sha256:{pin}",
+             edge_correct=5, date="2026-10-24T06:10:47Z")
+    rel, _record = measure.select_e4_receipt(root, frozen_pin=pin)
+    assert rel.endswith("w2b-operator-x.json"), rel
+
+
+def test_a_receipt_that_is_json_but_not_an_object_refuses_instead_of_tracebacks():
+    root = Path(tempfile.mkdtemp())
+    receipts = root / measure.E4_RECEIPT_DIR
+    receipts.mkdir(parents=True)
+    (receipts / "w2b-operator-list.json").write_text("[]")
+    with pytest.raises(SystemExit) as exc:
+        measure.select_e4_receipt(root, frozen_pin="sha256:" + "d" * 64)
+    assert "not a record" in str(exc.value), str(exc.value)
+
+
+def test_e4_refuses_to_select_without_the_frozen_pin():
+    """An un-pinned selection cannot check the artifact, so it is refused."""
+    with pytest.raises(SystemExit) as exc:
+        measure.select_e4_receipt(_REPO, frozen_pin="")
+    assert "frozen corpus pin" in str(exc.value)
+
+
+def test_the_e4_row_reads_a_receipt_on_the_frozen_pin_and_not_the_old_constant():
+    """The row's artifact is on the FROZEN pin, and is not the pre-#8503 constant.
+
+    The pin is read out of the record (never typed) and compared with the receipt's
+    own ``corpus_hash`` — that equality is the property. The NUMBER is not pinned
+    here: the bar is 15/15, so the day a 15/15 receipt lands this row goes GREEN and a
+    hard-coded ``== 5`` would red on the epic's own success (and the cheapest green
+    would be to edit the assertion). The 2 → 5 movement is pinned by its own test.
+    """
+    pin = _prereg()["corpus"]["fixtures_hash"]
+    e4 = measure.load_e4(_REPO, frozen_pin=pin)
+    assert measure._same_corpus(e4["corpus_hash"], pin), e4
+    assert e4["evidence"] != measure.E4_RECEIPT, (
+        "E4 is reading the pre-#8503 receipt on a DIFFERENT corpus revision again — "
+        "the row's number is not a measurement of the frozen corpus")
+    assert e4["evidence"].startswith("tests/eval/write_path/receipts/")
+    # the row built from it cites THAT file, and its number is that file's number
+    row = measure.build_e4_row(e4, bars=measure.parse_bars(_prereg()),
+                               corpus_sha=pin)
+    assert row["evidence"] == e4["evidence"], row
+    assert (row["numerator"], row["denominator"]) == (
+        _receipt_audit(e4["evidence"])["edge_correct"],
+        _receipt_audit(e4["evidence"])["planted"]), row
+
+
+def _receipt_audit(rel: str) -> dict:
+    return json.loads((_REPO / rel).read_text())["operator_audit"]
+
+
+def test_the_e4_number_is_the_frozen_receipts_two_and_not_the_old_ones():
+    """The defect, pinned as a NUMBER: the old artifact says 2, the selected one 5.
+
+    This test is meant to re-stale. It records that the row used to report **2/15**
+    from `w2b-operator-2026-10-19.json` (corpus `943a99ec…`, pre-`#8503`) while the
+    frozen-corpus receipts read **5/15**; if either number moves, the corpus or the
+    connect step moved and the epic's record has to be re-read, which is exactly what
+    should be noisy. It compares the two artifacts rather than asserting one of them
+    in isolation, so it cannot be greened by editing a single constant.
+    """
+    old = _receipt_audit(measure.E4_RECEIPT)
+    assert old["edge_correct"] == 2 and old["planted"] == 15, old
+    pin = _prereg()["corpus"]["fixtures_hash"]
+    selected = measure.load_e4(_REPO, frozen_pin=pin)
+    assert selected["edge_correct"] == 5 and selected["planted"] == 15, selected
+    assert selected["edge_correct"] > old["edge_correct"]
+
+
+def test_main_builds_the_e4_row_from_the_selector_and_never_from_the_constant():
+    """The union of selection and row is pinned, so a reversion cannot stay green.
+
+    The reviewer's finding: `main` built the row inline, so replacing
+    ``"evidence": receipt["evidence"]`` with the constant left all tests passing while
+    the published row cited a file it was not measured on. This asserts the source
+    ``main`` runs calls ``build_e4_row(load_e4(frozen_pin=...))`` — the two names, on
+    the path that actually produces the table.
+    """
+    source = PROBE.read_text()
+    assert "e4 = build_e4_row(receipt, bars=bars, corpus_sha=corpus_sha)" in source
+    assert "receipt = load_e4(frozen_pin=corpus_sha)" in source
+    assert "load_e4()" not in source, (
+        "an un-pinned load_e4() call would score E4 from whatever receipt is newest, "
+        "not from one on the frozen corpus")
+
+
+def test_a_row_cites_the_receipt_the_selector_chose():
+    """The evidence path on the ROW follows the selection, not the constant."""
+    rows = measure.build_rows(
+        head="a" * 40, out_path="docs/evidence/7949-capstone/e1-e2.log",
+        log_corpus_sha="sha256:" + "d" * 64,
+        e1={"verdict": "BLOCKED", "sha": "c" * 40, "corpus_sha256": "e" * 64,
+            "note": "E1 note"},
+        e2={"verdict": "BLOCKED", "sha": "c" * 40, "corpus_sha256": "e" * 64,
+            "note": "E2 note"},
+        e3={"verdict": "RED", "numerator": 23, "denominator": 70, "note": "E3 note"},
+        e4={"verdict": "RED", "numerator": 5, "denominator": 15, "sha": "a" * 9,
+            "corpus_sha256": "sha256:" + "d" * 64, "note": "E4 note",
+            "evidence": "tests/eval/write_path/receipts/w2b-operator-selected.json"},
+        e5={"verdict": "RED", "numerator": 12, "denominator": 25, "note": "E5 note"})
+    by_criterion = {row["criterion"]: row for row in rows}
+    assert (by_criterion["E4"]["evidence"]
+            == "tests/eval/write_path/receipts/w2b-operator-selected.json")
+
+
+def test_a_row_with_no_evidence_path_is_refused_not_defaulted_to_the_constant():
+    """The reviewer's P1: a missing key must not silently cite the old artifact.
+
+    ``build_rows`` used ``e4.get("evidence", E4_RECEIPT)``, so any caller that omitted
+    the key produced a row whose NUMBERS came from the pinned receipt and whose
+    CITATION pointed at the pre-#8503 one — the exact defect this change closes, left
+    open in the function that builds the table, and invisible to the gate (V4 passes,
+    V7 passes on the matching corpus, V10 checks only the denominator).
+    """
+    with pytest.raises(KeyError):
+        measure.build_rows(
+            head="a" * 40, out_path="docs/evidence/7949-capstone/e1-e2.log",
+            log_corpus_sha="sha256:" + "d" * 64,
+            e1={"verdict": "BLOCKED", "sha": "c" * 40, "corpus_sha256": "e" * 64,
+                "note": "E1 note"},
+            e2={"verdict": "BLOCKED", "sha": "c" * 40, "corpus_sha256": "e" * 64,
+                "note": "E2 note"},
+            e3={"verdict": "RED", "numerator": 23, "denominator": 70,
+                "note": "E3 note"},
+            e4={"verdict": "RED", "numerator": 5, "denominator": 15,
+                "sha": "a" * 9, "corpus_sha256": "sha256:" + "d" * 64,
+                "note": "E4 note"},
+            e5={"verdict": "RED", "numerator": 12, "denominator": 25,
+                "note": "E5 note"})

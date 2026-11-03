@@ -249,6 +249,17 @@ pre-registered corpus. The verdict does not move — the bar is 15 of 15 — and
 number is **not** edited into the shipped log: a row moves by re-running the probe
 and removing the file it replaces. This note is the correction that rule permits.
 
+⛔ **APPLIED 2026-11-02 — the defect is closed mechanically, not by this paragraph.**
+`probes/capstone_measure.py::select_e4_receipt` now selects E4's receipt by the receipt's OWN
+`corpus_hash`: the newest match on the frozen pin wins, no match REFUSES (naming the pin and every
+candidate scanned) rather than falling back to "the newest file", and an absent pin refuses. The
+row's `evidence` follows that selection instead of a filename constant, so the row can no longer
+cite an artifact it was not measured from — which is what let this note exist while the row
+published `2/15`. Pinned by `tests/test_7949_capstone_measure.py`
+(`test_the_e4_row_reads_a_receipt_on_the_frozen_pin_and_not_the_old_constant`,
+`test_main_builds_the_e4_row_from_the_selector_and_never_from_the_constant`,
+`test_a_row_with_no_evidence_path_is_refused_not_defaulted_to_the_constant`).
+
 ---
 
 ## Reproduce
