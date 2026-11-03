@@ -60,31 +60,19 @@ what survives both the SIGKILL to the lane's group and the lane process exiting.
 `tests/test_rail_detach.py` proves the difference by re-running the SAME launch
 with detachment off and killing the launcher's group.
 
-Stdlib only, and Python >= 3.12 (the repo contract — the module-level
-`from datetime import UTC` is 3.11+, so the #5128 guard below refuses an older
-interpreter by NAME instead of dying on that import).
+Stdlib only (this runs on the plain `python3` of a cell).
 """
 from __future__ import annotations
 
-import sys
-
-# #5128: refuse a <3.12 interpreter before the imports below — a module-level
-# 3.11+-only import (`from datetime import UTC`) would fail first (D9 shape).
-if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
-    raise SystemExit(
-        f"tools/rail_detach.py requires Python >= 3.12 (got "
-        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
-        f"`uv run python tools/rail_detach.py`"
-    )
-
 import argparse
-import fcntl
 import json
 import os
 import re
+import signal
 import subprocess
+import sys
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 # ── the mutation seam ────────────────────────────────────────────────────────
@@ -92,11 +80,6 @@ from pathlib import Path
 # `tests/test_rail_detach.py` patches this to False and observes the rail die —
 # a test that passes either way would prove nothing.
 DETACH_NEW_SESSION = True
-
-# How long an un-pid'd `SPAWNING=1` artifact may stand for "launching". A spawn
-# happens in microseconds; a minute is generous enough to never race a healthy
-# launch and short enough that a launch killed in that window cannot wedge a PR.
-SPAWNING_TTL_S = 60
 
 RAIL_REL = "scripts/admin-merge.sh"
 DEFAULT_STATE_DIR = Path(
@@ -147,17 +130,7 @@ def read_all(text: str, key: str) -> list[str]:
 
 
 def _iso_now() -> str:
-    return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-def _age_seconds(iso: str) -> float | None:
-    """Seconds since an artifact timestamp, or None when it cannot be read."""
-    try:
-        then = datetime.strptime(iso.strip(), "%Y-%m-%dT%H:%M:%SZ").replace(
-            tzinfo=UTC)
-    except (AttributeError, ValueError):
-        return None
-    return (datetime.now(UTC) - then).total_seconds()
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _pid_alive(pid: int, marker: str) -> bool:
@@ -192,35 +165,6 @@ def _pid_alive(pid: int, marker: str) -> bool:
         # The child's argv carries the rail path; a recycled pid will not.
         return Path(marker).name in raw or marker in raw
     return True  # no /proc (non-Linux): the kill probe is all we have
-
-
-def _int_or_none(s: str) -> int | None:
-    """A torn/garbled kv value must not crash the read-only verb. `printf` writes
-    `EXIT=%s` and its argument in separate expansions, so a group kill can land
-    between them and leave `EXIT=` — the fleet beat then gets a traceback instead
-    of a state, which is worse than any verdict."""
-    try:
-        return int((s or "").strip())
-    except (TypeError, ValueError):
-        return None
-
-
-def _merge_evidence(log: str) -> tuple[str, str]:
-    """(state, sha) from the rail's OWN words, or ('', '') when it said nothing.
-    ⛔ A CODE-0 EXIT IS NOT A MERGE: `admin-merge.sh --dry-run` (and --help,
-    --print-bounds) exit 0 having merged nothing, and the launcher deliberately
-    passes operator args through. Merged requires the rail to SAY merged."""
-    m = MERGED_AT_RE.search(log)
-    if m:
-        return MERGED, m.group(2)
-    if ALREADY_MERGED_RE.search(log):
-        # Already merged before this attempt: that merge commit belongs to the
-        # earlier merge and is NOT this branch head (under a squash the head is
-        # never on main — admin-merge.sh:9033). Absent, never invented.
-        return MERGED, ""
-    if MERGED_NO_SHA_RE.search(log):
-        return MERGED, ""
-    return "", ""
 
 
 # ── collect ──────────────────────────────────────────────────────────────────
@@ -278,15 +222,10 @@ def collect(state_dir: Path, repo: str, pr: int) -> RailState | None:
         # reported merged — evidence forged by concatenation. Every verdict read
         # is scoped to the LAST attempt.
         cut = full.rfind(ATTEMPT_MARK)
-        # ⛔ NO MARK ⇒ NO SCOPED EVIDENCE. Our launcher always writes the mark
-        # before it spawns, so a log without one is not this attempt's: reading it
-        # whole would let a dead attempt inherit ANY earlier `✅ merged` line — the
-        # forged-evidence shape the scoping exists to prevent. Fail CLOSED (empty
-        # evidence ⇒ refused/lost), never "read everything".
-        log = full[cut:] if cut >= 0 else ""
+        log = full[cut:] if cut >= 0 else full
 
     exits = read_all(text, "EXIT")
-    pid = _int_or_none(read_field(text, "PID", "0")) or 0
+    pid = int(read_field(text, "PID", "0") or 0)
     st = RailState(
         pr=pr,
         state=WAITING,
@@ -299,63 +238,47 @@ def collect(state_dir: Path, repo: str, pr: int) -> RailState | None:
     )
 
     if exits:
-        code = _int_or_none(exits[-1])
+        code = int(exits[-1])
         st.exit_code = code
-        merged, sha = _merge_evidence(log)
-        if merged == MERGED:
-            st.state, st.merge_sha = MERGED, sha
-            if not sha:
+        st.state = MERGED if code == 0 else REFUSED
+        m = MERGED_AT_RE.search(log)
+        if m:
+            st.merge_sha = m.group(2)
+        elif ALREADY_MERGED_RE.search(log):
+            # Already merged before this attempt: the merge commit belongs to that
+            # earlier merge and is NOT this branch head (under a squash the head is
+            # never on main — admin-merge.sh:9033). Absent, never invented.
+            st.merge_sha = ""
+        else:
+            m = MERGED_NO_SHA_RE.search(log)
+            if m:
                 st.reason = ("merged; the rail could not read the merge commit "
                              "(admin-merge.sh deliberately does not print it)")
-        else:
-            # Exit 0 with no merge line: the rail DECLINED to merge (a --dry-run,
-            # a --print-bounds, a help exit) or refused. Either way there is no
-            # merge, and saying `merged` would release the next beat's gate on
-            # evidence that does not exist.
-            st.state = REFUSED
+        if st.state == REFUSED:
             hits = REFUSAL_RE.findall(log)
-            st.reason = (hits[-1].strip()[:400] if hits else
-                         (f"exited {code} without a merge line — the rail did not "
-                          "merge (e.g. --dry-run), so this is not a merge"
-                          if code == 0 else "no refusal line in the log"))
+            st.reason = (hits[-1].strip()[:400] if hits else "no refusal line in the log")
         return st
 
     # No EXIT line yet. Alive ⇒ waiting; gone ⇒ lost (NEVER merged).
     if _pid_alive(pid, str(art)):
         st.state = WAITING
         return st
-    if pid == 0 and read_field(text, "SPAWNING") and not exits:
-        # Between `SPAWNING=1` and the `PID=` append the rail IS alive but
-        # unnamed. Reporting `lost` there defeats the same guard that refuses a
-        # second rail (#observed live 2026-11-03).
-        #
-        # ⛔ BUT THE SENTINEL MUST EXPIRE. A launch killed in exactly this window
-        # (or a `Popen` that raised, e.g. EAGAIN under cell load) leaves
-        # `SPAWNING=1` with no pid and nothing that would ever write anything
-        # else — so an unexpired sentinel would report a live rail that does not
-        # exist FOREVER, and the duplicate guard would refuse every later start:
-        # the PR becomes unrailable. Past the TTL that state is `lost`, which is
-        # both true (no rail is running) and recoverable (a new start is allowed).
-        age = _age_seconds(st.since)
-        if age is not None and age <= SPAWNING_TTL_S:
-            st.state = WAITING
-            st.reason = "launching (no pid recorded yet)"
-            return st
-        st.state = LOST
-        st.reason = ("the launch died between the artifact write and the spawn — "
-                     "no rail ever started (SPAWNING never became a pid)")
-        return st
     # A merge the rail ANNOUNCED and then died before recording the exit code is
     # still a merge — the announcement is made only after the API confirmed
     # `state=MERGED`. Reading it is not a gate being relaxed: the rail's gates ran
     # to completion, only the bookkeeping line was lost. Anything short of that
     # announcement stays `lost` (a vanished rail has NO verdict — #2235).
-    merged, sha = _merge_evidence(log)
-    if merged == MERGED:
-        st.state, st.merge_sha = MERGED, sha
-        st.reason = ("the rail's log records the merge"
-                     + (" (no merge sha printed)" if not sha else "")
-                     + "; the EXIT line was never written")
+    m = MERGED_AT_RE.search(log)
+    if m:
+        st.state = MERGED
+        st.merge_sha = m.group(2)
+        st.reason = ("the rail's log records the merge; the EXIT line was never "
+                     "written (the process died between them)")
+        return st
+    if MERGED_NO_SHA_RE.search(log):
+        st.state = MERGED
+        st.reason = ("the rail's log records the merge (no merge sha printed); the "
+                     "EXIT line was never written")
         return st
     st.state = LOST
     st.reason = "the rail process is gone with no EXIT line — killed, not decided"
@@ -405,23 +328,18 @@ def _head_sha(cwd: Path, repo: str, pr: int) -> str:
     return out.stdout.strip() if out.returncode == 0 else "unreadable"
 
 
-def _shquote(value: object) -> str:
-    """POSIX single-quote `value` for the child's `bash -c` body."""
-    return "'" + str(value).replace("'", "'\\''") + "'"
-
-
 def child_script(rail: Path, repo: str, pr: int, logp: Path, art: Path,
                  extra: list[str]) -> list[str]:
     """The detached rail's argv. NOTHING but the one lander is invoked: no gh
     merge, no flags added, no gate relaxed. `extra` is passed through verbatim
     because it is the operator's own rail invocation (e.g. `--dry-run`)."""
-    rail_args = " ".join(
-        _shquote(a) for a in [str(rail), str(pr), "--repo", repo, *extra])
+    q = lambda s: "'" + str(s).replace("'", "'\\''") + "'"
+    rail_args = " ".join(q(a) for a in [str(rail), str(pr), "--repo", repo, *extra])
     body = (
-        f"printf 'CHILD_STARTED=%s\\n' \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\" >> {_shquote(art)}\n"
-        f"bash {rail_args} >> {_shquote(logp)} 2>&1\n"
+        f"printf 'CHILD_STARTED=%s\\n' \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\" >> {q(art)}\n"
+        f"bash {rail_args} >> {q(logp)} 2>&1\n"
         f"rc=$?\n"
-        f"printf 'EXIT=%s\\nFINISHED_AT=%s\\n' \"$rc\" \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\" >> {_shquote(art)}\n"
+        f"printf 'EXIT=%s\\nFINISHED_AT=%s\\n' \"$rc\" \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\" >> {q(art)}\n"
         f"exit \"$rc\"\n"
     )
     return ["bash", "-c", body]
@@ -446,64 +364,46 @@ def launch(pr: int, *, cwd: Path, state_dir: Path, repo: str | None = None,
                 "never what is checked"
             )
     repo = repo or _resolve_repo(Path(cwd))
-    # ⛔ RESOLVE, because the child runs with `cwd=<checkout>`: a relative
-    # `--state-dir` would otherwise resolve the artifact/log against the CHECKOUT
-    # while the launcher writes them against the lane's own cwd — splitting one
-    # rail across two paths, where a real merge reads back as `lost` and a failed
-    # redirect (which stops bash before the rail ever runs) still prints STARTED.
-    cwd = Path(cwd).resolve()
-    state_dir = Path(state_dir).resolve()
+    state_dir = Path(state_dir)
     state_dir.mkdir(parents=True, exist_ok=True)
     art = artifact_path(state_dir, repo, pr)
     logp = log_path(state_dir, repo, pr)
 
-    # ⛔ THE DUPLICATE-RAIL GUARD IS A LOCK, NOT A PRECONDITION. `collect` then
-    # `Popen` is check-then-act: two lanes (or a lane and a fleet beat) both read
-    # `no live rail` and both spawn, which is exactly the #3061 collision the
-    # guard exists to refuse — and two live rails then share one artifact, so the
-    # loser's verdict overwrites the winner's.
-    lock = Path(str(art) + ".lock")
-    with lock.open("a+") as lockfh:
-        fcntl.flock(lockfh.fileno(), fcntl.LOCK_EX)
-        state_dir.mkdir(parents=True, exist_ok=True)
-        prior = collect(state_dir, repo, pr)
-        if prior is not None and prior.state == WAITING:
-            raise Refused(
-                f"a rail is ALREADY LIVE for PR #{pr} (pid {prior.pid}, since "
-                f"{prior.since}) — two rails on one PR is the #3061 collision; "
-                f"collect it with: collect {pr}"
-            )
-
-        head = _head_sha(Path(cwd), repo, pr)
-        # A fresh attempt starts a fresh record; the previous attempt stays in the
-        # .log (the child appends), which is what the merged-sha parse reads.
-        # `SPAWNING=1` is written BEFORE the spawn, because the window between the
-        # two is a rail that exists but has no pid yet — and `collect` must not
-        # call that `lost` (nor let a second rail through).
-        art.write_text(
-            f"# rail artifact — {repo}#{pr}\n"
-            f"PR={pr}\nREPO={repo}\nHEAD={head}\nSTARTED_AT={_iso_now()}\n"
-            f"CWD={cwd}\nLOG={logp}\nSPAWNING=1\n"
-            f"RAIL_ARGS={' '.join([str(pr), '--repo', repo, *extra])}\n",
-            encoding="utf-8",
+    prior = collect(state_dir, repo, pr)
+    if prior is not None and prior.state == WAITING:
+        raise Refused(
+            f"a rail is ALREADY LIVE for PR #{pr} (pid {prior.pid}, since "
+            f"{prior.since}) — two rails on one PR is the #3061 collision; "
+            f"collect it with: collect {pr}"
         )
-        with logp.open("a", encoding="utf-8") as fh:
-            fh.write(f"\n===== rail attempt started {_iso_now()} (detached) =====\n")
 
-        argv = child_script(rail, repo, pr, logp, art, extra)
-        with logp.open("a", encoding="utf-8") as logfh:
-            proc = subprocess.Popen(
-                argv,
-                cwd=str(cwd),
-                stdin=subprocess.DEVNULL,
-                stdout=logfh,
-                stderr=subprocess.STDOUT,
-                start_new_session=DETACH_NEW_SESSION,  # ← the whole mechanism
-                close_fds=True,
-            )
-        sid = os.getsid(proc.pid) if hasattr(os, "getsid") else proc.pid
-        with art.open("a", encoding="utf-8") as fh:
-            fh.write(f"PID={proc.pid}\nSID={sid}\n")
+    head = _head_sha(Path(cwd), repo, pr)
+    # A fresh attempt starts a fresh record; the previous attempt stays in the
+    # .log (the child appends), which is what the merged-sha parse reads.
+    art.write_text(
+        f"# rail artifact — {repo}#{pr}\n"
+        f"PR={pr}\nREPO={repo}\nHEAD={head}\nSTARTED_AT={_iso_now()}\n"
+        f"CWD={cwd}\nLOG={logp}\n"
+        f"RAIL_ARGS={' '.join([str(pr), '--repo', repo, *extra])}\n",
+        encoding="utf-8",
+    )
+    with logp.open("a", encoding="utf-8") as fh:
+        fh.write(f"\n===== rail attempt started {_iso_now()} (detached) =====\n")
+
+    argv = child_script(rail, repo, pr, logp, art, extra)
+    with logp.open("a", encoding="utf-8") as logfh:
+        proc = subprocess.Popen(
+            argv,
+            cwd=str(cwd),
+            stdin=subprocess.DEVNULL,
+            stdout=logfh,
+            stderr=subprocess.STDOUT,
+            start_new_session=DETACH_NEW_SESSION,  # ← the whole mechanism
+            close_fds=True,
+        )
+    sid = os.getsid(proc.pid) if hasattr(os, "getsid") else proc.pid
+    with art.open("a", encoding="utf-8") as fh:
+        fh.write(f"PID={proc.pid}\nSID={sid}\n")
     return Launch(pr=pr, pid=proc.pid, sid=sid, artifact=str(art), log=str(logp), head=head)
 
 

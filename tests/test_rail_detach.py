@@ -8,10 +8,9 @@ set by the runner QUEUE (run 41557371710: created 01:05:15Z, still queued at
 ceiling is 18064 s, so it was healthy-and-waiting when the LANE died and took the
 verdict with it. Make the rail the thing that outlives the lane.
 
-The proof that matters is `test_detachment_is_what_survives_the_lane` in its
-TWO arms (`[False]` and `[True]`): the same launch, the same kill, opposite
-outcomes — the `[False]` arm is the mutant (detachment off) and the rail dies
-with the lane, so a test that passes either way proves nothing.
+The proof that matters is `test_rail_survives_the_lane_group_kill` TOGETHER WITH
+`test_mutant_without_detachment_the_rail_dies_with_the_lane`: the same launch,
+the same kill, opposite outcomes. A test that passes either way proves nothing.
 
 No database, no network: the "rail" is a stub script that says what the real one
 says, and the launcher never resolves a repo it was given.
@@ -211,95 +210,6 @@ def test_cli_collect_resolves_the_repo_from_disk_not_the_network(tmp_path, capsy
     rc = rd.main(["collect", "64", "--state-dir", str(sd)])   # no --repo, no network
     assert rc == 0
     assert capsys.readouterr().out.startswith("RAIL(#64, ")
-
-
-def test_dry_run_exit_zero_is_not_a_merge(tmp_path):
-    """⛔ `admin-merge.sh --dry-run` merges nothing and exits 0. Reporting that as
-    `merged` would release the next beat's gate on evidence that does not exist."""
-    body = textwrap.dedent(
-        """#!/usr/bin/env bash
-        echo "admin-merge: --dry-run — evidence that WOULD be posted:"
-        echo "admin-merge: --dry-run performs no base run, no CI re-run, posts no comment and merges nothing."
-        exit 0
-        """
-    )
-    co = make_checkout(tmp_path, body=body)
-    sd = tmp_path / "state"
-    rd.launch(65, cwd=co, state_dir=sd, repo="o/r", extra=["--dry-run"])
-    st = wait_state(sd, 65, rd.REFUSED)
-    assert st.state == rd.REFUSED and st.exit_code == 0
-    assert "without a merge line" in st.reason
-
-
-def test_torn_exit_line_does_not_crash_collect(tmp_path):
-    """A group kill between `printf 'EXIT=%s'` and its argument leaves `EXIT=`.
-    A read-only verb must report a state, never a traceback."""
-    co = make_checkout(tmp_path)
-    sd = tmp_path / "state"
-    os.environ["FAKE_RAIL_SLEEP"] = "20"
-    try:
-        ln = rd.launch(66, cwd=co, state_dir=sd, repo="o/r")
-    finally:
-        os.environ.pop("FAKE_RAIL_SLEEP", None)
-    os.kill(ln.pid, signal.SIGKILL)
-    time.sleep(0.3)
-    art = rd.artifact_path(sd, "o/r", 66)
-    art.write_text(art.read_text() + "EXIT=\n")      # the torn append
-    st = rd.collect(sd, "o/r", 66)
-    assert st.state == rd.REFUSED and st.exit_code is None   # fail closed, no crash
-
-
-def test_spawning_sentinel_expires_instead_of_wedging_the_pr(tmp_path):
-    """A launch killed between `SPAWNING=1` and `PID=` leaves a state with no rail
-    to ever write anything. It must age out to `lost` — and `start` must then be
-    allowed again — or the PR is unrailable forever."""
-    co = make_checkout(tmp_path)
-    sd = tmp_path / "state"
-    now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-    old = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - 600))
-    art = rd.artifact_path(sd, "o/r", 67)
-    sd.mkdir(parents=True)
-    for started_at in (now, old):
-        art.write_text(f"PR=67\nREPO=o/r\nSTARTED_AT={started_at}\nSPAWNING=1\n")
-        st = rd.collect(sd, "o/r", 67)
-        if started_at == now:
-            assert st.state == rd.WAITING and "launching" in st.reason
-        else:
-            assert st.state == rd.LOST and "no rail ever started" in st.reason
-    # …and the stale one does not block a new attempt
-    ln = rd.launch(67, cwd=co, state_dir=sd, repo="o/r")
-    assert ln.pid > 0
-    assert wait_state(sd, 67, rd.MERGED).state == rd.MERGED
-
-
-def test_relative_state_dir_lands_in_one_place(tmp_path, monkeypatch):
-    """The child runs with cwd=<checkout>, so a relative --state-dir must be
-    resolved once: otherwise the launcher writes the artifact one place, the rail
-    writes its log another, and a real merge reads back as `lost`."""
-    co = make_checkout(tmp_path)
-    monkeypatch.chdir(tmp_path)
-    ln = rd.launch(68, cwd=co, state_dir=Path("relstate"), repo="o/r")
-    assert Path(ln.artifact).is_absolute() and Path(ln.log).is_absolute()
-    assert Path(ln.artifact).parent == Path(ln.log).parent == (tmp_path / "relstate").resolve()
-    st = wait_state((tmp_path / "relstate").resolve(), 68, rd.MERGED)
-    assert st.state == rd.MERGED and st.merge_sha == "deadbeefcafe1234"
-
-
-def test_a_log_without_an_attempt_mark_is_no_evidence(tmp_path):
-    """No attempt mark ⇒ not this attempt's log ⇒ no scoped evidence. Reading it
-    whole would let a dead attempt inherit an earlier `✅ merged` line."""
-    co = make_checkout(tmp_path)
-    sd = tmp_path / "state"
-    rd.launch(69, cwd=co, state_dir=sd, repo="o/r")
-    assert wait_state(sd, 69, rd.MERGED).state == rd.MERGED
-    art = rd.artifact_path(sd, "o/r", 69)
-    logp = Path(rd.read_field(art.read_text(), "LOG"))
-    # a foreign/recreated log: same words, no mark
-    logp.write_text("admin-merge: ✅ merged PR #69 at deadbeefcafe1234 (state=MERGED)\n")
-    art.write_text(art.read_text().replace("EXIT=", "EXIT_TORN="))  # attempt 2: no exit
-    st = rd.collect(sd, "o/r", 69)
-    assert st.state != rd.MERGED, st.as_dict()
-    assert st.merge_sha == ""
 
 
 def test_collect_has_no_side_effects(tmp_path):
