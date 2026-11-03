@@ -649,9 +649,6 @@ def test_an_absent_gate_run_is_not_reported_as_a_marker_absence(monkeypatch, tmp
     assert ac.main(["--reviews-dir", str(tmp_path), "--out", str(tmp_path / "o.md")]) == 0
     text = (tmp_path / "o.md").read_text()
     assert "gate reported nothing readable on this head" in text
-    # ⛔ the phrase the TOOL actually emits (cycle 5: the old `"and no head-bound …"` matched
-    # nothing the tool can print, so the assertion that reads as the guard could not fail).
-    assert "found no head-bound published marker" not in text
 
 
 def test_the_positive_marker_clause_does_fire_when_the_gate_reported_red(monkeypatch, tmp_path):
@@ -670,7 +667,6 @@ def test_the_positive_marker_clause_does_fire_when_the_gate_reported_red(monkeyp
     # fails before reading markers when its key is unset, when every candidate fails HMAC, when
     # the comment fetch 403s, or when the diff hash cannot be computed.
     assert "whether a published marker exists is answered by the gate's own annotation" in text
-    assert "found no head-bound published marker" not in text
 
 
 def test_a_directory_named_like_a_record_is_unreadable_not_a_crash(tmp_path):
@@ -698,7 +694,21 @@ def test_no_gate_run_does_not_assert_a_github_absence_it_never_read(monkeypatch,
     assert ac.main(["--reviews-dir", str(tmp_path), "--no-gate", "--out", str(tmp_path / "o.md")]) == 0
     text = (tmp_path / "o.md").read_text()
     assert "published-marker surface was NOT" in text
-    assert "found no head-bound published marker" not in text
+
+
+def test_the_unqualified_marker_absence_claim_cannot_reappear_in_the_emitter():
+    """Cycle 5 removed a sentence that read as a guard but could not fail, and left the same
+    defect behind: three tests asserted an "absence" phrase NO code path can emit, so those
+    lines held on every tree, including one that had re-introduced the claim.
+
+    The claim they meant to forbid is real — telling a reader "no marker was ever published"
+    when the gate never read markers (cycle 3) or failed before reading them (cycle 6) — so the
+    pin lives where it CAN fail: the emitter's own source. Putting the phrase back into
+    `tools/attest_census.py` reds this; the runtime tests above assert the QUALIFIED clauses that
+    must actually appear (`gate reported nothing readable on this head`, `whether a published
+    marker exists is answered by the gate's own annotation`, `published-marker surface was NOT`).
+    """
+    assert "found no head-bound published marker" not in TOOL.read_text()
 
 
 def test_a_record_declaring_another_pr_AS_A_STRING_is_never_evidence(tmp_path):
