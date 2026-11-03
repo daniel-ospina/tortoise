@@ -2319,7 +2319,16 @@ def _upsert_statement(
     # is worse than naming none (#10620).
     exact = not isinstance(key, _SqlExpr) and not any(
         isinstance(value, _SqlExpr) for value in col_values.values())
-    return Statement(sql, tuple(params), tuple(columns) if exact else None)
+    # ⛔ BOTH fields are named, never positional. `Statement` carries `sql, params,
+    # param_columns, columns` — the fold's #9956 field is THIRD and main's #10620
+    # field is FOURTH — so the pre-re-integration spelling (`Statement(sql, params,
+    # <columns>)`, correct on main where `columns` WAS third) silently bound main's
+    # column list into `param_columns` and left `columns` None: main's
+    # value-withholding and the fold's per-parameter naming were both dead, and
+    # `tests/test_record_searchkeys_10620.py` reds 4 pins on it.
+    return Statement(sql, tuple(params),
+                     param_columns=tuple(param_columns),
+                     columns=tuple(columns) if exact else None)
 
 
 def _patch_statement(
@@ -2360,7 +2369,14 @@ def _patch_statement(
         f"UPDATE public.{node.table} SET {', '.join(sets)} "
         f"WHERE org_id = %s AND graph_id = %s AND {predicate}"
     )
-    return Statement(sql, tuple(params), tuple(col_values) + (("props",) if tail else ()))
+    # Both fields named — see the note in `_upsert_statement`. `param_columns` is
+    # the fold's per-PARAMETER list (#9956: `sets` columns in `params` order,
+    # then `props`, then the predicate's `org_id`/`graph_id`/`match`), which is
+    # NOT the same thing as main's `columns` (the columns this statement
+    # WRITES); a patch has both, and taking one side left the other dead.
+    return Statement(sql, tuple(params),
+                     param_columns=tuple(param_columns),
+                     columns=tuple(col_values) + (("props",) if tail else ()))
 
 
 def _delete_statement(
