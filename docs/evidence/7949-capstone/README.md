@@ -432,10 +432,27 @@ a superseded run is replaced by RE-RUNNING the probe, not by editing the log it 
 Two provenance facts a reader needs, both stated in the log rather than
 smoothed over: the FILE postdates the pre-registration (added 2026-10-22) but the MEASUREMENT
 does not (`date=2026-10-19T01:39:26Z`), and its `corpus_hash` is **not** the frozen
-`fixtures_hash`. The row is therefore a non-green measurement on **its own** corpus revision,
-and the gate (V7) requires that digest to appear in the cited artifact — a declaration the
-artifact does not record is a finding. The mechanism is #8503 (the planted edges are not formed
-at all); the receipt's retrievability rate is unmeasured (#9596).
+`fixtures_hash`. **The shipped log's row** is therefore a non-green measurement on **its own**
+corpus revision (`943a99ec…`), and the gate (V7) requires that digest to appear in the cited
+artifact the row declares — which is why *that* row carries `artifact_corpus_sha256`. The
+**current** row does not take that arm: it is selected BY the frozen pin, so its
+`corpus_sha256` IS the log's corpus and V7's short-circuit applies to it (§*The gate: two
+questions, two exits* states which arm each row takes). The mechanism is #8503 (the planted
+edges are not formed at all); the receipt's retrievability rate is unmeasured (#9596).
+
+⚠️ **The frozen record still publishes the pre-fix figure for E4, and is deliberately NOT
+edited.** `PRE-REGISTRATION.md` §10.3 says *"E4 is not amended"*, scores it at **2 of 15**, and
+closes with *"its row are unchanged"*; `preregistration.json`'s
+`criteria[E4].post_registration_measurement` still hands a machine consumer `edge_correct=2 of 15
+… so it measures its own corpus revision`. Both sentences are scoped to
+`capstone-measured-e0fc940b.log`, so neither is a false statement about that log — but the record
+is the one file a consumer reads without a human in the loop, and it now disagrees with the row
+this bundle publishes while carrying no pointer to the selector. It is **not** silently edited:
+`preregistration.json` pins the document by BYTES (`document_sha256`), and the `#10463` ruling
+recorded further down this bundle says an amendment is a **NEW linked record, never an edit to
+the frozen one**. This section is that changes record — read the record's E4 figure as *that
+log's*, read the row's as **5/15 via `select_e4_receipt`**, and treat the §10.3 sentence about
+"its row" as true of the log it names and not of the row the probe now builds.
 
 ## E5 — the falsifier, re-scored against this commit's gold
 
