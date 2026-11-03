@@ -23,7 +23,10 @@ from __future__ import annotations
 import ast
 import inspect
 import os
+import shutil
+import subprocess
 import textwrap
+from pathlib import Path
 
 import pytest
 from fastapi import HTTPException
@@ -248,8 +251,8 @@ def test_the_gate_set_is_DERIVED_from_quota_not_hand_copied():
     #    registry half cannot name a resource the guard would then refuse (a
     #    registry resource that is not gate-able is a contradiction: its count
     #    would be refused as `unknown quota resource`).
-    assert quota_mod.DERIVED_CAP_RESOURCES <= gateable
-    assert quota_mod.REGISTRY_SCOPED_RESOURCES <= gateable
+    assert gateable >= quota_mod.DERIVED_CAP_RESOURCES
+    assert gateable >= quota_mod.REGISTRY_SCOPED_RESOURCES
 
     # 4. the gate holds THAT object — identity, not a copy. A copy is the drift.
     assert ha._GRAPH_SCOPED_QUOTA_RESOURCES is quota_mod.TENANT_GRAPH_RESOURCES
@@ -319,7 +322,7 @@ def test_a_resource_enforce_org_limit_SPECIAL_CASES_is_DECLARED_and_admitted():
     # 2. a DECLARED derived cap must actually be handled, or the declaration is
     #    a promise nothing keeps (it would be admitted by the guard and then hit
     #    the `limit_key is None` arm as `unknown quota resource`).
-    assert quota_mod.DERIVED_CAP_RESOURCES <= branches
+    assert branches >= quota_mod.DERIVED_CAP_RESOURCES
 
     # 3. and the runtime half of the same invariant: an undeclared resource is
     #    REFUSED, classified, before any branch can accept it.
@@ -463,3 +466,54 @@ def test_a_factory_failure_is_fail_closed_and_attributable(monkeypatch, caplog):
     assert any("sdk unavailable" in m for m in lines), lines
     # attributable: the #686 promise is team= + resource= on every fail-closed line
     assert any(f"team={TEST_ORG_ID}" in m and "resource=points" in m for m in lines), lines
+
+
+def _ruff_binary() -> str | None:
+    """The pinned `ruff` the REQUIRED lint leg runs, or `None` if it is absent.
+
+    `ruff` is a dev dependency (`pyproject.toml`, `ruff==0.16.4`, the same pin
+    the leg installs), so the `.venv` a lane tests from carries it; an
+    environment stripped of the dev group cannot run the check, and the case
+    below SKIPS there rather than asserting a claim it did not measure.
+    """
+    root = Path(__file__).resolve().parent.parent
+    pinned = root / ".venv" / "bin" / "ruff"
+    if pinned.exists():
+        return str(pinned)
+    return shutil.which("ruff")
+
+
+def test_this_file_is_clean_under_the_REQUIRED_lint_leg():
+    """A lint error HERE reds a REQUIRED check with every case in this file green.
+
+    MEASURED, not pre-emptive: `agent-infra-ci / lint` runs `ruff check .` over
+    the whole tree (`.github/workflows/ci.yml` — "ruff check . + mypy
+    tortoise/") and was **RED at `b0b77730a617`** with exactly three SIM300
+    findings in this file — `assert quota_mod.DERIVED_CAP_RESOURCES <= gateable`
+    and its two siblings, Yoda comparisons ruff's `SIM` select flags. Nobody saw
+    it: both round-4 reviewers listed `ruff` under UNVERIFIED (they had no
+    `.venv`), and no case in a file of green assertions can observe its own
+    lint. The check that actually blocked the merge was the one nothing covered,
+    which is the same shape `tests/test_ci_new_failure_gate.py`'s own
+    lint case exists for (#10564).
+
+    The config is the tree's own: `ruff` resolves the nearest `pyproject.toml`
+    for each analyzed path, so an explicit path is judged exactly as
+    `ruff check .` judges it. Reds on the pre-fix file (rc=1, three SIM300);
+    inert only where `ruff` is absent, and a SKIP there — never a false green.
+    """
+    binary = _ruff_binary()
+    if binary is None:
+        pytest.skip("ruff is not installed in this environment")
+    this_file = Path(__file__).resolve()
+    proc = subprocess.run(
+        [binary, "check", "--no-cache", str(this_file)],
+        cwd=this_file.parent.parent,
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode == 0, (
+        f"{this_file.name} must be ruff-clean — the `agent-infra-ci / lint` leg "
+        f"runs `ruff check .` over this path and is REQUIRED; got "
+        f"rc={proc.returncode}:\n{proc.stdout}{proc.stderr}"
+    )
