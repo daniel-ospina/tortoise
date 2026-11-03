@@ -26,6 +26,7 @@ import socket
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -34,6 +35,10 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from tools import test_lane as tl  # noqa: E402
+
+#: The REAL lease writer, captured before the autouse fixture stubs it. Tests that
+#: exercise the lease mechanism itself restore this.
+_REAL_TOUCH_LEASE = tl._touch_lease
 
 
 class _R:
@@ -138,6 +143,9 @@ def test_reaper_reaps_an_unowned_container_and_keeps_a_live_owner(
         else _R(0, "", ""))
     monkeypatch.setattr(tl, "_worktree_slugs",
                         lambda: {"dead": str(dead), "alive": str(alive)})
+    # LIVENESS is a live PROCESS in the worktree, not the directory's existence
+    # (the measured conflation: 68 containers outlived their lanes by days).
+    monkeypatch.setattr(tl, "_live_lane_paths", lambda: {str(alive)})
     monkeypatch.setattr(tl, "_started_epoch", lambda _n: 0.0)
     out = tl.reap_orphans()
     joined = "\n".join(out)
@@ -208,17 +216,28 @@ def test_the_reaper_never_removes_a_container_no_worktree_here_claims(monkeypatc
 
     def fake(*a, **k):
         if a[0] == "ps":
-            return _R(0, "fdb-lane-someoneelse\trunning\n", "")
+            return _R(0, "fdb-lane-abcdef0123\trunning\n", "")
         if a[0] == "rm":
             removed.append(a)
         return _R(0, "", "")
 
     monkeypatch.setattr(tl, "_docker", fake)
     monkeypatch.setattr(tl, "_worktree_slugs", lambda: {})
-    monkeypatch.setattr(tl, "_started_epoch", lambda _n: 0.0)
+    # YOUNG: the backstop is a bound, not a hair trigger. An unowned container
+    # inside ORPHAN_MAX_AGE_H is REPORTED and removed by nothing.
+    monkeypatch.setattr(tl, "_started_epoch", lambda _n: time.time())
     out = tl.reap_orphans()
     assert removed == [], removed
     assert "report only" in out[0], out
+
+    # OLD but IN USE: the container's own CLIENT LIST outranks the clock. A
+    # cross-clone lane the /proc scan cannot name still spares its container,
+    # because the container itself reports the live client.
+    monkeypatch.setattr(tl, "_started_epoch", lambda _n: 0.0)
+    monkeypatch.setattr(tl, "_container_in_use", lambda _n: True)
+    out = tl.reap_orphans()
+    assert removed == [], (removed, out)
+    assert "active client" in "\n".join(out), out
 
 
 # ── The port-exhaustion fix: a TERMINAL container is provably out of service ──
@@ -446,6 +465,7 @@ def test_reaper_still_never_reaps_a_RUNNING_container_of_a_live_owner(
     # and the arm is ARMED, so widening it to `_LIVE_ISH_STATES` removes them.
     monkeypatch.setattr(tl, "_worktree_slugs",
                         lambda: {k: str(owner) for k in states})
+    monkeypatch.setattr(tl, "_live_lane_paths", lambda: {str(owner)})
     monkeypatch.setattr(tl, "_started_epoch", lambda _n: 0.0)
     monkeypatch.setattr(tl, "container_state",
                         lambda n: states[n[len("fdb-lane-"):]])
@@ -460,7 +480,7 @@ def test_reaper_still_never_reaps_a_RUNNING_container_of_a_live_owner(
     # second guard.
     for name in ("pausedone", "createdone", "cycling"):
         line = next(x for x in out if name in x)
-        assert "owning worktree exists" in line, (name, line)
+        assert "owning lane is LIVE" in line, (name, line)
     for line in out:
         assert "FAILED" not in line, out
 
@@ -487,7 +507,10 @@ def test_reaper_never_reaps_a_TERMINAL_container_it_cannot_ATTRIBUTE(
     monkeypatch.setattr(tl, "_docker", fake)
     monkeypatch.setattr(tl, "lane_name", lambda: "fdb-lane-mine")
     monkeypatch.setattr(tl, "_worktree_slugs", lambda: {})
-    monkeypatch.setattr(tl, "_started_epoch", lambda _n: 0.0)
+    # INSIDE the backstop: "cannot attribute" still removes nothing on its own.
+    # (The backstop itself is proven by
+    # test_reaper_backstop_mutant_without_it_a_cold_unowned_container_survives.)
+    monkeypatch.setattr(tl, "_started_epoch", lambda _n: time.time())
     monkeypatch.setattr(tl, "container_state", lambda _n: "exited")
     out = tl.reap_orphans()
     assert removed == [], (removed, out)
@@ -658,12 +681,236 @@ def test_reaper_reads_no_state_as_UNKNOWN_not_as_terminal(tmp_path, monkeypatch)
     monkeypatch.setattr(tl, "_docker", fake)
     monkeypatch.setattr(tl, "lane_name", lambda: "fdb-lane-mine")
     monkeypatch.setattr(tl, "_worktree_slugs", lambda: {"nostate": str(owner)})
+    monkeypatch.setattr(tl, "_live_lane_paths", lambda: {str(owner)})
     monkeypatch.setattr(tl, "_started_epoch", lambda _n: 0.0)
     monkeypatch.setattr(tl, "container_state", lambda _n: "exited")
     monkeypatch.setenv(tl.STOPPED_REAP_ENV, "1")
     out = tl.reap_orphans()
     assert removed == [], (removed, out)
     assert "kept fdb-lane-nostate" in out[0], out
+
+
+@pytest.fixture(autouse=True)
+def _isolated_reap_state(tmp_path, monkeypatch):
+    """NEVER let a test write the LIVE fleet reap state, and never let a test's
+    fake `_docker` be surprised by the lease's `inspect`.
+
+    The production sweep reads `REAP_STATE_DIR`, so a test that recorded a real
+    container's name would make that container reapable by a later sweep. Caught
+    in review cycle 3: this suite had left a real
+    `state/lane-reap/fdb-lane-tm9190.unused` behind on this box.
+
+    `_touch_lease` is stubbed NO-OP by default because it spends one `docker
+    inspect` on `start()`, and most tests here pin an exact docker call shape;
+    the two tests below un-stub it to prove the call sites exist.
+    """
+    monkeypatch.setattr(tl, "REAP_STATE_DIR", tmp_path / "reap-state")
+    monkeypatch.setattr(tl, "_touch_lease", lambda _n: None)
+
+
+def test_START_records_a_lease_on_both_paths(lane, monkeypatch):
+    """Review cycle 4, P1: the lease's whole value is that the LANE writes it, and
+    nothing tested that `start()` ever does — so deleting either call left the
+    suite green (which is how an unrefreshed lease reached a live `run`).
+
+    Mutation: delete `_touch_lease(name)` from either `start()` exit and one of
+    these two asserts fails."""
+    touched: list = []
+    monkeypatch.setattr(tl, "_touch_lease", lambda n: touched.append(n))
+    monkeypatch.setattr(tl, "_worktree_slugs", lambda: {})
+
+    # CREATE path: no container yet.
+    monkeypatch.setattr(tl, "container_state", lambda _n: "absent")
+    monkeypatch.setattr(tl, "_docker", lambda *a, **k: _R(0, "deadbeef\n", "") if a[0] == "run" else _R(0, "0.0.0.0:16390\n" if a[0] == "port" else "", ""))
+    monkeypatch.setattr(tl, "_wait_ready", lambda _n, _p=None: True)
+    monkeypatch.setattr(tl, "_published_port", lambda _n: (True, 16390))
+    monkeypatch.setattr(tl, "_created_image", lambda _n: tl.IMAGE)
+    monkeypatch.setattr(tl, "_graph_count", lambda _n: 0)
+    tl.start()
+    assert touched, "the CREATE path must record a lease"
+
+    # REUSE path: a running container.
+    touched.clear()
+    monkeypatch.setattr(tl, "container_state", lambda _n: "running")
+    monkeypatch.setattr(tl, "_container_memory_limit", lambda _n: 2 << 30)
+    monkeypatch.setattr(tl, "_container_live_maxmemory", lambda _n: 1536 << 20)
+    monkeypatch.setattr(tl, "_container_redis_args", lambda _n: "")
+    tl.start()
+    assert touched, "the REUSE path must record a lease"
+
+
+def test_a_failed_lease_write_leaves_NO_record(monkeypatch):
+    monkeypatch.setattr(tl, "_touch_lease", _REAL_TOUCH_LEASE)
+    """Review cycle 4, P1: a stale record still MATCHES the live container's id,
+    so a failed write left `_unused_gap` ageing the old stamp — reading "this lane
+    just used its DB" as "it has not used it for hours". Mutation: skip the
+    drop on failure and the last assert fails."""
+    monkeypatch.setattr(tl, "_container_id", lambda _n: "eeeeeeeeeeee")
+    f = tl._reap_state_path("fdb-lane-w0123456789")
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_text(f"eeeeeeeeeeee {time.time() - 9 * 3600:.0f}\n")
+
+    def _no_write(_self, *_a, **_k):
+        raise OSError("read-only state dir")
+    monkeypatch.setattr(type(f), "write_text", _no_write, raising=False)
+    tl._touch_lease("fdb-lane-w0123456789")
+    assert not f.exists(), "a failed write must leave no record to age"
+    assert tl._unused_gap("fdb-lane-w0123456789") is None
+
+
+def test_unused_gap_is_keyed_to_the_INSTANCE_not_the_name(monkeypatch):
+    monkeypatch.setattr(tl, "_touch_lease", _REAL_TOUCH_LEASE)
+    """REGRESSION for review cycle 3's P0: a lane's own `down`, or the next
+    `start()` replacing a stopped container, keeps the NAME. A name-keyed record
+    handed the REPLACEMENT the dead container's gap, and a fresh container was
+    deleted at the first moment it was between steps.
+
+    Mutation: drop the `prior[0] != cid` test and the last assertion fails."""
+    ids = iter(["aaaaaaaaaaaa", "bbbbbbbbbbbb"])
+    monkeypatch.setattr(tl, "_container_id", lambda _n: next(ids, "bbbbbbbbbbbb"))
+    assert tl._unused_gap("fdb-lane-x0123456789") is None
+    f = tl._reap_state_path("fdb-lane-x0123456789")
+    f.write_text(f"aaaaaaaaaaaa {time.time() - 9 * 3600:.0f}\n")
+    # SAME name, DIFFERENT container -> first sighting again, never a 9h gap
+    assert tl._unused_gap("fdb-lane-x0123456789") is None
+
+
+def test_touch_lease_restarts_the_clock(monkeypatch):
+    monkeypatch.setattr(tl, "_touch_lease", _REAL_TOUCH_LEASE)
+    """REGRESSION for review cycle 3's second P0: the clock must restart when the
+    LANE uses the container, not when a peer sweep happens to observe a hold — and
+    not on the reaper's own probe (the reason the `INFO stats` counter arm was
+    inert; its own read incremented it, proved by the real-container run).
+
+    Mutation: remove `_touch_lease` from `start()` and a live lane that steps
+    between two peer sweeps is reaped by the gap its own sweeps never reset."""
+    monkeypatch.setattr(tl, "_container_id", lambda _n: "cccccccccccc")
+    f = tl._reap_state_path("fdb-lane-y0123456789")
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_text(f"cccccccccccc {time.time() - 9 * 3600:.0f}\n")
+    assert tl._unused_gap("fdb-lane-y0123456789") > 8
+    tl._touch_lease("fdb-lane-y0123456789")          # the lane used it
+    assert tl._unused_gap("fdb-lane-y0123456789") < 0.1
+
+
+def test_unused_gap_reads_a_TERMINAL_container(monkeypatch):
+    """A stopped container cannot be touched by a lane, so its lease stops
+    advancing and its gap is pure wall time — that is the population holding
+    ports out of PORT_RANGE, and it must stay reclaimable."""
+    monkeypatch.setattr(tl, "_container_id", lambda _n: "dddddddddddd")
+    f = tl._reap_state_path("fdb-lane-z0123456789")
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_text(f"dddddddddddd {time.time() - 30 * 3600:.0f}\n")
+    gap = tl._unused_gap("fdb-lane-z0123456789")
+    assert gap is not None and gap > 29, gap
+
+
+def test_a_STOPPED_ownerless_orphan_is_reclaimed(monkeypatch):
+    """The population that exhausts the port range: a STOPPED container nobody
+    owns keeps its published port reserved (measured: 67 of 110 ports held by
+    EXITED containers). `docker exec` into a stopped container always fails, so
+    `_container_in_use` is None there — and if None kept the container, the
+    backstop could never reclaim them. A terminal container cannot hold a client,
+    which is positive evidence from docker's own state, not an absence.
+
+    Mutation: read `busy` from the probe even when the state is terminal (i.e.
+    drop the short-circuit) and this fails."""
+    removed: list = []
+
+    def fake(*a, **k):
+        if a[0] == "ps":
+            return _R(0, "fdb-lane-0fedcba987\texited\n", "")
+        if a[0] == "rm":
+            removed.append(a[1:])
+        return _R(0, "", "")
+
+    monkeypatch.setattr(tl, "_docker", fake)
+    monkeypatch.setattr(tl, "lane_name", lambda: "fdb-lane-mine")
+    monkeypatch.setattr(tl, "_worktree_slugs", lambda: {})
+    monkeypatch.setattr(tl, "_live_lane_paths", lambda: set())
+    # Exactly what a real `docker exec` into a stopped container does: fails.
+    monkeypatch.setattr(tl, "_container_in_use", lambda _n: None)
+    monkeypatch.setattr(tl, "container_state", lambda _n: "exited")
+    monkeypatch.setattr(tl, "_started_epoch", lambda _n: time.time() - 40 * 3600)
+    monkeypatch.setattr(tl, "_unused_gap", lambda _n: 40.0)
+    out = tl.reap_orphans()
+    assert removed == [("-f", "fdb-lane-0fedcba987")], (removed, out)
+
+
+def test_worktree_of_extracts_the_root_from_a_shell_wrapper_cmdline(tmp_path):
+    """The cwd-only test calls a live lane dead; so does a NAIVE cmdline test.
+
+    MEASURED DEFECT (review cycle 1, P0): `_worktree_of` spliced the whole
+    command-line PREFIX onto the mark (`text[:i] + "/.worktrees/"`), which yields
+    `bash -c 'cd <WT>/...` — never a directory — so the cmdline proof was inert
+    and a lane whose only reference was in its wrapper was reaped. Every shape
+    below is one the docstring names, and the shell separators (`<WT>;`) are
+    glued straight onto the path."""
+    wt = tmp_path / "repo" / ".worktrees" / "some-lane"
+    wt.mkdir(parents=True)
+    for shape in (f"bash -c 'cd {wt} && uv run pytest'",
+                  f"bash -c 'cd {wt};uv run pytest'",
+                  f"bash -c 'cd {wt}/tests && uv run pytest'",
+                  f"cd {wt} && make",
+                  str(wt)):
+        assert tl._worktree_of(shape) == str(wt), (shape, tl._worktree_of(shape))
+    # A name in prose that is NOT a directory is not an owner.
+    assert tl._worktree_of("/x/.worktrees/does-not-exist") is None
+
+
+def test_live_lane_paths_is_NONE_when_no_process_can_be_read(monkeypatch):
+    """`None` is "unreadable" and authorises no removal; an EMPTY set is "nothing
+    is alive" and would authorise removing everything. Conflating them is the
+    fail-open this module forbids everywhere else."""
+    monkeypatch.setattr(tl.os, "listdir", lambda _p: [])
+    assert tl._live_lane_paths() is None
+    monkeypatch.setattr(tl.os, "listdir", lambda _p: ["1", "2"])
+    monkeypatch.setattr(tl.os, "readlink", lambda _p: (_ for _ in ()).throw(OSError()))
+    assert tl._live_lane_paths() is None
+
+
+def test_container_in_use_passes_CLIENT_and_LIST_as_SEPARATE_argv(monkeypatch):
+    """MEASURED BUG (2026-11-03): `redis-cli "CLIENT LIST"` is ONE argument, and
+    the server replies ``ERR unknown command 'CLIENT LIST'`` while `docker exec`
+    still exits **0**. The arm therefore answered "nobody is connected" for every
+    container — a FALSE NEGATIVE that reaps a live lane's database.
+
+    Mutation: join the two argv entries (or drop the ERR check) and this fails.
+    Both halves are pinned: the ARGV shape, and the refusal to read a non-listing
+    reply as "unused"."""
+    seen: list = []
+
+    def fake(*a, **k):
+        seen.append(a)
+        return _R(0, "ERR unknown command 'CLIENT LIST'\n", "")
+
+    monkeypatch.setattr(tl, "_docker", fake)
+    assert tl._container_in_use("fdb-lane-x") is None, (
+        "an ERR reply is UNREADABLE, never 'unused'")
+    argv = list(seen[0])
+    assert argv[:3] == ["exec", "fdb-lane-x", "redis-cli"], argv
+    assert "CLIENT" in argv and "LIST" in argv, argv
+    assert not any("CLIENT LIST" in a for a in argv), argv
+
+    # A real listing: the blocking client is activity, and the PROBE itself is
+    # not (otherwise every container reports itself busy).
+    monkeypatch.setattr(tl, "_docker", lambda *a, **k: _R(
+        0, "id=7 cmd=blpop idle=2\nid=8 cmd=client|list idle=0\n", ""))
+    assert tl._container_in_use("fdb-lane-x") is True
+    monkeypatch.setattr(tl, "_docker", lambda *a, **k: _R(
+        0, "id=8 cmd=client|list idle=0\n", ""))
+    assert tl._container_in_use("fdb-lane-x") is False
+
+    # Any reply that is not a client LISTING is unreadable -> None. `redis-cli`
+    # prints a bare error line for these and still exits 0, so a two-string
+    # blocklist would answer "unused" and authorise a kill.
+    for reply in ("LOADING Redis is loading the dataset in memory\n",
+                  "BUSY Redis is busy running a script\n",
+                  "NOAUTH Authentication required.\n",
+                  "WRONGTYPE Operation against a key holding the wrong kind\n"):
+        monkeypatch.setattr(tl, "_docker",
+                            lambda *a, _r=reply, **k: _R(0, _r, ""))
+        assert tl._container_in_use("fdb-lane-x") is None, reply
 
 
 def test_pick_port_names_the_stopped_container_remedy_when_the_range_is_full(
@@ -722,14 +969,193 @@ def test_ping_over_host_is_true_when_something_answers(monkeypatch):
         worker.join(timeout=2)
 
 
-def test_no_inert_age_backstop_knob_exists():
-    """#8180 review: `ORPHAN_MAX_AGE_H` (and its
-    `TORTOISE_TEST_LANE_ORPHAN_MAX_AGE_H` knob) was read by nothing, so it
-    advertised an age bound the code deliberately does not implement — and an
-    operator setting it changed no behaviour on a DESTRUCTIVE sweep. The dead
-    knob is removed; re-adding an unread age constant fails here."""
-    assert not hasattr(tl, "ORPHAN_MAX_AGE_H"), (
-        "an age constant that nothing reads is a claim the code does not keep")
+def test_the_age_backstop_is_READ_not_an_inert_claim(tmp_path, monkeypatch):
+    """#8180 review's property, preserved through the fix: an age constant that
+    nothing reads advertises a bound the code does not keep, and on a
+    DESTRUCTIVE sweep that is a silent lie. The pre-fix code therefore carried no
+    constant at all — and, as a result, a container whose lane was gone but whose
+    worktree survived was reaped by NOTHING (measured: 68 on cell-1, oldest 4
+    days, load 639.88 on 8 cores, every lane on the box stopped working).
+
+    The gap is measured by `REAP_STATE_DIR`'s stamp, so the bound is proven by
+    moving the STAMP, not the container's age. Mutation: delete either comparison
+    and this fails."""
+    owner = tmp_path / "worktree-of-a-dead-lane"
+    owner.mkdir()
+    removed: list = []
+
+    def fake(*a, **k):
+        if a[0] == "ps":
+            return _R(0, "fdb-lane-deadlane\trunning\n", "")
+        if a[0] == "rm":
+            removed.append(a[1:])
+        return _R(0, "", "")
+
+    monkeypatch.setattr(tl, "_docker", fake)
+    monkeypatch.setattr(tl, "lane_name", lambda: "fdb-lane-mine")
+    monkeypatch.setattr(tl, "_worktree_slugs", lambda: {"deadlane": str(owner)})
+    monkeypatch.setattr(tl, "_live_lane_paths", lambda: set())
+    monkeypatch.setattr(tl, "_container_in_use", lambda _n: False)
+    monkeypatch.setattr(tl, "OWNER_GRACE_H", 2.0)
+    monkeypatch.setattr(tl, "_started_epoch", lambda _n: time.time() - 3 * 3600)
+
+    # 1 h of the gap, grace 2 h -> KEPT. Proves OWNER_GRACE_H gates the removal.
+    monkeypatch.setattr(tl, "_unused_gap", lambda _n, **k: 1.0)
+    out = tl.reap_orphans()
+    assert removed == [], (removed, out)
+    assert "grace has passed" in "\n".join(out), out
+
+    # 3 h of the gap -> REMOVED. The bound is read, so crossing it reaps.
+    monkeypatch.setattr(tl, "_unused_gap", lambda _n, **k: 3.0)
+    out = tl.reap_orphans()
+    assert removed == [("-f", "fdb-lane-deadlane")], (removed, out)
+
+
+def test_a_LIVE_lane_between_steps_is_NOT_reaped(tmp_path, monkeypatch):
+    """REGRESSION for review cycle 2's P0, and the whole point of the stamp.
+
+    `start()` REUSES a running container, so `StartedAt` is hours old for a lane
+    that has been up for hours. Measuring the grace against `StartedAt` meant a
+    live lane was reaped at the FIRST instant it happened to be between steps (no
+    process in the worktree, its client idle past `ACTIVE_CLIENT_IDLE_S`) — data
+    loss for a live lane, the exact bug this arm exists to prevent.
+
+    Mutation: compare against `_started_epoch` instead of the unheld stamp and
+    this fails — a 5 h old container that has never been observed unheld is
+    removed."""
+    owner = tmp_path / "live-lane-worktree"
+    owner.mkdir()
+    removed: list = []
+
+    def fake(*a, **k):
+        if a[0] == "ps":
+            return _R(0, "fdb-lane-busylane\trunning\n", "")
+        if a[0] == "rm":
+            removed.append(a[1:])
+        return _R(0, "", "")
+
+    monkeypatch.setattr(tl, "_docker", fake)
+    monkeypatch.setattr(tl, "lane_name", lambda: "fdb-lane-mine")
+    monkeypatch.setattr(tl, "_worktree_slugs", lambda: {"busylane": str(owner)})
+    monkeypatch.setattr(tl, "_container_in_use", lambda _n: False)  # quiet client
+    monkeypatch.setattr(tl, "_live_lane_paths", lambda: set())      # between steps
+    monkeypatch.setattr(tl, "_started_epoch", lambda _n: time.time() - 5 * 3600)
+    monkeypatch.setattr(tl, "_unused_gap", lambda _n, **k: None)   # first sighting
+    out = tl.reap_orphans()
+    assert removed == [], (removed, out)
+    assert "has not yet been observed unused" in "\n".join(out), out
+
+
+def test_holds_decides_whether_arm_2_may_delete(tmp_path):
+    """`_holds` is the guard that decides a real `docker rm -f`, and it had no
+    direct test at all. Mutation: an exact-path-only comparison breaks the
+    subdirectory case; dropping the nested-worktree exclusion makes a plain repo
+    checkout permanently un-held by every lane beneath it."""
+    repo = tmp_path / "repo"
+    lane = repo / ".worktrees" / "lane-a"
+    sibling = repo / ".worktrees" / "lane-a-sibling"
+    for d in (repo, lane, sibling):
+        d.mkdir(parents=True)
+    assert tl._holds(str(repo), str(repo)) is True
+    assert tl._holds(str(repo / "tests"), str(repo)) is True
+    assert tl._holds(str(lane), str(lane)) is True
+    assert tl._holds(str(lane / "tools"), str(lane)) is True     # subdirectory
+    assert tl._holds(str(lane), str(repo)) is False              # nested worktree
+    assert tl._holds(str(sibling), str(lane)) is False           # sibling prefix
+    assert tl._holds("/elsewhere", str(repo)) is False
+
+
+def test_a_name_with_no_worktree_slug_is_REPORT_ONLY(monkeypatch):
+    """Review cycle 1, P0: the ownerless arm's spare was exact slug equality, which
+    is STRUCTURALLY unreachable for names this tool did not mint (`fdb-lane-tm9190`
+    has no 10-hex slug, so no `/proc`-derived slug can ever equal it). The
+    backstop then removed them, silently reversing #5084's report-only ruling for
+    that class. #5084 stands: an owner this tool cannot NAME is not destroyed."""
+    removed: list = []
+
+    def fake(*a, **k):
+        if a[0] == "ps":
+            return _R(0, "fdb-lane-tm9190\trunning\n", "")
+        if a[0] == "rm":
+            removed.append(a[1:])
+        return _R(0, "", "")
+
+    monkeypatch.setattr(tl, "_docker", fake)
+    monkeypatch.setattr(tl, "lane_name", lambda: "fdb-lane-mine")
+    monkeypatch.setattr(tl, "_worktree_slugs", lambda: {})
+    monkeypatch.setattr(tl, "_live_lane_paths", lambda: set())
+    monkeypatch.setattr(tl, "_container_in_use", lambda _n: False)
+    monkeypatch.setattr(tl, "_started_epoch", lambda _n: 0.0)   # ancient
+    out = tl.reap_orphans()
+    assert removed == [], (removed, out)
+    assert "carries no worktree slug" in "\n".join(out), out
+
+
+def test_ORPHAN_MAX_AGE_H_gates_the_unowned_arm(tmp_path, monkeypatch):
+    """The owner-INDETERMINATE half (#8180's Outcome: "an age backstop for
+    containers whose owner can no longer be determined"). Mutation: drop the
+    `age_h < ORPHAN_MAX_AGE_H` comparison and this fails — and that mutant is the
+    pre-fix leak, in which ownerless containers survived for days."""
+    removed: list = []
+
+    def fake(*a, **k):
+        if a[0] == "ps":
+            return _R(0, "fdb-lane-0123456789\trunning\n", "")
+        if a[0] == "rm":
+            removed.append(a[1:])
+        return _R(0, "", "")
+
+    monkeypatch.setattr(tl, "_docker", fake)
+    monkeypatch.setattr(tl, "lane_name", lambda: "fdb-lane-mine")
+    monkeypatch.setattr(tl, "_worktree_slugs", lambda: {})
+    monkeypatch.setattr(tl, "_live_lane_paths", lambda: set())
+    monkeypatch.setattr(tl, "_container_in_use", lambda _n: False)
+    monkeypatch.setattr(tl, "container_state", lambda _n: "running")
+    monkeypatch.setattr(tl, "ORPHAN_MAX_AGE_H", 24.0)
+
+    monkeypatch.setattr(tl, "_started_epoch", lambda _n: time.time() - 25 * 3600)
+    monkeypatch.setattr(tl, "_unused_gap", lambda _n, **k: 1.0)
+    out = tl.reap_orphans()
+    assert removed == [], (removed, out)
+    # Pin the REASON: inside the backstop the container is kept, naming
+    # ORPHAN_MAX_AGE_H. Without this the guard could go inert unnoticed.
+    assert "backstop has passed" in "\n".join(out), out
+
+    monkeypatch.setattr(tl, "_unused_gap", lambda _n, **k: 25.0)
+    out = tl.reap_orphans()
+    assert removed == [("-f", "fdb-lane-0123456789")], (removed, out)
+
+
+def test_a_live_cross_clone_lane_spares_its_container_by_SLUG(tmp_path, monkeypatch):
+    """The git blind spot, closed by /proc. A container owned by ANOTHER clone on
+    the box (measured: `/tmp/cell-t3/.worktrees/...`) is absent from THIS clone's
+    `git worktree list`, so the pre-fix code could not attribute it and removed
+    nothing forever. `_live_lane_paths` names the worktree from /proc regardless
+    of clone, and the SLUG match is what spares it.
+
+    Mutation: use `_worktree_slugs` (the git list) instead of the /proc-derived
+    slugs for the liveness check, and this container is reaped — the live-lane
+    kill this test exists to prevent."""
+    wt = tmp_path / ".worktrees" / "cross-clone-lane"
+    wt.mkdir(parents=True)
+    slug = tl.slug_for(wt)
+    removed: list = []
+
+    def fake(*a, **k):
+        if a[0] == "ps":
+            return _R(0, f"fdb-lane-{slug}\trunning\n", "")
+        if a[0] == "rm":
+            removed.append(a[1:])
+        return _R(0, "", "")
+
+    monkeypatch.setattr(tl, "_docker", fake)
+    monkeypatch.setattr(tl, "lane_name", lambda: "fdb-lane-mine")
+    monkeypatch.setattr(tl, "_worktree_slugs", lambda: {})   # git cannot see it
+    monkeypatch.setattr(tl, "_live_lane_paths", lambda: {str(wt)})
+    monkeypatch.setattr(tl, "_started_epoch", lambda _n: 0.0)  # ancient
+    out = tl.reap_orphans()
+    assert removed == [], (removed, out)
+    assert "LIVE process elsewhere" in "\n".join(out), out
 
 
 def test_wait_ready_does_not_overshoot_its_budget_when_the_host_probe_black_holes(
@@ -1454,6 +1880,12 @@ def test_start_reuses_a_running_container_without_removing_it(lane, monkeypatch)
     monkeypatch.setattr(tl, "_container_redis_args", lambda _n: "")
     monkeypatch.setattr(tl, "_remove_and_describe",
                         lambda n: removed.append(n) or "removed it")
+
+    # The reuse path now also records a LEASE (one `inspect` for the instance
+    # id) so the reaper can tell a live lane from a leaked one. That read is
+    # orthogonal to the property here, which is that the reuse path never runs
+    # `docker run` and never removes the container.
+    monkeypatch.setattr(tl, "_touch_lease", lambda _n: None)
 
     def _boom(*_a, **_k):
         raise AssertionError("`docker run` must not be reached on the reuse path")
