@@ -776,6 +776,37 @@ class TestFailureModes:
             served.close()
 
 
+    def test_the_redirect_remedy_is_actionable_for_a_STORED_credential(
+        self, upstream, home, bridge_factory,
+    ):
+        """The advice must be one that can work for the source that produced it.
+
+        A FILE-sourced credential decides its own endpoint (co-source, #2369
+        D1.1), so "point TORTOISE_MCP_URL at the target" changes nothing: the
+        store's `api_url` wins, the operator repeats the failure, and the message
+        is accurate and useless — the #10605 defect in the branch added for it.
+        """
+        url, stub = upstream
+        _write_credential(home, "tt_stored_redirect", url[: -len("/mcp")])
+        target = _Upstream()
+        target.refuse = True
+        served = _serve(target)
+        target_url = next(served)
+        try:
+            stub.redirect_to = target_url
+            bridge = bridge_factory()
+
+            bridge.send(_INITIALIZE)
+            text = bridge.read()["error"]["message"]
+
+            assert "MCP-CREDENTIAL-NOT-CARRIED" in text, text
+            assert "api_url" in text and "credentials.json" in text, (
+                f"a stored credential was told to use an env URL it ignores: {text}")
+            assert "point TORTOISE_MCP_URL" not in text, text
+        finally:
+            served.close()
+
+
 # ── Interop: the real MCP daemon, through the bridge ────────────────────────
 
 

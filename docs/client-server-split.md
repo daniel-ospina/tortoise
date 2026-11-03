@@ -242,10 +242,15 @@ useless: it points at the credential's VALUE when the client never looked again
 
    No key in the config, no `${VAR}` to expand, nothing to go stale. Its auth
    refusals are named too, and split by cause: `MCP-KEY-EMPTY` when nothing
-   resolved (fixable without a restart) versus a value-fault message when a
-   credential WAS sent and the server refused it. Server text is quoted as
-   evidence, but a credential VALUE echoed back by the server is redacted before
-   it reaches the harness's transcript or logs.
+   resolved (fixable without a restart), `MCP-CREDENTIAL-NOT-CARRIED` when one
+   resolved but the request that failed carried none — the cross-origin redirect
+   hop, after which httpx deliberately drops `Authorization` — versus a
+   value-fault message when a credential WAS sent and the server refused it. Each
+   cause carries the remedy that can actually work for its source: an env key is
+   pointed at the final URL, a stored key is given the `api_url` to record,
+   because a stored credential takes its endpoint from its own file (#2369 D1.1).
+   Server text is quoted as evidence, but a credential VALUE echoed back by the
+   server is redacted before it reaches the harness's transcript or logs.
 
 **WHICH SOURCE IS ACTUALLY LIVE — stated, because "reads the live environment" is
 too generous.** The bridge is a CHILD process, so its environment is a snapshot
