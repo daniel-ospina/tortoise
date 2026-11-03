@@ -2942,13 +2942,15 @@ def _multi_artifact_record(row: dict | None = None) -> dict:
 def test_a_non_green_row_on_another_corpus_must_declare_that_revision():
     """A row whose number comes from a DIFFERENT artifact must say so.
 
-    The capstone's rows do not all come from one run: E1/E2 cite #9076's arm run,
-    and neither measured the corpus the capstone run froze. E4 is deliberately NOT
-    in that set any more — since #7949's selector the probe refuses an off-pin
-    receipt, so the CURRENT E4 row's corpus is the log's; the arm still matters for
-    logs written before the selector (the shipped `capstone-measured-e0fc940b.log`
-    carries exactly that shape). Refusing those rows outright would hide the only
-    numbers they have;
+    The capstone's rows have not all come from one run. E1/E2 cited #9076's arm run,
+    which did not measure the corpus the capstone run froze, until `#9889` re-scored
+    them on the FROZEN corpus (their records now carry that digest); and E4 cited an
+    operator receipt on another revision until `#7949`'s selector made it choose the
+    receipt BY the frozen pin, so the CURRENT E4 row's corpus is the log's. The arm
+    still matters for every log written BEFORE those two changes — the shipped
+    `capstone-measured-e0fc940b.log` carries exactly those shapes — so a rule deleted
+    once the current probes stop taking it would leave those recorded rows
+    unverifiable. Refusing such rows outright would hide the only numbers they have;
     accepting them on the row's word would let any red row name any corpus. So the
     row DECLARES the revision, and the declaration is checked against the artifact.
     """

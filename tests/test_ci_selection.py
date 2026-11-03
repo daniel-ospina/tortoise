@@ -919,6 +919,52 @@ def test_the_9572_seed_surface_pins_are_selected_on_their_own_modules():
         )
 
 
+def test_the_10180_carry_pin_runs_on_the_module_that_carries_it():
+    """#10180 review P2: the promote carry must be pinned where it is written.
+
+    `tests/test_10180_promote_default_graph.py` was registered on `api` ONLY,
+    and its row's own standing instruction is "Re-derive if a further source
+    file joins the diff." A fifth source then did: `tortoise/onboarding/state.py`,
+    which carries the carry's two writers (`carry_onboards_edge`,
+    `copy_org_state`, commits `adbae1bce`/`41e7bc7b2`/`0c615d9ac`).
+
+    That module is an `onboarding` `SOURCE_PATTERNS` PREFIX match, and in
+    `select()` a named-surface match REPLACES the `core` fallback — so a
+    state.py-only diff selected `['onboarding']` and never the `api` arm.
+    Measured before the `onboarding` entry: 145 `test_files`, this suite
+    ABSENT. The sibling on that surface,
+    `test_9079_onboarding_declared_lane.py`, is NOT a substitute: it walks the
+    carry's STATEMENT SHAPES (§17.1 write doors), not its semantics —
+    union/no-regress, `already_present` never overwrites, `not_in_target`
+    declines, and the reported reason set — which this suite is the only pin for.
+
+    Same #1349/#2938/#3154 silent-drop class as the #9572 pin above; asserted on
+    the FILE, not on non-emptiness, because `onboarding` is selected either way.
+    Mutation check: removing the `onboarding` entry fails the second assert.
+    """
+    guard = "test_10180_promote_default_graph.py"
+    carry_module = "tortoise/onboarding/state.py"
+    assert (REPO / carry_module).exists(), f"pinned file is gone: {carry_module}"
+    r = _sel([carry_module])
+    assert "onboarding" in r["surfaces"], (
+        f"{carry_module} selects {r['surfaces']}, not onboarding — the premise "
+        "of this pin changed; re-derive it"
+    )
+    assert guard in r["test_files"], (
+        f"{carry_module} does not select {guard} — the carry's only semantic "
+        "pin sleeps on the one diff that can regress it (a copy that stops "
+        "regressing `status`, an id-only `:Subject` stub, a decline arm that "
+        f"starts writing). selected {len(r['test_files'])} files"
+    )
+    # The `api` arm is not replaced by this one: the promote verb's own modules
+    # must still reach the suite (the row that existed before the carry landed).
+    api = _sel(["tortoise/hosted_api.py"])
+    assert guard in api["test_files"], (
+        f"the api registration regressed — {guard} absent from a hosted_api.py "
+        "diff's selection"
+    )
+
+
 def test_the_4282_durability_suite_is_selected_on_the_modules_it_guards():
     """#10053 review P2: a durability invariant must run on the modules it pins.
 
@@ -1105,13 +1151,25 @@ def test_every_source_pattern_is_selectable():
     Direction: entry -> runs. This does NOT catch the reverse (a guarded page with
     no SOURCE_PATTERNS entry at all) — that direction is tracked separately.
     """
-    assert "onboarding" in load_manifest()["surfaces"]
+    # ONE manifest parse for the WHOLE test, the guard below included: `_sel`
+    # re-reads and re-parses the ~10k-line `config/ci-surfaces.yml` on every
+    # call, and this loop calls it once per SOURCE_PATTERNS entry — measured
+    # 92.5 s of a 300 s pytest-timeout budget on a quiet box, i.e. a
+    # load-dependent flake on a congested runner (test-slow leg c, run
+    # 41534018861). `select()` is a pure function of (changed, event, manifest)
+    # — it only ever `.get`s from it, and `load_manifest()` has no cache — so
+    # hoisting the parse changes the timing and nothing else: same calls, same
+    # assertions. The guard reads the SAME parsed value instead of parsing a
+    # second time, so the comment's claim is true by construction rather than
+    # by the reader subtracting one (review note, PR #10631).
+    manifest = load_manifest()
+    assert "onboarding" in manifest["surfaces"]
     dead = []
     for surface, pats in SOURCE_PATTERNS.items():
         if surface == "core":
             continue
         for pat in pats:
-            if not _sel([pat])["surfaces"]:
+            if not select([pat], "pull_request", manifest)["surfaces"]:
                 dead.append((surface, pat))
     assert not dead, (
         f"SOURCE_PATTERNS entries that select NO surface (dead on arrival — the "
@@ -3172,6 +3230,16 @@ def test_record_schema_pin_runs_on_migration_or_doc_change():
         # asserted the same three things twice; the duplicate is removed rather
         # than left to double-run.
         "supabase/migrations/20261029000001_record_point_cache_tier.sql",
+        # #10620 / PR #10648 review P1: the FORWARD migration that NARROWS
+        # `public.point.search_keys` from `jsonb` to `text`, the tenth member of
+        # this family and the only one that had no entry. Same gap as its
+        # neighbours: it sorts outside the `2026101200000` CORE_ALSO prefix, so
+        # without this line a change to this file ALONE selected NO surface
+        # (measured on the pre-fix head: `surfaces: []`, `full: False`) and none
+        # of the three guards that read it — `test_9078`'s
+        # `RECORD_REAPPLY_STEPS`, `test_9231`'s `RECORD_MIGRATIONS` registry pin,
+        # `test_record_schema_placement.py` — ran on it.
+        "supabase/migrations/20261102000002_record_point_search_keys_text.sql",
         # The DOC side of the #7968 pair, restated after #9638 review P1 deleted
         # it: `test_record_schema_placement.py` reads this file's table, so a
         # docs-only edit must select `core` too. Measured on the pre-fix head:
@@ -4341,6 +4409,22 @@ def test_drift_guard_tool_change_selects_core_not_tier1():
     assert r["full"] is False, r
     assert "core" in r["surfaces"], r
     assert "test_drift_guard.py" in r["test_files"], r
+    assert set(r["test_files"]) != _tier1()
+
+
+def test_closes_landing_tool_change_selects_core_not_tier1():
+    # #10597 review c7-4: tools/closes_landing.py owns
+    # tests/test_closes_landing.py. The flat "tools/" NON_PYTHON_PREFIXES entry
+    # swallows the path, so without the CORE_ALSO row a tool-only change selects
+    # NO surface and falls back to tier-1 smoke — the suite pinning the
+    # instrument never runs on the PR that changes the instrument. Same
+    # silent-drop class as the drift-guard peer above; every other CORE_ALSO row
+    # in that tuple is pinned the same way. Mutation check: removing the row
+    # filters the path out and fails every assert below.
+    r = _sel(["tools/closes_landing.py"])
+    assert r["full"] is False, r
+    assert "core" in r["surfaces"], r
+    assert "test_closes_landing.py" in r["test_files"], r
     assert set(r["test_files"]) != _tier1()
 
 
@@ -13036,6 +13120,23 @@ def test_lane_stash_guard_runs_on_a_tools_only_change():
     assert r["full"] is False, r
     assert r["surfaces"] == ["core"], r
     assert "test_lane_stash.py" in r["test_files"], r
+
+
+def test_rail_pin_runs_on_a_tools_only_change():
+    # #2148: `tests/test_rail_detach.py` (registered `core`) pins the merge
+    # rail's DURABILITY — the detached session that lets `admin-merge.sh`
+    # outlive the lane, the fail-closed verdict vocabulary, and the `flock`
+    # duplicate-rail guard. `tools/` is a flat NON_PYTHON_PREFIXES entry and
+    # `tools/rail_detach.py` matches no SOURCE_PATTERNS row, so before the
+    # CORE_ALSO entry a tools-only diff was filtered out BEFORE the
+    # "not matched -> core" fallback: the pin never ran on the file it exists
+    # to hold (the #1349/#3332/#3616 silent-drop class). Mutation check:
+    # removing the CORE_ALSO entry fails the arm below (surfaces == [] and the
+    # guard absent from test_files).
+    r = _sel(["tools/rail_detach.py"])
+    assert r["full"] is False, r
+    assert r["surfaces"] == ["core"], r
+    assert "test_rail_detach.py" in r["test_files"], r
 
 
 def test_turn_parity_census_guard_runs_on_a_tools_only_change():

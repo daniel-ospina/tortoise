@@ -61,6 +61,20 @@ THE CLASSES (what the plan is made of, per session holding graph turn nodes)
                                record lost). ⛔ MUST NOT BE PURGED: the record
                                holds a DIFFERENT transcript, so a delete
                                substitutes one for the other silently.
+    DUPLICATE-WINDOW           the RECORD holds two or more windows for one
+                               session id (a re-capture or a resume), and the
+                               graph holds turn nodes for it. Entry order is
+                               the only index the record carries, so no turn
+                               can be placed: the census cannot say which
+                               window the graph's `t<i>` came from. ⛔ MUST NOT
+                               BE PURGED — and ⛔ MUST NOT BE BACKFILLED
+                               EITHER: a RECORD-BEHIND backfill or a MISMATCH
+                               field fix would both write ONE window over the
+                               other. The repair is to resolve which capture is
+                               authoritative, by hand. The census refuses these
+                               sessions by name and holds their nodes back
+                               (`duplicate_window`), and this tool refuses a
+                               planned one under `REFUSE_DUPLICATE_WINDOW`.
 
 WHAT PARITY IS MATCHED ON (the brief's "not just the count" rule)
 ================================================================
@@ -308,6 +322,14 @@ CLASS_PARITY = "PARITY"
 CLASS_RECORD_AHEAD = "RECORD-AHEAD"
 CLASS_RECORD_BEHIND = "RECORD-BEHIND"
 CLASS_MISMATCH = "MISMATCH"
+#: A RECORD-SIDE duplicate (a re-capture or a resume): the record holds two or
+#: more windows for one session id, so entry order — the only index it carries —
+#: cannot place a turn. It is NOT a graph/backfill gap, and saying so matters:
+#: the repair for MISMATCH is a field fix and the repair for RECORD-BEHIND is a
+#: backfill, and BOTH would write the wrong window over a duplicate. The census
+#: refuses these sessions by name (`duplicate_window`) and holds their nodes
+#: back; this class carries that name through to the plan (review P2).
+CLASS_DUPLICATE_WINDOW = "DUPLICATE-WINDOW"
 
 #: Refusal codes. Each is a NAME, not a sentence, so a test asserts the reason
 #: and an operator greps the log — a guard whose refusals are not
@@ -323,6 +345,7 @@ REFUSE_CONFIRMATION_MISMATCH = "confirmation-mismatch"
 REFUSE_EXACT_SET_MISMATCH = "exact-set-mismatch"
 REFUSE_RECORD_BEHIND = "record-behind"
 REFUSE_MISMATCH = "mismatch"
+REFUSE_DUPLICATE_WINDOW = "duplicate-window"
 REFUSE_NOT_IN_PLAN = "session-not-in-plan"
 REFUSE_JOURNAL_UNCONFIRMED = "journal-unconfirmed"
 # The post-effect family (#10483 review, P2 — the half-purge between the DELETE
@@ -421,7 +444,21 @@ def classify_sessions(report: dict) -> dict:
         problems = verdict.get("problems") or []
         missing = [p for p in problems if p.get("problem") == "missing_in_record"]
         mismatched = [p for p in problems if p.get("problem") != "missing_in_record"]
-        if missing:
+        duplicate = [p for p in problems
+                     if p.get("problem") == "duplicate_window"]
+        if duplicate and not missing:
+            # NAMED as what it is. Falling through to MISMATCH would say "the
+            # record holds a DIFFERENT transcript" about a session the census
+            # explicitly refused to place, i.e. it would INVERT the arm's own
+            # warning ("do not backfill over it") into an invitation to
+            # backfill (review P2).
+            klass = CLASS_DUPLICATE_WINDOW
+            reason = ("the RECORD holds more than one window for this session "
+                      "(a re-capture or a resume) — entry order is the only "
+                      "index it carries, so no key can be placed. This is a "
+                      "record-side duplicate, NOT a graph/backfill gap: do "
+                      "not backfill over it")
+        elif missing:
             # RECORD-BEHIND wins the class over MISMATCH: the dangerous half is
             # the transcript the record does not hold at all, and an operator
             # who reads "MISMATCH" would think a field repair is the remedy
@@ -443,7 +480,8 @@ def classify_sessions(report: dict) -> dict:
             "mismatched": len(mismatched),
             "graph_turn_nodes": int(verdict.get("graph_turn_nodes") or 0),
             "record_turn_rows": int(verdict.get("record_turn_rows") or 0),
-            "sample_ids": sorted({str(p.get("node")) for p in problems})[:10],
+            "sample_ids": sorted({str(p.get("node")) for p in problems
+                                 if p.get("node")})[:10],
         })
 
     # Anomalies are nodes in the DELETE SET the census could not compare. They
@@ -456,7 +494,10 @@ def classify_sessions(report: dict) -> dict:
               CLASS_RECORD_BEHIND: sum(1 for e in excluded
                                        if e["class"] == CLASS_RECORD_BEHIND),
               CLASS_MISMATCH: sum(1 for e in excluded
-                                  if e["class"] == CLASS_MISMATCH)}
+                                  if e["class"] == CLASS_MISMATCH),
+              CLASS_DUPLICATE_WINDOW: sum(
+                  1 for e in excluded
+                  if e["class"] == CLASS_DUPLICATE_WINDOW)}
     return {"eligible": eligible, "excluded": excluded, "counts": counts}
 
 
@@ -845,6 +886,19 @@ def evaluate_gate(*, plan: dict | None, live_report: dict | None,
         return (REFUSE_MISMATCH,
                 "target session(s) MISMATCH — the record holds a DIFFERENT "
                 "transcript for these turns: " + ", ".join(mismatched[:10]))
+    duplicated = [e["session"] for e in classified["excluded"]
+                  if e["class"] == CLASS_DUPLICATE_WINDOW
+                  and e["session"] in planned]
+    if duplicated:
+        # A fresh NAMED refusal, not a fall-through: the exact-set check below
+        # WOULD still refuse (a duplicate is excluded, so the digest moves), so
+        # this is diagnosis rather than a guard — but the wrong diagnosis sends
+        # the operator to re-approve a set that is correct, when the record is
+        # the side that holds two windows.
+        return (REFUSE_DUPLICATE_WINDOW,
+                "target session(s) DUPLICATE-WINDOW — the record holds more "
+                "than one window for these sessions, so no key can be "
+                "placed: " + ", ".join(duplicated[:10]))
 
     live_digest = plan_digest(classified["eligible"],
                               _plan_journal_path(plan))
@@ -1846,7 +1900,8 @@ def main(argv: list[str] | None = None) -> int:
     print(f"census     : PARITY({counts[CLASS_PARITY]}, of which "
           f"{counts[CLASS_RECORD_AHEAD]} RECORD-AHEAD) · "
           f"RECORD-BEHIND({counts[CLASS_RECORD_BEHIND]}) · "
-          f"MISMATCH({counts[CLASS_MISMATCH]})")
+          f"MISMATCH({counts[CLASS_MISMATCH]}) · "
+          f"DUPLICATE-WINDOW({counts.get(CLASS_DUPLICATE_WINDOW, 0)})")
     for entry in plan["excluded"]["sessions"]:
         print(f"  EXCLUDED  {entry['class']} {entry['session']}: "
               f"{entry['graph_turn_nodes']} graph node(s) — {entry['reason']}")

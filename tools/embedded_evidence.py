@@ -592,7 +592,11 @@ def _manifest_receipt(files: list[str], marker: str, out_dir: Path) -> dict:
             )
         return p.returncode, p.stdout
 
-    rc = mod.emit_manifest(files, marker, out, runner=_runner)
+    # The pin is computed against the SAME directory the child runs in
+    # (`embedded_evidence` uses REPO_ROOT, whoever invoked it). Passing only
+    # `runner` here used to leave the pin keyed on the caller's cwd — a
+    # different tree from the child's (#10636 review P2).
+    rc = mod.emit_manifest(files, marker, out, runner=_runner, cwd=str(REPO_ROOT))
     if rc != 0 or not out.exists():
         raise RuntimeError(f"emit_manifest failed rc={rc}")
     nodeids = [
