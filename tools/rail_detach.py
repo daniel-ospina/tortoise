@@ -37,6 +37,7 @@ THE ARTIFACT (durable, tool-owned)
     ${CELL_HOME:-$HOME}/.pi/agent/state/rail/rail-<owner-repo>-<pr>.md
 
 `KEY=VALUE` lines, appended in place: PR/REPO/HEAD/STARTED_AT/PID/SID/LOG/CWD,
+then `CHILD_PID=` (written by the RAIL itself) and `CHILD_STARTED=`,
 then `EXIT=`/`FINISHED_AT=` when the rail exits. `VERDICT` and `MERGE_SHA` are
 DERIVED at collect time from the rail's own log lines (`✅ merged PR #N at <sha>`,
 `ALREADY MERGED`) rather than re-asking the API — the artifact must be readable
@@ -44,12 +45,37 @@ when the network is not, and the rail's own words are the primary record.
 
 STATES
 ------
-    waiting   the rail process is alive (own session) and has no EXIT yet
+    waiting   the rail is still RUNNING (own session) and has no EXIT yet
     merged    EXIT=0
     refused   EXIT != 0 (the rail's own fail-closed verdict; reason carried)
-    lost      the pid is gone with NO EXIT line — killed outright. NEVER reported
-              as merged: a rail that vanished has no verdict, and inventing one is
-              the #2235 fail-open shape.
+    lost      nothing that carries the verdict is left, and there is NO EXIT line
+              — killed outright. NEVER reported as merged: a rail that vanished
+              has no verdict, and inventing one is the #2235 fail-open shape.
+
+WHICH PROCESS *IS* THE RAIL (measured 2026-11-03, review P1)
+-----------------------------------------------------------
+`start` spawns `bash -c <wrapper>`; the wrapper starts the rail as a BACKGROUND
+job (so it can `wait` for it and then write `EXIT=`). Two processes therefore
+carry the work, and they do NOT die together:
+
+    PID=        the wrapper — writes `EXIT=`, dies first when someone kills it
+    CHILD_PID=  the rail itself — runs `scripts/admin-merge.sh`
+
+Probing only `PID=` reported `lost` for a rail that had merely lost its wrapper:
+measured, the wrapper took a SIGKILL, `killpg(pid, 0)` still answered, the rail
+ran to completion and printed its merge line, and nobody was left to write
+`EXIT=`. The next `start` was then allowed, truncated the artifact and appended a
+new attempt mark — which scopes the FIRST rail's `✅ merged` line out for good.
+A wrong, durable verdict for a PR that merged.
+
+So a rail is alive while EITHER process is, and the rail's own pid is recorded BY
+THE RAIL (`$$`, before it execs `admin-merge.sh`) rather than by the wrapper
+(`$!`): a wrapper killed at any moment after the fork then still leaves a name
+for a rail that is running. The rail's claim is checked by GROUP MEMBERSHIP
+(`os.getpgid(child) == the wrapper's pid`), not by its argv: a pid's session and
+process group are inherited across fork and preserved across `execve`
+(credentials(7)), so membership survives whatever the rail execs, and a recycled
+pid — which belongs to some other group — cannot impersonate it.
 
 "gone" has to be TRUE on every box this runs on, and it is not free: on a host
 without procfs `os.kill(pid, 0)` answers yes for a ZOMBIE. `_pid_alive` therefore
@@ -274,14 +300,38 @@ def _proc_cmdline(pid: int) -> str | None:
         return None
 
 
-def _pid_alive(pid: int, marker: str) -> bool:
-    """Alive AND still ours — `os.kill(pid, 0)` alone reports a RECYCLED pid as
-    a live rail, which would report `waiting` forever on a dead rail."""
-    if pid <= 0:
+def _in_group(pid: int, pgid: int) -> bool:
+    """`pid` exists AND is a member of `pgid`'s process group.
+
+    THE ownership test for the rail process. It survives `exec` (fork and execve
+    both preserve the group) where an argv marker does not — the rail may exec
+    anything — and it defeats pid reuse, because a recycled pid is in some other
+    group. `getpgid` raises for a pid that is gone, so this also answers "exists".
+    """
+    if pid <= 0 or pgid <= 0:
         return False
     try:
-        os.kill(pid, 0)
+        return os.getpgid(pid) == pgid
     except OSError:
+        return False
+
+
+def _pid_alive(pid: int, marker: str = "", *, pgid: int | None = None) -> bool:
+    """Alive AND still ours — `os.kill(pid, 0)` alone reports a RECYCLED pid as
+    a live rail, which would report `waiting` forever on a dead rail.
+
+    `pgid` swaps the "is it ours" test from an argv marker to GROUP MEMBERSHIP —
+    required for the rail itself (see the module docstring): its argv is whatever
+    `admin-merge.sh` last exec'd, while its group is fixed at fork time.
+    """
+    if pid <= 0:
+        return False
+    if pgid is None:
+        try:
+            os.kill(pid, 0)
+        except OSError:
+            return False
+    elif not _in_group(pid, pgid):
         return False
     # A ZOMBIE still answers kill(0) and its cmdline is EMPTY — reporting it alive
     # would leave a killed rail reading `waiting` forever. `Z` is gone-as-far-as-
@@ -295,6 +345,10 @@ def _pid_alive(pid: int, marker: str) -> bool:
         # fork/exec window) — alive, not dead. Reporting `lost` there is how a
         # healthy rail reads as killed (#observed live 2026-11-03).
         if not raw.strip():
+            return True
+        if pgid is not None:
+            # Identity is already settled by group membership; the argv is the
+            # rail's own business and may be anything it exec'd.
             return True
         # The child's argv carries the rail path; a recycled pid will not.
         return Path(marker).name in raw or marker in raw
@@ -313,6 +367,21 @@ def _pid_alive(pid: int, marker: str) -> bool:
     if not stat:
         return False  # `ps` knows no such pid ⇒ it is gone
     return not stat.startswith("Z")
+
+
+def _rail_alive(leader: int, child: int, marker: str) -> bool:
+    """Is the rail's WORK still running? Two processes carry it, and they do not
+    die together: the wrapper (`leader`, which writes `EXIT=`) and the rail
+    itself (`child`, which runs `admin-merge.sh`). Probing only the wrapper read
+    `lost` for a rail that had merely lost its wrapper and was still merging
+    (measured — see the module docstring). Either one alive means `waiting`.
+
+    An artifact from before `CHILD_PID=` has no rail pid; it falls back to the
+    wrapper-only probe, which is what it was written under.
+    """
+    if _pid_alive(leader, marker):
+        return True
+    return leader > 0 and child > 0 and _pid_alive(child, pgid=leader)
 
 
 def _int_or_none(s: str) -> int | None:
@@ -425,6 +494,7 @@ def collect(state_dir: Path, repo: str, pr: int) -> RailState | None:
 
         exits = read_all(text, "EXIT")
         pid = _int_or_none(read_field(text, "PID", "0")) or 0
+        child = _int_or_none(read_field(text, "CHILD_PID", "0")) or 0
         st = RailState(
             pr=pr,
             state=WAITING,
@@ -458,8 +528,10 @@ def collect(state_dir: Path, repo: str, pr: int) -> RailState | None:
                               if code == 0 else "no refusal line in the log"))
             return st
 
-        # No EXIT line yet. Alive ⇒ waiting; gone ⇒ lost (NEVER merged).
-        if _pid_alive(pid, str(art)):
+        # No EXIT line yet. Alive ⇒ waiting; gone ⇒ lost (NEVER merged). ⛔ ALIVE
+        # IS "THE WRAPPER **OR** THE RAIL": a killed wrapper leaves the rail
+        # running, and reading that as `lost` was the P1 (module docstring).
+        if _rail_alive(pid, child, str(art)):
             st.state = WAITING
             return st
 
@@ -468,7 +540,12 @@ def collect(state_dir: Path, repo: str, pr: int) -> RailState | None:
         # on the fresh text when the artifact has moved; break when it has not
         # (including `CHILD_STARTED=`, which the child appends and which changes
         # nothing a verdict reads).
-        if read_all(art.read_text(encoding="utf-8", errors="replace"), "EXIT") != exits:
+        fresh = art.read_text(encoding="utf-8", errors="replace")
+        # `CHILD_PID=` is the same race one process over: the wrapper can be
+        # killed in the instant between the spawn and the child naming itself, so
+        # a first read that missed it is not yet "no rail".
+        if (read_all(fresh, "EXIT") != exits
+                or (not child and read_field(fresh, "CHILD_PID"))):
             continue
         break
     if pid == 0 and read_field(text, "SPAWNING") and not exits:
@@ -537,6 +614,18 @@ def _resolve_repo(cwd: Path) -> str:
             f"`gh repo view` did not answer within {GH_PROBE_TIMEOUT_S}s — refusing to "
             "detach a rail at a target this launch could not name"
         ) from None
+    except (OSError, subprocess.SubprocessError) as e:
+        # ⛔ `gh` ABSENT is not a traceback. This call is on `start`'s own path, so
+        # an uncaught `FileNotFoundError` escaped `main()` and exited 1 — the code
+        # this tool reserves for `collect --assert-merged` "not merged" — while
+        # the docstring promises "2 = environment error" (a minimal-PATH runner
+        # has already produced `exit code 127` on `gh` elsewhere in this repo,
+        # #9018). `_ps` two functions away already treats an unrunnable probe as a
+        # distinct answer; this does the same.
+        raise Refused(
+            f"could not run `gh` to name the repo ({type(e).__name__}: {e}) — refusing "
+            "to detach a rail at a target this launch could not name"
+        ) from None
     if out.returncode == 0 and out.stdout.strip():
         repo = out.stdout.strip()
         if env_repo and env_repo != repo:
@@ -561,7 +650,10 @@ def _head_sha(cwd: Path, repo: str, pr: int) -> str:
             cwd=str(cwd), capture_output=True, text=True,
             timeout=GH_PROBE_TIMEOUT_S,
         )
-    except subprocess.TimeoutExpired:
+    except (subprocess.TimeoutExpired, OSError, subprocess.SubprocessError):
+        # Same reason as `_resolve_repo`: the declared contract is "the sha *or*
+        # `unreadable`", so a `gh` that cannot run has to answer `unreadable`
+        # rather than escape. `HEAD` gates nothing.
         return "unreadable"
     return out.stdout.strip() if out.returncode == 0 else "unreadable"
 
@@ -575,13 +667,28 @@ def child_script(rail: Path, repo: str, pr: int, logp: Path, art: Path,
                  extra: list[str]) -> list[str]:
     """The detached rail's argv. NOTHING but the one lander is invoked: no gh
     merge, no flags added, no gate relaxed. `extra` is passed through verbatim
-    because it is the operator's own rail invocation (e.g. `--dry-run`)."""
+    because it is the operator's own rail invocation (e.g. `--dry-run`).
+
+    The rail runs as a BACKGROUND job so this wrapper can `wait` for its exit
+    code and record `EXIT=` — and it records its OWN pid (`$$`) before `exec`-ing
+    the lander, so a wrapper killed at any point after the fork still leaves a name
+    for a rail that is running (`$!` would be written BY the wrapper, i.e. lost in
+    exactly the case this exists for). `exec` keeps the pid, so `CHILD_PID=` names
+    the real rail."""
     rail_args = " ".join(
         _shquote(a) for a in [str(rail), str(pr), "--repo", repo, *extra])
+    # `bash -c <script> rail <art> <rail-argv...>`: $1 is the artifact, `$@` after
+    # the shift is the lander invocation. Double quotes only — this string is
+    # itself single-quoted by `_shquote`.
+    self_naming_rail = (
+        'printf "CHILD_PID=%s\\n" "$$" >> "$1"; shift; exec bash "$@"'
+    )
     body = (
+        f"bash -c {_shquote(self_naming_rail)} rail {_shquote(str(art))} {rail_args} "
+        f">> {_shquote(logp)} 2>&1 &\n"
+        f"child=$!\n"
         f"printf 'CHILD_STARTED=%s\\n' \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\" >> {_shquote(art)}\n"
-        f"bash {rail_args} >> {_shquote(logp)} 2>&1\n"
-        f"rc=$?\n"
+        f"wait \"$child\"; rc=$?\n"
         f"printf 'EXIT=%s\\nFINISHED_AT=%s\\n' \"$rc\" \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\" >> {_shquote(art)}\n"
         f"exit \"$rc\"\n"
     )

@@ -18,6 +18,7 @@ says, and the launcher never resolves a repo it was given.
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import signal
@@ -102,6 +103,28 @@ def wait_state(state_dir, pr, want, timeout=15.0, pred=None):
     return st
 
 
+def wait_field(path: Path, key: str, timeout=10.0) -> str:
+    end = time.time() + timeout
+    while time.time() < end:
+        value = rd.read_field(path.read_text(encoding="utf-8"), key)
+        if value:
+            return value
+        time.sleep(0.02)
+    return ""
+
+
+def kill_group(pid: int, sig=signal.SIGKILL) -> None:
+    """Kill a rail's WHOLE process group — the wrapper AND the rail.
+
+    ⛔ `PID=` is the `bash -c` WRAPPER and `CHILD_PID=` is the rail, and they die
+    separately: killing only the wrapper leaves the rail RUNNING (that is the P1
+    this file now pins). "The rail is gone" therefore means the group, never the
+    one pid.
+    """
+    with contextlib.suppress(OSError):   # ProcessLookupError: already gone
+        os.killpg(os.getpgid(pid), sig)
+
+
 # ── the collect contract ─────────────────────────────────────────────────────
 def test_start_returns_immediately_and_collect_sees_it_waiting(tmp_path, monkeypatch):
     co = make_checkout(tmp_path)
@@ -148,7 +171,11 @@ def test_refused_state_carries_the_rails_own_reason(tmp_path, monkeypatch):
 
 
 def test_a_killed_rail_is_lost_never_merged(tmp_path):
-    """No EXIT line is NOT a verdict. Reporting `merged` here would be #2235."""
+    """No EXIT line is NOT a verdict. Reporting `merged` here would be #2235.
+
+    The kill is to the GROUP: `PID=` names the wrapper, and killing it alone
+    leaves the rail it started running (see the wrapper arm below).
+    """
     co = make_checkout(tmp_path)
     sd = tmp_path / "state"
     os.environ["FAKE_RAIL_SLEEP"] = "30"
@@ -157,11 +184,43 @@ def test_a_killed_rail_is_lost_never_merged(tmp_path):
     finally:
         os.environ.pop("FAKE_RAIL_SLEEP", None)
     time.sleep(0.2)
-    os.kill(ln.pid, signal.SIGKILL)
+    kill_group(ln.pid)
     time.sleep(0.3)
     st = rd.collect(sd, "o/r", 13)
     assert st.state == rd.LOST and st.exit_code is None
     assert "no EXIT line" in st.reason
+
+
+def test_a_killed_wrapper_does_not_lose_a_live_rail(tmp_path, monkeypatch):
+    """⛔ TWO PROCESSES CARRY THE VERDICT, AND THEY DIE SEPARATELY.
+
+    `start` runs `bash -c <wrapper>`, and the wrapper runs the lander as a
+    background job so it can `wait` for it and write `EXIT=`. `PID=` therefore
+    names the WRAPPER; the rail has its own pid (`CHILD_PID=`, written by the rail
+    itself). Probing only the wrapper reported `lost` for a rail that was still
+    merging — measured before the fix: the rail went on to print its `✅ merged`
+    line with nobody left to write `EXIT=`, while `collect` said `lost`, so the
+    next beat's `start` was allowed, truncated the artifact and appended a new
+    attempt mark, which scopes that real merge line out for good (#2235's durable
+    wrong verdict, in the safe direction but permanent).
+    """
+    co = make_checkout(tmp_path)
+    sd = tmp_path / "state"
+    monkeypatch.setenv("FAKE_RAIL_SLEEP", "3")
+    ln = launch(sd, co, pr=75)
+    assert wait_state(sd, 75, rd.WAITING).state == rd.WAITING
+    art = rd.artifact_path(sd, "o/r", 75)
+    child = int(wait_field(art, "CHILD_PID") or 0)
+    assert child > 0, art.read_text()          # named by the RAIL, not the wrapper
+    assert child != ln.pid                     # …and it is a different process
+    os.kill(ln.pid, signal.SIGKILL)            # the WRAPPER dies; the rail lives on
+    time.sleep(0.2)
+    st = rd.collect(sd, "o/r", 75)
+    assert st.state != rd.LOST, st.as_dict()   # pre-fix: `lost` while it was merging
+    st = wait_state(sd, 75, rd.MERGED, timeout=25)
+    assert st.state == rd.MERGED and st.merge_sha == "deadbeefcafe1234"
+    assert st.exit_code is None
+    assert "EXIT line was never written" in st.reason
 
 
 def test_announced_merge_survives_a_missing_exit_line(tmp_path):
@@ -211,7 +270,10 @@ def test_a_rail_that_exits_during_the_liveness_probe_keeps_its_exit_code(tmp_pat
     art.write_text("\n".join(ln for ln in text.splitlines() if not ln.startswith("EXIT=")) + "\n")
     assert "EXIT=" not in art.read_text()                     # the stale read
 
-    def exits_during_the_probe(pid, marker):
+    def exits_during_the_probe(pid, marker="", **kw):
+        # `**kw` because the probe's ownership test grew a group-membership arm
+        # (`pgid=`); this fake answers "gone" for BOTH processes, which is the
+        # interleaving under test.
         with art.open("a", encoding="utf-8") as fh:
             fh.write(f"EXIT=0\nFINISHED_AT={rd._iso_now()}\n")
         return False                                          # …and it is GONE
@@ -237,7 +299,7 @@ def test_previous_attempts_merge_line_is_not_inherited(tmp_path):
     finally:
         os.environ.pop("FAKE_RAIL_SLEEP", None)
     time.sleep(0.2)
-    os.kill(ln.pid, signal.SIGKILL)                              # …and is killed
+    kill_group(ln.pid)                                           # …and is killed
     time.sleep(0.3)
     st = rd.collect(sd, "o/r", 61)
     assert st.state == rd.LOST, st.as_dict()
@@ -316,7 +378,7 @@ def test_torn_exit_line_does_not_crash_collect(tmp_path):
         ln = rd.launch(66, cwd=co, state_dir=sd, repo="o/r")
     finally:
         os.environ.pop("FAKE_RAIL_SLEEP", None)
-    os.kill(ln.pid, signal.SIGKILL)
+    kill_group(ln.pid)          # the whole group: nothing is left to write an EXIT
     time.sleep(0.3)
     art = rd.artifact_path(sd, "o/r", 66)
     art.write_text(art.read_text() + "EXIT=\n")      # the torn append
@@ -614,3 +676,117 @@ def test_an_unmeasurable_liveness_probe_keeps_the_rail_alive(tmp_path, monkeypat
         assert rd._pid_alive(proc.pid, "/state/rail-o-r-8.md") is True
     finally:
         proc.wait()
+
+
+# ── `gh` absent: a refusal, never a traceback whose exit code is the gate ────
+def _no_gh(monkeypatch):
+    """`gh` is NOT INSTALLED: `subprocess.run([...])` raises FileNotFoundError,
+    exactly as it does on a minimal-PATH runner. Filtered by argv so the local
+    `ps` probe (the same `subprocess.run`) keeps working."""
+    real_run = subprocess.run
+
+    def run(argv, *a, **kw):
+        if isinstance(argv, (list, tuple)) and argv and argv[0] == "gh":
+            raise FileNotFoundError(2, "No such file or directory", "gh")
+        return real_run(argv, *a, **kw)
+
+    monkeypatch.setattr(rd.subprocess, "run", run)
+
+
+def test_a_missing_gh_refuses_start_instead_of_tracebacking_as_exit_1(tmp_path, monkeypatch):
+    """⛔ EXIT 1 IS THIS TOOL'S MACHINE GATE (`collect --assert-merged`, "not
+    merged"). An uncaught `FileNotFoundError` from `gh repo view` escaped `main()`
+    as a traceback and the interpreter's exit **1** — i.e. a launcher that could
+    not even name the repo reported itself as "a rail ran and the PR is not
+    merged". `start`'s documented contract is `4 = refused`, and a minimal-PATH
+    runner has already produced `exit code 127` on `gh` elsewhere in this repo
+    (#9018). Refuse, do not wedge the code space."""
+    co = make_checkout(tmp_path)
+    sd = tmp_path / "state"
+    _no_gh(monkeypatch)
+    rc = rd.main(["start", "73", "--cwd", str(co), "--state-dir", str(sd)])
+    assert rc == 4, rc                       # pre-fix: FileNotFoundError → exit 1
+    assert not rd.artifact_path(sd, "o/r", 73).exists()
+
+
+def test_a_missing_gh_makes_the_head_unreadable_not_a_crash(tmp_path, monkeypatch):
+    """`_head_sha`'s declared contract is "the sha *or* `unreadable`", and `HEAD`
+    gates nothing — so a `gh` that cannot run must not stop the rail starting."""
+    co = make_checkout(tmp_path)
+    sd = tmp_path / "state"
+    _no_gh(monkeypatch)
+    ln = launch(sd, co, pr=77)               # repo given ⇒ only `_head_sha` calls `gh`
+    assert ln.head == "unreadable"
+    assert wait_state(sd, 77, rd.MERGED).state == rd.MERGED
+
+
+# ── the duplicate-rail guard is a LOCK, and only a race can tell ─────────────
+RACER = textwrap.dedent(
+    """
+    import sys
+    sys.path.insert(0, {tools!r})
+    import rail_detach as rd
+    try:
+        ln = rd.launch({pr}, cwd={co!r}, state_dir={sd!r}, repo="o/r")
+        print("STARTED", ln.pid, flush=True)
+    except rd.Refused as e:
+        print("REFUSED", str(e).replace("\\n", " "), flush=True)
+    """
+)
+
+
+def test_two_processes_racing_start_produce_exactly_one_rail(tmp_path, monkeypatch):
+    """⛔ THE SEQUENTIAL ARM ABOVE CANNOT SEE THE LOCK.
+
+    `test_refuses_a_second_live_rail_on_one_pr` goes launch → collect → launch in
+    ONE process, so a guard implemented as `collect()`-then-`Popen()` with **no
+    lock at all** passes it unchanged. The lock's whole value is atomicity under
+    concurrency, which that test never creates — this one does, with two REAL
+    processes on one PR.
+
+    The race is made deterministic in both directions instead of hoped for: the
+    first racer is held INSIDE the lock by a slow `gh` (`_head_sha` is called
+    there), and the second arrives while it is held. With the lock the second's
+    `collect` runs after the first wrote `SPAWNING=`/`PID=` → `waiting` → refuse.
+    Without it, both read "no rail", both spawn, and the artifact/log are written
+    twice (#3061 — measured: the arm fails on a lockless guard, see the PR
+    comment).
+    """
+    slow = fake_gh(tmp_path, "#!/usr/bin/env bash\nsleep 2\nexit 1\n", sub="slowbin3")
+    monkeypatch.setenv("PATH", f"{slow}{os.pathsep}{os.environ.get('PATH', '')}")
+    monkeypatch.setenv("FAKE_RAIL_SLEEP", "30")     # the winner's rail stays live
+    co = make_checkout(tmp_path)
+    sd = tmp_path / "state"
+    env = dict(os.environ, PYTHONPATH=str(REPO_ROOT / "tools"))
+
+    def racer():
+        return subprocess.Popen(
+            [sys.executable, "-c", RACER.format(
+                tools=str(REPO_ROOT / "tools"), pr=76, co=str(co), sd=str(sd))],
+            cwd=str(REPO_ROOT), env=env, stdout=subprocess.PIPE, text=True,
+        )
+
+    a = racer()
+    time.sleep(0.4)      # A is inside the lock, held there by its slow `gh`
+    b = racer()
+    try:
+        outs = [a.stdout.read(), b.stdout.read()]
+        a.wait(timeout=40)
+        b.wait(timeout=40)
+        started = [o for o in outs if o.startswith("STARTED")]
+        refused = [o for o in outs if o.startswith("REFUSED")]
+        assert len(started) == 1 and len(refused) == 1, outs
+        text = rd.artifact_path(sd, "o/r", 76).read_text(encoding="utf-8")
+        assert len(rd.read_all(text, "PID")) == 1, text
+        assert len(rd.read_all(text, "CHILD_PID")) == 1, text
+        assert Path(rd.read_field(text, "LOG")).read_text(encoding="utf-8").count(
+            rd.ATTEMPT_MARK) == 1
+        st = rd.collect(sd, "o/r", 76)
+        assert st.state == rd.WAITING, st.as_dict()
+    finally:
+        for racer_proc in (a, b):
+            if racer_proc.poll() is None:
+                racer_proc.kill()
+        st = rd.collect(sd, "o/r", 76)
+        if st is not None and st.pid:
+            kill_group(st.pid)
