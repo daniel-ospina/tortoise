@@ -471,9 +471,10 @@ FOLD_ON_CREATE_DEFAULTS: dict[str, dict[str, Any]] = {
 #:   `_upsert_object`/`_upsert_subject` seed `status=coalesce($st, 'live')` from
 #:   the creation record's own payload (`projection/entities.py`), and
 #:   `sdk.create_entity` accepts a caller status — ⚠️ the SUBJECT door validates it
-#:   against §4.2, the OBJECT door validates nothing (`sdk.py:4923`,
-#:   `:23474-23479`: `:Object`/`:Event` "do not validate, they STORE the value")
-#:   — so `create_object(name, status='superseded')` writes a terminal status at
+#:   against §4.2, while the OBJECT door validates nothing: `sdk.create_entity`'s
+#:   `t == 'subject'` branch checks `_SUBJECT_STATUS_VALUES`, its `t == 'object'`
+#:   branch has no status check at all — so `create_object(name, status='superseded')`
+#:   writes a terminal status at
 #:   birth that `never_store` keeps out of the layer tables. `ObjectRegistered` /
 #:   `SubjectAdded` are now selected from the SAME stream (their `payload ->
 #:   'status'`) and replayed in `seq` order, ON CREATE, so a record-sourced
@@ -1819,11 +1820,17 @@ def apply_event_stream_folds(
                 # this replay assumes, and the divergence runs in BOTH directions:
                 #   (ii-a) the node existed at that earlier event, so a pre-birth
                 #   `restatus`/pack fold the live graph DID apply is DISCARDED by
-                #   this arm — MEASURED: `[restatus(seq 1, 'archived'),
-                #   birth(seq 2, None)]` rebuilds with NO status (reads LIVE) while
-                #   the graph holds `archived` (terminal), and
-                #   `[birth(None), …, birth('archived')]` (delete-then-re-create)
-                #   rebuilds absent while the graph holds `archived`. The v1 of
+                #   this arm. ⚠️ TWO INSTANCES, and the terminal latch below closed
+                #   the first of them: `[restatus(seq 1, 'archived'), birth(seq 2,
+                #   None)]` USED TO rebuild with NO status (reads LIVE) while the
+                #   graph holds `archived` — it now rebuilds `archived`, because the
+                #   latch refuses the birth write over a terminal the replay already
+                #   holds (review round 9 re-measured this: the old text here still
+                #   claimed it broken, which was itself a false claim). What is STILL
+                #   OPEN is the other instance: `[birth(None), …, birth('archived')]`
+                #   (delete-then-re-create) rebuilds absent while the graph holds
+                #   `archived`, because there the `birth_seen` earliest-only rule
+                #   discards the value and the latch never sees it. The v1 of
                 #   this comment named only the opposite direction ("possibly a
                 #   TERMINAL value the graph never held"), which is the rarer
                 #   half;
@@ -1842,7 +1849,8 @@ def apply_event_stream_folds(
                 # `live._terminal_excluded` admits as CURRENT, and
                 # `entity_identity.resolve_entity_id` resolves its name. That is
                 # #9974's own harm, re-opened by the leg added to close it — and
-                # measured on this very tree:
+                # measured on the PRE-FIX head (`952e30fa7`; it rebuilds `archived`
+                # here, which is the point of the latch):
                 #     [restatus(seq 5, 'archived'), birth(seq 9, 'live')]
                 #       → rebuilt `live`; the graph holds `archived`.
                 # So the birth arm honours the SAME latch every other in-stream
