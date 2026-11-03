@@ -2263,12 +2263,19 @@ def render_log(*, head: str, prereg_sha: str, bars: dict, corpus_sha: str,
         f"operators_total={e4['operators_total']} "
         f"operators_provenanced={e4['operators_provenanced']}")
     add(f"e4 outcome={e4_out['outcome']} {e4_out['value']} bar={e4_out['bar']}")
-    add("e4 provenance: the FILE postdates the pre-registration but the "
-        f"MEASUREMENT does not — its own date={e4['date']} and its "
-        f"corpus_hash={e4['corpus_hash']} are not the frozen corpus "
-        f"({corpus_sha}). This row is therefore scored as a NON-GREEN measurement "
-        "on ITS OWN corpus revision, and the gate requires that digest to appear "
-        "in the artifact itself (V7)")
+    on_pin = _same_corpus(str(e4["corpus_sha256"] or ""), corpus_sha)
+    add("e4 provenance: the receipt's own "
+        f"date={e4['date']} and commit={e4['commit']} are the RECEIPT's, not this "
+        f"run's head. " + (
+            f"Its corpus_hash={e4['corpus_hash']} IS the frozen corpus "
+            f"({corpus_sha}) — this row was selected BY that hash, so it is scored "
+            "on the pre-registered corpus and V7's declared-mismatch arm is not "
+            "taken for it"
+            if on_pin else
+            f"Its corpus_hash={e4['corpus_hash']} is NOT the frozen corpus "
+            f"({corpus_sha}). This row is therefore scored as a NON-GREEN "
+            "measurement on ITS OWN corpus revision, and the gate requires that "
+            "digest to appear in the artifact itself (V7)"))
     add("")
     add("## E5 — a fresh re-score of the #7947 arms against this corpus's gold")
     add(f"e5 arms_dir={e5['arms_dir']} artifact={e5['artifact']}")
