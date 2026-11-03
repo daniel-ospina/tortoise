@@ -437,25 +437,39 @@ def _spawn_orphan_pid(tmpdir: str | None = None,
                          stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                          text=True, env=env)
 
+    import select
+
     def _child_stderr() -> str:
         """The child's OWN stderr — the only datum that says why it never
         reached READY (#10703).
 
-        Read AFTER the child is reaped: a live child keeps the pipe open, so
-        reading first would block on a spawn that is merely slow. An empty
-        capture is reported as such rather than as an empty string, so a
-        failure can never again read as a bare `orphan spawn failed: ''` with
-        the diagnosis silently discarded.
+        Read AFTER the child is reaped, and BOUNDED: a live grandchild (the
+        embedded server redislite forks) can hold the write end of this pipe
+        open, so a plain ``p.stderr.read()`` would block on exactly the arm that
+        has something to report. An empty capture says so explicitly, so no
+        failure can read as a bare ``orphan spawn failed: ''`` again.
         """
+        assert p.stderr is not None
+        chunks: list[str] = []
+        deadline = time.monotonic() + 2.0
         try:
-            err = (p.stderr.read() or "").strip()
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                if not select.select([p.stderr], [], [], remaining)[0]:
+                    break
+                piece = os.read(p.stderr.fileno(), 65536)
+                if not piece:  # EOF
+                    break
+                chunks.append(piece.decode("utf-8", "replace"))
         except (OSError, ValueError):  # pipe already closed/torn down
             return " [child stderr unreadable]"
+        err = "".join(chunks).strip()
         if not err:
             return " [child wrote nothing to stderr]"
         return f"\n--- child stderr (tail) ---\n{err[-2000:]}"
 
-    import select
     if not select.select([p.stdout], [], [], 30)[0]:
         p.kill()
         p.wait()
@@ -500,6 +514,28 @@ def test_a_spawn_failure_names_the_childs_own_stderr():
     assert marker in msg, (
         "the child's own stderr must be in the failure message — "
         f"`orphan spawn failed: ''` is the defect being fixed; got: {msg}")
+
+    # (B) The drain is BOUNDED. A spawned embedded server is a grandchild that
+    # inherits this pipe, so a plain `p.stderr.read()` would block on exactly
+    # the failure that has the diagnosis to report — trading a missing message
+    # for a hung leg. A grandchild that holds the pipe open must cost the cap,
+    # not the job.
+    held = "10703-sentinel-a-grandchild-holds-the-pipe"
+    started = time.monotonic()
+    with pytest.raises(AssertionError) as exc2:
+        _spawn_orphan_pid(code=(
+            "import os,sys,time\n"
+            f"sys.stderr.write({held!r}); sys.stderr.flush()\n"
+            "if os.fork() == 0:\n"
+            "    devnull = os.open(os.devnull, os.O_WRONLY)\n"
+            "    os.dup2(devnull, 1)\n"
+            "    time.sleep(20); os._exit(0)\n"
+            "sys.exit(4)\n"))
+    elapsed = time.monotonic() - started
+    assert held in str(exc2.value), str(exc2.value)
+    assert elapsed < 15.0, (
+        f"the stderr drain must be bounded — a pipe a grandchild still holds "
+        f"open took {elapsed:.1f}s")
 
 
 @pytest.fixture(autouse=True)
