@@ -3340,6 +3340,43 @@ def test_build_e4_row_refuses_a_receipt_off_the_pin():
     assert "REFUSED" in str(exc.value), str(exc.value)
 
 
+def test_the_e4_note_follows_the_outcome_it_sits_beside_and_not_a_fixed_claim():
+    """The note asserted "#8503: the planted edges are still not all formed" ALWAYS.
+
+    The bar is 15 of 15, so the moment an on-pin receipt reads 15/15 the row is GREEN
+    and its own note said the planted edges were not formed — a sentence the row's own
+    fields refute, emitted at exactly the epic's success state, and uncovered because
+    every fixture sat at 5/15. Both arms are pinned here, because the point is that
+    the clause FOLLOWS the number it sits beside.
+    """
+    bars = measure.parse_bars(_prereg())
+    pin = "sha256:" + "d" * 64
+
+    def row(edge_correct: int) -> dict:
+        receipt = {"evidence": "x.json", "planted": 15,
+                   "edge_correct": edge_correct, "content_ok": 11,
+                   "operators_total": 33, "date": "d", "commit": "abc",
+                   "corpus_hash": pin, "verdict": "regression",
+                   "failure_origin": "gate_regression"}
+        return measure.build_e4_row(receipt, bars=bars, corpus_sha=pin)
+
+    red = row(5)
+    assert red["verdict"] == "RED", red
+    assert "still not all formed" in red["note"], red["note"]
+
+    green = row(15)
+    assert green["verdict"] == "GREEN", green
+    assert "still not all formed" not in green["note"], (
+        "the row is GREEN — its note must not say the planted edges are unformed: "
+        f"{green['note']}")
+    assert "IS met" in green["note"], green["note"]
+
+    # The retrievability half is a fact about the RECEIPT, not about the number, so
+    # it stays on BOTH arms — removing it with the #8503 clause would lose a true
+    # disclosure at the exact moment the row goes green.
+    assert "#9596" in green["note"] and "#9596" in red["note"]
+
+
 def test_the_newest_frozen_pin_receipt_wins_because_the_ordering_is_the_property():
     """`matched[-1]` is a claim the docs make; pin it or `matched[0]` stays green.
 

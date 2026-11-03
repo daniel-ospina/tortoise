@@ -1920,19 +1920,26 @@ def _instant(raw: object) -> tuple[int, object]:
     ``…T00:30:00Z`` lexically while being genuinely EARLIER. The key decides both which
     receipt wins and whether an unscorable one refuses the selection, so a wrong
     compare makes the two disagree — a false refusal one way, a reopened silent skip
-    the other. Returns ``(0, raw)`` for anything absent or unparseable (so an undated
-    record never displaces a dated one) and ``(1, datetime)`` otherwise; the tag is
-    compared first, so a datetime is never ordered against a str.
+    the other. Returns ``(0, "")`` for an ABSENT date, ``(0, <the date as text>)``
+    for one that is PRESENT but unreadable, and ``(1, datetime)`` otherwise (so an
+    undated record never displaces a dated one); the tag is compared first, so a
+    datetime is never ordered against a str.
 
     ⛔ The two tag-0 shapes are NOT the same fact, and the CALLER must separate them:
     ``(0, "")`` is "no date recorded", which the ordering can state honestly;
-    ``(0, raw)`` is "a date is recorded and it cannot be read", which makes the
+    ``(0, <text>)`` is "a date is recorded and it cannot be read", which makes the
     record's position in the order unknowable. Ranking the second as if it were the
     first let an OLDER on-pin receipt publish E4's number while a newer measurement
     sat unread (and silenced the would-have-won refusal when that newer one was also
     unscorable) — so ``select_e4_receipt`` REFUSES it, on the same reasoning it
     refuses an unreadable file: nothing can prove the newest measurement on the
     frozen corpus is not the one whose date could not be parsed.
+
+    The second element of a tag-0 key is therefore ALWAYS a ``str``: an absent date
+    contributes ``""`` and a present-but-unreadable one contributes ``repr(raw)`` (a
+    non-string such as ``"date": 20261024`` lands here rather than being flattened
+    into the absent shape). Both are only ever compared against other strings, so
+    ordering is unaffected.
     """
     text = raw if isinstance(raw, str) else ("" if raw is None else repr(raw))
     if not text:
@@ -2199,6 +2206,19 @@ def build_e4_row(receipt: dict, *, bars: dict, corpus_sha: str) -> dict:
             "row from a receipt that does not carry the pin would print a sentence "
             "the row's own fields refute")
     result = e4_outcome_for(receipt, bars)
+    # ⛔ THIS CLAUSE IS A CLAIM ABOUT THE NUMBER BESIDE IT, so it follows that
+    # number's outcome. It used to be unconditional, which was harmless only while
+    # every receipt read below the bar: the bar is 15 of 15, so the moment an on-pin
+    # receipt reads 15/15 the row is GREEN and it announced that "the planted edges
+    # are still not all formed" — a sentence the row's OWN fields refute, fired at
+    # exactly the epic's success state. The `#9596` half is metric-specific (the
+    # receipt's retrievability is unreported whatever the edge count) and stays
+    # unconditional; only the `#8503` half is a claim about the number.
+    edge_clause = (
+        "the planted-edge bar IS met by this receipt, so #8503's fix holds here"
+        if result["outcome"] == "PASS"
+        else "the planted edges are still not all formed (#8503)"
+    )
     return {
         "verdict": verdict_word(result),
         "numerator": receipt["edge_correct"],
@@ -2216,7 +2236,7 @@ def build_e4_row(receipt: dict, *, bars: dict, corpus_sha: str) -> dict:
                  f"are the RECEIPT's, not this run's head. verdict="
                  f"{receipt['verdict']} failure_origin={receipt['failure_origin']} "
                  f"is the receipt's own gate verdict over its metrics, not this "
-                 f"row's: the planted edges are still not all formed (#8503), and "
+                 f"row's: {edge_clause}, and "
                  f"the receipt's retrievability rate is UNMEASURED (#9596)"),
     }
 
