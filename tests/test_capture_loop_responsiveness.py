@@ -233,6 +233,57 @@ def test_capture_points_estimate_reads_off_the_event_loop(client, monkeypatch):
         f"other request on the single loop (#4625 leg 72)")
 
 
+def test_capture_sessions_gate_allowance_read_is_off_the_event_loop(
+        client, monkeypatch):
+    """#9567 D12 (review round 10): the REST capture gate's allowance fill must
+    not run its control-plane read ON the event loop.
+
+    ``_check_org_limit(org, "sessions")`` now FILLS any missing allowance key
+    from ``quota.resolve_org_limits`` — a SYNC read (``_orgs_row_fail_soft``
+    → ``httpx`` with a retry ladder under schema drift, or
+    ``_make_sdk(namespace="registry")`` + a ``Team`` query). Pre-change that
+    call did NO I/O at all (every resolver supplies ``max_sessions: None``, so
+    ``enforce_org_limit`` returned before counting — the file's own #10133
+    note), which is why the new read is easy to leave inline: it runs on EVERY
+    REST capture, including the store-only (#3892/#4258) and replay lanes that
+    reach it having done no other I/O, and it parks the single uvicorn worker
+    for a control-plane round-trip (the #2988/#3498 class).
+
+    The discriminator is the thread the resolver ran on: a worker thread has no
+    running event loop. ``resolve_org_limits`` is patched on its SOURCE module
+    because the path imports it inside ``carry_resolved_allowances``, at call
+    time — so a path that stops calling it leaves ``ran_on_loop`` absent and
+    fails on the first assertion instead of passing vacuously.
+    """
+    seen: dict[str, object] = {}
+
+    import tortoise.quota as quota_mod
+
+    def _fake_resolve(org_id):
+        seen["thread"] = threading.current_thread().name
+        try:
+            asyncio.get_running_loop()
+            seen["ran_on_loop"] = True
+        except RuntimeError:
+            seen["ran_on_loop"] = False
+        # NO allowance configured — today's only production state. The read
+        # still happens (the fill cannot know a key is absent without asking),
+        # which is exactly the cost this test pins as OFF the loop.
+        return {"org_id": org_id, "tier": "free"}
+
+    monkeypatch.setattr(quota_mod, "resolve_org_limits", _fake_resolve)
+    r = client.post("/v1/sessions", json={"conversation": _CONV})
+
+    assert "ran_on_loop" in seen, (
+        "the sessions-door allowance fill never ran "
+        f"({r.status_code}: {r.text[:200]}) — this run proves nothing")
+    assert seen["ran_on_loop"] is False, (
+        f"the capture's allowance fill ran ON the event loop "
+        f"(thread {seen['thread']!r}) — a control-plane round-trip (laddered "
+        f"under schema drift) parks every concurrent request, including the "
+        f"/health check, on the single loop (#2988/#3498)")
+
+
 def test_stalled_capture_does_not_freeze_the_event_loop(client, monkeypatch):
     """The invariant: while a capture is stalled, the API keeps answering.
 
