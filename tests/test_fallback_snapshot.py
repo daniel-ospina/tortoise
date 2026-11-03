@@ -1104,7 +1104,7 @@ def test_a_reader_racing_the_commit_invalidate_tail_gets_the_cohorts_rows():
     """The bound is ONE FLIGHT, not "no result crosses a write boundary" (round 10, P2).
 
     ``_mark_dirty`` runs ``invalidate()`` at the TAIL of each write surface, AFTER the
-    graph commit (``sdk.py:17589`` -> ``:17594``). So there is a window between a write
+    graph commit (``sdk.py:17590`` -> ``:17594``). So there is a window between a write
     COMMITTING and its invalidate landing. A reader whose ``get`` misses inside that
     window samples the PRE-write stamp and joins the pre-write flight.
 
@@ -1125,8 +1125,20 @@ def test_a_reader_racing_the_commit_invalidate_tail_gets_the_cohorts_rows():
     built = threading.Event()
     release = threading.Event()
     rows: list[dict] = []
+    # The write COMMITS between the leader's rows being read and its invalidate landing;
+    # the racing reader arrives in that window. Modelled as an event the leader's builder
+    # READS AT BUILD TIME, NOT as ``fs._store.invalidate`` — modelling the write AS the
+    # invalidate is exactly what hid this window from the round-9 tests. ⛔ The event must
+    # be READ BY THE BUILDER and asserted FALSE there: a ``committed`` flag set and
+    # asserted by the test thread alone is unfalsifiable (review round 12, P3: that is
+    # what the previous version did — wrapper changed, the property did not).
+    committed = threading.Event()
+    seen_at_build: list[bool] = []
 
     def leader_builder(_proj):
+        # Read the commit state AT BUILD TIME, so the assertion below tests a fact the
+        # test thread cannot set afterwards.
+        seen_at_build.append(committed.is_set())
         built.set()
         release.wait(timeout=10)
         return _snap_stub("pre-commit")
@@ -1136,14 +1148,9 @@ def test_a_reader_racing_the_commit_invalidate_tail_gets_the_cohorts_rows():
     t1.start()
     assert built.wait(timeout=10), "the leader's build never started"
 
-    # The write COMMITS here (a fresh MATCH would see it) … its ``_mark_dirty`` →
-    # ``invalidate`` has NOT run yet. A reader arriving in this window samples the
-    # pre-write stamp and joins the pre-write flight. The commit is modelled as a flag
-    # the leader's rows predate, NOT as ``fs._store.invalidate`` — modelling the write AS
-    # the invalidate is exactly what hid this window from the round-9 tests.
-    committed = threading.Event()
+    # The write COMMITS now — after the leader's rows were read, BEFORE its invalidate.
     committed.set()
-    assert committed.is_set(), "the write committed before the racing reader arrives"
+
     heard: list[dict] = []
     t2 = threading.Thread(
         target=lambda: heard.append(
@@ -1166,7 +1173,11 @@ def test_a_reader_racing_the_commit_invalidate_tail_gets_the_cohorts_rows():
     t1.join(timeout=20)
     t2.join(timeout=20)
 
-    assert committed.is_set()
+    assert seen_at_build == [False], (
+        f"the leader's rows must be read BEFORE the write committed (that is what makes "
+        f"them pre-commit rows), and the builder records that fact at build time — got "
+        f"{seen_at_build}. If this is [True] the test has modelled the commit as landing "
+        f"before the build, i.e. it is no longer pinning the window it names")
     assert rows and rows[0].get("tag") == "pre-commit"
     assert heard and heard[0].get("tag") == "pre-commit", (
         "the documented behaviour: a reader racing the commit->invalidate tail is served "
@@ -1255,14 +1266,24 @@ def test_a_write_opens_a_concurrent_build_which_is_the_stated_concurrency_bound(
     deadline = time.monotonic() + 10
     while time.monotonic() < deadline:
         fl = fs._FLIGHTS.get((key, g1))
-        if fl is not None and fl.waiters >= 4:
+        with lock:
+            # ⛔ BOTH facts, not just the waiter count (review round 12, P3):
+            # ``_flight_begin`` bumps ``waiters`` for the LEADER before it reaches
+            # ``produce()`` -> ``builder``, so ``waiters >= 4`` alone can be satisfied
+            # while no g1 build has started — which then failed ``concurrent`` below and
+            # printed "generations were serialised", a misleading diagnosis of code that
+            # had not changed. Require the build to have entered as well.
+            entered = builds.count("g1") >= 1
+        if fl is not None and fl.waiters >= 4 and entered:
             break
         time.sleep(0.005)
     else:
+        with lock:
+            _entered = builds.count("g1")
         raise AssertionError(
             f"the four same-stamp readers never shared one flight "
-            f"(waiters={getattr(fs._FLIGHTS.get((key, g1)), 'waiters', None)}) — "
-            f"they are not coalescing")
+            f"(waiters={getattr(fs._FLIGHTS.get((key, g1)), 'waiters', None)}, "
+            f"g1_builds={_entered}) — they are not coalescing")
 
     with lock:
         # ⛔ ``not g0_done`` — the EVENT that says the g0 build has returned, not

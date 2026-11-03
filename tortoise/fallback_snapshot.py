@@ -329,7 +329,9 @@ def get_or_build(proj, key: tuple, *, store: FallbackSnapshotStore | None = None
     the worker thread with no log (review round 7, P3: measured, not theoretical).
     Unreachable today: the only builder is ``build_snapshot``, which makes no such
     call. This line exists so the next reshape that routes a builder through this
-    seam fails loudly instead of wedging a flight.
+    seam MEETS THE PRECONDITION IN ITS OWN REVIEW instead of wedging a flight — a
+    docstring cannot fail loudly (review round 12, P3: the previous wording promised a
+    loud failure three lines above a hazard it had just described as silent).
     """
     store = _store if store is None else store
     build = build_snapshot if builder is None else builder
@@ -401,8 +403,12 @@ def get_or_build(proj, key: tuple, *, store: FallbackSnapshotStore | None = None
     #
     # Pinned by ``test_a_reader_racing_the_commit_invalidate_tail_gets_the_cohorts_rows``.
     #
-    # ⇒ "overtaken" never means "stale for this reader"; it only means "must not be
-    # CACHED" (the put guard inside ``produce``). So there is NO rebuild path here — the
+    # ⇒ "overtaken" never means "must be REBUILT for this reader"; it only means "must
+    # not be CACHED" (the put guard inside ``produce``). ⛔ NOT "never means stale for
+    # this reader" — that contradicted guarantee 2 above (review round 12, P3): the
+    # racing reader IS served rows predating a committed write. What the partition buys
+    # is that no reader needs its own build, not that no reader sees a stale row. So
+    # there is NO rebuild path here — the
     # previous version had one, keyed on "the generation changed", which was true for the
     # WHOLE cohort and cost one corpus build PER READER (review round 9, P2: measured 6
     # builds for 1 leader + 5 joiners — the amplifier this module exists to remove,
