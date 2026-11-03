@@ -1183,23 +1183,30 @@ def test_a_mixed_never_read_population_round_trips(tmp_path):
 
 
 def test_a_failed_question_beside_a_resumed_one_is_not_red(tmp_path):
-    """A READ question whose activation FAILED, beside a never-read (resumed
-    pre-arm) one — the ordinary mixed population that made the whole-census
-    cross-check red a correct artifact (#10678 review 3, P2).
+    """A READ question whose activation FAILED, beside a row with no manifest at
+    all (a resumed pre-arm outcome) — the ordinary mixed population that made
+    the whole-census cross-check red a correct artifact (#10678 review 3, P2).
 
-    BOTH rows are never-read by the cell predicate (``per_question_unread`` is
-    2, asserted below — a fail-open manifest carries no census cells either),
-    yet their reasons DIFFER: ``activation_failed`` and ``no_manifest``. A
-    cross-check that assumes the never-read population carries ONE reason
-    therefore refuses an artifact the probe just produced correctly. The reason
-    is also what lets ``_row_shapes`` restore ``measured``: the fail-open row IS
-    measured, the resumed one is not.
+    The two inert rows are NOT interchangeable. q2 is a READ question (a
+    manifest exists and FAILED): the manifest is a DICT, and a dict counts as
+    measured whether or not it was read, so ``cells.measured`` includes it;
+    its ``ep_ran``/``error`` cells are what make it a READ row, and
+    ``_rebuild_outcome`` rebuilds it from those cells. q3 has
+    no manifest at all and is the only row whose census cells are ALL null, so
+    only q3 needs a shape from ``inert_questions[].reason``. ``inert_by_reason``
+    counts both (2) and ``per_question_unread`` counts both (2, asserted below),
+    so neither count IS the never-read set the shape resolver needs. That is why
+    the counts are checked against the independent run-level witness
+    ``cells.measured`` instead (``no_manifest = rows - measured``,
+    ``activation_failed = measured - read_rows``) — ``_row_shapes`` READS that
+    witness, it never restores it.
     """
     doc = {"fingerprint": {"activate_beliefs": True},
            "outcomes": [
                {"question_id": "q1", "question_type": "t",
                 "belief_activation": _manifest()},
-               # READ, non-null, and FAILED — inert, but not never-read.
+               # READ (a manifest exists) and FAILED, but its CENSUS was never
+               # read — ``activation_failed``, not ``no_manifest``.
                {"question_id": "q2", "question_type": "t",
                 "belief_activation": {"ep_ran": False, "error": "boom"}},
                # NEVER read — a resumed pre-arm outcome, no manifest at all.
