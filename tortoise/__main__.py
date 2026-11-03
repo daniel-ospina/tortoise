@@ -3012,6 +3012,13 @@ def _scrub(text: str, *secrets: object) -> str:
         if cut == -1:
             continue
         query = sec[cut + 1:]
+        if not query:
+            # A URL ending in `?`/`#` yields an EMPTY query, and
+            # `"".join`-style replacement (`text.replace("", marker)`) interleaves
+            # the marker between EVERY character — shredding the diagnostic this
+            # function exists to keep legible (and losing the 403 remedy, because
+            # the body is scrubbed before it is parsed).
+            continue
         fragments.append(query)
         decoded = _unquote(query)
         fragments.append(decoded)
@@ -3033,7 +3040,10 @@ def _scrub(text: str, *secrets: object) -> str:
                 # fragments above — a short password is still a credential.
                 fragments.append(part)
 
-    for fragment in sorted(set(fragments), key=len, reverse=True):
+    for fragment in sorted((f for f in set(fragments) if f), key=len, reverse=True):
+        # belt and braces: a zero-length fragment matches between every character
+        if len(fragment) < 1:
+            continue
         text = text.replace(fragment, "<redacted>")
     return text
 
@@ -3091,7 +3101,11 @@ def _same_endpoint(a: object, b: object) -> bool:
             if not host:
                 return None
             default = 443 if split.scheme in ("https", "") else 80
-            return (host.lower(), split.port or default)
+            port = split.port
+            # `port or default` would fold an explicit 0 into the scheme default;
+            # `:0` is not a usable endpoint, so treat it as unknown rather than
+            # silently equal to `:443`.
+            return (host.lower(), default if port is None else port)
         except ValueError:
             return None
 
@@ -3438,6 +3452,11 @@ def _cmd_config(args) -> int:
     raw_uri = _os.environ.get("TORTOISE_DB_URI")
     uri = (raw_uri or "").strip()
     graph_store: dict = {"source": "TORTOISE_DB_URI" if uri else "none"}
+    if not uri:
+        # A script must not read "none" as "no store configured": the embedded
+        # default is in play, and only `doctor` resolves it.
+        graph_store["note_default"] = (
+            "no TORTOISE_DB_URI — `tortoise doctor` reports the resolved default")
     if raw_uri is not None and not uri:
         # Set-but-empty is not "absent": the user believes they configured it.
         graph_store["note"] = "TORTOISE_DB_URI is set but empty — treated as unset"
@@ -3647,6 +3666,8 @@ def _cmd_config(args) -> int:
             print("  existing team from the current directory.")
     print()
     print("Graph store")
+    if graph_store.get("note_default"):
+        print(f"  ·  {graph_store['note_default']}")
     if graph_store.get("target"):
         kind = graph_store.get("target_kind")
         suffix = f"  ({graph_store['source']}{', ' + kind if kind else ''})"
@@ -3713,8 +3734,10 @@ def _cmd_config(args) -> int:
         harness_ok = ("the harness's copy works"
                       if not harness.get("api_key_unsendable")
                       else "the harness's copy cannot be sent either")
-        print(f"  → the SAME key as the CLI, modulo surrounding whitespace — the"
-              f" CLI's copy cannot authenticate (see above), {harness_ok}")
+        print("  → the SAME key as the CLI, modulo surrounding whitespace — the"
+              " CLI's copy is sent verbatim (surrounding whitespace is normally"
+              " stripped in transit, so it usually still works; CR/LF would make"
+              f" it unsendable), {harness_ok}")
     elif relation == "same-key-different-host":
         print("  → the SAME key as the CLI but a DIFFERENT endpoint — a refusal on"
               " one says nothing about the other")
@@ -3871,9 +3894,11 @@ _ORG_INFO_REMEDIES: dict[str, str] = {
     "GRAPH_SCOPED_TEAM_SURFACE": (
         "this API key is bound to ONE graph, so it cannot read team-level info."
         " That is deliberate (a per-graph key must never see org-wide data), not"
-        " a fault. Your own coordinates are already on this machine: run"
-        " `tortoise config show`. For an org-wide key, mint one on the dashboard"
-        " (API Keys tab) and `tortoise init --api-key <it>`."
+        " a fault. The dashboard's API Keys tab names the org and graph this key"
+        " is bound to. `tortoise config show` reports what THIS machine knows —"
+        " which for a key installed with `init --api-key`, or exported as"
+        " TORTOISE_API_KEY, is the key but not the org. For an org-wide key, mint"
+        " one on the dashboard and `tortoise init --api-key <it>`."
     ),
 }
 

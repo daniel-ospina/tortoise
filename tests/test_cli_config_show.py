@@ -1261,6 +1261,43 @@ def test_the_scrubber_covers_query_values(monkeypatch, capsys, tmp_path):
     assert "p%40ss" not in scrubbed
 
 
+@pytest.mark.parametrize("url", ["https://h/?", "https://h/#", "https://h?",
+                                  "https://h#"])
+def test_an_empty_query_does_not_shred_the_diagnostic(url):
+    """A URL ending in `?`/`#` yields an EMPTY fragment, and `replace("", marker)`
+    interleaves the marker between every character — losing the remedy, because
+    the body is scrubbed before it is parsed."""
+    assert main._scrub("API error 500: disk full", url) == "API error 500: disk full"
+
+
+def test_a_trailing_question_mark_api_url_still_gets_the_403_remedy(capsys):
+    main._explain_org_info_failure(
+        403, json.dumps({"detail": {"error_code": "GRAPH_SCOPED_TEAM_SURFACE"}}),
+        "https://api.premiselabs.co/?")
+    err = capsys.readouterr().err
+    assert "bound to ONE graph" in err
+    assert "<redacted>" not in err
+
+
+def test_the_remedy_does_not_promise_coordinates_this_machine_may_not_have():
+    """`config show` says "the resolved store carries no org_id" for exactly the
+    two key shapes the remedy prescribed, so the remedy must not claim otherwise."""
+    text = main._ORG_INFO_REMEDIES["GRAPH_SCOPED_TEAM_SURFACE"]
+    assert "already on this machine" not in text
+    assert "reports what THIS machine knows" in text
+
+
+def test_a_space_padded_key_is_not_called_broken(monkeypatch, capsys, tmp_path):
+    """h11 strips leading/trailing OWS, so a space-padded key normally still
+    authenticates — only CR/LF makes it unsendable."""
+    _global(tmp_path)
+    monkeypatch.setenv("TORTOISE_API_KEY", GLOBAL_KEY + " ")
+    assert _run() == 0
+    out = capsys.readouterr().out
+    assert "cannot authenticate" not in out
+    assert "usually still works" in out
+
+
 def test_a_short_query_value_does_not_shred_the_diagnostic():
     """A bare fragment of 1-2 chars matches inside ordinary prose: `?v=1` turned
     "API error 401" into "API error 40<redacted>". Scrub the pair instead."""
