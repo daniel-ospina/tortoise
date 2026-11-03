@@ -1130,7 +1130,10 @@ def test_a_filled_page_is_still_returned_to_a_best_effort_caller(monkeypatch):
     rows = ha._iter_registered_orgs()
     assert rows is not None, "a best-effort caller must still get its page"
     assert len(rows) == ha._ORG_ENUMERATION_MAX_ROWS
-    assert rows[0] == {"org_id": "org_000000", "name": None}
+    # #10180: the page also carries `graph_name` (the retention sweep's default
+    # graph, resolved without a second read per org).
+    assert rows[0] == {"org_id": "org_000000", "name": None,
+                       "graph_name": None}
 
 
 def test_retention_sweep_processes_a_full_page_at_the_cap(monkeypatch):
@@ -1226,7 +1229,8 @@ def test_short_supabase_org_enumeration_is_returned(monkeypatch):
 
     monkeypatch.setattr(sc, "is_supabase_enabled", lambda: True)
     monkeypatch.setattr(sc, "get_control_plane", lambda: _FakeCP())
-    expected = [{"org_id": "org_a", "name": "A"}]
+    # #10180: `graph_name` rides the page (see the sibling assertion).
+    expected = [{"org_id": "org_a", "name": "A", "graph_name": None}]
     assert ha._iter_registered_orgs() == expected
     assert ha._iter_registered_orgs(require_complete=True) == expected
 
