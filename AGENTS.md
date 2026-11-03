@@ -24,6 +24,26 @@
 > `!` note (its exit code is unchanged — the link IS correct), and `--pin-check` makes it a verdict.
 > They are separate invocations on purpose and are REFUSED together (`--check --pin-check` exits 2)
 > rather than silently answering only the cheaper question — run each on its own line.
+>
+> ⛔ **NEITHER answers the third question, and its absence is what made #10114 a no-op: "is the code
+> this box EXECUTES the pinned bytes?"** `--check` grades the repo's `scripts/` pointer and
+> `--pin-check` grades the checkout, but the fleet RUNS `~/.pi/agent/scripts` — a **copy** farm that
+> `pi-bootstrap/setup.sh` materialises at install time. Neither mode reads it. Measured 2026-11-03 on
+> the `cmux` cell, both of the above green: the farm was **15 files stale**, including a
+> `pr-doctor.py` still carrying the pre-**agent-infra**#2888 flat `SPAWN_TIMEOUT_S=2400` — below the
+> fleet's 2700 s progress allowance, so the wall-clock backstop pre-empted the bound that is supposed
+> to decide `wedged`. Two green lines read as "the harness is fine" over a fleet capping every repair
+> lane at 40 minutes.
+>
+> The grader is **agent-infra's, not this repo's** — `bash "$AGENT_INFRA_PATH/scripts/check-farm-drift.sh"`
+> (absolute: a relative `bash scripts/…` is refused by the script-indirection guard, agent-infra#3173),
+> adding `--dest`/`--pin-file` when `CELL_HOME` differs from `$HOME`. Its exits: `0` match; `1` a
+> farm-declared file differs **or a declared file never landed** — re-running the farm **is** the
+> remedy; `3` stale but **no farm array delivers it**, so a re-run is *not* the remedy (declare /
+> delete / retire); `2` UNKNOWN, cannot verify — **never** a pass. Run it before you believe the two
+> green lines above. Do **not** add a tortoise-side mirror — a second owner of that predicate was
+> refused (tortoise#10722, closed superseded); the farm arrays and `is_declared_local` live in
+> agent-infra.
 
 ---
 
