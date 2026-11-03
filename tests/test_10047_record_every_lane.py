@@ -330,6 +330,46 @@ _TENANT_INSTALLERS = frozenset({
     "_bind_dream_record_tenant",          # the dream drain's own SDK
 }) | _INSTALLING_OPENERS
 
+#: SDK-returning names whose record tenant this static scan CANNOT model, split
+#: from the vocabularies above so that "not modelled" is declared rather than
+#: silent. `_handle_state` answers `None` ("not an SDK handle at all") for any
+#: name it does not recognise, and `_unbound_record_writes` then looks straight
+#: past the write — the false-PASS shape this file has now remediated three
+#: times (#10380 P2.1 `_open_org_graph_sdk`, #10180's `_org_sdk*` spellings, and
+#: this one). The sets below are the third remediation: the classification is
+#: PINNED by `test_every_sdk_shaped_name_in_the_package_is_classified`, so the
+#: next opener must be classified deliberately instead of arriving as a silent
+#: `None`.
+#:
+#: `_AMBIENT_OPENERS` DO return a real org-scoped SDK a lane writes through, and
+#: their tenant is the REQUEST's ambient scope (`OrgResolutionMiddleware` →
+#: `_record_tenant_scope`) — installed around the whole request rather than on
+#: the handle, which no amount of AST reading can see. `_get_org_sdk` is the
+#: package's second org-scoped opener and carries `tortoise/mcp_server.py`'s
+#: entire record-write surface, so leaving it out of every set would have made
+#: this file claim a completeness it does not have. The limit is real and is
+#: stated rather than papered over: a lane that opens `_get_org_sdk()` OUTSIDE a
+#: request has no tenant and this scan cannot tell.
+_AMBIENT_OPENERS = frozenset({
+    "_get_org_sdk",               # request-scoped; tenant = the ambient scope
+})
+#: SDK-shaped names that are NOT org-scoped lane construction sites: the
+#: registry/base/probe accessors and their caches. They are not "bound" and not
+#: "unbound" — they are simply not the thing this scan judges, and naming them
+#: keeps the completeness leg from having to special-case them.
+_NOT_A_LANE_OPENER = frozenset({
+    "_sdk", "_get_sdk", "_default_sdk", "_get_base_sdk",
+    "_probe_sdk", "_acquire_probe_sdk", "_registry_probe_sdk",
+    "_reset_registry_probe_sdk", "_registry_sdk", "_reg_sdk",
+    "_close_cached_sdk", "mine_corpus_with_sdk",
+})
+#: Every name this file claims to know. A name outside it reaches `_handle_state`
+#: as `None`, which is the silent exemption the completeness leg exists to stop.
+_DECLARED_SDK_NAMES = (frozenset(_SDK_OPENERS) | frozenset(_INSTALLING_OPENERS)
+                       | frozenset(_UNBOUND_OPENERS)
+                       | frozenset(_TENANT_INSTALLERS)
+                       | _AMBIENT_OPENERS | _NOT_A_LANE_OPENER)
+
 #: The seeds the verb derivation starts from: a record row is appended HERE and
 #: nowhere else, so "reaches one of these" is the definition of a record write.
 _RECORD_WRITE_SEEDS = frozenset({
@@ -653,6 +693,144 @@ def test_no_hosted_lane_writes_records_through_an_unbound_sdk():
             _module_functions(tree)[lane]), (
             f"{lane} opens an org-scoped SDK and no longer installs the "
             "org's DEFAULT-graph record tenant (#10047)")
+
+
+#: The shipped package, derived from the module the hosted lanes live in — so
+#: the walk follows the INSTALL rather than a hand-written path.
+_PACKAGE_ROOT = Path(ha.__file__).resolve().parent
+
+
+def _joined(items: list[str]) -> str:
+    """The multi-line assertion body: one item per line, indented under it."""
+    return "\n  " + "\n  ".join(items)
+
+
+def test_no_lane_ANYWHERE_in_the_package_writes_records_through_an_unbound_sdk():
+    """#10046: the class is PACKAGE-wide, not `hosted_api.py`-wide.
+
+    Why this leg exists. The leg above parses ONE module (`ha.__file__`), which
+    is where every hosted lane happened to live when #10047 landed. Nothing
+    keeps a record-writing lane there: a new `hosted_worker.py`, the backup
+    sweep, or any future module can open `_make_sdk(namespace=org_id)` (or one
+    of the `_org_sdk*` openers) and emit rows no install covers — and the guard
+    stays GREEN while an ARMED deployment refuses every one `no_tenant`. That
+    is a DECLINE counter, not a failure: the lane reads healthy and files
+    nothing, which is exactly the silent-invisible class #10046 was filed for
+    ("the gap is invisible until such a tenant tries to write").
+
+    Measured before this leg was added: 264 modules, 149 (module, lane) entries —
+    175 call sites — and 0 unbound record writes, so widening the scan cannot red
+    on the code as it stands. Its whole job is the module that does not exist
+    yet.
+
+    WHAT THIS SCAN CANNOT SEE, stated rather than implied: it judges a write by
+    the handle's OPENER, and only openers in the declared vocabularies are
+    recognised (`_unbound_record_writes` looks past a handle `_handle_state`
+    answers `None` for). So "0 unbound" is exactly "0 writes through a DECLARED
+    unbound opener" — the vocabulary's completeness is what makes the claim
+    mean anything, and it is pinned by
+    `test_every_sdk_shaped_name_in_the_package_is_classified`. A lane opening
+    `_get_org_sdk()` outside a request is bound by nothing and is the declared
+    blind spot (`_AMBIENT_OPENERS`).
+    """
+    modules = sorted(_PACKAGE_ROOT.rglob("*.py"))
+    assert len(modules) >= 200, (
+        f"the package walk found only {len(modules)} modules under "
+        f"{_PACKAGE_ROOT} — the walk no longer sees the shipped package, so a "
+        "clean result would prove nothing")
+
+    sites: dict[str, int] = {}
+    unbound: list[str] = []
+    unparsed: list[str] = []
+    for path in modules:
+        rel = path.relative_to(_PACKAGE_ROOT)
+        try:
+            tree = ast.parse(path.read_text())
+        except (SyntaxError, UnicodeDecodeError, OSError) as exc:
+            # CANNOT-ANSWER is not a pass: an unreadable module could hold the
+            # very lane this scan exists to catch.
+            unparsed.append(f"{rel}: {type(exc).__name__}: {exc}")
+            continue
+        for lane, count in _org_scoped_sdk_sites(tree).items():
+            sites[f"{rel}:{lane}"] = count
+        unbound.extend(f"{rel}: {site}"
+                       for site in _unbound_record_writes(tree))
+
+    assert unparsed == [], (
+        "the package walk could not parse these modules, so it cannot answer "
+        "whether they install a record tenant:" + _joined(unparsed))
+
+    # Non-vacuity, the same rule the single-module leg states: a scan that
+    # matched nothing is not a pass.
+    assert sum(sites.values()) >= 40, (
+        f"the package scan found only {sum(sites.values())} org-scoped SDK "
+        "construction sites — the AST criteria no longer match how lanes open "
+        "their SDK, so `unbound == []` below certifies nothing")
+
+    assert unbound == [], (
+        "these lanes OUTSIDE hosted_api.py write records through an SDK handle "
+        "with NO record tenant installed, so an ARMED deployment refuses every "
+        "row they emit `no_tenant` (a DECLINE counter — the lane looks healthy "
+        "and files nothing). Install one at the construction site: "
+        "`_bind_default_graph_record_tenant(sdk, org_id)` for a lane that "
+        "cannot see a request credential (#10047), or open the SDK through "
+        "`_data_sdk`/`_data_sdk_offloaded` when it can:" + _joined(unbound))
+
+
+def test_every_sdk_shaped_name_in_the_package_is_classified():
+    """The `0 unbound` claim is only as strong as the OPENER vocabulary.
+
+    `_handle_state` answers `None` — "not an SDK handle at all" — for a name it
+    does not recognise, and `_unbound_record_writes` then looks straight past
+    the write. An opener that returns a real org-scoped SDK, is in no declared
+    set, and is used by a lane WITHOUT an install is therefore GREEN: the exact
+    recurrence the package-wide leg above exists to catch, arriving through the
+    one axis that leg cannot see.
+
+    Measured when this leg was added: 17 module-level `*_sdk` definitions in the
+    package, 4 of them already declared, 13 undeclared — including
+    `_get_org_sdk`, which carries `tortoise/mcp_server.py`'s entire record-write
+    surface (109 call sites) and whose tenant is the request's AMBIENT scope.
+
+    Mutation this reddens on: deleting `_get_org_sdk` from `_AMBIENT_OPENERS`
+    (it returns to being silently exempt), or adding a `_sdk`-shaped helper to
+    any module without classifying it.
+    """
+    modules = sorted(_PACKAGE_ROOT.rglob("*.py"))
+    shaped: set[str] = set()
+    for path in modules:
+        try:
+            tree = ast.parse(path.read_text())
+        except (SyntaxError, UnicodeDecodeError, OSError):
+            continue  # the leg above fails LOUD on these; do not double-report
+        shaped.update(name for name in _module_functions(tree)
+                      if name.endswith("_sdk"))
+
+    assert len(shaped) >= 15, (
+        f"only {len(shaped)} `*_sdk` definitions found in the package — the name "
+        "shape no longer describes how openers are spelled, so the classification "
+        "below certifies nothing: " + _joined(sorted(shaped)))
+
+    unclassified = sorted(shaped - _DECLARED_SDK_NAMES)
+    assert unclassified == [], (
+        "these SDK-shaped names are in NO declared vocabulary, so "
+        "`_handle_state` answers `None` for them and `_unbound_record_writes` "
+        "looks past every write that goes through one. Classify each one — "
+        "`_UNBOUND_OPENERS` (returns an SDK with no tenant: the scan judges it), "
+        "`_INSTALLING_OPENERS` (installs before returning), "
+        "`_AMBIENT_OPENERS` (tenant is the request's ambient scope, unmodellable "
+        "here) or `_NOT_A_LANE_OPENER` (not an org-scoped lane construction "
+        "site):" + _joined(unclassified))
+
+    # The declaration cannot rot into a lie: a classified name that no longer
+    # exists is a vocabulary describing code that is gone.
+    vanished = sorted(
+        name for name in _AMBIENT_OPENERS | _NOT_A_LANE_OPENER
+        if name not in shaped)
+    assert vanished == [], (
+        "these declared SDK names no longer exist as module-level definitions, "
+        "so the classification is stale and its exemptions are unchecked:"
+        + _joined(vanished))
 
 
 # ── The guard's own pins, on synthetic lanes ──────────────────────────────
