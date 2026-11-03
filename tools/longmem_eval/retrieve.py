@@ -2277,7 +2277,15 @@ def retrieve_for_question(
     # product writes; the raw ``session-transcript`` chunk kind stays
     # addressable for the eval A/B — in ONE batched query and
     # splice them back immediately after that session's LAST base hit —
-    # additive, so an injected item can never evict a base item; the
+    # additive ON THE POOL, so an injected item never drops a base item
+    # FROM IT. That is NOT reader-additivity (#10540): the reader consumes
+    # a PREFIX of the pool, so an injected item inside that window
+    # displaces one base hit, and a session whose hits sat at the window's
+    # tail can lose its representation ENTIRELY — the crowding this arm's
+    # outcome forbids and every pre-#10540 census key could not see. The
+    # reader-window census ~215 lines below
+    # (``session_reinjection.reader_window_displacement``) measures
+    # exactly that. The
     # shared guard then re-caps through the same contract C3-1 uses.
     # Product rules live in tortoise/session_reinjection.py. INSERTION
     # POINT IS PINNED: after the C3-1 block, before the C2 boost — the
