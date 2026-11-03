@@ -2586,3 +2586,36 @@ def test_the_window_widens_until_the_pool_is_observed_and_says_so_when_it_never_
     assert any(
         "ZERO jobs on this box's registrations" in n for n in rec2["notes"]
     ), rec2["notes"]
+
+
+def test_a_peer_boxs_job_does_not_count_as_observing_THIS_box(env):
+    """⛔ THE DISCLOSURE MUST BE ABOUT THE BOX THE PASS REPORTS ON, NOT THE REPO'S POOL.
+
+    `pool = read_pool(repo)` is the REPO's runner pool — every box — and `wedged_runners` is
+    deliberately evaluated over it (a wedged registration is reported wherever it lives, and the
+    runbook sends its repair to the owning box). Counting observations the same way was a
+    different bug: one job on a PEER box's registration made `pool_jobs_observed >= 1` AND tripped
+    the pool-observed early stop, so a box whose own registrations were never sampled recorded no
+    note at all and read as sampled — the exact silence the field exists to break.
+
+    Non-vacuity: on the pre-fix tree the counter is `name in pool` (repo-wide), so `observed` is 1
+    and no note is emitted; both arms below red.
+    """
+    e = env(
+        ncpu=8,
+        pool=[("r1", "online", False, ""), ("peer-box-runner", "online", False, "")],
+        installs=[("gh-runner-x64-1", "r1")],
+    )
+    e.run_ids = "1\n2\n3\n"
+    # every observed job ran on the PEER box; this box's own registration never appears
+    e.jobs_tsv.write_text(
+        _outcomes("peer-box-runner\tsuccess\t2026-11-03T05:00:00Z\t2026-11-03T05:05:00Z"),
+        encoding="utf-8",
+    )
+    rec = e.record()
+    assert rec["pool_jobs_observed"] == 0, (
+        f"a job on a peer box's registration was counted as an observation of THIS box: {rec}"
+    )
+    assert any(
+        "ZERO jobs on this box's registrations" in n for n in rec["notes"]
+    ), rec["notes"]

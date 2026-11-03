@@ -751,7 +751,7 @@ def read_job_outcomes(
     *,
     pool: dict[str, "PoolEntry"] | None = None,
     max_runs: int = WEDGED_PROBE_MAX_RUNS,
-) -> list[tuple[str, str, int]]:
+) -> tuple[list[tuple[str, str, int]], int]:
     """`(runner_name, conclusion, seconds)` for the jobs of the last completed runs.
 
     BOUNDED and stated: at least `runs` and at most `max_runs` completed runs, one page of up to
@@ -762,9 +762,16 @@ def read_job_outcomes(
     `pool` enables the pool-observed STOP: past `runs`, the walk ends as soon as one job's
     `runner_name` is in `pool`, because the remaining runs cannot make the window MORE
     representative. It does NOT stop early on a light window — three all-hosted runs are exactly
-    the case that must NOT read as "the pool is fine" (see `WEDGED_PROBE_MAX_RUNS`). When `max_runs`
-    is exhausted with no pool job in it, the outcomes returned observed the pool ZERO times and the
-    caller must not certify capacity from them.
+    the case that must NOT read as "the pool is fine" (see `WEDGED_PROBE_MAX_RUNS`). ⛔ PASS THIS
+    BOX'S OWN registrations, not the repo-wide pool: `wedged_runners` is deliberately evaluated
+    over the repo pool, but the QUESTION this walk answers is "was the pool I am judging
+    observed", and a peer box's job is not an observation of this one.
+
+    Returns `(outcomes, runs_read)`. When `max_runs` is exhausted with no match, `outcomes`
+    observed the pool ZERO times — `converge` does NOT turn that into `uncertified` (that state is
+    reserved for an UNREADABLE history, and a light window is routine on a repo whose workflows
+    mostly run on GitHub-hosted runners), it discloses it in `record["pool_jobs_observed"]` and a
+    note, worded from `runs_read` so it does not claim a sample it did not take.
     """
     gh = gh_bin()
     if not gh:
@@ -785,9 +792,11 @@ def read_job_outcomes(
     ]
     outcomes: list[tuple[str, str, int]] = []
     seen_pool = False
+    runs_read = 0
     for index, run_id in enumerate(ids):
         if index >= max_runs:
             break
+        runs_read += 1
         rows = _gh_lines(
             [
                 gh,
@@ -816,7 +825,7 @@ def read_job_outcomes(
         # more representative of it, so the walk ends here (the bound in the docstring).
         if seen_pool and index + 1 >= runs:
             break
-    return outcomes
+    return outcomes, runs_read
 
 
 def wedged_runners(
@@ -1339,32 +1348,35 @@ def converge(
     local = discover(root, alive=alive_dirs)
     pool = read_pool(repo)
     # ⛔ READ WHAT THE POOL DID, NOT ONLY WHAT IT CLAIMS (see `read_job_outcomes`). Taken BEFORE
-    # any action so the record describes the box as it was found, and bounded to 3 runs so a pass
-    # costs 4 API reads, not a paginated crawl.
+    # any action so the record describes the box as it was found, and bounded to
+    # `WEDGED_PROBE_MAX_RUNS` (10) completed runs — one run-list read plus one jobs page each, so
+    # 11 API reads worst case — and the walk stops as soon as a job on THIS BOX is seen.
     wedged: list[str] = []
+    hosted_here = {r.name for r in local}
     try:
-        outcomes = read_job_outcomes(repo, pool=pool)
+        outcomes, runs_read = read_job_outcomes(repo, pool=hosted_here)
         wedged = wedged_runners(pool, outcomes)
         # ⛔ CERTIFICATION IS ABOUT THE READ, AND THE SAMPLING IS DISCLOSED SEPARATELY. R3 says an
         # UNREADABLE history certifies nothing; this arm therefore stays keyed on readability (a
         # `uncertified`/exit-2 for a merely light window would red the timer every interval on a
         # healthy box, and would renumber a contract callers key on). What was dishonest was the
         # SILENCE: a window that observed ZERO jobs on this box's registrations proved nothing
-        # about the pool, yet arrived as plain `certified`. The walk now widens to `MAX_RUNS` first
-        # (`WEDGED_PROBE_MAX_RUNS`), and whatever it found is stated in the record so the next
-        # reader can tell "the pool served nothing and was fine" from "the pool was never sampled".
-        # A genuinely wedged registration IS observable here (its failed jobs carry its
-        # `runner_name`), so the widened window is what closes the gap; this field is the audit
-        # trail for when it could not.
-        record["pool_jobs_observed"] = sum(1 for name, _c, _s in outcomes if name in pool)
+        # about them, yet arrived as plain `certified`. The walk widens to `MAX_RUNS` first, and
+        # whatever it found is stated in the record so the next reader can tell "the box served
+        # nothing and was fine" from "the box was never sampled". ⛔ THE COUNTER IS SCOPED TO
+        # `hosted_here`, NOT TO `pool`: `wedged_runners` is evaluated over the REPO pool (a wedged
+        # registration is reported wherever it lives, and the runbook sends its repair to the
+        # owning box), but counting repo-wide here would let ONE job on a peer box suppress the
+        # disclosure for a box never sampled — the note's own words are "this box's
+        # registrations".
+        record["pool_jobs_observed"] = sum(1 for name, _c, _s in outcomes if name in hosted_here)
         record["capacity_certified"] = True
         if not record["pool_jobs_observed"]:
             record["notes"].append(
                 "job outcomes READABLE, but they observed ZERO jobs on this box's registrations "
-                f"across the last {WEDGED_PROBE_MAX_RUNS} completed runs (they were served "
-                "elsewhere — most workflows here run on GitHub-hosted runners) — so this pass "
-                "found no EVIDENCE OF A WEDGE, which is not the same as having observed the pool "
-                "serving work"
+                f"in the {runs_read} completed run(s) the probe could read (up to "
+                f"{WEDGED_PROBE_MAX_RUNS}) — so this pass found no EVIDENCE OF A WEDGE, which is "
+                "not the same as having observed the pool serving work"
             )
     except Unmeasurable as exc:
         record["capacity_certified"] = False
@@ -1780,8 +1792,12 @@ def converge(
         record["verdict"] = "converged" if record["actions"] else "at-ceiling"
     # ⛔ A CAPACITY VERDICT OVER A POOL THAT ANSWERS EVERY JOB WITH A SETUP FAILURE IS THE FALSE
     # PASS THIS FILE EXISTS TO PREVENT, and it is the one case the counts cannot see. It overrides
-    # only the BENIGN verdicts: a refusal, an unreadable pass, an action failure and `over-ceiling`
-    # are each a statement about something else that a wedged registration does not make untrue.
+    # only the BENIGN verdicts — the ones that are an answer rather than a failure. ⛔ `over-ceiling`
+    # IS ONE OF THEM, AND SAYING IT WASN'T RE-OPENED THE BUG: it is exit **0** by the EXIT block
+    # ("a live count above the measured ceiling removes nothing, so that pass has nothing it could
+    # have failed at"), so it reports NO failure of its own to erase. This comment used to group it
+    # with the arms that DO report a failure (a refusal, an unreadable pass, an action failure),
+    # which is the opposite of what the tuple below now does — do not "restore" it to that list.
     # ⛔ AND `under-target` IS BENIGN ONLY WITHOUT AN ATTEMPTED GROWTH. `problem_kind=no-listener`
     # is the ONE under-target cause the EXIT block calls a failure of the guard (a runner was
     # INSTALLED and no listener came up), and `main` reports it as exit 4 by keying on that CAUSE.
