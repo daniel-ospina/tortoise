@@ -176,6 +176,26 @@ class MeasureError(RuntimeError):
 #: evidence of queue starvation, and must not be classified as one.
 QUEUED_STATUSES = frozenset({"queued", "waiting", "requested", "pending"})
 
+#: DECISION (#10753) — a zero-job queued run is NAMED, never ACTED ON.
+#:
+#: GitHub can create a run at a PR head and leave it queued with NO job for a
+#: long time. Two measured populations, and they OVERLAP in duration:
+#:   * run 41645418314 sat with `total_count=0` from 13:33:42 to 14:51:44 — **78
+#:     minutes** — and then EXPANDED and ran its full matrix. A legitimate run.
+#:   * run 41658530408 sat with `total_count=0` from 14:55:37 for **63 minutes**
+#:     and then terminated `completed/cancelled` with zero jobs EVER created and
+#:     no successor at the head (#10753's headline shape).
+#: The legitimate run outlived the ghost, so NO age bound separates the two
+#: classes, and the API exposes nothing else that does. Therefore a re-trigger
+#: cannot be aimed at the ghost alone: it would also fire at the run that was
+#: about to report, and `python-ci.yml`'s `cancel-in-progress: true` would use
+#: that new run to CANCEL it — the repair destroying the CI it exists to
+#: protect, on repeat. So this tool does not act on "zero jobs". It REPORTS the
+#: state (`PrPlan.unexpanded`, the `unexpanded=` counter, and the CLI's
+#: UNEXPANDED line) so a stuck head stops being silent, and it leaves the remedy
+#: where it is safe: the existing `rerun` path once the run is terminal, and
+#: capacity work (tools/ci_queue_health.py) while it is not.
+
 
 @dataclass
 class Run:
@@ -187,6 +207,9 @@ class Run:
     run_attempt: int
     event: str
     created_at: str = ""
+    #: Jobs the CURRENT attempt has created. `None` means UNPROBED or UNREADABLE,
+    #: which is deliberately NOT zero — see `is_unexpanded`.
+    job_count: int | None = None
 
 
 @dataclass
@@ -197,6 +220,13 @@ class PrPlan:
     pending: list[str] = field(default_factory=list)
     rerun: list[Run] = field(default_factory=list)
     missing_run: list[str] = field(default_factory=list)
+    #: Producing runs that exist at the head but hold ZERO jobs (#10753).
+    #: REPORTED ONLY, deliberately: see the module-level DECISION note. These runs
+    #: stay in `pending` and in `in_flight` (the shipped behaviour) because an
+    #: unexpanded run cannot be distinguished from a legitimately queued one, so
+    #: acting on it would cancel CI that was about to report. The ids are carried
+    #: so a stuck head is NAMED instead of silently reading as pending.
+    unexpanded: list[int] = field(default_factory=list)
     exhausted: list[str] = field(default_factory=list)
     # Workflows still running at this head. A close/reopen re-fires EVERY
     # PR-evaluable workflow, and each one's `concurrency:` group then cancels the
@@ -232,7 +262,8 @@ class PrPlan:
         nothing left to act on (`actionable` is False) and must still be reported
         and escalated — dropping it is how an unrepairable check goes silent.
         """
-        return bool(self.actionable or self.rerun or self.exhausted or self.starved)
+        return bool(self.actionable or self.rerun or self.exhausted or self.starved
+                    or self.unexpanded)
 
 
 def _run(argv: list[str], timeout: int = 120) -> subprocess.CompletedProcess:
@@ -306,6 +337,62 @@ def runs_at_head(repo: str, sha: str) -> list[Run]:
                 run_attempt=int(r.get("run_attempt") or 1), event=r.get("event") or "",
                 created_at=r.get("created_at") or "")
             for r in raw]
+
+
+def run_job_count(repo: str, run_id: int) -> int | None:
+    """Jobs the run's CURRENT attempt has created, or None when unreadable.
+
+    `filter=latest` is stated rather than defaulted, because this is the field the
+    question turns on. `total_count` from a one-job page: the only question is
+    "is it zero", so no jobs payload is transferred and page size does not affect
+    `total_count` (verified live). FAIL CLOSED — an API error or a payload without
+    `total_count` is `None`, never 0, because `None` and 0 mean opposite things to
+    `is_unexpanded`.
+
+    ⚠️ `filter=latest`, NOT `all`, is correct here: a RE-RUN creates a new attempt
+    whose jobs do not exist yet, so `latest` answers "has THIS attempt been given
+    a job". Counting jobs from earlier attempts would make a fresh re-run attempt
+    look expanded (#10753 review, verified on run 41650707145: attempt 2 started
+    15:44:29 with the run's `created_at` still 14:08:08 — 96 minutes earlier).
+    """
+    try:
+        data = gh_api(f"repos/{repo}/actions/runs/{run_id}/jobs?per_page=1&filter=latest")
+    except MeasureError:
+        return None
+    if not isinstance(data, dict):
+        return None
+    total = data.get("total_count")
+    return int(total) if isinstance(total, int) else None
+
+
+def probe_job_counts(repo: str, runs: list[Run]) -> None:
+    """Fill `job_count` on the runs whose zero-ness can change a decision.
+
+    Only NON-COMPLETED runs are probed: a completed run's job count changes no
+    verdict (`classify` already decides those from the conclusion), so the
+    ordinary merge path — where every run has finished — spends no extra call.
+    """
+    for r in runs:
+        if r.status != "completed" and r.job_count is None:
+            r.job_count = run_job_count(repo, r.id)
+
+
+def is_unexpanded(run: Run) -> bool:
+    """A run that exists at the head but has been given NO job (#10753).
+
+    NAMED, NOT ACTED ON — see the module-level DECISION note for the measurement
+    that forces this. In short: run 41645418314 sat jobless for 78 minutes and
+    then ran a full green matrix, while run 41658530408 sat jobless for 63 minutes
+    and was then terminated `cancelled` with no successor. The legitimate run
+    OUTLIVED the ghost, so no bound separates them and a re-trigger would cancel
+    CI that was about to report. The state is therefore reported so a stuck head
+    is not silent, and the remedy stays where it is safe.
+
+    FAIL CLOSED: `job_count is None` (unprobed or unreadable) is NOT zero, so an
+    unmeasured run is never described as unexpanded. Under-reporting here leaves
+    the shipped behaviour, which is the safe direction.
+    """
+    return run.job_count == 0
 
 
 def age_seconds(created_at: str, now: float | None = None) -> float | None:
@@ -418,7 +505,7 @@ def producing_runs(ctx: str, all_runs: list[Run], emitters: dict[str, list[str]]
 
 def classify(pr: dict, checks: list[dict], all_runs: list[Run], required: list[str],
              emitters: dict[str, list[str]], max_attempts: int,
-             queue_starved: bool = False) -> PrPlan:
+             queue_starved: bool = False, now: float | None = None) -> PrPlan:
     """The whole decision, PURE — no API calls — so it is unit-testable.
 
     For each required context absent from the head's check runs, the producing
@@ -427,6 +514,12 @@ def classify(pr: dict, checks: list[dict], all_runs: list[Run], required: list[s
       * a run is still in flight            -> PENDING (wait; the run emits it)
       * a completed run exists              -> DEAD   (re-run it)
       * no run exists at all                -> UNTRIGGERED (re-trigger the PR)
+
+    The UNEXPANDED arm is #10753, and it is REPORT-ONLY: a non-completed run is not
+    necessarily a run that will report, but it cannot be told apart from one that
+    will, so `pending` keeps its shipped meaning and the state is merely named.
+    There is deliberately NO `UNTRIGGERED` arm for zero jobs — see the module-level
+    DECISION note and `is_unexpanded`.
 
     and, orthogonally, `queue_starved` adds the repo-level reading: a context
     whose producing runs EXIST but are all QUEUED (none executing) while the repo
@@ -445,7 +538,7 @@ def classify(pr: dict, checks: list[dict], all_runs: list[Run], required: list[s
     plan = PrPlan(number=int(pr["number"]), head=pr["headRefOid"],
                   in_flight=sorted({r.name or r.path for r in all_runs
                                     if r.status != "completed"}))
-    ages = [a for a in (age_seconds(r.created_at) for r in all_runs
+    ages = [a for a in (age_seconds(r.created_at, now) for r in all_runs
                         if r.status != "completed") if a is not None]
     plan.oldest_pending_age_seconds = max(ages) if ages else None
     seen = {c.get("name") for c in checks if c.get("name")}
@@ -462,6 +555,19 @@ def classify(pr: dict, checks: list[dict], all_runs: list[Run], required: list[s
         # is the context DEAD (the #8254 signature: a completed run with zero jobs).
         if any(r.status != "completed" for r in runs):
             plan.pending.append(ctx)
+            # #10753 — NAME IT, DO NOT ACT ON IT. `pending` is correct and stays:
+            # the run may still be given a runner. But a pending context whose every
+            # live producing run holds ZERO jobs is the shape that can sit for hours
+            # and then be terminated without ever executing, so its run ids are
+            # recorded — otherwise a stuck head reads identically to a healthy one
+            # and nothing anywhere says which runs were never expanded.
+            live_ids = [r.id for r in runs
+                        if r.status != "completed" and is_unexpanded(r)]
+            if live_ids and len(live_ids) == sum(1 for r in runs
+                                                 if r.status != "completed"):
+                for rid in live_ids:
+                    if rid not in plan.unexpanded:
+                        plan.unexpanded.append(rid)
             # STARVED (#9115): the runs EXIST and NONE of them is executing, so no
             # slot was granted. Requires the repo-level reading to have WITNESSED
             # starvation (FLOOD or PR-STARVED) — the same per-head shape is the
@@ -652,6 +758,12 @@ def build_plans(repo: str, required: list[str], emitters: dict[str, list[str]],
             raise MeasureError(f"PR #{pr.get('number')} has no headRefOid — cannot measure")
         checks = check_runs_at(repo, head)
         runs = runs_at_head(repo, head)
+        # #10753: a non-completed run's JOB COUNT is what separates "still queued
+        # and about to report" from "never expanded and never will". Probed here,
+        # not in `classify`, because `classify` is PURE and unit-tested without
+        # touching GitHub. Nothing is spent on the ordinary path: a head whose runs
+        # have all completed probes nothing.
+        probe_job_counts(repo, runs)
         plans.append(classify(pr, checks, runs, required, emitters, max_attempts,
                               queue_starved=queue_starved))
     return plans
@@ -738,6 +850,7 @@ def report(plans: list[PrPlan], apply: bool, trigger_ok: bool, repo: str,
         rec: dict = {"pr": p.number, "head": p.head, "absent": p.absent,
                      "pending": p.pending, "rerun": [], "reopened": False,
                      "missing_run": p.missing_run, "exhausted": list(p.exhausted),
+                     "unexpanded": list(p.unexpanded),
                      "starved": list(p.starved),
                      "reopen_attempts": 0, "needs_user_actor": False}
         # A SPENT BUDGET ESCALATES REGARDLESS OF WHAT ELSE IS TRUE OF THE PR, so it
@@ -997,6 +1110,11 @@ def main(argv: list[str] | None = None) -> int:
         # runner slot — so they are counted separately rather than inflating a
         # number whose whole meaning is "a repair will be attempted".
         "starved": sum(1 for p in plans if p.starved),
+        # A producing run that exists at the head with ZERO jobs (#10753). Reported
+        # so a stuck head stops reading as a healthy pending one; NOT counted in
+        # `needing_repair`, because the safe remedy is not a per-PR action — see
+        # the module-level DECISION note.
+        "unexpanded": sum(1 for p in plans if p.unexpanded),
         # A check that is merely LATE (its producing run is in flight) needs no
         # repair, so it is deliberately excluded from this count — otherwise the
         # number would report the normal in-flight state of every pushed PR.
@@ -1017,13 +1135,31 @@ def main(argv: list[str] | None = None) -> int:
         print(f"{summary['queue']}")
         print(f"ci-check-repair [{mode}] repo={args.repo} open_prs={summary['open_prs']} "
               f"needing_repair={summary['needing_repair']} starved={summary['starved']} "
-              f"trigger={summary['trigger_ok']}")
+              f"unexpanded={summary['unexpanded']} trigger={summary['trigger_ok']}")
         for r in records:
             print(f"  #{r['pr']} absent={r['absent']} pending={r['pending']} "
                   f"starved={r.get('starved', [])} "
+                  f"unexpanded={r.get('unexpanded', [])} "
                   f"rerun={[x['run'] for x in r['rerun']]} missing_run={r['missing_run']} "
                   f"reopened={r['reopened']} reopen_attempts={r['reopen_attempts']} "
                   f"needs_user_actor={r['needs_user_actor']}")
+        if summary["unexpanded"]:
+            # Named state, and HONESTLY no per-PR remedy — the same doctrine as
+            # STARVED below, with the reason a re-trigger is not offered: the
+            # unexpanded class and the legitimately-queued class overlap in
+            # duration (78 min legitimate vs 63 min ghost, both measured), so a
+            # re-trigger would also hit a run that was about to report and
+            # `cancel-in-progress` would use it to cancel that run.
+            print("ci-check-repair: UNEXPANDED — a required check's producing run exists "
+                  "at the head but holds ZERO jobs, so it has been given no runner and "
+                  "cannot report yet. This is NOT distinguishable from a run that is "
+                  "merely queued behind a saturated pool (a measured legitimate run "
+                  "waited 78 min before its jobs appeared), so no per-PR re-trigger is "
+                  "attempted here: it would cancel CI that was about to report. While it "
+                  "is queued the remedy is capacity (`uv run python "
+                  "tools/ci_queue_health.py`); once it terminates without running, the "
+                  "existing rerun path re-runs it at the SAME head sha (never move the "
+                  "head — that would unbind the review record).", file=sys.stderr)
         if summary["starved"]:
             # Named state, named remedy. A starved head is not repaired by anything
             # this tool can do: the missing resource is a runner slot.

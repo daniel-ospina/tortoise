@@ -21,6 +21,7 @@ import os
 import re
 import subprocess
 import sys
+
 from pathlib import Path
 
 import pytest
@@ -193,6 +194,124 @@ def test_no_producing_run_is_missing_run():
     plan = R.classify(pr(), [], runs, ["docs", "ai-review-gate"], EMITTERS, max_attempts=3)
     assert plan.missing_run == ["ai-review-gate"]
     assert [r.id for r in plan.rerun] == [42]
+
+
+# ── 3b. #10753 — a zero-job run is NAMED, never acted on ──────────────────
+#
+# GitHub can create a run at a PR head and leave it queued with no job for a long
+# time. Two measured populations OVERLAP in duration, so nothing separates a run
+# that will be expanded from one that will be terminated:
+#   * run 41645418314 sat with total_count=0 from 13:33:42 to 14:51:44 (78 min)
+#     and then EXPANDED and ran a full matrix — a LEGITIMATE run;
+#   * run 41658530408 sat with total_count=0 from 14:55:37 for 63 min and then
+#     terminated `completed/cancelled` with zero jobs ever created and no
+#     successor (#10753's headline shape).
+# The legitimate run outlived the ghost. A re-trigger would therefore also fire at
+# the run that was about to report, and `cancel-in-progress` would use the new run
+# to CANCEL it. So the state is REPORTED and `pending` keeps its shipped meaning.
+
+def unexpanded(rid, path, jobs=0, status="queued", name=""):
+    """A producing run with a PROVEN job count on the current attempt."""
+    return R.Run(id=rid, name=name or Path(path).stem,
+                 path=f".github/workflows/{path}", status=status, conclusion=None,
+                 run_attempt=1, event="pull_request",
+                 created_at="2026-11-03T14:55:37Z", job_count=jobs)
+
+
+def test_a_zero_job_run_is_recorded_by_id_but_stays_pending():
+    """The #10753 shape: named, so a stuck head is not silent — and not acted on."""
+    checks = [check(c) for c in REQUIRED if c != "python-ci-gate"]
+    runs = [unexpanded(41658530408, "python-ci.yml")]
+    plan = R.classify(pr(), checks, runs, REQUIRED, EMITTERS, max_attempts=3)
+    assert plan.unexpanded == [41658530408], "the zero-job run must be NAMED"
+    assert plan.pending == ["python-ci-gate"], (
+        "pending is CORRECT and must not change — the run may still get a runner")
+    assert plan.rerun == [] and plan.missing_run == [], (
+        "acting here would re-trigger a run that may be about to report")
+    assert plan.needs_report, "a stuck head must not read as a healthy pending one"
+
+
+def test_a_zero_job_run_is_still_in_flight_so_the_deferral_is_unchanged():
+    """`in_flight` semantics are untouched: only a TERMINAL run stops deferring.
+
+    Removing it would let the reopen fire at a head whose run may still report,
+    which is the harm the deferral exists to avoid.
+    """
+    runs = [unexpanded(500, "python-ci.yml", status="in_progress", name="Python CI")]
+    plan = R.classify(pr(), [], runs, ["python-ci-gate"], EMITTERS, max_attempts=3)
+    assert plan.in_flight == ["Python CI"]
+    assert plan.unexpanded == [500]
+
+
+def test_an_unmeasurable_job_count_is_never_reported_as_unexpanded():
+    """NEGATIVE CONTROL: `None` is not zero — fail closed, as `run_is_unexpanded` does."""
+    checks = [check(c) for c in REQUIRED if c != "python-ci-gate"]
+    for jobs in (None, 1, 26):
+        runs = [unexpanded(7, "python-ci.yml", jobs=jobs)]
+        plan = R.classify(pr(), checks, runs, REQUIRED, EMITTERS, max_attempts=3)
+        assert plan.unexpanded == [], f"job_count={jobs!r} is not a proven zero"
+        assert plan.pending == ["python-ci-gate"]
+
+
+def test_a_zero_job_run_beside_an_expanded_one_is_not_reported():
+    """NEGATIVE CONTROL: the mixed case says nothing about the context."""
+    checks = [check(c) for c in REQUIRED if c != "python-ci-gate"]
+    runs = [unexpanded(1, "python-ci.yml"),
+            unexpanded(2, "python-ci.yml", jobs=26, status="in_progress")]
+    plan = R.classify(pr(), checks, runs, REQUIRED, EMITTERS, max_attempts=3)
+    assert plan.unexpanded == [], "a context with one expanded run is not unexpanded"
+    assert plan.pending == ["python-ci-gate"]
+
+
+def test_the_rerun_path_still_owns_the_terminal_cancelled_shape():
+    """The ghost's END state is already repaired: completed/cancelled -> rerun."""
+    checks = [check(c) for c in REQUIRED if c != "python-ci-gate"]
+    runs = [run(77, "python-ci.yml", "completed", "cancelled")]
+    plan = R.classify(pr(), checks, runs, REQUIRED, EMITTERS, max_attempts=3)
+    assert [r.id for r in plan.rerun] == [77]
+    assert plan.unexpanded == [], "a terminal run is not unexpanded"
+    assert plan.needs_report
+
+
+def test_unexpanded_never_escalates_under_the_automatic_token(monkeypatch):
+    """REPORT-ONLY: it must not reach the PAT handoff, because the remedy is unsafe."""
+    plan = _plan(absent=["python-ci-gate"], pending=["python-ci-gate"],
+                 unexpanded=[41658530408], in_flight=["Python CI"])
+    code, recs = R.report([plan], apply=True, trigger_ok=False, repo="o/r",
+                          cooldown_min=60)
+    assert recs[0]["unexpanded"] == [41658530408]
+    assert recs[0]["needs_user_actor"] is False, (
+        "escalating would make the local fallback reopen — the unsafe action")
+    assert code == 0
+
+
+def test_run_job_count_asks_for_the_LATEST_attempt_only(monkeypatch):
+    """`filter=latest`, not `all`: a re-run attempt has no jobs yet.
+
+    Run 41650707145 is attempt 2, started 15:44:29 with the run's `created_at`
+    still 14:08:08 — so counting an earlier attempt's jobs would make a fresh
+    re-run look expanded, and counting `created_at` would make it look ancient.
+    """
+    seen = {}
+
+    def fake(path):
+        seen["path"] = path
+        return {"total_count": 0}
+
+    monkeypatch.setattr(R, "gh_api", fake)
+    assert R.run_job_count("o/r", 41650707145) == 0
+    assert "filter=latest" in seen["path"], seen["path"]
+
+
+def test_run_job_count_fails_closed(monkeypatch):
+    def boom(path):
+        raise R.MeasureError("nope")
+
+    monkeypatch.setattr(R, "gh_api", boom)
+    assert R.run_job_count("o/r", 1) is None
+
+    monkeypatch.setattr(R, "gh_api", lambda path: {"jobs": []})
+    assert R.run_job_count("o/r", 1) is None, "a payload without total_count is not zero"
 
 
 # ── report(): who is allowed to act ────────────────────────────────────────
