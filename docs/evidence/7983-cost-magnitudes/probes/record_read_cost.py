@@ -103,6 +103,7 @@ MIGRATIONS = [
     # is absorbed by page slack. Measured twice: `rho-bench.log`'s basis note and
     # daniel-ospina/tortoise#10070, comment 6426999081.
     "20261029000001_record_point_cache_tier.sql",
+    "20261030000001_record_procedural_status_fold.sql",
 ]
 
 #: §17.4.1's published rates, restated so the arithmetic below is auditable and

@@ -257,6 +257,16 @@ RECORD_MIGRATIONS: tuple[str, ...] = (
     # post-move one.
     "20261027000001_record_semantic_id_key.sql",
     "20261029000001_record_point_cache_tier.sql",
+    # #9974 — the PROCEDURAL `status` FOLD (no column, no table: it replaces the
+    # two procedural VIEWS). Registered for the registry reason above — the
+    # wheel ships it (`pyproject.toml`'s `*_record_*.sql` glob matches) and
+    # `tests/test_9231_record_migrations_trigger.py` reds on the omission — and
+    # because this module is the PROJECTION's declared payload contract: the
+    # view folds the same three arms `RECORD_MUTATIONS` declares
+    # (`ObjectRegistered`/`SubjectAdded` creation, `ObjectSuperseded`, and
+    # `EntityMutated`'s `state.status`), which is why the fold may read
+    # `state->>'status'` without guessing a key.
+    "20261030000001_record_procedural_status_fold.sql",
 )
 
 #: The tenancy GUC every record RLS policy reads (`*_read_org`, `*_app_tenant`).
@@ -728,6 +738,20 @@ class OpDispatch:
     `refused_props_names()`, which reads the same CHECKs from disk.
     `Point.status` is NOT in this set: a Point's lifecycle IS journaled
     (`PointRetracted`/`…Superseded`) and `point.status` is a PRIMARY column.
+
+    ⚠️ **A dropped name still has a CARRIER, and dropping it is not the same as
+    losing it (#9974).** A `restatus` whose whole payload is a status drops every
+    column and every tail key, so the layer UPDATE sets nothing (the
+    `node_key = node_key` placeholder) — but the VALUE is not lost: the same
+    record's payload (`state.status`) is what the record writes to
+    `public.journal_event` (layer 1), and the procedural view
+    (`public.object_current_status` / `public.subject_current_status`) folds it
+    back out. That is the whole reason the drop is correct rather than a
+    silent skip: the cache is derived FROM the event stream, so the event
+    stream — not a column, not a props key — is where it must be
+    reconstructible. Before #9974 nothing read it back, which is why the value
+    was lost in practice; the loader now does
+    (`cache_projection.PROJECTION_OWNED_CACHES`).
     """
 
     table_for_label: Mapping[str, str]

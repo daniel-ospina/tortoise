@@ -87,6 +87,7 @@ MIGRATIONS = [
     # of a column. What the file's re-declaration buys is that the tier is a
     # DECLARED column (dropped by name on the way out) rather than an unknown one.
     "20261029000001_record_point_cache_tier.sql",
+    "20261030000001_record_procedural_status_fold.sql",
 ]
 DSN = "postgresql://postgres:cap@127.0.0.1:15499/capstone"
 

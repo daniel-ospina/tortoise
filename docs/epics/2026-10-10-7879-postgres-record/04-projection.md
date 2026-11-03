@@ -183,6 +183,54 @@ closed at both layers:
   — §9.5 Q3 retired them and `_upsert_document` scrubs them, so storing them would
   leave the record holding state the node removed.
 
+### 2.1 The projection-owned caches: the record COMPUTES what it refuses (#9974)
+
+Refusing a name is half of §2.6's ownership, and for a while it was the WHOLE of
+what this epic had: the record dropped `Object.status`/`Subject.status` (correct
+— they are caches, never authority) and **nothing computed them**, so
+`rebuild_from_record` materialized a node with no `status` at all for a node the
+journal records as TERMINAL. `tortoise/live.py::_terminal_excluded` reads an
+absent status as **LIVE**, so the cache projection, which exists to make the
+cache a faithful copy of the record, was manufacturing a live claim about a
+superseded Object. Measured on #9974; filed P1-severe.
+
+What makes it fixable WITHOUT a column (i.e. without reopening §2.6) is that the
+record holds the reconstruction source the placement table names — **its own
+event stream**, `public.journal_event` (layer 1, written by the live path since
+`#9190`). Migration `20261030000001_record_procedural_status_fold.sql` extends
+the procedural views over it, and `cache_projection.PROJECTION_OWNED_CACHES`
+reads that fold:
+
+| label | property | the record's source | class |
+|---|---|---|---|
+| `Object` | `status` | `public.object_current_status` | §2.6 DERIVED (a cache) |
+| `Subject` | `status` | `public.subject_current_status` | §2.6 DERIVED (a cache) |
+
+The fold it reads is the journal replay's own set of writers, in journal `seq`
+order (last writer wins): creation (`status` is an `ON CREATE` write in
+`_upsert_object`/`_upsert_subject`, so a RE-registration never moves it),
+`ObjectSuperseded` / the Subject's `EntityMutated op=supersede`, and
+`EntityMutated`'s `state.status` **regardless of `op`** — which is
+`classify_entity_mutation_op`'s own instruction (*"a consumer wanting EVERY
+status transition must read `state["status"]` and must NOT filter on `op"`*).
+The `superseded_by` fallback stays UNDER the fold, for a row whose stream the
+record does not hold.
+
+⚠️ **Named gap, and it is the fold's, not this epic's:** the CONNECTOR / PACK
+lifecycle (`_fold_object_status` + `status_folds.py`'s pack-declared registries)
+is a vocabulary packs declare AT RUNTIME, so it cannot be a constant SQL fold
+without guessing; those Objects still read `live` from the view. Tracked as
+**#10198**. One visible cost, stated rather than discovered later:
+`tortoise/reconciliation.py` compares the record VIEW to the cache, so a
+connector-tracked Object now reports a `field_mismatches` entry on `status` —
+which is the truth (the record genuinely cannot account for that value), not a
+second writer.
+
+⚠️ **The refusal is NOT weakened by this.** A `status` COLUMN or a `props`-tail
+`status` is still dropped/refused by `_props_from_row`; only the declared view
+column is read, and it is read under its own alias (`cache_status`) so a view
+value can never be confused with a record column.
+
 ## 3. What this document does not claim
 
 * **It does not re-open §2.0.** Postgres-as-record is the owner's ruling; this is

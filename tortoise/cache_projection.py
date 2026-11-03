@@ -44,10 +44,33 @@ THE FOUR PROPERTIES, AND WHERE EACH LIVES
    forbids, and `rebuild_from_record`'s report is about the RECORD's coverage,
    not a census of what the wipe destroyed.
 2. **The cache is never authoritative.** A property is projected **iff** the
-   schema declares a column for it and does not refuse it. The property→column
+   schema declares a column for it and does not refuse it — OR it is a
+   **projection-owned cache** the record COMPUTES (§2.6), which is the one class
+   that is neither a column nor a `props` key by decision. The property→column
    decision is **read from disk** — the schema (#7968) and the placement table
    (#7955) — never restated here, so a new column is a loud failure rather than
    a silent drop.
+
+   ⚠️ **The projection-owned caches are projected, not dropped, since #9974.**
+   `Object.status` / `Subject.status` are declared a write-through cache of the
+   lifecycle event stream (§2.6; `ONTOLOGY.md` §2/§4.3), so the schema has no
+   column for them and refuses the name in `props` — and this projection used to
+   drop them for exactly that reason, which made `rebuild_from_record` produce a
+   node with NO status for a node the journal records as TERMINAL. Absence is
+   not neutral here: `live._terminal_excluded` reads an absent status as LIVE,
+   so a superseded Object came back current. The record *does* hold the
+   reconstruction source the placement table names — its own event stream
+   (`public.journal_event`, layer 1) — and the procedural views fold it
+   (`public.object_current_status` / `public.subject_current_status`, migration
+   `20261012000004` as extended by `20261030000001`). This module therefore
+   READS that fold (`PROJECTION_OWNED_CACHES`) and writes the value under its
+   graph name. The value is still never authority: it is computed from the
+   record's history on every read and stored nowhere.
+
+   The class is declared, not inferred: a name is projected here only if
+   :data:`PROJECTION_OWNED_CACHES` names it AND its label, and a `props` tail or
+   a COLUMN carrying the same name is still refused exactly as before — so the
+   refusal keeps its force and the cache acquires one value it can prove.
 3. **Rebuildable from the record alone.** The plan is a pure function of the
    record view: same view ⇒ same statements (idempotent), and the written field
    set equals the record view's field set exactly (never a superset). ⚠️ One
@@ -102,12 +125,15 @@ from .stored_form import STORED_VECTOR_PROPS, VERBATIM_MARKER, is_verbatim
 
 __all__ = [
     "ADDITIONAL_PRIMARY_COLUMNS",
+    "CACHE_ROW_COLUMN",
     "FOLD_ON_CREATE_DEFAULTS",
     "KEY_PROPERTY",
     "NODE_TABLES",
+    "PROJECTION_OWNED_CACHES",
     "RELATION_TABLE",
     "AmbiguousRecordColumn",
     "CacheProjectionError",
+    "CacheSource",
     "ProjectionPlan",
     "ProjectionReport",
     "RecordNode",
@@ -248,10 +274,14 @@ ADDITIONAL_PRIMARY_COLUMNS: dict[str, dict[str, str]] = {
 #: EXCLUDED, each with its reason — the fold's OTHER `ON CREATE` defaults are
 #: not applied here, and the reasons are not all "it is not a constant":
 #:
-#: * `status` (`'live'` on Subject/Object) — PROJECTION-OWNED CACHE (§2.6/
-#:   `record_projection.OpDispatch.never_store`); the schema has no column for it,
-#:   so nothing a record row carries could contradict this table, and the cache
-#:   seeds it through the fold.
+#: * `status` (`'live'` on Subject/Object) — NOT here, because it is not a
+#:   CONSTANT and it is not the fold's: it is a PROJECTION-OWNED CACHE (§2.6)
+#:   whose value the RECORD computes, so it is carried by
+#:   :data:`PROJECTION_OWNED_CACHES` and read from the procedural view rather
+#:   than defaulted here (#9974). A default in this table would be the "seed the
+#:   fold's constant" answer the same issue measured and rejected: it returns
+#:   `'live'` for a node the record holds as `superseded`/`deprecated`, which is
+#:   worse than the NULL it would replace because it is a positive claim.
 #: * `createdAt` (`coalesce($ca, $now)`) — not a constant: the default is the
 #:   REBUILD INSTANT, so there is nothing for a table to pin.
 #: * `Source.sourceKind` — ONTOLOGY §4.6 REQUIRED, `public.source.source_kind`
@@ -314,6 +344,56 @@ FOLD_ON_CREATE_DEFAULTS: dict[str, dict[str, Any]] = {
     "Subject": {"subjectKind": "other"},
     "Object": {"objectKind": "other", "title": ""},
 }
+
+
+@dataclass(frozen=True)
+class CacheSource:
+    """WHERE a projection-owned cache's value is READ from (never computed here).
+
+    ``row_column`` — the SELECT alias :func:`read_record_view` builds, distinct
+    from every record column so a VIEW value can never be classified as one.
+    ``view`` — the record's procedural view (`20261012000004`, extended by
+    `20261030000001`), which is the fold's ONE home.
+    ``view_key_column`` — the view's key column, needed for the join; the views
+    spell it per label (`object_key`/`subject_key`), so it is declared rather
+    than derived from the view's name.
+    """
+
+    row_column: str
+    view: str
+    view_key_column: str
+
+
+#: `{label: {graph property: record source}}` — the values the RECORD computes
+#: for a **projection-owned cache** (§2.6), never stored as a column or a `props`
+#: key (#9974).
+#:
+#: WHY THIS IS A DECLARED TABLE AND NOT A DERIVATION HERE. The projection must
+#: not invent the fold: `Object.status`/`Subject.status` are the procedural
+#: layer's, and the procedural layer's ONE home is the record's view
+#: (`20261012000004_record_procedural.sql`: *"the procedural layer is a VIEW/READ
+#: — never a fourth table"*). So the fold lives in
+#: `public.object_current_status`/`public.subject_current_status` and this
+#: module only READS it, under the property name the graph uses. A second fold
+#: computed in Python would be a second answer to one question — and the two
+#: would drift the first time an arm was added to one of them.
+#:
+#: The view's value is read under a DISTINCT `row column` (`cache_status`), so a
+#: VIEW value can never be confused with — or shadow — a record column, and
+#: `_props_from_row`'s refusal of the bare name stays exactly as strong as it
+#: was: a row column or `props` tail carrying `status` is still dropped (and a
+#: tail is still refused loudly).
+PROJECTION_OWNED_CACHES: dict[str, dict[str, CacheSource]] = {
+    "Object": {"status": CacheSource("cache_status", "object_current_status",
+                                    "object_key")},
+    "Subject": {"status": CacheSource("cache_status", "subject_current_status",
+                                     "subject_key")},
+}
+
+#: The `row column` each procedural view is read under, per label — the SELECT
+#: alias :func:`read_record_view` builds. Derived from the table above so the two
+#: cannot spell it differently.
+CACHE_ROW_COLUMN = "cache_status"
 
 #: The placement table (#7955) — the field contract the schema is pinned to.
 _PLACEMENT_DOC = (
@@ -685,11 +765,41 @@ def _props_from_row(table: str, row: Mapping[str, Any], *,
     return out
 
 
+def _cache_props(label: str, row: Mapping[str, Any]) -> dict[str, Any]:
+    """The PROJECTION-OWNED caches this label's row carries, as properties.
+
+    Read from the `row column` :data:`PROJECTION_OWNED_CACHES` declares — which
+    :func:`read_record_view` fills from the record's procedural view — and
+    returned under the label's GRAPH property name. `None` (the view is absent,
+    or the row was assembled by a caller that did not join it) contributes
+    nothing: an absent cache value must not become an empty one, because the
+    difference between "not computed" and "computed as nothing" is exactly the
+    difference this issue is about.
+
+    ⚠️ The value is NOT accepted from the record itself. A `status` COLUMN or a
+    `props` key of that name is still dropped by :func:`_props_from_row` (the
+    `props` key loudly) — so the cache is never made authoritative through the
+    row, which is the half of §2.6 the old code already kept right.
+    """
+    out: dict[str, Any] = {}
+    for prop, cache in PROJECTION_OWNED_CACHES.get(label, {}).items():
+        value = row.get(cache.row_column)
+        if value is not None:
+            out[prop] = _scalar(value)
+    return out
+
+
 def node_from_row(label: str, row: Mapping[str, Any]) -> RecordNode:
     """One record row → one `RecordNode`, keyed by the label's contract key."""
     table = NODE_TABLES.get(label)
     if table is None:
         raise UnknownRecordLabel(f"{label!r} has no record table")
+    # The procedural view's SELECT alias is NOT a record column, and
+    # `_props_from_row` refuses an unclassified column LOUDLY (correctly — that
+    # is how a schema change is caught). Strip it before the row is classified
+    # and apply it below, so the two doors cannot be confused: a row column is
+    # classified/refused, a computed cache is declared.
+    record_row = {k: v for k, v in row.items() if k != CACHE_ROW_COLUMN}
     key_prop = KEY_PROPERTY[label]
     key_column = _rp.snake(key_prop)
     raw = row.get(key_column)
@@ -698,7 +808,7 @@ def node_from_row(label: str, row: Mapping[str, Any]) -> RecordNode:
             f"{label}: no contract key at {table}.{key_column} — the schema's "
             f"own CHECK would refuse the row, and a NULL key cannot be merged"
         )
-    props = _props_from_row(table, row)
+    props = _props_from_row(table, record_row)
     # The key column is a graph property too (`id`, `url`, `eventId` — the
     # contract's key columns; `name` stopped being one for `Object`/`Subject`
     # in #9881), so it is projected under its own name as well as being the
@@ -723,6 +833,12 @@ def node_from_row(label: str, row: Mapping[str, Any]) -> RecordNode:
     for prop, default in FOLD_ON_CREATE_DEFAULTS.get(label, {}).items():
         if props.get(prop) is None:
             props[prop] = default
+    # …then the record's COMPUTED caches (§2.6), which are neither a column nor
+    # a fold constant (#9974). Applied AFTER the defaults so a declared cache
+    # always wins over a fallback — the two sets are disjoint today (a name in
+    # both would be a declaration error), and ordering it this way makes the
+    # precedence stated rather than incidental.
+    props.update(_cache_props(label, row))
     return RecordNode(label=label, key=raw, props=props)
 
 
@@ -803,9 +919,27 @@ def read_record_view(conn: Any, *, org_id: str, graph_id: str,
         # (cache_tier <> 'record_only')`, i.e. every row of the record's
         # highest-volume table read and thrown away. A third tier added later
         # must therefore be a place someone LOOKS, which is the point.
-        tier = " AND cache_tier = 'graph'" if table == "point" else ""
-        for row in _rows(cur, f"SELECT * FROM public.{table} "
-                              "WHERE org_id = %s AND graph_id = %s" + tier,
+        tier = " AND t.cache_tier = 'graph'" if table == "point" else ""
+        # The label's PROJECTION-OWNED caches are READ, never invented (#9974):
+        # `LEFT JOIN <the procedural view>`, aliasing its value to
+        # `CACHE_ROW_COLUMN` so it stays distinguishable from a record column
+        # (`_props_from_row` refuses an unclassified COLUMN loudly, and must
+        # keep doing so). `LEFT` rather than an inner join because the cache is
+        # a fold of the record's history: a row whose stream is not in this
+        # record (a non-journaled producer, a rotated journal) must still be
+        # projected — it simply carries no computed value, and absence there is
+        # honest rather than a fabricated `live`.
+        cache_join = ""
+        cache_cols = ""
+        for _prop, _cache in PROJECTION_OWNED_CACHES.get(label, {}).items():
+            cache_join += (
+                f" LEFT JOIN public.{_cache.view} v ON v.org_id = t.org_id"
+                f" AND v.graph_id = t.graph_id"
+                f" AND v.{_cache.view_key_column} = t.node_key")
+            cache_cols += f", v.status AS {_cache.row_column}"
+        for row in _rows(cur,
+                         f"SELECT t.*{cache_cols} FROM public.{table} t{cache_join} "
+                         "WHERE t.org_id = %s AND t.graph_id = %s" + tier,
                          (org_id, graph_id)):
             nodes.append(node_from_row(label, row))
     # …and its EDGES go with it (#10017 R2 review): a CONTAINS edge to a

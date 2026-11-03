@@ -1020,3 +1020,158 @@ def test_read_record_view_asks_for_the_scope_it_was_given():
         "for)")
     for sql in seen[2:]:
         assert "org_id = %s" in sql and "graph_id = %s" in sql
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# The OTHER half of §2.6's ownership: the cache COMPUTES the value (#9974)
+# ════════════════════════════════════════════════════════════════════════════
+#
+# `test_record_projection.py::test_the_projection_owned_status_cache_is_never_stored_by_a_mutation`
+# pins the record's REFUSAL — `Object.status` / `Subject.status` are a cache,
+# so neither the record's layer tables nor a `props` tail may hold them. That
+# half was always right, and it was the only half: nothing asserted that
+# ANYTHING produced the value, so `rebuild_from_record` wrote a node with no
+# status for a node the journal records as TERMINAL, and `live._terminal_excluded`
+# reads an absent status as LIVE. The legs below are the missing half.
+
+
+def test_the_projection_owned_status_cache_is_projected_from_the_procedural_view():
+    """The cache projection produces the value the record refuses to store.
+
+    The value arrives under the view's own SELECT alias (`cache_status`), which
+    `read_record_view` fills from `public.object_current_status` /
+    `public.subject_current_status` — the record's procedural fold. Without this
+    leg the whole issue is unobserved: the plan for a superseded Object simply
+    carried no `status`, and the resulting node read LIVE.
+    """
+    superseded = _node("Object", {"id": "acme", "name": "acme",
+                                  cp.CACHE_ROW_COLUMN: "superseded"})
+    assert superseded.props["status"] == "superseded"
+
+    subject = _node("Subject", {"id": "s-1", "name": "s-1",
+                                cp.CACHE_ROW_COLUMN: "archived"})
+    assert subject.props["status"] == "archived"
+
+    # And the statement the plan emits carries it — this is what a rebuild
+    # actually runs, so the assertion above must not be the only one.
+    stmt = cp.node_statement(superseded)
+    assert stmt.params["props"]["status"] == "superseded"
+
+
+def test_an_absent_procedural_fold_contributes_nothing_rather_than_live():
+    """A row with no computed cache must carry NO status, not a guessed one.
+
+    Absence is honest here: the record holds no event stream for that row, so
+    the fold has nothing to answer. Writing a default would be the very
+    substitution this issue removes — and `'live'` in particular is a POSITIVE
+    claim that a terminal node is current, which is worse than the NULL it
+    replaces for any reader that checks truthiness.
+    """
+    silent = _node("Object", {"id": "acme", "name": "acme"})
+    assert "status" not in silent.props
+    assert "status" not in cp.node_statement(silent).params["props"]
+
+
+def test_the_projection_owned_cache_is_still_refused_from_the_row_itself():
+    """The ownership split survives: a cache value may not arrive AS authority.
+
+    Two doors, and both must stay shut even though the projection now WRITES the
+    property: a `status` COLUMN on a record row is dropped (it is a DERIVED name
+    and the schema refuses it — `test_no_derived_property_has_a_record_column`),
+    and a `status` in the `props` tail is refused LOUDLY. Only the declared view
+    column is read.
+    """
+    from_column = _node("Object", {"id": "acme", "name": "acme",
+                                   "status": "deprecated"})
+    assert "status" not in from_column.props, (
+        "a `status` COLUMN was projected as authority — the cache must come "
+        "from the procedural view, never from the row")
+
+    with pytest.raises(cp.CacheProjectionError):
+        _node("Object", {"id": "acme", "name": "acme",
+                         "props": {"status": "deprecated"}})
+    with pytest.raises(cp.CacheProjectionError):
+        _node("Subject", {"id": "s-1", "name": "s-1",
+                          "props": {"status": "archived"}})
+
+
+def test_the_declared_projection_owned_caches_are_the_docs_derived_class():
+    """The declaration is pinned to §2.6 — not to what the code finds convenient.
+
+    A projection-owned cache is projected DESPITE having no PRIMARY claim, so the
+    set must be exactly the names the recorded decision classifies that way:
+    DERIVED in the placement table, refused in `props` by the schema, and with no
+    column. A name that later GAINS a column (i.e. becomes PRIMARY) must leave
+    this table — this test is what makes that move deliberate rather than a
+    silent promotion of a cache to authority.
+    """
+    derived = {(table, prop) for table, prop in _rows("D")}
+    placed = {(table, prop) for table, prop, _cls in PLACEMENT_ROWS}
+    assert cp.PROJECTION_OWNED_CACHES, (
+        "no projection-owned cache is declared — either §2.6's class moved, or "
+        "this leg is now vacuous")
+    for label, sources in cp.PROJECTION_OWNED_CACHES.items():
+        table = cp.NODE_TABLES[label]
+        for prop, source in sources.items():
+            assert prop in REFUSED[table], (
+                f"{label}.{prop} is projected as a computed cache but the schema "
+                f"does not refuse it in `props` — the refusal is what makes the "
+                f"view the ONLY source")
+            assert rp.snake(prop) not in TABLE_COLUMNS[table], (
+                f"{label}.{prop} has a record COLUMN — it is a PRIMARY value "
+                f"now, so it must not be projected from a view")
+            if (table, prop) in placed:
+                # §2.6 lists `Object.status` explicitly and classifies it D.
+                # `Subject.status` is NOT a row of the placement table —
+                # 03-schema.md records why (`§2.6 and ONTOLOGY.md §4.2 both name
+                # it a cache`, so it is classified where it lives rather than
+                # added as a third Subject row). So the table is checked where it
+                # SPEAKS, and the schema refusal above is the check that covers
+                # both labels.
+                assert (table, prop) in derived, (
+                    f"{label}.{prop} is declared a PROJECTION-OWNED CACHE here "
+                    f"but the placement table does not classify it D — the "
+                    f"declaration and §2.6 have diverged")
+            assert source.view_key_column in {
+                "object_key", "subject_key"}, (
+                f"{source.view} declares an unexpected key column — the join "
+                f"would be written against a name the view does not expose")
+
+
+def test_read_record_view_reads_the_procedural_fold_and_no_other_opinion():
+    """The READ door: the join is what makes the value a RECORD value.
+
+    Both halves matter. The join must be present for the labels that declare a
+    cache (or the value never arrives, and the plan is silently poorer than the
+    record), and it must be ABSENT everywhere else (a projection that joined a
+    procedural view for a label that declares none would be reading a source the
+    declaration does not name).
+    """
+    seen: list[str] = []
+
+    class _Cursor(_FakeCursor):
+        def execute(self, sql, params=None):
+            seen.append(sql)
+            super().execute(sql, params)
+
+    class _Conn:
+        def cursor(self):
+            return _Cursor({})
+
+    cp.read_record_view(_Conn(), org_id="o", graph_id="g")
+
+    object_sql = [s for s in seen if "FROM public.object t" in s]
+    assert object_sql, "the reader issued no Object query"
+    assert object_sql[0].count("LEFT JOIN public.object_current_status") == 1
+    assert f"AS {cp.CACHE_ROW_COLUMN}" in object_sql[0]
+    assert "v.object_key = t.node_key" in object_sql[0], (
+        "the join must address the view by its own key column, or a rename of "
+        "either side silently produces no rows")
+
+    subject_sql = [s for s in seen if "FROM public.subject t" in s]
+    assert subject_sql and "public.subject_current_status" in subject_sql[0]
+
+    point_sql = [s for s in seen if "FROM public.point t" in s]
+    assert point_sql and "JOIN" not in point_sql[0].upper().replace(
+        "LEFT JOIN PUBLIC.POINT", ""), (
+        "a label that declares no projection-owned cache must not read one")

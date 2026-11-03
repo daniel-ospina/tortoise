@@ -84,6 +84,7 @@ RECORD_MIGRATIONS = [
     # both, so a list that disagrees here would drift the moment the duplicate
     # is revived.
     "20261029000001_record_point_cache_tier.sql",
+    "20261030000001_record_procedural_status_fold.sql",
 ]
 DSN = os.environ.get(
     "CAPSTONE_PG_DSN", "postgresql://postgres:cap@127.0.0.1:15499/capstone")

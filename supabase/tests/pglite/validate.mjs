@@ -698,6 +698,17 @@ const suites = [
   // "the suite exists" is then mistaken for "the suite passes". Add the entry in
   // the same commit as the file.
   '20261022000001_record_tenancy_posture.sql',  // #9554
+  // #9974 — the PROCEDURAL `status` fold over the record's own event stream:
+  // Object/Subject creation, `EntityMutated op=restatus`, supersession (both
+  // the `ObjectSuperseded` record and the Subject's `op=supersede`), the
+  // last-writer-by-seq order `rebuild_all` resolves, the ON CREATE-only
+  // re-registration rule, and the `superseded_by` fallback under the fold. The
+  // read-back is the RECORD side of the issue's own pin (`status` after a
+  // record-sourced rebuild must be the value the live graph held, not NULL).
+  // NOTE: this list is EXPLICIT, not a glob — a suite file that is not named
+  // here never runs, and "the suite exists" is then mistaken for "the suite
+  // passes". Add the entry in the same commit as the file.
+  '20261030000001_record_status_fold.sql',  // #9974
   // #4550 — `recover_team_key`'s cap count AND revoke-target scan exclude
   // EXPIRED-but-unrevoked rows, driven against the REAL function. NOTE: this
   // list is EXPLICIT, not a glob — a suite file that is not named here never

@@ -85,12 +85,28 @@ def test_an_entity_mutation_cannot_carry_the_tier() -> None:
 # keys on the MAIN table so the relation query's `public.point` SUBQUERY — the
 # record-only key set — is not mistaken for a node read.
 
+def _is_node_read(sql: str) -> str | None:
+    """The node table a `read_record_view` statement reads, or None.
+
+    ⚠️ The reader ALIASES the table (`… FROM public.<table> t …`) since #9974,
+    because a label with a projection-owned cache LEFT JOINs the procedural view
+    onto it. The alias is not cosmetic — the tier predicate must be qualified
+    (`t.cache_tier`), and an unqualified one becomes ambiguous the moment a
+    joined view carries a column of that name — so this matcher reads the alias
+    form and would NOT match a reader that dropped it.
+    """
+    for table in cp.NODE_TABLES.values():
+        if f"FROM public.{table} t" in sql:
+            return table
+    return None
+
+
 def _read_view(monkeypatch, point_rows, labels=("Point",)):
     sqls: list[str] = []
 
     def _rows(cur, sql, params):
         sqls.append(sql)
-        if sql.startswith("SELECT * FROM public.point"):
+        if _is_node_read(sql) == "point":
             # Honour the reader's own predicate rather than restating the answer:
             # delete the filter from the reader and this returns both rows.
             if "cache_tier = 'graph'" in sql:
@@ -127,10 +143,8 @@ def test_the_filter_is_never_applied_to_a_table_without_the_column(monkeypatch) 
     subquery, so applying the predicate to every table — the exact reversal this
     test names — left it green (round-2 review, measured)."""
     _v, sqls = _read_view(monkeypatch, [], labels=tuple(cp.NODE_TABLES))
-    node_reads = {f"SELECT * FROM public.{t}" for t in cp.NODE_TABLES.values()}
-    other_tables = [sq for sq in sqls
-                    if any(sq.startswith(p) for p in node_reads)
-                    and not sq.startswith("SELECT * FROM public.point")]
+    node_reads = [sq for sq in sqls if _is_node_read(sq)]
+    other_tables = [sq for sq in node_reads if _is_node_read(sq) != "point"]
     assert other_tables, "no non-point node read was exercised — test is blind"
     for sql in other_tables:
         assert "cache_tier" not in sql, sql
