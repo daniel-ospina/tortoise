@@ -3197,6 +3197,57 @@ def test_the_committed_blocker_record_covers_every_cited_blocker():
             "blocker that still holds")
 
 
+def test_every_citation_of_the_refusal_record_names_the_rows_that_carry_it():
+    """A `cited_by` is a CLAIM about a committed record, so it is checked against it.
+
+    ⛔ BOTH entries citing the REFUSAL record were wrong, and NOTHING read them
+    (#10601 review round 9, P3 ×2 — `git grep 'cited_by' -- '*.py'` finds no pin):
+    `#5199` claimed "E3/E4" while E4's `blocked_by` is `#9077`, and `#9075`
+    claimed that record's "four UNPREREGISTERED rows" where it has TWO (E1/E2),
+    a count no row-level reading could contradict because the string named no row
+    at all. This is the file V12 reads for provenance, and the OK line prints it
+    as a verification — so a stale claim here is read AS provenance by the gate.
+
+    The rule pinned is the one that makes the claim CHECKABLE, not the one that
+    makes it pretty: a citation of the refusal record must NAME the rows it is
+    talking about, and each named row must cite THAT issue in `capstone.log`.
+    Measured pre-fix on this tree: `#5199` reds on E4 (`blocked_by` `#9077`), and
+    `#9075` reds on naming no row at all.
+
+    Only the REFUSAL record is checkable: the SUPERSEDED table's log is deleted by
+    the bundle's own supersede rule, so its citations have no in-tree artifact.
+    The population is pinned below, so a renamed marker cannot empty this out.
+    """
+    states = cvc.load_blocker_states(_REPO / cvc.BLOCKER_STATES_DEFAULT)
+    table = cvc.extract_block(LOG.read_text())
+    blocked_by = {row["criterion"]: row.get("blocked_by")
+                  for row in table["rows"]}
+    assert blocked_by, "the refusal record carries no rows to check against"
+    checked, problems = set(), []
+    for issue, entry in states.items():
+        if issue.startswith("_"):
+            continue
+        text = entry.get("cited_by") or ""
+        if "REFUSAL record" not in text:
+            continue
+        checked.add(issue)
+        named = re.findall(r"\bE\d+[ab]?\b", text)
+        if not named:
+            problems.append(
+                f"{issue} cites the REFUSAL record but names no row, so the claim "
+                f"has nothing to be checked against: {text!r}")
+            continue
+        for row in named:
+            if blocked_by.get(row) != issue:
+                problems.append(
+                    f"{issue} cites {row}, whose blocked_by is "
+                    f"{blocked_by.get(row)!r}: {text!r}")
+    assert checked == {"#5199", "#9075", "#9077"}, (
+        f"the refusal-only citations are no longer readable as such (found "
+        f"{sorted(checked)}) — the marker this pin reads was renamed or dropped")
+    assert not problems, "\n".join(problems)
+
+
 def test_a_malformed_blocker_record_is_a_usage_error_not_a_disarm(tmp_path):
     """A present-but-broken record must not answer "no V12".
 
