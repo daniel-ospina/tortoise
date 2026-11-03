@@ -455,18 +455,27 @@ def test_the_parse_reads_arms_not_a_fixed_line():
 
 # ── the table shape, and the two rules that keep a row honest ────────────
 
-def _rows(out_path: str = "docs/evidence/7949-capstone/e1-e2.log") -> list[dict]:
+#: The E4 row fixture's artifact: a receipt ON the run's own corpus, because
+#: `build_e4_row` REFUSES anything else — handing E4 the retired off-pin constant here
+#: would re-assert the defect this fixture is meant to model (a row whose note says
+#: "the SAME receipt, on the SAME corpus" while its fields declare another revision).
+_E4_ON_PIN = "tests/eval/write_path/receipts/w2b-operator-2026-10-24-8503-b.json"
+
+
+def _rows(out_path: str = "docs/evidence/7949-capstone/e1-e2.log", *,
+          log_corpus_sha: str = "sha256:" + "d" * 64,
+          e4: dict | None = None) -> list[dict]:
     return measure.build_rows(
-        head="a" * 40, out_path=out_path, log_corpus_sha="sha256:" + "d" * 64,
+        head="a" * 40, out_path=out_path, log_corpus_sha=log_corpus_sha,
         e1={"verdict": "BLOCKED", "sha": "c" * 40, "corpus_sha256": "e" * 64,
             "note": "E1 note"},
         e2={"verdict": "BLOCKED", "sha": "c" * 40, "corpus_sha256": "e" * 64,
             "note": "E2 note"},
         e3={"verdict": "RED", "numerator": 23, "denominator": 70,
             "note": "E3 note"},
-        e4={"verdict": "RED", "numerator": 2, "denominator": 15,
-            "sha": "6164c683c", "corpus_sha256": "sha256:" + "f" * 64,
-            "evidence": measure.E4_RECEIPT, "note": "E4 note"},
+        e4={"verdict": "RED", "numerator": 5, "denominator": 15,
+            "sha": "a999be41e", "corpus_sha256": log_corpus_sha,
+            "evidence": _E4_ON_PIN, "note": "E4 note"} if e4 is None else e4,
         e5={"verdict": "RED", "numerator": 12, "denominator": 25,
             "note": "E5 note"})
 
@@ -505,27 +514,69 @@ def test_a_row_cites_the_artifact_it_was_written_to():
     rows = {row["criterion"]: row for row in _rows(out_path=out)}
     assert rows["E3"]["evidence"] == out
     assert rows["E1"]["evidence"] == measure.E1E2_LOG
-    assert rows["E4"]["evidence"] == measure.E4_RECEIPT
+    assert rows["E4"]["evidence"] == _E4_ON_PIN
     assert rows["E5"]["evidence"] == measure.E5_RESCORE
 
 
 def test_a_row_measured_on_another_corpus_declares_it():
-    """E1/E2/E4 cite artifacts on other corpus revisions — and say so.
+    """E1/E2 cite artifacts on other corpus revisions — and say so.
 
     The declaration is what V7 checks against the artifact's own text, so a row
     that carries ``corpus_sha256`` differing from the log's must also carry
     ``artifact_corpus_sha256``. A row that tried to look like the run's own corpus
     instead would be claiming a measurement it did not take.
+
+    ⛔ E4 is deliberately NOT in that set any more: ``build_e4_row`` refuses a receipt
+    whose ``corpus_hash`` is not the frozen pin, so on the real path E4's row IS the
+    run's corpus and the declaration must be ABSENT. It was emitted unconditionally
+    while E4 read the off-pin constant, and it survived the selector — asserting "a
+    different revision" about the one row that cannot be scored on one, in a field V7
+    never reads (its same-corpus arm short-circuits first). The off-pin shape is still
+    covered, by handing ``build_rows`` an off-pin ``e4`` directly: the condition is on
+    the operands, not a hard ``None`` that would also neuter the rule.
     """
+    log_corpus = "sha256:" + "d" * 64
     rows = {row["criterion"]: row for row in _rows()}
-    for criterion in ("E1", "E2", "E4"):
+    for criterion in ("E1", "E2"):
         row = rows[criterion]
         assert measure.normalise_corpus(row["corpus_sha256"]) != \
-            measure.normalise_corpus("sha256:" + "d" * 64), criterion
+            measure.normalise_corpus(log_corpus), criterion
         assert row.get("artifact_corpus_sha256") == row["corpus_sha256"], criterion
-    for criterion in ("E3", "E5"):
-        assert rows[criterion]["corpus_sha256"] == "sha256:" + "d" * 64, criterion
+    for criterion in ("E3", "E4", "E5"):
+        assert rows[criterion]["corpus_sha256"] == log_corpus, criterion
         assert "artifact_corpus_sha256" not in rows[criterion], criterion
+
+    off_pin = {row["criterion"]: row for row in _rows(e4={
+        "verdict": "RED", "numerator": 2, "denominator": 15,
+        "sha": "6164c683c", "corpus_sha256": "sha256:" + "f" * 64,
+        "evidence": measure.E4_RECEIPT, "note": "off-pin E4 note"})}
+    assert off_pin["E4"]["artifact_corpus_sha256"] == "sha256:" + "f" * 64, \
+        off_pin["E4"]
+    assert off_pin["E4"]["evidence"] == measure.E4_RECEIPT
+
+
+def test_the_real_e4_row_declares_no_other_corpus_revision():
+    """The row ``main`` actually builds carries NO ``artifact_corpus_sha256``.
+
+    That field told a machine consumer (``run.rows[E4].artifact_corpus_sha256``) that
+    E4's artifact measured a different corpus revision than the run froze, while the
+    note beside it said the two ARE the same — and V7 could never catch it, because
+    ``_same_corpus`` short-circuits before the declaration is read. So the arm went
+    from VERIFIED (pre-fix: an off-pin constant whose digest had to appear in the
+    artifact) to an unverified, redundant claim on the one row that cannot be scored
+    off the pin at all. This drives the real selector -> row -> table path, so a
+    reversion reds here and not only in a fixture.
+
+    Non-vacuity: at the previous head ``build_rows`` stamped the field unconditionally
+    from ``e4["corpus_sha256"]``, so the first assertion is red there; the fixture case
+    above is what reds if the condition becomes a blanket removal.
+    """
+    pin = _prereg()["corpus"]["fixtures_hash"]
+    e4 = measure.build_e4_row(measure.load_e4(_REPO, frozen_pin=pin),
+                              bars=measure.parse_bars(_prereg()), corpus_sha=pin)
+    rows = {row["criterion"]: row for row in _rows(log_corpus_sha=pin, e4=e4)}
+    assert "artifact_corpus_sha256" not in rows["E4"], rows["E4"]
+    assert measure._same_corpus(rows["E4"]["corpus_sha256"], pin), rows["E4"]
 
 
 def test_the_e1_and_e2_siblings_carry_the_same_denominator():
