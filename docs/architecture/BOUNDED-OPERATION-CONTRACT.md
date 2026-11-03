@@ -70,43 +70,16 @@ a reader who finds the number has drifted should search the quoted fragment: tha
 
 | surface | bound | state | evidence |
 |---|---|---|---|
-| `TortoiseSDK.get_cross_lens_candidates` (MCP: `tortoise_find_cross_lens_candidates`) | `max_candidates` (200 on the MCP wrapper) — one of three bounds on this surface, see ⚠️ below | **MARKS** | `tortoise/sdk.py:28434-28438` — returns `truncated`, `cap` and `count` alongside the rows (`truncated = len(all_candidates) > limit`, where `limit = min(int(max_candidates), CROSS_LENS_CANDIDATE_CAP)` is derived at `:28406`; there is no `limit=` parameter on this surface) |
-| `event_store.read_after` | `limit` | **REFUSES** | `tortoise/event_store.py:974` — `if not 1 <= limit <= MAX_PAGE: raise ValueError(...)`, with the message stating *why* coercion would be indistinguishable from a drained stream |
-| `GET /v1/search` (hosted) | `limit` | **MARKS** | `tortoise/hosted_api.py:12307` — `response.update(truncation_field(trunc_out))`, i.e. `truncated` + `total_available` (PR #10500, merged). ⚠️ `count` is still rows **delivered**, not matched — the marker, not `count`, is the instrument |
-| MCP `tortoise_search` (`tool_registry.py:474`) · `GET /search` (selfhost, `selfhost_api.py:364-365`) | `limit` | **SILENT** | both return a bare list (`response_model=list[PointResponse]`, `selfhost_api.py:364`) with the bound on the signature (`limit: int = Query(10, ge=1, le=100)`, `:365`); recorded as a **deliberate limit** on #8447's 2026-11-01 comment (§6) and restated in `config/surface-manifest.yml:139-141` (*"returns a bare list, so it does not carry the field; wrapping a list in an object is a declared return-type change"*), because a marker here IS a return-shape change |
-| `TortoiseSDK.list_batches` (MCP: `tortoise_list_batches`) | `limit=20` | **SILENT** | `tortoise/sdk.py:27810` — `return items[:limit]`; the method's contract is `-> list[dict]` (`:27761`), so there is no field in which to say "there are more" |
-| `TortoiseSDK.suggest_entry_points` (MCP: `tortoise_suggest_entry_points`) | `limit=5` | **SILENT** | `tortoise/sdk.py:35186` — `results = results[:limit]`, returning `results` at `:35234`; declared `-> list[dict]` (`:35132`) |
-| `tortoise_query(text=…)` (MCP, `tool_registry.py:290`; the `text=` arm only) | `limit` (100 on that arm) | **SILENT** | `tortoise/mcp_server.py:3178-3180` calls `tortoise_fts_query(…, limit=eff_limit)` **without** the private marker sink, and the SDK method is declared `-> list[dict]` (`sdk.py:35980`) — so even though `tortoise_fts_query` CAN compute the marker (`_truncation_out`, `:35979`), a bare list has nowhere to carry it. Its structural arm (`text=None`) is a different surface, and not all of its branches are marked, see ⚠️ below |
-| `GET /v1/points` (hosted, `hosted_api.py:11591`) | `limit=50` (`Query(50, ge=1, le=1000)`) | **MARKS** | `hosted_api.py:11630` asks the store for `limit + 1` (an internal probe row, dropped before delivery) and `list_points`' own `mark_truncation`/`truncation_field` calls (`:11685`, `:11690`) publish `truncated` via `truncation.py`; `total_available` is deliberately WITHHELD (`exact=False` — a probe proves *more exist*, not *how many*), so a truncated page takes the third state. `count` is still rows **delivered**, and the cap VALUES are unchanged |
-| `GET /points` (selfhost, `selfhost_api.py:315`) | `limit=50` | **SILENT** | `response_model=list[PointResponse]` — a bare list on the route |
-| `GET /v1/events` (hosted, `hosted_api.py:10217-10221`) | `limit=100` (`le=_MAX_EVENT_PAGE`) | **REFUSES at the edge** | `limit: int = Query(100, ge=1, le=_MAX_EVENT_PAGE)` (`:10221`) refuses 0 at the route; the seam below it (`read_after`) refuses both ends — see §3 |
-
-⚠️ **`get_cross_lens_candidates` MARKS one of its three bounds.** The marker is
-`truncated = len(all_candidates) > limit` (`sdk.py:28434`), where `limit` derives from `max_candidates`
-(`:28406`). Two further bounds on that same surface do not reach it at all: `top_k` (`:28404`, clamped
-to `CROSS_LENS_ANN_TOP_K_MAX`) bounds the per-point ANN pull (`:28531`, `limit=top_k + 1`), and
-`CROSS_LENS_POOL_CAP = 1000` (`:4226`) cuts the eligible pool (`:28471`). A saturated ANN window over a
-point with more above-threshold neighbours than `top_k` is precisely the *"a downstream leg lost
-rows"* case §4 item 3 requires to flip the marker — and it stays `false`. Read `truncated: false` on
-this surface as *"the candidate cut did not fire"*, never as *"nothing was lost"*: the two SILENT
-bounds are named here rather than folded into the marker because folding them in is a code change
-(the return is already a `dict`, so it is additive and needs no surface approval — `issue_insight`'s
-`_with_truncation` helper performs exactly that additive fold at `sdk.py:34591-34599`, and
-`tortoise_fts_query` folds a *saturated window* into its marker at `:36764` —
-`_trunc["incomplete"] = bool(_leg_peak >= str_limit or _lost_legs)`, which is the precedent for the
-ANN-window case specifically), and this document is the census, not the fix.
-
-⚠️ **`tortoise_query`'s structural arm (`text=None`) is a different surface, and not ONE surface.**
-With `offset`/`page` given it returns a `hasMore`/`total` dict — the `tag` arm at
-`mcp_server.py:2710-2712`, the default arm at `:2725-2730` → `sdk.py:22269`. Unpaginated it returns a
-bare list on the success path — `tag` at `mcp_server.py:2703`, default at `:2745` through
-`TortoiseSDK.query` (`:2736-2738` → `sdk.py:22115-22118`) — except when that list is empty, a `kind` was given, **and**
-`compute_suggestion` has a hint to offer, where `:2740-2744` returns `{"results", "suggestion"}`, a
-dict carrying no `hasMore`/`total`. Boundary refusals (`page < 1`, `offset < 0`, `limit < 1`) and an
-SDK failure surfacing from `_safe` return a structured error dict instead. **This block is not an
-inventory**: none of these branches has a row in the census above, and per the absence rule below
-they read as named-but-not-yet-censused, never as compliant — a complete enumeration is a finding for
-a census row, not a parenthetical here.
+| `TortoiseSDK.get_cross_lens_candidates` (MCP: `tortoise_find_cross_lens_candidates`) | `limit` | **MARKS** | `tortoise/sdk.py::get_cross_lens_candidates` — returns `truncated`, `cap` and `count` alongside the rows (`truncated = len(all_candidates) > limit`) |
+| `event_store.read_after` | `limit` | **REFUSES** | `tortoise/event_store.py::read_after` — `if not 1 <= limit <= MAX_PAGE: raise ValueError(...)`, with the message stating *why* coercion would be indistinguishable from a drained stream |
+| `GET /v1/search` (hosted) | `limit` | **MARKS** | `tortoise/hosted_api.py::search` — `response.update(truncation_field(trunc_out))`, i.e. `truncated` + `total_available` (PR #10500, merged). ⚠️ `count` is still rows **delivered**, not matched — the marker, not `count`, is the instrument |
+| MCP `tortoise_search` (`tortoise/tool_registry.py::TOOL_REGISTRY`) · `GET /search` (selfhost, `tortoise/selfhost_api.py::search`) | `limit` | **SILENT** | both return a bare list (`response_model=list[PointResponse]` on the route); recorded as a **deliberate limit** on #8447's 2026-11-01 comment (§6) and restated in `config/surface-manifest.yml` → `response_fields[tortoise_search].truncated` (*"returns a bare list, so it does not carry the field; wrapping a list in an object is a declared return-type change"*), because a marker here IS a return-shape change |
+| `TortoiseSDK.list_batches` (MCP: `tortoise_list_batches`) | `limit=20` | **SILENT** | `tortoise/sdk.py::list_batches` — `return items[:limit]`; the method's contract is `-> list[dict]`, so there is no field in which to say "there are more" |
+| `TortoiseSDK.suggest_entry_points` (MCP: `tortoise_suggest_entry_points`) | `limit=5` | **SILENT** | `tortoise/sdk.py::suggest_entry_points` — `results = results[:limit]` on a plain `[:limit]` cut with no offset and no cursor; declared `-> list[dict]` |
+| `tortoise_query(text=…)` (MCP, `tortoise/tool_registry.py::TOOL_REGISTRY`; the `text=` arm only) | `limit` (100 on that arm) | **SILENT** | `mcp_server.py::tortoise_query` calls `tortoise_fts_query(…, limit=eff_limit)` **without** the private marker sink, and the SDK method is declared `-> list[dict]` (`sdk.py::tortoise_fts_query`) — so even though `tortoise_fts_query` CAN compute the marker (`_truncation_out`, a keyword-only parameter on that signature), a bare list has nowhere to carry it. Its structural arm (`text=None`) is a different surface, and not all of its branches are marked, see ⚠️ below |
+| `GET /v1/points` (hosted, `tortoise/hosted_api.py::list_points`) | `limit=50` (`Query(50, ge=1, le=1000)`) | **MARKS** | the same function asks the store for `limit+1` (an internal probe row, dropped before delivery) and its own `mark_truncation`/`truncation_field` calls (`tortoise/truncation.py::truncation_field`) publish `truncated`; `total_available` is deliberately WITHHELD (`exact=False` — a probe proves *more exist*, not *how many*), so a truncated page takes the third state. `count` is still rows **delivered**, and the cap VALUES are unchanged |
+| `GET /points` (selfhost, `tortoise/selfhost_api.py::list_points`) | `limit=50` | **SILENT** | `response_model=list[PointResponse]` — a bare list on the route |
+| `GET /v1/events` (hosted, `tortoise/hosted_api.py::events_poll`) | `limit=100` (`le=_MAX_EVENT_PAGE`) | **REFUSES at the edge** | `limit: int = Query(100, ge=1, le=_MAX_EVENT_PAGE)` in `events_poll` refuses 0 at the route; the seam below it (`tortoise/event_store.py::read_after`) refuses both ends — see §3 |
 
 ⚠️ **The census is a population, and this table is the part of it that has been measured** — it is
 NOT yet exhaustive. §1 also names *body/log caps* and *ingest chunking*, and no row here covers
@@ -125,10 +98,11 @@ non-breaking place to put an incompleteness marker:
 For the two SDK-implemented ones, that second option is an MCP/SDK **surface** change, and the
 repo's hard rule requires Daniel's approval before any surface change (`AGENTS.md` → *MCP/SDK
 Surface Approval*). `tortoise_search` is the third of the same class — an MCP tool
-(`tortoise/tool_registry.py:474`), not a route — and the manifest's own note calls its list→object
-change *"an MCP Surface Approval decision"* (`config/surface-manifest.yml:140-141`). `tortoise_query`
-is the fourth: an MCP tool (`tool_registry.py:290`) whose `text=` arm returns `tortoise_fts_query`'s
-bare list. So the four are recorded here as:
+(`tortoise/tool_registry.py::TOOL_REGISTRY`), not a route — and the manifest's own note calls its
+list→object change *"an MCP Surface Approval decision"* (`config/surface-manifest.yml` →
+`response_fields[tortoise_search].truncated`). `tortoise_query` is the fourth: an MCP tool
+(`tortoise/tool_registry.py::TOOL_REGISTRY`) whose `text=` arm returns `tortoise_fts_query`'s bare
+list. So the four are recorded here as:
 
 > **NEEDS-APPROVAL(`tortoise_list_batches`, `tortoise_suggest_entry_points`, `tortoise_search`,
 > `tortoise_query`)** —
@@ -140,17 +114,18 @@ bare list. So the four are recorded here as:
 **SILENT** with the same return-shape dependency. The deferral record's own sentence names **two**
 surfaces: `tortoise_search` and selfhost `GET /search` — **#8447's 2026-11-01 comment** §6, verbatim:
 *"Deliberate limit: `tortoise_search` (MCP) and `selfhost_api`'s `/search` are list-shaped, so they
-still cannot say it"*, with `config/surface-manifest.yml:139-141` restating the MCP half. It is
-**not** a scope note on any PR body.
+still cannot say it"*, with §1 rows #13/#14 as the same pair and `config/surface-manifest.yml` →
+`response_fields[tortoise_search].truncated` restating the MCP half. It is **not** a scope note on
+any PR body.
 
 ⚠️ **§1 of that same comment is not the same pair, and this is the trap the deferral sentence hides.**
-§1 row #13 is selfhost `/search` (`selfhost_api.py:365`, `:380-386`), but row #14 carries **two**
-surfaces — `tortoise_search` (`mcp_server.py:2945`) *and* `tortoise_query(text=…)` (`:2717-2720`), the
-second of which §6's sentence does not name. §1's own bullet list parks the whole `#13/#14` list-shaped
-set (*"a field cannot ride a list, and wrapping one is a declared return-type change = an **MCP/SDK
-surface decision (owner-only)**"*), so `tortoise_query` sits under the same class rule; it is censused
-here as **SILENT** rather than left off the table on the strength of a sentence that names only two of
-the three.
+§1 row #13 is selfhost `/search` (`tortoise/selfhost_api.py::search`), but row #14 carries **two**
+surfaces — `tortoise_search` (`mcp_server.py::tortoise_search`) *and* `tortoise_query(text=…)`
+(`mcp_server.py::tortoise_query`), the second of which §6's sentence does not name. §1's own bullet
+list parks the whole `#13/#14` list-shaped set (*"a field cannot ride a list, and wrapping one is a
+declared return-type change = an **MCP/SDK surface decision (owner-only)**"*), so `tortoise_query`
+sits under the same class rule; it is censused here as **SILENT** rather than left off the table on
+the strength of a sentence that names only two of the three.
 
 ⚠️ **`selfhost GET /points` is NOT in that record.** It is the same shape and needs the same
 decision, but no artifact has decided it yet — so it is recorded here as **SILENT and undecided**,
