@@ -221,7 +221,7 @@ def test_a_hybrid_op_type_claim_reads_operator_shaped_not_structural(sdk):
 
     ``is_operator = true OR op_type IS NOT NULL`` also admits a hybrid
     ``create_point(op_type=…)`` CLAIM — the engine's operator-side selections
-    use exactly that predicate (`ep.py:1456`, `:1804`, `:1870`, `:2573`) while
+    use exactly that predicate (`ep.py:1456`, `:1804`, `:1870`, `:2579`) while
     ``ep._non_operator`` admits the same node as a CLAIM on the participant
     side, so one node can be in both populations. The narrow
     ``is_operator IS NULL AND op_type IS NOT NULL`` spelling was REJECTED (it
@@ -255,7 +255,7 @@ def test_a_hybrid_op_type_claim_reads_operator_shaped_not_structural(sdk):
 # ── #10137: the point ratio conflates evidence with belief ────────────────
 
 def _ingest_claim(sdk: TortoiseSDK, content: str) -> str:
-    """A claim written EXACTLY as ``ingest_v2._write_extraction`` writes one:
+    """A claim written EXACTLY as ``ingest_v2._write_payload`` writes one:
     kind ``statement``, ``status="draft"``, and — the trap — ``is_episodic=True``
     (``ingest_v2.py:275-290``). The flag is the QUOTA discriminator
     (``quota.py:1024-1030``), not a belief/evidence one; a denominator filtered
@@ -650,7 +650,7 @@ def test_census_probe_names_the_ratio_a_point_coverage_floor(tmp_path):
     P2). The denominator counts every non-operator ``Point``, and the v2 ingest
     writes episodic turn points and transcript chunks that can never carry EP
     state, so a key named ``claim_coverage`` asserts a denominator the bundle's
-    own README denies ("a floor, not a claim-coverage figure").
+    own README denies ("a **floor**, not a claim-coverage figure").
 
     Non-vacuous: the pre-fix probe published ``claim_coverage``, so the second
     assertion fails on it."""
@@ -764,7 +764,7 @@ def test_census_probe_keeps_the_disclosure_invariant_on_a_duplicate_qid(tmp_path
     """``questions_in_run - questions == questions_failed`` holds for EVERY
     input, including one whose outcome ids are not distinct (#10137 review, P3).
 
-    ``summary["questions"]`` is ``len(rows)`` (``measurement_posture.py:353``)
+    ``summary["questions"]`` is ``len(rows)`` (``measurement_posture.py:355``)
     and the failure ids are distinct ids, so two independent counts made the
     published total SMALLER than the ratio's own denominator (``-1``) for a
     duplicate-qid input. The total is now DERIVED from the denominator plus the
@@ -1655,8 +1655,8 @@ def test_committed_census_rederives_its_own_aggregate():
 
     # ``no_op_reason`` is the eighth published cell, it is part of
     # ``_CENSUS_CELLS``, and the README makes a claim about it a reader relies
-    # on ("null in all 24 because no question no-op'd — that null is the
-    # measured value, not a missing one"). Nothing derived it: every committed
+    # on (the README's "in all 24 because no question" — the null is the
+    # measured value, not a missing one). Nothing derived it: every committed
     # row has ``points_with_ep > 0``, so ``_classify_question`` never consults
     # the column, and a write of ``"no_ep_factors"`` onto all 24 rows shipped
     # GREEN — a row claiming the EP pass wrote nothing beside
