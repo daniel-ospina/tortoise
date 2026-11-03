@@ -1081,10 +1081,19 @@ def test_the_reprojection_shapes_match_the_probe():
     assert mp._optional_int(0) == 0
 
     # The mirror constant must stay the probe's row key set, or a tenth cell
-    # would silently drop out of the re-projection.
+    # would silently drop out of the re-projection — and it must hold for EVERY
+    # row, not just the first: a cell ADDED to any other row has no counterpart
+    # in the re-projection and can carry any number, which is the same "a
+    # published cell nothing checks" defect closed above for `cells`,
+    # `by_question_type`, `point_coverage` and the root (#10678 review).
     doc = json.loads(_ARTIFACT.read_text())
-    assert set(_CENSUS_CELLS) | {"question_id", "question_type"} == \
-        set(doc["per_question"][0])
+    want_row = set(_CENSUS_CELLS) | {"question_id", "question_type"}
+    off = [(i, sorted(set(r) ^ want_row))
+           for i, r in enumerate(doc["per_question"]) if set(r) != want_row]
+    assert not off, (
+        f"{_ARTIFACT}: per_question row(s) {[i for i, _ in off]} carry a cell "
+        f"set that is not the probe's own {sorted(want_row)} — an added cell "
+        f"has no counterpart in the re-projection and can carry any number")
 
 
 @pytest.mark.parametrize("never_read", [
