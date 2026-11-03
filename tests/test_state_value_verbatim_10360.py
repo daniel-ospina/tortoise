@@ -33,6 +33,7 @@ from __future__ import annotations
 import inspect
 import json
 import pathlib
+import re
 
 import pytest
 
@@ -979,6 +980,21 @@ def test_the_carve_outs_own_ADJACENT_time_units_are_judged():
         "forty thousand requests per week") == ()
 
 
+#: The patterns that assert the ADJACENCY gap is OPEN again — the thing
+#: `test_the_registry_row_names_the_residual_that_still_stands` must red on.
+#: Deliberately narrow: each one names a REOPENING, so a truthful rewording of
+#: "this gap is closed" passes, and `fails open` (true of the SPELLING case) is
+#: not matched (review cycle 6, measured against 4 reopenings and 4 paraphrases).
+_ADJACENCY_REOPENING = (
+    r"\bnot\s+closed\b",
+    r"\bno\s+longer\s+closed\b",
+    r"\bunclosed\b",
+    r"\bre-?open",
+    r"\b(is|are|remains|remain|stays?|was|were)\s+(still\s+|now\s+)?open\b",
+    r"\bopen\s+again\b",
+)
+
+
 def test_the_registry_row_names_the_residual_that_still_stands():
     """`config/v4-mechanisms.yml` must not describe a CLOSED gap as open.
 
@@ -1002,27 +1018,51 @@ def test_the_registry_row_names_the_residual_that_still_stands():
     # ⛔ BOTH HALVES, or the pin is half-vacuous (review cycle 3, MEASURED: with
     # only the two assertions above, flipping `is CLOSED` to `is still OPEN`
     # stayed GREEN — the header and the word ADJACENCY survive any rewording of
-    # the verdict). The closed half must be stated as closed...
+    # the verdict).
     #
     # ⛔ AND A BARE `CLOSED` SUBSTRING IS STILL HALF-VACUOUS (review cycle 4,
-    # MEASURED: `is not closed:` contains `CLOSED`, so the gap could be asserted
-    # OPEN while this passed). So the verdict is matched as the PHRASE
-    # `is closed` over whitespace-normalised lowercase text — `is not closed` /
-    # `is no longer closed` do not contain that phrase — and the negation list
-    # below is the belt to that brace.
-    flat = " ".join(after.split()).lower()
-    assert "adjacency half" in flat and "is closed" in flat, (
-        "the row no longer states the adjacency gap as CLOSED — this table "
-        "closed it; if it was reopened, say so AND delete that claim")
-    for open_claim in ("is still open", "is not closed", "no longer closed",
-                       "unclosed", "is not judged on adjacency",
-                       "never fused"):
-        assert open_claim not in flat, (
-            f"the row still says {open_claim!r} of the adjacency class, which "
-            "this table closed")
-    # positive control: the RATE class IS still open, so the check above cannot
-    # have been satisfied by a row that says nothing at all.
-    assert "not judged" in flat, after
+    # MEASURED: `is not closed:` contains `CLOSED`).
+    #
+    # ⛔ AND A PHRASE MATCH PLUS A NEGATION ALLOWLIST IS STILL FAIL-OPEN, on the
+    # exact shapes a lane writes (review cycle 5, MEASURED). Two leaks:
+    #   (a) the two checks were DECOUPLED, so keeping the closed sentence and
+    #       appending "the ADJACENCY half remains open" passed — the negation
+    #       list is an unbounded-enemy allowlist and "remains open" / "open
+    #       again" / "except `minute`, which is open again" are not on it;
+    #   (b) the guard read `[:1200]` while residual (d) runs 1339 chars, so a
+    #       reopening note appended where a lane APPENDS it was invisible EVEN
+    #       with a phrase from the list ("no longer closed").
+    # So: scope to the WHOLE (d) block (up to `(e) the`), take every SENTENCE
+    # that makes an adjacency claim, and require that sentence to say `closed`
+    # and to carry NO reopening word — the check is per-sentence, so an appended
+    # contradiction lands in its own sentence and reds, and the window cannot
+    # truncate it. Verified against 4 reopening mutations (all FAIL) and 7
+    # truthful paraphrases ("is now CLOSED", "has been CLOSED", "We have closed
+    # the ADJACENCY half", "the ADJACENCY gap is closed" — all PASS).
+    block = row.split("(d) a RATE unit", 1)[1].split("(e) the", 1)[0]
+    flat = " ".join(block.split()).lower()
+    claims = [s for s in re.split(r"(?<=[.!?;])\s+", flat) if "adjacency" in s]
+    assert claims, (
+        "the row no longer makes any ADJACENCY claim in residual (d) — this "
+        "table closed that gap; if it was reopened, say so AND delete this pin")
+    for sentence in claims:
+        assert "closed" in sentence, (
+            f"the row does not state the ADJACENCY gap as CLOSED: {sentence!r}")
+        # ⛔ MATCH THE ASSERTION OF OPENNESS, NOT BARE WORDS (review cycle 6,
+        # MEASURED): banning `not`/`never`/`still` outright over-blocked truthful
+        # paraphrases, because the sentence window can merge an adjacent clause
+        # (`… is CLOSED: … per day` is `not judged` → tripped on `not`). These
+        # patterns name reopening and nothing else, and `fails open` (a truthful
+        # thing to write about the SPELLING case) is deliberately not matched.
+        for pattern in _ADJACENCY_REOPENING:
+            m = re.search(pattern, sentence)
+            assert m is None, (
+                f"the row's adjacency claim says {m.group(0)!r}, which this "
+                f"table closed: {sentence!r}")
+    # positive control: the RATE class IS still open, and it must stay NAMED, or
+    # the assertions above could be satisfied by a row that says nothing at all.
+    assert "not judged" in flat, block
+    assert "per day" in flat or "per\n      day" in block, block
 
 
 def test_the_suffix_comes_from_the_last_digit_run():
