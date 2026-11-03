@@ -12201,17 +12201,20 @@ class TortoiseSDK:
         A dedup hit NEVER REVISES A TERMINAL CLAIM (#10368): the content
         identity is resolved unconditionally, so a re-assertion can land on a
         retracted/superseded point — and a CONTENT-only match does not name a
-        target, so it must not settle a new revision onto one. The fold's
-        generic metadata props — and the `updatedAt` stamp that would carry
-        them — are dropped (never silently: the reply carries a transient
-        `metadata_not_applied` advisory naming them), and a fold carrying a
-        temporal prop is dropped whole with `temporal_not_applied` (#7819).
-        What STILL applies is EVIDENCE — the `extractedFrom` source fold and the
-        authored `credibility` word, which #7704's owner ruling ("a dedup hit
-        KEEPS the new evidence") and #398 make an addition to a claim's support
-        rather than a revision of it. To revise a terminal claim deliberately,
-        name it by id with ``update_point`` (a METADATA revision lands; its
-        temporal props are still refused, #7819).
+        target, so it must not settle a new revision onto one. On a terminal
+        target the fold writes NO revision at all: its generic metadata props
+        are dropped (never silently: the reply carries a transient
+        `metadata_not_applied` advisory naming them), its `updatedAt` stamp is
+        not written — so no `PointRevised` is journaled against the dead id —
+        and a fold carrying a temporal prop is dropped whole with
+        `temporal_not_applied` (#7819). What STILL applies is EVIDENCE — the
+        `extractedFrom` source fold and the authored `credibility` word, which
+        #7704's owner ruling ("a dedup hit KEEPS the new evidence") and #398
+        make an addition to a claim's support rather than a revision of it;
+        both write their own server-owned state and neither touches
+        `updatedAt`. To revise a terminal claim deliberately, name it by id
+        with ``update_point`` (a METADATA revision lands; its temporal props
+        are still refused, #7819).
 
         LIVE is the default (#1088): a point created WITHOUT an explicit
         ``status`` is live — not draft — whatever its kind. Draft is opt-in:
@@ -12666,16 +12669,20 @@ class TortoiseSDK:
                 # (`supersede_retroactively` has no SDK method and no registry
                 # row; #5362 waits on surface approval).
                 # #10368: ONE terminal read serves BOTH guards — the #7819
-                # temporal drop just below and the metadata drop on the WRITE
-                # LEG further down. It is read only when the fold carries any
-                # prop at all (a pure dedup hit has nothing to drop and cannot
-                # reach the temporal branch), and hoisting it is a COST fix, not
-                # an optimisation for its own sake: a fold carrying a temporal
-                # prop onto a LIVE target used to pay the fan-out query twice,
-                # because the temporal branch returns only on a non-None marker
-                # and the write leg then asked again.
+                # temporal drop just below and the write-leg verdict further
+                # down (the metadata drop AND the `updatedAt` stamp). Read once,
+                # when the fold could write anything at all: any prop, or an
+                # authored word, which lands with `props` empty. A fold that
+                # carries neither reaches no write and pays nothing.
+                #
+                # ⛔ Reading it lazily at each use is NOT equivalent: the
+                # temporal branch returns only on a NON-None marker, so a fold
+                # carrying a temporal prop onto a LIVE target asked twice, and a
+                # word-only fold asked a third time. `None` therefore means
+                # "live" here only because every path that consults this value
+                # has a non-empty `props` or a `cred_prior`.
                 _fold_terminal = (self._lifecycle_terminal_marker(pid)
-                                  if props else None)
+                                  if (props or cred_prior is not None) else None)
                 _temporal = _TEMPORAL_RESTAMP_PROPS & set(props)
                 if _temporal and _fold_terminal is not None:
                     _logger.warning(
@@ -12999,9 +13006,12 @@ class TortoiseSDK:
                 #     evidence fold on purpose. Refusing those would reopen a
                 #     recorded decision, not close this one;
                 #   • what is dropped is the UNRULED generic-metadata leg, and
-                #     the `updatedAt` stamp it would have carried — otherwise
-                #     the drop is cosmetic and the issue's indicator (no stamp
-                #     movement, no prop stored) does not hold.
+                #     the `updatedAt` stamp that carries any revision — the
+                #     gate on the write leg below is keyed on the terminal
+                #     VERDICT, not on whether something was dropped, so a word-
+                #     or evidence-only fold cannot re-stamp a dead claim either.
+                #     Otherwise the drop is cosmetic and the issue's indicator
+                #     (no stamp movement, no prop stored) does not hold.
                 #
                 # Dropped AND ADVISED, never silent (#7819's own posture;
                 # #5365: a silently dropped write is the defect this family
@@ -13010,23 +13020,27 @@ class TortoiseSDK:
                 # raise here is the deterministic 500 that #3366 exists to
                 # prevent — the same reason #7819 chose a drop.
                 _dropped_props: list[str] = []
-                if props:
-                    if _fold_terminal is None:
-                        _fold_terminal = self._lifecycle_terminal_marker(pid)
-                    if _fold_terminal is not None:
-                        _dropped_props = sorted(props)
-                        _logger.warning(
-                            "create_point: dedup resolved to point %s, which "
-                            "is already terminal (%s) — a content-only fold "
-                            "does not revise a terminal claim, so the "
-                            "metadata props %s were NOT applied (#10368).",
-                            pid, _fold_terminal, _dropped_props)
-                        props.clear()
-                # An applied WORD still stamps the revision (#398/#490), but a
-                # fold whose metadata leg was just dropped must not — see
-                # above. The evidence/word legs have made their own
-                # server-owned writes by now and neither touches `updatedAt`.
-                if props or (_word_applied and not _dropped_props):
+                if props and _fold_terminal is not None:
+                    _dropped_props = sorted(props)
+                    _logger.warning(
+                        "create_point: dedup resolved to point %s, which "
+                        "is already terminal (%s) — a content-only fold "
+                        "does not revise a terminal claim, so the "
+                        "metadata props %s were NOT applied (#10368).",
+                        pid, _fold_terminal, _dropped_props)
+                    props.clear()
+                # An applied WORD still stamps the revision on a LIVE target
+                # (#398/#490), but a TERMINAL one takes no stamp — not from the
+                # dropped metadata leg and not from the word leg either. The
+                # ruled evidence/word legs have already made their own
+                # server-owned writes above this line (#7704/#398 stay whole)
+                # and neither touches `updatedAt`; gating the stamp on
+                # `_dropped_props` instead of on the VERDICT let a
+                # `credibility`-only or `extractedFrom`+word fold still bump
+                # `updatedAt` and journal a `PointRevised` against a dead id
+                # (measured on the #10368 review: 21:08:00.559425 ->
+                # .910422, with NO advisory, since nothing was dropped).
+                if props or (_word_applied and _fold_terminal is None):
                     # Only touch the existing point when the caller passed
                     # other props (or an applied word) — a pure dedup hit (no
                     # props) must not bump updatedAt or re-trigger EP
@@ -43650,10 +43664,10 @@ class TortoiseSDK:
         """The `metadata_not_applied` advisory payload (#10368).
 
         ADVISORY ONLY — the fold has already dropped the props; this makes the
-        drop OBSERVABLE to the caller (`create_point` returns it on a COPY of
-        the dedup snapshot, and the hosted commit receipt folds it into
-        `warnings`), which is the #5365 posture #7819's own drop follows.
-        Never raises, never blocks.
+        drop OBSERVABLE to the caller (`create_point` returns it on a COPY of a
+        fresh `get_point` read of the hit, and the hosted commit receipt folds
+        it into `warnings`), which is the #5365 posture #7819's own drop
+        follows. Never raises, never blocks.
 
         ``dropped`` names the props that did not land, so the caller can tell a
         metadata drop from a mistyped key without diffing the stored node.

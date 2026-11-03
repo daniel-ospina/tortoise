@@ -498,8 +498,9 @@ response_fields:
     never re-labels (a Point is a different record, not a relabel of an entity), so `kind_layer_routed` cannot fire
     here. A FOURTH code rides it too (#10368): `metadata_not_applied`, when the write DEDUP-hits a point that is
     already a terminal claim and the payload carried GENERIC metadata props — a CONTENT-only match does not name a
-    target, so it does not revise a settled belief: those props are dropped, the advisory''s `props` list names them,
-    and the response reports the HIT rather than a silent rewrite. EVIDENCE still folds onto a dead claim (the
+    target, so it does not revise a settled belief: those props are dropped, the fold''s `updatedAt` stamp is not
+    written (no `PointRevised` against the dead id), the advisory''s `props` list names them, and the response
+    reports the HIT rather than a silent rewrite. EVIDENCE still folds onto a dead claim (the
     `extractedFrom` source fold and the authored `credibility` word, #7704/#398), so this leg alone is dropped
     prop-by-prop. All of these ride the SAME key on the dedup-hit return, so a re-run reports them together rather
     than dropping one'

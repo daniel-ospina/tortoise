@@ -33,6 +33,44 @@ aboutObjects: ONTOLOGY.md, canonical ontology, model versions
 
 ---
 
+> **Behaviour record for #10368 (2026-11-03 — `ONTOLOGY.md` is NOT modified; the §4.7 sentence is PARKED awaiting the owner's approval):**
+>
+> **What the code now does (write-door behaviour, no model change).** `create_point(dedup=True)` resolves its
+> dedup hit by CONTENT alone (`_find_point_by_content` applies no status/outdated filter), so a re-assertion
+> can land on a point that is already terminal. Until #10368 the fold's only terminal guard was #7819's,
+> scoped to `_TEMPORAL_RESTAMP_PROPS`, which a fold carrying an ordinary metadata prop slipped past: it
+> reached `props["updatedAt"] = now; update_point(pid, **props)` and REWROTE the dead node (measured:
+> `updatedAt` moved, the prop stored, `status` still `retracted`). The `ingest` door had already refused the
+> same shape at Phase 1 (#9819/#10377); this closes the SDK door.
+>
+> **The boundary, stated as three sentences (the §4.7 text awaiting approval):**
+>
+> 1. A **content-only** match does not name a target, so it settles no revision onto a terminal claim: the
+>    fold's generic metadata props are dropped and reported in a transient `metadata_not_applied` advisory,
+>    and the fold's `updatedAt` stamp is not written — so no `PointRevised` is journaled against the dead id.
+> 2. The **temporal** leg is unchanged: a fold carrying any of `_TEMPORAL_RESTAMP_PROPS` is dropped WHOLE
+>    with `temporal_not_applied` (#7819), and it dominates — the evidence fold riding the same call is
+>    dropped with it, because the fold is all-or-nothing.
+> 3. The **evidence** legs still apply to a terminal claim: the `extractedFrom` source fold and the authored
+>    `credibility` word write their own server-owned state and neither touches `updatedAt` — #7704's owner
+>    ruling is that "a dedup hit KEEPS the new evidence" ("one claim, N sources"), and #398 rules the word IS
+>    a source. They add to a claim's support; they do not revise what it says.
+>
+> **What did NOT change.** The revision capability #3305 records is a same-id writer and belongs to the door
+> that NAMES its target: `update_point(terminal, confidence=…)` still lands (only the window is refused,
+> #7819), pinned by `tests/test_lifecycle_guards.py::test_a_dead_claim_still_accepts_a_content_and_metadata_revision`
+> and the two rebuild pins (`test_pointinvalidated_rebuild.py`, `test_pointsuperseded_rebuild.py`). #10368
+> narrowed the *unaddressed* fold, not that door. `ingest`'s Phase 1 guard, #6110's key identity and #9649's
+> unguarded `update_entity` arms are likewise untouched.
+>
+> **Why the §4.7 sentence is parked rather than written.** That file carries its own rule (*"no modification …
+> without explicit approval of the exact changes by Daniel Ospina"*), so the one sentence that would align §4.7
+> with the behaviour above waits on that approval; this entry is the record until then. #10368's own acceptance
+> criteria specify the behaviour, and the departure from the #7819 comment/test is marked with an
+> `OVERRIDES:` line on the issue.
+
+---
+
 > **Build record for v3.31 (2026-11-02 — #9974 R1 / PR #10524 — `ONTOLOGY.md` is NOT modified; two texts are PARKED awaiting the owner's approval):**
 >
 > **What the code now does (build record, no model change).** #9974 R1 (PR #10524) moved the status fold so a
