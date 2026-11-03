@@ -1441,7 +1441,8 @@ def _parse_added_columns(sql: str) -> dict[str, frozenset[str]]:
 #: parameter's encoding depends on (#9548).
 _COLUMN_TYPE_RE = re.compile(
     r'^\s*("?([a-z_][a-z0-9_]*)"?)\s+'
-    r'(text|jsonb|integer|boolean|bigint|double precision|timestamptz)\b', re.M)
+    r'(text|jsonb|integer|boolean|bigint|double precision|timestamptz)\b',
+    re.M | re.I)
 #: A forward migration that ADDS a COLUMN with a TYPE — the type is what
 #: `_ADDED_COLUMN_RE` above does not keep, and `table_columns()` unions the same
 #: statements (append-only history adds a column that way, #2782). ⛔ The TYPE
@@ -1470,48 +1471,6 @@ _ALTER_COLUMN_TYPE_RE = re.compile(
     r"ALTER\s+COLUMN\s+\"?([a-z_][a-z0-9_]*)\"?\s+TYPE\s+"
     r"(text|jsonb|integer|boolean|bigint|double precision|timestamptz)\b",
     re.S | re.I)
-
-
-def _jsonb_columns_for_dir(migrations_dir: Path) -> frozenset[str]:
-    """`jsonb_columns()` for ONE already-resolved migrations directory."""
-    sql = _read_migrations(migrations_dir)
-    # `(table, column)` PAIRS, so a per-table narrowing cannot delete a column
-    # that is `jsonb` in ANOTHER record table; flattened to names at the end.
-    found: set[tuple[str, str]] = set()
-    for table, body in _TABLE_RE.findall(sql):
-        if table not in THE_RECORD_TABLES:
-            continue
-        for _quoted, column, type_name in _COLUMN_TYPE_RE.findall(body):
-            if type_name == "jsonb":
-                found.add((table, column))
-    for table, body in _ALTER_ADD_COLUMN_RE.findall(sql):
-        if table not in THE_RECORD_TABLES:
-            continue
-        for column, type_name in _ADDED_COLUMN_TYPED_RE.findall(body):
-            if type_name.lower() == "jsonb":
-                found.add((table, column))
-    if not any(table in THE_RECORD_TABLES
-               for table, _body in _TABLE_RE.findall(sql)):
-        # ⛔ FAIL CLOSED, like `table_columns()`. An EMPTY set is the worst
-        # answer this function can give: it silently stops the #9548 encoding
-        # and the row drops come back with no signal at all. A partial tree (a
-        # migration missing) still yields a map — narrower, and the pin on
-        # #9264's narrowing is what notices — so only the "no schema at all"
-        # case is refused here.
-        raise RecordProjectionError(
-            "the record schema is not on disk — no CREATE TABLE for any record "
-            f"table was found in {migrations_dir}. The jsonb encoding rule "
-            "reads the DECLARED column types from those files, and an empty "
-            "answer would silently stop serialising a scalar bound to a jsonb "
-            "column — the row-drop class #9548 exists to end."
-        )
-    for table, column, type_name in _ALTER_COLUMN_TYPE_RE.findall(sql):
-        if table not in THE_RECORD_TABLES:
-            continue
-        found.discard((table, column))
-        if type_name.lower() == "jsonb":
-            found.add((table, column))
-    return frozenset(column for _table, column in found)
 
 
 #: How long a parsed jsonb map may be reused, in seconds. `_jsonb_or_scalar`
@@ -1553,7 +1512,7 @@ def _jsonb_columns_for_dir(migrations_dir: Path) -> frozenset[str]:
         if table not in THE_RECORD_TABLES:
             continue
         for _quoted, column, type_name in _COLUMN_TYPE_RE.findall(body):
-            if type_name == "jsonb":
+            if type_name.lower() == "jsonb":
                 found.add((table, column))
     for table, body in _ALTER_ADD_COLUMN_RE.findall(sql):
         if table not in THE_RECORD_TABLES:

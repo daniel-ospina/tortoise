@@ -242,9 +242,11 @@ def test_the_jsonb_map_is_not_reparsed_per_parameter(monkeypatch):
     path, which §17 forbids the seam from adding.
 
     Counted, not timed: the assertion is the NUMBER of migrations reads a plan
-    build performs, so it cannot flake on a loaded box. Three are expected —
-    `table_columns()`, `refused_props_names()`, and the jsonb map itself, which
-    `replay_plan` installs in `_JSONB_PLAN_CACHE` for the length of the build.
+    build performs, so it cannot flake on a loaded box. The answer is memoised in
+    `_JSONB_CACHE` for `_JSONB_CACHE_TTL_SECONDS`, so a COLD build is three
+    reads — `table_columns()`, `refused_props_names()`, and the jsonb map — and a
+    warm one is two. The cache is cleared first so the count means "once per
+    plan build" rather than "whatever was left warm by an earlier test".
     A per-parameter re-parse shows up here as one read per string parameter
     (measured on the regressed shape: ~180 for this plan).
     """
@@ -258,13 +260,60 @@ def test_the_jsonb_map_is_not_reparsed_per_parameter(monkeypatch):
         return real(migrations_dir)
 
     monkeypatch.setattr(rp, "_read_migrations", _counting)
+    rp._jsonb_cache_clear()
     tenant = _tenant()
     record = _record(tenant, search_keys=GRAPH_KEYS)
     rp.replay_plan([record] * 20, org_id=tenant[0], graph_id=tenant[1])
-    assert len(reads) <= 4, (
-        f"one plan build read the migrations {len(reads)} times for 20 records "
-        "— the jsonb map is being re-parsed per bound parameter instead of "
-        "once per plan")
+    try:
+        assert len(reads) <= 3, (
+            f"one plan build read the migrations {len(reads)} times for 20 "
+            "records — the jsonb map is being re-parsed per bound parameter "
+            "instead of once per build")
+    finally:
+        rp._jsonb_cache_clear()
+
+
+def test_a_synthetic_tree_reaches_the_forward_and_fail_closed_arms(tmp_path):
+    """The two branches the real tree cannot exercise (#9548 review round 6).
+
+    `jsonb_columns(migrations_dir=…)` and `_jsonb_cache_clear()` had no caller,
+    so nothing could reach either a forward-migration change on a DELETE-shaped
+    tree or the fail-closed refusal — a regression in either would stay green.
+    Both arms are driven here on a COPY of the record migrations:
+
+    * a narrowing (`point.search_keys jsonb → text`) must drop the name, or the
+      rule would JSON-quote strings bound to a now-`text` column: no error, no
+      counter, silent corruption;
+    * an empty directory must RAISE, because an empty set silently disables the
+      encoding and the 22Q02 row drops come back.
+    """
+    import shutil
+
+    from tortoise import record_projection as rp
+
+    tree = tmp_path / "migrations"
+    tree.mkdir()
+    for name in rp.RECORD_MIGRATIONS:
+        source = rp._migrations_dir() / name
+        if source.exists():
+            shutil.copy(source, tree / name)
+    # The real tree FIRST, so the arm is proven to reach the parser at all.
+    assert "search_keys" in rp.jsonb_columns(tree)
+    # ⚠️ APPENDED to the LAST registry file, never a new file: `_read_migrations`
+    # reads exactly `RECORD_MIGRATIONS`, so a file outside the registry would be
+    # invisible and the arm would pass by not being read at all (measured).
+    last = tree / rp.RECORD_MIGRATIONS[-1]
+    last.write_text(
+        last.read_text(encoding="utf-8")
+        + "\nALTER TABLE public.point ALTER COLUMN search_keys TYPE text;\n",
+        encoding="utf-8")
+    assert "search_keys" not in rp.jsonb_columns(tree), (
+        "a jsonb→text narrowing must remove the column from the encoding rule")
+
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    with pytest.raises(rp.RecordProjectionError):
+        rp.jsonb_columns(empty)
 
 
 def test_the_replay_wrapper_attributes_a_failing_statement():
