@@ -3752,6 +3752,52 @@ def test_the_pre_registration_cites_the_classify_sites_the_tree_actually_has():
                 "other line is an argument from code that never runs")
 
 
+def test_the_pre_registration_cites_the_turn_writer_by_symbol_not_by_line():
+    """§1's residual counts the turn rows by their WRITER — and that cite was unpinned.
+
+    The paragraph argues that the E1 bar's residual is a second contradiction the
+    instrument cannot remove: 159 of the 338 `Point`s are mechanical turn rows
+    written by `_TURN_WRITE_CYPHER`, which writes no `extractedFrom` link by
+    construction. It named the writer by BOTH its symbol and a `tortoise/sdk.py`
+    line — and the line was the half that rotted: at `f16ca1cf6` the paragraph said
+    `sdk.py:2408` while the constant sits at `2451`, the same symbol the merge
+    closing round 11 re-pointed in five other bundle files. Nothing read this one:
+    `_PREREG_STEP_CITE_DOCS` resolves the two classify surfaces and §7's carve-out
+    only, and `_BUNDLE_CITE` matches `sdk|edges|extractor_v2` cites in the SIX
+    bundle DOCUMENTS — this file is not among them, and a `sdk.py` number quoted in
+    it is swept by nothing.
+
+    The durable fix is the one this bundle keeps re-learning (`#9675`, `#10377`,
+    `#10108`): cite the symbol, which cannot re-stale. This leg refuses a
+    `sdk.py:<line>` anywhere in the document AND resolves the symbol it names
+    instead, so a rename reds here rather than leaving the argument resting on
+    code the tree does not have.
+
+    Non-vacuity: at the pre-fix head the document carried `tortoise/sdk.py:2408`,
+    so the numeric-cite refusal reds; once it is a symbol cite, the resolution arm
+    is the one that can fail.
+    """
+    text = (_REPO / "docs/evidence/7949-capstone/PRE-REGISTRATION.md").read_text(
+        encoding="utf-8")
+    numeric = re.findall(r"sdk\.py:\d+", text)
+    assert not numeric, (
+        "PRE-REGISTRATION.md cites `tortoise/sdk.py` by LINE again "
+        f"({numeric}) — that number is resolved by no sweep (this document is not "
+        "a `_BUNDLE_DOCS` entry, and `_PREREG_STEP_CITE_DOCS` reads the extractor), "
+        "so it rots silently on the next insertion above it; cite the symbol"
+    )
+    assert "_TURN_WRITE_CYPHER" in text, (
+        "§1's residual no longer names the turn writer `_TURN_WRITE_CYPHER` — the "
+        "159/338 clause rests on it writing no `extractedFrom` link"
+    )
+    sdk = "tortoise/sdk.py"
+    assert re.search(r"^_TURN_WRITE_CYPHER = \(",
+                     (_REPO / sdk).read_text(encoding="utf-8"), re.MULTILINE), (
+        f"`_TURN_WRITE_CYPHER` is not a module-level constant in {sdk} any more — "
+        "the symbol §1 cites has to resolve"
+    )
+
+
 def test_the_pre_registration_cites_the_state_value_carve_out_extent():
     """§7 argues E2a's two exclusions from the carve-out's own text — so ITS cite is derived too.
 
