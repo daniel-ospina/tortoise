@@ -936,8 +936,15 @@ def build_rows(*, head: str, out_path: str, log_corpus_sha: str,
     # "no declaration": on the real path this is False (`build_e4_row` refused an
     # off-pin receipt before we got here), and an `e4` handed in from another
     # revision still declares itself.
-    e4_off_this_corpus = not _same_corpus(e4["corpus_sha256"] or "",
-                                         log_corpus_sha or "")
+    #
+    # ⛔ The operands are COERCED to `str`, like `build_e4_row`'s and `render_log`'s
+    # own `_same_corpus` calls. Without it a non-string `corpus_sha256` escapes as
+    # `AttributeError: 'int' object has no attribute 'removeprefix'` — a traceback
+    # where the contract is a ROW the gate can report (V7 reds a non-string
+    # declaration). `build_e4_row` cannot produce one, so that is a synthetic-caller
+    # path, but the two siblings coerce and this line is not the place to differ.
+    e4_off_this_corpus = not _same_corpus(str(e4["corpus_sha256"] or ""),
+                                         str(log_corpus_sha or ""))
 
     return [
         # E1 and E2 carry the counts their OWN criteria are written over — E2 the

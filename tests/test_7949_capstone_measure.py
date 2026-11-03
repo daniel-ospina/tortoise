@@ -932,6 +932,29 @@ def test_the_e1_and_e2_rows_carry_the_counts_their_criteria_are_written_over():
     reading another population reds this test rather than the table.
     """
     parsed = measure.measure_e1_e2(_REPO)
+
+
+def test_a_non_string_e4_corpus_yields_a_row_and_not_a_traceback():
+    """A synthetic ``e4`` with a non-string corpus produces a ROW, not an exception.
+
+    ``build_rows`` is a pure table builder, and the two sibling ``_same_corpus`` call
+    sites (``build_e4_row``, ``render_log``) already coerce their operands to ``str``.
+    This one did not, so a caller handing E4 a number escaped as
+    ``AttributeError: 'int' object has no attribute 'removeprefix'`` from inside
+    ``_same_corpus`` — a traceback where the contract is a row the GATE can report
+    (V7 reds a non-string declaration; it is not this function's job to crash).
+
+    Non-vacuity: reds at the previous head (09a08e28f) with that AttributeError.
+    """
+    rows = {row["criterion"]: row for row in _rows(e4={
+        "verdict": "RED", "numerator": 2, "denominator": 15, "sha": "6164c683c",
+        "corpus_sha256": 5, "evidence": measure.E4_RECEIPT, "note": "odd note"})}
+    assert rows["E4"]["corpus_sha256"] == 5, rows["E4"]
+    assert rows["E4"]["artifact_corpus_sha256"] == 5, rows["E4"]
+
+
+def test_the_e1_and_e2_siblings_carry_the_same_denominator():
+    """V8's rule: the composite pair is carried, not restated differently."""
     rows = {row["criterion"]: row for row in _rows()}
     assert (rows["E2"]["numerator"], rows["E2"]["denominator"]) == (
         parsed["e2a_survived"], parsed["e2a_units"])
