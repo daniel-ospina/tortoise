@@ -502,11 +502,19 @@ FOLD_ON_CREATE_DEFAULTS: dict[str, dict[str, Any]] = {
 #:   is the write that CREATED the node. `_upsert_object`/`_upsert_subject` MERGE
 #:   on `id` and write `status` ON CREATE only, so for an id that already existed
 #:   (a stub/mention path, `EventAPI.add_object(id=…)` (`api.py:671`) or
-#:   `_server_id`, a pre-#3590 graph, or a
-#:   delete-then-re-create under an EXPLICIT id — the SDK mints a fresh id on its
-#:   own delete+re-create path, so that one is not reachable) the
+#:   `_server_id`, a pre-#3590 graph) the
 #:   live node took the ON MATCH arm and kept its own status while this replay
 #:   would otherwise write the record's.
+#:   ⚠️ ONE ITEM THAT IS *NOT* AN ON MATCH CASE, and the distinction matters
+#:   because it decides which residue below applies: a **delete-then-re-create
+#:   under an EXPLICIT id** is NOT ON MATCH — the node was removed, so the
+#:   re-create `MERGE` matches nothing and takes **ON CREATE**, and the graph ends
+#:   up holding the LATER record's value while the `birth_seen` earliest-only rule
+#:   answers from the FIRST incarnation (MEASURED on FalkorDB: create
+#:   `status='archived'` → `archived`; `MATCH … DELETE`; re-create the same id
+#:   `status='live'` → `live`). That is residue (ii-a-2) below — the HARM
+#:   direction, not the fail-safe one. (The SDK mints a fresh id on its own
+#:   delete+re-create path, so an explicit `id=` is what reaches it.)
 #:   ⛔ THE DIVERGENCE RUNS IN BOTH DIRECTIONS, and only ONE of them is closed.
 #:   (ii-a) THE HARM DIRECTION — a TERMINAL the graph really DID hold, discarded by
 #:   the birth arm, so the rebuild answers CURRENT: `[restatus(seq 1,'archived'),
