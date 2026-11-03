@@ -1094,15 +1094,21 @@ def _org_sdk_for_credential(org: dict) -> TortoiseSDK:
 
     The credential carries ``graph_namespace`` (resolved once, at auth), so this
     is the same decision as `_org_sdk` taken from a value already in hand. It is
-    what the REQUEST paths use — the capture/data plane, the quota gate (whose
-    contract is fail-CLOSED, #686: falling back to the historical open would
-    count the DEMOTED graph — a stale-low count admits an org past its cap
-    (revenue) and a stale-high one 402s writes it is under (customer)), the pack
-    catalog/install, the Overview count and the onboarding PATCH.
+    what the REQUEST paths use — the capture/data plane, the org-wide half of the
+    quota gate (`_gate_sdk_for`, whose contract is fail-CLOSED, #686: falling
+    back to the historical open would count the DEMOTED graph — a stale-low count
+    admits an org past its cap (revenue) and a stale-high one 402s writes it is
+    under (customer)), the pack catalog/install, the Overview count and the
+    onboarding PATCH.
 
     A GRAPH-BOUND credential answers the historical `namespace=org_id` count
     `_count_resource` has always done for it — `_default_graph_name` is None
-    there by construction (its `graph_namespace` is a custom graph's).
+    there by construction (its `graph_namespace` is a custom graph's). That is
+    exactly why the quota gate must NOT route a graph-bound credential here:
+    its write opens the CUSTOM graph, so `_gate_sdk_for` takes the
+    `graph_name=_data_graph_name(org)` branch instead (#4051). This function
+    stays the answer to "which graph is this org's DEFAULT" — not to "which
+    graph will this request open".
     """
     moved = _default_graph_name(org)
     return (_make_sdk(graph_name=moved) if moved
@@ -8536,8 +8542,7 @@ def _gate_sdk_for(org: dict, resource: str):
     bound its size — so `graph_name="org_team-001"` for an org-wide key would
     park a SECOND anchor (`org_team-001` beside the write's `team-001`) for every
     org in the process. Mirroring also preserves the "identical connection"
-    property
-    `mcp_server._enforce_quota` states as the rule.
+    property `mcp_server._enforce_quota` states as the rule.
 
     Two deliberate non-uses:
     - registry-scoped resources get `None`: their count is a control-plane read
