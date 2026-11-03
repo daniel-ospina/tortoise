@@ -103,7 +103,7 @@ _EVIDENCE_REF = re.compile(
     # ⛔ github.com ONLY: the docstring promises a GitHub artifact, and cycle 9 measured
     # `https://example.com/#issuecomment-9` (and bitbucket/localhost) licensing RESTORE — a pointer
     # whose SHAPE was checked but which resolves to no artifact on any repo.
-    r"|^https?://(?:www\.)?github\.com/[^#\s]+/[^#\s]+#(?:issuecomment|discussion_r|pullrequestreview)-\d+$"
+    r"|^https?://(?:www\.)?github\.com/[^#\s]+/[^#\s]+#(?:issuecomment-|pullrequestreview-|discussion_r)\d+$"
 )
 
 RESTORE = "RESTORE"
@@ -484,7 +484,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--repo", default="daniel-ospina/tortoise")
     ap.add_argument("--reviews-dir", default=str(Path.home() / ".pi/agent/reviews"))
     ap.add_argument("--limit", type=int, default=100)
-    ap.add_argument("--no-gate", action="store_true", help="skip the per-PR check-run read (offline / quota-safe)")
+    ap.add_argument("--no-gate", action="store_true", help="skip the per-PR check-run read (gh pr list is still required)")
     ap.add_argument("--json", action="store_true", help="machine-readable rows on stdout instead of markdown")
     ap.add_argument("--out", default="operations/attest-census.md")
     args = ap.parse_args(argv)
@@ -598,6 +598,8 @@ def main(argv: list[str] | None = None) -> int:
             "repo": args.repo,
             "generated_at": generated_at,
             "reviews_dir": str(reviews_dir),
+            "truncated": truncated,
+            "limit": args.limit,
             "rows": [
                 {
                     "pr": r.pr, "head": r.head, "branch": r.branch, "outcome": r.outcome, "why": r.why,

@@ -170,8 +170,8 @@ def test_the_pr_list_guard_refuses_a_scalar_payload(monkeypatch, tmp_path):
 
 
 def test_a_github_url_with_no_path_is_not_an_artifact():
-    """Cycle 10: `\S*` matched the empty path, so `https://github.com/#issuecomment-9` licensed
-    RESTORE from a pointer that names no repo, no PR and no artifact."""
+    r"""Cycle 10: the URL arm's `\S*` matched the empty path, so `https://github.com/#issuecomment-9`
+    licensed RESTORE from a pointer that names no repo, no PR and no artifact."""
     for empty in ("https://github.com/#issuecomment-9", "https://github.com/.#issuecomment-9"):
         r = ac.Record(path=Path("/x.json"), head_sha=LIVE, mint="fresh", verdict="clean", evidence=empty)
         assert r.real_evidence is False, empty
@@ -205,6 +205,54 @@ def test_a_population_that_fits_is_not_labelled_truncated(monkeypatch, tmp_path)
     out = tmp_path / "o.md"
     assert ac.main(["--reviews-dir", str(tmp_path), "--no-gate", "--limit", "5", "--out", str(out)]) == 0
     assert "TRUNCATED" not in out.read_text()
+
+
+def test_a_hyphenless_discussion_r_permalink_is_an_artifact():
+    """Round 11: the cycle-10 tightening required a `-` for ALL anchor kinds, so a real
+    `#discussion_r<id>` permalink (no hyphen on GitHub) was refused as "prose-shaped"."""
+    url = "https://github.com/cli/cli/pull/3#discussion_r332430752"
+    r = ac.Record(path=Path("/x.json"), head_sha=LIVE, mint="fresh", verdict="clean", evidence=url)
+    assert r.real_evidence is True
+    assert ac.classify(LIVE, r, *RED)[0] == ac.RESTORE
+
+    for good in (
+        "https://github.com/o/r/pull/1#issuecomment-9",
+        "https://github.com/o/r/pull/1#pullrequestreview-9",
+    ):
+        assert ac.Record(
+            path=Path("/x.json"), head_sha=LIVE, mint="fresh", verdict="clean", evidence=good
+        ).real_evidence is True, good
+
+
+def test_json_surface_states_truncation(monkeypatch, tmp_path, capsys):
+    """Round 11 P1: `--json` carried `limit` rows and rc 0 with no truncation marker, so a
+    programmatic consumer read a partial census as the whole population."""
+    import json as _json
+
+    def gh(args):
+        if args[0] == "pr":
+            return [{"number": n, "headRefOid": LIVE, "headRefName": "b", "title": "t"} for n in range(1, 4)]
+        return {"check_runs": []}
+
+    monkeypatch.setattr(ac, "gh_json", gh)
+    assert ac.main(["--reviews-dir", str(tmp_path), "--no-gate", "--limit", "2", "--json"]) == 0
+    payload = _json.loads(capsys.readouterr().out)
+    assert payload["truncated"] is True
+    assert payload["limit"] == 2
+    assert len(payload["rows"]) == 2
+
+
+def test_json_surface_is_not_truncated_when_the_population_fits(monkeypatch, tmp_path, capsys):
+    import json as _json
+
+    def gh(args):
+        if args[0] == "pr":
+            return [{"number": 1, "headRefOid": LIVE, "headRefName": "b", "title": "t"}]
+        return {"check_runs": []}
+
+    monkeypatch.setattr(ac, "gh_json", gh)
+    assert ac.main(["--reviews-dir", str(tmp_path), "--no-gate", "--limit", "2", "--json"]) == 0
+    assert _json.loads(capsys.readouterr().out)["truncated"] is False
 
 
 def test_missing_record_is_none(tmp_path):
