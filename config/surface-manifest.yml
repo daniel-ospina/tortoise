@@ -1062,10 +1062,10 @@ rows:
     is REFUSED, naming the fault and the accepted forms (#9202).'
   dependency: declares TortoiseSDK.create_point (resolves)
   lifecycle: active
-  used_by: never called, tooling, docs
+  used_by: agents, tooling, docs
   recommendation: keep
   basis: observed
-  reason: not called over MCP, but used by tooling — removing it would break that
+  reason: called by agents
   recommended_family: null
   proposed: false
   exemption: false

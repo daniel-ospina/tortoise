@@ -455,9 +455,21 @@ def test_a_meter_returning_a_non_MeterReading_is_refused_not_an_AttributeError()
 
 def test_a_non_reading_on_an_UNLIMITED_dimension_is_logged_not_raised():
     """The observed-only path promises a broken meter cannot refuse a write
-    nobody capped — even a non-``MeterReading`` (review round 7)."""
-    with pytest.raises(QuotaCheckError):  # bounded dimension: still a refusal
-        enforce_allowances(_limits(max_graph_storage_mb=10),
-                           meters={"graph_storage": lambda _o: 5.0})
-    enforce_allowances(_limits(max_graph_storage_mb=None),
-                       meters={"graph_storage": lambda _o: 5.0})
+    nobody capped — even a non-``MeterReading`` (review round 7).
+
+    ⚠️ The bounded half goes through a SYNTHETIC non-blocked dimension: driving
+    it through ``graph_storage`` would refuse at the BLOCKED branch before the
+    meter is called, so the test would stay green with the type gate deleted
+    (review round 8).
+    """
+    from tortoise.allowance_gate import _reading
+
+    bounded = AllowanceDimension(
+        dimension="capture_extraction", limit_key="max_extraction_tokens",
+        unit="tokens", meter=_meter(1), stale_after_seconds=60)
+    with pytest.raises(QuotaCheckError):  # bounded: a non-reading is a refusal
+        _reading(bounded, ORG, {"capture_extraction": lambda _o: 5.0},
+                 observed_only=False)
+    # unlimited (observed-only): logged, never raised, meter still called
+    assert _reading(bounded, ORG, {"capture_extraction": lambda _o: 5.0},
+                    observed_only=True) is None

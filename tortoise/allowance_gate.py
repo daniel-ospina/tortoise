@@ -245,24 +245,22 @@ def _graph_storage_mb(org_id: str) -> MeterReading | None:
     )
 
 
-def _disclose_unmeasured(org_id: str, reason: str) -> None:
-    """Log an our-side metering fault at ERROR — and do NOT reuse the swallow-site
-    reporter.
+def _describe_fault(reason: str) -> str:
+    """The sentence a REFUSAL uses for an our-side metering fault.
 
-    ``metering.report_unmetered_increment`` exists for the six sites that SERVE a
-    request and lose the increment; its alert text says exactly that ("the request
-    was served") and it hard-codes ``DROP_CLASS_WINDOW_UNRESOLVABLE``. Here the
-    request is REFUSED and nothing was dropped, so calling it would (a) alert with
-    the reverse of what happened, (b) file a phantom dropped increment under the
-    wrong class, and (c) mint a ninth, undeclared lane that the lane-inventory
-    fence cannot see because the call shape is positional. Naming the wrong class
-    durably is worse than not filing: the durable disclosure needs its own
-    ``served=False`` surface and class on #4779, and that is a follow-up, not
-    something this gate may fake.
+    ⚠️ It does NOT log and does NOT report on the #3981/#4779 surface, for a
+    reason the logging sites make explicit: the SAME meter is read on two paths.
+    On the fail-closed path the write is refused (``_reading`` logs at ERROR with
+    ``tenant refused``); on the "unlimited but still metered" path it is SERVED
+    (``_reading`` logs a WARNING). A message minted here cannot know which, and a
+    durable disclosure cannot either — so the fault is described for the refusal,
+    and the logging is done by the caller that KNOWS. ``metering``'s
+    ``report_unmetered_increment`` is the swallow-site reporter: its text asserts
+    "the request was served" and it hard-codes ``DROP_CLASS_WINDOW_UNRESOLVABLE``,
+    so reusing it here would assert the opposite of a refusal and file the wrong
+    class. The durable ``served=False`` surface + class is a #4779 follow-up.
     """
-    _logger.error(
-        "allowance unmeasured (our fault, tenant refused): team=%s reason=%s",
-        org_id, reason)
+    return f"the {reason} fault is on our side"
 
 
 def _extraction_tokens(org_id: str) -> MeterReading | None:
@@ -289,18 +287,17 @@ def _extraction_tokens(org_id: str) -> MeterReading | None:
             # ⚠️ OUR fault, not the tenant's: the ledger or the billing window
             # failed. The gate still REFUSES (#686 fail-closed), the refusal
             # names the fault, and it is logged at ERROR for the operator (the
-            # durable #4779 surface is a follow-up — see `_disclose_unmeasured`) —
+            # durable #4779 surface is a follow-up) —
             # ``metering._current_period``'s own docstring records the opposing
             # ruling ("refusing a paying org over our own bookkeeping fault is
             # exactly the #3981 ruling forbids"), and this is the reconciliation:
-            # refuse, name it, and REPORT it, rather than serve silently or
-            # refuse invisibly. Choosing "serve + report" instead needs a ruling
+            # refuse and name it, leaving the logging to `_reading` (which KNOWS
+            # whether this path refuses or serves). Choosing "serve instead" needs a ruling
             # (a cap that serves past our fault is a cap that can be evaded during
             # an outage), so it is not taken here.
-            _disclose_unmeasured(org_id, reason)
             raise MeterUnavailable(
-                f"the {reason} fault is on our side (capture usage could not be "
-                f"read), not on the tenant's")
+                f"{_describe_fault(reason)} (capture usage could not be read), "
+                f"not on the tenant's")
         return ABSENT
     return MeterReading(
         used=float(usage.get("capture_tokens_total") or 0),
@@ -479,8 +476,8 @@ def _reading(dim: AllowanceDimension, org_id: str,
                 "team=%s dimension=%s error=%r", org_id, dim.dimension, e)
             return None
         _logger.error(
-            "allowance meter failed (fail-closed): team=%s dimension=%s "
-            "error=%r", org_id, dim.dimension, e)
+            "allowance meter failed (fail-closed, tenant refused): team=%s "
+            "dimension=%s error=%r", org_id, dim.dimension, e)
         raise QuotaCheckError(
             f"{dim.dimension} usage could not be measured for team {org_id!r}: "
             f"{e!r}") from e
@@ -622,5 +619,7 @@ def enforce_allowances(
                     f"({allowance:g} {dim.unit}, used {used:g}). Upgrade your "
                     f"plan to increase it.{note}"),
                 resource=dim.dimension, used=int(used), limit=int(allowance),
-                estimated=bool(reading.estimated),
+                # Omitted (None) when the figure is exact, so `quota.py`'s
+                # documented payload shape holds: only an ESTIMATE is labelled.
+                estimated=True if reading.estimated else None,
             )

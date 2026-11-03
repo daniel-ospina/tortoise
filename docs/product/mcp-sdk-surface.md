@@ -224,7 +224,7 @@ not recorded here has no approval behind it, and the carve-out does not cover it
 | `tortoise_search` | Hybrid semantic search — FTS + vector + structural RRF fusion with EP confidence annotation. Use when matching by MEANING (natural-language query); for exact structural/filter q… | tortoise_fts_query | agents, eval-harness, tooling, docs | **keep** | in use — called by agents |
 | `tortoise_suggest_entry_points` | Entity resolution — NL query → matching entities from the graph. | suggest_entry_points | never called, tooling, docs | **keep** | never called — not called over MCP, but used by tooling — removing it would break that |
 | `tortoise_index_files` | Index a corpus directory of .md files as Sources + Events (D10: a document is a Source) (the unified index path — replaces tortoise_index_sessions + tortoise_ingest_corpus file… | index_directory | never called, tooling, docs | **keep** | group: `deprecated-index` · never called — not called over MCP, but used by tooling — removing it would break that |
-| `tortoise_create_point` | Create a Point node (statement, decision, vision, hypothesis, etc.). dedup=True (default): idempotent — returns existing Point if content matches. Declaring extractedFrom materi… | create_point | never called, tooling, docs | **keep** | never called — not called over MCP, but used by tooling — removing it would break that |
+| `tortoise_create_point` | Create a Point node (statement, decision, vision, hypothesis, etc.). dedup=True (default): idempotent — returns existing Point if content matches. Declaring extractedFrom materi… | create_point | agents, tooling, docs | **keep** | in use — called by agents |
 | `tortoise_calibrate_summary` | Audit graph calibration state. Returns per-point guidance. | calibrate_summary | never called, tooling, docs | **keep** | never called — not called over MCP, but used by tooling — removing it would break that |
 | `tortoise_set_point_baseline` | Set Beta prior evidence for a claim. | set_point_baseline | never called, tooling, docs | **keep** | never called — not called over MCP, but used by tooling — removing it would break that |
 | `tortoise_set_source_tier` | Set (or change) a Source's credibility tier (T0-T4). Non-destructive — never overwrites sourceKind type strings. | set_source_tier | never called, tooling, docs | **keep** | never called — not called over MCP, but used by tooling — removing it would break that |
@@ -618,7 +618,7 @@ contradict.**
 So this is a live question, and the honest thing is to argue it rather than drop it. Here is the
 argument, both ways, with the weak parts named.
 
-**The case for pinning a small advertised set.** 79 of the 81 tools we advertise have no
+**The case for pinning a small advertised set.** 78 of the 81 tools we advertise have no
 call in our own tool-call log. Mainstream clients cap the tools they will show — a
 reported 40 in Cursor — so a client that caps there sees at most 40 of these 81, while we
 pay context for all of them on every turn. Every comparable we studied pins a smaller set,
