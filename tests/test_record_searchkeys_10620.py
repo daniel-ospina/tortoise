@@ -1223,6 +1223,13 @@ def _shipped_flatten_ddl() -> str:
     # the conversion's job there is to PRESERVE the value — `ELSE NULL` would
     # drop it. Pinned so a rewrite of any arm goes red instead of silently
     # changing what an existing row becomes.
+    # ⚠️ A NON-`str` ARRAY ELEMENT is the fourth divergence and it is deliberately
+    # NOT a row here: the `assert actual == written` below holds `actual ==
+    # written` for every list in this matrix, and that equality is FALSE for
+    # `["a", null]` / `["a", {"k": "v"}]` by design. It has its own leg —
+    # `test_the_array_arms_non_str_elements_are_the_stated_divergence` — which
+    # asserts BOTH ends (the SQL text and the writer's Python-repr rule) so the
+    # exception is pinned rather than implied.
     ({"k": "v"}, None),                  # object: preserved, rendering-tolerant
     (42, "42"),                         # number: its own text form
     (True, "true"),                     # boolean: its own text form
@@ -1292,3 +1299,80 @@ def test_the_migration_converts_existing_rows_by_the_write_path_rule(value, expe
         # exists — so the test states both rather than letting the arms drift.
         with pytest.raises(record_projection.RecordProjectionError):
             record_projection._record_column_value("point", "search_keys", value)
+
+
+def test_the_array_arms_non_str_elements_are_the_stated_divergence():
+    """⛔ The ONE array shape where the migration's arm is not the write path.
+
+    `jsonb_array_elements_text` yields SQL `NULL` for a JSON `null` element and
+    the element's own JSON text for a nested object/array, so `["a", null]`
+    lands as `a` and `["a", {"k": "v"}]` as `a {"k": "v"}`. The write path's
+    `str(item)` would give `a None` / `a {'k': 'v'}` — PYTHON REPRS — and the
+    migration's header says, in as many words, why it does not reproduce them
+    (#10648 review P3). This leg asserts BOTH ends, so a change to either side
+    (the SQL arm or the writer's rule) goes red instead of quietly making the
+    converted column `replay(journal)`-divergent.
+
+    Reachability is low and that is why this is a documented divergence rather
+    than a rewrite: `search_keys` is `list[str]` in `commit_schema`, so only a
+    pre-existing `jsonb` row (the old `_jsonb_or_scalar` path, or a hand-written
+    row) can hold a non-`str` element.
+    """
+    conn = _record_schema_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(_shipped_flatten_ddl())
+            try:
+                cur.execute(
+                    "SELECT public.record_flatten_search_keys(%s::jsonb)",
+                    (json.dumps(["a", None]),))
+                null_element = cur.fetchone()[0]
+                cur.execute(
+                    "SELECT public.record_flatten_search_keys(%s::jsonb)",
+                    (json.dumps(["a", {"k": "v"}]),))
+                nested_element = cur.fetchone()[0]
+            finally:
+                cur.execute("DROP FUNCTION IF EXISTS "
+                            "public.record_flatten_search_keys(jsonb)")
+    finally:
+        conn.close()
+
+    # An element with NO text is dropped — never the literal `None`.
+    assert null_element == "a", (
+        f"a JSON `null` element converted to {null_element!r}; the arm drops an "
+        "element with no text (the write path would emit the repr `None`)")
+    # A nested element keeps ITS OWN text — never a Python repr.
+    assert nested_element is not None and nested_element.startswith("a "), (
+        f"a nested element converted to {nested_element!r}")
+    assert '"k"' in nested_element, (
+        f"the nested element's own content did not survive: {nested_element!r}")
+    assert "'k'" not in nested_element, (
+        f"the arm reproduced a PYTHON REPR in a persisted column: {nested_element!r}")
+
+    # …and the other end of the divergence, DB-free, so neither side can move
+    # without this leg following it.
+    assert record_projection._record_column_value(
+        "point", "search_keys", ["a", None]) == "a None"
+    assert record_projection._record_column_value(
+        "point", "search_keys", ["a", {"k": "v"}]) == "a {'k': 'v'}"
+
+
+def test_the_migration_header_states_the_non_str_element_divergence():
+    """The divergence must be READABLE, not just asserted (#10648 review P3).
+
+    The header is what a future lane reads before deciding the arm is "the SAME
+    rule" and tidying it. It used to claim exactly that, so the two element
+    shapes that break the equality were invisible: this pins the paragraph, and
+    names BOTH ends (`a None` / `a {'k': 'v'}` on the Python side) so a rewrite
+    of the text cannot quietly drop the reason the arms differ.
+    """
+    header = MIGRATION_PATH.read_text(encoding="utf-8")
+
+    assert "NON-`str` ELEMENT" in header, (
+        "the migration header no longer states the non-`str` array-element "
+        "divergence, and the arm still diverges "
+        "(`test_the_array_arms_non_str_elements_are_the_stated_divergence`)")
+    for named in ("a None", "a {'k': 'v'}", "are_the_stated_divergence"):
+        assert named in header, (
+            f"the header's divergence paragraph no longer names {named!r}, so a "
+            "reader cannot tell which shape is the exception")

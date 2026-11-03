@@ -53,14 +53,17 @@
 -- `flatten_search_keys_prop` remains the ONLY flattener in the WRITE path: this
 -- migration does not introduce a second one. The `USING` below is bootstrap
 -- arithmetic on rows that already exist, and for an ARRAY it applies the SAME
--- rule (per-element `strip`, blank elements dropped, joined by one space, order
--- preserved — see the function body) so a value that predates the ruling lands
--- in the one canonical form rather than being dropped or reshaped into a second
--- one.
+-- rule FOR THE SHAPES A PRODUCER CAN EMIT (per-element `strip`, blank elements
+-- dropped, joined by one space, order preserved — see the function body) so a
+-- value that predates the ruling lands in the one canonical form rather than
+-- being dropped or reshaped into a second one. (`search_keys` is `list[str]` in
+-- `commit_schema`; a NON-`str` element is the one array shape where the arm
+-- diverges, deliberately — stated below.)
 --
 -- ⛔ WHERE THE CONVERSION IS DELIBERATELY BROADER THAN THE WRITE PATH
--- (review P3, #10648). The array arm is the write path's rule exactly; the
--- OBJECT / NUMBER / BOOLEAN arms are not, and the difference is stated here
+-- (review P3, #10648). The array arm is the write path's rule exactly FOR EVERY
+-- ELEMENT A PRODUCER CAN EMIT; a NON-`str` ELEMENT of an array, and the
+-- OBJECT / NUMBER / BOOLEAN arms, are not — the differences are stated here
 -- rather than left for a reader to reconcile:
 --
 --   * `_record_column_value("point", "search_keys", <dict>)` REFUSES
@@ -77,10 +80,35 @@
 --     (`42`, `true`) is a value, and `ELSE NULL` would have dropped it. The write
 --     path never produces them either (a bool bound to a `text` column is
 --     `42804`), so again the arms only ever fire on rows that already exist.
+--   * a NON-`str` ELEMENT inside an array is the one place the ARRAY arm itself
+--     diverges from the write path (#10648 review P3), and it diverges on
+--     purpose. `jsonb_array_elements_text` renders a nested object/array as its
+--     own JSON text (`{"k": "v"}`) and yields SQL `NULL` for a JSON `null`, so
+--     `["a", null]` lands as `a` (an element with no text is dropped) and
+--     `["a", {"k": "v"}]` as `a {"k": "v"}`. The write path's restatement
+--     (`record_projection._record_column_value`) is `str(item)`, i.e. `a None`
+--     and `a {'k': 'v'}` — PYTHON REPRS. Reproducing a repr in a persisted
+--     column would store one language's artifact as the record's canonical form
+--     (a `replay(journal)`-divergent value, and `rebuild_from_record` copies
+--     this column back into the graph), so this file keeps the element's own
+--     JSON text instead and drops only an element that HAS no text. Unreachable
+--     from any producer — `search_keys` is `list[str]` — so only a pre-existing
+--     `jsonb` row (the old `_jsonb_or_scalar` path, or a hand-written row) can
+--     hold one. Both shapes are pinned by
+--     `tests/test_record_searchkeys_10620.py::test_the_array_arms_non_str_elements_
+--     are_the_stated_divergence`, and the two ends are asserted together so a
+--     change to EITHER side goes red.
 --
 -- The arms are therefore converted-and-preserved, not converted-and-shaped, and
--- `tests/test_record_searchkeys_10620.py` executes each one (plus the writer's
--- refusal of the object shape) so a rewrite of any arm goes red.
+-- `tests/test_record_searchkeys_10620.py` executes each one (both sides of the
+-- non-`str` element divergence included, plus the writer's refusal of the object
+-- shape) so a rewrite of any arm goes red.
+--
+-- The divergence is also PINNED AS TEXT: the header above is what a future lane
+-- reads before "tidying" the arm, so
+-- `tests/test_record_searchkeys_10620.py::test_the_migration_header_states_the_
+-- non_str_element_divergence` fails if this paragraph is deleted while the arm
+-- still diverges.
 --
 -- A FORWARD migration, never an edit of 20261012000003: migrations are
 -- append-only history (the `check-migration-append-only` gate refuses an edit to
