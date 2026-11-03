@@ -5078,17 +5078,23 @@ surfaces:
   # `docs/architecture/BOUNDED-OPERATION-CONTRACT.md`, whose evidence column is
   # line numbers into `tortoise/sdk.py`, `mcp_server.py`, `hosted_api.py`,
   # `selfhost_api.py`, `event_store.py`, `tool_registry.py` and
-  # `config/surface-manifest.yml` — so the change that rots it is a shift in any
-  # of those files, and `core` is the arm that runs on the module diffs those
-  # paths select. What it pins: the header's re-derivation ledger records every
-  # `from`→`to` coordinate pair, and NO live citation in the census may point at
-  # a coordinate that ledger has retired — the defect it was written for was §2a
-  # still citing the `/v1/points` route and the `/v1/search` marker pair at the
-  # pre-`d3f148a56` numbers while the table rows cited the current ones, i.e. two
-  # coordinate systems for one construction inside one document. Text-only (one
-  # file read); no DB, no graph, no network, no model. DUAL-REGISTERED with
-  # `tier1`: a docs-only edit of the census document selects NO surface and runs
-  # `tier1` ONLY, so this row alone would be asleep on the change that breaks it.
+  # `config/surface-manifest.yml`. What it pins: the header's re-derivation ledger
+  # records every `from`→`to` coordinate pair, and NO live citation in the census
+  # may point at a coordinate that ledger has retired — the defect it was written
+  # for was §2a still citing the `/v1/points` route and the `/v1/search` marker
+  # pair at the pre-`d3f148a56` numbers while the table rows cited the current
+  # ones, i.e. two coordinate systems for one construction inside one document.
+  # Text-only (one file read); no DB, no graph, no network, no model.
+  # ⚠️ This row does NOT by itself catch that defect, and the comment claiming
+  # otherwise is why it is spelled out here (#10620 review, issue 5: measured with
+  # this manifest, `hosted_api.py` — the file whose movement is the whole subject
+  # of the third re-derivation — selects `api`+`onboarding`, which REPLACES the
+  # `core` fallback, so `core` is ABSENT on exactly the module diff that rots the
+  # cites). Coverage still holds, but through the `tier1` arm below: `select()`
+  # unions `tier1` into every partial selection (`tools/ci_selection.py`), and a
+  # docs-only edit of the census document selects NO surface and runs `tier1`
+  # ONLY. DUAL-REGISTERED with `tier1` for that reason — keeping only one of the
+  # two rows is what would put this guard to sleep.
   - test_8447_census_citation_coordinates.py
   # #9189 (§17.2): the reconciler's PRODUCTION TRIGGER. `tortoise/reconciliation.py`
   # had a comparison and no production caller (measured at `f96a18da1` and
