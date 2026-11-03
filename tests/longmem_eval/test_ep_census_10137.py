@@ -886,6 +886,7 @@ def test_census_probe_keys_a_non_str_qid_apart_from_its_repr(tmp_path):
     assert out["questions_failed"] == 1        # NOT folded into the outcome
     assert out["questions_in_run"] == 2
 
+
 _CENSUS_CELLS = ("operators", "factor_edges", "points_with_ep",
                  "points_unmeasured", "points_off_neutral",
                  "points_moved_off_neutral", "ep_ran", "no_op_reason", "error")
@@ -908,6 +909,34 @@ def _rebuild_outcome(row) -> dict:
     if any(v is not None for v in cells.values()):
         outcome["belief_activation"] = cells
     return outcome
+
+
+def test_the_reprojection_shapes_match_the_probe():
+    """The two branches ``_rebuild_outcome`` claims, pinned on synthetic rows.
+
+    The committed sample is FULLY read, so neither branch executes against it:
+    without these, deleting the manifest-less arm or re-spelling the UNREAD
+    predicate left every test green — the "could be reverted with the suite
+    still green" shape this bundle exists to avoid (README:163).
+    """
+    unread = {"question_id": "q", "question_type": "t",
+              **{k: None for k in _CENSUS_CELLS}}
+    assert _rebuild_outcome(unread) == {"question_id": "q", "question_type": "t"}
+    assert mp._classify_question(None)[0] == mp.INERT_NO_MANIFEST
+    # …and a dict-of-nulls is NOT a never-read row: it is a failed activation.
+    assert mp._classify_question({k: None for k in _CENSUS_CELLS})[0] == \
+        mp.INERT_ACTIVATION_FAILED
+
+    # A non-numeric cell is UNKNOWN, which is what ``_optional_int`` says and
+    # what the probe's ``_census_unread`` says — ``value is None`` says READ.
+    assert mp._optional_int(True) is None
+    assert mp._optional_int(0) == 0
+
+    # The mirror constant must stay the probe's row key set, or a tenth cell
+    # would silently drop out of the re-projection.
+    doc = json.loads(_ARTIFACT.read_text())
+    assert set(_CENSUS_CELLS) | {"question_id", "question_type"} == \
+        set(doc["per_question"][0])
 
 
 def test_committed_census_rederives_its_own_aggregate():
@@ -935,8 +964,14 @@ def test_committed_census_rederives_its_own_aggregate():
     assert summary["questions"] == doc["questions"]
     assert summary["questions_with_ep"] == doc["questions_with_ep"]
     assert summary["inert_by_reason"] == doc["inert_by_reason"]
-    # …including the state the artifact publishes beside the ratio, and the
-    # failure population the ratio is scoped to.
+    # …the enumerated EP-inert population beside them (the input the issue
+    # names for any fix), and the completed set the counts describe.
+    assert summary["inert_questions"] == doc["inert_questions"]
+    assert doc["completed"] == [{"question_id": r["question_id"],
+                                 "question_type": r["question_type"]}
+                                for r in rows]
+    # …including the state published beside the ratio, and the failure
+    # population the ratio is scoped to.
     assert mp.belief_layer_state(requested=True, activation=summary) == \
         doc["belief_layer"]
     assert doc["questions_in_run"] - doc["questions"] == doc["questions_failed"]
@@ -962,6 +997,10 @@ def test_committed_census_rederives_its_own_aggregate():
         derived = summary["by_question_type"][qtype]
         assert {k: committed.get(k) for k in reconciled} == \
             {k: derived.get(k) for k in reconciled}, qtype
+    # The bucket SET is derivable from the rows, so it is pinned even though
+    # the bucket SHAPE is not: deleting a whole question type is a hand-edit
+    # the loop above would otherwise skip silently.
+    assert set(summary["by_question_type"]) == set(doc["by_question_type"])
 
     # The disclosure fields describe THESE rows: nothing was unread. UNREAD is
     # ``_optional_int(cell) is None`` — the one predicate the probe's
@@ -969,7 +1008,10 @@ def test_committed_census_rederives_its_own_aggregate():
     # would call a non-numeric cell (``operators: true``) READ here while its
     # ``cells.operators_unread`` companion calls it UNREAD.
     assert doc["per_question_source"] == "outcome.belief_activation"
-    assert doc["per_question_unread"] == 0
+    assert doc["per_question_unread"] == sum(
+        1 for r in rows
+        if any(mp._optional_int(r.get(k)) is None
+               for k in mp._UNKNOWN_PER_MANIFEST_KEYS))
     for key in ("points_with_ep", "points_unmeasured", "operators",
                 "factor_edges"):
         assert doc["cells"][f"{key}_unread"] == sum(
