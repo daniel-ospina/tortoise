@@ -1095,3 +1095,84 @@ def test_the_pinned_linter_accepts_the_rendered_table(hostile, tmp_path):
         assert "Summary: 0 issues in 0 files" in out, f"the pinned linter rejects a hostile cell {hostile!r}: {out}"
     finally:
         target.unlink(missing_ok=True)
+
+
+# ── the artifact's own provenance: a digest of ITS OWN BODY (#10687 cycle 13) ────────
+#
+# `operations/attest-census.md` is COMMITTED, and the body of this PR promises it is
+# "regenerated, never hand-edited — the file is the authority". At the review head that was
+# false: the header read `generated 2026-11-03T05:22:14Z` while lines 15-19 had been reflowed
+# BY HAND eight hours later, so a lane filtering rows by that stamp read a population older
+# than the document it sat in. A run-time timestamp can never notice an edit after the run;
+# a digest of the body can, offline and without `gh`. Two tests: the artifact is checked as
+# committed, and the check itself is proved to discriminate.
+
+
+def test_the_committed_census_matches_its_own_content_digest():
+    """The committed snapshot must be exactly what `render` emitted.
+
+    This FAILS on any hand-edited census — including the prose-only edit that produced the
+    review finding (no row moved, so nothing else in the suite could see it) — and it fails
+    on a document that carries no digest at all, because absence proves nothing.
+    """
+    ac = _load()
+    committed = Path(__file__).resolve().parent.parent / "operations" / "attest-census.md"
+    assert committed.exists(), f"{committed} is the committed snapshot this PR promises"
+
+    reason = ac.verify_census_document(committed.read_text(encoding="utf-8"))
+    assert reason == "", (
+        f"{committed} does not match its own header digest → {reason}. "
+        "Regenerate it with `uv run python tools/attest_census.py`; never edit it by hand."
+    )
+
+
+def test_a_hand_edit_anywhere_in_the_body_breaks_the_digest():
+    """Non-vacuity: the three shapes a hand edit actually takes.
+
+    The review's incident was a PROSE edit (the `Totals:` line plus the RESTORE paragraph),
+    so the digest must cover prose and not merely the table. The row edit and the appended
+    footnote are the other two shapes, and the undigested document is the pre-fix tree.
+    """
+    ac = _load()
+    rows = [
+        ac.Row(pr=1, head=LIVE, branch="b", title="t", record=None, outcome=ac.IN_FLIGHT, why="w"),
+        ac.Row(pr=2, head=LIVE, branch="b", title="t", record=None, outcome=ac.OK, why="w"),
+    ]
+    text = ac.render(rows, "o/r", "2026-11-03T00:00:00Z")
+    assert ac.verify_census_document(text) == "", "a freshly rendered document must verify"
+
+    edits = {
+        # the measured incident: prose re-stated by hand, no row touched
+        "prose": text.replace("IN-FLIGHT=1 · OK=1", "IN-FLIGHT=2 · OK=1"),
+        "row": text.replace("| #1 |", "| #9 |"),
+        "appended": text + "\n> hand-written footnote\n",
+    }
+    for name, edited in edits.items():
+        assert edited != text, f"the {name} edit did not apply — this assertion would be vacuous"
+        reason = ac.verify_census_document(edited)
+        assert "edited after generation" in reason, f"the {name} edit went undetected: {reason!r}"
+
+    # And the pre-fix shape — no digest line at all — is REFUSED, never accepted as clean.
+    undigested = "\n".join(
+        ln for ln in text.splitlines() if "content sha256" not in ln
+    )
+    assert "no `content sha256`" in ac.verify_census_document(undigested)
+
+
+def test_a_record_containing_the_digest_placeholder_still_verifies():
+    """`render` substitutes the placeholder ONCE, in the header — never in record text.
+
+    A registry record is arbitrary JSON from disk, so its `why` can contain the token. If
+    `render` substituted every occurrence, the header hex plus the record's own hex could
+    never be re-derived into the pre-digest text, and a legitimately generated census would
+    report itself hand-edited.
+    """
+    ac = _load()
+    hostile = ac._DIGEST_PLACEHOLDER
+    rec = ac.Record(path=Path("/tmp/r-1.json"), head_sha=LIVE, mint="fresh", verdict="clean",
+                    evidence="comment:1")
+    row = ac.Row(pr=1, head=LIVE, branch="b", title="t", record=rec, outcome=ac.RE_REVIEW, why=hostile)
+    text = ac.render([row], "o/r", "2026-11-03T00:00:00Z")
+
+    assert hostile in text, "the record's own text must survive verbatim"
+    assert ac.verify_census_document(text) == "", "a record containing the token must still verify"
