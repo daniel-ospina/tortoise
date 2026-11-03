@@ -2769,7 +2769,8 @@ def test_a_pre_birth_fold_cannot_survive_the_creation_record():
 def test_the_birth_status_is_on_create_only_like_the_live_fold():
     """A re-mention journals ANOTHER creation record; it must not overwrite.
 
-    `_upsert_object` writes `status=coalesce($st, 'live')` **ON CREATE**, and
+    `_upsert_object` writes `status=$st` **ON CREATE** (derived-or-absent
+    since #9974 R1), and
     #3590 journals `ObjectRegistered` on EVERY create — so a second
     `create_object` for the same node is carried by the record and must fold
     NOTHING. A last-writer-wins replay here would resurrect (or retro-terminate)
@@ -2783,7 +2784,8 @@ def test_the_birth_status_is_on_create_only_like_the_live_fold():
         # re-mention through, so only the "earliest creation record speaks" rule
         # suppresses it. Measured: with `birth_seen` removed this case folds
         # `archived`, a TERMINAL status the graph never held (create #1 stored
-        # `coalesce(NULL,'live')='live'` and ON MATCH never replaced it) —
+        # NO status — `$st` is NULL and `SET x = NULL` REMOVES the property — and
+        # ON MATCH never replaced it) —
         # `live._terminal_excluded` would then hide a live name.
         cp.LifecycleEvent(seq=1, event_kind="", is_birth=True,
                           birth_status=None,
