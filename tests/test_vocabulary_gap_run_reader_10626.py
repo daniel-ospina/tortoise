@@ -561,7 +561,12 @@ def test_a_raising_attach_never_turns_a_committed_run_into_a_raised_one(monkeypa
     `contextlib.suppress(Exception)` for exactly this reason; the new sibling path
     was not. A raising receipt-field builder stands in for any raise here.
     """
-    def _boom(_reading):
+    def _boom(_reading, **_kwargs):
+        # ⛔ `**_kwargs`, not a bare `_reading` (fold review cycle 8): `_attach` calls
+        # the builder with `attached=`, so a stub that accepts only one positional
+        # argument raises `TypeError` BEFORE its own `RuntimeError` - the intended
+        # path is never exercised and the test passes for the wrong reason. A test
+        # whose stub the production signature can drift away from is not a pin.
         raise RuntimeError("receipt alarm builder blew up")
 
     monkeypatch.setattr(v2, "_vocabulary_gap_run_warning", _boom)
@@ -577,6 +582,52 @@ def test_a_raising_attach_never_turns_a_committed_run_into_a_raised_one(monkeypa
         f"(built before written) and must not escape; got {out!r}")
     # The loss is not silent: the process census still holds it.
     assert v2.vocabulary_gap_report().get(UNLISTED_MARKER, 0) >= 1
+
+    # ⛔ THE LANE-BUILT RECEIPT MAY HAVE NO `stats` AT ALL (fold review cycle 6, P2).
+    # The case above supplies `{"stats": {}, ...}`, so it never takes the
+    # `stats is None` path — and that path used to CREATE `receipt["stats"] = {}`
+    # BEFORE the builder ran, leaving `{"ok": True, "stats": {}}` on a lane that HAD
+    # recorded a loss: the documented "recorded nothing" shape, i.e. the ambiguity
+    # #10626 exists to remove. Pinning it here so the mutation cannot return.
+    def _run_without_stats() -> dict:
+        v2._record_vocabulary_gap([UNLISTED_MARKER])
+        return {"ok": True}
+
+    bare = v2._run_scoped_vocabulary_gap(_run_without_stats)()
+    assert bare == {"ok": True}, (
+        "a raising builder injected a `stats` key onto a receipt that never had "
+        f"one, fabricating the 'recorded nothing' shape; got {bare!r}")
+
+
+def test_a_null_stats_receipt_takes_the_reading():
+    """A receipt may carry `"stats": None` — KEY PRESENT, VALUE NONE.
+
+    That is a THIRD shape, not the same one the cycle-6 pin covers: the missing-key
+    case omits `stats` entirely. `receipt.get("stats")` returns `None` for both, so a
+    repair written as `receipt.setdefault("stats", {})` inserts nothing (the key
+    already exists), hands back `None`, and the write raises — swallowed by the outer
+    handler, so the lane ships the "recorded nothing" shape with its warning
+    discarded (fold review cycle 7, P2). This is a SEPARATE test on purpose: the
+    sibling above has the builder monkeypatched to raise for its whole body, so the
+    reading could never attach here and the assertion would measure the stub, not
+    the reader (fold review cycle 8).
+    """
+    def _run_with_null_stats() -> dict:
+        v2._record_vocabulary_gap([UNLISTED_MARKER])
+        return {"ok": True, "stats": None}
+
+    nulled = v2._run_scoped_vocabulary_gap(_run_with_null_stats)()
+    assert isinstance(nulled.get("stats"), dict), (
+        "a `stats: None` receipt must be REPLACED by a dict and take the reading - "
+        f"not left as None (which silently drops the reading); got {nulled!r}")
+    assert nulled["stats"]["vocabulary_gap"]["tokens"][UNLISTED_MARKER] == 1, (
+        f"the reading did not attach to a `stats: None` receipt; got {nulled!r}")
+    gap_warnings = [w for w in nulled.get("warnings", []) if "vocabulary gap" in str(w)]
+    assert len(gap_warnings) == 1, (
+        f"exactly one run alarm must land beside the reading; got {nulled!r}")
+    assert gap_warnings[0].rstrip().endswith("the vocabulary from it (#5329)."), (
+        "a `stats: None` receipt that DID take the reading must still point at "
+        f"stats.vocabulary_gap; got {gap_warnings[0]!r}")
 
 
 def test_the_reader_never_replaces_a_lanes_own_receipt_fields():

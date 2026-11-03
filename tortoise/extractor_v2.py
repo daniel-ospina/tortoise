@@ -12906,7 +12906,7 @@ def _record_vocabulary_gap(absorbed: list[str]) -> None:
     a line above `def extract_session_v2(` — the #7949 bundle's cites are typed
     against those line numbers, and every line added there re-stales them.
     """
-    with contextlib.suppress(Exception):  # observability never decides
+    try:  # observability never decides
         _VOCABULARY_GAPS.record(absorbed)
         # #10626: and the RUN-level ledger, when a run is executing in this
         # context.  Inside the same suppress for the same reason — a reader that
@@ -12915,6 +12915,25 @@ def _record_vocabulary_gap(absorbed: list[str]) -> None:
         run = _vocabulary_gap_run_accumulator()
         if run is not None:
             run.absorb(absorbed)
+    except Exception as exc:
+        # P2: a reader that FAILS must be diagnosable. Swallowing in silence made
+        # a broken ledger indistinguishable from "this run recorded no loss" -
+        # the exact ambiguity #10626 exists to remove - while the fallback
+        # WARNING this path relies on is spent after 32 distinct tokens. Log
+        # once, itself guarded, so observability still never decides.
+        # ⛔ `logging` is imported LOCALLY, the module's own idiom (see
+        # `_record_vocabulary_gap`): this module has no module-level import, so a
+        # bare `logging.getLogger` here raises NameError and the guarded handler
+        # below would swallow exactly the diagnostic it exists to emit (fold
+        # review cycle 5, VGATE F821).
+        with contextlib.suppress(Exception):  # a raising handler must not decide
+            import logging
+
+            logging.getLogger(__name__).warning(
+                "run vocabulary-gap ledger could not record a loss: %s",
+                exc,
+                exc_info=True,
+            )
 
 
 #: How many distinct tokens a run-level WARNING names.  Bounded on purpose: the
@@ -12924,7 +12943,9 @@ def _record_vocabulary_gap(absorbed: list[str]) -> None:
 _VOCABULARY_GAP_WARN_NAMES = 8
 
 
-def _vocabulary_gap_run_warning(reading: dict[str, Any]) -> str:
+def _vocabulary_gap_run_warning(
+    reading: dict[str, Any], *, attached: bool = True
+) -> str:
     """The run-level alarm for a reading that recorded a loss (#10626).
 
     Carries the token NAMES because that is what makes the alarm actionable — a
@@ -12974,12 +12995,24 @@ def _vocabulary_gap_run_warning(reading: dict[str, Any]) -> str:
     if not parts:  # unreachable through `_attach`, kept so no caller ships a hole
         parts.append("no readable loss (the reading recorded none of the three "
                      "shapes)")
+    # `attached` states whether `_attach` actually wrote the reading to
+    # `stats.vocabulary_gap`. The pointer sentence is emitted only when it is
+    # true (review cycle 5, P2): `_attach` writes that key only
+    # `if isinstance(stats, dict)`, so on a lane whose `stats` is not a dict an
+    # unconditional pointer named a field that was never written - a
+    # customer-visible receipt entry pointing at nothing.
     return (
         "boundary vocabulary gap (#5329): this run's folds absorbed "
         + "; ".join(parts)
-        + ". The fold decision is UNCHANGED — this is the record, not a gate; "
-        "the reading is at stats.vocabulary_gap and the cure is curating the "
-        "vocabulary from it (#5329)."
+        + ". The fold decision is UNCHANGED - this is the record, not a gate"
+        + (
+            "; the reading is at stats.vocabulary_gap and the cure is "
+            "curating the vocabulary from it (#5329)."
+            if attached
+            else
+            "; this lane's receipt carried no dict `stats`, so the reading "
+            "is in this warning only (#5329)."
+        )
     )
 
 
@@ -13050,9 +13083,25 @@ def _run_scoped_vocabulary_gap(run):
     And the converse, which is the module's own invariant rather than a nicety
     (#10626 review round 7, P2): a RAISING READER never converts a successful,
     already-committed capture into an exception.  The post-run attach runs inside
-    ``contextlib.suppress(Exception)`` for exactly the reason the two census
-    writers do — the points have landed by then, so an escape would leave this
-    function and `sdk` would report ``ok: False`` on a capture that SUCCEEDED.
+    a guarded ``try`` for exactly the reason the two census writers do — the
+    points have landed by then, so an escape would leave this function and
+    `sdk` would report ``ok: False`` on a capture that SUCCEEDED.  A guarded
+    ``try`` rather than ``contextlib.suppress`` so the failure is LOGGED: a
+    reader that broke silently was indistinguishable from "this run recorded no
+    loss", which is the ambiguity #10626 exists to remove.
+
+    ⚠️ KNOWN EXCLUSION (fold review cycle 5, P2): the THIRD fold site named by
+    #10626 is **not** wrapped — ``sdk._dedup_content_candidates``, whose
+    ``fold_allowed(prior_content, content)`` call at `tortoise/sdk.py` is reached
+    from `tortoise/mining.py`'s batch entry.  It is excluded deliberately: that
+    entry returns the mining receipt (``dedup_hits``/``dedup_wired``/
+    ``dedup_deferred``), not a capture ``stats``/``warnings`` shape, so wrapping
+    it here would either invent a ``stats`` key on a receipt that never had one
+    or need a third attach shape — a behaviour change on a lane this reader does
+    not have receipt coverage for.  Until it is wired, a marker absorbed by the
+    mining fold reaches only the process census, whose only egress is the
+    WARNING capped at 32 distinct tokens per process.  Tracked as a follow-up
+    issue rather than silently omitted handover.
     """
     from functools import wraps
 
@@ -13081,12 +13130,31 @@ def _run_scoped_vocabulary_gap(run):
         """
         if not _vocabulary_gap_recorded_a_loss(reading):
             return
-        # Build first, write second: nothing below can leave a torn receipt.
-        warning = _vocabulary_gap_run_warning(reading)
-        stats = receipt.get("stats")
-        if stats is None:
+        # Decide the attach BEFORE the warning is built, so the warning can never
+        # point at a `stats.vocabulary_gap` this lane did not write (P2) - and
+        # derive that predicate WITHOUT MUTATING THE RECEIPT (fold review cycle 6,
+        # P2): the first revision still ran `receipt["stats"] = {}` before the
+        # build, so a raising builder left `{'ok': True, 'stats': {}}` - the
+        # documented "recorded nothing" shape - on a lane that HAD recorded a loss,
+        # which is the very ambiguity #10626 exists to remove. The existing
+        # atomicity pin cannot see it (its receipt always carries `stats`). Now:
+        # no write of any kind until the builder has returned.
+        existing = receipt.get("stats")
+        attached = existing is None or isinstance(existing, dict)
+        warning = _vocabulary_gap_run_warning(reading, attached=attached)
+        # ⛔ ASSIGN, never `setdefault` (fold review cycle 7, P2): `setdefault`
+        # inserts only when the KEY IS MISSING, so a receipt carrying
+        # `"stats": None` — where `existing is None` is true, making
+        # `attached` true — would return that `None` and the write below would
+        # raise `TypeError`, swallowed by the outer handler: the lane would ship
+        # the "recorded nothing" shape after all, with its warning discarded too.
+        # Assigning replaces the `None`, and still writes nothing before the
+        # builder has returned.
+        if existing is None:
             stats = receipt["stats"] = {}
-        if isinstance(stats, dict):
+        else:
+            stats = existing
+        if attached:
             stats["vocabulary_gap"] = reading
         warnings = receipt.get("warnings")
         if warnings is None:
@@ -13114,7 +13182,7 @@ def _run_scoped_vocabulary_gap(run):
         # ``{**result, "ok": False, …}`` on an escape).  Observability may degrade
         # to unattached — the process census + WARNING still hold the reading —
         # but it may never decide the capture's outcome.
-        with contextlib.suppress(Exception):  # observability never decides
+        try:  # observability never decides
             reading = accumulator.reading()
             if isinstance(result, dict):
                 _attach(result, reading)
@@ -13122,6 +13190,21 @@ def _run_scoped_vocabulary_gap(run):
                   and isinstance(result[1], dict)):
                 # the M2 lane's ``(extracted, meta)`` contract (#1530 D8)
                 _attach(result[1], reading)
+        except Exception as exc:
+            # P2: a reader that raises must leave a diagnostic. This bridge is
+            # the only place a run-level reading reaches the receipt, so a
+            # silent failure here is indistinguishable from "no loss recorded".
+            # ⛔ Local `import logging`: the module's own idiom, and the reason a
+            # bare `logging.getLogger` here would NameError into the suppress
+            # (fold review cycle 5, VGATE F821).
+            with contextlib.suppress(Exception):  # a raising handler must not decide
+                import logging
+
+                logging.getLogger(__name__).warning(
+                    "run vocabulary-gap reading could not attach to the receipt: %s",
+                    exc,
+                    exc_info=True,
+                )
         return result
 
     return _run_with_census
