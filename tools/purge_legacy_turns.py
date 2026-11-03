@@ -61,6 +61,20 @@ THE CLASSES (what the plan is made of, per session holding graph turn nodes)
                                record lost). ⛔ MUST NOT BE PURGED: the record
                                holds a DIFFERENT transcript, so a delete
                                substitutes one for the other silently.
+    DUPLICATE-WINDOW           the RECORD holds two or more windows for one
+                               session id (a re-capture or a resume), and the
+                               graph holds turn nodes for it. Entry order is
+                               the only index the record carries, so no turn
+                               can be placed: the census cannot say which
+                               window the graph's `t<i>` came from. ⛔ MUST NOT
+                               BE PURGED — and ⛔ MUST NOT BE BACKFILLED
+                               EITHER: a RECORD-BEHIND backfill or a MISMATCH
+                               field fix would both write ONE window over the
+                               other. The repair is to resolve which capture is
+                               authoritative, by hand. The census refuses these
+                               sessions by name and holds their nodes back
+                               (`duplicate_window`), and this tool refuses a
+                               planned one under `REFUSE_DUPLICATE_WINDOW`.
 
 WHAT PARITY IS MATCHED ON (the brief's "not just the count" rule)
 ================================================================
