@@ -2482,7 +2482,7 @@ def test_every_pass_clears_the_read_cache_and_the_job_read_failure_count(monkeyp
         "a leaked count makes EVERY later pass abstain on EVERY job count")
     assert R._CANCEL_SETTLE_SPENT_S == 0.0, (
         "a leaked settle spend silently disables the cancel on every later pass")
-    assert R._PASS_DEADLINE is not None and R._PASS_DEADLINE > R.time.time(), (
+    assert R._PASS_DEADLINE is not None and R.time.time() < R._PASS_DEADLINE, (
         "the wall-clock budget must be RE-ARMED per pass, not inherited from the last"
         " one — a spent deadline turns every later refusal into an instant exit 2")
 
