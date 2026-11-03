@@ -20,9 +20,14 @@ This tool decides which, mechanically, from three facts only:
 
   1. record exists?                       (canonical path, then the legacy `<pr>.json`)
   2. record.head_sha == PR headRefOid?    (byte-for-byte, 40 lowercase hex)
-  3. record carries a REAL verdict with evidence — `verdict` in the clean allow-list
-     (`clean` / `clean-micro` / `clean-low`), `evidence` a NON-EMPTY STRING, and
-     `mint` != "carried".
+  3. record carries a REAL verdict with ARTIFACT-SHAPED evidence — `verdict` in the clean
+     allow-list (`clean` / `clean-micro` / `clean-low`), `evidence` matching `_EVIDENCE_REF`
+     (`<kind>:<digits>` or a GitHub `#issuecomment-`/`#discussion_r`/`#pullrequestreview-` URL),
+     and `mint` not carried.
+
+     ⛔ Not "a non-empty string": that weaker rule is exactly what cycle 5 measured as fail-open
+     (`"TODO: verify"`, `"evidence: none"`, `" : "` all licensed `RESTORE` for a record with no
+     artifact at all). Weakening `real_evidence` back to a non-empty check re-opens fabrication.
 
 BINDING IS BY HEAD, DELIBERATELY NARROWER THAN THE GATE
 -------------------------------------------------------
@@ -227,8 +232,11 @@ def classify(
     # verdict" (cycle 6: the row asserted the opposite of its own `verdict` column, so a lane
     # concluded the review had found issues and re-reviewed for the wrong reason).
     if not isinstance(record.evidence, str) or _EVIDENCE_REF.match(record.evidence.strip()) is None:
+        # ⛔ Do NOT assert a verdict here: this branch fires on the EVIDENCE test, and cycle 7
+        # measured the claim "is clean" printed beside `verdict=ISSUES` — which sends a lane to
+        # repair a pointer on a review that actually found issues, without reading the findings.
         return NOTHING, (
-            f"record verdict {record.verdict!r} is clean at the live head, but its evidence "
+            f"record verdict {record.verdict!r} at the live head, but its evidence "
             f"({record.evidence!r}) is not an artifact pointer — it cannot be quoted as proof"
         )
     return NOTHING, f"record verdict {record.verdict!r} is not a clean verdict — nothing to restore"

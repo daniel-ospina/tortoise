@@ -564,6 +564,26 @@ def test_prose_carrying_a_colon_is_not_evidence():
         assert "is not a clean verdict" not in why, why
 
 
+def test_the_reason_never_claims_a_non_clean_verdict_is_clean():
+    """Cycle 7: the evidence-pointer branch printed "is clean" beside `verdict=ISSUES`, sending a
+    lane to repair a pointer on a review that FOUND ISSUES — the mirror of the cycle-6 defect."""
+    for verdict in ("ISSUES", "NOT CLEAN", "", "clean"):
+        r = ac.Record(path=Path("/x.json"), head_sha=LIVE, mint="fresh", verdict=verdict, evidence="TODO: verify")
+        outcome, why = ac.classify(LIVE, r, *RED)
+        assert outcome == ac.NOTHING, (verdict, outcome)
+        assert "is clean" not in why, (verdict, why)
+        assert "not an artifact pointer" in why, (verdict, why)
+
+
+def test_an_unresolvable_out_home_is_rc_2_and_writes_nothing(tmp_path, monkeypatch):
+    """Cycle 7: without the guard `--out '~nosuchuser/o.md'` did not raise — it created a literal
+    `./~nosuchuser/` directory and returned 0, i.e. a completed census at a path nobody named."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(ac, "gh_json", lambda args: [])
+    assert ac.main(["--reviews-dir", str(tmp_path), "--out", "~nosuchuser12345/o.md"]) == 2
+    assert not (tmp_path / "~nosuchuser12345").exists()
+
+
 def test_an_unresolvable_reviews_dir_home_is_rc_2_not_a_traceback(tmp_path):
     # `pathlib.expanduser` raises RuntimeError for `~nosuchuser` — rc 1 would break the contract.
     import pytest
