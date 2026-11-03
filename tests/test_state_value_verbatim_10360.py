@@ -100,9 +100,10 @@ BATTERY = (
     # units are VALUE, not form: a minutes->hours rewrite is refused, while a
     # unit SPELLED differently is not (review P2 on the first round).
     ("the TTL is 20 minutes", "the TTL is 20 hours", True, "unit rewritten"),
-    # `_value_bindings` fuses only the units in its own `_UNIT_WORDS`, so the
-    # judged form is the fused one (`800ms`); a unit written APART is not
-    # fused by the engine and therefore not a unit identity here either.
+    # `_value_bindings` fuses a unit the engine's `_UNIT_WORDS` carries, whether
+    # it is ATTACHED (`800ms`) or written APART (`800 ms`) — so both forms are
+    # unit identities and are compared. Only a spelling OUTSIDE `_UNIT_EQUIV`
+    # (`800millis`) falls back to the unstated-unit tolerance.
     ("the timeout is 800ms", "the timeout is 800s", True, "unit rewritten 2"),
     ("the TTL is 20 minutes", "the TTL is 20 mins", False, "unit spelling"),
     ("the p95 is 0.5 seconds", "the p95 is .5 seconds", False, "leading dot"),
@@ -915,6 +916,88 @@ def test_the_unit_table_covers_every_unit_the_engine_can_fuse():
     Mutating any of the six `k/km/mi/m/kg/lb` rows reds this.
     """
     assert set(v2._UNIT_WORDS) <= set(v2._UNIT_EQUIV)
+
+
+def test_the_carve_outs_own_ADJACENT_time_units_are_judged():
+    """Residual (d)'s ADJACENCY half, closed: a unit beside a value is judged.
+
+    ``STATE_VALUE_CARVE_OUT`` states its operational examples in time units —
+    "back under 800 milliseconds", "a ten minute TTL". At ``a6e20f05b05d`` every
+    one of those unit words was OUTSIDE ``_UNIT_WORDS``: ``_value_bindings``
+    fuses a following token only when that table carries it, so ``800 seconds``
+    bound a value with NO unit, ``_value_identity_matches`` read an absent unit
+    as the deliberate "one side omits the unit" tolerance, and the rewrite was
+    WRITTEN as verbatim. That is the silent-correctness class this issue exists
+    to close, on the guarantee's own worked examples.
+
+    ⛔ NOT the whole of residual (d): the carve-out's RATE example ("forty
+    thousand requests per day") has no unit adjacent to its number, so it is
+    still unjudged and is named as residual (d) in `config/v4-mechanisms.yml`.
+    This test is scoped to what it actually closes.
+
+    MUTATION CHECK TARGET: remove ``seconds``/``minute``/``days``/``miles``
+    (or the ``d``/``wk``/``mo``/``y``/``mi`` identities) from the tables and
+    this goes red.
+    """
+    for content, quote in (
+            ("back under 800 seconds", "back under 800 milliseconds"),
+            ("a ten minute TTL", "a ten hour TTL"),
+            ("the lease is 3 hours", "the lease is 3 days"),
+            ("the drive is 20 miles", "the drive is 20 km")):
+        assert v2._value_slot_divergence(content, quote), (
+            content, quote)
+    # …and the WRITE refuses the point, not just the pure function
+    result = _write("back under 800 seconds", "back under 800 milliseconds")
+    assert result["payload"]["points"] == [], (
+        "a time-unit rewrite of the carve-out's own example reached the write "
+        "path — residual (d) is open again")
+    assert any("REWRITES its own verbatim quote" in w
+               for w in result["warnings"]), result["warnings"]
+    # ⛔ THE FALSE-ACCUSATION DIRECTION, pinned for EVERY new identity: the SAME
+    # value with its unit spelled differently (word vs symbol vs attached) must
+    # stay EQUAL. Without these rows a typo in any new value (`miles` → `ml`,
+    # `days` → `dd`) turns a truthful point into a refusal — the direction this
+    # carve-out must never break — and nothing else in this file notices.
+    for content, quote in (
+            ("the drive is 20 miles", "the drive is 20 mi"),
+            ("the lease is 3 days", "the lease is 3 d"),
+            ("the sprint is 2 weeks", "the sprint is 2 wk"),
+            ("the lease is 3 months", "the lease is 3 mo"),
+            ("the SLA is 5 years", "the SLA is 5 yr"),
+            ("the cache TTL is 900 milliseconds", "the cache TTL is 900 ms"),
+            ("the TTL is 20 minutes", "the TTL is 20 mins"),
+            ("the share is 20 percent", "the share is 20%"),
+            ("back under 800 milliseconds", "back under 800ms")):
+        assert v2._value_slot_divergence(content, quote) == (), (
+            content, quote)
+    # …and the RATE form the carve-out also names is NOT judged: pinned so the
+    # registry row's surviving (d) cannot be closed by accident, and so a future
+    # lane closing it has to move that row.
+    assert v2._value_slot_divergence(
+        "forty thousand requests per day",
+        "forty thousand requests per week") == ()
+
+
+def test_the_registry_row_names_the_residual_that_still_stands():
+    """`config/v4-mechanisms.yml` must not describe a CLOSED gap as open.
+
+    The row's (d) is the artifact a lane reads ("⛔ WHAT IS STILL NOT ENFORCED —
+    read this before improving a number"). It named the ADJACENCY gap
+    (`seconds`, `minute`, `hour`, `day`, `mile`) as unjuged; that gap is closed
+    by the tables above, so the row was left FALSE and nothing red on it. This
+    pins both halves: the closed class must not come back into the row, and the
+    still-open RATE class must stay named there.
+    """
+    row = (pathlib.Path(__file__).resolve().parent.parent
+           / "config" / "v4-mechanisms.yml").read_text(encoding="utf-8")
+    residual = row.split("(d) a RATE unit", 1)
+    assert len(residual) == 2, (
+        "the registry row no longer states residual (d) as the RATE-unit gap — "
+        "if the adjacency gap was reopened, say so there; if (d) was closed, "
+        "delete this pin and the row together")
+    after = residual[1][:1200]
+    assert "per\n      day" in after or "per day" in after, after
+    assert "ADJACENCY" in after.upper(), after
 
 
 def test_the_suffix_comes_from_the_last_digit_run():
