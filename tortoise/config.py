@@ -497,7 +497,11 @@ def resolve_db_path(explicit: str | None = None) -> str:
         # is written out rather than imported: `__main__` imports THIS module, so a
         # masker import here would cycle.
         _shown = uri.split("?", 1)[0].split("#", 1)[0]
-        if "@" in _shown and ":" in _shown.rsplit("@", 1)[0]:
+        # AUTHORITY FORM, not "does it contain a colon": `//token@host/x.db` carries
+        # a token as the user with no `:` at all, and the tree's own masker fails
+        # closed on ANY `@` in a scheme-less value. Requiring a colon was narrower
+        # than that rule and leaked this shape on all three streams.
+        if _shown.startswith("//") and "@" in _shown.split("/", 2)[-1].split("/", 1)[0]:
             _shown = "<redacted: userinfo-shaped>"
         logger.warning(
             "TORTOISE_DB_URI=%r is a file path (no supported scheme: %s) — "

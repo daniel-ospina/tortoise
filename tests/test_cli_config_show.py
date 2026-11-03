@@ -1898,6 +1898,7 @@ def test_the_db_uri_log_line_does_not_print_a_query_credential(
 @pytest.mark.parametrize("hostile", [
     "/tmp/x.db?password=hunter2",
     "//u:hunter2@host/x.db",          # #2987: absolute, scheme dropped, authority kept
+    "//hunter2@host/x.db",            # …and a TOKEN as the user, with no colon
 ])
 def test_the_db_uri_log_line_does_not_print_a_userinfo_credential(
         monkeypatch, capsys, caplog, tmp_path, hostile):
