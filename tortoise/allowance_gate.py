@@ -508,9 +508,9 @@ def carry_resolved_allowances(
     **A lookup MISS is not a fault** (#9567 review round 11). The three outcomes
     of the read are DIFFERENT states and must not collapse into one:
 
-    * the resolver has **no record** for this org (:class:`~tortoise.quota.
-      OrgNotFoundError`) → the dict is returned UNCHANGED. A cap cannot be armed
-      from a record that does not exist, so the caller's own already-authoritative
+    * the resolver has **no record** for this org
+      (``quota.OrgNotFoundError``) → the dict is returned UNCHANGED. A cap
+      cannot be armed from a record that does not exist, so the caller's own already-authoritative
       dict stands and the dimension stays at the gate's declared default (an
       absent key is unconfigured = unlimited, ``#4051``). Refusing here refused a
       tenant whose absence is a well-defined state — a 500 on every gated door
