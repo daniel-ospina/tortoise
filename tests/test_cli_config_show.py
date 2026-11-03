@@ -1466,7 +1466,7 @@ def test_a_present_but_unusable_org_field_is_not_called_absent(capsys, tmp_path)
     assert "org_id_hint" not in cred          # the hint would be a false explanation
     assert _run() == 0
     out = capsys.readouterr().out
-    assert "not a string" in out
+    assert "not a NON-EMPTY string" in out
 
 
 def test_the_chmod_remedy_is_display_escaped_too(monkeypatch, capsys, tmp_path):
@@ -1484,6 +1484,51 @@ def test_the_chmod_remedy_is_display_escaped_too(monkeypatch, capsys, tmp_path):
         assert not any(ln.strip().startswith("FAKE") for ln in out.splitlines())
     finally:
         target.chmod(0o600)
+
+
+def test_a_blank_org_field_is_absent_not_mistyped(capsys, tmp_path):
+    """`signup`/`recover` copy the server's value straight through, so `""` is
+    reachable — and it IS a string. Calling it "not a string" also suppressed the
+    hint that is exactly right for it."""
+    _write(tmp_path / ".tortoise" / "credentials.json", json.dumps({
+        "api_key": GLOBAL_KEY, "api_url": "https://api.premiselabs.co",
+        "org_id": "", "org_name": "  ",
+    }))
+    assert _run(("config", "show", "--json")) == 0
+    cred = json.loads(capsys.readouterr().out)["credential"]
+    assert "org_field_warning" not in cred
+    assert "org_id_hint" in cred              # the accurate explanation, restored
+
+
+def test_the_global_store_refusing_makes_the_transmitting_verbs_fail_too(
+        monkeypatch, capsys, tmp_path):
+    """Those verbs resolve `global_only=True`; asserting "unaffected" without
+    looking told the reader to rely on upload while it was broken."""
+    home = tmp_path / "home"
+    repo = tmp_path / "repo"
+    (home / ".tortoise").mkdir(parents=True)
+    repo.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.chdir(repo)
+    (repo / ".tortoise").write_text("{not json")
+    (home / ".tortoise" / "credentials.json").write_text("{not json")
+    assert _run() == 1
+    out = capsys.readouterr().out
+    assert "FAIL TOO" in out
+    assert "are unaffected" not in out
+
+
+def test_the_db_uri_log_line_does_not_print_a_query_credential(
+        monkeypatch, capsys, tmp_path):
+    """`resolve_db_path` logs the RAW value; a `?password=…` in a path-shaped
+    TORTOISE_DB_URI reached stderr in clear, one line above the redacted field."""
+    _global(tmp_path)
+    monkeypatch.setenv(
+        "TORTOISE_DB_URI", "/tmp/x.db?password=topsecret&api_key=tt_leak")
+    assert _run(("config", "show", "--json")) == 0
+    cap = capsys.readouterr()
+    assert "topsecret" not in cap.out + cap.err
+    assert "tt_leak" not in cap.out + cap.err
 
 
 def test_a_resolved_path_with_a_colon_is_still_a_path(monkeypatch, capsys, tmp_path):
