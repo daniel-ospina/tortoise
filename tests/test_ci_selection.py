@@ -6472,6 +6472,69 @@ def test_duration_coverage_guard_boundary_and_realistic():
     assert duration_coverage_issues(load_manifest()) == []
 
 
+# #2148 (the batch fold's PR #10726) review P3: the map's own ENTRY RULE is that a
+# fast file added by a PR must carry a `durations:` row at all — "a default is not a
+# reading" — and the coverage FLOOR cannot police it, because the floor is a RATIO
+# (`duration_coverage_issues()` against 0.90, ~70 files of headroom here). Two of the
+# nine test files that fold ADDED (`test_attest_census.py`, `test_rail_detach.py`) were
+# registered in a fast surface with no row, so they packed at the flat default while
+# every other added file carried one. Nothing reds on that today, which is exactly why
+# it needs a pin: the rule was enforced by hand once (`test_substrate_map.py`) and
+# silently missed twice.
+#
+# The list is EXPLICIT rather than derived from git: `ADDED_BY_THIS_FOLD` is a fact
+# about one PR's diff, and a test that shelled out to `git diff <base>...HEAD` would
+# change meaning with the base it happened to run against (and would go silently empty
+# on a shallow CI checkout, which is the #10356 shallow-channel trap this same file
+# already carries a control for).
+ADDED_BY_THIS_FOLD = (
+    "test_10084_graph_argument_omit_first.py",
+    "test_10084_graph_disclosure.py",
+    "test_4051_gate_graph.py",
+    "test_9548_record_search_keys_shape.py",
+    "test_attest_census.py",
+    "test_cli_config_show.py",
+    "test_closes_landing.py",
+    "test_metering_capture_usage_reader.py",
+    "test_rail_detach.py",
+)
+
+
+def test_every_test_file_the_fold_added_carries_a_durations_row():
+    """#2148 P3: the ENTRY RULE, pinned — an added fast file has a row of its own."""
+    from tools.ci_selection import load_manifest
+    durations = load_manifest()["durations"]
+    missing = [f for f in ADDED_BY_THIS_FOLD if f not in durations]
+    assert missing == [], (
+        "a test file this PR ADDS is registered in a fast surface but carries no "
+        f"`durations:` row, so it packs at the flat default: {missing}. The map's "
+        "ENTRY RULE requires the row to EXIST (#3400/#4348) — add it with the "
+        "`new in …` note; `tools/ci_timing.py --refresh-durations` fills the value "
+        "from a push-to-main junit sweep later.")
+
+
+def test_the_added_file_row_guard_bites_at_the_pre_fix_head():
+    """Non-vacuity: on the PRE-FIX map the guard must name exactly the two rowless files.
+
+    The pre-fix state is reconstructed from the live map by dropping the two rows this
+    fix adds — not by an invented fixture — so the assertion is about the map this PR
+    shipped, and a future reader can re-derive it the same way.
+    """
+    from tools.ci_selection import load_manifest
+    real = load_manifest()["durations"]
+    # the guard's own predicate, applied to a map that lacks the two rows this fix adds
+    pre_fix = {k: v for k, v in real.items()
+               if k not in {"test_attest_census.py", "test_rail_detach.py"}}
+    assert [f for f in ADDED_BY_THIS_FOLD if f not in pre_fix] == [
+        "test_attest_census.py", "test_rail_detach.py"], (
+        "the pre-fix reconstruction must find exactly the two files the review "
+        "reported rowless — otherwise this pin is not testing that defect")
+    # and dropping any ONE row is still named, so the guard is not keyed to those two
+    dropped = next(f for f in ADDED_BY_THIS_FOLD if f in real)
+    holed = {k: v for k, v in real.items() if k != dropped}
+    assert [f for f in ADDED_BY_THIS_FOLD if f not in holed] == [dropped]
+
+
 # The refresher (`tools/ci_timing.py::render_refreshed_manifest`) rewrites a row's
 # VALUE and preserves its trailing comment verbatim, so a note that states WHERE
 # the number came from can outlive the basis it states — the file ships a rule about
