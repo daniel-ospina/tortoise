@@ -926,8 +926,12 @@ class TestIdentityOnTheResult:
         the reason it printed in the same line.
 
         ⛔ The discriminating assertion is the sentence's OWN text: an earlier
-        draft of this test asserted `"budget" not in message`, which no arm has
-        ever emitted — inert against the defect it named (review round 5).
+        draft of this test asserted `"budget" not in message`. No arm emits that
+        word at this revision, and a reintroduction would trip the check rather
+        than slip past it — a pre-merge revision (`0b3b9366d`) DID emit `the
+        query budget cut part of the lookup` from the `partial` arm, so the draft
+        was not inert against the defect it named; what makes it unnecessary is
+        exact equality, which forbids any added clause (review round 5).
         """
         out = v2.extract_session_v2(_NoCandidates(), _conv(), session_id="s1")
         block = out["identity"]

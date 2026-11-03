@@ -10673,8 +10673,8 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
             # would reach this arm with a NON-zero denominator and assert a
             # vacancy that is not there — the same claim-about-an-unrun-check
             # defect, one input over (#10633 review, P2). No such producer
-            # exists today (`extract_session_v2` takes no `search`, and both
-            # `search_graph` degrade paths pin `query_results: {"ran": [],
+            # exists today (`extract_session_v2` takes no `search`, and every
+            # `search_graph` degrade path pins `query_results: {"ran": [],
             # "failed": []}`), so this is the invariant held locally rather than
             # a behaviour change: every reachable arm-3 run already has a zero
             # denominator, which the arm's own tests assert. A contradictory
