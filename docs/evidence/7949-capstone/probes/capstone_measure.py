@@ -130,6 +130,7 @@ import re
 import subprocess
 import time
 from contextlib import contextmanager
+from datetime import UTC, datetime
 from pathlib import Path
 
 #: ``docs/evidence/7949-capstone/probes/capstone_measure.py`` → repo root.
@@ -2118,6 +2119,34 @@ def _same_corpus(a: str, b: str) -> bool:
     return a.removeprefix("sha256:") == b.removeprefix("sha256:")
 
 
+def _instant(raw: object) -> tuple[int, object]:
+    """A comparable instant from a receipt's ``date``, or a sentinel that sorts FIRST.
+
+    A STRING compare is not an ordering here: ``…T01:00:00+02:00`` sorts ABOVE
+    ``…T00:30:00Z`` lexically while being genuinely EARLIER. The key decides both which
+    receipt wins and whether an unscorable one refuses the selection, so a wrong
+    compare makes the two disagree — a false refusal one way, a reopened silent skip
+    the other. Returns ``(0, raw)`` for anything absent or unparseable (so an undated
+    record never displaces a dated one) and ``(1, datetime)`` otherwise; the tag is
+    compared first, so a datetime is never ordered against a str.
+    """
+    text = raw if isinstance(raw, str) else ""
+    if not text:
+        return (0, "")
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return (0, text)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return (1, parsed)
+
+
+def _sort_key(record: dict, name: str) -> tuple:
+    """The ONE ordering key, shared by the winner choice and the refusal predicate."""
+    return (_instant(record.get("date")), str(record.get("run_id") or ""), name)
+
+
 def select_e4_receipt(repo: Path = ROOT, frozen_pin: str = "") -> tuple[str, dict]:
     """E4's artifact: the operator receipt measured on the FROZEN corpus.
 
@@ -2141,13 +2170,15 @@ def select_e4_receipt(repo: Path = ROOT, frozen_pin: str = "") -> tuple[str, dic
     * every ``*.json`` in the receipts directory is read (the name is not trusted to
       say which files are receipts), and the one whose hash **matches** the pin wins;
       no match REFUSES rather than falling back to "the newest file";
-    * among matches the ordering is by the record's own ISO-8601 ``date`` string and
-      then ``run_id``, and the winner is the last. The writer emits ``…Z``; a receipt
-      whose ``date`` is absent sorts first, so an undated record never displaces a
-      dated one. That ordering is a STRING compare on an unparsed date (a ``+02:00``
-      stamp sorts above its ``Z`` equivalent), which is why the pin — not the date —
-      is what makes the choice safe: every match is on the frozen corpus, so the
-      number cannot differ by corpus whichever one wins;
+    * among matches the ordering is by the record's own ``date`` and then ``run_id``,
+      and the winner is the last. The date is PARSED where it can be (the writer emits
+      a fixed ``…Z`` stamp, but a hand-authored receipt may carry an offset —
+      ``…T01:00:00+02:00`` sorts ABOVE ``…T00:30:00Z`` as a STRING while being
+      genuinely EARLIER); a receipt whose ``date`` is absent or unparseable sorts
+      first, so an undated record never displaces a dated one. One helper
+      (``_sort_key``) produces the key for BOTH the winner choice and the
+      would-have-won refusal below, because those two disagreeing is exactly how a
+      silent revert gets in;
     * a file in the receipts directory that cannot be read as a JSON object REFUSES
       the selection: its corpus and date are unknowable, so nothing can prove the
       newest measurement on the frozen corpus is not it;
@@ -2170,13 +2201,13 @@ def select_e4_receipt(repo: Path = ROOT, frozen_pin: str = "") -> tuple[str, dic
                          "written over the pre-registered corpus")
     directory = repo / E4_RECEIPT_DIR
     paths = sorted(directory.glob(E4_RECEIPT_GLOB)) if directory.is_dir() else []
-    matched: list[tuple[str, str, Path, dict]] = []
+    matched: list[tuple[tuple, Path, dict]] = []
     skipped: list[str] = []
     #: Candidates that ARE on the frozen pin but carry no ``operator_audit``, so they
     #: cannot be scored. Kept with their ORDERING key: one that sorts after the winner
     #: is a REFUSAL (it would have won), one that sorts before it provably cannot affect
     #: the result and is ignored — refusing on those would name a false reason.
-    unscorable: list[tuple[tuple[str, str, str], str]] = []
+    unscorable: list[tuple[tuple, str]] = []
     #: Files in the receipts directory that could not be read as a JSON object. Their
     #: corpus and date are unknowable, so nothing can prove the newest measurement on
     #: the frozen corpus is not one of them — a REFUSAL, never a silent skip.
@@ -2184,7 +2215,10 @@ def select_e4_receipt(repo: Path = ROOT, frozen_pin: str = "") -> tuple[str, dic
     for path in paths:
         try:
             record = json.loads(path.read_text())
-        except (OSError, json.JSONDecodeError) as exc:
+        except (OSError, ValueError) as exc:
+            # JSONDecodeError and UnicodeDecodeError are both ValueError subclasses, so
+            # this catches a non-UTF-8 file too — otherwise it escapes as a traceback
+            # instead of the refusal naming the file.
             unreadable.append(f"{path.name} (unreadable: {exc})")
             continue
         if not isinstance(record, dict):
@@ -2197,12 +2231,11 @@ def select_e4_receipt(repo: Path = ROOT, frozen_pin: str = "") -> tuple[str, dic
         if not _same_corpus(corpus_hash, frozen_pin):
             skipped.append(f"{path.name} (corpus_hash {corpus_hash[:20]}…)")
             continue
-        key = (str(record.get("date") or ""),
-               str(record.get("run_id") or ""), path.name)
+        key = _sort_key(record, path.name)
         if not isinstance(record.get("operator_audit"), dict):
             unscorable.append((key, path.name))
             continue
-        matched.append((key[0], key[1], path, record))
+        matched.append((key, path, record))
     if unreadable:
         raise SystemExit(
             f"capstone-measure: REFUSED — {len(unreadable)} file(s) in "
@@ -2211,18 +2244,22 @@ def select_e4_receipt(repo: Path = ROOT, frozen_pin: str = "") -> tuple[str, dic
             "prove the newest measurement on the frozen corpus is not one of them — "
             "repair or remove the file, or re-run the operator probe")
     if not matched:
+        if unscorable:
+            raise SystemExit(
+                f"capstone-measure: REFUSED — {len(unscorable)} receipt(s) in "
+                f"{directory} ARE on the frozen corpus ({frozen_pin}) but carry no "
+                "operator_audit, and nothing else matched, so none of them can be "
+                f"scored: {sorted(name for _key, name in unscorable)}. Repair or "
+                "remove them, or re-run the operator probe")
         raise SystemExit(
             f"capstone-measure: REFUSED — no operator receipt in "
             f"{directory} was measured on the frozen corpus "
             f"({frozen_pin}). {len(paths)} candidate(s) were scanned and none "
-            f"matched: {skipped or 'none present'}"
-            + (f"; unscorable on the pin: "
-               f"{sorted(name for _key, name in unscorable)}" if unscorable else "")
-            + ". E4 is a bar over the "
+            f"matched: {skipped or 'none present'}. E4 is a bar over the "
             "pre-registered corpus; scoring it from another revision would report "
             "a number this run's corpus cannot support")
-    matched.sort(key=lambda entry: (entry[0], entry[1], entry[2].name))
-    winner = (matched[-1][0], matched[-1][1], matched[-1][2].name)
+    matched.sort(key=lambda entry: entry[0])
+    winner = matched[-1][0]
     would_have_won = sorted(name for key, name in unscorable if key > winner)
     if would_have_won:
         raise SystemExit(
@@ -2233,7 +2270,7 @@ def select_e4_receipt(repo: Path = ROOT, frozen_pin: str = "") -> tuple[str, dic
             "receipt publish the row's number while the newest measurement on the "
             "same corpus sat unread — repair or remove the receipt, or re-run the "
             "operator probe")
-    _date, _run_id, path, record = matched[-1]
+    _key, path, record = matched[-1]
     return path.relative_to(repo).as_posix(), record
 
 
@@ -2291,7 +2328,8 @@ def build_e4_row(receipt: dict, *, bars: dict, corpus_sha: str) -> dict:
     and ``verdict``/``failure_origin`` are the receipt's gate verdict over its own
     metrics, not this row's verdict.
     """
-    if not _same_corpus(str(receipt.get("corpus_hash") or ""), corpus_sha):
+    if not corpus_sha or not _same_corpus(str(receipt.get("corpus_hash") or ""),
+                                         corpus_sha):
         raise SystemExit(
             f"capstone-measure: REFUSED — build_e4_row was handed "
             f"{receipt.get('evidence')!r}, whose corpus_hash="
