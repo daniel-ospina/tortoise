@@ -630,15 +630,15 @@ status() {
       case "$probe_out" in
         *wedged*)
           echo "NOTE: the pool is WEDGED — MEASURED, not a measurement failure. A fire exits 6 when" >&2
-          echo "      nothing else about it has already decided the code; a fire that is refused," >&2
-          echo "      cannot measure, fails an action, fails to grow, or is refused by the" >&2
-          echo "      provisioner reports THAT code and still names the registrations (the tool's" >&2
-          echo "      EXIT block says which). Repair it as docs/ops/ci-runner-x64.md describes; the" >&2
-          echo "      schedule is armed so the state stops being invisible." >&2 ;;
+          echo "      nothing else about it has already decided the code; a pass whose own verdict is" >&2
+          echo "      `refused`, `unmeasurable`, `action-failed`, `under-target`+`no-listener` or" >&2
+          echo "      `fill-refused-by-provisioner` reports THAT code and still names the registrations" >&2
+          echo "      (the tool's EXIT block says which). Repair it as docs/ops/ci-runner-x64.md" >&2
+          echo "      describes; the schedule is armed so the state stops being invisible." >&2 ;;
         *uncertified*)
           echo "NOTE: the job outcomes were UNREADABLE — capacity cannot be certified either way. A" >&2
-          echo "      fire exits 2 when nothing else about it has already decided the code, until 'gh'" >&2
-          echo "      can read them (a --status probe stays exit 0 by design)." >&2 ;;
+          echo "      fire exits 2 when nothing else about it has already decided the code, and keeps" >&2
+          echo "      doing so until 'gh' can read them (a --status probe stays exit 0 by design)." >&2 ;;
       esac
     else
       echo "probe: FAILED (exit $probe_rc) — this schedule would fire and do NOTHING:" >&2
@@ -846,8 +846,8 @@ if [ "${AUTOSCALE_SKIP_PROBE:-0}" != "1" ]; then
       echo "      block says which). Repair it as docs/ops/ci-runner-x64.md describes." >&2 ;;
     *uncertified*)
       echo "NOTE: the job outcomes were UNREADABLE — every fire reports the state; a fire exits 2 when" >&2
-      echo "      nothing else about it has already decided the code, until 'gh' can read them (a" >&2
-      echo "      --status probe stays exit 0 by design)." >&2 ;;
+      echo "      nothing else about it has already decided the code, and keeps doing so until 'gh' can" >&2
+      echo "      read them (a --status probe stays exit 0 by design)." >&2 ;;
   esac
 fi
 mkdir -p "$STATE_DIR" "$INSTALL_DIR" || exit 1
