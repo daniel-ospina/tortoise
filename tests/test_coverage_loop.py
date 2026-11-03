@@ -310,6 +310,47 @@ def test_loop_disabled_is_default_byte_identical(seeded_sdk):
         "default behavior must not run the loop")
 
 
+# ── (a2) the resolved floor arm reaches the guard (#10629 review) ───────
+
+def test_floor_term_arm_reaches_the_coverage_loop_guard(seeded_sdk,
+                                                         monkeypatch):
+    """#2513 (#10629 review P2): the arming path actually ARMS something.
+
+    The seam landed correct but unarmable — no CLI flag, and neither eval-lane
+    composition forwarded it, so the published "next command" died at argparse
+    and the arm was never selected at all. This pins the COVERAGE-LOOP half by
+    execution: the kwargs the guard RECEIVES are the resolved ones. A dropped
+    forward reds here, instead of the sealed A/B silently running the OFF leg
+    while its receipt says armed.
+    """
+    from tools.longmem_eval import retrieve as _ret
+    from tortoise.retrieval import DEFAULT_POOL_SESSION_CAP
+    from tortoise.retrieval import guard_and_recap_pool as _real_guard
+
+    seen: list[dict] = []
+
+    def _capture(items, **kw):
+        seen.append({k: kw.get(k) for k in ("floor_term", "per_session_cap")})
+        return _real_guard(items, **kw)
+
+    monkeypatch.setattr(_ret, "_guard_and_recap_pool", _capture)
+    on = _ret.retrieve_for_question(
+        seeded_sdk, _question(), ks=(5,), top_k=10, pool_size=60,
+        coverage_loop=True, floor_term=True, guard_per_session_cap=1)
+    assert seen == [{"floor_term": True, "per_session_cap": 1}], seen
+    assert on["coverage_loop_stats"]["floor_term"] is True
+    assert on["coverage_loop_stats"]["guard_per_session_cap"] == 1
+
+    # the default path rides the SAME expression, with the product cap
+    seen.clear()
+    off = _ret.retrieve_for_question(
+        seeded_sdk, _question(), ks=(5,), top_k=10, pool_size=60,
+        coverage_loop=True)
+    assert seen == [{"floor_term": False,
+                     "per_session_cap": DEFAULT_POOL_SESSION_CAP}], seen
+    assert off["coverage_loop_stats"]["floor_term"] is False
+
+
 def test_eval_env_gate_failsafe_off(seeded_sdk, monkeypatch):
     """The eval A/B gate (``retrieve_for_question`` / env
     ``TORTOISE_LME_COVERAGE_LOOP``) is fail-safe OFF: unset and garbage
