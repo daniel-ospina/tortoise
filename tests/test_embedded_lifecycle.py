@@ -175,9 +175,14 @@ def test_server_probe_is_portable_without_procfs(monkeypatch, what):
     then reddened.
 
     ⚠️ What each arm can and cannot prove, stated so the fail is not
-    over-claimed. A flag flip CANNOT red a ``/proc``-only implementation on a
-    Linux CI host, because ``/proc`` answers there and the answer is correct
-    either way. So the arms red on the pre-fix code by NAME and by BEHAVIOUR:
+    over-claimed. The PRE-CHECK below is what makes the portability claim
+    executable on any host: it hides procfs AND makes the ``/proc`` arm answer
+    ``None`` (what it answers on a host that has none) *before* it asserts, so
+    a ``/proc``-only read cannot satisfy it — the Linux CI host included. That
+    is a correction of this test's own first form, which gated the arms on
+    ``_cmdline_from_proc`` and therefore passed on Linux only and failed
+    deterministically on the mac it was written for (3 arms x 10 s). The arms
+    themselves red on the pre-fix code by NAME and by BEHAVIOUR:
 
     * ``ps_arm`` — calls :func:`_cmdline_from_ps` directly, so the fallback is
       exercised for real against a live process. Pre-fix that function does not
@@ -193,11 +198,21 @@ def test_server_probe_is_portable_without_procfs(monkeypatch, what):
     else:
         proc = _spawn_marked_sleeper("redislite/bin/redis-server")
     try:
-        # The real (procfs) source has to see it before we hide procfs, so a
-        # pass cannot come from ps being handed a pid that was never there.
-        assert wait_for(lambda: _cmdline_from_proc(proc.pid) is not None,
-                        timeout_s=10), "the child never became observable"
+        # Simulate the mac BEFORE the pre-check, on every host: no procfs, and
+        # the ``/proc`` arm answers ``None`` for a live pid — which is exactly
+        # what it does where ``/proc`` does not exist. The pre-check can then
+        # only be satisfied by the DISPATCHED source, so it still proves the
+        # child became observable through a real read (a ``ps`` read of a live
+        # child, not a pid that was never there) AND it reds a ``/proc``-only
+        # pre-check on a Linux host, where such a read is invisible to review.
         _hide_procfs(monkeypatch)
+        monkeypatch.setattr(sys.modules[__name__], "_cmdline_from_proc",
+                            lambda pid: None)
+        assert wait_for(lambda: _server_cmdline(proc.pid) is not None,
+                        timeout_s=10), (
+            "the child never became observable through the ps fallback — on a "
+            "host without procfs that is the false-PASS shape this probe "
+            "removes")
         if what == "ps_arm":
             got = _cmdline_from_ps(proc.pid)
             assert got is not None, (
