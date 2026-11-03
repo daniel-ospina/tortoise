@@ -52,11 +52,35 @@
 --
 -- `flatten_search_keys_prop` remains the ONLY flattener in the WRITE path: this
 -- migration does not introduce a second one. The `USING` below is bootstrap
--- arithmetic on rows that already exist, and it applies the SAME rule
--- (per-element `strip`, blank elements dropped, joined by one space, order
+-- arithmetic on rows that already exist, and for an ARRAY it applies the SAME
+-- rule (per-element `strip`, blank elements dropped, joined by one space, order
 -- preserved — see the function body) so a value that predates the ruling lands
 -- in the one canonical form rather than being dropped or reshaped into a second
 -- one.
+--
+-- ⛔ WHERE THE CONVERSION IS DELIBERATELY BROADER THAN THE WRITE PATH
+-- (review P3, #10648). The array arm is the write path's rule exactly; the
+-- OBJECT / NUMBER / BOOLEAN arms are not, and the difference is stated here
+-- rather than left for a reader to reconcile:
+--
+--   * `_record_column_value("point", "search_keys", <dict>)` REFUSES
+--     (`RecordProjectionError`: the graph leaves a dict as-is, and `text` cannot
+--     hold it), so no NEW row can arrive as an object. A pre-existing one can
+--     only have come from the old `_jsonb_or_scalar` path (which `json.dumps`ed
+--     a list) or from a hand-written row — and for those the choice is between
+--     keeping the value's text and DROPPING the value. This file keeps it
+--     (`$1::text`, the jsonb rendering) because a bootstrap that silently
+--     discards data is the failure mode this migration exists to end; the write
+--     path's refusal is what keeps that lenience from becoming a second
+--     representation going forward.
+--   * `number` / `boolean` are the same trade one step milder: their text form
+--     (`42`, `true`) is a value, and `ELSE NULL` would have dropped it. The write
+--     path never produces them either (a bool bound to a `text` column is
+--     `42804`), so again the arms only ever fire on rows that already exist.
+--
+-- The arms are therefore converted-and-preserved, not converted-and-shaped, and
+-- `tests/test_record_searchkeys_10620.py` executes each one (plus the writer's
+-- refusal of the object shape) so a rewrite of any arm goes red.
 --
 -- A FORWARD migration, never an edit of 20261012000003: migrations are
 -- append-only history (the `check-migration-append-only` gate refuses an edit to

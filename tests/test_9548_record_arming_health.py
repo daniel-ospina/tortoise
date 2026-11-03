@@ -32,7 +32,6 @@ the old payload fails here rather than in production:
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import hashlib
 import json
 import os
@@ -69,36 +68,6 @@ def _isolate_env(monkeypatch):
         record_writer.RECORD_GRAPH_ENV,
     ):
         monkeypatch.delenv(name, raising=False)
-
-
-@pytest.fixture(autouse=True)
-def _start_from_zero_write_failures():
-    """Isolate the PROCESS-GLOBAL write-failure state (#10620, #10185).
-
-    `/health` folds a RECENT refusal into `record.ok` — a record that is dropping
-    rows must not read healthy, which is the whole point — so a leg that arms the
-    record and asserts `ok is True` would otherwise be asserting "no OTHER test in
-    this process tripped the seam": an ordering dependency between test files, not
-    a property of the block.
-
-    TWO pieces of process state must be cleared, and they are different things:
-
-    * the CUMULATIVE counter — cleared per reason via the public `remove(reason)`
-      for every reason the snapshot currently reports, so a future reason is
-      cleared too rather than silently re-introducing the bleed;
-    * the REFUSAL STAMP that the window-based verdict reads (#10185). Removing the
-      counter does NOT clear it, and the default window is 5 minutes — longer than
-      the whole suite — so ONE refusal counted by an earlier leg would redden every
-      later leg. This is the exact cross-file bleed the counter half already had.
-
-    Production never calls `clear_record_last_refusal` (it is test-only by
-    contract): the stamp is what makes a refusal observable.
-    """
-    for reason in monitoring.record_write_failure_counts():
-        with contextlib.suppress(KeyError):  # already gone — nothing to do
-            monitoring.RECORD_WRITE_FAILURE_COUNT.remove(reason)
-    monitoring.clear_record_last_refusal()
-    yield
 
 
 def _stub_health_dependencies(monkeypatch) -> None:

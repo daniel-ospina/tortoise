@@ -9961,9 +9961,11 @@ durations:
   test_9350_capture_provenance_journalled.py: 17.6
   test_9548_record_arming_health.py: 0.1
   # #10620 — the DB-free legs are sub-second; the Postgres legs pay the
-  # connect + replay. Measured on a throwaway container at this head: 35 legs
-  # (one of them parametrized over 9 shapes) in ~5 s ARMED, 24 legs in ~4 s
-  # unarmed (the 11 DB legs skip).
+  # connect + replay. At this head the file collects 42 legs (two parametrized
+  # ones: 6 reasons, 12 conversion shapes) — 28 run everywhere, 14 skip without
+  # `TEST_RECORD_DB_URI` (the 2 row legs + the 12-shape conversion leg, which the
+  # armed `test-record-postgres` job runs). Unarmed it is ~3 s; the 4.5 s budget
+  # keeps headroom for the armed legs on a cold container.
   test_record_searchkeys_10620.py: 4.5
   test_9555_narrative_carrier.py: 3.4
   test_backfill_references_5141.py: 0.1

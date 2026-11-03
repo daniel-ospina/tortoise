@@ -694,11 +694,17 @@ class RecordStatementError(RecordProjectionError):
     string) over five hours, and the deployment's own log could not name it.
 
     The message therefore carries, all of it derived from the statement that
-    actually ran rather than from a guess: the statement's ordinal, its verb and
-    table, the columns it wrote with their (bounded) values, and the driver's
-    own ``str(exc)`` verbatim. ``str(exc)`` is the half that names the FAULT
-    (``invalid input syntax for type json``); the columns are the half that names
-    the SUBJECT. Neither alone answers "which column, which row, why".
+    actually ran rather than from a guess: the driver's own ``str(exc)``
+    verbatim, the statement's ordinal, its verb and table, and the columns it
+    wrote with their (bounded) values. ``str(exc)`` is the half that names the
+    FAULT (``invalid input syntax for type json``); the columns are the half that
+    names the SUBJECT. Neither alone answers "which column, which row, why".
+
+    ⛔ THE LINE IS COMPOSED TO FIT THE WRAPPING CONSUMER'S BUDGET
+    (:func:`_failure_line`), because `record_writer._bounded_cause` keeps the
+    HEAD of a message: a line over its limit loses the TAIL, which is where this
+    method puts the driver's fault clause — the half that says what went wrong
+    (#10648 review P2).
     """
 
 
@@ -5015,7 +5021,44 @@ _CONTENT_COLUMNS: frozenset[str] = frozenset({
 #: How much of the DRIVER's message a failure line carries. The driver names the
 #: fault in the first clause and then quotes a LINE of our own SQL, which the
 #: attribution already states far better than a truncated excerpt can.
-_ATTRIBUTION_EXC_LIMIT = 400
+_ATTRIBUTION_EXC_LIMIT = 200
+
+#: The WHOLE failure line's budget in characters, and the number
+#: ``record_writer._bounded_cause`` uses as its own default — ONE number, in one
+#: place, because the two halves have to be budgeted TOGETHER (#10648 review P2).
+#:
+#: The wrap's limit used to be independent of what the projection composed, and
+#: `_bounded_cause` keeps the HEAD of a message. With the driver's text at the
+#: TAIL, a wide statement (a point upsert populates 21 columns — a measured
+#: 488-char attribution) produced a line over the wrap's 400, and the first thing
+#: truncated away was the FAULT: the wrap returned 400 chars in which `invalid
+#: input syntax for type json` was absent, which is the one half this attribution
+#: exists to deliver. The line is now COMPOSED to fit this budget — the driver
+#: clause is bounded on its own, the statement/columns take what is left, and a
+#: long column list is shortened (with an explicit `…` marker) rather than the
+#: fault — so the wrap never truncates a line the projection composed.
+ATTRIBUTION_LINE_LIMIT = 600
+
+#: Between the two halves of a failure line.
+_FAILURE_SEP = " — "
+
+
+def _failure_line(attribution: str, driver: str) -> str:
+    """``<subject> — <driver>``, composed to FIT the wrap's own budget.
+
+    Both halves are bounded here, together, against
+    :data:`ATTRIBUTION_LINE_LIMIT`: the driver clause on its own
+    (:data:`_ATTRIBUTION_EXC_LIMIT`), then the statement/columns against what is
+    left. Nothing downstream has to re-budget a line this function produced, and
+    a column list longer than the room left for it is cut with a `…` marker
+    instead of the fault clause disappearing (#10648 review P2).
+    """
+    driver = _bounded(driver, _ATTRIBUTION_EXC_LIMIT)
+    budget = ATTRIBUTION_LINE_LIMIT - len(driver) - len(_FAILURE_SEP)
+    if len(attribution) > budget:
+        # One character of the budget is the truncation marker itself.
+        attribution = f"{attribution[:max(budget - 1, 0)]}…"
+    return f"{attribution}{_FAILURE_SEP}{driver}"
 
 #: The three shapes the plan emits (`_upsert_statement`, `_patch_statement`,
 #: `_delete_statement`). Anything else is named by index rather than
@@ -5233,8 +5276,10 @@ def replay(records: Sequence[Mapping[str, Any]], conn: Any, *, org_id: str,
             # column refused a row. Raised here, where the failing statement is
             # still in hand, and chained so the driver's traceback survives.
             raise RecordStatementError(
-                f"{_statement_attribution(statement, index, total)}: "
-                f"{type(exc).__name__}: {_bounded(str(exc), _ATTRIBUTION_EXC_LIMIT)}"
+                _failure_line(
+                    _statement_attribution(statement, index, total),
+                    f"{type(exc).__name__}: {exc!s}",
+                )
             ) from exc
     report = ReplayReport(events=len(records), statements=0)
     for statement in plan:

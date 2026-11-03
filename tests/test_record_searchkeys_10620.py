@@ -35,7 +35,6 @@ The DB-free legs run everywhere. The Postgres legs skip without
 """
 from __future__ import annotations
 
-import contextlib
 import json
 import logging
 import os
@@ -211,6 +210,67 @@ def test_a_failed_live_write_names_the_record_and_its_id(monkeypatch, caplog):
     )
 
 
+def _wide_point_record() -> dict:
+    """A realistic, WIDE point upsert — 21 populated columns.
+
+    Width is the whole point of the leg below: the attribution for this record is
+    a measured 488 characters, so anything that budgets the line by character
+    count decides what survives. A narrow record would let a truncating wrap pass
+    by luck.
+    """
+    return {"type": "PointAdded", "point": {
+        "eventId": "pt-wide", "id": "pt-wide",
+        "content": "a claim " + "x" * 200,
+        "point_kind": "statement", "search_keys": "err4032 release",
+        "quote": "q", "verbatim": "v", "speaker": "s", "label": "l",
+        "status": "active", "op_type": "IMPL", "direction": "forward",
+        "tags": ["a", "b"], "authored_by": "me", "assessor": "au",
+        "reviewed": True, "currency": "USD", "amount_minor": 100,
+        "grounding": "g", "as_of": "2026", "props": {"k": "v" * 50},
+    }}
+
+
+def test_the_wrap_cannot_truncate_the_fault_away_on_a_wide_statement(monkeypatch):
+    """⛔ The FAULT is the half that must survive the wrap (#10648 review P2).
+
+    `record_writer._bounded_cause` keeps the HEAD of a message, and the driver's
+    own text used to sit at the TAIL of the attribution. On a wide statement
+    (measured: a 488-char attribution for a 21-column point upsert) the wrap
+    therefore returned 400 characters in which `invalid input syntax for type
+    json` was ABSENT — the attribution existed and still could not say what went
+    wrong.
+
+    Driven through `RecordWriter.write` (the REAL wrap) against a cursor that
+    refuses the real `point` statement, not through `replay()` (which is the
+    unwrapped message) and not through a hand-written `RecordWriteError`.
+    """
+    cursor = _BoomCursor(_JSON_REFUSAL)
+    monkeypatch.setattr(record_projection, "scope_connection",
+                        lambda conn, org_id: cursor)
+    writer = record_writer.RecordWriter(dsn="postgresql://u:p@db.example.com/db")
+
+    with pytest.raises(record_writer.RecordWriteError) as caught:
+        writer.write([_wide_point_record()], org_id="org-t", graph_id="graph-t",
+                     conn=object(), position=False)
+
+    message = str(caught.value)
+    assert "invalid input syntax for type json" in message, (
+        "the driver's own text is the half that names the FAULT, and the wrap "
+        f"truncated it away: {message}"
+    )
+    assert "record statement" in message and "public.point" in message, (
+        f"the SUBJECT (which statement, which table) must still be named: {message}"
+    )
+    assert "node_key=pt-wide" in message and "search_keys=<15 chars withheld>" in message, (
+        "the identifying column must survive: a wide statement truncates its "
+        f"COLUMN LIST, never its identity or its fault: {message}"
+    )
+    assert len(message) < record_projection.ATTRIBUTION_LINE_LIMIT + 200, (
+        "one log line, and the wrap must not have to cut the line the "
+        f"projection composed: {len(message)} chars"
+    )
+
+
 def test_an_unattributed_update_names_its_set_column():
     """`_UPDATE_SETS_RE` must be WIRED, not a dead regex (#10620 review, P2).
 
@@ -275,32 +335,84 @@ def test_the_identity_reader_never_invents_a_value():
     ) == "point.eventId=p1"
 
 
+def test_the_identity_reader_withholds_a_content_bearing_identity():
+    """⛔ `name` IDENTIFIES a source, and a source's `name` is its TITLE.
+
+    `_RECORD_IDENTITY_KEYS` ends with `name` precisely so a `source`/`object`
+    snapshot with no id can still be identified — but that field holds the
+    document's title, the same datum `_CONTENT_COLUMNS` withholds as `title`, and
+    this line is the SAME log line. Printed verbatim it put a document title in
+    the operator's log through the column next door, which is the leak the
+    withhold list exists to prevent (#10648 review P3). The key is still NAMED,
+    with its length: that is what keeps the line diagnosable.
+    """
+    text = record_writer._record_identity(
+        {"type": "SourceAdded", "source": {"name": "Q3 pricing memo"}})
+
+    assert "source.name=" in text, f"the field must still be named: {text}"
+    assert "Q3 pricing memo" not in text, f"a document title reached the log: {text}"
+    assert "<15 chars withheld>" in text, text
+
+
+def test_the_identity_reader_bounds_every_value():
+    """Nothing that reaches this log may be sized by the caller."""
+    text = record_writer._record_identity(
+        {"type": "PointAdded", "point": {"eventId": "p" * 500}})
+
+    assert len(text) < 200, f"an unbounded identity value sized the log line: {len(text)}"
+    assert "point.eventId=" in text, text
+
+
 # ════════════════════════════════════════════════════════════════════════════
 # 2. Health honesty — a dropped row is not a healthy deployment
 # ════════════════════════════════════════════════════════════════════════════
 
 
-@pytest.fixture(autouse=True)
-def _no_ambient_record_refusal():
-    """Nothing here may assert test ORDER through process-global refusal state.
+#: Set by the leg below so the isolation proof after it can SKIP (not fail) when
+#: the two legs are not run together — a `-k` selection must not report a false
+#: red for a property it never set up.
+_REFUSAL_STAMPED_BY_A_PRIOR_LEG = False
 
-    Two pieces of state are global and BOTH are cleared, because they are
-    different facts: the cumulative counter (mirrored verbatim into `/health`)
-    and the refusal stamp the window verdict is computed from (#10185). Clearing
-    only the first leaves a refusal counted by another file reddening these legs
-    for five minutes.
+
+def test_a_counted_refusal_is_visible_in_the_leg_that_counts_it():
+    """The premise of the isolation proof below, asserted as a premise."""
+    global _REFUSAL_STAMPED_BY_A_PRIOR_LEG
+    from tortoise import monitoring
+
+    monitoring.record_record_write_failure("write_failed")
+    refusing = monitoring.record_refusing()
+
+    assert refusing is not None and refusing["reason"] == "write_failed"
+    _REFUSAL_STAMPED_BY_A_PRIOR_LEG = True
+
+
+def test_the_next_leg_does_not_inherit_that_refusal():
+    """⛔ THE CROSS-FILE BLEED, pinned by the file that causes it (#10648 P2).
+
+    `record_refusing()` is PROCESS state on a 300 s window, so before the hoist
+    this leg — and four `status == "ok"` legs in
+    `tests/test_backup_watcher_health.py`, which drive the REAL block — asserted
+    "no earlier test in this worker tripped the record seam". That is an ordering
+    dependency between test FILES, not a property of the block, and it reddens
+    for a reason that has nothing to do with the code under test.
+
+    The clearing lives in `tests/conftest.py::_no_ambient_record_refusal`, which
+    is autouse for the WHOLE suite; this leg fails if that hoist is removed or
+    narrowed back to one file.
     """
     from tortoise import monitoring
 
-    def _clear() -> None:
-        monitoring.clear_record_last_refusal()
-        for reason in monitoring.record_write_failure_counts():
-            with contextlib.suppress(KeyError):  # already gone — nothing to do
-                monitoring.RECORD_WRITE_FAILURE_COUNT.remove(reason)
+    if not _REFUSAL_STAMPED_BY_A_PRIOR_LEG:  # pragma: no cover — `-k` selection
+        pytest.skip("the stamping leg did not run in this selection")
 
-    _clear()
-    yield
-    _clear()
+    assert monitoring.record_refusing() is None, (
+        "a refusal counted by an earlier leg is still inside the 5-minute "
+        "window — every later `status == ok` leg in this worker now asserts "
+        "test ORDER instead of the record's health"
+    )
+    assert monitoring.record_write_failure_counts().get("write_failed", 0) == 0, (
+        "the cumulative counter leaked across legs too"
+    )
 
 
 def _health(monkeypatch, failures: dict[str, int], *, refusing=None) -> dict:
@@ -466,6 +578,43 @@ def test_status_itself_degrades_not_only_the_sub_block(monkeypatch):
     assert body["record"]["degraded_reasons"] == {"no_tenant": 3}
 
 
+def test_a_quiet_record_block_reads_ok_through_the_real_seam(monkeypatch):
+    """The OTHER direction of the fold, with NO stub on the record seam.
+
+    `test_status_itself_degrades_not_only_the_sub_block` above stubs
+    `record_refusing`, so it pins the degraded direction only. This leg stubs
+    nothing on the record seam: it reads the PROCESS's real refusal state — the
+    same read the four `status == "ok"` legs in
+    `tests/test_backup_watcher_health.py` make. It is therefore the direct
+    regression leg for the cross-file bleed (#10648 review P2): a refusal
+    counted by ANY earlier leg in the worker reddens this one, which is only
+    green because `tests/conftest.py::_no_ambient_record_refusal` clears the
+    stamp and the counter on both sides of every test.
+    """
+    import asyncio
+
+    from tortoise import hosted_api, monitoring
+
+    assert monitoring.record_refusing() is None, (
+        "the leg did not start from a clear refusal state — the conftest hoist "
+        "is what makes this assertion a property of the code, not of the order"
+    )
+    monkeypatch.setattr(hosted_api, "_WATCHER", None)
+    monkeypatch.setattr(hosted_api, "_WATCHER_START_ERROR", None)
+    monkeypatch.setattr(hosted_api, "_WATCHER_EXPECTED", False)
+    probe = {"ok": True, "latency_ms": 0.1, "error": None}
+    health_probe = getattr(hosted_api, "_HEALTH_PROBE", None)
+    if health_probe is not None:
+        monkeypatch.setattr(health_probe, "snapshot", lambda: dict(probe))
+
+    body = asyncio.run(hosted_api.health())
+
+    assert body["status"] == "ok", body["record"]
+    assert body["record"]["degraded"] is False, body["record"]
+    assert body["record"]["refusing"] is None, body["record"]
+    assert body["record"]["ok"] is True, body["record"]
+
+
 def test_the_health_docstring_states_the_window_not_a_counter_fold():
     """`health()`'s own docstring must not teach the reading #10185 forbids.
 
@@ -563,10 +712,17 @@ def test_content_columns_are_named_but_never_quoted():
 def test_content_columns_are_real_record_columns():
     """The withhold list may not rot into names no table has (#10620 cycle 3).
 
-    A name that is not a column never matches, so a stale entry silently stops
-    protecting anything — and a NEW content column missing from the set leaks the
-    value it holds. Both directions are checked against the schema the projection
-    itself reads.
+    TWO checks, and they are NOT the same kind of check — stated precisely here
+    because an earlier revision claimed "both directions" for what is one
+    mechanical direction plus one maintained list (#10648 review P3):
+
+    1. NO STALE ENTRY, mechanically over the schema the projection itself reads:
+       a withheld name that is not a column of any record table never matches, so
+       it silently stops protecting anything.
+    2. NO MISSING ENTRY, for the columns this PR's own diff can leak. This one
+       CANNOT be derived from the schema — a column name does not say whether its
+       value is the user's text — so it is a maintained list, and a new
+       content-bearing column has to be added to it deliberately.
     """
     columns = set()
     for table_columns in record_projection.table_columns().values():
@@ -777,6 +933,15 @@ def _shipped_flatten_ddl() -> str:
     ([], None),
     (["only"], "only"),
     ("err4032 release", "err4032 release"),
+    # ⛔ The three arms BEYOND the write path (#10648 review P3). They are not
+    # reachable from a new record (`_record_column_value` refuses a dict and
+    # never emits a number/boolean), but a pre-existing row can hold one, and
+    # the conversion's job there is to PRESERVE the value — `ELSE NULL` would
+    # drop it. Pinned so a rewrite of any arm goes red instead of silently
+    # changing what an existing row becomes.
+    ({"k": "v"}, '{"k": "v"}'),      # object: the jsonb text rendering
+    (42, "42"),                         # number: its own text form
+    (True, "true"),                     # boolean: its own text form
 ])
 def test_the_migration_converts_existing_rows_by_the_write_path_rule(value, expected):
     """One datum, one form: the `USING` arm must equal the writer's rule.
@@ -821,3 +986,11 @@ def test_the_migration_converts_existing_rows_by_the_write_path_rule(value, expe
             f"{value!r}: the migration's arm gives {actual!r} while the write "
             f"path gives {written!r} — the two shapes diverge"
         )
+    elif isinstance(value, dict):
+        # ⛔ The divergence IN THE OTHER DIRECTION, pinned (#10648 review P3):
+        # the conversion PRESERVES an object row, the write path REFUSES one.
+        # Both are deliberate — the record must not gain a second representation
+        # going forward, and a bootstrap must not drop a value that already
+        # exists — so the test states both rather than letting the arms drift.
+        with pytest.raises(record_projection.RecordProjectionError):
+            record_projection._record_column_value("point", "search_keys", value)

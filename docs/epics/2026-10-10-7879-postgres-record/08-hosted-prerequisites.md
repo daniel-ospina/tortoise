@@ -299,8 +299,10 @@ test until the entry was deleted, while a **producer-side** fix left the entry g
 the ruling that assertion existed to enforce is the one that closed both halves: **prefer the schema
 side**. Every refusal in that loop is now a HARD FAILURE — there is no allowance left to widen.
 **What it blocks:** a **complete** session record (the redaction count was lost until #9264's
-migration) and any Point that carries extracted `search_keys` (still refused ⇒ still lost). Both
-are silent losses the journal heals, so they are invisible without R3.
+migration) and any Point that carries extracted `search_keys` — that one was refused for **302
+rows in 5 h** before #10620 narrowed `point.search_keys` to `text` (the producer's form), so both
+halves are now carried. Both were silent losses the journal heals, which is why they were
+invisible without R3.
 
 ### R5 — Materialise the point-property edge family into `relation` · **L** · code · **BLOCKER**
 
@@ -459,9 +461,10 @@ rebuild = record-sourced rebuild, **1 : 1 : 1** for `ownedBy`, `dependsOn`, `has
 one row each (the zero re-measured on the same harness before the change: `relation` = 3 rows total, `CONTAINS` 2 and `extractedFrom` 1). A `capture_session` on that harness leaves one residual mismatch —
 `aboutObject` and
 `extractedFrom` short by the captured turns — and it is NOT this family: the captured Point itself never reaches
-the record, because its `search_keys` string met `point.search_keys jsonb` (**R4**'s pinned, now FIXED by #10620 —
-tolerance vocabulary (DELETED in #10620), `tests/test_9078_…`), so the edges that Point carried have no endpoint to
-resolve. Named here so it is not read as an edge defect.
+the record, because its `search_keys` string met `point.search_keys jsonb`. That was **R4**'s remaining
+half, FIXED by #10620 (the column is now `text`; the `tests/test_9078_…` tolerance vocabulary is
+DELETED with it), so the edges that Point carried have no endpoint to resolve only on a deployment
+that has not applied `20261102000001`. Named here so it is not read as an edge defect.
 
 **What is still not carried, with why** — this is the "0 families without a stated reason" answer: TWO families
 and ONE shape.

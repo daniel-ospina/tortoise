@@ -6456,7 +6456,20 @@ def _record_health() -> dict:
     # either in here would make every `capture_session` read as a broken record.
     failures = block["record_write_failures"]
     if isinstance(failures, dict):
-        refusing = record_refusing()
+        # ⛔ GUARDED, like every other read in this function (#10648 review P2).
+        # The docstring above promises this block "never raises and never
+        # 5xxes", and each sibling read — the monitoring import, the counter
+        # snapshot, the tenancy read, the DSN read — is wrapped with "liveness
+        # must answer, always". This one was not, and it is the shape that turns
+        # a monitoring fix into a 500 on the endpoint Fly probes. No current
+        # raiser exists (`record_refusing` touches one module global and
+        # `time.monotonic`); the guard is the contract, not a bug workaround.
+        try:
+            refusing = record_refusing()
+        except Exception as exc:  # liveness must answer, always
+            refusing = None
+            block["ok"] = False
+            block["error"] = f"refusal state unreadable: {str(exc)[:160]}"
         block["refusing"] = refusing
         reason = refusing["reason"] if refusing else None
         block["degraded"] = bool(refusing)
