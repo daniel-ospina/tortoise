@@ -28,6 +28,7 @@ constant) — no graph, no network.
 """
 from __future__ import annotations
 
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -255,12 +256,15 @@ def test_fetch_is_one_query_with_the_filter_in_the_query():
 
 def test_fetch_constrains_event_kind_to_the_turn_shape():
     """``pointKind``'s vocabulary is open, so the turn kind alone does not
-    prove a node is a turn: the hosted demo/dashboard seed writes
-    ``pointKind='event'`` with NO ``is_episodic`` (its body IS
-    ``[role]``-tagged, so ``is_episodic`` is the conjunct that excludes
-    it). The default (turn) kind must carry the shape predicate; the eval's
-    chunk A/B must NOT (chunks are role-prefixed windows whose shape is
-    already pinned by the kind)."""
+    prove a node is a turn: a graph seeded BEFORE ``#10000`` by the hosted
+    demo/dashboard seed holds ``pointKind='event'`` points with NO
+    ``is_episodic`` (its body IS ``[role]``-tagged, so ``is_episodic`` is the
+    conjunct that excludes them). Since ``#10000`` that seed writes no turn
+    node at all (§9.1/D1: the transcript is Postgres'), so no writer in this
+    tree produces that shape — the clause is kept because a legacy graph still
+    holds those nodes, and it must stay excluded. The default (turn) kind must
+    carry the shape predicate; the eval's chunk A/B must NOT (chunks are
+    role-prefixed windows whose shape is already pinned by the kind)."""
     proj = _FakeProj(rows=[])
     source_session_chunk_pass(proj, ["seed1"], pool_ids=[])
     turn_cypher, _ = proj.g.calls[0]
@@ -785,3 +789,67 @@ def test_annotate_pool_additions_is_whole_dict_identical_except_leg():
     assert added["session_date"] == "2026-01-02"
     assert added["match_source"] == "session"
     assert base["match_source"] == "fts"
+
+
+# ── the DELETED demo turn writer may not be described as current fact ───────
+_REPO = Path(__file__).resolve().parent.parent
+
+#: Every home in the tree that explains WHY the turn-shape constraint needs
+#: the ``is_episodic`` conjunct (``session_reinjection._TURN_SHAPE_FILTER``).
+#: The hosted demo/dashboard seed's ``pointKind='event'`` turn writer is
+#: HISTORY since #10000, so a home stating it as current fact is the sentence a
+#: later reader would cite to delete a conjunct a legacy graph still needs.
+_TURN_SHAPE_NARRATIVE_HOMES = (
+    "tortoise/session_reinjection.py",
+    "tortoise/retrieval.py",
+    "tests/test_session_reinjection.py",
+    "tests/test_session_reinjection_rules.py",
+)
+
+#: The PRESENT-TENSE form: the demo/dashboard seed named as the WRITER of
+#: ``pointKind='event'``. The corrected sentences all say the opposite ("writes
+#: no turn node at all"), which this deliberately does not match — note the
+#: stored form is spelled out here as prose precisely so this comment is not
+#: itself a hit.
+_PRESENT_TENSE_DEMO_EVENT_WRITER = re.compile(
+    r"seed\s+writes?\s+(?:``)?pointKind")
+
+
+def test_no_home_states_the_deleted_demo_turn_writer_as_current_fact():
+    """#10000 review P3: three homes were corrected and the fourth was missed.
+
+    `hosted_api._seed_demo_graph` is the non-turn ``pointKind='event'`` writer
+    the ``is_episodic`` conjunct exists to exclude — the shape `#10000` removed
+    across §9.1/D1. A home that still says the seed WRITES that shape is false
+    in the present tense, and it reads as grounds for deleting the (still
+    necessary, legacy-population) conjunct.
+
+    A POPULATION assertion over every narrative home, not a pin at the one site
+    this round edited: that site-local shape is the failure. The same sentence
+    was restated in `session_reinjection.py`, `retrieval.py` and
+    `test_session_reinjection.py` and left present-tense HERE, so a pin inside
+    the one file being fixed reds on nothing when a fifth home is added.
+    """
+    missing = [rel for rel in _TURN_SHAPE_NARRATIVE_HOMES
+               if not (_REPO / rel).is_file()]
+    assert not missing, (
+        "a narrative home moved or was deleted, so this pin no longer covers "
+        f"the claim it exists for: {missing}")
+
+    for rel in _TURN_SHAPE_NARRATIVE_HOMES:
+        flat = " ".join((_REPO / rel).read_text(encoding="utf-8").split())
+        assert not _PRESENT_TENSE_DEMO_EVENT_WRITER.search(flat), (
+            f"`{rel}` says the demo/dashboard seed WRITES ``pointKind='event'`` "
+            "as current fact — since #10000 it writes no turn node at all "
+            "(§9.1/D1). Restate it as history (the clause is kept because a "
+            "graph seeded BEFORE #10000 still holds those nodes) rather than "
+            "leaving a claim about a writer that no longer exists")
+        # The positive half: the HISTORY MARKER is what makes the surviving
+        # conjunct defensible. Without it the clause reads as dead weight and
+        # the next reader deletes it — and legacy demo graphs lose the only
+        # exclusion keeping their orphan `event` nodes out of the turn set.
+        assert "#10000" in flat, (
+            f"`{rel}` explains the `is_episodic` turn-shape constraint without "
+            "naming #10000, so the reader cannot tell the demo/dashboard "
+            "seed's `event` nodes are a LEGACY population the clause is "
+            "retained for")
