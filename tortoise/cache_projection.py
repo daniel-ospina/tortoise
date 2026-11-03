@@ -473,10 +473,11 @@ FOLD_ON_CREATE_DEFAULTS: dict[str, dict[str, Any]] = {
 #:   #9974 R1 (#10524), which removed the fold's fabricated `coalesce($st,
 #:   'live')` and the door's `out["status"] = "live"` — and `sdk.create_entity`
 #:   accepts a caller status — ⚠️ the SUBJECT door validates it against §4.2, the
-#:   OBJECT door validates nothing (the `_validate_bundle` status-refusal loop in
-#:   `sdk.ingest` says so of `:Object`/`:Event`: "do not validate, they STORE the
-#:   value" — cited by SYMBOL, not by line, per #10524's own rule that a merge
-#:   re-stales a line cite while a symbol cannot) — so
+#:   OBJECT door validates nothing (`sdk._check_endpoints`'s status-refusal loop,
+#:   reached through `sdk._validate_bundle` — it says so of `:Object`/`:Event`:
+#:   "do not validate, they STORE the value"; cited by SYMBOL, not by line, per
+#:   #10524's own rule that a merge re-stales a line cite while a symbol cannot)
+#:   — so
 #:   `create_object(name, status='superseded')` writes a terminal status at
 #:   birth that `never_store` keeps out of the layer tables. `ObjectRegistered` /
 #:   `SubjectAdded` are now selected from the SAME stream (their `payload ->
@@ -505,10 +506,11 @@ FOLD_ON_CREATE_DEFAULTS: dict[str, dict[str, Any]] = {
 #:   would otherwise write the record's.
 #:   ⛔ THE DIVERGENCE RUNS IN BOTH DIRECTIONS, and only ONE of them is closed.
 #:   (a) THE HARM DIRECTION — a TERMINAL the graph really DID hold, discarded by
-#:   the birth arm, so the rebuild answers CURRENT: `[restatus(seq 1,'archived'),
-#:   birth(seq 2,'live')]` rebuilt `live` while the graph holds `archived`, and
-#:   `live._terminal_excluded` then admits a superseded entity whose name still
-#:   resolves. Reachability is not exotic: the first journaled creation record is
+#:   the birth arm, so the rebuild answers CURRENT. PRE-LATCH the overwrite
+#:   ordering `[restatus(seq 1,'archived'), birth(seq 2,'live')]` rebuilt `live`
+#:   while the graph holds `archived`, and `live._terminal_excluded` then admits a
+#:   superseded entity whose name still resolves — that ordering is CLOSED, see
+#:   (a-1). Reachability is not exotic: the first journaled creation record is
 #:   a RE-MENTION whenever the node pre-existed (stub, explicit `id=`, pre-#3590
 #:   graph, partial replay from `start_seq`), and a caller-supplied
 #:   `create_object(..., status='live')` states it explicitly — so the failure
@@ -1825,15 +1827,20 @@ def apply_event_stream_folds(
                 # delete-then-re-create) the live fold took a DIFFERENT arm than
                 # this replay assumes, and the divergence runs in BOTH directions:
                 #   (a) the node existed at that earlier event, so a pre-birth
-                #   `restatus`/pack fold the live graph DID apply is DISCARDED by
-                #   this arm — MEASURED: `[restatus(seq 1, 'archived'),
-                #   birth(seq 2, None)]` rebuilds with NO status (reads LIVE) while
-                #   the graph holds `archived` (terminal), and
-                #   `[birth(None), …, birth('archived')]` (delete-then-re-create)
-                #   rebuilds absent while the graph holds `archived`. The v1 of
-                #   this comment named only the opposite direction ("possibly a
-                #   TERMINAL value the graph never held"), which is the rarer
-                #   half;
+                #   `restatus`/pack fold the live graph DID apply can be
+                #   DISCARDED by this arm. ⚠️ ONE of its orderings is now CLOSED
+                #   by the terminal latch below, and the other is NOT — do not
+                #   read this as "closed":
+                #   (a-1) `restatus → silent birth` (`[restatus(seq 1,
+                #   'archived'), birth(seq 2, None)]`) is CLOSED. MEASURED at this
+                #   head: it rebuilds `archived`, because `if not
+                #   _is_terminal_status(status)` refuses to let the silent birth
+                #   clear a terminal the replay already holds (pre-latch it
+                #   rebuilt with NO status, which reads LIVE).
+                #   (a-2) `delete-then-re-create` is STILL OPEN —
+                #   `[birth(None), …, birth('archived')]` rebuilds absent while the
+                #   graph holds `archived`, because the value is discarded by the
+                #   earliest-only rule, which the latch cannot reach.
                 #   (b) the ON MATCH arm keeps the node's own status while this
                 #   replay writes the record's — note that a re-CREATE under an
                 #   explicit id takes ON CREATE, so there the graph holds the

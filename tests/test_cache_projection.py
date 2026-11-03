@@ -1477,12 +1477,16 @@ def test_a_birth_record_cannot_resurrect_a_terminal_the_graph_holds():
     ⛔ That is #9974's own harm, re-opened by the leg added to close it: a
     rebuilt status of `live` is admitted by `live._terminal_excluded` as CURRENT
     and its name resolves through `entity_identity.resolve_entity_id`. It is NOT
-    the benign "absent reads LIVE" flavour — the arm actively asserts CURRENT,
-    and `sdk._entity_door_props` seeds `status='live'` on every create, so the
-    seeded value is exactly what lands here. Reachability is ordinary: the first
+    the benign "absent reads LIVE" flavour — the arm actively asserts CURRENT.
+    ⚠️ The value has to be STATED to land here: `sdk._entity_door_props` used to
+    seed `status='live'` on every create, and #9974 R1 (#10524) DELETED that
+    fabrication, so the route is now a caller-supplied
+    `create_object(..., status='live')` or a pre-R1 journal — narrower, and still
+    reachable. Reachability of the RE-MENTION is ordinary either way: the first
     journaled creation record is a re-mention whenever the node pre-existed the
     journal (name stub, explicit `id=`, pre-#3590 graph, partial replay from
-    `start_seq`).
+    `start_seq`), and `_upsert_object` then takes the ON MATCH arm, which writes
+    no `status` (`projection/entities.py`).
 
     MEASURED without the latch (`if not _is_terminal_status(status)`): the first
     assertion below reads `'live'`.
