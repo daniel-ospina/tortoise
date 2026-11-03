@@ -2445,6 +2445,18 @@ def test_mention_stub_id_with_an_unestablished_name_still_refuses(env):
     assert "object-superseded-unregistered" not in str(ei.value), (
         "the mention stub's established id was exempted because the record's "
         f"NAME was unestablished: {ei.value}")
+    # #10157 review P1 (cross-surface): the reference fold must reach the SAME
+    # disposition. It used to `continue` here — recording NOTHING, not even the
+    # exempt row — because its stub-existence oracle was `mention_stub_ids`
+    # (HISTORY: "a stub was minted at some point") rather than the journal's
+    # END-state survivor set. A stub id stops addressing its node by routes
+    # that mark nothing deleted (the registration below lands `ON MATCH` and
+    # re-ids that very node), so `check_consistency` passed a journal
+    # `rebuild_all` refuses — the fail-OPEN direction of the #3585 agreement.
+    r = check_consistency(str(events / "events.jsonl"), proj)
+    assert r["non_folded_refused_count"] >= 1, (
+        "the reference fold silently passed a supersede the graph engine "
+        f"refuses: {r['non_folded_events']}")
 
 
 def test_mention_established_then_deleted_name_still_refuses(env):
@@ -2604,6 +2616,95 @@ def test_mention_stub_rementioned_after_delete_folds_again(env):
         "the reference fold treated a re-mentioned stub as still deleted: "
         f"{r['non_folded_events']}")
     assert r["divergence"] != "non-folded", r["divergence"]
+
+
+def test_mention_stub_existence_is_the_journals_END_state():
+    """#10157 review P1: the stub-existence oracle must answer "does a node
+    carry this id at the journal's END", not "was this id ever minted".
+
+    FAILS IF: the sweep filters `mention_stub_ids` by the historical `deleted`
+    marks (the pre-fix form). `mention_stub_ids` records that a stub was minted
+    SOMEWHERE in the walk; an id stops addressing its node by routes that mark
+    nothing deleted — a later `ObjectRegistered` for the same name lands
+    `ON MATCH` and RE-IDS that very node (`_upsert_object`), so
+    `MATCH (o:Object {id:$id})` binds 0 rows afterwards. Keyed on history, the
+    reference fold `continue`d and recorded NOTHING for a record every graph
+    engine refuses, so `check_consistency` passed a journal `rebuild_all`
+    refuses (the fail-OPEN direction of the #3585 agreement).
+
+    Both polarities are pinned here, graph-free, because they are the two
+    answers the SAME question must give: the re-id'd stub is GONE at the end
+    (refuse), the deleted-then-RE-MENTIONED stub is BACK at the end (fold — a
+    mention re-mints it `ON CREATE`, which `journal_object_surviving_keys`
+    models; the `deleted` mark alone cannot).
+
+    REACHABLE: `test_mention_stub_id_with_an_unestablished_name_still_refuses`
+    is this exact fixture driven through `rebuild_all`, and a later
+    registration of a mentioned name is an ordinary capture shape.
+    """
+    stub = _entity_name_id("Object", "ACME-END")
+    re_ided = [
+        {"type": "EventRecorded", "id": "e-end-1", "eventKind": "k",
+         "object": "ACME-END", "event_id": "e-end-rec"},
+        {"type": "ObjectSuperseded", "id": stub, "name": "GHOST-END",
+         "supersedes_by": "y", "event_id": "e-end-sup"},
+        {"type": "ObjectRegistered", "id": "obj-end-real",
+         "name": "ACME-END", "status": "live", "event_id": "e-end-reg"},
+    ]
+    with collect_non_folded() as nf:
+        _fold_journal_entities([dict(e) for e in re_ided])
+    assert [e.shape for e in refused_events(nf)] == \
+        ["object-superseded-miss"], (
+            "the reference fold recorded nothing for an id the journal "
+            "re-id'd away — the graph engines refuse this record: "
+            f"{[str(e) for e in nf]}")
+
+    revived = [
+        {"type": "EventRecorded", "id": "e-rev-1", "eventKind": "k",
+         "object": "ACME-REV", "event_id": "e-rev-rec1"},
+        {"type": "EntityMutated", "op": "delete", "label": "Object",
+         "id": _entity_name_id("Object", "ACME-REV"),
+         "event_id": "e-rev-del"},
+        {"type": "EventRecorded", "id": "e-rev-2", "eventKind": "k",
+         "object": "ACME-REV", "event_id": "e-rev-rec2"},
+        {"type": "ObjectSuperseded", "name": "ACME-REV",
+         "supersedes_by": "y", "event_id": "e-rev-sup"},
+    ]
+    with collect_non_folded() as nf:
+        _fold_journal_entities([dict(e) for e in revived])
+    assert [e.shape for e in refused_events(nf)] == [], (
+        "the reference fold refused a stub the journal re-MENTIONED after "
+        f"deleting it — the graph folds that supersede: {[str(e) for e in nf]}")
+
+
+def test_supersede_with_a_non_string_name_returns_a_verdict_not_a_crash():
+    """#10157 review P2: a malformed `name` must be REFUSED, never crash the gate.
+
+    FAILS IF: the stub-resolution limb calls `mention_stub_carriers.get(oname)`
+    without the `isinstance(oname, str)` guard its three neighbours carry
+    (`_object_target`'s name branch, `_supersede_name_unregistered`, and
+    `_record_supersede_miss`'s `candidate`). A hand-written or legacy journal
+    line carrying `"name": ["x"]` reaches the unguarded `dict.get` and raises
+    `TypeError: unhashable type: 'list'`, so `check_consistency` — a health
+    gate — aborts with a traceback instead of returning a verdict, and
+    `_fold_journal_entities` dies before recording any other miss in the
+    journal.
+
+    REACHABLE: the `_raw` fixture writes journal lines by hand, and the shape
+    already appears in the tree (`test_7853_confidence_label_propagation.py`
+    uses `state={"name": ["matrix-moved"]}`).
+    """
+    events = [
+        {"type": "ObjectSuperseded", "id": "obj-malformed",
+         "name": ["MALFORMED"], "supersedes_by": "y",
+         "event_id": "e-malformed"},
+    ]
+    with collect_non_folded() as nf:
+        _fold_journal_entities([dict(e) for e in events])
+    assert [e.shape for e in refused_events(nf)] == \
+        ["object-superseded-miss"], (
+            "a non-string name was not classified (nor recorded): "
+            f"{[str(e) for e in nf]}")
 
 
 def test_nested_supersede_of_an_established_name_agrees_on_every_engine(env):

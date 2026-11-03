@@ -1990,26 +1990,34 @@ def _fold_journal_entities(events: list[dict]) -> tuple[dict, set, set]:
                     if _stub_label not in _NAME_MERGE_LABELS:
                         continue
                     _stub_id = entity_name_id(_stub_label, _stub_name)
-                    # #10157 review P2: a mention RE-mints a stub the journal
-                    # deleted earlier — `MERGE (o:Object {name:$name})` with an
-                    # `ON CREATE` id binds no node once the old one is gone, so
-                    # it creates one carrying that same deterministic id. The
-                    # id is therefore live again, exactly as a later creation
-                    # record revives its incarnation (`deleted.discard` in the
-                    # creation branch). Without this the sweep still believed
-                    # the stub deleted and refused a journal all three graph
-                    # engines fold.
-                    # ⛔ BEFORE the `continue` below: a RE-mention finds the
-                    # carrier set already populated (it is never pruned), so
-                    # clearing the mark after that branch would never run.
-                    deleted.discard((_stub_label, _stub_id))
                     _stub_carriers = carriers_by_name.setdefault(
                         (_stub_label, _stub_name), set())
                     if _stub_carriers:
                         # `MERGE … {name:$name}` matched an existing carrier, so
                         # the stub id (an `ON CREATE` write) does NOT land and
                         # no carrier moves. Same rule the fold applies.
+                        #
+                        # #10157 review P1 (second trigger): a mention RE-mints
+                        # a stub the journal deleted earlier — the marked `MERGE`
+                        # binds no node once the old one is gone, so `ON CREATE`
+                        # fires and the SAME deterministic id is live again,
+                        # exactly as a later creation record revives its
+                        # incarnation (the `deleted.discard` in the creation
+                        # branch). The carrier set is never pruned by a delete,
+                        # so the re-minted node is still `_stub_id` HERE — which
+                        # is what makes this test the right one.
+                        # ⛔ It is NOT the right test when a REGISTRATION took
+                        # the name: that is the same `MERGE`, but it lands
+                        # `ON MATCH` and re-ids the node to the registration's
+                        # own id — after which the graph holds NOTHING carrying
+                        # `_stub_id`. Clearing the mark there reported a deleted
+                        # node as live and made the sweep `continue` on a
+                        # supersede every graph engine refuses (#10157 review
+                        # P1, measured on the registration fixture).
+                        if _stub_id in _stub_carriers:
+                            deleted.discard((_stub_label, _stub_id))
                         continue
+                    deleted.discard((_stub_label, _stub_id))
                     _stub_carriers.add(_stub_id)
                     if _stub_label == "Object":
                         mention_stub_carriers.setdefault(
@@ -2248,24 +2256,51 @@ def _fold_journal_entities(events: list[dict]) -> tuple[dict, set, set]:
             # also asserts `check_consistency` refuses — the guard below is
             # otherwise pinned by nothing).
             #
-            # ⛔ EXISTENCE is `deleted`, NOT the gated `_object_hard_deleted`
-            # map (review P2). That map's re-creation anchors are seeded only
-            # from `PointAdded` / `OperatorAdded` records, so a stub revived by
-            # a later `EventRecorded` MENTION is not an anchor there: it keeps
-            # reporting the delete and the sweep refused a journal all three
-            # graph engines fold. `deleted` is the fold's own END-state set and
-            # the seeding clears the mark on a re-mint, which is exactly the
-            # "does this node exist now" question this limb asks. (The gated
-            # map remains the right oracle for its own `supersede-target-
-            # deleted` exemption, which must stay anchored — a different
-            # question, asked above.)
+            # ⛔ EXISTENCE is the journal's END-STATE survivor set —
+            # `journal_object_surviving_keys`, the SAME `surviving_ids`
+            # `_object_target` reads — NOT the historical `deleted` marks and
+            # NOT the gated `_object_hard_deleted` map (review P1 + P2).
+            # Three oracles, three different questions, and only one of them is
+            # the graph's:
+            #   * `mention_stub_ids` alone is HISTORY — "a stub was minted at
+            #     some point in the walk". A stub id stops addressing its node
+            #     by routes that mark nothing deleted: a later `ObjectRegistered`
+            #     for the same name lands `ON MATCH` and re-ids the node, so
+            #     `MATCH (o:Object {id:$id})` binds 0 rows afterwards. Keyed on
+            #     history, this fold `continue`d and recorded NOTHING — not the
+            #     refusal and not even the exempt row — for a record every
+            #     graph engine refuses: a fail-OPEN inside the very predicate
+            #     that exists to keep the two classifiers in step (#10157
+            #     review P1, measured on
+            #     `test_mention_stub_id_with_an_unestablished_name_still_
+            #     refuses`'s own fixture).
+            #   * `deleted` records a delete ANYWHERE in the walk and is only
+            #     cleared by a re-creation the fold recognises; a re-mention
+            #     after a registration took the name does not revive the stub
+            #     id, so a mark-based filter both missed that revival and
+            #     over-read this one.
+            #   * `journal_object_surviving_keys` models `ON CREATE` / `ON MATCH`
+            #     per record — it drops the id a registration re-ids away and
+            #     re-adds the deterministic stub id on a re-mention that mints
+            #     again — which is exactly "does a node carry this id at the
+            #     journal's END", the question the deferred sweep asks.
+            # (The gated `hard_deleted` map remains the right oracle for its own
+            # `supersede-target-deleted` exemption, above: that one must stay
+            # ANCHORED, a different question.)
             _surviving_stub_ids = {
-                _sid for _sid in mention_stub_ids
-                if ("Object", _sid) not in deleted}
+                _sid for _sid in mention_stub_ids if _sid in surviving_ids}
+            # ⛔ The name limb is `isinstance`-guarded like every other reader
+            # of this field (`_object_target` above, `_supersede_name_
+            # unregistered`, `_record_supersede_miss`'s `candidate`): a journal
+            # line carrying `"name": [...]` / `{...}` is not a string key, and
+            # an unguarded `dict.get` raised `TypeError: unhashable type`,
+            # aborting this health gate with a traceback instead of a verdict
+            # (#10157 review P2).
             _stub_hit = (
                 (isinstance(oid, str) and oid in _surviving_stub_ids)
-                or any(_sid in _surviving_stub_ids
-                       for _sid in mention_stub_carriers.get(oname, ())))
+                or (isinstance(oname, str) and bool(oname)
+                    and any(_sid in _surviving_stub_ids
+                            for _sid in mention_stub_carriers.get(oname, ()))))
             if _stub_hit:
                 continue
             # Genuinely unresolvable: an id no journaled registration leaves
