@@ -69,9 +69,22 @@ class FallbackSnapshotStore:
     def __init__(self) -> None:
         self._store: dict[tuple, dict] = {}
         self._lock = threading.RLock()
+        #: Monotone counter bumped by every invalidation/clear. A build captures it
+        #: before reading the corpus and re-checks it before caching the result, so a
+        #: write that lands MID-BUILD can never be undone by that build's ``put``
+        #: (#10602 review round 2). Deliberately ONE global counter rather than a
+        #: per-key one: it is an integer with no growth, and it errs toward NOT caching
+        #: (a write to another graph costs a rebuild, never staleness).
+        self._generation = 0
+
+    def generation(self) -> int:
+        """Current invalidation generation (see ``get_or_build``'s STALENESS note)."""
+        with self._lock:
+            return self._generation
 
     def invalidate(self, key: tuple) -> None:
         with self._lock:
+            self._generation += 1
             self._store.pop(key, None)
 
     def get(self, key: tuple) -> dict | None:
@@ -104,6 +117,7 @@ class FallbackSnapshotStore:
 
     def clear(self) -> None:
         with self._lock:
+            self._generation += 1
             self._store.clear()
 
 
@@ -123,66 +137,118 @@ _store = FallbackSnapshotStore()
 # store is asked for *while it is already the thing under strain*.
 #
 # What this is NOT: it changes no cache policy, no TTL, no size cap, no bound and no
-# result. A joiner re-checks the store under the lock, so a build that completed
-# while it waited is REUSED; a caller that builds gets exactly the snapshot it would
-# have built itself. The staleness a joiner can inherit is bounded by its own wait
-# (milliseconds), which is far inside the 60 s TTL the store already tolerates.
+# result. Nothing is cached that was not already cached, and no answer changes.
 #
-# ⛔ It is not a "cache" in the sense #10602's recorded decisions forbid (§14.2 /
-# §12.1c make FalkorDB itself the cache under the hybrid): the entry, its lifetime
-# and its invalidation are unchanged — this only stops N readers doing identical
-# work at once.
-_BUILD_LOCKS_GUARD = threading.Lock()
-_BUILD_LOCKS: dict[tuple, threading.Lock] = {}
-#: Bound on the lock registry. A lock is dropped only while it is NOT held, so the
-#: dict can never strand a waiter on a discarded lock; entries are re-minted on
-#: demand, and the LRU store this mirrors holds only ``MAX_SNAPSHOT_ENTRIES``.
-MAX_BUILD_LOCKS = 32
+# ⛔ It is also not the "add a cache" remedy #10602's recorded decisions forbid
+# (STORAGE-ARCHITECTURE §14.2 / §12.1c make FalkorDB itself the cache under the
+# hybrid): the entry, its lifetime and its write-side invalidation are unchanged —
+# this only stops N readers doing identical work at once.
+#
+# WHY A FLIGHT AND NOT A PER-KEY LOCK (review rounds 1-2). A bare lock serialises the
+# FAILURE outcome too: ``build_snapshot`` returns ``None`` above ``MAX_CORPUS_POINTS``
+# and on any query exception, and a ``None`` is never cached — so N readers took the
+# lock one after another and each re-ran the identical doomed build, i.e. exactly the
+# concurrency-linear latency this fixes, on the two paths it most needed to help
+# (an over-cap hosted graph, and a store whose snapshot query is failing). A flight
+# publishes ONE outcome — success or ``None`` — to every reader that joined it, so the
+# failure path costs one attempt, not N. A lock registry also had to be evicted to stay
+# bounded, and an evicted-then-re-minted lock let two builds run at once for one key
+# (the bug, back). A flight is removed when its last waiter leaves, so the registry is
+# bounded by what is IN FLIGHT and needs no eviction at all.
+_FLIGHTS: dict[tuple, _Flight] = {}
+_FLIGHTS_GUARD = threading.Lock()
 
 
-def _build_lock(key: tuple) -> threading.Lock:
-    """The one build lock for ``key`` (minted on demand, bounded)."""
-    with _BUILD_LOCKS_GUARD:
-        lock = _BUILD_LOCKS.get(key)
-        if lock is not None:
-            return lock
-        while len(_BUILD_LOCKS) >= MAX_BUILD_LOCKS:
-            for old_key, old_lock in list(_BUILD_LOCKS.items()):
-                if old_key != key and not old_lock.locked():
-                    del _BUILD_LOCKS[old_key]
-                    break
-            else:  # every registry entry is held — mint past the cap, never block
-                break
-        lock = threading.Lock()
-        _BUILD_LOCKS[key] = lock
-        return lock
+class _Flight:
+    """One in-flight corpus build, shared by everyone waiting on the same key."""
+
+    __slots__ = ("done", "result", "waiters")
+
+    def __init__(self) -> None:
+        self.done = threading.Event()
+        #: Only read once ``done`` is set (None means the build produced nothing:
+        #: too big, or its query failed — the legacy path then runs).
+        self.result: dict | None = None
+        self.waiters = 0
 
 
-def get_or_build(proj, key: tuple, *, store: "FallbackSnapshotStore | None" = None,
+def _flight_begin(key: tuple) -> tuple[_Flight, bool]:
+    """Join (or open) the flight for ``key``. Returns ``(flight, is_leader)``."""
+    with _FLIGHTS_GUARD:
+        flight = _FLIGHTS.get(key)
+        if flight is not None:
+            flight.waiters += 1
+            return flight, False
+        flight = _Flight()
+        flight.waiters = 1
+        _FLIGHTS[key] = flight
+        return flight, True
+
+
+def _flight_end(key: tuple, flight: _Flight) -> None:
+    """Leave a flight; the last one out removes it (registry is in-flight-bounded)."""
+    with _FLIGHTS_GUARD:
+        flight.waiters -= 1
+        if flight.waiters <= 0 and _FLIGHTS.get(key) is flight:
+            del _FLIGHTS[key]
+
+
+def get_or_build(proj, key: tuple, *, store: FallbackSnapshotStore | None = None,
                  builder=None) -> dict | None:
     """Cached snapshot for ``key``, building it at most ONCE per key at a time.
 
     Behaviourally identical to the read path's ``get``/``build_snapshot``/``put``
-    sequence (same entry, same None-on-too-big/failed contract, same write-side
-    invalidation); the only difference is that concurrent readers COALESCE instead
-    of each fetching the whole corpus. ``builder``/``store`` are test seams.
+    sequence — same entry, same ``None``-on-too-big / ``None``-on-failed contract, same
+    write-side invalidation — except that concurrent readers COALESCE onto one build.
+
+    STALENESS, stated exactly (review round 2 corrected an overstatement here). A build
+    can be OVERTAKEN by a write: rows are read at t1, ``_mark_dirty`` →
+    ``invalidate(key)`` lands at t2, and a naive ``put`` would publish the pre-write rows
+    for the full 60 s TTL — to every reader, where before each reader built its own and
+    a later one self-healed over the stale entry. So the store's generation is captured
+    before the build and re-checked before the ``put``: if any write invalidated while
+    the build ran, the result is returned to that build's cohort but NOT cached, and the
+    next reader starts a fresh build. A cohort's own staleness is then bounded by the
+    build it joined — the very rows it would have read itself — never by the TTL.
+
+    ``builder``/``store`` are test seams.
     """
     store = _store if store is None else store
     build = build_snapshot if builder is None else builder
+
     snap = store.get(key)
     if snap is not None:
         return snap
-    with _build_lock(key):
-        # Re-check UNDER the lock: a build that completed while this caller waited
-        # is exactly the snapshot it would have built, so it is reused rather than
-        # repeated (the whole point — the wait replaces a full-corpus fetch).
-        snap = store.get(key)
-        if snap is not None:
-            return snap
-        snap = build(proj)
-        if snap is not None:
-            store.put(key, snap)
-        return snap
+
+    flight, leader = _flight_begin(key)
+    if leader:
+        try:
+            # Re-check under leadership: a build may have completed between the
+            # miss above and this flight opening.
+            snap = store.get(key)
+            if snap is None:
+                generation = store.generation()
+                snap = build(proj)
+                # Publish only if no write invalidated the corpus mid-build (see
+                # STALENESS above) — otherwise this cohort keeps its answer and the
+                # next reader rebuilds, which is the self-healing the pre-#10602
+                # per-reader build got for free.
+                if snap is not None and store.generation() == generation:
+                    store.put(key, snap)
+            flight.result = snap
+        finally:
+            flight.done.set()
+            _flight_end(key, flight)
+        return flight.result
+
+    try:
+        # Bounded by the build's own store socket timeouts (the projection's socket
+        # sets connect 2 s / read 10 s), not by an arbitrary join deadline.
+        flight.done.wait()
+        return flight.result
+    finally:
+        _flight_end(key, flight)
+
 
 # Stable key for a ``:memory:`` projection whose client exposes no store
 # identity handle at all. All such projections share it, which buys

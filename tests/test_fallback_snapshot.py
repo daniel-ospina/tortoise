@@ -718,9 +718,8 @@ def test_get_or_build_coalesces_concurrent_readers():
         t.join(timeout=30)
 
     assert len(builds) == 1, (
-        "one corpus build for %d concurrent readers — got %d (the pre-#10602 "
-        "shape: N readers, N whole-corpus fetches)"
-        % (len(out), len(builds)))
+        f"one corpus build for {len(out)} concurrent readers — got {len(builds)} "
+        "(the pre-#10602 shape: N readers, N whole-corpus fetches)")
     assert len(out) == 8 and all(v is not None for v in out.values())
     assert len({id(v) for v in out.values()}) == 1, \
         "every reader must be served the same built snapshot"
@@ -758,6 +757,109 @@ def test_get_or_build_rebuilds_after_invalidation_and_survives_failure():
     assert snap is not None and snap["tag"] == "second"
     fs._store.invalidate(key)
     assert fs._store.get(key) is None, "invalidate() still drops the entry"
+    # …and the drop is HONOURED on the next read (review round 2: this half was
+    # only asserted on the store, so a get_or_build that served the invalidated
+    # snapshot across a write would have passed).
+    rebuilt = fs.get_or_build(None, key, builder=lambda _p: _snap_stub("third"))
+    assert rebuilt is not None and rebuilt["tag"] == "third", \
+        "a read after invalidate() must REBUILD, not serve the dropped snapshot"
+    assert len(calls) == 2, "the failed build must not have been retried implicitly"
+
+
+def test_get_or_build_coalesces_a_FAILED_build_too():
+    """The failure path must cost ONE attempt, not N (review round 2, P2).
+
+    ``build_snapshot`` returns None above MAX_CORPUS_POINTS and on any query
+    exception, and a None is never cached — so a per-key LOCK serialised those N
+    readers into N identical doomed builds. A flight publishes the single outcome
+    to everyone who joined it.
+    """
+    import threading
+
+    fs._store.clear()
+    key = ("fail-graph", "fail-ns")
+    attempts = []
+    lock = threading.Lock()
+    start = threading.Barrier(6)
+    out = {}
+
+    def failing(_proj):
+        with lock:
+            attempts.append(1)
+        time.sleep(0.15)
+        return None
+
+    def reader(i):
+        start.wait()
+        out[i] = fs.get_or_build(None, key, builder=failing)
+
+    threads = [threading.Thread(target=reader, args=(i,)) for i in range(6)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=30)
+
+    assert len(attempts) == 1, (
+        f"a failed build must be attempted ONCE for {len(out)} concurrent "
+        f"readers — got {len(attempts)} (serialised failure is concurrency-linear "
+        "latency on the over-cap / failing-store path)")
+    assert all(v is None for v in out.values()), \
+        "every joiner must get the None contract, so the legacy path runs"
+    assert fs._store.get(key) is None, "a failure must never be cached"
+
+
+def test_get_or_build_does_not_publish_a_build_overtaken_by_a_write():
+    """A write landing MID-BUILD must not be undone by that build's put.
+
+    Review round 2: rows are read at t1, a write invalidates at t2, and a naive
+    put publishes the PRE-write rows for the full 60 s TTL — to every reader,
+    where before each reader built its own and the later one self-healed. The
+    generation guard returns the answer to this cohort but caches nothing, so the
+    next reader rebuilds.
+    """
+    fs._store.clear()
+    key = ("race-graph", "race-ns")
+
+    def builder_overtaken_by_a_write(_proj):
+        # A write lands while the corpus is being read.
+        fs._store.invalidate(key)
+        return _snap_stub("stale")
+
+    first = fs.get_or_build(None, key, builder=builder_overtaken_by_a_write)
+    assert first is not None, "this cohort still gets an answer"
+    assert fs._store.get(key) is None, (
+        "a snapshot overtaken by a write must NOT be cached — caching it serves "
+        "pre-write rows to every reader for the whole TTL")
+    second = fs.get_or_build(None, key, builder=lambda _p: _snap_stub("fresh"))
+    assert second is not None and second["tag"] == "fresh", \
+        "the next reader must rebuild (self-healing, as the pre-#10602 path got free)"
+    assert fs._store.get(key) is not None, "the clean build IS cached"
+
+
+def test_degraded_read_with_claim_class_never_uses_the_snapshot(sdk, monkeypatch):
+    """#2351 must survive the #10602 reshape (review round 2, P3).
+
+    The snapshot is a LEAN projection with no class column, so a claim-class
+    filter cannot be honoured from it — the read must take the legacy path and
+    never call ``get_or_build``. A later "simplification" that calls
+    ``get_or_build`` first would silently break the pre-truncation class filter
+    with every other test green.
+    """
+    sdk.create_point("statement", "alpha beta gamma delta")
+    called = []
+    real = fs.get_or_build
+
+    def spy(proj, key, **kw):
+        called.append(key)
+        return real(proj, key, **kw)
+
+    monkeypatch.setattr(fs, "get_or_build", spy)
+    results = sdk.tortoise_fts_query(
+        query=FTS_MISS, limit=10, claim_class="asserted")
+    assert isinstance(results, list)
+    assert called == [], (
+        "a claim_class-filtered degraded read must NOT touch the snapshot "
+        "(#2351: the lean projection cannot honour it)")
 
 
 def test_degraded_read_path_goes_through_get_or_build(sdk, monkeypatch):
@@ -784,6 +886,6 @@ def test_degraded_read_path_goes_through_get_or_build(sdk, monkeypatch):
         "the degraded read never reached get_or_build — it is still calling "
         "build_snapshot directly, i.e. one whole-corpus fetch PER READER "
         "(#10602)")
-    assert len(calls) == 1, "one degraded read → one coalesced build (%d)" % len(calls)
+    assert len(calls) == 1, f"one degraded read → one coalesced build ({len(calls)})"
     assert any(t.get("reason") == "tfidf_snapshot" for t in trace), \
         "the read must still be served by the snapshot arm it went through"
