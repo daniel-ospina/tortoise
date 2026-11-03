@@ -236,15 +236,22 @@ def _closing_re(sep: str) -> re.Pattern[str]:
 _CLOSING_RE = _closing_re(_CLOSING_SEPARATORS["lenient"])
 _CLOSING_RE_ONELINE = _closing_re(_CLOSING_SEPARATORS["strict"])
 
-#: A BLANK line, i.e. the end of a paragraph. An inline code span cannot cross
-#: it (§6.1 keeps a span inside one paragraph), so it is where the STRICT inline
-#: scan stops looking for a closing backtick run (`_span_limit`).
-_BLANK_LINE_RE = re.compile(r"\n[ \t]*\n")
-
 #: A line that STARTS a new block, tested on the line's text AFTER its blockquote
 #: prefix. A span is inline content and cannot cross a block boundary, and most
 #: blocks end the paragraph WITHOUT a blank line — which is why the strict scan
-#: needed this as well as `_BLANK_LINE_RE` (see `_paragraph_end`).
+#: needs this AS WELL AS `_paragraph_end`'s own blank-line test (`if not
+#: line.strip()`): those are the two halves of the paragraph bound, and
+#: `_span_limit` takes the whole bound from `_paragraph_end`.
+#:
+#: ⛔ There is deliberately no blank-line-only bound sitting beside this one.
+#: Bounding the strict scan at the next blank line ALONE paired a stray backtick
+#: run with the OPENER of a real span in a later block and bought a false `lands`
+#: (#10634 review P2, the fail-open direction this module forbids), so the
+#: constant that spelled that bound was DELETED rather than left as a tempting
+#: "fix" under a comment claiming it is live (#10634 review P3). Do not restore
+#: it, and do not splice it into `_paragraph_end`: it is anchored on a leading
+#: newline while `_paragraph_end` is already standing at a line start, so its
+#: `match` would find nothing and silently WIDEN the strict bound.
 _BLOCK_START_RE = re.compile(
     r"(?: {0,3}(?:[-*+]|\d{1,9}[.)])(?:[ \t]|$)"          # a list item marker
     r"| {0,3}#{1,6}(?:[ \t]|$)"                             # an ATX heading
