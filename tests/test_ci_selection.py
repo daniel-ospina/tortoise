@@ -3230,6 +3230,16 @@ def test_record_schema_pin_runs_on_migration_or_doc_change():
         # asserted the same three things twice; the duplicate is removed rather
         # than left to double-run.
         "supabase/migrations/20261029000001_record_point_cache_tier.sql",
+        # #10620 / PR #10648 review P1: the FORWARD migration that NARROWS
+        # `public.point.search_keys` from `jsonb` to `text`, the tenth member of
+        # this family and the only one that had no entry. Same gap as its
+        # neighbours: it sorts outside the `2026101200000` CORE_ALSO prefix, so
+        # without this line a change to this file ALONE selected NO surface
+        # (measured on the pre-fix head: `surfaces: []`, `full: False`) and none
+        # of the three guards that read it — `test_9078`'s
+        # `RECORD_REAPPLY_STEPS`, `test_9231`'s `RECORD_MIGRATIONS` registry pin,
+        # `test_record_schema_placement.py` — ran on it.
+        "supabase/migrations/20261102000002_record_point_search_keys_text.sql",
         # The DOC side of the #7968 pair, restated after #9638 review P1 deleted
         # it: `test_record_schema_placement.py` reads this file's table, so a
         # docs-only edit must select `core` too. Measured on the pre-fix head:
@@ -13110,6 +13120,23 @@ def test_lane_stash_guard_runs_on_a_tools_only_change():
     assert r["full"] is False, r
     assert r["surfaces"] == ["core"], r
     assert "test_lane_stash.py" in r["test_files"], r
+
+
+def test_rail_pin_runs_on_a_tools_only_change():
+    # #2148: `tests/test_rail_detach.py` (registered `core`) pins the merge
+    # rail's DURABILITY — the detached session that lets `admin-merge.sh`
+    # outlive the lane, the fail-closed verdict vocabulary, and the `flock`
+    # duplicate-rail guard. `tools/` is a flat NON_PYTHON_PREFIXES entry and
+    # `tools/rail_detach.py` matches no SOURCE_PATTERNS row, so before the
+    # CORE_ALSO entry a tools-only diff was filtered out BEFORE the
+    # "not matched -> core" fallback: the pin never ran on the file it exists
+    # to hold (the #1349/#3332/#3616 silent-drop class). Mutation check:
+    # removing the CORE_ALSO entry fails the arm below (surfaces == [] and the
+    # guard absent from test_files).
+    r = _sel(["tools/rail_detach.py"])
+    assert r["full"] is False, r
+    assert r["surfaces"] == ["core"], r
+    assert "test_rail_detach.py" in r["test_files"], r
 
 
 def test_turn_parity_census_guard_runs_on_a_tools_only_change():

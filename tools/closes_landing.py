@@ -84,16 +84,89 @@ no test in the file imported the renderer at all, which is the re-staleable
 `closingIssuesReferences`: for this question the source is empty precisely when it
 matters.
 
+Second question, same grammar: MERGED-BUT-OPEN (#10698)
+------------------------------------------------------
+Everything above asks *"will this keyword fire?"*. `--merged-but-open` asks the
+NEXT question, about the merge that already happened: **"is the issue this merge
+belongs to actually closed — and if not, what does the evidence support?"**
+
+It exists because `lands` is a claim about the KEYWORD, not about the issue. A
+merged-on-main `Closes #N` reports `lands` whether or not `#N` closed, and a
+`Refs #N` body produces **no finding at all** — so the drift this mode measures
+is invisible to every arm above. Measured on this repository at #10698
+(2026-11-03, the default 48 h window): of 43 open P0/P1 issues, **0** appear in
+any merged-on-default PR's `closingIssuesReferences`, **31** are referenced by a
+merged PR and carry no closure record (18 by a timeline mention, 12 by a
+`Refs`-only body, 1 by a `Closes` stranded on a non-default base), and **12** are
+referenced by nothing at all. A `Refs` closes nothing
+(https://docs.github.com/en/issues/tracking-your-work-with-issues/using-issues/linking-a-pull-request-to-an-issue
+lists exactly `close(s|d) fix(es|ed) resolve(s|d)`), so the issue stays open while
+the work sits on `main`.
+
+The three verdicts, and what each one is allowed to rest on:
+
+* `done`     — a merged-on-DEFAULT-branch PR lists the issue in its
+                `closingIssuesReferences`. That is GitHub's OWN closure record:
+                the keyword fired. It is the only positive evidence this mode
+                accepts, because a keyword that merged into the default branch
+                *closes the issue* — so an issue that is still open beside such
+                a PR is a deliberate reopen or a repo with automatic closing
+                turned off, never something this tool may read as "done" on its
+                own say-so. (In the measured 48 h window the `done` population
+                is 0 — but that is the WINDOW, not the rule: over all merged
+                history back to 2026-10-12 exactly 3 of the 43 carry a closure
+                record — `#4282 <- PR #8174`, `#9548 <- PR #9585`,
+                `#10000 <- PR #10011` — and a human reopened ALL THREE. That is
+                why `done` also requires a timeline with no reopen — see
+                `Timeline`.)
+* `partial`  — no closure record, but a merged-on-default PR references the
+                issue: a `Closes` that did not fire, a `Refs`-only body, or a
+                bare mention in the timeline. The work may be on `main`; nothing
+                demonstrates it is finished.
+* `not-done` — no merged-on-default PR references the issue by any route,
+                INCLUDING its timeline. This is a measured statement, so it is
+                emitted only after the timeline was read.
+
+Checkboxes are an ANNOTATION, never a gate. Measured over that same population:
+37 of 43 issue bodies carry no task list at all, and none of the 6 that do has
+every box checked — so gating on them would pass the majority vacuously and
+block the largest P0/P1s permanently. `acceptance=k/n` is printed and nothing
+depends on it.
+
+The line formats are the fleet-readable contract:
+
+    MERGED-BUT-OPEN(<merge-sha> <pr#> -> #<issue> verdict=<v> reason=<r> acceptance=<k/n|none>)
+    NO-MERGE-REF(#<issue> verdict=<v> reason=<r> acceptance=<k/n|none>)
+
+`NO-MERGE-REF` carries placeholders because TWO verdicts legitimately print
+there: `verdict=not-done reason=no-merge-ref-in-window` on a measured absence,
+and `verdict=partial reason=unmeasured-timeline` under `--no-timeline` (where
+neither a reopen nor an absence can be ruled out). What defines the kind is the
+ABSENCE of a merge sha, not the verdict.
+
+TWO kinds, deliberately: a `not-done` issue has no merge, so printing a `<sha>
+<pr#>` for it would assert a merge that never happened. A `grep MERGED-BUT-OPEN`
+therefore collects only lines backed by a real merge sha.
+
+Like everything above, this mode **never writes** — no comments, no labels, no
+closures. `done` is the PRECONDITION for a human (or a lane) closing an issue,
+never the authorisation to do it.
+
 Usage
 -----
     uv run python tools/closes_landing.py --pr 10568                # one PR
     uv run python tools/closes_landing.py --sweep                   # every open PR on a non-default base
     uv run python tools/closes_landing.py --pr 10568 --annotate     # ::warning:: lines
+    uv run python tools/closes_landing.py --merged-but-open         # merge -> issue state
+    uv run python tools/closes_landing.py --merged-but-open \
+        --label P0-blocker --label P1-severe --since-hours 48       # the P0/P1 drift
     uv run python tools/closes_landing.py --body-file body.md --base act-10465 \
         --carrier-body-file carrier.md          # offline: no network at all
 
 Exit codes: 0 = nothing inert · 3 = at least one inert OR unresolved closing
 ref · 2 = the question could not be measured at all (gh/API failed).
+`--merged-but-open` keeps the same shape: 0 = every issue has a closure record ·
+3 = at least one `partial` or `not-done` · 2 = UNMEASURABLE.
 """
 
 from __future__ import annotations
@@ -115,7 +188,9 @@ import json
 import re
 import subprocess
 import time
+from collections.abc import Iterable
 from dataclasses import asdict, dataclass
+from datetime import UTC, datetime, timedelta
 from itertools import pairwise
 from pathlib import Path
 
@@ -874,6 +949,10 @@ def strip_code(body: str, strict: bool = False) -> str:
         out.append(raw)   # prose: keep it, keywords and all
     return "\n".join(out)
 
+# A list item's content column, so a fence opened inside one can END when the
+# item ends. Without it, `- item\n  ```\nCloses #N\n` blanked the column-0 prose
+# and the tool reported nothing at all (review c10-3).
+_LIST_MARKER_RE = re.compile(r"^(?P<indent>[ \t]*)(?:[-*+]|\d{1,9}[.)])(?P<gap>[ \t]+)")
 
 def parse_closing_refs(body: str, repo: str | None = None,
                        strict: bool = False) -> list[int]:
@@ -1048,6 +1127,22 @@ def classify(pr: PullRequest, by_head: dict[str, PullRequest],
                 carrier=None,
                 detail=_no_carrier_detail(pr, issue, default_branch, path,
                                           why or "no-pr", by_head),
+            ))
+            continue
+        # A SUBJECT that was CLOSED WITHOUT MERGING never fired the keyword — but
+        # ONLY when its base IS the default branch: on a sibling base the question
+        # is whether the CARRIER carries the keyword, which the arms below answer,
+        # and claiming the subject "targets main" would be false (review c3-1).
+        if pr.closed_unmerged and pr.base == default_branch:
+            findings.append(Finding(
+                issue=issue, pr=pr.number, base=pr.base, verdict="unresolved",
+                carrier=pr.number,
+                detail=(f"PR #{pr.number} says `Closes #{issue}` and targets "
+                        f"`{default_branch}`, but it was CLOSED WITHOUT "
+                        f"MERGING — GitHub never fired the keyword, so "
+                        f"#{issue} stays open and its work is not on "
+                        f"`{default_branch}`. Re-open it, or carry the change "
+                        f"(and the keyword) on the PR that does land."),
             ))
             continue
         # A SUBJECT that was CLOSED WITHOUT MERGING never fired the keyword — but
@@ -1507,6 +1602,373 @@ def worst_verdict(findings: list[Finding]) -> str:
     return "none"
 
 
+# ── MERGED-BUT-OPEN core (#10698): pure, network-free ────────────────────────
+
+#: The NON-closing reference verbs. GitHub does not act on any of these — the
+#: closing vocabulary is exactly `close(s|d) fix(es|ed) resolve(s|d)` — which is
+#: the whole reason they need their own class: a `Refs #N` is a real claim about
+#: an issue that can never close one.
+#:
+#: `See` is deliberately NOT included. It fires on ordinary prose ("see #100 for
+#: context"), so it would make `partial` near-universal and the fleet signal
+#: worthless. Bare mentions — including the commit-message path — come from the
+#: issue's own timeline instead, which is the source, not a guess.
+_REFERENCE_VERBS = r"refs?|references?"
+
+def _reference_re(sep: str) -> re.Pattern[str]:
+    """The reference pattern with ONE separator spelling (`lenient`/`strict`).
+
+    Same asymmetry as `_closing_re`, for the same reason: a PASS arm may not
+    rest on a shape the tool cannot demonstrate GitHub acts on.
+    """
+    return re.compile(
+        r"(?i)\b(?P<keyword>" + _REFERENCE_VERBS + r")"
+        + sep
+        + r"(?:(?P<slug>[A-Za-z0-9._-]+/[A-Za-z0-9._-]+))?"
+        r"#(?P<number>\d+)\b"
+    )
+
+
+_REFERENCE_RE = _reference_re(_CLOSING_SEPARATORS["lenient"])
+_REFERENCE_RE_ONELINE = _reference_re(_CLOSING_SEPARATORS["strict"])
+
+
+def parse_reference_refs(body: str, repo: str | None = None,
+                         strict: bool = False) -> list[int]:
+    """Issue numbers this body REFERENCES without claiming to close.
+
+    Same code-stripping as `parse_closing_refs`, and that is not a detail: a
+    QUOTED reference is not a reference. Measured on this repository (2026-11-03),
+    a naive regex read `PR #10519` as carrying `Closes #10541` because that exact
+    phrase sits inside a backtick span in its prose — the shape this function
+    would reproduce if it parsed the body itself.
+    """
+    text = _strip_inline_code(strip_code(body or "", strict), strict=strict)
+    seen: list[int] = []
+    pattern = _REFERENCE_RE_ONELINE if strict else _REFERENCE_RE
+    for m in pattern.finditer(text):
+        slug = m.group("slug")
+        if slug and (repo is None or slug.lower() != repo.lower()):
+            continue
+        n = int(m.group("number"))
+        if n not in seen:
+            seen.append(n)
+    return seen
+
+
+#: A markdown TASK LIST item. GitHub renders `-`, `*`, `+` and `N.` alike as task
+#: lists, so all four markers are accepted — counting only `-` would report
+#: `total=0` on a `* [ ]` checklist and let that axis pass vacuously.
+_TASK_ITEM_RE = re.compile(
+    r"^[ \t]*(?:[-*+]|\d{1,9}[.)])[ \t]+\[([ xX])\][ \t]", re.MULTILINE)
+
+
+@dataclass(frozen=True)
+class Acceptance:
+    """The issue's own task-list completion: an ANNOTATION, never a gate.
+
+    Why it cannot gate: measured over the 43 open P0/P1 issues at #10698, 37 carry
+    no task list at all (so the axis would pass vacuously) and none of the 6 that
+    do has every box checked (so it would block the largest issues permanently).
+    Ticks are also self-attestation by whoever wrote the body. It is printed
+    because a reader asked for it, and `done` does not depend on it.
+    """
+
+    total: int = 0
+    checked: int = 0
+
+    @property
+    def all_checked(self) -> bool:
+        return self.total > 0 and self.checked == self.total
+
+    def label(self) -> str:
+        return "none" if self.total == 0 else f"{self.checked}/{self.total}"
+
+
+def acceptance_from_body(body: str) -> Acceptance:
+    """Count the issue body's task-list items. Code spans/fences do not count.
+
+    `strict=True` on the strip: a QUOTED checklist (`- [ ]` inside a code block,
+    e.g. a template being discussed) is not this issue's acceptance.
+    """
+    text = _strip_inline_code(strip_code(body or "", True), strict=True)
+    boxes = _TASK_ITEM_RE.findall(text)
+    return Acceptance(total=len(boxes),
+                      checked=sum(1 for b in boxes if b.lower() == "x"))
+
+
+@dataclass(frozen=True)
+class IssueRecord:
+    """The issue's own state — the half of the link this module never read."""
+
+    number: int
+    state: str = ""
+    body: str = ""
+
+    @property
+    def open(self) -> bool:
+        return self.state.upper() == "OPEN"
+
+    @property
+    def acceptance(self) -> Acceptance:
+        return acceptance_from_body(self.body)
+
+
+@dataclass(frozen=True)
+class MergedPR:
+    """A MERGED pull request, with the two fields the link needs.
+
+    Separate from `PullRequest` on purpose: that record documents itself as "the
+    four fields the question needs" for the stack question, and adding a merge
+    sha to it would have to be fetched on every `--pr`/`--sweep` run that does use
+    it. Here `merge_sha` and `closing_issues` are the question.
+    """
+
+    number: int
+    base: str
+    body: str = ""
+    merge_sha: str = ""
+    merged_at: str | None = None
+    closing_issues: tuple[int, ...] = ()
+
+    @property
+    def merged(self) -> bool:
+        return bool(self.merged_at) or bool(self.merge_sha)
+
+    def on_default(self, default_branch: str) -> bool:
+        return bool(default_branch) and self.base == default_branch
+
+    def merged_into_default(self, default_branch: str) -> bool:
+        """MERGED **and** into the default branch — the only state a reason may
+        rest on.
+
+        Both halves are load-bearing, and neither is decoration. A keyword on an
+        OPEN PR has not failed to fire, it has not fired YET; calling that
+        `closes-did-not-fire` would tell a reader the merge happened and lost the
+        closure. And a `Closes` on an unmerged sibling base is the *live* form of
+        #10597 — a warning about something still fixable — not this mode's claim
+        about a merge that already happened.
+        """
+        return self.merged and self.on_default(default_branch)
+
+
+#: The reasons a link carries, so the fleet's comment can be worded from the
+#: reason instead of collapsing four unrelated situations into `partial`.
+REASON_CLOSURE = "closure-record"      # done: GitHub's own closure link fired
+REASON_CLOSES_DID_NOT_FIRE = "closes-did-not-fire"
+REASON_REFS_ONLY = "refs-only"
+REASON_MENTION_ONLY = "mention-only"
+REASON_CLOSES_NON_DEFAULT = "closes-on-non-default-base"
+REASON_UNMEASURED_TIMELINE = "unmeasured-timeline"
+REASON_REOPENED = "reopened"
+REASON_NO_MERGE_REF = "no-merge-ref-in-window"
+
+MERGE_LINK_VERDICTS = ("done", "partial", "not-done")
+
+
+@dataclass(frozen=True)
+class MergeLink:
+    """One issue's link to the merges that touched it, and the verdict."""
+
+    issue: int
+    verdict: str
+    reason: str
+    pr: int = 0
+    sha: str = ""
+    acceptance: Acceptance = Acceptance()
+
+    def line(self) -> str:
+        """The fleet-readable contract line (see the module header).
+
+        Two kinds because a `not-done` issue has NO merge: printing a sha and a
+        PR number for it would assert a merge that never happened, and a
+        `grep MERGED-BUT-OPEN` would then collect rows nothing backs.
+        """
+        if self.sha:
+            return (f"MERGED-BUT-OPEN({self.sha} {self.pr} -> #{self.issue} "
+                    f"verdict={self.verdict} reason={self.reason} "
+                    f"acceptance={self.acceptance.label()})")
+        return (f"NO-MERGE-REF(#{self.issue} verdict={self.verdict} "
+                f"reason={self.reason} acceptance={self.acceptance.label()})")
+
+    def as_dict(self) -> dict:
+        return {"issue": self.issue, "verdict": self.verdict,
+                "reason": self.reason, "pr": self.pr, "sha": self.sha,
+                "acceptance_total": self.acceptance.total,
+                "acceptance_checked": self.acceptance.checked}
+
+
+@dataclass(frozen=True)
+class Timeline:
+    """What the issue's own timeline says: what referenced it, and whether a
+    HUMAN REOPENED it.
+
+    The reopen half is the one that protects a `done`, and it is not a nicety.
+    Measured on this repository (2026-11-03, 1000 merged PRs back to 2026-10-12):
+    exactly **3** of the 43 open P0/P1 issues appear in a merged PR's
+    `closingIssuesReferences` — `#4282 <- PR #8174` (merged 2026-10-12T00:31:20Z,
+    reopened 13:21:12Z), `#9548 <- PR #9585` (merged 2026-10-23T23:58:07Z,
+    reopened 2026-10-24T12:12:06Z) and `#10000 <- PR #10011` (merged
+    2026-10-26T02:11:20Z, reopened 02:48:58Z). All three are OPEN. The keyword
+    fired and the issue closed; a human then reopened it. Reporting `done` from
+    the closure record alone would close those three over the top of that
+    judgement — the single most expensive thing this tool could do, and the
+    reason `done` is not allowed to rest on the record by itself.
+
+    (`reopened_after` is deliberately conservative: a reopen with no comparable
+    merge timestamp counts as AFTER.)
+    """
+
+    refs: tuple[MergedPR, ...] = ()
+    last_reopened_at: str | None = None
+
+    def reopened_after(self, stamp: str | None) -> bool:
+        if not self.last_reopened_at:
+            return False
+        if not stamp:
+            return True
+        return self.last_reopened_at > stamp
+
+
+def judge_issue(issue: IssueRecord, prs: list[MergedPR], *,
+                default_branch: str, repo: str | None = None,
+                timeline: Timeline | None = None) -> MergeLink:
+    """Judge ONE open issue against the merges that touched it.
+
+    Order is FIRST-MATCH-WINS and worst-last, and every step is evidence the tool
+    can point at — never an inference:
+
+    1. `done`     — GitHub's OWN closure record (`closingIssuesReferences`) on a
+                    PR merged into the default branch, AND the timeline shows no
+                    reopen after it. Nothing else may buy it.
+    2. `partial`  — a merged-on-default PR names the issue in its body, or the
+                    issue's timeline records a reference from such a PR.
+    3. `not-done` — nothing above, AND the timeline was actually read. The guard
+                    lives HERE rather than only in `judge_population`, so a
+                    direct caller cannot footgun it either: `timeline=None` means
+                    "not measured", and an unmeasured absence degrades to the
+                    weaker `partial`/`unmeasured-timeline`. Only a READ timeline
+                    (`Timeline(refs=())`, i.e. read and found nothing) supports
+                    `not-done` — and the same rule protects `done`, because a
+                    reopen can only be ruled out once the timeline was read.
+    """
+    acceptance = issue.acceptance
+
+    def link(verdict: str, reason: str, pr: MergedPR | None) -> MergeLink:
+        return MergeLink(
+            issue=issue.number, verdict=verdict, reason=reason,
+            pr=pr.number if pr else 0,
+            sha=pr.merge_sha if pr else "",
+            acceptance=acceptance)
+
+    # Newest merge first, so the cited sha is the most recent evidence rather
+    # than whichever PR GitHub happened to list first. `merged_at` is
+    # ISO-8601, so a plain string sort is chronological.
+    ordered = sorted(prs, key=lambda p: p.merged_at or "", reverse=True)
+
+    # 1 — GitHub's own closure record. Only a DEFAULT-branch merge can carry one
+    #     (`closingIssuesReferences` is empty on a sibling base, by definition) —
+    #     and only the TIMELINE can say whether a human then reopened the issue.
+    for pr in ordered:
+        if not (pr.merged_into_default(default_branch)
+                and issue.number in pr.closing_issues):
+            continue
+        if timeline is None:
+            # The record is GitHub's, but "was this reopened?" cannot be answered
+            # from a timeline nobody read — so the stronger verdict is withheld.
+            return link("partial", REASON_UNMEASURED_TIMELINE, pr)
+        if timeline.reopened_after(pr.merged_at):
+            return link("partial", REASON_REOPENED, pr)
+        return link("done", REASON_CLOSURE, pr)
+
+    # 2 — a claim that did not fire, a claim stranded on a sibling base, a
+    #     `Refs`-only body, or a timeline mention — strongest first. STRICT for
+    #     `Closes` (a lenient-only claim cannot even be shown to be a claim),
+    #     lenient for `Refs` (that class exists to catch what the closing grammar
+    #     cannot see, so under-reporting it is the harmful direction here).
+    #
+    #     `closes-on-non-default-base` is not a courtesy rank. It is #10597's
+    #     measured shape: PR #10568 carried `Closes #10541` and merged into
+    #     `act-10465`, so the keyword was ignored and the work only rode to main
+    #     through a carrier that named a DIFFERENT issue. Reporting that as a bare
+    #     `mention-only` would hide the mechanism `closes_landing` exists to name.
+    rank_of: dict[str, int] = {
+        REASON_CLOSES_DID_NOT_FIRE: 4,
+        REASON_CLOSES_NON_DEFAULT: 3,
+        REASON_REFS_ONLY: 2,
+        REASON_MENTION_ONLY: 1,
+    }
+    best: tuple[int, str, MergedPR] | None = None
+    for pr in ordered:
+        if not pr.merged:
+            continue          # an unmerged PR cannot have failed to close anything
+        strict_closes = issue.number in parse_closing_refs(pr.body, repo,
+                                                           strict=True)
+        refs = issue.number in parse_reference_refs(pr.body, repo)
+        on_default = pr.on_default(default_branch)
+        if strict_closes and on_default:
+            tier: str | None = REASON_CLOSES_DID_NOT_FIRE
+        elif strict_closes:
+            tier = REASON_CLOSES_NON_DEFAULT
+        elif refs and on_default:
+            tier = REASON_REFS_ONLY
+        else:
+            tier = None
+        if tier is None:
+            continue
+        score = rank_of[tier]
+        if best is None or score > best[0]:
+            best = (score, tier, pr)
+    if best is not None:
+        return link("partial", best[1], best[2])
+
+    if timeline is None:
+        # NOT MEASURED. `not-done` is a claim about an ABSENCE, and this is the
+        # only place the absence could have come from.
+        return link("partial", REASON_UNMEASURED_TIMELINE, None)
+
+    for pr in reversed(list(timeline.refs)):
+        if pr.merged_into_default(default_branch):
+            return link("partial", REASON_MENTION_ONLY, pr)
+
+    return link("not-done", REASON_NO_MERGE_REF, None)
+
+
+def judge_population(issues: Iterable[IssueRecord], prs: list[MergedPR], *,
+                     default_branch: str, repo: str | None = None,
+                     timelines: dict[int, Timeline] | None = None,
+                     ) -> list[MergeLink]:
+    """Judge the whole population, and never emit `not-done` from an unread one.
+
+    `timelines` maps an issue to what its own timeline said. An issue MISSING
+    from that mapping had no timeline read, so its row degrades to
+    `partial`/`unmeasured-timeline` — `judge_issue` enforces that, and this
+    function's only job is to pass `None` (not an empty `Timeline`) for an issue
+    it has no measurement for. That distinction IS the guard: an empty `Timeline`
+    says "read it, found nothing", `None` says "did not read it" — and both
+    `done` and `not-done` depend on it.
+    """
+    links: list[MergeLink] = []
+    for issue in issues:
+        tl = timelines.get(issue.number) if timelines is not None else None
+        links.append(judge_issue(issue, prs, default_branch=default_branch,
+                                 repo=repo, timeline=tl))
+    return links
+
+
+def merge_link_worst(links: list[MergeLink]) -> str:
+    """The single verdict for a set of links, worst-first — its OWN vocabulary.
+
+    `worst_verdict` is deliberately not reused: it iterates the stack questions'
+    tokens and would return `"none"` for every `partial`/`not-done` link, i.e. a
+    false PASS on the whole report (plan review, finding 7).
+    """
+    for verdict in ("not-done", "partial", "done"):
+        if any(link.verdict == verdict for link in links):
+            return verdict
+    return "none"
+
+
 # ── live layer: `gh`, no writes, each call self-describing ────────────────────
 
 class Unmeasurable(RuntimeError):
@@ -1514,6 +1976,20 @@ class Unmeasurable(RuntimeError):
 
 
 _GH_FIELDS = "number,baseRefName,body,headRefName,state,mergedAt"
+
+#: The MERGED-BUT-OPEN field set. `mergeCommit` gives the sha a report line must
+#: cite, and `closingIssuesReferences` is GitHub's own closure record — both come
+#: back in the SAME `gh pr list` call as the bodies, so a 200-PR window costs one
+#: request rather than 200. `mergeCommit` is null on an open PR, which is why the
+#: record treats `merged_at` as the primary signal.
+_MERGED_GH_FIELDS = (
+    "number,baseRefName,body,state,mergedAt,mergeCommit,closingIssuesReferences"
+)
+
+#: The issue field set the link needs — the issue's OWN state, which no arm above
+#: has ever read.
+_ISSUE_GH_FIELDS = "number,state,body"
+
 
 #: A `gh` call that never returns must not hang the run (#10634 review P2). This
 #: tool runs inside a small advisory CI job (`.github/workflows/
@@ -1716,6 +2192,446 @@ def sweep(repo: str | None, default_branch: str) -> list[Finding]:
     return findings
 
 
+# ── MERGED-BUT-OPEN live layer (#10698): reads only ───────────────────────────
+
+
+def _ref_slug(node: dict) -> str:
+    """The `owner/name` a GitHub ref names, from any of the shapes it appears in.
+
+    ⛔ There are FOUR, and a guard that reads only the first two is INERT. Measured
+    on this box against the live API (2026-11-03):
+
+        gh pr view 8174 --json closingIssuesReferences
+        {"number":4282,
+         "repository":{"id":"R_kgDOToroqw","name":"tortoise",
+                       "owner":{"id":"MDQ6VXNlcjgxNTYwNDkx","login":"daniel-ospina"}},
+         "url":"https://github.com/daniel-ospina/tortoise/issues/4282"}
+
+    — no `nameWithOwner`, no `repository_url`. A first version of this function
+    read exactly those two, fell through to "assume local", and a unit test built
+    from a shape production never produces passed while the guard did nothing at
+    all. That is why the shapes are enumerated here rather than guessed.
+    """
+    repo = node.get("repository") or {}
+    slug = repo.get("nameWithOwner") or ""
+    if slug:
+        return str(slug)
+    owner = (repo.get("owner") or {}).get("login") or ""
+    name = repo.get("name") or ""
+    if owner and name:
+        return f"{owner}/{name}"
+    # `repository_url` is the REST field; `url` is what `gh pr view --json
+    # closingIssuesReferences` emits (a github.com URL ending `/issues/<n>`).
+    for url in (node.get("repository_url") or "", node.get("url") or ""):
+        for marker in ("/repos/", "github.com/"):
+            if marker not in url:
+                continue
+            tail = url.split(marker, 1)[1].strip("/")
+            if "/issues/" in tail:
+                tail = tail.split("/issues/", 1)[0]
+            elif "/pull/" in tail:
+                tail = tail.split("/pull/", 1)[0]
+            parts = tail.split("/")
+            if len(parts) >= 2 and parts[0] and parts[1]:
+                return f"{parts[0]}/{parts[1]}"
+    return ""
+
+
+def ref_is_local(node: dict | None, repo: str | None) -> bool:
+    """Is this GitHub ref about OUR repository?
+
+    ⛔ `#4282` in another repository is not `#4282` here, and the closing/linking
+    arms are the wrong place to learn that. `closingIssuesReferences` and a
+    timeline `cross-referenced` source both carry the owning repository, and a PR
+    body may legitimately say `Closes other/repo#123` — so a number compared
+    without its owner mints a `done` (the precondition for CLOSING an issue) for
+    a local issue that a foreign commit merely shares a number with. The body
+    parsers in this module already scope by slug (`parse_reference_refs`); this
+    is the same rule for the record-based arms.
+
+    When `repo` is unknown there is nothing to compare against, so the ref is
+    taken as local: that is the module's default behaviour everywhere else, and
+    guessing "foreign" would turn every real closure into a `partial`.
+
+    ⛔ Residual, stated rather than glossed: a ref that names no repository at all
+    is treated as FOREIGN (see the body). `gh` always sends one — `repository` in
+    the GraphQL shape, `repository_url` in the REST shape — so this fires only on
+    a payload this code has never seen, and it fails in the direction that leaves
+    an issue open.
+    """
+    if not repo:
+        return True
+    if not isinstance(node, dict):
+        return False
+    slug = _ref_slug(node)
+    if not slug:
+        # NO identification at all. Fail CLOSED: this arm decides whether `done`
+        # may be claimed, and `done` is the precondition for closing an issue —
+        # so an unattributable reference costs a `partial` (the issue stays
+        # open), never a `done`. The module's own doctrine: a wrong close is
+        # worse than an open issue.
+        return False
+    return slug.lower() == repo.lower()
+
+
+def _to_merged_pr(raw: dict, repo: str | None = None) -> MergedPR:
+    commit = raw.get("mergeCommit") or {}
+    refs = raw.get("closingIssuesReferences") or []
+    return MergedPR(
+        number=int(raw["number"]),
+        base=raw.get("baseRefName") or "",
+        body=raw.get("body") or "",
+        merge_sha=(commit.get("oid") or "") if isinstance(commit, dict) else "",
+        merged_at=raw.get("mergedAt"),
+        closing_issues=tuple(
+            int(r["number"]) for r in refs
+            if isinstance(r, dict) and r.get("number") is not None
+            and ref_is_local(r, repo)),
+    )
+
+
+def fetch_merged_prs(repo: str | None, since_hours: int,
+                     limit: int = 200) -> list[MergedPR]:
+    """Merged PRs in a MERGE-TIME window, paged by day.
+
+    ⛔ The window is pinned with `--search "merged:<start>..<end>"` on purpose.
+    `gh pr list --state merged` orders by `createdAt`, NOT by merge time —
+    measured at #10698: #10624 (created 18:52) merged at 07:12, i.e. the NEWEST
+    merge, and it prints fifth behind PRs merged hours earlier. A client-side
+    `mergedAt` filter over that list would sample created-order and silently drop
+    a PR merged an hour ago because it was opened a week ago.
+
+    ⛔ …and it is paged by DAY, not fetched as one range, because this one call
+    carries every body in the window and its cost is super-linear in the row
+    count: 200 rows with the full field set measured 1.6 s, while 157 rows in a
+    seven-day window blew past the 60 s per-call bound on the same API (measured
+    twice, on an idle token). Seven day-sized pages cost the same total bytes but
+    never put a week of bodies in one response — so a week-long census stops being
+    the thing that reports UNMEASURED.
+
+    A page that comes back FULL is UNMEASURABLE: a truncated page cannot tell
+    "nothing references this issue" from "the reference is in the part I did not
+    read".
+    """
+    now = datetime.now(UTC)
+    since = now - timedelta(hours=since_hours)
+    repo_args = ["--repo", repo] if repo else []
+    found: dict[int, MergedPR] = {}
+    cursor = now
+    while cursor > since:
+        chunk_start = max(since, cursor - timedelta(days=1))
+        query = (f"merged:{chunk_start.strftime('%Y-%m-%dT%H:%M:%SZ')}"
+                 f"..{cursor.strftime('%Y-%m-%dT%H:%M:%SZ')} sort:updated-desc")
+        raw = _gh(["pr", "list", *repo_args, "--state", "merged",
+                   "--search", query, "--limit", str(limit),
+                   "--json", _MERGED_GH_FIELDS])
+        try:
+            rows = json.loads(raw)
+            if not isinstance(rows, list):
+                raise TypeError("not a JSON array")
+            page = [_to_merged_pr(r, repo) for r in rows]
+        except (KeyError, TypeError, ValueError, AttributeError) as exc:
+            # A 200 carrying `{"message": "Bad credentials"}` is the same failure
+            # as a non-zero exit, and must land on the documented exit 2 rather
+            # than escaping `main()` as a traceback (exit 1).
+            raise Unmeasurable(
+                f"the merged PRs could not be read: {raw[:200]}") from exc
+        if len(rows) >= limit:
+            raise Unmeasurable(
+                f"one day-sized page is FULL ({limit} rows for {query}) — a "
+                f"truncated page would report `no-merge-ref` over merges it never "
+                f"read; narrow --since-hours")
+        for pr in page:
+            found[pr.number] = pr
+        cursor = chunk_start
+    return sorted(found.values(), key=lambda pr: pr.merged_at or "")
+
+
+def fetch_open_issues(labels: Iterable[str], repo: str | None,
+                      limit: int = 500) -> list[IssueRecord]:
+    """The open-issue population, one call per label.
+
+    Two calls for the P0/P1 census, never 43: the bodies arrive with the list.
+    """
+    repo_args = ["--repo", repo] if repo else []
+    found: dict[int, IssueRecord] = {}
+    for label in labels:
+        raw = _gh(["issue", "list", *repo_args, "--state", "open",
+                   "--label", label, "--limit", str(limit),
+                   "--json", _ISSUE_GH_FIELDS])
+        try:
+            rows = json.loads(raw)
+            if not isinstance(rows, list):
+                raise TypeError("not a JSON array")
+            for r in rows:
+                int(r["number"])
+        except (KeyError, TypeError, ValueError, AttributeError) as exc:
+            raise Unmeasurable(
+                f"the open issues labelled {label!r} could not be read: "
+                f"{raw[:200]}") from exc
+        if len(rows) >= limit:
+            raise Unmeasurable(
+                f"the open-issue population for {label!r} is FULL ({limit} rows) "
+                f"— a truncated population is not a census")
+        for r in rows:
+            n = int(r["number"])
+            found.setdefault(n, IssueRecord(
+                number=n, state=r.get("state") or "",
+                body=r.get("body") or ""))
+    return [found[n] for n in sorted(found)]
+
+
+def fetch_timeline(issue: int, slug: str,
+                   prs_by_number: dict[int, MergedPR]) -> Timeline:
+    """The merged PRs this issue's OWN timeline records a reference from.
+
+    Two event kinds, and both are the SOURCE rather than a guess:
+
+    * `cross-referenced` — a PR or issue that linked this one. `source.issue.number`
+      identifies it directly.
+    * `referenced` — a COMMIT that mentions this one, carrying only `commit_id`.
+      This is the documented path by which a closing keyword in a **squash or
+      merge commit message** closes an issue (GitHub: "You can also use closing
+      keywords in a commit message. The issue will be closed when you merge the
+      commit into the default branch, but the pull request that contains the
+      commit will not be listed as a linked pull request") — invisible to any
+      body-only parse. It is attributed here by matching `commit_id` against the
+      PR's own `merge_commit_sha`, which IS that commit for a squash merge and for
+      a merge commit.
+
+    ⚠️ Residual, stated rather than glossed: a `referenced` event naming an
+    arbitrary BRANCH commit (not the merge commit) is not attributed — that would
+    need a commit→PR lookup per event. Such a mention is missed, which costs a
+    `mention-only` (reported as `no-merge-ref-in-window` instead); it never
+    manufactures a claim.
+
+    It also returns the LAST `reopened` timestamp, because that is the only
+    evidence that can tell a fired keyword from a closure a human rejected — see
+    `Timeline`.
+
+    An unreadable timeline is UNMEASURABLE, never "no references": that absence is
+    what a `not-done` verdict rests on.
+    """
+    if not slug:
+        raise Unmeasurable(
+            "the reference timeline needs an `owner/name` slug and none was "
+            "resolved — `not-done` would rest on an unread timeline")
+    # `--paginate --slurp` so a busy issue (one measured issue carried 63
+    # `referenced` + 27 `cross-referenced` events) is read to the end instead of
+    # its first page.
+    raw = _gh(["api", "--paginate", "--slurp",
+               f"repos/{slug}/issues/{issue}/timeline?per_page=100"])
+    try:
+        pages = json.loads(raw)
+    except (KeyError, TypeError, ValueError) as exc:
+        raise Unmeasurable(
+            f"the timeline of #{issue} could not be read: {raw[:200]}") from exc
+    if not isinstance(pages, list) or any(not isinstance(page, list)
+                                         for page in pages):
+        # FAIL CLOSED. An empty `Timeline` means "read to the end, found
+        # nothing" — which is exactly the state `not-done` rests on — so a body
+        # this code cannot parse must never collapse into one. `_gh` already
+        # raises on a non-zero exit, so this arm is reachable only on a 200 with
+        # an unexpected shape (a proxy, a `gh` shim, a non-`--slurp` response):
+        # rare, and the one place where "I do not know" would otherwise resolve
+        # to "nothing is there".
+        raise Unmeasurable(
+            f"the timeline of #{issue} did not come back as an array of pages: "
+            f"{raw[:200]} — an unreadable timeline is UNMEASURED, never 'no "
+            f"references', because an empty one is what `not-done` rests on")
+    events = [e for page in pages for e in page]
+    by_sha = {pr.merge_sha: pr for pr in prs_by_number.values() if pr.merge_sha}
+    seen: list[MergedPR] = []
+    last_reopened: str | None = None
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        kind = event.get("event")
+        if kind == "reopened":
+            stamp = event.get("created_at")
+            if isinstance(stamp, str) and (last_reopened is None
+                                           or stamp > last_reopened):
+                last_reopened = stamp
+            continue
+        if kind not in ("referenced", "cross-referenced"):
+            continue
+        source = (event.get("source") or {}).get("issue") or {}
+        number = source.get("number")
+        pr = (prs_by_number.get(int(number))
+              if number is not None and ref_is_local(source, slug) else None)
+        if pr is None:
+            sha = event.get("commit_id")
+            pr = by_sha.get(sha) if isinstance(sha, str) else None
+        if pr is not None and pr not in seen:
+            seen.append(pr)
+    return Timeline(refs=tuple(seen), last_reopened_at=last_reopened)
+
+
+def fetch_issues_by_number(numbers: Iterable[int],
+                           repo: str | None) -> list[IssueRecord]:
+    """Read a specific set of issues — used when no label selects the population.
+
+    One call per issue, so the caller must bound the set. That is fine here: the
+    set is what the merged PRs themselves named, which is the population the
+    question is about.
+    """
+    repo_args = ["--repo", repo] if repo else []
+    out: list[IssueRecord] = []
+    for n in sorted(set(numbers)):
+        raw = _gh(["issue", "view", str(n), *repo_args,
+                   "--json", _ISSUE_GH_FIELDS])
+        try:
+            r = json.loads(raw)
+            if not isinstance(r, dict):
+                raise TypeError("not a JSON object")
+            int(r["number"])
+        except (KeyError, TypeError, ValueError, AttributeError) as exc:
+            raise Unmeasurable(
+                f"issue #{n} could not be read: {raw[:200]}") from exc
+        out.append(IssueRecord(number=int(r["number"]),
+                               state=r.get("state") or "",
+                               body=r.get("body") or ""))
+    return out
+
+
+def merged_but_open(repo: str | None, default_branch: str, *,
+                    labels: Iterable[str] = (), since_hours: int,
+                    prs: list[MergedPR] | None = None,
+                    timelines: bool = True) -> list[MergeLink]:
+    """The MERGED-BUT-OPEN census over a population of OPEN issues.
+
+    The timeline is read for every issue whose verdict can still depend on it —
+    that is, every issue the bodies did NOT already settle — because `not-done`
+    is a claim about an ABSENCE and an unread timeline cannot support one, and a
+    reopen can only be ruled out from a timeline that was read.
+
+    Population, two ways:
+      * labels given  — the labelled OPEN issues (a census: unreferenced issues
+                        are `not-done` rows, which is the point);
+      * no labels     — the OPEN issues a merged PR itself named. A `not-done`
+                        row about an issue nothing ever referenced is noise here,
+                        and there is no label to bound `gh issue list`.
+    """
+    slug = repo or ""
+    labels = list(labels)
+    if prs is None:
+        prs = fetch_merged_prs(repo, since_hours)
+    if not prs:
+        raise Unmeasurable(
+            f"no merged PRs were returned for the last {since_hours}h window — "
+            f"an empty window is UNMEASURED, never a clean census")
+    by_number = {pr.number: pr for pr in prs}
+    if labels:
+        issues = fetch_open_issues(labels, repo)
+    else:
+        named: set[int] = set()
+        for pr in prs:
+            named.update(pr.closing_issues)
+            named.update(parse_closing_refs(pr.body, repo))
+            named.update(parse_reference_refs(pr.body, repo))
+        issues = fetch_issues_by_number(named, repo) if named else []
+        issues = [i for i in issues if i.open]
+    if not issues:
+        # An EMPTY census is UNMEASURED, never clean — the module's own doctrine.
+        # With no labels that is a legitimate "no merged PR named any open issue";
+        # with labels it is almost always a typo (`--label P9-nonsense`), and
+        # exiting 0 on it would report a clean sweep over nothing at all.
+        if labels:
+            raise Unmeasurable(
+                f"the open-issue population is EMPTY for labels={labels} in a "
+                f"{since_hours}h window — an empty census is UNMEASURED, never "
+                f"clean; check the label names")
+        return []
+    if not timelines:
+        # No timeline read ⇒ no `done` and no `not-done` (neither a reopen nor an
+        # absence can be ruled out on a timeline nobody read);
+        # `judge_population` degrades every such row to `partial`.
+        return judge_population(issues, prs, default_branch=default_branch,
+                                repo=repo, timelines=None)
+
+    # The timeline is read ONLY for the issues it can still change the answer for:
+    # the ones a body-based arm already resolves are `partial` either way. Two
+    # classes still need it — a `done` candidate (only the timeline can rule out a
+    # reopen) and the `not-done` boundary (an absence must be measured). Reading
+    # all 43 cost 2m14s for a 48 h window (measured), most of the module's 300 s
+    # budget spent answering a question the bodies had already settled — and an
+    # UNMEASURED run is the one outcome a drift census cannot afford.
+    pre = judge_population(issues, prs, default_branch=default_branch,
+                           repo=repo, timelines=None)
+    need = [link.issue for link in pre if link.reason == "unmeasured-timeline"]
+    linked: dict[int, Timeline] = {}
+    for number in need:
+        linked[number] = fetch_timeline(number, slug, by_number)
+    return judge_population(issues, prs, default_branch=default_branch,
+                            repo=repo, timelines=linked)
+
+
+def _run_merged_but_open(ap: argparse.ArgumentParser,
+                         args: argparse.Namespace) -> int:
+    """The `--merged-but-open` mode (#10698): its own fetch, verdict and exit map.
+
+    Deliberately NOT sharing `worst_verdict`: that function iterates the stack
+    vocabulary (`inert`/`unresolved`/`lands`) and returns `none` for every
+    `partial`/`not-done` link, which would exit 0 on a report that is entirely
+    drift — a false PASS wearing the other mode's contract.
+
+    The aggregate `gh` budget is shared with the stack mode (module state), so it
+    is reset here too: a census is a fresh question, and inheriting a spent clock
+    from something that ran earlier in the same process would be UNMEASURED for a
+    reason the reader cannot see.
+    """
+    _reset_run_budget()
+    try:
+        # When the caller names BOTH the repo and the default branch, nothing is
+        # left to measure — and `fetch_identity` costs a `gh repo view`, which is
+        # a GraphQL round trip that has been measured at >60 s under fleet load
+        # (it then reports UNMEASURED over a question the arguments already
+        # answered). Supplying both is the documented way to spend no budget on
+        # identity.
+        if args.repo and args.default_branch:
+            default_branch, slug = args.default_branch, args.repo
+        else:
+            measured_default, slug = fetch_identity(args.repo)
+            default_branch = args.default_branch or measured_default
+        links = merged_but_open(args.repo or slug or None, default_branch,
+                                labels=args.label, since_hours=args.since_hours,
+                                timelines=not args.no_timeline)
+    except Unmeasurable as exc:
+        print(f"closes_landing: UNMEASURED — {exc}", file=sys.stderr)
+        return 2
+
+    verdict = merge_link_worst(links)
+    counts = {v: sum(1 for link in links if link.verdict == v)
+              for v in MERGE_LINK_VERDICTS}
+    if args.json:
+        print(json.dumps({"default_branch": default_branch,
+                          "since_hours": args.since_hours,
+                          "population": len(links), "verdict": verdict,
+                          "counts": counts,
+                          "links": [link.as_dict() for link in links]}, indent=2))
+    elif args.annotate:
+        for link in links:
+            if link.verdict != "done":
+                msg = link.line().replace("%", "%25").replace("\r", "").replace(
+                    "\n", "%0A")
+                print(f"::warning title={link.verdict} #{link.issue}::{msg}")
+    else:
+        # The WHOLE census, `done` rows included: the line format carries
+        # `verdict=done`, so a reader must be able to grep it. `--annotate` stays
+        # drift-only — an annotation is a warning, and "this one is fine" is not.
+        for link in links:
+            print(link.line())
+        # The summary goes to stdout so a reader who greps only the lines still
+        # sees the denominator — "nothing printed" must never be mistakable for
+        # "nothing measured".
+        print(f"closes_landing: population={len(links)} "
+              f"done={counts['done']} partial={counts['partial']} "
+              f"not-done={counts['not-done']} verdict={verdict} "
+              f"window={args.since_hours}h")
+
+    return 3 if verdict in ("partial", "not-done") else 0
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
         description="Report `Closes #N` refs that will never fire because the PR's "
@@ -1726,6 +2642,10 @@ def main(argv: list[str] | None = None) -> int:
                        help="classify every open PR on a non-default base")
     which.add_argument("--body-file", type=Path,
                        help="offline: read the PR body from a file")
+    which.add_argument("--merged-but-open", action="store_true",
+                       help="(#10698) for every open issue a MERGED PR touched, "
+                            "report whether anything closed it: "
+                            "done | partial | not-done")
     ap.add_argument("--repo", default=None, help="owner/name (default: ambient)")
     ap.add_argument("--base", default=None,
                     help="offline/--body-file only: the PR's base branch")
@@ -1737,8 +2657,20 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--annotate", action="store_true",
                     help="emit GitHub Actions ::warning lines instead of prose")
     ap.add_argument("--json", action="store_true", help="emit JSON")
+    ap.add_argument("--label", action="append", default=[],
+                    help="--merged-but-open only: restrict the population to this "
+                         "label (repeatable, e.g. --label P0-blocker --label P1-severe)")
+    ap.add_argument("--since-hours", type=int, default=48,
+                    help="--merged-but-open only: the MERGE-TIME window (default 48)")
+    ap.add_argument("--no-timeline", action="store_true",
+                    help="--merged-but-open only: skip the per-issue timeline read. "
+                         "`not-done` is then never emitted (an unread timeline "
+                         "cannot support a claim of absence)")
     args = ap.parse_args(argv)
     _reset_run_budget()
+
+    if args.merged_but_open:
+        return _run_merged_but_open(ap, args)
 
     try:
         if args.body_file is not None:

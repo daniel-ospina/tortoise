@@ -193,7 +193,10 @@ from tortoise.projection import (
     is_missing_graph_error,  # #2163: absent-graph GRAPH.DELETE family == success
     journal_mint_write_ahead,  # #3390: journal the intended name BEFORE the CREATE
 )
-from tortoise.quota import with_limit_contact  # #5425 refusal seam
+from tortoise.quota import (  # #5425 refusal seam; #4051 count-scope split
+    TENANT_GRAPH_RESOURCES,
+    with_limit_contact,
+)
 
 # #9555 / R7: the ONE spelling of §9.1's narrative carrier type. Its record home
 # is `public.session_narrative` and it materialises no node (§9.1: "not in the
@@ -329,8 +332,8 @@ _KEEPALIVE_LOCK = threading.Lock()
 # ── #3060: dedicated executors for long / stallable work ───────────────────
 # `asyncio.to_thread` (the house style — see `list_packs`) submits to the
 # loop's SHARED default executor, which is where ~80 other `to_thread` call
-# sites and the auth middleware's abuse hooks (`_abuse_post_auth` et al.) run.
-# That is fine for short work. It is NOT fine for the capture extraction: on a
+# sites run. That is fine for short work. It is NOT fine for the capture
+# extraction: on a
 # stalled provider it blocks for the token-scaled deadline (~800s at a 16K
 # budget, per attempt, retried), so enough concurrent stalls would occupy every
 # default worker (min(32, cpu+4) — 6 on prod's 2 vCPU) and hold that shared,
@@ -1094,15 +1097,21 @@ def _org_sdk_for_credential(org: dict) -> TortoiseSDK:
 
     The credential carries ``graph_namespace`` (resolved once, at auth), so this
     is the same decision as `_org_sdk` taken from a value already in hand. It is
-    what the REQUEST paths use — the capture/data plane, the quota gate (whose
-    contract is fail-CLOSED, #686: falling back to the historical open would
-    count the DEMOTED graph — a stale-low count admits an org past its cap
-    (revenue) and a stale-high one 402s writes it is under (customer)), the pack
-    catalog/install, the Overview count and the onboarding PATCH.
+    what the REQUEST paths use — the capture/data plane, the org-wide half of the
+    quota gate (`_gate_sdk_for`, whose contract is fail-CLOSED, #686: falling
+    back to the historical open would count the DEMOTED graph — a stale-low count
+    admits an org past its cap (revenue) and a stale-high one 402s writes it is
+    under (customer)), the pack catalog/install, the Overview count and the
+    onboarding PATCH.
 
     A GRAPH-BOUND credential answers the historical `namespace=org_id` count
     `_count_resource` has always done for it — `_default_graph_name` is None
-    there by construction (its `graph_namespace` is a custom graph's).
+    there by construction (its `graph_namespace` is a custom graph's). That is
+    exactly why the quota gate must NOT route a graph-bound credential here:
+    its write opens the CUSTOM graph, so `_gate_sdk_for` takes the
+    `graph_name=_data_graph_name(org)` branch instead (#4051). This function
+    stays the answer to "which graph is this org's DEFAULT" — not to "which
+    graph will this request open".
     """
     moved = _default_graph_name(org)
     return (_make_sdk(graph_name=moved) if moved
@@ -3185,11 +3194,14 @@ _DREAM_QUEUE_TTL_S = 600
 # class. `asyncio.to_thread` submits to the loop's SHARED default executor, and
 # this module's own #3060 criterion (:145-160) is explicit that the shared pool
 # "is fine for short work" and "NOT fine" for long/stallable work. The ~80
-# other `to_thread` sites on that pool include the auth middleware's abuse
-# hooks (`_abuse_post_auth`, awaited on EVERY authenticated request), so a
-# burst of dream passes would park every worker (prod is 2 vCPU →
+# other `to_thread` sites on that pool are enough on their own to park every
+# worker during a burst (prod is 2 vCPU →
 # `min(32, cpu+4)` = 6) and stall unrelated tenants BEFORE their handlers —
-# while `/health` stays green by design (#2850), so nothing would notice. That
+# #10618 removed the last PER-REQUEST tenant of that pool (`first_api_call` and
+# `_abuse_post_auth`, both awaited on every authenticated request; they ride the
+# bounded telemetry lane now), which shortens no fuse: the shared pool is still
+# unbounded-wait and still `min(32, cpu+4)`. While `/health` stays green by
+# design (#2850), nothing would notice. That
 # is the #3060 starvation path relocated, not removed. Dream therefore gets its
 # OWN pool: it can only ever starve itself.
 #
@@ -6314,13 +6326,27 @@ def _record_health() -> dict:
         serves several.
 
     ``ok`` is False when the value was SET and refused, when the counters could
-    not be read, and when the tenancy resolution could not be read — a
+    not be read, when the tenancy resolution could not be read, and when the
+    record is REFUSING writes RIGHT NOW (``degraded``, #10185/#10620) — a
     monitoring surface that cannot read its own state must not report healthy,
-    that being fail-open on the monitoring path itself. All three fold into
-    ``status`` (the ``backup_watcher`` rule: off-by-policy stays ``ok``,
-    "wanted but broken" degrades). A refused DSN is exactly the silent-arming
-    defect this exists to end: it is counted ``malformed_dsn`` on every capture
-    and the record stays empty while the operator believes it is armed.
+    and one that reads "rows are being dropped" and still says ``ok`` is worse
+    than one that cannot read at all. All of them fold into ``status`` (the
+    ``backup_watcher`` rule: off-by-policy stays ``ok``, "wanted but broken"
+    degrades). A refused DSN is exactly the silent-arming defect this exists to
+    end: it is counted ``malformed_dsn`` on every capture and the record stays
+    empty while the operator believes it is armed.
+
+    ``degraded`` is WINDOW-based, not a fold over the cumulative counters. #10185
+    (owner-authored, the open home for this half) measured why the obvious fold
+    is wrong and forbids it verbatim: *"Do not simply fold
+    any(record_write_failures) ⇒ ok = False. The counters are cumulative since
+    process start and never reset, so one historical refusal … would pin the
+    deployment `degraded` forever"*. It is wrong in BOTH directions — that
+    forever-red, and a restart that reads ``ok: true`` while the rows are still
+    missing. So the verdict is :func:`monitoring.record_refusing`: a refusal
+    inside a bounded window, which clears on its own with no restart and no
+    counter reset (#10185 indicator 2). The cumulative totals stay in
+    ``record_write_failures`` as the HISTORY, per reason.
 
     Never raises and never 5xxes — a health path must always answer.
     """
@@ -6329,6 +6355,7 @@ def _record_health() -> dict:
         from tortoise.monitoring import (
             record_non_journal_skip_counts,
             record_position_unproven_count,
+            record_refusing,
             record_write_failure_counts,
         )
     except Exception as exc:  # liveness must answer, always
@@ -6342,6 +6369,8 @@ def _record_health() -> dict:
                 "record_write_failures": None,
                 "record_non_journal_skips": None,
                 "record_position_unproven": None,
+                "degraded": None, "degraded_reasons": None,
+                "refusing": None,
                 "counters_error": reason, "tenancy_error": reason,
                 "fetched_at": datetime.now(UTC).isoformat(),
                 "error": reason}
@@ -6357,6 +6386,22 @@ def _record_health() -> dict:
         "record_write_failures": None,
         "record_non_journal_skips": None,
         "record_position_unproven": None,
+        # ⛔ WHETHER THE RECORD IS LOSING ROWS RIGHT NOW (#10185/#10620). ``None``
+        # is "not evaluated" (the counter snapshot could not be read); ``False``
+        # is "no armed write was refused inside the window"; ``True`` is "rows
+        # were DROPPED moments ago", and it makes ``ok`` False — so it folds
+        # into ``status`` too. Before this field the block mirrored the counters
+        # and stopped there, which left the exact failure this surface exists to
+        # report reading as ``ok: true``: 302 point records were dropped on the
+        # hosted app (one ``jsonb`` column refusing every point that carried
+        # search keys) while ``/health`` answered `ok` for five hours. A counter
+        # with no verdict is a counter nobody reads.
+        "degraded": None,
+        "degraded_reasons": None,
+        # WHAT is refusing and HOW LONG AGO, or ``None``. ``degraded`` is this
+        # block's boolean; ``refusing`` is its identity, so an operator reading
+        # a red deployment never has to guess which arm tripped.
+        "refusing": None,
         "counters_error": None,
         "tenancy_error": None,
         "error": None,
@@ -6380,6 +6425,73 @@ def _record_health() -> dict:
     except Exception as exc:  # liveness must answer, always
         block["counters_error"] = str(exc)[:200]
         block["ok"] = False
+    # ⛔ THE VERDICT, not just the number (#10185/#10620). The full vocabulary
+    # this counter carries — SIX values, documented at
+    # ``monitoring.record_record_write_failure`` — is not uniformly
+    # replay-healable, and naming four of them here sent operators to a replay
+    # that could not exist for two:
+    #
+    #   ``write_failed``      the record was unreachable or the projection
+    #                         refused the row — a REPLAY heals it.
+    #   ``no_tenant``         armed with no tenant in scope; heal the tenant
+    #                         resolution, then replay.
+    #   ``malformed_dsn``     the value is configured but unusable — fix the
+    #                         value; every write is refused until then.
+    #   ``circuit_open``      a connect failed moments ago, so the live door
+    #                         refused locally; a replay heals it.
+    #   ``no_journal``        armed on a deployment with NO journal: the write
+    #                         has no source and NO REPLAY CAN HEAL IT — the
+    #                         remedy is to stop counting a record that can never
+    #                         exist, not to replay.
+    #   ``seam_unimportable`` the record module itself could not be imported
+    #                         (a failing import hook), so the seam never ran —
+    #                         the remedy is the import, not a replay.
+    #
+    # THE VERDICT IS WINDOW-BASED, NOT A FOLD OVER THE COUNTERS. #10185
+    # (owner-authored; the open home for this half) forbids the fold: the
+    # counters are cumulative and never reset, so `any(count > 0)` pins a
+    # deployment ``degraded`` for the life of the process after ONE transient
+    # refusal — and a flag that is always red is a flag an operator ignores —
+    # while a restart clears it with the rows still missing. So we ask the
+    # bounded-window question instead: was a write refused in the last
+    # ``RECORD_REFUSAL_WINDOW_SECONDS``? That clears on its own, with no restart
+    # and with no cumulative counter reset or hidden (#10185 indicator 2).
+    #
+    # ``degraded_reasons`` therefore names the reason behind THIS verdict (the
+    # newest counted one) with its cumulative count — the count is history, the
+    # reason is current. It is NOT a filter of the cumulative dict presented as
+    # a current state; a reason that stopped refusing drops out of it while its
+    # total stays visible in ``record_write_failures``.
+    #
+    # ⛔ THE SKIP COUNTERS ARE DELIBERATELY EXCLUDED, and this is the line that
+    # keeps `/health` from reddening on a healthy deployment: a
+    # `no_durable_journal` decline (the M2 scratch-journal lane) and a
+    # `position_unproven` append are NOT lost rows — the first has no journal to
+    # lose one from, the second is healed by a later replay (#9231/#9307). Folding
+    # either in here would make every `capture_session` read as a broken record.
+    failures = block["record_write_failures"]
+    if isinstance(failures, dict):
+        # ⛔ GUARDED, like every other read in this function (#10648 review P2).
+        # The docstring above promises this block "never raises and never
+        # 5xxes", and each sibling read — the monitoring import, the counter
+        # snapshot, the tenancy read, the DSN read — is wrapped with "liveness
+        # must answer, always". This one was not, and it is the shape that turns
+        # a monitoring fix into a 500 on the endpoint Fly probes. No current
+        # raiser exists (`record_refusing` touches one module global and
+        # `time.monotonic`); the guard is the contract, not a bug workaround.
+        try:
+            refusing = record_refusing()
+        except Exception as exc:  # liveness must answer, always
+            refusing = None
+            block["ok"] = False
+            block["error"] = f"refusal state unreadable: {str(exc)[:160]}"
+        block["refusing"] = refusing
+        reason = refusing["reason"] if refusing else None
+        block["degraded"] = bool(refusing)
+        block["degraded_reasons"] = (
+            {reason: failures.get(reason, 0)} if isinstance(reason, str) else {})
+        if refusing:
+            block["ok"] = False
     try:
         block["single_tenant_declared"] = record_writer.single_tenant_declared()
     except Exception as exc:
@@ -6472,7 +6584,14 @@ async def health():
     the process can resolve) and the same class as ``backup_watcher`` (a
     durability seam whose "off" state must be distinguishable from "on"). See
     ``_record_health``; it collects no I/O, and only a REFUSED DSN, an unread
-    counter snapshot, or an unread tenancy resolution degrades ``status``.
+    counter snapshot, an unread tenancy resolution, or an armed write REFUSED
+    inside ``RECORD_REFUSAL_WINDOW_SECONDS`` (``record.refusing`` feeding
+    ``record.degraded``, #10185/#10620 — the record is dropping rows RIGHT NOW)
+    degrades ``status``. A NON-ZERO ``record_write_failures`` whose last refusal
+    is older than that window does NOT: the counters are cumulative since
+    process start and never reset, so folding the total in would pin the
+    deployment degraded for the life of the process — the forever-red failure
+    #10185 forbids (``test_a_historical_refusal_does_not_degrade_forever``).
 
     Build check (#10447): ``build`` names the build that is SERVING — commit,
     whether the tree was dirty at build time (stamped by the deploy; `null` means
@@ -7040,11 +7159,19 @@ async def get_current_org(request: Request) -> dict:
         # tortoise/analytics.py); distinct_id is the key creator's user UUID
         # (joins web + server funnels), with org_id fallback for legacy/
         # bootstrap keys that predate created_by.
+        # #10618: activation telemetry, so it rides the bounded telemetry lane
+        # — NOT the loop's shared default executor, which is what made this
+        # per-request hop able to park a request BEFORE its handler.
         if first_api_call_pending(org_id):
-            await asyncio.to_thread(
-                first_api_call,
-                created_by or org_id, org_id, request.url.path, request.method,
-            )
+            try:  # noqa: SIM105
+                await _telemetry_hook_off_loop(
+                    functools.partial(
+                        first_api_call,
+                        created_by or org_id, org_id, request.url.path,
+                        request.method),
+                    op="first_api_call")
+            except Exception:
+                pass  # never gate auth on activation telemetry
         # #329: fetch quota limits in the SAME fetch as tier (one round-trip;
         # mirrors quota.resolve_org_limits so REST and MCP see identical limits).
         org = sdk._get_registry().query(
@@ -7224,17 +7351,25 @@ async def _get_current_org_supabase(request: Request, token: str) -> dict:
         # #528: activation telemetry — first successful API auth per org.
         # created_by (key creator's user UUID) joins web + server funnels,
         # with org_id fallback for keys that predate created_by.
+        # #10618: activation telemetry, so it rides the bounded telemetry lane
+        # — NOT the loop's shared default executor, which is what made this
+        # per-request hop able to park a request BEFORE its handler.
         if first_api_call_pending(org_id):
-            await asyncio.to_thread(
-                first_api_call,
-                org.get("created_by") or org_id, org_id,
-                request.url.path, request.method,
-            )
+            try:  # noqa: SIM105
+                await _telemetry_hook_off_loop(
+                    functools.partial(
+                        first_api_call,
+                        org.get("created_by") or org_id, org_id,
+                        request.url.path, request.method),
+                    op="first_api_call")
+            except Exception:
+                pass  # never gate auth on activation telemetry
         request.state.org_id = org_id
         request.state.tier = org["tier"]
         _publish_default_namespace(org)
-        # #308: R3 read velocity + R4 geo (best-effort, off the critical
-        # path via to_thread).
+        # #308: R3 read velocity + R4 geo (best-effort). #10618: it rides the
+        # bounded telemetry lane, never the loop's shared default executor —
+        # this hook is awaited on EVERY authenticated request.
         await _abuse_post_auth(request, org)
         # #2600: canonical actor_user_id alias (UUID-gated, reads created_by
         # already on the resolve_api_key dict). Additive; ContextVar set lives
@@ -8574,11 +8709,91 @@ def _key_limit_refusal(
         QuotaExceededError(message, resource="api_keys"))
 
 
-#: The resources `quota._count_resource` counts in the TENANT graph (as opposed
-#: to the control plane / the registry, where the graph pointer is irrelevant).
-#: #10180: these are the ones whose count must follow a promoted default — see
-#: `_check_org_limit`.
-_TENANT_GRAPH_RESOURCES = frozenset({"points", "sessions", "documents"})
+#: The resources whose count reads the TENANT GRAPH (`quota._count_resource`'s
+#: tenant-graph branch). For these the gate must count the graph the request
+#: actually opens; the registry-scoped resources (`api_keys`/`users`/`graphs`)
+#: are counted in the control plane and take no data SDK (#4051).
+#:
+#: ⛔ IMPORTED, never re-listed here. `quota.TENANT_GRAPH_RESOURCES` DERIVES the
+#: set (`_RESOURCE_LIMIT_KEYS` + the derived `documents` cap, minus
+#: `quota.REGISTRY_SCOPED_RESOURCES`), and `_count_resource` branches on that
+#: same declaration. A hand-copied literal equalled the truth only on the day it
+#: was written: add one gate-able resource to `_RESOURCE_LIMIT_KEYS` and this
+#: gate would return `None` for it — counting the org's DEFAULT graph while the
+#: write opens its own, which is exactly the #4051 defect — and nothing would
+#: red, because a literal cannot drift from a fact it does not share a source
+#: with (round-3 review, P2).
+#:
+#: This SUPERSEDES the `_TENANT_GRAPH_RESOURCES` literal #10180 added on this
+#: line: one name for the one set, so the two cannot drift.
+_GRAPH_SCOPED_QUOTA_RESOURCES = TENANT_GRAPH_RESOURCES
+
+
+def _gate_sdk_for(org: dict, resource: str):
+    """The SDK whose graph the org-limit gate must COUNT — #4051.
+
+    `_data_graph_name` is *"the single value the ADMISSION GATE and the opener
+    share"*, but the gate did not use it: it called `enforce_org_limit(org,
+    resource)` with no SDK, so `quota._count_resource` fell back to its own
+    `_make_sdk(namespace=org_id)` — the org's **DEFAULT** graph, whatever graph
+    the request would actually open. `_data_sdk` writes into the graph-bound
+    key's CUSTOM `org_<tid>_<gid>` graph, so the gate counted a different graph
+    than it guarded: a custom graph already OVER its `max_points` still passed
+    the commit lane's points gate (measured: 5 points against a limit of 5, the
+    default graph empty, no refusal).
+
+    This mirrors the opener's TWO call forms rather than re-deriving one:
+    a graph-bound key gets `graph_name=_data_graph_name(org)` (the value
+    `_data_sdk` passes verbatim), and an org-wide key gets exactly what
+    `_org_sdk_for_credential` builds — which is the SAME decision the #10180
+    promotion work put on this path, reused rather than restated: a moved
+    default opens `graph_name=<promoted namespace>`, and every other org opens
+    the historical `namespace=org_id`. Those two axes are ORTHOGONAL and both
+    were real — #10180 made an org-wide count follow a PROMOTION, #4051 makes a
+    graph-BOUND count follow the BINDING, and before the merge of the two each
+    fix left the other's lane vacuous.
+
+    Mirroring the FORMS matters as much as the graph: `_make_sdk` keys its
+    embedded keepalive anchor on `graph_name if graph_name is not None else
+    namespace` (`_FALLBACK_KEEPALIVE`), and that dict never evicts a HEALTHY
+    anchor — it is only replaced when `_anchor_usable` fails (#1502) and never to
+    bound its size — so `graph_name="org_team-001"` for an org-wide key would
+    park a SECOND anchor (`org_team-001` beside the write's `team-001`) for every
+    org in the process. Mirroring also preserves the "identical connection"
+    property `mcp_server._enforce_quota` states as the rule.
+
+    Two deliberate non-uses:
+    - registry-scoped resources get `None`: their count is a control-plane read
+      and building a data SDK for them would be pure cost on the key-mint path.
+    - an UNRESOLVED graph binding (`_data_graph_name` → `None`) also gets
+      `None`, and NOT because the gate's reading is harmless: what holds is that
+      **no write can occur either way** — `_data_sdk` refuses the request 403
+      GRAPH_NOT_FOUND — so returning `None` cannot widen access. Substituting a
+      graph here WOULD be a fail-open widening. ⚠️ At the three
+      `/v1/{points,objects,subjects}` sites the gate runs before that 403, so the
+      default-graph count is still taken first and a 402 can pre-empt the 403 —
+      the same ordering the residual below records for the RESOLVED arm; this
+      arm is not exempt from it.
+
+    ⛔ KNOWN RESIDUAL (recorded, not fixed): on the three `/v1/{points,objects,
+    subjects}` sites the gate runs BEFORE `_data_sdk`'s `_assert_graph_owned`, so
+    for a binding whose namespace RESOLVES but is not owned (a DB-inconsistency
+    window, never client input — `graph_namespace` is auth-stamped) the gate now
+    counts that graph and a 402 can pre-empt the 403. Closing it means either
+    moving the gate after the SDK open at those three sites or gating the graph
+    SDK on a completed ownership check; both are their own change. The commit
+    lane is NOT in this class: it opens `_data_sdk` before its gate.
+    """
+    if resource not in _GRAPH_SCOPED_QUOTA_RESOURCES:
+        return None
+    if org.get("graph_id"):
+        graph = _data_graph_name(org)
+        if graph is None:
+            return None
+        return _make_sdk(graph_name=graph)
+    if not org.get("org_id"):
+        return None
+    return _org_sdk_for_credential(org)
 
 
 def _check_org_limit(org: dict, resource: str, *,
@@ -8621,27 +8836,26 @@ def _check_org_limit(org: dict, resource: str, *,
         quota_refusal_payload,
     )
     try:
-        # #10180: the points/sessions/documents counts are TENANT-graph counts, so
-        # the SDK they run against decides which graph the cap is measured on.
-        # Pass the org's DEFAULT-graph SDK explicitly (the `sdk=` arm
-        # `_count_resource` already documents for "REST callers that already hold
-        # one") so a promoted default is counted where the writes it admits
-        # actually land. Without it the gate counts the graph a promotion
-        # DEMOTED: a stale-low count admits an org past its real cap (the money
-        # gate failing OPEN) and a stale-high one refuses writes it is under.
-        # `org` is the RESOLVED CREDENTIAL (not the org ROW): an org-wide one
-        # carries `graph_namespace` — its default's namespace, resolved once at
-        # auth — so this needs no control-plane read and cannot fail open. (An
-        # earlier draft read `graph_name` here, a key no credential dict has:
-        # every gate then took the I/O branch, i.e. a blocking PostgREST read on
-        # the event loop of the capture path.) Scoped to the resources that ARE
-        # counted in the tenant graph — `api_keys`/`users`/`graphs` are counted
-        # from the control plane or the registry and must not pay for an SDK
-        # they never touch.
-        enforce_org_limit(
-            org, resource, slot_credit=slot_credit,
-            sdk=(_org_sdk_for_credential(org)
-                 if resource in _TENANT_GRAPH_RESOURCES else None))
+        # #4051 + #10180: the points/sessions/documents counts are TENANT-graph
+        # counts, so the SDK they run against decides WHICH graph the cap is
+        # measured on. Two orthogonal ways that went wrong, both closed by
+        # `_gate_sdk_for`: (a) #4051 — a graph-BOUND key was counted in the org's
+        # DEFAULT graph while its write went to a custom one, so the gate was
+        # present and vacuous; (b) #10180 — a PROMOTED default was counted where
+        # it used to be, so a stale-low count admitted an org past its real cap
+        # (the money gate failing OPEN). `org` is the RESOLVED CREDENTIAL (not
+        # the org ROW): an org-wide one carries `graph_namespace` — its
+        # default's namespace, resolved once at auth — so this needs no
+        # control-plane read and cannot fail open.
+        #
+        # `sdk_factory=` (lazy), NOT `sdk=`: a gate that RETURNS before counting
+        # must not build a graph handle to prove it. `sessions` is unlimited by
+        # #4010 and `documents` returns for an unlimited `max_points`, so an
+        # eager resolve was measured as 0 -> 1 `_make_sdk` per capture, 764 us of
+        # it embedded, on the event loop — for a count that never ran.
+        enforce_org_limit(org, resource,
+                          sdk_factory=lambda: _gate_sdk_for(org, resource),
+                          slot_credit=slot_credit)
     except QuotaExceededError as e:
         # #4614: the refusal is a STRUCTURED, distinguishable state — a `code`
         # plus the resource/used/limit the gate actually compared — not the
@@ -8764,8 +8978,8 @@ async def _emit_capture_ledger(org_id: str, session_id: str, meta: dict,
     blocking I/O, and this API runs a single uvicorn worker (the #2988 / #3498
     class). The analytics emit goes through the SHARED off-loop entry point
     (``_emit_analytics_off_loop`` → ``_cp_offload`` on the dedicated
-    ``telemetry`` pool, #4468) rather than the loop's SHARED default executor,
-    which the abuse hooks compete on — #4015 moved every other hosted funnel
+    ``telemetry`` pool, #4468) rather than the loop's SHARED default executor
+    — #4015 moved every other hosted funnel
     emit there and left this lane for #4468. The ledger write stays on
     ``asyncio.to_thread`` deliberately: it is a DIFFERENT op (the durable
     per-period row the spend cap reads, not the analytics row), it has no
@@ -8814,8 +9028,133 @@ def _suspended_detail() -> dict:
 
 
 
+# ── #10618: the per-request telemetry hooks leave the SHARED pool ──────────
+# Every authenticated request used to pay a hop on the loop's SHARED default
+# executor (``asyncio.to_thread``) BEFORE its handler ran — ``first_api_call``
+# and ``_abuse_post_auth``. That pool is ``min(32, cpu+4)`` (**6** on prod's
+# 2 vCPU), its queue is UNBOUNDED, and ~180 other ``to_thread`` sites compete
+# for it, so a few stalled tenants parked every worker and the request that
+# could not get one never reached its handler at all. Measured (#10618): with
+# the pool full, ``await _abuse_post_auth(...)`` does not return.
+#
+# Both hooks are BEST-EFFORT TELEMETRY whose contract is "this must never gate
+# the request path", so they move to a bounded control-plane pool — the #3060
+# pattern applied to the last two per-request tenants of the shared pool. They
+# get their OWN pool (``monitoring.CONTROL_PLANE_ABUSE_*``, ``pool="abuse"``)
+# rather than riding ``telemetry``: that pool also carries the UNRECOVERABLE
+# ``billing_notify`` (its ``WebhookEvent`` marker is already committed, so a
+# refused submission is a notification lost for good), and ``check_new_country``
+# holds a PROCESS-GLOBAL lock across a PostgREST round trip, so a cold geo cache
+# — the first request after every restart — could have offered that stall the
+# capacity a billing notify needs. On their own pool the hooks can only ever
+# starve themselves.
+#
+# Delivery is PRESERVED, not traded: ``cancel_on_timeout=False`` (#4456) makes
+# the bound abandon only the AWAIT, so a submission still QUEUED when the bound
+# expires STILL RUNS, and the record lands later instead of vanishing. The only
+# real drop left is a genuinely REFUSED submission (the pool's backlog is
+# full), which is escalated to a rate-limited ERROR line
+# (``_log_abuse_offload_refused``) so a suppression is ATTRIBUTABLE — never
+# silent. That is deliberate: an attacker who can saturate the pool must not be
+# able to suppress their own velocity accounting INVISIBLY.
+#
+# The bound is short on purpose. These hooks are bookkeeping; a request must not
+# pay seconds for them, and because the bound is delivery-preserving a short one
+# costs LATENCY of the record, never the record itself.
+_ABUSE_OFFLOAD_TIMEOUT_S = 1.0
+
+#: Rate limit for the ``ABUSE_OFFLOAD_REFUSED`` ERROR floor (#10618, the #4456
+#: shape). ONE saturation refuses a hook per request for EVERY tenant — the repo
+#: already ruled against per-drop alert amplification
+#: (``operator_alert._log_shed``), so the line is shed-logged: one per window is
+#: enough to see it.
+_ABUSE_REFUSED_LOG_INTERVAL_S = 60.0
+#: ``None`` = never logged (NOT ``0.0`` — ``time.monotonic()``'s reference point
+#: is undefined, so a fresh-boot clock would suppress every line).
+_LAST_ABUSE_REFUSED_LOG: float | None = None
+_ABUSE_REFUSED_LOG_LOCK = threading.Lock()
+
+
+def _log_abuse_offload_refused(op: str) -> None:
+    """The rate-limited ERROR floor for a REFUSED hook (#10618).
+
+    Without it a refused submission is indistinguishable from routine
+    best-effort telemetry noise — a WARNING at most, and
+    ``record_control_plane_offload`` counts it on the ``bound_miss_refused``
+    outcome, neither of which says an abuse record was LOST for a request the
+    caller got a 200 for. Never raises (a reporting path must not become the
+    failure it reports).
+    """
+    global _LAST_ABUSE_REFUSED_LOG
+    with contextlib.suppress(Exception):
+        now = time.monotonic()
+        with _ABUSE_REFUSED_LOG_LOCK:
+            if (_LAST_ABUSE_REFUSED_LOG is not None
+                    and now - _LAST_ABUSE_REFUSED_LOG
+                    < _ABUSE_REFUSED_LOG_INTERVAL_S):
+                return
+            _LAST_ABUSE_REFUSED_LOG = now
+        _logger.error(
+            "ABUSE_OFFLOAD_REFUSED: %s was REFUSED by the control-plane "
+            "offload seam — the abuse/activation record for this request was "
+            "DROPPED (the abuse pool's backlog is full), so velocity "
+            "accounting is missing a request it served. One line per %.0fs "
+            "window.",
+            op, _ABUSE_REFUSED_LOG_INTERVAL_S)
+
+
+async def _telemetry_hook_off_loop(fn, *, op: str) -> None:
+    """Run ONE per-request telemetry hook on the BOUNDED ``abuse`` lane.
+
+    #10618: never the loop's shared default executor (``min(32, cpu+4)``,
+    unbounded wait — a stalled tenant there parks a request BEFORE its
+    handler). Three properties are deliberate:
+
+    * ``cancel_on_timeout=False`` (#4456) makes the short bound
+      DELIVERY-preserving: the bound abandons only the AWAIT, so a submission
+      still QUEUED when it expires STILL RUNS. A saturated pool delays the
+      record; it does not drop it.
+    * A REFUSAL (backlog full — the callable never ran) is the ONE real drop,
+      and it is reported through ``_log_abuse_offload_refused`` (rate-limited)
+      instead of being swallowed.
+    * A BOUND MISS is NOT logged per call. ``_cp_offload(best_effort=True)``
+      emits an unthrottled WARNING on every miss, and this hook runs on EVERY
+      authenticated request — under saturation that would be one WARNING per
+      request, exactly the per-drop amplification the refusal line sheds, and
+      it would bury the one line worth reading. ``run_control_plane_call``
+      still records the miss on the ``bound_miss_running`` outcome and
+      attributes the abandoned work's eventual result (#4456), so nothing is
+      invisible — it is simply metered instead of shouted.
+
+    ⛔ CONTEXT: a pool thread is process-lifetime, so each invocation runs
+    under a FRESH COPY of the submitting context (``monitoring.confine_context``,
+    wrapped per submission because the wrapper binds the context it was created
+    with — #10612/#10642). That reproduces the ``asyncio.to_thread`` copy the
+    hooks relied on (a request's ContextVars are still visible inside the hook)
+    and guarantees a ContextVar set there cannot leak into the NEXT request the
+    worker serves — the same rule ``_graph_offload`` follows. None of today's
+    hook callables touches a ContextVar; this keeps that from becoming a silent
+    trap if one ever does.
+
+    A raise from the callable ITSELF still propagates to the caller's own guard
+    — same as the direct ``to_thread``/``await`` it replaces.
+    ``CancelledError`` is a ``BaseException`` and is untouched.
+    """
+    from tortoise.monitoring import ControlPlaneOffloadError
+    try:
+        await run_control_plane_call(
+            confine_context(fn), op=op, pool="abuse",
+            timeout=_ABUSE_OFFLOAD_TIMEOUT_S, cancel_on_timeout=False)
+    except ControlPlaneOffloadError as exc:
+        if exc.refused:
+            _log_abuse_offload_refused(op)
+        # A bound miss is not a drop: the queued submission still runs and the
+        # seam meters its outcome (``bound_miss_running`` + the abandoned-result
+        # callback). Deliberately no per-call line (#10618 review P2).
+
+
 def _abuse_post_auth_sync(method: str, headers: dict, org: dict) -> None:
-    """#308 post-auth hooks (run via asyncio.to_thread): R3 read velocity
+    """#308 post-auth hooks (run off the loop, #10618): R3 read velocity
     (GET only — writes never count as reads, scoping delta 11) + R4 geo
     (every request). Best-effort; TORTOISE_ABUSE_DISABLED kills both."""
     from tortoise import abuse as _abuse
@@ -8832,10 +9171,19 @@ def _abuse_post_auth_sync(method: str, headers: dict, org: dict) -> None:
 
 
 async def _abuse_post_auth(request: Request, org: dict) -> None:
-    """Async wrapper — never raises into the auth path."""
+    """Async wrapper — never raises into the auth path.
+
+    #10618: awaited on EVERY authenticated request, so it rides the bounded
+    ``telemetry`` lane (``_telemetry_hook_off_loop``) and never the loop's
+    shared default executor. ``request.headers``/``request.method`` are read
+    HERE, on the loop: ``Request`` is not thread-safe and a worker must not
+    touch it.
+    """
     try:
         headers = dict(request.headers)
-        await asyncio.to_thread(_abuse_post_auth_sync, request.method, headers, org)
+        await _telemetry_hook_off_loop(
+            functools.partial(_abuse_post_auth_sync, request.method, headers, org),
+            op="abuse.post_auth")
     except Exception:
         pass  # best-effort — abuse telemetry never breaks auth
 
@@ -8850,7 +9198,10 @@ def _abuse_record_points_sync(org: dict, n: int) -> None:
 
 async def _abuse_record_points(request: Request, org: dict, n: int) -> None:
     try:  # noqa: SIM105
-        await asyncio.to_thread(_abuse_record_points_sync, org, n)
+        # #10618: the bounded telemetry lane, never the shared default pool.
+        await _telemetry_hook_off_loop(
+            functools.partial(_abuse_record_points_sync, org, n),
+            op="abuse.record_points")
     except Exception:
         pass  # best-effort — never block the write path
 
@@ -8863,7 +9214,10 @@ def _abuse_evaluate_keys_sync(org_id: str) -> None:
 
 async def _abuse_evaluate_keys(org_id: str) -> None:
     try:  # noqa: SIM105
-        await asyncio.to_thread(_abuse_evaluate_keys_sync, org_id)
+        # #10618: the bounded telemetry lane, never the shared default pool.
+        await _telemetry_hook_off_loop(
+            functools.partial(_abuse_evaluate_keys_sync, org_id),
+            op="abuse.evaluate_keys")
     except Exception:
         pass
 
@@ -12029,11 +12383,15 @@ async def org_info(org: dict = Depends(get_current_org_session_ungated)):  # noq
     sdk = await _graph_offload(
         lambda: _org_sdk_for_credential(org), op="org_sdk")
     # Count REAL Points in default graph. #2360: demo/sample Points
-    # (_seed_demo_graph: the 12 sample Points + _demo_sentinel) are EXCLUDED
+    # (_seed_demo_graph: the 9 sample Points + _demo_sentinel) are EXCLUDED
     # — the Overview memory digest (this count) presents the user's own
     # filings, never opt-in/legacy sample content masquerading as user data.
-    # The exclusion set is the same constant the demo seeder writes from, so
-    # it can never drift. #1591: FAIL SOFT — a missing/broken org graph
+    # The exclusion set is the same constant the demo seeder declares, so it
+    # can never drift. Since #10000 the set is a SUPERSET of what the seeder
+    # writes: the three `epi_turn*` ids no longer name a node (§9.1/D1 — the
+    # demo's episodic layer is the Session), and they stay in the set so the
+    # count keeps excluding a graph seeded before that change.
+    # #1591: FAIL SOFT — a missing/broken org graph
     # (half-failed provisioning, restores) must not dead-end the dashboard
     # with a hard 500; the client renders the empty state and a write
     # recreates the graph. SCOPE (#3718): the SDK construction above is a
@@ -13559,7 +13917,19 @@ _DEMO_SEMANTIC_POINTS = [
      ["tortoise", "ontology"]),
 ]
 
-# (pid, content) — episodic turns (pointKind 'event', no tags)
+# (pid, content) — the demo's SAMPLE TRANSCRIPT: DECLARED, NOT WRITTEN.
+# ⛔ Since #10000 these carry NO graph node. §9.1/D1 puts raw turn text in
+# Postgres ("not in the graph, not a `Document`, not a `Point`"), so
+# `_seed_demo_graph` writes only the demo `:Session` FOR THIS LAYER — whose
+# `turn_count` is **0**, because it stores no turn — and reports this list's
+# LENGTH as the
+# response's `sample_turns`, NEVER as `turn_count` (which is a completeness
+# claim the session read acts on; see the note at the write site). The ids are still
+# declared here because `_DEMO_POINT_IDS` names them: a graph seeded BEFORE
+# #10000 holds those nodes, and `org.point_count` must keep excluding them.
+# Read the texts as the sample transcript the demo DESCRIBES — nothing writes
+# them to a store, and `tests/test_10000_turns_record_only.py` reads them to
+# assert exactly that.
 _DEMO_EPISODIC_TURNS = [
     ("epi_turn1", "[user] Let's set up our agent memory system with Tortoise."),
     ("epi_turn2", "[assistant] I'll initialize the graph and configure the ontology layers. "
@@ -13599,9 +13969,12 @@ _DEMO_PROCEDURAL_POINTS = [
      ["workflow", "review"]),
 ]
 
-# Every demo/sample Point the seeder can write, incl. the sentinel. The
-# Overview digest (org.point_count) excludes exactly this set — sample
-# content never counts as the user's own filings (#2360).
+# Every demo/sample Point the seeder can write, incl. the sentinel — PLUS the
+# `epi_turn*` ids it no longer writes (see `_DEMO_EPISODIC_TURNS`). The
+# Overview digest (org.point_count) excludes this set — sample content never
+# counts as the user's own filings (#2360) — and a graph seeded before #10000
+# still holds those three, so the set is deliberately a SUPERSET of what the
+# seeder writes today.
 _DEMO_POINT_IDS: frozenset[str] = frozenset(
     pid for pid, *_ in (
         _DEMO_SEMANTIC_POINTS + _DEMO_EPISODIC_TURNS
@@ -13669,24 +14042,54 @@ def _seed_demo_graph(org_id: str) -> dict:
     # #3554: the id comes from the ONE declaration (`session_schema.demo_session_id`),
     # not a local f-string, so the writer and any future exclusion cannot drift.
     session_id = demo_session_id(org_id)
+    # ⛔ `turn_count` is 0, NOT the sample transcript's length. `turn_count` is a
+    # COMPLETENESS CLAIM the capture path earns by storing the turns it counts
+    # (`record_read.served_turn_count` refuses a copy that holds fewer than the
+    # declared count, and the capture writer sets it to the length it actually
+    # wrote). This seed stores no turn anywhere, so declaring 3 would
+    # be the one shape the product never produces: measured on an armed,
+    # journaling deployment the demo session's read refused with
+    # `record_unavailable` (503), and on an unarmed one it served
+    # `{"turns": 3, "turn_points": []}` — two numbers in one body contradicting
+    # each other, the exact class #10021-P2 added that guard to eliminate.
+    # The sample transcript's LENGTH is reported as `sample_turns` in the
+    # response instead, where no read treats it as a promise about stored rows.
     proj.g.query(
         "MERGE (s:Session {id:$sid}) "
-        "SET s.created_at=$now, s.turn_count=3",
+        "SET s.created_at=$now, s.turn_count=0",
         params={"sid": session_id, "now": now},
     )
-    episodic_turns = _DEMO_EPISODIC_TURNS
-    for pid, content in episodic_turns:
-        proj.g.query(
-            "MERGE (t:Point {id:$id}) "
-            "SET t.content=$c, t.pointKind='event', t.is_operator=false, "
-            "t.status='live', t.createdAt=$now, t.updatedAt=$now",
-            params={"id": pid, "c": content, "now": now},
-        )
-        proj.g.query(
-            "MATCH (s:Session {id:$sid}), (t:Point {id:$pid}) "
-            "MERGE (s)-[:CONTAINS]->(t)",
-            params={"sid": session_id, "pid": pid},
-        )
+    # ── §9.1/D1: the demo's episodic layer is the SESSION, never turn nodes ──
+    # `STORAGE-ARCHITECTURE.md` §9.1 (D1), under §2.0's authority split, puts raw
+    # turn text in Postgres — "not in the graph, not a `Document`, not a
+    # `Point`". This seeder wrote one `:Point {pointKind:'event'}` per demo turn
+    # carrying that turn's literal text, `CONTAINS`-wired to the Session: the
+    # per-turn-text-node shape `#10000` removed from the capture path, and the
+    # last PRODUCT/RUNTIME writer producing it unconditionally. THREE residuals
+    # still write that shape and are deliberate, so they are named rather than
+    # left to be rediscovered — this enumeration is the book a §9.1/D1 audit
+    # would close on: the capture path keeps it as its record-incapable
+    # fallback; both offline eval-corpus ingest legs (`tools/longmem_eval/
+    # ingest.py`, `ingest_v2.py`) mint it ungated for the corpus graphs they
+    # build; and `tools/ask_spotcheck.py::seed_capture_turn_store` mints it
+    # (raw Cypher, no gate) for every ask fixture since #3914 — the copy this
+    # module's capture-side NOTE calls the THIRD. It is
+    # not a captured transcript, so there is no record row it duplicates —
+    # which made the graph the only RUNTIME store of text §2.0 says the graph
+    # may not authoritatively hold.
+    #
+    # The demo now writes the shape the product produces: the Session with its
+    # counter and no turn text on any node.
+    #
+    # ⚠️ NOT RETROACTIVE, the same posture as the `tags` note above: the sentinel
+    # short-circuits before any write, so a demo graph seeded BEFORE this keeps
+    # its `epi_turn*` nodes. ⛔ RE-SEEDING DOES NOT REPAIR THEM — a re-seed
+    # writes nothing for those ids and deletes nothing (unlike the `tags` case,
+    # whose `MERGE` re-writes `p.tags`). Deleting those three nodes is the
+    # graph-side repair, and it is destructive, so it is out of this change's
+    # scope. Blast radius: opt-in sample content that `org.point_count`
+    # excludes — but the demo `:Session` is still returned by the session reads,
+    # so the pre-existing nodes stay reachable there and in search.
 
     # ── Epistemic Layer — claims with evidence ───────────────────
     epistemic_points = _DEMO_EPISTEMIC_POINTS
@@ -13746,18 +14149,32 @@ def _seed_demo_graph(org_id: str) -> dict:
         params={"now": now},
     )
 
+    # `points` is a `:Point` CENSUS of what this call writes (the sentinel
+    # excluded — `public_demo` adds it), not a description of the sample
+    # content: its only consumer meters a write op — `public_demo` calls
+    # `_record_write_op(org, nodes_written=created["points"] + 1)`, whose
+    # contract is "net-new non-episodic nodes written by this call". The
+    # episodic layer now writes NO node (its text would be a §9.1/D1
+    # violation), so counting it here would bill three nodes that do not
+    # exist. The declared transcript LENGTH is reported separately as
+    # `sample_turns`, so nothing that wants the demo's shape has to read the
+    # census, and nothing that bills has to read the declaration.
     total_points = (
-        len(semantic_points) + len(episodic_turns)
-        + len(epistemic_points) + len(procedural_points)
+        len(semantic_points) + len(epistemic_points) + len(procedural_points)
     )
     return {
         "status": "demo_created",
         "org_id": org_id,
         "session_id": session_id,
         "points": total_points,
+        #: The declared length of the sample transcript. Survives the removal
+        #: of the turn nodes because the DECLARATION survives; the Session
+        #: states 0 — the number of turns it actually stores.
+        "sample_turns": len(_DEMO_EPISODIC_TURNS),
         "layers": {
             "semantic": len(semantic_points),
-            "episodic": len(episodic_turns),
+            # 0 NODES: the episodic layer is the Session, per §9.1/D1.
+            "episodic": 0,
             "epistemic": len(epistemic_points),
             "procedural": len(procedural_points),
         },
@@ -13768,7 +14185,9 @@ def _seed_demo_graph(org_id: str) -> dict:
 
 @app.post("/internal/demo")
 async def create_demo_graph(request: Request):
-    """Create an OPT-IN demo graph with sample Points across all 4 ontology
+    """Create an OPT-IN demo graph with sample Points across the semantic,
+    epistemic and procedural layers, plus the demo `:Session` (the episodic
+    layer carries no Point since #10000, §9.1/D1), across the 4 ontology
     layers.
 
     #2360 (re-spec): this is NO LONGER auto-called by the tenant-provision
@@ -17017,11 +17436,14 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
             # ALL traffic ("no known healthy instances for route tcp/443") — one
             # slow model call took down the whole product, not just the capture.
             # `to_thread`-style context propagation, but on the CAPTURE pool:
-            # a stalled extraction must not be able to starve the auth
-            # middleware's abuse hooks or the other `to_thread` call sites out
-            # of the shared default executor (#3060). /health is no longer one
-            # of those tenants — since #2850 it reads in-memory state and takes
-            # no thread hand-off (see the pool notes at the top of the file).
+            # a stalled extraction must not be able to starve the other
+            # `to_thread` call sites out of the shared default executor
+            # (#3060) — that pool is 6 workers with an unbounded wait. (#10618
+            # moved the auth path's per-request hooks off it; the hazard this
+            # comment guards is the pool's, not theirs.) /health is no longer
+            # one of those tenants — since #2850 it reads in-memory state and
+            # takes no thread hand-off (see the pool notes at the top of the
+            # file).
             # `_run_off_loop` copies the caller's contextvars into the worker,
             # which is what `_call_once`'s own `copy_context()` snapshot
             # depends on (#2185).
@@ -35936,7 +36358,7 @@ async def public_demo(org: dict = Depends(get_current_org_gated)):  # noqa: B008
     Reuses the same seeding logic as /internal/demo but requires a Bearer
     tt_ key instead of the internal key. Idempotent (sentinel check).
     """
-    # C5 #2114 (code-review P1): the demo seed writes ~13 Points into the
+    # C5 #2114 (code-review P1): the demo seed writes ~10 Points into the
     # org's DEFAULT graph — a graph-bound key seeding it would be a
     # cross-graph write; a graphs:read-only key seeding it would be a
     # read→write scope bypass. Demo is a default-graph org surface.
@@ -35945,7 +36367,7 @@ async def public_demo(org: dict = Depends(get_current_org_gated)):  # noqa: B008
     # #3718 residual (DATA plane): every step of the seed region below is SYNC
     # FalkorDB socket I/O — `_make_sdk` (in embedded mode it probes the anchor
     # and can open the DB), the projection attach, the sentinel read, the quota
-    # count and the ~13-Point seed. They run as ONE worker hand-off, so the
+    # count and the ~10-Point seed. They run as ONE worker hand-off, so the
     # region's statements stay uninterleaved WITHIN the request.
     #
     # ⚠️ ONE HAND-OFF IS NOT MUTUAL EXCLUSION: `asyncio.to_thread` submits to
@@ -35966,13 +36388,13 @@ async def public_demo(org: dict = Depends(get_current_org_gated)):  # noqa: B008
             return {"existing": True, "created": None}
         # #1922: quota-gate the seed like the MCP twin
         # (tortoise_onboarding_demo_create → _enforce_quota("points")). The
-        # demo seed writes ~13 Points, so it must consume the points quota
+        # demo seed writes ~10 Points, so it must consume the points quota
         # like any other Point-creating write — the REST surface was the
         # 0-quota bypass (bug-hunt 2026-08-28 server P2-13). Idempotent
         # re-calls short-circuit above and skip the gate (no write).
         _check_org_limit(org, "points")
         # The shared demo seeder (extracted from /internal/demo) opens its own
-        # SDK and writes ~13 Points.
+        # SDK and writes ~10 Points.
         return {"existing": False, "created": _seed_demo_graph(org["org_id"])}
 
     async with await _demo_seed_lock(org["org_id"]):
@@ -35983,13 +36405,15 @@ async def public_demo(org: dict = Depends(get_current_org_gated)):  # noqa: B008
         # worker hand-off too (the probe in the lane guard finds it otherwise).
         await asyncio.to_thread(
             _update_onboarding_state, org["org_id"], demo_created=True)
+        # 10 = the 9 seeded `:Point` nodes + `_demo_sentinel` (was a stale 15
+        # that never matched the seed; corrected with the #10000 census).
         await _track_onboarding_event(org, "first_memory_created",
-                                      source="demo", point_count=15)
+                                      source="demo", point_count=10)
         return {"status": "already_seeded", "org_id": org["org_id"]}
 
     created = out["created"]
 
-    # #1922: meter the seed that actually ran — one write op billing 12
+    # #1922: meter the seed that actually ran — one write op billing the 9
     # seeded points + the _demo_sentinel Point (net-new non-episodic nodes,
     # the value-first commit cost driver epic #909 §4.4). A concurrent
     # request may have completed the seed first (sentinel now present) —
@@ -37684,9 +38108,9 @@ async def _emit_analytics_off_loop(org_id: str, event_name: str,
     ``_cp_offload``, and since #4468 it is also the capture-cost lane's
     (``_emit_capture_ledger``) off-loop path: that lane used to keep its own
     ``asyncio.to_thread`` call — still off-loop, but on the loop's SHARED
-    default executor, which the abuse hooks and the selfhost readiness probe
-    also use, so it was not isolated the way this pool is. ``mcp_server`` keeps
-    its own retained emitter.
+    default executor, shared with the selfhost readiness probe and every other
+    ``to_thread`` site, so it was not isolated the way this pool is.
+    ``mcp_server`` keeps its own retained emitter.
 
     ``_track_analytics_event`` is a synchronous ``httpx.Client`` POST and
     ``hosted_api`` runs a SINGLE uvicorn worker, so calling it inline from an
@@ -43464,8 +43888,8 @@ async def webhooks_stripe(request: Request):
             # ``to_thread`` submits to the loop's SHARED default executor,
             # whose workers are NON-daemon and are JOINED at shutdown (#2850),
             # so a black-holed socket would delay uvicorn's shutdown — and a
-            # notify would park one of the six workers the /health probe and
-            # the abuse hooks also use (#3060; #4468 tracks the same residual
+            # notify would park one of the six workers the /health probe uses
+            # (#3060; #4468 tracks the same residual
             # on the capture-cost lane). The telemetry pool is a
             # process-lifetime DAEMON pool with a bounded backlog, so a wedged
             # notify is abandoned at the seam's wait bound instead of
