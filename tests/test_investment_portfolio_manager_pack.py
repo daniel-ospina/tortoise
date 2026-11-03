@@ -813,6 +813,50 @@ class TestExtractionWithThePackOff:
         # The positive control that makes the equality mean something.
         assert any(k.startswith(f"{NS}:") for k in compile_value_brief())
 
+    def test_the_brief_does_not_depend_on_the_manifest_glob_order(
+            self, monkeypatch):
+        """`pack_refs` rows are a function of the MANIFESTS, not of `readdir`.
+
+        The test above compares two compiles of the SAME catalog read from two
+        different PATHS (the repo tree and a `shutil.copytree` copy). That is
+        only a meaningful comparison if the compile ignores directory order —
+        and it did not: `pack_refs[kind]` rows were extended once per
+        contributing pack, in `packs_dir.glob("*/manifest.yaml")` order, which
+        is `os.scandir` order. POSIX does not specify that order, dict
+        equality hides it, list equality does not — so the comparison above
+        reddened on the ARM64 runner on this repo's own catalog while passing
+        on a host whose two directories happened to enumerate identically
+        (#10519, `test (e)` of run 41503880186).
+
+        Non-vacuous in the direction that matters: pre-fix, the reversed glob
+        yields `['dev:issue', 'product-strategy:product', …]` against
+        `['product-strategy:product', …, 'dev:issue']` for
+        `product-strategy:feature` (and two more multi-pack rows), so the two
+        briefs compare unequal and this assertion fails. Post-fix both are
+        sorted and equal.
+        """
+        forward = compile_value_brief()
+
+        real_glob = Path.glob
+
+        def reversed_glob(self, pattern, **kwargs):
+            return iter(list(reversed(list(real_glob(self, pattern, **kwargs)))))
+
+        monkeypatch.setattr(Path, "glob", reversed_glob)
+        backwards = compile_value_brief()
+        monkeypatch.undo()
+
+        # The perturbation must actually reach the merge, or this proves
+        # nothing: at least one kind has to be named by MORE than one pack
+        # (only then can the row order differ at all).
+        multipack = {k: row for k, row in forward["pack_refs"].items()
+                     if len(row) > 1}
+        assert multipack, "fixture: the catalog must declare a multi-pack row"
+        assert backwards == forward
+        assert backwards["pack_refs"] == forward["pack_refs"]
+        for kind, row in backwards["pack_refs"].items():
+            assert row == sorted(row), (kind, row)
+
     def test_gated_off_kind_index_and_its_cache_key_are_unchanged(
             self, packs_without_portfolio):
         gated = compile_kind_index_spec(
