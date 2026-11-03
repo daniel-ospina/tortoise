@@ -19321,8 +19321,10 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
     # `create_point`'s dedup branch DROPS a fold carrying a validity window
     # because the content address resolves to a terminal claim, and (since
     # #10368) `metadata_not_applied`, raised when the same fold carries GENERIC
-    # metadata props instead. A dropped fold writes nothing, so without this the
-    # client gets a 200 whose `when` or whose props were silently not applied.
+    # metadata props instead. The temporal drop applies NOTHING (#7819); the
+    # metadata drop applies nothing of THAT leg while the fold's evidence legs
+    # still land (#7704/#398) — so without this the client gets a 200 whose
+    # `when`, or whose metadata props, were silently not applied.
     # ⚠️ NOT a closed enumeration: every `advisories` entry a `create_point` leg
     # returns is forwarded below, so a NEW write-time code reaches `warnings[]`
     # without an edit here — but a code that is never named in this comment is a

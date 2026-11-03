@@ -12671,18 +12671,27 @@ class TortoiseSDK:
                 # #10368: ONE terminal read serves BOTH guards — the #7819
                 # temporal drop just below and the write-leg verdict further
                 # down (the metadata drop AND the `updatedAt` stamp). Read once,
-                # when the fold could write anything at all: any prop, or an
-                # authored word, which lands with `props` empty. A fold that
-                # carries neither reaches no write and pays nothing.
+                # when the fold could write anything at all: any CALLER prop, or
+                # an authored word, which lands with `props` empty.
+                #
+                # ⛔ `content_hash` is excluded from that predicate because THIS
+                # door puts it there unconditionally (#80) and only pops it
+                # after the fold — so `if props` would be true on every dedup
+                # hit, including a bare re-assertion that can write nothing, and
+                # the fan-out read would be paid on the idempotent-replay hot
+                # path for no verdict at all (measured by the #10368 review: a
+                # no-prop re-assertion went 0 -> 1 reads when the predicate did
+                # not exclude it).
                 #
                 # ⛔ Reading it lazily at each use is NOT equivalent: the
                 # temporal branch returns only on a NON-None marker, so a fold
-                # carrying a temporal prop onto a LIVE target asked twice, and a
-                # word-only fold asked a third time. `None` therefore means
-                # "live" here only because every path that consults this value
-                # has a non-empty `props` or a `cred_prior`.
-                _fold_terminal = (self._lifecycle_terminal_marker(pid)
-                                  if (props or cred_prior is not None) else None)
+                # carrying a temporal prop onto a LIVE target asked twice.
+                # `None` therefore means "live" here only because every path
+                # that consults this value has a caller prop or a `cred_prior`.
+                _fold_terminal = (
+                    self._lifecycle_terminal_marker(pid)
+                    if (set(props) - {"content_hash"}
+                        or cred_prior is not None) else None)
                 _temporal = _TEMPORAL_RESTAMP_PROPS & set(props)
                 if _temporal and _fold_terminal is not None:
                     _logger.warning(
@@ -13019,8 +13028,17 @@ class TortoiseSDK:
                 # re-keys a payload onto an existing content address, so a
                 # raise here is the deterministic 500 that #3366 exists to
                 # prevent — the same reason #7819 chose a drop.
+                # ⛔ `not _key_hits`: this drop is a verdict about a CONTENT
+                # match. A caller-supplied KEY resolves the hit even when the
+                # content differs (#6110 calls a key an IDENTITY, not a label),
+                # i.e. that caller DID address the point — the deliberation side
+                # of this issue's own line — so the key leg keeps exactly the
+                # behaviour it had before #10368. (`ingest` refuses a key fold
+                # onto a terminal point at Phase 1 instead, #9818/#10377; the
+                # two doors differ here on purpose: Phase 1 can refuse the whole
+                # bundle before any write, this door can only drop and advise.)
                 _dropped_props: list[str] = []
-                if props and _fold_terminal is not None:
+                if props and _fold_terminal is not None and not _key_hits:
                     _dropped_props = sorted(props)
                     _logger.warning(
                         "create_point: dedup resolved to point %s, which "

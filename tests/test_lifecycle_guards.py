@@ -953,6 +953,40 @@ def test_create_point_dedup_does_not_mutate_a_terminal_point(sdk):
     # TRANSIENT, like the #8171 advisories it sits beside: never on the node.
     assert "advisories" not in after
 
+    # The guarantee is "no revision", so the STAMP is only half of it: a
+    # `PointRevised` journaled against the dead id would be replayed into one
+    # (#7951), and the suite would never see it. Drive EVERY terminal shape and
+    # read the journal, not just `updatedAt` — the family convention is
+    # `test_a_refused_temporal_write_journals_no_revision`.
+    for status in _TERMINAL_STATUSES:
+        armed = _point(sdk, status=status)
+        content = sdk.get_point(armed)["content"]
+        before_row = sdk.get_point(armed)
+        # `sdk` here has no event log of its own; the fixture's sibling test
+        # covers the journal on a logged SDK, so assert the stamp + the props
+        # here and the journal in the dedicated test below.
+        again = sdk.create_point("statement", content, dedup=True,
+                                 custom_probe=status)
+        assert again["id"] == armed, status
+        after_row = sdk.get_point(armed)
+        assert after_row["updatedAt"] == before_row["updatedAt"], (
+            f"status={status}: the fold re-stamped a TERMINAL point")
+        assert "custom_probe" not in after_row, (status, after_row.keys())
+        dropped = next(a for a in again["advisories"]
+                       if a.get("code") == "metadata_not_applied")
+        assert dropped["props"] == ["custom_probe"], (status, dropped)
+    # ...and the legacy `outdated=true` FLAG with no terminal status is terminal
+    # too (_TERMINAL_STATUSES covers the vocabulary; this is the other shape).
+    flagged = _point(sdk, outdated=True)
+    flagged_content = sdk.get_point(flagged)["content"]
+    before_row = sdk.get_point(flagged)
+    sdk.create_point("statement", flagged_content, dedup=True,
+                     custom_probe="flag")
+    after_row = sdk.get_point(flagged)
+    assert after_row["updatedAt"] == before_row["updatedAt"], (
+        "the legacy outdated=true flag must be terminal for this fold too")
+    assert "custom_probe" not in after_row
+
     # ...and the stamp must not sneak back in through the OTHER legs. The ruled
     # evidence/word legs write props of their own and none of them may carry a
     # revision. Each shape gets its OWN fresh point: a shared target would make
@@ -982,6 +1016,71 @@ def test_create_point_dedup_does_not_mutate_a_terminal_point(sdk):
         assert after["status"] == "retracted", (label, after["status"])
         assert after.get("credibility") == canonical_tier("gold"), (
             f"{label}: #398's word leg must still land", after.get("credibility"))
+
+
+def test_a_KEY_named_fold_onto_a_terminal_point_is_unchanged(sdk):
+    """The key leg is deliberately NOT widened (#10368 scope statement).
+
+    A caller-supplied `key` is an IDENTITY (#6110), so a fold it resolves DID
+    address the point — the deliberation side of the line this issue draws. The
+    drop is therefore gated on `not _key_hits`, and this pins that boundary: a
+    key-named fold keeps writing onto a terminal target exactly as it did
+    before, and reports NO `metadata_not_applied`. Without this mirror the gate
+    could be "simplified" into dropping every fold, silently reversing the
+    scope recorded on the issue.
+    """
+    content = f"key named fold {uuid.uuid4().hex[:8]}"
+    pid = sdk.create_point("statement", content, dedup=True, key="K-10368")["id"]
+    sdk.retract_point(pid)
+    again = sdk.create_point("statement", content, dedup=True,
+                             key="K-10368", custom_probe="z")
+    assert again["id"] == pid
+    assert sdk.get_point(pid).get("custom_probe") == "z", (
+        "a KEY-named fold must keep the behaviour it had before #10368")
+    codes = [a.get("code") for a in (again.get("advisories") or [])]
+    assert "metadata_not_applied" not in codes, again
+
+
+@pytest.mark.parametrize("kwargs", [
+    {"custom_probe": "x"},
+    {"credibility": "gold"},
+    {"extractedFrom": "https://example.com/10368-journal"},
+    {"extractedFrom": "https://example.com/10368-journal",
+     "credibility": "gold"},
+], ids=["prop", "word", "evidence", "evidence+word"])
+def test_a_terminal_fold_journals_no_pointrevised(tmp_path, kwargs):
+    """#10368 — the guarantee is "no revision", and a revision is a RECORD.
+
+    `updatedAt` not moving is only half of it: a `PointRevised` appended for the
+    dead id is replayed into one by `rebuild_all`, so a journal entry is the
+    same mutation one rebuild later (#7951's outbox ordering). Pinned on a
+    LOGGED SDK for every ruled-leg shape, including the two that carry no
+    generic prop — those were the shapes cycle 2 of the #10368 review found
+    still stamping the dead claim.
+    """
+    from tortoise.log import EventLog
+    from tortoise.sdk import TortoiseSDK
+
+    events = tmp_path / "events"
+    events.mkdir()
+    path = events / "events.jsonl"
+    sdk = TortoiseSDK(str(tmp_path / "g10368.db"),
+                      event_log_path=str(path))
+    try:
+        content = f"journal no revision {uuid.uuid4().hex[:8]}"
+        pid = sdk.create_point("statement", content, dedup=True)["id"]
+        sdk.retract_point(pid)
+        before = [e for e in EventLog(str(path)).read_all()
+                  if e.get("type") == "PointRevised" and e.get("id") == pid]
+        sdk.create_point("statement", content, dedup=True, **kwargs)
+        after = [e for e in EventLog(str(path)).read_all()
+                 if e.get("type") == "PointRevised" and e.get("id") == pid]
+        assert after == before, (
+            f"{sorted(kwargs)}: the fold journaled a PointRevised against a "
+            f"TERMINAL point ({len(after) - len(before)} new record(s))")
+        assert sdk.get_point(pid)["status"] == "retracted"
+    finally:
+        sdk.close()
 
 
 def test_create_point_dedup_still_folds_EVIDENCE_onto_a_terminal_point(sdk):

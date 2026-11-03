@@ -500,12 +500,16 @@ response_fields:
     already a terminal claim and the payload carried GENERIC metadata props — a CONTENT-only match does not name a
     target, so it does not revise a settled belief: those props are dropped, the fold''s `updatedAt` stamp is not
     written (no `PointRevised` against the dead id), the advisory''s `props` list names them, and the response
-    reports the HIT rather than a silent rewrite. EVIDENCE still folds onto a dead claim (the
+    reports the HIT rather than a silent rewrite. A fold whose hit was resolved by the caller''s `key` is NOT
+    affected — a key is a caller-declared identity (#6110), i.e. the addressing side of this door, so it keeps
+    the behaviour it has today. EVIDENCE still folds onto a dead claim (the
     `extractedFrom` source fold and the authored `credibility` word, #7704/#398), so this leg alone is dropped
     prop-by-prop. All of these ride the SAME key on the dedup-hit return, so a re-run reports them together rather
     than dropping one'
-  unchanged_when_off: n/a — not flag-gated; the key is ABSENT on a sourced or word-bearing write, and on every write
-    whose fold actually applied, so that response stays byte-identical
+  unchanged_when_off: n/a — not flag-gated; the key is ABSENT on a purely sourced or word-bearing write and on
+    every write whose fold applied in full, so those responses stay byte-identical. It is PRESENT whenever a leg was
+    dropped — the temporal drop (#7819), the terminal content-fold metadata drop (#10368) — including on a
+    word-bearing fold, because the word legs and the metadata leg are decided separately
 - response: tortoise_check_structure
   field: _meta.tortoise_error
   emitted_when: 'only for the transport wait-bound refusal — the ONE producer whose failure payload is a `{code,
