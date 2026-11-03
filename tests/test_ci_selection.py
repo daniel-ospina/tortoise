@@ -4248,6 +4248,34 @@ def test_9664_capstone_runs_on_the_middleware_diff_that_can_break_it():
             api_sel)
 
 
+def test_10668_allowance_gate_evidence_runs_on_both_diff_classes():
+    # #10668 review P1: `tests/test_allowance_gate.py` is the evidence for the
+    # #9567 D11/D12 allowance gate, and it was registered in NO surface —
+    # `--integrity` printed `❌ manifest drift: ['test_allowance_gate.py']`
+    # (redding the REQUIRED `manifest-integrity` leg) and no leg ever selected
+    # it, so the suite would have stayed green if the gate were deleted (#10513
+    # / #1349 silent-drop class).
+    #
+    # Two modules carry the subject and they classify DIFFERENTLY: a
+    # `tortoise/quota.py` diff (the gate's primary door, `enforce_org_limit`)
+    # selects `api`, while `tortoise/allowance_gate.py` matches no SOURCE_PATTERN
+    # and falls through to the `core` fallback — and a match REPLACES the
+    # fallback, so neither arm alone covers both diff classes (#9192/#9664
+    # idiom).
+    #
+    # Mutation check: deleting the `api` arm fails the quota pair, deleting the
+    # `core` arm fails the allowance_gate pair.
+    api_sel = _sel(["tortoise/quota.py"])
+    assert api_sel["full"] is False, api_sel
+    assert api_sel["surfaces"] == ["api"], api_sel
+    assert "test_allowance_gate.py" in api_sel["test_files"], api_sel
+
+    core_sel = _sel(["tortoise/allowance_gate.py"])
+    assert core_sel["full"] is False, core_sel
+    assert core_sel["surfaces"] == ["core"], core_sel
+    assert "test_allowance_gate.py" in core_sel["test_files"], core_sel
+
+
 def test_source_currency_tool_change_selects_core_not_tier1():
     # #5581: tools/source_currency.py owns tests/test_source_currency_5581.py
     # (`core`) — the §4.6 aggregate, the sourced disclosure, and the flag-gated
