@@ -150,15 +150,10 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # undeclared mutation in the tree).
     "test_9664_capstone_connector_to_record.py": [
         r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
-    # #10655 `tortoise config show`: the suite never opens a graph — every URI
-    # mutation exists to feed the REPORT (a redacted DSN, an unusable target, a
-    # trio, a path-shaped fallback), so it forces the EMBEDDED lane on purpose.
-    # A URI redirect would fold these assertions onto a shared server graph whose
-    # target the test does not control, and the report would be asserting about a
-    # store it was not given. The setenv IS the point; the fixture-param
-    # monkeypatch auto-restores (no lane leak).
-    "test_cli_config_show.py": [
-        r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"'],
+    # #10655 `tortoise config show` — the intent (declared below with the entry,
+    # after the #2084 reconciliation): the suite never opens a graph, every URI
+    # mutation feeds the REPORT (a redacted DSN, an unusable target, the trio, a
+    # path-shaped fallback).
     # #9567 capstone: the D11/D12 quota case forces the EMBEDDED lane (delenv
     # the URI, then pin TORTOISE_DB_PATH to a tmp_path db) so the gate's count
     # never rides a shared server graph. The delenv IS the point; the
@@ -454,6 +449,27 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # leak into a later docker-lane test).
     "test_subject_binding_1370.py": [r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"'],
     # ── Mixed lanes: CLI/HTTP surfaces force BOTH lanes deliberately ────────
+    # #10655: `config show` REPORTS the graph store, so several tests feed it a
+    # credential-bearing `TORTOISE_DB_URI` and assert what the report does and
+    # does NOT print (masked DSN, no query/fragment, the #2987 scheme-less
+    # `user:password` shape, a blank/whitespace value, and the embedded-file
+    # fallback). The env control IS the test input and no lane is being forced —
+    # the suite constructs no SDK and contacts no server. Every site is the
+    # fixture-param `monkeypatch.setenv`, so pytest auto-undoes at teardown (no
+    # lane leak); the isolation fixture's `delenv(var)` loop is not censused
+    # (no literal) and is auto-undone too. Registered only after the fact: the
+    # module landed without this entry, which reds `--integrity`/this gate on
+    # the PR head (measured 2026-11-03: the only undeclared mutations in the
+    # tree, 11 sites in the one file).
+    # #10655 `tortoise config show`: the suite never opens a graph — every URI
+    # mutation exists to feed the REPORT (a redacted DSN, an unusable target, a
+    # trio, a path-shaped fallback), so it forces the EMBEDDED lane on purpose. A
+    # URI redirect would fold those assertions onto a shared server graph whose
+    # target the test does not control, and the report would assert about a store
+    # it was not given. The setenv IS the point; the fixture-param monkeypatch
+    # auto-restores (no lane leak).
+    "test_cli_config_show.py": [r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"',
+                                 r'monkeypatch\.setenv\(\s*$'],  # the multi-line form (`setenv(` then the name on the next line) is censused by its FIRST source line, so it needs the open-paren pattern
     "test_cli_context.py": [r'monkeypatch\.(?:delenv|setenv)\(\s*"TORTOISE_DB_URI"',
                             r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])'],
     "test_cli_serve.py": [r'monkeypatch\.(?:delenv|setenv)\(\s*"TORTOISE_DB_URI"'],

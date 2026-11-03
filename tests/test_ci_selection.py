@@ -978,8 +978,8 @@ def test_the_10655_config_show_suite_is_selected_on_its_own_module():
     have been selected by nothing, on this PR or on `main` afterwards.
 
     Measured before the `api` entry (`classify_test_file(...)` -> `None`):
-    a `tortoise/__main__.py`-only diff selects `['api']` and 862 files, this
-    suite ABSENT. `api` is the only surface that helps, because
+    a `tortoise/__main__.py`-only diff selects `['api']` and a few hundred files,
+    this suite ABSENT. `api` is the only surface that helps, because
     `tortoise/__main__.py` is an EXACT `api` `SOURCE_PATTERNS` match and in
     `select()` a named-surface match REPLACES the `core` fallback.
 
@@ -1010,6 +1010,24 @@ def test_the_10655_config_show_suite_is_selected_on_its_own_module():
         "the one diff that can regress them (a credential printed in the clear, "
         "a remasked DSN, a 403 remedy table that explains away a 500). "
         f"selected {len(r['test_files'])} files"
+    )
+    # …and the `config.py` half (#10655 review F4). `tortoise/config.py` matches no
+    # `SOURCE_PATTERNS` row, so a config.py-only diff falls through to `core`; with
+    # this suite registered on `api` alone the diff selected `core` and the suite
+    # was ABSENT. That matters beyond tidiness: the ONLY pin on `config.py`'s
+    # #5109 `?password=…` log redaction lives in this suite (`caplog`-asserted),
+    # so the one diff that can revert the cut ran nothing. `core` carries the
+    # dual registration; `api` still owns the classification (first-match order),
+    # which is why the assert above stays `== "api"`.
+    cfg = _sel(["tortoise/config.py"])
+    assert "core" in cfg["surfaces"], (
+        f"tortoise/config.py selects {cfg['surfaces']}, not core — the premise of "
+        "this half of the pin changed; re-derive it"
+    )
+    assert guard in cfg["test_files"], (
+        f"a tortoise/config.py-only diff does not select {guard} — the #5109 log "
+        "redaction pin sleeps on the one diff that can revert it (a query "
+        f"credential written back into the log record). selected {len(cfg['test_files'])} files"
     )
 
 

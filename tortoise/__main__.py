@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import re
 import sys
 from pathlib import Path
 
@@ -1949,6 +1950,38 @@ def _cmd_init(args):
 
 
 
+def _load_regular_store_json(path: Path):
+    """`json.loads(path.read_text())` for a REGULAR file, else `None`.
+
+    `read_text()` on a FIFO/socket/device BLOCKS in `open()` — it does not
+    raise, so a caller's `except` never fires and the command never returns
+    (#10655 review). `_describe_store` already gates on `is_file()` for exactly
+    this reason; the raw credential readers did not, and there are three of
+    them — so the gate lives HERE rather than being remembered per call site.
+    `is_file()` is the resolver's own predicate (regular files only), so a path
+    this skips is exactly a path `_resolve_config_path` skips: the resolver
+    moves on to the next candidate and the read that would have hung follows
+    the same decision.
+    """
+    import json as _j
+    try:
+        if not path.is_file():
+            return None
+    except OSError:
+        # `is_file()` re-raises a non-ENOENT OSError (EACCES on a PARENT
+        # directory). The resolver skips such a candidate silently, and so do
+        # these readers.
+        return None
+    try:
+        return _j.loads(path.read_text())
+    except Exception:
+        # Unparseable JSON, invalid UTF-8 (ValueError), a pathologically nested
+        # store (RecursionError): a reader that raised here would refuse every
+        # command instead of reporting on it, which is the opposite of what
+        # these readers exist for.
+        return None
+
+
 def _read_stored_signup_token_with_source() -> tuple[str | None, Path | None]:
     """Stored st_ token from the active configs (#1709), WITH its source.
 
@@ -1959,14 +1992,10 @@ def _read_stored_signup_token_with_source() -> tuple[str | None, Path | None]:
     divergence (revoke/recover read the token from a DIFFERENT config
     than the auth key).
     """
-    import json as _j
     from pathlib import Path
     for path in (Path.cwd() / ".tortoise",
                  Path.home() / ".tortoise" / "credentials.json"):
-        try:
-            cfg = _j.loads(path.read_text())
-        except Exception:
-            continue
+        cfg = _load_regular_store_json(path)
         tok = cfg.get("signup_token") if isinstance(cfg, dict) else None
         if isinstance(tok, str) and tok:
             # #5109: the `st_` recovery token is a full credential in its own
@@ -2036,14 +2065,10 @@ def _read_stored_config_api_url() -> str | None:
     carries no api_key — recover authenticates with the signup token and
     only needs the URL, so a keyless config must not block recovery.
     """
-    import json as _j
     from pathlib import Path
     for path in (Path.cwd() / ".tortoise",
                  Path.home() / ".tortoise" / "credentials.json"):
-        try:
-            cfg = _j.loads(path.read_text())
-        except Exception:
-            continue
+        cfg = _load_regular_store_json(path)
         url = cfg.get("api_url") if isinstance(cfg, dict) else None
         if isinstance(url, str) and url.strip():
             return url.strip()
@@ -2069,16 +2094,14 @@ def _token_only_config_path():
     legacy token-only file shadows it); None when the key is genuinely
     lost.
     """
-    import json as _j
     from pathlib import Path
     candidates = (Path.cwd() / ".tortoise",
                   Path.home() / ".tortoise" / "credentials.json")
     seen_token_only = None
     for path in candidates:
-        try:
-            cfg = _j.loads(path.read_text())
-        except Exception:
-            continue
+        # Regular-file gate: `read_text()` on a FIFO blocks forever (#10655
+        # review). A skipped candidate is a candidate the resolver skips too.
+        cfg = _load_regular_store_json(path)
         if not isinstance(cfg, dict):
             continue
         key = cfg.get("api_key")
@@ -3049,6 +3072,26 @@ def _scrub(text: str, *secrets: object) -> str:
         # belt and braces: a zero-length fragment matches between every character
         if len(fragment) < 1:
             continue
+        if not fragment.strip():
+            # A whitespace-only value is not a credential any reader can learn
+            # from — and treating it as a replacement site rewrites EVERY space
+            # in the message: `TORTOISE_DB_URI=' '` turned the
+            # `RELATIVE_PATH_ERROR` remedy into `<redacted>` confetti, in the one
+            # verb whose whole purpose is legibility. Echoing a space is strictly
+            # better than shredding the diagnostic, so this fragment is skipped.
+            # (#10655 review: the same reasoning already guarded SHORT QUERY
+            # values above; it was not applied to the top-level secret.)
+            continue
+        if len(fragment) <= 2:
+            # A 1-2 char secret IS a credential and must still not be printed,
+            # but a bare substring sweep replaces that character everywhere
+            # (every `a` in the prose becomes `<redacted>`). Token-bounded
+            # replacement keeps both properties: the secret as a standalone
+            # token is redacted, the words that merely contain the character are
+            # not. A boundary is a non-word char on each side, so an echoed
+            # `"api_key": "a"` is still covered.
+            text = re.sub(rf"(?<!\w){re.escape(fragment)}(?!\w)", "<redacted>", text)
+            continue
         text = text.replace(fragment, "<redacted>")
     return text
 
@@ -3195,6 +3238,69 @@ def _same_path(a: Path | None, b: Path | None) -> bool:
         return _os.path.realpath(a) == _os.path.realpath(b)
     except OSError:
         return False
+
+
+def _blocking_directory(path: Path) -> Path | None:
+    """The SHALLOWEST directory that makes `path` unreachable, else None.
+
+    `_STORE_UNREADABLE` is reached TWO ways, and only one of them is about the
+    FILE's own mode: a store behind a mode-000 PARENT DIRECTORY fails
+    `Path.is_file()`, which re-raises `EACCES` out of the resolver instead of
+    reading the file (`pathlib` swallows only ENOENT/ENOTDIR/EBADF/ELOOP). In
+    that state the file's own mode is not merely unknown — it cannot be known,
+    because `stat` on the child needs search permission on the parent.
+
+    So the remedy must name the object that actually blocks. Measured on a
+    mode-000 parent, the printed `chmod 600 <dir>/credentials.json` exits 1
+    with "Permission denied" and sends the reader back to the same refusal,
+    while granting traversal on the DIRECTORY succeeds — the file is fine.
+
+    Two things make the answer non-obvious, and both are measured:
+
+    * `Path.parents` is purely LEXICAL. A store reached through a SYMLINK is
+      real practice here (a `./.tortoise` symlinked to the global store is the
+      documented sharing trick), and then every lexical ancestor of the LINK is
+      traversable while the TARGET sits behind a mode-000 directory — so the
+      real path is walked too, and it is walked FIRST because its ancestor is
+      the object to fix.
+    * Walked from the ROOT down, not by testing the nearest parent first: an
+      inaccessible NEAREST ancestor is only reachable THROUGH the shallower one
+      that blocks it, so `chmod` on the deeper path cannot run at all.
+
+    Returns None when no directory blocks — then the file's own mode is the
+    problem and the caller's `chmod 600 <file>` is the right advice.
+    """
+    import os as _os
+    chains: list[Path] = []
+    try:
+        real = Path(_os.path.realpath(path))
+        if str(real) != str(path):
+            chains.append(real)
+    except (OSError, RuntimeError):
+        pass
+    chains.append(path)
+    for chain in chains:
+        try:
+            ancestors = list(chain.parents)
+        except (OSError, RuntimeError):
+            continue
+        for cand in reversed(ancestors):            # root first, nearest last
+            try:
+                if not cand.is_dir():
+                    # Not a directory at all. `os.access` is False for ENOENT /
+                    # ENOTDIR / ESTALE too, not only EACCES, and blaming the
+                    # mode of a path that is not there would assert a fact this
+                    # verb cannot see. Reaching this candidate already PROVES
+                    # every shallower component is traversable AND a directory,
+                    # so stopping here cannot hide a real blocker.
+                    return None
+            except OSError:
+                # The environment itself cannot answer (a deleted cwd). Decline
+                # rather than repeat the guessing this verb exists to replace.
+                return None
+            if not _os.access(cand, _os.X_OK):
+                return cand
+    return None
 
 
 def _cmd_config(args) -> int:
@@ -3766,9 +3872,33 @@ def _cmd_config(args) -> int:
             # This is a line the user is told to PASTE, and the path is
             # store-derived (a directory name can legally contain `;`/spaces/`|`),
             # so it is shell-quoted like the other two paste lines in this report.
-            print("   The file is there but unreadable — fix its permissions "
-                  f"(`chmod 600 "
-                  f"{_printable(_shlex.quote(str(cred['blocked_by'])))}`).")
+            # WHICH OBJECT: `unreadable` is reached both by a mode-000 FILE and
+            # by a store behind a non-traversable DIRECTORY (see
+            # `_blocking_directory`), and the file's mode is unknowable in the
+            # second state. A single `chmod 600 <file>` line asserted a fact the
+            # tool cannot see AND printed a command that fails (measured), so the
+            # object is decided from evidence at render time.
+            blocker = _blocking_directory(Path(cred["blocked_by"]))
+            if blocker is not None:
+                # `u+x`, not `700`: traversal is ALL that is missing, and the
+                # blocker can be an ancestor the reader never meant to change
+                # (a shared parent, even `HOME`) — `700` would revoke its
+                # group/other access and fix more than the diagnosis names.
+                print("   The DIRECTORY containing it is not traversable — fix "
+                      "that first (`chmod u+x "
+                      f"{_printable(_shlex.quote(str(blocker)))}`); the "
+                      "file's own mode cannot be checked until it is.")
+                # The blocker is chosen shallowest and can be a shared parent,
+                # and `chmod` needs OWNERSHIP — which the report cannot grant.
+                # Naming that here is the difference between advice that can be
+                # followed and an imperative the reader cannot obey.
+                print("   That `chmod` needs ownership of the directory — if it "
+                      "is a shared parent you do not own, ask its owner to "
+                      "grant traversal.")
+            else:
+                print("   The file is there but unreadable — fix its permissions "
+                      f"(`chmod 600 "
+                      f"{_printable(_shlex.quote(str(cred['blocked_by'])))}`).")
             print("   ⛔ Do NOT delete it: this store may hold the signup_token that "
                   "`tortoise recover` needs.")
         else:
@@ -4001,12 +4131,13 @@ def _cmd_org_info(args) -> int:
         )
         with urlopen(req, timeout=10) as resp:
             data = json.loads(resp.read())
-    # ORDER MATTERS: HTTPError (an OSError) first, then the transport OSErrors,
-    # then the rest. `http.client.RemoteDisconnected` is BOTH a
-    # ConnectionResetError (OSError) and an HTTPException, so it must take the
-    # TRANSPORT path — it is a dropped connection, not a bad response body. The
-    # RETRY itself stays gated on a TIMEOUT (`_is_timeout_reason`): a reset is a
-    # different failure and is reported plainly rather than retried.
+    # ORDER MATTERS — on the FIRST attempt and on the RETRY alike: HTTPError (an
+    # OSError) first, then the transport OSErrors, then the rest.
+    # `http.client.RemoteDisconnected` is BOTH a ConnectionResetError (OSError)
+    # and an HTTPException, and Python takes the FIRST matching clause, so it
+    # must land on the TRANSPORT branch — it is a dropped connection, not a bad
+    # response body. Only a TIMEOUT is retried (`_is_timeout_reason`): a reset or
+    # a refusal is reported on the first attempt and never retried.
     except HTTPError as e:
         # `errors="replace"`: a proxy/captive portal answering 4xx with a
         # latin-1 or binary body would otherwise raise UnicodeDecodeError INSIDE
@@ -4064,18 +4195,26 @@ def _cmd_org_info(args) -> int:
                 body = ""
             _explain_org_info_failure(retry_exc.code, body, api_url, api_key)
             return 1
-        except (http.client.HTTPException, ValueError, RecursionError) as retry_exc:
-            # The retry REACHED something: a captive-portal/proxy body is not
-            # "still no answer", and folding it into the transport branch sent
-            # the reader to the health endpoint for a proxy problem.
-            print(f"Invalid response from API: "
-                  f"{_printable(_scrub(str(retry_exc), api_url, api_key))}",
-                  file=sys.stderr)
-            return 1
         except OSError as retry_exc:
+            # The TRANSPORT branch, and it MUST precede the HTTPException arm
+            # below: `http.client.RemoteDisconnected` is BOTH a
+            # ConnectionResetError (an OSError) and an HTTPException, so with the
+            # arms in the other order a connection dropped during the retry was
+            # reported as "Invalid response from API" — blaming the server's
+            # BODY on exactly the cold-then-dropped path this retry exists for.
+            # Same order as the first attempt.
             print(f"   still no answer: {_printable(retry_exc)}", file=sys.stderr)
             print("   Check https://api.premiselabs.co/health, or your "
                   "TORTOISE_API_URL, then `tortoise config show`.",
+                  file=sys.stderr)
+            return 1
+        except (http.client.HTTPException, ValueError, RecursionError) as retry_exc:
+            # The retry REACHED something that is NOT a transport failure: a
+            # captive-portal/proxy body is not "still no answer", and folding it
+            # into the transport branch sent the reader to the health endpoint
+            # for a proxy problem.
+            print(f"Invalid response from API: "
+                  f"{_printable(_scrub(str(retry_exc), api_url, api_key))}",
                   file=sys.stderr)
             return 1
 
