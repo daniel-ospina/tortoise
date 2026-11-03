@@ -2243,3 +2243,86 @@ def test_the_CLI_prints_the_tolerated_empty_days(tmp_path, capsys, monkeypatch):
     assert code == 0, out
     assert "empty day  : archive/2026-10-01.jsonl.gz" in out
     assert "NOT a parity pass" in out
+
+
+# ── the exit-code contract for a DROPPED interior line (review P3) ───────────
+#
+# The PR body's arm table claimed an unparsable INTERIOR line is a `CensusError`
+# (exit 3). It is not: the line is dropped and named, and the verdict is then
+# decided by the POPULATION — `missing_in_record` -> exit 2 when the graph holds
+# a turn for it, exit 0 when it does not. That is the same three-way contract
+# `diff` publishes (0 = no differences, 1 = differences found, 2 = trouble):
+# "the comparison found a difference" is NOT "the instrument could not read".
+# Collapsing the two on the authority store pointed the operator at a leg
+# refusal that does not exist there (the real record carries such lines) and hid
+# that the run had in fact reached a verdict.
+#
+# Both halves are pinned at the CLI boundary on purpose — the exit code is the
+# datum the artifact reports and the only thing an operator acts on.
+
+def _record_with_one_DROPPED_interior_line(tmp_path) -> Path:
+    """A SETTLED day holding `s2`'s merged line plus a readable `s3`."""
+    root = tmp_path / "session-events"
+    root.mkdir()
+    _local_record(root, {"s1": _conversation(("user", "hi"))},
+                  name="2026-11-01.jsonl")
+    good = json.dumps({"session_id": "s3",
+                       "conversation": _conversation(("user", "x"))})
+    # `s2`'s record lost its newline, so it merged into `s3`'s line: the whole
+    # line is unparsable and is dropped (never partially recovered).
+    (root / "2026-11-02.jsonl").write_text(
+        '{"session_id": "s2", "conversation": [{"role": "user",\n'
+        + good + "\n", encoding="utf-8")
+    return root
+
+
+def test_a_DROPPED_interior_line_reaches_a_VERDICT_at_exit_TWO_never_exit_three(
+        tmp_path, capsys, monkeypatch):
+    """The graph holds a turn for the dropped session: REFUSED, exit 2.
+
+    `CensusError`/exit 3 is the arm for "the record could not be read", and it
+    is what this state used to produce — on the authority store, whose real
+    record carries lost-newline merges, that made the gate unopenable and
+    misreported a reached verdict as an unreadable leg.
+
+    Mutation that goes RED here: restoring the whole-leg refusal for an interior
+    unparsable line (a `CensusError` raised in `read_local_record_turns`) — the
+    run then exits 3 with the refusal text, not 2 with a parity refusal.
+    """
+    root = _record_with_one_DROPPED_interior_line(tmp_path)
+    monkeypatch.setattr(tpc, "read_graph_turns", lambda *a, **k: {
+        "nodes": {"s2_t0": _graph_node("s2_t0", "s2", content="[user] lost")},
+        "unidentifiable": []})
+    code = tpc.main(["--uri", "docker://:@127.0.0.1:1/g",
+                     "--local-record-dir", str(root)])
+    captured = capsys.readouterr()
+    out, err = captured.out, captured.err
+    assert code == 2, out + err
+    assert code != 3, ("exit 3 means the record could not be READ — the line "
+                       "was dropped and a verdict WAS reached")
+    assert "unparsable : 2026-11-02.jsonl:1" in out
+    assert "DROPPED, not recovered" in out
+    assert "verdict    : REFUSED" in out
+
+
+def test_a_DROPPED_interior_line_whose_turn_the_graph_never_held_is_exit_ZERO(
+        tmp_path, capsys, monkeypatch):
+    """The other half: nothing in the population needs the dropped line.
+
+    The population comes from the GRAPH, so a line holding no graph turn cannot
+    hide one — the run stays CLEAN (exit 0) and says what it dropped. A pin that
+    only covered the refusal half would pass over a fix that just downgraded
+    exit 3 to exit 2 unconditionally.
+    """
+    root = _record_with_one_DROPPED_interior_line(tmp_path)
+    monkeypatch.setattr(tpc, "read_graph_turns", lambda *a, **k: {
+        "nodes": {"s1_t0": _graph_node("s1_t0", "s1", content="[user] hi"),
+                  "s3_t0": _graph_node("s3_t0", "s3", content="[user] x")},
+        "unidentifiable": []})
+    code = tpc.main(["--uri", "docker://:@127.0.0.1:1/g",
+                     "--local-record-dir", str(root)])
+    out = capsys.readouterr().out
+    assert code == 0, out
+    assert "unparsable : 2026-11-02.jsonl:1" in out
+    assert "NOT a parity pass" in out
+    assert "verdict    : CLEAN" in out
