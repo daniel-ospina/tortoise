@@ -143,8 +143,8 @@ def test_a_FULL_default_graph_cannot_refuse_a_write_into_an_EMPTY_bound_graph():
     graph does to a write into an EMPTY bound graph — and that is the direction
     that froze the fleet (the counted graph sat at `max_points`, so every REST
     write behind it was refused, while the bound graph kept absorbing ~200
-    counted Points in 48 minutes; the refusal body was `Team points limit
-    reached`).
+    counted Points in 48 minutes; the refusal's `message` began `Team points
+    limit reached`).
 
     DISCRIMINATION: SAME credential, SAME limit, and only the two graphs'
     populations swapped — so only a gate that counts the graph the request
@@ -160,12 +160,19 @@ def test_a_FULL_default_graph_cannot_refuse_a_write_into_an_EMPTY_bound_graph():
                           sdk=(_org_sdk_for_credential(org)
                                if resource in _TENANT_GRAPH_RESOURCES else None))
 
+    (`_TENANT_GRAPH_RESOURCES` is #10180's literal, which #10637 REPLACED with
+    `_GRAPH_SCOPED_QUOTA_RESOURCES = quota.TENANT_GRAPH_RESOURCES` — same
+    members. A restore must define the old name or use the new one; the run
+    reported here substituted the declaration.)
+
     Note it PASSED an sdk — `_make_sdk(namespace=org_id)` for a graph-bound
     credential — so this class is NOT found by grepping for calls that omit the
     argument. (The module docstring above describes the ORIGINAL #4051 shape,
     which did omit it; #10452 later passed a default-graph handle, and THAT is
-    the revision measured here. Same wrong graph, two mechanisms.) Measured: this arm raised `QuotaExceededError: Team points limit
-    reached (5)` from the full counted graph (`_check_org_limit` wraps it as
+    the revision measured here. Same wrong graph, two mechanisms.)
+
+    Measured: this arm raised `QuotaExceededError: Team points limit reached
+    (5)` from the full counted graph (`_check_org_limit` wraps it as
     `HTTPException 402`), and the cap-hole arm above reported
     `Failed: DID NOT RAISE HTTPException`.
 
