@@ -5815,6 +5815,11 @@ _SCRIPT_BLOCKS = (
 )
 
 
+# Differences that make two claims RIVALS rather than one claim in two
+# spellings.  The value dimensions (number, date) are absent by design: a
+# differing value is a new value for the same attribute, which is exactly what
+# UPDATE exists to record.  These are the differences where nothing may be
+# destroyed — neither a fold nor a supersede.
 _IDENTITY_DIMENSIONS = frozenset({
     "negation", "condition", "scope", "language", "substituted_content",
     "unreadable",
@@ -7021,14 +7026,9 @@ def _scripts(content: str) -> frozenset[str]:
     """Scripts the claim's characters are drawn from — a language difference in
     the one form decidable without a model.
 
-    ⚠️ A letter in no known block is `_UNLISTED_SCRIPT` (defined at the END of
-    this module with `_script_of` — new code goes below the #7949 capstone
-    marker, and an insertion HERE re-stales every live cite above it), NOT
-    nothing: contributing nothing meant the claim was never compared for
-    language and an unlisted script silently folded (#5329).  The input is
-    NFC-folded first, as every other boundary input is.
-
-    That is #5329's script share, as far as a finite list can be made safe.
+    ⚠️ A letter in no known block is `_UNLISTED_SCRIPT` (defined at the end of
+    this module, below the #7949 marker), NOT nothing: contributing nothing meant
+    the claim was never compared for language, so an unlisted script folded (#5329).
     """
     found: set[str] = set()
     for ch in _fold_unicode(content).translate(_APOSTROPHES):
