@@ -755,7 +755,7 @@ belongs to). It drives the script as a subprocess in a hermetic env — a temp b
    ⛔ **WHAT THE UNION DOES AND DOES NOT BUY, stated plainly so the next stall is not read as
    closed.** The repair hardening fixed the *manual* and *provisioner-adjacent* path only: a repair
    can no longer strip `ubuntu-latest`, and nothing else in this repo calls `--repair-labels`
-   (`tools/runner_autoscale.py:1238` invokes the installer as `--count … --fallback auto`, never
+   (`tools/runner_autoscale.py:1290` invokes the installer as `--count … --fallback auto`, never
    `--repair-labels`, and its own `_preserve_labels` already kept the label). It does NOT stop the
    remover above: the gate's `fallback_off` still strips `ubuntu-latest` from this pool on its next
    tick, from `scripts/ci_runner_gate.sh` in **agent-infra**, which is not in this checkout. So the
@@ -1027,8 +1027,16 @@ exactly this mode and reads a non-zero exit as "the guard cannot MEASURE").
 
 ```bash
 uv run python tools/runner_autoscale.py --repo daniel-ospina/tortoise --status --json \
-  | jq '{verdict, wedged, notes}'
+  | jq '{verdict, wedged, notes, runners: [.runners[] | {name, dir}]}'
 ```
+
+⛔ **THE INSTALL DIRECTORY COMES FROM `runners[]`, NEVER FROM THE NAME.** The section below used to
+say `dir=/opt/gh-runner-x64-<n>`, deriving `<n>` from the name — and the pool read is REPO-WIDE, so a
+wedged name need not have an `-<n>` at all: the measured pool's first wedged registration is named
+plain **`cmux`** (instance 4, `/opt/gh-runner-x64-4`; it served 6 of that run's 16 failures), and
+`/opt/gh-runner-x64-cmux` does not exist — so the obvious `rm -rf` **exits 0 having touched
+nothing** while the operator believes the wedge is repaired. `runners[]` (also `local[]`) carries the
+name→directory pair the box itself reported, which is the only authoritative source.
 
 **Before repairing, name the cause** — ⛔ **THE TUPLE ABOVE IS A SIGNATURE, NOT A CAUSE, AND THE
 TWO KNOWN CAUSES NEED DIFFERENT REPAIRS.** `(runner_name, failure, ≤ 30 s, no success in the window)` is exactly what a
@@ -1053,10 +1061,14 @@ nothing else lives there, and a running job must not be interrupted — check `b
 registration first):
 
 ```bash
-# Run ON the box that hosts the registration. `name` comes from `--status --json` -> `wedged[]`;
-# the directory is `/opt/gh-runner-x64-<n>` (instance 1 keeps the bare `/opt/gh-runner-x64`).
-name=pi-runner-cmux-x64-7
-dir=/opt/gh-runner-x64-7
+# Run ON the box that hosts the registration. `name` comes from `--status --json` -> `wedged[]`,
+# and the directory MUST be read from `runners[]` (the box's own report) — NOT derived from the
+# name: `cmux` is a wedged registration with no `-<n>` suffix (it is /opt/gh-runner-x64-4), so
+# `/opt/gh-runner-x64-$suffix` would `rm -rf` a path that does not exist and exit 0.
+name=pi-runner-cmux-x64-7        # from wedged[]
+dir=/opt/gh-runner-x64-7         # from runners[] -> {name, dir}; verify it is THIS box's
+# ⛔ a wedged name from ANOTHER box appears in this repo's pool read but not in `runners[]` — its
+# repair belongs on that box, and no local `rm -rf` can touch it.
 unit="actions.runner.daniel-ospina-tortoise.$name"
 sudo systemctl stop "$unit.service"
 sudo rm -rf "$dir/_work/_temp/_github_workflow"

@@ -249,16 +249,24 @@ EXIT  0 converged / at-ceiling / over-ceiling / nothing to do / a REFUSAL (an an
         probes exactly that mode; see the `under-target` line above and `main`'s exit ladder.
         ⛔ WHICH CODE WINS when a registration is wedged AND the pass ALSO hit a failure of its
         own: `wedged` overrides the BENIGN verdicts only — `converged`, `at-ceiling`,
-        `under-target` WITHOUT `problem_kind=no-listener`, and `fill-blocked`. It does NOT
-        override exit 4
+        `over-ceiling`, `under-target` WITHOUT `problem_kind=no-listener`, and `fill-blocked`. It
+        does NOT override exit 4
         (`under-target` with `problem_kind=no-listener` — a runner was INSTALLED and nothing came
         up), exit 5 (`fill-refused-by-provisioner`), exit 3 (an action failure), exit 2
-        (unmeasured), exit 1 (refused) or `over-ceiling`. In each of those the pass already
-        reports a failure of its OWN, and replacing it with 6 would erase a cause a caller keys
-        on — and the co-occurrence is the NORMAL shape, not a corner: the measured box had four
-        wedged registrations WHILE the fill loop ran on the same pass. The wedged registrations
-        are still NAMED in `record["wedged"]` and in the pass note, so nothing is hidden by the
-        ordering; only the exit CODE is ordered. ⛔ `fill-blocked` USED TO BE ABSENT FROM THIS
+        (unmeasured) or exit 1 (refused). In each of those the pass already reports a failure of
+        its OWN, and replacing it with 6 would erase a cause a caller keys on — and the
+        co-occurrence is the NORMAL shape, not a corner: the measured box had four wedged
+        registrations WHILE the fill loop ran on the same pass. The wedged registrations are
+        still NAMED in `record["wedged"]` and in the pass note, so nothing is hidden by the
+        ordering; only the exit CODE is ordered. ⛔ `over-ceiling` IS ON THE BENIGN SIDE FOR THE
+        SAME REASON `fill-blocked` IS — it is exit **0** by this file's own EXIT contract (a live
+        count above the measured ceiling removes nothing, so that pass "has nothing it could have
+        failed at"), so it reports no failure of its OWN to erase. Leaving it out therefore
+        re-opened the exact false PASS this section closes, on the shape the filed box actually
+        had: `CORE_TABLE` caps `by_cores` at **3** for >= 8 cores (`((8, 3), (4, 2), (1, 1))`),
+        and the measured box had FOUR live registrations (`/opt/gh-runner-x64-{4,6,7,8}`), i.e.
+        `live=4 > ceil=3` -> `over-ceiling` -> **exit 0 over a pool that served nothing**, for
+        three days. ⛔ `fill-blocked` USED TO BE ABSENT FROM THIS
         LIST, which made the sentence false in the other direction: that branch is taken before
         any count is looked at, so a wedged pool on a box with no provisioner reported exit 0.
 """
@@ -692,7 +700,17 @@ def read_pool(repo: str) -> dict[str, PoolEntry]:
 # (denied `_work/_temp` vs a memory-starved host) are in `docs/ops/ci-runner-x64.md`.
 WEDGED_SETUP_S = 30  # <= this many seconds: too fast for a suite, so no step can have run one
 WEDGED_MIN_FAILURES = 3  # measured spread, not a single flake
-WEDGED_PROBE_RUNS = 3  # BOUNDED: the last 3 completed runs, one page of jobs each
+# ⛔ THE WINDOW IS TWO-SIDED, AND ONE-SIDED WAS A FALSE PASS. `WEDGED_PROBE_RUNS` is the MINIMUM
+# read; `WEDGED_PROBE_MAX_RUNS` is the bound the walk may not exceed. A repo-wide "last 3 completed
+# runs" is not the same thing as "the last 3 runs THIS POOL served": most of this repo's workflows
+# are `runs-on: ubuntu-latest`/`ubuntu-24.04` and go to GitHub-hosted runners, so a window of three
+# all-hosted runs is ROUTINE (measured 2026-11-03: consecutive `Inbound relay` runs, every job
+# hosted and `skipped`). Against such a window `wedged_runners` correctly matches nothing, and the
+# old `capacity_certified = True` then CERTIFIED a pool it had observed ZERO jobs on and exited 0 —
+# R3's false pass one layer down ("we did not look" is not "it works", and neither is "we looked
+# somewhere else"). So the walk keeps going, bounded, until the pool is actually OBSERVED.
+WEDGED_PROBE_RUNS = 3  # MINIMUM completed runs read, before the pool-observed early stop applies
+WEDGED_PROBE_MAX_RUNS = 10  # BOUND: at most 10 runs, one page of jobs each (11 API reads worst case)
 
 
 def _gh_lines(cmd: list[str], what: str) -> list[str]:
@@ -717,15 +735,36 @@ def _seconds(started: str, completed: str) -> int | None:
         b = datetime.datetime.fromisoformat(completed.replace("Z", "+00:00"))
     except ValueError:
         return None
-    return int((b - a).total_seconds())
+    delta = int((b - a).total_seconds())
+    # ⛔ A NEGATIVE DELTA IS NOT "A FAST FAILURE", it is an unusable measurement. GitHub does
+    # return `completed_at` EARLIER than `started_at` on rows it re-stamped (measured on run
+    # 41578276118: `started_at 05:47:58Z`, `completed_at 05:47:57Z` -> -1), and the predicate below
+    # is `seconds <= setup_s`, which a negative passes. Masked today only because such rows carry
+    # no `runner_name` — but nothing GUARANTEES that, so drop the row instead of counting it as
+    # evidence that a machine cannot serve a job.
+    return None if delta < 0 else delta
 
 
-def read_job_outcomes(repo: str, runs: int = WEDGED_PROBE_RUNS) -> list[tuple[str, str, int]]:
-    """`(runner_name, conclusion, seconds)` for the jobs of the last `runs` completed runs.
+def read_job_outcomes(
+    repo: str,
+    runs: int = WEDGED_PROBE_RUNS,
+    *,
+    pool: dict[str, "PoolEntry"] | None = None,
+    max_runs: int = WEDGED_PROBE_MAX_RUNS,
+) -> list[tuple[str, str, int]]:
+    """`(runner_name, conclusion, seconds)` for the jobs of the last completed runs.
 
-    BOUNDED and stated: `runs` runs, one page of up to 100 jobs per run — a run with more than 100
-    jobs is read up to 100. Unreadable RAISES (`Unmeasurable`): "we could not look" is not "the
-    pool is fine", and the caller turns that into `uncertified`, never into `converged`.
+    BOUNDED and stated: at least `runs` and at most `max_runs` completed runs, one page of up to
+    100 jobs per run — a run with more than 100 jobs is read up to 100. Unreadable RAISES
+    (`Unmeasurable`): "we could not look" is not "the pool is fine", and the caller turns that into
+    `uncertified`, never into `converged`.
+
+    `pool` enables the pool-observed STOP: past `runs`, the walk ends as soon as one job's
+    `runner_name` is in `pool`, because the remaining runs cannot make the window MORE
+    representative. It does NOT stop early on a light window — three all-hosted runs are exactly
+    the case that must NOT read as "the pool is fine" (see `WEDGED_PROBE_MAX_RUNS`). When `max_runs`
+    is exhausted with no pool job in it, the outcomes returned observed the pool ZERO times and the
+    caller must not certify capacity from them.
     """
     gh = gh_bin()
     if not gh:
@@ -736,7 +775,7 @@ def read_job_outcomes(repo: str, runs: int = WEDGED_PROBE_RUNS) -> list[tuple[st
             [
                 gh,
                 "api",
-                f"repos/{repo}/actions/runs?per_page={runs}&status=completed",
+                f"repos/{repo}/actions/runs?per_page={max(max_runs, runs)}&status=completed",
                 "--jq",
                 ".workflow_runs[].id",
             ],
@@ -745,7 +784,10 @@ def read_job_outcomes(repo: str, runs: int = WEDGED_PROBE_RUNS) -> list[tuple[st
         if line.strip()
     ]
     outcomes: list[tuple[str, str, int]] = []
-    for run_id in ids:
+    seen_pool = False
+    for index, run_id in enumerate(ids):
+        if index >= max_runs:
+            break
         rows = _gh_lines(
             [
                 gh,
@@ -768,6 +810,12 @@ def read_job_outcomes(repo: str, runs: int = WEDGED_PROBE_RUNS) -> list[tuple[st
             if seconds is None:
                 continue
             outcomes.append((name, conclusion, seconds))
+            if pool is not None and name in pool:
+                seen_pool = True
+        # Past the MINIMUM window, the pool has been observed: more runs cannot make the reading
+        # more representative of it, so the walk ends here (the bound in the docstring).
+        if seen_pool and index + 1 >= runs:
+            break
     return outcomes
 
 
@@ -793,7 +841,11 @@ def wedged_runners(
     for name, conclusion, seconds in outcomes:
         if conclusion == "success":
             ok[name] = ok.get(name, 0) + 1
-        elif conclusion == "failure" and seconds <= setup_s:
+        # The lower bound is not decoration: a NEGATIVE delta (a `completed_at` stamped before
+        # `started_at`) is an unusable row, and a bare `<= setup_s` counts it as the tightest
+        # possible setup failure. `_seconds` already drops those, and this keeps the predicate
+        # honest for every direct caller (`tests/test_runner_autoscale.py` exercises it directly).
+        elif conclusion == "failure" and 0 <= seconds <= setup_s:
             fast_failures[name] = fast_failures.get(name, 0) + 1
     return sorted(
         name
@@ -1291,8 +1343,29 @@ def converge(
     # costs 4 API reads, not a paginated crawl.
     wedged: list[str] = []
     try:
-        wedged = wedged_runners(pool, read_job_outcomes(repo))
+        outcomes = read_job_outcomes(repo, pool=pool)
+        wedged = wedged_runners(pool, outcomes)
+        # ⛔ CERTIFICATION IS ABOUT THE READ, AND THE SAMPLING IS DISCLOSED SEPARATELY. R3 says an
+        # UNREADABLE history certifies nothing; this arm therefore stays keyed on readability (a
+        # `uncertified`/exit-2 for a merely light window would red the timer every interval on a
+        # healthy box, and would renumber a contract callers key on). What was dishonest was the
+        # SILENCE: a window that observed ZERO jobs on this box's registrations proved nothing
+        # about the pool, yet arrived as plain `certified`. The walk now widens to `MAX_RUNS` first
+        # (`WEDGED_PROBE_MAX_RUNS`), and whatever it found is stated in the record so the next
+        # reader can tell "the pool served nothing and was fine" from "the pool was never sampled".
+        # A genuinely wedged registration IS observable here (its failed jobs carry its
+        # `runner_name`), so the widened window is what closes the gap; this field is the audit
+        # trail for when it could not.
+        record["pool_jobs_observed"] = sum(1 for name, _c, _s in outcomes if name in pool)
         record["capacity_certified"] = True
+        if not record["pool_jobs_observed"]:
+            record["notes"].append(
+                "job outcomes READABLE, but they observed ZERO jobs on this box's registrations "
+                f"across the last {WEDGED_PROBE_MAX_RUNS} completed runs (they were served "
+                "elsewhere — most workflows here run on GitHub-hosted runners) — so this pass "
+                "found no EVIDENCE OF A WEDGE, which is not the same as having observed the pool "
+                "serving work"
+            )
     except Unmeasurable as exc:
         record["capacity_certified"] = False
         record["notes"].append(
@@ -1723,13 +1796,15 @@ def converge(
     # for the same reason `under-target` is: it is a benign statement about something ELSE.
     if (
         wedged
-        and record["verdict"] in ("converged", "at-ceiling", "under-target", "fill-blocked")
+        and record["verdict"]
+        in ("converged", "at-ceiling", "over-ceiling", "under-target", "fill-blocked")
         and record.get("problem_kind") != "no-listener"
     ):
         record["verdict"] = "wedged"
     elif record.get("capacity_certified") is False and record["verdict"] in (
         "converged",
         "at-ceiling",
+        "over-ceiling",
         "fill-blocked",
     ):
         record["verdict"] = "uncertified"

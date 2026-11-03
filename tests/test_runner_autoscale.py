@@ -70,7 +70,16 @@ GH_FAKE = textwrap.dedent("""\
     # `*/actions/runs?*` also matches `.../actions/runs/<id>/jobs?per_page=100` — the run-list arm
     # swallowed every jobs read and the probe saw zero outcomes while looking like it had worked.
     case "${2:-}" in
-      */jobs?*) cat "${JOBS_TSV:-/dev/null}"; exit $? ;;
+      */jobs?*)
+        # JOBS_BY_RUN=<dir>: serve `<run-id>.tsv` per run, so a case can model a window whose
+        # EARLY runs were served elsewhere and whose LATER ones the pool served — the shape the
+        # pool-observed widening exists for. Falls back to the single JOBS_TSV when no per-run
+        # file matches, so every pre-existing case keeps its meaning.
+        if [ -n "${JOBS_BY_RUN:-}" ]; then
+          rid="${2#*/actions/runs/}"; rid="${rid%%/*}"
+          if [ -f "${JOBS_BY_RUN}/${rid}.tsv" ]; then cat "${JOBS_BY_RUN}/${rid}.tsv"; exit 0; fi
+        fi
+        cat "${JOBS_TSV:-/dev/null}"; exit $? ;;
       */actions/runs?*) printf '%s' "${RUN_IDS:-}"; exit 0 ;;
     esac
     # POOL_FAIL_AFTER=<n>: the first n pool reads succeed, every later read FAILS. That is the
@@ -288,6 +297,7 @@ class Env:
         self.run_ids = ""
         self.jobs_tsv = tmp / "jobs.tsv"
         self.jobs_tsv.write_text("", encoding="utf-8")
+        self.jobs_by_run_dir: Path | None = None
         self.restart_marker = tmp / "restarted"
         self.provisioner_log = tmp / "provisioner.log"
         self.config_log = tmp / "config.log"
@@ -371,6 +381,7 @@ class Env:
                 "POOL_TSV": str(self.pool_tsv),
                 "RUN_IDS": self.run_ids,
                 "JOBS_TSV": str(self.jobs_tsv),
+                "JOBS_BY_RUN": "" if self.jobs_by_run_dir is None else str(self.jobs_by_run_dir),
                 "RESTART_MARKER": str(self.restart_marker),
                 "SYSTEMCTL_RC": str(self.systemctl_rc),
                 "SYSTEMCTL_ENABLE_RC": str(self.enable_rc),
@@ -446,6 +457,14 @@ class Env:
         if not self.alive_file.exists():
             return 0
         return len([ln for ln in self.alive_file.read_text().splitlines() if ln.strip()])
+
+    def set_jobs_by_run(self, rows: dict[str, str]) -> None:
+        """Serve a DIFFERENT jobs page per run id — a window that only later observed the pool."""
+        d = self.root / "jobs-by-run"
+        d.mkdir(exist_ok=True)
+        for rid, body in rows.items():
+            (d / f"{rid}.tsv").write_text(body + "\n", encoding="utf-8")
+        self.jobs_by_run_dir = d
 
     def provisioned(self) -> list[str]:
         if not self.provisioner_log.exists():
@@ -2432,3 +2451,138 @@ def test_the_measured_triple_is_stated_once_and_every_citation_agrees_with_it():
             f"{total} — state the measured triple once and cite it"
         )
         assert stale not in text, f"{where} still quotes the unreconciled {stale!r}"
+
+
+def test_over_ceiling_cannot_be_the_verdict_over_a_wedged_pool(env):
+    """⛔ `over-ceiling` IS A GREEN EXIT, SO LEAVING IT OUT RE-OPENED THE FALSE PASS.
+
+    The override tuple listed `converged`/`at-ceiling`/`under-target`/`fill-blocked` and reasoned
+    that a wedged registration must not erase a failure the pass "already reports of its OWN" —
+    true of exits 1/2/3/4/5, but `over-ceiling` is exit **0** by this file's own EXIT contract ("a
+    live count above the measured ceiling removes nothing, so that pass has nothing it could have
+    failed at"). So it reports no failure to erase, and excluding it left a scheduled pass exiting
+    0 over a pool that serves nothing.
+
+    The shape is not a corner — it is the filed box's OWN shape: `CORE_TABLE = ((8, 3), (4, 2),
+    (1, 1))` caps `by_cores` at 3 for >= 8 cores, and that box had FOUR live registrations
+    (`/opt/gh-runner-x64-{4,6,7,8}`), so `live=4 > ceil=3` -> `over-ceiling` -> exit 0 over its 16
+    setup-failure jobs. This pins the 4-listener case so the arm cannot silently revert.
+
+    Non-vacuity: on the pre-fix tool `verdict` stays `over-ceiling` and `_rc` is 0, so both red.
+    """
+    names = ["r1", "r2", "r3", "r4"]
+    e = env(
+        ncpu=8,  # CORE_TABLE -> core_ceiling == 3, so four live listeners is over-ceiling
+        pool=[(n, "online", False, "") for n in names],
+        installs=[(f"gh-runner-x64-{i}", n) for i, n in enumerate(names, 1)],
+    )
+    e.run_ids = "1\n2\n3\n"
+    e.jobs_tsv.write_text(
+        _outcomes(*(f"{n}\tfailure\t2026-11-03T05:53:24Z\t2026-11-03T05:53:27Z" for n in names)),
+        encoding="utf-8",
+    )
+    rec = e.record()
+    assert rec["ceiling"] == 3 and rec["live"] == 4, rec
+    assert rec["wedged"] == names, rec
+    assert rec["verdict"] == "wedged", (
+        f"a wedged pool over an over-ceiling count reported {rec['verdict']!r} — `over-ceiling` is "
+        "a green exit, so this is the false PASS the wedged verdict exists to close"
+    )
+    assert rec["_rc"] == 6, rec
+
+
+def test_an_unreadable_history_over_an_over_ceiling_count_is_uncertified(env):
+    """The `uncertified` sibling: `over-ceiling` must not swallow a FAILED read either.
+
+    Same reasoning one arm over — if the job outcomes could not be read, capacity cannot be
+    certified, and `over-ceiling` is exit 0. Reporting green there is R3's fail-open direction.
+
+    Non-vacuity: on the pre-fix tool `verdict` stays `over-ceiling` and `_rc` is 0.
+    """
+    names = ["r1", "r2", "r3", "r4"]
+    e = env(
+        ncpu=8,
+        pool=[(n, "online", False, "") for n in names],
+        installs=[(f"gh-runner-x64-{i}", n) for i, n in enumerate(names, 1)],
+    )
+    e.run_ids = "1\n"
+    e.jobs_tsv = e.root / "missing-jobs.tsv"
+    rec = e.record()
+    assert rec["ceiling"] == 3 and rec["live"] == 4, rec
+    assert rec["capacity_certified"] is False, rec
+    assert rec["verdict"] == "uncertified", rec
+    assert rec["_rc"] == 2, rec
+
+
+def test_a_negative_duration_is_not_a_fast_setup_failure():
+    """⛔ `completed_at` BEFORE `started_at` IS AN UNUSABLE ROW, NOT EVIDENCE OF A WEDGE.
+
+    `_seconds` returned the raw delta and the predicate is `seconds <= setup_s`, so a negative
+    delta counted as a setup failure. GitHub does return such rows (measured on run 41578276118:
+    `started_at 05:47:58Z`, `completed_at 05:47:57Z` -> -1); they are masked today only because
+    that particular row carried no `runner_name`, and nothing guarantees that.
+
+    Non-vacuity: on the pre-fix tool `_seconds` returns -1 and the predicate calls the runner
+    wedged, so both arms red.
+    """
+    assert RA._seconds("2026-11-03T05:47:58Z", "2026-11-03T05:47:57Z") is None
+    assert RA._seconds("2026-11-03T05:47:58Z", "2026-11-03T05:53:24Z") == 326
+    pool = {"r1": RA.PoolEntry(name="r1", status="online", busy=False)}
+    assert RA.wedged_runners(pool, [("r1", "failure", -1)] * 3) == []
+
+
+def test_the_window_widens_until_the_pool_is_observed_and_says_so_when_it_never_was(env):
+    """⛔ THREE ALL-HOSTED RUNS ARE ROUTINE, AND THEY CERTIFIED A POOL THEY NEVER SAW.
+
+    Most of this repo's workflows are `runs-on: ubuntu-latest`/`ubuntu-24.04`, so a "last 3
+    completed runs" window served entirely by GitHub-hosted runners is the normal case (measured
+    2026-11-03: consecutive `Inbound relay` runs, every job hosted). Against such a window
+    `wedged_runners` correctly matches nothing — and the pass then reported capacity certified
+    with zero observations of the pool, which is R3's false pass one layer down.
+
+    The window now keeps walking (bounded) until a job on one of THIS box's registrations is seen,
+    and when it never is, the record says so instead of leaving it implicit.
+
+    Non-vacuity: on the pre-fix tool the walk stops at 3 runs, so the pooled run at index 5 is
+    never read and `pool_jobs_observed` does not exist at all.
+    """
+    names = ["r1", "r2", "r3"]
+    e = env(
+        ncpu=8,
+        pool=[(n, "online", False, "") for n in names],
+        installs=[(f"gh-runner-x64-{i}", n) for i, n in enumerate(names, 1)],
+    )
+    # five hosted-only runs, then one the pool served — past the 3-run minimum, inside the bound
+    e.run_ids = "1\n2\n3\n4\n5\n6\n"
+    e.set_jobs_by_run(
+        {
+            **{
+                str(i): f"GitHub Actions {i}\tsuccess\t2026-11-03T05:00:00Z\t2026-11-03T05:00:30Z"
+                for i in range(1, 6)
+            },
+            "6": "r1\tsuccess\t2026-11-03T05:00:00Z\t2026-11-03T05:05:00Z",
+        }
+    )
+    rec = e.record()
+    assert rec["pool_jobs_observed"] >= 1, rec
+    assert "wedged" not in rec, rec
+
+    # ... and a window that NEVER observes the pool discloses the sampling gap instead of hiding it
+    e2 = env(
+        ncpu=8,
+        pool=[(n, "online", False, "") for n in names],
+        installs=[(f"gh-runner-x64-{i}", n) for i, n in enumerate(names, 1)],
+    )
+    e2.run_ids = "1\n2\n3\n4\n5\n6\n"
+    e2.set_jobs_by_run(
+        {
+            str(i): f"GitHub Actions {i}\tsuccess\t2026-11-03T05:00:00Z\t2026-11-03T05:00:30Z"
+            for i in range(1, 7)
+        }
+    )
+    rec2 = e2.record()
+    assert rec2["pool_jobs_observed"] == 0, rec2
+    assert rec2["capacity_certified"] is True, rec2  # readable — R3 is about the READ
+    assert any(
+        "ZERO jobs on this box's registrations" in n for n in rec2["notes"]
+    ), rec2["notes"]
