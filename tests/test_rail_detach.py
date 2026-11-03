@@ -212,6 +212,42 @@ def test_cli_collect_resolves_the_repo_from_disk_not_the_network(tmp_path, capsy
     assert capsys.readouterr().out.startswith("RAIL(#64, ")
 
 
+def test_dry_run_exit_zero_is_not_a_merge(tmp_path):
+    """⛔ `admin-merge.sh --dry-run` merges nothing and exits 0. Reporting that as
+    `merged` would release the next beat's gate on evidence that does not exist."""
+    body = textwrap.dedent(
+        """#!/usr/bin/env bash
+        echo "admin-merge: --dry-run — evidence that WOULD be posted:"
+        echo "admin-merge: --dry-run performs no base run, no CI re-run, posts no comment and merges nothing."
+        exit 0
+        """
+    )
+    co = make_checkout(tmp_path, body=body)
+    sd = tmp_path / "state"
+    rd.launch(65, cwd=co, state_dir=sd, repo="o/r", extra=["--dry-run"])
+    st = wait_state(sd, 65, rd.REFUSED)
+    assert st.state == rd.REFUSED and st.exit_code == 0
+    assert "without a merge line" in st.reason
+
+
+def test_torn_exit_line_does_not_crash_collect(tmp_path):
+    """A group kill between `printf 'EXIT=%s'` and its argument leaves `EXIT=`.
+    A read-only verb must report a state, never a traceback."""
+    co = make_checkout(tmp_path)
+    sd = tmp_path / "state"
+    os.environ["FAKE_RAIL_SLEEP"] = "20"
+    try:
+        ln = rd.launch(66, cwd=co, state_dir=sd, repo="o/r")
+    finally:
+        os.environ.pop("FAKE_RAIL_SLEEP", None)
+    os.kill(ln.pid, signal.SIGKILL)
+    time.sleep(0.3)
+    art = rd.artifact_path(sd, "o/r", 66)
+    art.write_text(art.read_text() + "EXIT=\n")      # the torn append
+    st = rd.collect(sd, "o/r", 66)
+    assert st.state == rd.REFUSED and st.exit_code is None   # fail closed, no crash
+
+
 def test_collect_has_no_side_effects(tmp_path):
     co = make_checkout(tmp_path)
     sd = tmp_path / "state"

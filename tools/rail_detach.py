@@ -65,6 +65,7 @@ Stdlib only (this runs on the plain `python3` of a cell).
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
 import os
 import re
@@ -167,6 +168,35 @@ def _pid_alive(pid: int, marker: str) -> bool:
     return True  # no /proc (non-Linux): the kill probe is all we have
 
 
+def _int_or_none(s: str) -> int | None:
+    """A torn/garbled kv value must not crash the read-only verb. `printf` writes
+    `EXIT=%s` and its argument in separate expansions, so a group kill can land
+    between them and leave `EXIT=` — the fleet beat then gets a traceback instead
+    of a state, which is worse than any verdict."""
+    try:
+        return int((s or "").strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def _merge_evidence(log: str) -> tuple[str, str]:
+    """(state, sha) from the rail's OWN words, or ('', '') when it said nothing.
+    ⛔ A CODE-0 EXIT IS NOT A MERGE: `admin-merge.sh --dry-run` (and --help,
+    --print-bounds) exit 0 having merged nothing, and the launcher deliberately
+    passes operator args through. Merged requires the rail to SAY merged."""
+    m = MERGED_AT_RE.search(log)
+    if m:
+        return MERGED, m.group(2)
+    if ALREADY_MERGED_RE.search(log):
+        # Already merged before this attempt: that merge commit belongs to the
+        # earlier merge and is NOT this branch head (under a squash the head is
+        # never on main — admin-merge.sh:9033). Absent, never invented.
+        return MERGED, ""
+    if MERGED_NO_SHA_RE.search(log):
+        return MERGED, ""
+    return "", ""
+
+
 # ── collect ──────────────────────────────────────────────────────────────────
 @dataclass
 class RailState:
@@ -225,7 +255,7 @@ def collect(state_dir: Path, repo: str, pr: int) -> RailState | None:
         log = full[cut:] if cut >= 0 else full
 
     exits = read_all(text, "EXIT")
-    pid = int(read_field(text, "PID", "0") or 0)
+    pid = _int_or_none(read_field(text, "PID", "0")) or 0
     st = RailState(
         pr=pr,
         state=WAITING,
@@ -238,47 +268,49 @@ def collect(state_dir: Path, repo: str, pr: int) -> RailState | None:
     )
 
     if exits:
-        code = int(exits[-1])
+        code = _int_or_none(exits[-1])
         st.exit_code = code
-        st.state = MERGED if code == 0 else REFUSED
-        m = MERGED_AT_RE.search(log)
-        if m:
-            st.merge_sha = m.group(2)
-        elif ALREADY_MERGED_RE.search(log):
-            # Already merged before this attempt: the merge commit belongs to that
-            # earlier merge and is NOT this branch head (under a squash the head is
-            # never on main — admin-merge.sh:9033). Absent, never invented.
-            st.merge_sha = ""
-        else:
-            m = MERGED_NO_SHA_RE.search(log)
-            if m:
+        merged, sha = _merge_evidence(log)
+        if merged == MERGED:
+            st.state, st.merge_sha = MERGED, sha
+            if not sha:
                 st.reason = ("merged; the rail could not read the merge commit "
                              "(admin-merge.sh deliberately does not print it)")
-        if st.state == REFUSED:
+        else:
+            # Exit 0 with no merge line: the rail DECLINED to merge (a --dry-run,
+            # a --print-bounds, a help exit) or refused. Either way there is no
+            # merge, and saying `merged` would release the next beat's gate on
+            # evidence that does not exist.
+            st.state = REFUSED
             hits = REFUSAL_RE.findall(log)
-            st.reason = (hits[-1].strip()[:400] if hits else "no refusal line in the log")
+            st.reason = (hits[-1].strip()[:400] if hits else
+                         (f"exited {code} without a merge line — the rail did not "
+                          "merge (e.g. --dry-run), so this is not a merge"
+                          if code == 0 else "no refusal line in the log"))
         return st
 
     # No EXIT line yet. Alive ⇒ waiting; gone ⇒ lost (NEVER merged).
     if _pid_alive(pid, str(art)):
         st.state = WAITING
         return st
+    if pid == 0 and read_field(text, "SPAWNING") and not exits:
+        # Between `SPAWNING=1` and the `PID=` append the rail IS alive but
+        # unnamed. Reporting `lost` there defeats the same guard that refuses a
+        # second rail (#observed live 2026-11-03).
+        st.state = WAITING
+        st.reason = "launching (no pid recorded yet)"
+        return st
     # A merge the rail ANNOUNCED and then died before recording the exit code is
     # still a merge — the announcement is made only after the API confirmed
     # `state=MERGED`. Reading it is not a gate being relaxed: the rail's gates ran
     # to completion, only the bookkeeping line was lost. Anything short of that
     # announcement stays `lost` (a vanished rail has NO verdict — #2235).
-    m = MERGED_AT_RE.search(log)
-    if m:
-        st.state = MERGED
-        st.merge_sha = m.group(2)
-        st.reason = ("the rail's log records the merge; the EXIT line was never "
-                     "written (the process died between them)")
-        return st
-    if MERGED_NO_SHA_RE.search(log):
-        st.state = MERGED
-        st.reason = ("the rail's log records the merge (no merge sha printed); the "
-                     "EXIT line was never written")
+    merged, sha = _merge_evidence(log)
+    if merged == MERGED:
+        st.state, st.merge_sha = MERGED, sha
+        st.reason = ("the rail's log records the merge"
+                     + (" (no merge sha printed)" if not sha else "")
+                     + "; the EXIT line was never written")
         return st
     st.state = LOST
     st.reason = "the rail process is gone with no EXIT line — killed, not decided"
@@ -369,41 +401,53 @@ def launch(pr: int, *, cwd: Path, state_dir: Path, repo: str | None = None,
     art = artifact_path(state_dir, repo, pr)
     logp = log_path(state_dir, repo, pr)
 
-    prior = collect(state_dir, repo, pr)
-    if prior is not None and prior.state == WAITING:
-        raise Refused(
-            f"a rail is ALREADY LIVE for PR #{pr} (pid {prior.pid}, since "
-            f"{prior.since}) — two rails on one PR is the #3061 collision; "
-            f"collect it with: collect {pr}"
-        )
+    # ⛔ THE DUPLICATE-RAIL GUARD IS A LOCK, NOT A PRECONDITION. `collect` then
+    # `Popen` is check-then-act: two lanes (or a lane and a fleet beat) both read
+    # `no live rail` and both spawn, which is exactly the #3061 collision the
+    # guard exists to refuse — and two live rails then share one artifact, so the
+    # loser's verdict overwrites the winner's.
+    lock = Path(str(art) + ".lock")
+    with lock.open("a+") as lockfh:
+        fcntl.flock(lockfh.fileno(), fcntl.LOCK_EX)
+        state_dir.mkdir(parents=True, exist_ok=True)
+        prior = collect(state_dir, repo, pr)
+        if prior is not None and prior.state == WAITING:
+            raise Refused(
+                f"a rail is ALREADY LIVE for PR #{pr} (pid {prior.pid}, since "
+                f"{prior.since}) — two rails on one PR is the #3061 collision; "
+                f"collect it with: collect {pr}"
+            )
 
-    head = _head_sha(Path(cwd), repo, pr)
-    # A fresh attempt starts a fresh record; the previous attempt stays in the
-    # .log (the child appends), which is what the merged-sha parse reads.
-    art.write_text(
-        f"# rail artifact — {repo}#{pr}\n"
-        f"PR={pr}\nREPO={repo}\nHEAD={head}\nSTARTED_AT={_iso_now()}\n"
-        f"CWD={cwd}\nLOG={logp}\n"
-        f"RAIL_ARGS={' '.join([str(pr), '--repo', repo, *extra])}\n",
-        encoding="utf-8",
-    )
-    with logp.open("a", encoding="utf-8") as fh:
-        fh.write(f"\n===== rail attempt started {_iso_now()} (detached) =====\n")
-
-    argv = child_script(rail, repo, pr, logp, art, extra)
-    with logp.open("a", encoding="utf-8") as logfh:
-        proc = subprocess.Popen(
-            argv,
-            cwd=str(cwd),
-            stdin=subprocess.DEVNULL,
-            stdout=logfh,
-            stderr=subprocess.STDOUT,
-            start_new_session=DETACH_NEW_SESSION,  # ← the whole mechanism
-            close_fds=True,
+        head = _head_sha(Path(cwd), repo, pr)
+        # A fresh attempt starts a fresh record; the previous attempt stays in the
+        # .log (the child appends), which is what the merged-sha parse reads.
+        # `SPAWNING=1` is written BEFORE the spawn, because the window between the
+        # two is a rail that exists but has no pid yet — and `collect` must not
+        # call that `lost` (nor let a second rail through).
+        art.write_text(
+            f"# rail artifact — {repo}#{pr}\n"
+            f"PR={pr}\nREPO={repo}\nHEAD={head}\nSTARTED_AT={_iso_now()}\n"
+            f"CWD={cwd}\nLOG={logp}\nSPAWNING=1\n"
+            f"RAIL_ARGS={' '.join([str(pr), '--repo', repo, *extra])}\n",
+            encoding="utf-8",
         )
-    sid = os.getsid(proc.pid) if hasattr(os, "getsid") else proc.pid
-    with art.open("a", encoding="utf-8") as fh:
-        fh.write(f"PID={proc.pid}\nSID={sid}\n")
+        with logp.open("a", encoding="utf-8") as fh:
+            fh.write(f"\n===== rail attempt started {_iso_now()} (detached) =====\n")
+
+        argv = child_script(rail, repo, pr, logp, art, extra)
+        with logp.open("a", encoding="utf-8") as logfh:
+            proc = subprocess.Popen(
+                argv,
+                cwd=str(cwd),
+                stdin=subprocess.DEVNULL,
+                stdout=logfh,
+                stderr=subprocess.STDOUT,
+                start_new_session=DETACH_NEW_SESSION,  # ← the whole mechanism
+                close_fds=True,
+            )
+        sid = os.getsid(proc.pid) if hasattr(os, "getsid") else proc.pid
+        with art.open("a", encoding="utf-8") as fh:
+            fh.write(f"PID={proc.pid}\nSID={sid}\n")
     return Launch(pr=pr, pid=proc.pid, sid=sid, artifact=str(art), log=str(logp), head=head)
 
 
