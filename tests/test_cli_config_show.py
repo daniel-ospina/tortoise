@@ -1357,6 +1357,9 @@ def test_the_same_key_on_a_different_host_is_not_called_one_identity(
     ("https://API.premiselabs.co", "https://api.premiselabs.co", True),
     ("https://api.premiselabs.co:443", "https://api.premiselabs.co", True),
     ("https://api.premiselabs.co", "https://other.example", False),
+    # the SAME malformed value on both sides is UNKNOWN, never "different"
+    ("api.premiselabs.co", "api.premiselabs.co", None),
+    ("https://api.premiselabs.co", "api.premiselabs.co", None),
 ])
 def test_endpoint_comparison_is_normalised_like_the_hook(
         capsys, tmp_path, cli_url, hook_url, agree):
@@ -1371,7 +1374,11 @@ def test_endpoint_comparison_is_normalised_like_the_hook(
     assert _run(("config", "show", "--json")) == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["identity_host_agrees"] is agree
-    assert payload["identity_relation"] == ("same" if agree else "same-key-different-host")
+    if agree is None:
+        assert payload["identity_relation"] == "same-key-host-unknown"
+    else:
+        assert payload["identity_relation"] == ("same" if agree
+                                                else "same-key-different-host")
 
 
 @pytest.mark.parametrize("bad_url", [
@@ -1533,6 +1540,22 @@ def test_an_absent_global_store_makes_the_transmitting_verbs_identity_less(
     assert "do not resolve either" in out
 
 
+def test_the_same_malformed_api_url_on_both_sides_is_not_called_different(
+        monkeypatch, capsys, tmp_path):
+    """A missing scheme is the normal shape of a mistyped TORTOISE_API_URL, and the
+    report printed two identical values then asserted they differ."""
+    monkeypatch.setenv("TORTOISE_API_KEY", GLOBAL_KEY)
+    monkeypatch.setenv("TORTOISE_API_URL", "api.premiselabs.co")
+    assert _run(("config", "show", "--json")) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["identity_host_agrees"] is None
+    assert payload["identity_relation"] == "same-key-host-unknown"
+    assert _run() == 0
+    out = capsys.readouterr().out
+    assert "DIFFERENT endpoint" not in out
+    assert "cannot be made" in out
+
+
 def test_a_transport_drop_is_reported_as_transport_not_as_an_invalid_response(
         monkeypatch, capsys, tmp_path):
     """`RemoteDisconnected` is both an OSError and an HTTPException. It used to be
@@ -1600,11 +1623,14 @@ def test_the_whitespace_relation_carries_the_endpoint_verdict(
     monkeypatch.setenv("TORTOISE_API_URL", "")
     assert _run(("config", "show", "--json")) == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["identity_host_agrees"] is False
-    assert payload["identity_relation"].endswith("different-host")
+    # `TORTOISE_API_URL=""` is not a parseable endpoint, so the verdict is UNKNOWN,
+    # not "different" — the same distinction this commit makes everywhere else.
+    assert payload["identity_host_agrees"] is None
+    assert payload["identity_relation"].endswith("host-unknown")
     assert _run() == 0
     out = capsys.readouterr().out
-    assert "DIFFERENT endpoint" in out
+    assert "cannot be made" in out
+    assert "DIFFERENT endpoint" not in out
 
 
 def test_an_unreadable_store_is_not_offered_for_deletion(capsys, tmp_path):
