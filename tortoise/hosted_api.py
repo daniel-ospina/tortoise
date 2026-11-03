@@ -332,8 +332,8 @@ _KEEPALIVE_LOCK = threading.Lock()
 # ── #3060: dedicated executors for long / stallable work ───────────────────
 # `asyncio.to_thread` (the house style — see `list_packs`) submits to the
 # loop's SHARED default executor, which is where ~80 other `to_thread` call
-# sites and the auth middleware's abuse hooks (`_abuse_post_auth` et al.) run.
-# That is fine for short work. It is NOT fine for the capture extraction: on a
+# sites run. That is fine for short work. It is NOT fine for the capture
+# extraction: on a
 # stalled provider it blocks for the token-scaled deadline (~800s at a 16K
 # budget, per attempt, retried), so enough concurrent stalls would occupy every
 # default worker (min(32, cpu+4) — 6 on prod's 2 vCPU) and hold that shared,
@@ -3194,11 +3194,14 @@ _DREAM_QUEUE_TTL_S = 600
 # class. `asyncio.to_thread` submits to the loop's SHARED default executor, and
 # this module's own #3060 criterion (:145-160) is explicit that the shared pool
 # "is fine for short work" and "NOT fine" for long/stallable work. The ~80
-# other `to_thread` sites on that pool include the auth middleware's abuse
-# hooks (`_abuse_post_auth`, awaited on EVERY authenticated request), so a
-# burst of dream passes would park every worker (prod is 2 vCPU →
+# other `to_thread` sites on that pool are enough on their own to park every
+# worker during a burst (prod is 2 vCPU →
 # `min(32, cpu+4)` = 6) and stall unrelated tenants BEFORE their handlers —
-# while `/health` stays green by design (#2850), so nothing would notice. That
+# #10618 removed the last PER-REQUEST tenant of that pool (`first_api_call` and
+# `_abuse_post_auth`, both awaited on every authenticated request; they ride the
+# bounded telemetry lane now), which shortens no fuse: the shared pool is still
+# unbounded-wait and still `min(32, cpu+4)`. While `/health` stays green by
+# design (#2850), nothing would notice. That
 # is the #3060 starvation path relocated, not removed. Dream therefore gets its
 # OWN pool: it can only ever starve itself.
 #
@@ -7156,11 +7159,19 @@ async def get_current_org(request: Request) -> dict:
         # tortoise/analytics.py); distinct_id is the key creator's user UUID
         # (joins web + server funnels), with org_id fallback for legacy/
         # bootstrap keys that predate created_by.
+        # #10618: activation telemetry, so it rides the bounded telemetry lane
+        # — NOT the loop's shared default executor, which is what made this
+        # per-request hop able to park a request BEFORE its handler.
         if first_api_call_pending(org_id):
-            await asyncio.to_thread(
-                first_api_call,
-                created_by or org_id, org_id, request.url.path, request.method,
-            )
+            try:  # noqa: SIM105
+                await _telemetry_hook_off_loop(
+                    functools.partial(
+                        first_api_call,
+                        created_by or org_id, org_id, request.url.path,
+                        request.method),
+                    op="first_api_call")
+            except Exception:
+                pass  # never gate auth on activation telemetry
         # #329: fetch quota limits in the SAME fetch as tier (one round-trip;
         # mirrors quota.resolve_org_limits so REST and MCP see identical limits).
         org = sdk._get_registry().query(
@@ -7340,17 +7351,25 @@ async def _get_current_org_supabase(request: Request, token: str) -> dict:
         # #528: activation telemetry — first successful API auth per org.
         # created_by (key creator's user UUID) joins web + server funnels,
         # with org_id fallback for keys that predate created_by.
+        # #10618: activation telemetry, so it rides the bounded telemetry lane
+        # — NOT the loop's shared default executor, which is what made this
+        # per-request hop able to park a request BEFORE its handler.
         if first_api_call_pending(org_id):
-            await asyncio.to_thread(
-                first_api_call,
-                org.get("created_by") or org_id, org_id,
-                request.url.path, request.method,
-            )
+            try:  # noqa: SIM105
+                await _telemetry_hook_off_loop(
+                    functools.partial(
+                        first_api_call,
+                        org.get("created_by") or org_id, org_id,
+                        request.url.path, request.method),
+                    op="first_api_call")
+            except Exception:
+                pass  # never gate auth on activation telemetry
         request.state.org_id = org_id
         request.state.tier = org["tier"]
         _publish_default_namespace(org)
-        # #308: R3 read velocity + R4 geo (best-effort, off the critical
-        # path via to_thread).
+        # #308: R3 read velocity + R4 geo (best-effort). #10618: it rides the
+        # bounded telemetry lane, never the loop's shared default executor —
+        # this hook is awaited on EVERY authenticated request.
         await _abuse_post_auth(request, org)
         # #2600: canonical actor_user_id alias (UUID-gated, reads created_by
         # already on the resolve_api_key dict). Additive; ContextVar set lives
@@ -8959,8 +8978,8 @@ async def _emit_capture_ledger(org_id: str, session_id: str, meta: dict,
     blocking I/O, and this API runs a single uvicorn worker (the #2988 / #3498
     class). The analytics emit goes through the SHARED off-loop entry point
     (``_emit_analytics_off_loop`` → ``_cp_offload`` on the dedicated
-    ``telemetry`` pool, #4468) rather than the loop's SHARED default executor,
-    which the abuse hooks compete on — #4015 moved every other hosted funnel
+    ``telemetry`` pool, #4468) rather than the loop's SHARED default executor
+    — #4015 moved every other hosted funnel
     emit there and left this lane for #4468. The ledger write stays on
     ``asyncio.to_thread`` deliberately: it is a DIFFERENT op (the durable
     per-period row the spend cap reads, not the analytics row), it has no
@@ -9009,8 +9028,133 @@ def _suspended_detail() -> dict:
 
 
 
+# ── #10618: the per-request telemetry hooks leave the SHARED pool ──────────
+# Every authenticated request used to pay a hop on the loop's SHARED default
+# executor (``asyncio.to_thread``) BEFORE its handler ran — ``first_api_call``
+# and ``_abuse_post_auth``. That pool is ``min(32, cpu+4)`` (**6** on prod's
+# 2 vCPU), its queue is UNBOUNDED, and ~180 other ``to_thread`` sites compete
+# for it, so a few stalled tenants parked every worker and the request that
+# could not get one never reached its handler at all. Measured (#10618): with
+# the pool full, ``await _abuse_post_auth(...)`` does not return.
+#
+# Both hooks are BEST-EFFORT TELEMETRY whose contract is "this must never gate
+# the request path", so they move to a bounded control-plane pool — the #3060
+# pattern applied to the last two per-request tenants of the shared pool. They
+# get their OWN pool (``monitoring.CONTROL_PLANE_ABUSE_*``, ``pool="abuse"``)
+# rather than riding ``telemetry``: that pool also carries the UNRECOVERABLE
+# ``billing_notify`` (its ``WebhookEvent`` marker is already committed, so a
+# refused submission is a notification lost for good), and ``check_new_country``
+# holds a PROCESS-GLOBAL lock across a PostgREST round trip, so a cold geo cache
+# — the first request after every restart — could have offered that stall the
+# capacity a billing notify needs. On their own pool the hooks can only ever
+# starve themselves.
+#
+# Delivery is PRESERVED, not traded: ``cancel_on_timeout=False`` (#4456) makes
+# the bound abandon only the AWAIT, so a submission still QUEUED when the bound
+# expires STILL RUNS, and the record lands later instead of vanishing. The only
+# real drop left is a genuinely REFUSED submission (the pool's backlog is
+# full), which is escalated to a rate-limited ERROR line
+# (``_log_abuse_offload_refused``) so a suppression is ATTRIBUTABLE — never
+# silent. That is deliberate: an attacker who can saturate the pool must not be
+# able to suppress their own velocity accounting INVISIBLY.
+#
+# The bound is short on purpose. These hooks are bookkeeping; a request must not
+# pay seconds for them, and because the bound is delivery-preserving a short one
+# costs LATENCY of the record, never the record itself.
+_ABUSE_OFFLOAD_TIMEOUT_S = 1.0
+
+#: Rate limit for the ``ABUSE_OFFLOAD_REFUSED`` ERROR floor (#10618, the #4456
+#: shape). ONE saturation refuses a hook per request for EVERY tenant — the repo
+#: already ruled against per-drop alert amplification
+#: (``operator_alert._log_shed``), so the line is shed-logged: one per window is
+#: enough to see it.
+_ABUSE_REFUSED_LOG_INTERVAL_S = 60.0
+#: ``None`` = never logged (NOT ``0.0`` — ``time.monotonic()``'s reference point
+#: is undefined, so a fresh-boot clock would suppress every line).
+_LAST_ABUSE_REFUSED_LOG: float | None = None
+_ABUSE_REFUSED_LOG_LOCK = threading.Lock()
+
+
+def _log_abuse_offload_refused(op: str) -> None:
+    """The rate-limited ERROR floor for a REFUSED hook (#10618).
+
+    Without it a refused submission is indistinguishable from routine
+    best-effort telemetry noise — a WARNING at most, and
+    ``record_control_plane_offload`` counts it on the ``bound_miss_refused``
+    outcome, neither of which says an abuse record was LOST for a request the
+    caller got a 200 for. Never raises (a reporting path must not become the
+    failure it reports).
+    """
+    global _LAST_ABUSE_REFUSED_LOG
+    with contextlib.suppress(Exception):
+        now = time.monotonic()
+        with _ABUSE_REFUSED_LOG_LOCK:
+            if (_LAST_ABUSE_REFUSED_LOG is not None
+                    and now - _LAST_ABUSE_REFUSED_LOG
+                    < _ABUSE_REFUSED_LOG_INTERVAL_S):
+                return
+            _LAST_ABUSE_REFUSED_LOG = now
+        _logger.error(
+            "ABUSE_OFFLOAD_REFUSED: %s was REFUSED by the control-plane "
+            "offload seam — the abuse/activation record for this request was "
+            "DROPPED (the abuse pool's backlog is full), so velocity "
+            "accounting is missing a request it served. One line per %.0fs "
+            "window.",
+            op, _ABUSE_REFUSED_LOG_INTERVAL_S)
+
+
+async def _telemetry_hook_off_loop(fn, *, op: str) -> None:
+    """Run ONE per-request telemetry hook on the BOUNDED ``abuse`` lane.
+
+    #10618: never the loop's shared default executor (``min(32, cpu+4)``,
+    unbounded wait — a stalled tenant there parks a request BEFORE its
+    handler). Three properties are deliberate:
+
+    * ``cancel_on_timeout=False`` (#4456) makes the short bound
+      DELIVERY-preserving: the bound abandons only the AWAIT, so a submission
+      still QUEUED when it expires STILL RUNS. A saturated pool delays the
+      record; it does not drop it.
+    * A REFUSAL (backlog full — the callable never ran) is the ONE real drop,
+      and it is reported through ``_log_abuse_offload_refused`` (rate-limited)
+      instead of being swallowed.
+    * A BOUND MISS is NOT logged per call. ``_cp_offload(best_effort=True)``
+      emits an unthrottled WARNING on every miss, and this hook runs on EVERY
+      authenticated request — under saturation that would be one WARNING per
+      request, exactly the per-drop amplification the refusal line sheds, and
+      it would bury the one line worth reading. ``run_control_plane_call``
+      still records the miss on the ``bound_miss_running`` outcome and
+      attributes the abandoned work's eventual result (#4456), so nothing is
+      invisible — it is simply metered instead of shouted.
+
+    ⛔ CONTEXT: a pool thread is process-lifetime, so each invocation runs
+    under a FRESH COPY of the submitting context (``monitoring.confine_context``,
+    wrapped per submission because the wrapper binds the context it was created
+    with — #10612/#10642). That reproduces the ``asyncio.to_thread`` copy the
+    hooks relied on (a request's ContextVars are still visible inside the hook)
+    and guarantees a ContextVar set there cannot leak into the NEXT request the
+    worker serves — the same rule ``_graph_offload`` follows. None of today's
+    hook callables touches a ContextVar; this keeps that from becoming a silent
+    trap if one ever does.
+
+    A raise from the callable ITSELF still propagates to the caller's own guard
+    — same as the direct ``to_thread``/``await`` it replaces.
+    ``CancelledError`` is a ``BaseException`` and is untouched.
+    """
+    from tortoise.monitoring import ControlPlaneOffloadError
+    try:
+        await run_control_plane_call(
+            confine_context(fn), op=op, pool="abuse",
+            timeout=_ABUSE_OFFLOAD_TIMEOUT_S, cancel_on_timeout=False)
+    except ControlPlaneOffloadError as exc:
+        if exc.refused:
+            _log_abuse_offload_refused(op)
+        # A bound miss is not a drop: the queued submission still runs and the
+        # seam meters its outcome (``bound_miss_running`` + the abandoned-result
+        # callback). Deliberately no per-call line (#10618 review P2).
+
+
 def _abuse_post_auth_sync(method: str, headers: dict, org: dict) -> None:
-    """#308 post-auth hooks (run via asyncio.to_thread): R3 read velocity
+    """#308 post-auth hooks (run off the loop, #10618): R3 read velocity
     (GET only — writes never count as reads, scoping delta 11) + R4 geo
     (every request). Best-effort; TORTOISE_ABUSE_DISABLED kills both."""
     from tortoise import abuse as _abuse
@@ -9027,10 +9171,19 @@ def _abuse_post_auth_sync(method: str, headers: dict, org: dict) -> None:
 
 
 async def _abuse_post_auth(request: Request, org: dict) -> None:
-    """Async wrapper — never raises into the auth path."""
+    """Async wrapper — never raises into the auth path.
+
+    #10618: awaited on EVERY authenticated request, so it rides the bounded
+    ``telemetry`` lane (``_telemetry_hook_off_loop``) and never the loop's
+    shared default executor. ``request.headers``/``request.method`` are read
+    HERE, on the loop: ``Request`` is not thread-safe and a worker must not
+    touch it.
+    """
     try:
         headers = dict(request.headers)
-        await asyncio.to_thread(_abuse_post_auth_sync, request.method, headers, org)
+        await _telemetry_hook_off_loop(
+            functools.partial(_abuse_post_auth_sync, request.method, headers, org),
+            op="abuse.post_auth")
     except Exception:
         pass  # best-effort — abuse telemetry never breaks auth
 
@@ -9045,7 +9198,10 @@ def _abuse_record_points_sync(org: dict, n: int) -> None:
 
 async def _abuse_record_points(request: Request, org: dict, n: int) -> None:
     try:  # noqa: SIM105
-        await asyncio.to_thread(_abuse_record_points_sync, org, n)
+        # #10618: the bounded telemetry lane, never the shared default pool.
+        await _telemetry_hook_off_loop(
+            functools.partial(_abuse_record_points_sync, org, n),
+            op="abuse.record_points")
     except Exception:
         pass  # best-effort — never block the write path
 
@@ -9058,7 +9214,10 @@ def _abuse_evaluate_keys_sync(org_id: str) -> None:
 
 async def _abuse_evaluate_keys(org_id: str) -> None:
     try:  # noqa: SIM105
-        await asyncio.to_thread(_abuse_evaluate_keys_sync, org_id)
+        # #10618: the bounded telemetry lane, never the shared default pool.
+        await _telemetry_hook_off_loop(
+            functools.partial(_abuse_evaluate_keys_sync, org_id),
+            op="abuse.evaluate_keys")
     except Exception:
         pass
 
@@ -17277,11 +17436,14 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
             # ALL traffic ("no known healthy instances for route tcp/443") — one
             # slow model call took down the whole product, not just the capture.
             # `to_thread`-style context propagation, but on the CAPTURE pool:
-            # a stalled extraction must not be able to starve the auth
-            # middleware's abuse hooks or the other `to_thread` call sites out
-            # of the shared default executor (#3060). /health is no longer one
-            # of those tenants — since #2850 it reads in-memory state and takes
-            # no thread hand-off (see the pool notes at the top of the file).
+            # a stalled extraction must not be able to starve the other
+            # `to_thread` call sites out of the shared default executor
+            # (#3060) — that pool is 6 workers with an unbounded wait. (#10618
+            # moved the auth path's per-request hooks off it; the hazard this
+            # comment guards is the pool's, not theirs.) /health is no longer
+            # one of those tenants — since #2850 it reads in-memory state and
+            # takes no thread hand-off (see the pool notes at the top of the
+            # file).
             # `_run_off_loop` copies the caller's contextvars into the worker,
             # which is what `_call_once`'s own `copy_context()` snapshot
             # depends on (#2185).
@@ -37946,9 +38108,9 @@ async def _emit_analytics_off_loop(org_id: str, event_name: str,
     ``_cp_offload``, and since #4468 it is also the capture-cost lane's
     (``_emit_capture_ledger``) off-loop path: that lane used to keep its own
     ``asyncio.to_thread`` call — still off-loop, but on the loop's SHARED
-    default executor, which the abuse hooks and the selfhost readiness probe
-    also use, so it was not isolated the way this pool is. ``mcp_server`` keeps
-    its own retained emitter.
+    default executor, shared with the selfhost readiness probe and every other
+    ``to_thread`` site, so it was not isolated the way this pool is.
+    ``mcp_server`` keeps its own retained emitter.
 
     ``_track_analytics_event`` is a synchronous ``httpx.Client`` POST and
     ``hosted_api`` runs a SINGLE uvicorn worker, so calling it inline from an
@@ -43726,8 +43888,8 @@ async def webhooks_stripe(request: Request):
             # ``to_thread`` submits to the loop's SHARED default executor,
             # whose workers are NON-daemon and are JOINED at shutdown (#2850),
             # so a black-holed socket would delay uvicorn's shutdown — and a
-            # notify would park one of the six workers the /health probe and
-            # the abuse hooks also use (#3060; #4468 tracks the same residual
+            # notify would park one of the six workers the /health probe uses
+            # (#3060; #4468 tracks the same residual
             # on the capture-cost lane). The telemetry pool is a
             # process-lifetime DAEMON pool with a bounded backlog, so a wedged
             # notify is abandoned at the seam's wait bound instead of
