@@ -61,11 +61,27 @@ def _idle_exec(*a):
     raise AssertionError(f"unexpected docker call: {a}")
 
 
+LANE_FIXTURE_ROOT = Path("/tmp/fdb-lane-fixture-worktree")
+#: The name DERIVED from the fixture root, so the fixture cannot hand tests an
+#: identity whose two halves disagree — `_assert_removal_allowed` re-derives the
+#: name from the root it is given and refuses a removal whose name does not match
+#: (#10712 round-4 finding 1 made the name and the root ONE read).
+LANE_NAME = tl.container_name(tl.slug_for(LANE_FIXTURE_ROOT))
+
+
 @pytest.fixture
 def lane(monkeypatch):
-    """Pin the lane's container name so tests do not depend on the CWD."""
-    monkeypatch.setattr(tl, "lane_name", lambda: "fdb-lane-0123456789")
-    return "fdb-lane-0123456789"
+    """Pin the lane's container name — and the ROOT it is derived from — so tests
+    do not depend on the CWD.
+
+    Both are pinned together because `start()` derives its container NAME and its
+    ownership LABEL from ONE `repo_root()` read (`_lane_identity`); stubbing only
+    the name leaves the label naming whatever the real CWD is, which is the
+    divergence #10712 round-4 finding 1 is about.
+    """
+    monkeypatch.setattr(
+        tl, "_lane_identity", lambda: (LANE_NAME, LANE_FIXTURE_ROOT))
+    return LANE_NAME
 
 
 @pytest.fixture(autouse=True)
@@ -106,7 +122,7 @@ def test_start_refuses_a_container_that_answers_INSIDE_but_not_on_the_host_port(
     # exercises its own property rather than the engine check.
     monkeypatch.setattr(tl, "_created_image", lambda _n: tl.IMAGE)
     monkeypatch.setattr(tl, "_ping_over_host", lambda port, timeout: False)
-    monkeypatch.setattr(tl, "container_state", lambda _n: "running")
+    monkeypatch.setattr(tl, "container_state", lambda _n, **_k: "running")
     monkeypatch.setattr(tl, "_published_port", lambda _n: (True, 16390))
     monkeypatch.setattr(tl, "_docker", lambda *a, **k: _R(0, "PONG\n", ""))
     monkeypatch.setattr(tl, "READY_TIMEOUT", 1)
@@ -298,7 +314,7 @@ def test_reaper_KEEPS_a_TERMINAL_container_of_a_LIVE_owner_by_DEFAULT(
     monkeypatch.setattr(tl, "_docker", fake)
     monkeypatch.setattr(tl, "lane_name", lambda: "fdb-lane-mine")
     monkeypatch.setattr(tl, "_worktree_slugs", lambda: {"deadlane": str(owner)})
-    monkeypatch.setattr(tl, "container_state", lambda _n: "exited")
+    monkeypatch.setattr(tl, "container_state", lambda _n, **_k: "exited")
     out = tl.reap_orphans()
     assert removed == [], (removed, out)
     line = out[0]
@@ -335,7 +351,7 @@ def test_reaper_reaps_a_TERMINAL_container_of_a_live_owner_only_on_OPT_IN(
     monkeypatch.setattr(tl, "_docker", fake)
     monkeypatch.setattr(tl, "lane_name", lambda: "fdb-lane-mine")
     monkeypatch.setattr(tl, "_worktree_slugs", lambda: {"deadlane": str(owner)})
-    monkeypatch.setattr(tl, "container_state", lambda _n: "exited")
+    monkeypatch.setattr(tl, "container_state", lambda _n, **_k: "exited")
     monkeypatch.setenv(tl.STOPPED_REAP_ENV, "1")
     out = tl.reap_orphans()
     assert removed == [("-f", "fdb-lane-deadlane")], (removed, out)
@@ -363,7 +379,7 @@ def test_reaper_treats_only_the_exact_opt_in_value_as_consent(
     monkeypatch.setattr(tl, "_docker", fake)
     monkeypatch.setattr(tl, "lane_name", lambda: "fdb-lane-mine")
     monkeypatch.setattr(tl, "_worktree_slugs", lambda: {"deadlane": str(owner)})
-    monkeypatch.setattr(tl, "container_state", lambda _n: "exited")
+    monkeypatch.setattr(tl, "container_state", lambda _n, **_k: "exited")
     for value in ("true", "yes", "2", "1 ", ""):
         removed.clear()
         monkeypatch.setenv(tl.STOPPED_REAP_ENV, value)
@@ -526,7 +542,7 @@ def test_reaper_never_reaps_a_TERMINAL_container_it_cannot_ATTRIBUTE(
     monkeypatch.setattr(tl, "lane_name", lambda: "fdb-lane-mine")
     monkeypatch.setattr(tl, "_worktree_slugs", lambda: {})
     monkeypatch.setattr(tl, "_started_epoch", lambda _n: 0.0)
-    monkeypatch.setattr(tl, "container_state", lambda _n: "exited")
+    monkeypatch.setattr(tl, "container_state", lambda _n, **_k: "exited")
     # The age backstop is DISABLED: this test pins the STATE arm's
     # `owner is not None` guard, and must not depend on the idle probe's
     # readability to hold. (The backstop's own arm is tested separately.)
@@ -559,7 +575,7 @@ def test_reaper_re_reads_the_state_before_removing(monkeypatch, tmp_path):
     monkeypatch.setattr(tl, "_docker", fake)
     monkeypatch.setattr(tl, "lane_name", lambda: "fdb-lane-mine")
     monkeypatch.setattr(tl, "_worktree_slugs", lambda: {"cameback": str(owner)})
-    monkeypatch.setattr(tl, "container_state", lambda _n: "running")
+    monkeypatch.setattr(tl, "container_state", lambda _n, **_k: "running")
     monkeypatch.setenv(tl.STOPPED_REAP_ENV, "1")
     out = tl.reap_orphans()
     assert removed == [], removed
@@ -645,7 +661,7 @@ def test_reaper_carries_the_termination_evidence_into_its_report(
     monkeypatch.setattr(tl, "_docker", fake)
     monkeypatch.setattr(tl, "lane_name", lambda: "fdb-lane-mine")
     monkeypatch.setattr(tl, "_worktree_slugs", lambda: {"oomed": str(owner)})
-    monkeypatch.setattr(tl, "container_state", lambda _n: "exited")
+    monkeypatch.setattr(tl, "container_state", lambda _n, **_k: "exited")
     monkeypatch.setenv(tl.STOPPED_REAP_ENV, "1")   # the arm must be ARMED here
     monkeypatch.setattr(tl, "_termination_report",
                         lambda _n, live: "killed for memory (OOMKilled=true)")
@@ -703,7 +719,7 @@ def test_reaper_reads_no_state_as_UNKNOWN_not_as_terminal(tmp_path, monkeypatch)
     monkeypatch.setattr(tl, "lane_name", lambda: "fdb-lane-mine")
     monkeypatch.setattr(tl, "_worktree_slugs", lambda: {"nostate": str(owner)})
     monkeypatch.setattr(tl, "_started_epoch", lambda _n: 0.0)
-    monkeypatch.setattr(tl, "container_state", lambda _n: "exited")
+    monkeypatch.setattr(tl, "container_state", lambda _n, **_k: "exited")
     monkeypatch.setenv(tl.STOPPED_REAP_ENV, "1")
     out = tl.reap_orphans()
     assert removed == [], (removed, out)
@@ -810,7 +826,11 @@ def test_the_container_is_created_with_an_OWNERSHIP_LABEL(lane, monkeypatch,
     root = tmp_path / "the-real-worktree"
     root.mkdir()
     assert Path(root).resolve() != Path.cwd().resolve(), "test must discriminate"
-    monkeypatch.setattr(tl, "repo_root", lambda: root)
+    # `_lane_identity` is the ONE read `start()` derives both records from (round
+    # 4, finding 1); stubbing `repo_root` here would exercise a second caller and
+    # pin a seam the code no longer has.
+    monkeypatch.setattr(tl, "_lane_identity",
+                        lambda: (tl.container_name(tl.slug_for(root)), root))
     calls: list = []
 
     def fake(*a, **k):
@@ -837,6 +857,79 @@ def test_the_container_is_created_with_an_OWNERSHIP_LABEL(lane, monkeypatch,
         f"Path.cwd(): {owner}")
     slug_arg = argv[argv.index("--label", argv.index("--label") + 1) + 1]
     assert slug_arg == f"{tl.LABEL_SLUG}={tl.slug_for(root)}", argv
+
+
+def test_the_NAME_and_the_ownership_LABEL_come_from_ONE_root_read(monkeypatch,
+                                                                 tmp_path):
+    """#10712 round-4 finding 1: ONE degraded `repo_root()` read must not weld a
+    container shut forever.
+
+    `repo_root()` has a documented PER-CALL degraded mode (`Path.cwd()` on a git
+    timeout — the overloaded hosts this tool exists for — on git being absent, on
+    `OSError`, or on a non-zero `rev-parse`). The container NAME is
+    `slug_for(root)` and the ownership label is `<root>` + `slug_for(root)`; while
+    those came from TWO reads, one of them could degrade and stamp a container
+    whose label names a different worktree than its own name. `reap_orphans()`
+    then vetoes the label as uncorroborated — it skips EVERY arm, before the name
+    record is even built — and after the worktree is removed the name cannot
+    resolve either, so the container outlives every proof: the #8180 leak, back
+    through the door built to close it.
+
+    So this test flips the root BETWEEN calls, which is exactly what a degraded
+    read looks like from inside `start()`: the name and the label must still
+    describe the SAME worktree, and `repo_root()` must be read exactly ONCE.
+    """
+    first, second = tmp_path / "read-one", tmp_path / "read-two"
+    first.mkdir()
+    second.mkdir()
+    reads: list[Path] = []
+
+    def flipping_root():
+        reads.append(first if not reads else second)
+        return reads[-1]
+
+    monkeypatch.setattr(tl, "repo_root", flipping_root)
+    calls: list = []
+
+    def fake(*a, **k):
+        calls.append(a)
+        if a[0] == "inspect":
+            return _R(0, "absent\n", "")
+        if a[0] == "run":
+            return _R(0, "deadbeef\n", "")
+        if a[0] == "port":
+            return _R(0, "0.0.0.0:16390\n", "")
+        return _R(0, "PONG\n", "")
+
+    monkeypatch.setattr(tl, "_docker", fake)
+    name, _port = tl.start(port=16390)
+
+    assert len(reads) == 1, (
+        f"`start()` must derive the container identity from ONE `repo_root()` "
+        f"read, not {len(reads)}: {reads}")
+    # The name and the label must name the SAME worktree — the invariant the
+    # reap-time corroboration check leans on, made true by construction.
+    assert name == tl.container_name(tl.slug_for(first)), name
+    run = [c for c in calls if c[0] == "run"]
+    assert run, calls
+    argv = list(run[0])
+    owner = argv[argv.index("--label") + 1].split("=", 1)[1]
+    slug_arg = argv[argv.index("--label", argv.index("--label") + 1) + 1]
+    assert owner == str(first.resolve()), (
+        f"the label must describe the worktree the NAME came from ({first}), not "
+        f"a second, degraded read ({second}): {owner}")
+    assert slug_arg == f"{tl.LABEL_SLUG}={tl.slug_for(first)}", argv
+    assert name == tl.container_name(slug_arg.split("=", 1)[1]), (
+        "the container name and its label slug must be the same digest — that "
+        "is what `reap_orphans()` corroborates the label against")
+
+
+def test_the_label_writer_cannot_read_the_root_itself():
+    """The single-read invariant is only true if `_label_args` cannot read the
+    root itself: a root parameter is what makes "ONE `repo_root()` read" a
+    property of the code instead of a comment (#10712 round-4 finding 1).
+    """
+    assert list(inspect.signature(tl._label_args).parameters) == ["root"]
 
 
 def test_an_ownership_LABEL_makes_a_DEREGISTERED_worktree_still_reapable(
@@ -1439,6 +1532,50 @@ def test_the_idle_probe_gives_each_exec_its_OWN_short_timeout(monkeypatch):
         "a sample must be cheaper than a call whose answer decides a lane")
 
 
+def test_the_removal_time_STATE_recheck_takes_the_PROBE_timeout(monkeypatch):
+    """#10712 round-4 finding 3: the budget's own reasoning applies to the
+    removal-time STATE re-read, not just to the samples.
+
+    A TERMINAL candidate is never probed (`_idle_evidence` short-circuits on
+    `_TERMINAL_STATES` because `docker exec` into a stopped container fails), so
+    its evidence at the moment of action is docker's own state string — and that
+    re-read used the 60 s default, 12× the bound this module argues for. The
+    re-read only decides whether a container may be REAPED and "cannot tell"
+    already means KEEP, so it must not be worth a minute of the lane's start-up.
+    Mutation: drop the `timeout=` and this is red (the pre-fix code passed none).
+    """
+    seen: list[dict] = []
+
+    def state(_name, **k):
+        seen.append(k)
+        return "exited"
+
+    monkeypatch.setattr(tl, "container_state", state)
+    ok, why = tl._idle_recheck("fdb-lane-a", "exited", None)
+    assert (ok, why) == (True, ""), (ok, why)
+    assert seen == [{"timeout": tl.IDLE_PROBE_TIMEOUT}], (
+        f"the terminal re-read must carry the probe's bound, not "
+        f"DOCKER_TIMEOUT: {seen}")
+    assert tl.IDLE_PROBE_TIMEOUT < tl.DOCKER_TIMEOUT, (
+        "the pin is only worth something while the two bounds differ")
+
+
+def test_the_label_docstring_does_not_call_the_slug_write_only():
+    """#10712 round-4 finding 4: the docstring said the tool "reads back only
+    `worktree`" and that `slug` is a diagnostic — while `reap_orphans()`
+    DECIDES on `slug` (a mismatch vetoes the whole container) and this PR's own
+    `test_a_LABEL_whose_SLUG_disagrees_with_the_container_is_not_evidence`
+    asserts it must be READ. A docstring that demotes a deciding label to a
+    diagnostic is the "an unread constant is a lie" defect mirrored in prose.
+    """
+    doc = tl._label_args.__doc__ or ""
+    assert "reads back only" not in doc, (
+        f"the tool reads `slug` back and decides on it: {doc}")
+    assert "CORROBORATING" in doc.upper(), doc
+    assert "DECIDE" in doc.upper(), doc
+    assert "DIAGNOSTIC" in doc.upper(), doc
+
+
 def test_the_idle_probe_stops_at_its_WALL_CLOCK_budget(monkeypatch):
     """#10712 review 3: what is constant is the SLEEP, not the cost.
 
@@ -1586,7 +1723,7 @@ def test_start_sweeps_orphans_and_reports_them_on_stderr(
     dead = tmp_path / "dead-worktree"
     monkeypatch.setenv("TORTOISE_TEST_LANE_REAP", "1")
     monkeypatch.setattr(tl, "lane_name", lambda: "fdb-lane-mine")
-    monkeypatch.setattr(tl, "container_state", lambda _n: "absent")
+    monkeypatch.setattr(tl, "container_state", lambda _n, **_k: "absent")
     monkeypatch.setattr(tl, "_worktree_slugs", lambda: {"dead": str(dead)})
     removed: list = []
 
@@ -1669,7 +1806,7 @@ def test_stop_refuses_an_unmanaged_lane_name_and_never_calls_docker(monkeypatch)
 
 
 def test_stop_reports_absent_for_a_managed_container_that_is_not_running(lane, monkeypatch):
-    monkeypatch.setattr(tl, "container_state", lambda _n: "absent")
+    monkeypatch.setattr(tl, "container_state", lambda _n, **_k: "absent")
     assert tl.stop() == "absent"
 
 
@@ -1714,7 +1851,7 @@ def test_a_command_that_ignores_a_flag_must_not_accept_it(argv):
 
 
 def test_status_still_accepts_the_flag_it_does_use(monkeypatch, capsys):
-    monkeypatch.setattr(tl, "container_state", lambda _n: "running")
+    monkeypatch.setattr(tl, "container_state", lambda _n, **_k: "running")
     monkeypatch.setattr(tl, "_graph_count", lambda _n: 1)
     monkeypatch.setattr(tl, "_published_port", lambda _n: (True, 16390))
     assert tl.main(["status", "--graph", "other_graph"]) == 0
@@ -2089,9 +2226,9 @@ def test_start_refuses_when_a_stale_container_cannot_be_removed(monkeypatch):
     """A failed `rm` on a stale container must surface as a REMOVAL failure —
     not as `docker run`'s "name already in use", which reads as a run problem
     rather than the removal problem it is."""
-    monkeypatch.setattr(tl, "container_state", lambda _n: "exited")
+    monkeypatch.setattr(tl, "container_state", lambda _n, **_k: "exited")
     monkeypatch.setattr(tl, "_remove_and_describe",
-                        lambda _n: "FAILED to remove it — check `docker ps -a`")
+                        lambda _n, **_k: "FAILED to remove it — check `docker ps -a`")
     with pytest.raises(SystemExit) as exc:
         tl.start()
     assert "could not be removed" in str(exc.value)
@@ -2165,7 +2302,7 @@ def test_flags_are_accepted_after_the_subcommand(monkeypatch, capsys):
 def test_start_refuses_when_docker_state_is_unknown(monkeypatch):
     """A docker failure is not evidence that no container exists: guessing
     `absent` there would remove a container that may belong to another lane."""
-    monkeypatch.setattr(tl, "container_state", lambda _n: "unknown")
+    monkeypatch.setattr(tl, "container_state", lambda _n, **_k: "unknown")
 
     def _boom(*_a, **_k):  # pragma: no cover - asserted not to run
         raise AssertionError("docker was called despite an unknown state")
@@ -2191,7 +2328,7 @@ def test_an_invalid_graph_name_is_refused_before_a_container_exists(monkeypatch)
 def test_status_reports_the_published_port(monkeypatch, capsys):
     """`status` must state the port the container actually publishes (the one a
     lane needs for its URI), never a placeholder."""
-    monkeypatch.setattr(tl, "container_state", lambda _n: "running")
+    monkeypatch.setattr(tl, "container_state", lambda _n, **_k: "running")
     monkeypatch.setattr(tl, "_graph_count", lambda _n: 3)
     monkeypatch.setattr(tl, "_published_port", lambda _n: (True, 16390))
     assert tl.main(["status"]) == 0
@@ -2203,11 +2340,11 @@ def test_status_reports_the_published_port(monkeypatch, capsys):
 def test_status_fails_closed_when_it_cannot_ask(monkeypatch, capsys):
     """A script checking the exit code must be able to tell "could not ask"
     from an answer, and a failed `docker port` must not read as "no port"."""
-    monkeypatch.setattr(tl, "container_state", lambda _n: "unknown")
+    monkeypatch.setattr(tl, "container_state", lambda _n, **_k: "unknown")
     assert tl.main(["status"]) == 1
     assert "unknown" in capsys.readouterr().err
 
-    monkeypatch.setattr(tl, "container_state", lambda _n: "running")
+    monkeypatch.setattr(tl, "container_state", lambda _n, **_k: "running")
     monkeypatch.setattr(tl, "_graph_count", lambda _n: 0)
     monkeypatch.setattr(tl, "_published_port", lambda _n: (False, None))
     # A FAILED `docker port` is not an answer either: without this, a caller
@@ -2221,7 +2358,7 @@ def test_status_fails_closed_when_it_cannot_ask(monkeypatch, capsys):
 def test_status_fails_closed_when_the_graph_count_fails(monkeypatch, capsys):
     """`status`'s whole job is the answer, so BOTH of its queries must fail
     closed — a failed `GRAPH.LIST` used to print `graphs=unknown` and exit 0."""
-    monkeypatch.setattr(tl, "container_state", lambda _n: "running")
+    monkeypatch.setattr(tl, "container_state", lambda _n, **_k: "running")
     monkeypatch.setattr(tl, "_graph_count", lambda _n: None)
     monkeypatch.setattr(tl, "_published_port", lambda _n: (True, 16390))
     assert tl.main(["status"]) == 1
@@ -2231,7 +2368,7 @@ def test_status_fails_closed_when_the_graph_count_fails(monkeypatch, capsys):
 def test_status_fails_when_a_running_container_publishes_no_port(monkeypatch, capsys):
     """`start()` calls this identical state a hard error; `status` must not call
     it success, and it cannot report a URI it does not have."""
-    monkeypatch.setattr(tl, "container_state", lambda _n: "running")
+    monkeypatch.setattr(tl, "container_state", lambda _n, **_k: "running")
     monkeypatch.setattr(tl, "_graph_count", lambda _n: 0)
     monkeypatch.setattr(tl, "_published_port", lambda _n: (True, None))
     assert tl.main(["status"]) == 1
@@ -2247,7 +2384,7 @@ def test_start_reuses_a_running_container_without_removing_it(lane, monkeypatch)
     # exercises its own property rather than the engine check.
     monkeypatch.setattr(tl, "_created_image", lambda _n: tl.IMAGE)
     removed = []
-    monkeypatch.setattr(tl, "container_state", lambda _n: "running")
+    monkeypatch.setattr(tl, "container_state", lambda _n, **_k: "running")
     monkeypatch.setattr(tl, "_published_port", lambda _n: (True, 16390))
     monkeypatch.setattr(tl, "_wait_ready", lambda _n, _host_port=None: True)
     # #7357: the reuse path also READS the container's memory limit (and warns
@@ -2264,12 +2401,12 @@ def test_start_reuses_a_running_container_without_removing_it(lane, monkeypatch)
     monkeypatch.setattr(tl, "_container_live_maxmemory", lambda _n: 1536 << 20)
     monkeypatch.setattr(tl, "_container_redis_args", lambda _n: "")
     monkeypatch.setattr(tl, "_remove_and_describe",
-                        lambda n: removed.append(n) or "removed it")
+                        lambda n, **_k: removed.append(n) or "removed it")
 
     def _boom(*_a, **_k):
         raise AssertionError("`docker run` must not be reached on the reuse path")
     monkeypatch.setattr(tl, "_docker", _boom)
-    assert tl.start() == ("fdb-lane-0123456789", 16390)
+    assert tl.start() == (LANE_NAME, 16390)
     assert removed == [], "a running lane container must never be removed"
 
 
@@ -2318,7 +2455,7 @@ def test_start_refuses_to_reuse_a_running_container_born_from_a_floating_engine(
     def _boom(*_a, **_k):  # pragma: no cover - asserted not to run
         raise AssertionError("a running lane container must not be touched")
 
-    monkeypatch.setattr(tl, "container_state", lambda _n: "running")
+    monkeypatch.setattr(tl, "container_state", lambda _n, **_k: "running")
     monkeypatch.setattr(tl, "_created_image",
                         lambda _n: "falkordb/falkordb:latest")
     monkeypatch.setattr(tl, "_published_port", lambda _n: (True, 16390))
@@ -2351,7 +2488,7 @@ def test_start_refuses_to_reuse_a_running_container_of_unknown_engine(
     def _boom(*_a, **_k):  # pragma: no cover - asserted not to run
         raise AssertionError("an unreadable container must not be touched")
 
-    monkeypatch.setattr(tl, "container_state", lambda _n: "running")
+    monkeypatch.setattr(tl, "container_state", lambda _n, **_k: "running")
     monkeypatch.setattr(tl, "_created_image", lambda _n: None)
     monkeypatch.setattr(tl, "_published_port", lambda _n: (True, 16390))
     monkeypatch.setattr(tl, "_wait_ready", lambda _n, _host_port=None: True)
@@ -2385,7 +2522,7 @@ def test_start_refuses_a_port_it_cannot_move_a_live_lane_to(lane, monkeypatch):
     # (`_created_image`) before returning it; pinned here so the test
     # exercises its own property rather than the engine check.
     monkeypatch.setattr(tl, "_created_image", lambda _n: tl.IMAGE)
-    monkeypatch.setattr(tl, "container_state", lambda _n: "running")
+    monkeypatch.setattr(tl, "container_state", lambda _n, **_k: "running")
     monkeypatch.setattr(tl, "_published_port", lambda _n: (True, 16390))
 
     def _boom(*_a, **_k):  # pragma: no cover - asserted not to run
@@ -2405,13 +2542,13 @@ def test_start_accepts_an_explicit_port_that_matches(lane, monkeypatch):
     # (`_created_image`) before returning it; pinned here so the test
     # exercises its own property rather than the engine check.
     monkeypatch.setattr(tl, "_created_image", lambda _n: tl.IMAGE)
-    monkeypatch.setattr(tl, "container_state", lambda _n: "running")
+    monkeypatch.setattr(tl, "container_state", lambda _n, **_k: "running")
     monkeypatch.setattr(tl, "_published_port", lambda _n: (True, 16390))
     monkeypatch.setattr(tl, "_wait_ready", lambda _n, _host_port=None: True)
     monkeypatch.setattr(tl, "_remove_and_describe",
-                        lambda n: (_ for _ in ()).throw(
+                        lambda n, **_k: (_ for _ in ()).throw(
                             AssertionError("must not remove a live lane")))
-    assert tl.start(port=16390) == ("fdb-lane-0123456789", 16390)
+    assert tl.start(port=16390) == (LANE_NAME, 16390)
 
 
 def test_the_documented_shell_contract_aborts_on_failure():
@@ -2496,7 +2633,7 @@ def test_repo_root_falls_back_when_git_cannot_be_executed(monkeypatch, capsys):
 def test_start_returns_the_published_port_not_the_requested_one(lane, monkeypatch):
     """The published host port is ephemeral and authoritative, so echoing the
     requested value would print a URI pointing at nothing."""
-    monkeypatch.setattr(tl, "container_state", lambda _n: "absent")
+    monkeypatch.setattr(tl, "container_state", lambda _n, **_k: "absent")
     monkeypatch.setattr(tl, "pick_port", lambda *a, **k: 16399)
     monkeypatch.setattr(tl, "_published_port", lambda _n: (True, 16400))
     seen = []
@@ -2505,7 +2642,7 @@ def test_start_returns_the_published_port_not_the_requested_one(lane, monkeypatc
         seen.append((args, kwargs))
         return _R(0, "PONG")
     monkeypatch.setattr(tl, "_docker", _fake)
-    assert tl.start() == ("fdb-lane-0123456789", 16400)
+    assert tl.start() == (LANE_NAME, 16400)
 
     runs = [(argv, kw) for argv, kw in seen if argv[:2] == ("run", "-d")]
     assert runs, "`docker run` must have been invoked"
@@ -2550,7 +2687,7 @@ def test_start_passes_the_canonical_engine_args(lane, monkeypatch):
     ``FALKORDB_ARGS`` is asserted on the ARGV (the docker seam), not on the
     constant: the failure this guards is the flag not reaching ``docker run``.
     """
-    monkeypatch.setattr(tl, "container_state", lambda _n: "absent")
+    monkeypatch.setattr(tl, "container_state", lambda _n, **_k: "absent")
     monkeypatch.setattr(tl, "pick_port", lambda *a, **k: 16399)
     monkeypatch.setattr(tl, "_published_port", lambda _n: (True, 16400))
     seen = []
@@ -2623,7 +2760,7 @@ def test_start_removes_only_a_container_this_tool_manages(lane, monkeypatch):
     def _boom(*_a, **_k):  # pragma: no cover - asserted not to run
         raise AssertionError("docker was reached for an unmanaged container")
 
-    monkeypatch.setattr(tl, "container_state", lambda _n: "exited")
+    monkeypatch.setattr(tl, "container_state", lambda _n, **_k: "exited")
     monkeypatch.setattr(tl, "is_managed", lambda _n, _host_port=None: False)
     monkeypatch.setattr(tl, "_docker", _boom)
     with pytest.raises(SystemExit) as exc:
@@ -2638,7 +2775,7 @@ def test_start_refuses_to_reuse_a_running_container_that_is_wedged(lane, monkeyp
     # (`_created_image`) before returning it; pinned here so the test
     # exercises its own property rather than the engine check.
     monkeypatch.setattr(tl, "_created_image", lambda _n: tl.IMAGE)
-    monkeypatch.setattr(tl, "container_state", lambda _n: "running")
+    monkeypatch.setattr(tl, "container_state", lambda _n, **_k: "running")
     monkeypatch.setattr(tl, "_published_port", lambda _n: (True, 16390))
     monkeypatch.setattr(tl, "_wait_ready", lambda _n, _host_port=None: False)
     with pytest.raises(SystemExit) as exc:
@@ -2657,7 +2794,7 @@ def test_a_failed_port_query_never_removes_a_container(lane, monkeypatch):
     def _boom(*_a, **_k):  # pragma: no cover - asserted not to run
         raise AssertionError("a failed port query led to a removal")
 
-    monkeypatch.setattr(tl, "container_state", lambda _n: "running")
+    monkeypatch.setattr(tl, "container_state", lambda _n, **_k: "running")
     monkeypatch.setattr(tl, "_published_port", lambda _n: (False, None))
     monkeypatch.setattr(tl, "_remove_and_describe", _boom)
     monkeypatch.setattr(tl, "_docker", _boom)
@@ -2670,10 +2807,10 @@ def test_a_failed_port_query_on_a_fresh_container_says_so_and_cleans_up(lane, mo
     """The other half: a container we JUST created and cannot address has
     nothing to hand back, so it is removed — and the message names the failed
     query rather than claiming it publishes no port."""
-    monkeypatch.setattr(tl, "container_state", lambda _n: "absent")
+    monkeypatch.setattr(tl, "container_state", lambda _n, **_k: "absent")
     monkeypatch.setattr(tl, "pick_port", lambda *a, **k: 16399)
     monkeypatch.setattr(tl, "_published_port", lambda _n: (False, None))
-    monkeypatch.setattr(tl, "_remove_and_describe", lambda _n: "removed it")
+    monkeypatch.setattr(tl, "_remove_and_describe", lambda _n, **_k: "removed it")
     monkeypatch.setattr(tl, "_docker", lambda *a, **k: _R(0, "PONG"))
     with pytest.raises(SystemExit) as exc:
         tl.start()
@@ -2703,9 +2840,9 @@ def test_cleanup_reports_a_failed_removal_instead_of_claiming_success(lane, monk
     — reverting it to an unverified "removed it" must not leave the suite green."""
     monkeypatch.setattr(tl, "is_managed", lambda _n, _host_port=None: True)
     monkeypatch.setattr(tl, "_docker", lambda *a, **k: _R(1, "", "container busy"))
-    assert "FAILED to remove it" in tl._remove_and_describe("fdb-lane-0123456789")
+    assert "FAILED to remove it" in tl._remove_and_describe(LANE_NAME)
     monkeypatch.setattr(tl, "_docker", lambda *a, **k: _R(0, "", ""))
-    assert tl._remove_and_describe("fdb-lane-0123456789") == "removed it"
+    assert tl._remove_and_describe(LANE_NAME) == "removed it"
 
 
 def test_cleanup_refuses_an_unmanaged_name(lane, monkeypatch):
@@ -2725,7 +2862,7 @@ def test_stop_refuses_on_an_unknown_daemon_state(lane, monkeypatch):
     def _boom(*_a, **_k):  # pragma: no cover - asserted not to run
         raise AssertionError("stop() reached docker with an unknown state")
 
-    monkeypatch.setattr(tl, "container_state", lambda _n: "unknown")
+    monkeypatch.setattr(tl, "container_state", lambda _n, **_k: "unknown")
     monkeypatch.setattr(tl, "_docker", _boom)
     with pytest.raises(SystemExit) as exc:
         tl.stop()
@@ -2742,19 +2879,19 @@ def test_start_cleans_up_when_the_container_answers_but_publishes_nothing(lane, 
             return _R(0, "PONG", "")
         return _R(0, "", "")
 
-    monkeypatch.setattr(tl, "container_state", lambda _n: "absent")
+    monkeypatch.setattr(tl, "container_state", lambda _n, **_k: "absent")
     monkeypatch.setattr(tl, "pick_port", lambda *a, **k: 16399)
     monkeypatch.setattr(tl, "_published_port", lambda _n: (True, None))
     monkeypatch.setattr(tl, "_docker", _fake)
     with pytest.raises(SystemExit) as exc:
         tl.start()
     assert "it publishes no port" in str(exc.value)
-    assert ("rm", "-f", "fdb-lane-0123456789") in calls
+    assert ("rm", "-f", LANE_NAME) in calls
 
 
 def test_stop_surfaces_a_failed_removal(lane, monkeypatch):
     """`stop` must not return "removed" when `docker rm` failed."""
-    monkeypatch.setattr(tl, "container_state", lambda _n: "running")
+    monkeypatch.setattr(tl, "container_state", lambda _n, **_k: "running")
     monkeypatch.setattr(tl, "_docker", lambda *a, **k: _R(1, "", "boom"))
     with pytest.raises(SystemExit) as exc:
         tl.stop()
@@ -2909,7 +3046,7 @@ def test_the_derived_ceiling_is_refused_before_any_container_is_removed(
     """
     monkeypatch.setenv(tl.CONTAINER_MEMORY_ENV, "1m")
     monkeypatch.setattr(tl, "reap_orphans", lambda *a, **k: [])
-    monkeypatch.setattr(tl, "container_state", lambda _n: "exited")
+    monkeypatch.setattr(tl, "container_state", lambda _n, **_k: "exited")
 
     def _boom(*_a, **_k):  # pragma: no cover - asserted not to run
         raise AssertionError("docker was called before ceiling validation")
@@ -3188,10 +3325,10 @@ def test_the_start_reuse_path_reports_a_container_with_no_dataset_ceiling(
     not the call.
     """
     monkeypatch.setattr(tl, "_created_image", lambda _n: tl.IMAGE)
-    monkeypatch.setattr(tl, "container_state", lambda _n: "running")
+    monkeypatch.setattr(tl, "container_state", lambda _n, **_k: "running")
     monkeypatch.setattr(tl, "_published_port", lambda _n: (True, 16390))
     monkeypatch.setattr(tl, "_wait_ready", lambda _n, _host_port=None: True)
-    monkeypatch.setattr(tl, "_remove_and_describe", lambda n: "removed it")
+    monkeypatch.setattr(tl, "_remove_and_describe", lambda n, **_k: "removed it")
     # The container is 2g-born and UNBOUNDED — the measured shape of the
     # container this note exists for (`fdb-lane-1555b57be7`).
     monkeypatch.setattr(tl, "_container_memory_limit", lambda _n: 2 << 30)
@@ -3204,11 +3341,11 @@ def test_the_start_reuse_path_reports_a_container_with_no_dataset_ceiling(
     monkeypatch.setattr(tl, "_container_live_maxmemory", unbounded)
     monkeypatch.setattr(tl, "_container_redis_args", lambda _n: "")
 
-    assert tl.start() == ("fdb-lane-0123456789", 16390)
+    assert tl.start() == (LANE_NAME, 16390)
     err = capsys.readouterr().err
     assert "NO dataset ceiling in effect" in err, err
     assert "down" in err, err
-    assert read == ["fdb-lane-0123456789"], (
+    assert read == [LANE_NAME], (
         "start() must ASK the reused container for its live ceiling: without that "
         f"call the note is dead code on the only path that needs it, got {read}"
     )
@@ -3367,7 +3504,7 @@ def test_a_stale_killed_container_is_named_BEFORE_it_is_removed(
     pressure) had killed it: the legibility half this change exists for, absent
     on the path the kill actually leaves.
     """
-    monkeypatch.setattr(tl, "container_state", lambda _n: "exited")
+    monkeypatch.setattr(tl, "container_state", lambda _n, **_k: "exited")
     monkeypatch.setattr(tl, "pick_port", lambda *a, **k: 16390)
     monkeypatch.setattr(tl, "_wait_ready", lambda *a, **k: False)
     seen: list = []
@@ -3410,7 +3547,7 @@ def test_a_reused_container_reports_prior_termination_as_history_not_cause(
     not answer, restarting it is the remedy. Calling this failure a kill was the
     false diagnosis the review measured on a live lane container."""
     monkeypatch.setattr(tl, "_created_image", lambda _n: tl.IMAGE)
-    monkeypatch.setattr(tl, "container_state", lambda _n: "running")
+    monkeypatch.setattr(tl, "container_state", lambda _n, **_k: "running")
     monkeypatch.setattr(tl, "_published_port", lambda _n: (True, 16390))
     monkeypatch.setattr(tl, "_wait_ready", lambda *a, **k: False)
     monkeypatch.setattr(tl, "_container_memory_limit", lambda _n: 2 << 30)
@@ -3442,7 +3579,7 @@ def test_a_restart_loop_is_named_as_a_restart_loop(lane, monkeypatch):
     A report keyed only on OOMKilled/137 stayed silent on exactly the restart
     loop the issue is about, so `RestartCount > 0` is its own trigger — with
     memory pressure named as the HYPOTHESIS, because docker reports no reason."""
-    monkeypatch.setattr(tl, "container_state", lambda _n: "absent")
+    monkeypatch.setattr(tl, "container_state", lambda _n, **_k: "absent")
     monkeypatch.setattr(tl, "_wait_ready", lambda *a, **k: False)
 
     def fake(*a, **k):
@@ -3471,7 +3608,7 @@ def test_reusing_an_uncapped_container_warns_instead_of_handing_it_back(
     neighbours the issue names as the pressure source — handing one back in
     silence is how they stay uncapped."""
     monkeypatch.setattr(tl, "_created_image", lambda _n: tl.IMAGE)
-    monkeypatch.setattr(tl, "container_state", lambda _n: "running")
+    monkeypatch.setattr(tl, "container_state", lambda _n, **_k: "running")
     monkeypatch.setattr(tl, "_published_port", lambda _n: (True, 16390))
     monkeypatch.setattr(tl, "_wait_ready", lambda *a, **k: True)
     monkeypatch.setattr(tl, "_container_memory_limit", lambda _n: 0)
@@ -3517,7 +3654,7 @@ def test_a_container_that_dies_during_the_wait_is_named_a_death_not_a_wedge(
     states = iter(["running", "exited"])
 
     monkeypatch.setattr(tl, "_created_image", lambda _n: tl.IMAGE)
-    monkeypatch.setattr(tl, "container_state", lambda _n: next(states, "exited"))
+    monkeypatch.setattr(tl, "container_state", lambda _n, **_k: next(states, "exited"))
     monkeypatch.setattr(tl, "_published_port", lambda _n: (True, 16390))
     monkeypatch.setattr(tl, "_wait_ready", lambda *a, **k: False)
     monkeypatch.setattr(tl, "_container_memory_limit", lambda _n: 2 << 30)
@@ -3548,7 +3685,7 @@ def test_a_container_that_dies_during_the_wait_is_named_a_death_not_a_wedge(
     # from a failed read is the mistake the absent-vs-unreadable rule exists to
     # prevent (#7357 review).
     states2 = iter(["running", "unknown"])
-    monkeypatch.setattr(tl, "container_state", lambda _n: next(states2, "unknown"))
+    monkeypatch.setattr(tl, "container_state", lambda _n, **_k: next(states2, "unknown"))
 
     def termination_answers(*a, **k):
         # The STATE read failed, but docker ANSWERS the termination inspect: this
@@ -3649,7 +3786,7 @@ def test_a_kill_names_the_MEASURED_cap_not_the_current_env(lane, monkeypatch):
     and OOM-killed while the env says 8g was reported as killed by a cap it does
     not have. The cap that applies is docker's `HostConfig.Memory`."""
     monkeypatch.setattr(tl, "_created_image", lambda _n: tl.IMAGE)
-    monkeypatch.setattr(tl, "container_state", lambda _n: "absent")
+    monkeypatch.setattr(tl, "container_state", lambda _n, **_k: "absent")
     monkeypatch.setenv(tl.CONTAINER_MEMORY_ENV, "8g")
 
     def fake(*a, **k):
@@ -3693,8 +3830,8 @@ def test_a_paused_container_is_never_removed(lane, monkeypatch):
     its termination facts read `OOMKilled=false ExitCode=0 RestartCount=0`, so the
     removal printed nothing: a paused container holding a graph was silently
     deleted, and `start()` returned the replacement as if nothing had happened."""
-    monkeypatch.setattr(tl, "container_state", lambda _n: "paused")
-    monkeypatch.setattr(tl, "_assert_removal_allowed", lambda _n: None)
+    monkeypatch.setattr(tl, "container_state", lambda _n, **_k: "paused")
+    monkeypatch.setattr(tl, "_assert_removal_allowed", lambda _n, **_k: None)
 
     def _boom(*_a, **_k):  # pragma: no cover - asserted not to run
         raise AssertionError("a paused container must never be removed")
@@ -3709,7 +3846,7 @@ def test_a_paused_container_is_never_removed(lane, monkeypatch):
 
     # An UNRECOGNISED state is not permission to delete either: docker may add
     # one, and the default must be "keep the container".
-    monkeypatch.setattr(tl, "container_state", lambda _n: "frobnicating")
+    monkeypatch.setattr(tl, "container_state", lambda _n, **_k: "frobnicating")
     with pytest.raises(SystemExit) as e:
         tl.start()
     assert "does not recognise" in str(e.value), str(e.value)
