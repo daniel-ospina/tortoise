@@ -62,7 +62,16 @@ def _report(clean=None, failed=None) -> dict:
         "population": {"episodic_graph_nodes": 9, "turn_shaped_nodes": 9,
                        "sessions_with_graph_turns": len(clean) + len(failed),
                        "outside_population": 0},
-        "record": {"turn_rows_total": 9, "episodic_rows_not_turn_shaped": 0},
+        "record": {"turn_rows_total": 9, "episodic_rows_not_turn_shaped": 0,
+                   # The authority and the comparison width, which every census
+                   # this repo emits states (#10627 review, P3). The fixture
+                   # carries what the tool really writes — the hosted leg and
+                   # its seven fields — so a plan built from it can be told
+                   # apart from one built from a three-field local census.
+                   "leg": "hosted"},
+        "compared_fields": ["key", "content", "speaker", "createdAt",
+                            "kind", "status", "content_hash", "embedding"],
+        "declared_absent": [],
         "parity": {"clean_sessions": clean, "failed_sessions": failed},
         "anomalies": {k: [] for k in ("orphan", "cross_wired",
                                       "non_decimal_suffix", "operator_flagged",
@@ -1436,6 +1445,74 @@ def test_the_plan_records_a_LIVE_read_as_its_source(tmp_path, monkeypatch,
     assert "FILE" not in capsys.readouterr().out
 
 
+def test_the_plan_records_the_record_leg_and_the_comparison_WIDTH(
+        tmp_path, capsys):
+    """#10627 review (P3): the artefact a human SIGNS must state which record the
+    parity evidence came from and how wide the comparison was.
+
+    `--execute` re-derives with the hosted leg and its seven fields, but
+    `--census-json` is the only preview path an operator has on a postponed
+    hosted deployment. Before this pin the plan carried neither the leg nor the
+    field list, so a plan resting on the LOCAL JSONL's three compared fields
+    was byte-for-byte identical to one resting on all seven against
+    `public.point` — for an IRREVERSIBLE graph delete. Measured RED against the
+    pre-fix `census` block (the three keys are absent, `KeyError`).
+    """
+    report = _report(clean=[_clean_with_ids("s1", ["s1_t0"])])
+    report["record"] = {"turn_rows_total": 9,
+                        "episodic_rows_not_turn_shaped": 0,
+                        "leg": "local", "dir": "/home/x/.tortoise/session-events"}
+    report["compared_fields"] = ["key", "content", "speaker"]
+    report["declared_absent"] = ["embedding", "createdAt"]
+    plan_path = tmp_path / "plan.json"
+    assert purge.main([*_TARGET_ARGV, "--target-note", "t", "--census-json",
+                       _write(tmp_path, "census.json", report),
+                       "--plan-out", str(plan_path)]) == 0
+    plan = json.loads(plan_path.read_text(encoding="utf-8"))
+    assert plan["census"]["record_leg"] == "local"
+    assert plan["census"]["record_dir"] == "/home/x/.tortoise/session-events"
+    assert plan["census"]["compared_fields"] == ["key", "content", "speaker"]
+    assert plan["census"]["declared_absent"] == ["embedding", "createdAt"]
+    out = capsys.readouterr().out
+    # …and the PREVIEW the operator reads before signing says the same thing.
+    assert "record leg : local (/home/x/.tortoise/session-events)" in out
+    assert "compared   : key, content, speaker" in out
+    assert "not compared: embedding, createdAt" in out
+
+
+@pytest.mark.parametrize("mutate, needle", [
+    (lambda r: r.pop("record"), "no `record` block"),
+    (lambda r: r["record"].pop("leg"), "record.leg"),
+    (lambda r: r.__setitem__("record", {"leg": ""}), "record.leg"),
+    (lambda r: r.pop("compared_fields"), "compared_fields"),
+    (lambda r: r.pop("declared_absent"), "declared_absent"),
+])
+def test_a_census_report_that_states_no_leg_or_no_width_is_refused(
+        tmp_path, capsys, mutate, needle):
+    """#10627 review (P3), the fail-closed half: an artifact that does not say
+    which record it compared, or how wide, must not become a signable plan.
+
+    The plan is the artefact a human approves for an IRREVERSIBLE graph delete,
+    and an UNSTATED width is not a full-width comparison. Every census this
+    repo emits carries all three keys, so this refuses only a hand-edited or
+    pre-#10627 artifact — which is exactly the class whose evidence width is
+    not established. Measured RED against the pre-fix `_report_problem` (all
+    five mutations exited 0 and wrote a signable plan).
+    """
+    report = _report(clean=[_clean_with_ids("s1", ["s1_t0"])])
+    mutate(report)
+    plan_path = tmp_path / "plan.json"
+    rc = purge.main([*_TARGET_ARGV, "--target-note", "t", "--census-json",
+                     _write(tmp_path, "census.json", report),
+                     "--plan-out", str(plan_path)])
+    assert rc == 3
+    assert not plan_path.exists()          # no signable plan was written
+    err = capsys.readouterr().err
+    assert purge.REFUSE_CENSUS_UNREADABLE in err
+    assert needle in err
+    assert "Traceback" not in err
+
+
 # ── a malformed-but-parseable plan is a refusal, not a traceback ─────────
 
 def test_execute_refuses_a_plan_entry_without_ids(
@@ -2612,6 +2689,14 @@ def test_a_record_side_DUPLICATE_is_named_not_reported_as_a_transcript_mismatch(
     assert entry["sample_ids"] == []
     assert out["counts"][purge.CLASS_DUPLICATE_WINDOW] == 1
     assert out["counts"][purge.CLASS_MISMATCH] == 0
+
+    # ⛔ AND NOT AS A "MISMATCHED FIELD" EITHER (review P3). `class` was fixed to
+    # name the duplicate; the `mismatched` COUNT was not, so the approvable
+    # artifact carried `mismatched: 1` for a session the census never compared a
+    # single field of — telling an operator the MISMATCH remedy (a field fix)
+    # applied to a session whose only repair is to resolve the capture by hand.
+    assert entry["mismatched"] == 0, entry
+    assert entry["missing"] == 0, entry
 
 
 def test_a_planned_DUPLICATE_session_refuses_under_its_OWN_name():
