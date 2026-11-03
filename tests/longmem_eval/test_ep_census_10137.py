@@ -1605,6 +1605,25 @@ def test_committed_census_rederives_its_own_aggregate():
         assert doc["cells"][f"{key}_unread"] == sum(
             1 for r in rows if mp._optional_int(r.get(key)) is None)
 
+    # ``no_op_reason`` is the eighth published cell, it is part of
+    # ``_CENSUS_CELLS``, and the README makes a claim about it a reader relies
+    # on ("null in all 24 because no question no-op'd — that null is the
+    # measured value, not a missing one"). Nothing derived it: every committed
+    # row has ``points_with_ep > 0``, so ``_classify_question`` never consults
+    # the column, and a write of ``"no_ep_factors"`` onto all 24 rows shipped
+    # GREEN — a row claiming the EP pass wrote nothing beside
+    # ``points_moved_off_neutral: 185`` and ``belief_layer: activated``. That is
+    # the same self-contradiction as ``stale_run_guard``, and the one bundle
+    # whose stated question is whether the layer DID anything (#10678 review).
+    for r in rows:
+        if (mp._optional_int(r.get("points_moved_off_neutral")) or 0) > 0:
+            assert r.get("no_op_reason") is None, (
+                f"{_ARTIFACT}: per_question[{r.get('question_id')!r}] moved "
+                f"{r.get('points_moved_off_neutral')!r} point(s) off the "
+                f"neutral mean but names a no_op_reason "
+                f"{r.get('no_op_reason')!r} — a pass that moved points cannot "
+                f"also report that it wrote nothing (README:214)")
+
     # ONE artifact-identity anchor: the sample this bundle was cut from.
     # Update together with the artifact, never on its own. ``source`` sits here
     # for the same reason and not in the derivation list: the report and
