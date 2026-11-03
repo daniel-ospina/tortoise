@@ -65,9 +65,39 @@ what survives both the SIGKILL to the lane's group and the lane process exiting.
 `tests/test_rail_detach.py` proves the difference by re-running the SAME launch
 with detachment off and killing the launcher's group.
 
-Stdlib only (this runs on the plain `python3` of a cell).
+Stdlib only (this runs on the plain `python3` of a cell — which must be >= 3.12;
+see the guard below).
+
+EXIT CODES
+----------
+    0  ok — a verdict was reported (`waiting`/`merged`/`refused`/`lost`)
+    1  `collect --assert-merged` and the state is not `merged` — the machine gate
+    2  environment error: the repo could not be named, or the interpreter is < 3.12
+    3  `collect` found no artifact for that PR
+    4  `start` refused (a rail is already live, or a forbidden bypass is set)
 """
 from __future__ import annotations
+
+import sys
+
+# #5128 shape: refuse a <3.12 interpreter BEFORE the imports below. This is not a
+# style rule — the module imports `datetime.UTC` (3.11+), so on an older `python3`
+# (the ambient /usr/bin/python3 on a macOS box is 3.9) the import dies FIRST and
+# the operator gets a traceback instead of this message. The gate that enforces
+# the position is tests/test_entry_point_python_guard.py, corpus-wide.
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    # #5128/#4053: emit the message explicitly and exit 2. `SystemExit(<str>)`
+    # always exits 1, and THIS tool publishes 1 as `collect --assert-merged`
+    # "not merged" — the fleet's machine gate. An old interpreter reported
+    # through 1 would be indistinguishable from a rail that ran and refused,
+    # so 2 (this tool's environment-error code) carries the refusal instead.
+    print(
+        f"tools/rail_detach.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python tools/rail_detach.py`",
+        file=sys.stderr,
+    )
+    raise SystemExit(2)
 
 import argparse
 import fcntl
@@ -75,7 +105,6 @@ import json
 import os
 import re
 import subprocess
-import sys
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
