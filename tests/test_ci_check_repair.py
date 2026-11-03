@@ -2448,15 +2448,87 @@ def test_a_refused_cancel_does_not_spend_the_rerun(monkeypatch):
     ⭐ P2 (review): the stub GRANTED the cancel, so the `returncode != 0` branch this
     test is named for was never entered (deleting the guard left it green), and the
     un-patched `_sleep` made the failed settle loop cost 9 real seconds per run.
+
+    ⭐ P2 #10641 review: the state MOVED. A non-zero exit here is the API ANSWERING —
+    `403 Resource not accessible by integration` from a token without `actions: write`,
+    or an org policy. Folding that into `deferred` ("nothing was changed") reported a
+    repair this credential cannot perform as a discharged window, so the scheduled run
+    exited 0, coverage said the window was covered, and the local actor — the credential
+    that COULD perform it — was never engaged. It is `denied` now, which escalates.
+
+    ⛔ `denied`, NOT `failed`: #10763 landed the SAME distinction on main while this
+    branch was open, from the other end (it anchored a `_CANCEL_DENIED_RE` on GitHub's
+    permission wording so a rate-limited 403 stays a deferral). Both fixes agree on the
+    behaviour that matters — a readable permission refusal must escalate — and this
+    rebase keeps that fix's STATE NAME and its narrower anchor rather than replacing
+    them, because the anchor is what keeps the secondary rate limiter's own 403 out of
+    the escalation path.
     """
     monkeypatch.setattr(R, "gh_json", _api())
     monkeypatch.setattr(R, "_sleep",
                         lambda s: pytest.fail("a refused cancel has no settle loop to sleep in"))
     verbs: list[str] = []
-    monkeypatch.setattr(R, "_run", _verbs(verbs, cancel_rc=1))
+    monkeypatch.setattr(R, "_run", _verbs(verbs, cancel_rc=1,
+                                           cancel_stderr="Resource not accessible by integration"))
+    assert R._rerun("o/r", run(1, "ci.yml", "pending"), 1,
+                    expected_head="a" * 40) == "denied", (
+        "a readable permission refusal is a repair this credential cannot perform — "
+        "not a skip")
+    assert verbs == ["cancel"], "no rerun may be issued after a refused cancel"
+
+
+def test_a_cancel_post_whose_answer_was_lost_is_not_a_skip(monkeypatch):
+    """⭐ P2 #10641 review: a POST TIMEOUT is UNKNOWN EFFECT, not "nothing changed".
+
+    `_run` kills the child on expiry (`timeout=120`), and a killed `gh` may already have
+    had its request applied — the server's ANSWER is what was lost, not the act. The
+    post-POST states are the ones that must not read as "nothing was changed", yet this
+    path answered `refused` → `deferred`, whose record carries no `cancel_landed`.
+
+    Discriminating: pre-fix this returns `deferred` (indistinguishable from the
+    pre-POST `no_budget` skip), and a rerun is issued off a cancel that may have landed.
+    """
+    monkeypatch.setattr(R, "gh_json", _api())
+    monkeypatch.setattr(R, "_sleep", lambda s: pytest.fail("no settle loop without a POST answer"))
+    verbs: list[str] = []
+
+    def fake(argv, **_kw):
+        verb = argv[-1].rsplit("/", 1)[-1]
+        verbs.append(verb)
+        if verb == "cancel":
+            raise subprocess.TimeoutExpired(cmd=argv, timeout=120)
+        return _Done(0)
+
+    monkeypatch.setattr(R, "_run", fake)
+    assert R._rerun("o/r", run(1, "ci.yml", "pending"), 1,
+                    expected_head="a" * 40) == "cancel_unknown", (
+        "the POST was sent and the answer was lost — the effect is UNKNOWN")
+    assert verbs == ["cancel"], (
+        "a rerun issued off a cancel that may have landed is refused 'already running'")
+
+
+def test_a_cancel_post_that_never_left_the_process_is_still_a_deferral(monkeypatch):
+    """The other half of the split: `gh` could not be STARTED, so NOTHING was changed.
+
+    `OSError` is raised before any request is made (a missing/unrunnable binary), so
+    "nothing was changed" is TRUE and the deferral is correct — this must not be folded
+    into the unknown-effect state, which would suppress a legitimate retry's record.
+    """
+    monkeypatch.setattr(R, "gh_json", _api())
+    monkeypatch.setattr(R, "_sleep", lambda s: pytest.fail("no settle loop without a POST"))
+    verbs: list[str] = []
+
+    def fake(argv, **_kw):
+        verb = argv[-1].rsplit("/", 1)[-1]
+        verbs.append(verb)
+        if verb == "cancel":
+            raise FileNotFoundError("gh")
+        return _Done(0)
+
+    monkeypatch.setattr(R, "_run", fake)
     assert R._rerun("o/r", run(1, "ci.yml", "pending"), 1,
                     expected_head="a" * 40) == "deferred"
-    assert verbs == ["cancel"], "no rerun may be issued after a refused cancel"
+    assert verbs == ["cancel"]
 
 
 def test_a_PERMISSION_denied_cancel_is_TERMINAL_and_never_a_deferral(monkeypatch):
@@ -2854,6 +2926,56 @@ def test_a_cancel_that_landed_unobserved_is_recorded_as_landed(monkeypatch):
     assert entry["deferred"] is True, (
         "still a SKIP: the next window owns the replacement attempt")
     assert code == 0, "the cancel landed and is bounded — this is not 'needs a human'"
+
+
+def test_a_cancel_whose_effect_is_unknown_is_recorded_as_neither(monkeypatch):
+    """⭐ P2 #10641 review: the third state — the POST was SENT and the ANSWER was lost.
+
+    Neither claim is true: the run MAY be cancelled (`cancel_landed` would overstate it)
+    and something MAY have changed (`deferred`'s bare form would understate it). Still a
+    SKIP — a lost answer is not "a repair this credential cannot perform", and the next
+    window re-reads the run and acts on what is then true.
+
+    Discriminating: pre-fix the timeout path answered `refused` → `deferred`, so the
+    entry carries no effect key at all and reads as a clean no-op.
+    """
+    monkeypatch.setattr(R, "_rerun", lambda *a, **k: "cancel_unknown")
+    plan = _plan(absent=["python-ci-gate"],
+                 rerun=[run(41523739094, "python-ci.yml", "pending")])
+    code, recs = R.report([plan], apply=True, trigger_ok=True, repo="o/r", cooldown_min=60)
+    entry = recs[0]["rerun"][0]
+    assert entry["ok"] is False
+    assert entry["cancel_effect_unknown"] is True, (
+        "the POST was sent and the answer was lost — the record must say the effect is unknown")
+    assert "cancel_landed" not in entry, (
+        "the cancel MAY have landed — claiming it did is the same error in the other direction")
+    assert code == 0, "unknown is bounded by the next window — this is not 'needs a human'"
+
+
+def test_a_cancel_the_credential_cannot_perform_escalates_the_window(monkeypatch):
+    """⭐ P2 #10641 review — the WHOLE path, not a stubbed `_rerun` return.
+
+    `_cancel` → `_rerun` → `report` for an API that ANSWERS with a refusal (a `403` from
+    a token without `actions: write`). The workflow's exit code is documented as
+    "non-zero when a PR needs a repair this credential cannot perform. That is the signal
+    the local fallback keys on" — so this must reach exit 1.
+
+    Discriminating: pre-fix the whole chain produced `deferred` and exit 0, so every
+    30-minute window reported the window as covered while the cancel was never attempted
+    by anyone — the one outcome the local fallback exists to prevent.
+    """
+    monkeypatch.setattr(R, "gh_json", _api())
+    monkeypatch.setattr(R, "_sleep", lambda s: pytest.fail("a refused cancel never settles"))
+    monkeypatch.setattr(R, "_run", _verbs([], cancel_rc=1,
+                                           cancel_stderr="Resource not accessible by integration"))
+    plan = _plan(absent=["python-ci-gate"], head="a" * 40,
+                 rerun=[run(41523739094, "python-ci.yml", "pending")])
+    code, recs = R.report([plan], apply=True, trigger_ok=True, repo="o/r", cooldown_min=60)
+    entry = recs[0]["rerun"][0]
+    assert entry["ok"] is False and "deferred" not in entry, (
+        "the API answered — this is not a deferral")
+    assert code == 1, (
+        "a repair this credential cannot perform must engage the local fallback")
 
 
 # ── 16. the two per-pass resets and the `no_verdict` record key are load-bearing ──
