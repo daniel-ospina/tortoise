@@ -722,6 +722,31 @@ RECORD_WRITE_FAILURE_COUNT = Counter(
     "Armed record writes that did not happen (#9188)",
     ["reason"],
 )
+
+#: How long a recorded refusal counts as "happening NOW" (#10185, direction 1).
+#:
+#: The counter above is CUMULATIVE since process start and is never reset — that
+#: is deliberate (a total that resets cannot be alerted on), but it means the
+#: counter can never answer "is the record refusing writes at this moment?".
+#: #10185 measured the two ways a cumulative answer is wrong: one transient
+#: refusal during a failover pins a deployment `degraded` for the life of the
+#: process (an operator who learns the flag is always red ignores the next real
+#: one), and a restart silently clears it while the rows are still missing. The
+#: issue's own constraint is verbatim: *"Do not simply fold
+#: any(record_write_failures) ⇒ ok = False"*.
+#:
+#: So the refusal state is TIME-BOUNDED and the counters stay untouched: a stamp
+#: beside the counter, read as a verdict only inside this window. Nothing is
+#: reset and nothing is hidden — a quiet window clears the signal with no
+#: restart, and the cumulative totals keep the history.
+RECORD_REFUSAL_WINDOW_SECONDS = 300.0
+
+#: ``(monotonic_ts, reason)`` of the most recent counted refusal, or ``None``.
+#: Process memory on purpose — the same lifetime as the counter it annotates;
+#: persisting it would need a store the health path may not touch (#2850: no I/O
+#: on ``/health``). A single tuple assignment is atomic under the GIL, so the
+#: read below can never see a torn value.
+_RECORD_LAST_REFUSAL: tuple[float, str] | None = None
 # #9231 review P2: an armed record write into a lane whose log is NOT a journal.
 # SEPARATE from ``RECORD_WRITE_FAILURE_COUNT`` on purpose: this is a DECLINE, not
 # a loss. The record is ``replay(journal)``, and these lanes have no journal at
@@ -1443,6 +1468,54 @@ def record_record_write_failure(reason: str) -> None:
     same reason the journal append's is: the capture already committed.
     """
     RECORD_WRITE_FAILURE_COUNT.labels(reason=reason).inc()
+    # #10185: the CUMULATIVE counter above can never answer "refusing now", so
+    # every counted refusal also stamps WHEN and WHY. `monotonic` (not wall
+    # clock) because only the AGE is published: a wall-clock read would report a
+    # negative age across an NTP step and read as "not refusing" — the one
+    # direction this signal must never fail in.
+    global _RECORD_LAST_REFUSAL
+    _RECORD_LAST_REFUSAL = (time.monotonic(), reason)
+
+
+def record_last_refusal() -> tuple[float, str] | None:
+    """``(monotonic_ts, reason)`` of the most recent counted refusal (#10185).
+
+    The RAW stamp, not a verdict — callers that want ``refusing-now`` semantics
+    use :func:`record_refusing`, which applies the window.
+    """
+    return _RECORD_LAST_REFUSAL
+
+
+def clear_record_last_refusal() -> None:
+    """Forget the refusal stamp. TEST ISOLATION ONLY — no production caller.
+
+    Production must never call this: the stamp is what makes a refusal
+    OBSERVABLE, so clearing it in-process would recreate the silent-drop shape
+    this signal exists to remove. It exists so a test leg can start from "no
+    refusal yet" without reaching into the module's private state.
+    """
+    global _RECORD_LAST_REFUSAL
+    _RECORD_LAST_REFUSAL = None
+
+
+def record_refusing() -> dict[str, object] | None:
+    """The record's CURRENT refusal state, or ``None`` if it is not refusing.
+
+    ``{"reason": <the newest counted reason>, "age_s": <seconds since it was
+    counted>}`` inside :data:`RECORD_REFUSAL_WINDOW_SECONDS`, else ``None``.
+
+    This is the signal #10185 asks for: it CLEARS on a quiet window with no
+    restart and without resetting or hiding any cumulative counter (indicator
+    2). It is read from memory only, so ``/health`` keeps collecting no I/O
+    (#2850 P0).
+    """
+    stamp = _RECORD_LAST_REFUSAL
+    if stamp is None:
+        return None
+    age = time.monotonic() - stamp[0]
+    if age > RECORD_REFUSAL_WINDOW_SECONDS:
+        return None
+    return {"reason": stamp[1], "age_s": round(age, 1)}
 
 
 def record_non_journal_skip(reason: str = "no_durable_journal") -> None:

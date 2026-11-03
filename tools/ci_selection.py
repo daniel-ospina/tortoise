@@ -1875,6 +1875,22 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # `test_10017_cache_tier.py`, not merely a `core` registration
              # (#1349/#3332/#3616).
              "supabase/migrations/20261029000001_record_point_cache_tier.sql",
+             # #10620 / PR #10648 review P1: the FORWARD record migration that
+             # NARROWS `public.point.search_keys` from `jsonb` to `text` — the
+             # same `ALTER COLUMN … TYPE … USING` shape as #9264's
+             # `session.capture_redactions` entry above, and it sorts outside the
+             # `2026101200000` prefix while `supabase/` is a NON_PYTHON_PREFIX.
+             # Measured on the pre-fix head: `_sel([<this path>])` ->
+             # `surfaces: []`, `full: False`, so EVERY guard that reads this
+             # file's text or applies it ran nothing on a change to it alone —
+             # `test_9078`'s `RECORD_REAPPLY_STEPS` (an older container keeps
+             # `jsonb` and would drop rows again), `RECORD_MIGRATIONS`'
+             # registry-completeness pin (`test_9231`), and
+             # `test_record_schema_placement.py`. The #1349/#3332/#3616
+             # silent-drop class, and nine sibling entries exist for exactly it.
+             # Pinned by
+             # tests/test_ci_selection.py::test_record_schema_pin_runs_on_migration_or_doc_change.
+             "supabase/migrations/20261102000002_record_point_search_keys_text.sql",
              # Re-stated at the migration pair, NOT replaced by it (#9638 review
              # P1): the DOC side is an independent member of this set. The
              # #9555/R7 entry above was inserted over this path, so a
