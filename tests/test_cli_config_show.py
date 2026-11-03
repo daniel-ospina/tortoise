@@ -1610,12 +1610,71 @@ def test_the_unreadable_remedy_names_which_object_blocks(capsys, tmp_path):
         assert _run() == 1
         out = capsys.readouterr().out
         assert "chmod 600" not in out
-        line = next(ln for ln in out.splitlines() if "chmod 700 " in ln)
-        inside = line.split("chmod 700 ", 1)[1].split("`", 1)[0]
+        line = next(ln for ln in out.splitlines() if "chmod u+x " in ln)
+        inside = line.split("chmod u+x ", 1)[1].split("`", 1)[0]
         # the DIRECTORY, not the child file nothing can stat
         assert shlex.split(inside) == [str(dir_store.parent)]
     finally:
         dir_store.parent.chmod(0o700)
+
+
+def test_the_unreadable_remedy_finds_the_shallowest_and_the_real_blocker(
+        monkeypatch, capsys, tmp_path):
+    """Two ways the naive answer names an object that cannot be `chmod`ed.
+
+    1. NESTED blockers: with `outer` AND `outer/inner` both mode-000, only the
+       SHALLOW one can be fixed — `chmod` on the deeper path cannot even be
+       reached. A nearest-parent implementation passes every other assertion in
+       this file (both fixtures block at the immediate parent) while shipping
+       this bug, so it is pinned here.
+    2. A SYMLINKED store: `Path.parents` is LEXICAL, so when `./.tortoise` is a
+       link (real practice — it is how one store is shared) whose TARGET sits
+       behind a mode-000 directory, every lexical ancestor is traversable. The
+       real blocker must still be found and named; naming the link re-prints
+       the `chmod 600` that fails.
+    """
+    import os
+    import shlex
+
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+
+    # ── 1. two nested non-traversable levels: name the SHALLOW one ──
+    outer = tmp_path / "outer"
+    inner = outer / "inner"
+    _write(inner / ".tortoise" / "credentials.json", GLOBAL)   # the FILE is 0600
+    monkeypatch.setenv("HOME", str(inner))     # so the store IS a candidate
+    inner.chmod(0o000)
+    outer.chmod(0o000)
+    try:
+        os.chdir(elsewhere)
+        assert _run() == 1
+        out = capsys.readouterr().out
+        line = next(ln for ln in out.splitlines() if "chmod u+x " in ln)
+        inside = line.split("chmod u+x ", 1)[1].split("`", 1)[0]
+        assert shlex.split(inside) == [str(outer)]     # NOT inner
+    finally:
+        outer.chmod(0o700)
+        inner.chmod(0o700)
+
+    # ── 2. the store is a symlink; the TARGET's ancestor is the blocker ──
+    deep = tmp_path / "deep"
+    real_store = deep / "mid" / "secret"
+    _write(real_store, GLOBAL)                 # the real FILE is 0600
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / ".tortoise").symlink_to(real_store)   # the CWD candidate is a link
+    deep.chmod(0o000)
+    try:
+        os.chdir(repo)
+        assert _run() == 1
+        out = capsys.readouterr().out
+        assert "chmod 600" not in out
+        line = next(ln for ln in out.splitlines() if "chmod u+x " in ln)
+        inside = line.split("chmod u+x ", 1)[1].split("`", 1)[0]
+        assert shlex.split(inside) == [str(deep)]      # the REAL blocker
+    finally:
+        deep.chmod(0o700)
 
 
 def test_a_blank_org_field_is_absent_not_mistyped(capsys, tmp_path):
@@ -1826,8 +1885,8 @@ def test_an_unreadable_store_is_not_offered_for_deletion(capsys, tmp_path):
         assert "Do NOT delete it" in out
         assert "repair or delete it" not in out
         import shlex
-        line = next(ln for ln in out.splitlines() if "chmod 700" in ln)
-        inside = line.split("chmod 700 ", 1)[1].split("`", 1)[0]
+        line = next(ln for ln in out.splitlines() if "chmod u+x " in ln)
+        inside = line.split("chmod u+x ", 1)[1].split("`", 1)[0]
         # the DIRECTORY, not the child file that cannot even be stat'ed
         assert shlex.split(inside) == [str(d)]
         assert "chmod 600" not in out

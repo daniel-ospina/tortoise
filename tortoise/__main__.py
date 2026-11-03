@@ -3220,7 +3220,7 @@ def _same_path(a: Path | None, b: Path | None) -> bool:
 
 
 def _blocking_directory(path: Path) -> Path | None:
-    """The SHALLOWEST directory above `path` this process cannot traverse.
+    """The SHALLOWEST directory that makes `path` unreachable, else None.
 
     `_STORE_UNREADABLE` is reached TWO ways, and only one of them is about the
     FILE's own mode: a store behind a mode-000 PARENT DIRECTORY fails
@@ -3232,30 +3232,53 @@ def _blocking_directory(path: Path) -> Path | None:
     So the remedy must name the object that actually blocks. Measured on a
     mode-000 parent, the printed `chmod 600 <dir>/credentials.json` exits 1
     with "Permission denied" and sends the reader back to the same refusal,
-    while `chmod 700 <dir>` succeeds — the file is fine, the DIRECTORY is not.
+    while granting traversal on the DIRECTORY succeeds — the file is fine.
 
-    Walking from the ROOT down rather than testing only the immediate parent:
-    when an inaccessible ancestor is one or more levels up, the nearest parent
-    is unreachable THROUGH it, so a `chmod` on the deeper path cannot run at
-    all. The shallowest non-traversable component is the one to fix.
+    Two things make the answer non-obvious, and both are measured:
 
-    Returns None when every ancestor is traversable — then the file's own mode
-    is the problem and the caller's `chmod 600 <file>` is the right advice.
+    * `Path.parents` is purely LEXICAL. A store reached through a SYMLINK is
+      real practice here (a `./.tortoise` symlinked to the global store is the
+      documented sharing trick), and then every lexical ancestor of the LINK is
+      traversable while the TARGET sits behind a mode-000 directory — so the
+      real path is walked too, and it is walked FIRST because its ancestor is
+      the object to fix.
+    * Walked from the ROOT down, not by testing the nearest parent first: an
+      inaccessible NEAREST ancestor is only reachable THROUGH the shallower one
+      that blocks it, so `chmod` on the deeper path cannot run at all.
+
+    Returns None when no directory blocks — then the file's own mode is the
+    problem and the caller's `chmod 600 <file>` is the right advice.
     """
     import os as _os
+    chains: list[Path] = []
     try:
-        ancestors = list(path.parents)
+        real = Path(_os.path.realpath(path))
+        if str(real) != str(path):
+            chains.append(real)
     except (OSError, RuntimeError):
-        return None
-    for cand in reversed(ancestors):            # root first, nearest last
+        pass
+    chains.append(path)
+    for chain in chains:
         try:
+            ancestors = list(chain.parents)
+        except (OSError, RuntimeError):
+            continue
+        for cand in reversed(ancestors):            # root first, nearest last
+            try:
+                if not cand.is_dir():
+                    # Not a directory at all. `os.access` is False for ENOENT /
+                    # ENOTDIR / ESTALE too, not only EACCES, and blaming the
+                    # mode of a path that is not there would assert a fact this
+                    # verb cannot see. Reaching this candidate already PROVES
+                    # every shallower component is traversable AND a directory,
+                    # so stopping here cannot hide a real blocker.
+                    return None
+            except OSError:
+                # The environment itself cannot answer (a deleted cwd). Decline
+                # rather than repeat the guessing this verb exists to replace.
+                return None
             if not _os.access(cand, _os.X_OK):
                 return cand
-        except OSError:
-            # The environment itself cannot answer (a deleted cwd). Claiming a
-            # directory is to blame would repeat the guessing this verb exists
-            # to replace, so decline and let the caller describe the file.
-            return None
     return None
 
 
@@ -3836,8 +3859,12 @@ def _cmd_config(args) -> int:
             # object is decided from evidence at render time.
             blocker = _blocking_directory(Path(cred["blocked_by"]))
             if blocker is not None:
+                # `u+x`, not `700`: traversal is ALL that is missing, and the
+                # blocker can be an ancestor the reader never meant to change
+                # (a shared parent, even `HOME`) — `700` would revoke its
+                # group/other access and fix more than the diagnosis names.
                 print("   The DIRECTORY containing it is not traversable — fix "
-                      "that first (`chmod 700 "
+                      "that first (`chmod u+x "
                       f"{_printable(_shlex.quote(str(blocker)))}`); the "
                       "file's own mode cannot be checked until it is.")
             else:
