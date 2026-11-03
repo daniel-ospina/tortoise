@@ -29,6 +29,7 @@ claims:
 | `test_the_instrument_is_selected_by_its_own_subjects` | the pins above actually RUN in CI | a subject diff stops selecting this file — a falsifier that never executes |
 | `test_two_package_inits_keep_distinct_writer_identities` | the writer map's exhaustiveness | two writers in one package collapse into one key, so a label bullet 2 compares vanishes |
 | `test_a_collision_is_classified_whichever_exit_writes_it` | the duplicate guard itself, DRIVEN rather than injected | the collision rule is consulted at only one of the four exits, so a later `unresolved_write`/two-label definition silently overwrites a `gated` one and the collision reads as an ordinary unresolved producer (order-dependent, and no test drove it) |
+| `test_a_collided_writer_is_not_REPORTED_as_an_override` | the OTHER half of the guard — the `overridden` bookkeeping `_put()` withdraws on a collision | a collision replaces a writer's override-supplied label while the key stays in `overridden`, so the note that promises to distinguish ASSIGNED labels from DERIVED ones reports an override the row did not use (in either `ast.walk` order) |
 | `test_a_duplicate_writer_identity_holds_bullet_two_at_partial` | bullet 2's honesty | a writer whose label could not be resolved stops holding the row, while bullet 1 still reports the same hole |
 | `test_the_tool_parses_under_the_floor` | the `#5128` guard is PROTECTIVE, not documentary | 3.12-only syntax (PEP 701) creeps back in, so the file dies in the tokenizer before its own guard can refuse |
 | `test_a_line_that_merely_mentions_the_flag_is_not_a_shipped_default` | bullet 1's `on_by_default` input | a line that *documents* the flag (prose, a workflow step name, a commented list item) is scored as a shipped ON |
@@ -1689,6 +1690,84 @@ def test_a_collision_is_classified_whichever_exit_writes_it(tmp_path, monkeypatc
     assert writers["tortoise.distinct::_upsert_object"]["kind"] == "gated"
     assert not [k for k, d in writers.items()
                 if d["kind"] == "duplicate" and k.startswith("tortoise.distinct")]
+
+
+def test_a_collided_writer_is_not_REPORTED_as_an_override(tmp_path, monkeypatch):
+    """A collision REPLACES the label, so its override must stop being reported.
+
+    `_embedding_writers` adds a key to `overridden` when
+    `WRITER_LABEL_OVERRIDES` supplies its label, and `score_path_bullet`
+    PRINTS `_overridden_writers() & set(written_labels())` — "labels assigned
+    by the DOCUMENTED override, not derived from Cypher". A `duplicate` entry
+    keeps its key in `written_labels()`, so an override whose label a later
+    collision replaced stayed in that note: the row reported a label it did
+    NOT use, in the one place that promises to distinguish assigned labels
+    from derived ones.
+
+    `_put()`'s `overridden.discard(key)` is what keeps the two halves agreeing,
+    and until now nothing drove it — deleting that line left this file green,
+    the same removal-direction hole the round-26 falsifier closed for the
+    guard itself (this PR's review, P3).
+
+    ⛔ Both orders are driven: the override's definition first, then the one
+    that collides with it, AND the reverse — the `ast.walk` order is what the
+    guard must not depend on.
+    """
+    def point(blackticks_label: str | None) -> str:
+        """One `_point`: gated, optionally naming a label in its own Cypher."""
+        cypher = (
+            "    return vec\n" if blackticks_label is None else
+            f"    return 'MERGE (n:{blackticks_label} {{id: 1}})"
+            " SET n.embedding = $vec'\n"
+        )
+        return (
+            "def _point(p):\n"
+            "    vec = encode_for_row('x', None)\n" + cypher
+        )
+
+    roots: dict[str, object] = {}
+    for name, defs in (
+        # The override fires FIRST, then a labelled `_point` collides with it.
+        ("override_then_labelled", (point(None), point("Object"))),
+        # ...and the reverse: the labelled one lands, then the override.
+        ("labelled_then_override", (point("Object"), point(None))),
+        # Control: NO collision, so the override must still be reported.
+        ("uncollided", (point(None),)),
+    ):
+        root = tmp_path / name
+        (root / "tortoise").mkdir(parents=True)
+        (root / "tortoise" / "embeddings.py").write_text(
+            "def encode_for_row(t, d):\n    return None\n", encoding="utf-8")
+        (root / "tortoise" / "api.py").write_text(
+            "from .embeddings import encode_for_row\n" + "\n\n".join(defs),
+            encoding="utf-8")
+        roots[name] = root
+
+    key = "tortoise.api::_point"
+    for name in ("override_then_labelled", "labelled_then_override"):
+        monkeypatch.setattr(probe, "REPO_ROOT", roots[name])
+        writers = probe.embedding_writers()
+        assert writers[key]["kind"] == "duplicate", (name, writers[key])
+        assert writers[key]["label"] == probe.DUPLICATE_LABEL, (name, writers[key])
+        # The key IS in `written_labels()` (a `duplicate` maps onto the sentinel),
+        # which is exactly why the override half has to be withdrawn.
+        assert probe.written_labels(writers)[key] == probe.DUPLICATE_LABEL, name
+        assert key not in probe._overridden_writers(), (
+            f"{name}: the collision replaced the label, so reporting "
+            f"`{key}` as a DOCUMENTED override claims a label the row did not "
+            f"use: {sorted(probe._overridden_writers())}"
+        )
+        # ...which is the exact expression `score_path_bullet` prints from.
+        assert probe._overridden_writers() & set(
+            probe.written_labels(writers)) == set(), name
+
+    # Control, so a guard that simply never recorded an override cannot pass:
+    # with no collision, the documented override is still reported.
+    monkeypatch.setattr(probe, "REPO_ROOT", roots["uncollided"])
+    writers = probe.embedding_writers()
+    assert writers[key]["kind"] == "gated", writers[key]
+    assert writers[key]["label"] == "Point", writers[key]
+    assert probe._overridden_writers() == {key}, probe._overridden_writers()
 
 
 def test_a_duplicate_writer_identity_holds_bullet_two_at_partial(monkeypatch):
