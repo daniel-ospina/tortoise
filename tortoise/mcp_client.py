@@ -301,6 +301,19 @@ def _raise_if_credential_was_missing(exc: BaseException, sent: Connection | None
     raise _refusal(exc, sent) from exc
 
 
+def describe_failure(exc: BaseException, provider: _BearerProvider | None = None) -> str:
+    """`str(exc)` with any credential VALUE redacted — for callers that PRINT it.
+
+    A server may echo the key it rejected, and fastmcp carries the server's JSON-RPC
+    text into the exception it raises. `status()` returns text, and the CLI prints
+    it, so the same rule the bridge applies has to hold here: the evidence may
+    travel, the value may not. The key is taken from what the failed request
+    actually carried when that is known, else from the live resolution.
+    """
+    key = provider.sent.key if provider is not None and provider.sent is not None else None
+    return redact(str(exc), key or resolve_connection().key)
+
+
 class _BearerProvider(httpx.Auth):
     """An httpx auth provider that resolves the credential on EVERY request.
 
@@ -458,11 +471,16 @@ class _GuardedClient:
 
     async def __aexit__(self, exc_type, exc, tb):
         result = False
+        teardown_failed = False
         if exc is None:
             try:
                 result = await self._client.__aexit__(exc_type, exc, tb)
             except BaseException as raised:
+                # A close/session-termination failure AFTER a successful body must
+                # not be swallowed: `status()` would report `ok` for a probe whose
+                # teardown failed — a false PASS, not a benign one.
                 exc = raised
+                teardown_failed = True
         else:
             # The library re-raises the body's error here; whichever instance
             # arrives, it is the one that must be classified.
@@ -472,6 +490,8 @@ class _GuardedClient:
                 exc = raised
         if exc is not None:
             _classify_failure(exc, self._provider)
+            if teardown_failed:
+                raise exc
         else:
             _announce_withheld(self._provider)
         return result
@@ -554,8 +574,12 @@ def status() -> dict[str, Any]:
         _logger.debug("tortoise unconfigured: %s", exc)
         return {"status": STATUS_UNCONFIGURED, "url": _url(provider), "error": str(exc)}
     except Exception as exc:  # noqa: BLE001, RUF100
-        _logger.debug("tortoise unavailable: %s", exc)
-        return {"status": _UNAVAILABLE, "url": _url(provider), "error": str(exc)}
+        _logger.debug("tortoise unavailable: %s", describe_failure(exc, provider))
+        return {
+            "status": _UNAVAILABLE,
+            "url": _url(provider),
+            "error": describe_failure(exc, provider),
+        }
 
 
 def available() -> bool:
