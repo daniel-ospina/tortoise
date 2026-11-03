@@ -908,7 +908,7 @@ def _unread_shapes(doc, source=None) -> dict:
     (``probes/census.py:245-258``), so an outcome carrying NO
     ``belief_activation`` and one carrying ``"belief_activation": {}`` produce
     a byte-identical all-null row — the probe's own ``_census_unread`` calls
-    BOTH unread (``census.py:52-73``), while
+    BOTH unread (``census.py:52-66``), while
     ``measurement_posture._classify_question`` classifies them DIFFERENTLY:
     ``no_manifest`` for a non-dict (``:235``) and ``activation_failed`` for a
     manifest that carries none of the census cells, e.g. the empty dict
@@ -916,7 +916,7 @@ def _unread_shapes(doc, source=None) -> dict:
 
     The probe does not leave the reader without the answer, though: it ALSO
     publishes ``inert_questions``, one entry per inert question carrying the
-    classification ``reason`` (``measurement_posture:305-310``). That reason
+    classification ``reason`` (``measurement_posture:533-545``). That reason
     IS the shape, so it is derived PER ROW from the artifact — never guessed
     for the population. A MIXED re-cut (one outcome with no manifest, one with
     an empty one — both ordinary shapes) carries both reasons in one artifact
@@ -955,19 +955,37 @@ def _unread_shapes(doc, source=None) -> dict:
         f"shape it came from, so the artifact must — otherwise this pin is "
         f"guessing, which is the defect it exists to prevent")
 
-    counted = {}
-    for row in null_rows:
-        reason = next(r for r, s in _UNREAD_SHAPES.items()
-                      if s == shapes[key(row.get("question_id"))])
-        counted[reason] = counted.get(reason, 0) + 1
-    published = {k: v for k, v in (doc.get("inert_by_reason") or {}).items()
-                 if k in _UNREAD_SHAPES and v}
-    if isinstance(doc.get("inert_by_reason"), dict) and doc["per_question"]:
-        assert published == counted, (
-            f"{source}: inert_by_reason = {published!r} but inert_questions "
-            f"maps the {len(null_rows)} never-read row(s) to {counted!r} — one "
-            f"of the two was hand-edited, or the producer changed and this pin "
-            f"has not been told")
+    # The counts are cross-checked against the RUN-LEVEL witness, NOT against
+    # ``inert_by_reason``: that census counts every inert question, including
+    # READ rows, and a read row can legitimately carry one of these reasons — a
+    # fail-open manifest recording its diagnosis
+    # (``{"ep_ran": False, "error": …}``) is a non-null row classified
+    # ``activation_failed``. Comparing the whole census against the never-read
+    # rows alone therefore reds a correct artifact whose failures and whose
+    # resumed pre-arm outcomes coexist, which is an ordinary mixed population.
+    # ``cells.measured`` separates the two populations independently: a dict
+    # manifest counts as measured whether or not it was read, so
+    # absent = rows - measured and empty = measured - read_rows.
+    measured = mp._optional_int((doc.get("cells") or {}).get("measured"))
+    if measured is not None:
+        read_rows = [r for r in rows
+                     if any(r.get(k) is not None for k in _CENSUS_CELLS)]
+        want = {_UNREAD_ABSENT: len(rows) - measured,
+                _UNREAD_EMPTY: measured - len(read_rows)}
+        got = {_UNREAD_ABSENT: sum(1 for s in shapes.values()
+                                   if s == _UNREAD_ABSENT),
+               _UNREAD_EMPTY: sum(1 for s in shapes.values()
+                                  if s == _UNREAD_EMPTY)}
+        assert got == want, (
+            f"{source}: inert_questions places the never-read rows as "
+            f"no_manifest={got[_UNREAD_ABSENT]}, "
+            f"activation_failed={got[_UNREAD_EMPTY]}, but the run-level "
+            f"witness says no_manifest={want[_UNREAD_ABSENT]}, "
+            f"activation_failed={want[_UNREAD_EMPTY]} ({len(rows)} row(s), "
+            f"cells.measured={measured}, {len(read_rows)} read) — the "
+            f"classifications and the counts disagree, so one of them was "
+            f"hand-edited or the producer changed and this pin has not been "
+            f"told")
     return shapes
 
 
@@ -985,16 +1003,25 @@ def _rebuild_outcome(row, unread_shape: str | None = None) -> dict:
     no ``belief_activation`` at all, and a manifest carrying none of the census
     cells — because the probe collapses both (see ``_unread_shapes``). Choosing
     one for both would be the false claim above, so the shape is an INPUT the
-    caller derives from the artifact; ``None`` (the fully-read committed
-    sample) never needs it.
+    caller derives from the artifact. A caller that forgets it gets a REFUSAL,
+    never the old silent guess: a ``None`` default that fell back to
+    manifest-less would re-introduce exactly the defect this change removes,
+    for the next person who adds a call site.
     """
     cells = {k: row.get(k) for k in _CENSUS_CELLS}
     outcome = {"question_id": row["question_id"],
                "question_type": row["question_type"]}
     if any(v is not None for v in cells.values()):
         outcome["belief_activation"] = cells
+    elif unread_shape is None:
+        raise AssertionError(
+            f"{row.get('question_id')!r} is a NEVER-read per_question row "
+            f"(every census cell null), so its manifest shape must be derived "
+            f"from the artifact — pass `_shape_of(_unread_shapes(doc), row)`. "
+            f"Defaulting to manifest-less would guess, and a guess is what reds "
+            f"a correct artifact")
     elif unread_shape == _UNREAD_EMPTY:
-        # ``{}`` — a manifest that EXISTS and failed. The dict-of-nulls is what
+        # A manifest that EXISTS and failed. The dict-of-nulls is what
         # ``_failed`` reads as "ep_ran is not True", i.e. activation_failed.
         outcome["belief_activation"] = cells
     return outcome
@@ -1131,6 +1158,100 @@ def test_a_mixed_never_read_population_round_trips(tmp_path):
         f"rows re-derive {derived['inert_by_reason']!r}")
 
 
+def test_a_failed_question_beside_a_resumed_one_is_not_red(tmp_path):
+    """A READ question whose activation FAILED, beside a never-read (resumed
+    pre-arm) one — the ordinary mixed population that made the whole-census
+    cross-check red a correct artifact (#10678 review 3, P2).
+
+    ``inert_by_reason`` counts BOTH of them as ``activation_failed``, so
+    comparing that census against the never-read rows alone refuses an artifact
+    the probe just produced correctly. ``cells.measured`` is the witness that
+    separates them: the failed read row has cells, the resumed row has none.
+    """
+    doc = {"fingerprint": {"activate_beliefs": True},
+           "outcomes": [
+               {"question_id": "q1", "question_type": "t",
+                "belief_activation": _manifest()},
+               # READ, non-null, and FAILED — inert, but not never-read.
+               {"question_id": "q2", "question_type": "t",
+                "belief_activation": {"ep_ran": False, "error": "boom"}},
+               # NEVER read — a resumed pre-arm outcome, no manifest at all.
+               {"question_id": "q3", "question_type": "t"},
+           ],
+           "failures": []}
+    cut = _probe().cells(_write(tmp_path, doc))
+
+    assert cut["inert_by_reason"] == {mp.INERT_ACTIVATION_FAILED: 1,
+                                     mp.INERT_NO_MANIFEST: 1}, (
+        f"the fixture must produce BOTH reasons from DIFFERENT populations; "
+        f"got {cut['inert_by_reason']!r}")
+    # ``per_question_unread`` is 2, not 1: a failed fail-open manifest carries
+    # no census cells either, so it is UNKNOWN by the same predicate. That is
+    # why the never-read set is computed from the CELLS, never from this count.
+    assert cut["per_question_unread"] == 2, cut["per_question_unread"]
+
+    shapes = _unread_shapes(cut, source="a failure+resume re-cut")
+    derived = mp.summarize_belief_activation(
+        [_rebuild_outcome(r, _shape_of(shapes, r)) for r in cut["per_question"]],
+        requested=True)
+
+    assert derived["measured"] == cut["cells"]["measured"], (
+        f"failure+resume re-cut says measured={cut['cells']['measured']!r} but "
+        f"the rows re-derive {derived['measured']!r}")
+    assert derived["inert_by_reason"] == cut["inert_by_reason"], (
+        f"failure+resume re-cut says inert_by_reason="
+        f"{cut['inert_by_reason']!r} but the rows re-derive "
+        f"{derived['inert_by_reason']!r}")
+
+
+def test_a_never_read_row_without_a_derived_shape_is_refused():
+    """A caller that forgets to derive the shape gets a REFUSAL, never the old
+    silent guess (#10678 review 3, P3).
+
+    Non-vacuous: the pre-fix ``unread_shape=None`` default returned a
+    manifest-less outcome here, re-introducing the guess for every future call
+    site.
+    """
+    unread = {"question_id": "q", "question_type": "t",
+              **{k: None for k in _CENSUS_CELLS}}
+    with pytest.raises(AssertionError) as refused:
+        _rebuild_outcome(unread)
+    message = str(refused.value)
+    assert "'q'" in message, f"the refusal must name the row; got: {message}"
+    assert "_unread_shapes" in message, (
+        f"the refusal must name the derivation it wants; got: {message}")
+
+
+def test_a_census_whose_row_classifications_disagree_with_its_counts_is_refused(tmp_path):
+    """The run-level witness BITES: relabelling a never-read row so the reason
+    counts no longer match ``cells.measured`` is refused, not accepted.
+
+    Non-vacuous: with the witness disabled every test still passes, which is
+    the "could be reverted with the suite still green" shape this bundle exists
+    to avoid (README:163).
+    """
+    doc = {"fingerprint": {"activate_beliefs": True},
+           "outcomes": [
+               {"question_id": "q1", "question_type": "t",
+                "belief_activation": _manifest()},
+               {"question_id": "q3", "question_type": "t"},
+           ],
+           "failures": []}
+    cut = _probe().cells(_write(tmp_path, doc))
+    assert _unread_shapes(cut, source="honest")  # the honest cut is accepted
+
+    # A single flip: the counts can no longer be right, because the shape the
+    # label claims would make the row MEASURED and ``cells.measured`` says not.
+    for entry in cut["inert_questions"]:
+        entry["reason"] = mp.INERT_ACTIVATION_FAILED
+    with pytest.raises(AssertionError) as refused:
+        _unread_shapes(cut, source="a relabelled census")
+    message = str(refused.value)
+    assert "a relabelled census" in message, message
+    assert "cells.measured" in message, (
+        f"the refusal must name the witness it checked; got: {message}")
+
+
 def test_a_census_that_cannot_place_its_never_read_rows_is_refused(tmp_path):
     """When the artifact does NOT say which shape a never-read row came from,
     the pin refuses rather than guessing — and it says which row and why.
@@ -1168,15 +1289,18 @@ def test_committed_census_rederives_its_own_aggregate():
     (key set and ORDER only, never a value): keys alone let a cell carry a
     number no row supports.
 
-    ⚠️ Two published cells are RESIDUALLY un-derived, by the artifact's own
+    ⚠️ Three published cells are RESIDUALLY un-derived, by the artifact's own
     limits rather than by choice, and this pin cannot close them:
     ``questions_in_run`` / ``questions_failed`` are checked only against each
-    other and the ratio (`:1200`), because ``per_question`` carries outcomes
+    other and the ratio (`:1245`), because ``per_question`` carries outcomes
     and never the failure ids, so a coordinated edit of both ships green; and
-    ``source`` is asserted as a literal because the report and checkpoint
-    branches emit an identical shape. Deriving them needs the probe to publish
-    the failure identities and the input kind — filed as the remaining work,
-    not silently left open.
+    the per-row shape IDENTITY — ``inert_questions[].reason`` is where the
+    shape is read from, so a BALANCED swap of two rows' reasons reproduces
+    every count (``measured``/``failed``/``errors`` agree) while mislabelling
+    both. ``source`` is NOT in this list: it is pinned as an artifact-identity
+    anchor beside the sample pin, not derived. Closing the remainder needs the
+    probe to publish the failure identities and the per-row shape — filed as
+    the remaining work, not silently left open.
     """
     doc = json.loads(_ARTIFACT.read_text())
     rows = doc["per_question"]
@@ -1300,6 +1424,13 @@ def test_committed_census_rederives_its_own_aggregate():
             1 for r in rows if mp._optional_int(r.get(key)) is None)
 
     # ONE artifact-identity anchor: the sample this bundle was cut from.
-    # Update together with the artifact, never on its own.
+    # Update together with the artifact, never on its own. ``source`` sits here
+    # for the same reason and not in the derivation list: the report and
+    # checkpoint branches emit an identical output shape, so which input
+    # produced this file is not derivable from the file — it is an assertion
+    # about provenance, and it must not be editable while it looks checked.
+    assert doc["source"] == "checkpoint", (
+        f"{_ARTIFACT}: source = {doc['source']!r}, but this artifact was cut "
+        f"from the run's checkpoint (README:139-143 pins that provenance)")
     assert (len(rows), summary["operators"]) == (24, 1710), \
         "pinned sample — update together with the artifact"
