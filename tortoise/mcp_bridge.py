@@ -345,6 +345,23 @@ def _protocol_version_from(result: Any) -> str | None:
     return None
 
 
+def _capture_protocol_version(messages: list[Any], state: dict) -> None:
+    """Record the protocol version an `initialize` result negotiated.
+
+    Called on EVERY path that relays a reply, including the partial-batch early
+    return in `forward()`. That path bypasses the tail of the function, and
+    without this call a batched `initialize` whose sibling id went unanswered
+    would leave `state["protocol_version"]` unset for the rest of the session, so
+    every later request would omit `MCP-Protocol-Version` and the server would
+    fall back to its default revision. Idempotent — the tail calls it again.
+    """
+    for message in messages:
+        if isinstance(message, dict) and "result" in message:
+            version = _protocol_version_from(message["result"])
+            if version:
+                state["protocol_version"] = version
+
+
 def forward(client: httpx.Client, state: dict, payload: Any) -> list[Any]:
     """Send one client message upstream and return the messages to write back.
 
@@ -432,9 +449,15 @@ def forward(client: httpx.Client, state: dict, payload: Any) -> list[Any]:
                 # exists BECAUSE a relayed reply may quote the credential the server
                 # rejected. Applying the guard without it traded a silence for a
                 # leak on the busiest relay path, which is strictly worse.
+                relayed = [_redact_message(m, connection.key) for m in messages
+                           if isinstance(m, dict) and m.get("id") in expected_ids]
+                # ⛔ AND SO IS THE PROTOCOL-VERSION CAPTURE. It lives in the tail,
+                # which this return skips, so a batched `initialize` whose sibling
+                # id went unanswered would negotiate a version and then never send
+                # `MCP-Protocol-Version` again for the life of the session.
+                _capture_protocol_version(relayed, state)
                 return [
-                    *(_redact_message(m, connection.key) for m in messages
-                      if isinstance(m, dict) and m.get("id") in expected_ids),
+                    *relayed,
                     *_errors_for_ids(
                         missing, -32603,
                         f"the MCP endpoint answered HTTP {response.status_code} with no "
@@ -449,11 +472,7 @@ def forward(client: httpx.Client, state: dict, payload: Any) -> list[Any]:
         )
 
     messages = [_redact_message(message, connection.key) for message in messages]
-    for message in messages:
-        if isinstance(message, dict) and "result" in message:
-            version = _protocol_version_from(message["result"])
-            if version:
-                state["protocol_version"] = version
+    _capture_protocol_version(messages, state)
     return messages
 
 
