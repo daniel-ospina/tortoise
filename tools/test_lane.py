@@ -2077,8 +2077,13 @@ def _worktree_slugs() -> dict[str, str] | None:
     This is the only read in `reap_orphans()` that takes its own root, and it is
     safe to: it answers "which strangers does git still list", never "is the
     container this call created mine" (that identity is threaded in — see
-    `reap_orphans`'s ``own_name``). A degraded cwd here can only ever list FEWER
-    worktrees, which the arms below read as "spare more", never as "delete".
+    `reap_orphans`'s ``own_name``). A degraded cwd here is `Path.cwd()`, which is
+    inside this very repo, so the list is unchanged; if git answers with FEWER
+    worktrees (or fails, which is `None` and fail-closed) the affected container
+    drops out of the DETERMINED bucket into INDETERMINATE — where the default
+    REPORTS and removal needs an explicit operator switch
+    (`OWNER_INDETERMINATE_REAP_ENV`), and where a live lane is still spared by
+    the `/proc` arm.
     """
     try:
         r = subprocess.run(
