@@ -8595,6 +8595,19 @@ def _check_org_limit(org: dict, resource: str, *,
                 carry_resolved_allowances,
             )
         except Exception as e:  # mapped to the documented refusal below
+            # #686: ALERT at ERROR before refusing. An import-time drift here
+            # (the gate's `_dimension()` is deliberately loud at import) refuses
+            # EVERY gated REST door at once, so it is the one fault on this path
+            # that MUST be alertable — and it was the only one that logged
+            # nothing, while its sibling `quota.enforce_org_limit` logs this same
+            # fault at ERROR. The handler below used to assume "quota already
+            # logged the refusal", which is true on every other refusal path and
+            # false on this one, so a drift that takes the whole REST surface
+            # down was silent on REST and alerting on MCP — the
+            # one-state-two-answers class this PR exists to remove.
+            _logger.error(
+                "allowance gate unavailable (fail-closed): team=%s "
+                "resource=%s error=%r", org_id, resource, e)
             raise QuotaCheckError(
                 f"the allowance gate could not be loaded "
                 f"({type(e).__name__}: {e}) — refusing rather than checking a "
@@ -8644,11 +8657,13 @@ def _check_org_limit(org: dict, resource: str, *,
             detail=quota_refusal_payload(e),
         )
     except QuotaCheckError as e:
-        # `quota` already logged the refusal at ERROR level — `_count_resource`
-        # for a counting failure (#686), and the limit validation for an
+        # The REFUSING SITE already logged at ERROR level — `_count_resource`
+        # for a counting failure (#686), the limit validation for an
         # UNREADABLE limit (#4051, on BOTH the generic path and the `documents`
-        # derived branch) or a MISSING one (#4051 review round 5); avoid
-        # double-logging — this site only records the HTTP context.
+        # derived branch) or a MISSING one (#4051 review round 5), the
+        # allowance-gate IMPORT guard directly above (#9567), and
+        # `tortoise.allowance_gate` for every fail-closed refusal it raises.
+        # Avoid double-logging — this site only records the HTTP context.
         _logger.debug(
             "quota check failed (fail-closed): team=%s resource=%s error=%s",
             org_id, resource, str(e),

@@ -13,6 +13,7 @@ exception reaching the caller as a 500).
 """
 from __future__ import annotations
 
+import logging
 from datetime import UTC, datetime
 
 import pytest
@@ -698,16 +699,21 @@ def test_a_resolver_fault_at_the_rest_seam_is_the_documented_500(monkeypatch):
     assert "allowances could not be resolved" in detail, detail
 
 
-def test_a_missing_allowance_gate_module_is_the_documented_500(monkeypatch):
+def test_a_missing_allowance_gate_module_is_the_documented_500(monkeypatch,
+                                                              caplog):
     """The gate's drift check is DELIBERATELY LOUD AT IMPORT, and
     ``quota.enforce_org_limit`` wraps the same import so the loudness lands
     inside ``QuotaCheckError`` (#4051). The REST seam imported it bare, on EVERY
     door — ``api_keys``/``users``/``graphs`` included — so an import-time drift
     escaped ``_check_org_limit`` as an ``ImportError``/``KeyError``.
 
-    Mutation this REDs: drop the inner ``try/except`` around the seam's
-    ``from tortoise.allowance_gate import …`` and the import failure propagates
-    instead of the mapped refusal.
+    Mutations this REDs:
+    * drop the inner ``try/except`` around the seam's
+      ``from tortoise.allowance_gate import …`` and the import failure
+      propagates instead of the mapped refusal;
+    * drop the ``_logger.error(...)`` above the raise and the refusal is
+      emitted with NO ERROR record at all (#686 — an import-time drift refuses
+      every gated REST door, so it is the one fault here that must be pageable).
     """
     import sys
 
@@ -716,11 +722,22 @@ def test_a_missing_allowance_gate_module_is_the_documented_500(monkeypatch):
     from tortoise.hosted_api import _check_org_limit
 
     monkeypatch.setitem(sys.modules, "tortoise.allowance_gate", None)
-    with pytest.raises(HTTPException) as exc:
-        # A NON-gated door: the import runs on every door, so the mapping must
-        # hold there too (`users` is outside ALLOWANCE_GATED_RESOURCES).
-        _check_org_limit(_rest_org(), "users")
+    with caplog.at_level(logging.ERROR):
+        with pytest.raises(HTTPException) as exc:
+            # A NON-gated door: the import runs on every door, so the mapping
+            # must hold there too (`users` is outside
+            # ALLOWANCE_GATED_RESOURCES).
+            _check_org_limit(_rest_org(), "users")
     assert exc.value.status_code == 500, exc.value
     detail = str(exc.value.detail)
     assert detail.startswith("Quota check failed:"), detail
     assert "allowance gate could not be loaded" in detail, detail
+    # #686: and it must ALERT. The sibling `quota.enforce_org_limit` logs this
+    # same fault at ERROR; the REST seam refused without logging anything while
+    # the handler below it assumed "quota already logged the refusal" — true on
+    # every other refusal path, false on this one, so the fault that takes the
+    # whole REST surface down was silent here and alerting on MCP.
+    errors = [r.getMessage() for r in caplog.records
+              if r.levelno == logging.ERROR]
+    assert any("allowance gate unavailable (fail-closed)" in m for m in errors), \
+        errors
