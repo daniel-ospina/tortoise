@@ -244,6 +244,18 @@ measure = _load()
 scores_probe = _load_scores()
 
 
+def _load_probe(name: str):
+    """Load a sibling probe module by file name — the provenance pins need the
+    PRODUCER (`e1_paired_arm`) and not only the scoring driver, because the
+    README's sentence is about which reader each of them uses."""
+    path = _REPO / "docs/evidence/7949-capstone/probes" / f"{name}.py"
+    spec = _ilu.spec_from_file_location(f"{name}_pin", str(path))
+    assert spec and spec.loader
+    module = _ilu.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def _prereg() -> dict:
     return json.loads(PREREG.read_text())
 
@@ -4266,7 +4278,10 @@ def _bundle(tmp_path: Path) -> Path:
     return repo
 
 
-def test_a_before_arm_that_was_not_OFF_is_refused(tmp_path, capsys):
+@pytest.mark.parametrize("key", ["TORTOISE_VET", "TORTOISE_CLASSIFY_LATER",
+                                  "TORTOISE_VALUE_GATE",
+                                  "TORTOISE_S2_DECISION_SEAM"])
+def test_a_before_arm_that_was_not_OFF_is_refused(key, tmp_path, capsys):
     """#10610 review P1: the before arm's OWN arm-readback is now checked.
 
     `e1_paired_arm.py` refuses to run with any of the three switches already set
@@ -4282,19 +4297,19 @@ def test_a_before_arm_that_was_not_OFF_is_refused(tmp_path, capsys):
     repo = _bundle(tmp_path)
     path = repo / "docs/evidence/9889/e1-paired-off-arm-1.json"
     record = json.loads(path.read_text())
-    assert record["arm"]["TORTOISE_VET"] is None      # the shipped arm is OFF
-    record["arm"]["TORTOISE_VET"] = "1"                # …now it is ON
+    assert record["arm"][key] is None                 # the shipped arm is OFF
+    record["arm"][key] = "1"                          # …now THIS key alone is ON
     path.write_text(json.dumps(record))
     with pytest.raises(SystemExit) as refused:
         scores_probe.score(repo)
     assert refused.value.code == 2, refused.value
     err = capsys.readouterr().err
     assert "not a before arm" in err, err
-    assert "TORTOISE_VET='1'" in err, err
+    assert f"{key}='1'" in err, err
 
     # …and the shipped bundle still scores, so the arm discriminates an ON record
     # from the OFF record that ships rather than refusing the whole form.
-    record["arm"]["TORTOISE_VET"] = None
+    record["arm"][key] = None
     path.write_text(json.dumps(record))
     assert scores_probe.score(repo)["e1"]["outcome"] in ("REFUSED", "PASS", "FAIL")
 
@@ -4348,32 +4363,42 @@ def test_the_readmes_floor_provenance_claim_matches_the_code():
     The paragraph describes **Probe 1, `e1_paired_arm.py`**, and that probe's
     `min_before_share()` reads the share floor STRAIGHT off `denominator_floors`,
     on purpose and with its own stated reason (an escaping `ValueError` from a
-    helper is not a refusal a run can be read from). The first cut of this pin
-    asserted the opposite — that both floors come through `parse_bars` — so it
-    passed a false sentence and would have redded the true one. A pin that makes
-    a false claim load-bearing is worse than no pin.
+    helper is not a refusal a run can be read from). An earlier cut of this pin
+    matched WORDING and asserted the opposite, so it passed a false sentence and
+    would have redded the true one — and a later cut still could not fail, because
+    its "claim" filter matched an unrelated line and its last assertion compared a
+    value with itself.
 
-    So this asserts doc and code agree, by asking the CODE for the number: the
-    floor the driver enforces must BE the floor the README names the source of.
+    So this does not read the prose for tokens at all. It BEHAVES the claim: hand
+    the probe a pre-registration whose bars `parse_bars` cannot read at all. A
+    probe routed through that map cannot return a floor; a probe reading
+    `denominator_floors` returns the frozen 0.20. That is the provenance, measured.
     """
+    probe = _load_probe("e1_paired_arm")
     readme = (_REPO / "docs/evidence/9889/README.md").read_text()
-    probe = (_REPO / "docs/evidence/7949-capstone/probes/e1_paired_arm.py").read_text()
     # The stale parenthetical is gone: `parse_bars` DOES expose the share floor
     # since this PR (#10610), so "does not expose" is refuted by the tree.
     assert "which `parse_bars` does not expose" not in readme
-    # …and the README names the map the probe really reads.
-    claim = [line for line in readme.splitlines()
-             if "e1_min_before_share" in line and "denominator_floors" in line]
-    assert claim, "the README no longer states where the share floor is read from"
-    # The probe's own docstring states the same provenance, so neither can drift.
-    assert "Read straight off the record, not through `parse_bars`" in probe
-    # And the floor the driver ENFORCES is the one the README claims it reads.
+    # …and the false replacement an earlier cut wrote must not come back either.
+    assert "both through `parse_bars`" not in readme
+
     prereg = _prereg()
-    enforced = scores_probe.frozen_denominators(_REPO)["e1_min_before_share"]
-    assert enforced == prereg["denominator_floors"]["e1_min_before_share"], enforced
+    frozen = prereg["denominator_floors"]["e1_min_before_share"]
+    # The map itself cannot read this record's bars any more…
+    broken = json.loads(json.dumps(prereg))
+    for entry in broken["criteria"]:
+        if entry.get("id", "").startswith("E1"):
+            entry["threshold"] = "PASS-ish"     # unparseable on purpose
+    with pytest.raises((SystemExit, ValueError)):
+        scores_probe._parse_bars(broken)
+    # …and the probe still returns the floor, which it can only do off
+    # `denominator_floors`. Non-vacuity: routing `min_before_share` through
+    # `parse_bars` reds here with that same exception.
+    assert probe.min_before_share(broken) == frozen, probe.min_before_share(broken)
 
 
-def test_the_measured_arm_must_be_ON_in_its_own_readback(tmp_path, capsys):
+@pytest.mark.parametrize("key", ["TORTOISE_VET", "TORTOISE_CLASSIFY_LATER"])
+def test_the_measured_arm_must_be_ON_in_its_own_readback(key, tmp_path, capsys):
     """#10610 review P1, the other half: the AFTER arm's readback is checked too.
 
     E1's bar is `after <= 0.5 x before`, which only means anything if the after
@@ -4391,17 +4416,17 @@ def test_the_measured_arm_must_be_ON_in_its_own_readback(tmp_path, capsys):
     text = log.read_text()
     arm_line = [ln for ln in text.splitlines() if ln.startswith("# arm: ")]
     assert len(arm_line) == 1, arm_line
-    dead = (arm_line[0]
-            .replace("TORTOISE_VET=1", "TORTOISE_VET=<unset>")
-            .replace("TORTOISE_CLASSIFY_LATER=1",
-                     "TORTOISE_CLASSIFY_LATER=<unset>"))
+    # ONE key at a time: setting both together let a narrowed `_ARM_ON_VARS` stay
+    # green, because the refusal names only the first failing var.
+    dead = arm_line[0].replace(f"{key}=1", f"{key}=<unset>")
+    assert dead != arm_line[0], (key, arm_line[0])
     log.write_text(text.replace(arm_line[0], dead))
     with pytest.raises(SystemExit) as refused:
         scores_probe.score(repo)
     assert refused.value.code == 2, refused.value
     err = capsys.readouterr().err
     assert "were not ON" in err, err
-    assert "TORTOISE_VET" in err, err
+    assert key in err, err
 
     # …and the shipped log still scores, with its readback carried into the
     # record so the after side's provenance is auditable, not only checked.
