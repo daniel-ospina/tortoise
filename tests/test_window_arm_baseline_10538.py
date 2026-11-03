@@ -81,11 +81,13 @@ def test_the_receipt_disclaims_the_measurement_it_is_not():
     #       accounts for none of it;
     #   (b) the session-diverse guard -> evidence_recall@5 0.527 -> 0.4706;
     #   (c) the closure is the guard's -> recall_all@5 0.6761 -> 0.8592, a NET
-    #       GAIN, with `inj_only` identical to `off` on every graded metric.
+    #       GAIN, with `inj_only` identical to `off` on every RECALL metric
+    #       (its reader_surface@5 differs — that is (a)'s injection loss).
     for fragment in ("reader_surface@5 0.9436 -> 0.9289",
                      "same 0.9289",
                      "evidence_recall@5 0.527 -> 0.4706",
                      "recall_all@5 0.6761 -> 0.8592",
+                     "on every RECALL metric",
                      "the closure is the guard's alone"):
         assert fragment in why, (
             f"the #8713 citation lost part of the source's split ({fragment!r}) "
@@ -336,6 +338,40 @@ def test_a_pick_outside_the_reader_window_is_not_counted_as_graded():
     assert zero["pick_ranks"] == [0]
     assert zero["picks_outside_window"] == ["sa0"]
     assert zero["graded_by_recall_all_at_5"] == 0
+
+
+def test_the_sole_representative_count_is_per_session_not_per_bucket():
+    """The count is per ``session_id``, NOT per ``(session_date, session_id)``
+    bucket (the key ``held_buckets`` uses) — and that mismatch is exactly what
+    makes the not-sufficient case reachable: a session split across two raw date
+    strings has TWO base-window slots as far as this count is concerned, so
+    neither of its evicted ids is a sole representative even though each
+    ``(date, session)`` bucket held one.
+
+    The pre-registered pools cannot see this: ``_pool()`` stamps one date on
+    every hit, so both definitions agree on all six of them.
+    """
+    pool = [
+        {"id": f"sa{i}", "session_id": "sA", "session_date": "2023-04-15",
+         "content": "alpha"} for i in range(10)
+    ] + [
+        {"id": "sx10", "session_id": "sX", "session_date": "2023-04-15",
+         "content": "alpha"},
+        {"id": "sx11", "session_id": "sX", "session_date": "2023-04-16",
+         "content": "alpha"},
+        {"id": "sd12", "session_id": "sD", "session_date": "2023-04-18",
+         "content": "alpha"},
+        {"id": "se13", "session_id": "sE", "session_date": "2023-04-19",
+         "content": "alpha"},
+    ]
+    order, picks = _fused(pool, window=SHIPPED_WINDOW)
+    got = window_arm_retention(pool, order, picks=picks,
+                               window=SHIPPED_WINDOW)
+    assert set(got["evicted_ids"]) == {"sx10", "sx11"}, got["evicted_ids"]
+    assert got["evicted_sole_representatives"] == [], (
+        "the count became per-bucket — a session split across two dates has two "
+        "slots by this definition")
+    assert got["deleted_sessions"] == ["sX"] and got["additive"] is False
 
 
 def test_the_unclustered_window_declines_at_every_geometry():

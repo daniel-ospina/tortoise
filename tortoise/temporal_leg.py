@@ -753,8 +753,10 @@ def window_arm_retention(
                                    narrowed. ``0`` means only that the COUNT did
                                    not grow — it covers a swap AND an arm that
                                    never fired at all (the committed receipt
-                                   carries 20 ``net: 0`` rows with
-                                   ``fired: false``, ``pick_ranks: []``), so read
+                                   carries 24 ``net: 0`` rows with
+                                   ``fired: false`` and ``pick_ranks: []`` — 20
+                                   in the ``by_pool`` sweep, 4 in the
+                                   shallow-pool control), so read
                                    ``evicted_ids`` / ``pick_ranks`` to tell them
                                    apart. It is silent about WHICH sessions left,
                                    and it is NOT equivalent to ``additive`` in
@@ -769,11 +771,16 @@ def window_arm_retention(
                                    and that is the harm this arm can do.
                                    Source-of-truth for ``additive``.
     ``evicted_sole_representatives``  the narrower, SLOT-level diagnostic: the
-                                   evicted ids whose ``(session_date,
-                                   session_id)`` bucket held exactly ONE
-                                   base-window slot. ⚠️ It is NEITHER sufficient
-                                   NOR necessary for a deletion — read
-                                   ``deleted_sessions`` for the verdict:
+                                   evicted ids whose SESSION held exactly ONE
+                                   base-window slot. ⚠️ The count is per
+                                   ``session_id``, NOT per ``(session_date,
+                                   session_id)`` bucket — deliberately, because
+                                   that mismatch with ``held_buckets``' key is
+                                   exactly what makes the next bullet's
+                                   not-sufficient case reachable. ⚠️ It is
+                                   NEITHER sufficient NOR necessary for a
+                                   deletion — read ``deleted_sessions`` for the
+                                   verdict:
                                    * not necessary: a session holding two slots
                                      disappears when both are displaced, with no
                                      sole representative at all (measured on the
