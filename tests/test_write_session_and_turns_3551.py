@@ -30,6 +30,7 @@ import inspect
 import re
 import sys
 import textwrap
+from pathlib import Path
 
 import pytest
 
@@ -534,13 +535,30 @@ def test_demo_seed_is_excluded_from_the_primitive(client):
     # is excluded by identity, and the population is the string literals that
     # contain Cypher. The only `turn_count=` assignment among them must be 0, so
     # a param (`turn_count=$n`) or a literal fails it.
-    fn = ast.parse(textwrap.dedent(src)).body[0]
+    tree = ast.parse(textwrap.dedent(src))
+    fn = tree.body[0]
     doc = ast.get_docstring(fn, clean=False)
-    cypher = [
+    literals = [
         node.value for node in ast.walk(fn)
         if isinstance(node, ast.Constant) and isinstance(node.value, str)
-        and node.value != doc
-        and ("SET " in node.value or "MERGE " in node.value)]
+        and node.value != doc]
+    # ⛔ PLUS the module-level Cypher the function references: hoisting a
+    # statement into a constant (`_HOSTED_SESSION_CYPHER` and friends) is this
+    # repo's own convention, asserted elsewhere in this very file, and a
+    # function-only scan reads the hoisted write as an ABSENT one — measured
+    # (#10675 review round 12, P2): the pin redded with `got []` while the
+    # statement still declared exactly 0.
+    used = {node.id for node in ast.walk(fn) if isinstance(node, ast.Name)}
+    module = ast.parse(Path(ha_mod.__file__).read_text(encoding="utf-8"))
+    hoisted = [
+        node.value.value for node in module.body
+        if isinstance(node, ast.Assign) and len(node.targets) == 1
+        and isinstance(node.targets[0], ast.Name)
+        and node.targets[0].id in used
+        and isinstance(node.value, ast.Constant)
+        and isinstance(node.value.value, str)]
+    cypher = [text for text in literals + hoisted
+              if "SET " in text or "MERGE " in text]
     # ⚠️ NON-VACUITY: an empty population would make the assertion below pass for
     # the wrong reason, and a future refactor could hand the Cypher to a helper.
     assert cypher, (

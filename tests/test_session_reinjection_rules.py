@@ -1072,29 +1072,41 @@ _TURN_SHAPE_NARRATIVE_HOMES_PRESENT_TENSE_ONLY = (
 #: bounded window keep it from firing on an unrelated seed ("the demo seed
 #: writes ~10 Points") or on the corrected prose ("a graph seeded BEFORE
 #: #10000 … the seed holds ``pointKind``"). ⚠️ The demonstration above is
-#: spelled in CAPITALS on purpose: a lower-case sample in this comment block
-#: would match, and this file is itself one of the homes below.
+#: spelled in CAPITALS as belt-and-braces only — the block is EXCISED before
+#: this file is scanned (see `_GUARD_BLOCK`), so a lower-case sample here would
+#: not match either. Measured: injecting one inside the block leaves the pin
+#: GREEN.
 #:
 #: ⛔ TWO MORE PROPERTIES, both measured (#10675 review round 10, P2):
 #: * **CASE** — without ``IGNORECASE`` an uppercase ``WRITES`` was fail-OPEN.
 #:   That was the sharpest form of the defect: this guard's own failure message
 #:   spelled the claim in capitals, i.e. in a spelling its own regex could not
 #:   match.
-#: * **KIND** — ``_seed_demo_graph`` still writes ``pointKind='claim'`` points
-#:   for the epistemic layer (``hosted_api.py:14027``). Those are TRUE
-#:   present-tense statements, and matching a bare ``pointKind`` reds them as
-#:   if they were the deleted writer. So the kind is CAPTURED and read in code:
-#:   a violation is an UNQUALIFIED kind or ``event``; any other named kind is
-#:   explicitly not this claim. Measured: ``writes ``pointKind='claim'`` `` was
-#:   a false RED before, and is GREEN now.
+#: * **KIND** — the seeder WRITES points of other kinds: its semantic,
+#:   epistemic and procedural tuples bind ``observation``, ``statement``,
+#:   ``hypothesis``, ``decision``, ``evidence`` and ``workflow`` through
+#:   ``p.pointKind=$k`` (``hosted_api.py``'s ``_DEMO_*_POINTS``, one shared
+#:   write loop). Those are TRUE present-tense statements, and matching a bare
+#:   ``pointKind`` reds them as if they were the deleted writer. So the kind is
+#:   CAPTURED and read in code: a violation is an UNQUALIFIED kind or
+#:   ``event``; any other named kind is explicitly not this claim. Measured:
+#:   ``writes ``pointKind='hypothesis'`` `` was a false RED before, and is
+#:   GREEN now.
 _PRESENT_TENSE_DEMO_EVENT_WRITER = re.compile(
     # The SUBJECT: the qualified seed noun, the FUNCTION name, or the bare
     # ``the seeder``. `the ask-fixture seeder` does not match — the article has
     # to sit directly on ``seeder`` — and that seeder really does read `event`,
     # so it must not be swept up.
     r"(?:(?:demo|dashboard|hosted|sample)[^.\n]{0,40}?seed(?:er)?"
-    r"|_seed_demo_graph|the\s+seeder)\s+"
-    r"(?:also\s+)?(?:writes?|mints?|creates?)\b"
+    r"|_seed_demo_graph|the\s+seeder)"
+    # The gap matters: this tree writes "the demo seed STILL writes …",
+    # "… CONTINUES TO WRITE …", and backticks the identifier
+    # (``_seed_demo_graph``) — all of which a bare `subject\\s+verb` misses,
+    # measured (round 12, P2: all three were GREEN on a present-tense `event`
+    # claim). Backticks only, never a bare `\s*`, so the subject must still be
+    # the sentence's subject.
+    r"[`'\"“]*\s+(?:also\s+|still\s+|continues?\s+to\s+)?"
+    r"(?:writes?|mints?|creates?)\b"
     # * **NEGATION** — the CORRECTED sentences say the seed "writes NO turn
     #   node at all", and a bare verb match refuses exactly the prose this pin
     #   wants written: measured, "since #10000 the demo seed writes no
@@ -1135,6 +1147,10 @@ def _present_tense_writer_claim(flat: str) -> str | None:
 #: self-matching literal here would make a reworded header split at this
 #: assignment — reintroducing the self-grading it exists to prevent.
 _GUARD_BLOCK = "# ── the " + "DELETED demo turn writer"
+#: Where the guard's machinery ENDS and the population file resumes. Excising
+#: from the header to EOF would leave every test appended after it unscanned —
+#: measured (round 12, P2): a present-tense claim appended at EOF stayed GREEN.
+_GUARD_END = "def test_no_home_states_the_deleted_demo_turn_writer_as_current_fact("
 
 
 def _narrative_text(rel: str) -> str:
@@ -1153,7 +1169,13 @@ def _narrative_text(rel: str) -> str:
             f"`{rel}` — the section header it names is what keeps this pin from "
             "grading its own commentary, so a reworded header must update "
             "`_GUARD_BLOCK` too")
-        raw = parts[0]
+        rest = parts[1]
+        assert _GUARD_END in rest, (
+            f"the guard's machinery end marker {_GUARD_END!r} was not found "
+            f"after the guard block in `{rel}` — without it the excision would "
+            "swallow every test below the guard, which is where a later lane "
+            "appends")
+        raw = parts[0] + rest.split(_GUARD_END, 1)[1]
     return " ".join(raw.split())
 
 

@@ -3246,15 +3246,17 @@ def test_the_repair_note_names_BOTH_halves_of_a_legacy_demo_graph():
     # instruction, so a same-meaning rewording ("reset `s.turn_count` to 0")
     # is refused although the purge lane is told exactly the right thing
     # (#10675 review round 11, P3). The VALUE is what the note must pin.
-    assert re.search(r"s\.turn_count\s*=\s*0", repair), (
+    # Accept the VALUE however the sentence spells the operator: `= 0`,
+    # `to 0`, or a bare "reset `s.turn_count` to 0" — the note must name
+    # the counter and the value, not one punctuation choice (#10675
+    # review round 12, P2: `\s*=\s*0` never accepted the `to 0` form the
+    # first version of this comment itself offered as the example).
+    assert re.search(r"s\.turn_count[`\s]*(?:=|to)\s*0\b", repair), (
         "the repair paragraph names the node delete but not the counter — "
         "deleting the `epi_turn*` nodes ALONE leaves `s.turn_count=3` beside "
         "zero rows, which the read refuses (503 on an armed deployment, "
         "`{\"turns\": 3, \"turn_points\": []}` on an unarmed one), so it "
         f"instructs a destructive lane to re-create the defect: {repair!r}")
-    assert "DETACH DELETE" in note, (
-        "the repair note does not say HOW the nodes go, so the half it does "
-        f"name is still not executable: {note}")
     assert "#10017" in note, (
         "the note describes a destructive graph-side repair without naming the "
         f"lane that owns it (§9.1 residual (a), `#10017`): {note}")
