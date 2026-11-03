@@ -279,7 +279,6 @@ if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
 
 import argparse
 import contextlib
-import fcntl
 import hashlib
 import json
 import os
@@ -2402,54 +2401,83 @@ def _reap_state_path(name: str) -> Path:
     return REAP_STATE_DIR / f"{name}.unused"
 
 
-#: A `run` in progress holds an EXCLUSIVE `flock` on this file for its whole
-#: child. The exit hook keys on THIS, not on a client socket: a peer `run` in the
-#: same worktree is not an active redis client while it is still collecting
-#: (~41 842 tests at the measured head), so a `CLIENT LIST`-idle reading would
-#: let the first `run` to exit remove the container under the second one
-#: (#10813 review P2). The lock is the run's own liveness — exactly what the
-#: `_container_in_use` probe cannot see.
-def _run_lock_path(name: str) -> Path:
-    return REAP_STATE_DIR / f"{name}.runlock"
+#: A `run` in progress records itself as `REAP_STATE_DIR/<container>.run.<pid>`.
+#:
+#: ⛔ NOT a single exclusive `flock`. The first version of this guard took one
+#: exclusive lock, which is per-CONTAINER — so only one `run` could hold it and
+#: the SECOND run held nothing at all, answering "no peer" from its own exit
+#: probe. When the holder exited first it removed the non-holder's live
+#: container: the exact failure the guard was written to prevent, green in the
+#: tests because they only exercised the other ordering (#10813 review P1).
+#: A per-PID marker expresses "one OR MORE peers", which is what the question
+#: actually is.
+def _run_marker_path(name: str, pid: int) -> Path:
+    return REAP_STATE_DIR / f"{name}.run.{pid}"
+
+
+def _pid_alive(pid: int) -> bool:
+    """Is `pid` a live process? An EPERM probe still means it exists."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True          # EPERM: alive, just not ours to signal
+    return True
 
 
 @contextlib.contextmanager
-def _run_lock(name: str):
-    """Hold the run lock, yielding whether we got it. Never raises."""
-    handle = None
+def _run_marker(name: str):
+    """Record this `run` as live for its whole child. Never raises.
+
+    Yields whether the record could be written — an unwritable state dir means a
+    peer's presence cannot be established, which is `None`, not `False`.
+    """
+    pid = os.getpid()
+    path = _run_marker_path(name, pid)
+    written = False
     try:
         REAP_STATE_DIR.mkdir(parents=True, exist_ok=True)
-        # The handle must OUTLIVE this block: closing it releases the lock, so a
-        # `with open(...)` here would drop the lock the instant it was taken.
-        handle = Path(_run_lock_path(name)).open("w")   # noqa: SIM115 — see above
-        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        got = True
+        path.write_text(f"{pid}\n")
+        written = True
     except OSError:
-        got = False
+        written = False
     try:
-        yield got
+        yield written
     finally:
-        if handle is not None:
+        if written:
             with contextlib.suppress(OSError):
-                fcntl.flock(handle, fcntl.LOCK_UN)
-            with contextlib.suppress(OSError):
-                handle.close()
+                path.unlink(missing_ok=True)
 
 
 def _peer_run_is_live(name: str) -> bool | None:
-    """Is another `run` holding this worktree's lock right now?
+    """Is another `run` live on this container?
 
-    ``None`` means the lock could not be read — treated as "a peer may be live"
-    so the hook declines to reap (fail-closed), exactly as for the client probe.
+    ``None`` means the marker directory could not be read — the hook treats that
+    as "a peer may be live" and declines to reap (fail-closed). The caller must
+    therefore test ``is not False``, not truthiness: ``None`` is falsy and would
+    silently re-open the hole (#10813 review P2).
 
-    The probe takes and releases the lock, so a peer that arrives in the window
-    between the release and the reap wins the acquire and the hook declines:
-    the race resolves in the SAFE direction only.
+    Stale records (a marker whose pid is gone — a `run` that was SIGKILLed) are
+    removed as they are found, so the check is self-healing.
     """
-    with _run_lock(name) as got:
-        if got:
-            return False
-        return None if not _run_lock_path(name).exists() else True
+    try:
+        entries = list(REAP_STATE_DIR.glob(f"{name}.run.*"))
+    except OSError:
+        return None
+    mine = os.getpid()
+    for entry in entries:
+        try:
+            pid = int(entry.name.rsplit(".", 1)[1])
+        except (IndexError, ValueError):
+            continue
+        if pid == mine:
+            continue
+        if _pid_alive(pid):
+            return True
+        with contextlib.suppress(OSError):
+            entry.unlink(missing_ok=True)
+    return False
 
 
 def _drop_lease(name: str) -> None:
@@ -3510,7 +3538,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     except (ValueError, OSError):        # not the main thread / unsupported
         _prev_term = None
     try:
-        with _run_lock(name) as _held:
+        with _run_marker(name):
             rc = subprocess.run(argv, env=env).returncode
     finally:
         if _prev_term is not None:
@@ -3533,7 +3561,7 @@ def cmd_run(args: argparse.Namespace) -> int:
                     kept = True
                     print(f"test-lane: NOT reaping {name} on exit — a live "
                           f"client is using it", file=sys.stderr)
-                elif _peer_run_is_live(name):
+                elif _peer_run_is_live(name) is not False:
                     kept = True
                     print(f"test-lane: NOT reaping {name} on exit — another "
                           f"`run` holds this worktree", file=sys.stderr)

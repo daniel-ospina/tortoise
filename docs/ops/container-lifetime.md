@@ -99,6 +99,22 @@ never disagree about what an orphan is.
   the shared image and is deliberately **not** counted as freed.
 * **Age is never the proof.** A thirty-hour-old container — past every threshold —
   whose lane holds a live process is KEPT, and a test pins that at that age.
+* ⛔ **What the deployed unit will and will not reap, stated plainly.** The unit
+  sets **no** arming variable, so it removes only **proof 1** — a container whose
+  owning *worktree is gone*. Proofs 2 and 3 (owner worktree exists but its lane is
+  gone; owner indeterminate) are **withheld by default**, because #8180's ruling
+  only authorises "when the worktree that owns it is gone" and does not settle
+  the other two. Consequence, so nobody is surprised: a lane killed mid-turn
+  leaves its worktree in place, so the timer **reports** that container every 15
+  minutes and does not remove it; an `exited` container holding one of the
+  `PORT_RANGE` ports is likewise reported, not released. Arming them is one
+  environment line each (`TORTOISE_TEST_LANE_REAP_LANE_GONE`,
+  `…_OWNER_INDETERMINATE`, `…_STOPPED`) — a decision for the #8180 ruling, not
+  for this tool.
+* ⛔ **A container stranded in the MAIN checkout is exempt by design and forever.**
+  The sweep never removes "this worktree's own" container, and the timer's
+  `WorkingDirectory` is the main checkout — so a `run` there that is SIGKILLed
+  leaves a container neither clock will take. Use `down` from that checkout.
 
 `tools/install-container-reaper-timer.sh` installs
 `tortoise-container-reaper.{service,timer}`: **every 15 minutes**, `OnCalendar`

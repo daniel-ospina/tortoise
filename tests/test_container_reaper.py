@@ -311,6 +311,39 @@ def test_every_line_carries_name_age_owner_and_bytes(box, capsys):
     assert "bytes=" in line, line
 
 
+def test_the_dry_run_REFUSES_a_writing_verb_the_sweep_might_issue(monkeypatch,
+                                                                 capsys):
+    """The interception is a deny-list; its refusals had no test at all.
+
+    A reviewer deleted BOTH `raise SystemExit` arms and the suite stayed green —
+    so a dry run that silently executed `docker kill` or an arbitrary
+    `docker exec` would have shipped (#10813 review P2).
+    """
+    monkeypatch.setenv("TORTOISE_CONTAINER_REAPER_SHA256", "")
+    monkeypatch.setenv("TORTOISE_TEST_LANE_POLICY_SHA256", "")
+
+    def sweep_issues(*verbs):
+        def fake(*args, **kwargs):
+            if args[:1] == ("ps",):
+                return _R(0, PS_ROWS if args[-1] == _PS_HEADER else "x\tRunning\n")
+            if args[:1] in verbs:
+                raise AssertionError(f"the dry run executed {args}")
+            return _R(0, "", "")
+        return fake
+
+    for verb in (("kill",), ("volume",), ("system",), ("image",), ("stats",)):
+        monkeypatch.setattr(tl, "_docker", sweep_issues(*[verb]))
+        monkeypatch.setattr(tl, "_worktree_slugs", lambda: {})
+        monkeypatch.setattr(tl, "_live_lane_paths", lambda: set())
+        monkeypatch.setattr(tl, "_container_in_use", lambda _n: False)
+        # The sweep must actually reach the verb for this to prove anything:
+        # drive the interception directly through a stub sweep.
+        monkeypatch.setattr(tl, "reap_orphans",
+                            lambda v=verb: (tl._docker(*v, "fdb-lane-x"), [])[1])
+        rc = cr.main(["reap"])
+        assert rc in (2, 3), (verb, rc)
+
+
 def test_an_unreadable_docker_is_exit_2_and_removes_NOTHING(monkeypatch, capsys):
     docker = _Docker(ps_rc=1)
     monkeypatch.setattr(tl, "_docker", docker)

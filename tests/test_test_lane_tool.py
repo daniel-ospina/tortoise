@@ -4677,26 +4677,52 @@ def test_SIGTERM_reaches_the_hook_and_the_run_exits_143(lane, monkeypatch):
     assert reaped == [1], "the hook did not run on the SIGTERM path"
 
 
-def test_a_PEER_run_holding_the_worktree_lock_blocks_the_reap(lane, monkeypatch,
-                                                              capsys):
-    """A peer `run` is not an active redis CLIENT while it is still collecting.
+def test_a_PEER_run_that_holds_NOTHING_still_blocks_the_reap(lane, monkeypatch,
+                                                            capsys):
+    """The ordering that matters: the peer is LIVE but is NOT the lock holder.
 
-    The client probe answers "idle", so keying the guard on it alone would let the
-    first `run` to exit remove the container under the second one, whose suite
-    then reports connection errors as test verdicts (#10813 review P2). The run
-    lock is the run's own liveness.
+    A single exclusive lock cannot express "one OR more peers" — the second run
+    holds nothing, so its own exit probe answers "no peer" and it removes the
+    first run's live container. Verified by experiment on the first version of
+    this guard (#10813 review P1); this test uses a real second PROCESS whose
+    marker is present while a `run` exits, which is that exact shape.
     """
     _stub_start(monkeypatch, port=16412)
     reaped: list = []
     monkeypatch.setattr(tl.subprocess, "run", lambda *a, **k: _R(0, "", ""))
     monkeypatch.setattr(tl, "stop", lambda: (reaped.append(1), "removed")[1])
-    assert tl._peer_run_is_live("fdb-lane-0123456789") is False
-    with tl._run_lock("fdb-lane-0123456789") as held:
-        assert held
-        assert tl._peer_run_is_live("fdb-lane-0123456789") is True
+    name = LANE_FIXTURE_NAME
+    assert tl._peer_run_is_live(name) is False
+    peer = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        tl.REAP_STATE_DIR.mkdir(parents=True, exist_ok=True)
+        marker = tl._run_marker_path(name, peer.pid)
+        marker.write_text(f"{peer.pid}\n")
+        assert tl._peer_run_is_live(name) is True, "a live peer run was not seen"
         assert tl.main(["run", "--", "-q", "tests/"]) == 0
-        assert reaped == [], "a peer's live container was removed"
+        assert reaped == [], "a live peer run's container was removed"
         assert "another `run` holds this worktree" in capsys.readouterr().err
+        # …and a STALE marker (the peer was killed) does not block forever.
+        peer.kill()
+        peer.wait(timeout=10)
+        assert tl._peer_run_is_live(name) is False
+        tl.main(["run", "--", "-q", "tests/"])
+        assert reaped == [1], "a stale marker permanently disabled the hook"
+    finally:
+        if peer.poll() is None:
+            peer.kill()
+            peer.wait(timeout=10)
+
+
+def test_an_UNREADABLE_peer_state_fails_CLOSED(lane, monkeypatch, capsys):
+    """`None` is falsy — a truthiness test re-opens the hole (#10813 review P2)."""
+    _stub_start(monkeypatch, port=16412)
+    reaped: list = []
+    monkeypatch.setattr(tl.subprocess, "run", lambda *a, **k: _R(0, "", ""))
+    monkeypatch.setattr(tl, "stop", lambda: (reaped.append(1), "removed")[1])
+    monkeypatch.setattr(tl, "_peer_run_is_live", lambda _n: None)
+    assert tl.main(["run", "--", "-q", "tests/"]) == 0
+    assert reaped == [], "an unreadable peer state reaped anyway"
 
 
 def test_a_FAILING_reap_never_changes_the_runs_verdict(lane, monkeypatch, capsys):
