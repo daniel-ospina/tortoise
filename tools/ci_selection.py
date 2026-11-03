@@ -2574,7 +2574,25 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # zips — no DB, no network) and `core` is where it is registered. Pinned by
              # tests/test_ci_selection.py::
              # test_ci_catch_history_tool_change_selects_core_not_tier1.
-             "tools/ci_catch_history.py")
+             "tools/ci_catch_history.py",
+             # #2148: `tools/` is a flat NON_PYTHON_PREFIXES entry and no
+             # SOURCE_PATTERNS row matches `tools/rail_detach.py`, so a
+             # TOOL-ONLY change filtered to `changed == []` and took the
+             # docs-only early return — the durability pin registered under
+             # `core` (`tests/test_rail_detach.py`) would never run on the very
+             # file whose `DETACH_NEW_SESSION` seam is the whole mechanism (the
+             # #1349/#3332/#3616 silent-drop class, the same shape as
+             # `tools/lane_stash.py` and `tools/ci_catch_history.py` above).
+             # The `core` row that registers the test file is CLASSIFICATION
+             # only (#4348): a name in a surface's test_files only runs when that
+             # surface is ALREADY selected. MEASURED before this entry:
+             # `select(["tools/rail_detach.py"], "pull_request",
+             # load_manifest())` -> surfaces=[], full=False, 72 files, the pin
+             # ABSENT. CORE_ALSO (not TOOL_CARVEOUTS) because the guard is
+             # hermetic (a stub rail, temp dirs) and `core` is where its suite
+             # lives. Pinned by
+             # tests/test_ci_selection.py::test_rail_pin_runs_on_a_tools_only_change.
+             "tools/rail_detach.py")
 NON_PYTHON_PREFIXES = (
     "docs/", "website/", "product/", "legal/", "growth/", "engineering/",
     "finance-accounting/", "menu-bar/", "ux/", "data/", "operations/",
