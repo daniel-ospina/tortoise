@@ -961,6 +961,150 @@ def test_the_probe_excludes_ITSELF_from_the_client_count(monkeypatch):
         "the probe's own connection must not count as a client")
 
 
+def test_a_WRONG_label_never_overrides_a_live_name_proof(monkeypatch, tmp_path):
+    """MUTATION GUARD (rule: no record may overrule another).
+
+    The label survives teardown, so it is the record that must be consulted
+    first — but it can be WRONG: it is written from a `repo_root()` read whose
+    documented degraded mode falls back to `Path.cwd()` on a slow host. Taking
+    the label whenever one exists would let one stale label override a perfectly
+    good NAME proof and `rm -f` a LIVE lane's graphs.
+
+    Here the label names a path that is gone while the name resolves to a
+    worktree that EXISTS. The container must be KEPT. Mutation: restore
+    `owner = stamped or slugs.get(slug)` and this fails with a removal.
+    """
+    live = tmp_path / "live-lane"
+    live.mkdir()
+    gone = tmp_path / "stale-label-target"
+    removed: list = []
+
+    def fake(*a, **k):
+        if a[0] == "ps":
+            return _R(0, f"fdb-lane-abcdef0123\trunning\t{gone}\n", "")
+        if a[0] == "rm":
+            removed.append(a[1:])
+        return _R(0, "", "")
+
+    monkeypatch.setattr(tl, "_docker", fake)
+    # The NAME still resolves this slug to a live worktree.
+    monkeypatch.setattr(tl, "_worktree_slugs", lambda: {"abcdef0123": str(live)})
+    monkeypatch.setattr(tl, "lane_name", lambda: "fdb-lane-mine")
+    monkeypatch.setattr(tl, "_started_epoch", lambda _n: 0.0)
+    monkeypatch.setenv(tl.ORPHAN_MAX_AGE_ENV, "0")
+    out = tl.reap_orphans()
+    assert removed == [], f"a stale label must not kill a live lane: {out}"
+    assert "owning worktree exists" in out[0], out
+
+
+def test_a_label_pointing_at_a_live_path_keeps_the_container(monkeypatch, tmp_path):
+    """The mirror case: the label names an existing path and the name resolves
+    to nothing. One record says "present", so the container is kept."""
+    live = tmp_path / "live-lane"
+    live.mkdir()
+    removed: list = []
+
+    def fake(*a, **k):
+        if a[0] == "ps":
+            return _R(0, f"fdb-lane-abcdef0123\trunning\t{live}\n", "")
+        if a[0] == "rm":
+            removed.append(a[1:])
+        return _R(0, "", "")
+
+    monkeypatch.setattr(tl, "_docker", fake)
+    monkeypatch.setattr(tl, "_worktree_slugs", lambda: {})
+    monkeypatch.setattr(tl, "lane_name", lambda: "fdb-lane-mine")
+    monkeypatch.setattr(tl, "_started_epoch", lambda _n: 0.0)
+    out = tl.reap_orphans()
+    assert removed == [], out
+    assert "owning worktree exists" in out[0], out
+
+
+def test_a_server_restart_inside_the_window_is_NOT_idle(monkeypatch):
+    """MUTATION GUARD (rule: only a monotonic, probe-sized delta is idle).
+
+    A DECREASING connection counter means the server restarted inside the probe
+    window — its graphs were just reloaded and clients are about to attach. That
+    is the ONE reading that unambiguously shows somebody operating the container,
+    so treating it as "idle" deletes the container at the worst possible moment.
+    Mutation: compare only the upper bound (`two[0] - one[0] > 2`) and this fails
+    with a removal.
+    """
+    removed: list = []
+    counter = {"n": 500, "sample": 0}
+
+    def fake(*a, **k):
+        if a[0] == "ps":
+            return _R(0, "fdb-lane-unowned123\trunning\t\n", "")
+        if a[0] == "rm":
+            removed.append(a[1:])
+            return _R(0, "", "")
+        if a[0] == "exec" and a[2:] == ("redis-cli", "INFO", "stats"):
+            counter["sample"] += 1
+            # Second sample has RESET (the server restarted): 500 -> 3.
+            counter["n"] = 3 if counter["sample"] > 1 else counter["n"] + 1
+            return _R(0, f"total_connections_received:{counter['n']}\r\n", "")
+        if a[0] == "exec" and a[2:] == ("redis-cli", "CLIENT", "LIST"):
+            return _R(0, "id=1 cmd=client|list tot-net-in=26\n", "")
+        return _R(0, "", "")
+
+    import time as _t
+    monkeypatch.setattr(tl, "_docker", fake)
+    monkeypatch.setattr(tl, "_worktree_slugs", lambda: {})
+    monkeypatch.setattr(tl, "lane_name", lambda: "fdb-lane-mine")
+    monkeypatch.setattr(tl, "_started_epoch",
+                        lambda _n: _t.time() - 500 * 3600)
+    monkeypatch.setattr(tl, "IDLE_PROBE_WINDOW_S", 0.0)
+    monkeypatch.delenv(tl.ORPHAN_MAX_AGE_ENV, raising=False)
+    out = tl.reap_orphans()
+    assert removed == [], f"a restarted server must not be reaped: {out}"
+    assert "went BACKWARDS" in out[0], out
+
+
+def test_idleness_is_RE_VERIFIED_at_the_moment_of_action(monkeypatch):
+    """MUTATION GUARD (rule: re-verify before the `rm`, not once for the batch).
+
+    `_idle_evidence` finishes ALL second samples before ANY removal, so a
+    candidate's verdict goes stale while later candidates are sampled. A lane
+    that starts using the container inside that gap must be spared — the module
+    already re-reads container STATE "AT THE MOMENT OF ACTION" for its other
+    destructive arm, and idleness needs the same discipline.
+
+    Mutation: drop the `_idle_sample` re-check immediately before the `rm` and
+    this fails with a removal.
+    """
+    import time as _t
+    removed: list = []
+    state = {"calls": 0}
+
+    def fake(*a, **k):
+        if a[0] == "ps":
+            return _R(0, "fdb-lane-unowned123\trunning\t\n", "")
+        if a[0] == "rm":
+            removed.append(a[1:])
+            return _R(0, "", "")
+        if a[0] == "exec" and a[2:] == ("redis-cli", "INFO", "stats"):
+            state["calls"] += 1
+            return _R(0, f"total_connections_received:{100 + state['calls']}\r\n", "")
+        if a[0] == "exec" and a[2:] == ("redis-cli", "CLIENT", "LIST"):
+            # Idle for the two probe samples; a client has appeared by the
+            # removal-time re-check (call 3 and later).
+            extra = "" if state["calls"] <= 2 else "\nid=7 cmd=get"
+            return _R(0, "id=1 cmd=client|list" + extra, "")
+        return _R(0, "", "")
+
+    monkeypatch.setattr(tl, "_docker", fake)
+    monkeypatch.setattr(tl, "_worktree_slugs", lambda: {})
+    monkeypatch.setattr(tl, "lane_name", lambda: "fdb-lane-mine")
+    monkeypatch.setattr(tl, "_started_epoch",
+                        lambda _n: _t.time() - 500 * 3600)
+    monkeypatch.setattr(tl, "IDLE_PROBE_WINDOW_S", 0.0)
+    monkeypatch.delenv(tl.ORPHAN_MAX_AGE_ENV, raising=False)
+    out = tl.reap_orphans()
+    assert removed == [], f"a lane that started using it must be spared: {out}"
+    assert "at removal time" in out[0], out
+
+
 def test_an_UNREADABLE_label_read_refuses_the_whole_sweep(monkeypatch):
     """MUTATION GUARD (rule: unreadable != no labels).
 

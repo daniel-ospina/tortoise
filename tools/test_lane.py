@@ -1936,9 +1936,15 @@ def _label_args() -> list[str]:
     host-level reader); this tool reads back only ``worktree``, which is the
     label that decides. Nothing decides on `created`.
     """
+    # ONE `repo_root()` read, not two: the label PAIR must describe the same
+    # worktree. `repo_root()` has a documented degraded mode (it falls back to
+    # `Path.cwd()` after a git timeout on the overloaded hosts this tool targets),
+    # so reading it twice could stamp a slug from one root and a path from
+    # another — a container whose label names a worktree that never owned it.
+    root = repo_root()
     return [
-        "--label", f"{LABEL_OWNER}={Path(repo_root()).resolve()}",
-        "--label", f"{LABEL_SLUG}={slug_for(repo_root())}",
+        "--label", f"{LABEL_OWNER}={Path(root).resolve()}",
+        "--label", f"{LABEL_SLUG}={slug_for(root)}",
         "--label", f"{LABEL_CREATED}={datetime.now(UTC).isoformat()}",
     ]
 
@@ -2057,10 +2063,20 @@ def _idle_evidence(names: list[str]) -> dict[str, tuple[bool, str]]:
                                 "not reaped")
         elif two[1]:
             out[name] = (False, f"{two[1]} client(s) connected")
-        elif two[0] - one[0] > PROBE_CONNECTIONS_PER_SAMPLE:
+        elif (delta := two[0] - one[0]) > PROBE_CONNECTIONS_PER_SAMPLE:
             out[name] = (False, "connections arrived between samples "
                                 f"({one[0]}->{two[0]}, more than the probe's own "
                                 f"{PROBE_CONNECTIONS_PER_SAMPLE})")
+        elif delta < 0:
+            # A DECREASING counter means the server restarted inside the window:
+            # the graphs were just reloaded and clients are about to attach, so
+            # this is the one reading that unambiguously shows somebody
+            # OPERATING the container. Treating it as "idle" would delete the
+            # container at the worst possible moment. Uninterpretable evidence
+            # is KEEP, exactly like unreadable evidence.
+            out[name] = (False, "the connection counter went BACKWARDS "
+                                f"({one[0]}->{two[0]}), so the server restarted "
+                                "inside the window — not idle")
         else:
             out[name] = (True, "no foreign client connected and no connection "
                                f"beyond the probe's own across "
@@ -2086,6 +2102,24 @@ def _drain_age_candidates(age_candidates: list[tuple[str, str]],
             out.append(f"reap: kept {name} — no owner here and it is {age_txt}, "
                        f"but IN USE: {detail}; report only (a clock alone "
                        f"authorises nothing)")
+            continue
+        # RE-VERIFY AT THE MOMENT OF ACTION. `_idle_evidence` finishes every
+        # second sample before ANY removal, so on a large population this
+        # candidate's verdict is seconds old by the time its turn comes. The
+        # module already applies this discipline to its other destructive arm
+        # ("the state is re-read IMMEDIATELY before the removal"); the same
+        # staleness applies to idleness, and the cost of trusting a stale
+        # verdict is deleting the container a lane just started using.
+        now = _idle_sample(name)
+        if now is None:
+            out.append(f"reap: kept {name} — no owner here and it is {age_txt}, "
+                       f"but idleness could not be re-confirmed at removal time "
+                       f"(fail-closed)")
+            continue
+        if now[1]:
+            out.append(f"reap: kept {name} — no owner here and it is {age_txt}, "
+                       f"but {now[1]} client(s) connected at removal time "
+                       f"(fail-closed)")
             continue
         prior = ("" if states.get(name) not in _TERMINAL_STATES
                  else _termination_report(name, live=False))
@@ -2280,19 +2314,41 @@ def reap_orphans() -> list[str]:
         # worktree and #8180's proof stays reachable.
         slug = name[len(NAME_PREFIX):]
         stamped = (labels.get(name) or {}).get("owner", "")
-        owner = stamped or slugs.get(slug)
         state = states[name]
-        # Resolved ONCE, before either proof, so no arm can report a worktree as
-        # "exists" without having looked at it.
-        present: bool | None = None
-        if owner is not None:
+        # ── TWO OWNERSHIP RECORDS, and NEITHER may overrule the other ────────
+        # The label SURVIVES teardown and the name does not, but a label can be
+        # wrong (it is written from a `repo_root()` read that has a documented
+        # degraded `Path.cwd()` fallback on a slow host) — so taking the label
+        # whenever one exists would let a single stale label override a perfectly
+        # good name proof and `rm -f` a LIVE lane's graphs. That is the exact
+        # inverse of the bug this change fixes, and it is worse.
+        #
+        # The rule is therefore: reap only when EVERY available record says the
+        # owner is gone; keep when ANY says it is present; keep when any of them
+        # is unreadable. A record that resolves to nothing (`None`) abstains.
+        records = [r for r in (stamped or None, slugs.get(slug)) if r]
+        verdicts: list[tuple[str, bool | None]] = []
+        for record in records:
             try:
-                present = Path(owner).is_dir()
+                verdicts.append((record, Path(record).is_dir()))
             except OSError:
                 # pathlib suppresses ENOENT/ENOTDIR/EBADF/ELOOP but NOT EACCES,
                 # so an inaccessible worktree path raises. "Cannot tell" is the
                 # REPORT-ONLY case: it must never be read as "the owner is gone".
+                verdicts.append((record, None))
+        owner = records[0] if records else None
+        present: bool | None = None
+        if verdicts:
+            unknown = [r for r, v in verdicts if v is None]
+            alive = [r for r, v in verdicts if v]
+            if unknown:
                 present = None
+                owner = unknown[0]
+            elif alive:
+                present = True
+                owner = alive[0]
+            else:
+                present = False
         if owner is not None and present is None:
             out.append(f"reap: kept {name} — its owning worktree {owner} "
                        f"could not be examined (fail-closed, report only)")
@@ -2370,9 +2426,12 @@ def reap_orphans() -> list[str]:
                        + (f"; it was {facts}" if facts else ""))
             continue
         if owner is not None:
-            # The owner IS determined and its worktree exists, so ownership
-            # alone decides — and a live owner is never reaped, at any age.
-            out.append(f"reap: kept {name} — its owning worktree exists ({owner})")
+            # The owner IS determined and at least one record's worktree exists,
+            # so ownership alone decides — and a live owner is never reaped, at
+            # any age. Every consulted record is named: a disagreement between
+            # the label and the name is exactly what a reader needs to see.
+            seen = ", ".join(r for r, _ in verdicts) or owner
+            out.append(f"reap: kept {name} — its owning worktree exists ({seen})")
             continue
         # Owner INDETERMINATE: neither a label nor any worktree in THIS clone
         # claims it. Before the labels existed this was the END of the road —
