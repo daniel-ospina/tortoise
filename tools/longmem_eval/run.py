@@ -4587,7 +4587,6 @@ def run_evaluation(
         # false-PASS class the sibling `reinjection_total_cap` forward closed.
         # Conditional presence (``None`` while no pool-order arm runs) keeps
         # an inert value off the fingerprint, as documented at the parameter.
-        guard_per_session_cap=guard_per_session_cap,
         # C4 (#2517/#2568, #2513): the resolved re-injection arm + guard
         # ablation ride the fingerprint as ALWAYS-PRESENT resolved bools
         # (the sibling-arm convention) — a fingerprint-bearing pre-feature
