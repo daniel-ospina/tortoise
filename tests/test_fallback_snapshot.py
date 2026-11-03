@@ -679,14 +679,34 @@ def test_snapshot_store_is_bounded_and_lru(monkeypatch):
 # The degraded read path built the snapshot with a bare ``build_snapshot``
 # call, so EVERY concurrent reader ran its own whole-corpus fetch. Measured
 # (idle local store, 10,000 points): N simultaneous degraded reads cost N
-# builds — 8 readers took 4.0–4.6 s each while ONE took 0.8 s, i.e. a search
+# builds — 8 readers took 3.7–4.6 s each while ONE took 595 ms (the module's
+# measurement, quoted identically here and in ``sdk.py:36898``), i.e. a search
 # got slower the more agents were searching, which is #10602's own signature
 # (5 concurrent agents, every call ~13.2 s). ``get_or_build`` coalesces.
 
 def _snap_stub(tag="s"):
-    return {"built_at": time.monotonic(), "dirty": False, "points": [],
-            "vectorizer": None, "doc_vecs": None, "model_id": None,
-            "tag": tag}
+    d = _snap()
+    d["tag"] = tag
+    return d
+
+
+def _await_waiters(key, n, timeout=10.0, store=None):
+    """Block until ``n`` readers are REGISTERED on the flight for ``key``.
+
+    The mechanical synchroniser for the coalescing tests (review P2). An exact build
+    count is only meaningful once every reader has JOINED the flight, and
+    ``time.sleep`` is a guess at that: on a loaded box (this fleet runs at load > 3) a
+    thread that reaches ``_flight_begin`` after the flight is removed legitimately
+    builds again, so the assertion reds on green code. ``waiters`` is the real signal —
+    the same pattern the after-a-write test below already uses.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        fl = fs._FLIGHTS.get((fs._store if store is None else store, key))
+        if fl is not None and fl.waiters >= n:
+            return True
+        time.sleep(0.005)
+    return False
 
 
 def test_get_or_build_coalesces_concurrent_readers():
@@ -702,7 +722,9 @@ def test_get_or_build_coalesces_concurrent_readers():
     def slow_builder(_proj):
         with lock:
             builds.append(1)
-        time.sleep(0.25)  # long enough that all 8 readers are inside the miss
+        # Hold the build until all 8 readers are INSIDE the miss — mechanically,
+        # not by sleeping and hoping (review P2).
+        _await_waiters(key, 8)
         return _snap_stub()
 
     out = {}
@@ -790,7 +812,7 @@ def test_get_or_build_coalesces_a_FAILED_build_too():
     def failing(_proj):
         with lock:
             attempts.append(1)
-        time.sleep(0.15)
+        _await_waiters(key, 6)
         return None
 
     def reader(i):
@@ -907,7 +929,7 @@ def test_a_reader_arriving_AFTER_a_write_does_not_get_pre_write_rows():
     # pins "late joiner of an overtaken build" rather than a scheduling accident.
     deadline = time.monotonic() + 5
     while time.monotonic() < deadline:
-        fl = fs._FLIGHTS.get(key)
+        fl = fs._FLIGHTS.get((fs._store, key))
         if fl is not None and fl.waiters >= 2:
             break
         time.sleep(0.005)

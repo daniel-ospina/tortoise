@@ -145,6 +145,15 @@ class FallbackSnapshotStore:
             return snap
 
     def put(self, key: tuple, snap: dict) -> None:
+        """Insert unconditionally — TEST-ONLY since #10602 (review P2).
+
+        No production caller uses this any more: the read path goes through
+        ``put_if_generation``, which refuses a snapshot a write has overtaken.
+        Left public because the store's own tests seed and evict through it, but
+        an UNGUARDED insert beside the guarded one is exactly the stale-put bug
+        the generation guard exists to stop, so a new production caller should
+        reach for ``put_if_generation`` instead.
+        """
         with self._lock:
             self._put_locked(key, snap)
 
@@ -208,10 +217,18 @@ _store = FallbackSnapshotStore()
 # concurrency-linear latency this fixes, on the two paths it most needed to help
 # (an over-cap hosted graph, and a store whose snapshot query is failing). A flight
 # publishes ONE outcome — success or ``None`` — to every reader that joined it, so the
-# failure path costs one attempt, not N. A lock registry also had to be evicted to stay
+# failure path costs one BUILD ATTEMPT, not N (narrowed, review P2: a published ``None``
+# still sends every reader down the legacy path, whose full-payload fetch is per reader —
+# that remaining amplification is #10602's residual, not something this flight claims to
+# close). A lock registry also had to be evicted to stay
 # bounded, and an evicted-then-re-minted lock let two builds run at once for one key
 # (the bug, back). A flight is removed when its last waiter leaves, so the registry is
 # bounded by what is IN FLIGHT and needs no eviction at all.
+#
+# KEYED BY ``(store, key)``, not by ``key`` alone (review P2): ``get_or_build`` accepts a
+# ``store=`` seam, and a registry keyed by the snapshot key alone would coalesce two
+# distinct stores onto ONE builder — the joiner then receives the OTHER store's snapshot
+# for that key, a silent wrong answer rather than a slow one.
 _FLIGHTS: dict[tuple, _Flight] = {}
 _FLIGHTS_GUARD = threading.Lock()
 
@@ -237,25 +254,29 @@ class _Flight:
         self.waiters = 0
 
 
-def _flight_begin(key: tuple) -> tuple[_Flight, bool]:
-    """Join (or open) the flight for ``key``. Returns ``(flight, is_leader)``."""
+def _flight_begin(store: FallbackSnapshotStore, key: tuple) -> tuple[_Flight, bool]:
+    """Join (or open) the flight for ``(store, key)``. Returns ``(flight, is_leader)``."""
+    flight_key = (store, key)
     with _FLIGHTS_GUARD:
-        flight = _FLIGHTS.get(key)
+        flight = _FLIGHTS.get(flight_key)
         if flight is not None:
             flight.waiters += 1
             return flight, False
         flight = _Flight()
         flight.waiters = 1
-        _FLIGHTS[key] = flight
+        _FLIGHTS[flight_key] = flight
         return flight, True
 
 
-def _flight_end(key: tuple, flight: _Flight) -> None:
+def _flight_end(
+    store: FallbackSnapshotStore, key: tuple, flight: _Flight
+) -> None:
     """Leave a flight; the last one out removes it (registry is in-flight-bounded)."""
+    flight_key = (store, key)
     with _FLIGHTS_GUARD:
         flight.waiters -= 1
-        if flight.waiters <= 0 and _FLIGHTS.get(key) is flight:
-            del _FLIGHTS[key]
+        if flight.waiters <= 0 and _FLIGHTS.get(flight_key) is flight:
+            del _FLIGHTS[flight_key]
 
 
 def get_or_build(proj, key: tuple, *, store: FallbackSnapshotStore | None = None,
@@ -289,86 +310,110 @@ def get_or_build(proj, key: tuple, *, store: FallbackSnapshotStore | None = None
     store = _store if store is None else store
     build = build_snapshot if builder is None else builder
 
-    snap = store.get(key)
-    if snap is not None:
-        return snap
+    #: A late joiner may re-enter the flight ONCE (see the staleness branch below);
+    #: bounded on purpose, so a stream of writes cannot livelock a reader. The
+    #: bounded fallback is the pre-#10602 behaviour — this reader builds for itself
+    #: — never a stale answer and never a spin.
+    reentered = False
+    while True:
+        snap = store.get(key)
+        if snap is not None:
+            return snap
 
-    flight, leader = _flight_begin(key)
-    if leader:
-        try:
-            # Re-check under leadership: a build may have completed between the
-            # miss above and this flight opening.
-            snap = store.get(key)
-            if snap is None:
-                generation = store.generation(key)
-                flight.generation = generation
-                try:
-                    snap = build(proj)
-                except Exception:  # noqa: BLE001, RUF100
-                    # A raise here is NOT one of the two failures ``build_snapshot``
-                    # swallows itself (over-cap, query exception) — it is an
-                    # unexpected error. Uncaught, it would propagate to the LEADER
-                    # while every joiner read ``result is None`` and quietly took the
-                    # legacy path: one failure, two different answers (review round
-                    # 4, P3). Publish the documented None contract to the whole
-                    # cohort instead, so every reader of this key takes the same
-                    # path — and LOG it, because a silent swallow would hide a bug.
-                    logger.exception(
-                        "#10602: corpus build raised — serving this key's cohort "
-                        "the legacy path (key=%r)", key)
-                    snap = None
-                # Publish only if no write invalidated the corpus mid-build (see
-                # STALENESS above) — otherwise this cohort keeps its answer and the
-                # next reader rebuilds, which is the self-healing the pre-#10602
-                # per-reader build got for free. The compare and the insert are ONE
-                # hold of the store lock, so a write landing between them cannot be
-                # undone by this put (review round 2).
-                if snap is not None:
-                    store.put_if_generation(key, snap, generation)
-            flight.result = snap
-        finally:
-            flight.done.set()
-            _flight_end(key, flight)
-        return flight.result
-
-    try:
-        # NOT deadline-bounded, and the comment says so on purpose (review round 2):
-        # the two corpus queries are bounded by the store socket timeouts (connect
-        # 2 s / read 10 s), but ``build_snapshot`` then runs ``EmbeddingModel.encode``
-        # (a hosted provider call) and ``TfidfVectorizer.fit`` over up to
-        # ``MAX_CORPUS_POINTS`` documents, and NEITHER carries a deadline. So a stuck
-        # embedder pins every reader of this key — the same hang those readers each
-        # hit individually before #10602, now shared. Do not read this wait as bounded.
-        flight.done.wait()
-        if (
-            flight.result is not None
-            and flight.generation is not None
-            and store.generation(key) != flight.generation
-        ):
-            # A write landed while this build ran, and THIS reader arrived AFTER it
-            # — its own ``store.get`` above missed, so serving the leader's rows
-            # would hand the caller pre-write data after its own write committed
-            # (review round 6, P2: the generation guard stopped that result being
-            # CACHED, but not being DELIVERED to a late joiner; pre-#10602 this
-            # reader ran its own build and saw the write). Build for this reader.
-            #
-            # ⛔ NOT ``return get_or_build(...)``: the flight is still registered
-            # until the leader's ``_flight_end``, so a recursive call would re-join
-            # this completed flight and spin. The build sequence is inline instead.
-            generation = store.generation(key)
+        flight, leader = _flight_begin(store, key)
+        if leader:
             try:
-                fresh = build(proj)
-            except Exception:  # noqa: BLE001, RUF100
-                logger.exception(
-                    "#10602: rebuild for a late joiner raised — serving the legacy "
-                    "path (key=%r)", key)
-                return None
-            if fresh is not None:
-                store.put_if_generation(key, fresh, generation)
+                # Re-check under leadership: a build may have completed between the
+                # miss above and this flight opening.
+                snap = store.get(key)
+                if snap is None:
+                    generation = store.generation(key)
+                    flight.generation = generation
+                    try:
+                        snap = build(proj)
+                    except Exception:  # noqa: BLE001, RUF100
+                        # A raise here is NOT one of the two failures ``build_snapshot``
+                        # swallows itself (over-cap, query exception) — it is an
+                        # unexpected error. Uncaught, it would propagate to the LEADER
+                        # while every joiner read ``result is None`` and quietly took the
+                        # legacy path: one failure, two different answers (review round
+                        # 4, P3). Publish the documented None contract to the whole
+                        # cohort instead, so every reader of this key takes the same
+                        # path — and LOG it, because a silent swallow would hide a bug.
+                        logger.exception(
+                            "#10602: corpus build raised — serving this key's cohort "
+                            "the legacy path (key=%r)", key)
+                        snap = None
+                    # Publish only if no write invalidated the corpus mid-build (see
+                    # STALENESS above) — otherwise this cohort keeps its answer and the
+                    # next reader rebuilds, which is the self-healing the pre-#10602
+                    # per-reader build got for free. The compare and the insert are ONE
+                    # hold of the store lock, so a write landing between them cannot be
+                    # undone by this put (review round 2).
+                    if snap is not None:
+                        store.put_if_generation(key, snap, generation)
+                flight.result = snap
+            finally:
+                flight.done.set()
+                _flight_end(store, key, flight)
+            return flight.result
+
+        try:
+            # NOT deadline-bounded, and the comment says so on purpose (review round 2):
+            # the two corpus queries are bounded by the store socket timeouts (connect
+            # 2 s / read 10 s), but ``build_snapshot`` then runs ``EmbeddingModel.encode``
+            # (a hosted provider call) and ``TfidfVectorizer.fit`` over up to
+            # ``MAX_CORPUS_POINTS`` documents, and NEITHER carries a deadline. So a stuck
+            # embedder pins every reader of this key — the same hang those readers each
+            # hit individually before #10602, now shared. Do not read this wait as bounded.
+            flight.done.wait()
+            stale = (
+                flight.result is not None
+                and flight.generation is not None
+                and store.generation(key) != flight.generation
+            )
+            if not stale:
+                return flight.result
+        finally:
+            _flight_end(store, key, flight)
+
+        # A write landed while the build this reader joined ran, and THIS reader
+        # arrived AFTER it — its own ``store.get`` above missed, so serving the
+        # leader's rows would hand the caller pre-write data after its own write
+        # committed (review round 6, P2: the generation guard stopped that result
+        # being CACHED, but not being DELIVERED to a late joiner; pre-#10602 this
+        # reader ran its own build and saw the write).
+        #
+        # ⛔ NOT ``return get_or_build(...)``: the flight is still registered until
+        # the leader's ``_flight_end``, so a recursive call would re-join this
+        # completed flight and spin. The flight is ENDED above (the ``finally``)
+        # before anything else happens, which is what makes re-entry safe.
+        #
+        # The first clean rebuild after the write IS cached (``put_if_generation``
+        # with a matching generation), so check the store first: a cohort of N late
+        # joiners then pays for ONE build, not N (review round 8, P1: building inline
+        # here ran a whole-corpus build PER WAITER — the very amplification #10602
+        # exists to remove, on the path its own comment calls "a writing fleet").
+        generation = store.generation(key)
+        fresh = store.get(key)
+        if fresh is not None:
             return fresh
-        return flight.result
-    finally:
-        _flight_end(key, flight)
+        if not reentered:
+            # Re-enter as a NEW leader: the rebuild coalesces onto a fresh flight
+            # instead of running once per waiter. BOUNDED to one re-entry (see
+            # ``reentered`` above).
+            reentered = True
+            continue
+        try:
+            fresh = build(proj)
+        except Exception:  # noqa: BLE001, RUF100
+            logger.exception(
+                "#10602: rebuild for a late joiner raised — serving the legacy "
+                "path (key=%r)", key)
+            return None
+        if fresh is not None:
+            store.put_if_generation(key, fresh, generation)
+        return fresh
 
 
 # Stable key for a ``:memory:`` projection whose client exposes no store
