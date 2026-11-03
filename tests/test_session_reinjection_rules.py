@@ -601,10 +601,21 @@ def test_the_guard_arm_requires_a_pool_order_composition():
     assert _run._pool_order_arm_on(False, False, True) is False
     assert _run._pool_order_arm_on(False, True, False) is False
 
-    for kwargs in ({"floor_term": True},
-                   {"guard_per_session_cap": 3},
+    for kwargs in (# the arms are pinned EXPLICITLY here, not inherited from
+                   # the environment (#10629 review): cases 1-2 pass neither
+                   # composition, so ``run_evaluation`` would resolve both from
+                   # the documented env twins (``TORTOISE_LME_COVERAGE_LOOP`` /
+                   # ``TORTOISE_LME_SESSION_REINJECTION``) — an exported value
+                   # armed a pool-order composition and made the expected
+                   # refusal DID-NOT-RAISE in the very test that pins the gate.
+                   # Pinning them also asserts the POSITIVE side of the truth
+                   # table above: no composition, knob armed ⇒ refused.
+                   {"coverage_loop": False, "session_reinjection": False,
+                    "floor_term": True},
+                   {"coverage_loop": False, "session_reinjection": False,
+                    "floor_term": False, "guard_per_session_cap": 3},
                    # a reinjection run with the guard ablated calls no guard
-                   {"session_reinjection": True,
+                   {"coverage_loop": False, "session_reinjection": True,
                     "session_reinjection_guard": False,
                     "floor_term": True}):
         with pytest.raises(ArmConflictError) as excinfo:

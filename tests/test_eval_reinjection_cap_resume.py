@@ -105,11 +105,19 @@ def _run_guard(instances, tmp_path, checkpoint, *, cap):
     cap with no pool-order arm: ``ArmConflictError``). Every other
     results-affecting knob is held identical, so the only fingerprint
     difference between the runs in a test is the cap itself.
+
+    ``session_reinjection`` and ``floor_term`` are pinned EXPLICITLY, not
+    inherited from the environment (#10629 review, adjacent to ISSUE 2): an
+    exported ``TORTOISE_LME_SESSION_REINJECTION`` would arm the second
+    pool-order composition and make every call here raise the both-arms
+    ``ArmConflictError``, and an exported ``TORTOISE_LME_FLOOR_TERM`` would
+    make "held identical" depend on the shell.
     """
     return runner.run_evaluation(
         instances, reader=MockReader(), judge=MockJudge(),
         ks=(5,), top_k=5, split="s", work_dir=str(tmp_path),
         checkpoint=str(checkpoint), coverage_loop=True,
+        session_reinjection=False, floor_term=False,
         guard_per_session_cap=cap)
 
 
