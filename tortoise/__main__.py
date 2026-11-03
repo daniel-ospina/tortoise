@@ -3016,11 +3016,22 @@ def _scrub(text: str, *secrets: object) -> str:
         decoded = _unquote(query)
         fragments.append(decoded)
         for part in query.replace("#", "&").split("&"):
-            if "=" in part:
-                value = part.split("=", 1)[1]
-                if value:
-                    fragments.append(value)
-                    fragments.append(_unquote(value))
+            if "=" not in part:
+                continue
+            value = part.split("=", 1)[1]
+            if not value:
+                continue
+            if len(value) >= 6:
+                fragments.append(value)
+                fragments.append(_unquote(value))
+            else:
+                # A short query value (`?v=2`, `?env=prod`) as a bare fragment
+                # shreds the diagnostic it exists to preserve — `?v=1` turns
+                # "API error 401" into "API error 40<redacted>". Scrub the whole
+                # pair instead: the credential is still covered, the prose is not.
+                # The floor is deliberately NOT applied to user/password
+                # fragments above — a short password is still a credential.
+                fragments.append(part)
 
     for fragment in sorted(set(fragments), key=len, reverse=True):
         text = text.replace(fragment, "<redacted>")
@@ -3054,6 +3065,34 @@ def _mask_display_target(value: str) -> str:
     if not cuts:
         return masked
     return masked[:min(cuts)] + "…"
+
+
+def _same_endpoint(a: object, b: object) -> bool:
+    """Do two configured api_urls name the SAME endpoint?
+
+    Compares the parsed AUTHORITY (host, case-folded; port, defaulted per scheme),
+    not the literal string, and applies the trailing-slash normalisation the Pi
+    hook itself applies (`resolveConfig` strips trailing slashes). Comparing
+    whole URLs made `https://h/` vs `https://h` read as "a DIFFERENT host" when
+    both surfaces contact the identical endpoint — a false statement about the
+    user's own configuration, and the one this comparison exists to avoid.
+    """
+    from urllib.parse import urlsplit
+
+    def parts(value: object) -> tuple[str, int] | None:
+        if not isinstance(value, str) or not value.strip():
+            return None
+        try:
+            split = urlsplit(value.strip())
+        except ValueError:
+            return None
+        if not split.hostname:
+            return None
+        default = 443 if split.scheme in ("https", "") else 80
+        return (split.hostname.lower(), split.port or default)
+
+    left, right = parts(a), parts(b)
+    return left is not None and left == right
 
 
 def _publishable_fingerprint(key: object) -> str | None:
@@ -3510,30 +3549,31 @@ def _cmd_config(args) -> int:
     payload["harness"] = harness
     same_identity: bool | None = None
     relation: str | None = None
-    hosts_agree = bool(api_key) and bool(harness_effective) and (
-        _mask_display_target(api_url or "") == harness.get("api_url"))
+    hosts_agree = bool(api_key) and bool(harness_effective) and _same_endpoint(
+        api_url, harness.get("api_url"))
     if api_key and harness_effective:
         if _key_fingerprint(harness_effective) == _key_fingerprint(api_key):
             same_identity = True
             relation = "same" if hosts_agree else "same-key-different-host"
         elif isinstance(api_key, str) and api_key.strip() == harness_effective:
-            # The SAME key, differing only by the whitespace the report already
-            # flags: the CLI's copy is unsendable while the hook's works. Calling
-            # that "two identities" is substantively wrong — a harness refusal
-            # DOES say something about the CLI key here.
-            same_identity, relation = False, "same-modulo-whitespace"
+            # The SAME credential, differing only by the whitespace the report
+            # already flags (the CLI's copy cannot authenticate; the hook's can).
+            # `identity_agrees` answers "is this one credential?" — yes — and
+            # `identity_relation` carries the caveat. Reporting `false` here made
+            # the payload's two fields disagree about the same question.
+            same_identity, relation = True, "same-modulo-whitespace"
         else:
             same_identity, relation = False, "different"
     payload["identity_agrees"] = same_identity
     payload["identity_relation"] = relation
-    payload["identity_host_agrees"] = hosts_agree if same_identity else None
+    payload["identity_host_agrees"] = hosts_agree if harness_effective else None
 
     if payload.get("message"):
-        # `_cmd_fail`'s documented contract: the message goes to stderr in BOTH
-        # modes, and the machine payload carries status/error/message. A consumer
-        # keying on `status == "error"` must see the failure — and so must a
-        # human in the DEGRADED case, which is also exit 1 and used to print
-        # nothing but a pointer to a note that did not exist.
+        # The message goes to stderr in BOTH modes. The two failure payloads
+        # differ on purpose: `refused` carries status/error/config_state/message
+        # (the `_cmd_fail` shape a consumer keys on), while `degraded` carries
+        # status/message/resolution_error and NO `error` — nothing was refused,
+        # so nothing is claimed about a store. Both exit 1.
         print(_printable(payload["message"]), file=_sys.stderr)
     if json_mode:
         _emit_json(payload)
@@ -3661,8 +3701,6 @@ def _cmd_config(args) -> int:
             print("  → the CLI has no identity — nothing to compare")
         elif harness_state in (_STORE_ABSENT, _STORE_EMPTY) or not harness_effective:
             print("  → the harness has no identity — it will run unauthenticated")
-    elif same_identity and hosts_agree:
-        print("  → same identity as the CLI (same key, same host)")
     elif relation == "same-modulo-whitespace":
         harness_ok = ("the harness's copy works"
                       if not harness.get("api_key_unsendable")
@@ -3670,8 +3708,10 @@ def _cmd_config(args) -> int:
         print(f"  → the SAME key as the CLI, modulo surrounding whitespace — the"
               f" CLI's copy cannot authenticate (see above), {harness_ok}")
     elif relation == "same-key-different-host":
-        print("  → the SAME key as the CLI but a DIFFERENT host — a refusal on one"
-              " says nothing about the other")
+        print("  → the SAME key as the CLI but a DIFFERENT endpoint — a refusal on"
+              " one says nothing about the other")
+    elif same_identity and hosts_agree:
+        print("  → same identity as the CLI (same key, same endpoint)")
     else:
         print("  → a DIFFERENT key from the CLI — the harness and the CLI are two"
               " identities. A refusal from one says nothing about the other.")
@@ -3715,7 +3755,7 @@ def _cmd_org_info(args) -> int:
         )
         with urlopen(req, timeout=10) as resp:
             data = json.loads(resp.read())
-    except (http.client.HTTPException, ValueError) as e:
+    except (http.client.HTTPException, ValueError, RecursionError) as e:
         # `http.client.InvalidURL` derives from HTTPException — neither OSError nor
         # ValueError — so it used to escape as a TRACEBACK whose message embeds the
         # api_url (a password in its userinfo, or a "nonnumeric port" reading of
@@ -3782,7 +3822,7 @@ def _cmd_org_info(args) -> int:
                 body = ""
             _explain_org_info_failure(retry_exc.code, body, api_url, api_key)
             return 1
-        except (http.client.HTTPException, ValueError) as retry_exc:
+        except (http.client.HTTPException, ValueError, RecursionError) as retry_exc:
             # The retry REACHED something: a captive-portal/proxy body is not
             # "still no answer", and folding it into the transport branch sent
             # the reader to the health endpoint for a proxy problem.
@@ -3856,14 +3896,17 @@ def _explain_org_info_failure(code: int, body: str, api_url: object,
     # masker calls `.split()`, so coerce here rather than trap the next caller.
     api_url = api_url if isinstance(api_url, str) else str(api_url or "")
     # The body is the reply to a request that carried `Authorization`, so a
-    # server or proxy that echoes the request echoes the KEY. It is also
-    # unbounded — a multi-MB proxy page must not be printed whole.
-    body = _scrub(body, api_url, api_key)[:2000]
+    # server or proxy that echoes the request echoes the KEY. Scrub it once, and
+    # parse the FULL text — truncating before `_json.loads` made a verbose
+    # refusal lose the very remedy this function exists to print. Only the
+    # DISPLAY fallback below is bounded (a multi-MB proxy page must not be
+    # printed whole).
+    body = _scrub(body, api_url, api_key)
 
     error_code = None
     try:
         parsed = _json.loads(body)
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, RecursionError):
         parsed = None
     # The body is entirely server/proxy-controlled: it may be an object, a list,
     # a bare string or null. Reading `.get` off it without this guard crashed
@@ -3912,7 +3955,7 @@ def _explain_org_info_failure(code: int, body: str, api_url: object,
         print("   Check which store won first: `tortoise config show`.",
               file=_sys.stderr)
         return
-    print(f"API error ({code}): {_printable(body)}", file=_sys.stderr)
+    print(f"API error ({code}): {_printable(body[:2000])}", file=_sys.stderr)
 
 
 ONBOARDING_PROMPT_URL = "https://app.premiselabs.co/skills/tortoise-onboarding/SKILL.md"

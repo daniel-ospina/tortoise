@@ -1261,6 +1261,15 @@ def test_the_scrubber_covers_query_values(monkeypatch, capsys, tmp_path):
     assert "p%40ss" not in scrubbed
 
 
+def test_a_short_query_value_does_not_shred_the_diagnostic():
+    """A bare fragment of 1-2 chars matches inside ordinary prose: `?v=1` turned
+    "API error 401" into "API error 40<redacted>". Scrub the pair instead."""
+    body = "rate limited, retry later"
+    assert main._scrub(body, "https://h/v1?env=a") == body
+    assert "API error 40<redacted>" not in main._scrub("API error 401 unauthorised",
+                                                       "https://h/?v=1")
+
+
 def test_the_harness_key_is_also_checked_for_sendability(monkeypatch, capsys, tmp_path):
     """Reporting a non-latin-1 harness key as healthy while the CLI key gets a
     ⛔ contradicts itself in one payload — and the arrow claimed "the harness's
@@ -1290,7 +1299,29 @@ def test_the_same_key_on_a_different_host_is_not_called_one_identity(
     assert payload["identity_relation"] == "same-key-different-host"
     assert payload["identity_host_agrees"] is False
     assert _run() == 0
-    assert "DIFFERENT host" in capsys.readouterr().out
+    assert "DIFFERENT endpoint" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("cli_url, hook_url, agree", [
+    ("https://api.premiselabs.co/", "https://api.premiselabs.co", True),
+    ("https://API.premiselabs.co", "https://api.premiselabs.co", True),
+    ("https://api.premiselabs.co:443", "https://api.premiselabs.co", True),
+    ("https://api.premiselabs.co", "https://other.example", False),
+])
+def test_endpoint_comparison_is_normalised_like_the_hook(
+        capsys, tmp_path, cli_url, hook_url, agree):
+    """The hook strips trailing slashes and compares hosts, not literal URLs;
+    comparing whole URLs reported `https://h/` vs `https://h` as a DIFFERENT
+    host — a false statement about the user's own configuration."""
+    _write(tmp_path / ".tortoise" / "credentials.json", json.dumps({
+        "api_key": GLOBAL_KEY, "api_url": cli_url,
+        "org_id": "00e8e36129794bcdb2c992ff47",
+    }))
+    _harness(tmp_path, json.dumps({"apiKey": GLOBAL_KEY, "apiUrl": hook_url}))
+    assert _run(("config", "show", "--json")) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["identity_host_agrees"] is agree
+    assert payload["identity_relation"] == ("same" if agree else "same-key-different-host")
 
 
 def test_a_keyless_harness_file_is_not_called_unusable(monkeypatch, capsys, tmp_path):
@@ -1370,6 +1401,38 @@ def test_the_scrubber_covers_the_percent_decoded_userinfo():
     assert "p@ss:word" not in scrubbed
 
 
+def test_a_verbose_refusal_still_gets_its_remedy(capsys):
+    """Truncating before parsing made a 4 KB 403 lose the suspension message and
+    its appeal URL — the one refusal this change exists to explain."""
+    body = json.dumps({"detail": {"code": "SUSPENDED", "message": "Suspended.",
+                                 "appeal_url": "https://premiselabs.co/appeal"},
+                       "filler": "x" * 4000})
+    main._explain_org_info_failure(403, body, "https://api.example")
+    err = capsys.readouterr().err
+    assert "suspended" in err.lower()
+    assert "https://premiselabs.co/appeal" in err
+
+
+def test_a_deeply_nested_response_body_does_not_traceback(monkeypatch, capsys, tmp_path):
+    import io
+
+    _global(tmp_path)
+
+    class _Resp(io.BytesIO):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    def _fake_urlopen(_req, timeout=None):
+        return _Resp(b"[" * 12000 + b"]" * 12000)
+
+    monkeypatch.setattr("urllib.request.urlopen", _fake_urlopen)
+    assert main.main(["team", "info"]) == 1
+    assert "Traceback" not in capsys.readouterr().err
+
+
 def test_a_deeply_nested_store_is_corrupt_not_a_recursion_crash(capsys, tmp_path):
     """`json.loads` raises RecursionError on a pathologically nested store — which
     is neither ValueError nor TypeError, and would escape the "reported, never
@@ -1427,7 +1490,10 @@ def test_whitespace_only_difference_is_not_called_two_identities(monkeypatch, ca
     assert _run(("config", "show", "--json")) == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["identity_relation"] == "same-modulo-whitespace"
-    assert payload["identity_agrees"] is False      # the published digests differ
+    # one credential (the payload must not say "agrees: false" while the human
+    # line says "the SAME key"); the caveat rides on the relation + the ⚠️ line
+    assert payload["identity_agrees"] is True
+    assert "api_key_whitespace" in payload["credential"]
     assert _run() == 0
     out = capsys.readouterr().out
     assert "modulo surrounding whitespace" in out
