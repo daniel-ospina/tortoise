@@ -248,6 +248,29 @@ def test_torn_exit_line_does_not_crash_collect(tmp_path):
     assert st.state == rd.REFUSED and st.exit_code is None   # fail closed, no crash
 
 
+def test_spawning_sentinel_expires_instead_of_wedging_the_pr(tmp_path):
+    """A launch killed between `SPAWNING=1` and `PID=` leaves a state with no rail
+    to ever write anything. It must age out to `lost` — and `start` must then be
+    allowed again — or the PR is unrailable forever."""
+    co = make_checkout(tmp_path)
+    sd = tmp_path / "state"
+    now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    old = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - 600))
+    art = rd.artifact_path(sd, "o/r", 67)
+    sd.mkdir(parents=True)
+    for started_at in (now, old):
+        art.write_text(f"PR=67\nREPO=o/r\nSTARTED_AT={started_at}\nSPAWNING=1\n")
+        st = rd.collect(sd, "o/r", 67)
+        if started_at == now:
+            assert st.state == rd.WAITING and "launching" in st.reason
+        else:
+            assert st.state == rd.LOST and "no rail ever started" in st.reason
+    # …and the stale one does not block a new attempt
+    ln = rd.launch(67, cwd=co, state_dir=sd, repo="o/r")
+    assert ln.pid > 0
+    assert wait_state(sd, 67, rd.MERGED).state == rd.MERGED
+
+
 def test_collect_has_no_side_effects(tmp_path):
     co = make_checkout(tmp_path)
     sd = tmp_path / "state"

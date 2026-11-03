@@ -82,6 +82,11 @@ from pathlib import Path
 # a test that passes either way would prove nothing.
 DETACH_NEW_SESSION = True
 
+# How long an un-pid'd `SPAWNING=1` artifact may stand for "launching". A spawn
+# happens in microseconds; a minute is generous enough to never race a healthy
+# launch and short enough that a launch killed in that window cannot wedge a PR.
+SPAWNING_TTL_S = 60
+
 RAIL_REL = "scripts/admin-merge.sh"
 DEFAULT_STATE_DIR = Path(
     os.environ.get("CELL_HOME") or os.path.expanduser("~")
@@ -132,6 +137,16 @@ def read_all(text: str, key: str) -> list[str]:
 
 def _iso_now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _age_seconds(iso: str) -> float | None:
+    """Seconds since an artifact timestamp, or None when it cannot be read."""
+    try:
+        then = datetime.strptime(iso.strip(), "%Y-%m-%dT%H:%M:%SZ").replace(
+            tzinfo=timezone.utc)
+    except (AttributeError, ValueError):
+        return None
+    return (datetime.now(timezone.utc) - then).total_seconds()
 
 
 def _pid_alive(pid: int, marker: str) -> bool:
@@ -297,8 +312,22 @@ def collect(state_dir: Path, repo: str, pr: int) -> RailState | None:
         # Between `SPAWNING=1` and the `PID=` append the rail IS alive but
         # unnamed. Reporting `lost` there defeats the same guard that refuses a
         # second rail (#observed live 2026-11-03).
-        st.state = WAITING
-        st.reason = "launching (no pid recorded yet)"
+        #
+        # ⛔ BUT THE SENTINEL MUST EXPIRE. A launch killed in exactly this window
+        # (or a `Popen` that raised, e.g. EAGAIN under cell load) leaves
+        # `SPAWNING=1` with no pid and nothing that would ever write anything
+        # else — so an unexpired sentinel would report a live rail that does not
+        # exist FOREVER, and the duplicate guard would refuse every later start:
+        # the PR becomes unrailable. Past the TTL that state is `lost`, which is
+        # both true (no rail is running) and recoverable (a new start is allowed).
+        age = _age_seconds(st.since)
+        if age is not None and age <= SPAWNING_TTL_S:
+            st.state = WAITING
+            st.reason = "launching (no pid recorded yet)"
+            return st
+        st.state = LOST
+        st.reason = ("the launch died between the artifact write and the spawn — "
+                     "no rail ever started (SPAWNING never became a pid)")
         return st
     # A merge the rail ANNOUNCED and then died before recording the exit code is
     # still a merge — the announcement is made only after the API confirmed
