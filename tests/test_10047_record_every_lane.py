@@ -27,6 +27,8 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import functools
+import re
 from pathlib import Path
 from typing import ClassVar
 
@@ -354,15 +356,29 @@ _AMBIENT_OPENERS = frozenset({
     "_get_org_sdk",               # request-scoped; tenant = the ambient scope
 })
 #: SDK-shaped names that are NOT org-scoped lane construction sites: the
-#: registry/base/probe accessors and their caches. They are not "bound" and not
-#: "unbound" — they are simply not the thing this scan judges, and naming them
-#: keeps the completeness leg from having to special-case them.
+#: registry/base/probe accessors, their caches, and the plain helpers that take
+#: an SDK rather than return one. They are not "bound" and not "unbound" — they
+#: are simply not the thing this scan judges, and naming them keeps the
+#: completeness leg from having to special-case them. Every member is asserted to
+#: still EXIST, so this cannot rot into a fiction.
 _NOT_A_LANE_OPENER = frozenset({
+    # accessors that return an SDK for a NON-org-scoped graph
     "_sdk", "_get_sdk", "_default_sdk", "_get_base_sdk",
     "_probe_sdk", "_acquire_probe_sdk", "_registry_probe_sdk",
     "_reset_registry_probe_sdk", "_registry_sdk", "_reg_sdk",
-    "_close_cached_sdk", "mine_corpus_with_sdk",
+    "_close_cached_sdk",
+    # helpers that take a handle (or a backend) instead of opening a lane
+    "mine_corpus_with_sdk", "_retire_probe_sdk_locked", "_sdk_matches_env",
+    "_sdk_usable", "_sdk_backend_is_embedded", "sdk_reflex",
+    "_probe_sdk_key", "_probe_sdk_reset",
 })
+#: An SDK-SHAPED name — `…_sdk`, `_sdk…`, `sdk_…`. Broader than
+#: `endswith("_sdk")`, which silently excluded `_sdk_matches_env`-style helpers
+#: AND the real openers `_org_sdk_from_name` / `_data_sdk_offloaded` (their
+#: `_sdk_` is interior), so a RENAME could have retired a declared opener into a
+#: silent exemption without reddening anything.
+_SDK_NAME_RE = re.compile(r"(^|_)sdk(_|$)")
+
 #: Every name this file claims to know. A name outside it reaches `_handle_state`
 #: as `None`, which is the silent exemption the completeness leg exists to stop.
 _DECLARED_SDK_NAMES = (frozenset(_SDK_OPENERS) | frozenset(_INSTALLING_OPENERS)
@@ -408,9 +424,47 @@ def _called_names(node) -> set[str]:
 
 
 def _module_functions(tree) -> dict:
-    """Every module-level lane/helper, by name (a nested def rides its parent)."""
-    return {node.name: node for node in tree.body
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    """Every lane/helper this file scans, by name.
+
+    A NESTED def rides its parent — its calls are already inside the parent's
+    `ast.walk`, so listing it separately would double-count. A CLASS METHOD does
+    not ride anything: `tree.body` never saw it, so a `Worker.run()` that opens
+    an org-scoped SDK and writes records was neither a site nor a write. That
+    was an entire blind axis (#10046 review P2) — the package has 564 classes,
+    and a worker/indexer class is the most natural shape for the next lane.
+    Keyed `Class.method` so a method cannot collide with a module-level name.
+
+    Measured when methods were added: 0 method-level org-scoped opener calls in
+    the package, so this widens the scan WITHOUT reddening anything — it only
+    closes the shape that does not exist yet.
+    """
+    found = {node.name: node for node in tree.body
+             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    for cls in tree.body:
+        if not isinstance(cls, ast.ClassDef):
+            continue
+        for node in cls.body:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                found.setdefault(f"{cls.name}.{node.name}", node)
+    return found
+
+
+@functools.cache
+def _tree_at(path: str, mtime_ns: int, size: int):
+    """A parsed module, cached on the file's OWN identity.
+
+    Keyed on `(mtime, size)` rather than the path alone, deliberately: the
+    mutation pins in this file ADD and REMOVE modules, and a path-keyed cache
+    would serve a stale tree (or miss the new file) and turn a real red into a
+    false green — the failure mode a cache must never introduce into a guard.
+    """
+    return ast.parse(Path(path).read_text())
+
+
+def _tree_of(path: Path):
+    """`ast.parse` of *path*, cached while the file is unchanged."""
+    stat = path.stat()
+    return _tree_at(str(path), stat.st_mtime_ns, stat.st_size)
 
 
 def _derived_record_emitting_verbs() -> frozenset[str]:
@@ -731,7 +785,10 @@ def test_no_lane_ANYWHERE_in_the_package_writes_records_through_an_unbound_sdk()
     mean anything, and it is pinned by
     `test_every_sdk_shaped_name_in_the_package_is_classified`. A lane opening
     `_get_org_sdk()` outside a request is bound by nothing and is the declared
-    blind spot (`_AMBIENT_OPENERS`).
+    blind spot (`_AMBIENT_OPENERS`). Two indirections are likewise OUT of the
+    scan and are named so they are not mistaken for coverage: an SDK handed to a
+    writing helper as a KEYWORD argument (`_write(sdk=_org_sdk(org))`) and one
+    reached through a lambda or local factory.
     """
     modules = sorted(_PACKAGE_ROOT.rglob("*.py"))
     assert len(modules) >= 200, (
@@ -742,19 +799,42 @@ def test_no_lane_ANYWHERE_in_the_package_writes_records_through_an_unbound_sdk()
     sites: dict[str, int] = {}
     unbound: list[str] = []
     unparsed: list[str] = []
+    silent: list[str] = []
     for path in modules:
         rel = path.relative_to(_PACKAGE_ROOT)
         try:
-            tree = ast.parse(path.read_text())
+            tree = _tree_of(path)
         except (SyntaxError, UnicodeDecodeError, OSError) as exc:
             # CANNOT-ANSWER is not a pass: an unreadable module could hold the
             # very lane this scan exists to catch.
             unparsed.append(f"{rel}: {type(exc).__name__}: {exc}")
             continue
-        for lane, count in _org_scoped_sdk_sites(tree).items():
+        opened_here = _org_scoped_sdk_sites(tree)
+        for lane, count in opened_here.items():
             sites[f"{rel}:{lane}"] = count
         unbound.extend(f"{rel}: {site}"
                        for site in _unbound_record_writes(tree))
+        # Per-MODULE non-vacuity, because the global floor below cannot see drift
+        # on the axis this leg was widened for: only 3 modules contribute sites
+        # and `hosted_api.py` alone holds 168 of 175, so a criteria change that
+        # stopped matching in every OTHER module would still clear the floor
+        # with the one leg it already covered. A module that calls `_make_sdk` at
+        # all — including the string-literal namespaces the org-scoped predicate
+        # excludes — but contributes no site is where that drift would show.
+        # Guarded on `opened_here` first so the walk is skipped for the modules
+        # that DID contribute (hosted_api.py is the largest file in the package
+        # and never needs it).
+        if not opened_here and any(
+                isinstance(call, ast.Call)
+                and getattr(call.func, "id", None) == "_make_sdk"
+                for call in ast.walk(tree)):
+            silent.append(str(rel))
+
+    assert silent == [], (
+        "these modules open an SDK but contribute NO org-scoped site, so the "
+        "scan's AST criteria have stopped matching here and `unbound == []` says "
+        "nothing about them. Either the criteria need updating, or the opener is "
+        "a registry/base lane the predicate should exclude:" + _joined(silent))
 
     assert unparsed == [], (
         "the package walk could not parse these modules, so it cannot answer "
@@ -787,29 +867,36 @@ def test_every_sdk_shaped_name_in_the_package_is_classified():
     recurrence the package-wide leg above exists to catch, arriving through the
     one axis that leg cannot see.
 
-    Measured when this leg was added: 17 module-level `*_sdk` definitions in the
-    package, 4 of them already declared, 13 undeclared — including
+    Measured when this leg was added: 27 SDK-SHAPED module-level definitions in
+    the package (the `_sdk` token anywhere, not just a `_sdk` suffix — the suffix
+    test alone excluded the real openers `_org_sdk_from_name` and
+    `_data_sdk_offloaded`), 7 of them already declared, 20 undeclared — including
     `_get_org_sdk`, which carries `tortoise/mcp_server.py`'s entire record-write
     surface (109 call sites) and whose tenant is the request's AMBIENT scope.
 
     Mutation this reddens on: deleting `_get_org_sdk` from `_AMBIENT_OPENERS`
-    (it returns to being silently exempt), or adding a `_sdk`-shaped helper to
-    any module without classifying it.
+    (it returns to being silently exempt), or adding an SDK-shaped helper to any
+    module without classifying it.
     """
     modules = sorted(_PACKAGE_ROOT.rglob("*.py"))
     shaped: set[str] = set()
     for path in modules:
         try:
-            tree = ast.parse(path.read_text())
+            tree = _tree_of(path)
         except (SyntaxError, UnicodeDecodeError, OSError):
             continue  # the leg above fails LOUD on these; do not double-report
-        shaped.update(name for name in _module_functions(tree)
-                      if name.endswith("_sdk"))
+        # MODULE-LEVEL only: the classification is a package vocabulary, and a
+        # method is scoped to its class (its writes are covered by the leg
+        # above, which now walks methods too).
+        shaped.update(
+            node.name for node in tree.body
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and _SDK_NAME_RE.search(node.name))
 
-    assert len(shaped) >= 15, (
-        f"only {len(shaped)} `*_sdk` definitions found in the package — the name "
-        "shape no longer describes how openers are spelled, so the classification "
-        "below certifies nothing: " + _joined(sorted(shaped)))
+    assert len(shaped) >= 20, (
+        f"only {len(shaped)} SDK-shaped definitions found in the package — the "
+        "name shape no longer describes how openers are spelled, so the "
+        "classification below certifies nothing: " + _joined(sorted(shaped)))
 
     unclassified = sorted(shaped - _DECLARED_SDK_NAMES)
     assert unclassified == [], (
@@ -822,10 +909,15 @@ def test_every_sdk_shaped_name_in_the_package_is_classified():
         "here) or `_NOT_A_LANE_OPENER` (not an org-scoped lane construction "
         "site):" + _joined(unclassified))
 
-    # The declaration cannot rot into a lie: a classified name that no longer
-    # exists is a vocabulary describing code that is gone.
+    # The declaration cannot rot into a lie — checked over EVERY opener
+    # vocabulary, not just the two that were easy to reach. The suffix-era
+    # version checked only `_AMBIENT_OPENERS | _NOT_A_LANE_OPENER`, so renaming
+    # `_org_sdk_from_name` would have left the stale entry standing while the new
+    # name reached `_handle_state` as `None` (a silent exemption, and the very
+    # false PASS this file exists to stop).
     vanished = sorted(
-        name for name in _AMBIENT_OPENERS | _NOT_A_LANE_OPENER
+        name for name in (_UNBOUND_OPENERS | _INSTALLING_OPENERS
+                          | _AMBIENT_OPENERS | _NOT_A_LANE_OPENER)
         if name not in shaped)
     assert vanished == [], (
         "these declared SDK names no longer exist as module-level definitions, "
