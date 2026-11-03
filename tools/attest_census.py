@@ -86,6 +86,7 @@ if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
     raise SystemExit(2)
 
 import argparse
+import contextlib
 import hashlib
 import json
 import re
@@ -304,7 +305,10 @@ def load_record(
         return None
 
     try:
-        raw = chosen.read_text()
+        # ⛔ Pinned to UTF-8, not the ambient locale (review cycle 14). JSON is UTF-8 by RFC 8259 and
+        # `record-review.sh` writes it that way, so under a C locale the locale default turns a
+        # perfectly good record into a false `UNREADABLE` — under-reporting a restorable proof.
+        raw = chosen.read_text(encoding="utf-8")
     except (OSError, ValueError) as exc:
         # OSError: permission denied, dangling link, a DIRECTORY named *.json.
         # ValueError: invalid UTF-8 (`UnicodeDecodeError`) — cycle 3 measured it escaping as rc 1.
@@ -614,6 +618,13 @@ def render(rows: list[Row], repo: str, generated_at: str, truncated: bool = Fals
 
 
 def main(argv: list[str] | None = None) -> int:
+    # ⛔ The report carries non-ASCII (`—`, `…`, the ⛔/⚠️ markers) in its own PROSE, so a C/POSIX
+    # stdout cannot encode it: without this, `print(text)` after a perfectly good run raises
+    # `UnicodeEncodeError` and the tool exits 1 — breaking its published `0`/`2`-never-`1` contract
+    # (measured: review cycle 14). Pinned the same way `validation/check-license-surface.py` pins a
+    # C-locale stream, and suppressed because `sys.stdout` may be a replaced stream without it.
+    with contextlib.suppress(AttributeError, ValueError):
+        sys.stdout.reconfigure(encoding="utf-8")
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--repo", default="daniel-ospina/tortoise")
     ap.add_argument("--reviews-dir", default=str(Path.home() / ".pi/agent/reviews"))
@@ -757,8 +768,14 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     try:
         out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text(text)
-    except OSError as exc:  # unwritable --out is a surface we could not write, not a finding
+        # ⛔ `encoding="utf-8"` is part of the CONTRACT, not tidiness (review cycle 14): this file is
+        # read by the pinned markdownlint, by `verify_census_document` (which re-derives its sha256)
+        # and by lanes grepping rows, so its bytes cannot be whatever locale the invoking shell
+        # exported. And `ValueError` in the `except` is load-bearing: `UnicodeEncodeError` is a
+        # `ValueError`, NOT an `OSError`, so an unencodable payload (a lone surrogate from a `gh`
+        # payload is the real shape) would escape the old `except OSError` as a traceback and rc 1.
+        out.write_text(text, encoding="utf-8")
+    except (OSError, ValueError) as exc:  # unwritable/unencodable --out is not a finding
         print(f"attest_census: could not write {out}: {exc}", file=sys.stderr)
         return 2
     print(text)

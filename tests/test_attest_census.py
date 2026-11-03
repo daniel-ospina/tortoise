@@ -20,6 +20,8 @@ from __future__ import annotations
 import ast
 import importlib.util
 import json
+import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -617,6 +619,66 @@ def test_an_unwritable_out_path_is_rc_2_not_a_traceback(monkeypatch, tmp_path):
     blocker = tmp_path / "file-not-dir"
     blocker.write_text("x")
     assert ac.main(["--reviews-dir", str(tmp_path), "--out", str(blocker / "o.md")]) == 2
+
+
+def test_a_c_locale_cannot_turn_a_good_run_into_exit_1(tmp_path):
+    """The artifact's BYTES must not depend on the ambient locale, and no encoding failure may
+    escape as rc 1 — the published contract is `0`/`2`, never `1`.
+
+    Measured shape (review cycle 14, the finding this test closes): under
+    `LC_ALL=C PYTHONCOERCECLOCALE=0 PYTHONUTF8=0`, `Path.write_text(text)` with NO `encoding=`
+    raises `UnicodeEncodeError` — a `ValueError`, **not** an `OSError` — so the `except OSError`
+    around the write let it escape as a traceback and rc 1, AFTER a run that had already read
+    everything correctly. A branch name or a `gh` stderr line carrying one non-ASCII character is
+    the whole trigger, and the file would otherwise have been the report every downstream reader
+    consumes (the pinned markdownlint, `verify_census_document`, a lane grepping rows): UTF-8 by
+    contract, so its encoding cannot be whatever the invoking shell happened to export.
+
+    Runs the real entry point in a subprocess on purpose: the default encoding of `open()` is
+    decided by the C library at interpreter start-up and cannot be monkeypatched in-process, so an
+    in-process test could not fail here. A `gh` shim supplies the payload — no network.
+    """
+    shim = tmp_path / "bin"
+    shim.mkdir()
+    payload = json.dumps(
+        [{"number": 5, "headRefOid": LIVE, "headRefName": "fix/naïve-ünicode", "title": "t"}]
+    )
+    gh = shim / "gh"
+    gh.write_text("#!/bin/sh\nprintf '%s' '" + payload + "'\n", encoding="utf-8")
+    gh.chmod(0o755)
+    reviews = tmp_path / "reviews"
+    reviews.mkdir()
+    out = tmp_path / "o.md"
+    # Drop every locale/encoding variable the ambient shell may export, then force the C locale:
+    # a leftover `PYTHONIOENCODING`/`PYTHONUTF8` would make this test vacuous on the box that runs it.
+    env = {
+        k: v
+        for k, v in os.environ.items()
+        if k not in ("PYTHONIOENCODING", "PYTHONUTF8", "PYTHONCOERCECLOCALE", "LC_ALL", "LANG")
+    }
+    env.update(
+        {
+            "PATH": shim.as_posix() + os.pathsep + env.get("PATH", ""),
+            "LC_ALL": "C",
+            "LANG": "C",
+            "PYTHONCOERCECLOCALE": "0",
+            "PYTHONUTF8": "0",
+        }
+    )
+    proc = subprocess.run(
+        [sys.executable, str(TOOL), "--reviews-dir", str(reviews), "--no-gate", "--out", str(out)],
+        cwd=str(tmp_path),
+        env=env,
+        capture_output=True,
+        timeout=120,
+    )
+    assert proc.returncode == 0, (
+        f"a C-locale box turned a good run into rc {proc.returncode} "
+        f"(contract: 0 or 2, never 1)\nstdout={proc.stdout[-2000:]!r}\nstderr={proc.stderr[-2000:]!r}"
+    )
+    assert out.exists(), f"rc 0 but no report was written: {sorted(p.name for p in tmp_path.iterdir())}"
+    # Decoded as UTF-8 deliberately: mojibake or a locale-encoded byte would not decode here.
+    assert "naïve-ünicode" in out.read_bytes().decode("utf-8")
 
 
 def test_no_gate_does_not_overwrite_a_record_present_reason(monkeypatch, tmp_path):
