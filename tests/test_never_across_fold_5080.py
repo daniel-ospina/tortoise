@@ -616,13 +616,18 @@ class TestDistinguishingDifference:
         language at all, the word read as a one-sided broadening, and the pair
         folded — this issue's silent memory loss, in its script form.
 
-        The direction is now the opposite one, and that is the whole fix: an
-        alphabetic character in NO known block is an UNKNOWN script, which is
-        an identity difference (``language``) and therefore refuses the fold,
-        so both claims survive.  The list is still finite — it is not
-        completed here — but its incompleteness now costs NOISE (a fold
-        refused, both claims kept) instead of a DELETED CLAIM, which is what
-        makes the boundary independent of a list being complete.
+        The direction is now the opposite one, and that is the whole fix: a
+        letter in NO known block is an UNKNOWN script, which is an identity
+        difference (``language``) and therefore refuses the fold, so both claims
+        survive.  The list is still finite — it is not completed here — but its
+        incompleteness now costs NOISE (a fold refused, both claims kept)
+        instead of a DELETED CLAIM, which is what makes the boundary independent
+        of a list being complete.
+
+        The four anti-over-refusal legs below are as load-bearing as the closure
+        itself: a sentinel that fires on the wrong character turns a legitimate
+        fold into a duplicate stored forever, and each of them caught a real
+        over-refusal in review.
         """
         assert v2.distinguishing_difference(
             "we ship the build", "we ship \u0568 the build") == "language"
@@ -648,6 +653,25 @@ class TestDistinguishingDifference:
         # refuse a fold between two claims that merely lost one.
         assert v2.distinguishing_difference("\u5f97\u308b \u00d7",
                                            "\u5f97\u308b") is None
+        # A claim read RAW (no NFC) against the same claim read NFD used to
+        # produce DIFFERENT script sets, so "ἀρχή" stopped folding with its own
+        # decomposed spelling — the same claim, stored twice forever.  `_scripts`
+        # now NFC-folds its input like every other boundary input does.
+        assert v2.fold_allowed("\u1f00\u03c1\u03c7\u03ae",
+                               "\u03b1\u0313\u03c1\u03c7\u03ae")
+        # A precomposed letter belongs to its BASE letter's script, searched one
+        # NFD level deeper: polytonic Greek (U+1F00-U+1FFF) is in no block, but
+        # it is GREEK, so dropping its accents still folds.
+        assert v2.fold_allowed("\u1f10\u03bd \u1f00\u03c1\u03c7\u1fc7",
+                               "\u03b5\u03bd \u03b1\u03c1\u03c7\u03b7")
+        # A script-block range carries its NON-letters too, on purpose: Arabic
+        # Indic digits are Arabic.  Reading only letters here turned this pair
+        # from a refused identity difference into a permitted `number`
+        # SUPERSEDE — a destroyed prior claim.
+        assert v2.distinguishing_difference(
+            "we have \u0661\u0662\u0663 pages", "we have 123 pages") == "language"
+        assert not v2.supersede_allowed("we have \u0661\u0662\u0663 pages",
+                                        "we have 123 pages")
         assert v2.fold_allowed("\u0441\u0435\u0440\u0432\u0435\u0440 \u00f7",
                                "\u0441\u0435\u0440\u0432\u0435\u0440")
         # A whole-claim language change is still refused, as it always was.
