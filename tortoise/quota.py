@@ -1172,21 +1172,27 @@ def enforce_org_limit(limits: dict | None, resource: str, sdk=None, *,
             | "documents".
         sdk: pre-built org SDK (REST callers already hold one) — optional.
             ⛔ For a TENANT-GRAPH resource (`TENANT_GRAPH_RESOURCES` —
-            `points`, `sessions`, `documents`) omitting BOTH this and
-            `sdk_factory` does NOT leave the count unscoped: `_count_resource`
-            falls back to `_make_sdk(namespace=org_id)` — the org's **DEFAULT**
-            graph (`org_<tid>`) — while a graph-bound credential's write lands
-            in `org_<tid>_<gid>` (`hosted_api._data_graph_name`). That
-            divergence is #8906: with a FULL default graph the gate REFUSES a
-            write into an EMPTY bound graph (and a graph-bound credential can
-            never reach the default graph, so it cannot lower that count), and
-            with an EMPTY default graph it ADMITS a write into a FULL bound one.
-            Pass exactly one of this or `sdk_factory` for those three. Both
-            current callers do — `hosted_api._check_org_limit` builds
-            `sdk_factory=_gate_sdk_for(org, resource)`, `mcp_server` passes
-            `sdk=_get_org_sdk()`. REGISTRY-SCOPED resources (`api_keys`,
-            `users`, `graphs`) are control-plane counts and are unaffected: the
-            registry namespace is the correct target for them.
+            `points`, `sessions`, `documents`) an omitted `sdk` is NOT
+            "unscoped": `_count_resource` falls back to
+            `_make_sdk(namespace=org_id)` — the graph `namespace=org_id`
+            derives, historically `org_<tid>` — while the WRITE may open a
+            different graph (`hosted_api._data_graph_name`). Two credential
+            shapes diverge that way: a graph-bound credential, whose write
+            lands in `org_<tid>_<gid>`; and an ORG-WIDE credential of a
+            PROMOTED org (#10180), whose default lives in another namespace, so
+            the fallback reads the graph promotion DEMOTED. #8906 is that
+            divergence: the counted graph being full REFUSES a write into a
+            target graph with room, and the counted graph being empty ADMITS a
+            write into a full target. Pass this or `sdk_factory` for those
+            three. Every current caller passes one of the two — measured, 4
+            call sites, 0 omissions (`rg -n 'enforce_org_limit[(]' tortoise/`):
+            `hosted_api._check_org_limit` supplies
+            `sdk_factory=_gate_sdk_for(org, resource)`, `mcp_server` supplies
+            `sdk=_get_org_sdk()`, and the two `/v1/index/docs` gates supply
+            `sdk=org_sdk` — correct there, because their write target IS the
+            default graph. REGISTRY-SCOPED resources (`api_keys`, `users`,
+            `graphs`) are control-plane counts and are unaffected: the registry
+            namespace is the correct target for them.
         sdk_factory: #4051 — called ONLY if and when the count is actually
             taken, for callers that must count the graph the write will open but
             must not build an SDK when the limit is unlimited (the capture lane's
