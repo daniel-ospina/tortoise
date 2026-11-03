@@ -108,6 +108,11 @@ _WARNED_READABLE_STORES: set[str] = set()
 #: one-off operator warnings already emitted, keyed by topic — never repeated.
 _WARNED_TOPICS: set[str] = set()
 
+#: provenance of the most recent request this process made. Used ONLY as a
+#: redaction fallback by `describe_failure`: a caller that prints an error after
+#: a rotation must still strip the key that was actually on the wire.
+_LAST_SENT: list[Connection | None] = [None]
+
 
 def _warn_once(topic: str, message: str) -> None:
     """Write a one-off operator warning to stderr (never raises, never repeats)."""
@@ -310,8 +315,16 @@ def describe_failure(exc: BaseException, provider: _BearerProvider | None = None
     travel, the value may not. The key is taken from what the failed request
     actually carried when that is known, else from the live resolution.
     """
-    key = provider.sent.key if provider is not None and provider.sent is not None else None
-    return redact(str(exc), key or resolve_connection().key)
+    keys = []
+    if provider is not None and provider.sent is not None:
+        keys.append(provider.sent.key)
+    if _LAST_SENT[0] is not None:
+        keys.append(_LAST_SENT[0].key)
+    keys.append(resolve_connection().key)
+    text = str(exc)
+    for key in keys:
+        text = redact(text, key)
+    return text
 
 
 class _BearerProvider(httpx.Auth):
@@ -338,6 +351,7 @@ class _BearerProvider(httpx.Auth):
     def auth_flow(self, request):
         connection = resolve_connection()
         self.sent = connection
+        _LAST_SENT[0] = connection
         self.withheld = None
         if connection.key and not _same_endpoint(connection.url, self.url):
             self.withheld = connection
