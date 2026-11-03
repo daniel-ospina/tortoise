@@ -404,9 +404,13 @@ class Run:
     run_attempt: int
     event: str
     created_at: str = ""
-    #: When the run's CURRENT ATTEMPT started (GitHub's `run_started_at`), null while
-    #: the attempt is still queued. `created_at` is the RUN's creation and does NOT
-    #: move on a rerun — MEASURED 2026-11-02 on run 41523739094, whose attempt 2 began
+    #: When the run's CURRENT ATTEMPT started (GitHub's `run_started_at`). NOT reliably
+    #: null while an attempt is queued — MEASURED 2026-11-03 that a QUEUED re-run
+    #: attempt already carries the stamp (run 41585740714: `run_attempt` 2, created
+    #: 05:45:16Z, `run_started_at` 05:54:22Z, still `queued`) — so a missing stamp is an
+    #: ABSTENTION in `attempt_age_seconds`, never evidence that an attempt has not
+    #: started. `created_at` is the RUN's creation and does NOT move on a rerun —
+    #: MEASURED 2026-11-02 on run 41523739094, whose attempt 2 began
     #: at 21:41:43Z while `created_at` still read 20:56:13Z (the attempt-1 time). The
     #: job count describes the LATEST attempt, so the AGE must too, or every rerun
     #: inherits the first attempt's age and its floor becomes 0 (see `_zero_job_stalled`).
@@ -1052,9 +1056,11 @@ def _live_zero_job(repo: str, run_id: int) -> tuple[str | None, int | None, int 
     cancels is KNOWN to contain runs that would have created jobs on their own.
 
     ⛔ THE ATTEMPT IS PART OF THE MEASUREMENT, NOT DECORATION. A status of `queued`
-    with `0` jobs is ALSO the shape of a FRESH RE-RUN ATTEMPT (its `run_started_at` is
-    null until it starts), so a peer re-run of the same run id inside the pass window
-    presents a payload identical to the one the classification was made from. Asking
+    with `0` jobs is ALSO the shape of a FRESH RE-RUN ATTEMPT, so a peer re-run of the
+    same run id inside the pass window presents a payload identical to the one the
+    classification was made from — the attempt integer is the field that separates
+    them (do not lean on `run_started_at` here: a queued re-run DOES carry a stamp —
+    see the measurement recorded on `ZERO_JOB_MAX_REPAIRABLE_ATTEMPT`). Asking
     only "is it still a queued zero-job run" would then cancel an attempt that was
     progressing normally, spend a second attempt of the budget, and (with
     `max_attempts = 3`) escalate the context EXHAUSTED — the loop the classification
@@ -1120,10 +1126,10 @@ def _cancel(repo: str, run: Run) -> str:
     UNCACHED (`_live_zero_job`) and the POST is issued only while the run is still in
     a QUEUED status with a MEASURED zero AND the attempt it classified — the same
     discipline `_rerun` already applies to the head immediately before its own action.
-    The ATTEMPT is compared for the reason the classification side abstains on it: a
-    fresh re-run attempt is `queued` with `0` jobs and a null `run_started_at`, so a
+    The ATTEMPT is compared because a fresh re-run attempt is `queued` with `0` jobs: a
     peer re-run of the same run id inside the pass window is INDISTINGUISHABLE from
-    the stalled run by status and job count alone.
+    the stalled run by status and job count alone, and `run_attempt` is the only field
+    in that payload that tells them apart.
 
     Only 'cancelled' means the run is OBSERVED `completed`: a rerun issued against a
     run the API still considers live is refused (`403 This workflow is already
