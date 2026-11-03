@@ -663,7 +663,7 @@ class TestExpansionSideSearchKeys:
         # Reachability of the displacement itself, so the assertion above is
         # not merely "the list is short".
         read_side_tail = sorted(
-            identifier_aliases(self.PROSE) + ["couch", "ikea", "800"],
+            [*identifier_aliases(self.PROSE), "couch", "ikea", "800"],
             key=len, reverse=True)[:4]
         assert "ikea800" in read_side_tail, read_side_tail
 
