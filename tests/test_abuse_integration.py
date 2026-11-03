@@ -156,6 +156,32 @@ def _await_records(predicate, *, timeout: float = 5.0,
     return predicate()
 
 
+def _await_no_record(predicate, *, after=None, window: float = 1.0,
+                     interval: float = 0.02) -> bool:
+    """Bounded NEGATIVE wait for an offloaded abuse/activation record (#10618).
+
+    The mirror of `_await_records`, and the fix for the class the cycle-3
+    review named: a negative assertion (``flagged_at is None``,
+    ``not notified``) read straight after the response is measured BEFORE the
+    offloaded hook can land, so a regression that wrongly flags/notifies
+    PASSES. Returns True only when `predicate` — the record that must NOT
+    appear — stayed false for the whole `window`.
+
+    `after` is the COMPLETION BARRIER: a predicate giving positive evidence
+    that the offloaded work for this request has already run (its own durable
+    row, its own in-memory read count). Without one the window can elapse while
+    the hook is still queued behind a busy ``abuse`` pool — which is the same
+    vacuity one step later — so a missing barrier is an assertion failure, not
+    a silently weaker pass.
+    """
+    if after is not None and not _await_records(after):
+        raise AssertionError(
+            "the offloaded abuse hook never landed the record this negative "
+            "assertion needs as its completion barrier, so the negative below "
+            "would measure nothing (#10618)")
+    return not _await_records(predicate, timeout=window, interval=interval)
+
+
 # ── R5: REST suspension enforcement ─────────────────────────────────────────
 
 class TestRestSuspension:
@@ -224,7 +250,14 @@ class TestPointBurst:
             for i in range(6):
                 self._post_point(tc, i)
             org_row = fake.tables["organizations"][0]
-            assert org_row["flagged_at"] is not None      # stage 1
+            # #10618: R1 recording + evaluation run in the OFFLOADED
+            # `_abuse_record_points` hook, so the flag can land just AFTER the
+            # response — poll (a bare read here flakes RED on a busy pool).
+            assert _await_records(
+                lambda: fake.tables["organizations"][0]["flagged_at"]
+                is not None), (  # stage 1
+                f"R1 never flagged after 6 in-window points; "
+                f"org={fake.tables['organizations'][0]!r}")
             assert org_row["suspended_at"] is None        # never stage 2
             assert not abuse.is_suspended_signal(TEAM)
             for i in range(3):  # continued in-window writes: still no suspend
@@ -246,10 +279,16 @@ class TestPointBurst:
         # is released when the clean evaluation above ends the first episode
         # (#3631), so both episodes notify; assert both the durable re-flag and
         # the second alert.
-        flag_rows = [e for e in fake.tables["abuse_events"]
-                     if e["event_type"] == "flag"]
-        assert len(flag_rows) >= 2
-        assert [c[0] for c in env["notified"]].count("abuse_flag") >= 2
+        # #10618: both are hook-produced, so poll for the SECOND of each rather
+        # than reading the instant the last response returns.
+        assert _await_records(
+            lambda: len([e for e in fake.tables["abuse_events"]
+                         if e["event_type"] == "flag"]) >= 2), (
+            f"the second (post-window) episode never re-flagged; "
+            f"flags={[e for e in fake.tables['abuse_events'] if e['event_type'] == 'flag']!r}")
+        assert _await_records(
+            lambda: [c[0] for c in env["notified"]].count("abuse_flag") >= 2), (
+            f"the second episode never re-alerted; notified={env['notified']!r}")
 
     def test_boundary_crossing_alerts_and_does_not_403(self, env):
         """A breach persisting past flagged_at + window escalates to a HUMAN
@@ -263,7 +302,12 @@ class TestPointBurst:
         with verdict_client(env["app"]) as tc:
             for i in range(6):
                 self._post_point(tc, i)
-            assert fake.tables["organizations"][0]["flagged_at"] is not None
+            # #10618: the flag is written by the OFFLOADED R1 hook — poll.
+            assert _await_records(
+                lambda: fake.tables["organizations"][0]["flagged_at"]
+                is not None), (
+                f"R1 never flagged after 6 in-window points; "
+                f"org={fake.tables['organizations'][0]!r}")
             # Age the flag EPISODE anchor (the flag event row — staging is
             # event-derived) a full window into the past, and move ONE point
             # event into the continuity band (flag, now-window] so the breach
@@ -283,11 +327,18 @@ class TestPointBurst:
             assert tc.get("/v1/team/keys", headers=_auth()).status_code != 403
             # The escalation is a human-review alert — a dashboard row the
             # operator can see AND a notification, never an "auto-suspended" lie.
-            assert [e for e in fake.tables["abuse_events"]
-                    if e["event_type"] == "review_needed"]
-            kinds = [c[0] for c in env["notified"]]
-            assert "abuse_review_needed" in kinds
-            assert "abuse_suspended" not in kinds
+            # #10618: the crossing evaluation, its `review_needed` row and its
+            # alert all come from the OFFLOADED R1 hook — poll each one.
+            assert _await_records(
+                lambda: bool([e for e in fake.tables["abuse_events"]
+                              if e["event_type"] == "review_needed"])), (
+                f"the boundary-crossing escalation never landed a "
+                f"review_needed row; events={fake.tables['abuse_events']!r}")
+            assert _await_records(
+                lambda: "abuse_review_needed"
+                in [c[0] for c in env["notified"]]), (
+                f"the human-review alert never fired; notified={env['notified']!r}")
+            assert "abuse_suspended" not in [c[0] for c in env["notified"]]
             # The 403 contract is UNCHANGED — it now requires a deliberate
             # OPERATOR suspend, which the engine no longer performs for anyone.
             fake.rpc("abuse_suspend", {"p_org_id": TEAM})
@@ -311,9 +362,17 @@ class TestPointBurst:
             for _ in range(6):
                 r = tc.delete("/v1/team/keys/revoke-me", headers=_auth())
                 assert r.status_code in (200, 404), r.text
-        events = [e for e in fake.tables.get("abuse_events", [])
-                  if e["event_type"] == "point_create"]
-        assert events == []  # revokes never record point_create
+        # #10618: the post-auth hook for those requests is offloaded, so a
+        # regression that recorded a point_create asynchronously could land
+        # AFTER this read. No completion barrier is available here — a DELETE's
+        # hook is a no-op (R3 counts GETs only, and there is no geo header) —, so
+        # the negative is measured over a bounded window instead of an instant.
+        assert _await_no_record(
+            lambda: bool([e for e in fake.tables.get("abuse_events", [])
+                          if e["event_type"] == "point_create"]),
+            window=1.0), (
+            f"a non-create write recorded a point_create; "
+            f"events={fake.tables.get('abuse_events')!r}")
         assert env["fake"].tables["organizations"][0]["flagged_at"] is None
 
 
@@ -343,7 +402,17 @@ class TestKeyVelocity:
                         json={"content": "next hooked request",
                               "kind": "statement"})
             assert r.status_code == 200
-        assert fake.tables["organizations"][0]["flagged_at"] is not None
+        # #10618: R1/R2 evaluation runs in the OFFLOADED `_abuse_record_points`
+        # hook, so the flag can land just after the response — poll. Once the
+        # flag is up the hook has run, so the alert read below is safe to poll
+        # on independently (it is emitted in the same evaluation).
+        assert _await_records(
+            lambda: fake.tables["organizations"][0]["flagged_at"] is not None), (
+            f"the piggybacked R2 evaluation never flagged the org; "
+            f"org={fake.tables['organizations'][0]!r}")
+        assert _await_records(
+            lambda: bool([c for c in env["notified"] if c[0] == "abuse_flag"])), (
+            f"the key_create flag never notified; notified={env['notified']!r}")
         flag_notifies = [c for c in env["notified"] if c[0] == "abuse_flag"]
         assert flag_notifies and flag_notifies[0][2]["rule"] == "key_create"
 
@@ -362,7 +431,18 @@ class TestKeyVelocity:
             r = tc.post("/v1/points", headers=_auth(),
                         json={"content": "hooked", "kind": "statement"})
             assert r.status_code == 200
-        assert fake.tables["organizations"][0]["flagged_at"] is None
+        # #10618: the flag would be written by the OFFLOADED hook, so reading it
+        # instantly would pass even if the regression flagged late. Barrier =
+        # the hooked request's OWN point_create row (R1 writes it, then
+        # evaluates); the evaluation's own `flagged_at` write follows it, so the
+        # bounded window starts once the hook has demonstrably run.
+        assert _await_no_record(
+            lambda: fake.tables["organizations"][0]["flagged_at"] is not None,
+            after=lambda: bool([e for e in fake.tables.get("abuse_events", [])
+                                if e["event_type"] == "point_create"]),
+            window=0.5), (
+            f"11 bootstrap mints must not flag the org; "
+            f"org={fake.tables['organizations'][0]!r}")
 
 
 # ── R3: exfiltration detection ──────────────────────────────────────────────
@@ -396,6 +476,20 @@ class TestExfiltration:
                 tc.get("/v1/team/keys", headers=_auth(TOKEN_A))
             for _ in range(40):
                 tc.get("/v1/team/keys", headers=_auth(TOKEN_B))
+            # #10618 cycle-3 review: the pre-#10618 negative here (`assert not
+            # [...]`, 100 reads == no breach) was DELETED rather than converted,
+            # so a threshold regression firing the TEAM breach at ≤100 reads
+            # would still pass (READ_TRACKER._notified dedups per window, so
+            # exactly one scope="team" notify results either way). Restored as a
+            # bounded negative: barrier = all 100 reads counted by the offloaded
+            # hooks, then a window in which no velocity notify may appear.
+            assert _await_no_record(
+                lambda: bool([c for c in env["notified"]
+                              if c[0] == "abuse_read_velocity"]),
+                after=lambda: len(abuse.READ_TRACKER._by_org.get(TEAM) or []) == 100,
+                window=0.5), (
+                f"the TEAM breach fired at 100 reads, below its 101 threshold; "
+                f"notified={env['notified']!r}")
             tc.get("/v1/team/keys", headers=_auth(TOKEN_B))  # 101st team read
         # #10618: the team notify comes from the OFFLOADED hook — poll (§ see
         # `_await_records`), then assert it fired exactly once.
@@ -415,8 +509,18 @@ class TestExfiltration:
             for i in range(101):
                 tc.post("/v1/points", headers=_auth(),
                         json={"content": f"write {i}", "kind": "statement"})
-        assert not [c for c in env["notified"]
-                    if c[0] == "abuse_read_velocity"]
+        # #10618: a wrongly-counted read would be recorded by the OFFLOADED
+        # post-auth hook, so an instant read of `notified` can pass before it
+        # lands. Barrier = all 101 POSTs' own point_create rows (the write-side
+        # hook), then a window in which no read-velocity notify may appear.
+        assert _await_no_record(
+            lambda: bool([c for c in env["notified"]
+                          if c[0] == "abuse_read_velocity"]),
+            after=lambda: len([e for e in env["fake"].tables.get("abuse_events", [])
+                               if e["event_type"] == "point_create"]) >= 101,
+            window=0.5), (
+            f"a POST burst fired read velocity (writes must never count as "
+            f"reads); notified={env['notified']!r}")
 
 
 # ── R4: geo ─────────────────────────────────────────────────────────────────
@@ -434,8 +538,14 @@ class TestGeo:
                 f"R4 notify never landed; notified={env['notified']!r}")
             tc.get("/v1/team/keys", headers={**_auth(), "CF-IPCountry": "US"})
             # negative assertion: give a MISSED notify the same bounded window
-            # to arrive before declaring the country quiet.
-            _await_records(lambda: len(env["notified"]) > 1, timeout=0.5)
+            # to arrive before declaring the country quiet. Barrier = this
+            # second GET's own R3 read counted, i.e. its offloaded hook ran.
+            assert _await_no_record(
+                lambda: len(env["notified"]) > 1,
+                after=lambda: len(abuse.READ_TRACKER._by_org.get(TEAM) or []) == 2,
+                window=0.5), (
+                f"an already-seen country notified again; "
+                f"notified={env['notified']!r}")
             assert len(env["notified"]) == 1  # seen country stays quiet
             tc.get("/v1/team/keys", headers={**_auth(), "CF-IPCountry": "DE"})
             assert _await_records(lambda: len(env["notified"]) == 2), (
@@ -453,6 +563,16 @@ class TestGeo:
     def test_no_header_fail_open(self, env):
         with verdict_client(env["app"]) as tc:
             assert tc.get("/v1/team/keys", headers=_auth()).status_code == 200
+        # #10618: the post-auth hook is offloaded and ALSO records R3 — barrier
+        # = that read counted, then a window in which no notify may appear (a
+        # geo notify without a CF-IPCountry header is the fail-closed bug this
+        # pins).
+        assert _await_no_record(
+            lambda: bool(env["notified"]),
+            after=lambda: len(abuse.READ_TRACKER._by_org.get(TEAM) or []) == 1,
+            window=0.5), (
+            f"a request with no CF-IPCountry header notified ops; "
+            f"notified={env['notified']!r}")
         assert env["notified"] == []
 
 

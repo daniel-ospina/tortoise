@@ -3185,11 +3185,14 @@ _DREAM_QUEUE_TTL_S = 600
 # other `to_thread` sites on that pool are enough on their own to park every
 # worker during a burst (prod is 2 vCPU →
 # `min(32, cpu+4)` = 6) and stall unrelated tenants BEFORE their handlers —
-# #10618 removed the last PER-REQUEST tenant of that pool (`first_api_call` and
-# `_abuse_post_auth`, both awaited on every authenticated request; they ride the
-# bounded ``abuse`` lane now), which shortens no fuse: the shared pool is still
-# unbounded-wait and still `min(32, cpu+4)`. While `/health` stays green by
-# design (#2850), nothing would notice. That
+# #10618 removed the last PER-REQUEST tenant of that pool on THIS (REST/hosted)
+# auth path (`first_api_call` and `_abuse_post_auth`, both awaited on every
+# authenticated request; they ride the bounded ``abuse`` lane now), which
+# shortens no fuse: the shared pool is still unbounded-wait and still
+# `min(32, cpu+4)`. It is not empty of per-request hops — the `/mcp` side still
+# awaits `abuse.check_new_country` there (pre-existing, tracked as #10720) — so
+# read this as "one tenant moved", never "the hazard is gone". While `/health`
+# stays green by design (#2850), nothing would notice. That
 # is the #3060 starvation path relocated, not removed. Dream therefore gets its
 # OWN pool: it can only ever starve itself.
 #
@@ -3216,8 +3219,10 @@ _DREAM_EXECUTOR = ThreadPoolExecutor(
 # is an unbounded all-time scan of an org's Sessions + CONTAINS (the windowed
 # funnel rides the same hand-off), so this is the "long / stallable" class the
 # comment at the top of this file says must NOT share the loop's default
-# executor with ~80 other `to_thread` sites and the auth middleware's abuse
-# hooks. Its own small pool means a slow graph can only starve the scorecard.
+# executor with ~80 other `to_thread` sites (the auth path's per-request abuse
+# hooks were among them until #10618 moved them to the bounded ``abuse`` lane —
+# the pool itself is unchanged: `min(32, cpu+4)` with an unbounded wait). Its
+# own small pool means a slow graph can only starve the scorecard.
 _SCORECARD_EXECUTOR = ThreadPoolExecutor(
     max_workers=max(1, min(_int_env("TORTOISE_SCORECARD_WORKERS", 2), 8)),
     thread_name_prefix="activation-scorecard")
@@ -21426,8 +21431,9 @@ _RETENTION_MAX_ORGS = 1000
 #: self-inflicted `org_read_timeout`. The read is a control-plane HTTP walk of
 #: up to `max_pages` round trips per org, which is the "long / stallable"
 #: class the #3060 doctrine above says must NOT share the loop's default
-#: executor with ~80 other `to_thread` sites and the auth middleware's abuse
-#: hooks.
+#: executor with ~80 other `to_thread` sites (the auth path's per-request abuse
+#: hooks left that pool in #10618; its width and its unbounded wait did not
+#: change, so the doctrine stands).
 _RETENTION_MAX_CONCURRENCY = 4
 
 
