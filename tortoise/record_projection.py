@@ -146,6 +146,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -170,9 +171,11 @@ __all__ = [
     "TURNS_SNAPSHOT_OPTIONAL_KEYS",
     "TURNS_SNAPSHOT_UNATTESTABLE_KEYS",
     "RecordProjectionError",
+    "RecordStatementError",
     "RefusedJournalOperation",
     "ReplayReport",
     "UnknownJournalRecordType",
+    "jsonb_columns",
     "mutations_for",
     "refused_props_names",
     "replay",
@@ -690,6 +693,37 @@ class RefusedJournalOperation(RecordProjectionError):
     fact from an **undeclared** type, and collapsing the two would hide which
     one a new producer tripped.
     """
+
+
+class RecordStatementError(RecordProjectionError):
+    """A plan statement FAILED at execution — the attribution Postgres omits.
+
+    The driver reports what went wrong with the VALUE ("invalid input syntax
+    for type json") and where it sat in the statement text (a caret under
+    `'err4032 r...`), but never WHICH column or which Python type disagreed with
+    the record's declared shape. #9548 lost **302** live rows to that gap: every
+    one surfaced as the bare class name `InvalidTextRepresentation` and nothing
+    could tell which of `public.point`'s 71 columns was refusing.
+
+    So the failing :class:`Statement` rides along, and `str()` carries all three
+    of the facts a failure report needs — the cause, the statement's first 120
+    chars, and each bound column's PYTHON value type. It is raised by
+    :func:`replay` around the `execute` call, so it is chained (`from exc`) and
+    the driver's own exception — with its LINE/DETAIL/CONTEXT — is never lost.
+    """
+
+    def __init__(self, statement: Statement, cause: BaseException,
+                 *, index: int = -1, total: int = -1) -> None:
+        self.statement = statement
+        self.cause = cause
+        self.index = index
+        self.total = total
+        where = (f"statement {index + 1}/{total}" if index >= 0 and total > 0
+                 else "statement")
+        super().__init__(
+            f"{where} failed ({type(cause).__name__}: {cause}) — "
+            f"{statement.attribution()}"
+        )
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -1351,6 +1385,12 @@ def _migrations_dir() -> Path:
     ships no `supabase/` tree, so without the second location `table_columns()`
     raised `RecordProjectionError` before a single statement and every armed
     live write failed — the record empty, the gate green (#9231 review P2).
+
+    ⛔ ZERO ARGUMENTS, deliberately: `tests/test_health_build_identity_10447.py`
+    patches this NAME with a zero-arg callable, and patch-by-name is the
+    documented seam for "the migrations moved". Giving it parameters would make
+    that seam raise `TypeError` from inside a plan build, so the freshness
+    question is answered elsewhere (see `jsonb_columns`) rather than here.
     """
     repo = REPO_ROOT / "supabase" / "migrations"
     if _complete(repo):
@@ -1397,6 +1437,153 @@ def _parse_added_columns(sql: str) -> dict[str, frozenset[str]]:
         for column in _ADDED_COLUMN_RE.findall(body):
             added.setdefault(table, set()).add(column)
     return {table: frozenset(cols) for table, cols in added.items()}
+
+
+#: One column definition of a `CREATE TABLE`, with its TYPE. The name-only
+#: reader above exists to answer "does the table have this column"; this one
+#: answers "what SHAPE does the column take", which is the question a bound
+#: parameter's encoding depends on (#9548).
+_COLUMN_TYPE_RE = re.compile(
+    r'^\s*("?([a-z_][a-z0-9_]*)"?)\s+'
+    r'(text|jsonb|integer|boolean|bigint|double precision|timestamptz)\b',
+    re.M | re.I)
+#: A forward migration that ADDS a COLUMN with a TYPE — the type is what
+#: `_ADDED_COLUMN_RE` above does not keep, and `table_columns()` unions the same
+#: statements (append-only history adds a column that way, #2782). ⛔ The TYPE
+#: comes from the same CLOSED vocabulary as `_COLUMN_TYPE_RE`, with NO terminator
+#: lookahead: what follows the type is arbitrary (`NOT NULL DEFAULT '{}'::jsonb`,
+#: or end-of-statement), and a lookahead demanding `,;)\n` immediately after it
+#: matches NONE of this repo's own forward migrations (measured).
+_ADDED_COLUMN_TYPED_RE = re.compile(
+    r"ADD\s+COLUMN\s+(?:IF\s+NOT\s+EXISTS\s+)?\"?([a-z_][a-z0-9_]*)\"?\s+"
+    r"(text|jsonb|integer|boolean|bigint|double precision|timestamptz)\b",
+    re.I)
+
+#: A forward migration that NARROWS or WIDENS an existing column's type:
+#: `ALTER TABLE public.<t> ALTER COLUMN <c> TYPE <type> [NOT NULL] [USING …]`.
+#: Append-only history means a landed type DECISION can only be reversed this way
+#: (#9264 turned `session.capture_redactions` from `jsonb` into `integer`), so a
+#: reader that understood only `CREATE TABLE` would report a `jsonb` column the
+#: live database no longer has. ⛔ Same rule as above — only the leading
+#: `TYPE <type>` token matters, never what follows it: a terminator lookahead here
+#: silently MISSED `… TYPE text NOT NULL` (measured), and that is the NARROWING
+#: direction. The name would have stayed in the `jsonb` set and every string
+#: bound to the now-`text` column would be JSON-QUOTED — no error, no counter,
+#: silent corruption.
+_ALTER_COLUMN_TYPE_RE = re.compile(
+    r"ALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?public\.([a-z_]+)\s+"
+    r"ALTER\s+COLUMN\s+\"?([a-z_][a-z0-9_]*)\"?\s+TYPE\s+"
+    r"(text|jsonb|integer|boolean|bigint|double precision|timestamptz)\b",
+    re.S | re.I)
+
+
+#: How long a parsed jsonb map may be reused, in seconds. `_jsonb_or_scalar`
+#: runs once per string parameter of EVERY statement, so an un-memoised parse
+#: measured 2.71 ms and made a 50-record `replay_plan` take 1182 ms instead of
+#: 5.8 ms — a ~200x regression on the SYNCHRONOUS capture path, which §17 forbids
+#: the seam from adding.
+#:
+#: ⛔ `table_columns()` IS NOT CACHED AT ALL, and this one is BOUNDED rather than
+#: exempt (#9548 review). `supabase/migrations` is applied by a workflow separate
+#: from the app deploy, so a long-lived process could otherwise keep answering a
+#: map it parsed before a migration landed: a NEW `jsonb` column would re-open the
+#: 22P02 row drops, and a `jsonb→text` NARROWING would JSON-quote strings bound to
+#: a now-`text` column with no error and no counter. A TTL bounds that window to
+#: :data:`_JSONB_CACHE_TTL_SECONDS` instead of to the process's lifetime, at a
+#: clock read per parameter rather than a file parse.
+#:
+#: ⛔ NOT A `ContextVar` PER PLAN BUILD, which would have no window at all: this
+#: module is FORBIDDEN an ambient carrier — `tests/test_record_projection.py::
+#: test_this_module_has_no_ambient_tenant_READER` reads `contextvars` itself as
+#: ambient state, because a value that outlives a call is one value for every
+#: tenant the process serves.
+_JSONB_CACHE_TTL_SECONDS = 5.0
+_JSONB_CACHE: dict = {"at": float("-inf"), "names": frozenset()}
+
+
+def _jsonb_cache_clear() -> None:
+    """Drop the TTL memo (for a caller that changed the migrations under us)."""
+    _JSONB_CACHE.update({"at": float("-inf"), "names": frozenset()})
+
+
+def _jsonb_columns_for_dir(migrations_dir: Path) -> frozenset[str]:
+    """`jsonb_columns()` for ONE already-resolved migrations directory."""
+    sql = _read_migrations(migrations_dir)
+    # `(table, column)` PAIRS, so a per-table narrowing cannot delete a column
+    # that is `jsonb` in ANOTHER record table; flattened to names at the end.
+    found: set[tuple[str, str]] = set()
+    for table, body in _TABLE_RE.findall(sql):
+        if table not in THE_RECORD_TABLES:
+            continue
+        for _quoted, column, type_name in _COLUMN_TYPE_RE.findall(body):
+            if type_name.lower() == "jsonb":
+                found.add((table, column))
+    for table, body in _ALTER_ADD_COLUMN_RE.findall(sql):
+        if table not in THE_RECORD_TABLES:
+            continue
+        for column, type_name in _ADDED_COLUMN_TYPED_RE.findall(body):
+            if type_name.lower() == "jsonb":
+                found.add((table, column))
+    if not any(table in THE_RECORD_TABLES
+               for table, _body in _TABLE_RE.findall(sql)):
+        # ⛔ FAIL CLOSED, like `table_columns()`. An EMPTY set is the worst
+        # answer this function can give: it silently stops the #9548 encoding
+        # and the row drops come back with no signal at all. A partial tree (a
+        # migration missing) still yields a map — narrower, and the pin on
+        # #9264's narrowing is what notices — so only the "no schema at all"
+        # case is refused here.
+        raise RecordProjectionError(
+            "the record schema is not on disk — no CREATE TABLE for any record "
+            f"table was found in {migrations_dir}. The jsonb encoding rule "
+            "reads the DECLARED column types from those files, and an empty "
+            "answer would silently stop serialising a scalar bound to a jsonb "
+            "column — the row-drop class #9548 exists to end."
+        )
+    for table, column, type_name in _ALTER_COLUMN_TYPE_RE.findall(sql):
+        if table not in THE_RECORD_TABLES:
+            continue
+        found.discard((table, column))
+        if type_name.lower() == "jsonb":
+            found.add((table, column))
+    return frozenset(column for _table, column in found)
+
+
+
+def jsonb_columns(migrations_dir: Path | None = None) -> frozenset[str]:
+    """The record's `jsonb` COLUMN NAMES, parsed from the migrations.
+
+    Keyed by column NAME, not `(table, column)`, because the one caller
+    (:func:`_jsonb_or_scalar`) is handed a column name and nothing else. That is
+    sound only while no `jsonb` column shares its name with a non-`jsonb`
+    column of another record table — an invariant a name-keyed map can silently
+    break, so it is PINNED
+    (`tests/test_9548_record_search_keys_shape.py`) rather than assumed; the
+    PARSE is per `(table, column)`, and only its result is flattened.
+
+    A `CREATE TABLE` is the base; a FORWARD `ALTER TABLE … ADD COLUMN` and
+    `ALTER TABLE … ALTER COLUMN … TYPE` are applied over it, because append-only
+    history can only change a column's shape that way. #9264 is the concrete case
+    and it MATTERS here: `session.capture_redactions` is declared `jsonb` in the
+    base shape and narrowed to `integer` by its own forward migration, so a
+    reader that stopped at `CREATE TABLE` would call an integer column a
+    document container.
+
+    ⛔ RE-PARSING PER PARAMETER IS NOT AN OPTION: `_jsonb_or_scalar` runs once per
+    string parameter of every statement, so an un-memoised parse is the whole
+    cost of a plan build. The answer is memoised for
+    :data:`_JSONB_CACHE_TTL_SECONDS` — long enough that a plan (or a burst of
+    writes) parses once, short enough that a migration landing while the process
+    runs is seen without a restart. `table_columns()` is uncached; this one is
+    bounded, and the difference is stated at the constant rather than implied.
+    """
+    if migrations_dir is not None:
+        return _jsonb_columns_for_dir(migrations_dir)
+    now = time.monotonic()
+    if now - float(_JSONB_CACHE["at"]) < _JSONB_CACHE_TTL_SECONDS:
+        return _JSONB_CACHE["names"]
+    names = _jsonb_columns_for_dir(_migrations_dir())
+    _JSONB_CACHE.update({"at": now, "names": names})
+    return names
 
 
 def table_columns(migrations_dir: Path | None = None) -> dict[str, frozenset[str]]:
@@ -1605,10 +1792,94 @@ class Statement:
 
     sql: str
     params: tuple[Any, ...]
+    #: Aligned with ``params``: when this tuple is NON-EMPTY it has exactly one
+    #: entry per parameter, and ``param_columns[i]`` is the record COLUMN the
+    #: i-th parameter is bound to. An EMPTY tuple means the statement carries NO
+    #: attribution (the journal row, the relation/direct-edge/narrative builders)
+    #: — a declared gap, not a claim of alignment: nothing here could name those
+    #: parameters, and inventing `""` placeholders would make the map look total
+    #: while still naming nothing. Exists for ATTRIBUTION, not execution.
+    #: ⚠️ WHY IT EXISTS AT ALL: when Postgres refuses a parameter it names the
+    #: offending VALUE's position in the statement text (`...  'event', 'arm b
+    #: content', 'live', 'err4032 r...`) and never the column, so a failure log
+    #: built from the driver's message alone cannot say WHICH column disagreed
+    #: with the graph. #9548 lost 302 rows to exactly that silence: every one was
+    #: reported as `InvalidTextRepresentation` and nothing else.
+    param_columns: tuple[str, ...] = ()
 
     def render(self) -> str:
         """A readable one-liner for logs and hover-less debugging."""
         return f"{self.sql} -- {self.params!r}"
+
+    def value_types(self) -> str:
+        """`column=python_type[→jsonb(shape)]` for every parameter it binds.
+
+        Two halves, and the SECOND is the one built for #9548. The Python type
+        alone stopped being diagnostic the moment this fix landed: a `str` bound
+        to a `jsonb` column IS the correct shape now (the column takes a JSON
+        scalar), so `search_keys=str` reads identically for a good binding and
+        for the defect it was added for. So a `jsonb`-column `str` parameter
+        also reports whether it IS a JSON document: `→jsonb` when it parses,
+        `→jsonb(NOT a JSON document)` when it does not. Never raises: a schema
+        that cannot be read must not replace the driver's cause with its own.
+
+        ⛔ WHAT THE THREE SHAPES MEAN, and the one that carries a MAP miss
+        (#10692 review P2 — the earlier version of this docstring sold
+        `→jsonb(NOT a JSON document)` as "exactly the pre-fix binding, visible
+        in the log line", which overstated it):
+
+          * `search_keys=str→jsonb` — the good binding: a `str` the map says is
+            a `jsonb` column, and whose value parses as a JSON document.
+          * `search_keys=str` — **NO `→jsonb` suffix at all**. This is the one a
+            stale/partial `jsonb_columns()` map produces, and it is the miss
+            the encoder cannot see either (the encoder reads the SAME map), so
+            the ABSENCE of the suffix is the signal: the parameter was bound to
+            a column this module does not believe is `jsonb`, i.e. it went to
+            the driver VERBATIM. Read it that way — an un-suffixed string
+            parameter on a column the migrations declare `jsonb` is the #9548
+            condition, not a clean binding.
+          * `search_keys=str→jsonb(NOT a JSON document)` — a `str` bound to a
+            column the map DOES call `jsonb` whose value is not JSON. ⚠️
+            DEFENSIVE ONLY: no statement builder in this module can produce it
+            today, because `_jsonb_or_scalar` `json.dumps`-es every `str` bound
+            to a `jsonb` column before it becomes a parameter, and the only
+            other `str` parameters here (`org_id`, `graph_id`, `node_key`, `id`,
+            `url`) are not `jsonb` columns. It stays because it is the read-out
+            for the shape #9548 shipped — a caller that builds a `Statement`
+            OUTSIDE these builders (a repair script, a hand-written backfill)
+            gets the shape named rather than an opaque `str` — and it is PINNED
+            as that by `tests/test_9548_record_search_keys_shape.py::
+            test_the_pre_fix_binding_shape_is_still_readable_when_built_by_hand`
+            (a hand-built `Statement`, labelled defensive-only), so this is a
+            tested branch rather than claimed coverage.
+        """
+        try:
+            jsonb = jsonb_columns()
+        except Exception:
+            jsonb = frozenset()
+        pairs: list[str] = []
+        seen: set[int] = set()
+        for index, name in enumerate(self.param_columns):
+            if not name or index in seen or index >= len(self.params):
+                continue
+            seen.add(index)
+            value = self.params[index]
+            declared = ""
+            if name in jsonb:
+                declared = "→jsonb"
+                if isinstance(value, str):
+                    try:
+                        json.loads(value)
+                    except (TypeError, ValueError):
+                        declared = "→jsonb(NOT a JSON document)"
+            pairs.append(f"{name}={type(value).__name__}{declared}")
+        return ", ".join(pairs)
+
+    def attribution(self) -> str:
+        """The failing statement, as much of it as a log line may carry."""
+        types = self.value_types()
+        columns = f" columns[{types}]" if types else ""
+        return f"statement {self.sql[:120]!r}{columns}"
 
 
 @dataclass(frozen=True)
@@ -1650,8 +1921,31 @@ def _jsonb_or_scalar(column: str, value: Any) -> Any:
     The caller supplies the value; this module does not coerce, because a
     journal carrying a string where the record's column is `boolean` is a
     journal/record disagreement and coercing it here would hide it.
+
+    ⛔ A `jsonb` COLUMN IS A DOCUMENT CONTAINER, NOT A LIST (#9548). A bare
+    string bound to it is a JSON *scalar* — `search_keys` is the case: the graph
+    stores it SPACE-JOINED (`flatten_search_keys_prop`, because FalkorDB's
+    Point FULLTEXT index cannot match an array-valued property, #5482) and the
+    journal carries the node's own value. Passing that string through unencoded
+    made Postgres read it as raw JSON TEXT and refuse EVERY such record with
+    `22P02` ("invalid input syntax for type json"); the seam counted one
+    `write_failed` and dropped the row. 302 drops were measured live at #9548.
+
+    ⚠️ `json.dumps` — not "store the array instead". The record is a CACHE OF
+    THE GRAPH (`cache_projection.node_from_row` reads this column straight back
+    onto the node), so the column must hold what a rebuild can materialize
+    without a repair pass: a JSON ARRAY reads back as a Python `list`, which is
+    the array-valued `search_keys` the FTS index cannot match — the breakage
+    moves from writes to reads (#10203/#5444 exist only to repair graphs that
+    carry one). A JSON STRING reads back as the graph's own flat `str`.
+
+    Which columns are `jsonb` is READ FROM THE MIGRATIONS (`jsonb_columns`),
+    never restated here: a hand-copied type list is a second declaration of the
+    schema, and the second declaration is the one that goes stale.
     """
     if isinstance(value, (dict, list)):
+        return json.dumps(value)
+    if isinstance(value, str) and column in jsonb_columns():
         return json.dumps(value)
     return value
 
@@ -1873,14 +2167,30 @@ def _upsert_statement(
     key_sql, key_params = _render_value(key)
     placeholders_list: list[str] = ["%s", "%s", "%s", key_sql]
     params: list[Any] = [org_id, graph_id, node.label, *key_params]
+    # Aligned with `params` (see `Statement.param_columns`): the four leading
+    # bindings are the record's own scope/key columns, then one entry per
+    # parameter the column's value expands to — a `_SqlExpr` can expand to
+    # several, which is why the name is repeated rather than zipped per column.
+    # ⛔ `key` IS A `_SqlExpr` TOO (#9956) and can expand to SEVEN parameters (a
+    # resolved `:Source` key is a `COALESCE(<6-param subquery>, %s)`), so its
+    # name must be repeated `len(key_params)` times. Seeding it ONCE misaligned
+    # every later name: measured on a `SourceCreated` plan, 20 params against 14
+    # names, `url_aliases` reported against a `graph_id` and the real `jsonb`
+    # parameter unnamed — i.e. defect 2 re-created on the one table that carries
+    # the most `jsonb` columns (`tests/test_9548_...::
+    # test_every_statement_s_param_columns_align_with_its_params` pins it).
+    param_columns: list[str] = ["org_id", "graph_id", "node_label",
+                               *(["node_key"] * len(key_params))]
     for column, value in col_values.items():
         fragment, values = _render_value(
             value if isinstance(value, _SqlExpr)
             else _jsonb_or_scalar(column, value))
         placeholders_list.append(fragment)
         params.extend(values)
+        param_columns.extend([column] * len(values))
     placeholders_list.append("%s")
     params.append(json.dumps(tail))
+    param_columns.append("props")
     placeholders = ", ".join(placeholders_list)
     # IDEMPOTENCE, stated once: re-applying the same record writes the same
     # absolute values onto the same row. A second replay of the journal
@@ -1899,7 +2209,7 @@ def _upsert_statement(
         f"VALUES ({placeholders}) "
         f"ON CONFLICT (org_id, graph_id, node_key) DO UPDATE SET {updates}"
     )
-    return Statement(sql, tuple(params))
+    return Statement(sql, tuple(params), tuple(param_columns))
 
 
 def _patch_statement(
@@ -1913,17 +2223,26 @@ def _patch_statement(
 ) -> Statement:
     sets: list[str] = []
     params: list[Any] = []
+    # Aligned with `params` (see `Statement.param_columns`) — a patch binds
+    # exactly one parameter per column.
+    param_columns: list[str] = []
     for column, value in col_values.items():
         sets.append(f"{column} = %s")
         params.append(_jsonb_or_scalar(column, value))
+        param_columns.append(column)
     if tail:
         sets.append("props = props || %s::jsonb")
         params.append(json.dumps(tail))
+        param_columns.append("props")
     if not sets:
         # A patch with nothing to write is a 0-row no-op by construction; make
         # it a real statement so the caller still sees the record was consumed.
         sets.append("node_key = node_key")
     params.extend([org_id, graph_id, *([key] * len(match))])
+    # `match` NAMES the predicate columns (`_ENTITY_MATCH_COLUMNS["source"]` is
+    # `("id", "node_key")`), so the names come from it — labelling every match
+    # parameter `node_key` would report an `id` predicate as `node_key`.
+    param_columns.extend(["org_id", "graph_id", *match])
     predicate = " OR ".join(f"{c} = %s" for c in match)
     if len(match) > 1:
         predicate = f"({predicate})"
@@ -1931,7 +2250,7 @@ def _patch_statement(
         f"UPDATE public.{node.table} SET {', '.join(sets)} "
         f"WHERE org_id = %s AND graph_id = %s AND {predicate}"
     )
-    return Statement(sql, tuple(params))
+    return Statement(sql, tuple(params), tuple(param_columns))
 
 
 def _delete_statement(
@@ -4977,8 +5296,18 @@ def replay(records: Sequence[Mapping[str, Any]], conn: Any, *, org_id: str,
     # context the plan is applied in — plus the role gate that decides whether
     # the context can mean anything at all.
     cursor = scope_connection(conn, org_id)
-    for statement in plan:
-        cursor.execute(statement.sql, statement.params)
+    for index, statement in enumerate(plan):
+        try:
+            cursor.execute(statement.sql, statement.params)
+        except Exception as exc:
+            # ATTRIBUTION (#9548). Postgres's message names the offending VALUE
+            # and its position in the statement, never the COLUMN or the Python
+            # type that disagreed with the record's declared shape — so 302
+            # dropped rows were reported as `InvalidTextRepresentation` and
+            # nothing else. The failing statement rides on the exception; the
+            # caller's transaction is untouched, exactly as before.
+            raise RecordStatementError(statement, exc, index=index,
+                                       total=len(plan)) from exc
     report = ReplayReport(events=len(records), statements=0)
     for statement in plan:
         if _JOURNAL_INSERT_PREFIX in statement.sql:

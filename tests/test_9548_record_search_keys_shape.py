@@ -1,0 +1,738 @@
+"""#9548 — the record DROPPED every Point carrying `search_keys`.
+
+THE DEFECT. `public.point.search_keys` is `jsonb`. The graph — and therefore
+every `PointAdded`/`PointPromoted` journal snapshot, which carries the NODE's own
+value — stores the **space-joined STRING** FalkorDB's Point FULLTEXT index needs
+(`projection/entities.py::flatten_search_keys_prop`; a list-valued property is
+never indexed, #5482). `record_projection._jsonb_or_scalar` serialised only
+`dict`/`list` and passed a `str` through as TEXT, so Postgres read it as raw JSON
+and refused EVERY such record with `22P02`:
+
+    psycopg2.errors.InvalidTextRepresentation: invalid input syntax for type json
+    DETAIL:  Token "err4032" is invalid.
+
+`record_writer.write_live_record` counted one `write_failed` and dropped the row.
+Measured live at #9548: `{"armed":true,"ok":true,
+"record_write_failures":{"write_failed":302}}` — 302 Points silently absent from
+the record while the receipt said `ok: true`. Nothing in the report named a
+column: the seam logged `type(exc).__name__` and threw `str(exc)` away.
+
+WHAT IS PINNED HERE, and why each half is needed.
+
+1. **The OLD shape is refused, and the test that says so fails on the pre-fix
+   code.** The projection now emits a JSON *document* for a `jsonb` column, so
+   the value bound for `search_keys` is `json.loads`-able and decodes back to
+   the graph's own string. Before the fix that parameter was the bare
+   `err4032 release deploy`, whose `json.loads` raises — i.e. the exact input
+   Postgres refused with `22P02`.
+2. **The NEW shape APPLIES and round-trips through the record's OWN reader.** A
+   green write is not enough: the record is a CACHE OF THE GRAPH
+   (`cache_projection.node_from_row` reads the column straight back onto the
+   node), so the read side must yield what the graph can index. Storing the
+   array instead also APPLIES — and reads back a `list`, the array-valued
+   `search_keys` the FULLTEXT index cannot match. That arm is pinned as a
+   REFUSAL, so "make the write green by storing the array" cannot pass by
+   accident.
+3. **A failure names its column.** `RecordStatementError` carries the failing
+   statement, its first 120 characters, and each bound column's Python type, and
+   `RecordWriter.write` no longer discards `str(exc)`.
+
+The DB legs need a Postgres carrying the record migrations (`TEST_RECORD_DB_URI`,
+the `#9551` job). Unset ⇒ they SKIP, never pass. The DB-free legs are the ones
+that red on the pre-fix code on the PR path.
+"""
+from __future__ import annotations
+
+import json
+import sys
+import uuid
+from pathlib import Path
+
+import pytest
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO_ROOT))
+
+from tortoise import monitoring, record_projection, record_writer  # noqa: E402
+
+RECORD_DB_ENV = "TEST_RECORD_DB_URI"
+
+#: The value the GRAPH holds after `flatten_search_keys_prop`: one space-joined
+#: string. Every arm below is built from it, so no arm can accidentally test a
+#: shape the product never writes.
+GRAPH_KEYS = "err4032 release deploy"
+
+
+def _record(tenant, *, search_keys, content="the deploy released err4032"):
+    point = {
+        "id": f"pt_{uuid.uuid4().hex[:16]}",
+        "pointKind": "event",
+        "content": content,
+        "status": "live",
+        "confidence": 0.8,
+        "c_cal": 0.7,
+    }
+    if search_keys is not None:
+        point["search_keys"] = search_keys
+    return {"type": "PointAdded", "point": point,
+            "ts": "2026-10-31T00:00:00Z"}
+
+
+def _search_keys_statement(plan):
+    """The ONE statement of a Point plan that binds `search_keys`.
+
+    Found through `Statement.param_columns` (the same alignment the failure
+    attribution uses), never by scanning `params` for a string that looks right:
+    a scan would pass on the wrong parameter. `plan[0]` is the `node_identity`
+    FK parent, which binds no `search_keys` at all.
+    """
+    found = [s for s in plan if "search_keys" in s.param_columns]
+    assert len(found) == 1, (
+        f"expected one statement binding `search_keys`, got {len(found)}: "
+        f"{[s.sql[:120] for s in found]}")
+    return found[0]
+
+
+def _search_keys_param(plan) -> object:
+    """The value the plan binds to the `search_keys` column."""
+    statement = _search_keys_statement(plan)
+    return statement.params[list(statement.param_columns).index("search_keys")]
+
+
+def _plan_record(record, tenant):
+    return record_projection.replay_plan(
+        [record], org_id=tenant[0], graph_id=tenant[1], position=False)
+
+
+def _tenant():
+    token = uuid.uuid4().hex[:8]
+    return (f"org-9548-{token}", f"graph-9548-{token}")
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# 1. The OLD shape — RED on the pre-fix code, with no database at all
+# ════════════════════════════════════════════════════════════════════════════
+
+
+def test_the_bound_search_keys_value_is_a_json_document_a_jsonb_column_takes():
+    """The parameter bound to a `jsonb` column must be VALID JSON (#9548).
+
+    THIS IS THE TEST THAT REDS ON THE PRE-FIX CODE. `_jsonb_or_scalar` passed
+    the graph's space-joined string through as TEXT, so the parameter was
+    `err4032 release deploy` — not a JSON document, which is exactly what
+    Postgres refused:
+
+        invalid input syntax for type json / DETAIL: Token "err4032" is invalid.
+
+    The assertion is `json.loads` and not "the string contains quotes" because
+    it is the SAME acceptance test Postgres applies to a `jsonb` input; a shape
+    it cannot parse is a shape the column refuses.
+    """
+    tenant = _tenant()
+    plan = _plan_record(_record(tenant, search_keys=GRAPH_KEYS), tenant)
+    bound = _search_keys_param(plan)
+    assert isinstance(bound, str), (
+        f"the column is `jsonb`, so the parameter is a serialized document "
+        f"(got {type(bound).__name__})")
+    try:
+        decoded = json.loads(bound)
+    except json.JSONDecodeError as exc:      # ← the pre-fix shape lands here
+        pytest.fail(
+            f"the value bound to `point.search_keys` is not a JSON document "
+            f"({bound!r}: {exc}) — a `jsonb` column refuses it with 22P02 and "
+            "the seam drops the row (#9548)")
+    assert decoded == GRAPH_KEYS, (
+        f"the document must decode back to the graph's own flat string "
+        f"(got {decoded!r})")
+
+
+def test_the_read_side_yields_the_graph_s_string_not_an_array():
+    """The SHAPE is a JSON string, never an array — and the why, pinned.
+
+    An array in the column also APPLIES (ARM C of the #9548 reproduction), so a
+    write-side test alone cannot tell the two shapes apart. What separates them
+    is the reader: `cache_projection.node_from_row` projects the column straight
+    onto the rebuilt node, and a JSON array becomes a Python `list` — the
+    array-valued `search_keys` FalkorDB's Point FULLTEXT index cannot match
+    (#5482), reachable only through `_fix_point_search_keys`'s repair pass.
+
+    WHAT THIS PROVES, NARROWLY: that the RECORD'S OWN READER hands the two
+    encodings to the rebuilt node as different Python values (`node_from_row` →
+    `_props_from_row` → `_scalar`), which is the fact that makes the shape choice
+    matter — through the real reader, not a stand-in, so it reds if
+    `_props_from_row` ever starts coercing.
+
+    It does NOT prove the write path refuses an array: nothing refuses one — a
+    list `search_keys` on the journal would encode to a JSON array, and the
+    `sdk.py` capture lane that can carry a list into the journal has no
+    `flatten_search_keys_prop` call. That arm is a SEPARATE open question about
+    the producer, not this defect, and is named as remaining scope on #9548
+    rather than papered over here.
+    """
+    from tortoise.cache_projection import node_from_row
+
+    tenant = _tenant()
+    record = _record(tenant, search_keys=GRAPH_KEYS)
+    bound = _search_keys_param(_plan_record(record, tenant))
+    assert isinstance(json.loads(bound), str)
+
+    def _rebuilt(search_keys):
+        # The row shape `read_record_view` hands `node_from_row`: the key column
+        # plus the columns its placement table authorises.
+        return node_from_row("Point", {
+            "node_key": "pt_1", "id": "pt_1", "content": "c",
+            "search_keys": search_keys}).props["search_keys"]
+
+    assert _rebuilt(json.loads(bound)) == GRAPH_KEYS, (
+        "the record's reader must hand the rebuild the graph's flat STRING")
+    assert _rebuilt(["err4032"]) == ["err4032"], (
+        "a JSON array reads back as a Python list — the array-valued "
+        "`search_keys` the Point FULLTEXT index cannot match, which is why the "
+        "column must hold a JSON STRING and not the token array")
+
+
+def test_every_statement_s_param_columns_align_with_its_params():
+    """`param_columns` must be a 1:1 map over `params` — the shapes that can break.
+
+    The attribution is only worth having if it is TRUE, and it is aligned by
+    construction in two builders — where a `_SqlExpr` can expand one COLUMN into
+    several parameters. Seeding the key with a single `node_key` misaligned every
+    later name on a `Source` plan (measured: 20 params against 14 names, the real
+    `jsonb` parameter unnamed and `url_aliases` reported against a `graph_id`),
+    re-creating defect 2 on the table with the most `jsonb` columns. `Point`'s key
+    is a literal string, so the round-trip test above cannot see it.
+
+    ⚠️ SCOPE, stated rather than implied: this builds the TWO record types whose
+    plans carry a `_SqlExpr` (a resolved `:Source` key, #9956) — the only shapes
+    in which a column can expand into several parameters. It does not walk the
+    rest of `RECORD_MUTATIONS`, and `tests/test_record_projection.py` asserts
+    nothing about `param_columns` either; a NEW builder that expands a value is
+    this pin's responsibility to grow.
+    """
+    from tortoise import record_projection as rp
+
+    tenant = _tenant()
+    misaligned: list[tuple] = []
+    seen = 0
+    for record_type, build in sorted(_RECORD_BUILDERS.items()):
+        for statement in rp.replay_plan([build(tenant)], org_id=tenant[0],
+                                        graph_id=tenant[1], position=True):
+            if not statement.param_columns:
+                # The journal row carries no attribution today; that is a
+                # declared gap, not an alignment claim (see #9548's remaining
+                # scope), so it is skipped rather than counted as aligned.
+                continue
+            seen += 1
+            if len(statement.param_columns) != len(statement.params):
+                misaligned.append(
+                    (record_type, statement.sql[:60],
+                     len(statement.param_columns), len(statement.params)))
+    assert seen >= 2, f"no statement carried an attribution to check ({seen})"
+    assert not misaligned, (
+        "param_columns and params disagree (record, sql, names, params): "
+        f"{misaligned} — the failure attribution would name the wrong column")
+
+
+def test_the_jsonb_map_is_not_reparsed_per_parameter(monkeypatch):
+    """ONE schema read per PLAN, not one per bound string (#9548 review).
+
+    `_jsonb_or_scalar` runs once per string parameter of EVERY statement, so an
+    un-memoised parse measured 2.71 ms and turned a 50-record `replay_plan` into
+    1182 ms instead of 5.8 ms — a ~200x regression on the SYNCHRONOUS capture
+    path, which §17 forbids the seam from adding.
+
+    Counted, not timed: the assertion is the NUMBER of migrations reads a plan
+    build performs, so it cannot flake on a loaded box. The answer is memoised in
+    `_JSONB_CACHE` for `_JSONB_CACHE_TTL_SECONDS`, so a COLD build is three
+    reads — `table_columns()`, `refused_props_names()`, and the jsonb map — and a
+    warm one is two. The cache is cleared first so the count means "once per
+    plan build" rather than "whatever was left warm by an earlier test".
+    A per-parameter re-parse shows up here as one read per string parameter
+    (measured on the regressed shape: ~180 for this plan).
+    """
+    from tortoise import record_projection as rp
+
+    reads: list[int] = []
+    real = rp._read_migrations
+
+    def _counting(migrations_dir=None):
+        reads.append(1)
+        return real(migrations_dir)
+
+    monkeypatch.setattr(rp, "_read_migrations", _counting)
+    rp._jsonb_cache_clear()
+    tenant = _tenant()
+    record = _record(tenant, search_keys=GRAPH_KEYS)
+    rp.replay_plan([record] * 20, org_id=tenant[0], graph_id=tenant[1])
+    try:
+        assert len(reads) <= 3, (
+            f"one plan build read the migrations {len(reads)} times for 20 "
+            "records — the jsonb map is being re-parsed per bound parameter "
+            "instead of once per build")
+    finally:
+        rp._jsonb_cache_clear()
+
+
+def test_a_synthetic_tree_reaches_the_forward_and_fail_closed_arms(tmp_path):
+    """The two branches the real tree cannot exercise (#9548 review round 6).
+
+    `jsonb_columns(migrations_dir=…)` and `_jsonb_cache_clear()` had no caller,
+    so nothing could reach either a forward-migration change on a DELETE-shaped
+    tree or the fail-closed refusal — a regression in either would stay green.
+    Both arms are driven here on a COPY of the record migrations:
+
+    * a narrowing (`point.search_keys jsonb → text`) must drop the name, or the
+      rule would JSON-quote strings bound to a now-`text` column: no error, no
+      counter, silent corruption;
+    * an empty directory must RAISE, because an empty set silently disables the
+      encoding and the 22Q02 row drops come back.
+    """
+    import shutil
+
+    from tortoise import record_projection as rp
+
+    tree = tmp_path / "migrations"
+    tree.mkdir()
+    for name in rp.RECORD_MIGRATIONS:
+        source = rp._migrations_dir() / name
+        if source.exists():
+            shutil.copy(source, tree / name)
+    # The real tree FIRST, so the arm is proven to reach the parser at all.
+    assert "search_keys" in rp.jsonb_columns(tree)
+    # ⚠️ APPENDED to the LAST registry file, never a new file: `_read_migrations`
+    # reads exactly `RECORD_MIGRATIONS`, so a file outside the registry would be
+    # invisible and the arm would pass by not being read at all (measured).
+    last = tree / rp.RECORD_MIGRATIONS[-1]
+    last.write_text(
+        last.read_text(encoding="utf-8")
+        + "\nALTER TABLE public.point ALTER COLUMN search_keys TYPE text;\n",
+        encoding="utf-8")
+    assert "search_keys" not in rp.jsonb_columns(tree), (
+        "a jsonb→text narrowing must remove the column from the encoding rule")
+
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    with pytest.raises(rp.RecordProjectionError):
+        rp.jsonb_columns(empty)
+
+
+def test_the_replay_wrapper_attributes_a_failing_statement():
+    """The try/except in `replay()` itself — not a hand-built exception.
+
+    Both other attribution tests bypass the wrapper (one constructs
+    `RecordStatementError` directly, the other replaces `replay`), so deleting
+    the `raise` in `replay()` left them green. This drives the REAL `replay()`
+    through a stub cursor that fails on the plan statement, and asserts the
+    chained cause, the index/total, and the column + Python type in the text.
+    """
+    from tortoise import record_projection as rp
+
+    tenant = _tenant()
+    record = _record(tenant, search_keys=GRAPH_KEYS)
+    driver_error = ValueError("invalid input syntax for type json")
+
+    class _Cursor:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def execute(self, sql, params=None):
+            self.calls += 1
+            # Fail on the statement that binds `search_keys` — the identity
+            # insert before it must execute so `index` is a real position.
+            if "search_keys" in sql:
+                raise driver_error
+
+        def fetchone(self):
+            return (tenant[0], False)
+
+    class _Conn:
+        def cursor(self):
+            return _Cursor()
+
+    import pytest as _pytest
+
+    from tortoise import record_projection as _rp
+    original = _rp.scope_connection
+    _rp.scope_connection = lambda conn, org_id: conn.cursor()
+    try:
+        with _pytest.raises(rp.RecordStatementError) as caught:
+            rp.replay([record], _Conn(), org_id=tenant[0], graph_id=tenant[1],
+                      position=False)
+    finally:
+        _rp.scope_connection = original
+    error = caught.value
+    assert error.__cause__ is driver_error, "the driver's cause must be chained"
+    assert error.total > 0 and 0 <= error.index < error.total
+    text = str(error)
+    assert "search_keys" in text and "search_keys=str→jsonb" in text, text
+    assert "invalid input syntax for type json" in text, text
+
+
+#: The record types with a plan this file can build without a database: the two
+#: whose statements carry a `_SqlExpr` (a resolved `:Source` key, #9956).
+_RECORD_BUILDERS: dict = {}
+
+
+def _register_builders() -> None:
+    """Fill `_RECORD_BUILDERS` with the `_SqlExpr`-bearing record shapes."""
+    def _source(tenant):
+        # `SourceCreated` is a FLAT snapshot (`path=None`, `key_from="url"`),
+        # and its `url` key resolves through `_source_key_resolution` — the
+        # `_SqlExpr` that expands to several parameters.
+        return {
+            "type": "SourceCreated",
+            "url": "https://example.com/a",
+            "document_kind": "document",
+            "url_aliases": ["https://example.com/a"],
+            "ts": "2026-10-31T00:00:00Z",
+        }
+
+    def _point(tenant):
+        return _record(tenant, search_keys=GRAPH_KEYS)
+
+    _RECORD_BUILDERS["SourceCreated"] = _source
+    _RECORD_BUILDERS["PointAdded"] = _point
+
+
+_register_builders()
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# 2. The schema read that decides the shape
+# ════════════════════════════════════════════════════════════════════════════
+
+
+def test_the_jsonb_columns_are_read_from_the_migrations_never_restated():
+    """`jsonb_columns()` reads the DDL — and sees a FORWARD type change.
+
+    Two things must be true for the encoding rule to be safe:
+
+    * `search_keys` is `jsonb` in the record's own schema (the fact the old
+      `_jsonb_or_scalar` did not consult at all); and
+    * `session.capture_redactions` is NOT — it is `jsonb` in the base
+      `CREATE TABLE` and `integer` after #9264's forward migration, so a reader
+      that stopped at `CREATE TABLE` would call an integer column a document
+      container.
+    """
+    jsonb = record_projection.jsonb_columns()
+    assert "search_keys" in jsonb, (
+        "public.point.search_keys is not reported as jsonb — the encoding rule "
+        "would stop applying and #9548 comes back")
+    assert "capture_redactions" not in jsonb, (
+        "capture_redactions is jsonb only in the BASE shape; #9264's forward "
+        "migration narrows it to integer, and the reader must see that")
+    # …and the columns that carry a genuinely multi-valued graph property stay.
+    for column in ("embedding", "tags"):
+        assert column in jsonb, column
+
+
+def test_no_jsonb_column_name_is_shared_with_a_non_jsonb_column():
+    """The rule is keyed by column NAME, so a name clash must not exist.
+
+    `_jsonb_or_scalar` is handed a column and nothing else, so
+    `jsonb_columns()` is a name-keyed set. If a `text` column in one record
+    table shared its name with a `jsonb` column in another, the rule would
+    JSON-encode that text column's strings — a NEW 22P02-free but
+    silently-mangled write. This test is what keeps the assumption honest
+    instead of a comment.
+    """
+    sql = record_projection._read_migrations()
+    # ⛔ THE SAME THREE INPUTS THE PARSER FOLDS, not `CREATE TABLE` alone: a
+    # forward `ADD COLUMN … jsonb` or an `ALTER COLUMN … TYPE` narrowing can
+    # introduce (or remove) a `jsonb` name the base shape never mentions, and a
+    # pin that read only the base would stay green through exactly the clash it
+    # exists to catch.
+    typed: dict[str, set[str]] = {}
+    for table, body in record_projection._TABLE_RE.findall(sql):
+        if table not in record_projection.THE_RECORD_TABLES:
+            continue
+        for _quoted, column, type_name in \
+                record_projection._COLUMN_TYPE_RE.findall(body):
+            typed.setdefault(column, set()).add(type_name)
+    for table, body in record_projection._ALTER_ADD_COLUMN_RE.findall(sql):
+        if table not in record_projection.THE_RECORD_TABLES:
+            continue
+        for column, type_name in \
+                record_projection._ADDED_COLUMN_TYPED_RE.findall(body):
+            typed.setdefault(column, set()).add(type_name.lower())
+    for table, column, type_name in \
+            record_projection._ALTER_COLUMN_TYPE_RE.findall(sql):
+        if table not in record_projection.THE_RECORD_TABLES:
+            continue
+        typed.setdefault(column, set()).discard("jsonb")
+        typed.setdefault(column, set()).add(type_name.lower())
+    jsonb = record_projection.jsonb_columns()
+    clashes = {c: t for c, t in typed.items() if c in jsonb and t - {"jsonb"}}
+    assert not clashes, (
+        f"column name(s) {clashes} are `jsonb` somewhere and another type "
+        "elsewhere — a name-keyed `jsonb_columns()` cannot tell them apart; "
+        "key the rule by (table, column) before adding one")
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# 3. Attribution — a failure names its column, its value type, its statement
+# ════════════════════════════════════════════════════════════════════════════
+
+
+def test_a_failed_statement_names_the_column_the_value_type_and_the_sql():
+    """The three facts #9548 was missing, on ONE line (#9548 defect 2).
+
+    302 lost rows were reported as nothing but `InvalidTextRepresentation`:
+    no column, no Python type, no statement. `RecordStatementError` carries all
+    three and `RecordWriter.write` no longer discards `str(exc)`.
+    """
+    tenant = _tenant()
+    statement = _search_keys_statement(
+        _plan_record(_record(tenant, search_keys=GRAPH_KEYS), tenant))
+    cause = ValueError("invalid input syntax for type json")
+    error = record_projection.RecordStatementError(
+        statement, cause, index=0, total=1)
+    text = str(error)
+    assert "search_keys" in text, text
+    assert "search_keys=str→jsonb" in text, (
+        f"the bound column's PYTHON type AND its declared shape must be named "
+        f"— they are the halves Postgres never reports, and the pair is what "
+        f"keeps the report diagnostic once `str` became the CORRECT binding: "
+        f"{text}")
+    assert statement.sql[:120] in text, text
+    assert "invalid input syntax for type json" in text, (
+        f"the cause's own text was discarded, which is defect 2 itself: {text}")
+
+
+def test_the_pre_fix_binding_shape_is_still_readable_when_built_by_hand(
+        monkeypatch):
+    """`value_types()` is READABLE in all three shapes, incl. the map MISS.
+
+    ⛔ WHY A HAND-BUILT `Statement` (#10692 review P2). The
+    `→jsonb(NOT a JSON document)` arm of `Statement.value_types()` is
+    UNREACHABLE for every statement this module builds — `_jsonb_or_scalar`
+    `json.dumps`-es each `str` bound to a `jsonb` column, and the only other
+    `str` parameters (`org_id`, `graph_id`, `node_key`, `id`, `url`) are not
+    `jsonb` columns — so before this test NOTHING exercised it, while the method
+    sold it as the read-out that "identifies #9548". A diagnostic that cannot
+    fire reads as coverage that is not there. It is kept (a repair script or a
+    backfill builds its own `Statement`), so it is pinned here as the
+    DEFENSIVE-ONLY branch it is.
+
+    The three shapes are the whole vocabulary, and the THIRD is the one a stale
+    `jsonb_columns()` map produces — the encoder reads the SAME map, so the
+    ABSENCE of `→jsonb` (not the NOT-a-document arm) is that miss's signal.
+    Also pins the "never raises" clause: a map that cannot be read must not
+    replace the driver's cause with its own exception.
+    """
+    from tortoise.record_projection import Statement
+
+    def _types(*, value: str, columns: tuple[str, ...] = ("search_keys",)):
+        return Statement(
+            "INSERT INTO public.point (search_keys) VALUES (%s)",
+            (value,), columns).value_types()
+
+    # 1. The GOOD binding: a `str` the map calls `jsonb` whose value IS a
+    #    JSON document — what `_jsonb_or_scalar` now emits for the graph's
+    #    space-joined string.
+    assert _types(value=json.dumps(GRAPH_KEYS)) == "search_keys=str→jsonb"
+
+    # 2. DEFENSIVE ONLY: the PRE-FIX binding shape (a bare graph string on a
+    #    `jsonb` column) is still NAMED rather than printed as an opaque `str`.
+    #    No builder in this module can produce it — this hand-built statement is
+    #    the only way in, which is exactly the point.
+    assert _types(value=GRAPH_KEYS) == (
+        "search_keys=str→jsonb(NOT a JSON document)"), (
+        "the pre-fix binding shape must stay readable — it is the read-out a "
+        "hand-built statement (repair script, backfill) needs")
+
+    # 3. A map MISS (stale/partial migrations parse): the column is bound
+    #    VERBATIM — the shape the encoder cannot see either, because it asks the
+    #    same map — and it reads as NO suffix. That absence is the signal; a
+    #    reader must not take `search_keys=str` as a clean binding.
+    monkeypatch.setattr(record_projection, "jsonb_columns",
+                        lambda *a, **k: frozenset())
+    assert _types(value=GRAPH_KEYS) == "search_keys=str", (
+        "an un-suffixed string parameter on a column the migrations declare "
+        "`jsonb` is the #9548 condition, not a clean binding")
+
+    # 4. A schema read that RAISES must degrade to no attribution, never
+    #    replace the driver's cause with its own exception.
+    def _boom(*_a, **_k):
+        raise OSError("migrations unreadable")
+
+    monkeypatch.setattr(record_projection, "jsonb_columns", _boom)
+    assert _types(value=GRAPH_KEYS) == "search_keys=str"
+
+
+def test_the_write_error_no_longer_discards_the_cause(monkeypatch):
+    """`RecordWriter.write` reports the cause text, not only its class name."""
+    def _boom(*_args, **_kwargs):
+        raise record_projection.RecordStatementError(
+            record_projection.Statement(
+                "INSERT INTO public.point (org_id, search_keys) VALUES (%s, %s)",
+                ("o", GRAPH_KEYS), ("org_id", "search_keys")),
+            ValueError("invalid input syntax for type json"),
+            index=0, total=1)
+
+    monkeypatch.setattr(record_projection, "replay", _boom)
+    monkeypatch.setenv(record_writer.RECORD_DSN_ENV,
+                       "postgresql://u:p@127.0.0.1:1/db")
+    writer = record_writer.RecordWriter(
+        connect=lambda dsn: _RefusingConnection())
+    with pytest.raises(record_writer.RecordWriteError) as caught:
+        writer.write([_record(_tenant(), search_keys=GRAPH_KEYS)],
+                     org_id="o", graph_id="g")
+    text = str(caught.value)
+    assert "record write failed" in text, text
+    assert "invalid input syntax for type json" in text, (
+        f"the cause text is still discarded, which is defect 2 itself: {text}")
+    assert "search_keys=str→jsonb" in text, text
+
+
+class _RefusingConnection:
+    """A connection the seam opens itself, so `write()` closes it on failure."""
+
+    def close(self) -> None:
+        return None
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# 4. The record APPLIES the live shape — against a real Postgres (#9551)
+# ════════════════════════════════════════════════════════════════════════════
+
+
+def _record_db():
+    import os
+    dsn = os.environ.get(RECORD_DB_ENV)
+    if not dsn:
+        pytest.skip(f"{RECORD_DB_ENV} unset — no record database to write to")
+    psycopg2 = pytest.importorskip("psycopg2")
+    conn = psycopg2.connect(dsn)
+    conn.commit()
+    return conn
+
+
+def _app_role_dsn(dsn: str) -> str:
+    """`dsn` connecting as the record's APPLICATION role (the gate's role)."""
+    from urllib.parse import parse_qs, quote, urlencode, urlsplit, urlunsplit
+
+    from test_9078_record_written_by_production_path import RECORD_APP_ROLE
+    parts = urlsplit(dsn)
+    query = parse_qs(parts.query)
+    # ⚠️ ONE `options` VALUE, several `-c` settings inside it. libpq keeps only
+    # the LAST value of a repeated URI keyword, so two `options=` pairs silently
+    # drop the first — measured here: `role=tortoise_record_app` vanished and the
+    # session opened as the provisioning superuser, which the role gate then
+    # refused. The timeouts are BOUNDED so a blocked write is a NAMED error
+    # instead of a hung test.
+    query["options"] = [
+        f"-c role={RECORD_APP_ROLE} -c lock_timeout=15000 "
+        "-c statement_timeout=30000"]
+    return urlunsplit(parts._replace(
+        query=urlencode(query, doseq=True, quote_via=quote)))
+
+
+def _seed(conn, tenant) -> None:
+    from test_9078_record_written_by_production_path import _ensure_record_schema, _seed_tenant
+    _ensure_record_schema(conn)
+    _seed_tenant(conn, tenant)
+    conn.commit()
+
+
+def _failures() -> int:
+    return int(monitoring.record_write_failure_counts().get("write_failed", 0))
+
+
+def test_the_record_applies_the_live_search_keys_shape_and_reads_it_back(
+        monkeypatch, caplog):
+    """PRODUCTION-FIRST: `write_failed` stops climbing, `write_ok` climbs.
+
+    Drives the LIVE DOOR the armed deployment drives
+    (`record_writer.write_live_record` — the one the three journal-append sites
+    call), on the app-role DSN `replay` requires, and asserts all three things a
+    green unit test alone cannot:
+
+    * every write returns APPLIED (the `write_ok` half — there is no separate
+      counter for it; the outcome on the returned `RecordWrite` IS the record of
+      a successful write, and `monitoring.record_write_failure_counts()` is the
+      failure half);
+    * `write_failed` did NOT move — and this assertion now DISCRIMINATES.
+      ⛔ `write_failed` is incremented in exactly ONE place: `write_live_record`'s
+      own `except`. `RecordWriter.write` merely raises, so an earlier version of
+      this test driving `write_records` compared two identical integers for ANY
+      input, including the pre-fix code — a decorative assertion wearing the
+      fix's headline claim (#9548 review round 4, P2). Driving the live door is
+      what makes `after == before` mean "no row was dropped";
+    * the row is REALLY there and the record's own reader gives back the graph's
+      flat string.
+
+    ⚠️ A REFUSAL IS REPORTED WITH THE LOG, not just its reason code: the cause
+    lives only in `write_live_record`'s WARNING (that is the door's contract —
+    it never raises), and `refusal='write_failed'` alone is precisely the
+    unattributable string this issue exists to end. `caplog.text` is asserted
+    into only on the failure path, so a red in the gated `#9551` job carries the
+    column, the statement and the driver's own message.
+    """
+    import logging
+
+    from tortoise.cache_projection import node_from_row
+    caplog.set_level(logging.WARNING, logger="tortoise.record_writer")
+
+    conn = _record_db()
+    tenant = _tenant()
+    _seed(conn, tenant)
+    monkeypatch.setenv(record_writer.RECORD_DSN_ENV,
+                       _app_role_dsn(_dsn()))
+    records = [_record(tenant, search_keys=GRAPH_KEYS,
+                       content=f"deploy {i} released err4032") for i in range(3)]
+
+    before = _failures()
+    applied = 0
+    for index, record in enumerate(records):
+        # One record per call, each with its OWN journal ordinal (`seq`), so
+        # `journal_event`'s `(org, graph, seq)` upsert never absorbs a
+        # sibling's position row. `write_live_record` commits and closes the
+        # connection the seam opens for it (unlike `write_records`, whose caller
+        # owns the transaction and which therefore increments NO counter).
+        write = record_writer.write_live_record(
+            record, seq=index + 1, tenant=tenant)
+        assert write is not None, "the record was not armed — nothing attempted"
+        assert write.outcome is record_writer.RecordWriteOutcome.APPLIED, (
+            f"the live shape was refused ({write.refusal!r}): {write!r} — the "
+            f"door's WARNING is the only place the cause is carried: "
+            f"{caplog.text}")
+        applied += 1
+    after = _failures()
+    assert applied == len(records)
+    assert after == before, (
+        f"`write_failed` climbed from {before} to {after} over {applied} "
+        "write(s) — the record is still dropping rows (#9548)")
+
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT node_key, search_keys FROM public.point "
+            "WHERE org_id=%s AND graph_id=%s ORDER BY node_key",
+            (tenant[0], tenant[1]))
+        rows = cur.fetchall()
+    assert len(rows) == len(records), (
+        f"the record holds {len(rows)} row(s) for {len(records)} write(s)")
+    for _key, stored in rows:
+        assert stored == GRAPH_KEYS, (
+            f"the column holds {stored!r}; the graph's value is the flat string "
+            f"{GRAPH_KEYS!r}")
+
+    # …and through the RECORD's OWN reader, which is what a rebuild consumes.
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT * FROM public.point WHERE org_id=%s AND graph_id=%s "
+            "ORDER BY node_key", (tenant[0], tenant[1]))
+        cols = [d[0] for d in cur.description]
+        node_rows = [dict(zip(cols, r, strict=True)) for r in cur.fetchall()]
+    conn.close()
+    for row in node_rows:
+        props = node_from_row("Point", row).props
+        assert props.get("search_keys") == GRAPH_KEYS, (
+            f"the rebuild reads search_keys back as {props.get('search_keys')!r} "
+            f"({type(props.get('search_keys')).__name__}) — only a str is what "
+            "the Point FULLTEXT index can match")
+
+
+def _dsn() -> str:
+    import os
+    return os.environ[RECORD_DB_ENV]

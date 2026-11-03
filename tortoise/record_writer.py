@@ -1075,7 +1075,26 @@ class RecordWriter:
             raise RecordWriteError(
                 f"the record write failed after {len(records)} journal "
                 f"record(s) were materialized from position {first_seq} "
-                f"({type(exc).__name__})"
+                # ⛔ `str(exc)` IS PART OF THE REPORT (#9548). Logging only
+                # `type(exc).__name__` discarded the one fact a failure had:
+                # 302 live rows were lost and every one of them was named
+                # `InvalidTextRepresentation` — no cause text, no column, no
+                # statement. The cause is chained (`from exc`) AND spelled out
+                # here, because the caller of this seam (`write_live_record`)
+                # logs `str()` of this exception and nothing else.
+                #
+                # ⚠️ THE TRADE-OFF, named rather than absorbed: a psycopg2
+                # message interpolates its parameters client-side, so the
+                # `LINE`/`DETAIL` it carries can quote a PREFIX of a row's
+                # values (the #9548 case quotes `Token "err4032" is invalid`).
+                # Pre-fix this line carried a class name and nothing else, so
+                # this IS a new exposure on the live path. Accepted: a lost row
+                # nobody can attribute is the worse failure (§17's own rule —
+                # the seam must never drop a row in silence), the row is the
+                # tenant's own data going to that tenant's own log, and the
+                # alternative (the primary message only) removes exactly the
+                # value/column half that made 302 drops unattributable.
+                f"({type(exc).__name__}: {exc})"
             ) from exc
 
         return RecordWrite(
