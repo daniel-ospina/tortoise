@@ -2330,8 +2330,14 @@ def test_the_birth_column_guards_a_non_string_status():
     `_PAYLOAD_EVENT`'s own `jsonb_typeof(payload -> 'event')` already satisfies,
     and its negative leg was a NON-f-string containing the literal
     `{_PAYLOAD_EVENT}`, so it compared text that can never appear in the
-    interpolated statement. Both are fixed by INTERPOLATING the expected column and
-    asserting it verbatim.
+    interpolated statement. Round 4 interpolated the expected column, which
+    fixed the POSITIVE legs — but the negative leg was still decoration
+    (measured on review): it compared a hand-spelled spelling with two spaces
+    and no `END`, which the source's f-string concatenation can never render, so
+    `bare not in sql` was trivially true and an UNGUARDED column would have
+    passed it. It now reads the birth column EXPRESSION out of the statement and
+    asserts it is a guarded `CASE`, which reds on any unguarded spelling
+    whatever its whitespace.
     """
     sql = cp._LIFECYCLE_EVENTS_SQL
     pae = cp._PAYLOAD_EVENT
@@ -2348,9 +2354,46 @@ def test_the_birth_column_guards_a_non_string_status():
         "the value through, not replace it (`''` is a legal stored status and "
         "must still fold)"
     )
-    bare = f", {pae} ->> 'status'  AS birth_status"
-    assert bare not in sql, (
-        "the UNGUARDED birth column is back — the guard exists in the FAKE only"
+
+    def birth_column(statement: str) -> str:
+        """The select item that yields `birth_status`, read out of the statement.
+
+        Depth-aware on purpose: `_PAYLOAD_EVENT` carries its OWN top-level-comma
+        `COALESCE(CASE WHEN …, payload)`, so the naive
+        `rsplit(",", 1)` lands inside the payload expression and reports a
+        column that starts with `payload)`. Only a comma at paren depth 0
+        separates select items.
+
+        ⚠️ The alias is matched WHOLE (`birth_status(?!\\w)`) and required to be
+        UNIQUE, because a decoy alias makes this pin unable to say which column
+        the reader consumes: with a guarded `… END AS birth_status_decoy,` in
+        front of an unguarded `… AS birth_status`, a bare `index("AS
+        birth_status")` reads the DECOY's `CASE` and passes the unguarded value
+        (measured — this was this leg's own vacuity, found the same way round 4's
+        was).
+        """
+        ends = [m.start() for m in re.finditer(r"AS birth_status(?!\w)", statement)]
+        assert len(ends) == 1, (
+            f"expected exactly ONE column aliased `birth_status`, found {len(ends)} "
+            "— a decoy alias (`…_decoy`, `…_2`) lets an unguarded value column sit "
+            "beside a guarded one and this pin would read the wrong expression"
+        )
+        end = ends[0]
+        depth = 0
+        start = 0
+        for i, ch in enumerate(statement[:end]):
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+            elif ch == "," and depth == 0:
+                start = i + 1
+        return statement[start:end].strip()
+
+    column = birth_column(sql)
+    assert column.startswith("CASE WHEN"), (
+        "the UNGUARDED birth column is back — the guard exists in the FAKE only; "
+        f"the statement selects {column!r}"
     )
 
 
