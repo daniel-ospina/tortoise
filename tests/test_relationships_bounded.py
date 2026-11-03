@@ -519,6 +519,15 @@ def test_fetch_state_subject_direct(sdk):
     p = _point(sdk, content="claim about the team")
     subj = sdk.create_subject("Epistemic Team", subjectKind="team")
     sdk._get_proj().create_about_edge(p["id"], subj["id"], "aboutSubject")
+    # #9974 R1: a Subject is born with NO stored status (the fold seeds
+    # `status=$st`), so this leg exercises the ABSENT case — `status` below must
+    # come from the read's own rendering (`live.status_as_reported`), not from a
+    # stored value. Pinned so a future writer on the birth path cannot make the
+    # leg pass without ever reaching that rendering.
+    assert _graph(sdk).query(
+        "MATCH (s:Subject {id:$id}) RETURN s.status",
+        params={"id": subj["id"]}).result_set == [[None]], (
+        "the leg must exercise the ABSENT-status case")
 
     state = fetch_point_epistemic_state(_graph(sdk), [p["id"]])[p["id"]]
     # #1423: the decoration carries the Subject's own lifecycle status ADDITIVELY
@@ -548,7 +557,13 @@ def test_fetch_state_subject_via_event(sdk):
     )
 
     state = fetch_point_epistemic_state(_graph(sdk), [p["id"]])[p["id"]]
-    # #1423: same additive `status` key on the event-resolved fallback hop.
+    # #1423: same additive `status` key on the event-resolved fallback hop — and
+    # the SAME absent-status rendering as the direct hop above (#9974 R1: a
+    # status-less birth stores nothing, and absent READS live).
+    assert _graph(sdk).query(
+        "MATCH (s:Subject {id:$id}) RETURN s.status",
+        params={"id": subj["id"]}).result_set == [[None]], (
+        "the leg must exercise the ABSENT-status case")
     assert state["subject"] == {"id": subj["id"], "name": "Daniel",
                                 "kind": "legalPerson", "status": "live"}
 
