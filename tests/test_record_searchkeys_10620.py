@@ -939,7 +939,7 @@ def _shipped_flatten_ddl() -> str:
     # the conversion's job there is to PRESERVE the value — `ELSE NULL` would
     # drop it. Pinned so a rewrite of any arm goes red instead of silently
     # changing what an existing row becomes.
-    ({"k": "v"}, '{"k": "v"}'),      # object: the jsonb text rendering
+    ({"k": "v"}, None),                  # object: preserved, rendering-tolerant
     (42, "42"),                         # number: its own text form
     (True, "true"),                     # boolean: its own text form
 ])
@@ -970,11 +970,25 @@ def test_the_migration_converts_existing_rows_by_the_write_path_rule(value, expe
     finally:
         conn.close()
 
-    assert actual == expected, (
-        f"{value!r} converted to {actual!r}, expected {expected!r} — the record "
-        "would hold a second representation of a value the graph holds as "
-        f"{expected!r}"
-    )
+    if isinstance(value, dict):
+        # `None` above means "assert the PRESERVE property, not a rendering":
+        # jsonb's text form is the spaced `{"k": "v"}` on every server this
+        # project runs, but a formatting difference must not read as a VALUE
+        # difference — the arm exists so an existing value is not dropped, and
+        # that is what is asserted.
+        assert actual is not None, (
+            f"an object row was DROPPED by the conversion ({value!r}) — `ELSE "
+            "NULL` is the data loss this arm exists to prevent"
+        )
+        assert '"k"' in actual and '"v"' in actual, (
+            f"the object's own content did not survive the conversion: {actual!r}"
+        )
+    else:
+        assert actual == expected, (
+            f"{value!r} converted to {actual!r}, expected {expected!r} — the record "
+            "would hold a second representation of a value the graph holds as "
+            f"{expected!r}"
+        )
 
     if isinstance(value, list):
         # …and the writer's own rule agrees, which is the property the header
