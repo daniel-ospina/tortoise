@@ -425,6 +425,80 @@ class TestCredentialResolution:
         sent = [h for h in seen if h]
         assert sent and set(sent) == {"Bearer tt_stored"}, sent
 
+    def test_a_credential_for_another_host_is_never_sent(self, recorded_daemon, isolated_home, monkeypatch):
+        """The SOURCE can rotate too: env key → store key on another host.
+
+        The client's endpoint is fixed at construction, so once the credential
+        resolves to a different host it is not this request's credential. Sending
+        it anyway is the exfiltration shape #2369 D1.1 forbids — measured here at
+        the server, which must never see the second key.
+        """
+        import asyncio
+
+        from tortoise import mcp_client
+
+        url, seen = recorded_daemon
+        monkeypatch.setenv("TORTOISE_MCP_URL", url)
+        monkeypatch.setenv("TORTOISE_API_KEY", "tt_env")
+        client = mcp_client.get_client()
+        store = isolated_home / ".tortoise" / "credentials.json"
+        store.parent.mkdir()
+
+        async def _rotate_the_source():
+            async with client:
+                await client.list_tools()
+                monkeypatch.delenv("TORTOISE_API_KEY")
+                store.write_text(json.dumps(
+                    {"api_key": "tt_store", "api_url": "https://other.example"}))
+                await client.list_tools()
+
+        asyncio.run(_rotate_the_source())
+
+        sent = [h for h in seen if h]
+        assert sent[0] == "Bearer tt_env", sent
+        assert "Bearer tt_store" not in sent, (
+            f"a credential belonging to another host was sent to this one: {sent}")
+
+    def test_a_credential_for_another_host_fails_by_name(self, isolated_home, monkeypatch):
+        """…and the failure names the conflict instead of a generic 401."""
+        import httpx
+
+        from tortoise import mcp_client
+
+        store = isolated_home / ".tortoise" / "credentials.json"
+        store.parent.mkdir()
+        store.write_text(json.dumps(
+            {"api_key": "tt_store", "api_url": "https://other.example"}))
+        provider = mcp_client._BearerProvider("http://127.0.0.1:9/mcp")
+        request = httpx.Request("POST", "http://127.0.0.1:9/mcp")
+
+        flow = provider.auth_flow(request)
+        next(flow)
+        assert "authorization" not in request.headers, "withheld credential was sent"
+
+        with pytest.raises(mcp_client.MCPCredentialHostMismatchError) as caught:
+            mcp_client._classify_failure(RuntimeError("401 Unauthorized"), provider)
+        message = str(caught.value)
+        assert caught.value.code == "MCP-CREDENTIAL-HOST-MISMATCH"
+        assert "other.example" in message and "127.0.0.1:9" in message
+
+    def test_a_tool_error_mentioning_401_is_not_a_credential_refusal(self, client_env):
+        """A TOOL's 401 is the tool's, not the client's — never rewritten.
+
+        fastmcp raises `ToolError` carrying the tool's own text; a connector that
+        reports `401 Unauthorized` for an upstream provider must keep that on the
+        keyless self-host path instead of being told its client has no key.
+        """
+        from fastmcp.exceptions import ToolError
+
+        from tortoise import mcp_client
+
+        sent = mcp_client.resolve_connection()
+        assert sent.key is None, "this test needs the keyless path"
+        # No raise: the classification must leave a ToolError alone.
+        mcp_client._raise_if_credential_was_missing(
+            ToolError("upstream provider returned 401 Unauthorized"), sent)
+
     def test_a_keyless_endpoint_still_needs_no_credential(
         self, recorded_daemon, monkeypatch, isolated_home,
     ):

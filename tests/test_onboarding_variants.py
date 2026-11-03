@@ -588,8 +588,16 @@ def test_5153_served_document_pins_the_canonical_mcp_key_variable():
     per-surface split and the open dependency (`agent-infra#1117`) instead of
     generalising."""
     skill = LIVE_SKILL.read_text(encoding="utf-8")
-    assert "is the canonical name, and the **only** one any code path" in skill, (
-        "the Pi step must state that TORTOISE_API_KEY is the only name read")
+    # The claim is "canonical, and the name every recipe uses" — not "the only
+    # name any code path reads". Since #5200 the MCP HTTP client also accepts
+    # `TORTOISE_MCP_API_KEY` as an alias (the fleet host exports it, #10605), so
+    # an absolute "only one name" would be false, and the disclosure is what keeps
+    # a reader from renaming the key and getting an empty Bearer (#5153).
+    assert "is the canonical name, and the one every recipe in this" in skill, (
+        "the Pi step must state which name is canonical for every recipe")
+    assert ("additionally accepts `TORTOISE_MCP_API_KEY` as an alias") in skill, (
+        "the alias the MCP HTTP client accepts must be disclosed, or the "
+        "'only one name' reading returns (#5200, #10605)")
     assert 'export TORTOISE_API_KEY="$TORTOISE_MCP_API_KEY"' in skill, (
         "the Pi step must show the alias a separately-named MCP credential needs")
 
@@ -598,8 +606,13 @@ def test_5153_served_document_pins_the_canonical_mcp_key_variable():
     assert referenced, (
         "the served document must carry an env-indirect Bearer snippet")
     client = (REPO_ROOT / "tortoise" / "mcp_client.py").read_text(encoding="utf-8")
-    unread = sorted(v for v in referenced
-                    if f'os.environ.get("{v}"' not in client)
+    # NAME-PRESENCE, not a fixed call shape. The client reads the environment
+    # through a precedence loop (`os.environ.get(name)` over a names tuple) since
+    # #10605's per-request resolution, which leaves the variable READ while the
+    # literal `os.environ.get("VAR"` shape disappears. Pinning the literal form
+    # redded a correct fix (#10727) while its intent — "the doc names a variable
+    # the client actually reads" — still held.
+    unread = sorted(v for v in referenced if v not in client)
     assert not unread, (
         "the served Bearer snippet references a variable the MCP HTTP client "
         f"never reads ({', '.join('$' + v for v in unread)}) — the 401 in #5153")
