@@ -23,14 +23,14 @@ The T's per-question leg is *"the value-bearing evidence is verbatim-present"*
   ``_value_verbatim_span``, called in the SHIPPED ORDER (resolve, then stamp
   against the resolved turn). **The two stamp-side inputs are the ones
   production hands it** — content clamped to ``_MAX_CONTENT`` and the quote to
-  200 chars (``extractor_v2.py:7548`` / ``:7610``), while the resolver gets the
-  raw point (``:7740``). See ``_stamp_inputs``.
+  200 chars (``extractor_v2.py:8773`` / ``:8841``), while the resolver gets the
+  raw point (``:9056``). See ``_stamp_inputs``.
 
 ⛔ **The resolver is not optional in this census.** The receipt's
 ``source_turn_id`` is the model's ADVISORY index; the write path resolves the
 turn from the quote first and never lets a wrong model index win
-(``_resolve_source_turn`` docstring; call site ``extractor_v2.py:7740`` →
-``:7756``). Passing the receipt field straight through measures a population
+(``_resolve_source_turn`` docstring; call site ``extractor_v2.py:9056`` →
+``:9072``). Passing the receipt field straight through measures a population
 production never produces *and* never fires the resolver's own E3 anchor
 warning — it under-counts ``no_turn`` and over-counts ``band`` (measured: 3
 points, all ``wp06_quarry_rollout``/``narrative``, which the resolver reports
@@ -42,8 +42,8 @@ observation: it answers *"what would the shipped mechanism stamp on these
 committed points?"*. The structural reason is that the measuring harness
 persists the S2 *model* output (``tests/eval/write_path/raw_vs_narrative.py`` →
 ``ev2.run_s2(...)``), which is pre-``pt_entry``; the span is stamped later, when
-``pt_entry`` is built (``extractor_v2.py:7741-7748``, stamped at
-``:7756-7759``). It is NOT a question of
+``pt_entry`` is built (``extractor_v2.py:9057-9064``, stamped at
+``:9072-9075``). It is NOT a question of
 dates — the receipts (committed 2026-10-19, ``ecc7bc8ca8``) postdate #8659
 (``2312845b6``, 2026-10-14) — so no re-ingest through that harness can ever put
 a span key in a receipt.
@@ -199,7 +199,7 @@ def _edus(session: str) -> list[dict]:
     ``_resolve_source_turn`` — "position and value can diverge"). A hand-rolled
     copy keeps the empty turns, so its list is LONGER and the divergence lands
     on the resolver's in-range bound, ``0 <= model_idx < len(edus)``
-    (``extractor_v2.py:7052``): a model index that fell inside the hand-rolled
+    (``extractor_v2.py:8240``): a model index that fell inside the hand-rolled
     list can fall outside production's, so the resolved ``turn_idx`` differs for
     exactly those points. That flips them between ``no_turn`` (``turn_idx is
     None``) and ``band``/``valuefree_quote``, changes which warning variant an
@@ -223,9 +223,9 @@ def _stamp_inputs(point: dict) -> tuple[str, str]:
     write path clamps them.
 
     ⛔ Not the receipt's raw strings. ``extractor_v2`` trims the content to
-    ``_MAX_CONTENT`` (``:7350``) and the quote to ``_MAX_QUOTE`` (``:7383``)
-    BEFORE ``_value_verbatim_span(content, quote, ...)`` is called (``:7504``);
-    only ``_resolve_source_turn`` gets the raw point (``:7488``, deliberately).
+    ``_MAX_CONTENT`` (``:8773``) and the quote to ``_MAX_QUOTE`` (``:8841``)
+    BEFORE ``_value_verbatim_span(content, quote, ...)`` is called (``:9072``);
+    only ``_resolve_source_turn`` gets the raw point (``:9056``, deliberately).
     A census on the raw strings therefore answers a question production never
     asks: a >``_MAX_QUOTE``-char quote gets an address production cannot stamp.
     Measured over the sealed corpus: 3 of the 217 points carry a
@@ -241,9 +241,22 @@ def _stamp_inputs(point: dict) -> tuple[str, str]:
     whole file green while the census reported offsets production never writes.
     With the caps imported, production's cap and the census's cap are one
     object, and the literal ``(0, 200)`` in the pin is what forces a re-measure.
+
+    ⛔ And the CUT is production's object too (#10742). The caps were imported
+    while the cut was re-typed as ``[:cap]`` — which was exact until
+    ``ee31e0412`` (#10513) replaced the write's hard slice with ``_write_span``
+    (a token-boundary cut that drops a split token carrying a decimal digit, so
+    a numeral is never read SHORT). From that commit on this function measured
+    a population production does not write for any point whose cap falls
+    mid-token — the same self-referential-pin trap the paragraph above records,
+    one field over. Calling ``_write_span`` here means a change to production's
+    cut moves the census with it, and
+    ``test_the_census_clamps_with_the_write_paths_own_cut`` proves the two are
+    one function rather than two agreements.
     """
-    content = str(point.get("content") or "").strip()[:v2._MAX_CONTENT]
-    quote = str(point.get("quote") or "").strip()[:v2._MAX_QUOTE]
+    content = v2._write_span(str(point.get("content") or "").strip(),
+                             v2._MAX_CONTENT)
+    quote = v2._write_span(str(point.get("quote") or "").strip(), v2._MAX_QUOTE)
     return content, quote
 
 
@@ -253,7 +266,7 @@ def _stamp_quote(point: dict) -> str:
     The dedupe half reads quotes too, and ``retrieval._same_fact`` compares the
     COMMITTED hit (``retrieval.py:2403-2405``: ``qa = str(a.get("quote") or
     "")``), i.e. after ``extractor_v2`` rewrote the field to
-    ``[:_MAX_QUOTE]`` at the point's own commit (``:7383``). Reading the raw
+    ``[:_MAX_QUOTE]`` at the point's own commit (``:8841``). Reading the raw
     receipt string here would measure a population no package holds — the same
     defect §2.1 and §2.3 each corrected once already (advisory turn index, raw
     span inputs), one field over.
@@ -374,7 +387,7 @@ def test_the_census_stamps_on_the_inputs_production_hands_it():
 
     ``_stamp_inputs`` trims the content to ``_MAX_CONTENT`` and the quote to
     ``_MAX_QUOTE`` because that is what ``extractor_v2`` hands
-    ``_value_verbatim_span`` (``:7350`` / ``:7383`` -> ``:7504``). Measured at
+    ``_value_verbatim_span`` (``:8773`` / ``:8841`` -> ``:9072``). Measured at
     this head: 3 points in the population carry a >``_MAX_QUOTE``-char quote and
     exactly ONE of them is value-bearing AND spanned — ``wp04_aurora_perf``/``raw``
     — and it is the only place the two readings differ, ``(0, 201)`` raw vs
@@ -444,7 +457,7 @@ def test_the_census_resolves_the_turn_the_way_the_write_path_does():
     """The census must not measure a population production never produces.
 
     The write path resolves the source turn from the quote BEFORE stamping
-    (``extractor_v2.py:7740`` → ``:7756``), and the receipt's
+    (``extractor_v2.py:9056`` → ``:9072``), and the receipt's
     ``source_turn_id`` is only the model's ADVISORY index. Reading that field
     straight through puts three ``wp06_quarry_rollout``/``narrative`` points on
     turns the resolver refuses (quote-overlap < 0.6), which (a) hides the
@@ -749,7 +762,7 @@ def _resolved_turn_key(point: dict, edus: list[dict]) -> str:
 
     ⛔ Not the receipt's own ``source_turn_id``. That field is the S2 model's
     ADVISORY index; production overwrites it with ``_resolve_source_turn``'s
-    answer before the point is committed (``extractor_v2.py:7740`` → ``:7747``),
+    answer before the point is committed (``extractor_v2.py:9056`` → ``:9063``),
     and ``_same_fact`` groups on the committed field
     (``retrieval.py:2403-2405``). Same defect class as §2.1's, one leg over —
     grouping by the advisory index counts pairs production never forms."""
@@ -957,7 +970,7 @@ def test_the_dedupe_leg_reads_the_COMMITTED_quote_not_the_raw_receipt(monkeypatc
     assert committed == {"consulted": 1, "value_flagged": 0,
                          "value_guard_decisive": 0, "collapsed": 1}, (
         f"the route did not read the COMMITTED quote: {committed} — production "
-        f"commits quote[:_MAX_QUOTE] (extractor_v2.py:7610), so the pair is a "
+        f"commits quote[:_MAX_QUOTE] (extractor_v2.py:8841), so the pair is a "
         "collapse, not a value conflict")
 
     # … and the SAME pair read the way this file used to read it, to show the
@@ -1102,26 +1115,134 @@ def _longest_quote_run(turn: str, quote: str):
 # lines reds until the numbers are re-derived, and a cite edited without
 # re-deriving reds too. That is the contract, not an inconvenience.
 _PUBLISHED_CITES = {
-    7548: ("content = _raw_content[:_MAX_CONTENT]", "the content clamp"),
-    7610: ('quote = str(p.get("quote") or "").strip()[:_MAX_QUOTE]',
+    8773: ("content = _write_span(_raw_content, _MAX_CONTENT)",
+           "the content clamp, at the write"),
+    8841: ('quote = _write_span(str(p.get("quote") or "").strip(), _MAX_QUOTE)',
            "the quote clamp, at the point's own commit"),
-    7052: ("if type(model_idx) is int and 0 <= model_idx < len(edus):",
+    8240: ("if type(model_idx) is int and 0 <= model_idx < len(edus):",
            "the resolver's in-range bound"),
-    7740: ("turn_idx = _resolve_source_turn(p, edus, warnings=warnings)",
+    9056: ("turn_idx = _resolve_source_turn(p, edus, warnings=warnings)",
            "the resolver call"),
-    7741: ("pt_entry = {", "the point entry the span is stamped into"),
-    7747: ('"source_turn_id": turn_idx,',
+    9057: ("pt_entry = {", "the point entry the span is stamped into"),
+    9063: ('"source_turn_id": turn_idx,',
            "the resolved turn the point COMMITS"),
-    7748: ("}", "the end of the point entry"),
-    7756: ("_span = _value_verbatim_span(content, quote, turn_idx, edus,",
+    9064: ("}", "the end of the point entry"),
+    9072: ("_span = _value_verbatim_span(content, quote, turn_idx, edus,",
            "the stamp itself"),
+}
+
+#: The same cites, as `docs/runbook/2684-slice-b-t-gate.md` publishes them. The
+#: runbook is the artifact a reader is sent to for this census's method, and it
+#: carried the SAME rotted numbers — repairing the file while leaving the doc
+#: stale is the split-brain this bundle's cite convention exists to prevent
+#: (#10742: the file was repaired in one place, the runbook kept `:7548`).
+_RUNBOOK = "docs/runbook/2684-slice-b-t-gate.md"
+_RUNBOOK_CITES = {
+    4000: ("def _verbatim_span_in_turn(turn_text: str, quote: str) -> "
+           "tuple[int, int] | None:", "_verbatim_span_in_turn"),
+    4028: ("def _carries_value(*texts: object) -> bool:", "_carries_value"),
+    4887: ("def _value_verbatim_span(content: str, quote: str, "
+           "turn_idx: int | None,", "_value_verbatim_span"),
+    4927: ("if not _carries_value(content, quote):", "the value-free gate"),
+    4928: ("return None", "the gate's refusal"),
+    8222: ("if not edus:", "the empty-turns early return"),
+    8223: ("return None", "its silent answer"),
+    8773: ("content = _write_span(_raw_content, _MAX_CONTENT)",
+           "the content clamp"),
+    8841: ('quote = _write_span(str(p.get("quote") or "").strip(), _MAX_QUOTE)',
+           "the quote clamp"),
+    9056: ("turn_idx = _resolve_source_turn(p, edus, warnings=warnings)",
+           "the resolver call"),
+    9057: ("pt_entry = {", "the point entry"),
+    9064: ("}", "the end of the point entry"),
+    9072: ("_span = _value_verbatim_span(content, quote, turn_idx, edus,",
+           "the stamp"),
+    9063: ('"source_turn_id": turn_idx,',
+           "the resolved turn the point COMMITS, in the entry"),
+    9075: ('pt_entry["span_start"], pt_entry["span_end"] = _span',
+           "the offsets landing on the entry"),
+    9061: ('"source_ref": "session.md", "quote": quote, "status": "draft",',
+           "the quote the point COMMITS, in the entry"),
 }
 
 #: The value-free gate `_value_verbatim_span` applies, published by the two
 #: artifacts this PR adds (they disagreed about it: the index row said
 #: `:3603-3604`, which is prose INSIDE the same docstring, while the runbook said
 #: `:3613-3614`). One site, three readers — so all three are pinned together.
-_VALUE_FREE_GATE = (3777, "if not _carries_value(content, quote):")
+_VALUE_FREE_GATE = (4927, "if not _carries_value(content, quote):")
+
+
+def _paste_ready_mapping(lines: list[str]) -> str:
+    """The corrected `_PUBLISHED_CITES` block, derived from THIS head.
+
+    #10742: re-deriving these numbers by hand is what let them rot — the
+    2026-11-01 lane derived the right ones and the next insertion above them
+    re-staled the lot. A failure that prints the replacement turns the repair
+    into one paste, and a pinned number whose snippet MOVED is auto-corrected
+    here rather than re-derived by the next lane. An entry that is STILL RIGHT
+    is echoed unchanged: `expected` is content, not a discriminator, so a line
+    like ``}`` matches hundreds of sites and must not be "corrected" to one.
+    """
+    out: list[str] = []
+    for number, (expected, label) in sorted(_PUBLISHED_CITES.items()):
+        if 1 <= number <= len(lines) and lines[number - 1].strip() == expected:
+            out.append(f"    {number}: ({expected!r},\n           {label!r}),")
+            continue
+        hits = [i for i, line in enumerate(lines, 1)
+                if line.strip() == expected]
+        if len(hits) == 1:
+            out.append(f"    {hits[0]}: ({expected!r},\n           {label!r}),")
+        elif hits:
+            out.append(f"    # {label}: {len(hits)} sites carry this line "
+                       f"{hits} — pick the one production runs")
+        else:
+            out.append(f"    # {label}: the snippet no longer exists — "
+                       f"re-derive by SYMBOL")
+    return "\n".join(out)
+
+
+#: A ``file.py:NNNN`` or a bare ``:NNNN`` continuation. The lookbehind keeps
+#: ``test_extractor_v2.py:<digits>`` from being read as ``extractor_v2.py:<digits>``
+#: (they are different files, and a false attribution here is a gate that lies).
+_CITE_RE = re.compile(
+    r"(?<![\w.])([\w./-]+\.py):(\d{4,5})(?:-(\d{4,5}))?"
+    r"|(?<![\w.]):(\d{4,5})(?:-(\d{4,5}))?")
+
+
+def _runbook_extractor_cites(body: str) -> tuple[set[int], set[int]]:
+    """Numbers the runbook attributes to ``extractor_v2.py``; and any it does not.
+
+    A bare ``:NNNN`` continues the last file named in the same PARAGRAPH, so a
+    sentence repaired around its continuation cannot pass by dropping the file
+    name — #10742's review caught exactly that (`:7747` and `:7745` survived the
+    first repair, because only FILE-QUALIFIED cites were swept). Paragraph
+    scoping is what keeps a cite from a neighbouring table row out of this one.
+    """
+    attributed: set[int] = set()
+    unattributed: set[int] = set()
+    current: str | None = None
+    for line in body.splitlines():
+        if not line.strip():
+            current = None
+            continue
+        for match in _CITE_RE.finditer(line):
+            named, start, end, bare, bare_end = match.groups()
+            if named is not None:
+                current = named
+                numbers = (start, end)
+            else:
+                numbers = (bare, bare_end)
+            for number in numbers:
+                if number is None:
+                    continue
+                # the runbook names the file both as `extractor_v2.py` and as
+                # `tortoise/extractor_v2.py`; the BASENAME decides the target.
+                if current is not None and \
+                        current.rsplit("/", 1)[-1] == "extractor_v2.py":
+                    attributed.add(int(number))
+                elif current is None:
+                    unattributed.add(int(number))
+    return attributed, unattributed
 
 
 def test_every_extractor_v2_cite_this_file_publishes_resolves_at_this_head():
@@ -1146,7 +1267,7 @@ def test_every_extractor_v2_cite_this_file_publishes_resolves_at_this_head():
         if end:
             published.add(int(end))
     unswept = sorted({int(n) for n in
-                      re.findall(r"extractor_v2\.py:(\d+)", text)}
+                      re.findall(r"(?<![\w.])extractor_v2\.py:(\d+)", text)}
                      - set(_PUBLISHED_CITES))
     assert not unswept, (
         "this file publishes a file-qualified extractor_v2.py cite that this pin "
@@ -1167,7 +1288,9 @@ def test_every_extractor_v2_cite_this_file_publishes_resolves_at_this_head():
         "the cites this census publishes point at lines that no longer carry "
         "the code they name — re-derive the numbers (the symbol is "
         "authoritative, the line is a convenience) and update the prose with "
-        "them:\n  " + "\n  ".join(stale))
+        "them:\n  " + "\n  ".join(stale)
+        + "\n\ncorrected mapping derived from this head — paste into "
+          "_PUBLISHED_CITES:\n" + _paste_ready_mapping(lines))
 
 
 def test_the_value_free_gate_cite_agrees_across_the_index_row_and_the_runbook():
@@ -1193,3 +1316,69 @@ def test_the_value_free_gate_cite_agrees_across_the_index_row_and_the_runbook():
             f"{name} no longer publishes `{cite}` for the value-free gate — "
             "the two artifacts must name the same site, and a stale number here "
             "is a number nothing can self-detect")
+
+
+def test_every_cite_the_runbook_publishes_resolves_at_this_head():
+    """The runbook publishes this census's cites, so it gets the same tripwire.
+
+    #10742: repairing the file's numbers while the runbook kept `:7548` is the
+    split-brain the cite convention exists to prevent — a reader sent to the
+    runbook for the method would follow a number that names unrelated code.
+    Bare continuations are attributed too (see `_runbook_extractor_cites`): the
+    first repair swept only file-qualified cites and left `:7747`/`:7745`
+    standing in sentences it had half-corrected, which is why paragraph
+    attribution is the rule rather than a convenience.
+    """
+    repo = WRITE_PATH.resolve().parents[2]
+    body = (repo / _RUNBOOK).read_text(encoding="utf-8")
+    lines = (repo / "tortoise/extractor_v2.py").read_text(encoding="utf-8") \
+        .splitlines()
+
+    attributed, unattributed = _runbook_extractor_cites(body)
+    unswept = sorted(attributed - set(_RUNBOOK_CITES))
+    assert not unswept, (
+        "the runbook publishes an extractor_v2.py cite this pin does not hold, "
+        f"so nothing verifies it: {unswept} — add it to _RUNBOOK_CITES with "
+        "the line it must name")
+    assert not unattributed, (
+        "these numbers continue NO named file, so nothing can say which source "
+        f"they cite: {sorted(unattributed)} — name the file beside the number")
+
+    stale = []
+    for number, (expected, label) in sorted(_RUNBOOK_CITES.items()):
+        got = lines[number - 1].strip()
+        if got != expected:
+            stale.append(f"extractor_v2.py:{number} ({label}) reads {got!r}, "
+                         f"not {expected!r}")
+    assert not stale, (
+        "the runbook's cites point at lines that no longer carry the code they "
+        "name — re-derive them (the symbol is authoritative, the line is a "
+        "convenience) and update the runbook with them:\n  "
+        + "\n  ".join(stale))
+
+
+def test_the_census_clamps_with_the_write_paths_own_cut():
+    """#10742: the census's clamp must BE production's ``_write_span``.
+
+    Non-vacuity: the case is built so the cap falls MID-TOKEN on a numeral,
+    where the hard slice reads the value SHORT (``1200`` -> ``12`` — the
+    false-accusation shape ``_write_span`` exists to prevent). A re-typed
+    ``[:cap]`` passes every other test in this file: measured, **0 of the 217
+    sealed points diverge**, so only a constructed mid-token case tells the two
+    mechanisms apart. That is why the caps alone being imported was not enough.
+    """
+    head = "a " * 99                       # 198 chars: the cap lands inside the
+    point = {"content": "x", "quote": head + "1200 seconds"}   # numeral
+    got = _stamp_inputs(point)[1]
+    assert got == v2._write_span(point["quote"], v2._MAX_QUOTE), (
+        "_stamp_inputs does not cut the way the write path cuts — a re-typed "
+        "[:cap] measures a population production never writes wherever the cap "
+        "falls mid-token (measured on the sealed corpus: 0 of 217 points, so "
+        "nothing else in this file can see it)")
+    assert got != point["quote"][:v2._MAX_QUOTE], (
+        "this case no longer discriminates: the hard slice and the token-safe "
+        "cut agree here, so the assertion above would pass for EITHER "
+        "mechanism — rebuild it so the cap splits a numeral")
+    assert "1200" not in got, (
+        "the token-safe cut must DROP a split numeral whole rather than store "
+        "a truncated value: " + repr(got))
