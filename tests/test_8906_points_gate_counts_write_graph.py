@@ -45,6 +45,18 @@ Both directives are asserted for every door, so neither "make it admit" nor
 sets to 25000 from ``pricing.json`` solo.max_graph_nodes), held at 1–2 here so
 one Point fills a graph. No limit value is changed and the graph's size is the
 only axis under test.
+
+⚠️ ``#10637`` (folded from the #4051 lane) landed the SAME defect's other half
+on ``main`` while this branch was open: ``quota.enforce_org_limit`` now takes a
+lazy ``sdk_factory=`` and ``_check_org_limit``'s fallback is
+``_gate_sdk_for(org, resource)``, which mirrors the OPENER's call forms instead
+of the org default. So the behavioural arms below no longer FALSIFY ``main`` —
+they pin the outcome (#8906 stays closed if that fallback is ever weakened) and
+they still falsify the pre-#10637 gate, which is what the falsification table in
+the PR body measured. The two structural arms (``/v1/demo`` one handle,
+`/v1/sessions`' vacuous gate) are the leaves ``#10637`` does NOT cover: an
+omitted-sdk fallback can be right and still cost a second handle, and a vacuous
+gate has no fallback to be right about.
 """
 from __future__ import annotations
 
@@ -407,3 +419,61 @@ def test_demo_door_hands_the_gate_and_the_seeder_ONE_handle(env, monkeypatch):
         "the gate and the seeder were handed DIFFERENT SDK handles at /v1/demo "
         "— the count and the write can then split when the default resolution "
         "moves between them (#8906)")
+
+
+def test_capture_sessions_gate_is_handed_the_capture_handle(env, monkeypatch):
+    """The 6th converted gate — `/v1/sessions`' `sessions` resource — is
+    VACUOUS today, so only a structural arm can pin it (#8906 review, F2).
+
+    Every resolver emits ``max_sessions: None`` since #4010, and
+    ``enforce_org_limit`` returns at the explicit-``None`` branch BEFORE it
+    counts, so no behavioural assertion can distinguish ``sdk=sdk`` from no
+    argument at this site: reverting that one keyword leaves the whole suite
+    green while the door silently re-arms #8906 the day a finite session cap
+    ships. This arm asserts the property the change buys — the gate receives the
+    SAME handle the capture lane writes through, and it is not ``None``.
+    """
+    import tortoise.hosted_api as ha_mod
+
+    e = env(max_points=100)
+    seen: dict[str, object] = {}
+
+    real_probe = ha_mod._capture_session_probe_off_loop
+    real_gate = ha_mod._check_org_limit
+
+    async def _spy_probe(org, session_id):
+        out = await real_probe(org, session_id)
+        seen["probe"] = out[0]
+        return out
+
+    def _spy_gate(org, resource, *, slot_credit=0, sdk=None):
+        if resource == "sessions":
+            seen["gate"] = sdk
+        return real_gate(org, resource, slot_credit=slot_credit, sdk=sdk)
+
+    monkeypatch.setattr(ha_mod, "_capture_session_probe_off_loop", _spy_probe)
+    monkeypatch.setattr(ha_mod, "_check_org_limit", _spy_gate)
+    # The offline extractor seam — this arm is about WHICH handle the gate gets,
+    # not about extraction, so no provider key or network is involved.
+    monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
+
+    r = e.tc.post(
+        "/v1/sessions",
+        json={"session_id": "s-8906-gate",
+              "conversation": [
+                  {"role": "user",
+                   "content": "The points gate must count the graph this write "
+                              "lands in, not the org default."},
+                  {"role": "assistant",
+                   "content": "Agreed. Count on the same handle the write uses."},
+              ]},
+        headers=e.headers())
+    assert r.status_code in (200, 201), r.text[:400]
+    assert seen.get("gate", "absent") is not None, (
+        "the capture door's `sessions` gate ran without an sdk — an omitted one "
+        "counts the org DEFAULT graph, so a finite session cap would compare "
+        "the cap against a graph this key never writes (#8906)")
+    assert seen["gate"] is seen.get("probe"), (
+        "the `sessions` gate was handed a DIFFERENT SDK handle than the capture "
+        "lane writes through — the count and the write can then target "
+        "different graphs (#8906)")
