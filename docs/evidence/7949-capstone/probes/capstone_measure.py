@@ -703,7 +703,16 @@ def build_rows(*, head: str, out_path: str, log_corpus_sha: str,
             "evidence_kind": "measurement", "evidence": evidence, "sha": sha,
             "numerator": numerator, "denominator": denominator,
             "corpus_sha256": corpus_sha256, "sibling": sibling,
-            "blocked_by": blocked_by, "note": note,
+            # ⛔ GREEN AND BLOCKED ARE MUTUALLY EXCLUSIVE, and the rule is enforced
+            # HERE rather than at each call site. Every sibling row used to stamp its
+            # blocker unconditionally (`#5333`, `#9736`, `#9738`), so the first time
+            # E1/E3/E5 actually passed, the row would be GREEN and carry an OPEN
+            # blocker — a table the gate refuses as dishonest ("GREEN carries a
+            # blocker", V5), i.e. a FALSE ACCUSATION against a row that had just
+            # succeeded. Fixing E4 alone left the identical latent defect four lines
+            # away; this is the one place the invariant can be stated once.
+            "blocked_by": None if verdict == "GREEN" else blocked_by,
+            "note": note,
         }
         if artifact_corpus_sha256 is not None:
             built["artifact_corpus_sha256"] = artifact_corpus_sha256
@@ -720,6 +729,21 @@ def build_rows(*, head: str, out_path: str, log_corpus_sha: str,
     # comparison. `build_e4_row` cannot produce one — this is the synthetic-caller
     # path — but the predicate's job is a verdict, not a traceback.
     e4_off_this_corpus = not _same_corpus(e4["corpus_sha256"], log_corpus_sha)
+
+    # ⛔ A NAMED REFUSAL, NOT A `KeyError`. Every sibling guard in this module refuses
+    # by name (``capstone-measure: REFUSED — …``) because a traceback is not a refusal:
+    # it carries no cause and lands at the END of a full corpus run. `evidence` used to
+    # be read with ``e4["evidence"]``, so a caller omitting it got an unlabelled
+    # ``KeyError`` — while this module's own header said ``build_rows`` REFUSES that
+    # mapping. The prose was right and the code was not; defaulting it instead would
+    # cite the pre-#8503 artifact beside this run's numbers, which is the defect this
+    # bundle closes.
+    if "evidence" not in e4:
+        raise SystemExit(
+            "capstone-measure: REFUSED — build_rows was handed an e4 mapping with no "
+            "`evidence` path. Defaulting it to E4_RECEIPT would cite the pre-#8503 "
+            "artifact beside this run's numbers, so the row is refused by name rather "
+            "than left to a KeyError")
 
     return [
         row("E1", verdict=e1["verdict"], evidence=E1E2_LOG, sha=e1["sha"],

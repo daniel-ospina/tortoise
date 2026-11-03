@@ -4088,8 +4088,12 @@ def test_a_row_with_no_evidence_path_is_refused_not_defaulted_to_the_constant():
     CITATION pointed at the pre-#8503 one — the exact defect this change closes, left
     open in the function that builds the table, and invisible to the gate (V4 passes,
     V7 passes on the matching corpus, V10 checks only the denominator).
+
+    The refusal is a NAMED one, not a ``KeyError``: this module's header already said
+    ``build_rows`` REFUSES such a mapping, and every sibling guard refuses by name
+    because a traceback carries no cause and lands at the end of a full corpus run.
     """
-    with pytest.raises(KeyError):
+    with pytest.raises(SystemExit) as exc:
         measure.build_rows(
             head="a" * 40, out_path="docs/evidence/7949-capstone/e1-e2.log",
             log_corpus_sha="sha256:" + "d" * 64,
@@ -4104,6 +4108,8 @@ def test_a_row_with_no_evidence_path_is_refused_not_defaulted_to_the_constant():
                 "note": "E4 note"},
             e5={"verdict": "RED", "numerator": 12, "denominator": 25,
                 "note": "E5 note"})
+    assert "REFUSED" in str(exc.value), str(exc.value)
+    assert "evidence" in str(exc.value), str(exc.value)
 
 
 def test_a_non_string_date_is_UNREADABLE_and_refuses_instead_of_parsing():
