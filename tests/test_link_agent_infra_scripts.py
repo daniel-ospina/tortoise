@@ -1683,6 +1683,376 @@ class TestPinAgreement:
 
 
 
+class TestDeployedDrift:
+    """#10114 — the INSTALLED copy the fleet EXECUTES, not the checkout behind the link.
+
+    ``--pin-check`` proves the checkout matches the pin, and a perfect link into that checkout
+    still says nothing about the copy installed earlier under ``~/.pi/agent/scripts``. That copy is
+    what the fleet runs (agent-infra's ``pi-bootstrap/cell-install.sh`` puts it there), and its
+    staleness is #10114's measured outage: a ``pr-doctor.py`` 971 lines older than the pinned
+    source, every repair dispatch refused by ``brief-gate.sh``, ~9 hours of a no-op fleet behind a
+    green setup line. These tests pin the answer in BOTH directions — a stale copy is named, and a
+    copy that IS the pinned bytes is not, including on a checkout behind the pin (where a
+    working-tree comparison would name the correct file as the wrong one).
+    """
+
+    def _home(self, tmp_path: Path, pin: str | None = None) -> Path:
+        home = tmp_path / "home"
+        state = home / ".pi" / "agent" / "state"
+        state.mkdir(parents=True)
+        if pin is not None:
+            (state / "HARNESS-PIN").write_text(pin + "\n")
+        return home
+
+    def _env(self, home: Path, **extra: str) -> dict[str, str]:
+        """The real environment minus whatever pin this machine happens to carry."""
+        env = {**os.environ, "HOME": str(home), "HARNESS_PIN": "", "CELL_HOME": ""}
+        env.update(extra)
+        return env
+
+    def _install(self, tmp_path: Path, infra: Path, names: tuple[str, ...]) -> Path:
+        """A deployed copy of ``names``, byte-copied from ``infra/scripts``. Returns its dir."""
+        target = tmp_path / "deployed"
+        target.mkdir()
+        for name in names:
+            src = infra / "scripts" / name
+            dst = target / name
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            dst.write_bytes(src.read_bytes())
+        return target
+
+    def _deployed_check(
+        self, repo: Path, infra: Path, env: dict[str, str], *args: str
+    ) -> subprocess.CompletedProcess[str]:
+        return run_tool(
+            "--deployed-check", "--repo", str(repo), "--infra", str(infra), *args, env=env
+        )
+
+    def test_a_copy_of_the_pinned_bytes_is_exit_0(
+        self, repo: Path, git_infra: Path, tmp_path: Path
+    ) -> None:
+        pin = git_commit(git_infra, "the pinned commit")
+        deployed = self._install(tmp_path, git_infra, ("record-review.sh",))
+        result = self._deployed_check(
+            repo, git_infra, self._env(self._home(tmp_path, pin)), "--deployed", str(deployed)
+        )
+        assert result.returncode == 0, (result.returncode, result.stdout, result.stderr)
+        assert "deployed: ok" in result.stdout, result.stdout
+        assert pin[:12] in result.stdout, "the verdict does not name the pin it compared against"
+
+    def test_a_copy_that_predates_the_pin_is_exit_1_and_NAMES_the_file(
+        self, repo: Path, git_infra: Path, tmp_path: Path
+    ) -> None:
+        """The measured #10114 shape: the installed copy is older than the pinned source."""
+        deployed = self._install(tmp_path, git_infra, ("record-review.sh",))
+        (git_infra / "scripts" / "record-review.sh").write_text("#!/bin/sh\necho NEWER\n")
+        pin = git_commit(git_infra, "the pinned commit, ahead of the installed copy")
+        result = self._deployed_check(
+            repo, git_infra, self._env(self._home(tmp_path, pin)), "--deployed", str(deployed)
+        )
+        assert result.returncode == 1, (result.returncode, result.stdout, result.stderr)
+        assert "deployed: stale" in result.stdout, result.stdout
+        assert "stale: record-review.sh" in result.stdout, (
+            "the finding does not NAME the drifting file, which is #10114's own target: 'a "
+            "scheduled check that names each drifting file'"
+        )
+        assert "re-install" in result.stderr, result.stderr
+
+    def test_a_SAME_SIZE_SAME_MTIME_different_content_is_still_stale(
+        self, repo: Path, git_infra: Path, tmp_path: Path
+    ) -> None:
+        """Why the predicate is BYTES: neither size nor mtime is the fact.
+
+        ``filecmp.cmp``'s default ``shallow=True`` treats identical ``os.stat`` signatures as
+        equal, and a ``cp`` that preserves timestamps makes the two signatures genuinely
+        identical — so a size-and-mtime implementation reports a DIFFERENT file as matching, in
+        the false-pass direction this issue is about. The replacement keeps the byte count and the
+        mtime and changes one byte: the verdict must still be ``stale``.
+        """
+        deployed = self._install(tmp_path, git_infra, ("record-review.sh",))
+        source = git_infra / "scripts" / "record-review.sh"
+        original = source.read_bytes()
+        swapped = original.replace(b"ran-record-review.sh", b"ran-record-review.SH")
+        assert swapped != original and len(swapped) == len(original), "the fixture must not resize"
+        source.write_bytes(swapped)
+        pin = git_commit(git_infra, "the pinned commit, one byte away")
+        installed = deployed / "record-review.sh"
+        stamp = (git_infra / "commit.log").stat()
+        os.utime(installed, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
+        result = self._deployed_check(
+            repo, git_infra, self._env(self._home(tmp_path, pin)), "--deployed", str(deployed)
+        )
+        assert result.returncode == 1, (result.returncode, result.stdout, result.stderr)
+        assert "stale: record-review.sh" in result.stdout, result.stdout
+
+    def test_a_file_the_pinned_tree_does_not_carry_is_LOCAL_not_drift(
+        self, repo: Path, git_infra: Path, tmp_path: Path
+    ) -> None:
+        """Cell bring-up writes its own helpers into the same directory — measured, 4 of 5."""
+        pin = git_commit(git_infra, "the pinned commit")
+        deployed = self._install(tmp_path, git_infra, ("record-review.sh",))
+        (deployed / "cell-helper.sh").write_text("#!/bin/sh\n# cell-local\n")
+        result = self._deployed_check(
+            repo, git_infra, self._env(self._home(tmp_path, pin)), "--deployed", str(deployed)
+        )
+        assert result.returncode == 0, (result.returncode, result.stdout, result.stderr)
+        assert "local: cell-helper.sh" in result.stdout, result.stdout
+        assert "stale:" not in result.stdout, "a cell-local helper was reported as drift"
+
+    def test_a_BEHIND_checkout_still_compares_against_the_PINNED_bytes(
+        self, repo: Path, git_infra: Path, tmp_path: Path
+    ) -> None:
+        """The reason the reference is ``cat-file blob <pin>`` and not ``<infra>/scripts``.
+
+        Measured on the box this was written for: ``$AGENT_INFRA_PATH`` is 139 commits BEHIND the
+        pin. A working-tree comparison would therefore report the correctly-installed file as
+        stale, and its remedy would send an operator to "fix" the one file that is already right.
+        Here the checkout is left at the OLD commit and the installed copy holds the PINNED bytes:
+        the verdict must be ``ok``.
+        """
+        behind = subprocess.run(
+            ["git", "-C", str(git_infra), "rev-parse", "HEAD"],
+            check=True, capture_output=True, text=True,
+        ).stdout.strip()
+        (git_infra / "scripts" / "record-review.sh").write_text("#!/bin/sh\necho PINNED\n")
+        pin = git_commit(git_infra, "the commit the box runs")
+        deployed = self._install(tmp_path, git_infra, ("record-review.sh",))
+        subprocess.run(
+            ["git", "-C", str(git_infra), "checkout", "-q", behind],
+            check=True, capture_output=True,
+        )
+        env = self._env(self._home(tmp_path, pin))
+        # Precondition: the CHECKOUT question does fail here. Without this the test could pass
+        # over a fixture that never reproduced the behind-the-pin shape at all.
+        said = run_tool("--pin-check", "--repo", str(repo), "--infra", str(git_infra), env=env)
+        assert said.returncode == 1, (said.returncode, said.stdout, said.stderr)
+        result = self._deployed_check(repo, git_infra, env, "--deployed", str(deployed))
+        assert result.returncode == 0, (result.returncode, result.stdout, result.stderr)
+        assert "deployed: ok" in result.stdout, result.stdout
+
+    def test_no_pin_record_is_cannot_verify_never_a_pass(
+        self, repo: Path, git_infra: Path, tmp_path: Path
+    ) -> None:
+        deployed = self._install(tmp_path, git_infra, ("record-review.sh",))
+        result = self._deployed_check(
+            repo, git_infra, self._env(self._home(tmp_path)), "--deployed", str(deployed)
+        )
+        assert result.returncode == 2, (result.returncode, result.stdout, result.stderr)
+        assert "no harness pin recorded" in result.stdout, result.stdout
+
+    def test_a_pin_commit_the_checkout_lacks_is_cannot_verify_with_a_remedy(
+        self, repo: Path, git_infra: Path, tmp_path: Path
+    ) -> None:
+        deployed = self._install(tmp_path, git_infra, ("record-review.sh",))
+        absent = "0" * 40
+        result = self._deployed_check(
+            repo, git_infra, self._env(self._home(tmp_path, absent)), "--deployed", str(deployed)
+        )
+        assert result.returncode == 2, (result.returncode, result.stdout, result.stderr)
+        assert "does not contain the pinned commit" in result.stdout, result.stdout
+        assert "git fetch origin && git checkout" in result.stdout, (
+            "the cannot-verify verdict must still hand over the repair: " + result.stdout
+        )
+
+    def test_nothing_installed_at_the_DEFAULT_location_is_exit_0_and_SAYS_SO(
+        self, repo: Path, git_infra: Path, tmp_path: Path
+    ) -> None:
+        """The DEFAULT location absent is a genuine answer: this box never installed the layer."""
+        pin = git_commit(git_infra, "the pinned commit")
+        result = self._deployed_check(repo, git_infra, self._env(self._home(tmp_path, pin)))
+        assert result.returncode == 0, (result.returncode, result.stdout, result.stderr)
+        assert "deployed: nothing-installed" in result.stdout, result.stdout
+
+    def test_an_explicit_deployed_path_that_does_not_exist_is_a_CALLER_ERROR(
+        self, repo: Path, git_infra: Path, tmp_path: Path
+    ) -> None:
+        """``--deployed`` is authoritative: a mistyped path is not the "nothing installed" pass.
+
+        The lenient read is the dangerous one — a path that is not mounted YET would answer the
+        pass code, and the operator would learn nothing. Same contract this module already keeps
+        for ``--infra "$AN_UNSET_VAR"`` and for ``--pin ''``.
+        """
+        pin = git_commit(git_infra, "the pinned commit")
+        result = self._deployed_check(
+            repo,
+            git_infra,
+            self._env(self._home(tmp_path, pin)),
+            "--deployed",
+            str(tmp_path / "never-installed"),
+        )
+        assert result.returncode == 2, (result.returncode, result.stdout, result.stderr)
+        assert "does not exist" in result.stderr, result.stderr
+
+    def test_files_installed_but_NONE_comparable_is_exit_2(
+        self, repo: Path, git_infra: Path, tmp_path: Path
+    ) -> None:
+        """Zero files compared is an UNANSWERED question, not a pass.
+
+        Reached in the wild by a nested ``cp -R`` — agent-infra's own ``cell-install.sh`` warns
+        about the ``SRC/. DEST/`` form for exactly this reason — which leaves every installed file
+        at a path the pinned tree does not carry.
+        """
+        pin = git_commit(git_infra, "the pinned commit")
+        deployed = tmp_path / "deployed"
+        (deployed / "nested" / "scripts").mkdir(parents=True)
+        (deployed / "nested" / "scripts" / "record-review.sh").write_text("#!/bin/sh\n")
+        result = self._deployed_check(
+            repo, git_infra, self._env(self._home(tmp_path, pin)), "--deployed", str(deployed)
+        )
+        assert result.returncode == 2, (result.returncode, result.stdout, result.stderr)
+        assert "deployed: nothing-comparable" in result.stdout, result.stdout
+
+    def test_a_dangling_deployed_symlink_is_cannot_verify(
+        self, repo: Path, git_infra: Path, tmp_path: Path
+    ) -> None:
+        """A link to a directory that is GONE is a box whose fleet has no scripts at all."""
+        pin = git_commit(git_infra, "the pinned commit")
+        target = tmp_path / "deployed"
+        target.symlink_to(tmp_path / "vanished" / "scripts")
+        result = self._deployed_check(
+            repo, git_infra, self._env(self._home(tmp_path, pin)), "--deployed", str(target)
+        )
+        assert result.returncode == 2, (result.returncode, result.stdout, result.stderr)
+        assert "not an existing" in result.stdout, result.stdout
+
+    def test_a_deployed_symlink_to_a_directory_is_COMPARED_through_the_link(
+        self, repo: Path, git_infra: Path, tmp_path: Path
+    ) -> None:
+        """A link is not fresh by construction: the fleet executes its TARGET's bytes.
+
+        This is the shipped shape (`bin/agent-infra.js` forceSymlinks the scripts dir), so the
+        pass this branch used to return sat on the default install path of every box provisioned
+        by `agent-infra init` — reading green while a link into a behind-the-pin checkout served
+        non-pinned bytes, which is #10114 itself.
+        """
+        deployed = self._install(tmp_path, git_infra, ("record-review.sh",))
+        (git_infra / "scripts" / "record-review.sh").write_text("#!/bin/sh\necho PINNED\n")
+        pin = git_commit(git_infra, "the pinned commit")
+        link = tmp_path / "linked"
+        link.symlink_to(deployed)
+        result = self._deployed_check(
+            repo, git_infra, self._env(self._home(tmp_path, pin)), "--deployed", str(link)
+        )
+        assert result.returncode == 1, (result.returncode, result.stdout, result.stderr)
+        assert "stale: record-review.sh" in result.stdout, result.stdout
+
+    def test_an_infra_that_is_not_a_REPO_ROOT_is_cannot_verify(
+        self, repo: Path, git_infra: Path, tmp_path: Path
+    ) -> None:
+        """``git -C <dir>`` answers about an ENCLOSING repository — the guard ``pin_state`` has.
+
+        ``resolve_infra`` accepts a vendored copy (it only requires ``<cand>/scripts`` to be a
+        directory), so without this guard every ``cat-file`` reads the enclosing repo's blobs and
+        can name a correctly-installed file as stale, with a remedy that cannot run there.
+        """
+        pin = git_commit(git_infra, "the pinned commit")
+        deployed = self._install(tmp_path, git_infra, ("record-review.sh",))
+        vendored = git_infra / "vendor" / "agent-infra"
+        (vendored / "scripts").mkdir(parents=True)
+        result = self._deployed_check(
+            repo, vendored, self._env(self._home(tmp_path, pin)), "--deployed", str(deployed)
+        )
+        assert result.returncode == 2, (result.returncode, result.stdout, result.stderr)
+        assert "ENCLOSING repository" in result.stdout, result.stdout
+
+    def test_a_present_but_UNREADABLE_pinned_blob_is_cannot_verify_not_local(
+        self, repo: Path, git_infra: Path, tmp_path: Path
+    ) -> None:
+        """`cat-file` exits 128 for BOTH "no such path" and "unreadable object".
+
+        Folding the second into the first classified every file as ``local`` and reported
+        ``nothing-installed`` at exit 0 — a green over a tree that was never compared, on a box
+        whose object store is damaged. Corrupting the loose blob object (leaving the commit
+        readable) reproduces it exactly.
+        """
+        pin = git_commit(git_infra, "the pinned commit")
+        deployed = self._install(tmp_path, git_infra, ("record-review.sh",))
+        oid = subprocess.run(
+            ["git", "-C", str(git_infra), "rev-parse", f"{pin}:scripts/record-review.sh"],
+            check=True, capture_output=True, text=True,
+        ).stdout.strip()
+        loose = git_infra / ".git" / "objects" / oid[:2] / oid[2:]
+        assert loose.is_file(), f"expected a loose object at {loose} — the fixture needs one"
+        loose.chmod(0o644)  # git writes objects read-only; the fixture only needs to edit it
+        loose.write_bytes(b"corrupted-on-purpose")
+        result = self._deployed_check(
+            repo, git_infra, self._env(self._home(tmp_path, pin)), "--deployed", str(deployed)
+        )
+        assert result.returncode == 2, (result.returncode, result.stdout, result.stderr)
+        assert "cannot be read" in result.stdout, result.stdout
+
+    def test_deployed_without_deployed_check_is_a_caller_error(
+        self, repo: Path, git_infra: Path, tmp_path: Path
+    ) -> None:
+        """A passed value that would be silently ignored must be refused in EVERY mode."""
+        pin = git_commit(git_infra, "the pinned commit")
+        env = self._env(self._home(tmp_path, pin))
+        for mode in ("--check", "--pin-check"):
+            result = run_tool(mode, "--deployed", str(tmp_path), "--repo", str(repo),
+                              "--infra", str(git_infra), env=env)
+            assert result.returncode == 2, (mode, result.returncode, result.stdout, result.stderr)
+            assert "no --deployed-check was selected" in result.stderr, (mode, result.stderr)
+
+    def test_a_symlinked_installed_file_is_not_compared(
+        self, repo: Path, git_infra: Path, tmp_path: Path
+    ) -> None:
+        """A link cannot be stale — its bytes are whatever it resolves to."""
+        pin = git_commit(git_infra, "the pinned commit")
+        deployed = self._install(tmp_path, git_infra, ("record-review.sh",))
+        (deployed / "linked-tool.sh").write_text("#!/bin/sh\n# not the pinned bytes\n")
+        (deployed / "linked-tool.sh").unlink()
+        (deployed / "linked-tool.sh").symlink_to(git_infra / "scripts" / "admin-merge.sh")
+        result = self._deployed_check(
+            repo, git_infra, self._env(self._home(tmp_path, pin)), "--deployed", str(deployed)
+        )
+        assert result.returncode == 0, (result.returncode, result.stdout, result.stderr)
+        assert "1 linked" in result.stdout, result.stdout
+
+    def test_the_installed_copy_is_resolved_under_CELL_HOME_not_HOME(
+        self, repo: Path, git_infra: Path, tmp_path: Path
+    ) -> None:
+        """The base the fleet WRITES the copy under — the same base as the pin record."""
+        deployed = self._install(tmp_path, git_infra, ("record-review.sh",))
+        (git_infra / "scripts" / "record-review.sh").write_text("#!/bin/sh\necho PINNED\n")
+        pin = git_commit(git_infra, "the pinned commit")
+        cell = tmp_path / "cell-home"
+        state = cell / ".pi" / "agent" / "state"
+        state.mkdir(parents=True)
+        (state / "HARNESS-PIN").write_text(pin + "\n")
+        installed = cell / ".pi" / "agent" / "scripts"
+        installed.mkdir(parents=True)
+        for entry in deployed.iterdir():
+            (installed / entry.name).write_bytes(entry.read_bytes())
+        env = {**os.environ, "HOME": str(self._home(tmp_path, "1" * 40)),
+               "HARNESS_PIN": "", "CELL_HOME": str(cell)}
+        result = self._deployed_check(repo, git_infra, env)
+        assert result.returncode == 1, (result.returncode, result.stdout, result.stderr)
+        assert str(installed) in result.stdout, (
+            "the default deployed dir ignored $CELL_HOME — a cell would be judged on $HOME's copy: "
+            + result.stdout
+        )
+
+    def test_an_empty_deployed_argument_is_a_caller_error(
+        self, repo: Path, git_infra: Path, tmp_path: Path
+    ) -> None:
+        pin = git_commit(git_infra, "the pinned commit")
+        result = self._deployed_check(
+            repo, git_infra, self._env(self._home(tmp_path, pin)), "--deployed", ""
+        )
+        assert result.returncode == 2, (result.returncode, result.stdout, result.stderr)
+        assert "--deployed was passed but is EMPTY" in result.stderr, result.stderr
+
+    def test_the_three_assertion_modes_are_mutually_exclusive(
+        self, repo: Path, git_infra: Path, tmp_path: Path
+    ) -> None:
+        pin = git_commit(git_infra, "the pinned commit")
+        env = self._env(self._home(tmp_path, pin))
+        result = run_tool("--deployed-check", "--pin-check", "--repo", str(repo),
+                          "--infra", str(git_infra), env=env)
+        assert result.returncode == 2, (result.returncode, result.stdout, result.stderr)
+        assert "not allowed with" in result.stderr, result.stderr
+
+
 class TestDefaultPinPathIsCallTime:
     """The pin path must be resolved at CALL time — the only shape a subprocess suite cannot see.
 

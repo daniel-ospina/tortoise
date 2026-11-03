@@ -15,10 +15,12 @@ in-repo because that CLI is not installed on every lane (#9475).
 
 Usage
 -----
-    uv run python tools/link_agent_infra_scripts.py            # create/repair the link
-    uv run python tools/link_agent_infra_scripts.py --check    # assert it, change nothing
-    uv run python tools/link_agent_infra_scripts.py --pin-check  # assert the CHECKOUT is the
-                                                                # tree this box is pinned to
+    uv run python tools/link_agent_infra_scripts.py                # create/repair the link
+    uv run python tools/link_agent_infra_scripts.py --check        # assert it, change nothing
+    uv run python tools/link_agent_infra_scripts.py --pin-check    # assert the CHECKOUT is the
+                                                                  # tree this box is pinned to
+    uv run python tools/link_agent_infra_scripts.py --deployed-check  # assert the INSTALLED
+                                                                  # scripts are the pinned bytes
 
 Exit codes
 ----------
@@ -34,7 +36,40 @@ loud, never silence); 1 = drift (behind / diverged / the pin commit is absent fr
 2 = cannot verify (the pin file is empty or unreadable, the checkout is not a git repo, or git
     could not answer — a git error or a timed-out git is UNKNOWN, never drift).
 
-The two assertion modes answer DIFFERENT questions and are refused together (exit 2, via an
+``--deployed-check`` answers a THIRD question, and the one #10114 was actually filed about: is
+``${CELL_HOME:-$HOME}/.pi/agent/scripts/`` — the INSTALLED copy the fleet EXECUTES — still the
+pinned bytes? ``--pin-check`` proves the checkout matches the pin, and a perfect link into that
+checkout still says nothing about a copy that was installed earlier and never refreshed. That is
+the measured #10114 outage: ``pr-doctor.py`` in ``~/.pi/agent/scripts/`` was 971 lines older than
+the pinned source, so ``brief-gate.sh`` refused 100% of its orders and the repair fleet was a
+no-op for ~9 hours while every setup line read green. The reference is the PINNED COMMIT's blob
+(``git cat-file blob <pin>:scripts/<path>``), never the checkout's working tree: the checkout this
+was written on was >100 commits BEHIND the pin the whole time, so a working-tree comparison would
+report the correct installed file as stale — a false positive whose remedy sends an operator to
+"fix" a file that is already right.
+
+Exit codes, ``--deployed-check``: 0 = every installed file that the pinned tree also carries is
+byte-identical (or the default install location does not exist, said out loud); 1 = at least one
+is STALE; 2 = cannot verify — which includes the case where files ARE installed and NONE of them
+is a path the pinned tree carries, because then nothing was compared and an unanswered question is
+never a clean one. A file in the deployed directory with NO counterpart in the pinned tree is
+``local`` — cell bring-up writes its own helpers there (``lane-arm.sh``, ``tortoise-graph.sh`` and
+friends exist only there), and calling those drift would make the check cry wolf on every healthy
+cell.
+
+Every number that varies with the box's pin is stated as a SHAPE, not a count: the pin moves under
+a lane (it did, mid-authoring), and a docstring quoting "139 commits" or "4 of 5 files" becomes
+false without anyone editing it. ``--deployed-check`` prints the live numbers when it runs.
+
+A deployed directory that is itself a SYMLINK is resolved and its target compared, never assumed
+fresh: a dangling link, a link to a plain file, and a link into a checkout that is behind the pin
+all read as passes under an "a link cannot be stale" shortcut, and the third of those is #10114
+itself. Presence and readability are asked SEPARATELY (``rev-parse --verify -q`` then
+``cat-file blob``) because `cat-file` exits 128 for both "no such path" and "unreadable object",
+and folding the second into the first reported a damaged object store as ``nothing-installed`` at
+exit 0.
+
+The assertion modes answer DIFFERENT questions and are refused together (exit 2, via an
 argparse ``mutually_exclusive_group``). Before that guard, ``--check --pin-check`` answered the
 pin question first and returned, so it exited **0** on a box whose pin was clean while the
 pointer assertion never ran — with a dangling pointer that is a green exit over a broken setup,
@@ -131,6 +166,34 @@ PIN_BEHIND = "behind"
 PIN_DIVERGED = "diverged"
 PIN_DRIFT = frozenset({PIN_ABSENT, PIN_BEHIND, PIN_DIVERGED})
 PIN_CANNOT_VERIFY = frozenset({PIN_UNREADABLE, PIN_NOT_A_REPO, PIN_GIT_ERROR})
+
+#: Where an INSTALLED copy of the agent-infra scripts lives, relative to the SAME base the pin
+#: record lives under. Agent-infra's cell bring-up installs the operational layer there
+#: (``pi-bootstrap/cell-install.sh``), and the fleet EXECUTES that copy — not the checkout — so it
+#: is the copy whose staleness silently disables tooling (#10114). Resolved at call time for the
+#: same reason ``default_pin_path()`` is a function: every test here redirects ``HOME``/``CELL_HOME``.
+DEPLOYED_RELATIVE = Path(".pi") / "agent" / "scripts"
+#: ``deployed_drift`` verdicts. ``stale`` is the only one that makes ``--deployed-check`` exit 1;
+#: ``cannot-verify`` is exit 2; ``ok`` and ``nothing-installed`` are the passes, and BOTH state
+#: their evidence (``nothing-installed`` is an answer — "no installed copy on this box" — and
+#: under this module's rule an unanswered question is never a clean one).
+DEPLOYED_OK = "ok"
+DEPLOYED_NOTHING_INSTALLED = "nothing-installed"
+#: Files ARE installed, and NONE of them is a path the pinned tree carries (a nested ``cp -R``, or
+#: a deploy layout that does not mirror ``scripts/``). Zero files were compared, so this is an
+#: UNANSWERED question and it exits 2 — the pass code belongs to ``nothing-installed``, which is
+#: the provable "this box never installed the layer" state and must stay distinguishable from it.
+DEPLOYED_NOTHING_COMPARABLE = "nothing-comparable"
+DEPLOYED_STALE = "stale"
+DEPLOYED_CANNOT_VERIFY = "cannot-verify"
+#: Per-file verdicts inside a ``--deployed-check`` run. ``local`` is NOT a failure: it means the
+#: pinned tree carries no such path, so there is no pinned byte for it to disagree with.
+DEPLOYED_ENTRY_OK = "ok"
+DEPLOYED_ENTRY_STALE = "stale"
+DEPLOYED_ENTRY_LOCAL = "local"
+#: Directory names never compared: ``__pycache__`` is interpreter bytecode, not installed
+#: content, and it is rebuilt from the file it caches — flagging it would be drift with no repair.
+DEPLOYED_SKIP_DIRS = frozenset({"__pycache__"})
 
 # Tools this repo names in its own docs and hooks. Only used to make a *stale checkout* legible
 # (`diagnose` asks agent-infra whether it has them); never to gate the link itself — the link
@@ -230,6 +293,19 @@ def _expand(raw: str) -> Path:
         return Path(raw)
 
 
+def _box_base() -> Path:
+    """``${CELL_HOME:-$HOME}``, then ``/tmp/cell-home`` — the base the fleet's own readers use.
+
+    One function, because TWO things under it must agree: the pin record
+    (``.pi/agent/state/HARNESS-PIN``) and the installed copy (``.pi/agent/scripts``) are written by
+    the same cell bring-up into the same base. Two copies of this resolution is how they would come
+    to disagree on the one host shape that sets ``CELL_HOME`` — a cell.
+    """
+    return Path(
+        os.environ.get(CELL_HOME_ENV) or os.environ.get("HOME") or DEFAULT_CELL_HOME
+    )
+
+
 def default_pin_path() -> Path:
     """Where this machine records its harness pin. A function, not a constant.
 
@@ -253,12 +329,18 @@ def default_pin_path() -> Path:
     one layer down. ``TestDefaultPinPathIsCallTime`` loads this module IN PROCESS and moves the
     bases, which is the only shape that can distinguish a function from a frozen constant.
     """
-    base = (
-        os.environ.get(CELL_HOME_ENV)
-        or os.environ.get("HOME")
-        or DEFAULT_CELL_HOME
-    )
-    return Path(base) / PIN_RELATIVE
+    return _box_base() / PIN_RELATIVE
+
+
+def default_deployed_dir() -> Path:
+    """Where this machine INSTALLS the agent-infra scripts — ``.pi/agent/scripts`` under the base.
+
+    The SAME base as ``default_pin_path()`` (``${CELL_HOME:-$HOME}``), and for a sharper reason
+    than symmetry: the installed copy and the pin record are written by the same cell bring-up
+    into the same ``$CELL_HOME``, so resolving one base for the pin and another for the copy would
+    compare the right bytes against the wrong box's pin on any host that sets ``CELL_HOME``.
+    """
+    return _box_base() / DEPLOYED_RELATIVE
 
 
 def resolve_pin(explicit: str | None) -> Path | None:
@@ -374,6 +456,28 @@ def _git(infra: Path, *args: str) -> subprocess.CompletedProcess[str] | None:
             timeout=GIT_TIMEOUT,
         )
     except (OSError, subprocess.SubprocessError, UnicodeDecodeError):
+        return None
+
+
+def _git_bytes(infra: Path, *args: str) -> subprocess.CompletedProcess[bytes] | None:
+    """``_git`` over BYTES, for ``cat-file blob``. ``None`` carries the same meaning as ``_git``.
+
+    ⛔ Content hashing must not go through ``text=True``. That decodes with
+    ``io.TextIOWrapper(newline=None)`` — UNIVERSAL NEWLINES — so ``\\r\\n`` in a blob and ``\\n`` on
+    disk would hash the same, and a CRLF-mangled shell script (``bash: $'\\r': command not
+    found``) would be reported as matching the pinned bytes. A byte difference IS the drift.
+    ``text=True`` also cannot survive a non-UTF-8 blob at all, which would surface a valid
+    binary-ish script as a ``UnicodeDecodeError`` traceback (exit 1, the DRIFT class) instead of a
+    verdict. Bytes have neither problem; the failure modes that remain are the two ``_git``
+    documents (``OSError`` = cannot be run, ``SubprocessError`` = hung past ``GIT_TIMEOUT``).
+    """
+    try:
+        return subprocess.run(
+            ["git", "-C", str(infra), *args],
+            capture_output=True,
+            timeout=GIT_TIMEOUT,
+        )
+    except (OSError, subprocess.SubprocessError):
         return None
 
 
@@ -558,6 +662,224 @@ def pin_remedy(infra: Path, pin: Path | None) -> str:
     return f"cd {infra} && git fetch origin && git checkout {sha}"
 
 
+def _deployed_files(deployed: Path) -> tuple[list[tuple[str, Path]], int]:
+    """Every REGULAR file installed under ``deployed``, plus how many entries were LINKED.
+
+    Sorted by relative path so the report is stable run to run (a check whose output reorders
+    itself is a check whose diff a reviewer cannot read). A SYMLINK is counted and skipped, never
+    compared: its content is whatever it resolves to, so a link cannot be stale — and following
+    one would let a link out of the installed tree decide a verdict about the installed tree.
+    """
+    found: list[tuple[str, Path]] = []
+    linked = 0
+    for root, dirnames, filenames in os.walk(deployed):
+        dirnames[:] = sorted(d for d in dirnames if d not in DEPLOYED_SKIP_DIRS)
+        for name in sorted(filenames):
+            path = Path(root) / name
+            if path.is_symlink():
+                linked += 1
+                continue
+            if not path.is_file():
+                continue
+            found.append((path.relative_to(deployed).as_posix(), path))
+    return found, linked
+
+
+def deployed_drift(
+    infra: Path, pin: Path | None, deployed: Path | None = None
+) -> tuple[str, str, list[tuple[str, str]]]:
+    """Classify the INSTALLED scripts against the PINNED commit's blobs (#10114).
+
+    ``(state, detail, entries)``. ``state`` is one of ``DEPLOYED_*``; ``entries`` is
+    ``(relative path, DEPLOYED_ENTRY_*)`` for every file the walk saw.
+
+    The reference is the PINNED COMMIT's tree — ``git cat-file blob <pin>:scripts/<path>`` — and
+    deliberately NOT ``<infra>/scripts/<path>`` on disk. ``--pin-check`` already reports a checkout
+    that is behind the pin, and on the box this was written on that gap was well over a hundred
+    commits; comparing against the working tree would therefore name the CORRECTLY installed file
+    as stale, whose remedy sends an operator to "fix" a file that is already the one the box runs.
+    ``git cat-file`` reads the pinned bytes regardless of what the checkout currently has checked
+    out, so it answers the question actually being asked — provided the pinned commit's objects
+    are present, which is exactly the condition this returns ``cannot-verify`` on when they are not.
+
+    Content is compared BY BYTES with ``==``, never by size or mtime and never through
+    ``filecmp.cmp``'s default ``shallow=True`` (which treats identical ``os.stat`` signatures as
+    equal, and reports a changed file as matching when its size and mtime happen to survive a
+    copy — the false-pass direction). ``pr-doctor.py`` being 971 lines shorter was a size
+    difference, but ``--force`` re-copies and ``touch`` do not reliably change size, so size is not
+    the predicate.
+
+    A file with NO counterpart in the pinned tree is ``local``, not drift, and this is load-bearing
+    rather than lenient: agent-infra's cell bring-up writes its own helpers into the same directory
+    (``lane-arm.sh``, ``tortoise-graph.sh``, ``tortoise_graph_client.py``,
+    ``install-lane-arm-timer.sh`` — none of which the pinned tree carries), so a check that flagged
+    them would cry wolf on every healthy cell and be switched off within a week, which is how a
+    guard ends up back where #10114 started.
+    """
+    target = default_deployed_dir() if deployed is None else deployed
+    try:
+        os.lstat(target)
+    except (FileNotFoundError, NotADirectoryError):
+        return (
+            DEPLOYED_NOTHING_INSTALLED,
+            f"nothing is installed at {target} — there is no copy to compare with the pin",
+            [],
+        )
+    except OSError as exc:
+        return DEPLOYED_CANNOT_VERIFY, f"{target} cannot be examined ({exc}) — cannot verify", []
+    if target.is_symlink():
+        # A deployed DIRECTORY that is a link is NOT fresh by construction: resolve it and judge
+        # the tree the fleet would actually execute. Returning `ok` here was wrong in three
+        # measured ways (all found in review) — a DANGLING link, a link to a plain file, and a link
+        # into a checkout that is BEHIND the pin each printed "every read resolves to the source,
+        # so nothing installed here can be stale" and exited 0. The first two are a box whose
+        # fleet has no scripts at all; the third is #10114 itself, and it sits on the DEFAULT
+        # install path of every box `agent-infra init` provisioned (``bin/agent-infra.js``
+        # forceSymlinks the scripts dir). Whether the install SHOULD be a link stays #10114's open
+        # question — this only refuses to assume the answer.
+        resolved = Path(os.path.realpath(target))
+        if not resolved.is_dir():
+            return DEPLOYED_CANNOT_VERIFY, (
+                f"{target} is a symlink -> {os.readlink(target)}, which is not an existing "
+                "directory — what the fleet would execute cannot be read, so this is not verified"
+            ), []
+        target = resolved
+    elif not target.is_dir():
+        return (
+            DEPLOYED_CANNOT_VERIFY,
+            f"{target} is not a directory — cannot verify",
+            [],
+        )
+
+    if pin is None:
+        return DEPLOYED_CANNOT_VERIFY, (
+            f"no harness pin recorded (no {default_pin_path()}, no ${PIN_ENV}, no --pin) — the "
+            "bytes these files must match cannot be named, so this is not verified"
+        ), []
+    try:
+        sha = _pin_sha_line(pin)
+    except (OSError, UnicodeDecodeError) as exc:
+        return (
+            DEPLOYED_CANNOT_VERIFY,
+            f"the pin record {pin} cannot be read ({exc}) — cannot verify",
+            [],
+        )
+    if not PIN_SHA_RE.match(sha or ""):
+        return DEPLOYED_CANNOT_VERIFY, (
+            f"the pin record {pin} holds {(sha or '')[:40]!r}, which is not a commit id — the "
+            "bytes these files must match cannot be named, so this is not verified"
+        ), []
+
+    # ⛔ ``git -C <dir>`` ANSWERS ABOUT AN ENCLOSING REPOSITORY. This is the guard ``pin_state``
+    # already carries (added there by PR #10250 ROUND 6 ISSUE 3 after it was measured in both
+    # directions), and it is NOT inherited here: a vendored, non-repo copy of agent-infra nested
+    # inside another checkout is a shape ``resolve_infra`` ACCEPTS (it only requires
+    # ``<cand>/scripts`` to be a directory), and every ``cat-file`` below would then answer from
+    # the ENCLOSING repo — naming a correctly-installed file as stale, and handing over a remedy
+    # (``git fetch && git checkout``) that cannot run in a non-checkout. Measured in review:
+    # ``git -C <repo>/docs cat-file -e <sha>^{commit}`` exits 0 and reads the enclosing repo's blobs.
+    toplevel = _git(infra, "rev-parse", "--show-toplevel")
+    if toplevel is None:
+        return DEPLOYED_CANNOT_VERIFY, (
+            f"git could not be asked whether {infra} is a git checkout — cannot verify "
+            "(a git that cannot answer says nothing about the installed copy)"
+        ), []
+    root = toplevel.stdout.strip() if toplevel.returncode == 0 else ""
+    if not root or os.path.realpath(root) != os.path.realpath(infra):
+        enclosing = f" (git answers for {root}, the ENCLOSING repository)" if root else ""
+        return DEPLOYED_CANNOT_VERIFY, (
+            f"{infra} is not a git checkout{enclosing}, so the pinned bytes {sha[:12]} cannot be "
+            "read from it — cannot verify"
+        ), []
+
+    present = _git(infra, "cat-file", "-e", f"{sha}^{{commit}}")
+    if present is None:
+        return DEPLOYED_CANNOT_VERIFY, (
+            f"git could not be asked whether {infra} contains the pinned commit {sha[:12]} — "
+            "cannot verify (a git that cannot answer says nothing about the installed copy)"
+        ), []
+    if present.returncode != 0:
+        return DEPLOYED_CANNOT_VERIFY, (
+            f"{infra} does not contain the pinned commit {sha[:12]}, so the bytes to compare "
+            f"against are not on this machine — bring the checkout to the pin first: "
+            f"{pin_remedy(infra, pin)}"
+        ), []
+
+    entries: list[tuple[str, str]] = []
+    files, linked = _deployed_files(target)
+    for rel, path in files:
+        spec = f"{sha}:{LINK_NAME}/{rel}"
+        blob = _git_bytes(infra, "cat-file", "blob", spec)
+        if blob is not None and blob.returncode == 0:
+            try:
+                on_disk = path.read_bytes()
+            except OSError as exc:
+                return DEPLOYED_CANNOT_VERIFY, (
+                    f"{path} cannot be read ({exc}) — cannot verify"
+                ), entries
+            entries.append(
+                (rel, DEPLOYED_ENTRY_OK if on_disk == blob.stdout else DEPLOYED_ENTRY_STALE)
+            )
+            continue
+
+        # ⛔ rc is NOT enough here. `git cat-file blob <rev>:<path>` exits **128** BOTH when the
+        # path does not exist in that tree AND when the object exists but cannot be READ — so
+        # branching on `returncode != 0` folded "a git that could not answer" into "the pinned
+        # tree does not carry this path" → `local` → and on a box whose object store is damaged (a
+        # partial/promisor clone whose remote is unreachable, a corrupt object) the whole run
+        # reported `nothing-installed` at exit **0**: a green verdict over a tree that was never
+        # compared, which is the silent-green class this mode exists to end. Presence and
+        # readability are asked SEPARATELY: `rev-parse --verify -q` answers 0 = present,
+        # 1 = absent (measured), anything else = git could not say.
+        exists = _git(infra, "rev-parse", "--verify", "-q", spec)
+        if exists is None or blob is None:
+            return DEPLOYED_CANNOT_VERIFY, (
+                f"git could not be asked for {rel} at the pin {sha[:12]} — cannot verify"
+            ), entries
+        if exists.returncode == 1:
+            # git answered, and the answer is "no such path in the pinned tree".
+            entries.append((rel, DEPLOYED_ENTRY_LOCAL))
+            continue
+        if exists.returncode != 0:
+            return DEPLOYED_CANNOT_VERIFY, (
+                f"git could not say whether {rel} exists at the pin {sha[:12]} (exit "
+                f"{exists.returncode}) — cannot verify"
+            ), entries
+        return DEPLOYED_CANNOT_VERIFY, (
+            f"{rel} IS at the pin {sha[:12]} but its bytes cannot be read from {infra} "
+            f"(git exit {blob.returncode}) — cannot verify (an unreadable object is not an absent "
+            "path)"
+        ), entries
+
+    compared = [rel for rel, state in entries if state != DEPLOYED_ENTRY_LOCAL]
+    stale = [rel for rel, state in entries if state == DEPLOYED_ENTRY_STALE]
+    local = len(entries) - len(compared)
+    tally = f"{len(compared) - len(stale)} ok, {len(stale)} stale, {local} local, {linked} linked"
+    if not compared and entries:
+        # Files ARE installed; none is a path the pinned tree carries, so ZERO files were compared.
+        # That is an UNANSWERED question, not a pass: a nested `cp -R` (agent-infra's own
+        # `cell-install.sh` warns about the `SRC/. DEST/` form for exactly this reason) lands here.
+        return DEPLOYED_NOTHING_COMPARABLE, (
+            f"{len(entries)} file(s) are installed at {target} and NONE is a path the pinned tree "
+            f"{sha[:12]} carries ({tally}) — nothing was compared, so this is not verified (a "
+            "nested install, or a deploy layout that does not mirror scripts/)"
+        ), entries
+    if not compared:
+        return DEPLOYED_NOTHING_INSTALLED, (
+            f"nothing is installed at {target} ({tally}) — there is no copy to compare with the "
+            "pin"
+        ), entries
+    if stale:
+        return DEPLOYED_STALE, (
+            f"{len(stale)} of {len(compared)} installed file(s) at {target} are NOT the bytes at "
+            f"the pin {sha[:12]} ({tally})"
+        ), entries
+    return DEPLOYED_OK, (
+        f"all {len(compared)} installed file(s) at {target} are the bytes at the pin "
+        f"{sha[:12]} ({tally})"
+    ), entries
+
+
 def link_state(dest: Path, src: Path) -> tuple[str, str]:
     """Classify ``dest`` against ``src``. Returns ``(state, detail)``.
 
@@ -677,7 +999,27 @@ def main(argv: list[str] | None = None) -> int:
             "Not combinable with --check: they answer different questions, so run both"
         ),
     )
+    modes.add_argument(
+        "--deployed-check",
+        action="store_true",
+        help=(
+            "assert the INSTALLED scripts under $CELL_HOME/.pi/agent/scripts are the PINNED "
+            "commit's bytes (#10114): 0 = every installed file the pinned tree also carries is "
+            "byte-identical, or the default install location is absent, 1 = at least one is "
+            "stale, 2 = cannot verify (including: files are installed but NONE is a path the "
+            "pinned tree carries, so nothing was compared). Files the pinned tree does not "
+            "carry are cell-local, never drift"
+        ),
+    )
     parser.add_argument("--dry-run", action="store_true", help="report the action, change nothing")
+    parser.add_argument(
+        "--deployed",
+        default=None,
+        help=(
+            "the INSTALLED scripts directory (default: "
+            f"${{{CELL_HOME_ENV}:-$HOME}}/{DEPLOYED_RELATIVE}); authoritative when passed"
+        ),
+    )
     parser.add_argument("--repo", default=str(REPO_ROOT), help="repo root (default: this checkout)")
     parser.add_argument("--infra", default=None, help="agent-infra checkout (default: $AGENT_INFRA_PATH); authoritative when passed")
     parser.add_argument(
@@ -711,6 +1053,67 @@ def main(argv: list[str] | None = None) -> int:
         infra = resolve_infra(args.infra)
         src = infra / LINK_NAME
         pin = resolve_pin(args.pin)
+
+        # ⛔ ``--deployed`` is validated in EVERY mode, not only inside its branch — the same
+        # contract ``--infra`` and ``--pin`` already keep (both are resolved above, before the mode
+        # dispatch, so a passed-but-unusable value raises in every mode). Two defects in review:
+        # ``--check --deployed ''`` exited on the POINTER verdict with the empty value never
+        # mentioned, and ``--dry-run --deployed /nonexistent`` relinked while silently dropping the
+        # flag at all. A lane that passes a value and gets a run that never consulted it cannot
+        # tell silence from agreement.
+        if args.deployed is not None:
+            if not args.deployed.strip():
+                raise ConfigError(
+                    "--deployed was passed but is EMPTY. It is AUTHORITATIVE when passed, so an "
+                    "empty value is not 'unset' and will not be replaced by the default: pass a "
+                    "real directory, or pass nothing and let the box's install location answer."
+                )
+            if not args.deployed_check:
+                raise ConfigError(
+                    "--deployed was passed but no --deployed-check was selected, so it would be "
+                    "ignored. It only answers the installed-copy question; drop the flag, or ask "
+                    "that question."
+                )
+
+        if args.deployed_check:
+            # Same doctrine as `--pin-check`: the verdict is ALWAYS printed, including the passes,
+            # because silence is what made the #10114 outages expensive.
+            deployed = None if args.deployed is None else _expand(args.deployed)
+            if deployed is not None:
+                # An EXPLICIT path that is not there is a caller error, never the "nothing "
+                # installed on this box" pass: that pass answers a question about the DEFAULT
+                # location. Treating a mistyped or not-yet-mounted path as a pass is the lenient
+                # direction this module closes everywhere else (`--infra "$UNSET"`, `--pin ''`).
+                try:
+                    os.lstat(deployed)
+                except (FileNotFoundError, NotADirectoryError):
+                    raise ConfigError(
+                        f"--deployed {deployed} does not exist. It is AUTHORITATIVE when passed, "
+                        "so it is not replaced by the default and its absence is not the box's "
+                        "'nothing installed' answer."
+                    ) from None
+                except OSError as exc:
+                    raise ConfigError(
+                        f"--deployed {deployed} cannot be examined ({exc}) — cannot verify."
+                    ) from exc
+            state, detail, entries = deployed_drift(infra, pin, deployed)
+            print(f"deployed: {state} — {detail}")
+            for rel, entry in entries:
+                if entry == DEPLOYED_ENTRY_STALE:
+                    print(f"  ✗ stale: {rel} — the installed bytes are not the pinned bytes")
+                elif entry == DEPLOYED_ENTRY_LOCAL:
+                    print(f"  · local: {rel} — not in the pinned tree, so not drift")
+            if state == DEPLOYED_STALE:
+                print(
+                    "  remedy: re-install the operational layer from the PINNED checkout "
+                    "(agent-infra's pi-bootstrap/cell-install.sh), or delete the stale copy so "
+                    "nothing keeps executing it",
+                    file=sys.stderr,
+                )
+                return 1
+            if state in {DEPLOYED_CANNOT_VERIFY, DEPLOYED_NOTHING_COMPARABLE}:
+                return 2
+            return 0
 
         if args.pin_check:
             # The one mode that answers the PIN question as a verdict. It always prints the
