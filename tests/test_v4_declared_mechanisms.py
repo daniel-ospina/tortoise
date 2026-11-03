@@ -941,27 +941,40 @@ def _test_node_names(path: Path) -> set[str] | None:
     def _decorator_never_reds(decorator: ast.expr) -> bool:
         """An UNCONDITIONAL skip/xfail decorator — it removes the node's red.
 
-        `xfail` has two ways to stay able to FAIL, and both must be kept as pins
-        (review cycle 9, P2):
+        `xfail` has exactly two ways to stay able to FAIL, and both keep the node
+        as a pin:
           * `xfail(strict=True)` REDS on an unexpected pass — it carries a red; and
-          * `xfail(cond, …)` is CONDITIONAL, exactly like `skipif(cond)`: when
-            `cond` is falsy the test runs normally and can red, so its FIRST
-            POSITIONAL argument (or a `condition=`/`cond=` keyword) is a
-            condition, not a reason.
-        Only a bare `xfail()` / `xfail(reason=…)` with no condition and no strict
-        is unable to red.
+          * `xfail(cond, …)` with a condition that may be FALSY runs the test
+            normally, so it can red: its FIRST POSITIONAL argument (or a
+            `condition=`/`cond=` keyword) is a condition, not a reason.
+        Everything else cannot red, and is therefore not a watch: a bare `xfail()`
+        / `xfail(reason=…)`, and — measured, review cycle 11, P2 — a condition
+        that is a literal TRUTHY constant, `xfail(True)` / `xfail(1)` /
+        `xfail(condition=True)`, which pytest xfails unconditionally (real pytest:
+        `2 xfailed`) so the body never runs. A manifest can be read, not executed,
+        so a NON-literal condition is unknowable here and is kept: that is this
+        gate's stated limit, and it errs toward keeping a pin.
         """
+
+        def _condition_may_be_falsy(expr: ast.expr) -> bool:
+            """A LITERAL condition is decided by its value; anything else may vary."""
+            if isinstance(expr, ast.Constant):
+                return not bool(expr.value)
+            return True
+
         name = _dotted_decorator(decorator)
         if name in never_red_skips:
             return True
         if name not in never_red_xfails:
             return False
         strict = False
-        conditional = bool(getattr(decorator, "args", ()))
+        conditional = False
         if isinstance(decorator, ast.Call):
+            if decorator.args:
+                conditional = _condition_may_be_falsy(decorator.args[0])
             for keyword in decorator.keywords:
                 if keyword.arg in ("condition", "cond"):
-                    conditional = True
+                    conditional = _condition_may_be_falsy(keyword.value)
                 elif keyword.arg == "strict" and isinstance(
                     keyword.value, ast.Constant
                 ):
@@ -5988,6 +6001,12 @@ def test_an_unconditional_skip_or_xfail_is_not_a_pin(tmp_path):
     nothing watches it — the exact fail-open this gate closes. The boundary is
     the point: `skipif(cond)` and an in-body `pytest.skip()` are CONDITIONAL and
     still red on the other branch, so both stay legitimate pins.
+
+    The condition's VALUE matters, not its presence (review cycle 11, P2):
+    `xfail(False)` runs the body and can red, but `xfail(True)` / `xfail(1)` /
+    `xfail(condition=True)` is xfailed unconditionally by pytest — MEASURED,
+    `2 xfailed` — so its body never runs and it is the same non-pin as a bare
+    `xfail()`. A non-literal condition is unknowable from a manifest and is kept.
     """
     module = tmp_path / "test_pinned.py"
     module.write_text(
@@ -6010,6 +6029,18 @@ def test_an_unconditional_skip_or_xfail_is_not_a_pin(tmp_path):
         "\n"
         "@pytest.mark.xfail(False)\n"
         "def test_conditionally_xfailed():\n"
+        "    assert True\n"
+        "\n"
+        "@pytest.mark.xfail(True, reason='always')\n"
+        "def test_literally_true_xfailed():\n"
+        "    assert False\n"
+        "\n"
+        "@pytest.mark.xfail(condition=1, reason='always, kw')\n"
+        "def test_literally_true_xfailed_kw():\n"
+        "    assert False\n"
+        "\n"
+        "@pytest.mark.xfail(CONDITION)\n"
+        "def test_variably_xfailed():\n"
         "    assert True\n"
         "\n"
         "@pytest.mark.skipif(False, reason='conditional')\n"
@@ -6036,6 +6067,7 @@ def test_an_unconditional_skip_or_xfail_is_not_a_pin(tmp_path):
         "test_plain",
         "test_strict_xfail",
         "test_conditionally_xfailed",
+        "test_variably_xfailed",
         "test_conditionally_skipped",
         "test_skips_in_body",
         "TestGroup::test_kept",
