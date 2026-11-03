@@ -1259,16 +1259,23 @@ class TestTheMarkerSiteRegisterIsComplete:
                 for module, _lineno, _name, owner in cls._scan(root)}
 
     def test_the_scan_sees_every_marker_call_site_in_the_tree(self):
-        """All SIX call sites, not the three a two-name filter can match.
+        """All SEVEN call sites, not the three a two-name filter can match.
 
         The tree calls the marker under `mark_truncation`, `_mark_truncation`,
-        and three further aliases introduced by
+        and four further aliases introduced by
         `from .truncation import mark_truncation as …`. Pre-fix the scan matched
-        two hard-coded names, so the three aliased calls were invisible to it —
+        two hard-coded names, so the aliased calls were invisible to it —
         the mount point for a new site that would have gone unpinned while the
         class docstring promised it could not. Asserted by the alias NAME, not
         by line number, because a line pin breaks on every unrelated edit to
         `sdk.py` while an alias pin only breaks when a site is added or moved.
+
+        ⚠️ The 7th is `tortoise/hosted_api.py`'s `_lost_mark`, added by #10602's
+        read lane: the hosted `/v1/search` arm marks the empty it returns when
+        the store will not OPEN (an outage is not a complete empty). It is a
+        FOURTH surface, not a fourth spelling of an existing one, which is why
+        the register and the site-set below each grew a row rather than one
+        function moving.
         """
         from collections import Counter
 
@@ -1276,6 +1283,7 @@ class TestTheMarkerSiteRegisterIsComplete:
                        for module, _lineno, name, _owner in self._scan())
         assert seen == Counter({
             ("tortoise/hosted_api.py", "mark_truncation"): 1,
+            ("tortoise/hosted_api.py", "_lost_mark"): 1,  # #10602 search outage arm
             ("tortoise/sdk.py", "_mark_truncation"): 2,
             ("tortoise/sdk.py", "_seed_mark"): 1,     # as _seed_mark
             ("tortoise/sdk.py", "_lost_mark"): 1,     # as _lost_mark
@@ -1305,11 +1313,17 @@ class TestTheMarkerSiteRegisterIsComplete:
             "tortoise/new_marker_site.py::a_new_bounded_read"
         }
 
-    def test_the_scan_finds_the_three_sites_the_register_names(self):
-        """Guard against a vacuous scan: the AST really does see all three."""
+    def test_the_scan_finds_the_sites_the_register_names(self):
+        """Guard against a vacuous scan: the AST really does see every site.
+
+        FOUR since #10602 added the hosted `/v1/search` outage arm; the test
+        (like the register it mirrors) grows a row per real surface rather than
+        treating the count as the property.
+        """
         sites = self._call_sites()
         assert sites == {
             "tortoise/hosted_api.py::list_points",
+            "tortoise/hosted_api.py::search",
             "tortoise/sdk.py::issue_insight",
             "tortoise/sdk.py::tortoise_fts_query",
         }, sites

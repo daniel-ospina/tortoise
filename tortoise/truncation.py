@@ -101,6 +101,13 @@ are rather than naming them:
   ``tortoise_issue_insight`` surface).
 - ``tortoise/hosted_api.py::list_points`` — hosted ``GET /v1/points``, a
   store-side ``LIMIT`` with no offset and no cursor.
+- ``tortoise/hosted_api.py::search`` — hosted ``GET /v1/search``, and a
+  DIFFERENT reason from the three above: it marks the empty it returns when the
+  store will not OPEN (#10602). An OUTAGE is not a complete empty — a 0-row
+  answer from a store that never opened must not read as "we looked and there
+  was nothing". Same predicate, opposite direction: the other three hedge a
+  SUCCESS that may have lost rows, this one refuses to launder a FAILURE into a
+  clean negative.
 
 Every such site must be on a DICT body; a field cannot ride a bare ``list``, so
 a list-shaped surface needs a return-shape decision first
