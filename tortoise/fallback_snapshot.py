@@ -279,7 +279,7 @@ def get_or_build(proj, key: tuple, *, store: FallbackSnapshotStore | None = None
 # Stable key for a ``:memory:`` projection whose client exposes no store
 # identity handle at all. All such projections share it, which buys
 # cacheability at the cost of per-store ISOLATION — not in one direction only:
-# this same tuple also keys the READ path (``sdk._fb_store.get(_key)``), so the
+# this same tuple also keys the READ path (``get_or_build(proj, _key, …)``), so the
 # first such store to build caches its snapshot under it and a DIFFERENT store
 # is then served that snapshot, with no write required. That is acceptable only
 # because the branch is unreachable for a real client: a real embedded client
