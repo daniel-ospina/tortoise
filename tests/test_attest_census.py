@@ -11,7 +11,9 @@ Every case here is one measured shape from the 2026-11-03 `ai-review-gate` red s
   * a `mint:"carried"` record → never restorable, whatever its verdict says (#10177 measured a carry
     re-binding an older `clean` onto a head whose own review found a P1).
 
-The tool is a reader: these tests assert it never writes, mints or posts anything.
+The tool never MINTS a verdict, never writes a registry record and never posts to GitHub — those it
+only reads. (It does write its own report: `--out`, default `operations/attest-census.md`, which the
+snapshot warning marks as per-box and short-lived.)
 """
 from __future__ import annotations
 
@@ -132,6 +134,43 @@ def test_a_corrupt_record_is_reported_not_crashed(tmp_path):
 
 def test_missing_record_is_none(tmp_path):
     assert ac.load_record(tmp_path, "daniel-ospina", "tortoise", 11) is None
+
+
+def test_a_head_that_differs_ONLY_IN_THE_LAST_CHARACTER_is_re_review():
+    """⛔ Pins "byte-for-byte" (cycle 8). Every other fixture differs in the FIRST character, so a
+    truncated comparison (`rec_head[:12] == head[:12]`, or `[:7]`) stayed green — and would restore
+    a proof bound to a DIFFERENT commit. One flipped last char is the discriminator."""
+    near = LIVE[:-1] + ("b" if LIVE[-1] != "b" else "c")
+    assert len(near) == 40 and near[:39] == LIVE[:39] and near != LIVE
+    outcome, why = ac.classify(LIVE, rec(head=near), *RED)
+    assert outcome == ac.RE_REVIEW, why
+
+
+def test_a_record_head_that_is_not_40_lowercase_hex_is_unreadable(tmp_path):
+    """`rec_head` must be a real sha, not just non-empty: `"abc"` or uppercase hex is a record the
+    tool cannot bind, and reporting it as `RE-REVIEW` would be a completed census over a record it
+    could not read (cycle 8)."""
+    for bad in ("abc", "A" * 40, LIVE + "0"):
+        r = ac.Record(path=Path("/x.json"), head_sha=bad, mint="fresh", verdict="clean", evidence="comment:1")
+        outcome, why = ac.classify(LIVE, r, *RED)
+        assert outcome == ac.UNREADABLE, (bad, outcome)
+        assert "head_sha" in why
+
+
+def test_the_pr_list_guard_refuses_a_list_of_non_objects(monkeypatch, tmp_path):
+    """`not all(isinstance(p, dict) …)` is load-bearing: without it a `["x"]` payload raises
+    AttributeError out of main as rc 1 (cycle 8)."""
+    monkeypatch.setattr(ac, "gh_json", lambda args: ["x"])
+    assert ac.main(["--reviews-dir", str(tmp_path), "--out", str(tmp_path / "o.md")]) == 2
+
+
+def test_the_rendered_report_carries_its_snapshot_warning(monkeypatch, tmp_path):
+    """The banner is the artifact's only defence against a stale census being read as live state."""
+    monkeypatch.setattr(ac, "gh_json", lambda args: [])
+    assert ac.main(["--reviews-dir", str(tmp_path), "--out", str(tmp_path / "o.md")]) == 0
+    text = (tmp_path / "o.md").read_text()
+    assert "SNAPSHOT, NOT A LIVE VERDICT" in text
+    assert "per-machine" in text
 
 
 # ── review cycle 1 findings (each measured before it was fixed) ──────────────

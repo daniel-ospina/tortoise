@@ -409,8 +409,9 @@ def render(rows: list[Row], repo: str, generated_at: str) -> str:
         "One row per open PR: its head, whether a review record exists on **this box**, whether that",
         "record's head equals the PR's head, what the record claims, and what the `ai-review-gate`",
         "check says. `RESTORE` is the only outcome that licenses re-posting a proof — and even then the",
-        "verdict is quoted from the record, never synthesised. A record at any other head is",
-        "`RE-REVIEW`: the code moved.",
+        "verdict is quoted from the record, never synthesised. A record at any other head is not"
+        " evidence of the live code: it is `RE-REVIEW` when the gate has no green verdict, and `OK`",
+        " only because the gate itself already accepted the proof (so no re-post is owed).",
         "",
         f"**{totals}**",
         "",
