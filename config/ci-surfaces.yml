@@ -1388,6 +1388,18 @@ surfaces:
   - test_probe_reset_inflight_4608.py  # #4608: a probe reset/rebuild must not close a handle an in-flight probe still queries (hosted_api + selfhost)
   - test_provisioning_edge_function.py
   - test_quota.py
+  # #8906: the points gate must count the graph the request WRITES. Every pin
+  # lives in `tortoise/hosted_api.py` (`_check_org_limit`'s `sdk` threading + the
+  # five points doors that omitted it: /v1/points, /v1/objects, /v1/subjects,
+  # /v1/sessions/commit, /v1/demo) and `tortoise/quota.py` (`_count_resource`'s
+  # `sdk=None` fallback to the org DEFAULT graph) — both EXACT `api`
+  # SOURCE_PATTERNS matches that REPLACE the `core` fallback in `select()`. So an
+  # `api` arm is the ONLY one a hosted_api.py/quota.py-only diff reaches: a
+  # `core`-only entry would leave this regression guard unrun on the exact
+  # change it exists to guard (the #1349/#2938/#3154 silent-drop class, the same
+  # argument as the #4503 row below). DB-free embedded fixtures (temp redislite +
+  # real key rows), so it needs no carve-out registration.
+  - test_8906_points_gate_counts_write_graph.py
   # #4503: the EDGE class is outside every accounting surface. This
   # file pins the cap's invariance to edge-state growth, so it is
   # registered under `api` -- the surface `tortoise/quota.py`
