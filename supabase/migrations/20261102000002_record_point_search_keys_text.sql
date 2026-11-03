@@ -1,5 +1,5 @@
 -- ============================================================================
--- Migration 20261102000001: `public.point.search_keys` is TEXT — the graph's
+-- Migration 20261102000002: `public.point.search_keys` is TEXT — the graph's
 -- own flat string (#10620, epic #7879 · R4's remaining half)
 -- ----------------------------------------------------------------------------
 -- `public.point.search_keys` was declared `jsonb` (the table's blanket type for
