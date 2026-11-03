@@ -1058,6 +1058,19 @@ def read_local_record_turns(directory, node_keys: Iterable[str] | None = None
                 "not an empty one, so an absence is NOT established") from exc
         for entry in entries:
             if not entry.is_file():
+                # ⛔ A RECORD-SHAPED PATH THAT IS NOT A REGULAR FILE IS A
+                # NARROWING OF THE SURFACE, so it is DISCLOSED (review P3).
+                # `is_file()` follows symlinks, so a dangling `<day>.jsonl`, a
+                # FIFO, or a directory named `<day>.jsonl` was skipped by a bare
+                # `continue` and named in NO list: the artifact then reported
+                # `files` as full coverage of a surface it had quietly dropped,
+                # which is the one thing this leg's own `skipped_files` contract
+                # forbids. Only record-SHAPED names are named here; a plain
+                # directory (e.g. `archive/`) is not a narrowing.
+                if any(entry.name.endswith(s) for s in _LOCAL_RECORD_SUFFIXES):
+                    skipped_files.append(
+                        f"{entry.relative_to(root)} (not a regular file, "
+                        "so its records were not read)")
                 continue
             for suffix in _LOCAL_RECORD_SUFFIXES:
                 if entry.name.endswith(suffix):
@@ -1287,6 +1300,33 @@ def read_local_record_turns(directory, node_keys: Iterable[str] | None = None
                     "at": where,
                     "error": f"session {sid} `conversation` is "
                              f"{type(conversation).__name__}, not a list"})
+                continue
+            # ⛔ AN EMPTY FILED WINDOW IS NOT A SECOND CAPTURE WINDOW (review
+            # P2). A line whose conversation windows to NOTHING (`[]`, or turns
+            # that are blank / not dicts / not `str` roles) contributes no key to
+            # `rows_by_key` — and it cannot reach the graph either: the filing
+            # leg (`session_events_drain`) windows the same list and DEAD-LETTERS
+            # the session as `no_conversation` when the window is empty, so it
+            # filed no turn and can hide none. Counting it as an `occurrence`
+            # made ONE real window plus one empty line look like two capture
+            # windows of one index space: the session was popped from the
+            # positional key space and REFUSED as `duplicate_window`, whose
+            # repair advice is "resolve which capture is authoritative, by hand"
+            # — a false refusal, with a wrong cause, on the exact class the
+            # duplicate arm exists to keep open. The empty line is still a real
+            # SESSION (`[]` is data, not loss) and stays in `conversations` when
+            # it is the only line; it just never counts as a window.
+            try:
+                filed_turns = _filing_window(conversation)
+            except Exception as exc:
+                raise CensusError(
+                    f"the local record's session {sid} could not be put "
+                    f"through the filing leg's window "
+                    f"({type(exc).__name__}: {exc}) — without the window the "
+                    "graph's positional keys cannot be derived, so an absence "
+                    "is NOT established") from exc
+            if not filed_turns:
+                conversations.setdefault(sid, conversation)
                 continue
             occurrences[sid] = occurrences.get(sid, 0) + 1
             conversations[sid] = conversation
@@ -1890,7 +1930,13 @@ def main(argv: list[str] | None = None) -> int:
         # `--record-dsn` is an ambiguity worth refusing. Refusing on the
         # ambient variable made the documented flag unusable on any box that
         # exports the DSN the repo's own `.env.example` sets.
-        if args.record_dsn:
+        # ⛔ PRESENCE, NOT TRUTHINESS (review P3) — the same rule the hosted arm
+        # below applies to the same flag. `--record-dsn ""` is a SET flag whose
+        # value is empty (a shell expansion of an unset variable), not "no
+        # flag": a truthiness test let `--local-record-dir DIR --record-dsn ""`
+        # through, so the documented "an explicit flag combination is refused"
+        # guard did not exist for the one spelling an unset variable produces.
+        if args.record_dsn is not None:
             sys.stderr.write(
                 "turn_parity_census: --local-record-dir and --record-dsn are "
                 "mutually exclusive — the census compares against ONE record, "

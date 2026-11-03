@@ -2459,3 +2459,94 @@ def test_a_DROPPED_interior_line_whose_turn_the_graph_never_held_is_exit_ZERO(
     assert "unparsable : 2026-11-02.jsonl:1" in out
     assert "NOT a parity pass" in out
     assert "verdict    : CLEAN" in out
+
+
+def test_an_EMPTY_filed_window_is_not_a_SECOND_capture_window(tmp_path):
+    """A `conversation` that windows to NOTHING is not a second window.
+
+    Review P2. The filing leg windows the same list and DEAD-LETTERS the session
+    as `no_conversation` when the window is empty
+    (`tortoise/session_events_drain.py`, `turns = _window(...)` →
+    `if not turns: return dead("no_conversation", ...)`), so an empty line filed
+    no turn and can hide none. Counting it as an `occurrence` made ONE real
+    window plus one empty line look like two capture windows of one index space,
+    which popped the session from the positional key space and REFUSED it as
+    `duplicate_window` — a false refusal, with a wrong cause and the wrong repair
+    advice, on exactly the class the duplicate arm exists to keep open.
+
+    Mutation that goes RED here: restoring the unconditional
+    `occurrences[sid] = occurrences.get(sid, 0) + 1`.
+    """
+    # An explicit `[]`, and a conversation whose only turn is blank (the window
+    # drops it) — the two shapes an empty FILED window comes in.
+    _local_record(tmp_path, {"s1": _conversation(("user", "hi"))},
+                  name="2026-11-01.jsonl")
+    (tmp_path / "2026-11-02.jsonl").write_text(
+        json.dumps({"session_id": "s1", "conversation": []}) + "\n"
+        + json.dumps({"session_id": "s2",
+                      "conversation": _conversation(("user", "   "))}) + "\n",
+        encoding="utf-8")
+    record = tpc.read_local_record_turns(tmp_path)
+    assert record["duplicate_window"] == [], record["duplicate_window"]
+    # s1 keeps its one real window and is certifiable; s2 held no turn at all.
+    assert list(record["rows_by_key"]) == ["s1_t0"]
+    assert record["sessions"] == 2
+    report = tpc.census(
+        {"nodes": {"s1_t0": _graph_node("s1_t0", "s1", content="[user] hi")}},
+        record, sample=5)
+    assert report["verdict"] == "CLEAN", report["parity"]
+    # …and the empty line does not overwrite the real window when it comes FIRST.
+    (tmp_path / "2026-11-03.jsonl").write_text(
+        json.dumps({"session_id": "s3", "conversation": []}) + "\n"
+        + json.dumps({"session_id": "s3",
+                      "conversation": _conversation(("user", "yo"))}) + "\n",
+        encoding="utf-8")
+    record = tpc.read_local_record_turns(tmp_path)
+    assert record["duplicate_window"] == []
+    assert record["rows_by_key"]["s3_t0"]["content"] == "[user] yo"
+
+
+def test_a_record_SHAPED_path_that_is_not_a_file_is_DISCLOSED(tmp_path):
+    """`is_file()` follows symlinks; a bare `continue` was a silent narrowing.
+
+    Review P3. A dangling `<day>.jsonl` (a seal that unlinked its target, a
+    half-finished rotate), a FIFO, or a directory named `<day>.jsonl` was dropped
+    and named in NO list — so `files` read as full coverage of a surface the leg
+    had quietly skipped, which is the one thing its own `skipped_files` contract
+    forbids ("a narrowed surface the artifact does not name is a silent claim of
+    coverage"). A plain directory (`archive/`) is not a narrowing and stays
+    unnamed.
+
+    Mutation that goes RED here: restoring the bare `if not entry.is_file():
+    continue`.
+    """
+    _local_record(tmp_path, {"s1": _conversation(("user", "hi"))},
+                  name="2026-11-01.jsonl")
+    (tmp_path / "2026-11-02.jsonl").mkdir()          # a directory, record-shaped
+    (tmp_path / "2026-11-03.jsonl").symlink_to(tmp_path / "gone.jsonl")
+    record = tpc.read_local_record_turns(tmp_path)
+    assert list(record["rows_by_key"]) == ["s1_t0"]
+    named = record["skipped_files"]
+    assert any(s.startswith("2026-11-02.jsonl") for s in named), named
+    assert any(s.startswith("2026-11-03.jsonl") for s in named), named
+    assert all("not a regular file" in s for s in named), named
+
+
+def test_an_EMPTY_record_dsn_alongside_the_local_dir_is_REFUSED(tmp_path,
+                                                               capsys):
+    """Presence, not truthiness — on the MUTUAL-EXCLUSION arm too.
+
+    Review P3. `if args.record_dsn:` let `--local-record-dir DIR --record-dsn ""`
+    through, so the documented "an explicit flag combination is refused" guard
+    did not exist for the exact spelling an unset variable produces. No wrong
+    verdict followed (the local leg is the one named), but the guard was absent.
+
+    Mutation that goes RED here: restoring `if args.record_dsn:`.
+    """
+    _local_record(tmp_path, {"s1": _conversation(("user", "hi"))})
+    code = tpc.main(["--db-path", str(tmp_path / "g.db"),
+                     "--local-record-dir", str(tmp_path),
+                     "--record-dsn", ""])
+    err = capsys.readouterr().err
+    assert code == 1, err
+    assert "mutually exclusive" in err
