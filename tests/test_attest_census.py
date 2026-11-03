@@ -132,6 +132,43 @@ def test_a_corrupt_record_is_reported_not_crashed(tmp_path):
     assert got.real_evidence is False
 
 
+def test_evidence_urls_must_be_github_artifacts():
+    """Cycle 9: the URL arm checked the ANCHOR, not the host — so example.com, bitbucket and
+    localhost all licensed RESTORE for a pointer that resolves to no artifact on any repo."""
+    for foreign in (
+        "https://example.com/#issuecomment-9",
+        "https://bitbucket.org/x#issuecomment-9",
+        "http://localhost/#pullrequestreview-1",
+    ):
+        r = ac.Record(path=Path("/x.json"), head_sha=LIVE, mint="fresh", verdict="clean", evidence=foreign)
+        assert r.real_evidence is False, foreign
+        assert ac.classify(LIVE, r, *RED)[0] != ac.RESTORE, foreign
+
+
+def test_the_record_cell_does_not_call_an_intact_foreign_record_corrupt(tmp_path):
+    """Cycle 9: `CORRUPT` keyed on `rec.error == ""`, so an intact foreign/unattributable record —
+    JSON that merely names another PR/repo — was labelled corrupt, whose remedy is destructive."""
+    (tmp_path / "7.json").write_text(
+        '{"head_sha":"' + LIVE + '","mint":"fresh","verdict":"clean","evidence":"comment:1"}'
+    )
+    (tmp_path / "8.json").write_text("{not json")
+    good = ac.Row(pr=7, head=LIVE, branch="b", title="t", record=ac.load_record(tmp_path, "o", "r", 7))
+    assert good.record is not None and "legacy" in good.record.error
+    text = ac.render([good], "o/r", "2026-11-03T00:00:00Z")
+    assert "(unattributable)" in text and "(corrupt)" not in text, text
+    bad = ac.Row(pr=8, head=LIVE, branch="b", title="t", record=ac.load_record(tmp_path, "o", "r", 8))
+    assert "(corrupt)" in ac.render([bad], "o/r", "2026-11-03T00:00:00Z")
+
+
+def test_the_pr_list_guard_refuses_a_scalar_payload(monkeypatch, tmp_path):
+    """Cycle 9: the list clause was unpinned — a dict payload is refused by the all-dicts clause
+    (iterating its string keys), but a SCALAR (`null` from a proxy/rate-limit answer, or a number)
+    reached `for pr in prs` and raised TypeError -> rc 1."""
+    for scalar in (None, 5, "x"):
+        monkeypatch.setattr(ac, "gh_json", lambda args, s=scalar: s)
+        assert ac.main(["--reviews-dir", str(tmp_path), "--out", str(tmp_path / "o.md")]) == 2, scalar
+
+
 def test_missing_record_is_none(tmp_path):
     assert ac.load_record(tmp_path, "daniel-ospina", "tortoise", 11) is None
 
@@ -625,7 +662,6 @@ def test_an_unresolvable_out_home_is_rc_2_and_writes_nothing(tmp_path, monkeypat
 
 def test_an_unresolvable_reviews_dir_home_is_rc_2_not_a_traceback(tmp_path):
     # `pathlib.expanduser` raises RuntimeError for `~nosuchuser` — rc 1 would break the contract.
-    import pytest
 
     assert ac.main(["--reviews-dir", "~nosuchuser12345/rev", "--out", str(tmp_path / "o.md")]) == 2
 

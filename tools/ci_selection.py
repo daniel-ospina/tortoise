@@ -2886,6 +2886,14 @@ TOOL_CARVEOUTS = (
     # matrix) is the safe default for a tool whose answer drives dispatch.
     "tools/who_is_on.py",
     "tools/who-is-on.sh",
+    # #10687 (attest census): `tools/attest_census.py` decides, per PR, whether a review proof may
+    # be RE-POSTED or must be re-reviewed — the fabricate-vs-repair boundary. Same silent-drop class
+    # as the carve-outs above: `tools/` is a flat NON_PYTHON_PREFIXES entry, so a TOOL-ONLY diff came
+    # back `surfaces=[]` and fell to tier-1 smoke, which does not carry `tests/test_attest_census.py`
+    # (measured: registering the test under `core` alone leaves a tool-only change unguarded). Its
+    # classifier IS the rule this lane exists to enforce, so a weakening of it must never ship on a
+    # smoke-only matrix. Fail-closed: the whole `attest_census` family.
+    "tools/attest_census",
     # #5052/#9487 review P1: the dispatch-time CLAIM on the graph
     # (tools/work_claim.py) owns tests/test_work_claim.py — the 87 hermetic arms
     # that pin the fail-closed refusal contract (`acquire`/`status`/`release`

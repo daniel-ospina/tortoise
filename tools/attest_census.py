@@ -72,7 +72,7 @@ import re
 import subprocess
 import sys
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
@@ -100,7 +100,10 @@ def _is_carried(mint: str) -> bool:
 # with no artifact at all — the docstring's rule, unimplemented.
 _EVIDENCE_REF = re.compile(
     r"^(?:comment|issuecomment|review|review-comment|discussion):\d+$"
-    r"|^https?://\S*#(?:issuecomment|discussion_r|pullrequestreview)[-]?\d+$"
+    # ⛔ github.com ONLY: the docstring promises a GitHub artifact, and cycle 9 measured
+    # `https://example.com/#issuecomment-9` (and bitbucket/localhost) licensing RESTORE — a pointer
+    # whose SHAPE was checked but which resolves to no artifact on any repo.
+    r"|^https?://(?:www\.)?github\.com/\S*#(?:issuecomment|discussion_r|pullrequestreview)[-]?\d+$"
 )
 
 RESTORE = "RESTORE"
@@ -420,7 +423,18 @@ def render(rows: list[Row], repo: str, generated_at: str) -> str:
     ]
     for r in rows:
         rec = r.record
-        rec_cell = "—" if rec is None else (rec.path.name if rec.error == "" else "CORRUPT")
+        if rec is None:
+            rec_cell = "—"
+        elif rec.error == "":
+            rec_cell = rec.path.name
+        elif "foreign" in rec.error:
+            rec_cell = f"{rec.path.name} (foreign)"
+        elif "legacy" in rec.error:
+            rec_cell = f"{rec.path.name} (unattributable)"
+        else:
+            # Only a record that could NOT be read is corrupt; the label's remedy is destructive,
+            # so it must never cover an intact record that merely names another PR/repo (cycle 9).
+            rec_cell = f"{rec.path.name} (corrupt)"
         rhead = "—"
         match = "—"
         if rec is not None:
@@ -472,7 +486,7 @@ def main(argv: list[str] | None = None) -> int:
     except RuntimeError as exc:  # `~nosuchuser` — expanduser raises, and that must not be rc 1
         print(f"attest_census: cannot resolve --reviews-dir {args.reviews_dir!r}: {exc}", file=sys.stderr)
         return 2
-    generated_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    generated_at = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     try:
         prs = gh_json(
