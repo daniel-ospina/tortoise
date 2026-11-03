@@ -1701,19 +1701,20 @@ def test_a_deeply_nested_store_is_corrupt_not_a_recursion_crash(capsys, tmp_path
     assert [r["state"] for r in payload["credential"]["ladder"] if r["blocks"]] == ["corrupt"]
 
 
-def test_a_scheme_less_user_password_dsn_is_not_printed(capsys, tmp_path):
+def test_a_scheme_less_user_password_dsn_is_not_printed(monkeypatch, capsys, tmp_path):
     """The #2987 shape: a copy-paste that dropped the `@host` tail."""
     _global(tmp_path)
-    import os
-    os.environ["TORTOISE_DB_URI"] = "dockeruser:S3cretPw"
-    try:
-        assert _run(("config", "show", "--json")) == 0
-        cap = capsys.readouterr()
-        assert "S3cretPw" not in cap.out + cap.err
-        store = json.loads(cap.out)["graph_store"]
-        assert "embedded file path" not in store.get("target_kind", "")
-    finally:
-        del os.environ["TORTOISE_DB_URI"]
+    # `monkeypatch`, not a raw os.environ set/`del`: the raw form restores the
+    # variable to ABSENT, which is not where it started when the caller runs this
+    # on a URI-carrying lane — `tests/test_uri_env_mutations_declared.py`'s #2084
+    # restoration guard reds on that class (it is the #2062 pop-without-restore
+    # shape one `del` over), and the fixture-param monkeypatch auto-restores.
+    monkeypatch.setenv("TORTOISE_DB_URI", "dockeruser:S3cretPw")
+    assert _run(("config", "show", "--json")) == 0
+    cap = capsys.readouterr()
+    assert "S3cretPw" not in cap.out + cap.err
+    store = json.loads(cap.out)["graph_store"]
+    assert "embedded file path" not in store.get("target_kind", "")
 
 
 def test_an_ignored_api_url_env_is_disclosed(monkeypatch, capsys, tmp_path):

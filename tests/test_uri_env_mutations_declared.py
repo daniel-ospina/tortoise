@@ -448,6 +448,16 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     "test_cli_context.py": [r'monkeypatch\.(?:delenv|setenv)\(\s*"TORTOISE_DB_URI"',
                             r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])'],
     "test_cli_serve.py": [r'monkeypatch\.(?:delenv|setenv)\(\s*"TORTOISE_DB_URI"'],
+    # #10726: `tortoise config show` is a REPORTER — it resolves the URI and
+    # prints what it found, so every case here sets TORTOISE_DB_URI purely as
+    # the report's INPUT and nothing connects (DELIBERATE_URI in the
+    # "deliberately-unreachable URI probe" sense: a `docker://…:16379` that is
+    # never dialled, a scheme-less DSN the resolver REJECTS, `""`/`"   "` for the
+    # unset/whitespace branches, and one masked-password case). The module
+    # landed inside the #10726 fold without its entry, which red'd the required
+    # `test (h)` leg. Every site is the fixture-param monkeypatch, so pytest
+    # auto-undoes at teardown — no lane leak into a later docker-lane test.
+    "test_cli_config_show.py": [r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"'],
     "test_extractor_v2.py": [r'monkeypatch\.(?:delenv|setenv)\(\s*"TORTOISE_DB_URI"'],
     "test_mcp_server.py": [r'monkeypatch\.(?:delenv|setenv)\(\s*"TORTOISE_DB_URI"'],
     "test_pipeline_cli.py": [r'monkeypatch\.(?:delenv|setenv)\(\s*"TORTOISE_DB_URI"'],

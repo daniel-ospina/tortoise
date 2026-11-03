@@ -5157,10 +5157,10 @@ def test_the_arm_key_sets_are_the_producers():
     silently: it reds here rather than certifying an arm nobody defined.
     """
     producer = _load_probe("e1_paired_arm")
-    assert scores_probe._ARM_VARS == (*producer.ARM_KEYS, producer.SEAM_KEY), (
+    assert (*producer.ARM_KEYS, producer.SEAM_KEY) == scores_probe._ARM_VARS, (
         scores_probe._ARM_VARS, producer.ARM_KEYS, producer.SEAM_KEY)
-    assert scores_probe._ARM_ON_VARS == tuple(measure.ARM_ON), measure.ARM_ON
-    assert scores_probe._ARM_OFF_VARS == tuple(measure.ARM_OFF), measure.ARM_OFF
+    assert tuple(measure.ARM_ON) == scores_probe._ARM_ON_VARS, measure.ARM_ON
+    assert tuple(measure.ARM_OFF) == scores_probe._ARM_OFF_VARS, measure.ARM_OFF
 
 
 def test_an_e2b_population_under_its_floor_is_REFUSED_not_FAILED(tmp_path):
