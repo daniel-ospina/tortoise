@@ -12586,12 +12586,15 @@ def _seed_demo_graph(org_id: str) -> dict:
     # `Point`". This seeder wrote one `:Point {pointKind:'event'}` per demo turn
     # carrying that turn's literal text, `CONTAINS`-wired to the Session: the
     # per-turn-text-node shape `#10000` removed from the capture path, and the
-    # last PRODUCT/RUNTIME writer producing it unconditionally. Two residuals
+    # last PRODUCT/RUNTIME writer producing it unconditionally. THREE residuals
     # still write that shape and are deliberate, so they are named rather than
-    # left to be rediscovered: the capture path keeps it as its
-    # record-incapable fallback, and both offline eval-corpus ingest legs
-    # (`tools/longmem_eval/ingest.py`, `ingest_v2.py`) mint it ungated for the
-    # corpus graphs they build. It is
+    # left to be rediscovered — this enumeration is the book a §9.1/D1 audit
+    # would close on: the capture path keeps it as its record-incapable
+    # fallback; both offline eval-corpus ingest legs (`tools/longmem_eval/
+    # ingest.py`, `ingest_v2.py`) mint it ungated for the corpus graphs they
+    # build; and `tools/ask_spotcheck.py::seed_capture_turn_store` mints it
+    # (raw Cypher, no gate) for every ask fixture since #3914 — the copy this
+    # module's capture-side NOTE calls the THIRD. It is
     # not a captured transcript, so there is no record row it duplicates —
     # which made the graph the only RUNTIME store of text §2.0 says the graph
     # may not authoritatively hold.
