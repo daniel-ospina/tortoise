@@ -483,6 +483,18 @@ _GUARD_EXEMPT_FILES = {
 }
 
 
+# ⛔ ONE definition of the construction shapes the namespace census enumerates.
+# BOTH consumers — the `call_re` below AND the anti-widening pin that guards the
+# `synthetic-source` exemption row — read THIS tuple, so a shape can never be
+# added to the census and silently missed by the pin. A second hand-written copy
+# of the call set is exactly how the pin came to cover 1 of 3 shapes (#10802
+# review, P2): `TortoiseSDK(namespace="registry")` and
+# `sdk_factory(namespace="registry")` were counted by the census, exempted by
+# the row, and invisible to the pin — a false PASS on the widening it exists to
+# prevent.
+_NAMESPACE_CALL_NAMES = ("TortoiseSDK", "_make_sdk", "sdk_factory")
+
+
 def _sdk_call_namespace_literals():
     """Yield (file_name, line_number, literal) for every namespace="..."
     literal inside TortoiseSDK(/_make_sdk(/sdk_factory( call blocks of
@@ -492,7 +504,8 @@ def _sdk_call_namespace_literals():
     redirect's per-path derivation covers them."""
     from tests._embedded import TEST_NO_REDIRECT_STEMS
     exempt = _GUARD_EXEMPT_FILES | set(TEST_NO_REDIRECT_STEMS)
-    call_re = re.compile(r"\b(TortoiseSDK|_make_sdk|sdk_factory)\s*\(")
+    call_re = re.compile(
+        r"\b(" + "|".join(_NAMESPACE_CALL_NAMES) + r")\s*\(")
     lit_re = re.compile(r"namespace\s*=\s*(['\"])([^'\"]+)\1")
     for f in sorted(_TESTS_ROOT.glob("test_*.py")) \
             + sorted((_TESTS_ROOT / "e2e").glob("test_*.py")):
@@ -574,6 +587,88 @@ def test_namespace_routing_table_keys_exist():
         assert (_TESTS_ROOT / fname).exists() \
             or (_TESTS_ROOT / "e2e" / fname).exists(), \
             f"ROUTED_NAMESPACES key {fname!r} is not a test module"
+
+
+def _real_registry_constructions(path: Path) -> list[str]:
+    """Every EXECUTABLE `namespace="registry"` construction in `path`.
+
+    Recognises every shape `_sdk_call_namespace_literals()` counts — both read
+    `_NAMESPACE_CALL_NAMES`, so the exemption pin and the census cannot disagree
+    about what a construction is. `ast` walks the module, so a docstring sample
+    or an `ast.parse` source STRING is never reported here: only real calls are,
+    which is precisely the distinction the `synthetic-source` row relies on.
+    """
+    tree = ast.parse(path.read_text())
+    found = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        name = getattr(func, "id", None) or getattr(func, "attr", None)
+        if name not in _NAMESPACE_CALL_NAMES:
+            continue
+        for kw in node.keywords:
+            if kw.arg == "namespace" and isinstance(kw.value, ast.Constant) \
+                    and kw.value.value == "registry":
+                found.append(f"{path.name}:{node.lineno}")
+    return found
+
+
+@pytest.mark.parametrize("call", [
+    '_make_sdk(namespace="registry")',
+    'TortoiseSDK(namespace="registry")',
+    'sdk_factory(namespace="registry")',
+    '_ha.sdk_factory(namespace="registry")',
+])
+def test_the_registry_widening_pin_recognises_every_census_shape(tmp_path, call):
+    """Non-vacuity pin for the row below: EVERY shape the census parses must be
+    DETECTED by the exemption pin, or the `synthetic-source` row can widen
+    through the ones it cannot see. Red on the pre-fix pin, which matched
+    `_make_sdk` alone and let `TortoiseSDK(...)`/`sdk_factory(...)` through
+    (#10802 review, P2)."""
+    sample = tmp_path / "test_synthetic_sample.py"
+    sample.write_text(f"{call}\n")
+    assert _real_registry_constructions(sample) == [f"{sample.name}:1"]
+
+
+def test_the_registry_widening_pin_ignores_the_text_matches_the_row_is_for(tmp_path):
+    """The complement: the two matches the row was added for are TEXT — a
+    docstring sample and an `ast.parse` source string — so a pin that red on
+    them would refuse the very exemption its own row declares. Pinned here so
+    the widening guard stays precise in BOTH directions."""
+    sample = tmp_path / "test_synthetic_text.py"
+    sample.write_text(
+        '"""A text sample: _make_sdk(namespace="registry")."""\n'
+        '\n'
+        'SRC = "def f():\\n    return TortoiseSDK(namespace=\\"registry\\")\\n"\n'
+    )
+    assert _real_registry_constructions(sample) == []
+
+
+def test_the_registry_exemption_cannot_widen_past_its_synthetic_matches():
+    """The `test_10047_record_every_lane.py: {"registry": ...}` row is a
+    per-FILE, per-LITERAL exemption, so on its own it exempts ANY future
+    `namespace="registry"` literal written into that file — including a REAL
+    `_make_sdk(namespace="registry")` construction, which is exactly what the
+    row's own comment says the exemption is NOT for (the two matches it was
+    added for are TEXT: a docstring sample and an `ast.parse` source string).
+
+    Fold review cycle 5, P2: the row reasoned only about the two synthetic
+    matches and nothing stopped it widening. Pin the actual invariant — that
+    file must contain no real registry construction at all — so a future lane
+    that writes one reds HERE, next to the exemption it would be invalidating,
+    instead of shipping a prod-coupled namespace under a synthetic exemption.
+    """
+    path = _TESTS_ROOT / "test_10047_record_every_lane.py"
+    real_calls = _real_registry_constructions(path)
+    assert real_calls == [], (
+        "a REAL registry construction appeared in a "
+        "file the `synthetic-source` routing row exempts for the literal "
+        "'registry' — the row is for TEXT matches only (a docstring sample and "
+        "an ast.parse source string), so this construction must be routed "
+        "deliberately (a `_test` namespace, or its own ROUTED_NAMESPACES "
+        "reason) rather than inherit a synthetic exemption: "
+        + ", ".join(real_calls))
 
 
 def test_select_graph_literals_guard_passing_or_routed():
