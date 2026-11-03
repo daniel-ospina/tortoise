@@ -1010,12 +1010,20 @@ _CONVERTED_CLIENT_SEAMS: dict[str, tuple[int, frozenset[str]]] = {
         "test_non_step_flow_op_keeps_its_session_lane",
         "test_operational_key_still_writes",
         "test_server_owned_capture_keys_are_refused"})),
-    # +2: the mount-only MCP parent (`TestMcp._mcp_client` — a local `Starlette`
+    # +3: the mount-only MCP parent (`TestMcp._mcp_client` — a local `Starlette`
     # carrying ONLY `OrgResolutionMiddleware`, so no `WaitBoundMiddleware` is on
     # its path; its `status_code == 200` reads are answered by that local echo
-    # route, never by the hosted app) and the pin's control. The other
-    # twenty-five constructions (all `TestClient(env["app"])`) are converted.
-    "tests/test_abuse_integration.py": (2, frozenset({
+    # route, never by the hosted app), the pin's control, and #10618's
+    # shared-pool probe. The other twenty-five constructions (all
+    # `TestClient(env["app"])`) are converted.
+    #
+    # ⛔ #10618's probe MUST stay plain (`httpx.AsyncClient` over
+    # `ASGITransport`): it asserts `answer["status"] == 200` while every shared
+    # default-executor slot is stalled, and its RED is the wall-clock refusal
+    # itself. `verdict_async_client` converts exactly that refusal into the
+    # contract's INCONCLUSIVE skip, so routing it through the seam would turn
+    # the defect this test exists to catch into a SKIP.
+    "tests/test_abuse_integration.py": (3, frozenset({
         "test_alerts_endpoint_session_authed",
         "test_alerts_reachable_while_suspended",
         "test_alerts_require_membership", "test_bootstrap_mints_excluded",
