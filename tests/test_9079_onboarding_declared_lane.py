@@ -54,6 +54,8 @@ from __future__ import annotations
 
 import ast
 import re
+import shutil
+import tempfile
 import textwrap
 from pathlib import Path
 
@@ -194,6 +196,9 @@ _EXERCISED_WRITERS = frozenset({
     "write_compact", "write_fork_unsure_at", "clear_fork_unsure_at",
     "write_last_decide_attempt", "write_operational_state",
     "remove_decide_completed_edge", "regress_status",
+    # #10180 review P2: the promote carry's anchor link (the writer that can
+    # mint a `:Subject` in the TARGET graph).
+    "carry_onboards_edge",
     # #9157: the eager-init route — the CREATION write the lane used to miss.
     # Exercised here so the label census covers it in the SAME walk.
     "run_eager_init",
@@ -207,7 +212,39 @@ _EXERCISED_READERS = frozenset({
 _STATED_OTHERS = {
     "_prune_orphan_decide_step":
         "private; reached from remove_decide_completed_edge, which IS exercised",
+    # #10180 review P2: the anchor-carry's two READS are private and reached
+    # ONLY from `carry_onboards_edge`, which the write walk exercises on ALL
+    # THREE of its arms (decline, carried, link), so their statements are seen.
+    "_read_subject_anchor":
+        "private; reached from carry_onboards_edge, which IS exercised",
+    "_subject_anchor_name_taken":
+        "private; reached from carry_onboards_edge, which IS exercised",
 }
+
+
+def _carry_source_projection():
+    """A SECOND, journal-backed projection — the graph a promote carry reads FROM.
+
+    ⛔ WHY A SECOND PROJECTION, and not `proj.db.select_graph(...)` (#10452 F1).
+    `_run` reaches the raw `Graph` when the handle carries one
+    (`getattr(graph, "g", None)`), so a carry whose DESTINATION is a raw graph
+    issues its `:Subject` MERGE outside `_GuardedGraph.query` — the only place
+    `LaneProbe` records — and, even if it were seen, `getattr(handle, "_proj",
+    None)` is absent there, so the statement would land in `foreign()` and never
+    in `own()`. The pin below then judges only the statements the WALK wrote,
+    and a carry that regressed to `write_onboards_edge`'s id-only MERGE stays
+    green. Aiming the destination at `proj` is what makes the pin constrain
+    `carry_onboards_edge`: the source can be any other projection, and it is
+    this one.
+
+    Returns `(sdk, projection, root)`; the caller closes and removes it.
+    """
+    from tortoise.sdk import TortoiseSDK
+
+    root = Path(tempfile.mkdtemp(prefix="9079-carry-src-"))
+    sdk = TortoiseSDK(str(root / "src.db"),
+                      event_log_path=str(root / "src.jsonl"))
+    return sdk, sdk._get_proj(), root
 
 
 def _walk_the_hosted_write_set(proj, org_id: str = ORG) -> None:
@@ -227,6 +264,36 @@ def _walk_the_hosted_write_set(proj, org_id: str = ORG) -> None:
     _os.write_completed_step(proj, org_id, "team-named")
     _os.write_member_progress(proj, org_id, "user-1", ["team-named"])
     _os.write_onboards_edge(proj, org_id, f"anchor-{org_id}")
+    # #10180 (review P2): the PROMOTE CARRY's anchor link. It is the one writer
+    # in this lane that can MINT a `:Subject` from a SOURCE graph, so the class
+    # check must see its real arms rather than assume it — and it must see them
+    # ATTRIBUTED to this projection (#10452 F1), so every arm writes on `proj`.
+    #
+    # The DECLINE arm: the target's anchor exists but carries no identity (it
+    # was minted by the id-only link above), so the carry refuses to write.
+    assert _os.carry_onboards_edge(proj, proj, org_id,
+                                   f"anchor-{org_id}") == "not_in_target"
+    # …the CARRIED and LINK arms need a SOURCE anchor that HAS an identity, in a
+    # graph that is not the target. The source is a second projection, so the
+    # seed lands on ITS handle (recorded as `foreign()`) while the carried MERGE
+    # lands on `proj` — the guarded handle the pin reads.
+    src_sdk, src_proj, src_root = _carry_source_projection()
+    try:
+        _os._run(src_proj,
+                 "MERGE (s:Subject {id: $sid}) SET s.name = $name, "
+                 "s.subjectKind = $subjectKind, s.org_id = $org_id",
+                 {"sid": f"carry-{org_id}",
+                  "name": f"Carry Anchor {org_id}",
+                  "subjectKind": "organization", "org_id": org_id})
+        assert _os.carry_onboards_edge(src_proj, proj, org_id,
+                                       f"carry-{org_id}") == "carried"
+        # …and the LINK arm, which is the arm a RE-promotion takes (the target
+        # now holds the anchor WITH its identity): no mint, just the link.
+        assert _os.carry_onboards_edge(src_proj, proj, org_id,
+                                       f"carry-{org_id}") == "linked"
+    finally:
+        src_sdk.close()
+        shutil.rmtree(src_root, ignore_errors=True)
     _os.write_status(proj, org_id, _os.STATUS_COMPLETE)
     _os.write_compact(proj, org_id, True)
     _os.write_fork_unsure_at(proj, org_id, "2026-10-19T00:00:00Z")
@@ -420,14 +487,27 @@ def test_the_subject_anchor_mint_is_not_widened(sdk_with_journal, monkeypatch):
         "MERGE (s:Subject {id: $sid}) WITH s "
         f"MERGE (n:{_os.ONBOARDING_NODE_LABEL} {{org_id: $org_id}}) "
         "SET n.org_subject_id = $sid WITH n, s "
-        f"MERGE (n)-[:{_os.ONBOARDS_EDGE}]->(s)"
+        f"MERGE (n)-[:{_os.ONBOARDS_EDGE}]->(s)",
+        # #10180 (review P2): the promote carry's anchor. Its target graph is
+        # the org's NEW DEFAULT and has never held the anchor, so an id-only
+        # MERGE there mints a name-less `:Subject` the seed's BY-NAME
+        # collision check cannot see. This is the one widening that argument
+        # admits, and it is stated rather than discovered: the same id the
+        # onboarding node carries, plus the identity properties a seed would
+        # have written. A THIRD shape reds below, and so does ISSUING NEITHER.
+        "MERGE (s:Subject {id: $sid}) "
+        "SET s.name = $name, s.subjectKind = $subjectKind, s.org_id = $org_id",
     )
-    subject_statements = [c for c, _r, w in seen if w and "Subject" in c]
+    subject_statements = {c for c, _r, w in seen if w and "Subject" in c}
     assert subject_statements, (
         "no statement touching `:Subject` was issued — this pin would be vacuous"
     )
-    for cypher in subject_statements:
-        assert cypher == expected, (
+    for cypher in subject_statements - set(expected):
+        # `raise`, never `assert False` (ruff B011, the CI lint gate): under
+        # `python -O` an assert is STRIPPED, so the one red this pin exists to
+        # raise — a widened `:Subject` mint — would go GREEN in an optimized
+        # run, i.e. the gate would report the widening as authorized.
+        raise AssertionError(
             "the `:Subject` anchor statement changed. It is the ONE write on "
             "this lane to a journalled ontology class, authorized only as the "
             "id-only anchor link (see the ANCHOR MINT bullet above "
@@ -435,6 +515,19 @@ def test_the_subject_anchor_mint_is_not_widened(sdk_with_journal, monkeypatch):
             "on #9079 and update both the bullet and this expectation:\n"
             f"  expected: {expected}\n  actual:   {cypher}"
         )
+    # ⛔ AND THE OTHER DIRECTION (#10452 F1): a shape the walk no longer ISSUES
+    # is a shape this pin can no longer constrain. Without this half, reverting
+    # `carry_onboards_edge`'s carried arm to `write_onboards_edge` — the id-only
+    # MERGE that function exists to replace — writes only `expected[0]`, which
+    # the subset check above accepts, and the suite stays GREEN on the defect.
+    assert set(expected) <= subject_statements, (
+        "the walk no longer issues every `:Subject` shape this pin expects, so "
+        "the assertion above cannot see the missing one. The carry's carried "
+        "arm is the ONLY writer of the second shape; if it regressed to "
+        "`write_onboards_edge`'s id-only MERGE, the org's new default graph "
+        "gets an anonymous anchor and this test would not notice.\n"
+        f"  not issued: {sorted(set(expected) - subject_statements)}"
+    )
 
 
 def test_a_peer_projection_opening_mid_walk_is_not_attributed_to_this_lane(
