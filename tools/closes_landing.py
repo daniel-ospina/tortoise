@@ -161,33 +161,36 @@ def _closing_re(sep: str) -> re.Pattern[str]:
 _CLOSING_RE = _closing_re(_CLOSING_SEPARATORS["lenient"])
 _CLOSING_RE_ONELINE = _closing_re(_CLOSING_SEPARATORS["strict"])
 
-#: A BLANK line, i.e. the end of a paragraph. An inline code span cannot cross
-#: it (§6.1 keeps a span inside one paragraph), so it is where the STRICT inline
-#: scan stops looking for a closing backtick run (`_span_limit`).
-_BLANK_LINE_RE = re.compile(r"\n[ \t]*\n")
-
 #: A line that STARTS a new block, tested on the line's text AFTER its blockquote
 #: prefix. A span is inline content and cannot cross a block boundary, and most
 #: blocks end the paragraph WITHOUT a blank line — which is why the strict scan
-#: needed this as well as `_BLANK_LINE_RE` (see `_paragraph_end`).
+#: needed this as well as a blank line (see `_paragraph_end`).
+#:
+#: A SETEXT UNDERLINE is the fifth such boundary and was the one this list
+#: omitted: `===` / `=` / `-` / `--` turns the preceding line into an `<h1>`/`<h2>`
+#: and ends the paragraph, so a stray run before it could pair straight through
+#: it with the opener of a real span below (#10634 review P2, fail-open). A
+#: one-or-two `-` run is a setext underline, not a thematic break (which needs
+#: three), so the two alternatives do not overlap.
 _BLOCK_START_RE = re.compile(
     r"(?: {0,3}(?:[-*+]|\d{1,9}[.)])(?:[ \t]|$)"          # a list item marker
     r"| {0,3}#{1,6}(?:[ \t]|$)"                             # an ATX heading
     r"| {0,3}(?:(?:\*[ \t]*){3,}|(?:-[ \t]*){3,}|(?:_[ \t]*){3,})$"  # thematic break
+    r"| {0,3}(?:=+|-{1,2})[ \t]*$"                          # a setext underline
     r"| {0,3}<)"                                            # an HTML block
 )
 
 
 def _paragraph_end(text: str, start: int) -> int:
-    """Where the PARAGRAPH containing `start` ends, per CommonMark's block rules.
+    """Where the BLOCK containing `start` ends, per CommonMark's own rules.
 
-    This is the STRICT arm's bound for a span's closing run, and it must be the
+    This is the bound for a span's closing run in BOTH arms, and it must be the
     renderer's own: a code span is INLINE content, so it cannot cross a block
-    boundary — and a blockquote line, a list item, an ATX heading, a thematic
-    break or an HTML block all end the paragraph WITHOUT a blank line. Bounding
-    the search at the next blank line alone therefore let an unmatched backtick
-    pair with the OPENER of a genuine span in a later block, blank the wrong
-    region, and expose the keyword that span held:
+    boundary — and a blockquote line, a list item, an ATX heading, a setext
+    underline, a thematic break or an HTML block all end the paragraph WITHOUT a
+    blank line. Bounding the search at the next blank line alone therefore let an
+    unmatched backtick pair with the OPENER of a genuine span in a later block,
+    blank the wrong region, and expose the keyword that span held:
 
         Use `foo in the old version
         > note
@@ -202,6 +205,11 @@ def _paragraph_end(text: str, start: int) -> int:
     never a false closure, so the boundary tests err toward stopping: the
     container is compared by DEPTH (never by prefix string) and any line that
     could start a block ends the span.
+
+    One block does NOT end at a blank line: an INDENTED code block continues
+    across blanks, and ends at the first line of ordinary text. Its own content is
+    literal, so a run inside it can never pair with anything outside, and
+    treating the blank as the end would pair it with a real span below.
     """
     line_start = text.rfind("\n", 0, start) + 1
     first_end = text.find("\n", start)
@@ -212,6 +220,12 @@ def _paragraph_end(text: str, start: int) -> int:
     # another — `> a `Closes\n> #100` b` is one span, `a `x\n> `Closes #100``
     # is not.
     depth = _quote_depth(_split_prefix(text[line_start:first_end])[0])
+    # Is the opener itself sitting in an INDENTED code block? Then its block is
+    # that code block, which continues across blank lines.
+    _opener_prefix, opener_rest = _split_prefix(text[line_start:first_end])
+    del _opener_prefix
+    in_indented_code = (len(opener_rest) - len(opener_rest.lstrip(" "))
+                        > _MAX_FENCE_INDENT)
     pos = first_end + 1
     while pos < len(text):
         end = text.find("\n", pos)
@@ -219,12 +233,21 @@ def _paragraph_end(text: str, start: int) -> int:
             end = len(text)
         line = text[pos:end]
         if not line.strip():
-            return pos                      # a blank line ends the paragraph
+            if in_indented_code:
+                pos = end + 1          # a blank line does NOT end indented code
+                continue
+            return pos                 # …but it ends a paragraph
         prefix, rest = _split_prefix(line)
         if _quote_depth(prefix) != depth:
-            return pos                      # a different container
+            return pos                 # a different container
+        if in_indented_code:
+            # …the code block ends at the first line of ordinary text.
+            if len(rest) - len(rest.lstrip(" ")) <= _MAX_FENCE_INDENT:
+                return pos
+            pos = end + 1
+            continue
         if _BLOCK_START_RE.match(rest):
-            return pos                      # a new block type
+            return pos                 # a new block type
         pos = end + 1
     return len(text)
 
@@ -240,31 +263,33 @@ def _span_limit(text: str, start: int, strict: bool) -> int:
         -> <p>Example: <code>Closes #10541</code> is the quoted form.</p>
 
     A span cannot cross a BLANK line (§6.1's content stays inside one paragraph)
-    or any other BLOCK boundary (§6.1: a span is inline content), so the strict
-    scan stops at `_paragraph_end` — the renderer's own boundary. Bounding it at
-    the next blank line alone paired a stray run with the opener of a real span
-    in a later block and exposed the keyword that span held (#10634 review P2).
-    The two callers want OPPOSITE things from an unsure case, and this is the one
-    place the module's asymmetry has to be spelled out in code:
+    or any other BLOCK boundary (§6.1: a span is inline content), so BOTH arms
+    stop at `_paragraph_end` — the renderer's own boundary. A per-line bound let
+    an unmatched run pair with the OPENER of a real span in a later block and
+    expose the keyword that span held (#10634 review P2); a per-line bound on the
+    LENIENT side lost a real claim rather than exposing one, because a stray run
+    before a real span legitimately closes on that span's opener:
 
-    * `strict` is the PASS arms (the carrier body, and the subject's own `lands`
-      arm). Under-stripping there is a `lands` on a shape GitHub ignores — the
-      one outcome this module forbids — so it searches to the end of the
-      PARAGRAPH: an over-strip only costs a pass that was never demonstrable
-      (`unresolved`, a warning), never a false closure.
-    * lenient is the FINDING arms. Blanking between two stray runs that a
-      renderer keeps literal (an indented code line pairing with a tick in a
-      later paragraph, `    a `b\nprose `c Closes #100`) would LOSE a real
-      closure — the harmful direction for a warning — so it refuses to pair
-      across a line break at all and over-reports the multi-line span instead.
-      For the shapes in `_COMMONMARK_SHAPES` that costs a false warning and was
-      measured to cost a claim in none: the renderer's CODE shapes here are all
-      reported by the strict arm's paragraph bound below.
+        "a`\n`Closes #100`\n"  ->  <p>a<code> </code>Closes #100`</p>
+
+    i.e. `Closes #100` is PROSE and GitHub fires it, while the per-line scan
+    blanked the span and reported nothing (#10634 review P3).
+
+    The two arms still differ, but in what they do with a span they CAN find,
+    never in how far they look: `strict` is the PASS arms (the carrier body, and
+    the subject's own `lands` arm), where the renderer's own bound is the whole
+    question; lenient is the FINDING arms, which cannot pass anything on the
+    result (a lenient match is only ever a warning), so the identical bound gives
+    the identical shape rather than an over- or under-report on one arm alone.
+
+    ⚠️ The previous lenient bound was per-line and its docstring justified that
+    by a case it believed would otherwise LOSE a claim. `_paragraph_end` now
+    carries that case for both arms — an INDENTED code block continues across
+    blank lines and ends at the first line of ordinary text — so the worry is met
+    by the bound itself instead of by refusing to look across a line break.
     """
-    if strict:
-        return _paragraph_end(text, start)
-    line_end = text.find("\n", start)
-    return len(text) if line_end < 0 else line_end
+    del strict          # both arms use the renderer's own bound; see the note
+    return _paragraph_end(text, start)
 
 
 def _strip_inline_code(text: str, *, strict: bool = False) -> str:
@@ -635,6 +660,23 @@ def strip_code(body: str, strict: bool = False) -> str:
     out: list[str] = []
     fence: _Fence | None = None
     list_cols: list[int] = []
+    #: Whether an INDENTED code block could START at the current line. An
+    #: indented block cannot interrupt a paragraph or a list item (§4.4), so a
+    #: four-column line that continues prose is TEXT — and blanking it is not the
+    #: safe over-strip it was documented as: it can blank the CLOSER of a code
+    #: span whose opener sits higher up, which turns over-strip into
+    #: under-strip and exposes the keyword the span held:
+    #:
+    #:     a`
+    #:     Closes #100
+    #:         x`
+    #:
+    #: renders `<p>a<code> Closes #100     x</code></p>` — CODE — but the third
+    #: line was blanked, line 1's opener was left unmatched-literal, and the
+    #: keyword became prose: `lands`, exit 0 (#10634 review P3, fail-open).
+    #: True at the start of the body and after a blank line (or a blank quote
+    #: line, whose content is empty after its prefix); False after prose.
+    code_can_start = True
     for raw in body.splitlines():
         line = raw.expandtabs(4)
         indent = len(line) - len(line.lstrip(" "))
@@ -702,10 +744,16 @@ def strip_code(body: str, strict: bool = False) -> str:
         if fence:
             out.append("")
             continue
-        if strict and (rest_indent > _MAX_FENCE_INDENT or rest.startswith("\t")):
+        if strict and ((rest_indent > _MAX_FENCE_INDENT
+                        or rest.startswith("\t")) and code_can_start):
             out.append("")
+            code_can_start = True
             continue
         out.append(raw)   # prose: keep it, keywords and all
+        # A line with no content after its container prefix is a BLANK line as
+        # far as the next block is concerned; anything else opens a paragraph,
+        # and an indented block cannot interrupt one.
+        code_can_start = not rest.strip()
     return "\n".join(out)
 
 
