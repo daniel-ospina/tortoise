@@ -137,6 +137,25 @@ ROUTED_NAMESPACES: dict[str, dict[str, str]] = {
     # test reads. Same `prod-coupled` class as its neighbours above.
     "test_3516_client_captured_at.py": {"registry": "prod-coupled"},
     "test_agent_signup.py": {"registry": "prod-coupled"},
+    # #10046: the two `namespace="registry"` matches in this module are TEXT fed
+    # to `ast.parse`, never a construction. `test_a_literal_namespace_is_not_an
+    # _org_scoped_site` hands the record-tenant scanner a synthetic source
+    # snippet and asserts the round-3 predicate excludes a string-literal
+    # namespace; the other is the same literal quoted in that test's own
+    # docstring. Both are kept byte-for-byte `"registry"` ON PURPOSE — that is
+    # the spelling PROD resolves and the exact shape the doubled-predicate P1
+    # mis-counted — so they are declared here rather than renamed to a `test_*`
+    # namespace, which would make the pin exercise a spelling no prod lane uses
+    # (and the docstring `grep` a literal it no longer explains). The guard greps
+    # file TEXT, so it cannot tell this from a real construction; MEASURED with
+    # the guard's own `_sdk_call_namespace_literals()` at #10723's head — it
+    # reports lines 2020 (the docstring's own `_make_sdk(namespace="registry")`
+    # sample) and 2037 (the `registry = 'def f(): … namespace="registry" …'`
+    # snippet) — and without this row it reds on exactly those two →
+    # `test-slow (e)` → python-ci-gate, which is how it was found. Re-derive by
+    # running the generator; the numbers move whenever the test file above them
+    # is edited, so they are a measurement, not a constant.
+    "test_10047_record_every_lane.py": {"registry": "synthetic-source"},
     # #7677: the retry-idempotency tests drive REAL org creation through the
     # registry control plane — `_make_sdk(namespace="registry")._get_registry()`
     # is the same construction the endpoint under test uses, and the behaviour
