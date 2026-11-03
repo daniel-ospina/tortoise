@@ -96,8 +96,16 @@ def test_goal_state_does_not_leak_into_status(sdk):
     achievement, `status` is the draft/live lifetime. Setting one must not
     move the other."""
     goal = sdk.create_object("REVENUE", objectKind="goal", goalState="met")
-    assert goal["status"] == "live"
-    assert goal["status"] != "met"
+    # #9974 R1: the birth status is DERIVED-OR-ABSENT — the entity fold seeds
+    # `status=$st` and the create door no longer fabricates `'live'`, so a
+    # status-less birth stores NO `status` and an ABSENT status READS live
+    # (`live._terminal_excluded`). The leg's claim is the two-axis split, so:
+    # the achievement value must not have leaked into `status` (the key is
+    # absent — nothing wrote it), and `goalState` must still have landed (or
+    # the `!= "met"` half would pass vacuously).
+    assert goal.get("status") is None
+    assert goal.get("status") != "met"
+    assert goal["goalState"] == "met"
     p = sdk.create_point("goal", "GOAL - REVENUE", status="draft",
                          goalState="unmet")
     assert p["status"] == "draft"
