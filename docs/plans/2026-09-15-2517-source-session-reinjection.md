@@ -446,7 +446,8 @@ contract; single-source the chunk kind and the `match_source` leg across the eva
   truth). `sessions_lost` is `null` on the census-failure path (its siblings are
   `null` there too) and `measured: False` on every path where no census ran —
   including the whole OFF arm, where the counts are a zeroed DESIGN and not a
-  measurement, so a consumer must filter on `measured` before deriving a rate; `r1_knobs` + **always-present resolved-bool fingerprint** entries for both
+  measurement, so a consumer must filter on `measured` before deriving a rate;
+  `r1_knobs` + **always-present resolved-bool fingerprint** entries for both
   keys (§2); the Layer-1 projection entry in `outcomes_to_report`
   (`run.py:4923` precedent) **together with the `tests/test_longmem_runner.py:365/433`
   golden update in this same task** (the golden pins the exact outcome dict, so a
