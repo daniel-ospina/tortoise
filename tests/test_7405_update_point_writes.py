@@ -4695,8 +4695,6 @@ def test_a_fifo_at_the_journal_path_cannot_park_the_presence_scan(tmp_path):
     WAIT, so an in-process assertion would HANG the suite rather than fail it; a
     subprocess with a timeout turns "parked" into the failure this case reports.
     """
-    from tortoise.log import MentionScan
-
     fifo = tmp_path / "journal.fifo"
     os.mkfifo(fifo)
     code = textwrap.dedent(
