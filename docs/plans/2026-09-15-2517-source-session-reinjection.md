@@ -440,7 +440,8 @@ contract; single-source the chunk kind and the `match_source` leg across the eva
   injected_per_session_merged: {sid: int}, injected_merged: int, dropped_by_cap: int,
   reader_window_displacement: {window, injected_in_window, base_displaced,
   sessions_lost: [str] | null, sessions_before, sessions_after, measured},
-  fetch_ok: bool, total_cap_hit: bool, guard: bool, latency_ms, tr_excluded}`
+  fetch_ok: bool, total_cap_hit: bool, guard: bool, latency_ms, tr_excluded,
+  floor_term: bool, guard_per_session_cap: int}`
   (per-session dicts + `injected_merged` are the non-derivable signals; `seeded`/
   `injected_total` are documented reader conveniences, never a second source of
   truth). `sessions_lost` is `null` on the census-failure path (its siblings are
