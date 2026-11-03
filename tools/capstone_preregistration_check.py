@@ -3009,8 +3009,17 @@ def main(argv: list[str] | None = None) -> int:
             print(f"FAIL — {len(report['failures'])} problem(s):")
             for f in report["failures"]:
                 print(f"  - {f}")
-                # The human block above is not an identity; this is (#10536). One
-                # annotation per finding, so a NEW finding cannot inherit a red main's.
+                # The rail compares failures by IDENTITY, not by check name
+                # (``scripts/admin-merge.sh``: "make the failing step print a
+                # parseable identity — a '::error::<message>' annotation or a
+                # 'FAILED <nodeid>' line — then re-run the rail"). A bare
+                # ``FAIL — N problem(s)`` block is not parseable, so a red that
+                # is main's OWN pre-existing red cannot be exempted and blocks
+                # every PR — a false block, not a gate. The annotation does not
+                # change the verdict (exit code unchanged); it makes the refusal
+                # ATTRIBUTABLE. The identity itself comes from (#10536)'s
+                # mask-proof discriminator: one annotation per finding, so a NEW
+                # finding cannot inherit a red main's.
                 print(_rail_identity_annotation(report["document"], f), file=sys.stderr)
         for note in report.get("registry_scopes", []):
             print(f"registry arm NOT applied — {note}")
