@@ -27,9 +27,17 @@ stands — the argument is what makes the target legible at the call site, and a
 caller who needs a second graph still has to send it).
 
 What this file does NOT claim: that the venue will now pass a write that carries
-`graph` anyway. The venue's filter is a policy decision on their side, and the
-same error is reported for write calls with no routing argument at all and for
-the same tool definitions served from two different domains. See #10084.
+`graph` anyway. The venue's filter is a policy decision on their side.
+
+Two reports recorded on #10084 (comment `2026-11-01T05:58:54Z`) say the SAME
+error also hits write calls with **no** routing argument, and the same tool
+definitions served from two different domains (`community.openai.com` threads
+1384381 — prod `.com` blocked, QA `.net` succeeded — and 1407832). ⛔ Those are
+OTHER servers' reports, not this repo's measurement: OUR graph-free control write
+SUCCEEDED (point `1a17966af61-e7dfb7eeea90`), so a graph-free write path provably
+exists on this venue. That is why this change is a lever on what the model is TOLD
+to send and never a demonstrated bypass — if graph-free writes were blocked here
+too, the re-brief would buy nothing.
 """
 from __future__ import annotations
 
@@ -199,10 +207,13 @@ def test_the_excluded_tools_still_do_not_advertise_it():
 
 
 @pytest.mark.parametrize("value", ["default", "org_ws_gid", "a-unique-name"])
-def test_an_explicit_graph_is_still_dispatched_value_independently(value):
-    """The description forbids the redundant NO-OP form; it must not make the
-    dispatch refuse a value. `_take_graph_argument` is the single dispatch seam
-    both the advertised and the honoured set go through."""
+def test_an_explicit_graph_survives_the_pop_and_is_not_swallowed(value):
+    """`_take_graph_argument` POPS the key (and refuses it on a
+    `GRAPH_ARGUMENT_EXCLUDED` tool) — it neither resolves nor authorises: that is
+    `_resolve_graph_argument` → `mcp_auth.plan_graph_target`, pinned in
+    `tests/test_9340_graph_tool_argument.py`. What this pins is narrower and real:
+    the re-briefed description changes what the model is TOLD to send, so the
+    pop must still hand the advertised value on instead of swallowing it."""
     arguments = {"kind": "Observation", "content": "x", "graph": value}
     taken = mcp_server._take_graph_argument("tortoise_create_point", arguments)
     assert taken == value, taken
