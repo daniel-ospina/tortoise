@@ -3269,6 +3269,90 @@ def test_the_newest_frozen_pin_receipt_wins_because_the_ordering_is_the_property
     assert record["operator_audit"]["edge_correct"] == 5, record
 
 
+def test_the_ordering_compares_instants_and_not_date_strings():
+    """An offset stamp sorts ABOVE its ``Z`` equivalent as a STRING while being EARLIER.
+
+    Measured: ``2026-10-24T01:00:00+02:00`` is 2026-10-23T23:00Z, genuinely BEFORE
+    ``2026-10-24T00:30:00Z``, but lexically AFTER it. The two fixtures below are chosen
+    so a raw-string ordering and a parsed-instant ordering pick DIFFERENT files, and
+    they differ in ``edge_correct`` — so the published E4 numerator moves if the
+    comparison regresses. Reverting ``_sort_key`` to a string compare leaves every
+    other case green; this one is what reds.
+
+    The undated third receipt pins the documented sentinel: an absent ``date`` sorts
+    FIRST, so an undated record never displaces a dated one.
+    """
+    pin = "sha256:" + "d" * 64
+    root = Path(tempfile.mkdtemp())
+    receipts = root / measure.E4_RECEIPT_DIR
+    receipts.mkdir(parents=True)
+    _receipt(receipts / "w2b-operator-offset.json", corpus_hash=pin,
+             edge_correct=13, date="2026-10-24T01:00:00+02:00")  # 2026-10-23T23:00Z
+    _receipt(receipts / "w2b-operator-zulu.json", corpus_hash=pin,
+             edge_correct=5, date="2026-10-24T00:30:00Z")
+    _receipt(receipts / "w2b-operator-undated.json", corpus_hash=pin,
+             edge_correct=99, date="")
+
+    rel, record = measure.select_e4_receipt(root, frozen_pin=pin)
+    assert rel.endswith("w2b-operator-zulu.json"), (
+        f"the LATER instant must win; a raw-string compare picks the +02:00 stamp: {rel}")
+    assert record["operator_audit"]["edge_correct"] == 5, record
+
+
+def test_the_would_have_won_boundary_is_the_instant_not_the_string():
+    """The ignore/refuse boundary must be decided on the same key as the winner.
+
+    An unscorable on-pin receipt that is genuinely EARLIER than the winner can never
+    win, so it is ignored. Under a raw-string compare its ``+02:00`` stamp sorts ABOVE
+    the winner's ``Z`` stamp and the selection REFUSES — a refusal that names a
+    consequence that is not true, over a run that is perfectly fine.
+    """
+    pin = "sha256:" + "d" * 64
+    root = Path(tempfile.mkdtemp())
+    receipts = root / measure.E4_RECEIPT_DIR
+    receipts.mkdir(parents=True)
+    # Chronologically EARLIER (2026-10-23T23:00Z) but lexically later, and unscorable.
+    _receipt(receipts / "w2b-operator-offset.json", corpus_hash=pin,
+             edge_correct=13, date="2026-10-24T01:00:00+02:00", audit=False)
+    _receipt(receipts / "w2b-operator-zulu.json", corpus_hash=pin,
+             edge_correct=5, date="2026-10-24T00:30:00Z")
+
+    rel, record = measure.select_e4_receipt(root, frozen_pin=pin)
+    assert rel.endswith("w2b-operator-zulu.json"), rel
+    assert record["operator_audit"]["edge_correct"] == 5, record
+
+
+def test_a_missing_receipts_directory_refuses_differently_from_an_empty_one():
+    """An ABSENT receipts directory is not an EMPTY one.
+
+    Both produced the identical "none present" refusal, so a wrong root or a partial
+    checkout pointed the reader at a missing receipt when the real cause was a missing
+    tree — the mirror of the case where "none present" was printed about a directory
+    that did hold an on-pin candidate. Both arms are pinned here, because the point is
+    the DISTINCTION, not either message on its own.
+    """
+    pin = "sha256:" + "d" * 64
+    absent = Path(tempfile.mkdtemp())
+    with pytest.raises(SystemExit) as exc:
+        measure.select_e4_receipt(absent, frozen_pin=pin)
+    missing = str(exc.value)
+    assert "REFUSED" in missing, missing
+    assert str(absent / measure.E4_RECEIPT_DIR) in missing, missing
+    assert "does not exist" in missing, missing
+    assert "candidate(s) were scanned" not in missing, (
+        "an absent directory must not report a scan count — there was nothing to "
+        f"scan: {missing}")
+
+    empty = Path(tempfile.mkdtemp())
+    (empty / measure.E4_RECEIPT_DIR).mkdir(parents=True)
+    with pytest.raises(SystemExit) as exc:
+        measure.select_e4_receipt(empty, frozen_pin=pin)
+    scanned = str(exc.value)
+    assert "candidate(s) were scanned" in scanned, scanned
+    assert "none present" in scanned, scanned
+    assert "does not exist" not in scanned, scanned
+
+
 def test_e4_refuses_rather_than_falling_back_to_another_corpus():
     """No receipt on the pin = no measurement, named — never "the newest file".
 
@@ -3403,12 +3487,41 @@ def test_main_builds_the_e4_row_from_the_selector_and_never_from_the_constant():
     ``main`` runs calls ``build_e4_row(load_e4(frozen_pin=...))`` — the two names, on
     the path that actually produces the table.
     """
-    source = PROBE.read_text()
-    assert "e4 = build_e4_row(receipt, bars=bars, corpus_sha=corpus_sha)" in source
-    assert "receipt = load_e4(frozen_pin=corpus_sha)" in source
-    assert "load_e4()" not in source, (
-        "an un-pinned load_e4() call would score E4 from whatever receipt is newest, "
-        "not from one on the frozen corpus")
+    tree = ast.parse(PROBE.read_text())
+    main = next(node for node in tree.body
+                if isinstance(node, ast.FunctionDef) and node.name == "main")
+
+    # What main assigns from a call, by target name — resolves `receipt` to load_e4.
+    assigned_from: dict[str, str] = {}
+    for node in ast.walk(main):
+        if (isinstance(node, ast.Assign) and isinstance(node.value, ast.Call)
+                and isinstance(node.value.func, ast.Name)):
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    assigned_from[target.id] = node.value.func.id
+
+    loads = [node for node in ast.walk(main)
+             if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+             and node.func.id == "load_e4"]
+    assert loads, "main never calls load_e4 — E4 would come from somewhere unpinned"
+    for call in loads:
+        assert any(kw.arg == "frozen_pin" for kw in call.keywords), (
+            "an un-pinned load_e4() call would score E4 from whatever receipt is "
+            "newest, not from one on the frozen corpus")
+
+    row_calls = [node for node in ast.walk(main)
+                 if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                 and node.func.id == "build_e4_row"]
+    assert len(row_calls) == 1, (
+        f"main must build the E4 row exactly once: {len(row_calls)}")
+    source_arg = row_calls[0].args[0] if row_calls[0].args else None
+    assert isinstance(source_arg, ast.Name), (
+        "main must build E4's row from a plain name, so this pin can follow it")
+    assert assigned_from.get(source_arg.id) in {"load_e4", "select_e4_receipt"}, (
+        f"main builds E4's row from {source_arg.id}, which is not what "
+        "load_e4()/select_e4_receipt() returned — building it from anything else is "
+        "the reversion this pin exists to catch (the earlier version of this test "
+        "grepped source TEXT, which is why the render-path defects stayed green)")
 
 
 def test_main_binds_every_name_it_hands_render_log_and_load_e4_carries_its_keys():
