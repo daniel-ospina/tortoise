@@ -707,7 +707,34 @@ class RecordStatementError(RecordProjectionError):
     HEAD of a message: a line over its limit loses the TAIL, which is where this
     method puts the driver's fault clause — the half that says what went wrong
     (#10648 review P2).
+
+    ⚠️ TWO CALL SHAPES, because two lineages of this attribution met in the
+    batch fold and both are load-bearing:
+
+    * ``RecordStatementError(<message>)`` — what :func:`replay` raises, with the
+      line composed by :func:`_failure_line` around
+      :func:`_statement_attribution` (verb, table, declared columns, and the
+      driver's cause, all budgeted together).
+    * ``RecordStatementError(statement, cause, index=…, total=…)`` — what a
+      caller that still HOLDS the :class:`Statement` passes (a repair script, a
+      backfill, a test): the message is then
+      :func:`Statement.attribution` (``value_types()``, i.e. the Python type of
+      every bound value and whether a `jsonb`-column string parses) plus the
+      cause, so neither form can produce a report missing the fault clause.
     """
+
+    def __init__(self, statement: Statement | str,
+                 cause: BaseException | None = None, *,
+                 index: int = -1, total: int = -1) -> None:
+        if cause is None:
+            super().__init__(statement)
+            return
+        where = (f"statement {index + 1}/{total}" if index >= 0 and total > 0
+                 else "statement")
+        super().__init__(
+            f"{where} failed ({type(cause).__name__}: {cause}) — "
+            f"{statement.attribution()}"
+        )
 
 
 class UnknownJournalRecordType(RecordProjectionError):
@@ -730,35 +757,6 @@ class RefusedJournalOperation(RecordProjectionError):
     """
 
 
-class RecordStatementError(RecordProjectionError):
-    """A plan statement FAILED at execution — the attribution Postgres omits.
-
-    The driver reports what went wrong with the VALUE ("invalid input syntax
-    for type json") and where it sat in the statement text (a caret under
-    `'err4032 r...`), but never WHICH column or which Python type disagreed with
-    the record's declared shape. #9548 lost **302** live rows to that gap: every
-    one surfaced as the bare class name `InvalidTextRepresentation` and nothing
-    could tell which of `public.point`'s 71 columns was refusing.
-
-    So the failing :class:`Statement` rides along, and `str()` carries all three
-    of the facts a failure report needs — the cause, the statement's first 120
-    chars, and each bound column's PYTHON value type. It is raised by
-    :func:`replay` around the `execute` call, so it is chained (`from exc`) and
-    the driver's own exception — with its LINE/DETAIL/CONTEXT — is never lost.
-    """
-
-    def __init__(self, statement: Statement, cause: BaseException,
-                 *, index: int = -1, total: int = -1) -> None:
-        self.statement = statement
-        self.cause = cause
-        self.index = index
-        self.total = total
-        where = (f"statement {index + 1}/{total}" if index >= 0 and total > 0
-                 else "statement")
-        super().__init__(
-            f"{where} failed ({type(cause).__name__}: {cause}) — "
-            f"{statement.attribution()}"
-        )
 
 
 # ════════════════════════════════════════════════════════════════════════════

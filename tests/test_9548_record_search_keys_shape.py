@@ -114,36 +114,60 @@ def _tenant():
 # ════════════════════════════════════════════════════════════════════════════
 
 
-def test_the_bound_search_keys_value_is_a_json_document_a_jsonb_column_takes():
-    """The parameter bound to a `jsonb` column must be VALID JSON (#9548).
+def test_the_bound_search_keys_value_is_the_graph_s_string_verbatim():
+    """`public.point.search_keys` is TEXT in the landed schema — verbatim (#10620).
 
-    THIS IS THE TEST THAT REDS ON THE PRE-FIX CODE. `_jsonb_or_scalar` passed
-    the graph's space-joined string through as TEXT, so the parameter was
-    `err4032 release deploy` — not a JSON document, which is exactly what
-    Postgres refused:
+    ⚠️ THIS TEST'S PREMISE INVERTED when the batch integrated current `main`.
+    #9548 fixed this column on the ENCODING side (`_jsonb_or_scalar` serialised
+    the graph's flat string into a JSON document); #10620 fixed it on the COLUMN
+    side (migration `20261102000002_record_point_search_keys_text.sql` narrows
+    `point.search_keys` to `text`). Both landed, so the merged tree carries the
+    narrowing and the bound value is now the graph's own string — a JSON-quoting
+    encoder on a `text` column would store the quotes as DATA.
 
-        invalid input syntax for type json / DETAIL: Token "err4032" is invalid.
+    The encoding rule is not dead: it still governs every column that IS
+    `jsonb`, and that half is asserted below on the SAME statement. The old
+    body — `json.loads(bound)` — is retained as the second arm because it is
+    the acceptance test Postgres applies to a `jsonb` input.
 
-    The assertion is `json.loads` and not "the string contains quotes" because
-    it is the SAME acceptance test Postgres applies to a `jsonb` input; a shape
-    it cannot parse is a shape the column refuses.
+    ⛔ WHAT STILL REDS: the second arm below fails if any parameter bound to a
+    column the schema still declares `jsonb` is not a JSON document — which is
+    exactly the pre-fix shape (`_jsonb_or_scalar` passing a bare graph string
+    through as TEXT), and exactly Postgres's 22P02 refusal.
     """
+    from tortoise import record_projection as rp
+
     tenant = _tenant()
     plan = _plan_record(_record(tenant, search_keys=GRAPH_KEYS), tenant)
     bound = _search_keys_param(plan)
-    assert isinstance(bound, str), (
-        f"the column is `jsonb`, so the parameter is a serialized document "
-        f"(got {type(bound).__name__})")
-    try:
-        decoded = json.loads(bound)
-    except json.JSONDecodeError as exc:      # ← the pre-fix shape lands here
-        pytest.fail(
-            f"the value bound to `point.search_keys` is not a JSON document "
-            f"({bound!r}: {exc}) — a `jsonb` column refuses it with 22P02 and "
-            "the seam drops the row (#9548)")
-    assert decoded == GRAPH_KEYS, (
-        f"the document must decode back to the graph's own flat string "
-        f"(got {decoded!r})")
+    jsonb = rp.jsonb_columns()
+    assert "search_keys" not in jsonb, (
+        "public.point.search_keys is `text` since "
+        "20261102000002_record_point_search_keys_text.sql (#10620) — if it is "
+        "back in `jsonb_columns()` the encoding rule starts JSON-quoting a "
+        "text column, which stores the quotes as data")
+    assert bound == GRAPH_KEYS, (
+        f"a `text` column takes the graph's own flat string VERBATIM "
+        f"(got {bound!r})")
+
+    # …and the jsonb half of the rule still applies, on the same statement:
+    # every parameter bound to a column the schema declares `jsonb` is a JSON
+    # document Postgres can parse. This is the #9548 acceptance test, kept
+    # alive on the columns that still need it.
+    statement = _search_keys_statement(plan)
+    for offset, column in enumerate(statement.param_columns):
+        if column not in jsonb:
+            continue
+        value = statement.params[offset]
+        if not isinstance(value, str):
+            continue
+        try:
+            json.loads(value)
+        except json.JSONDecodeError as exc:
+            pytest.fail(
+                f"the value bound to `{column}` is not a JSON document "
+                f"({value!r}: {exc}) — a `jsonb` column refuses it with 22P02 "
+                "and the seam drops the row (#9548)")
 
 
 def test_the_read_side_yields_the_graph_s_string_not_an_array():
@@ -174,7 +198,11 @@ def test_the_read_side_yields_the_graph_s_string_not_an_array():
     tenant = _tenant()
     record = _record(tenant, search_keys=GRAPH_KEYS)
     bound = _search_keys_param(_plan_record(record, tenant))
-    assert isinstance(json.loads(bound), str)
+    # `text` since #10620's `20261102000002`: the reader gets the graph's flat
+    # STRING, not a JSON document and not a token array. `search_keys` may not
+    # be read as an array by anything downstream — FalkorDB's Point FULLTEXT
+    # index cannot match one (#5482).
+    assert isinstance(bound, str) and bound == GRAPH_KEYS
 
     def _rebuilt(search_keys):
         # The row shape `read_record_view` hands `node_from_row`: the key column
@@ -183,7 +211,7 @@ def test_the_read_side_yields_the_graph_s_string_not_an_array():
             "node_key": "pt_1", "id": "pt_1", "content": "c",
             "search_keys": search_keys}).props["search_keys"]
 
-    assert _rebuilt(json.loads(bound)) == GRAPH_KEYS, (
+    assert _rebuilt(bound) == GRAPH_KEYS, (
         "the record's reader must hand the rebuild the graph's flat STRING")
     assert _rebuilt(["err4032"]) == ["err4032"], (
         "a JSON array reads back as a Python list — the array-valued "
@@ -214,20 +242,30 @@ def test_every_statement_s_param_columns_align_with_its_params():
     tenant = _tenant()
     misaligned: list[tuple] = []
     seen = 0
+    declined = 0
     for record_type, build in sorted(_RECORD_BUILDERS.items()):
         for statement in rp.replay_plan([build(tenant)], org_id=tenant[0],
                                         graph_id=tenant[1], position=True):
-            if not statement.param_columns:
-                # The journal row carries no attribution today; that is a
-                # declared gap, not an alignment claim (see #9548's remaining
-                # scope), so it is skipped rather than counted as aligned.
+            # ⚠️ TWO attribution shapes coexist (#10620 ∧ #9548): `columns` is
+            # the builder's DECLARED pairing (None when a `_SqlExpr` key shifts
+            # it — the Source plan), `param_columns` is the per-parameter map.
+            # Either may be the one stating an alignment; when NEITHER does, the
+            # statement is a declared gap (the journal row) and is skipped rather
+            # than counted as aligned.
+            named = statement.columns
+            if named is None and not statement.param_columns:
+                declined += 1
                 continue
             seen += 1
-            if len(statement.param_columns) != len(statement.params):
+            stated = named if named is not None else statement.param_columns
+            if len(stated) != len(statement.params):
                 misaligned.append(
-                    (record_type, statement.sql[:60],
-                     len(statement.param_columns), len(statement.params)))
-    assert seen >= 2, f"no statement carried an attribution to check ({seen})"
+                    (record_type, statement.sql[:60], len(stated),
+                     len(statement.params)))
+    assert seen >= 1, f"no statement carried an attribution to check ({seen})"
+    assert declined >= 1, (
+        "the `_SqlExpr` shape must DECLINE to state a pairing (#10620) — if "
+        f"every statement now states one, this pin no longer covers it ({declined})")
     assert not misaligned, (
         "param_columns and params disagree (record, sql, names, params): "
         f"{misaligned} — the failure attribution would name the wrong column")
@@ -297,18 +335,31 @@ def test_a_synthetic_tree_reaches_the_forward_and_fail_closed_arms(tmp_path):
         source = rp._migrations_dir() / name
         if source.exists():
             shutil.copy(source, tree / name)
-    # The real tree FIRST, so the arm is proven to reach the parser at all.
-    assert "search_keys" in rp.jsonb_columns(tree)
+    # The real tree FIRST, so the arm is proven to reach the parser at all —
+    # and it is the LIVE narrowing `20261102000002` (#10620) that proves the
+    # ALTER arm was read: `search_keys` is `jsonb` in the base shape and must
+    # NOT be in the set.
+    real = rp.jsonb_columns(tree)
+    assert "search_keys" not in real, (
+        "the real tree's `20261102000002` narrowing was not applied — a "
+        "jsonb→text ALTER must remove the column from the encoding rule")
+    assert "embedding" in real, (
+        "no column survived the parse at all — the arm would pass by reading "
+        "nothing")
     # ⚠️ APPENDED to the LAST registry file, never a new file: `_read_migrations`
     # reads exactly `RECORD_MIGRATIONS`, so a file outside the registry would be
     # invisible and the arm would pass by not being read at all (measured).
     last = tree / rp.RECORD_MIGRATIONS[-1]
     last.write_text(
         last.read_text(encoding="utf-8")
-        + "\nALTER TABLE public.point ALTER COLUMN search_keys TYPE text;\n",
+        + "\nALTER TABLE public.point\n"
+          "    ALTER COLUMN search_keys TYPE jsonb\n"
+          "    USING search_keys::jsonb;\n",
         encoding="utf-8")
-    assert "search_keys" not in rp.jsonb_columns(tree), (
-        "a jsonb→text narrowing must remove the column from the encoding rule")
+    assert "search_keys" in rp.jsonb_columns(tree), (
+        "a text→jsonb WIDENING must put the column back in the encoding rule — "
+        "the ALTER arm was read for the real narrowing above, and this is the "
+        "same arm driven the other way")
 
     empty = tmp_path / "empty"
     empty.mkdir()
@@ -362,9 +413,15 @@ def test_the_replay_wrapper_attributes_a_failing_statement():
         _rp.scope_connection = original
     error = caught.value
     assert error.__cause__ is driver_error, "the driver's cause must be chained"
-    assert error.total > 0 and 0 <= error.index < error.total
     text = str(error)
-    assert "search_keys" in text and "search_keys=str→jsonb" in text, text
+    # The line is composed by `_failure_line(_statement_attribution(...), …)`
+    # (#10620): it names the ORDINAL, the table, the declared columns and the
+    # driver's own fault clause. `search_keys` is `text` since #10620's
+    # migration, so it carries no `→jsonb` annotation — the annotation belongs
+    # to columns that are still `jsonb`.
+    assert "record statement" in text and "/" in text, text
+    assert "public.point" in text, text
+    assert "search_keys" in text, text
     assert "invalid input syntax for type json" in text, text
 
 
@@ -415,9 +472,13 @@ def test_the_jsonb_columns_are_read_from_the_migrations_never_restated():
       container.
     """
     jsonb = record_projection.jsonb_columns()
-    assert "search_keys" in jsonb, (
-        "public.point.search_keys is not reported as jsonb — the encoding rule "
-        "would stop applying and #9548 comes back")
+    # `search_keys` is the FORWARD-change witness: `jsonb` in the base shape,
+    # `text` after `20261102000002` (#10620). A reader that stopped at
+    # `CREATE TABLE` would keep JSON-quoting a text column.
+    assert "search_keys" not in jsonb, (
+        "public.point.search_keys is `text` since 20261102000002 — a reader "
+        "that still calls it jsonb would JSON-quote a text column, storing the "
+        "quotes as data (#10620)")
     assert "capture_redactions" not in jsonb, (
         "capture_redactions is jsonb only in the BASE shape; #9264's forward "
         "migration narrows it to integer, and the reader must see that")
@@ -489,11 +550,12 @@ def test_a_failed_statement_names_the_column_the_value_type_and_the_sql():
         statement, cause, index=0, total=1)
     text = str(error)
     assert "search_keys" in text, text
-    assert "search_keys=str→jsonb" in text, (
-        f"the bound column's PYTHON type AND its declared shape must be named "
-        f"— they are the halves Postgres never reports, and the pair is what "
-        f"keeps the report diagnostic once `str` became the CORRECT binding: "
-        f"{text}")
+    assert "search_keys=str" in text, (
+        f"the bound column and the PYTHON type of its value must be named — "
+        f"they are the halves Postgres never reports: {text}")
+    assert "search_keys=str→jsonb" not in text, (
+        "`search_keys` is `text` since 20261102000002 (#10620); a `→jsonb` "
+        f"annotation here means the schema map is stale: {text}")
     assert statement.sql[:120] in text, text
     assert "invalid input syntax for type json" in text, (
         f"the cause's own text was discarded, which is defect 2 itself: {text}")
@@ -522,32 +584,35 @@ def test_the_pre_fix_binding_shape_is_still_readable_when_built_by_hand(
     """
     from tortoise.record_projection import Statement
 
-    def _types(*, value: str, columns: tuple[str, ...] = ("search_keys",)):
+    # ⚠️ `payload`, not `search_keys`: `search_keys` is `text` since #10620's
+    # `20261102000002`, so it can no longer carry the `→jsonb` shapes this test
+    # exists to pin. `payload` is still declared `jsonb`, so all three shapes
+    # remain reachable through a hand-built statement.
+    def _types(*, value: str, columns: tuple[str, ...] = ("payload",)):
         return Statement(
-            "INSERT INTO public.point (search_keys) VALUES (%s)",
+            "INSERT INTO public.event (payload) VALUES (%s)",
             (value,), columns).value_types()
 
     # 1. The GOOD binding: a `str` the map calls `jsonb` whose value IS a
-    #    JSON document — what `_jsonb_or_scalar` now emits for the graph's
-    #    space-joined string.
-    assert _types(value=json.dumps(GRAPH_KEYS)) == "search_keys=str→jsonb"
+    #    JSON document — what `_jsonb_or_scalar` emits for a `jsonb` column.
+    assert _types(value=json.dumps(GRAPH_KEYS)) == "payload=str→jsonb"
 
-    # 2. DEFENSIVE ONLY: the PRE-FIX binding shape (a bare graph string on a
-    #    `jsonb` column) is still NAMED rather than printed as an opaque `str`.
-    #    No builder in this module can produce it — this hand-built statement is
+    # 2. DEFENSIVE ONLY: the PRE-FIX binding shape (a bare string on a `jsonb`
+    #    column) is still NAMED rather than printed as an opaque `str`. No
+    #    builder in this module can produce it — this hand-built statement is
     #    the only way in, which is exactly the point.
     assert _types(value=GRAPH_KEYS) == (
-        "search_keys=str→jsonb(NOT a JSON document)"), (
+        "payload=str→jsonb(NOT a JSON document)"), (
         "the pre-fix binding shape must stay readable — it is the read-out a "
         "hand-built statement (repair script, backfill) needs")
 
     # 3. A map MISS (stale/partial migrations parse): the column is bound
     #    VERBATIM — the shape the encoder cannot see either, because it asks the
     #    same map — and it reads as NO suffix. That absence is the signal; a
-    #    reader must not take `search_keys=str` as a clean binding.
+    #    reader must not take `payload=str` as a clean binding.
     monkeypatch.setattr(record_projection, "jsonb_columns",
                         lambda *a, **k: frozenset())
-    assert _types(value=GRAPH_KEYS) == "search_keys=str", (
+    assert _types(value=GRAPH_KEYS) == "payload=str", (
         "an un-suffixed string parameter on a column the migrations declare "
         "`jsonb` is the #9548 condition, not a clean binding")
 
@@ -557,7 +622,7 @@ def test_the_pre_fix_binding_shape_is_still_readable_when_built_by_hand(
         raise OSError("migrations unreadable")
 
     monkeypatch.setattr(record_projection, "jsonb_columns", _boom)
-    assert _types(value=GRAPH_KEYS) == "search_keys=str"
+    assert _types(value=GRAPH_KEYS) == "payload=str"
 
 
 def test_the_write_error_no_longer_discards_the_cause(monkeypatch):
@@ -582,7 +647,8 @@ def test_the_write_error_no_longer_discards_the_cause(monkeypatch):
     assert "record write failed" in text, text
     assert "invalid input syntax for type json" in text, (
         f"the cause text is still discarded, which is defect 2 itself: {text}")
-    assert "search_keys=str→jsonb" in text, text
+    assert "search_keys=str" in text, (
+        f"the failing column and its value type must ride the wrap: {text}")
 
 
 class _RefusingConnection:
