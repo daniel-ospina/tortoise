@@ -38,9 +38,20 @@ import re
 import subprocess
 import sys
 import time
+import tomllib
 from pathlib import Path
 
 import pytest
+# The CommonMark renderer is the ORACLE for the span/fence grammar below, so it is
+# imported HARD — not through `pytest.importorskip`. A skip would turn the
+# mitigation into a silently absent check (`s` in a summary nobody reads) on any
+# interpreter that lost the dependency, which is the re-staleable process claim
+# this file exists to kill (#10634 review P3). Same shape as
+# `tests/test_blog_authoring_doc.py:21`, the precedent that put markdown-it-py in
+# the `test` extra and the dev group in the first place (#8379), and
+# `test_the_commonmark_oracle_stays_a_declared_dependency` below keeps both
+# declarations from being tidied away.
+from markdown_it import MarkdownIt
 
 ROOT = Path(__file__).resolve().parents[1]
 MODULE_PATH = ROOT / "tools" / "closes_landing.py"
@@ -2075,9 +2086,7 @@ _COMMONMARK_SHAPES = [
 
 @pytest.mark.parametrize("body,why", _COMMONMARK_SHAPES)
 def test_the_parser_agrees_with_a_real_commonmark_renderer(body, why):
-    markdown_it = pytest.importorskip(
-        "markdown_it", reason="markdown-it-py is a declared test dependency (#8379)")
-    html = markdown_it.MarkdownIt("commonmark").render(body)
+    html = MarkdownIt("commonmark").render(body)
     prose = _CODE_BLOCK_RE.sub("", html)
     match = _FIRST_REF_RE.search(body)
     assert match, (why, body)
@@ -2094,6 +2103,38 @@ def test_the_parser_agrees_with_a_real_commonmark_renderer(body, why):
             f"{why}: the renderer puts #{n} in <pre><code> ({html!r}) and the "
             f"strict parse — the PASS arm — reported it. A keyword GitHub ignores "
             f"cannot buy a `lands`.")
+
+
+def test_the_commonmark_oracle_stays_a_declared_dependency():
+    """The oracle above is only as durable as the two declarations behind it.
+
+    `markdown-it-py` sits in the `test` extra (what every CI pytest leg installs)
+    **and** in the dev group (what `uv sync --extra embeddings --extra parity`
+    installs — that command does NOT include the `test` extra, #2985), because
+    this module imports it at module scope. Dropping either declaration is what
+    made the earlier `importorskip` shape dangerous: the renderer would stop
+    being installed on exactly one of the two paths and the cross-check would
+    degrade to a skip instead of reddening a test. Pinned here so the removal is
+    a red test, not a quietly weaker instrument.
+    """
+    pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+
+    def _names(requirement_set: list[str]) -> set[str]:
+        return {
+            re.split(r"[<>=!~\[\s]", req, maxsplit=1)[0].strip().lower()
+            for req in requirement_set
+        }
+
+    test_extra = pyproject["project"]["optional-dependencies"]["test"]
+    dev_group = pyproject["dependency-groups"]["dev"]
+    assert "markdown-it-py" in _names(test_extra), (
+        "markdown-it-py left the `test` extra — the CommonMark oracle in this "
+        "file imports it at module scope, so every CI pytest leg would fail to "
+        "collect instead of checking the parser (#8379, #10634 review P3)")
+    assert "markdown-it-py" in _names(dev_group), (
+        "markdown-it-py left the dev group — the canonical dev install "
+        "(`uv sync --extra embeddings --extra parity`) does not include the "
+        "`test` extra, so this file could not even be collected locally (#2985)")
 
 
 def test_the_ITEM_EDGE_is_measured_in_the_space_the_item_lives_in():
