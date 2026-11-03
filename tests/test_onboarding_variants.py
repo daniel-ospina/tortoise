@@ -589,15 +589,29 @@ def test_5153_served_document_pins_the_canonical_mcp_key_variable():
     generalising."""
     skill = LIVE_SKILL.read_text(encoding="utf-8")
     # The claim is "canonical, and the name every recipe uses" — not "the only
-    # name any code path reads". Since #5200 the MCP HTTP client also accepts
+    # name any code path reads". The MCP HTTP client ALSO accepts
     # `TORTOISE_MCP_API_KEY` as an alias (the fleet host exports it, #10605), so
     # an absolute "only one name" would be false, and the disclosure is what keeps
     # a reader from renaming the key and getting an empty Bearer (#5153).
+    #
+    # PROVENANCE (#10727 review, F3): #5200 is still OPEN and only PROPOSED the
+    # alias — no code path on main read the name before this PR — so "since
+    # #5200 the client accepts it" is false: the alias is landed by the #10605
+    # fix. Pinning it here is what stops a later reader from restoring the tidy
+    # but wrong sentence, because that is exactly the shape a doc review would
+    # "correct" back (#5153's own rule: the document must not credit a change
+    # that has not landed).
     assert "is the canonical name, and the one every recipe in this" in skill, (
         "the Pi step must state which name is canonical for every recipe")
     assert ("additionally accepts `TORTOISE_MCP_API_KEY` as an alias") in skill, (
         "the alias the MCP HTTP client accepts must be disclosed, or the "
         "'only one name' reading returns (#5200, #10605)")
+    assert "#5200 *proposed*" in skill, (
+        "the alias's provenance must credit #5200 with PROPOSING it and the "
+        "#10605 fix with landing it — #5200 is still open (#10727 review F3)")
+    assert "Since #5200" not in skill, (
+        "the false provenance returned: #5200 did not land the alias, it "
+        "proposed it while open (#10727 review F3)")
     assert 'export TORTOISE_API_KEY="$TORTOISE_MCP_API_KEY"' in skill, (
         "the Pi step must show the alias a separately-named MCP credential needs")
 

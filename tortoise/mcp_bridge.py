@@ -1,14 +1,31 @@
 """stdio ↔ Streamable-HTTP bridge for the Tortoise MCP endpoint (#10605).
 
 WHY THIS EXISTS. A harness config that carries an `Authorization` header is a
-CAPTURE, not a lookup: `${TORTOISE_API_KEY}` is expanded once, when the harness
-process starts, and the resulting string is replayed for the life of the
-process. A long-lived session (an agent that has been up for hours, a CI lane, a
-desktop app that stays open for days) therefore keeps sending whatever it
-expanded at start-up — empty if the key was not in the environment yet, stale if
-it has since rotated — and the server can only answer
-`Unauthorized: invalid or missing Bearer token`. That message is accurate and
-useless: it points at the credential's VALUE when the client never looked again.
+CAPTURE, not a lookup — and the capture has TWO halves, only one of which is
+about the `${VAR}` syntax.
+
+  * The `${VAR}` EXPANSION is not the stale part. On the harness that reported
+    this (#10605, measured twice from its source and once on the wire: 3/3
+    `initialize` POSTs) `expandExpr()` RE-RUNS AT EVERY CONNECT. Re-expanding a
+    frozen `process.env` is still a capture, but the name is the defect that
+    produced the reported 401: `process.env` is captured when the harness
+    process starts, and an UNSET variable expands silently to `""` — so
+    `${TORTOISE_MCP_API_KEY}`, a name the client did not read, sent
+    `Authorization: Bearer ` (empty) on every connect of a session that was
+    otherwise correctly configured.
+  * What is frozen is `process.env` itself (and, for a bridge child, the
+    snapshot it is spawned with), plus the per-CONNECTION capture: the header a
+    config yields is resolved once per connection and then replayed for that
+    connection's life, so a rotation mid-connection is invisible until the next
+    one.
+
+So the server can only answer `Unauthorized: invalid or missing Bearer token`.
+That message is accurate and useless: it points at the credential's VALUE when
+the client never looked at the source again after the process started — and,
+in the reported shape, when the NAME it looked for was never set at all. The
+design consequence is a CONFIG-NAME fix, not a cache-expiry fix, which is why
+the bridge moves the name out of the config entirely rather than trying to
+refresh an expansion.
 
 The bridge moves the credential out of the config and into a process that reads
 it PER REQUEST. The harness declares a local command instead of a header:

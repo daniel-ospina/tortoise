@@ -398,6 +398,63 @@ class TestCredentialResolution:
             f"{sent} — the client re-reads the store only at construction"
         )
 
+    def test_the_fleet_alias_reaches_the_wire(
+        self, recorded_daemon, isolated_home, monkeypatch,
+    ):
+        """#5200/#10605: `TORTOISE_MCP_API_KEY` alone must authenticate.
+
+        The alias leg had NO behavioural test on the client. The only thing
+        pinning it was a doc assertion that greps `_ENV_KEY_NAMES` for the name
+        — and a name in that tuple is not a name the RESOLUTION reads (a
+        refactor that kept the tuple for the refusal message while the loop
+        iterated something else stayed green). This reads the header the SERVER
+        received, so the leg is proven on the wire: the alias alone, with the
+        canonical variable absent, must arrive as a Bearer value.
+        """
+        from tortoise import mcp_client
+
+        url, seen = recorded_daemon
+        monkeypatch.setenv("TORTOISE_MCP_URL", url)
+        monkeypatch.delenv("TORTOISE_API_KEY", raising=False)
+        monkeypatch.setenv("TORTOISE_MCP_API_KEY", "tt_alias_only")
+
+        mcp_client.list_tools()
+
+        sent = [h for h in seen if h]
+        assert sent, (
+            "no Authorization header reached the server at all when only the "
+            "fleet alias was set — a harness that exports "
+            "TORTOISE_MCP_API_KEY sends an empty Bearer (#5153). sources "
+            f"the client resolved: {seen!r}"
+        )
+        assert sent[-1] == "Bearer tt_alias_only", sent
+
+    def test_the_canonical_name_outranks_the_alias(
+        self, recorded_daemon, isolated_home, monkeypatch,
+    ):
+        """The alias is a FALLBACK — the documented precedence must hold.
+
+        Both names set to different values is the only case that distinguishes
+        a precedence chain from a last-wins scan, and it is the case a harness
+        with a stale alias and a rotated canonical key actually hits: an
+        inverted order sends the stale one and reports a 401 against a key the
+        operator has already replaced.
+        """
+        from tortoise import mcp_client
+
+        url, seen = recorded_daemon
+        monkeypatch.setenv("TORTOISE_MCP_URL", url)
+        monkeypatch.setenv("TORTOISE_API_KEY", "tt_canonical")
+        monkeypatch.setenv("TORTOISE_MCP_API_KEY", "tt_alias_only")
+
+        mcp_client.list_tools()
+
+        sent = [h for h in seen if h]
+        assert sent and sent[-1] == "Bearer tt_canonical", (
+            "the alias outranked the canonical name — precedence is "
+            f"TORTOISE_API_KEY first, then the alias: {sent!r}"
+        )
+
     def test_a_blank_key_is_never_sent_as_an_empty_bearer(
         self, recorded_daemon, monkeypatch,
     ):
