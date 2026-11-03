@@ -1651,6 +1651,19 @@ _COMMONMARK_SHAPES = [
     ("- ```\n   > Closes #100\n", "a literal `>` inside a depth-0 item fence"),
     ("- ```\n>   Closes #100\n", "a blockquote line ends a depth-0 item fence"),
     ("> - ```\n   > Closes #100\n", "indented quote marker ends a quoted item"),
+    # …and inside a QUOTE that sits inside an ITEM: the item's content column is
+    # expressed in `rest` space, so a 4-column run there is NOT a fence (the
+    # renderer shows <pre><code>) and the claim after it is PROSE. Passing the
+    # item's RAW column into `_fence_open` read the run as a fence and blanked
+    # the claim — an under-report (measured: 48 of 1008 item/quote shapes).
+    ("- item\n  >     ```\n  > Closes #100\n",
+     "4-column run inside a quote inside an item is an INDENTED code block"),
+    # …and the OUTER container is matched FIRST: this line dedents below the
+    # item's content column in RAW coordinates, so the item — and the fence
+    # inside it — END, and the depth-2 quote after it is top-level prose.
+    # Consuming the `>` before measuring the dedent kept the block open over it.
+    ("- item\n  > ```\n> > Closes #100\n",
+     "a RAW dedent ends the item and the fence it contains"),
     # and the claims that ARE prose
     ("> Closes #100\n", "a quoted paragraph is prose"),
     ("- item\n  ```\nCloses #100\n", "a column-0 line ends the item"),
@@ -1679,3 +1692,38 @@ def test_the_parser_agrees_with_a_real_commonmark_renderer(body, why):
             f"{why}: the renderer puts #{n} in <pre><code> ({html!r}) and the "
             f"strict parse — the PASS arm — reported it. A keyword GitHub ignores "
             f"cannot buy a `lands`.")
+
+
+def test_the_ITEM_EDGE_is_measured_in_the_space_the_item_lives_in():
+    """Two shapes a single-space container refactor got wrong in ONE direction each.
+
+    Both were found by driving bodies through a real CommonMark renderer rather
+    than by reasoning about the grammar, and both are pinned by the measured
+    shape (not a paraphrase of it):
+
+    * the enclosing item's content column is expressed in `rest` space, so
+      `  >     ``` ` inside a 2-column item is 4 columns — an INDENTED code
+      block, not a fence — and the claim after it is PROSE;
+    * a line that dedents below the item's content column in RAW coordinates
+      ends the item BEFORE the fence's `>` markers are matched, so the fence and
+      the item end together.
+
+    Asserting the FINDING (lenient) arm here is the point: losing a real claim
+    is the outcome the module's docstring calls the harmful one, and it is the
+    one no `lands`-side test can see.
+    """
+    indented_in_quote_in_item = "- item\n  >     ```\n  > Closes #100\n"
+    assert cl.parse_closing_refs(indented_in_quote_in_item) == [100], (
+        "the 4-column run is an indented code block, so #100 is prose and the "
+        "lenient arm must report it")
+
+    raw_dedent = "- item\n  > ```\n> > Closes #100\n"
+    assert cl.parse_closing_refs(raw_dedent) == [100], (
+        "the raw dedent ends the item and its fence; #100 is a top-level quote "
+        "and prose")
+
+    # The direction that must NOT change: a marker-line fence has its item
+    # INSIDE the quote, so the same line stays CONTENT and may not be reported.
+    marker_line_fence_in_quote = "> - ```\n>   Closes #100\n"
+    assert cl.parse_closing_refs(marker_line_fence_in_quote, None, strict=True) == []
+    assert cl.parse_closing_refs(marker_line_fence_in_quote) == []

@@ -357,12 +357,22 @@ class _Fence:
     a raw column (and then the reverse), each time buying a false `lands`.
     `container_col` derives the raw column from these two fields, so there is
     only ONE number in each space and no way to mix them.
+
+    `item_col_raw` is the enclosing item's content column in RAW coordinates,
+    and is set ONLY when that item sits OUTSIDE the fence's blockquote (its
+    content column is at or before the quote's markers). CommonMark matches the
+    OUTER container first, so such an item ends on a RAW dedent — consuming a
+    `>` marker before measuring it read a column-0 `>` as the container's own,
+    missed the dedent, and kept the fence open over top-level prose (#10634
+    review). A marker-line fence has its item INSIDE the quote, so it leaves
+    this 0 and is measured after the prefix via `close_base`.
     """
 
     opener: tuple[str, int]
     prefix: str
     close_base: int
     in_list: bool
+    item_col_raw: int = 0
 
     @property
     def container_col(self) -> int:
@@ -451,10 +461,12 @@ def _fence_candidate(prefix: str, rest: str, indent: int,
             return None
         return _Fence(opener, prefix, base, True)
     content_col = list_cols[-1] if list_cols else 0
-    opener = _fence_open(rest, content_col)
+    residual_col = max(0, content_col - len(prefix))
+    opener = _fence_open(rest, residual_col)
     if opener is None:
         return None
-    return _Fence(opener, prefix, max(0, content_col - len(prefix)), bool(list_cols))
+    return _Fence(opener, prefix, residual_col, bool(list_cols),
+                  content_col if list_cols else 0)
 
 
 def strip_code(body: str, strict: bool = False) -> str:
@@ -531,9 +543,18 @@ def strip_code(body: str, strict: bool = False) -> str:
             fence_depth = _quote_depth(fence.prefix)
             consumed, residual, column = _fence_line_column(line, fence_depth)
             ended = consumed < fence_depth
-            if not ended and fence.in_list and line[column:].strip() \
-                    and residual < fence.close_base:
-                ended = True
+            if not ended and fence.in_list and line.strip():
+                if fence.item_col_raw:
+                    # The item is OUTSIDE the fence's blockquote (its content
+                    # column sits at or before the quote's markers), so the item
+                    # is matched BEFORE them and its edge is the RAW column.
+                    # Measuring this dedent after consuming a `>` marker read a
+                    # column-0 `>` as the container's own and missed the dedent:
+                    # the item (and its fence) stayed "open" over top-level
+                    # prose, losing a real claim (#10634 review).
+                    ended = indent < fence.item_col_raw
+                elif line[column:].strip():
+                    ended = residual < fence.close_base
             if not ended:
                 # A closer is measured from the CONTAINING BLOCK's content
                 # column (§4.5: up to three spaces past it, and its indentation
