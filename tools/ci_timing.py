@@ -2139,9 +2139,13 @@ def _balance_cut_parens(text: str) -> str:
 # this map to ZERO wraps, and the row count grows with every file the census
 # measures — a frozen figure would describe neither state, and this file is not
 # one the sweep (`tortoise-ci[bot]`, three paths under `docs/` and `config/`) can
-# edit. At this head one row wraps (`test_source_staleness_sweep_5038.py`);
+# edit. ⛔ A count in WORDS is the same frozen figure as a count in digits —
+# spelling it out does not make it a shape claim, it only moves the figure out of
+# reach of a digit-shaped guard, and this file has already had that happen once
+# (#10575 review, P3). So NO figure is stated here at all, in either form: the
+# pair is COMPUTED where it can be —
 # `tests/test_ci_timing.py::test_the_maps_indented_blocks_are_preamble_shaped_
-# not_wrap_shaped` computes the pair (and re-runs it on a swept map), and
+# not_wrap_shaped` derives it (and re-runs it on a swept map), and
 # `::test_the_rationales_map_counts_stay_DERIVED_not_frozen_in_prose` keeps this
 # prose from freezing it again. The guard that judges the written map joins a
 # row's tail with its continuations before it judges a note
@@ -2226,8 +2230,8 @@ def _row_continuation_lines(lines: list[str], index: int) -> list[int]:
        an indented block documents. This map's DOMINANT convention is the opposite
        of the one the previous two conditions imply — an indented block PRECEDES
        the row it documents — with this module's own predicates, the OVERWHELMING
-       majority of such blocks open a new note of their own (all but the one wrap
-       noted above, at this head), and the ones sampled document the row BELOW —
+       majority of such blocks open a new note of their own, and the ones sampled
+       document the row BELOW —
        `# #4071: …` sits
        above `test_embedded_lane_canonical_store_4071.py`, `# #5612: …` above
        `test_journal_growth.py`, and the `355.0 IS A DELIBERATE CAP … #9172` block

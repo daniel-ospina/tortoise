@@ -6119,11 +6119,13 @@ def test_a_stripped_basis_clause_does_not_orphan_a_parenthesis() -> None:
 # ── a WRAPPED note is ONE note (the 2026-11-02 refresh's half-parenthesis) ────
 #
 # A row's note is not the tail on its row line: a note CAN wrap across indented `#`
-# continuation lines (at this head exactly one row does, and the block's dominant
-# shape is the PREAMBLE for the row below — the overwhelming majority of indented
-# blocks open a note of their own). ⛔ Both counts are DERIVED below and never
-# stated as absolutes here: a refresh flattens the wrap and grows the row count,
-# and this file is not one the sweep can edit (#10575 review, P2).
+# continuation lines (the block's dominant shape is the PREAMBLE for the row below —
+# the overwhelming majority of indented blocks open a note of their own). ⛔ Neither
+# count is stated here, in digits OR in words: a refresh flattens the wrap and grows
+# the row count, and this file is not one the sweep can edit (#10575 review, P2/P3).
+# Both are DERIVED below, where they can be computed rather than asserted —
+# `test_the_maps_indented_blocks_are_preamble_shaped_not_wrap_shaped` derives the
+# pair on the committed map AND on a swept render.
 # And the guard that judges a written map joins them before judging
 # (`tests/test_ci_selection.py`
 # `_durations_row_comments`). The renderer used to reason about the row-line
@@ -7122,9 +7124,19 @@ def test_an_unreadable_or_pinned_odd_declaration_refuses_the_write() -> None:
 # `test_the_maps_indented_blocks_are_preamble_shaped_not_wrap_shaped`), and this
 # guard pins the other direction: the prose must not freeze a count the sweep
 # moves. Both halves are needed, or deleting the rationale would be a way to pass.
+#: A count of the map's WRAPPED rows or of its indented blocks, in DIGITS **or in
+#: WORDS**. The word forms are not decoration: after `0124b592a` removed the digit
+#: form from these very sites the claim came straight back spelled out and bound to
+#: `this head` — a moving referent, so still a figure the weekly sweep invalidates
+#: without touching any of these files (#10575 review, P3). A digit-shaped guard
+#: read that as clean, which is the whole reason both forms are pinned here.
+_COUNT_WORD = r"(?:one|two|three|four|five|six|seven|eight|nine|ten|\d+)"
 _FROZEN_MAP_COUNT_RE = re.compile(
     r"\b1 row of \d+\b"
-    r"|\b\d+ of (?:its|the) \d+ (?:indented |such )?blocks?\b")
+    r"|\b\d+ of (?:its|the) \d+ (?:indented |such )?blocks?\b"
+    rf"|\b{_COUNT_WORD} rows?\s+wraps?\b"
+    rf"|\bexactly\s+{_COUNT_WORD}\s+rows?\s+does\b"
+    rf"|\ball but the\s+{_COUNT_WORD}\s+wraps?\b")
 _RATIONALE_SITES = ("tools/ci_timing.py", "tests/test_ci_timing.py",
                     "tests/test_ci_selection.py")
 _SHAPE_CLAIM = "open a new note"
@@ -7156,3 +7168,38 @@ def test_the_rationales_map_counts_stay_DERIVED_not_frozen_in_prose() -> None:
     assert silent == [], (
         f"the rationale no longer states the dominant convention ({_SHAPE_CLAIM!r}) "
         f"for: {silent} — the CUT arm is destructive, and the shape IS its justification")
+
+
+def test_the_count_guard_sees_the_WORD_form_of_the_same_figure() -> None:
+    """Non-vacuity for the word-form nodes, plus quiet on the TRUE historical pins.
+
+    Removing the digits from a rationale does not remove the claim: `3b1821394`
+    cleared the digit form off the three sites above and put the same figure back
+    spelled out, each one bound to `this head` — and the digit-only pattern read the
+    tree as clean (#10575 review, P3). Every sample below is that shipped shape.
+
+    They are ASSEMBLED from fragments on purpose: this file is itself one of
+    `_RATIONALE_SITES`, so writing the claim out in one piece would make the guard
+    above red on the test that proves the guard works.
+    """
+    frozen = [
+        " ".join(("At this head", "one", "row", "wraps", "(`test_x.py`);")),
+        " ".join(("(all but the", "one", "wrap", "noted above, at this head)")),
+        " ".join(("(at this head", "exactly", "one", "row", "does, and the")),
+        " 1 row of ".join(("", "1227")),
+        " ".join(("73 of the", "74", "such blocks", "open a new note")),
+    ]
+    missed = [s for s in frozen if not _FROZEN_MAP_COUNT_RE.findall(s)]
+    assert missed == [], (
+        f"the prose guard no longer sees a frozen map count in these shapes: {missed}")
+    # …and it stays QUIET on the statements that are true as written: a measurement
+    # pinned to a fixed sha is historical, not a claim about the live tree, and the
+    # dominant-convention sentence carries no count at all. Reddening either would be
+    # the false red this guard exists to avoid committing in the other direction.
+    quiet = [
+        "committed (wrapped=1, preamble=74) → after one adopting render (0, 73)",
+        "the overwhelming majority of such blocks open a new note at this head",
+    ]
+    noisy = {s: _FROZEN_MAP_COUNT_RE.findall(s) for s in quiet}
+    assert {s: hits for s, hits in noisy.items() if hits} == {}, (
+        f"the prose guard reds a TRUE statement: {noisy}")
