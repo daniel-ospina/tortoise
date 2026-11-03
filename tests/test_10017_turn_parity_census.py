@@ -1869,8 +1869,14 @@ def test_a_line_with_NO_conversation_key_is_DROPPED_and_still_fails_CLOSED(
     affected session reads as `missing_in_record` → REFUSED.
 
     Mutation that goes RED here: restoring `if conversation is None:
-    conversation = []` (the session becomes an empty CLEAN session), or
-    restoring the whole-leg `raise CensusError` (the two asserts below).
+    conversation = []` (the `malformed_lines` disclosure disappears, so the
+    first assert raises), or restoring the whole-leg `raise CensusError` (the
+    two asserts below). Note what the coercion does NOT do: it cannot reach a
+    false CLEAN. `CLEAN` is only ever assigned to sessions the GRAPH holds, and
+    the graph holds `s1_t0` here, so a coerced-empty `s1` still reports
+    `missing_in_record` -> REFUSED. The regression this pin catches is the LOSS
+    OF THE DISCLOSURE — the operator is told nothing was dropped — not a
+    passing verdict.
     """
     (tmp_path / "2026-11-02.jsonl").write_text(
         json.dumps({"session_id": "s1"}) + "\n"
@@ -2084,6 +2090,68 @@ def test_a_record_that_parses_ZERO_sessions_refuses(tmp_path):
     (tmp_path / "2026-11-02.jsonl").write_text("\n\n", encoding="utf-8")
     with pytest.raises(tpc.CensusError, match="ZERO sessions"):
         tpc.read_local_record_turns(tmp_path)
+
+
+def test_a_record_of_ONLY_malformed_lines_refuses_NAMING_the_line_not_emptiness(
+        tmp_path):
+    """Review P3: the zero-session guard fires for TWO different states, and it
+    said the wrong one for both.
+
+    A record whose every line was DROPPED is not an empty record — the lines
+    were read and discarded, so the record is DAMAGED and its transcripts are
+    uncertifiable. The per-line `malformed :` disclosure cannot carry that
+    news: the report object is built after the guard raises, so the refusal is
+    the ONLY place the dropped lines can be named. Saying "parsed ZERO
+    sessions … an empty record" over a damaged one tells the operator a healthy
+    empty store is in front of them — on the gate #10017 waits on, that is
+    misreport, not a safety margin.
+
+    Mutation that goes RED here: restoring the single `parsed ZERO sessions`
+    refusal for this state (both `malformed` asserts), or dropping the line
+    from the message (the `at` assert).
+    """
+    # An explicit `[]` conversation is REAL data and is placed, so it must be a
+    # malformed line of another class: no usable `session_id`.
+    (tmp_path / "2026-11-02.jsonl").write_text(
+        json.dumps({"conversation": [], "session_id": "   "}) + "\n",
+        encoding="utf-8")
+    with pytest.raises(tpc.CensusError) as exc:
+        tpc.read_local_record_turns(tmp_path)
+    message = str(exc.value)
+    assert "DROPPED every line" in message
+    assert "DAMAGED, not empty" in message
+    assert "malformed 2026-11-02.jsonl:1" in message
+    # …and it must NOT read as the empty-record refusal, which is a different
+    # on-disk state with a different repair.
+    assert "ZERO sessions" not in message
+    assert "an empty record" not in message
+
+
+def test_a_record_of_ONLY_unparsable_lines_refuses_NAMING_the_line_not_emptiness(
+        tmp_path):
+    """The unparsable half of the same guard (review P3).
+
+    The line is placed in a SEALED day on purpose: the newest PLAIN file's last
+    line is the legitimate torn tail (`torn_tail`, tolerated), so a plain file
+    here would exercise the tail arm instead of this one. A `.gz` day has no
+    tail exemption, which is exactly the corruption this arm names.
+
+    Mutation that goes RED here: the single `parsed ZERO sessions` refusal, or
+    a message that omits which line was dropped.
+    """
+    import gzip
+    archive = tmp_path / "archive"
+    archive.mkdir()
+    (archive / "2026-10-01.jsonl.gz").write_bytes(
+        gzip.compress(b'{"session_id": "s1", "conversation": [\n'))
+    with pytest.raises(tpc.CensusError) as exc:
+        tpc.read_local_record_turns(tmp_path)
+    message = str(exc.value)
+    assert "DROPPED every line" in message
+    assert "DAMAGED, not empty" in message
+    assert "unparsable archive/2026-10-01.jsonl.gz:1" in message
+    assert "ZERO sessions" not in message
+    assert "an empty record" not in message
 
 
 # ── the four thin shape arms (review P3: none had a pin; then review P2 turned

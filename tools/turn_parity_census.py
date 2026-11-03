@@ -1009,6 +1009,15 @@ def read_local_record_turns(directory, node_keys: Iterable[str] | None = None
     `test_an_interior_unparsable_line_is_DROPPED_disclosed_and_still_FAILS_CLOSED`,
     which asserts the DISCLOSURE and the fail-closed verdict TOGETHER: the
     disclosure alone would not be a safety property.
+
+    The ONE state where dropping is not a disclosure is the record that held
+    NOTHING BUT dropped lines: there is no report to name them in, because the
+    per-line disclosure is emitted after the read returns. That state is a
+    `CensusError` whose message says the record was NOT empty and names the
+    first dropped line — an all-dropped record is a damaged record, never an
+    empty one. Pinned by
+    `test_a_record_of_ONLY_malformed_lines_refuses_NAMING_the_line_not_emptiness`
+    and its unparsable sibling.
     """
     root = Path(directory).expanduser()
     if not root.is_dir():
@@ -1298,9 +1307,29 @@ def read_local_record_turns(directory, node_keys: Iterable[str] | None = None
                                  "windows": occurrences[sid]})
 
     if not conversations and not duplicate_window:
-        # Non-empty files, zero parseable records: the record is empty, which is
-        # not evidence of parity (a whitespace-only day used to slip past the
-        # file-level guard — review cycle 4, P2).
+        # ⛔ TWO DIFFERENT STATES, ONE VERDICT — and the message must name which
+        # (review P3). This guard is reached both by a record that held NO
+        # records (an empty/whitespace-only day — not evidence of parity, review
+        # cycle 4 P2) and by a record whose EVERY line was DROPPED. The second
+        # state is not emptiness: the lines were READ and discarded, so the
+        # transcripts they described are uncertifiable, and a refusal that says
+        # "parsed ZERO sessions / an empty record" reports a healthy empty store
+        # over a damaged one. The report object (and the per-line `unparsable :`
+        # / `malformed  :` disclosure it feeds) is built AFTER this raise, so the
+        # dropped lines can only be named here.
+        dropped = ([("unparsable", d) for d in unparsable_lines]
+                   + [("malformed", d) for d in malformed_lines])
+        if dropped:
+            first_kind, first = dropped[0]
+            raise CensusError(
+                f"the local record under {root} DROPPED every line it held — "
+                f"{len(unparsable_lines)} unparsable, {len(malformed_lines)} "
+                f"malformed, {len(torn_tail)} torn tail, ZERO placed, from "
+                f"{len(files)} file(s). The record is DAMAGED, not empty: every "
+                "line was read and discarded, so none of it can be placed "
+                "positionally and an absence is NOT established. First "
+                "dropped line — "
+                f"{first_kind} {first['at']}: {first['error']}")
         raise CensusError(
             f"the local record under {root} parsed ZERO sessions from "
             f"{len(files)} file(s) — an empty record is not evidence of parity, "
