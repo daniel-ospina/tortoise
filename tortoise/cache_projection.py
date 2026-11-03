@@ -468,8 +468,9 @@ FOLD_ON_CREATE_DEFAULTS: dict[str, dict[str, Any]] = {
 #:   latches exactly where the live graph latches. See
 #:   :data:`EVENT_STREAM_FOLDS` and :class:`LifecycleEvent`'s `restatus_status`.
 #:   ✅ **CLOSED (#9974's BIRTH leg) — the CREATION writer is now read.**
-#:   `_upsert_object`/`_upsert_subject` seed `status=coalesce($st, 'live')` from
-#:   the creation record's own payload (`projection/entities.py`), and
+#:   `_upsert_object`/`_upsert_subject` write `status=$st` ON CREATE from the
+#:   creation record's own payload (`projection/entities.py`) — DERIVED-OR-ABSENT
+#:   since #9974 R1, which deleted the fabricated `coalesce($st, 'live')` — and
 #:   `sdk.create_entity` accepts a caller status — ⚠️ the SUBJECT door validates it
 #:   against §4.2, while the OBJECT door validates nothing: `sdk.create_entity`'s
 #:   `t == 'subject'` branch checks `_SUBJECT_STATUS_VALUES`, its `t == 'object'`
@@ -484,24 +485,23 @@ FOLD_ON_CREATE_DEFAULTS: dict[str, dict[str, Any]] = {
 #:   'status'`) and replayed in `seq` order, ON CREATE, so a record-sourced
 #:   rebuild reproduces the value `rebuild_all` (which reads the JSONL payload)
 #:   writes instead of materializing NO status → LIVE. ⚠️ That is the STATED
-#:   value; see residue (i) for the one place the two rebuild routes still
-#:   differ on the property set.
-#:   ⚠️ TWO STATED BOUNDS ride that leg, both deliberate:
-#:   (i) the live fold's `coalesce($st, 'live')` DEFAULT is NOT reproduced —
-#:   where the creation record states no status the replay writes NONE, because
-#:   an absent status already reads LIVE (`live._terminal_excluded`) and
-#:   materializing `'live'` would assert a lifecycle fact the record never stated
+#:   value, and since #9974 R1 it is the WHOLE value: the two rebuild routes now
+#:   agree on the PROPERTY SET as well as on the answer (see (i)).
+#:   ✅ **(i) IS NO LONGER A BOUND — it is AGREEMENT (#9974 R1).** This leg writes
+#:   NONE where the creation record states no status, and since R1 `rebuild_all`
+#:   does the same: `_upsert_object`'s ON CREATE arm is `status=$st`, so a
+#:   status-less `ObjectRegistered` leaves the property ABSENT on BOTH routes
 #:   (pinned: `test_a_silent_birth_record_derives_no_status_rather_than_live`).
-#:   ⚠️ THE PRICE, stated rather than hidden: for such a record the TWO rebuild
-#:   routes now differ on the PROPERTY SET — `rebuild_all` reads the JSONL
-#:   payload through `_upsert_object`'s ON CREATE `coalesce($st, 'live')` and
-#:   writes `'live'` (measured on the embedded engine: a status-less
-#:   `ObjectRegistered` leaves the node `status='live'`), while this leg writes
-#:   nothing. The difference is not a wrong ANSWER (both read LIVE), but it is a
-#:   real difference in what the two routes materialise, and it is the price of
-#:   not fabricating a lifecycle claim the record never made. Any future
-#:   `rebuild_all`-vs-`rebuild_from_record` equality probe must treat
-#:   `absent ≡ 'live'` for this property on a silent creation record.
+#:   Neither route fabricates `'live'`, and an ABSENT status already reads LIVE
+#:   (`live._terminal_excluded`), so nothing is lost by the silence.
+#:   ⚠️ That bound was REAL when it was written and the history is why it is
+#:   spelled out: the fold then seeded `coalesce($st, 'live')`, so `rebuild_all`
+#:   materialised `'live'`, this leg materialised nothing, and any
+#:   `rebuild_all`-vs-`rebuild_from_record` equality probe had to treat
+#:   `absent ≡ 'live'`. #9974 R1 removed the fabrication at the fold, so that
+#:   divergence — and the price this paragraph used to charge for it — is GONE.
+#:   Do not restore either from an older tree.
+#:   ⚠️ ONE STATED BOUND rides that leg, and it is deliberate:
 #:   (ii) "the EARLIEST creation record speaks" is exact only where that record
 #:   is the write that CREATED the node. `_upsert_object`/`_upsert_subject` MERGE
 #:   on `id` and write `status` ON CREATE only, so for an id that already existed
@@ -524,11 +524,18 @@ FOLD_ON_CREATE_DEFAULTS: dict[str, dict[str, Any]] = {
 #:   the birth arm, so the rebuild answers CURRENT: `[restatus(seq 1,'archived'),
 #:   birth(seq 2,'live')]` rebuilt `live` while the graph holds `archived`, and
 #:   `live._terminal_excluded` then admits a superseded entity whose name still
-#:   resolves. Reachability is not exotic: `sdk._entity_door_props` seeds
-#:   `status='live'` on every create, and the first journaled creation record is a
+#:   resolves. Reachability is ordinary: the first journaled creation record is a
 #:   RE-MENTION whenever the node pre-existed (stub, explicit `id=`, pre-#3590
-#:   graph, partial replay from `start_seq`) — so the failure does not degrade to
-#:   the benign "absent reads LIVE" flavour, it actively asserts CURRENT.
+#:   graph, partial replay from `start_seq`), and a caller may name ANY birth
+#:   status — so a re-mention that names a NON-TERMINAL word
+#:   (`create_object(name, status='live')`) reaches this arm while the graph took
+#:   ON MATCH and kept the `archived` an earlier `restatus` put there. So the
+#:   failure does not degrade to the benign "absent reads LIVE" flavour, it
+#:   actively asserts CURRENT. ⚠️ NARROWER since #9974 R1, and do not overstate
+#:   it: the door now fabricates NO status (`sdk._entity_door_props` seeds none),
+#:   so an UNQUALIFIED re-mention carries no status at all and the latch has
+#:   nothing to write — the harm needs a CALLER-SUPPLIED value, which is exactly
+#:   what the pin below constructs.
 #:   ⛔ ONE of its two orderings is CLOSED, and the other is NOT — do not read this
 #:   as "the harm direction is fixed":
 #:   (ii-a-1) the OVERWRITE ordering (above) is CLOSED. The birth arm now honours
@@ -537,7 +544,7 @@ FOLD_ON_CREATE_DEFAULTS: dict[str, dict[str, Any]] = {
 #:   (ii-a-2) the DELETE-THEN-RE-CREATE ordering is STILL OPEN, and the latch
 #:   cannot reach it: it is the `birth_seen` earliest-only rule that discards the
 #:   value, not the (now-guarded) assignment. `_upsert_object` writes
-#:   `coalesce($st, 'live')` ON CREATE, so a re-create under an EXPLICIT id puts
+#:   `status=$st` ON CREATE, so a re-create under an EXPLICIT id puts
 #:   the LATER record's terminal in the graph while this replay answers from the
 #:   FIRST incarnation — `[birth(seq 1, None), birth(seq 2, 'archived')]` and
 #:   `[birth(seq 1, 'live'), birth(seq 2, 'archived')]` both rebuilt absent/`live`
@@ -814,8 +821,9 @@ class LifecycleEvent:
     #: `EntityMutated`'s `state.status` has. `is_birth` is a separate flag because
     #: a creation record with NO status still decides the ON CREATE arm (see
     #: :func:`apply_event_stream_folds`): the live fold's `_upsert_object` writes
-    #: `status=coalesce($st, 'live')` ONLY on create, so the Earliest creation
-    #: record is the one that speaks and a later re-mention never overwrites.
+    #: `status=$st` ONLY on create (derived-or-absent since #9974 R1), so the
+    #: Earliest creation record is the one that speaks and a later re-mention
+    #: never overwrites.
     is_birth: bool = False
     birth_status: str | None = None
 
@@ -1819,12 +1827,12 @@ def apply_event_stream_folds(
                 # because the pre-birth fold had already made it non-None. So the
                 # rebuilt Object read as CURRENT and its name resolved: #9974's
                 # own harm, one ordering case over.
-                # ⚠️ The live fold's `coalesce($st, 'live')` DEFAULT is NOT
-                # reproduced: a creation record that states no status leaves the
-                # property ABSENT, because absent already reads LIVE and
-                # materializing `'live'` would fabricate a lifecycle claim the
-                # record never made (pinned: `test_a_silent_birth_record_
-                # derives_no_status_rather_than_live`).
+                # ⚠️ A creation record that states no status leaves the property
+                # ABSENT — which is exactly what the live fold writes since
+                # #9974 R1 (`status=$st`; a NULL write REMOVES the property):
+                # absent already reads LIVE, and materializing `'live'` would
+                # fabricate a lifecycle claim the record never made (pinned:
+                # `test_a_silent_birth_record_derives_no_status_rather_than_live`).
                 # ⚠️ STATED BOUND (round 7, P2 — the rule above holds for the
                 # CREATED case only, and the record carries NO create-vs-match
                 # signal, so it cannot be tightened here): "the earliest creation

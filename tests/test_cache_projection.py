@@ -1478,11 +1478,12 @@ def test_a_birth_record_cannot_resurrect_a_terminal_the_graph_holds():
     rebuilt status of `live` is admitted by `live._terminal_excluded` as CURRENT
     and its name resolves through `entity_identity.resolve_entity_id`. It is NOT
     the benign "absent reads LIVE" flavour — the arm actively asserts CURRENT,
-    and `sdk._entity_door_props` seeds `status='live'` on every create, so the
-    seeded value is exactly what lands here. Reachability is ordinary: the first
-    journaled creation record is a re-mention whenever the node pre-existed the
-    journal (name stub, explicit `id=`, pre-#3590 graph, partial replay from
-    `start_seq`).
+    and a caller may name any birth status, so a NON-TERMINAL word (the case
+    below names `live`) is exactly what lands here. Reachability is ordinary: the
+    first journaled creation record is a re-mention whenever the node pre-existed
+    the journal (name stub, explicit `id=`, pre-#3590 graph, partial replay from
+    `start_seq`) — and the caller supplies the non-terminal status, since
+    #9974 R1's door fabricates none.
 
     MEASURED without the latch (`if not _is_terminal_status(status)`): the first
     assertion below reads `'live'`.
@@ -2620,9 +2621,9 @@ def test_a_silent_birth_record_derives_no_status_rather_than_live():
     """#9974 — the OTHER half: where the derivation cannot know, it says NOTHING.
 
     An unknown status is honest — `live` is the bug. A creation record can carry
-    NO status at all (the quiet producer is `EventAPI.add_object`, which seeds
-    none — `sdk.create_entity` is NOT silent: `_entity_door_props` sets
-    `status='live'` on every create), and the cache must
+    NO status at all — and since #9974 R1 BOTH producers are silent
+    (`EventAPI.add_object` seeds none, and `sdk._entity_door_props` no longer
+    fabricates `status='live'` on create), so the cache must
     not invent one: `live._terminal_excluded` already reads an absent status as
     LIVE for the transition it is willing to make on the READ side, and a
     MATERIALISED `live` would additionally claim a positive lifecycle fact the
@@ -2712,8 +2713,8 @@ def test_a_pre_birth_fold_cannot_survive_the_creation_record():
 def test_the_birth_status_is_on_create_only_like_the_live_fold():
     """A re-mention journals ANOTHER creation record; it must not overwrite.
 
-    `_upsert_object` writes `status=coalesce($st, 'live')` **ON CREATE**, and
-    #3590 journals `ObjectRegistered` on EVERY create — so a second
+    `_upsert_object` writes `status=$st` **ON CREATE** (derived-or-absent since
+    #9974 R1), and #3590 journals `ObjectRegistered` on EVERY create — so a second
     `create_object` for the same node is carried by the record and must fold
     NOTHING. A last-writer-wins replay here would resurrect (or retro-terminate)
     a node the live graph left alone: the same class of divergence, from the
