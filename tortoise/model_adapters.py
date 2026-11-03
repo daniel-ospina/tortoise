@@ -574,7 +574,122 @@ def _alert_provider_billing_exhausted(adapter, exc: BaseException,
 
 # ── Provider routing (D2) ──────────────────────────────────────────────────
 
+#: Provider → key env var. **THE ONE PROVIDER-KEY REGISTRY FOR THE V2
+#: EXTRACTOR'S RESOLVER** — `resolve_extractor_provider` (below) derives its key
+#: presence from this mapping rather than reading the env vars inline, so the
+#: provider set the resolver HONOURS and the provider set this mapping names
+#: cannot disagree on what a provider's key is.
+#:
+#: ⚠️ Registering an entry does NOT make the resolver route it (review cycle 2):
+#: `resolve_extractor_provider` names its routing order in its own `_chain(...)`
+#: calls, so a provider present here but absent from those literals resolves to
+#: nothing — its key is read and then never used, and a deployment holding only
+#: that key reports `no-provider` and silently skips extraction, the #8133
+#: symptom class on the opposite axis.
+#: `test_the_v2_resolver_honours_exactly_the_provider_key_map` pins both
+#: directions as far as an AST assertion can, and the two halves are SEPARATE
+#: asserts (review cycle 5, P2 — the earlier wording credited one half with
+#: both): `assert not unrouted` is map → routing (every provider IN this map
+#: appears in the resolver's `_chain(...)` arguments or its explicit-selector
+#: comparisons), and `assert not stray_routing` is routing → map (nothing
+#: OUTSIDE this map is named by a `_chain(...)` argument or an `explicit == ...`
+#: comparator). Both parse the AST, so a comment naming a provider satisfies
+#: neither. Measured: before the second half existed, a branch gated on its own
+#: env literal — `if os.environ.get("ANTHROPIC_KEY"): return _chain(
+#: "anthropic", ...)` — was honoured with all four guards green.
+#:
+#: ⛔ RESIDUALS, stated rather than claimed closed: both halves read LITERAL
+#: names, so a provider routed or read through a module-level constant
+#: (`_chain(_P, ...)` / `os.environ.get(_X)` with `_P`/`_X` bound at module
+#: scope) is invisible to both; and the separate inline-key scan
+#: (`test_resolve_extractor_provider_reads_no_inline_provider_keys`) flags only
+#: literals ending in `_API_KEY`, so a key var named otherwise is not flagged by
+#: IT (the routing → map half catches the routing anyway, provided the provider
+#: name is itself a literal). No test here claims either is closed.
+#:
+#: ⚠️ Coverage, stated exactly (review cycles 1-2, then closed at cycle 7):
+#: this map is the single source for the KEY PRESENCE of BOTH routing lanes —
+#: `resolve_extractor_provider` (capture) and `resolve_reader_provider` (ask)
+#: each derive it from `_provider_keys_present()`, so neither names a provider
+#: key env var itself. `keyed` in the ask lane is still SCOPED to that lane's
+#: own enum (`_ASK_PROVIDERS`): the ask lane owns which providers it may route
+#: — a POLICY set — while the key NAMES are this map's alone. That split is
+#: the point, not a residual.
+#:
+#: ⛔ ONE residual remains, stated rather than claimed closed:
+#: `_SPEC_FAMILY_PROVIDERS`/`_providers_can_serve` never read this map at all.
+#: It is a CAPABILITY map (which provider can serve a model family), not a key
+#: map — a provider's key and its families are different facts, and this map
+#: deliberately does not carry the second. Register a provider here and it
+#: gains a KEY, not a family: the ask lane will still refuse to serve it until
+#: `_SPEC_FAMILY_PROVIDERS` names it. Teaching the ask lane is a THREE-step
+#: chain, and each step has its own gate (measured, review cycle 3):
+#:   1. absent from `_ASK_PROVIDERS` → `ValueError: TORTOISE_ASK_PROVIDER=<p>
+#:      invalid — valid values: auto | deepseek-direct | openrouter | venice`
+#:      (the ENUM gate fires first, before any family or key check);
+#:   2. in `_ASK_PROVIDERS`, absent from `_SPEC_FAMILY_PROVIDERS` →
+#:      `ValueError: … cannot serve <model> — the <family> family is served
+#:      only by deepseek-direct, openrouter, venice`;
+#:   3. also in `_SPEC_FAMILY_PROVIDERS` but its key env var is NOT in THIS
+#:      map → the `_PROVIDER_KEY_ENV[explicit]` lookup raises `KeyError`, which
+#:      the ask lane's own build wrapper surfaces as `AskReaderUnavailable`
+#:      (`reader_unavailable`, HTTP 502 — there is no `/v1/ask` route since
+#:      #3849, so it is never a 500; measured, review cycle 4). NOTE (review
+#:      cycle 8): "absent from `keyed`" is NOT the trigger — `keyed` now gives
+#:      every `_ASK_PROVIDERS` name a `False` default, so nothing can be absent
+#:      from it. The trigger is the MAP not carrying an entry, and the AUTO
+#:      path has the mirror of it in the `missing=` lookup — which is why BOTH
+#:      lookups use `.get` (a registry edit must be a refusal or a routing
+#:      answer, never a bare `KeyError` out of the ask lane).
+#: `test_ask_lane_provider_set_is_registered_in_the_key_registry` pins the
+#: invariant that keeps step 3 unreachable in the committed tree.
+#: `test_resolve_reader_provider_derives_its_keys_from_the_registry` pins that
+#: derivation; `test_no_routing_lane_names_a_provider_key_literal` pins it
+#: structurally for every `os.environ`-reading function in this module.
+#:
+#: Why it is single-source (#8133): the defect this closes was two
+#: hand-maintained lists in the SAME file — this map, and three inline
+#: `os.environ.get("…_API_KEY")` reads inside the resolver. `venice` was in the
+#: first and absent from the lane gate; adding a provider to one list and
+#: forgetting the other is how it happened. A guard test
+#: (`test_resolve_extractor_provider_reads_no_inline_provider_keys`) now fails
+#: if any `*_API_KEY` name is read literally inside the resolver, and
+#: `test_the_v2_resolver_honours_exactly_the_provider_key_map` pins the
+#: map → behaviour direction.
+#:
+#: ⚠️ Adding an entry here registers the provider's KEY. It does not decide
+#: whether that provider is an AUTO-PATH PRIMARY (that is a `_chain` call
+#: below, and a key whose provider is fallback-capable but not a primary is a
+#: legitimate future state), it does not add the provider to the
+#: explicit-selector enum (`_PROVIDER_NAMES` — a product question open on
+#: #8133), and it is not enough on its own for a hosted deployment: also
+#: register the provider in `tortoise.ingest._PROVIDERS`, in
+#: `sdk._SESSION_LLM_PROVIDER_PRIORITY` + `_SESSION_LLM_DEFAULT_MODELS`, and in
+#: the deploy mirror. `test_the_lane_gate_registry_covers_the_v2_extractor_
+#: registry` and friends fail loudly if one of those is skipped.
+_PROVIDER_KEY_ENV = {
+    "deepseek-direct": "DEEPSEEK_API_KEY",
+    "openrouter": "OPENROUTER_API_KEY",
+    "venice": "VENICE_API_KEY",
+}
+
+#: The providers `TORTOISE_EXTRACTOR_PROVIDER` accepts explicitly. ⚠️ NOT
+#: derived from `_PROVIDER_KEY_ENV`: whether `venice` is a pinnable primary or
+#: intentionally fallback-only is an OPEN product question recorded on #8133
+#: (the auto path returns it as a standalone primary — the tree's precedent,
+#: not a recorded decision). Nothing here may widen this tuple until that
+#: question is ruled; the two are allowed to differ in exactly this one
+#: direction, and `test_the_v2_resolver_honours_exactly_the_provider_key_map`
+#: states so instead of asserting equality.
 _PROVIDER_NAMES = ("deepseek-direct", "openrouter")
+
+
+def _provider_keys_present() -> dict[str, bool]:
+    """Which registered providers have their key set — derived from
+    `_PROVIDER_KEY_ENV`, the only place EITHER routing lane reads a provider's
+    key var (`resolve_extractor_provider` and `resolve_reader_provider` both
+    call this; see the registry's coverage note)."""
+    return {p: bool(os.environ.get(env)) for p, env in _PROVIDER_KEY_ENV.items()}
 
 
 def resolve_extractor_provider() -> tuple[str, str | None]:
@@ -585,11 +700,21 @@ def resolve_extractor_provider() -> tuple[str, str | None]:
     absent fails closed with ValueError (never silently route elsewhere);
     an invalid value lists the valid ones. Unset infers DEEPSEEK first
     (owner-confirmed production decision); no keys → (None, None) — the
-    caller gate fails closed as today."""
+    caller gate fails closed as today.
+
+    This function names the ROUTING ORDER, never the provider set: which
+    providers EXIST (and which env var each one's key lives in) is
+    `_PROVIDER_KEY_ENV`'s job, and the key presence below is derived from it
+    (#8133 — the venue where two lists drifted apart)."""
     explicit = os.environ.get("TORTOISE_EXTRACTOR_PROVIDER", "").strip().lower()
-    ds_key = bool(os.environ.get("DEEPSEEK_API_KEY"))
-    or_key = bool(os.environ.get("OPENROUTER_API_KEY"))
-    vz_key = bool(os.environ.get("VENICE_API_KEY"))
+    _keys = _provider_keys_present()
+    # `.get(p, False)`, not `_keys[p]`: a provider dropped from the registry is
+    # a ROUTING change (falls out of the pool, as the inline reads did before
+    # #8133), never a KeyError inside capture. Same style as `_chain` below
+    # (review cycle 4, P3 — the direct-indexing form made a registry edit a
+    # crash where `main` was indifferent to the map).
+    ds_key = _keys.get("deepseek-direct", False)
+    or_key = _keys.get("openrouter", False)
 
     # Pilot #1549 — 3-provider rotation: the fallback chain extends to
     # venice when its key is configured. The ordered pool is
@@ -597,9 +722,7 @@ def resolve_extractor_provider() -> tuple[str, str | None]:
     def _chain(primary: str, *ordered: str) -> tuple[str, list[str]]:
         avail = [primary]
         for p in ordered:
-            if ((p == "deepseek-direct" and ds_key)
-                    or (p == "openrouter" and or_key)
-                    or (p == "venice" and vz_key)):
+            if _keys.get(p, False):
                 avail.append(p)
         return (primary, avail)
 
@@ -627,7 +750,7 @@ def resolve_extractor_provider() -> tuple[str, str | None]:
         return _chain("deepseek-direct", "openrouter", "venice")
     if or_key:
         return _chain("openrouter", "deepseek-direct", "venice")
-    if vz_key:
+    if _keys.get("venice", False):
         return _chain("venice", "openrouter", "deepseek-direct")
     return (None, None)
 
@@ -654,14 +777,9 @@ _SPEC_FAMILY_PROVIDERS = {
 }
 
 #: Ask-lane provider enum (``TORTOISE_ASK_PROVIDER`` valid values).
+#: ⚠️ `venice` is here and not in `_PROVIDER_NAMES` — the asymmetry is #8133's
+#: open product question, not an oversight to tidy away.
 _ASK_PROVIDERS = ("deepseek-direct", "openrouter", "venice")
-
-#: Provider → key env var (the empty-intersection guard names these).
-_PROVIDER_KEY_ENV = {
-    "deepseek-direct": "DEEPSEEK_API_KEY",
-    "openrouter": "OPENROUTER_API_KEY",
-    "venice": "VENICE_API_KEY",
-}
 
 #: Ordered provider chain per explicit primary (mirrors
 #: ``resolve_extractor_provider``'s ``_chain`` ordering).
@@ -725,11 +843,19 @@ def resolve_reader_provider(model_id: str) -> tuple[str | None, list[str]]:
     """
     explicit = (os.environ.get("TORTOISE_ASK_PROVIDER", "").strip().lower()
                 or "auto")
-    ds_key = bool(os.environ.get("DEEPSEEK_API_KEY"))
-    or_key = bool(os.environ.get("OPENROUTER_API_KEY"))
-    vz_key = bool(os.environ.get("VENICE_API_KEY"))
-    keyed = {"deepseek-direct": ds_key, "openrouter": or_key,
-             "venice": vz_key}
+    # Key presence comes from the ONE registry (`_PROVIDER_KEY_ENV`), scoped to
+    # this lane's own provider enum. Before review cycle 7 this was a THIRD
+    # hand-written key list in the module — the exact #8133 shape (three inline
+    # `os.environ.get("…_API_KEY")` reads plus a dict restating them), which is
+    # how `venice` could be added to one list and missed by the other.
+    # Byte-identical: `_ASK_PROVIDERS` is exactly the registry's key set today,
+    # and the iteration order is `_ASK_PROVIDERS`', so `keyed` is unchanged.
+    # Scoping to `_ASK_PROVIDERS` (rather than taking the registry wholesale)
+    # keeps the ask lane's POLICY set its own: a provider registered in the map
+    # but not yet routable here must not flip the `not any(keyed.values())`
+    # lenient-default branch below.
+    _registered = _provider_keys_present()
+    keyed = {p: _registered.get(p, False) for p in _ASK_PROVIDERS}
     servable = _providers_can_serve(model_id)
 
     if explicit != "auto":
@@ -743,18 +869,26 @@ def resolve_reader_provider(model_id: str) -> tuple[str | None, list[str]]:
                 f"— the {model_id.split('/', 1)[0]} family is served only by "
                 f"{', '.join(sorted(servable))}")
         if not keyed[explicit]:
+            # `.get`: a provider dropped from the registry is absent from
+            # `keyed` AND from this map, so a direct `_PROVIDER_KEY_ENV[explicit]`
+            # would turn the fail-closed ValueError into a bare KeyError out of
+            # the ask lane (review cycle 8, P3 — the same "a registry edit is a
+            # refusal, not a crash" rule the capture lane got).
+            key_env = _PROVIDER_KEY_ENV.get(explicit)
+            unset = (f"{key_env} is not set" if key_env else
+                     f"{explicit} has no key env var (absent from "
+                     f"_PROVIDER_KEY_ENV)")
             raise ValueError(
-                f"TORTOISE_ASK_PROVIDER={explicit} but "
-                f"{_PROVIDER_KEY_ENV[explicit]} is not set — an explicit "
+                f"TORTOISE_ASK_PROVIDER={explicit} but {unset} — an explicit "
                 f"provider names a key that isn't configured; never "
                 f"silently routing elsewhere (#1530 fail-closed)")
         chain = _ASK_PROVIDER_CHAIN[explicit]
-        pool = [p for p in chain if p in servable and keyed[p]]
+        pool = [p for p in chain if p in servable and keyed.get(p, False)]
         return (explicit, pool)
 
     # auto mode: ordered servable providers that have keys configured.
     pool = [p for p in _ASK_PROVIDER_CHAIN["deepseek-direct"]
-            if p in servable and keyed[p]]
+            if p in servable and keyed.get(p, False)]
     if pool:
         return (pool[0], pool)
     # Empty intersection. The deepseek family keeps the lenient no-key
@@ -762,8 +896,8 @@ def resolve_reader_provider(model_id: str) -> tuple[str | None, list[str]]:
     # every other family fails LOUD at build time naming the key it needs.
     if "deepseek-direct" in servable and not any(keyed.values()):
         return (None, ["openrouter"])
-    missing = sorted({_PROVIDER_KEY_ENV[p] for p in servable
-                      if not keyed[p]})
+    missing = sorted({_PROVIDER_KEY_ENV.get(p, f"{p} (no key env var)")
+                      for p in servable if not keyed.get(p, False)})
     raise ValueError(
         f"no configured provider can serve {model_id!r}: the "
         f"{', '.join(sorted(servable))} lane(s) need "

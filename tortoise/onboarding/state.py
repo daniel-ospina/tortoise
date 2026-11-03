@@ -457,6 +457,19 @@ def _org_lock(org_id: str) -> threading.Lock:
 #     bless that; it is named here so it is not discovered, and the fix (the
 #     seed's journalled door should be the only minter, or the anchor needs its
 #     own declaration) is tracked on `#9079`'s family.
+#     ⚠️ #10180's promote carry (`carry_onboards_edge`) is the SECOND, and it is
+#     a DELIBERATE WIDENING of what this lane may write to `:Subject`: the
+#     id-only link cannot serve it, because the target graph is the org's new
+#     DEFAULT graph and has never held the anchor, so an id-only MERGE there
+#     mints a name-less `:Subject` that `find_subject_by_name` cannot see (the
+#     next seed files a SECOND Organization anchor beside it) and that
+#     `_count_resource("points")` counts as a tenant point. So it carries the
+#     anchor WITH its identity properties (name/subjectKind/org_id), keyed by
+#     the id the onboarding node already holds. It is still an unjournalled
+#     `:Subject` write — the same #9079 debt, one statement wider — and
+#     `tests/test_9079_onboarding_declared_lane.py::
+#     test_the_subject_anchor_mint_is_not_widened` pins BOTH statements exactly
+#     so a third widening cannot slip in beside them.
 #   * It DOES now cover the eager-init statement on the org-graph lanes
 #     (`#9157`). `eager_init_query()` had only ever BUILT text: its five call
 #     sites issued the result on `proj.db.select_graph(<g>)` — §17.1's escape
@@ -752,6 +765,98 @@ def completed_steps(graph: Any, org_id: str) -> list[str]:
     return [row[0] for row in res.result_set]
 
 
+def _read_subject_anchor(graph: Any, subject_id: str) -> dict[str, Any] | None:
+    """The Organization Subject's IDENTITY properties, or None when absent.
+
+    Keyed by ``id`` (the ref the onboarding node carries), never by name: the
+    caller already knows which node it means."""
+    res = _run(graph,
+               "MATCH (s:Subject {id: $sid}) "
+               "RETURN s.name, s.subjectKind, s.org_id",
+               {"sid": subject_id})
+    rows = res.result_set
+    if not rows:
+        return None
+    row = rows[0]
+    return {"id": subject_id,
+            "name": row[0] if len(row) > 0 else None,
+            "subjectKind": row[1] if len(row) > 1 else None,
+            "org_id": row[2] if len(row) > 2 else None}
+
+
+def _subject_anchor_name_taken(graph: Any, name: str) -> bool:
+    """Does this graph already hold a Subject under ``name``? (Any id.)"""
+    res = _run(graph, "MATCH (s:Subject {name: $name}) RETURN count(s)",
+               {"name": name})
+    rows = res.result_set
+    return bool(rows and rows[0] and rows[0][0])
+
+
+def carry_onboards_edge(src_graph: Any, dst_graph: Any, org_id: str,
+                        subject_id: str) -> str:
+    """Link the carried node to the ORG ANCHOR in the target graph (#10180).
+
+    WHY THIS IS NOT ``write_onboards_edge``. That writer MERGEs
+    ``(s:Subject {id: $sid})`` and, in every caller it was written for, the
+    anchor ALREADY EXISTS — the seed core files the Subject first, so the MERGE
+    is a LINK. #10180's promote carry is the one caller where the target graph
+    holds no copied data by design ("no data is copied, moved or replayed"),
+    and there that MERGE MINTS instead: a ``:Subject`` carrying an ``id`` and
+    NOTHING ELSE — no ``name``, no ``subjectKind``, no ``org_id``. Three
+    measured consequences of such a stub standing in for the org's identity in
+    a graph that has just become the org's DEFAULT:
+
+    - ``find_subject_by_name`` cannot see it (it resolves BY NAME), so
+      ``_classify_anchor`` cannot recognise it as ours — the next seed
+      (``_run_onboarding_seed``, ``import_org``, a re-seed after a restart)
+      files a SECOND Organization Subject in the default graph, one of them
+      anonymous;
+    - ``_count_resource("points")`` counts ``n:Subject`` unconditionally, so
+      the tenant's usage includes a phantom point;
+    - a restore/snapshot round trip carries an ``org_subject_id`` that names a
+      node whose properties live only in the DEMOTED graph.
+
+    So: LINK what the target already holds; else CARRY the source anchor WITH
+    its identity properties (the same rows a seed would have written, keyed by
+    the same id, so identity survives the move); else DECLINE to write at all
+    and say so — ``not_in_target`` leaves the node's ``org_subject_id`` unset,
+    which is the honest answer and lets the next seed mint a real anchor
+    instead of a stub. It never writes a name-less Subject.
+
+    Returns ``"linked" | "carried" | "not_in_target"``.
+    """
+    dst = _read_subject_anchor(dst_graph, subject_id)
+    if dst is not None and dst.get("name"):
+        write_onboards_edge(dst_graph, org_id, subject_id)
+        return "linked"
+    src = _read_subject_anchor(src_graph, subject_id)
+    name = (src or {}).get("name") or (dst or {}).get("name")
+    if not name:
+        # Nothing to carry identity FROM. Writing the id-only stub here is the
+        # defect this function exists to prevent, so decline and report.
+        return "not_in_target"
+    if _subject_anchor_name_taken(dst_graph, name):
+        # The target already holds a Subject by that name under another id:
+        # naming this node too would leave two same-name carriers, which
+        # `find_subject_by_name` reports as ambiguous and `_classify_anchor`
+        # refuses. Leave identity resolution to the seed rather than guessing.
+        return "not_in_target"
+    props: dict[str, Any] = {"name": name}
+    if (src or {}).get("subjectKind"):
+        props["subjectKind"] = src["subjectKind"]
+    if (src or {}).get("org_id") or org_id:
+        props["org_id"] = (src or {}).get("org_id") or org_id
+    assign = ", ".join(f"s.{k} = ${k}" for k in props)
+    _run(dst_graph,
+         f"MERGE (s:Subject {{id: $sid}}) SET {assign}",
+         {"sid": subject_id, **props})
+    # Now the anchor exists in the target, so the module's own writer links to
+    # it and sets the node's `org_subject_id` on the same path every other
+    # caller uses.
+    write_onboards_edge(dst_graph, org_id, subject_id)
+    return "carried"
+
+
 def write_onboards_edge(graph: Any, org_id: str, subject_id: str) -> dict[str, Any]:
     """DM-1 node↔anchor link (W3 seed writes, #1999): set the node's
     org_subject_id property + MERGE the onboards edge → the Organization
@@ -763,6 +868,11 @@ def write_onboards_edge(graph: Any, org_id: str, subject_id: str) -> dict[str, A
 
     The compact/legacy gates depend on this link (the node tracks its org
     anchor); B1: the anchor is a Subject node, never Object/Statement.
+
+    ⛔ #10180's PROMOTE CARRY is NOT one of those callers: its target graph
+    holds no copied data by design, so this MERGE would mint an id-only stub
+    rather than link. It goes through ``carry_onboards_edge``. Any new caller
+    that cannot guarantee the anchor already exists must do the same.
     """
     ensure_onboarding_state_node(graph, org_id)
     with _org_lock(org_id):
@@ -1116,6 +1226,96 @@ def backfill_org(graph: Any, org_id: str, legacy_complete: bool, *,
         return {"org_id": org_id, "action": "would-create-complete"}
     ensure_onboarding_state_node(graph, org_id, status_from_mirror=True)
     return {"org_id": org_id, "action": "created-complete"}
+
+
+def copy_org_state(src_graph: Any, dst_graph: Any, org_id: str) -> dict[str, Any]:
+    """Carry this org's ``:OnboardingState`` into another graph (#10180).
+
+    WHY THIS EXISTS. ``:OnboardingState`` and its ``COMPLETED_STEP`` edges are
+    ORG-LEVEL state that happens to be STORED IN THE DEFAULT GRAPH — the one
+    org-level store that lives in a tenant graph. #10180's promote verb MOVES
+    the default graph, and the other #10180 lanes (the projection, the
+    completion gate, ``patch_onboarding_state``, the harness-connected filing)
+    now open the promoted one. Without a carry the record stays in the graph the
+    promotion DEMOTED while every reader has been converted onto the promoted
+    one: the node reads ABSENT, ``flow_defaults()`` is served, the wire answer
+    falls back to the legacy jsonb flag — so a promotion silently RE-OPENS
+    onboarding (the onboarding tool group is re-exposed to agents and the
+    dashboard wizard re-opens), loses the org's ``fork``/``compact`` choice, and
+    does it to an org whose status this module documents as MONOTONIC.
+
+    ORDER IS LOAD-BEARING: the node (carrying its status) is created FIRST,
+    then the step edges, then the FLOW keys. A copy that dies half-way must
+    never leave a graph where onboarding reads as INCOMPLETE — that failure is
+    the exact thing this function exists to prevent. Every write goes through
+    this module's own idempotent keyed-MERGE writers, so a replay CONVERGES
+    (steps are a set; ``write_status`` is monotonic; nothing is duplicated).
+
+    It is deliberately a UNION-style merge, not a wipe: a target that already
+    holds a node keeps the more-advanced state (``write_status`` never regresses
+    ``complete``, and the step edges only ever gain), because the alternative —
+    leaving a stale node while the real history stays behind — is the wrong-graph
+    write this whole change exists to remove.
+
+    Deliberately NOT copied, and why:
+
+    - ``operational_state`` — a SELF-HOST-only property (see
+      ``OPERATIONAL_PROP``); hosted keeps those keys in the team's jsonb, and
+      the verb that calls this is hosted-only (it moves a ``public.graphs``
+      row), so copying it would mint a second, driftable store.
+    - ``DECIDE_COMPLETED_REMOVED_AT`` — the #3912 repair stamp. A copy would
+      claim a repair happened to a node it never repaired.
+
+    Returns the report the caller puts in its response: ``migrated`` (a source
+    node existed), ``reason``, the copied ``steps`` and the node's flow summary.
+    """
+    node = read_onboarding_node(src_graph, org_id)
+    if node is None:
+        return {"migrated": False, "reason": "absent", "steps": [],
+                "status": None, "fork": None, "compact": False}
+    status = node.get("status")
+    if status not in STATUS_VALUES:
+        status = STATUS_ACTIVE
+    complete = status == STATUS_COMPLETE
+    fork = node.get("fork") if node.get("fork") in FORK_VALUES else None
+    compact = bool(node.get("compact"))
+    steps = sorted({s for s in completed_steps(src_graph, org_id)
+                    if validate_step_id(s)})
+    # 1. the NODE (and its monotonic status) first — a partial copy must not
+    #    re-open an org that had completed.
+    ensure_onboarding_state_node(dst_graph, org_id, fork=fork, compact=compact,
+                                 status_from_mirror=complete)
+    write_status(dst_graph, org_id, status, status_from_mirror=complete)
+    # 2. the step edges — the canonical store of "what is done".
+    for step_id in steps:
+        write_completed_step(dst_graph, org_id, step_id,
+                             status_from_mirror=complete)
+    # 3. the remaining FLOW keys the projection serves.
+    if fork is None and node.get("fork_unsure_at"):
+        write_fork_unsure_at(dst_graph, org_id, str(node["fork_unsure_at"]),
+                             compact=compact, status_from_mirror=complete)
+    attempt = node.get("last_decide_attempt")
+    if attempt in ("failed", "dismissed"):
+        write_last_decide_attempt(dst_graph, org_id, attempt,
+                                  status_from_mirror=complete)
+    for user_id, member_steps in parse_member_progress(
+            node.get("member_progress")).items():
+        write_member_progress(dst_graph, org_id, user_id, member_steps,
+                              status_from_mirror=complete)
+    subject_id = node.get("org_subject_id")
+    anchor = "absent"
+    if subject_id:
+        # The DM-1 anchor (W3): the node tracks its Organization Subject.
+        # ⛔ NOT `write_onboards_edge` directly: that writer MERGEs
+        # `(:Subject {id})` because in ITS callers the anchor already exists
+        # (the seed core creates it first), and it says so — "this writer
+        # links". HERE the target holds no copied data by design, so the same
+        # MERGE would MINT an id-only stub (see `carry_onboards_edge`).
+        anchor = carry_onboards_edge(src_graph, dst_graph, org_id,
+                                     str(subject_id))
+    return {"migrated": True, "reason": "copied", "steps": steps,
+            "status": status, "fork": fork, "compact": compact,
+            "subject_anchor": anchor}
 
 
 def recompute_completion(graph: Any, org_id: str,
