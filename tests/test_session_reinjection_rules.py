@@ -1075,10 +1075,12 @@ def test_reader_window_displacement_partial_window_separates_the_two_keys():
     nothing is lost and the counters are not the same number.
 
     An aliasing implementation (``base_displaced = injected_in_window``)
-    passes at 40 and at 50 and FAILS at 45 with ``10 == 5``; an
-    implementation that replaced ``base_window`` with the whole
-    ``base_pool`` likewise fails there, because the base pool is exactly 40
-    in the fixtures the other tests use.
+    passes at 40 and at 50 and FAILS at 45 with ``10 == 5``. That is the only
+    mutant these fixtures kill: every window here is ``0``, ``40``, ``45`` or
+    ``50`` against a 40-item base pool, so a whole-``base_pool`` read and
+    the shipped ``base_pool[:window]`` slice are the SAME list and the
+    substitution is a no-op. ``_corpus(per_session=5, n_sessions=12)`` below
+    is the fixture that separates them.
     """
     pool = _corpus()
     _added, _order, merged = _merge(pool, [3, 3, 3, 1])
@@ -1094,6 +1096,39 @@ def test_reader_window_displacement_partial_window_separates_the_two_keys():
     assert (full["injected_in_window"], full["base_displaced"]) == (10, 0)
     assert full["sessions_lost"] == []
     assert (full["sessions_before"], full["sessions_after"]) == (8, 8)
+
+
+def test_reader_window_displacement_ignores_sessions_outside_the_window():
+    """The PRODUCTION shape: a base pool LONGER than the reader window.
+
+    Every other fixture in this file has a 40-item base pool read at a window
+    of ``0``, ``40``, ``45`` or ``50`` — none smaller than the pool — so
+    ``base_pool[:window]`` and ``base_pool`` are the same list there and an
+    implementation that read the whole pool cannot be told from the shipped
+    slice. This one is the shape the eval lane actually runs: pool 60 (the
+    default ``DEFAULT_POOL_SIZE`` is 120) read at the reader's 40
+    (``DEFAULT_CONTEXT_ITEM_CAP``).
+
+    Why it matters beyond the fixture: on this shape a whole-``base_pool``
+    read puts the sessions whose hits sit at base ranks >= 40 into
+    ``sessions_before``, and ``sessions_lost`` then NAMES A SESSION AS LOST
+    that the reader never had — on the key the function's own docstring calls
+    load-bearing. 12 sessions x 5 hits = 60, so the window holds s0-s7 and
+    ``sessions_before`` must be 8, not 12.
+    """
+    pool = _corpus(per_session=5, n_sessions=12)
+    _added, _order, merged = _merge(pool, [3, 3, 3, 1])
+    assert (len(pool), len(merged)) == (60, 70), (len(pool), len(merged))
+    assert sorted({h["session_id"] for h in pool[:40]}) == \
+        [f"s{s}" for s in range(8)]
+
+    out = reader_window_displacement(pool, merged, window=40)
+    assert out["sessions_before"] == 8, (
+        "the reader's window holds 8 of the 12 sessions — counting the whole "
+        "base pool would report 12 and name s8-s11 as lost")
+    assert out["injected_in_window"] == 10
+    assert out["sessions_lost"] == ["s6", "s7"]
+    assert out["sessions_after"] == 6
 
 
 def test_reader_window_displacement_is_zero_without_injection():
