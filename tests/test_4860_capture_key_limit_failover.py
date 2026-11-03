@@ -55,6 +55,13 @@ def _pinned_provider_routing_env(monkeypatch):
     monkeypatch.delenv("TORTOISE_SESSION_LLM_MOCK", raising=False)
     monkeypatch.delenv("TORTOISE_SESSION_EXTRACTOR", raising=False)
     monkeypatch.delenv("TORTOISE_EXTRACT_MODEL", raising=False)
+    # ``_failover_cooldown_seconds`` (model_adapters) is a ROUTING knob too, and
+    # ``pin_provider_routing_env`` deliberately covers only the key envs and the
+    # four selectors. An ambient ``TORTOISE_EXTRACTOR_FAILOVER_COOLDOWN=0``
+    # disables the flap guard, so the exhausted openrouter leg is re-admitted and
+    # hit TWICE — which reds the "hit exactly once" clause and misdiagnoses a
+    # deliberately-disabled cooldown as broken rotation (#3699 class).
+    monkeypatch.delenv("TORTOISE_EXTRACTOR_FAILOVER_COOLDOWN", raising=False)
     for key in ("DEEPSEEK_API_KEY", "OPENROUTER_API_KEY", "VENICE_API_KEY"):
         monkeypatch.setenv(key, "test-key")
 
@@ -157,5 +164,14 @@ def test_capture_fails_over_when_a_provider_hits_its_key_limit(client, monkeypat
     assert calls["openrouter"] == 1, (
         "the exhausted leg must be hit exactly once and then cooldowned")
     assert calls["venice"] >= 1, "rotation must reach a live configured leg"
-    assert body.get("extraction_provider") == "venice", body
-    assert body.get("extraction_mode") == "llm:venice", body
+    # ⚠️ Deliberately NOT ``== "venice"``. ``extraction_provider`` is
+    # ``RotatingModel.route``, which names the LAST leg that served, and with a
+    # forced picker the pool alternates — so pinning it to a literal leg couples
+    # this guard to the pipeline's PARITY of LLM calls. Adding, splitting or
+    # retrying one stage would flip it to ``deepseek-direct`` and red the only
+    # #4860 guard while rotation was perfectly intact (raised as a P2 in review
+    # of PR #10778). What the claim actually needs is: the receipt names a leg
+    # that is NOT the exhausted one, and the mode agrees with it.
+    provider = body.get("extraction_provider")
+    assert provider in ("venice", "deepseek-direct"), body
+    assert body.get("extraction_mode") == f"llm:{provider}", body

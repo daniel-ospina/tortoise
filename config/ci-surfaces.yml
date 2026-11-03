@@ -1845,6 +1845,7 @@ surfaces:
   - test_10194_eval_suite_non_gating.py
   - test_10017_backfill_copy.py
   - test_2351_claim_class.py
+  - test_4860_capture_key_limit_failover.py
   - test_9555_narrative_cache_rebuild.py
   - test_9555_narrative_carrier.py
   - test_9567_record_capstone.py
