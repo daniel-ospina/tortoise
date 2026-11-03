@@ -979,8 +979,16 @@ def test_the_identity_withhold_list_is_a_subset_of_the_attribution_list():
     """
     from tortoise import record_writer
 
-    missing = sorted(record_writer._IDENTITY_CONTENT_KEYS
-                     - record_projection._CONTENT_COLUMNS)
+    # The identity keys are PAYLOAD names (`eventId` is not a column; `event_id`
+    # is), so they are compared in the column's own form — `snake` is the SAME
+    # normalisation `_split_properties` applies before `_column_pair` ever sees
+    # the name. Comparing raw payload names would demand a `_CONTENT_COLUMNS`
+    # entry for `eventId`, which `test_content_columns_are_real_record_columns`
+    # would then (correctly) reject as a name no table has.
+    missing = sorted(
+        {record_projection.snake(key)
+         for key in record_writer._IDENTITY_CONTENT_KEYS}
+        - record_projection._CONTENT_COLUMNS)
     assert not missing, (
         f"identity field(s) {missing} are withheld by `_record_identity` but "
         "PRINTED by `_statement_attribution` — the same value would appear twice "
