@@ -58,6 +58,7 @@ from __future__ import annotations
 import ast
 import re
 import sys
+import unicodedata
 from pathlib import Path
 
 import pytest
@@ -633,10 +634,11 @@ class TestDistinguishingDifference:
             "we ship the build", "we ship \u0568 the build") == "language"
         assert not v2.fold_allowed("we ship the build",
                                    "we ship \u0568 the build")
-        # Both sides in the SAME unlisted script still fold: the guard refuses
-        # a DIFFERENCE in language, never the fact that a script is unknown.
+        # Both sides in the SAME unlisted script still fold, and with DIFFERENT
+        # surfaces — the guard refuses a DIFFERENCE in language, never the fact
+        # that a script is unknown.
         assert v2.fold_allowed("we ship the \u0568 build",
-                               "we ship the \u0568 build")
+                               "we ship \u0568")
         # Letters in a NAMED script are unaffected.  LATIN includes its
         # accented blocks, so an accent is latin rather than "unknown" —
         # otherwise dropping an accent ("caf\u00e9"/"cafe") would refuse a
@@ -659,6 +661,23 @@ class TestDistinguishingDifference:
         # now NFC-folds its input like every other boundary input does.
         assert v2.fold_allowed("\u1f00\u03c1\u03c7\u03ae",
                                "\u03b1\u0313\u03c1\u03c7\u03ae")
+        # ⚠️ THE DISCRIMINATING NFC LEG, and the Greek pair above is NOT one:
+        # polytonic Greek is fixed by the NFD-base step alone, so that assertion
+        # passes with the normalisation reverted.  Decomposed HANGUL is the
+        # population the normalisation actually carries — its Jamo (U+1100–
+        # U+11FF) are in no block, so without NFC one side reads `unlisted` and
+        # the other `hangul`, and the same claim refuses to fold with itself.
+        assert v2.fold_allowed(
+            "\ud55c\uad6d\uc5b4", unicodedata.normalize("NFD", "\ud55c\uad6d\uc5b4"))
+        # Latin letters that are NOT in the ASCII range and NOT accented: a
+        # micro sign (`µ`, the unit in "5 µm"), an IPA letter, a PDF ligature
+        # and a fullwidth letter are all `latin`, so none of them reads as a
+        # LANGUAGE difference.  (They can still be a content substitution —
+        # "µm"/"m" differ on both sides — which is a different dimension.)
+        for surface in ("\u00b5", "\u0283", "\ufb01", "\uff21"):
+            assert v2._script_of(surface) == "latin", surface
+            assert v2.fold_allowed(f"we ship {surface}", f"we ship {surface}")
+        assert "latin" in v2._scripts("5 \u00b5m \u0283 \ufb01 \uff21")
         # A precomposed letter belongs to its BASE letter's script, searched one
         # NFD level deeper: polytonic Greek (U+1F00-U+1FFF) is in no block, but
         # it is GREEK, so dropping its accents still folds.
