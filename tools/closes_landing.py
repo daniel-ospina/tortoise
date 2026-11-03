@@ -1528,10 +1528,12 @@ _GH_TIMEOUT_SECONDS = 60
 #: one `--pr` run issues `2 + L` sequential calls (identity, the PR, one per base
 #: branch up the stack) and `collect_stack` follows the stack as far as it goes,
 #: so `L` is not capped by `MAX_STACK_DEPTH` — thirteen calls at the per-call cap
-#: already reach the job's `timeout-minutes: 15`. So there is also an aggregate
-#: budget: once it is gone the run reports UNMEASURED instead of spending the
-#: job, which is the same contract the per-call bound has (exit 2, never a pass,
-#: never a red the advisory step cannot cover).
+#: are 780s, and the ONLY workflow that runs this tool,
+#: `.github/workflows/closes-coherence.yml`, caps its job at `timeout-minutes: 10`
+#: (600s). So there is also an aggregate budget: once it is gone the run reports
+#: UNMEASURED instead of spending the job, which is the same contract the
+#: per-call bound has (exit 2, never a pass, never a red the advisory step
+#: cannot cover).
 _GH_RUN_BUDGET_SECONDS = 300
 
 _run_budget_started: float | None = None

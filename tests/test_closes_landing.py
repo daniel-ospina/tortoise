@@ -1291,8 +1291,9 @@ def test_gh_refuses_to_spend_the_run_budget_rather_than_the_whole_job(monkeypatc
     """#10634 review P2. The per-call bound leaves the RUN unbounded: one `--pr`
     run issues `2 + L` sequential calls (identity, the PR, one per base branch up
     the stack) and `collect_stack` follows the stack as far as it goes, so a
-    stalled API can consume the drift-guard job's whole `timeout-minutes: 15` —
-    and a JOB-level timeout is a red that `continue-on-error: true` cannot cover.
+    stalled API can consume the whole job cap (`.github/workflows/
+    closes-coherence.yml`, `timeout-minutes: 10`) — and a JOB-level timeout is a
+    red that `continue-on-error: true` cannot cover.
 
     Once the run's aggregate budget is spent, NO further call is made: the answer
     is UNMEASURED (exit 2), which is the same verdict the per-call bound gives.
@@ -1322,6 +1323,79 @@ def test_gh_clamps_each_call_to_the_runs_REMAINING_budget(monkeypatch):
     assert cl._gh(["x"]) == "{}"
     assert 0 < seen["timeout"] <= 6, seen
     assert seen["timeout"] < cl._GH_TIMEOUT_SECONDS, seen
+
+
+# ── …and the justification for that budget is a fact about its HOST ──────────
+
+#: The number of sequential `gh` calls the comment on `_GH_RUN_BUDGET_SECONDS`
+#: names as enough to reach the job cap: "thirteen calls at the per-call cap".
+#: It is the walk the pinned #10568/#10519 shape actually makes (`2 + L`: the
+#: identity call, the PR, and one per base up a five-deep stack, measured), not a
+#: ceiling — `collect_stack` walks as far as the stack goes.
+_DOCUMENTED_CALLS = 13
+
+
+def _timeout_minutes(path: Path) -> int:
+    found = re.findall(r"^\s*timeout-minutes:\s*(\d+)\s*$", path.read_text(), re.M)
+    assert len(found) == 1, (
+        f"{path.name} carries {len(found)} `timeout-minutes` values ({found}); this "
+        f"pin reads the ONE cap the tool's run budget must fit inside — re-measure it")
+    return int(found[0])
+
+
+def _workflows_running_the_tool() -> list[Path]:
+    return sorted(
+        path for path in (ROOT / ".github" / "workflows").glob("*.yml")
+        if "tools/closes_landing.py" in path.read_text()
+    )
+
+
+def test_the_run_budget_is_justified_by_the_cap_of_the_workflow_that_HOSTS_it():
+    r"""#10634 review P3 at `15763ba97`. The comment justifying
+    `_GH_RUN_BUDGET_SECONDS` said thirteen calls at the per-call cap "already
+    reach the job's `timeout-minutes: 15`" — `drift-guard.yml`'s cap, left behind
+    when the step moved to `closes-coherence.yml`, whose job caps at 10. That
+    arithmetic is the whole argument for the aggregate budget, so a reader
+    checking it against the tree found a workflow that does not host the tool.
+
+    Correcting the prose alone would drift again on the next move, so the claim is
+    MEASURED here against whichever workflow actually runs the tool: the budget
+    must fit inside that job's cap (otherwise the job timeout, not the budget,
+    ends the run — and a job-level kill is a red `continue-on-error` cannot cover),
+    and the documented call count at the per-call cap must genuinely reach it.
+
+    On the pre-fix tree this REDS on the prose leg: the comment region said
+    `timeout-minutes: 15` while the only workflow that runs the tool caps at 10.
+    """
+    hosts = _workflows_running_the_tool()
+    assert [path.name for path in hosts] == ["closes-coherence.yml"], (
+        f"the tool's hosting workflow(s) are {[p.name for p in hosts]}: the run "
+        f"budget's justification must be re-measured against the new cap")
+    cap_minutes = _timeout_minutes(hosts[0])
+    cap_seconds = cap_minutes * 60
+
+    # The prose leg — the exact claim that drifted. It is read from the comment
+    # block above `_GH_RUN_BUDGET_SECONDS`, because a `grep` of the whole file
+    # would also find the OTHER workflow's cap (`drift-guard.yml:53`) quoted in a
+    # sibling docstring and call the claim matched.
+    source = MODULE_PATH.read_text()
+    budget_at = source.index("_GH_RUN_BUDGET_SECONDS = ")
+    comment_block = source[source.index("#: …and the bound is PER CALL", 0, budget_at):budget_at]
+    named = re.findall(r"timeout-minutes:\s*(\d+)", comment_block)
+    assert named == [str(cap_minutes)], (
+        f"the comment justifying the run budget names `timeout-minutes: {named}` but "
+        f"{hosts[0].name} caps its job at {cap_minutes}: that sentence IS the "
+        f"argument for the budget, so it must name the workflow that hosts it")
+
+    assert cl._GH_RUN_BUDGET_SECONDS < cap_seconds, (
+        f"the {cl._GH_RUN_BUDGET_SECONDS}s run budget must end the run BEFORE the "
+        f"{cap_seconds}s job cap does, or the job timeout wins and a stalled API "
+        f"reds a job that `continue-on-error: true` cannot cover")
+    assert _DOCUMENTED_CALLS * cl._GH_TIMEOUT_SECONDS > cap_seconds, (
+        f"{_DOCUMENTED_CALLS} calls at the {cl._GH_TIMEOUT_SECONDS}s per-call cap "
+        f"are {_DOCUMENTED_CALLS * cl._GH_TIMEOUT_SECONDS}s and must reach the "
+        f"{cap_seconds}s job cap — that arithmetic IS the justification for an "
+        f"aggregate budget; if it no longer holds, re-measure the comment")
 
 
 def test_main_starts_a_FRESH_run_budget(monkeypatch, tmp_path):
