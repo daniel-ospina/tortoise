@@ -1644,6 +1644,14 @@ def _org_row(cp, org_id: str) -> dict | None:
     rows = cp.query("organizations", select=[
         "id", "tier", "max_users", "max_graphs", "graph_size_cap",
         "max_points", "suspended_at", "flagged_at", "email",
+        # #10180: the org's DEFAULT namespace. An `oat_` credential is org-wide,
+        # so this is the namespace it must open — and a promotion MOVES it. It
+        # rides the base organization read (no extra round trip), and
+        # `resolve_oauth_access_token` stamps it as `graph_namespace` exactly as
+        # `resolve_api_key`/`_session_user_org` do, or this lane would keep
+        # capturing into the graph the promotion DEMOTED while its record rows
+        # (tenant = `default_graph_id`) named the promoted one.
+        "graph_name",
     ], filters=[("id", "eq", org_id)])
     return rows[0] if rows else None
 
@@ -2112,6 +2120,15 @@ def resolve_oauth_access_token(cp, token: str) -> dict | None:
     org = _org_row(cp, row["org_id"])
     if org is None:
         return None
+    # #10180: read the DEFAULT namespace off the ROW before `_quota_fields`
+    # rebuilds the dict (it projects a fixed quota shape and does not carry
+    # `graph_name`) — the same field `resolve_api_key`/`_session_user_org` put on
+    # their credentials. An `oat_` credential is org-wide, so
+    # `mcp_auth._get_org_sdk` resolves this org's default graph from it; without
+    # it that lane silently opened `org_{org_id}`, which a promotion turns into
+    # the DEMOTED graph (nodes into the old graph, record rows filed under the
+    # new one).
+    _default_ns = org.get("graph_name")
     org = _quota_fields(cp, org)
     # #10046: the RECORD tenant for an OAuth credential. This resolver is the
     # OAuth half of the MCP auth boundary and — like a SESSION/JWT credential —
@@ -2119,14 +2136,23 @@ def resolve_oauth_access_token(cp, token: str) -> dict | None:
     # default-graph row id on the dict and `record_tenant_for` (the one
     # declaration both transports call) refused every armed write `no_tenant`
     # for the whole `oat_` class. The row is resolved through the SAME home the
-    # API-key lane uses (`default_graph_id_for_credential`), so the three
+    # API-key lane uses (`default_graph_for_credential`), so the three
     # credential classes cannot name different defaults; a `None` here stays a
     # NAMED refusal counted `no_tenant`, never a guess, and the lookup/mint is
     # contract-bound never to fail this caller.
-    from tortoise.supabase_control import default_graph_id_for_credential
+    #
+    # ⛔ ONE READ FOR BOTH FIELDS (#10452 review F2): the namespace above comes
+    # from the `organizations` row while the id used to come from a SEPARATE
+    # `public.graphs` read, and a `promote_default_graph` committing between the
+    # two handed this credential the DEMOTED namespace with the PROMOTED id —
+    # the MCP lane then opened one graph and filed every record under the other.
+    # The pair is one row, so it is asked once.
+    from tortoise.supabase_control import default_graph_for_credential
 
-    org["default_graph_id"] = default_graph_id_for_credential(
-        cp, row["org_id"], context="oauth auth self-heal")
+    _pair_ns, _pair_id = default_graph_for_credential(
+        cp, row["org_id"], _default_ns, context="oauth auth self-heal")
+    org["default_graph_id"] = _pair_id
+    org["graph_namespace"] = _pair_ns or _default_ns
     # #2600: the resolved dict carries the RAW actor fields (the token row's
     # user_id/client_id) so consuming seams (mcp_auth middleware / REST DI)
     # can alias the canonical `actor_user_id` — additive, transport-agnostic
