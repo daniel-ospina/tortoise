@@ -420,3 +420,20 @@ def test_the_absent_is_zero_semantics_are_declared_on_the_dimension():
     by_dim = {d.dimension: d for d in DIMENSIONS}
     assert by_dim["capture_extraction"].absent_is_zero is True
     assert by_dim["graph_storage"].absent_is_zero is False
+
+
+@pytest.mark.parametrize("reason", ["degraded", "schema_error", None])
+def test_an_unrecognised_unmeasured_reason_is_refused_not_treated_as_absent(
+        reason, monkeypatch):
+    """⛔ DEFAULT-DENY: only the CERTAIN reason ("absent") may pass as a zero.
+
+    Folding an unknown reason into "absent" would silently disarm a configured
+    allowance the day the reader grows a new one (review round 5, P2).
+    """
+    # Drive the REAL adapter with a stubbed reader instead of the meter.
+    monkeypatch.setattr(
+        "tortoise.metering.get_capture_usage",
+        lambda _org: {"measured": False, "unmeasured_reason": reason})
+    with pytest.raises(QuotaCheckError):
+        enforce_allowances(_limits(max_extraction_tokens=10),
+                           resource="sessions")

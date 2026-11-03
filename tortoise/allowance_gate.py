@@ -265,7 +265,13 @@ def _extraction_tokens(org_id: str) -> MeterReading | None:
     usage = get_capture_usage(org_id)
     if not usage.get("measured"):
         reason = usage.get("unmeasured_reason")
-        if reason in ("read_error", "period_error"):
+        if reason != "absent":
+            # ⛔ DEFAULT-DENY. Only the ONE reason that is CERTAIN (no ledger row
+            # yet for a cumulative flow) may pass as a zero; every other reason —
+            # including one this gate has never heard of, e.g. a future
+            # "degraded"/"schema_error" — is an unmeasurable figure and refuses.
+            # Folding an unknown reason into "absent" would silently disarm a
+            # configured allowance the day `get_capture_usage` grows a reason.
             # ⚠️ OUR fault, not the tenant's: the ledger or the billing window
             # failed. The gate still REFUSES (#686 fail-closed), but the refusal
             # names the fault and is disclosed on the #3981/#4779 surface —

@@ -1263,9 +1263,13 @@ def get_capture_usage(org_id: str) -> dict:
     False only when the ledger could not be read at all —
     ``"absent"`` (no row for the window: nobody has captured yet),
     ``"read_error"`` (the store refused the query) or
-    ``"period_error"`` (the billing window itself was unresolvable). An allowance
-    gate must refuse on those, and pass on a genuine zero — which is why the
-    reason travels rather than being flattened into the number.
+    ``"period_error"`` (the billing window itself was unresolvable). The reason
+    TRAVELS rather than being flattened into the number, because the two halves
+    are decided differently downstream: ``read_error``/``period_error`` must
+    REFUSE, while ``absent`` is the per-dimension decision a cumulative FLOW
+    declares as a zero (``allowance_gate.AllowanceDimension.absent_is_zero``,
+    #9567 review round 3 — the row is MERGE-created by the capture itself, so
+    refusing an absence would deadlock the window it is waiting for).
     """
     zeros = {
         "measured": False,
