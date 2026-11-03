@@ -1047,7 +1047,8 @@ def test_the_reprojection_shapes_match_the_probe():
     The committed sample is FULLY read, so neither branch executes against it:
     without these, deleting the dict-of-nulls arm or re-spelling the UNREAD
     predicate left every test green — the "could be reverted with the suite
-    still green" shape this bundle exists to avoid (README:163).
+    still green" shape this bundle exists to avoid (README, "the pin this
+    arm was missing until #10137 review").
 
     Non-vacuous on the point #10678's review caught: the two shapes must
     re-project to DIFFERENT outcomes. Collapsing them (the old single guess)
@@ -1242,7 +1243,7 @@ def test_a_census_whose_row_classifications_disagree_with_its_counts_is_refused(
 
     Non-vacuous: with the witness disabled every test still passes, which is
     the "could be reverted with the suite still green" shape this bundle exists
-    to avoid (README:163-164).
+    to avoid (README, "reverted with every test still green").
     """
     doc = {"fingerprint": {"activate_beliefs": True},
            "outcomes": [
@@ -1612,6 +1613,7 @@ def test_committed_census_rederives_its_own_aggregate():
     # about provenance, and it must not be editable while it looks checked.
     assert doc["source"] == "checkpoint", (
         f"{_ARTIFACT}: source = {doc['source']!r}, but this artifact was cut "
-        f"from the run's checkpoint (README:139-143 pins that provenance)")
+        f"from the run's checkpoint (the README's provenance-note section "
+          f"pins that)")
     assert (len(rows), summary["operators"]) == (24, 1710), \
         "pinned sample — update together with the artifact"
