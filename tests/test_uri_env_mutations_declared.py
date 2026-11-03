@@ -803,8 +803,13 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # REPORT of the resolved target, so a docker-half green is not claimed for
     # any site. Function-scoped `monkeypatch`, auto-undone at teardown (no lane
     # leak) — including the site that replaces a RAW `os.environ[...] = ...`
-    # whose `finally: del` deleted the ambient URI instead of restoring it (the
-    # #2062 pop-without-restore class, which this module's second guard reds).
+    # whose `finally: del` is a DELETE, not a restore: the site never puts the
+    # ambient value back, which is the shape this module's second guard reds
+    # (the #2062 pop-without-restore class). ⚠️ In THIS module that shape could
+    # not have reached a later test — the autouse `_isolated` fixture removes the
+    # URI with `monkeypatch.delenv` before every test and its teardown restores
+    # the ambient value — so the red was the mutation SHAPE, not an observed
+    # lane flip. Do not cite it as a measured leak (review finding, baf951165).
     "test_cli_config_show.py": [
         r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"'],
 }

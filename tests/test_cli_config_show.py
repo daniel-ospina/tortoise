@@ -1801,10 +1801,17 @@ def test_a_scheme_less_user_password_dsn_is_not_printed(
 
     The URI value IS the input under test, so `monkeypatch.setenv` is the right
     form: pytest auto-undoes it at teardown. The raw `os.environ[...] = ...` +
-    `finally: del os.environ[...]` this replaced did NOT restore — in the docker
-    lane it DELETED the ambient URI, so every later test in the same pytest
-    process constructed an embedded SDK instead (the #2062 pop-without-restore
-    class, `tests/test_uri_env_mutations_declared.py`'s second guard).
+    `finally: del os.environ[...]` this replaced is the shape the second guard in
+    `tests/test_uri_env_mutations_declared.py` reds (the #2062
+    pop-without-restore class): a `del` is a DELETE, not a restore, so the site
+    itself never puts an ambient value back.
+
+    ⚠️ Not a measured lane flip HERE, and do not cite it as one: this module's
+    autouse `_isolated` fixture removes `TORTOISE_DB_URI` with
+    `monkeypatch.delenv` before every test — recording the ambient value — so
+    its teardown restores the URI whatever this test does. The red was the
+    mutation SHAPE (an unrestored raw write), not a leak that reached a later
+    test; the `monkeypatch` form is what makes the site self-describing.
     """
     _global(tmp_path)
     monkeypatch.setenv("TORTOISE_DB_URI", "dockeruser:S3cretPw")
