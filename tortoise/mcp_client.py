@@ -378,6 +378,17 @@ def _raise_if_credential_was_missing(exc: BaseException, sent: Connection | None
         # The request never reached the point of attaching a credential (a
         # connect failure), so the live resolution is the only evidence there is.
         sent = resolve_connection()
+        if sent.key is not None:
+            # ⛔ NOT the empty-credential class: a key RESOLVES here, so
+            # `_refusal`'s "NO credential resolved on the client (checked …)"
+            # would assert the opposite of the current state AND name the very
+            # source that is set — the misdirection this module exists to remove
+            # (#10727 review, P3). What is true is narrower: the FAILED request
+            # never carried one, and nothing in the exception proves WHY (it
+            # carries no request, so `_carried_authorization` is None), so no
+            # second claim is invented — the server's message is relayed unchanged
+            # and the operator keeps the part that is accurate.
+            return
     elif sent.key is not None:
         # A credential RESOLVED — but did the failed request actually carry it?
         # httpx drops `Authorization` across a cross-origin redirect, so a 401 can

@@ -972,6 +972,52 @@ class TestCredentialResolution:
             f"construction: {payload['error']}")
         assert "tt_live_key" not in text, f"the credential value was printed: {text}"
 
+    def test_a_live_key_stops_the_empty_refusal_from_claiming_none_resolved(
+        self, monkeypatch, isolated_home,
+    ):
+        """`MCP-KEY-EMPTY` may not be raised when a credential DOES resolve.
+
+        The classification falls back to a LIVE resolution when the failed request
+        never attached a credential (`provider.sent is None` — a connect
+        failure). It then fell straight through to `_refusal`, whose text is
+        hard-coded to "NO credential resolved on the client (checked …)": with a
+        key set, that sentence is false AND it names the very source that is set —
+        the misdirection class this module exists to remove (#10727 review, P3).
+
+        The honest classification is "the failed request carried none, and WHY is
+        not knowable", so nothing is translated and the server's message stands.
+        """
+        from tortoise import mcp_client
+
+        monkeypatch.setenv("TORTOISE_MCP_URL", "http://127.0.0.1:9/mcp")
+        monkeypatch.setenv("TORTOISE_API_KEY", "tt_live_key")
+        provider = mcp_client._BearerProvider(mcp_client.resolve_connection().url)
+        assert provider.sent is None, "this test needs the no-request-evidence path"
+
+        # No raise: `MCP-KEY-EMPTY` would be a false statement about the state.
+        mcp_client._classify_failure(RuntimeError("401 Unauthorized"), provider)
+
+    def test_a_live_key_absent_still_gets_the_named_empty_refusal(
+        self, monkeypatch, isolated_home,
+    ):
+        """…while the source it names is honoured when NOTHING resolves.
+
+        The other half of the same branch: with no key anywhere, the refusal is
+        the accurate word, and the message must keep naming every source read.
+        """
+        from tortoise import mcp_client
+
+        monkeypatch.setenv("TORTOISE_MCP_URL", "http://127.0.0.1:9/mcp")
+        monkeypatch.delenv("TORTOISE_API_KEY", raising=False)
+        monkeypatch.delenv("TORTOISE_MCP_API_KEY", raising=False)
+        provider = mcp_client._BearerProvider(mcp_client.resolve_connection().url)
+
+        with pytest.raises(mcp_client.MCPKeyEmptyError) as caught:
+            mcp_client._classify_failure(RuntimeError("401 Unauthorized"), provider)
+
+        assert caught.value.code == "MCP-KEY-EMPTY"
+        assert "NO credential resolved" in str(caught.value)
+
     def test_a_tool_error_mentioning_401_is_not_a_credential_refusal(self, client_env):
         """A TOOL's 401 is the tool's, not the client's — never rewritten.
 
