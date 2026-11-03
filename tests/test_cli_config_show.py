@@ -982,6 +982,27 @@ def test_a_whitespace_only_db_uri_is_unset_everywhere_not_half_set(
     assert "configured but unusable" in capsys.readouterr().out
 
 
+def test_a_single_space_db_uri_still_reports_the_readable_remedy(
+        monkeypatch, capsys, tmp_path):
+    """A ONE-space value is the sharp case the 3-space pin above cannot see:
+    `_scrub` used it as a replacement fragment, so every space in the refusal
+    became `<redacted>` and the remedy — the only thing the user can act on —
+    was unreadable in both text and `--json`. (The 3-space value survives by
+    luck: the message's only run of three spaces is the quoted value.)"""
+    _global(tmp_path)
+    monkeypatch.setenv("TORTOISE_DB_URI", " ")
+    assert _run(("config", "show", "--json")) == 0
+    store = json.loads(capsys.readouterr().out)["graph_store"]
+    assert store["status"] == "configured but unusable"
+    assert "Relative DB path" in store["error"], (
+        f"the refusal's prose was shredded by the scrubber: {store['error']!r}")
+    assert "<redacted>" not in store["error"]
+    assert _run() == 0
+    out = capsys.readouterr().out
+    assert "Relative DB path" in out
+    assert "allow_nonstandard_path" in out      # the actionable half, still legible
+
+
 def test_a_key_with_surrounding_whitespace_is_reported_not_called_healthy(
         monkeypatch, capsys, tmp_path):
     """The CLI sends the env key VERBATIM while the Pi hook trims it — so a key
@@ -1386,6 +1407,38 @@ def test_a_short_query_value_does_not_shred_the_diagnostic():
     assert main._scrub(body, "https://h/v1?env=a") == body
     assert "API error 40<redacted>" not in main._scrub("API error 401 unauthorised",
                                                        "https://h/?v=1")
+
+
+def test_a_whitespace_only_secret_does_not_shred_the_diagnostic():
+    """The same reasoning applies to the TOP-LEVEL secret, which the short-query
+    guard did not cover: a whitespace-only value is not learnable from, and
+    using it as a fragment rewrote every space. `TORTOISE_DB_URI=' '` left
+    `ValueError:<redacted>Relative<redacted>DB<redacted>path…` — the whole point
+    of the verb, gone."""
+    from tortoise.config import RELATIVE_PATH_ERROR
+
+    msg = "ValueError: " + RELATIVE_PATH_ERROR.format(path=" ")
+    assert main._scrub(msg, " ") == msg
+    assert main._scrub("API error 500: disk full", "\t") == "API error 500: disk full"
+    # …and skipping a whitespace fragment does not disable the REAL secrets
+    # supplied alongside it in the same call.
+    assert "hunter2" not in main._scrub("API error 401: hunter2 rejected", " ", "hunter2")
+
+
+def test_a_one_character_secret_is_redacted_as_a_token_not_a_substring():
+    """A 1-2 char secret IS a credential and must not be printed — but a bare
+    substring sweep rewrites that character everywhere it occurs, which shreds
+    the diagnostic instead of protecting it. Token-bounded keeps both."""
+    text = "API error 401: bad token; answer a is invalid"
+    scrubbed = main._scrub(text, "a")
+    assert "answer <redacted> is invalid" in scrubbed
+    assert scrubbed.count("<redacted>") == 1, scrubbed
+    # the prose that merely CONTAINS the character survives
+    assert "error 401" in scrubbed
+    assert "bad token" in scrubbed
+    # the echoed-credential shapes a refusal actually prints are still covered
+    assert main._scrub('{"api_key": "a"}', "a") == '{"api_key": "<redacted>"}'
+    assert main._scrub("key=a&x=1", "a") == "key=<redacted>&x=1"
 
 
 def test_the_harness_key_is_also_checked_for_sendability(monkeypatch, capsys, tmp_path):

@@ -978,8 +978,8 @@ def test_the_10655_config_show_suite_is_selected_on_its_own_module():
     have been selected by nothing, on this PR or on `main` afterwards.
 
     Measured before the `api` entry (`classify_test_file(...)` -> `None`):
-    a `tortoise/__main__.py`-only diff selects `['api']` and 862 files, this
-    suite ABSENT. `api` is the only surface that helps, because
+    a `tortoise/__main__.py`-only diff selects `['api']` and a few hundred files,
+    this suite ABSENT. `api` is the only surface that helps, because
     `tortoise/__main__.py` is an EXACT `api` `SOURCE_PATTERNS` match and in
     `select()` a named-surface match REPLACES the `core` fallback.
 

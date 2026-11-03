@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import re
 import sys
 from pathlib import Path
 
@@ -3070,6 +3071,26 @@ def _scrub(text: str, *secrets: object) -> str:
     for fragment in sorted((f for f in set(fragments) if f), key=len, reverse=True):
         # belt and braces: a zero-length fragment matches between every character
         if len(fragment) < 1:
+            continue
+        if not fragment.strip():
+            # A whitespace-only value is not a credential any reader can learn
+            # from — and treating it as a replacement site rewrites EVERY space
+            # in the message: `TORTOISE_DB_URI=' '` turned the
+            # `RELATIVE_PATH_ERROR` remedy into `<redacted>` confetti, in the one
+            # verb whose whole purpose is legibility. Echoing a space is strictly
+            # better than shredding the diagnostic, so this fragment is skipped.
+            # (#10655 review: the same reasoning already guarded SHORT QUERY
+            # values above; it was not applied to the top-level secret.)
+            continue
+        if len(fragment) <= 2:
+            # A 1-2 char secret IS a credential and must still not be printed,
+            # but a bare substring sweep replaces that character everywhere
+            # (every `a` in the prose becomes `<redacted>`). Token-bounded
+            # replacement keeps both properties: the secret as a standalone
+            # token is redacted, the words that merely contain the character are
+            # not. A boundary is a non-word char on each side, so an echoed
+            # `"api_key": "a"` is still covered.
+            text = re.sub(rf"(?<!\w){re.escape(fragment)}(?!\w)", "<redacted>", text)
             continue
         text = text.replace(fragment, "<redacted>")
     return text
