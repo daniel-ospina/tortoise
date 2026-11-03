@@ -965,6 +965,54 @@ def test_the_10180_carry_pin_runs_on_the_module_that_carries_it():
     )
 
 
+def test_the_10655_config_show_suite_is_selected_on_its_own_module():
+    """#10655 review: the `config show` suite must run on `tortoise/__main__.py`.
+
+    `tests/test_cli_config_show.py` was added by #10655 with NO manifest row at
+    all — classified by no surface, so `tools/ci_selection.py --integrity`
+    reported it as drift (the required `manifest-integrity` leg reds) and no
+    leg could ever run it. `fast_pool()` is built from the manifest's own
+    member lists, not from a `tests/**` glob, so an unregistered file is in no
+    shard, no `full` push run and no diff-selected run: the masking,
+    fingerprint and remedy-table pins that are the whole point of #10655 would
+    have been selected by nothing, on this PR or on `main` afterwards.
+
+    Measured before the `api` entry (`classify_test_file(...)` -> `None`):
+    a `tortoise/__main__.py`-only diff selects `['api']` and 862 files, this
+    suite ABSENT. `api` is the only surface that helps, because
+    `tortoise/__main__.py` is an EXACT `api` `SOURCE_PATTERNS` match and in
+    `select()` a named-surface match REPLACES the `core` fallback.
+
+    Same #1349/#2938 silent-drop class as the #9572/#10180 pins above; asserted
+    on the FILE as well as the classification, not on non-emptiness, because
+    `api` is selected either way. Mutation check: removing the `api` entry
+    fails both asserts; removing only the `durations` row leaves them green
+    (the surface row is the load-bearing half — the coverage floor clears
+    without the weight).
+    """
+    guard = "test_cli_config_show.py"
+    own_module = "tortoise/__main__.py"
+    manifest = load_manifest()
+    assert (REPO / own_module).exists(), f"pinned file is gone: {own_module}"
+    assert (REPO / "tests" / guard).exists(), f"pinned suite is gone: {guard}"
+    assert classify_test_file(guard, manifest) == "api", (
+        f"{guard} classifies as {classify_test_file(guard, manifest)!r}, not "
+        "'api' — an unclassified new file reds `--integrity` and is selected by "
+        "no leg at all; re-derive the surface from the module it drives"
+    )
+    r = _sel([own_module])
+    assert "api" in r["surfaces"], (
+        f"{own_module} selects {r['surfaces']}, not api — the premise of this "
+        "pin changed; re-derive it"
+    )
+    assert guard in r["test_files"], (
+        f"{own_module} does not select {guard} — the config-show pins sleep on "
+        "the one diff that can regress them (a credential printed in the clear, "
+        "a remasked DSN, a 403 remedy table that explains away a 500). "
+        f"selected {len(r['test_files'])} files"
+    )
+
+
 def test_the_4282_durability_suite_is_selected_on_the_modules_it_guards():
     """#10053 review P2: a durability invariant must run on the modules it pins.
 

@@ -488,10 +488,15 @@ def resolve_db_path(explicit: str | None = None) -> str:
         expanded = os.path.expanduser(uri)
         if not os.path.isabs(expanded):
             raise ValueError(RELATIVE_PATH_ERROR.format(path=uri))
+        # #5109: CLI output is captured verbatim into a transcript, and this value
+        # can carry a credential in a query/fragment (`…/x.db?password=…`) — the
+        # backward-compat branch above is exactly the shape that keeps it. Cut at
+        # the first `?`/`#` before logging, the same rule the display maskers use.
         logger.warning(
             "TORTOISE_DB_URI=%r is a file path (no supported scheme: %s) — "
             "treating as embedded DB path (backward compat)",
-            uri, ", ".join(f"{s}://" for s in SUPPORTED_URI_SCHEMES))
+            uri.split("?", 1)[0].split("#", 1)[0],
+            ", ".join(f"{s}://" for s in SUPPORTED_URI_SCHEMES))
         return _abs(uri)
 
     # 4. default
