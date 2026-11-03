@@ -561,10 +561,12 @@ def _attestable(point: dict) -> bool:
 
       1. NOT an operator — the call site enters the identity/text check only
          on ``not op`` (``projection/entities.py:2484``), where ``op`` is
-         ``p.get("operator")`` (``:2452``) — the Point's ``operator`` dict.
-         An operator attests no text at all, so this is the FIRST gate;
-         leaving it out let clause 4 rescue the population only by
-         accident (operators happen to carry no ``content``);
+         ``p.get("operator")`` (``:2452``) narrowed to ``None`` for a non-dict
+         (``:2453-2457``). An operator attests no text at all, so this is the
+         FIRST gate; leaving it out let clause 4 rescue the population only
+         by accident (operators happen to carry no ``content``). The test is
+         TRUTHINESS of the dict, matching ``not op``: an empty ``operator={}``
+         is falsy and IS attested;
       2. a RESTORABLE vector — ``_writable_journalled_vector`` (``:2483``)
          refuses ``None``, an empty/non-list value, a non-finite or
          non-numeric element, and an implausible length. It is a PURE function
@@ -593,7 +595,13 @@ def _attestable(point: dict) -> bool:
     hand-edited record could carry a hash alone; such a record is genuinely
     unattestable and must not be counted.
     """
-    if isinstance(point.get("operator"), dict):
+    op = point.get("operator")
+    if isinstance(op, dict) and op:
+        # ⛔ NON-EMPTY dict, not "is a dict": the call site's `op` is falsy for
+        # an EMPTY operator dict, so `not op` lets that record through and the
+        # replay DOES compare it. Rejecting it here would over-count the
+        # population — a false RED, never a false green, but still wrong
+        # (final-review note, PR #10631).
         return False
     if _writable_journalled_vector(point.get("embedding")) is None:
         return False
@@ -612,8 +620,15 @@ def _attestable(point: dict) -> bool:
     return True
 
 
-def _attested_text(point: dict) -> str:
+def _attested_text(point: dict) -> str | None:
     """The text the attestation covers — the SAME fallback production hashes.
+
+    ``None`` only for a record with neither field a string, which
+    `_attestable` (clause 4) already refuses — so every call site below is
+    guarded by it and the fallback the annotation admits cannot reach
+    `content_hash`. Annotated honestly rather than as ``str``: the fallback
+    genuinely can yield ``None``, and the guard is what makes it unreachable
+    (final-review note, PR #10631).
 
     `_attestable` deliberately ADMITS a record with no `embeddingText` (the
     hash then covers `content`), so no derivation below may index
@@ -651,7 +666,11 @@ def test_the_attestable_predicate_pins_each_replay_gate_boundary():
     assert not _attestable(dict(base, operator={"id": "op"}))
     assert _attestable(dict(base, operator=None)), (
         "a non-dict `operator` is what a Point carries, not what an operator "
-        "does — `op = p.get('operator')` is truthy only for the dict shape")
+        "does — the call site narrows it to None at `:2453-2457`")
+    assert _attestable(dict(base, operator={})), (
+        "an EMPTY operator dict is FALSY, so the call site's `not op` admits "
+        "it and the replay compares its text — the predicate must not reject "
+        "it (that would over-count the population, a false RED)")
     # 2. restorability IS in the predicate (`_writable_journalled_vector`,
     #    `:2483`): an absent, empty, non-finite or implausibly long vector is
     #    never restored, so the replay never compares it.
