@@ -8513,12 +8513,11 @@ def _check_org_limit(org: dict, resource: str, *,
     admitted because the default was small. This is the house rule MCP and
     capture already obey (`mcp_server._enforce_quota`: "Count on the SAME org
     SDK the tool writes to … so the count and the write can never target
-    different databases"). ⚠️ NOT every per-graph credential diverges: a
-    legacy/pre-guard key bound to the org's DEFAULT graph node resolves to
-    ``org_{org_id}`` and always agreed (see ``_capture_session_key``). And
-    registry-scoped resources (api_keys/users/graphs) ignore ``sdk`` — they
-    count through the registry, not a tenant graph — so callers may pass it for
-    every resource.
+    different databases"). ⚠️ Which OTHER credentials diverge from the default
+    graph is LANE-dependent (hosted default-node bindings agree; selfhost
+    ``org_{name}`` bindings do not) — read the seam doc before generalising. And
+    registry-scoped resources (api_keys/users/graphs) are unaffected by ``sdk``
+    for the count, so callers may pass it for every resource.
 
     Fail-closed decision (#686)
     ~~~~~~~~~~~~~~~~~~~~~~~~~~~

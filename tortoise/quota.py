@@ -1089,9 +1089,19 @@ def enforce_org_limit(limits: dict | None, resource: str, sdk=None, *,
             write can never target different databases"), and the omission is
             silent — nothing fails loudly when a new door forgets it, which is
             why the contract is stated HERE rather than at each caller.
-            A legacy/pre-guard key bound to the org's DEFAULT graph node resolves
-            to ``org_{org_id}`` and never diverged; registry resources
-            (api_keys/users/graphs) ignore this argument entirely.
+            ⚠️ The bound-DEFAULT class is lane-dependent, so do not generalise
+            it: in the HOSTED lane every create path stores
+            ``graph_name = org_{org_id}``, so a legacy/pre-guard key bound to the
+            default graph node resolves to exactly what the fallback counts and
+            never diverged. In the SELFHOST/registry lane ``sdk.org_create``
+            stores ``graph_name = org_{name}`` (#2023 — the divergence is called
+            out in ``hosted_api._data_sdk``'s docstring), so a bound-default key
+            there diverges from ``org_{org_id}`` exactly as a custom binding
+            does.
+            Registry resources (``api_keys``/``users``/``graphs``) are
+            unaffected BY THE COUNT: they resolve the registry either way — a
+            passed registry-named sdk is reused and any other sdk is discarded
+            (``_count_resource``'s registry arm), so the number is the same.
         slot_credit: #4355 — how many slots this write RELEASES as part of the
             same operation, so the admission check is evaluated against the
             post-release count. It exists for exactly ONE caller: the
