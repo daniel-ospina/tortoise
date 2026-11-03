@@ -886,6 +886,30 @@ def test_census_probe_keys_a_non_str_qid_apart_from_its_repr(tmp_path):
     assert out["questions_failed"] == 1        # NOT folded into the outcome
     assert out["questions_in_run"] == 2
 
+_CENSUS_CELLS = ("operators", "factor_edges", "points_with_ep",
+                 "points_unmeasured", "points_off_neutral",
+                 "points_moved_off_neutral", "ep_ran", "no_op_reason", "error")
+
+
+def _rebuild_outcome(row) -> dict:
+    """Re-project ONE committed ``per_question`` row into the outcome the
+    summarizer consumes.
+
+    The probe emits a row for EVERY outcome, including ones whose
+    ``belief_activation`` was never read (every census cell null). Turning such
+    a row into a dict-of-nulls would re-classify ``no_manifest`` as
+    ``activation_failed`` and red this test on a CORRECT partial artifact, so a
+    never-read row is re-projected as a manifest-LESS outcome — the shape the
+    probe distinguishes and ``measurement_posture`` classifies ``no_manifest``.
+    """
+    cells = {k: row.get(k) for k in _CENSUS_CELLS}
+    outcome = {"question_id": row["question_id"],
+               "question_type": row["question_type"]}
+    if any(v is not None for v in cells.values()):
+        outcome["belief_activation"] = cells
+    return outcome
+
+
 def test_committed_census_rederives_its_own_aggregate():
     """The shipped artifact is auditable against itself: every aggregate cell
     is what the runner's own aggregation produces from the committed
@@ -898,18 +922,8 @@ def test_committed_census_rederives_its_own_aggregate():
     """
     doc = json.loads(_ARTIFACT.read_text())
     rows = doc["per_question"]
-    # ``error`` rides the rows and is the summarizer's FIRST failure signal
-    # (``measurement_posture._failed``), so a faithful re-projection must carry
-    # it — omitting it would red this test on a CORRECT artifact the moment a
-    # re-cut contained one failed question.
-    manifests = [{
-        "question_id": r["question_id"], "question_type": r["question_type"],
-        "belief_activation": {k: r.get(k) for k in (
-            "operators", "factor_edges", "points_with_ep", "points_unmeasured",
-            "points_off_neutral", "points_moved_off_neutral", "ep_ran",
-            "no_op_reason", "error")},
-    } for r in rows]
-    summary = mp.summarize_belief_activation(manifests, requested=True)
+    summary = mp.summarize_belief_activation(
+        [_rebuild_outcome(r) for r in rows], requested=True)
 
     for key, committed in doc["cells"].items():
         # ``key in summary`` first: a summarizer key that was renamed or
@@ -921,6 +935,20 @@ def test_committed_census_rederives_its_own_aggregate():
     assert summary["questions"] == doc["questions"]
     assert summary["questions_with_ep"] == doc["questions_with_ep"]
     assert summary["inert_by_reason"] == doc["inert_by_reason"]
+    # …including the state the artifact publishes beside the ratio, and the
+    # failure population the ratio is scoped to.
+    assert mp.belief_layer_state(requested=True, activation=summary) == \
+        doc["belief_layer"]
+    assert doc["questions_in_run"] - doc["questions"] == doc["questions_failed"]
+
+    # ``point_coverage.ratio`` is derived too — its two numerators sit in
+    # ``cells`` (pinned above), but the ratio would otherwise be editable.
+    coverage = doc["point_coverage"]
+    assert coverage["points_with_ep"] == doc["cells"]["points_with_ep"]
+    assert coverage["points_unmeasured"] == doc["cells"]["points_unmeasured"]
+    assert coverage["ratio"] == pytest.approx(
+        coverage["points_with_ep"]
+        / (coverage["points_with_ep"] + coverage["points_unmeasured"]))
 
     # Reconciled on the cells the artifact rests on, NOT the bucket SHAPE:
     # ``summarize_belief_activation`` adds keys additively by contract, so a
@@ -935,13 +963,17 @@ def test_committed_census_rederives_its_own_aggregate():
         assert {k: committed.get(k) for k in reconciled} == \
             {k: derived.get(k) for k in reconciled}, qtype
 
-    # The disclosure fields describe THESE rows: nothing was unread.
+    # The disclosure fields describe THESE rows: nothing was unread. UNREAD is
+    # ``_optional_int(cell) is None`` — the one predicate the probe's
+    # ``_census_unread`` and the summarizer use — not ``value is None``, which
+    # would call a non-numeric cell (``operators: true``) READ here while its
+    # ``cells.operators_unread`` companion calls it UNREAD.
     assert doc["per_question_source"] == "outcome.belief_activation"
     assert doc["per_question_unread"] == 0
     for key in ("points_with_ep", "points_unmeasured", "operators",
                 "factor_edges"):
         assert doc["cells"][f"{key}_unread"] == sum(
-            1 for r in rows if r.get(key) is None)
+            1 for r in rows if mp._optional_int(r.get(key)) is None)
 
     # ONE artifact-identity anchor: the sample this bundle was cut from.
     # Update together with the artifact, never on its own.
