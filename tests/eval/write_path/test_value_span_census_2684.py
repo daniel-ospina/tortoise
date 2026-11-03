@@ -775,7 +775,8 @@ def _resolved_turn_key(point: dict, edus: list[dict]) -> str:
     ADVISORY index; production overwrites it with ``_resolve_source_turn``'s
     answer before the point is committed (``extractor_v2.py:9056`` → ``:9063``),
     and ``_same_fact`` groups on the committed field
-    (``retrieval.py:3055``). Same defect class as §2.1's, one leg over —
+    (``retrieval.py:3051-3053`` — the ``_pkg_turn_key`` pair and its equality
+    test). Same defect class as §2.1's, one leg over —
     grouping by the advisory index counts pairs production never forms."""
     warnings: list[str] = []
     return _pkg_turn_key({"source_turn_id":
@@ -1231,6 +1232,9 @@ _CROSS_FILE_CITES: dict[tuple[str, int], tuple[str, str]] = {
     ("tortoise/retrieval.py", 3051):
         ("at = _pkg_turn_key(a)",
          "the same-source-turn route's entry"),
+    ("tortoise/retrieval.py", 3053):
+        ("if not (at and at == bt):",
+         "the same-turn GROUPING test `_same_fact` keys on"),
     ("tortoise/retrieval.py", 3055):
         ('qa = str(a.get("quote") or "")',
          "the COMMITTED quote read (`_same_fact`)"),

@@ -237,7 +237,8 @@ reachable **and decisive**:
 §2.1's rule, one leg over. Production overwrites the model's advisory index with
 the resolver's answer before the point is committed (`extractor_v2.py:9056` →
 `:9063`), and `_same_fact` groups on the committed field
-(`retrieval.py:3055`). Grouping by the advisory index instead gives
+(`retrieval.py:3051-3053` — the `_pkg_turn_key` pair and its equality test).
+Grouping by the advisory index instead gives
 `43 / 26 / 1 / 2` over all extracted points — a population no package holds, and
 this section's third population error. That reading is **published here and
 pinned** (`test_the_dedupe_leg_is_measured_on_BOTH_legs` asserts
