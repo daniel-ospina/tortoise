@@ -990,6 +990,23 @@ def _credential(**over) -> dict:
     return org
 
 
+def _counted_sdk(sdk, sdk_factory):
+    """The SDK `quota.enforce_org_limit` counts with, resolved the way IT does.
+
+    ⛔ `_check_org_limit` supplies the graph LAZILY (`sdk_factory=`, #4051): a
+    gate that returns before counting (`sessions` is unlimited by #4010, and
+    `documents` returns for an unlimited `max_points`) must not build a graph
+    handle to prove it — measured as 0 -> 1 `_make_sdk` per capture, 764 us
+    embedded, on the event loop, for a count that never ran. A stub that reads
+    only `sdk=` therefore sees `None` and asserts on a gate that never counted:
+    the assertion passes vacuously in one direction and reds in the other, but
+    in neither does it exercise the count. Resolve the factory here, exactly
+    where `quota` resolves it (see `_resolve_count_sdk`), so these pins measure
+    the graph the cap is actually computed on.
+    """
+    return sdk if sdk is not None else (sdk_factory() if sdk_factory else None)
+
+
 def test_the_quota_gate_counts_the_promoted_graph(monkeypatch):
     """The money gate. `_check_org_limit` must hand the counter the DEFAULT
     graph's SDK: counting the demoted graph admits an org past its real cap
@@ -1000,8 +1017,8 @@ def test_the_quota_gate_counts_the_promoted_graph(monkeypatch):
     seen: dict = {}
     monkeypatch.setattr(
         quota, "enforce_org_limit",
-        lambda limits, resource, sdk=None, **kw: seen.update(
-            {"resource": resource, "sdk": sdk}))
+        lambda limits, resource, sdk=None, sdk_factory=None, **kw: seen.update(
+            {"resource": resource, "sdk": _counted_sdk(sdk, sdk_factory)}))
     # A read here would also break the gate's fail-CLOSED contract: a read
     # failure would fall back to the demoted graph, i.e. count the wrong graph
     # silently. Prove there is no read at all.
@@ -1021,20 +1038,30 @@ def test_the_quota_gate_counts_the_promoted_graph(monkeypatch):
     assert opened == [] and seen["sdk"] is None
 
 
-def test_a_graph_bound_credential_keeps_the_historical_quota_count(monkeypatch):
+def test_a_graph_bound_credential_is_counted_on_the_graph_it_writes(monkeypatch):
     """A graph-bound credential's `graph_namespace` IS a custom graph's — the
-    default-graph question does not apply to it, and `_default_graph_name`
-    answering it would count a graph the credential never bound."""
+    default-graph question does not apply to it (`_default_graph_name` answers
+    `None`, so a PROMOTION can never leak into it).
+
+    ⛔ The count follows the BINDING, not the default (#4051 — merged here):
+    `_data_sdk` opens the custom graph, so a gate that counted the org's default
+    would be present and vacuous, which is the defect #4051's own suite pins.
+    This test previously asserted the historical `namespace=TEAM` count — the
+    pre-#4051 behaviour — and had to move with the merge; the #10180 property it
+    guards (promotion must not reach a graph-bound credential) is unchanged and
+    is the `_default_graph_name` assertion below."""
     import tortoise.quota as quota
 
     _hosted(monkeypatch)
     monkeypatch.setattr(
-        quota, "enforce_org_limit", lambda *a, **k: None)
+        quota, "enforce_org_limit",
+        lambda limits, resource, sdk=None, sdk_factory=None, **kw: _counted_sdk(
+            sdk, sdk_factory))
     opened = _capture_make_sdk(monkeypatch)
     ha._check_org_limit(
         _credential(graph_id=NEW_ID,
                     graph_namespace=f"org_{TEAM}_{NEW_ID}"), "points")
-    assert opened == [{"namespace": TEAM}]
+    assert opened == [{"graph_name": f"org_{TEAM}_{NEW_ID}"}]
     assert ha._default_graph_name(
         _credential(graph_id=NEW_ID,
                     graph_namespace=f"org_{TEAM}_{NEW_ID}")) is None
