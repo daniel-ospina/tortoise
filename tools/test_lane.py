@@ -278,6 +278,7 @@ if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
     )
 
 import argparse
+import contextlib
 import hashlib
 import json
 import os
@@ -2057,10 +2058,10 @@ def _live_lane_paths() -> set[str] | None:
             return
 
     for pid in pids:
-        try:
+        # A process that exited mid-scan has no `cwd` to read; that skip is the
+        # whole body, so `contextlib.suppress` states it (ruff SIM105).
+        with contextlib.suppress(OSError):
             keep(os.readlink(f"/proc/{pid}/cwd"))
-        except OSError:
-            pass
         try:
             raw = (Path(f"/proc/{pid}/cmdline").read_bytes()
                    .decode("utf-8", "replace").replace("\0", "\n"))
