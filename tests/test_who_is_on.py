@@ -3,7 +3,10 @@
 No network, no Docker, no FalkorDB. The GitHub surfaces are driven by a stub
 `gh` binary reading JSON fixtures from $GH_STUB_DIR; the LOCAL surfaces (the
 ones this tool exists for) use a real temp git repo with real branches and a
-real `git worktree add`. Git is isolated from the host (`GIT_CONFIG_GLOBAL` /
+real `git worktree add`. The PROCESS CENSUS — the third host input, which decides
+whether a local branch may be demoted — is served by a stub `ps` (see
+`_write_ps_stub`): read from the real table, the answer would depend on whether
+the machine running the suite happens to host live lanes (#10823). Git is isolated from the host (`GIT_CONFIG_GLOBAL` /
 `GIT_CONFIG_SYSTEM` -> /dev/null, HOME -> the temp dir) so a global
 `commit.gpgsign` or `init.defaultBranch` cannot change the result.
 
@@ -27,6 +30,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from datetime import UTC, datetime
 from pathlib import Path
@@ -107,11 +111,52 @@ cat "$f"
 """
 
 
-def _git_env(tmp: Path, gh_dir: Path | None = None) -> dict:
+def _write_ps_stub(directory: Path, rows: list[str]) -> Path:
+    """A `ps` stub serving the PROCESS TABLE from `rows` — one census, no host.
+
+    ⛔ THE PROCESS CENSUS IS A HOST INPUT, NOT A FIXTURE INPUT (#10823).
+    `collision_preflight` decides whether a local branch/worktree may be demoted
+    from `fleet_state.pi_processes()` (bare `ps` from `PATH`) and
+    `fleet_state.process_cwds()` (`/proc/<pid>/cwd`). On any box that HOSTS lanes
+    that table holds live `pi` processes — and one whose cwd is a REAPED worktree
+    reads back as `… (deleted)`, which `_usable_cwd` refuses, so the census is a
+    GAP and EVERY demotion fails closed. The answer then depends on what the host
+    happens to be running: measured 2026-11-03 on a cell, `pid 665680 ->
+    /home/cmux/tortoise/.worktrees/p1-10538 (deleted)` made
+    `test_an_empty_claim_is_listed_but_never_a_holder` red with
+    `'EMPTY-CLAIM' not found`, and the same failure reds `test (b)` in CI on the
+    fleet's own runners. Stubbing the table is the same PATH-shadowing technique
+    `failing_rebuild_path` already uses for `gh`/`cmux`; the fail-closed half is
+    pinned by
+    `test_a_live_pi_process_with_an_unreadable_cwd_is_never_an_empty_claim`,
+    which serves a REAL unreadable-cwd row through this same stub.
+
+    `fleet_state` makes two `ps` calls, so the stub answers both shapes: the
+    `command=` census and the `time=` table (`process_table`, read on a board
+    REBUILD — the `01 00:00:00` row is the harmless placeholder a fresh, no-pi
+    table needs).
+    """
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "rows").write_text("".join(f"{row}\n" for row in rows))
+    stub = directory / "ps"
+    stub.write_text(
+        "#!/usr/bin/env bash\n"
+        "# Stub process table — see the module docstring's HERMETICITY note.\n"
+        'case "$*" in\n'
+        '  *command=*) cat "$PS_STUB_ROWS" ;;\n'
+        '  *time=*)    printf \'0 0 00:00:00\\n\' ;;\n'
+        "  *)          exit 1 ;;\n"
+        "esac\n")
+    stub.chmod(stub.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    return stub
+
+
+def _git_env(tmp: Path, gh_dir: Path | None = None, ps_dir: Path | None = None) -> dict:
     """Host-independent env for child processes: no COLLISION_PREFLIGHT_* leak
     (a bad inherited value would change every invocation), no global git config
     (a global commit.gpgsign/init.defaultBranch must not affect the fixture),
-    HOME inside the temp dir."""
+    HOME inside the temp dir, and — when `ps_dir` is given — a `ps` stub ahead of
+    the real one on `PATH` so the process CENSUS cannot come from the host."""
     env = {k: v for k, v in os.environ.items()
            if not k.startswith("COLLISION_PREFLIGHT_")}
     if gh_dir is not None:
@@ -120,6 +165,9 @@ def _git_env(tmp: Path, gh_dir: Path | None = None) -> dict:
     env["GIT_CONFIG_SYSTEM"] = "/dev/null"
     env["GIT_TERMINAL_PROMPT"] = "0"
     env["HOME"] = str(tmp)
+    if ps_dir is not None:
+        env["PATH"] = f"{ps_dir}{os.pathsep}{env.get('PATH', '')}"
+        env["PS_STUB_ROWS"] = str(ps_dir / "rows")
     return env
 
 
@@ -127,6 +175,11 @@ class WhoIsOnTest(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory(prefix="who-is-on-")
         self.tmp = Path(self._tmp.name)
+        # FIRST — every `_git` call below goes through `_env()`, which puts this
+        # stub ahead of the real `ps`. The process table is HOST state and must
+        # never reach the answer (see `_write_ps_stub`).
+        self.ps_dir = self.tmp / "psstub"
+        _write_ps_stub(self.ps_dir, [f"1 0 {os.getuid()} /sbin/init"])
         self.repo = self.tmp / "repo"
         self.repo.mkdir()
         self._git(self.repo, "init", "-q", "-b", "main", "--template=")
@@ -240,8 +293,12 @@ class WhoIsOnTest(unittest.TestCase):
 
     def _env(self) -> dict:
         """Host-independent child env: no COLLISION_PREFLIGHT_* leak, no global
-        git config, HOME inside the temp dir."""
-        return _git_env(self.tmp, self.gh_dir)
+        git config, HOME inside the temp dir, a STUBBED process census."""
+        return _git_env(self.tmp, self.gh_dir, self.ps_dir)
+
+    def set_process_table(self, *rows: str) -> None:
+        """Replace the stubbed process table — `pid ppid uid command` rows."""
+        _write_ps_stub(self.ps_dir, list(rows))
 
     def _git(self, repo: Path, *args: str) -> None:
         subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True,
@@ -293,6 +350,25 @@ class WhoIsOnTest(unittest.TestCase):
             self._git(self.repo, "add", "-A")
             self._git(self.repo, "commit", "-qm", f"wip {i} on {name}")
         self._git(self.repo, "checkout", "-q", "main")
+
+    def reachable_origin(self) -> None:
+        """Point `origin` at a REAL bare repo in the fixture.
+
+        The default remote URL is a network-free `https://github.com/acme/…` that
+        resolves the SLUG but cannot be FETCHED, so the tool's `refs/claims/issue-N`
+        read fails (exit 128) and the row is NOT demoted for that reason — which
+        would make any demotion-family test pass vacuously on the wrong cause (found
+        exactly that way while proving the census test non-vacuous). A bare repo in
+        the temp dir makes the claim read answer "no claim", leaving the behaviour
+        under test as the only thing between the fixture and a demotion.
+        """
+        origin = self.tmp / "remotes" / "acme" / "example.git"
+        origin.parent.mkdir(parents=True, exist_ok=True)
+        subprocess.run(["git", "init", "-q", "--bare", str(origin)],
+                       check=True, capture_output=True, text=True, env=self._env())
+        self._git(self.repo, "remote", "set-url", "origin", str(origin))
+        self._git(self.repo, "update-ref", "refs/remotes/origin/main", "refs/heads/main")
+        self._git(self.repo, "push", "-q", "origin", "refs/heads/main:refs/heads/main")
 
     def remote_branch(self, name: str) -> None:
         """A branch whose remote-tracking ref exists — NOT local-only."""
@@ -399,13 +475,7 @@ exec {real} "$@"
         would hide the thing that needs cleaning up. So the answer is "nobody is a holder"
         WITH the empty branch named, in the weak-signal section.
         """
-        origin = self.tmp / "remotes" / "acme" / "example.git"
-        origin.parent.mkdir(parents=True, exist_ok=True)
-        subprocess.run(["git", "init", "-q", "--bare", str(origin)],
-                       check=True, capture_output=True, text=True, env=self._env())
-        self._git(self.repo, "remote", "set-url", "origin", str(origin))
-        self._git(self.repo, "update-ref", "refs/remotes/origin/main", "refs/heads/main")
-        self._git(self.repo, "push", "-q", "origin", "refs/heads/main:refs/heads/main")
+        self.reachable_origin()
         self.local_branch(f"fix/{ISSUE}-empty", ahead=0)
         rc, out = self.run_tool(ISSUE)
         self.assertEqual(rc, 0, out)
@@ -420,6 +490,58 @@ exec {real} "$@"
         self.assertEqual(rc_gate, 0, out_gate)
         self.assertIn("VERDICT: CLEAN", out_gate)
         self.assertIn("EMPTY-CLAIM", out_gate)
+
+    @unittest.skipUnless(Path("/proc/self/cwd").exists(),
+                         "the census fixture needs /proc (the kernel's own cwd read)")
+    def test_a_live_pi_process_with_an_unreadable_cwd_is_never_an_empty_claim(self):
+        """⛔ THE STUBBED CENSUS STILL FAILS CLOSED (#10823).
+
+        `setUp` serves a process table with no `pi` row so the demotion family
+        does not depend on what the host is running. That must not degrade into an
+        unconditional "nobody is there": a LIVE `pi` whose cwd cannot be resolved
+        (`fleet_state._usable_cwd` refuses the kernel's ` (deleted)` suffix — the
+        shape a lane leaves when its worktree is reaped under it) is a GAP, and a
+        gap means the read could not answer, so the branch is NOT demoted and NOT
+        reported as an empty claim. The row is served through the SAME stub, from a
+        real process whose directory is really gone.
+        """
+        self.reachable_origin()
+        self.local_branch(f"fix/{ISSUE}-census", ahead=0)
+        gone = self.tmp / "reaped-worktree"
+        gone.mkdir()
+        # A real process standing in a directory that is then REMOVED: the kernel
+        # appends ` (deleted)` to its `/proc/<pid>/cwd`, which is exactly the
+        # unreadable-cwd shape the census must not read as "no lane there".
+        proc = subprocess.Popen(
+            ["/bin/sh", "-c", 'cd "$0" && rmdir "$0" && exec sleep 120', str(gone)],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            self._wait_for_deleted_cwd(proc.pid)
+            self.set_process_table(f"{proc.pid} 1 {os.getuid()} pi")
+            rc, out = self.run_tool(ISSUE)
+        finally:
+            proc.terminate()
+            proc.wait(timeout=10)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("UNREADABLE", out)
+        self.assertIn("NOT treated as an empty claim", out)
+        self.assertNotIn("EMPTY-CLAIM", out)
+
+    @staticmethod
+    def _wait_for_deleted_cwd(pid: int, timeout: float = 10.0) -> None:
+        """Block until `/proc/<pid>/cwd` reads back with the ` (deleted)` suffix."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            try:
+                raw = os.readlink(f"/proc/{pid}/cwd")
+            except OSError:
+                raw = ""
+            if raw.endswith(" (deleted)"):
+                return
+            time.sleep(0.02)
+        raise AssertionError(
+            f"`/proc/{pid}/cwd` never read back as deleted — the fixture cannot "
+            "model a live `pi` whose cwd is unreadable, so this run proves nothing")
 
     def test_worktree_uncommitted_state_is_shown_for_local_holder(self):
         self.local_branch(f"fix/{ISSUE}-health")
