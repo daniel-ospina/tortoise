@@ -1130,6 +1130,11 @@ def test_emit_manifest_does_not_inherit_a_conftest_above_the_selection(tmp_path)
     rc = _skip_guard.emit_manifest([str(case / "test_ok.py")], "not track_b", out)
     assert rc == 0, rc
     assert out.exists(), "the collection completed — the manifest must be written"
+    # Kept as a SUBSTRING on purpose: that leaked ini also becomes `inipath`, so
+    # `rootpath` moves to `tmp_path` and the nodeid is `case/test_ok.py::test_ok`
+    # (`test_ok.py::test_ok` where no ini is found). The pin bounds CONFTEST
+    # loading only — it does not restore `rootpath` — so an exact-equality
+    # assertion here would be pinning the leak, not the fix.
     assert "test_ok.py::test_ok" in out.read_text(encoding="utf-8")
 
 
