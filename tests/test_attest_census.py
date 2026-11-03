@@ -172,10 +172,18 @@ def test_a_record_with_no_head_sha_is_unreadable_with_an_honest_reason():
 
 
 def test_empty_container_evidence_is_not_evidence():
-    for bogus in ([], {}, "null", "   "):
+    for bogus in ([], {}, "null", "   ", "None", "none", "n/a", "undefined"):
         r = ac.Record(path=Path("/x.json"), head_sha=LIVE, mint="fresh", verdict="clean", evidence=bogus)
         assert r.real_evidence is False, bogus
         assert ac.classify(LIVE, r, *RED)[0] != ac.RESTORE, bogus
+
+
+def test_evidence_must_be_artifact_shaped():
+    # A reference is `comment:<id>` / `review:<id>` / a URL ending in one.
+    for good in ("comment:6593768046", "review:123", "https://github.com/o/r/pull/1#issuecomment-9"):
+        r = ac.Record(path=Path("/x.json"), head_sha=LIVE, mint="fresh", verdict="clean", evidence=good)
+        assert r.real_evidence is True, good
+    assert ac.Record(path=Path("/x.json"), head_sha=LIVE, mint="fresh", verdict="clean", evidence="looks fine").real_evidence is False
 
 
 def test_a_foreign_repos_record_is_never_evidence(tmp_path):
@@ -207,21 +215,34 @@ def test_an_unreadable_registry_raises_instead_of_reporting_absence(tmp_path):
 
 
 def test_read_gate_picks_the_newest_attempt_by_id_not_by_order(monkeypatch):
-    """Requirement (c): newest attempt wins even when an older attempt is the green one.
+    """Requirement (c): newest by `id` — and the fixture must DISAGREE with list order.
 
-    A re-run ADDS an attempt, so the newest by `id` is the verdict. Reading the rollup — or
-    the first row — reports the stale red of a green commit (AGENTS.md §Reading verification
-    state).
+    The endpoint answers newest-first in production, so list order and id order agree there; a
+    fixture that also agrees cannot catch `runs[-1]`, which reads the OLDEST attempt (the rollup
+    error requirement (c) forbids). So the newest id here sits FIRST in the list.
     """
     payload = {
         "check_runs": [
-            {"id": 10, "name": ac.GATE_CHECK, "status": "completed", "conclusion": "success"},
             {"id": 99, "name": ac.GATE_CHECK, "status": "completed", "conclusion": "failure"},
-            {"id": 50, "name": "python-ci", "status": "completed", "conclusion": "failure"},
+            {"id": 10, "name": ac.GATE_CHECK, "status": "completed", "conclusion": "success"},
         ]
     }
     monkeypatch.setattr(ac, "gh_json", lambda args: payload)
     assert ac.read_gate("o/r", "a" * 40) == ("completed", "failure")
+
+
+def test_read_gate_ignores_another_check_that_has_the_highest_id(monkeypatch):
+    """The local `name ==` filter is load-bearing: check-run ids are repo-global and monotonic,
+    so if the `check_name` query is ever not honoured the newest run of ANY check would become
+    the gate verdict (a false OK, or a false RESTORE)."""
+    payload = {
+        "check_runs": [
+            {"id": 50, "name": "python-ci", "status": "completed", "conclusion": "failure"},
+            {"id": 10, "name": ac.GATE_CHECK, "status": "completed", "conclusion": "success"},
+        ]
+    }
+    monkeypatch.setattr(ac, "gh_json", lambda args: payload)
+    assert ac.read_gate("o/r", "a" * 40) == ("completed", "success")
 
 
 def test_no_gate_run_at_all_reports_absent_not_green(monkeypatch):
@@ -240,6 +261,56 @@ def test_main_returns_2_for_a_row_it_calls_unreadable(monkeypatch, tmp_path):
         ac, "gh_json", lambda args: [{"number": 1, "headRefOid": "short", "headRefName": "b", "title": "t"}]
     )
     assert ac.main(["--reviews-dir", str(tmp_path), "--no-gate", "--out", str(tmp_path / "o.md")]) == 2
+
+
+def test_main_returns_2_on_a_CORRUPT_record_row(monkeypatch, tmp_path):
+    """Pins the ONE rc-2 increment site: a corrupt record is UNREADABLE ⇒ rc 2.
+
+    Cycle 2 measured that deleting the generic increment left the suite green, because the
+    bad-head test incremented on its own path — so a corrupt record returned rc 0 while the
+    report printed UNREADABLE.
+    """
+    (tmp_path / "daniel-ospina-tortoise-1.json").write_text("{not json")
+    monkeypatch.setattr(
+        ac, "gh_json", lambda args: [{"number": 1, "headRefOid": LIVE, "headRefName": "b", "title": "t"}]
+    )
+    assert ac.main(["--reviews-dir", str(tmp_path), "--no-gate", "--out", str(tmp_path / "o.md")]) == 2
+
+
+def test_main_returns_2_when_the_check_run_read_fails(monkeypatch, tmp_path):
+    def boom(args):
+        raise RuntimeError("rate limited")
+
+    monkeypatch.setattr(ac, "gh_json", boom)
+    assert ac.main(["--reviews-dir", str(tmp_path), "--out", str(tmp_path / "o.md")]) == 2
+
+
+def test_a_directory_named_like_a_record_is_unreadable_not_a_crash(tmp_path):
+    """An unreadable record (perm denied, dangling link, a DIRECTORY named *.json) must not
+    raise out of main — that would be rc 1, against the 0/2-never-1 contract."""
+    (tmp_path / "daniel-ospina-tortoise-9.json").mkdir()
+    got = ac.load_record(tmp_path, "daniel-ospina", "tortoise", 9)
+    assert got is not None and got.error.startswith("unreadable:")
+
+
+def test_a_record_naming_another_pr_is_never_evidence(tmp_path):
+    (tmp_path / "daniel-ospina-tortoise-7.json").write_text(
+        '{"repo":"daniel-ospina/tortoise","pr":8,"head_sha":"' + LIVE + '","mint":"fresh",'
+        '"verdict":"clean","evidence":"comment:1"}'
+    )
+    got = ac.load_record(tmp_path, "daniel-ospina", "tortoise", 7)
+    assert got is not None and "foreign record" in got.error
+    assert ac.classify(LIVE, got, *RED)[0] == ac.UNREADABLE
+
+
+def test_no_gate_run_does_not_assert_a_github_absence_it_never_read(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        ac, "gh_json", lambda args: [{"number": 1, "headRefOid": LIVE, "headRefName": "b", "title": "t"}]
+    )
+    assert ac.main(["--reviews-dir", str(tmp_path), "--no-gate", "--out", str(tmp_path / "o.md")]) == 0
+    text = (tmp_path / "o.md").read_text()
+    assert "published-marker surface was NOT" in text
+    assert "and no head-bound published marker" not in text
 
 
 def test_main_returns_2_and_writes_no_artifact_when_gh_answers_non_json(monkeypatch, tmp_path):

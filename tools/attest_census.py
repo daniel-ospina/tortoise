@@ -78,6 +78,11 @@ GATE_CHECK = "ai-review-gate"
 # of vocabulary accident.
 CLEAN_VERDICTS = {"clean", "clean-micro", "clean-low"}
 
+# Producers stringify their empties — `"null"`, `"None"`, `"undefined"`. None of these is an
+# artifact reference, and each one, if accepted, would let an evidence-less record reach RESTORE
+# (measured by review cycle 2: `"None"`/`"none"`/`"n/a"`/`"undefined"` all returned RESTORE).
+_NULLISH_EVIDENCE = {"", "null", "none", "n/a", "na", "undefined", "false"}
+
 RESTORE = "RESTORE"
 RE_REVIEW = "RE-REVIEW"
 NOTHING = "NOTHING-TO-RESTORE"
@@ -122,8 +127,9 @@ class Record:
             bool(self.verdict)
             and self.verdict in CLEAN_VERDICTS
             and isinstance(self.evidence, str)
-            and self.evidence.strip() != ""
-            and self.evidence.strip().lower() != "null"
+            and self.evidence.strip().lower() not in _NULLISH_EVIDENCE
+            # an artifact reference is `<kind>:<id>` or a URL to one (`https://…#issuecomment-…`)
+            and ":" in self.evidence
             and self.mint != "carried"
         )
 
@@ -301,6 +307,9 @@ def read_gate(repo: str, head: str) -> tuple[str, str]:
     runs = [r for r in payload.get("check_runs", []) if r.get("name") == GATE_CHECK]
     if not runs:
         return "", ""
+    # ⛔ NEWEST BY `id`, never by list position: the endpoint answers newest-first, so
+    # `runs[-1]` would read the OLDEST attempt — the rollup error requirement (c) forbids
+    # (a re-run ADDS an attempt; the oldest may be a stale `cancelled`/`failure`).
     newest = max(runs, key=lambda r: r.get("id", 0))
     return str(newest.get("status") or ""), str(newest.get("conclusion") or "")
 
@@ -407,8 +416,15 @@ def main(argv: list[str] | None = None) -> int:
     rows: list[Row] = []
     unreadable = 0
     for pr in prs:
+        if not isinstance(pr.get("number"), int):
+            print(f"attest_census: `gh pr list` row has no integer number ({pr!r}) — refusing", file=sys.stderr)
+            return 2
         head = str(pr.get("headRefOid") or "")
-        rec = load_record(reviews_dir, owner, name, int(pr["number"]))
+        try:
+            rec = load_record(reviews_dir, owner, name, int(pr["number"]))
+        except RegistryUnreadable as exc:  # registry became unlistable mid-run (race)
+            print(f"attest_census: {exc} — refusing to report absence", file=sys.stderr)
+            return 2
         row = Row(
             pr=int(pr["number"]),
             head=head,
@@ -418,10 +434,17 @@ def main(argv: list[str] | None = None) -> int:
         )
         if not SHA_RE.match(head):
             row.outcome, row.why = UNREADABLE, f"PR head {head!r} is not a 40-char sha"
-            unreadable += 1
         elif args.no_gate:
             row.outcome, row.why = classify(head, rec, "", "", gate_known=False)
-            row.why += " (gate NOT read: --no-gate)"
+            if row.outcome == NOTHING:
+                # ⛔ Do not assert a GitHub-side absence this run never read: the marker
+                # surface is exactly what `--no-gate` skipped (measured by review cycle 2).
+                row.why = (
+                    "no record on this box at any head; the published-marker surface was NOT "
+                    "read (--no-gate), so this is not a statement about GitHub"
+                )
+            else:
+                row.why += " (gate NOT read: --no-gate)"
         else:
             try:
                 row.gate_status, row.gate_conclusion = read_gate(args.repo, head)
@@ -430,11 +453,14 @@ def main(argv: list[str] | None = None) -> int:
                 row.outcome, row.why = UNREADABLE, f"check-run read failed: {exc}"
         if row.gate_checked:
             row.outcome, row.why = classify(head, rec, row.gate_status, row.gate_conclusion)
-        # A row the tool itself calls UNREADABLE is a surface it could not read, so the
-        # run must not report 0 ("complete census") while displaying one.
+        # ⛔ ONE increment site. A row the tool itself calls UNREADABLE is a surface it could
+        # not read, so the run must not report 0 ("complete census") while displaying one.
+        # (A second increment in the bad-head branch made the rc-2 test pass even when this
+        # line was deleted — measured by review cycle 2.)
         if row.outcome == UNREADABLE:
             unreadable += 1
-        if rec is not None and rec.error:
+        if rec is not None and rec.error and row.outcome != UNREADABLE:
+            # UNREADABLE's `why` already carries the record's reason — do not print it twice.
             row.notes.append(f"record {rec.path.name}: {rec.error}")
         if rec is not None and rec.head_sha and len(rec.head_sha) != 40:
             row.notes.append(f"record head_sha {rec.head_sha!r} is not a 40-char sha — not bindable")
