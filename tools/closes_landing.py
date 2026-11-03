@@ -339,35 +339,36 @@ def _is_closer(rest: str, opener: tuple[str, int], content_col: int = 0) -> bool
 
 @dataclass(frozen=True)
 class _Fence:
-    """An OPEN fenced block: the four things its container needs to end it.
+    """An OPEN fenced block: the things its container needs to end it.
 
     * `prefix` — the blockquote prefix it opened under (the quote ending ends it);
-    * `item_col` — the enclosing LIST ITEM's content column (0 when none is
-      open), compared against a later line's indent to end the block. It is the
-      ITEM's column, never the fence run's own indent: §4.5 ends the block at
-      "the end of the containing block", and an item's content column is where
-      that block starts. Using the run's indent instead ended a fence on a line
-      that was still inside the item, so the block's content read as prose — a
-      `lands` (#10634 review P1);
-    * `close_base` — the CONTAINING BLOCK's content column inside `rest`, which
-      is what a closing fence is measured from (§4.5 allows a closer up to three
-      spaces past it, and its indent need not match the opener's); it is
-      `item_col` restated in `rest` coordinates;
+    * `close_base` — the CONTAINING BLOCK's content column in `rest` coordinates
+      (after the blockquote prefix). A dedent is a line whose residual indent
+      falls below it, and a closing fence is measured from it (§4.5 allows a
+      closer up to three spaces past the containing block's content column, and
+      its indent need not match the opener's). It is the ITEM's content column
+      when one is open — never the fence run's own indent: §4.5 ends the block at
+      "the end of the containing block", and an item's content line may sit BELOW
+      the opener's column and still be inside the block;
     * `in_list` — whether a list item was open, so a dedent can end the block.
+
+    There is deliberately no raw-coordinate item column: two review rounds
+    carried one alongside this field and ended up comparing a `rest` indent with
+    a raw column (and then the reverse), each time buying a false `lands`.
+    `container_col` derives the raw column from these two fields, so there is
+    only ONE number in each space and no way to mix them.
     """
 
     opener: tuple[str, int]
     prefix: str
-    item_col: int
     close_base: int
     in_list: bool
 
     @property
     def container_col(self) -> int:
         """The containing block's content column in RAW coordinates — where a
-        line's content has to start to still be inside this block. It is
-        `len(prefix) + close_base`, which is `item_col` for a list fence and the
-        quote's own width for a fence that is only inside a blockquote."""
+        line's content has to start to still be inside this block. A closer's
+        "up to three spaces" (§4.5) is measured from here."""
         return len(self.prefix) + self.close_base
 
 
@@ -448,13 +449,12 @@ def _fence_candidate(prefix: str, rest: str, indent: int,
         opener = _fence_open(rest[base:])
         if opener is None:
             return None
-        return _Fence(opener, prefix, len(prefix) + base, base, True)
+        return _Fence(opener, prefix, base, True)
     content_col = list_cols[-1] if list_cols else 0
     opener = _fence_open(rest, content_col)
     if opener is None:
         return None
-    return _Fence(opener, prefix, content_col,
-                  max(0, content_col - len(prefix)), bool(list_cols))
+    return _Fence(opener, prefix, max(0, content_col - len(prefix)), bool(list_cols))
 
 
 def strip_code(body: str, strict: bool = False) -> str:
@@ -512,8 +512,8 @@ def strip_code(body: str, strict: bool = False) -> str:
         line = raw.expandtabs(4)
         indent = len(line) - len(line.lstrip(" "))
         prefix, rest = _split_prefix(line)
-        # The line's indent AFTER its blockquote prefix: `item_col`/`close_base`
-        # are measured there, so a dedent must be too (see the fence branch).
+        # The line's indent AFTER its blockquote prefix: `close_base` is measured
+        # there, which is the space the strict arm below reports in.
         rest_indent = len(rest) - len(rest.lstrip(" "))
         if fence is not None:
             # The container can END the block: the quote it lived in closed, or
