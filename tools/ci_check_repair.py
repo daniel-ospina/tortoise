@@ -345,6 +345,26 @@ _sleep = time.sleep
 #: generic `'failed'`; the direct rerun is the remaining primitive.
 _CANCEL_NOT_QUEUED_RE = re.compile(r"has not been queued yet", re.I)
 
+#: ⛔ A 403 ON THE CANCEL IS *NOT* A DEFERRAL — it is a CREDENTIAL refusal (#10763).
+#: Restored here by the batch-9 fold: #10763 landed on `main` and #10641's branch predates
+#: it, so taking the branch's side silently DROPPED this state and restored the no-op gate
+#: it exists to close. `_cancel`'s other skips are all TRANSIENT and deferring them can
+#: succeed: a spent settle budget ('no_budget') refills, an observation that missed
+#: ('unsettled') or could not be read ('unreadable') is re-attempted, and a detail-less
+#: POST failure ('refused') may be a blip. A permission failure cannot be deferred into
+#: success — the token lacks `actions:write`, and no window grants it. Folding it into
+#: 'refused' (and so into `_rerun`'s 'deferred') made the caller stamp `deferred: True`,
+#: which the escalation predicate EXCLUDES — so the tool exited 0 while the required check
+#: was still absent, indefinitely. It gets its own TERMINAL state instead, which escalates.
+#:
+#: The wording is GitHub's own for the permission class. A bare `HTTP 403` is deliberately
+#: NOT the anchor — the secondary rate limiter answers 403 too, so a rate-limited 403 is
+#: excluded here and stays a deferral.
+_CANCEL_DENIED_RE = re.compile(
+    r"resource not accessible by (?:integration|app)"
+    r"|must have (?:admin|write) (?:rights|access)"
+    r"|\bforbidden\b", re.I)
+
 #: How long to wait for a CANCELLED run to settle before re-running it. A
 #: non-completed run cannot be re-run in place (see `_cancel`), so the repair is
 #: cancel-then-rerun and the API needs a moment to mark the run completed.
@@ -1151,6 +1171,12 @@ def _cancel(repo: str, run: Run) -> str:
             # The orphan shape: nothing can cancel it, so a direct rerun is the only
             # primitive left. Reported distinctly, never as a generic failure.
             return "not_queued"
+        if _CANCEL_DENIED_RE.search(detail) and not _RATE_LIMIT_RE.search(detail):
+            # PERMANENT (#10763). A permission refusal is not a window that did not
+            # happen — it is a window that never can. Kept out of 'refused' precisely
+            # because 'refused' is a SKIP (see the predicate at the other end of this
+            # chain).
+            return "denied"
         return "refused"
     started = time.time()
     try:
@@ -1250,6 +1276,10 @@ def _rerun(repo: str, run: Run, number: int, expected_head: str = "") -> str:
             state = "rerun_not_queued"
         elif cancelled == "moved":
             return "target_moved"
+        elif cancelled == "denied":
+            # NOT a deferral (#10763) — propagated so the caller escalates instead of
+            # promising a window that cannot ever succeed.
+            return "denied"
         elif cancelled == "cancel_unobserved":
             # THE CANCEL LANDED; THE RERUN DID NOT. Reached ONLY after `_cancel`'s POST
             # was accepted, so the run is genuinely cancelled with no replacement
@@ -1603,6 +1633,14 @@ def report(plans: list[PrPlan], apply: bool, trigger_ok: bool, repo: str,
                                          # perform".
                                          **({"deferred": True}
                                             if state == "deferred" else {}),
+                                         # ⛔ THE OPPOSITE CASE, AND NAMED SO IT CANNOT
+                                         # BE READ AS A DEFERRAL (#10763): the cancel was
+                                         # refused for PERMISSION, which no window
+                                         # repairs. It is given NO exemption key, so it
+                                         # reaches the escalation predicate as a real
+                                         # failure.
+                                         **({"credential_denied": True}
+                                            if state == "denied" else {}),
                                          # THE CANCEL LANDED, THE RERUN DID NOT: the
                                          # POST was accepted and the settle was never
                                          # observed, so the run IS cancelled with no

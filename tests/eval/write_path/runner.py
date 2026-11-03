@@ -1732,6 +1732,27 @@ def _validate_semantic_block(semantic: object, receipt: dict) -> list[str]:
 
 
 def _main(argv: list[str] | None = None) -> int:
+    # ⛔ #4282 RETIRED the `run` verb together with `run_benchmark` /
+    # `grade_session`, but five documents still instruct an operator to type it
+    # (`tests/eval/write_path/README.md` ×3, `docs/evidence/8503/README.md`,
+    # `docs/scoping/2026-09-07-2514-operator-corpus.md`,
+    # `tools/run-with-eval-keys.sh`'s usage header) — a doc line and a deleted
+    # subparser cannot see each other. The check is BEFORE argparse on purpose:
+    # the documented invocations carry flags this CLI no longer declares
+    # (`--out`, `--no-ep-pass`, `--sessions`), and argparse would answer with an
+    # unknown-flag error that reads like a typo instead of a removal.
+    raw = list(sys.argv[1:] if argv is None else argv)
+    if raw and raw[0] == "run":
+        print(
+            "the `run` verb is RETIRED (#4282): `run_benchmark` and "
+            "`grade_session`\nwere deleted with the 26 surplus SDK methods, so "
+            "this runner no longer\nscores a write-path run. `bless`, "
+            "`validate-receipt`, `calibrate` and\n`prescreen-audit` remain and "
+            "operate on an EXISTING receipt.\nDocuments that still show "
+            "`runner run` are stale against this tree.",
+            file=sys.stderr)
+        return EXIT_RUNNER_ERROR
+
     parser = argparse.ArgumentParser(
         prog="write-path-runner",
         description="W2-b write-path benchmark runner (epic #2080).",

@@ -3262,8 +3262,18 @@ def _registry_with_bound_and_wide_keys(tmp_path, monkeypatch):
     try:
         org = reg.org_create("org-10180-bound")
         org_id = org["id"]
-        reg.org_update(org_id, max_points=10_000, max_graphs=10,
-                       max_sessions=10_000)
+        # ⛔ #4282 DELETED `TortoiseSDK.org_update` (150 → 124 public methods), so
+        # this fixture writes the limits through the registry store that method
+        # delegated to — its own body WAS this `MATCH (t:Team {id:$id}) SET t +=
+        # $fields` (plus an audit row this fixture does not need); `org_create`
+        # below is the only surviving caller, and the limits still gate the
+        # doors this test drives.
+        reg._get_registry().query(
+            "MATCH (t:Team {id:$id}) SET t += $fields",
+            params={"id": org_id,
+                    "fields": {"max_points": 10_000, "max_graphs": 10,
+                               "max_sessions": 10_000}},
+        )
         graph = reg._graph_create(org_id, "graph-10180-bound", kind="custom")
         bound = reg.apikey_create(org_id, "bound-10180",
                                   graph_id=graph["graph_id"],

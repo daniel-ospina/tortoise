@@ -891,10 +891,13 @@ def test_no_redirect_stems_registry_exact():
         # reding on the addition is the pin working as designed, so the stem is
         # DECLARED here rather than exempted.
         "test_10122_point_name_not_indexed",
-        # #8488 scope 1: the context-enriched turn-embedding write path — the
-        # sibling of the lexical arm above, same three-way mirror (carve_out,
-        # TEST_NO_REDIRECT_STEMS, and this pin).
-        "test_context_enrich_8488",
+        # ⛔ `test_context_enrich_8488` is GONE from all three homes at once, not just
+        # from two: #10631's file drove `sdk.capture_session(...)` on 22 call sites, a
+        # door #4282 deletes, so the batch-9 fold removed the file, both
+        # `config/ci-surfaces.yml` registrations and its `TEST_NO_REDIRECT_STEMS`
+        # entry. THIS pin was the third home and the first two repairs left it stale —
+        # `frozenset(TEST_NO_REDIRECT_STEMS)` came out 56 against an `expected` of 57.
+        # The mirror is what caught it; do not re-add the stem without a file.
         # #9209: the write handle's NON-CYPHER verbs. The suite's
         # `sdk_with_journal` fixture asserts `proj._is_embedded` and counts
         # real nodes on that embedded projection, and the module carries

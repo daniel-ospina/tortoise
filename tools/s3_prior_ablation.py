@@ -614,7 +614,19 @@ def run_arm(arm: str, graph: str, sessions: list[str], census, golds: dict[str, 
             witness.clear()
             calls["real_session"] = 0
             calls["intercepted"] = 0
-            receipt = sdk.capture_session(_turns(sid), session_id=sid)
+            # ⛔ #4282 DELETED `TortoiseSDK.capture_session` (150 → 124 public methods),
+            # and this probe drove that exact wrapper. The surviving composite needs an
+            # ASGI org+slot context (`hosted_api._capture_session_impl`), and the two
+            # surviving SDK halves (`_extract_session_v2` / `_commit_session_v2`) are not
+            # the same call — so re-wiring this arm is a DECISION about what the E1 pair
+            # measures, not a rename, and it belongs to the lane that owns the arm.
+            # Until then it REFUSES BY NAME instead of dying on a bare AttributeError
+            # (the shape #4282 left the three other probes: an explicit `#4282` refusal).
+            raise SystemExit(
+                "tools/s3_prior_ablation.py cannot run: #4282 deleted the SDK door this\n"
+                "arm drove (`TortoiseSDK.capture_session`). Re-point the arm at a\n"
+                "surviving capture path (or record why the arm is retired) before\n"
+                "trusting any E1 before/after number this probe prints.")
             stats = receipt.get("stats") or {}
             # ⚠️ THE RECEIPT CARRIES NO `search` BLOCK ON THIS LANE. `capture_session` ->
             # `_extract_session_v2` never surfaces S3's report onto the meta it returns (only
