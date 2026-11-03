@@ -1031,6 +1031,16 @@ class TestTheMarkerSiteRegisterIsComplete:
     The list is derived from the tree (an AST scan), never restated here, so
     this test cannot itself go stale: adding a marker site without adding it to
     the register reds, which is exactly what the docstring's ⛔ rule promises.
+
+    ⚠️ "Derived from the tree" includes the NAME the marker is called under.
+    The tree already imports `truncation.mark_truncation` under three local
+    aliases besides `_mark_truncation` (`_seed_mark` at ``sdk.py:35495``,
+    `_lost_mark` at ``:35698``, `_lost_mark2` at ``:35723``), so a filter that
+    hard-codes the two names it happens to recognise sees 3 of the 6 call sites
+    and would leave the pin green while a NEW site was written in the aliasing
+    pattern the tree already uses three times. The name set is therefore read
+    off each module's own `ImportFrom` nodes (:meth:`_marker_aliases`), which is
+    the only form a hard-coded list cannot keep up with.
     """
 
     @staticmethod
@@ -1041,7 +1051,30 @@ class TestTheMarkerSiteRegisterIsComplete:
         return truncation.__doc__
 
     @staticmethod
-    def _call_sites() -> set[str]:
+    def _marker_aliases(tree) -> set[str]:
+        """Every local name that binds `truncation.mark_truncation` in `tree`.
+
+        Collected from the module's own `ImportFrom` nodes whose module ends in
+        ``truncation`` — ``from tortoise.truncation import mark_truncation``,
+        ``from .truncation import mark_truncation as _seed_mark`` and any other
+        alias a future site invents — instead of a hard-coded name list.
+        """
+        import ast
+
+        names = {"mark_truncation"}
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.ImportFrom):
+                continue
+            module = node.module or ""
+            if module.split(".")[-1] != "truncation":
+                continue
+            for alias in node.names:
+                if alias.name == "mark_truncation":
+                    names.add(alias.asname or alias.name)
+        return names
+
+    @classmethod
+    def _call_sites(cls, root=None) -> set[str]:
         """`<module>::<outermost enclosing function>` for every call site.
 
         The OUTERMOST def, not the innermost: a site inside a helper closure
@@ -1050,11 +1083,14 @@ class TestTheMarkerSiteRegisterIsComplete:
         import ast
         from pathlib import Path
 
-        root = Path(__file__).resolve().parent.parent / "tortoise"
+        if root is None:
+            root = Path(__file__).resolve().parent.parent / "tortoise"
+        root = Path(root)
         assert root.is_dir(), f"the package root is missing: {root}"
         sites: set[str] = set()
         for path in sorted(root.rglob("*.py")):
             tree = ast.parse(path.read_text(encoding="utf-8"))
+            names = cls._marker_aliases(tree)
             parents = {child: node for node in ast.walk(tree)
                        for child in ast.iter_child_nodes(node)}
             for node in ast.walk(tree):
@@ -1063,7 +1099,7 @@ class TestTheMarkerSiteRegisterIsComplete:
                 func = node.func
                 name = (func.attr if isinstance(func, ast.Attribute)
                         else getattr(func, "id", ""))
-                if name not in ("mark_truncation", "_mark_truncation"):
+                if name not in names:
                     continue
                 owner = ""
                 cursor = node
@@ -1075,6 +1111,47 @@ class TestTheMarkerSiteRegisterIsComplete:
                 sites.add(f"{path.relative_to(root.parent).as_posix()}"
                           f"::{owner}")
         return sites
+
+    def test_the_scan_reads_the_alias_set_off_the_tree(self):
+        """Non-vacuity: the three aliases the tree ALREADY uses are collected.
+
+        Pre-fix the scan matched two hard-coded names, so every one of these
+        was invisible to it — the mount point for a site that would have gone
+        unpinned while the class docstring promised it could not.
+        """
+        import ast
+        from pathlib import Path
+
+        root = Path(__file__).resolve().parent.parent / "tortoise"
+        aliases: set[str] = set()
+        for path in sorted(root.rglob("*.py")):
+            aliases |= self._marker_aliases(
+                ast.parse(path.read_text(encoding="utf-8")))
+        assert {"_seed_mark", "_lost_mark", "_lost_mark2",
+                "_mark_truncation"} <= aliases, aliases
+
+    def test_a_new_site_under_an_invented_alias_is_seen(self, tmp_path):
+        """A marker site in a NEW function under a THIRD alias name reds.
+
+        This is the exact escape the two-name filter allowed: `as _m` is the
+        pattern the tree already uses three times, so it is what the next site
+        will look like. Built in a throwaway tree so the assertion is about the
+        SCAN, not about a site this repo happens to have today.
+        """
+        pkg = tmp_path / "tortoise"
+        pkg.mkdir()
+        (pkg / "new_marker_site.py").write_text(
+            "from tortoise.truncation import mark_truncation as _m\n"
+            "\n"
+            "\n"
+            "def a_new_bounded_read(sink, rows, limit):\n"
+            "    _m(sink, returned=len(rows[:limit]), candidates=len(rows))\n"
+            "    return rows[:limit]\n",
+            encoding="utf-8")
+
+        assert self._call_sites(pkg) == {
+            "tortoise/new_marker_site.py::a_new_bounded_read"
+        }
 
     def test_the_scan_finds_the_three_sites_the_register_names(self):
         """Guard against a vacuous scan: the AST really does see all three."""
