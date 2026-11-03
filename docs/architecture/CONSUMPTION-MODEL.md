@@ -186,9 +186,13 @@ private-beta users, after the storage architecture + extractor + MCP deployments
 
 ---
 
-## 5 · What happens at the boundary — and why nothing refuses
+## 5 · What happens at the boundary — and why nothing refuses on a consumption dimension
 
-**The recorded decisions leave exactly one shape available, and it is not a hard cap.**
+**For the two dimensions this document defines, the recorded decisions leave exactly one shape available, and it is
+not a hard cap.** ⚠️ That is a statement about **these** dimensions only. The *node stock* is still a hard cap on
+`main`, on **every** tier and on the **capture** door (`max_graph_nodes` → `max_points` → a `402` before the write),
+which is the model defect `#4495` records and which §8 names as "still the enforced refusal on `main`". This
+section describes the boundary a bytes/tokens allowance must have; it does not describe what `main` enforces today.
 
 | recorded decision | what it forbids |
 |---|---|
@@ -203,7 +207,7 @@ customer's data.** The only behaviours at the boundary are the three below, and 
 | at the boundary | behaviour | who it protects | what the customer sees |
 |---|---|---|---|
 | allowance reached, credits available | **proceed and draw down credits**; the consumption is recorded against the overage line | the customer's work — never refused | the usage figure, the overage line, and a warning before the credits run out |
-| allowance reached, **no** credits | **proceed**, and surface a *degraded-but-complete* state: the customer is over their allowance and is told so on the next read of their usage, with the purchase path | the customer's work (we do not stop them), and our revenue (they cannot silently grow) | a `402`-**class** signal only on the *non-consumption* doors they can already not use — never on capture or commit |
+| allowance reached, **no** credits | **proceed**, and surface a *degraded-but-complete* state: the customer is over their allowance and is told so on the next read of their usage, with the purchase path | the customer's work (we do not stop them), and our revenue (they cannot silently grow) | a `402`-**class** signal only on the *non-consumption* doors they can already not use — never on capture or commit **for a consumption dimension**. The node stock refuses both today (§8); that is the constraint these two dimensions must *replace*, not a behaviour this table licenses |
 | a **safety** bound, not a billing bound — a per-org rate or transient byte throttle | **429 + `Retry-After`**, self-healing in ≤ 60 s | the shared instance and every *other* tenant (noisy neighbour) | a `Retry-After` and a limit/scope/value body |
 
 **The third row is the important distinction and the one lanes keep confusing.** A **throttle delays; it never
@@ -213,14 +217,24 @@ classified as *safety*, not *billing*, precisely so that adding one is never mis
 never-refusal ruling. **A per-tenant rate is not a consumption cap**, and this document does not raise or lower
 either existing number.
 
-**The one carve-out is `free` and `anon`, and it is recorded, not assumed.** `#4815`'s ruling is scoped to paid
-tiers, and it keeps the two unpaid tiers at `overage: false` — which, on `main` today, is a **refusal at the cap**
-(`max_graph_nodes`, enforced at `tortoise/billing.py:1178`; §4's `STORAGE overage` / `EXTRACTION overage` cells say
-`none` for exactly this reason). This document neither reverses that carve-out nor relies on it: the three
-behaviours above describe a tier whose allowance can be **exceeded**; a `free`/`anon` tenant's allowance is instead
-**reached and refused**, which is what `product/pricing.json` (`owner_confirmed 2026-08-07`) still says and what
-`#4815` explicitly preserves. Whether the unpaid tiers keep a refusal once the two new dimensions are enforced is
-the owner's call in the measurement pass (§4), and until he rules it stays as recorded.
+**The one carve-out is `free` and `anon` in the PRICING table — and it is recorded, not assumed.** `#4815`'s ruling is
+scoped to paid tiers, and it keeps the two unpaid tiers at `overage: false` — which, on `main` today, is a **refusal
+at the cap** (`max_graph_nodes`, enforced at `tortoise/billing.py:1178`; §4's `STORAGE overage` / `EXTRACTION
+overage` cells say `none` for exactly this reason). This document neither reverses that carve-out nor relies on it: the
+three behaviours above describe a tier whose allowance can be **exceeded**; a `free`/`anon` tenant's allowance is
+instead **reached and refused**, which is what `product/pricing.json` (`owner_confirmed 2026-08-07`) still says and
+what `#4815` explicitly preserves. Whether the unpaid tiers keep a refusal once the two new dimensions are enforced
+is the owner's call in the measurement pass (§4), and until he rules it stays as recorded.
+
+**⚠️ And the carve-out is *wider* than `free`/`anon` in the code, which is the defect, not a second decision.**
+`max_points` is set from `max_graph_nodes` for **every** tier (`apply_limits`, `tortoise/billing.py:702`), so the
+node stock refuses a **paying** tenant too, on capture (`tortoise/hosted_api.py:16033-16076` returns `402` when
+`count + est > max_points`, with no overage bypass) and on the points-gated write doors (`_check_org_limit(org,
+"points")` — `:10639`, `:10701`, `:10740`, and every other points door, each via `enforce_org_limit`). `#4815` itself says so: *"`max_graph_nodes` is a stock enforced as a write
+refusal (402) … the node cap binds before the ops allowance, making ~93% of free's and **~83% of solo's** monthly
+allowance unusable"* — solo is a paid tier. That is `#4495`'s **model defect** (a stock cap the flow cannot reach),
+and it is precisely what the two dimensions in §2 replace once the owner measures. It is not a licence for this
+document to add a refusal, and it is not evidence that never-refusal is scoped to `free`/`anon`.
 
 ⛔ **There is no row in this table that refuses a capture, a commit, a point, or a read because of a consumed
 dimension on a tier with overage on.** The `free`/`anon` refusal-at-the-cap above is the single recorded exception,
@@ -285,6 +299,7 @@ This document **implements** these; it reverses none of them. Run first, before 
 | extraction usage is billed in **tokens**; overage **purchased with prepaid credits** | owner 2026-09-26, `EXTRACTOR-V4-ARCHITECTURE.md` §0 (carries `OVERRIDES:`) | **obeys** — §2 EXTRACTION dimension; §5 behaviour |
 | storage overage is **purchase, not refusal** | owner 2026-09-26, `STORAGE-ARCHITECTURE.md` §0 | **obeys** — §5 forbids a refusal at the allowance edge |
 | tiers price **features**, never refusal | owner 2026-09-22, `#4815` (**paid** tiers; `free`/`anon` keep `overage: false`) | **obeys** — §5 carries the carve-out verbatim and adds no refusal of its own |
+| the **node stock** stays a hard write refusal until the owner measures | `#4815` scope §1, `#4495`, `product/pricing.json` `max_graph_nodes` | **obeys** — §5 records it as the constraint the two dimensions replace, on every tier and on the capture door |
 | **no capture caps**; usage is metered separately | owner 2026-08-09 | **obeys** — no consumption cap on either session write lane |
 | **no** session cap; **no** retention window of any length | `#4010`, `#3853` | **obeys** — §7 |
 | prices are calibrated by the owner **after beta**, from measured consumption | owner 2026-09-26 | **obeys** — every number `TBD-BY-MEASUREMENT` |

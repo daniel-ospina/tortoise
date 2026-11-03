@@ -612,18 +612,24 @@ def _redis_residue_snapshot() -> tuple[set[int], set[str]] | None:
     if pids is None:
         return None
     dirs: set[str] = set()
+    # ⛔ THE ITERATION IS INSIDE THE GUARD, not just the ``scandir`` call. A
+    # ``readdir`` that fails mid-walk (or an ``is_dir()`` stat on an entry whose
+    # target became inaccessible) raises from the loop, and this snapshot is
+    # taken in ``SessionRedisResidue.__init__`` — i.e. in an AUTOUSE fixture's
+    # SETUP, where an exception is not "cleaned nothing", it ERRORS every test
+    # in the module. Guarding only the constructor of the iterator left that
+    # half unmeasured (found in review of #7522/#10640).
     try:
         root = scan_root()
-        entries = os.scandir(root)
+        with os.scandir(root) as entries:
+            for entry in entries:
+                if entry.is_dir() and (
+                    os.path.exists(os.path.join(entry.path, "redis.socket"))
+                    or os.path.exists(os.path.join(entry.path, "redis.pid"))
+                ):
+                    dirs.add(entry.path)
     except (OSError, SharedTmpdirScanError):
         return None
-    with entries:
-        for entry in entries:
-            if entry.is_dir() and (
-                os.path.exists(os.path.join(entry.path, "redis.socket"))
-                or os.path.exists(os.path.join(entry.path, "redis.pid"))
-            ):
-                dirs.add(entry.path)
     return pids, dirs
 
 
