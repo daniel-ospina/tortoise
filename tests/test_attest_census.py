@@ -826,30 +826,42 @@ def test_an_old_interpreter_is_refused_with_exit_2_and_an_attributable_message(m
 # `f"**{totals}**"`, a paragraph consisting ENTIRELY of emphasis = MD036, so ANY change
 # that re-ran the census reddened a required check on a finding it did not write.
 
-# MD036's own exception: an emphasis-only paragraph whose text ends in punctuation is not
-# treated as a heading. `punctuationRe = /[.,;:!?…]$/` on the emphasis text.
-_MD036_PUNCTUATION = ".,;:!?…"
+# `markdownlint@0.41.1` `helpers/helpers.cjs:41` `allPunctuation`, VERBATIM — the rule
+# builds `new RegExp("[" + punctuation + "]$")` from it (`lib/md036.mjs:29-30`). Note it
+# has NO ellipsis and DOES carry six full-width marks: an earlier hand-written
+# `".,;:!?…"` was wrong in both directions and measured so (`**Foo bar…**` FIRES,
+# `**Foo bar。**` does not).
+_MD036_PUNCTUATION = ".,;:!?。，；：！？"
+
+# `md036.mjs:45-46` fires only when the emphasis TEXT token has exactly one child and it
+# is `data`. A code span, link, autolink or NESTED emphasis adds a child, so the paragraph
+# is not a heading candidate (measured: `**Foo *bar* baz**`, `_Foo **bar**_`,
+# `**Foo `code` bar**` and `**Foo [l](u)**` are all clean).
+_MD036_INLINE_MARKUP = "`[]<*"
 
 
 def _emphasis_only_paragraphs(text: str) -> list[str]:
     """Return the paragraphs in `text` that MD036 fires on.
 
-    A PROXY for the pinned linter, not a reimplementation of markdownlint: it models the
-    three conditions measured against `markdownlint v0.41.1` (the version behind
-    `markdownlint-cli2@0.23.3`) and is pinned to those measurements in
-    `test_the_md036_model_matches_the_measured_linter`. The AUTHORITY is the `docs` job —
-    if the two ever disagree, this model is what is wrong.
+    A PROXY for the pinned linter, not a reimplementation of markdownlint: the AUTHORITY
+    is the `docs` job. It is pinned to 21 measured shapes in
+    `test_the_md036_model_matches_the_measured_linter`; if the two ever disagree, this
+    model is what is wrong.
 
-    What it models, and why each part is load-bearing:
-      * the delimiter set includes `_`/`__`. A model that tested only `*` missed
-        `_Foo bar baz_`, which the linter DOES fire on (measured).
-      * the punctuation exception. `**Totals:**` alone is measured CLEAN, and it is the
-        shape this very fix introduces, so a model without the exception would flag the
-        house style it just created.
-      * PARAGRAPHS, not lines. `**Foo**\\nbar` is one paragraph with two inline children
-        and is measured clean; judging line-by-line flags it.
-      * non-paragraph lines are skipped: headings, blockquotes, table rows, list items
-        (`* ` with the SPACE — `*Foo*` is emphasis, not a bullet), and indented/fenced code.
+    It models the rule's three conditions (`lib/md036.mjs`):
+      * the paragraph must have ONE meaningful child — i.e. the whole paragraph is one
+        emphasis span, so a PARAGRAPH is judged, not a line (`**Foo**\\nbar` is two
+        children and is clean). Non-paragraph lines are skipped: headings, blockquotes,
+        table rows, list items (`* ` with the SPACE — `*Foo*` is emphasis, not a bullet),
+        and code.
+      * the emphasis text must be plain: `_MD036_INLINE_MARKUP` absent, and at most one
+        `_` (a single intraword underscore stays `data` — `**a_b**` FIRES).
+      * the text must not end in `_MD036_PUNCTUATION`.
+    Delimiters are tried longest-first so `**` wins over `*`.
+
+    A 4-space line is indented code only at the START of a paragraph: after a paragraph
+    line it is a LAZY CONTINUATION, so `**Foo**\\n    bar` is one two-child paragraph and
+    is clean (measured).
     """
     offenders: list[str] = []
     paragraph: list[str] = []
@@ -860,15 +872,17 @@ def _emphasis_only_paragraphs(text: str) -> list[str]:
             return
         joined = "\n".join(paragraph).strip()
         paragraph.clear()
-        for marker in ("**", "__", "*", "_"):  # longest first, so `**` wins over `*`
+        for marker in ("**", "__", "*", "_"):
             if len(joined) <= 2 * len(marker):
                 continue
             if not (joined.startswith(marker) and joined.endswith(marker)):
                 continue
             inner = joined[len(marker) : -len(marker)]
-            if marker in inner:
-                continue
-            if inner.strip() and not inner.rstrip().endswith(tuple(_MD036_PUNCTUATION)):
+            if not inner.strip():
+                return
+            if any(ch in inner for ch in _MD036_INLINE_MARKUP) or inner.count("_") > 1:
+                return
+            if not inner.rstrip().endswith(tuple(_MD036_PUNCTUATION)):
                 offenders.append(joined)
             return
 
@@ -881,7 +895,7 @@ def _emphasis_only_paragraphs(text: str) -> list[str]:
         if in_fence:
             continue
         is_bullet = len(s) > 1 and s[0] in "-+*" and s[1] == " "
-        indented_code = raw.startswith("    ") or raw.startswith("\t")
+        indented_code = not paragraph and (raw.startswith("    ") or raw.startswith("\t"))
         if not s or indented_code or s.startswith(("#", ">", "|")) or is_bullet:
             flush()
             continue
@@ -889,39 +903,49 @@ def _emphasis_only_paragraphs(text: str) -> list[str]:
     return offenders
 
 
+# Every shape below was MEASURED with the `docs` job's own producer
+# (`markdownlint-cli2@0.23.3`, repo config) over a real file under `operations/`, each run
+# confirming `Linting: 1 file`. That check is not ceremony: a copy outside the lint root
+# reports `Linting: 0 files` and a vacuous 0-issue "pass", which is how the first attempt
+# at this verification nearly went.
+_MD036_FIRES = [
+    "_Foo bar baz_",  # underscore emphasis — a `*`-only model missed this
+    "__Foo bar baz__",
+    "**Foo bar baz**",
+    "*Foo bar baz*",
+    "**Foo bar…**",  # ellipsis is NOT in the rule's punctuation set, so this FIRES
+    "**a_b**",  # one intraword underscore is still plain `data`
+]
+_MD036_CLEAN = [
+    "**Totals:**",  # ends in `:` — the shape this PR introduces
+    "**Totals:** RE-REVIEW=5",  # text outside the span: two children
+    "**Foo bar baz...**",  # punctuation
+    "**Foo bar baz.**",  # punctuation
+    "**Foo bar。**",  # full-width punctuation IS in the set
+    "**Foo**\nbar",  # one paragraph, two meaningful children
+    "**Foo**\n    bar",  # 4 spaces after a paragraph line is a LAZY CONTINUATION
+    "    **Indented code**",  # code block
+    "> **In a quote**",  # not a top-level paragraph
+    "- **In a list**",  # not a paragraph
+    "****",  # empty span
+    "**Foo *bar* baz**",  # nested emphasis -> more than one child
+    "_Foo **bar**_",  # nested strong -> more than one child
+    "**Foo `code` bar**",  # code span -> more than one child
+    "**Foo [l](u)**",  # link -> more than one child
+]
+
+
 def test_the_md036_model_matches_the_measured_linter():
     """Pin the proxy above to the pinned linter's MEASURED boundary.
 
-    Every row was measured with the `docs` job's own producer
-    (`markdownlint-cli2@0.23.3`, repo config) over a real file under `operations/`, each
-    run reporting `Linting: 1 file` — a copy outside the lint root reports
-    `Linting: 0 files` and a vacuous 0-issue "pass", which is why these are recorded from
-    in-tree runs. If markdownlint's rule changes, THIS test is what notices that the proxy
-    and the gate have parted company.
+    If markdownlint's rule changes, THIS test is what notices that the proxy and the gate
+    have parted company — rather than a docstring continuing to claim an agreement that
+    no longer holds.
     """
-    fired = [
-        "_Foo bar baz_",
-        "__Foo bar baz__",
-        "**Foo bar baz**",
-        "*Foo bar baz*",
-    ]
-    clean = [
-        "**Totals:**",  # punctuation exception — the shape this PR introduces
-        "**Totals:** RE-REVIEW=5",  # text outside the span
-        "**Foo bar baz...**",  # punctuation
-        "**Foo bar baz.**",  # punctuation
-        "**Foo**\nbar",  # one paragraph, two inline children
-        "    **Indented code**",  # code block
-        "> **In a quote**",  # not a paragraph
-        "- **In a list**",  # not a paragraph
-        "****",  # empty span
-    ]
-    for body in fired:
+    for body in _MD036_FIRES:
         assert _emphasis_only_paragraphs(f"Prose.\n\n{body}\n\n|x|\n|-|\n"), f"must fire (measured): {body!r}"
-    for body in clean:
+    for body in _MD036_CLEAN:
         assert not _emphasis_only_paragraphs(f"Prose.\n\n{body}\n\n|x|\n|-|\n"), f"measured clean: {body!r}"
-
-
 def test_the_report_never_renders_an_emphasis_only_paragraph():
     """#10687: the required `docs` check was RED on this PR's own regenerated census.
 
@@ -951,7 +975,7 @@ def test_the_report_never_renders_an_emphasis_only_paragraph():
 
 
 def test_a_pipe_in_a_record_field_cannot_break_the_table():
-    """#10687 cycle 1: registry text reached `render` unescaped.
+    """#10687: registry and `gh` text reached `render` unescaped.
 
     `evidence`, `verdict` and `mint` are read straight out of a record JSON on disk, and
     `why` embeds `gh`'s MULTI-LINE stderr. A `|` emitted an extra table cell — measured
@@ -960,6 +984,14 @@ def test_a_pipe_in_a_record_field_cannot_break_the_table():
     reds the required `docs` check on a finding the lane did not write" class this PR
     exists to close, plus silent column-shifting in a document lanes read to decide
     RE-POST vs RE-REVIEW.
+
+    Three inputs are here because each was a SEPARATE leak, found in a separate cycle:
+      * `head` — `gh`'s `headRefOid`, rendered even when it is not a sha (the UNREADABLE
+        path), and escaped INSIDE its code span because a GFM table splits cells BEFORE
+        inline parsing.
+      * a value already containing `\\|` — escaping `|` alone turns it into `\\\\|`, an
+        escaped backslash plus a LIVE delimiter.
+      * a multi-line `why` — a raw newline breaks out of the bullet it was written into.
     """
     ac = _load()
 
@@ -968,11 +1000,11 @@ def test_a_pipe_in_a_record_field_cannot_break_the_table():
         head_sha=LIVE,
         mint="fresh",
         verdict="clean | sneaky",
-        evidence="comment:1 | injected",
+        evidence="comment:1 | injected " + "\\" + "| tail",
     )
     row = ac.Row(
         pr=1,
-        head=LIVE,
+        head="abc|def",  # not a sha: reachable via the UNREADABLE path
         branch="b | c",
         title="t",
         record=rec,
@@ -983,9 +1015,21 @@ def test_a_pipe_in_a_record_field_cannot_break_the_table():
     text = ac.render([row], "o/r", "2026-11-03T00:00:00Z")
 
     def cells(line: str) -> int:
-        """Count UNESCAPED pipes: `\\|` is the escaping this fix adds, and a naive
-        `line.count("|")` counts the escaped ones too and so measures nothing."""
-        return sum(1 for i, ch in enumerate(line) if ch == "|" and (i == 0 or line[i - 1] != "\\")) - 1
+        """Count live delimiters, not every `|`.
+
+        A naive `line.count("|")` counts the escaped ones too and measures nothing, and
+        "preceded by a backslash means escaped" shares `_cell`'s original blind spot: `\\|`
+        is an ESCAPED BACKSLASH followed by a LIVE delimiter, so a pipe is escaped only
+        after an EVEN run of backslashes (#10687 cycle 2).
+        """
+
+        def escaped(i: int) -> bool:
+            n = 0
+            while i - n - 1 >= 0 and line[i - n - 1] == "\\":
+                n += 1
+            return n % 2 == 1
+
+        return sum(1 for i, ch in enumerate(line) if ch == "|" and not escaped(i)) - 1
 
     # No cell is injected: every table row carries the header's cell count.
     header = next(ln for ln in text.splitlines() if ln.startswith("| PR |"))
@@ -996,9 +1040,48 @@ def test_a_pipe_in_a_record_field_cannot_break_the_table():
     # And the injected pipes survive as escaped DATA rather than becoming structure.
     assert "comment:1 \\| injected" in text, text
     assert "clean \\| sneaky" in text, text
+    assert "abc\\|def" in text, text
 
-    # A multi-line `why`/note cannot break out of its bullet: no line in the flagged
-    # section starts with the continuation indentation of a raw newline.
-    assert "boom \\| splat" in text or "boom | splat" in text, text
+    # A multi-line `why`/note cannot break out of its bullet.
     assert "\n  failed rc=1" not in text, text
     assert "\nand a newline" not in text, text
+
+
+@pytest.mark.parametrize("hostile", ["comment:1 | injected", "comment:1" + "\\" + "|x", "a\nb|c"])
+def test_the_pinned_linter_accepts_the_rendered_table(hostile, tmp_path):
+    """The assertion above counts cells with a helper; this asserts the LINTER agrees.
+
+    Two independent checks on purpose: the helper is a model, the pinned markdownlint is the
+    gate, and `test_the_md036_model_matches_the_measured_linter` exists precisely because a
+    model and its gate can drift. This one writes the rendered report to a file the linter
+    linted and asserts on its OWN verdict — `Linting: 1 file` included, so a run that linted
+    nothing cannot pass as clean. Skipped where the pinned linter is not installed (the unit
+    suite is hermetic; the `docs` job is the authority and runs it in CI).
+    """
+    ac = _load()
+    script = Path(__file__).resolve().parent.parent / ".github" / "scripts" / "docs-markdownlint.sh"
+    if not script.exists():
+        pytest.skip("docs-markdownlint.sh not present")
+    target = Path(__file__).resolve().parent.parent / "operations" / "zz-attest-census-probe.md"
+    nodelist = tmp_path / "probe.nul"
+    report = tmp_path / "probe.out"
+    rec = ac.Record(
+        path=Path("/tmp/r-1.json"), head_sha=LIVE, mint="fresh", verdict="clean", evidence=hostile
+    )
+    row = ac.Row(pr=1, head=LIVE, branch="b", title="t", record=rec, outcome=ac.OK, why="w")
+    target.write_text(ac.render([row], "o/r", "2026-11-03T00:00:00Z"), encoding="utf-8")
+    nodelist.write_bytes(b"./operations/zz-attest-census-probe.md\0")
+    try:
+        import subprocess
+
+        subprocess.run(
+            ["bash", str(script), "--cli2", "markdownlint-cli2@0.23.3",
+             "--files-from", str(nodelist), "--output", str(report), "--label", "probe"],
+            cwd=Path(__file__).resolve().parent.parent, capture_output=True, timeout=300,
+        )
+        out = report.read_text() if report.exists() else ""
+        if "Linting: 1 file" not in out:
+            pytest.skip(f"pinned linter unavailable here (report: {out[:200]!r})")
+        assert "Summary: 0 issues in 0 files" in out, f"the pinned linter rejects a hostile cell {hostile!r}: {out}"
+    finally:
+        target.unlink(missing_ok=True)

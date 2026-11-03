@@ -416,13 +416,27 @@ def _cell(value: object) -> str:
     stderr (`gh_json` keeps `out.stderr.strip()[:300]` of it). A `|` therefore emitted
     extra table cells and a newline broke out of the bullet it was written into.
 
-    MEASURED (#10687 cycle 1): a record whose `evidence` is `"comment:1 | injected"`
-    rendered an 11-cell row (`Expected: 10; Actual: 11`) and the PINNED linter fired
+    MEASURED (#10687): a record whose `evidence` is `"comment:1 | injected"` rendered an
+    11-cell row (`Expected: 10; Actual: 11`) and the PINNED linter fired
     MD056/table-column-count. That is the SAME class this tool had just been fixed for —
     a regenerated census reddening the REQUIRED `docs` check on a finding the lane did
     not write — so the escape belongs here rather than in a later repair.
+
+    ⛔ The BACKSLASH is replaced FIRST, and that order is the whole point: escaping `|`
+    alone leaves data that already contains a literal `\\|` rendering as `\\\\|`, which GFM
+    reads as an ESCAPED BACKSLASH followed by a live delimiter. Measured with the pinned
+    linter: `evidence` = `"comment:1\\|x"` produced `MD056 [Expected: 10; Actual: 11]`.
+    A corrupt or hand-written record is exactly the input this census must survive, so
+    "a `|` would add a cell" was still false until the backslash was escaped too.
     """
-    return str(value).replace("|", "\\|").replace("\r", " ").replace("\n", " ").strip()
+    return (
+        str(value)
+        .replace("\\", "\\\\")
+        .replace("|", "\\|")
+        .replace("\r", " ")
+        .replace("\n", " ")
+        .strip()
+    )
 
 
 def render(rows: list[Row], repo: str, generated_at: str, truncated: bool = False, limit: int = 100) -> str:
@@ -499,13 +513,19 @@ def render(rows: list[Row], repo: str, generated_at: str, truncated: bool = Fals
         verdict = "—" if rec is None else (rec.verdict or "—")
         ev = "—" if rec is None else ("null" if rec.evidence in (None, "", False) else str(rec.evidence))
         gate = "not-read" if not r.gate_checked else (r.gate_conclusion or r.gate_status or "absent")
-        # Every cell is escaped: `rec_cell`, `verdict`, `mint` and `ev` come from a record
-        # JSON on disk, so a `|` in any of them would add a cell and break the table (#10687).
+        # Every DYNAMIC cell is escaped — the record-derived ones (`rec_cell`, `verdict`,
+        # `mint`, `ev`), the `gh`-derived ones (`rhead`, `head`, `match`, `gate`), and the
+        # record FILENAME inside `rec_cell` — because a `|` in any of them adds a cell and
+        # breaks the table (#10687). `head` is escaped INSIDE its code span: a GFM table is
+        # split into cells BEFORE inline parsing, so an unescaped `|` there severs the row
+        # even though the value is wrapped in backticks (measured: a 12-cell row, MD056).
+        # The two literal columns (`#<pr>` is an int, `outcome` is one of our own constants)
+        # carry no external text.
         lines.append(
             "| #" + " | ".join(
                 [
                     str(r.pr),
-                    f"`{r.head[:12]}…`",
+                    f"`{_cell(r.head[:12])}…`",
                     _cell(rec_cell),
                     _cell(rhead),
                     _cell(match),
