@@ -34,11 +34,25 @@ The identification is STRUCTURAL — `is_episodic = true` AND `pointKind =
 'event'` AND `id == session_id + '_t' + <all-decimal suffix>` for a
 `CONTAINS`-wired `:Session` — the same rule `sdk._capture_turn_ids` applies
 (suffix `isdecimal`, never prefix alone, so the `sec` vs `sec_t0` cross-match
-cannot admit another session's turns). No timestamp is needed to date a node:
-on an ARMED deployment the writer stops minting turn nodes (#10000), so turn
-nodes present in an armed target's graph are pre-cutover by construction — and
-the census does not need to know their age, only whether the record holds an
-equivalent copy. Nodes that look like turns but fail any leg of the shape are
+cannot admit another session's turns). No timestamp is needed to date a node,
+and nothing here dates one: the census does not need a turn's age, only
+whether the RECORD holds an equivalent copy.
+
+⚠️ An armed target's graph is NOT all pre-cutover. `#10000` makes the RECORD
+the first sink, but the writer still writes the turn to the GRAPH for every
+turn the record did not take — `capture_session` reads each write's outcome
+and sends `_unrecorded` through `_graph_write_with_retry` with the warning
+"the record did not take N of M turn(s) — writing them to the GRAPH so the
+transcript is not lost" (`tortoise/sdk.py`). So an armed graph legitimately
+holds POST-cutover turns the record declined, and they are
+`missing_in_record` **by construction** — the repair is a backfill into the
+record, never a delete. A lane that reads this contract as "every turn node in
+an armed graph is pre-cutover" would hand a #10000 fallback turn to the purge
+on an assumption about AGE that no leg of this census checks; the verdict
+stays correct because parity is by transcript text, not by age, which is
+exactly why the premise has to be stated right here.
+
+Nodes that look like turns but fail any leg of the shape are
 NOT purge candidates: they are reported as anomalies (orphans, non-decimal
 suffixes, cross-wirings, `is_operator` flags) so nothing is silently invisible
 to the gate — a census that quietly excluded what it could not classify would
@@ -236,15 +250,26 @@ THE PASS CRITERION AND THE EXIT CODES
        not place in the compared population (see the anomaly rule above).
        The gate REFUSES; the problems are listed per node and per field. Run
        the backfill / resolve the anomaly, then re-run this census.
-    3  a side could not be READ (graph unreachable, record unreachable,
-       tenant scope refused, graph read short of the store's own count). An
-       absence is NOT established — the census refuses to certify parity
-       over a side it could not see, or over part of one. This is the
+    3  the census could not ESTABLISH an absence — either a side could not
+       be READ (graph unreachable, record unreachable, tenant scope refused,
+       graph read short of the store's own count), or the COMPARISON could
+       not be completed over a side that was read fine: the record declared
+       an undeclinable field absent, declared a field this census never
+       compares, or an episodic node carries an `embeddingText` no leg
+       compares. An absence is NOT established in any of these cases — the
+       census refuses to certify parity over a side it could not see, over
+       part of one, or over a field it did not compare. This is the
        P0-shaped hole (#10024): an unscoped record read returns ZERO rows and
        would "pass" vacuously, so this tool reads through
        `record_projection.scope_connection` — the one prologue that verifies
        the tenant GUC stuck AND that the role cannot bypass RLS — and treats
        its refusal as exit 3, never as "no rows".
+
+       ⚠️ The two halves have DIFFERENT repairs, so read the message and not
+       just the code: an unreadable side is retried (reachability, IAM, RLS);
+       an uncomparable field is a CODE change to the comparison (select the
+       column and compare it). Retrying a `declared_absent`/`embeddingText`
+       refusal changes nothing, because nothing about the read was wrong.
 
 THE NEGATIVE ARM (how we know the gate refuses)
 ===============================================
@@ -548,7 +573,15 @@ _LOCAL_RECORD_GLOBS = tuple(
 
 
 class CensusError(Exception):
-    """A side could not be read — never a parity verdict (exit 3)."""
+    """The census could not establish an absence (exit 3) — never a parity
+    verdict.
+
+    Two arms, with different repairs: a side could not be READ (retry the
+    read — reachability, tenant scope, RLS), or the COMPARISON could not be
+    completed over a side that read fine (fix the comparison — an
+    undeclinable/invented `declared_absent`, or an `embeddingText` no leg
+    compares). Neither is a parity failure, so neither may be reported as one.
+    """
 
 
 def _f32(value: float) -> float:
@@ -1040,6 +1073,14 @@ def read_local_record_turns(directory, node_keys: Iterable[str] | None = None
     #: but a narrowed surface the artifact does not name is a silent claim of
     #: coverage — the exact class the four-surface enumeration closed.
     skipped_files: list[str] = []
+    #: A record-SHAPED path that exists but is not a regular file (a dangling
+    #: symlink, a FIFO, a directory named `<day>.jsonl`). A SEPARATE list from
+    #: `skipped_files` on purpose: that one is the day+shape COLLISION
+    #: disclosure and its stdout sentence states a collision cause, so sharing
+    #: it printed a contradictory cause for this class (review P3). Named, never
+    #: silent — a narrowed surface the artifact does not name is a silent claim
+    #: of coverage.
+    unreadable_paths: list[str] = []
     # ⛔ `scan_dir`, NOT `directory`: the loop variable used to reuse the name of
     # this function's own PARAMETER (`directory`, declared in the signature), so
     # every iteration silently destroyed the argument the caller passed. It is
@@ -1048,6 +1089,20 @@ def read_local_record_turns(directory, node_keys: Iterable[str] | None = None
     # loop would read the root path instead of the caller's value (review P3).
     for scan_dir in (root / "archive", root):
         if not scan_dir.exists():
+            # ⛔ AN UNRESOLVABLE SURFACE IS NOT AN ABSENT ONE (review P3).
+            # `exists()` follows links, so an `archive/` symlink whose target is
+            # gone (an unmounted archive volume, a re-provisioned disk) read
+            # exactly like "no archive directory yet" and was skipped in
+            # silence — while the artifact went on reporting the four
+            # shape x directory surfaces as covered. A GENUINELY missing
+            # `archive/` is normal and stays silent; a symlink that does not
+            # resolve never is, and it could be holding every sealed day.
+            if scan_dir.is_symlink():
+                raise CensusError(
+                    f"the local record's surface {scan_dir} is a symlink that "
+                    "does not resolve — an archive volume that is not mounted "
+                    "is NOT an archive that holds nothing, so an absence is "
+                    "NOT established")
             continue
         try:
             entries = list(scan_dir.iterdir())
@@ -1058,6 +1113,27 @@ def read_local_record_turns(directory, node_keys: Iterable[str] | None = None
                 "not an empty one, so an absence is NOT established") from exc
         for entry in entries:
             if not entry.is_file():
+                # ⛔ A RECORD-SHAPED PATH THAT IS NOT A REGULAR FILE IS A
+                # NARROWING OF THE SURFACE, so it is DISCLOSED (review P3).
+                # `is_file()` follows symlinks, so a dangling `<day>.jsonl`, a
+                # FIFO, or a directory named `<day>.jsonl` was skipped by a bare
+                # `continue` and named in NO list: the artifact then reported
+                # `files` as full coverage of a surface it had quietly dropped,
+                # which is the one thing this leg's own `skipped_files` contract
+                # forbids. Only record-SHAPED names are named here; a plain
+                # directory (e.g. `archive/`) is not a narrowing.
+                #
+                # ⛔ ITS OWN LIST, not `skipped_files` (review P3). That list is
+                # the COLLISION disclosure and its stdout line states a
+                # collision cause per entry, so putting this class there printed
+                # a self-contradicting sentence ("not a regular file … same
+                # day+shape as a file the root store already supplies") that
+                # named the wrong repair. Two causes, two lists, each with its
+                # own sentence.
+                if any(entry.name.endswith(s) for s in _LOCAL_RECORD_SUFFIXES):
+                    unreadable_paths.append(
+                        f"{entry.relative_to(root)} (not a regular file, "
+                        "so its records were not read)")
                 continue
             for suffix in _LOCAL_RECORD_SUFFIXES:
                 if entry.name.endswith(suffix):
@@ -1080,7 +1156,18 @@ def read_local_record_turns(directory, node_keys: Iterable[str] | None = None
             f"no record files under {root} ({' / '.join(_LOCAL_RECORD_GLOBS)}) "
             "— the local record is EMPTY, and an empty record is not evidence "
             "of parity (it is the shape that would certify deleting every "
-            "turn). An absence is NOT established")
+            "turn). An absence is NOT established"
+            # ⛔ EMPTY vs DAMAGED (review P3): a record-SHAPED path that exists
+            # and could not be read is not an empty record — the same
+            # distinction the all-dropped arm above makes for LINES. The report
+            # is built after this raise, so this is the only place it can be
+            # said; without it an operator is told to check the directory when
+            # the truth is an unreadable day file.
+            + (("\n\nThe directory is NOT empty of record-shaped paths: "
+                + "; ".join(unreadable_paths)
+                + " — those were present and NOT read, so this is a DAMAGED "
+                  "read, not an empty record.")
+               if unreadable_paths else ""))
 
     # ⛔ THE FILING LEG'S WINDOW (review P2): the graph's `t<i>` are minted over
     # the list that leg POSTed, not over the file's raw list, so `_window` is
@@ -1288,6 +1375,33 @@ def read_local_record_turns(directory, node_keys: Iterable[str] | None = None
                     "error": f"session {sid} `conversation` is "
                              f"{type(conversation).__name__}, not a list"})
                 continue
+            # ⛔ AN EMPTY FILED WINDOW IS NOT A SECOND CAPTURE WINDOW (review
+            # P2). A line whose conversation windows to NOTHING (`[]`, or turns
+            # that are blank / not dicts / not `str` roles) contributes no key to
+            # `rows_by_key` — and it cannot reach the graph either: the filing
+            # leg (`session_events_drain`) windows the same list and DEAD-LETTERS
+            # the session as `no_conversation` when the window is empty, so it
+            # filed no turn and can hide none. Counting it as an `occurrence`
+            # made ONE real window plus one empty line look like two capture
+            # windows of one index space: the session was popped from the
+            # positional key space and REFUSED as `duplicate_window`, whose
+            # repair advice is "resolve which capture is authoritative, by hand"
+            # — a false refusal, with a wrong cause, on the exact class the
+            # duplicate arm exists to keep open. The empty line is still a real
+            # SESSION (`[]` is data, not loss) and stays in `conversations` when
+            # it is the only line; it just never counts as a window.
+            try:
+                filed_turns = _filing_window(conversation)
+            except Exception as exc:
+                raise CensusError(
+                    f"the local record's session {sid} could not be put "
+                    f"through the filing leg's window "
+                    f"({type(exc).__name__}: {exc}) — without the window the "
+                    "graph's positional keys cannot be derived, so an absence "
+                    "is NOT established") from exc
+            if not filed_turns:
+                conversations.setdefault(sid, conversation)
+                continue
             occurrences[sid] = occurrences.get(sid, 0) + 1
             conversations[sid] = conversation
 
@@ -1426,6 +1540,7 @@ def read_local_record_turns(directory, node_keys: Iterable[str] | None = None
         "duplicate_window": duplicate_window,
         "filed_window": filed_window,
         "skipped_files": sorted(skipped_files),
+        "unreadable_paths": sorted(unreadable_paths),
     }
 
 
@@ -1733,6 +1848,10 @@ def census(graph: dict, record: dict, *, sample: int) -> dict:
                        # surface is narrower than `files` alone suggests, so
                        # the omission is named rather than implied.
                        "skipped_files": record.get("skipped_files") or [],
+                       # Record-SHAPED paths that exist and were NOT read (a
+                       # different cause from a displaced day+shape collision,
+                       # so its own key and its own stdout sentence).
+                       "unreadable_paths": record.get("unreadable_paths") or [],
                        # Held back from the positional key space, with the graph
                        # population each one needs placed: a duplicate that no
                        # graph turn needs is disclosed and does not block.
@@ -1890,7 +2009,13 @@ def main(argv: list[str] | None = None) -> int:
         # `--record-dsn` is an ambiguity worth refusing. Refusing on the
         # ambient variable made the documented flag unusable on any box that
         # exports the DSN the repo's own `.env.example` sets.
-        if args.record_dsn:
+        # ⛔ PRESENCE, NOT TRUTHINESS (review P3) — the same rule the hosted arm
+        # below applies to the same flag. `--record-dsn ""` is a SET flag whose
+        # value is empty (a shell expansion of an unset variable), not "no
+        # flag": a truthiness test let `--local-record-dir DIR --record-dsn ""`
+        # through, so the documented "an explicit flag combination is refused"
+        # guard did not exist for the one spelling an unset variable produces.
+        if args.record_dsn is not None:
             sys.stderr.write(
                 "turn_parity_census: --local-record-dir and --record-dsn are "
                 "mutually exclusive — the census compares against ONE record, "
@@ -2079,6 +2204,11 @@ def main(argv: list[str] | None = None) -> int:
         print(f"skipped    : {skipped} (same day+shape as a file the root "
               f"store already supplies — displaced, NOT read; a session "
               f"living only here reads as missing_in_record)")
+    for unreadable in report["record"].get("unreadable_paths") or []:
+        # Its OWN sentence: this class was never read for a DIFFERENT reason, and
+        # the collision cause above named the wrong repair for it (review P3).
+        print(f"unreadable : {unreadable} — present and NOT read; a session "
+              f"living only here reads as missing_in_record")
     for cls, entries in report["anomalies"].items():
         if entries:
             print(f"anomaly    : {len(entries)} {cls} "

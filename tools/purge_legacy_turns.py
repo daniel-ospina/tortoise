@@ -443,7 +443,16 @@ def classify_sessions(report: dict) -> dict:
         sid = verdict["session"]
         problems = verdict.get("problems") or []
         missing = [p for p in problems if p.get("problem") == "missing_in_record"]
-        mismatched = [p for p in problems if p.get("problem") != "missing_in_record"]
+        # ⛔ `duplicate_window` IS NOT A "MISMATCHED FIELD" (review P3). The arm
+        # below names the class correctly, but this count was left alone: a
+        # DUPLICATE-WINDOW exclusion therefore carried `mismatched: 1` in the
+        # APPROVABLE artifact over a session the census never compared a single
+        # field of (its own reason says no key can be placed), so the artifact
+        # told an operator the MISMATCH remedy — a field fix — applied. The same
+        # inversion this commit fixes in `class`, from the other field.
+        mismatched = [p for p in problems
+                      if p.get("problem") not in ("missing_in_record",
+                                                  "duplicate_window")]
         duplicate = [p for p in problems
                      if p.get("problem") == "duplicate_window"]
         if duplicate and not missing:
@@ -589,6 +598,22 @@ def build_plan(report: dict, *, target: dict, health: dict | None,
             # `--census-json` file is not a plan about the live deployment, and
             # the artefact a human approves has to say so (#10483 review, P3-4).
             "source": census_source or {"kind": "unspecified"},
+            # ⛔ AND WHAT THE PARITY EVIDENCE ACTUALLY COMPARED (#10627 review,
+            # P3). `--execute` re-derives with the HOSTED leg and its seven
+            # fields, but `--census-json` is the ONLY preview path an operator
+            # has on a postponed hosted deployment — so without these keys a
+            # plan whose evidence compared `key`/`content`/`speaker` off the
+            # LOCAL JSONL is byte-for-byte indistinguishable from one built
+            # from a seven-field hosted census, and a human signs an
+            # irreversible graph delete on evidence of unknown width and
+            # unknown authority. The census artifact already discloses this
+            # (its own `record.leg` / `compared_fields` / `declared_absent`);
+            # the artifact a human APPROVES did not. A narrower comparison
+            # must never read as the strong one.
+            "record_leg": record.get("leg"),
+            "record_dir": record.get("dir"),
+            "compared_fields": report.get("compared_fields") or [],
+            "declared_absent": report.get("declared_absent") or [],
             "episodic_graph_nodes": pop.get("episodic_graph_nodes"),
             "turn_shaped_nodes": pop.get("turn_shaped_nodes"),
             "sessions_with_graph_turns": pop.get("sessions_with_graph_turns"),
@@ -1249,6 +1274,42 @@ def _report_problem(report) -> str:
     for key in ("population", "parity", "dry_run"):
         if not isinstance(report.get(key), dict):
             return f"it carries no `{key}` block"
+    # ⛔ THE EVIDENCE'S AUTHORITY AND WIDTH ARE PART OF "IS THIS A CENSUS
+    # REPORT" (#10627 review, P3). A plan is the artefact a human signs for an
+    # IRREVERSIBLE graph delete, and `--census-json` is the only preview path
+    # on a postponed hosted deployment. Without these three keys the plan
+    # cannot state whether the parity evidence came from the hosted record or
+    # the local JSONL, nor which fields were compared — so a three-field local
+    # census and a seven-field hosted one would produce the same signable plan.
+    # Fail CLOSED on the artefact that does not say: an unstated width is not a
+    # full-width comparison. (Any census this repo emits carries all three —
+    # `since #10627`; an artifact without them predates the honesty fix.)
+    record = report.get("record")
+    if not isinstance(record, dict):
+        return ("it carries no `record` block, so which record its parity was "
+                "measured against is not established")
+    if not isinstance(record.get("leg"), str) or not record["leg"]:
+        return (f"record.leg is {type(record.get('leg')).__name__}, not a leg "
+                f"name, so which record its parity was measured against is "
+                f"not established")
+    if not isinstance(report.get("compared_fields"), list):
+        return ("compared_fields is missing or is not a list, so the width of "
+                "the comparison this plan rests on is not established")
+    # The ELEMENT type too: a non-string here survives the container check and
+    # then reaches `', '.join(...)` in the preview arm's own print, which is a
+    # TypeError traceback AFTER the signable plan file has been written — the
+    # exact shape the parity-entry checks below exist to prevent.
+    for index, field in enumerate(report["compared_fields"]):
+        if not isinstance(field, str):
+            return (f"compared_fields[{index}]: {type(field).__name__} is not "
+                    f"a field name")
+    if not isinstance(report.get("declared_absent"), list):
+        return ("declared_absent is missing or is not a list, so which fields "
+                "were NOT compared is not established")
+    for index, field in enumerate(report["declared_absent"]):
+        if not isinstance(field, str):
+            return (f"declared_absent[{index}]: {type(field).__name__} is not "
+                    f"a field name")
     for key in ("clean_sessions", "failed_sessions"):
         if not isinstance(report["parity"].get(key), list):
             return f"parity.{key} is missing or is not a list"
@@ -1897,6 +1958,21 @@ def main(argv: list[str] | None = None) -> int:
     print(f"source     : {source.get('kind')}"
           + (f" ({source.get('path')})" if source.get("path") else "")
           + (f" — {source['note']}" if source.get("note") else ""))
+    # ⛔ WHAT THE PARITY EVIDENCE COMPARED, on the screen the operator reads
+    # before signing (#10627 review, P3). `record_leg` is `hosted` or `local`;
+    # the field list is the width, and `declared_absent` is what was NOT
+    # compared — printed, never implied. A local census compares fewer fields
+    # than the hosted one, and the difference must be visible here or the
+    # preview reads as the strong one.
+    record_leg = plan["census"].get("record_leg")
+    record_dir = plan["census"].get("record_dir")
+    compared = plan["census"].get("compared_fields") or []
+    absent_fields = plan["census"].get("declared_absent") or []
+    print(f"record leg : {record_leg or 'UNSTATED'}"
+          + (f" ({record_dir})" if record_dir else ""))
+    print(f"compared   : {', '.join(compared) if compared else 'NOTHING — the leg was skipped'}")
+    if absent_fields:
+        print(f"not compared: {', '.join(absent_fields)} — declared absent by the record, NOT verified by this census")
     print(f"census     : PARITY({counts[CLASS_PARITY]}, of which "
           f"{counts[CLASS_RECORD_AHEAD]} RECORD-AHEAD) · "
           f"RECORD-BEHIND({counts[CLASS_RECORD_BEHIND]}) · "
