@@ -37,20 +37,20 @@
 >
 > The deployed-surface grader is **agent-infra's**, not this repo's — `scripts/check-farm-drift.sh` in
 > an agent-infra checkout (it is not itself farmed, so no copy under `~/.pi/agent/scripts` exists).
-> Two things make its verdict easy to miss. First, **the installer's failing exit is not the farm
-> verdict**: `setup.sh` (mac, under `$HOME`) and `cell-install.sh` (cell, under
-> `${CELL_HOME:-/tmp/cell-home}`) exit 1 from other steps too, while the farm leg fails the install on
-> the checker's `1` alone — and on `2` (cannot verify) or `3` (no deploy can fix it) it prints `this is
-> NOT a pass` and still ends with `Done!`. Second, **run the installer whose base is the farm this box
-> executes**: a `$HOME`-rooted run on a `CELL_HOME`-rooted box lands in the grader's FIRST-INSTALL arm
-> and prints `farm: OK` with the pin identity unverified — the false PASS this block is about, one
-> variable over. That farm is materialised only by the installer, so run it from a checkout **at the
-> pin**: from a tree at any other commit it re-farms bytes that are not the pin's, and advancing the
-> pin alone leaves the farm stale. Direct invocation from a pi session may be refused as
-> `script-indirection`, with a message that never mentions drift (agent-infra#3173, the #709 false
-> positive) — so **a refusal is not a clean result**. Do **not** add a tortoise-side mirror — a second
-> owner of that predicate was refused (tortoise#10722, closed superseded); the farm arrays and
-> `is_declared_local` live in agent-infra.
+> Two things make its verdict easy to miss. First, **the installer's exit is not the verdict, and only
+> one installer grades the farm at all**: `pi-bootstrap/setup.sh` runs the checker as its last leg and
+> fails the install on the checker's `1` alone — on `2` (cannot verify) or `3` (no deploy can fix it)
+> it prints `this is NOT a pass` and still ends with `Done!` — while `cell-install.sh` has no farm leg,
+> its own `verify_layer` comparing only against the tree it just installed from. Second, **the grader
+> reads the farm the installer's base names, which need not be the one this box executes**: a
+> `$HOME`-rooted run on a `CELL_HOME`-rooted box grades `$HOME/.pi/agent/scripts`, so neither its `OK`
+> nor its `COULD NOT VERIFY` says anything about the executed farm. That farm is materialised only by
+> the installer, so run it from a checkout **at the pin**: from a tree at any other commit it re-farms
+> bytes that are not the pin's, and advancing the pin alone leaves the farm stale. Direct invocation
+> from a pi session may be refused as `script-indirection`, with a message that never mentions drift
+> (agent-infra#3173, the #709 false positive) — so **a refusal is not a clean result**. Do **not** add
+> a tortoise-side mirror — a second owner of that predicate was refused (tortoise#10722, closed
+> superseded); the farm arrays and `is_declared_local` live in agent-infra.
 
 ---
 
