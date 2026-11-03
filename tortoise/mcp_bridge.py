@@ -146,18 +146,21 @@ def _response_messages(
     content_type = (response.headers.get("content-type") or "").split(";")[0].strip().lower()
     if content_type != "text/event-stream":
         raw = response.read()
-        snippet = raw[:400].decode("utf-8", "replace")
+        # REDACT FIRST, then truncate: a cut that lands INSIDE the credential
+        # leaves a fragment `str.replace` can no longer match, so redacting after
+        # the slice leaks the value in parts.
+        snippet = redact(raw.decode("utf-8", "replace"), sent.key)[:400]
         if not raw:
             return [], ""  # 202 Accepted: a notification/response was accepted, no reply
         try:
             body = json.loads(raw)
         except ValueError:
             _log(f"endpoint answered {response.status_code} with a non-JSON body: "
-                 f"{redact(raw[:200].decode('utf-8', 'replace'), sent.key)!r}")
-            return [], redact(snippet, sent.key)
+                 f"{redact(raw.decode('utf-8', 'replace'), sent.key)[:200]!r}")
+            return [], snippet
         # REDACT on this path too: the snippet is quoted into the no-reply error
         # below, and a 200 body can quote the credential as easily as a 401 can.
-        return (body if isinstance(body, list) else [body]), redact(snippet, sent.key)
+        return (body if isinstance(body, list) else [body]), snippet
 
     messages: list[Any] = []
     pending = {request_id for request_id in expected_ids if isinstance(request_id, (str, int))}
@@ -179,7 +182,7 @@ def _response_messages(
         try:
             message = json.loads(chunk)
         except ValueError:
-            _log(f"ignoring non-JSON event-stream payload: {redact(chunk[:120], sent.key)}")
+            _log(f"ignoring non-JSON event-stream payload: {redact(chunk, sent.key)[:120]}")
             continue
         messages.append(message)
         for item in (message if isinstance(message, list) else [message]):
@@ -204,7 +207,7 @@ def _refusal_message(status: int, body: str, sent: Connection) -> str:
         # REDACT before quoting: a server may echo the key it rejected, and this
         # message is written to the harness's transcript and logs. Quoting is the
         # evidence; the VALUE is never part of it.
-        detail += f": {redact(body.strip()[:400], sent.key)}"
+        detail += f": {redact(body.strip(), sent.key)[:400]}"
     if sent.key is None:
         return (
             f"{REFUSAL_CODE}: the Tortoise MCP endpoint rejected this request "
@@ -296,7 +299,7 @@ def forward(client: httpx.Client, state: dict, payload: Any) -> list[Any]:
                 return _errors_for(
                     payload, -32603,
                     f"MCP endpoint returned HTTP {response.status_code}: "
-                    f"{redact(response.read().decode('utf-8', 'replace')[:400], connection.key)}",
+                    f"{redact(response.read().decode('utf-8', 'replace'), connection.key)[:400]}",
                 )
 
             messages, snippet = _response_messages(response, expected_ids, connection)
@@ -311,7 +314,7 @@ def forward(client: httpx.Client, state: dict, payload: Any) -> list[Any]:
                     payload, -32603,
                     f"the MCP endpoint answered HTTP {response.status_code} with no "
                     f"JSON-RPC reply for id(s) {expected_ids}"
-                    + (f": {redact(snippet[:300], connection.key)}" if snippet.strip() else ""),
+                    + (f": {snippet[:300]}" if snippet.strip() else ""),
                 )
     except httpx.HTTPError as exc:
         return _errors_for(

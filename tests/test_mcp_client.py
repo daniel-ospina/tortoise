@@ -146,6 +146,37 @@ def refusing_daemon(monkeypatch, tmp_path):
     yield from _serve(_refuses_every_request)
 
 
+async def _fails_500_echoing_the_key(scope, receive, send):
+    """A 500 whose body echoes the Authorization header it received."""
+    if scope["type"] == "lifespan":
+        while True:
+            message = await receive()
+            if message["type"] == "lifespan.startup":
+                await send({"type": "lifespan.startup.complete"})
+            elif message["type"] == "lifespan.shutdown":
+                await send({"type": "lifespan.shutdown.complete"})
+                return
+    headers = {k.decode().lower(): v.decode() for k, v in scope.get("headers") or ()}
+    body = json.dumps({
+        "jsonrpc": "2.0", "id": None,
+        "error": {"code": -32603,
+                  "message": f"boom for {headers.get('authorization', '')}"},
+    }).encode()
+    await send({"type": "http.response.start", "status": 500, "headers": [
+        (b"content-type", b"application/json"),
+        (b"content-length", str(len(body)).encode()),
+    ]})
+    await send({"type": "http.response.body", "body": body})
+
+
+@pytest.fixture
+def echoing_failure_daemon(monkeypatch, tmp_path):
+    """A broken endpoint that quotes the credential it received in its 500."""
+    monkeypatch.setenv("TORTOISE_DB_URI", "")
+    monkeypatch.setenv("TORTOISE_DB_PATH", str(tmp_path / "daemon.db"))
+    yield from _serve(_fails_500_echoing_the_key)
+
+
 @pytest.fixture(autouse=True)
 def _no_ambient_store(monkeypatch, tmp_path):
     """No test in this module may read the REAL `~/.tortoise/credentials.json`.
@@ -670,6 +701,69 @@ class TestCredentialResolution:
         assert "was NOT sent" in err, err
         assert "other.example" in err and url in err, err
         assert "tt_store" not in err, f"the credential VALUE leaked to stderr: {err}"
+
+    def test_a_failed_teardown_is_not_reported_as_success(self):
+        """A close failure AFTER a good body must not vanish.
+
+        The guard captured the raw client's `__aexit__` exception and returned
+        `False` without re-raising, so `status()` reported `ok` for a probe whose
+        teardown failed — a false PASS, and the inverse of what a guard is for.
+        """
+        import asyncio
+
+        from tortoise import mcp_client
+
+        class _Raw:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                raise RuntimeError("transport close failed: lost socket")
+
+            async def list_tools(self):
+                return []
+
+        guard = mcp_client._GuardedClient(_Raw(), mcp_client._BearerProvider("http://h/mcp"))
+
+        async def _run():
+            async with guard as client:
+                await client.list_tools()
+
+        with pytest.raises(RuntimeError, match="transport close failed"):
+            asyncio.run(_run())
+
+    def test_status_never_prints_a_credential_the_server_echoed(
+        self, echoing_failure_daemon, isolated_home, monkeypatch,
+    ):
+        """The CLIENT surface redacts too, not just the bridge.
+
+        A server may echo the key it received, and `status()` returns text the CLI
+        prints to stdout — so the value must be redacted there as well. Measured on
+        a 500 whose body quotes the Authorization header.
+        """
+        from tortoise import mcp_client
+
+        monkeypatch.setenv("TORTOISE_MCP_URL", echoing_failure_daemon)
+        monkeypatch.setenv("TORTOISE_API_KEY", "tt_echoed_secret_value")
+
+        payload = mcp_client.status()
+        text = json.dumps(payload)
+
+        assert payload["status"] == "tortoise_unavailable", payload
+        assert "tt_echoed_secret_value" not in text, (
+            f"the credential value reached the status payload: {text}")
+
+        # …and the printer used by `status()`/the CLI strips an echoed value from
+        # text a library error DOES carry (fastmcp passes JSON-RPC `error.message`
+        # through on tool errors, which is exactly where an echo arrives).
+        provider = mcp_client._BearerProvider("http://h/mcp")
+        provider.sent = mcp_client.Connection(
+            "http://h/mcp", "tt_echoed_secret_value", "TORTOISE_API_KEY",
+            ("TORTOISE_API_KEY",))
+        printed = mcp_client.describe_failure(
+            RuntimeError("the key tt_echoed_secret_value is invalid"), provider)
+        assert "tt_echoed_secret_value" not in printed, printed
+        assert "<redacted>" in printed, printed
 
     def test_a_tool_error_mentioning_401_is_not_a_credential_refusal(self, client_env):
         """A TOOL's 401 is the tool's, not the client's — never rewritten.

@@ -481,6 +481,30 @@ class TestFailureModes:
         assert "tt_secret" not in text, f"the snippet relayed the credential value: {text}"
         assert "<redacted>" in text, f"the evidence was dropped instead of redacted: {text}"
 
+    def test_redaction_survives_a_TRUNCATED_body(self):
+        """Redact FIRST, truncate second — the order is the property.
+
+        Every site used to slice the body and redact the slice, so a credential
+        straddling the cut was emitted in part (up to `len(key) - 1` characters):
+        `str.replace` cannot match a value that is no longer whole. Measured here
+        at each boundary the bridge actually uses (200 / 300 / 400).
+        """
+        from tortoise.mcp_bridge import _refusal_message
+        from tortoise.mcp_client import Connection
+
+        key = "tt_Q7Zq9Xv3Lp0Rt5Wm2Kd8Nb4Yc6Hs1Jf"
+        sent = Connection("http://h/mcp", key, "TORTOISE_API_KEY", ("TORTOISE_API_KEY",))
+        windows = [key[i:i + 8] for i in range(len(key) - 7)]
+
+        # Straddle every boundary the bridge slices at (400 here, 200/300/400 in
+        # `forward`): the cut lands INSIDE the credential for most of these pads.
+        for pad in (200, 300, 350, 380, 393, 399, 400, 450):
+            text = _refusal_message(401, "x" * pad + key, sent)
+            assert not any(w in text for w in windows), (
+                f"pad={pad}: a FRAGMENT of the value was emitted: {text[-80:]}")
+            if pad <= 380:  # the marker fits inside the 400-char budget
+                assert "<redacted>" in text, f"pad={pad}: no evidence left: {text[-80:]}"
+
     def test_an_expired_session_can_be_re_initialized(self, upstream, home, bridge_factory):
         """The recovery the 404 message promises must actually be possible.
 

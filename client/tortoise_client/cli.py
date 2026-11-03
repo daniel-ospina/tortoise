@@ -50,7 +50,7 @@ import os
 import sys
 
 from tortoise import status_vocabulary as vocab
-from tortoise.mcp_client import call_tool, list_tools, status
+from tortoise.mcp_client import call_tool, describe_failure, list_tools, status
 
 # ── Exit codes (#3832 / D5, vocabulary #3805) ───────────
 # Supersedes #526's exit-0 clause FOR THE CLI PROBE ONLY. The library below is
@@ -127,7 +127,9 @@ def _cmd_list_tools(_args: argparse.Namespace) -> int:
     try:
         tools = list_tools()
     except Exception as exc:  # noqa: BLE001, RUF100
-        print(f"tortoise unavailable: {exc}", file=sys.stderr)
+        # The server may echo the credential it rejected; print evidence, never
+        # the VALUE (#10605).
+        print(f"tortoise unavailable: {describe_failure(exc)}", file=sys.stderr)
         return _EXIT_ERR
     for name in tools:
         print(name)
@@ -145,7 +147,7 @@ def _cmd_call(args: argparse.Namespace) -> int:
     try:
         result = call_tool(args.tool, arguments)
     except Exception as exc:  # noqa: BLE001, RUF100
-        print(f"call failed: {exc}", file=sys.stderr)
+        print(f"call failed: {describe_failure(exc)}", file=sys.stderr)
         return _EXIT_ERR
     if getattr(result, "is_error", None):
         print(json.dumps({"is_error": True, "result": str(result)}, indent=2))
