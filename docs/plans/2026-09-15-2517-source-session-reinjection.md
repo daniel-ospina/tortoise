@@ -41,7 +41,7 @@ window, and placement** derived below.
 | Labels | `complexity:standard`, `team:epistemic-team` | none |
 | O/I/T | objective + reader-surface indicators | batched `session_id` fetch, flood-guard, flag + census, C4 tie note |
 
-#2568's own text defers to #2513's C4 — *"Ties: #2513 C4 overlap decision — if C4
+`#2568`'s own text defers to #2513's C4 — *"Ties: #2513 C4 overlap decision — if C4
 lands separately, consume its seam instead of double-building"* — and the #2519
 doc §6 states *"If #2513's C4 stays separate, land there and C3-1 consumes the
 seam (no double-build)"*. **#2517 is canonical**; **#2568 is superseded/closed**
@@ -84,7 +84,7 @@ than left order-dependent. Three post-stages move pool-based metrics, in stage
 order: **C3-1 guard → C4 guard → C2 boost** (this is the corrected wording of the
 stale `retrieve.py:1598` comment — Task 2).
 
-#2519 is **not** expanded or claimed.
+`#2519` is **not** expanded or claimed.
 
 ### 0.2 The both-arms-ON refusal must ABORT, not fail-per-question
 
@@ -334,7 +334,7 @@ C5) would extend reach at the cost of a second budget dimension the reader-windo
 guard must police; it is recorded as a follow-up (§6), not silently taken.
 
 **Measurement preconditions (stated):** **R6 rerank, A6 evidence assembly, C3-1,
-#2518, `evidence_boost` (C2) and `aggregative_flag` (C5) are ALL pinned OFF** — C2
+`#2518`, `evidence_boost` (C2) and `aggregative_flag` (C5) are ALL pinned OFF** — C2
 and C5 are pool-order movers, so leaving either unpinned would confound the delta
 with a second re-order. C3-1×C4 both-ON additionally refuses (§0.2). The arm is
 defined at the one-shot defaults (also the C1 baseline). Each run gets its **own
@@ -554,7 +554,7 @@ update is owned by **Task 2**, where the projection entry lands — see Task 2.)
   sentence ± N; LlamaIndex `SentenceWindowNodeParser` +
   `MetadataReplacementPostProcessor`); **auto-merging retrieval** is the merge-style
   variant firing on a coverage ratio (`simple_ratio_thresh`). `[canonical]` LangChain
-  + LlamaIndex docs. Version pins unverified (JS-rendered) — moot, no dependency.
+  plus LlamaIndex docs. Version pins unverified (JS-rendered) — moot, no dependency.
 - **Competitor precedent:** Zep/Graphiti make raw **episodes first-class**, so a
   fact hit can return the episode that supplies context. `[competitor-precedent]`
   Zep v3 docs.

@@ -512,7 +512,7 @@ artifact the row declares — which is why *that* row carries `artifact_corpus_s
 questions, two exits* states which arm each row takes). The mechanism is #8503 — **CLOSED
 2026-10-24**, and that closure records the *disproof*, so `#8503` is that row's **measurement
 record, not a live blocker** (which is why the row's `blocked_by` is `#9596` and not `#8503`:
-#10537's V12 looks every blocker up in `blocker-states.json`, where a CLOSED one is a finding).
+`#10537`'s V12 looks every blocker up in `blocker-states.json`, where a CLOSED one is a finding).
 The planted edges are not formed at all, and the receipt's retrievability rate is unmeasured
 (`#9596`).
 

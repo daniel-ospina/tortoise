@@ -15,7 +15,7 @@ check says. `RESTORE` is the only outcome that licenses re-posting a proof — a
 verdict is quoted from the record, never synthesised. A record at any other head is not evidence of the live code: it is `RE-REVIEW` when the gate has no green verdict, and `OK`
  only because the gate itself already accepted the proof (so no re-post is owed).
 
-**RE-REVIEW=5 · NOTHING-TO-RESTORE=3 · IN-FLIGHT=11 · OK=18**
+Outcomes across the rows below: **RE-REVIEW=5 · NOTHING-TO-RESTORE=3 · IN-FLIGHT=11 · OK=18**
 
 | PR | head | record | record head | match | mint | verdict | evidence | gate | outcome |
 |---|---|---|---|---|---|---|---|---|---|
