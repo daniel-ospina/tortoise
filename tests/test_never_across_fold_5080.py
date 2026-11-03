@@ -675,16 +675,30 @@ class TestDistinguishingDifference:
         # `latin`, so none of them reads as a LANGUAGE difference.  (They can
         # still be a content substitution — "µm"/"m" differ on both sides —
         # which is a different dimension.)
-        for surface in ("\u00aa", "\u00b5", "\u0283", "\ufb01", "\uff21"):
+        for surface in ("\u00aa", "\u00b5", "\u0283", "\ufb01", "\uff41"):
             assert v2._script_of(surface) == "latin", surface
-            assert v2.fold_allowed(f"we ship {surface}", f"we ship {surface}")
-        assert "latin" in v2._scripts("5 \u00b5m \u0283 \ufb01 \uff21")
-        # A MODIFIER letter (category Lm, e.g. `ʰ`) is not script-bearing on its
-        # own, so it contributes nothing — the same as before this reading.  Four
-        # of them sit in a tests/fixtures file; refusing those folds as a
-        # `language` difference would have been a pure regression.
+            # DIFFERENT surfaces on the two sides: `fold_allowed(x, x)` is
+            # reflexive and would pass whatever the script reading did.
+            # The surface on ONE side only, so the leg discriminates the
+            # widening: with the surface read as `unlisted` the two script sets
+            # differ and the fold is refused.  (`Ａ` uppercase would refuse for
+            # an unrelated reason — a capital reads as a name — so the folding
+            # leg uses the lowercase fullwidth letter.)
+            assert v2.fold_allowed(f"we ship {surface} extra",
+                                   "we ship extra"), surface
+        assert "latin" in v2._scripts("5 \u00b5m \u0283 \ufb01 \uff41")
+        assert v2._script_of("\uff21") == "latin"  # FULLWIDTH capital too
+        # A MODIFIER letter (category Lm, e.g. `\u02b0`) IN NO BLOCK is not
+        # script-bearing on its own, so it contributes nothing — as before this
+        # reading.  An Lm INSIDE a listed block does carry its block (`\u30fc`
+        # is kana), so the residual is specifically Lm-in-an-unlisted script.
         assert v2._script_of("\u02b0") is None
-        assert v2.fold_allowed("we ship the \u02b0 build", "we ship the \u02b0")
+        assert v2._script_of("\u30fc") == "kana"
+        # One side carries the modifier letter and the other does not: THIS is
+        # the leg that discriminates the Lm rule.  With Lm read as `unlisted`
+        # the two script sets would differ and the fold would be refused —
+        # which is why `fold_allowed(x, x)` cannot carry it.
+        assert v2.fold_allowed("we ship the \u02b0 build", "we ship the build")
         # A precomposed letter belongs to its BASE letter's script, searched one
         # NFD level deeper: polytonic Greek (U+1F00-U+1FFF) is in no block, but
         # it is GREEK, so dropping its accents still folds.

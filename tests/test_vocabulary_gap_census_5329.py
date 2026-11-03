@@ -11,8 +11,8 @@ and FOLDS — and before this census the fold left no trace anywhere.
 script is an UNKNOWN SCRIPT and refuses the fold (``_UNLISTED_SCRIPT`` in
 ``_scripts``), so the script LETTER case is closed.  That is a statement about
 folds, not a claim that a script token is never absorbed — a one-sided token in
-a script present on BOTH sides still is, and is counted here.  Two script-only
-populations remain outside this census: a marks-or-digits-only script difference
+a script present on BOTH sides still is, and is counted here.  ONE script-only
+population remains outside this census: a marks-or-digits-only script difference
 (Thai `๑๒๓` vs `123`) is not a content token, so nothing absorbs it and nothing
 counts it; it is declared on ``_UNLISTED_SCRIPT`` instead.
 
