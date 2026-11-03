@@ -1105,7 +1105,9 @@ _PRESENT_TENSE_DEMO_EVENT_WRITER = re.compile(
     # measured (round 12, P2: all three were GREEN on a present-tense `event`
     # claim). Backticks only, never a bare `\s*`, so the subject must still be
     # the sentence's subject.
-    r"[`'\"“]*\s+(?:also\s+|still\s+|continues?\s+to\s+)?"
+    # …and a possessive with a noun phrase in front of the verb ("the demo
+    # seed's turn writer MINTS …"), which the bare form also missed (round 14).
+    r"(?:['’]s)?(?:\s+\w+){0,3}\s+(?:also\s+|still\s+|continues?\s+to\s+)?"
     r"(?:writes?|mints?|creates?)\b"
     # * **NEGATION** — the CORRECTED sentences say the seed "writes NO turn
     #   node at all", and a bare verb match refuses exactly the prose this pin
@@ -1118,7 +1120,9 @@ _PRESENT_TENSE_DEMO_EVENT_WRITER = re.compile(
 #: The kind a ``pointKind`` mention names, if it names one — the group read by
 #: :func:`_present_tense_writer_claim`. Split out so the KIND rule above is
 #: stated once, in code, instead of as a lookahead inside the pattern.
-_POINT_KIND = re.compile(r"pointKind\s*[=:]\s*[`'\"“]*([a-z_]+)", re.IGNORECASE)
+_POINT_KIND = re.compile(
+    r"pointKind[`'\"\s]*(?:[=:]\s*|is\s+|of\s+)[`'\"“]*([a-z_]+)",
+    re.IGNORECASE)
 
 
 def _present_tense_writer_claim(flat: str) -> str | None:
@@ -1138,7 +1142,10 @@ def _present_tense_writer_claim(flat: str) -> str | None:
         before = flat[max(0, hit.start() - 40):hit.start()]
         if _OTHER_SEEDER_CONTEXT.search(before):
             continue
-        kind = _POINT_KIND.search(hit.group())
+        # The kind may be named just PAST the verb's match ("… with a
+        # ``pointKind`` of ``observation``"), so read a short context, not the
+        # matched span alone (#10675 review round 14, P2).
+        kind = _POINT_KIND.search(flat[hit.start():hit.end() + 40])
         if kind is None or kind.group(1).lower() == "event":
             return hit.group()
     return None
@@ -1217,13 +1224,26 @@ _SEED_MENTION = re.compile(r"demo(?:/dashboard)?[\s-]+seed", re.IGNORECASE)
 #: A subject introduced as somebody ELSE's seeder, so a `the seeder writes
 #: …` immediately after it is not the demo seed's claim.
 _OTHER_SEEDER_CONTEXT = re.compile(
-    r"(?:ask[-_ ]?fixture|ask_spotcheck|fixture|onboarding)\W*$",
+    r"(?:ask[-_ ]?fixture|ask_spotcheck|onboarding)\W*$",
     re.IGNORECASE)
 
 _TURN_SHAPE_VOCABULARY = re.compile(
     r"pointKind\s*[=:]\s*[`'\"“]*event\b|\bturn node\b|\bis_episodic\b",
     re.IGNORECASE)
 
+
+
+def _sentence_at(text: str, pos: int) -> str:
+    """The sentence of ``text`` that contains ``pos``.
+
+    Sentence, not window: a guard that decides "is this mention about the turn
+    shape" on a character radius answers differently depending on where the
+    sentence sits in the file (#10675 review round 14, P2).
+    """
+    cut = text.rfind(". ", 0, pos)
+    start = 0 if cut == -1 else cut + 2
+    end = text.find(". ", pos)
+    return text[start:len(text) if end == -1 else end + 1]
 
 def test_no_home_states_the_deleted_demo_turn_writer_as_current_fact():
     """#10000 review P3: three homes were corrected and the fourth was missed.
@@ -1275,12 +1295,14 @@ def test_no_home_states_the_deleted_demo_turn_writer_as_current_fact():
         for _hit in seed_hits:
             window = flat[max(0, _hit.start() - _MARKER_WINDOW):
                           _hit.end() + _MARKER_WINDOW]
-            # ⛔ Only a mention ABOUT the turn shape owes the marker. The demo
-            # seed is discussed for other reasons too ("writes ~10 Points",
-            # "the fixture every read test reuses"), and demanding `#10000`
-            # beside those refused TRUE sentences a lane would plausibly write
-            # (#10675 review round 13, P2).
-            if not _TURN_SHAPE_VOCABULARY.search(window):
+            # ⛔ Only a mention ABOUT the turn shape owes the marker, and "about"
+            # is decided on the mention's OWN SENTENCE: judged on the ±window it
+            # depended on where in the file the sentence was typed — measured
+            # (#10675 review round 14, P2), the same TRUE sentence was GREEN at
+            # one insertion point and RED at another because a NEIGHBOUR's
+            # `pointKind='event'` fell inside the radius.
+            sentence = _sentence_at(flat, _hit.start())
+            if not _TURN_SHAPE_VOCABULARY.search(sentence):
                 continue
             assert "#10000" in window, (
                 f"`{rel}` names the demo/dashboard seed without naming #10000 "
