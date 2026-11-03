@@ -1427,6 +1427,47 @@ def test_a_shell_metacharacter_is_quoted_in_the_CACHE_GRAPH_line_too(
     assert token == "org_$(touch${IFS}/tmp/PWNED_BY_CONFIG_SHOW)"
 
 
+def test_the_chmod_remedy_is_quoted(capsys, tmp_path):
+    """It is a line the user is told to PASTE, and the path is store-derived — a
+    directory name can legally contain `;`."""
+    evil_dir = tmp_path / "x; touch MARKER"
+    evil_dir.mkdir()
+    target = evil_dir / ".tortoise"        # the resolver's CWD candidate IS this file
+    target.write_text(GLOBAL)
+    # mode-000 FILE: `is_file()` passes and `read_text()` fails inside the
+    # resolver's try, so it arrives as `_ConfigError` (deterministic on every
+    # platform — a mode-000 PARENT is swallowed by pathlib's `is_file()` in 3.12)
+    target.chmod(0o000)
+    try:
+        import os
+        os.chdir(evil_dir)
+        assert _run() == 1
+        out = capsys.readouterr().out
+        line = next(ln for ln in out.splitlines() if "chmod 600" in ln)
+        inside = line.split("chmod 600 ", 1)[1].rstrip("`).")
+        import shlex
+        assert shlex.split(inside) == [str(target)]
+    finally:
+        target.chmod(0o600)
+        del target
+
+
+def test_the_whitespace_relation_carries_the_endpoint_verdict(
+        monkeypatch, capsys, tmp_path):
+    """The `same-modulo-whitespace` branch used to drop the different-endpoint
+    clause its sibling carries."""
+    _global(tmp_path)                                    # api_url https://api.premiselabs.co
+    monkeypatch.setenv("TORTOISE_API_KEY", GLOBAL_KEY + " ")
+    monkeypatch.setenv("TORTOISE_API_URL", "")
+    assert _run(("config", "show", "--json")) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["identity_host_agrees"] is False
+    assert payload["identity_relation"].endswith("different-host")
+    assert _run() == 0
+    out = capsys.readouterr().out
+    assert "DIFFERENT endpoint" in out
+
+
 def test_an_unreadable_store_is_not_offered_for_deletion(capsys, tmp_path):
     """The file is INTACT and may hold the signup_token — a full credential and the
     only way back into the org. "repair or delete it" made deletion the
