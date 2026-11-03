@@ -1063,30 +1063,6 @@ def test_report_answer_string_absent_keys_noop():
 
 # ── OWNER VALIDATION: session_id on both capture paths ─────────────────────
 
-@pytest.mark.embedded_only  # Epic #1647 (PR #1684): the TORTOISE_SESSION_LLM_MOCK seam keys on the EMBEDDED lane — the v2 extractor's S3 stage runs on docker (mode='real') and the mock cannot search, yielding 0 points. Docker-lane mock extraction is a separate divergence (filed).
-def test_session_id_written_by_sdk_capture_path(tmp_path, monkeypatch):
-    """The SDK capture path (capture_session → _extract_session_v2) writes
-    session_id on the extracted points — source-session attribution (a) is
-    trustable on this path."""
-    monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
-    sdk = _fresh_sdk(tmp_path)
-    try:
-        res = sdk.capture_session([
-            {"role": "user", "content": "We decided to ship the strategy "
-                                        "document first."},
-            {"role": "assistant", "content": "Agreed, the strategy is durable."},
-        ])
-        sid = res["session_id"]
-        assert res["extracted"] >= 1
-        proj = sdk._get_proj()
-        rows = proj.g.query(
-            "MATCH (p:Point {is_episodic:false}) "
-            "RETURN p.id, coalesce(p.session_id, '')").result_set
-        assert rows, "expected extracted (non-episodic) points"
-        for pid, psid in rows:
-            assert psid == sid, f"point {pid} missing session_id"
-    finally:
-        sdk.close()
 
 
 def test_session_id_written_by_hosted_commit_path(monkeypatch, tmp_path):

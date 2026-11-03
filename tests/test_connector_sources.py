@@ -488,20 +488,6 @@ class TestEntityPathObjectReference:
 # Provenance chain (P4 unblock) — AC5
 # ═══════════════════════════════════════════════════════════════════════
 
-class TestProvenanceChain:
-    def test_get_provenance_chain_returns_connector_source(self):
-        with fresh_sdk() as sdk:
-            proj = sdk._get_proj()
-            proj.apply(gh_issue_event())
-            p = sdk.create_point("statement", "claim from issue 42",
-                                 extractedFrom=GH_URL)
-            chain = sdk.get_provenance_chain(p["id"])
-            assert len(chain) == 1
-            src = chain[0]["source"]
-            assert src["url"] == GH_URL
-            assert src["sourceKind"] == "github_issue"
-            assert chain[0]["labels"] == ["Event"]
-
 
 # ═══════════════════════════════════════════════════════════════════════
 # EP neutrality (AC6) — connector kinds are neutral → no weight change

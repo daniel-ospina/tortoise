@@ -37,6 +37,25 @@ def _make_point(sdk: TortoiseSDK, **kw):
     )
 
 
+
+def _incoming(sdk, point_id: str, rel_type: str) -> list[dict]:
+    """The `traverse(..., direction="incoming")` read, inlined.
+
+    `sdk.traverse` was deleted by #4282; this is the same query it issued, kept
+    here because the supersede tests only ever used it as a READER.
+    """
+    proj = sdk._get_proj()
+    rows = proj.g.query(
+        f"MATCH (n:Point {{id:$id}})<-[r:{rel_type}]-(m:Point) "
+        "RETURN m.id, m.content, m.pointKind, r.idx",
+        params={"id": point_id},
+    ).result_set
+    return [
+        {"id": r[0], "content": r[1], "pointKind": r[2],
+         "idx": r[3] if len(r) > 3 else None}
+        for r in rows
+    ]
+
 # ── IMPL edge transfer (target) ────────────────────────────────────
 
 def test_supersede_transfers_impl_to_target(sdk):
@@ -60,17 +79,14 @@ def test_supersede_transfers_impl_to_target(sdk):
     assert not sdk.get_point(claim_b["id"]).get("outdated")
 
     # IMPL edge moved to B
-    incoming_b = sdk.traverse(claim_b["id"], "IMPL", direction="incoming")
+    incoming_b = _incoming(sdk, claim_b["id"], "IMPL")
     assert len(incoming_b) >= 1, "IMPL edge should be transferred to B"
 
     # A has no live IMPL edges
-    incoming_a = sdk.traverse(claim_a["id"], "IMPL", direction="incoming")
+    incoming_a = _incoming(sdk, claim_a["id"], "IMPL")
     assert len(incoming_a) == 0, (
         f"A should have no incoming IMPL after supersede, got {incoming_a}"
     )
-
-
-# ── NAND edge transfer (target) ────────────────────────────────────
 
 def test_supersede_transfers_nand_to_target(sdk):
     """NAND evidence→claim_A: supersede A→B should move NAND edge to B."""
@@ -84,17 +100,14 @@ def test_supersede_transfers_nand_to_target(sdk):
     assert result["edges_transferred"] >= 1
 
     # NAND edge moved to B
-    incoming_b = sdk.traverse(claim_b["id"], "NAND", direction="incoming")
+    incoming_b = _incoming(sdk, claim_b["id"], "NAND")
     assert len(incoming_b) >= 1, "NAND edge should be transferred to B"
 
     # A has no live NAND edges
-    incoming_a = sdk.traverse(claim_a["id"], "NAND", direction="incoming")
+    incoming_a = _incoming(sdk, claim_a["id"], "NAND")
     assert len(incoming_a) == 0, (
         f"A should have no incoming NAND after supersede, got {incoming_a}"
     )
-
-
-# ── Source edge transfer ───────────────────────────────────────────
 
 def test_supersede_transfers_source_edge(sdk):
     """IMPL claim_A→target: supersede A→B should move source role to B."""
@@ -108,19 +121,16 @@ def test_supersede_transfers_source_edge(sdk):
     assert result["edges_transferred"] >= 1
 
     # B now has incoming IMPL (as source of the operator)
-    incoming_b = sdk.traverse(claim_b["id"], "IMPL", direction="incoming")
+    incoming_b = _incoming(sdk, claim_b["id"], "IMPL")
     assert len(incoming_b) >= 1, "B should receive the source IMPL edge"
 
     # A has no incoming IMPL
-    incoming_a = sdk.traverse(claim_a["id"], "IMPL", direction="incoming")
+    incoming_a = _incoming(sdk, claim_a["id"], "IMPL")
     assert len(incoming_a) == 0
 
     # The target still has its IMPL edge (operator→target not affected)
-    incoming_target = sdk.traverse(target["id"], "IMPL", direction="incoming")
+    incoming_target = _incoming(sdk, target["id"], "IMPL")
     assert len(incoming_target) >= 1, "Target should still have its IMPL edge"
-
-
-# ── Multiple edges ─────────────────────────────────────────────────
 
 def test_supersede_transfers_multiple_edges(sdk):
     """Multiple IMPL edges into A: all should transfer to B."""
@@ -135,13 +145,10 @@ def test_supersede_transfers_multiple_edges(sdk):
     result = sdk.supersede_point(claim_a["id"], claim_b["id"])
     assert result["edges_transferred"] == 2
 
-    incoming_b = sdk.traverse(claim_b["id"], "IMPL", direction="incoming")
+    incoming_b = _incoming(sdk, claim_b["id"], "IMPL")
     assert len(incoming_b) == 2
-    incoming_a = sdk.traverse(claim_a["id"], "IMPL", direction="incoming")
+    incoming_a = _incoming(sdk, claim_a["id"], "IMPL")
     assert len(incoming_a) == 0
-
-
-# ── Mixed edges (IMPL + NAND) ──────────────────────────────────────
 
 def test_supersede_transfers_mixed_edges(sdk):
     """IMPL and NAND into A: both transfer to B."""
@@ -156,14 +163,27 @@ def test_supersede_transfers_mixed_edges(sdk):
     result = sdk.supersede_point(claim_a["id"], claim_b["id"])
     assert result["edges_transferred"] == 2
 
-    impl_to_b = sdk.traverse(claim_b["id"], "IMPL", direction="incoming")
-    nand_to_b = sdk.traverse(claim_b["id"], "NAND", direction="incoming")
+    impl_to_b = _incoming(sdk, claim_b["id"], "IMPL")
+    nand_to_b = _incoming(sdk, claim_b["id"], "NAND")
     assert len(impl_to_b) == 1
     assert len(nand_to_b) == 1
 
     # A has zero of either
-    assert len(sdk.traverse(claim_a["id"], "IMPL", direction="incoming")) == 0
-    assert len(sdk.traverse(claim_a["id"], "NAND", direction="incoming")) == 0
+    assert len(_incoming(sdk, claim_a["id"], "IMPL")) == 0
+    assert len(_incoming(sdk, claim_a["id"], "NAND")) == 0
+
+
+
+# ── NAND edge transfer (target) ────────────────────────────────────
+
+
+# ── Source edge transfer ───────────────────────────────────────────
+
+
+# ── Multiple edges ─────────────────────────────────────────────────
+
+
+# ── Mixed edges (IMPL + NAND) ──────────────────────────────────────
 
 
 # ── No edges to transfer ───────────────────────────────────────────

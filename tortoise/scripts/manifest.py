@@ -30,7 +30,7 @@ sync_manifest = {
         },
         {
             "issue": 7045,
-            "script": "sdk.backfill_about_entities()",
+            "script": "(removed) sdk.backfill_about_entities() — deleted by #4282",
             "entity": "Point.aboutEntities",
             "source": "Keyword match Point.content ↔ Subject/Object.name",
             "graph_node": "Point property update",

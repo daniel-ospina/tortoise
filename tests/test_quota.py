@@ -396,93 +396,10 @@ class TestNonePreservation:
         assert limits["max_sessions"] is None  # unlimited (#4010)
 
 
-# ── #947 (epic #909 slice 2): sessions branch + is_episodic + constants ──
-
-class TestSessionsQuota:
-    """#947 P0: the sessions branch counts Session nodes, NOT all nodes.
-
-    Pre-fix ``_count_resource("sessions")`` fell through to ``MATCH (n)`` —
-    ~25 nodes per captured session → false 402 after ~40 captures. #4010: the
-    stored ``t.max_sessions`` is no longer honoured as a cap (sessions are
-    unlimited for every tier), so the same fixture that used to gate the 41st
-    capture now stores it — the #947 count property is unchanged.
-    """
-
-    def test_sessions_count_returns_session_nodes_and_41st_lands(
-            self, reg_sdk, tmp_path):
-        from tortoise.sdk import TortoiseSDK  # noqa: I001
-        import os
-        db = os.path.join(tmp_path, "quota.db")
-        tid = _find_org_id(reg_sdk)
-        # Inject max_sessions=40 on the Team node (provision_test_user
-        # convention — direct write, DE2E-7 quota fixture). #4010: a direct
-        # stored write is deliberately NOT honoured as a cap.
-        reg_sdk._get_registry().query(
-            "MATCH (t:Team {id:$id}) SET t.max_sessions=40",
-            params={"id": tid},
-        )
-        tenant = TortoiseSDK(db, namespace=tid)
-        try:
-            # 40 minimal captures (tiny conversation — no regex extraction)
-            for i in range(40):
-                tenant.capture_session(
-                    [{"role": "user", "content": "okay"}],
-                    session_id=f"s{i:02d}",
-                )
-            # P0 regression: sessions count == 40, NOT the all-nodes count
-            # (pre-fix this branch returned the all-nodes count → fails
-            # pre-fix).
-            count = count_org_usage(tid, "sessions", sdk=tenant)
-            assert count == 40, (
-                f"sessions count should be 40, got {count} — the P0 "
-                "(MATCH (n) all-nodes fallthrough) is not fixed")
-            all_nodes = tenant._get_proj().g.query(
-                "MATCH (n) RETURN count(n)"
-            ).result_set[0][0]
-            assert all_nodes > 40, (
-                f"expected >40 total nodes ({all_nodes}) — the fixture must "
-                "distinguish sessions from the pre-fix all-nodes count")
-            # #4010: the stored 40 is NOT honoured — the resolver yields None.
-            limits = resolve_org_limits(tid)
-            assert limits["max_sessions"] is None, (
-                "a stored max_sessions=40 was honoured as a cap — the #4010 "
-                "trap is open")
-            enforce_org_limit(limits, "sessions", sdk=tenant)  # no raise
-            # 41st session is STORED, not refused (was a 402 before #4010).
-            tenant.capture_session(
-                [{"role": "user", "content": "okay"}], session_id="s40")
-            assert count_org_usage(tid, "sessions", sdk=tenant) == 41
-        finally:
-            tenant.close()
-
-    def test_sessions_branch_ignores_non_session_nodes(self, reg_sdk, tmp_path):
-        """Only :Session nodes count — plain Points never inflate sessions."""
-        from tortoise.sdk import TortoiseSDK  # noqa: I001
-        import os
-        db = os.path.join(tmp_path, "quota.db")
-        tid = _find_org_id(reg_sdk)
-        tenant = TortoiseSDK(db, namespace=tid)
-        try:
-            tenant.capture_session(
-                [{"role": "user", "content": "okay"}], session_id="only_s1")
-            # ~10 non-Session nodes: turn Point + Event + extracted points
-            tenant.create_point("statement", "plain non-episodic point")
-            for i in range(8):
-                tenant.create_point("statement", f"filler point {i}")
-            assert count_org_usage(tid, "sessions", sdk=tenant) == 1
-            # 11 = 1 plain + 8 fillers + 1 v2-extracted value point + 1
-            # v2-minted Object entity (the deterministic _V2SessionMock
-            # extracts one point and one entity from "ok"); extracted value
-            # points AND minted entities are non-episodic and count against
-            # the quota by design — the capture estimate 3×Σ accounts for
-            # both, #1350/#1486/#1911). Turn points stay episodic (not
-            # counted).
-            assert count_org_usage(tid, "points", sdk=tenant) == 11
-        finally:
-            tenant.close()
-
-
 # ── #1726 Slice 1: documents resource (derived-constant cap) ─────
+# (#4282: the #947 sessions-branch class above went with `capture_session`;
+#  the count property it pinned still holds at test_quota.py's hosted pins
+#  and by test_issue_4010_sessions_unlimited.)
 
 class TestDocumentsQuota:
     """#1726: the documents gate fires on /v1/index/docs ONLY, with the
@@ -1216,22 +1133,6 @@ class TestObjectSubjectQuota:
         finally:
             tenant.close()
 
-    def test_capture_minted_object_counts_against_quota(
-            self, reg_sdk, tmp_path):
-        """#1911 + capture interplay: the deterministic _V2SessionMock mints
-        a non-episodic Object entity ('the strategy') alongside the extracted
-        value point — the Object now counts against the quota too (pre-fix
-        the Points-only count saw the value point but never the entity)."""
-        tid = _find_org_id(reg_sdk)
-        tenant = self._tenant(reg_sdk, tmp_path)
-        try:
-            tenant.capture_session(
-                [{"role": "user", "content": "okay"}], session_id="cap_s1")
-            # 1 value point + 1 minted Object = 2 (the Session/turn Point/
-            # Event/Source nodes stay episodic and are excluded)
-            assert count_org_usage(tid, "points", sdk=tenant) == 2
-        finally:
-            tenant.close()
 
 
 # ── #1977: direct event writes count against the quota cap ────────────────
@@ -1330,18 +1231,6 @@ class TestEventQuota:
         finally:
             tenant.close()
 
-    def test_capture_minted_events_stay_excluded(self, reg_sdk, tmp_path):
-        """Regression: the capture path stamps its Events episodic, so the
-        Event branch must not re-charge capture users (the count stays 2 =
-        1 value point + 1 minted Object, exactly as #1911 pinned)."""
-        tid = _find_org_id(reg_sdk)
-        tenant = self._tenant(reg_sdk, tmp_path)
-        try:
-            tenant.capture_session(
-                [{"role": "user", "content": "okay"}], session_id="ev_s1")
-            assert count_org_usage(tid, "points", sdk=tenant) == 2
-        finally:
-            tenant.close()
 
 
 class TestIsEpisodicBackfill:
@@ -1419,32 +1308,6 @@ class TestIsEpisodicBackfill:
         finally:
             tenant.close()
 
-    def test_new_capture_writes_carry_flag(self, reg_sdk, tmp_path):
-        """Seam note (MECE ISSUE 3): regex-fallback captures write is_episodic
-        on Session + turn Points going forward — unflagged new captures would
-        re-introduce the false-402 this fix eliminates."""
-        from backfill_is_episodic import run_backfill
-        tid = _find_org_id(reg_sdk)
-        tenant = self._make_tenant(reg_sdk, tmp_path)
-        try:
-            proj = tenant._get_proj()
-            tenant.capture_session(
-                [{"role": "user", "content": "okay"}], session_id="new_s1")
-            # Nothing to backfill — new capture nodes already carry the flag
-            # (turn Point, Event, and the session-provenance Source all stamp
-            # is_episodic at creation; _link_source stamps session refs, #1486).
-            assert run_backfill(proj) == {"matched": 0, "updated": 0}
-            # The turn Point is episodic; the ONE v2-extracted value point
-            # (deterministic _V2SessionMock, non-episodic by design) plus the
-            # v2-minted Object entity ('the strategy') are counted against
-            # the quota (#1350/#1486; the entity count is #1911 — capture-
-            # minted entities are non-episodic and previously invisible to
-            # the Points-only count).
-            assert count_org_usage(tid, "points", sdk=tenant) == 2
-            # Session counted by the sessions branch
-            assert count_org_usage(tid, "sessions", sdk=tenant) == 1
-        finally:
-            tenant.close()
 
 
 class TestBudgetConstants:

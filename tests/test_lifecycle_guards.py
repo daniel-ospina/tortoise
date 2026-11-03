@@ -940,30 +940,6 @@ def test_the_commit_receipt_contract_states_the_replay_exception():
     assert "duplicate:true" in doc and "temporal_not_applied" in doc, doc
 
 
-def test_hosted_commit_receipt_carries_a_dropped_fold_advisory():
-    """The advisory must reach the HOSTED surface, not just an SDK caller.
-
-    The hosted commit path is the reason the fold is dropped rather than raised
-    (`_execute_commit_writes` puts `validFrom` on the fold from the payload's
-    `when`), so it is exactly where a silent drop is invisible: a 200 with a
-    `when` that was never applied. The write phase returns the advisories and
-    the handler folds them into the response's additive `warnings[]`.
-
-    Census, not behaviour: driving a real commit payload to a terminal content
-    address needs the full commit harness, and this is the coupling that would
-    go stale silently (a create_point call site that forgets the advisory).
-    """
-    import tortoise.hosted_api as hosted
-
-    write_phase = inspect.getsource(hosted._execute_commit_writes)
-    assert write_phase.count('_written.get("advisories")') == 2, (
-        "both create_point legs of the write phase must carry the advisories")
-    assert "return _write_advisories" in write_phase
-    handler = inspect.getsource(hosted.commit_session)
-    assert "warnings.extend(_execute_commit_writes(" in handler, (
-        "the commit receipt must fold the write-time advisories into warnings")
-
-
 def test_the_temporal_refusal_set_uses_the_canonical_precision_names():
     """`_TEMPORAL_RESTAMP_PROPS` must not re-spell the two precision prop names.
 
@@ -992,3 +968,27 @@ def test_the_temporal_refusal_set_uses_the_canonical_precision_names():
     # ...and the set really holds the canonical names.
     assert {validity.FROM_PRECISION_PROP, validity.TO_PRECISION_PROP} <= \
         sdk_mod._TEMPORAL_RESTAMP_PROPS
+
+
+def test_hosted_commit_receipt_carries_a_dropped_fold_advisory():
+    """The advisory must reach the HOSTED surface, not just an SDK caller.
+
+    The hosted commit path is the reason the fold is dropped rather than raised
+    (`_execute_commit_writes` puts `validFrom` on the fold from the payload's
+    `when`), so it is exactly where a silent drop is invisible: a 200 with a
+    `when` that was never applied. The write phase returns the advisories and
+    the handler folds them into the response's additive `warnings[]`.
+
+    Census, not behaviour: driving a real commit payload to a terminal content
+    address needs the full commit harness, and this is the coupling that would
+    go stale silently (a create_point call site that forgets the advisory).
+    """
+    import tortoise.hosted_api as hosted
+
+    write_phase = inspect.getsource(hosted._execute_commit_writes)
+    assert write_phase.count('_written.get("advisories")') == 2, (
+        "both create_point legs of the write phase must carry the advisories")
+    assert "return _write_advisories" in write_phase
+    handler = inspect.getsource(hosted.commit_session)
+    assert "warnings.extend(_execute_commit_writes(" in handler, (
+        "the commit receipt must fold the write-time advisories into warnings")

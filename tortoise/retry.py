@@ -45,11 +45,13 @@ and keeps its own run knobs (``INGEST_WRITE_RETRIES`` etc.) eval-side.
   * the capture lane's graph writes, all in ``tortoise/sdk.py`` — the
     ``:Session`` MERGE (``_write_session_and_turns``), the batched
     ``UNWIND $turns`` turn store and the stale-turn ``DETACH DELETE`` sweep
-    (``_write_capture_turns``), and ``TortoiseSDK.capture_session``'s
-    follow-up provenance/state stamps (the minted-point ``eventId`` stamp,
+    (``_write_capture_turns``), and the capture lane's
+    follow-up provenance/state stamps — the minted-point ``eventId`` stamp,
     the operator ``eventId`` stamps, the ``retry_failed_capture`` provenance
     heal, the ``entity_links_*`` counters, and the
-    ``capture_ok``/``capture_extractor`` SET);
+    ``capture_ok``/``capture_extractor`` SET (the SDK ``capture_session``
+    entry point that ran these was deleted by #4282; the hosted lane still
+    runs them);
   * ``_post_commit`` — the ``POST /v1/sessions/commit`` transmission — on
     ``retryable_transient`` (the transport-class predicate; it is not a graph
     write, so the graph-state-gated ``retryable_aborted_write`` does not

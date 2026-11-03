@@ -233,24 +233,6 @@ def test_the_fold_gate_and_the_door_gate_are_one_rule():
     assert ids_mod.session_id_refusal("a\x00b") is None
 
 
-@pytest.mark.parametrize("value", (0, False, 123, b"  "))
-@pytest.mark.parametrize("door", ("capture", "commit"))
-def test_both_sdk_doors_refuse_a_present_non_string_id(sdk, door, value):
-    """The DOORS, not just the predicate — the predicate alone pins nothing.
-
-    An earlier draft minted before diagnosing, so ``session_id or mint()``
-    swallowed ``0``/``False`` (minted over) while ``123``/``b"  "`` were
-    refused — the two doors disagreed with each other and with the hosted
-    boundary. This is the test that reds if that ordering ever comes back.
-    """
-    client, _ = sdk
-    res = (client.capture_session(CONV, session_id=value) if door == "capture"
-           else client.commit_session(CONV, session_id=value))
-
-    assert res["ok"] is False, res
-    errors = [str(e) for e in (res.get("errors") or [])]
-    assert any("must be a string" in e for e in errors), errors
-    assert _session_ids(client) == [], _session_ids(client)
 
 
 def test_the_wire_normaliser_agrees_with_the_doors():
@@ -331,36 +313,8 @@ def test_the_skip_report_names_a_blank_identity_as_blank():
 
 # ── enforcement point 1: the SDK capture doors ───────────────────────────
 
-@pytest.mark.parametrize("door", ("capture", "commit"))
-@pytest.mark.parametrize("blank", ("   ", "\t"))
-def test_the_sdk_doors_refuse_a_blank_session_id(sdk, door, blank):
-    client, log_path = sdk
-    res = (client.capture_session(CONV, session_id=blank) if door == "capture"
-           else client.commit_session(CONV, session_id=blank))
-
-    assert res["ok"] is False, res
-    errors = [str(e) for e in (res.get("errors") or [])]
-    # ⛔ The EXACT constant, not a substring: `commit_session` has a SECOND,
-    # pre-existing Layer-1 gate whose text also contains "non-blank", so a
-    # substring assertion stays green when only the DOOR arm is reverted (a
-    # cycle-3 review finding) — and that revert costs a full LLM extraction
-    # before Layer-1 refuses.
-    assert ids_mod.SESSION_ID_BLANK_REFUSAL in errors, errors
-    # It refuses BEFORE doing the work: nothing was written, nothing journaled.
-    assert _session_ids(client) == [], (
-        f"a blank session id must write no :Session at all, got "
-        f"{_session_ids(client)!r}")
-    assert [r for r in _records(log_path)
-            if r.get("type") == "SessionRecorded"] == []
 
 
-def test_a_blank_session_id_cannot_mint_a_duplicate_session(sdk):
-    """The measured #9599 shape: two captures on one blank id, ONE container."""
-    client, _ = sdk
-    for _ in range(2):
-        res = client.capture_session(CONV, session_id="   ")
-        assert res["ok"] is False, res
-    assert _session_ids(client) == [], _session_ids(client)
 
 
 # ── enforcement point 2: the hosted boundary ─────────────────────────────
@@ -393,18 +347,6 @@ def test_the_hosted_boundary_validator_reds_without_the_network():
         SessionRequest(conversation=CONV, session_id=ok_value)
 
 
-def test_a_consent_declined_commit_still_reports_a_minted_id(sdk, monkeypatch):
-    """Receipt parity: the mint stays ABOVE the consent gate (#9599 review P3).
-
-    Moving the mint below the gate turns this field into `None` — a silent
-    change to a public receipt — and nothing else in the suite would notice.
-    """
-    client, _ = sdk
-    monkeypatch.delenv("TORTOISE_CAPTURE", raising=False)
-    res = client.commit_session(CONV)
-    assert res["ok"] is False, res
-    assert str(res.get("session_id", "")).startswith("session_"), res
-    assert "consent" in str(res.get("error", "")).lower(), res
 
 
 # ── the replay half: a journal written before the doors refused ────

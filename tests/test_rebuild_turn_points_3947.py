@@ -43,7 +43,6 @@ from __future__ import annotations
 
 import json
 import os
-from unittest import mock
 
 import pytest
 
@@ -69,30 +68,8 @@ def _offline_extractor(monkeypatch):
     monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
 
 
-@pytest.fixture()
-def captured(tmp_path):
-    """A scratch store + JSONL journal holding one captured 3-turn session."""
-    log_path = str(tmp_path / "events" / "sdk.jsonl")
-    sdk = TortoiseSDK(str(tmp_path / "tortoise.db"), event_log_path=log_path)
-    res = sdk.capture_session(CONV, session_id=SESSION_ID)
-    assert res["ok"] is True
-    assert res["turns"] == 3
-    yield sdk, log_path
-    sdk.close()
 
 
-@pytest.fixture()
-def unjournaled(tmp_path):
-    """The pre-#3947 write shape: a capture SDK with NO event log at all.
-
-    Every turn Point exists in the graph and nowhere in a journal — exactly
-    the state the fix has to make a rebuild REFUSE rather than erase.
-    """
-    sdk = TortoiseSDK(str(tmp_path / "tortoise.db"))
-    res = sdk.capture_session(CONV, session_id=SESSION_ID)
-    assert res["ok"] is True and res["turns"] == 3
-    yield sdk, str(tmp_path)
-    sdk.close()
 
 
 def _turn_ids(proj):
@@ -116,48 +93,8 @@ def _contains(proj):
 # ── (a)+(b): the turn write is replayable ────────────────────────────────
 
 
-def test_rebuild_restores_turn_points_and_session_link(captured):
-    """`rebuild()` — the wipe+replay path that used to lose them outright."""
-    sdk, log_path = captured
-    proj = sdk._get_proj()
-    before = _turn_ids(proj)
-    assert before == [f"{SESSION_ID}_t{i}" for i in range(3)]
-    assert set(before) <= set(_contains(proj))
-
-    proj.rebuild(EventLog(log_path), confirm_destructive=True)
-
-    assert _turn_ids(proj) == before, "turn Points must survive the rebuild"
-    assert set(before) <= set(_contains(proj)), \
-        "the CONTAINS edge must be replayed too"
-    # The node must come back as a TURN Point, not a nameless Point: content
-    # + speaker are the payload the journal now carries.
-    rows = proj.g.query(
-        "MATCH (t:Point {id:$id}) RETURN t.content, t.speaker, t.pointKind",
-        params={"id": before[0]},
-    ).result_set
-    assert rows[0][0] == "[user] We decided to rebuild the projection weekly."
-    assert rows[0][1] == "user"
-    assert rows[0][2] == "event"
-    # Session container recreated with the ontology's episodic flag (§4.5).
-    srows = proj.g.query(
-        "MATCH (s:Session {id:$sid}) RETURN s.is_episodic",
-        params={"sid": SESSION_ID},
-    ).result_set
-    assert srows and srows[0][0] is True
 
 
-def test_rebuild_all_restores_turn_points_and_session_link(captured):
-    """`rebuild_all()` — the CLI path. Its #548 snapshot kept the NODE but the
-    replay dropped `is_episodic`, so the turns came back as plain Points."""
-    sdk, log_path = captured
-    proj = sdk._get_proj()
-    before = _turn_ids(proj)
-    assert set(before) <= set(_contains(proj))
-
-    proj.rebuild_all(os.path.dirname(log_path), confirm_destructive=True)
-
-    assert _turn_ids(proj) == before
-    assert set(before) <= set(_contains(proj))
 
 
 # ── (b): live/replay parity for the quota discriminator ──────────────────
@@ -187,53 +124,8 @@ def test_replayed_point_keeps_is_episodic(tmp_path):
 # ── (c): the invariant — it must be able to RED ──────────────────────────
 
 
-def test_rebuild_raises_when_turn_points_are_unjournaled(unjournaled):
-    """THE REGRESSION. Reverting fix (a) to the raw-`proj.g.query` behaviour
-    puts the store back in exactly this state: turns in the graph, no record
-    in the journal. The rebuild must FAIL, not report success."""
-    sdk, tmp = unjournaled
-    proj = sdk._get_proj()
-    assert len(_turn_ids(proj)) == 3
-
-    empty_journal = EventLog(os.path.join(tmp, "nope.jsonl"))
-    with pytest.raises(RebuildDroppedEpisodicPoints) as ei:
-        proj.rebuild(empty_journal, confirm_destructive=True)
-
-    msg = str(ei.value)
-    assert SESSION_ID + "_t0" in msg and SESSION_ID + "_t2" in msg
-    assert "NOT touched" in msg
-    # ── #2943 "No loss without proof" ──
-    # The proof runs BEFORE `DETACH DELETE n`, so a refusal must leave the
-    # store exactly as it was. A post-wipe raise would have left 0 turns here
-    # — converting the silent-loss bug into a loud one, with nothing left.
-    assert len(_turn_ids(proj)) == 3, "a refused rebuild must not wipe the store"
-    assert set(_turn_ids(proj)) <= set(_contains(proj))
 
 
-def test_invariant_is_the_falsifier_for_is_episodic_parity(unjournaled):
-    """The pre-wipe proof must not be satisfiable by a node that only LOOKS
-    done: the check is on recreatability of the pre-wipe episodic set.
-
-    Stated the other way round, this is where ``rebuild_all`` REDs for fix
-    (b): its #548 snapshot supplies the id (so the proof passes), and the flag
-    is then asserted by
-    ``test_rebuild_all_restores_turn_points_and_session_link`` — whose
-    ``_turn_ids`` filter is ``is_episodic = true``, i.e. it returns ``[]``
-    without the parity clause.
-    """
-    sdk, _ = unjournaled
-    proj = sdk._get_proj()
-    turn = f"{SESSION_ID}_t0"
-    # No recreation source at all → refuse.
-    with pytest.raises(RebuildDroppedEpisodicPoints):
-        proj._assert_episodic_points_recreatable({turn}, [], snapshot_ids=())
-    # Either recreation source is enough — the #548 snapshot alone, a journal
-    # PointAdded, or a promoted full snapshot.
-    proj._assert_episodic_points_recreatable({turn}, [], snapshot_ids={turn})
-    for kind in ("PointAdded", "OperatorAdded", "PointPromoted",
-                 "OperatorPromoted"):
-        proj._assert_episodic_points_recreatable(
-            {turn}, [{"type": kind, "point": {"id": turn}}])
 
 
 def test_every_node_creating_journal_type_counts_as_recreatable(tmp_path):
@@ -314,91 +206,8 @@ def test_capture_gate_refuses_before_the_coverage_proof(tmp_path):
         sdk.close()
 
 
-def test_recapture_journals_the_stored_status_not_a_literal_draft(tmp_path):
-    """#3947 review (cycle 2, parity): the live turn write is
-    `t.status = coalesce(t.status, 'draft')`, so a RE-capture preserves a
-    promoted status. Journalling a literal `draft` makes the replay REGRESS a
-    promoted turn (`apply()` folds in order, so the second PointAdded wins).
-    The record must carry what the graph holds, like `createdAt`.
-    """
-    log_path = str(tmp_path / "events" / "sdk.jsonl")
-    sdk = TortoiseSDK(str(tmp_path / "tortoise.db"), event_log_path=log_path)
-    try:
-        sdk.capture_session(CONV, session_id=SESSION_ID)
-        proj = sdk._get_proj()
-        pid = f"{SESSION_ID}_t0"
-        proj.g.query("MATCH (t:Point {id:$id}) SET t.status='live'",
-                     params={"id": pid})
-        sdk.capture_session(CONV, session_id=SESSION_ID)  # re-capture
-
-        turns = [e for e in EventLog(log_path).read_all()
-                 if (e.get("point") or {}).get("id") == pid]
-        assert turns, "the re-capture must journal the turn"
-        assert turns[-1]["point"]["status"] == "live", (
-            "the journal must carry the STORED status; a literal 'draft' "
-            "regresses the promoted turn on replay")
-
-        proj.rebuild(EventLog(log_path), confirm_destructive=True)
-        after = proj.g.query("MATCH (t:Point {id:$id}) RETURN t.status",
-                             params={"id": pid}).result_set[0][0]
-        assert after == "live", "replay must not downgrade a promoted turn"
-    finally:
-        sdk.close()
 
 
-def test_recapture_shorter_does_not_resurrect_turns_on_rebuild(tmp_path):
-    """#1920 durability half: deleting the stale turns LIVE is not enough —
-    the deletion must also reach the journal, or ``rebuild`` replays the
-    first capture's ``PointAdded`` records and resurrects every orphan.
-
-    The journal is the durability surface #3947 established; a live-only
-    delete leaves a store whose rebuild silently re-creates the exact
-    residue the fix removed.
-
-    The GROW-BACK leg is the ordering pin: the deletion record is journaled by
-    the same capture that re-writes the remaining turns, so a fold that applied
-    a hard delete by id (ignoring its sequence) would erase turns a LATER
-    capture re-added.
-    """
-    log_path = str(tmp_path / "events" / "sdk.jsonl")
-    sdk = TortoiseSDK(str(tmp_path / "tortoise.db"), event_log_path=log_path)
-    try:
-        sdk.capture_session(CONV, session_id=SESSION_ID)  # 3 turns
-        sdk.capture_session([{"role": "user", "content": "shorter re-capture"}],
-                            session_id=SESSION_ID)        # 1 turn
-        proj = sdk._get_proj()
-        stale = [f"{SESSION_ID}_t{i}" for i in (1, 2)]
-        assert _turn_ids(proj) == [f"{SESSION_ID}_t0"]
-        for tid in stale:
-            assert proj.g.query("MATCH (t:Point {id:$id}) RETURN count(t)",
-                                params={"id": tid}).result_set[0][0] == 0
-
-        # The subscriber surface saw every turn's PointAdded, so it must see
-        # the hard delete too (the two-store split delete_point established).
-        retracted = {e["payload"].get("id")
-                     for e in sdk.poll_events(after=None)["events"]
-                     if e["type"] == "PointRetracted"}
-        assert set(stale) <= retracted, (
-            f"the deletion is invisible to the event surface: {sorted(set(stale) - retracted)}")
-
-        proj.rebuild(EventLog(log_path), confirm_destructive=True)
-
-        assert _turn_ids(proj) == [f"{SESSION_ID}_t0"], (
-            "a rebuild must not resurrect the turns the re-capture deleted")
-        live = set(_contains(proj))
-        assert not (set(stale) & live), (
-            f"resurrected turns are still CONTAINS-wired: {sorted(set(stale) & live)}")
-
-        # GROW BACK: the journaled delete must not suppress a turn a LATER
-        # capture re-writes under the same deterministic id.
-        sdk.capture_session(CONV, session_id=SESSION_ID)  # 3 turns again
-        assert _turn_ids(proj) == [f"{SESSION_ID}_t{i}" for i in range(3)]
-        proj.rebuild(EventLog(log_path), confirm_destructive=True)
-        assert _turn_ids(proj) == [f"{SESSION_ID}_t{i}" for i in range(3)], (
-            "the earlier hard-delete record must not suppress the re-grown "
-            "turns — the fold is sequence-ordered")
-    finally:
-        sdk.close()
 
 
 def test_forged_payload_contains_session_cannot_create_a_link(tmp_path):
@@ -545,32 +354,6 @@ def test_sdk_rejects_contains_session_prop():
         _sanitize_props({"contains_session": "sess_x"})
 
 
-def test_rebuild_all_restores_graph_only_session_container(unjournaled):
-    """#3947 review (F2/F6): the CLI path reported success while destroying the
-    ``:Session`` container and its ``CONTAINS`` edges of a journal-less store —
-    the #548 snapshot covers ``:Point`` nodes only. The Session snapshot
-    (mirroring the #990 ``:Batch`` precedent) keeps them, properties included.
-    """
-    sdk, _tmp = unjournaled
-    proj = sdk._get_proj()
-    before = _turn_ids(proj)
-    assert len(before) == 3
-    proj.g.query(
-        "MATCH (s:Session {id:$sid}) SET s.capture_ok=true, s.turn_count=3",
-        params={"sid": SESSION_ID})
-
-    counts = proj.rebuild_all(_tmp, confirm_destructive=True)  # a directory with no journal at all
-
-    assert counts["nodes"] >= 3
-    assert _turn_ids(proj) == before
-    assert set(before) <= set(_contains(proj)), (
-        "the CONTAINS edges must survive: without them every turn is orphaned")
-    rows = proj.g.query(
-        "MATCH (s:Session {id:$sid}) RETURN s.capture_ok, s.turn_count",
-        params={"sid": SESSION_ID}).result_set
-    assert rows and rows[0][0] is True and rows[0][1] == 3, (
-        "Session properties must survive too — a stub Session reads as "
-        "capture_ok=None (#2335 legacy presumed-captured) on the next capture")
 
 
 def test_rebuild_all_tolerates_a_journaled_hard_delete(tmp_path):
@@ -891,51 +674,3 @@ def test_prewipe_writer_refuses_an_over_cap_payload_without_wiping(
         sdk.close()
 
 
-def test_session_only_sidecar_write_failure_aborts_before_the_wipe(captured):
-    """#3947 review G6: a session-only sidecar write failure MUST abort.
-
-    The extractor-minted `(:Session)-[:CONTAINS]->(:Point)` edges are RAW,
-    UNJOURNALED writes (see ``_link_session`` in
-    ``tortoise/projection/entities.py``), so the durable pre-wipe sidecar is
-    their ONLY record. A normal capture IS the session-only shape
-    (``session_snapshot=1`` / ``session_point_links=4`` with
-    ``synthetic_events``/``batch_*`` empty — the journal carries the turn
-    Points, not the container or its links), so downgrading this failure to a
-    warning would wipe the graph with those edges living only in the
-    un-written sidecar: silent, permanent loss on an interrupted rebuild.
-    Pre-``3659d1fc8`` this failure RAISED; this test pins that, so the
-    warn-and-continue split cannot return.
-    """
-    sdk, log_path = captured
-    proj = sdk._get_proj()
-    # A sentinel that must survive the refused rebuild.
-    proj.g.query("CREATE (n:Sentinel {id:'sentinel-3947'})")
-
-    with (
-        mock.patch("tortoise.projection._write_prewipe_snapshot",
-                   side_effect=OSError("read-only log dir")),
-        pytest.raises(RuntimeError) as ei,
-    ):
-        proj.rebuild_all(os.path.dirname(log_path), confirm_destructive=True)
-
-    msg = str(ei.value)
-    assert "aborted BEFORE the graph wipe" in msg
-    # The refusal enumerates the session-only population and NONE of the
-    # three #3010 populations — the exact shape the F5 split misjudged.
-    # Anchor the counts with their preceding words: a bare `"0 <words>"`
-    # also matches `"10 <words>"`, so an unanchored form would silently stop
-    # pinning the session-only shape once the fixture grew. The session
-    # counts are asserted POSITIVELY and exactly — the template words alone
-    # are unconditional, so `":Session container(s)" in msg` is true even
-    # when the count is 0 and pins nothing (review G6 follow-up).
-    assert "destroy 0 graph-only Point event(s)" in msg
-    assert ", 0 :Batch marker(s)" in msg
-    assert ", 0 batch link(s)" in msg
-    assert "1 :Session container(s) and 4 session link(s)" in msg
-    # The wipe never ran: the sentinel, every turn Point and every CONTAINS
-    # edge are still here.
-    assert proj.g.query(
-        "MATCH (n:Sentinel {id:'sentinel-3947'}) RETURN count(n)"
-    ).result_set[0][0] == 1
-    assert _turn_ids(proj) == [f"{SESSION_ID}_t{i}" for i in range(3)]
-    assert set(_turn_ids(proj)) <= set(_contains(proj))

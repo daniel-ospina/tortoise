@@ -813,7 +813,7 @@ The lesson this entry keeps re-learning, now recorded in the guard itself: **a g
 - **The extractor ledger's KEEP row did not RENDER.** It carried 2 opening and 3 closing parentheses and an odd count of `**` markers, so its emphasis span broke and a stray `)` appeared mid-sentence — in the row a reader uses to decide the layer is cheap, and past every substring assertion the KEEP-row leg made (markdownlint's emphasis checks do not run inside a table cell). Balanced now, and the leg asserts paren and `**` balance. Mutation-checked: unbalanced again reds.
 - **Three citations in this entry were unqualified, and one is false at the declared pin.** The entry's own round-5 rule is that a number not true at the pin carries `at HEAD`; `security.py:85`, `record_projection.py:732` and `20261012000003_record_epistemic.sql:175` were bare, and at `c79ba1cf2` the first lands on `"INFORMED_BY", "PRODUCES"` (the about allowlist is at `:77-78`) while the other two do not exist. All three are qualified, and `test_the_correction_changelog_qualifies_its_line_citations` applies the rule to the paragraph that makes the citations. Mutation-checked: dropping one qualifier reds — the first version of that leg was VACUOUS, because a flat character window let a neighbour's `— at HEAD` qualify a bare citation beside it; the window now stops at the next citation.
 - **A CI fix, not a review finding.** The required `docs` check failed on a NEW markdownlint finding this PR introduced: the `§13 — the aboutObject headline claim is SCOPED…` heading was pressed against the preceding `---` with no blank line (MD022). One blank line added; the finding was authored here, so the baseline snapshot was not regenerated (`#7435` / `#7534`).
-- **Merged from a concurrent lane on this branch, and reconciled rather than stacked.** That lane re-measured the provenance reading (`10 failed / 11 passed`, obtained by swapping ALL FOUR live documents for their `01b5486ec` versions — a PARTIAL swap measures something else), and corrected §11.1's claim that `sdk._connect_issue_objects` calls `link_entity`: it does not, it calls `create_about_edge` (`sdk.py:20193` at the pinned revision), which emits the bare `MERGE`. Both are kept. The COUNT is not: two legs landed in the same merge, so the number was stale on arrival — which is exactly the argument for the instruction (the swap) over the number, and why the reading now lives here, in the ledger, where it is history rather than a claim about the current file.
+- **Merged from a concurrent lane on this branch, and reconciled rather than stacked.** That lane re-measured the provenance reading (`10 failed / 11 passed`, obtained by swapping ALL FOUR live documents for their `01b5486ec` versions — a PARTIAL swap measures something else), and corrected §11.1's claim that `sdk._connect_issue_objects` calls `link_entity`: it does not, it calls `create_about_edge` (`sdk.py:18768` at the pinned revision), which emits the bare `MERGE`. Both are kept. The COUNT is not: two legs landed in the same merge, so the number was stale on arrival — which is exactly the argument for the instruction (the swap) over the number, and why the reading now lives here, in the ledger, where it is history rather than a claim about the current file.
 
 **Eleventh review-cycle correction (fresh-context review of the tenth round's own fixes, P1 × 2 and P2 × 6) — the closed pair survived in the cost argument, an exemption checked one of its two statements, and this entry's own citation rule was broken by three of its citations.** No ruling and no measured property name changed.
 
@@ -875,7 +875,7 @@ deliberately rather than discovered later:
   `is_episodic` is the `#1486` discriminator), but it IS a behaviour change on
   that lane, and it is pinned rather than disclosed-away.
 
-**What now prevents a repeat.** `tests/test_8501_capture_path_anchor.py` — the
+**What now prevents a repeat.** `tests/test_8501_capture_path_anchor.py` (**deleted by #4282 — it drove `TortoiseSDK.capture_session`, one of the 26 dead public SDK methods; the anchor invariant now has NO pin, see §17 and the #4282 note in `STORAGE-ARCHITECTURE.md`**) — the
 anchor must be non-NULL, equal to the Source's stored `contentHash`, and present
 in the Point's own journaled `sourceVersionTransit`; it must survive a
 destructive `rebuild_all()`; a re-capture must neither advance nor drop it; the
@@ -952,7 +952,7 @@ still false. The review is the reason the count below moved in the direction tha
   `TortoiseSDK._state_related_objects` / `_state_related_points` (`sdk.py`, no line hint — it
   builds `"MATCH (n)-[a:" + self._ABOUT_TYPES + "]…"`, and the numbers this entry originally
   shipped with were already wrong by a few lines when written), `supersede_point`
-  (`sdk.py:13559`) and `_preview_supersede` (`mcp_server.py:6804`), both looping over
+  (`sdk.py::TortoiseSDK.supersede_point`) and `_preview_supersede` (`mcp_server.py:6804`), both looping over
   `SUPERSEDE_STRUCTURAL_RELS`.
   Worse, the table and the census **agreed perfectly** on the 13 sites the literal scan could see,
   and that agreement was circular: both were blind in the same place. Adding rows alone would have
@@ -1066,7 +1066,7 @@ not name, and a number that read as a count of something it did not count.
   pointer are now a reference to §13, and the name-invisible enumeration gained
   `navigation._hop_query`.
 - **A rotted `file.py:NNNN` citation was fixed in the passage this PR already rewrote.**
-  `_connect_issue_objects` was cited as `sdk.py:20154` — a line inside `_cross_lens_pool`'s Cypher.
+  `_connect_issue_objects` was cited as `sdk.py:18734` — a line inside `_cross_lens_pool`'s Cypher.
   It sat three paragraphs below the sentence explaining that line numbers were dropped *because*
   they had rotted. ⚠️ **The first fix of that citation shipped a new number, and the number was
   wrong too** (`34896`, which is a different function at every head it was checked against) — the
@@ -1189,12 +1189,12 @@ worth naming: both were **prose asserting a fact about prose**, which no arm was
   they rot does not hand a re-verifier a fresh one to copy. ⚠️ **This block is deliberately not
   guarded by a no-hints arm**, and the reason is structural rather than an omission: two of its
   hints exist **as examples of rot** (`assembly.py:573`/`:789`/`:809`, the `EXTRACTOR-V4` §13.8
-  pointer the fourth correction replaced, and `sdk.py:20154`, the `_connect_issue_objects` citation
+  pointer the fourth correction replaced, and `sdk.py:18734`, the `_connect_issue_objects` citation
   that was wrong when written), so a blanket arm would red on the passage that *documents* the
   defect. What the arm enforces — *the symbols are authoritative, the line number is a
   convenience* — therefore applies here in the smaller form this block can actually keep: **no hint
   is written as a re-verification aid**, and the four that remain across these two entries
-  (`ranking.py:1066`, `sdk.py:13559`, `mcp_server.py:6804` in the fifth-correction bullet, plus
+  (`ranking.py:1066`, `sdk.py:12263`, `mcp_server.py:6804` in the fifth-correction bullet, plus
   `topic_summarization.py:211` a paragraph below it) are dated record rather than pointers into the
   live table.
 - **`_numeral` advertised digits it could not receive.** Its docstring promised *"digits are
@@ -1677,7 +1677,7 @@ Non-vacuity was measured against the pre-fix module at the same doc text: the fi
 
 **2026-10-28 — `#10149` review round 9 (cycle 10): three findings, all in this PR's record about itself rather than in the legs — and each is now pinned by the class it belongs to.** A fresh-context review of `#10200` settled all three by reading the tree at the head.
 
-1. *The producer-evidence block cited `sdk.py` LINE NUMBERS, three of which no longer landed on the emitters.* The paragraph justifying `DIRECT_EDGE_CREATED_ATTR_GUARDS` pointed at `sdk.py:8493`, `sdk.py:23117` and `sdk.py:41317`; at the reviewed head those are `poll_events`, `list_batch` and `assess_source`, while the emitters sit in `_record_structural_edge` and `create_direct_edge`. A lane auditing "exactly two emitters" would land in prose — the same unpinned-number failure this PR removed from the documents, in the file that enforces the rule on them. The emitters are named by SYMBOL now, and `test_the_producer_evidence_block_cites_the_emitters_by_symbol` derives the enclosing functions from the AST and reds on a bare `sdk.py:<N>`.
+1. *The producer-evidence block cited `sdk.py` LINE NUMBERS, three of which no longer landed on the emitters.* The paragraph justifying `DIRECT_EDGE_CREATED_ATTR_GUARDS` pointed at `sdk.py:8493`, `sdk.py:21692` and `sdk.py:38881`; at the reviewed head those are `poll_events`, `list_batch` and `assess_source`, while the emitters sit in `_record_structural_edge` and `create_direct_edge`. A lane auditing "exactly two emitters" would land in prose — the same unpinned-number failure this PR removed from the documents, in the file that enforces the rule on them. The emitters are named by SYMBOL now, and `test_the_producer_evidence_block_cites_the_emitters_by_symbol` derives the enclosing functions from the AST and reds on a bare `sdk.py:<N>`.
 2. *This ledger stopped at round 6 (cycle 7) while the artifact it indexes cited a cycle 9 review in four places,* so the two rounds that introduced the widest denial frames and the newest vocabulary table (`EXEMPT_COUNTED_PATTERNS`) had no entry at all — in a record whose own convention is that a bound left out is a bound a lane will rely on. Rounds 7 and 8 are above, and `test_the_ledger_records_every_review_cycle_the_record_cites` derives the newest cycle from both files so the ledger cannot fall behind again.
 3. *A pin-index entry stated a numeral its own leg contradicted* (entry 33 said five review cycles where the leg's block says four, and `#10149`'s table lists exactly four). The value is `four` now, and `test_the_pin_index_states_the_9417_cycle_count_its_own_leg_does` reads the two statements against each other, because a count typed twice is exactly the defect class this census exists to close.
 
@@ -1721,6 +1721,20 @@ No census vocabulary entry, no document correction and no producer behaviour cha
 This round is also the reason the ledger leg now reads in BOTH directions: the module cites this round as `cycle 15`, so `test_the_ledger_records_every_review_cycle_the_record_cites` reds if this entry is ever removed. The leg had been one-sided since round 9 — it could only catch a ledger that fell behind a CITED cycle — and a round whose comments carried no cycle number was invisible to it, which is exactly how this entry came to be missing while the leg stayed green.
 
 No census vocabulary entry, no document correction and no producer behaviour changed in this round: `MAP_WRITERS` / `RECORDED_WRITERS` / `NOT_AN_ABOUT_WRITER`, the corrected passages and the `#10265` producer are untouched, and `_denied_verdicts` / `_unstated_verdicts` over the guarded sections stayed `[]` at the new head.
+
+**2026-10-28 — `#4282`.** §13's read-site table lost **row 36**, `sdk.py::TortoiseSDK.traverse`. That
+method was one of the 26 dead public SDK methods `#4282` deleted outright (owner ruling 2026-10-27,
+comment `6451763530`), so the row's symbol stopped resolving and the guard reds on it by design — the
+table's rule is that the SYMBOL is authoritative. It is retired rather than re-pointed because the
+row's REASON was the door: what made it a call-time reader was that `traverse` took the relationship
+type from a CALLER ARGUMENT, and the surviving door (the multi-hop traverse) fills the type slot
+itself and walks **every** relationship type — an all-edge read, already enumerated as row 22
+(`navigation.py::_hop_query`). Every derived figure in §13 moved with it: read sites 40 → **39**,
+customer-callable 19 → **18**, distinct doors 22 → **21** (SDK doors 8 → **7**; MCP 10 and REST 4
+unchanged), cell occurrences 31 → **30**. The prose in `EXTRACTOR-V4-ARCHITECTURE.md` §13.8 states the
+same figures, so it moved too — four `NINETEEN`s, a `TWENTY-TWO`, the list-closing marker and the
+`other FIFTEEN sites` enumeration (now fourteen). Row numbers elsewhere (27, 29-32, 39, 40) are cited
+by number in both documents, so the gap at 36 is left as a gap rather than renumbering the tail.
 
 **2026-10-30 — `#10139`.** The REBUILD half of `#9417`, and the end of the LAST declared false
 positive. The pass-2b structural `DirectEdgeRepoint` fold re-created a transferred `about*` edge with

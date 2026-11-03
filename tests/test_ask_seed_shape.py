@@ -101,7 +101,8 @@ def _render(sdk: TortoiseSDK, tx: dict) -> tuple[str, str]:
 def test_seed_capture_turn_store_is_capture_exact(sdk):
     """``seed_capture_turn_store`` — the ONE seeder every ask fixture now
     writes through — emits exactly what ``TortoiseSDK.capture_session``'s turn
-    loop emits: the ``{sid}_t{i}`` episodic Point per WINDOWED turn, the
+    loop emitted (the SDK door was deleted by #4282; this seeder is the surviving
+    writer): the ``{sid}_t{i}`` episodic Point per WINDOWED turn, the
     ``[role] <content>`` framing, the role normalization, and the CONTAINS
     edge. A blank turn IS stored (capture writes ``"[user] "``); a wholly
     blank session writes NOTHING (capture's gate is pre-mutation).

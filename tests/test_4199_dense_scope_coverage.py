@@ -130,23 +130,78 @@ def embedder(monkeypatch):
     EmbeddingModel._reset()
 
 
+
+
 def _capture_unembedded_turns(sdk, monkeypatch, session_id: str) -> list[str]:
     """The production state: turn Points written with NO dense material.
 
-    Exercises the real capture loop with the embedder unavailable (#4194's
-    declared negative — the turn is still stored, with an honest NULL vector),
-    never a hand-written raw Cypher node.
+    #4282 deleted `capture_session`; the same corpus is built by the surviving
+    `_write_session_and_turns` (via `_write_turns`) with the embedder
+    unavailable, which is #4194's declared negative — the turn is still stored,
+    with an honest NULL vector — never a hand-written raw Cypher node.
     """
     _no_embedder(monkeypatch)
-    assert sdk.capture_session(CONV, session_id=session_id)["turns"] == len(CONV)
+    _write_turns(sdk, session_id, embed=False)
     rows = sdk._get_proj().g.query(
         "MATCH (t:Point) WHERE t.id STARTS WITH $p RETURN t.id, t.embedding "
         "ORDER BY t.id",
         params={"p": f"{session_id}_t"}).result_set
-    assert rows, f"capture wrote no turn Points for {session_id}"
+    assert rows, f"the writer wrote no turn Points for {session_id}"
     assert all(r[1] is None for r in rows), (
         "the fixture must build an UN-embedded turn corpus")
     return [r[0] for r in rows]
+
+
+def _write_turns(sdk, session_id: str, *, embed: bool = True) -> dict:
+    """Write CONV as turn Points through the SURVIVING writer.
+
+    #4282 deleted `capture_session`; `_write_session_and_turns` is the same
+    writer the hosted lane drives, so the fixture builds the identical corpus.
+    `embed_fn` is the seam hosted installs — a raw `embedder.encode` bypasses
+    `encode_batch_for_store` and the vector lands NULL for the wrong reason.
+    """
+    import tortoise.sdk as sdk_mod
+
+    proj = sdk._get_proj()
+    embed_fn = (None if not embed else
+                (lambda texts: sdk_mod._capture_turn_embeddings(
+                    texts, proj.required_embedding_dim)))
+    out = sdk_mod._write_session_and_turns(
+        proj, sdk, session_id, CONV,
+        now="2026-06-01T00:00:00+00:00", embed_fn=embed_fn)
+    assert len(out["turn_texts"]) == len(CONV), out
+    return out
+
+
+def _legs(sdk, query: str, *, kind: str | None = None, limit: int = 10,
+          lane: str | None = None) -> dict:
+    """The deleted `retrieval_legs` probe, rebuilt from the survivors it wrapped.
+
+    #4282 deleted the wrapper, not its subject: one `recall_state` call with the
+    observational `leg_trace` contract, then `declared_degraded_read` (C1) and
+    `require_hybrid_read` (C2) — the same two predicates the production read
+    calls, so `hybrid` cannot disagree with the gate.
+    """
+    from tortoise.embeddings import EmbeddingModel
+    from tortoise.exceptions import HybridReadUnavailableError
+
+    leg_trace: list[dict] = []
+    sdk.recall_state(query, kind=kind, limit=limit, leg_trace=leg_trace)
+    marker = declared_degraded_read(leg_trace)
+    refusal_reason: str | None = None
+    try:
+        require_hybrid_read(leg_trace or None, lane=lane)
+        hybrid = True
+    except HybridReadUnavailableError as exc:
+        hybrid = False
+        refusal_reason = exc.reason
+    return {
+        "legs": leg_trace,
+        "declared_degraded_read": marker,
+        "hybrid": hybrid,
+        "hybrid_refusal_reason": refusal_reason,
+        "embedder": EmbeddingModel.status(),
+    }
 
 
 def _vector_entries(legs: list[dict]) -> list[dict]:
@@ -199,7 +254,7 @@ def test_partial_turn_corpus_read_is_declared_degraded(
             "the fixture must build the measured partial state (scope HAS "
             f"nodes, NONE embedded), got {in_scope}")
 
-        legs = sdk.retrieval_legs("auth dead-end", kind="event", limit=5)
+        legs = _legs(sdk, "auth dead-end", kind="event", limit=5)
     finally:
         sdk.close()
 
@@ -252,7 +307,7 @@ def test_an_out_of_scope_object_arm_cannot_launder_the_read(
         # production "plus any embedded Object" shape that laundered.
         obj = sdk.create_object("website config", objectKind="other")
 
-        legs = sdk.retrieval_legs("auth dead-end", kind="event", limit=5)
+        legs = _legs(sdk, "auth dead-end", kind="event", limit=5)
     finally:
         sdk.close()
 
@@ -317,7 +372,7 @@ def test_a_terminal_in_scope_object_arm_cannot_launder_the_read(
             params={"i": obj["id"]}).result_set
         assert rows and rows[0][0] == "retracted" and rows[0][1] is True, rows
 
-        legs = sdk.retrieval_legs("auth dead-end", kind="event", limit=5)
+        legs = _legs(sdk, "auth dead-end", kind="event", limit=5)
     finally:
         sdk.close()
 
@@ -380,13 +435,13 @@ def test_fully_embedded_turn_corpus_still_reports_hybrid(
     sdk = sdk_factory()
     try:
         _embedder(monkeypatch, embedder)
-        assert sdk.capture_session(CONV, session_id="sess-4199-full")["turns"] == 2
+        _write_turns(sdk, "sess-4199-full")
         rows = sdk._get_proj().g.query(
             "MATCH (t:Point) WHERE t.is_episodic=true RETURN t.embedding"
         ).result_set
         assert rows and all(r[0] is not None for r in rows), rows
 
-        legs = sdk.retrieval_legs("auth dead-end", kind="event", limit=5)
+        legs = _legs(sdk, "auth dead-end", kind="event", limit=5)
     finally:
         sdk.close()
 
@@ -413,7 +468,7 @@ def test_unscoped_read_keeps_reporting_hybrid(
         _embedder(monkeypatch, embedder)
         sdk.create_point("statement", "auth dead-end top issue claim", id="ext-1")
 
-        legs = sdk.retrieval_legs("auth dead-end", limit=5)
+        legs = _legs(sdk, "auth dead-end", limit=5)
     finally:
         sdk.close()
 
@@ -438,7 +493,7 @@ def test_empty_kind_scope_read_is_not_refused(
     try:
         _embedder(monkeypatch, embedder)
         sdk.create_point("statement", "auth dead-end top issue claim", id="ext-1")
-        legs = sdk.retrieval_legs(
+        legs = _legs(sdk, 
             "auth dead-end", kind="kind-nobody-wrote", limit=5)
     finally:
         sdk.close()

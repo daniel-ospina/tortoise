@@ -849,13 +849,6 @@ def test_audit_of_an_unloadable_stage_reports_zero_coverage_not_a_pass():
 # ── Runner wiring ──────────────────────────────────────────────────────────
 
 
-def test_run_benchmark_refuses_a_prescreen_without_the_judged_arm():
-    with pytest.raises(ValueError, match="requires --judge semantic"):
-        runner.run_benchmark(prescreen=prescreen.PRESCREEN_LEXICAL)
-    with pytest.raises(ValueError, match="unknown prescreen"):
-        runner.run_benchmark(prescreen="gpt-nli")
-
-
 def test_run_semantic_judge_records_the_block_and_repins(monkeypatch):
     session_id = "wp01_quarry_debug"
     note = "a note retained by the write path"

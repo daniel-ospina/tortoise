@@ -12,11 +12,23 @@ import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import pytest  # noqa: I001
+import pytest
 
 from tortoise.domain_loader import known_kinds, register_kind  # noqa: F401
 from tortoise.sdk import TortoiseSDK
 
+
+def _corrects_into(sdk, point_id: str) -> list:
+    """CORRECTS edges pointing FROM `point_id`, read directly.
+
+    `sdk.traverse(...)` was deleted by #4282 and these pins only ever used it as
+    a READER, so the same query is inlined rather than the coverage dropped.
+    """
+    rows = sdk._get_proj().g.query(
+        "MATCH (n:Point {id:$id})-[r:CORRECTS]->(m:Point) RETURN m.id",
+        params={"id": point_id},
+    ).result_set
+    return [{"id": r[0]} for r in rows]
 
 # ── Helpers ──────────────────────────────────────────────────────────
 
@@ -63,18 +75,6 @@ class TestCreatePoint:
 
 # ── create_or_update_point ───────────────────────────────────────────
 
-class TestCreateOrUpdatePoint:
-    def test_idempotent(self, sdk):
-        p1 = sdk.create_or_update_point("statement", "same stuff")
-        p2 = sdk.create_or_update_point("statement", "same stuff")
-        assert p1["id"] == p2["id"]
-
-    def test_second_call_updates_props(self, sdk):
-        p1 = sdk.create_or_update_point("statement", "dup", confidence=0.1)
-        p2 = sdk.create_or_update_point("statement", "dup", confidence=0.9)
-        assert p1["id"] == p2["id"]
-        assert p2["confidence"] == 0.9
-
 
 # ── update_point ─────────────────────────────────────────────────────
 
@@ -89,17 +89,27 @@ class TestUpdatePoint:
         sdk.update_point(p["id"], content="after")
         assert sdk.get_point(p["id"])["content"] == "after"
 
+
     def test_update_content_recomputes_content_hash(self, sdk):
         """#1904: update_point(content=...) recomputes content_hash in the
         same round trip. All dedup surfaces match on the stored hash, so a
         stale hash after a content edit silently breaks dedup — the edited
-        point's re-insert must dedup to the SAME point (exactly once)."""
+        point's re-insert must dedup to the SAME point (exactly once).
+
+        #4282 re-aimed the re-insert probe: `create_or_update_point` is one of
+        the 26 deleted methods, and `create_point(..., dedup=True)` is its
+        surviving equivalent — the dedup identity is the same
+        `(pointKind, content_hash)` pair, so the assertion still tests the
+        thing #1904 was filed about. Deleting the test instead would have lost
+        the only exactly-once oracle after an EDIT: the recompute is covered
+        elsewhere, this consequence is not.
+        """
         import hashlib
         p = sdk.create_point("statement", "X")
         sdk.update_point(p["id"], content="Y")
         after = sdk.get_point(p["id"])
         assert after["content_hash"] == hashlib.sha256(b"Y").hexdigest()
-        again = sdk.create_or_update_point("statement", "Y")
+        again = sdk.create_point("statement", "Y", dedup=True)
         assert again["id"] == p["id"]
         g = sdk._get_proj().g
         cnt = g.query(
@@ -355,110 +365,7 @@ class TestGetPoint:
 # ── traverse ─────────────────────────────────────────────────────────
 
 class TestTraverse:
-    def test_outgoing(self, sdk):
-        a, b = _make_point(sdk, content="src"), _make_point(sdk, content="tgt")
-        op = sdk.create_operator("IMPL", a["id"], [b["id"]])
-        # Ontology v2.1: operators hold IMPL edges to their inputs (source +
-        # targets); INPUT edges were removed. Outgoing IMPL from the operator
-        # node returns both inputs.
-        connected = sdk.traverse(op["id"], "IMPL", direction="outgoing")
-        assert len(connected) >= 2
-        assert {c["id"] for c in connected} == {a["id"], b["id"]}
 
-    def test_incoming(self, sdk):
-        a, b = _make_point(sdk, content="src"), _make_point(sdk, content="tgt")
-        sdk.create_operator("IMPL", a["id"], [b["id"]])
-        connected = sdk.traverse(b["id"], "IMPL", direction="incoming")
-        assert len(connected) >= 1
-
-    def test_unknown_rel_type_rejected(self, sdk):
-        """#329: rel_type is allowlisted — unknown types raise, no query runs."""
-        p = _make_point(sdk)
-        with pytest.raises(ValueError, match="Invalid relationship type"):
-            sdk.traverse(p["id"], "NONE_SUCH")
-
-    def test_injection_payload_rejected(self, sdk):
-        """#329: Cypher injection via rel_type is blocked before any query."""
-        p = _make_point(sdk)
-        payload = "IMPL]->(x:Point {id:'p2'}) DETACH DELETE x //"
-        with pytest.raises(ValueError, match="Invalid relationship type"):
-            sdk.traverse(p["id"], payload)
-
-    def test_known_rel_types_accepted(self, sdk):
-        a = _make_point(sdk, content="src")
-        b = _make_point(sdk, content="tgt")
-        sdk.create_operator("IMPL", a["id"], [b["id"]])
-        # No results but NO raise — known types pass validation
-        assert sdk.traverse(a["id"], "NAND") == []
-        assert sdk.traverse(a["id"], "TAGGED") == []
-        assert sdk.traverse(a["id"], "aboutPoint") == []
-
-    def test_invalid_direction_rejected(self, sdk):
-        p = _make_point(sdk)
-        with pytest.raises(ValueError, match="Invalid direction"):
-            sdk.traverse(p["id"], "IMPL", direction="sideways")
-
-    def test_operator_orientation_is_surfaced(self, sdk):
-        """#6101: an operator and its reverse must not read identically.
-
-        create_operator writes IMPL{idx=0} to the SOURCE and IMPL{idx>=1} to
-        each TARGET, so traverse has to hand the edge's idx back — without it
-        the two endpoints are an unordered pair and a cycle reads as its
-        reverse.
-        """
-        a, b = _make_point(sdk, content="A"), _make_point(sdk, content="B")
-        forward = sdk.create_operator("IMPL", a["id"], [b["id"]], label="produces")
-        reverse = sdk.create_operator("IMPL", b["id"], [a["id"]], label="produces")
-
-        fwd = {c["id"]: c for c in sdk.traverse(forward["id"], "IMPL", direction="outgoing")}
-        assert fwd[a["id"]]["idx"] == 0  # forward's SOURCE
-        assert fwd[b["id"]]["idx"] == 1  # forward's TARGET
-
-        rev = {c["id"]: c for c in sdk.traverse(reverse["id"], "IMPL", direction="outgoing")}
-        assert rev[b["id"]]["idx"] == 0  # reverse's SOURCE
-        assert rev[a["id"]]["idx"] == 1  # reverse's TARGET
-
-        # The two reads are distinguishable ONLY by idx (same ids, same
-        # content): this is the property the issue reported as lost.
-        assert (sorted(sdk.traverse(forward["id"], "IMPL"), key=lambda c: c["id"])
-                != sorted(sdk.traverse(reverse["id"], "IMPL"), key=lambda c: c["id"]))
-
-    def test_incoming_idx_locates_the_queried_point(self, sdk):
-        """#6101: reading a point's incoming IMPL edge reports where the
-        QUERIED point sits in the operator (0 = source, >= 1 = target)."""
-        a, b = _make_point(sdk, content="A"), _make_point(sdk, content="B")
-        op = sdk.create_operator("IMPL", a["id"], [b["id"]], label="produces")
-
-        src_side = {c["id"]: c for c in sdk.traverse(a["id"], "IMPL", direction="incoming")}
-        tgt_side = {c["id"]: c for c in sdk.traverse(b["id"], "IMPL", direction="incoming")}
-        assert src_side[op["id"]]["idx"] == 0
-        assert tgt_side[op["id"]]["idx"] == 1
-
-    def test_non_operator_edges_carry_no_idx(self, sdk):
-        """#6101: idx is None where the graph holds no operator position — the
-        key is additive, never a fabricated 0."""
-        old = _make_point(sdk, content="old")
-        new = sdk.create_point("statement", "new")
-        sdk.supersede_point(old["id"], new["id"])
-        corrected = sdk.traverse(new["id"], "CORRECTS", direction="outgoing")
-        assert corrected and corrected[0]["idx"] is None
-        assert corrected[0]["id"] == old["id"]
-
-    def test_input_mirror_reports_the_queried_position(self, sdk):
-        """#6101: the :INPUT mirror points the other way from the operator's own
-        edge — with direction="outgoing" from an input, the RETURNED operator's
-        idx is the QUERIED node's position, not the operator's (the swap the
-        traverse docstring calls out)."""
-        a, b = _make_point(sdk, content="A"), _make_point(sdk, content="B")
-        op = sdk.create_operator("IMPL", a["id"], [b["id"]], label="produces")
-
-        out_a = sdk.traverse(a["id"], "INPUT", direction="outgoing")
-        assert len(out_a) == 1 and out_a[0]["id"] == op["id"]
-        assert out_a[0]["idx"] == 0  # a is the operator's SOURCE
-
-        in_op = {c["id"]: c for c in sdk.traverse(op["id"], "INPUT", direction="incoming")}
-        assert in_op[a["id"]]["idx"] == 0
-        assert in_op[b["id"]]["idx"] == 1
 
     def test_navigation_surfaces_the_idx_from_a_real_graph(self, sdk):
         """#6101: `tortoise_traverse` and `entityProfile` read `r.idx` in
@@ -520,60 +427,12 @@ class TestGetChainStatus:
 # ── file_jtbd ────────────────────────────────────────────────────────
 
 
-
-
-
-
-class TestBatchCreatePoints:
-    def test_creates_multiple(self, sdk):
-        results = sdk.batch_create_points([
-            {"kind": "statement", "content": "A"},
-            {"kind": "goal", "content": "B"},
-            {"kind": "observation", "content": "C"},
-        ])
-        assert len(results) == 3
-        for r in results:
-            assert "id" in r
-
-    def test_all_have_ids(self, sdk):
-        results = sdk.batch_create_points([
-            {"kind": "statement", "content": "X"},
-            {"kind": "statement", "content": "Y"},
-        ])
-        ids = [r["id"] for r in results]
-        assert len(ids) == len(set(ids))  # unique
-
-
 # ── close ────────────────────────────────────────────────────────────
 
 # ── Invalidate / Supersede (#6999 GAP-12) ──────────────────────────
 
 class TestInvalidateSupersede:
-    def test_invalidate_sets_outdated_and_corrects_edge(self, sdk):
-        old = _make_point(sdk, content="old claim")
-        new = _make_point(sdk, content="new claim")
-        result = sdk.invalidate_point(old["id"], new["id"])
-        assert result["invalidated"] is True
-        assert result["id"] == old["id"]
-        assert result["corrected_by"] == new["id"]
-        # Verify outdated flag persisted
-        old_after = sdk.get_point(old["id"])
-        assert old_after["outdated"] is True
-        # Verify CORRECTS edge exists (traverse outgoing from new)
-        corrected = sdk.traverse(new["id"], "CORRECTS", direction="outgoing")
-        assert len(corrected) == 1
-        assert corrected[0]["id"] == old["id"]
 
-    def test_invalidate_missing_old_is_false(self, sdk):
-        # #330: invalidate_point must not report success for a missing old point
-        new = _make_point(sdk, content="new")
-        result = sdk.invalidate_point("missing-old", new["id"])
-        assert result["invalidated"] is False
-        assert result["id"] == "missing-old"
-        assert result["corrected_by"] == new["id"]
-        # No CORRECTS edge was created
-        corrected = sdk.traverse(new["id"], "CORRECTS", direction="outgoing")
-        assert len(corrected) == 0
 
     def test_invalidate_missing_new_raises(self, sdk):
         # #330: missing corrected_by would orphan an outdated point — must raise
@@ -583,41 +442,6 @@ class TestInvalidateSupersede:
         # Old point must NOT be marked outdated (no partial write)
         assert not sdk.get_point(old["id"]).get("outdated")
 
-    def test_invalidate_self_raises(self, sdk):
-        # #330: a self-CORRECTS edge poisons traversal/credibility — must raise
-        old = _make_point(sdk, content="old")
-        with pytest.raises(ValueError):
-            sdk.invalidate_point(old["id"], old["id"])
-        assert not sdk.get_point(old["id"]).get("outdated")
-        assert len(sdk.traverse(old["id"], "CORRECTS", direction="outgoing")) == 0
-
-    def test_supersede_idempotent_corrects_edge(self, sdk):
-        # #432: repeated supersede is an illegal transition (superseded is
-        # terminal). The CORRECTS edge from the first call is still unique.
-        old = _make_point(sdk, content="old-sup")
-        new = _make_point(sdk, content="new-sup")
-        sdk.supersede_point(old["id"], new["id"])
-        with pytest.raises(ValueError, match="already terminal"):
-            sdk.supersede_point(old["id"], new["id"])
-        corrected = sdk.traverse(new["id"], "CORRECTS", direction="outgoing")
-        assert len(corrected) == 1, "CORRECTS edge duplicated on re-supersede"
-
-    def test_invalidate_idempotent_corrects_edge(self, sdk):
-        # #330: re-invalidating the same pair must not duplicate CORRECTS.
-        # #2498: the repeat is now an ILLEGAL transition — the shared lifecycle
-        # guard treats the `outdated=true` flag invalidate just wrote as
-        # terminal, so the second call raises instead of re-asserting. The old
-        # #330 re-assert moved `expiredAt` forward and MERGEd one CORRECTS edge
-        # per distinct corrector onto a node every read surface already
-        # excludes. The first call's CORRECTS edge stays unique.
-        old = _make_point(sdk, content="old")
-        new = _make_point(sdk, content="new")
-        r1 = sdk.invalidate_point(old["id"], new["id"])
-        assert r1["invalidated"] is True
-        with pytest.raises(ValueError, match="already terminal"):
-            sdk.invalidate_point(old["id"], new["id"])
-        corrected = sdk.traverse(new["id"], "CORRECTS", direction="outgoing")
-        assert len(corrected) == 1, "CORRECTS edge duplicated on re-invalidate"
 
     def test_supersede_atomically_replaces(self, sdk):
         old = _make_point(sdk, content="old")
@@ -638,6 +462,68 @@ class TestInvalidateSupersede:
         with pytest.raises(ValueError, match="No point"):
             sdk.supersede_point("missing-old", new["id"])
 
+    def test_invalidate_sets_outdated_and_corrects_edge(self, sdk):
+        old = _make_point(sdk, content="old claim")
+        new = _make_point(sdk, content="new claim")
+        result = sdk.invalidate_point(old["id"], new["id"])
+        assert result["invalidated"] is True
+        assert result["id"] == old["id"]
+        assert result["corrected_by"] == new["id"]
+        # Verify outdated flag persisted
+        old_after = sdk.get_point(old["id"])
+        assert old_after["outdated"] is True
+        # Verify CORRECTS edge exists (traverse outgoing from new)
+        corrected = _corrects_into(sdk, new["id"])
+        assert len(corrected) == 1
+        assert corrected[0]["id"] == old["id"]
+
+    def test_invalidate_missing_old_is_false(self, sdk):
+        # #330: invalidate_point must not report success for a missing old point
+        new = _make_point(sdk, content="new")
+        result = sdk.invalidate_point("missing-old", new["id"])
+        assert result["invalidated"] is False
+        assert result["id"] == "missing-old"
+        assert result["corrected_by"] == new["id"]
+        # No CORRECTS edge was created
+        corrected = _corrects_into(sdk, new["id"])
+        assert len(corrected) == 0
+
+    def test_invalidate_self_raises(self, sdk):
+        # #330: a self-CORRECTS edge poisons traversal/credibility — must raise
+        old = _make_point(sdk, content="old")
+        with pytest.raises(ValueError):
+            sdk.invalidate_point(old["id"], old["id"])
+        assert not sdk.get_point(old["id"]).get("outdated")
+        assert len(_corrects_into(sdk, old["id"])) == 0
+
+    def test_supersede_idempotent_corrects_edge(self, sdk):
+        # #432: repeated supersede is an illegal transition (superseded is
+        # terminal). The CORRECTS edge from the first call is still unique.
+        old = _make_point(sdk, content="old-sup")
+        new = _make_point(sdk, content="new-sup")
+        sdk.supersede_point(old["id"], new["id"])
+        with pytest.raises(ValueError, match="already terminal"):
+            sdk.supersede_point(old["id"], new["id"])
+        corrected = _corrects_into(sdk, new["id"])
+        assert len(corrected) == 1, "CORRECTS edge duplicated on re-supersede"
+
+    def test_invalidate_idempotent_corrects_edge(self, sdk):
+        # #330: re-invalidating the same pair must not duplicate CORRECTS.
+        # #2498: the repeat is now an ILLEGAL transition — the shared lifecycle
+        # guard treats the `outdated=true` flag invalidate just wrote as
+        # terminal, so the second call raises instead of re-asserting. The old
+        # #330 re-assert moved `expiredAt` forward and MERGEd one CORRECTS edge
+        # per distinct corrector onto a node every read surface already
+        # excludes. The first call's CORRECTS edge stays unique.
+        old = _make_point(sdk, content="old")
+        new = _make_point(sdk, content="new")
+        r1 = sdk.invalidate_point(old["id"], new["id"])
+        assert r1["invalidated"] is True
+        with pytest.raises(ValueError, match="already terminal"):
+            sdk.invalidate_point(old["id"], new["id"])
+        corrected = _corrects_into(sdk, new["id"])
+        assert len(corrected) == 1, "CORRECTS edge duplicated on re-invalidate"
+
     def test_supersede_missing_new_raises(self, sdk):
         # #547: missing new point would orphan an outdated old — must raise
         old = _make_point(sdk, content="old")
@@ -646,7 +532,7 @@ class TestInvalidateSupersede:
         # Old point must NOT be marked outdated (no partial write)
         assert not sdk.get_point(old["id"]).get("outdated")
         # No CORRECTS edge
-        assert len(sdk.traverse(old["id"], "CORRECTS", direction="outgoing")) == 0
+        assert len(_corrects_into(sdk, old["id"])) == 0
 
     def test_supersede_self_raises(self, sdk):
         # #547: a self-CORRECTS edge poisons traversal — must raise
@@ -654,7 +540,7 @@ class TestInvalidateSupersede:
         with pytest.raises(ValueError):
             sdk.supersede_point(old["id"], old["id"])
         assert not sdk.get_point(old["id"]).get("outdated")
-        assert len(sdk.traverse(old["id"], "CORRECTS", direction="outgoing")) == 0
+        assert len(_corrects_into(sdk, old["id"])) == 0
 
 
 class TestClose:
@@ -1213,45 +1099,6 @@ class TestPromotePoint:
         sdk.close()
 
 
-class TestListDrafts:
-    def test_lists_only_draft_points(self, sdk):
-        _make_point(sdk, status="draft", content="draft one")
-        _make_point(sdk, status="live", content="live one")
-        drafts = sdk.list_drafts()
-        assert [d["content"] for d in drafts] == ["draft one"]
-        assert len(drafts) == 1
-
-    def test_contract_shape(self, sdk):
-        p = _make_point(sdk, status="draft", batch_id="b9",
-                        extractedFrom="src-1")
-        d = sdk.list_drafts()[0]
-        assert set(d) == {"id", "content", "pointKind", "provenance",
-                          "dedup_context", "batch_id"}
-        assert d["id"] == p["id"]
-        assert d["provenance"] == "src-1"
-        assert d["batch_id"] == "b9"
-        assert d["dedup_context"] is None
-
-    def test_limit(self, sdk):
-        for i in range(5):
-            _make_point(sdk, status="draft", content=f"d{i}")
-        assert len(sdk.list_drafts(limit=2)) == 2
-        with pytest.raises(ValueError):
-            sdk.list_drafts(limit=0)
-
-    def test_empty_queue(self, sdk):
-        assert sdk.list_drafts() == []
-
-    def test_dedup_context_assembled(self, sdk):
-        p = _make_point(sdk, status="draft", dedup_candidate=True,
-                        dedup_method="hash", dedup_similarity=1.0,
-                        dedup_target_id="t-1")
-        d = [x for x in sdk.list_drafts() if x["id"] == p["id"]][0]  # noqa: RUF015
-        assert d["dedup_context"] == {"dedup_method": "hash",
-                                      "dedup_similarity": 1.0,
-                                      "dedup_target_id": "t-1"}
-
-
 def test_de2e8_contradiction_propagates_after_promotion(sdk):
     """DE2E-8 tail: after both NAND endpoints promote, the incident operator
     node goes live and the contradiction propagates through EP (live→live)."""
@@ -1350,7 +1197,12 @@ def test_update_content_replay_hash_parity(tmp_path):
     edited point equals the hash the JSONL replay derives from the replayed
     content (PointRevised.new_content). Before the fix the stored hash stayed
     at sha256("X") while the replay content was "Y" — live graph and replay
-    diverged."""
+    diverged.
+
+    #4282 re-aimed the final re-insert probe at `create_point(..., dedup=True)`;
+    `create_or_update_point` was deleted. The parity legs above it are the
+    reason this test exists and none of them names a deleted method.
+    """
     import hashlib
     import json
 
@@ -1381,7 +1233,7 @@ def test_update_content_replay_hash_parity(tmp_path):
         params={"id": p["id"]},
     ).result_set[0]
     assert row[0] == "Y"
-    again = sdk.create_or_update_point("statement", "Y")
+    again = sdk.create_point("statement", "Y", dedup=True)
     assert again["id"] == p["id"]
     sdk.close()
 

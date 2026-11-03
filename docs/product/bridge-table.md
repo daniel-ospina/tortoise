@@ -280,7 +280,7 @@ that table does not carry.
 - `beta-sdk-surface.md` · rows `tortoise_mine_conversations`
   > | `mine_corpus` | 1 | → `mine_knowledge_from_directory`. It is the **batch form of `mine_knowledge_from_session`**, not a kind of indexing. |
 - `beta-sdk-surface.md` · rows `tortoise_annotate_operator`, `tortoise_mitigate_operator`
-  > | `mitigate_operator`, `operator_action`, `annotate_operator` | 3 | → `adjust_relationship` for strength, `update_knowledge` for annotation. `operator_action(**kwargs)` currently **accepts and silently ignores** `credibility` — a bug. |
+  > | `mitigate_operator`, `operator_action`, `annotate_operator` | 3 | → `adjust_relationship` for strength, `update_knowledge` for annotation. `operator_action(**kwargs)` **accepted and silently ignored** `credibility` — a bug that #4282 rendered moot by DELETING the method (with `mitigate_operator`/`annotate_operator` surviving as the writes, neither of which takes `credibility` through a `**kwargs` funnel). |
 - `beta-sdk-surface.md` · rows `tortoise_belief_timeline`, `tortoise_provenance`, `tortoise_session_context`
   > | `provenance`, `belief_timeline`, `session_context`, `volunteer_context` | 4 | → `check_confidence` where they are confidence context; `poll_events` where they are a timeline. |
 - `beta-sdk-surface.md` · rows `tortoise_paginated_query`, `tortoise_query`, `tortoise_query_points_by_tag`

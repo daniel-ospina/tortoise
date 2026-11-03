@@ -1083,15 +1083,6 @@ class TestValidation:
 # ── regression ──────────────────────────────────────────────────────
 
 class TestRegression:
-    def test_batch_create_points_still_works(self, sdk):
-        points = [
-            {"kind": "claim", "content": "one"},
-            {"kind": "claim", "content": "two"},
-        ]
-        created = sdk.batch_create_points(points)
-        assert len(created) == 2
-        assert {p["content"] for p in created} == {"one", "two"}
-        assert _point_count(sdk) == 2
 
     def test_create_point_dedup_still_works(self, sdk):
         p1 = sdk.create_point("claim", "same", dedup=True)
