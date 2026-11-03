@@ -23,6 +23,20 @@ through the cited region untouched, → `d72983b99`, which did not), so the cite
 than re-dated. The control that this was a READ and not a typed table: the four further
 cited files that no merge touched between those heads — `selfhost_api.py`, `tool_registry.py`,
 `event_store.py`, `config/surface-manifest.yml` — have unchanged numbers because the code did not move.
+
+**Re-derived once more at `origin/main = d3f148a56` (2026-11-03), for every `hosted_api.py` anchor — all
+seven re-derivations below, and all nine citation sites that carry them.**
+`d19a5ddc2` ("feat(10180): the verb that moves the default graph…") added 1,585 and removed 141
+lines to `tortoise/hosted_api.py`, and **no other cited file moved** (`git diff --stat d72983b99
+d3f148a56` over the eight cited paths reports `hosted_api.py` alone). Those seven therefore shift by a
+*uniform* +649, read at the anchor: `/v1/events` `10217`→`10866`, its `Query(…, le=_MAX_EVENT_PAGE)`
+`10221`→`10870`, `/v1/points` `10265`→`10914` with `list_points` at `10915`, its return `10324`→`10973`,
+and the `/v1/search` marker pair `10804-10813`→`11453-11462`. Every other figure below is unchanged
+from `d72983b99`, and the control still holds: `event_store.py`, `selfhost_api.py`, `tool_registry.py`
+and `config/surface-manifest.yml` are byte-identical between the two heads. This is the third
+re-derivation, and it is stated rather than silently re-dated because a uniform delta is exactly the
+shape that invites arithmetic instead of a read — the seven were re-read, then checked against the
+delta.
 **Status:** C1 of #8447 (this document). C2 (boundary tests per surface) and C3 (the four doors)
 are tracked on the issue.
 
@@ -72,14 +86,14 @@ a reader who finds the number has drifted should search the quoted fragment: tha
 |---|---|---|---|
 | `TortoiseSDK.get_cross_lens_candidates` (MCP: `tortoise_find_cross_lens_candidates`) | `max_candidates` (200 on the MCP wrapper) — one of three bounds on this surface, see ⚠️ below | **MARKS** | `tortoise/sdk.py:28434-28438` — returns `truncated`, `cap` and `count` alongside the rows (`truncated = len(all_candidates) > limit`, where `limit = min(int(max_candidates), CROSS_LENS_CANDIDATE_CAP)` is derived at `:28406`; there is no `limit=` parameter on this surface) |
 | `event_store.read_after` | `limit` | **REFUSES** | `tortoise/event_store.py:974` — `if not 1 <= limit <= MAX_PAGE: raise ValueError(...)`, with the message stating *why* coercion would be indistinguishable from a drained stream |
-| `GET /v1/search` (hosted) | `limit` | **MARKS** | `tortoise/hosted_api.py:10804-10813` — `response.update(truncation_field(trunc_out))`, i.e. `truncated` + `total_available` (PR #10500, merged). ⚠️ `count` is still rows **delivered**, not matched — the marker, not `count`, is the instrument |
+| `GET /v1/search` (hosted) | `limit` | **MARKS** | `tortoise/hosted_api.py:11453-11462` — `response.update(truncation_field(trunc_out))`, i.e. `truncated` + `total_available` (PR #10500, merged). ⚠️ `count` is still rows **delivered**, not matched — the marker, not `count`, is the instrument |
 | MCP `tortoise_search` (`tool_registry.py:474`) · `GET /search` (selfhost, `selfhost_api.py:364-365`) | `limit` | **SILENT** | both return a bare list (`response_model=list[PointResponse]` on the route, `:364`; the `limit` bound on the signature, `:365`); recorded as a **deliberate limit** on #8447's 2026-11-01 comment (§6) and restated in `config/surface-manifest.yml:139-141` (*"returns a bare list, so it does not carry the field; wrapping a list in an object is a declared return-type change"*), because a marker here IS a return-shape change |
 | `TortoiseSDK.list_batches` (MCP: `tortoise_list_batches`) | `limit=20` | **SILENT** | `tortoise/sdk.py:27022` — `return items[:limit]`; the method's contract is `-> list[dict]` (`:26973`), so there is no field in which to say "there are more" |
 | `TortoiseSDK.suggest_entry_points` (MCP: `tortoise_suggest_entry_points`) | `limit=5` | **SILENT** | `tortoise/sdk.py:34398` — `results = results[:limit]`, returning `results` at `:34446`; declared `-> list[dict]` (`:34346`) |
 | `tortoise_query(text=…)` (MCP, `tool_registry.py:290`; the `text=` arm only) | `limit` (100 on that arm) | **SILENT** | `tortoise/mcp_server.py:2717-2720` calls `tortoise_fts_query(…, limit=eff_limit)` **without** the private marker sink, and the SDK method is declared `-> list[dict]` (`sdk.py:35192`) — so even though `tortoise_fts_query` CAN compute the marker (`_truncation_out`, `:35191`), a bare list has nowhere to carry it. Its structural arm (`text=None`) is a different surface, and not all of its branches are marked, see ⚠️ below |
-| `GET /v1/points` (hosted, `hosted_api.py:10265`) | `limit=50` (`Query(50, ge=1, le=1000)`) | **SILENT** | `return {"points": results, "count": len(results)}` at `hosted_api.py:10324` — `count` is rows delivered; no marker |
+| `GET /v1/points` (hosted, `hosted_api.py:10914-10915`) | `limit=50` (`Query(50, ge=1, le=1000)`) | **SILENT** | `return {"points": results, "count": len(results)}` at `hosted_api.py:10973` — `count` is rows delivered; no marker |
 | `GET /points` (selfhost, `selfhost_api.py:315`) | `limit=50` | **SILENT** | `response_model=list[PointResponse]` — a bare list on the route |
-| `GET /v1/events` (hosted, `hosted_api.py:10217-10221`) | `limit=100` (`le=_MAX_EVENT_PAGE`) | **REFUSES at the edge** | `limit: int = Query(100, ge=1, le=_MAX_EVENT_PAGE)` (`:10221`) refuses 0 at the route; the seam below it (`read_after`) refuses both ends — see §3 |
+| `GET /v1/events` (hosted, `hosted_api.py:10866-10870`) | `limit=100` (`le=_MAX_EVENT_PAGE`) | **REFUSES at the edge** | `limit: int = Query(100, ge=1, le=_MAX_EVENT_PAGE)` (`:10870`) refuses 0 at the route; the seam below it (`read_after`) refuses both ends — see §3 |
 
 ⚠️ **`get_cross_lens_candidates` MARKS one of its three bounds.** The marker is
 `truncated = len(all_candidates) > limit` (`sdk.py:28434`), where `limit` derives from `max_candidates`
@@ -158,10 +172,10 @@ not as deferred. An undecided surface is not a deferred one; conflating them is 
 being tracked.
 
 ⚠️ **hosted `GET /v1/points` is NOT one of these, and is not parked on an approval.** Its body is a
-**dict**, not a list — `return {"points": results, "count": len(results)}` (`hosted_api.py:10324`) —
-and the route declares no `response_model` (`:10265-10266`), so a marker rides it **additively**,
+**dict**, not a list — `return {"points": results, "count": len(results)}` (`hosted_api.py:10973`) —
+and the route declares no `response_model` (`:10914-10915`), so a marker rides it **additively**,
 exactly as it rides `/v1/search`: build the body, then `response.update(truncation_field(…))`
-(`:10804`, `:10813`). #10500 recorded that shape as a `response_fields` row in
+(`:11453`, `:11462`). #10500 recorded that shape as a `response_fields` row in
 `config/surface-manifest.yml` (`:121-143`), **not** as an MCP/SDK surface approval — and its own
 note draws the line there: wrapping a *list* in an object is the return-type change; adding a field
 to an object body is not. So this one is **SILENT and fixable without an approval**: recorded here
