@@ -1170,33 +1170,29 @@ def enforce_org_limit(limits: dict | None, resource: str, sdk=None, *,
             `int()` refuses it and it is refused here too.
         resource: "points" | "api_keys" | "sessions" | "users" | "graphs"
             | "documents".
-        sdk: pre-built org SDK (REST callers already hold one) — optional.
-            ⛔ For a TENANT-GRAPH resource (`TENANT_GRAPH_RESOURCES` —
-            `points`, `sessions`, `documents`) an omitted `sdk` is NOT
-            "unscoped": `_count_resource` falls back to
-            `_make_sdk(namespace=org_id)` — the graph `namespace=org_id`
-            derives, historically `org_<tid>` — while the WRITE may open a
-            different graph (`hosted_api._data_graph_name`). Two credential
-            shapes diverge that way: a graph-bound credential, whose write
-            lands in `org_<tid>_<gid>`; and an ORG-WIDE credential of a
-            PROMOTED org (#10180), whose default lives in another namespace, so
-            the fallback reads the graph promotion DEMOTED. #8906 is that
-            divergence: the counted graph being full REFUSES a write into a
-            target graph with room, and the counted graph being empty ADMITS a
-            write into a full target. Pass the SDK whose graph this request will
-            WRITE (or an `sdk_factory` returning it) for those three. A
-            non-`None` `sdk` is NOT sufficient: the pre-#10637 call passed one
-            — `_org_sdk_for_credential(org)`, a default-graph handle — and still
-            counted another graph. Every current caller passes the right one —
-            measured, 4 executable call sites, 0 omissions (`rg -n
-            'enforce_org_limit[(]' tortoise/` also prints the `def` line and two
-            prose mentions): `hosted_api._check_org_limit` supplies
-            `sdk_factory=_gate_sdk_for(org, resource)`, `mcp_server` supplies
-            `sdk=_get_org_sdk()`, and the two `/v1/index/docs` gates supply
-            `sdk=org_sdk` — correct there, because their write target IS the
-            default graph. REGISTRY-SCOPED resources (`api_keys`, `users`,
-            `graphs`) are control-plane counts and are unaffected: the registry
-            namespace is the correct target for them.
+        sdk: pre-built org SDK (REST callers already hold one) — optional, and
+            for a TENANT-GRAPH resource (`TENANT_GRAPH_RESOURCES` — `points`,
+            `sessions`, `documents`) it must be the SDK of the graph this
+            request will WRITE. Omission is not "unscoped": `_count_resource`
+            falls back to `_make_sdk(namespace=org_id)` — the graph
+            `namespace=org_id` derives, historically `org_<tid>` — while the
+            write may open another one (`hosted_api._data_graph_name`). Two
+            credential shapes diverge: a graph-bound one (its write lands in
+            `org_<tid>_<gid>`), and an ORG-WIDE one on a PROMOTED org (#10180),
+            whose default moved to another namespace. #8906 is that divergence:
+            a full counted graph REFUSES a write into a target with room, and an
+            empty counted graph ADMITS a write into a full one. A non-None `sdk`
+            is NOT sufficient — the pre-#10637 call passed one
+            (`_org_sdk_for_credential`, a default-graph handle) and still counted
+            another graph. Pass the write graph's SDK, or an `sdk_factory`
+            returning it. All 4 current executable call sites do (`rg -n
+            'enforce_org_limit[(]' tortoise/` also prints the `def` and two prose
+            mentions): `hosted_api._check_org_limit` supplies
+            `sdk_factory=lambda: _gate_sdk_for(org, resource)`; `mcp_server`
+            supplies `sdk=_get_org_sdk()`; the two `/v1/index/docs` gates supply
+            `sdk=org_sdk`, which IS their write target. REGISTRY-SCOPED
+            resources (`api_keys`, `users`, `graphs`) are control-plane counts
+            and are unaffected.
         sdk_factory: #4051 — called ONLY if and when the count is actually
             taken, for callers that must count the graph the write will open but
             must not build an SDK when the limit is unlimited (the capture lane's
