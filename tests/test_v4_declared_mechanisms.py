@@ -2601,10 +2601,10 @@ def test_a_broken_code_field_yields_one_verdict_on_a_not_implemented_row(
         code=["src.py"],
         tests=["test_x.py"],
         symbols=["present_symbol"],
-        # The `pins:` rule is MANDATORY on a not-implemented row, so a fixture
-        # that flips `state` without one now reds on the rule rather than on the
-        # defect under test — one unrelated verdict drowning the assertion (#5064
-        # review P0). `test_x.py` is written above, so the pin resolves.
+        # #5064 indicator (3): an absent row also names the test that reds when
+        # the absence closes. Without it the row earns a SECOND verdict ("no
+        # absence pin"), which would make this test measure the pin rule instead
+        # of the one-defect-one-verdict shape it exists for.
         pins=["test_x.py::test_ok"],
     )
     assert gate_errors([good], root=tmp_path) == []
@@ -2646,8 +2646,9 @@ def test_the_unreadable_source_verdict_names_the_symbols_it_could_not_verify(
         code=["broken.py"],
         tests=["test_x.py"],
         symbols=["present_symbol"],
-        # Mandatory `pins:` on a not-implemented row — see the sibling fixture
-        # above (#5064 review P0).
+        # #5064 indicator (3): the pin is what makes the count below "ONE
+        # verdict for ONE defect" rather than "one verdict, plus the row's
+        # missing pin".
         pins=["test_x.py::test_ok"],
     )
     errors = gate_errors([row], root=tmp_path)
