@@ -682,7 +682,7 @@ unfirable (block at the top of §10).
 
 **1. Classification happens INLINE — inside S2.1's big call.** When the flag is on, `core_only=classify_later` is passed to S2 (`:4782`) so the extractor **only assigns core kinds and leaves domain kinds `unclassified`**, and the separate pass fills them in. When it is off, the extraction LLM emits kinds as part of its prose output. **That is the wrong place for them** — see below.
 
-**2. It must run on SURVIVORS.** ⚠️ `_collect_classify_items` collects from **`embed_list`** — the whole candidate set — and **`classify_consolidation` does not remove items from `embed_list`; it decides a write operation per point** (`:3967-3969`). **So a `DISCARD` (`#4899`) would currently be classified anyway.** *Classifying a row you are about to throw away is wasted work **and** it is worse than wasted: **the discards are exactly the rows whose kind is least meaningful**, so they pollute the classifier's own signals.*
+**2. It must run on SURVIVORS.** ⚠️ `_collect_classify_items` collects from **`embed_list`** — the whole candidate set — and **`classify_consolidation` does not remove items from `embed_list`; it decides a write operation per point** (`extractor_v2.py:3994`). **So a `DISCARD` (`#4899`) would currently be classified anyway.** *Classifying a row you are about to throw away is wasted work **and** it is worse than wasted: **the discards are exactly the rows whose kind is least meaningful**, so they pollute the classifier's own signals.*
 > **⇒ The wiring requirement: a discarded candidate must be removed from (or marked in) `embed_list`, or `_collect_classify_items` must skip it.** Without that, `#4899` and S2.3 ship in the wrong order and S2.3 pays for `#4899`'s savings.
 
 **3. It should be its OWN step, not a S2.2 substep — and the reason is the fast path.**
@@ -722,7 +722,7 @@ Resolved by call graph:
 |---|---|---|
 | 1st | `:4803` | classify pass on `embed_list` |
 | 2nd | `:4888` | classify pass on `complete_list` (after S4's merge) |
-| **last** | **`:4995`** | **`execute_embed(...)` — which contains `classify_consolidation` (`extractor_v2.py:3967-3969`), i.e. the dedup/consolidation gate** |
+| **last** | **`:4995`** | **`execute_embed(...)` — which contains `classify_consolidation` (`extractor_v2.py:3994`), i.e. the dedup/consolidation gate** |
 
 **⇒ Today we classify the whole set TWICE and then dedup it.** The mechanical, free, set-reducing operation runs **dead last**, after the two most expensive passes. **Every ordering principle says the opposite.**
 
