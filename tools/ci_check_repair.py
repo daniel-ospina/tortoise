@@ -130,6 +130,8 @@ if sys.version_info < (3, 12):  # noqa: UP036 -- intentional RUNTIME guard
 import argparse
 import json
 import os
+import random
+import re
 import shutil
 import subprocess
 import time
@@ -176,6 +178,148 @@ class MeasureError(RuntimeError):
 #: evidence of queue starvation, and must not be classified as one.
 QUEUED_STATUSES = frozenset({"queued", "waiting", "requested", "pending"})
 
+#: How long a run may sit in a QUEUED status with ZERO jobs before it stops being
+#: "waiting" and becomes "no verdict will arrive". MEASURED on daniel-ospina/tortoise
+#: 2026-11-02T20:14Z: 11 of 16 `pending` runs had zero jobs at 11-22 minutes old,
+#: while 11 runners were online (10 busy, 1 offline) — the wait was not runner
+#: matching, and progressive job creation (this repo's own measured note: a run's
+#: 22-job matrix appeared 51 min after the run) is a DELAY, not a queue slot.
+#:
+#: THE FLOOR IS A DECIDED TRADE-OFF, not a measured boundary. 1200 s sits INSIDE the
+#: 51-minute lag this repo measured, so some runs flagged here would have created
+#: jobs on their own; the cost of being early is one bounded, budget-limited rerun,
+#: while the cost of being late is what was measured — a 93-minute `pending` run that
+#: left a PR unmergeable and 1176 s of a rail waiting. Below the floor a zero-job run
+#: is indistinguishable from ordinary lag, and reporting it every window is the noise
+#: that gets a repair report muted.
+ZERO_JOB_MIN_AGE_S = float(os.environ.get("CI_REPAIR_ZERO_JOB_MIN_AGE_S") or 1200)
+
+#: Retries for a RATE-LIMITED read, and the sleep that paces them. A 403 from the
+#: secondary rate limiter is NOT an empty answer and NOT a permanent failure: the
+#: measured failure this exists for is a caller polling a REFUSED read for 1176 s and
+#: reporting "unreachable is not empty" hours later than it had to. `Retry-After` and
+#: `X-RateLimit-Reset` are honoured where `gh` surfaces them; otherwise the window
+#: starts at GitHub's documented floor and DOUBLES per attempt with equal jitter, so
+#: a fleet of lanes does not retry in lockstep and re-create the burst that triggered
+#: the limiter. There is deliberately no separate base constant: a base of 2 s gave
+#: `max(2 * 2**attempt, floor)` = the floor for every attempt `RATE_LIMIT_RETRIES`
+#: can reach, i.e. an EMPTY jitter window and one fixed 60 s wait for every lane.
+RATE_LIMIT_RETRIES = int(os.environ.get("CI_REPAIR_RATE_LIMIT_RETRIES") or 2)
+#: ⛔ THE NO-HINT FLOOR IS GITHUB'S OWN, NOT A GUESS. Documented handling for a
+#: refusal with no `retry-after`/`x-ratelimit-reset` is *"wait at least one minute
+#: before retrying"* (docs.github.com › rest/using-the-rest-api ›
+#: best-practices-for-using-the-rest-api). The first cut backed off `uniform(1, 2)`
+#: then `uniform(2, 4)`, so BOTH retries were spent inside ~3 s — inside the window
+#: the limiter is still enforcing — and a hint-less secondary limit reliably ended as
+#: `RATE-LIMITED (not empty)` having never effectively retried at all.
+RATE_LIMIT_MIN_SLEEP_S = float(
+    os.environ.get("CI_REPAIR_RATE_LIMIT_MIN_SLEEP_S") or 60.0)
+#: The cap on any wait, including a server hint. Raised from 60 s because a real
+#: `Retry-After: 300` was being SHORTENED to 60 — the opposite of *"you should not
+#: retry your request until after that many seconds has elapsed"*, and the premature
+#: retry the hint exists to prevent.
+RATE_LIMIT_MAX_SLEEP_S = float(
+    os.environ.get("CI_REPAIR_RATE_LIMIT_MAX_SLEEP_S") or 300.0)
+#: ⛔ NOT BATTERY: a bare `HTTP 403` is how a PERMISSION failure also arrives
+#: ("Resource not accessible by integration"), and retrying that sleeps up to two
+#: minutes and then diagnoses a token problem as a rate limit. Only these wordings
+#: mean "refused because of the budget"; a permission 403 keeps its own error.
+_RATE_LIMIT_RE = re.compile(r"rate limit|secondary rate|HTTP 429", re.I)
+
+#: ⛔ ONE WALL-CLOCK BUDGET FOR THE PASS. The job probes are bounded on their own
+#: (`JOB_READ_FAILURE_LIMIT`), but that bound does not bound the pass: `check_runs_at`
+#: and `runs_at_head` are >=2 reads for EVERY open PR, and every read may pay the
+#: rate-limit sleeps above. 20 PRs x 2 reads x (3 attempts + a 60 s wait) is ~80 min
+#: against the consumer workflow's `timeout-minutes: 15`, where the job is KILLED —
+#: and then neither `RATE-LIMITED (not empty)` nor any exit code is ever emitted, which
+#: is the silent outcome the named refusal exists to prevent. So the budget is spent
+#: on the WAIT (`_spend_rate_limit_wait`): a pass never sleeps itself past the budget,
+#: it raises the refusal it would otherwise have been killed before emitting. 720 s of
+#: the 900 s workflow leaves room for the repairs, the JSON write and teardown.
+PASS_BUDGET_S = float(os.environ.get("CI_REPAIR_PASS_BUDGET_S") or 720.0)
+#: When the current pass must stop sleeping — armed ONCE per pass, by the EARLIEST
+#: step of the pass that can see it (`main`, before its first API-touching read), and
+#: `None` when no pass is armed (the module used directly: tests, other callers).
+#: ⛔ ARMING IT LATE IS THE DEFECT THIS SHAPE EXISTS FOR: `main()` performs a LIVE
+#: read (`resolve_required` → branch protection) BEFORE `build_plans`, and while the
+#: deadline was armed inside `build_plans` that first read was UNBOUNDED — up to 600 s
+#: of unbudgeted sleeps, on top of the 720 s armed afterwards, against the consumer
+#: workflow's `timeout-minutes: 15`, where the job is KILLED and the measurement is
+#: lost exactly as `PASS_BUDGET_S` says it must not be.
+_PASS_DEADLINE: float | None = None
+
+
+def _arm_pass_deadline() -> float:
+    """Arm this pass's wall-clock budget and return the deadline.
+
+    Called by `main()` before its first API-touching step, and by `build_plans` when
+    no deadline was threaded in (a direct caller — tests, other tools — still gets a
+    bound, and each of ITS calls is a pass boundary).
+    """
+    global _PASS_DEADLINE
+    _PASS_DEADLINE = time.time() + PASS_BUDGET_S
+    return _PASS_DEADLINE
+
+#: ⛔ THE JOB READS HAVE THEIR OWN AGGREGATE BOUND. The main reads retry a refusal
+#: (they are few and each one gates the whole pass); a job count is a PER-RUN probe
+#: that can only ADD a distinction to one context, and there are as many of them as
+#: there are queued runs. Retrying each one would pay the rate-limit sleeps once per
+#: run — measured 11 zero-job runs, ~2 min each, against a workflow whose
+#: `timeout-minutes` is 15, so the job is KILLED instead of exiting 2 and the whole
+#: measurement is lost. So: no per-call retry, and after `JOB_READ_FAILURE_LIMIT`
+#: failures the pass STOPS probing and every later run abstains (None). Abstaining is
+#: the honest outcome — it never reads as a stall — and the pass still reports.
+JOB_READ_FAILURE_LIMIT = 2
+_JOB_READ_FAILURES = 0
+
+#: Statuses whose zero-job runs are NOT the stall this module names. `waiting` is a
+#: run parked for MANUAL APPROVAL or an environment gate: it has no jobs by design,
+#: no age makes it start, and a `rerun` cannot obtain an approval — re-running it
+#: spends the budget on a run whose next step is a human, not a scheduler.
+_APPROVAL_PARKED_STATUSES = frozenset({"waiting"})
+
+#: Per-PASS read cache for the hot reads (check-runs, runs and job counts for one
+#: sha). A pass reads each sha once per PR; the cache is what makes the zero-job
+#: re-classification free, and it is the seam a cross-process cache would extend.
+#: Cleared at the start of every pass — a stale entry would be a verdict about a
+#: head that has moved.
+_READ_CACHE: dict[tuple, object] = {}
+
+#: Patched in tests so a rate-limit test never actually sleeps.
+_sleep = time.sleep
+
+#: ⛔ The API's refusal for the ORPHAN shape this module targets: a run that reports
+#: `queued` with zero jobs and zero check runs cannot be cancelled at all — `POST
+#: /cancel` AND `/force-cancel` both answer `409 Cannot cancel a workflow run that has
+#: not been queued yet.` (orgs/community#206436, reproduced in the review). That is
+#: neither a permission failure nor a transient one, so it must not be folded into the
+#: generic `'failed'`; the direct rerun is the remaining primitive.
+_CANCEL_NOT_QUEUED_RE = re.compile(r"has not been queued yet", re.I)
+
+#: How long to wait for a CANCELLED run to settle before re-running it. A
+#: non-completed run cannot be re-run in place (see `_cancel`), so the repair is
+#: cancel-then-rerun and the API needs a moment to mark the run completed.
+#: MEASURED 2026-11-02 on run 41523739094: `POST /cancel` → `completed/cancelled` at
+#: once, and `POST /rerun` accepted 8 s later.
+#:
+#: ⛔ THE ORIGINAL BOUND WAS NOT IMPLEMENTED. "Bounded at 4 polls x 3 s so it can never
+#: approach the consumer workflow's `timeout-minutes: 15`" was false: the settle polls
+#: called `gh_json` at the DEFAULT `retries=2`, so each of them could cost 3 x
+#: `_run(timeout=120)` plus hint sleeps — ~8 minutes for ONE run — and `report()`
+#: cancels one run per flagged plan with no aggregate bound. Two flagged PRs killed the
+#: job instead of letting it exit 2, which is the "measurement lost" failure this PR
+#: rates P1 for the job probes. So: the polls carry NO retry, each poll has its own
+#: timeout, a run gets `_CANCEL_SETTLE_TOTAL_S` of wall clock, and a PASS spends at
+#: most `CANCEL_SETTLE_PASS_BUDGET_S` waiting for settles.
+_CANCEL_SETTLE_POLLS = 4
+_CANCEL_SETTLE_SLEEP_S = 3.0
+_CANCEL_SETTLE_POLL_TIMEOUT_S = 20
+_CANCEL_SETTLE_TOTAL_S = 30.0
+CANCEL_SETTLE_PASS_BUDGET_S = float(
+    os.environ.get("CI_REPAIR_CANCEL_SETTLE_BUDGET_S") or 60.0)
+#: Wall clock this pass has already spent waiting for cancels to settle.
+_CANCEL_SETTLE_SPENT_S = 0.0
+
 
 @dataclass
 class Run:
@@ -187,6 +331,18 @@ class Run:
     run_attempt: int
     event: str
     created_at: str = ""
+    #: When the run's CURRENT ATTEMPT started (GitHub's `run_started_at`), null while
+    #: the attempt is still queued. `created_at` is the RUN's creation and does NOT
+    #: move on a rerun — MEASURED 2026-11-02 on run 41523739094, whose attempt 2 began
+    #: at 21:41:43Z while `created_at` still read 20:56:13Z (the attempt-1 time). The
+    #: job count describes the LATEST attempt, so the AGE must too, or every rerun
+    #: inherits the first attempt's age and its floor becomes 0 (see `_zero_job_stalled`).
+    started_at: str = ""
+    #: Jobs the run's CURRENT attempt has created, or None when that read ABSTAINED.
+    #: `0` and `None` are deliberately different: only a MEASURED zero makes a run
+    #: "no verdict will arrive", because an unreadable jobs surface says nothing and
+    #: inferring a stall from it is the fail-open direction.
+    job_count: int | None = None
 
 
 @dataclass
@@ -215,6 +371,14 @@ class PrPlan:
     # contexts are NOT repaired by any per-PR action — no rerun and no reopen can
     # create a runner slot.
     starved: list[str] = field(default_factory=list)
+    # Runs at this head that are NOT completed, have a MEASURED zero jobs, and are
+    # older than ZERO_JOB_MIN_AGE_S. They stay in `pending` too — a reopen must stay
+    # deferred while they sit there — but `pending` alone asserts "the run will emit
+    # the check", and for this shape that assertion is FALSE: no job exists to emit
+    # anything, so waiting cannot clear it. Each entry is
+    # ``{run, workflow, status, jobs, age_seconds}`` and is reported by name as
+    # ``NO-VERDICT-WILL-ARRIVE(...)``.
+    no_verdict: list[dict] = field(default_factory=list)
 
     @property
     def actionable(self) -> bool:
@@ -232,30 +396,122 @@ class PrPlan:
         nothing left to act on (`actionable` is False) and must still be reported
         and escalated — dropping it is how an unrepairable check goes silent.
         """
-        return bool(self.actionable or self.rerun or self.exhausted or self.starved)
+        return bool(self.actionable or self.rerun or self.exhausted or self.starved
+                    or self.no_verdict)
 
 
 def _run(argv: list[str], timeout: int = 120) -> subprocess.CompletedProcess:
     return subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
 
 
-def gh_json(args: list[str]) -> object:
+def _rate_limit_sleep_s(detail: str, attempt: int, now: float | None = None) -> float:
+    """Seconds to wait before retrying a RATE-LIMITED read. PURE, so it is tested.
+
+    Order of authority: the server's own instruction first (`Retry-After` seconds,
+    then `X-RateLimit-Reset` as an absolute epoch), then exponential backoff from
+    GitHub's documented no-hint floor with EQUAL jitter over a window that DOUBLES per
+    attempt (`uniform(RATE_LIMIT_MIN_SLEEP_S, floor * 2**attempt)`, capped, so the
+    first retry spends the documented minute and every later one can wait longer).
+    Honouring the hint is the documented handling and so is the floor: *"honor the `retry-after` header … if it is not
+    present, wait at least one minute"*, with exponentially increasing delays for
+    repeated secondary-limit failures (docs.github.com › rest/using-the-rest-api ›
+    best-practices-for-using-the-rest-api, › rate-limits-for-the-rest-api). A
+    sub-minute guess retries inside the window the limiter is still enforcing, which
+    is how one 403 becomes a storm.
+
+    **OVERRIDES:** GitHub's *"do not retry until after that many seconds has
+    elapsed"* is capped at `RATE_LIMIT_MAX_SLEEP_S` (300 s), and a wait the pass's
+    own wall-clock budget cannot cover is REFUSED by `_spend_rate_limit_wait` rather
+    than shortened — an uncapped hint can park the pass past the consumer workflow's
+    `timeout-minutes: 15`, where it is killed and the measurement is lost, while a
+    shortened hint is the premature retry the hint exists to prevent.
+    """
+    m = re.search(r"[Rr]etry-[Aa]fter:\s*(\d+)", detail)
+    if m:
+        return min(float(m.group(1)), RATE_LIMIT_MAX_SLEEP_S)
+    m = re.search(r"[Xx]-[Rr]ate[Ll]imit-[Rr]eset:\s*(\d{9,})", detail)
+    if m:
+        reset_in = float(m.group(1)) - (now if now is not None else time.time())
+        return max(1.0, min(reset_in, RATE_LIMIT_MAX_SLEEP_S))
+    floor = RATE_LIMIT_MIN_SLEEP_S
+    # ⛔ THE WINDOW IS DERIVED FROM THE FLOOR, OR "EQUAL JITTER" IS A NO-OP. Growing
+    # from a 2 s base started BELOW the 60 s floor, so the ceiling was clamped UP to
+    # the floor and `uniform(60, 60)` returned exactly 60.0 at both attempts the retry
+    # budget can reach — every lane waited the same minute (the lockstep burst this
+    # function exists to break) and the delay never grew across attempts, which is
+    # GitHub's other documented half: *"use exponentially increasing delays for
+    # repeated failures"*. Doubling FROM the floor keeps the vendor's one-minute rule
+    # intact and makes every attempt after the first draw from a non-empty window
+    # (60-120 s, 60-240 s, …) up to the cap.
+    ceiling = min(floor * (2 ** attempt), RATE_LIMIT_MAX_SLEEP_S)
+    return random.uniform(floor, ceiling)
+
+
+def _spend_rate_limit_wait(wait_s: float, detail: str, args: list[str]) -> None:
+    """Sleep before a retry — or REFUSE when this pass cannot afford the wait.
+
+    See `PASS_BUDGET_S`. The bound is applied to the WAIT, not to the pass as a
+    whole, so an ordinary long pass is never aborted; only one that would sleep past
+    the consumer workflow's own timeout is turned into the named refusal it would
+    otherwise be killed before emitting. Symmetric with `JOB_READ_FAILURE_LIMIT`:
+    once the budget is spent, the honest output is a refusal, not a silence.
+    """
+    if _PASS_DEADLINE is not None:
+        left = _PASS_DEADLINE - time.time()
+        if wait_s > left:
+            raise MeasureError(
+                f"RATE-LIMITED (not empty): gh {' '.join(args)} was REFUSED by the API "
+                f"rate limiter and this pass cannot afford to wait ({left:.0f}s of its "
+                f"budget left, the enforced wait is {wait_s:.0f}s), so NOTHING was "
+                f"measured — this is a refusal, not an empty result: {detail[:400]}")
+    _sleep(wait_s)
+
+
+def gh_json(args: list[str], retries: int | None = None, timeout: int = 120) -> object:
     """`gh` → JSON. Any failure is a MeasureError (never a silent empty list).
 
     A truncated/empty answer must not read as "no PRs, all good": the whole point
     of the tool is that ABSENCE is dangerous, so an unreadable surface is exit 2.
+
+    A RATE-LIMITED read is retried (bounded, server hint honoured — see
+    `_rate_limit_sleep_s`) and, once that budget is spent, raised with a
+    ``RATE-LIMITED (not empty)`` prefix. That wording is load-bearing: the measured
+    failure it replaces is a caller that polled a read the API was REFUSING and then
+    reported an unreadable surface long after it already knew nothing was measured.
+    A refusal must arrive AS a refusal, never as a zero.
     """
-    try:
-        r = _run([GH_BIN, *args])
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        raise MeasureError(f"could not run {GH_BIN}: {exc}") from exc
-    if r.returncode != 0:
-        raise MeasureError(f"gh {' '.join(args)} exited {r.returncode}: "
-                           f"{(r.stderr or r.stdout or '').strip()[:400]}")
-    try:
-        return json.loads(r.stdout or "null")
-    except json.JSONDecodeError as exc:
-        raise MeasureError(f"gh {' '.join(args)} returned unparseable JSON: {exc}") from exc
+    tries = RATE_LIMIT_RETRIES if retries is None else retries
+    detail = ""
+    for attempt in range(max(0, tries) + 1):
+        try:
+            r = _run([GH_BIN, *args], timeout=timeout)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise MeasureError(f"could not run {GH_BIN}: {exc}") from exc
+        if r.returncode == 0:
+            try:
+                return json.loads(r.stdout or "null")
+            except json.JSONDecodeError as exc:
+                raise MeasureError(
+                    f"gh {' '.join(args)} returned unparseable JSON: {exc}") from exc
+        detail = ((r.stderr or "") + " " + (r.stdout or "")).strip()
+        limited = bool(_RATE_LIMIT_RE.search(detail))
+        if limited and attempt < tries:
+            _spend_rate_limit_wait(_rate_limit_sleep_s(detail, attempt), detail, args)
+            continue
+        if limited:
+            raise MeasureError(
+                f"RATE-LIMITED (not empty): gh {' '.join(args)} was REFUSED by the API "
+                f"rate limiter after {attempt + 1} attempt(s), so NOTHING was measured "
+                f"— this is a refusal, not an empty result: {detail[:400]}")
+        raise MeasureError(f"gh {' '.join(args)} exited {r.returncode}: {detail[:400]}")
+    raise MeasureError(f"gh {' '.join(args)} was rate limited; no read completed")
+
+
+def _cached(key: tuple, build):
+    """One read per key per PASS. See `_READ_CACHE`."""
+    if key not in _READ_CACHE:
+        _READ_CACHE[key] = build()
+    return _READ_CACHE[key]
 
 
 def gh_api(path: str, *, method: str = "GET") -> object:
@@ -296,16 +552,85 @@ def _paginate_array(path: str) -> list[dict]:
 
 
 def check_runs_at(repo: str, sha: str) -> list[dict]:
-    return _paginate(f"repos/{repo}/commits/{sha}/check-runs?filter=all", "check_runs")
+    return _cached(("checks", repo, sha),
+                   lambda: _paginate(f"repos/{repo}/commits/{sha}/check-runs?filter=all",
+                                     "check_runs"))
+
+
+def job_count(repo: str, run_id: int, attempt: int = 0) -> int | None:
+    """Jobs this run's current attempt has created — or None when the read ABSTAINED.
+
+    None and 0 are never conflated: only a MEASURED zero makes a run "no verdict
+    will arrive" (`classify`), because an unreadable jobs surface says nothing about
+    whether jobs exist and inferring a stall from it is the fail-open direction this
+    module refuses everywhere else.
+
+    NO PER-CALL RETRY, and a bounded aggregate (see `JOB_READ_FAILURE_LIMIT`): this is
+    a per-run probe, so a refusal here abstains for that run and, after a couple of
+    failures, stops probing for the rest of the pass rather than sleeping through the
+    workflow's own timeout once per queued run.
+    """
+    global _JOB_READ_FAILURES
+    if _JOB_READ_FAILURES >= JOB_READ_FAILURE_LIMIT:
+        return None
+    try:
+        data = _cached(("jobs", repo, run_id, attempt),
+                       lambda: gh_json(["api",
+                                        f"repos/{repo}/actions/runs/{run_id}/jobs?per_page=1"],
+                                       retries=0))
+    except (MeasureError, subprocess.TimeoutExpired):
+        _JOB_READ_FAILURES += 1
+        return None
+    if not isinstance(data, dict):
+        _JOB_READ_FAILURES += 1
+        return None
+    total = data.get("total_count")
+    return total if isinstance(total, int) else None
+
+
+def _zero_job_stalled(run: Run, min_age_s: float, now: float | None = None) -> bool:
+    """Is this run past the point where waiting can produce a verdict? PURE.
+
+    Requires a MEASURED zero (`job_count != 0` abstains on None) and an AGE — both
+    halves matter: young zero-job runs are the normal progressive-job-creation lag,
+    and an unreadable count is an abstention, not a zero. A run parked for manual
+    approval is excluded from the class entirely: its remedy is a human, and a
+    rerun cannot obtain one.
+
+    ⛔ BOTH HALVES MUST DESCRIBE THE SAME ATTEMPT. `job_count` is measured on the
+    run's LATEST attempt, so the age is the ATTEMPT's (`attempt_age_seconds`), never
+    the run's creation: ageing a fresh attempt from the run's creation gives it a
+    floor of 0, so a re-run that has not materialised its jobs yet is declared "no
+    verdict will arrive" the instant it exists, re-run again, and escalated
+    EXHAUSTED for a run that was progressing normally.
+    """
+    if run.status == "completed" or run.status in _APPROVAL_PARKED_STATUSES:
+        return False
+    if run.job_count != 0:
+        return False
+    age = attempt_age_seconds(run, now)
+    return age is not None and age >= min_age_s
 
 
 def runs_at_head(repo: str, sha: str) -> list[Run]:
-    raw = _paginate(f"repos/{repo}/actions/runs?head_sha={sha}", "workflow_runs")
-    return [Run(id=r["id"], name=r.get("name") or "", path=r.get("path") or "",
-                status=r.get("status") or "", conclusion=r.get("conclusion"),
-                run_attempt=int(r.get("run_attempt") or 1), event=r.get("event") or "",
-                created_at=r.get("created_at") or "")
-            for r in raw]
+    def build() -> list[Run]:
+        raw = _paginate(f"repos/{repo}/actions/runs?head_sha={sha}", "workflow_runs")
+        runs = [Run(id=r["id"], name=r.get("name") or "", path=r.get("path") or "",
+                    status=r.get("status") or "", conclusion=r.get("conclusion"),
+                    run_attempt=int(r.get("run_attempt") or 1),
+                    event=r.get("event") or "", created_at=r.get("created_at") or "",
+                    started_at=r.get("run_started_at") or "")
+                for r in raw]
+        # Job counts are read ONLY where they can change a verdict: a run that has
+        # not completed and is still QUEUED. A completed run's jobs are settled and an
+        # in-progress one demonstrably has jobs, so reading those is pure budget —
+        # which is the currency the rate-limit handling above exists to protect.
+        for r in runs:
+            if r.status in QUEUED_STATUSES and r.status not in _APPROVAL_PARKED_STATUSES:
+                r.job_count = job_count(repo, r.id, r.run_attempt)
+        return runs
+
+    return _cached(("runs", repo, sha), build)
 
 
 def age_seconds(created_at: str, now: float | None = None) -> float | None:
@@ -318,6 +643,40 @@ def age_seconds(created_at: str, now: float | None = None) -> float | None:
         return None
     now = now if now is not None else time.time()
     return max(0.0, now - when.timestamp())
+
+
+def attempt_age_seconds(run: Run, now: float | None = None) -> float | None:
+    """Seconds since the run's CURRENT ATTEMPT started, or None when UNMEASURABLE.
+
+    A rerun reuses the run object and does NOT move its `created_at` (measured live:
+    attempt 2 of run 41523739094 created 21:41Z still reported `created_at` 20:56Z),
+    while `run_started_at` IS attempt-scoped and read 21:41Z for that attempt. Since
+    `job_count` describes the latest attempt, the age that decides the stall class
+    has to come from here.
+
+    ⛔ A QUEUED RE-RUN ABSTAINS — IT IS NEVER AGED FROM `created_at`. GitHub leaves
+    `run_started_at` null for as long as a re-run attempt sits QUEUED
+    (open-telemetry/shared-workflows#440), and `created_at` does not move on a rerun,
+    so falling back to it for `run_attempt >= 2` returns ATTEMPT 1's age: the 1200 s
+    floor is already spent the instant the fresh attempt exists, and the run is
+    declared "no verdict will arrive", cancelled, re-run AGAIN and escalated
+    EXHAUSTED — precisely the failure `_zero_job_stalled` documents it prevents, and
+    the state #9115 says must be repaired by nothing. The fallback is therefore kept
+    ONLY for attempt 1 (where `created_at` and the attempt's start are the same
+    event); a queued re-run whose start has not been stamped abstains, and `None`
+    never enters the stall class — so an unmeasurable age never drives a destructive
+    act.
+
+    RESIDUAL, stated rather than hidden: a re-run that stays queued and is never
+    stamped is not aged at all, so it reads PENDING and is not named. That is the
+    fail-closed direction (wait, report the pending age, act on nothing) and it
+    resolves itself the moment the attempt starts and GitHub stamps the field.
+    """
+    if run.started_at:
+        return age_seconds(run.started_at, now)
+    if run.run_attempt >= 2:
+        return None
+    return age_seconds(run.created_at, now)
 
 
 def resolve_required(repo: str, record_path: Path, live: bool = True) -> list[str]:
@@ -418,7 +777,8 @@ def producing_runs(ctx: str, all_runs: list[Run], emitters: dict[str, list[str]]
 
 def classify(pr: dict, checks: list[dict], all_runs: list[Run], required: list[str],
              emitters: dict[str, list[str]], max_attempts: int,
-             queue_starved: bool = False) -> PrPlan:
+             queue_starved: bool = False,
+             zero_job_min_age_s: float | None = None) -> PrPlan:
     """The whole decision, PURE — no API calls — so it is unit-testable.
 
     For each required context absent from the head's check runs, the producing
@@ -462,6 +822,37 @@ def classify(pr: dict, checks: list[dict], all_runs: list[Run], required: list[s
         # is the context DEAD (the #8254 signature: a completed run with zero jobs).
         if any(r.status != "completed" for r in runs):
             plan.pending.append(ctx)
+            # NO-VERDICT-WILL-ARRIVE: a queued run with a MEASURED zero jobs on an
+            # aged head stays `pending` (a reopen must remain deferred) AND is named
+            # here, because `pending` asserts the run will emit the check and this run
+            # has no job that could. Bounded, not a new wait: this module's own
+            # documented primitive applies — a rerun creates a fresh attempt that DOES
+            # get jobs (measured on the #8254 shape) — and it spends the same attempt
+            # budget every other repair path spends.
+            floor = (ZERO_JOB_MIN_AGE_S if zero_job_min_age_s is None
+                     else zero_job_min_age_s)
+            for r in runs:
+                if not _zero_job_stalled(r, floor):
+                    continue
+                if not any(d["run"] == r.id for d in plan.no_verdict):
+                    plan.no_verdict.append(
+                        {"run": r.id, "workflow": r.name or r.path, "status": r.status,
+                         "jobs": r.job_count,
+                         "age_seconds": round(attempt_age_seconds(r) or 0)})
+                # ⛔ A STARVED CONTEXT IS STILL NOT REPAIRED (#9115). This is decided
+                # BEFORE the rerun below and it is load-bearing: under a measured
+                # flood EVERY queued run is a zero-job run, so naming them must not
+                # become "re-run them" — that adds load to the flood it is starving
+                # behind, and it spends each run's attempt budget so the repair that
+                # would have worked after the flood is gone (EXHAUSTED). The module's
+                # recorded rule is that a starved context is repaired by NOTHING.
+                if queue_starved and all(x.status in QUEUED_STATUSES for x in runs):
+                    continue
+                if r.run_attempt >= max_attempts:
+                    if ctx not in plan.exhausted:
+                        plan.exhausted.append(ctx)
+                elif r not in plan.rerun:
+                    plan.rerun.append(r)
             # STARVED (#9115): the runs EXIST and NONE of them is executing, so no
             # slot was granted. Requires the repo-level reading to have WITNESSED
             # starvation (FLOOD or PR-STARVED) — the same per-head shape is the
@@ -546,15 +937,170 @@ def _timeline_reopen_state(repo: str, number: int, cooldown_min: int,
     return recent, total
 
 
+def _live_zero_job(repo: str, run_id: int) -> tuple[str | None, int | None, int | None]:
+    """(status, job count, attempt) re-measured AT THE MOMENT OF ACTION — never cached.
+
+    `_READ_CACHE` still holds the classification-time answer, which is the whole
+    hazard: `build_plans` scans EVERY open PR before `report` acts, so a run measured
+    at zero jobs at the start of the pass can take a runner slot while the pass walks
+    the other PRs — and this module's own floor comment records that the class it
+    cancels is KNOWN to contain runs that would have created jobs on their own.
+
+    ⛔ THE ATTEMPT IS PART OF THE MEASUREMENT, NOT DECORATION. A status of `queued`
+    with `0` jobs is ALSO the shape of a FRESH RE-RUN ATTEMPT (its `run_started_at` is
+    null until it starts), so a peer re-run of the same run id inside the pass window
+    presents a payload identical to the one the classification was made from. Asking
+    only "is it still a queued zero-job run" would then cancel an attempt that was
+    progressing normally, spend a second attempt of the budget, and (with
+    `max_attempts = 3`) escalate the context EXHAUSTED — the loop the classification
+    side abstains to prevent. Returning `run_attempt` lets the caller compare it with
+    the attempt it classified and treat a different attempt as a DIFFERENT measurement.
+
+    All reads carry `retries=0`: this is a GATE, not a measurement worth spending the
+    pass budget on. An unreadable gate refuses the act (`_cancel` answers
+    'unreadable') and the refusal is reported.
+    """
+    data = gh_json(["api", f"repos/{repo}/actions/runs/{run_id}"], retries=0)
+    status = data.get("status") if isinstance(data, dict) else None
+    attempt = data.get("run_attempt") if isinstance(data, dict) else None
+    jobs = gh_json(["api", f"repos/{repo}/actions/runs/{run_id}/jobs?per_page=1"],
+                   retries=0)
+    total = jobs.get("total_count") if isinstance(jobs, dict) else None
+    return (status if isinstance(status, str) else None,
+            total if isinstance(total, int) else None,
+            attempt if isinstance(attempt, int) else None)
+
+
+def _cancel(repo: str, run: Run) -> str:
+    """Cancel a run we have just MEASURED to have zero jobs, and wait for it to settle.
+
+    Returns a STATE, so the caller can tell a skip from a failure:
+
+      'cancelled'   the cancel landed and the run was OBSERVED `completed`
+      'not_queued'  the documented `409 … has not been queued yet` for the orphan
+                    shape — the cancel is impossible, and a direct rerun is the only
+                    remaining primitive
+      'moved'       the pre-act re-measurement no longer shows a QUEUED zero-job run
+                    of the SAME ATTEMPT (jobs appeared, it started, it completed, or
+                    a peer re-ran it — a different attempt is a different
+                    measurement) → SKIP, never act
+      'unreadable'  the pre-act re-measurement could not be read → SKIP, never act
+      'refused'     the cancel POST failed for any other reason → SKIP
+      'unsettled'   the cancel landed but the run never reported `completed` in bound
+      'no_budget'   this pass's cancel-settle budget is spent → SKIP
+
+    ⛔ THE SAFETY PROPERTY IS MEASURED HERE, AT THE MOMENT OF ACTION — NOT BY THE
+    CALLER, AND NOT AT THE START OF THE PASS. This is reached only from the zero-job
+    stall class, where `job_count == 0` was measured, but that reading belongs to the
+    START of the pass: `build_plans` returns every plan first and only then does
+    `report` act, and a pass takes minutes (including up to 60 s sleeps per
+    rate-limited read). A run measured at zero jobs at T0 whose jobs materialise at
+    T0+δ would have those jobs DESTROYED by a cancel issued at T1 from a stale
+    `job_count` — the verdict discarded, an attempt of the budget spent, and the whole
+    workflow re-run. A run that COMPLETED in that window is worse: cancelling it would
+    report `cancelled_first: True` for a cancel that did not happen, converting a
+    finished verdict into a fresh attempt. So the run and its job count are re-read
+    UNCACHED (`_live_zero_job`) and the POST is issued only while the run is still in
+    a QUEUED status with a MEASURED zero AND the attempt it classified — the same
+    discipline `_rerun` already applies to the head immediately before its own action.
+    The ATTEMPT is compared for the reason the classification side abstains on it: a
+    fresh re-run attempt is `queued` with `0` jobs and a null `run_started_at`, so a
+    peer re-run of the same run id inside the pass window is INDISTINGUISHABLE from
+    the stalled run by status and job count alone.
+
+    Only 'cancelled' means the run is OBSERVED `completed`: a rerun issued against a
+    run the API still considers live is refused (`403 This workflow is already
+    running`), and issuing it anyway would spend the attempt budget on a call that
+    cannot succeed.
+    """
+    global _CANCEL_SETTLE_SPENT_S
+    try:
+        status, jobs, attempt = _live_zero_job(repo, run.id)
+    except (MeasureError, subprocess.TimeoutExpired, OSError):
+        return "unreadable"
+    if status is None or jobs is None or attempt is None:
+        return "unreadable"
+    if attempt != run.run_attempt:
+        # A DIFFERENT ATTEMPT IS A DIFFERENT MEASUREMENT. Someone (the API, a human
+        # re-run, another lane) replaced the attempt this run was classified on, so
+        # the queued-zero-job reading above does not describe the run that would be
+        # cancelled — it describes a fresh attempt that is just waiting for a slot.
+        return "moved"
+    if (status not in QUEUED_STATUSES or status in _APPROVAL_PARKED_STATUSES
+            or jobs != 0):
+        # SKIP. The classification is minutes old; this is the reading that decides
+        # whether there is still no work to destroy.
+        return "moved"
+    if _CANCEL_SETTLE_SPENT_S >= CANCEL_SETTLE_PASS_BUDGET_S:
+        # TESTED BEFORE THE POST, deliberately: with no budget left to OBSERVE the
+        # settle, the rerun that follows would be refused (`already running`) — so
+        # cancelling here would destroy the attempt's verdict without being able to
+        # re-establish it. Skip; the next window has a fresh budget.
+        return "no_budget"
+    try:
+        r = _run([GH_BIN, "api", "-X", "POST",
+                  f"repos/{repo}/actions/runs/{run.id}/cancel"])
+    except (OSError, subprocess.TimeoutExpired):
+        return "refused"
+    if r.returncode != 0:
+        detail = f"{r.stderr or ''} {r.stdout or ''}"
+        if _CANCEL_NOT_QUEUED_RE.search(detail):
+            # The orphan shape: nothing can cancel it, so a direct rerun is the only
+            # primitive left. Reported distinctly, never as a generic failure.
+            return "not_queued"
+        return "refused"
+    started = time.time()
+    try:
+        for poll in range(_CANCEL_SETTLE_POLLS):
+            elapsed = time.time() - started
+            if elapsed >= _CANCEL_SETTLE_TOTAL_S:
+                return "unsettled"
+            if _CANCEL_SETTLE_SPENT_S + elapsed >= CANCEL_SETTLE_PASS_BUDGET_S:
+                return "no_budget"
+            try:
+                data = gh_json(["api", f"repos/{repo}/actions/runs/{run.id}"],
+                               retries=0, timeout=_CANCEL_SETTLE_POLL_TIMEOUT_S)
+            except (MeasureError, subprocess.TimeoutExpired):
+                return "unsettled"
+            if isinstance(data, dict) and data.get("status") == "completed":
+                return "cancelled"
+            if poll + 1 < _CANCEL_SETTLE_POLLS:
+                wait = min(_CANCEL_SETTLE_SLEEP_S,
+                           max(0.0, _CANCEL_SETTLE_TOTAL_S - elapsed))
+                if wait:
+                    _sleep(wait)
+    finally:
+        # Real wall clock, not the nominal sleeps: the budget must bound what the
+        # pass ACTUALLY spends, and a patched-out `_sleep` must not spend it.
+        _CANCEL_SETTLE_SPENT_S += time.time() - started
+    return "unsettled"
+
+
 def _rerun(repo: str, run: Run, number: int, expected_head: str = "") -> str:
     """Re-run an EXISTING workflow run at the head it was measured at.
 
-    Returns 'rerun'|'head_moved'|'failed'. The head is re-read immediately before
-    acting, the SAME load-bearing precondition `_reopen` documents: a repair pass
-    over many PRs takes minutes, so a run whose head has already been replaced
-    would be re-run on a superseded sha and burn a CI cycle. If the head cannot be
-    re-read the action is SKIPPED, never guessed. 'head_moved' is a skip, not a
-    failure — the new head's own CI is the repair (mirrors `_reopen`).
+    Returns 'rerun'|'cancelled_rerun'|'rerun_not_queued'|'head_moved'|'target_moved'
+    |'failed'. The head is re-read immediately before acting, the SAME load-bearing
+    precondition `_reopen` documents: a repair pass over many PRs takes minutes, so a
+    run whose head has already been replaced would be re-run on a superseded sha and
+    burn a CI cycle. If the head cannot be re-read the action is SKIPPED, never
+    guessed. 'head_moved' is a skip, not a failure — the new head's own CI is the
+    repair (mirrors `_reopen`).
+
+    ⛔ A NON-COMPLETED RUN CANNOT BE RE-RUN IN PLACE. MEASURED 2026-11-02 against run
+    41523739094 while it was `pending` with zero jobs:
+    `POST /actions/runs/<id>/rerun` → `403 {"message": "This workflow is already
+    running"}`. So the stall class — which is by construction a NON-completed run —
+    needs CANCEL THEN RERUN; issuing the rerun alone would return 'failed' every
+    window and escalate a PR that this tool is supposed to repair. The primitive is
+    the one that actually cleared this shape: cancel → `completed/cancelled` → rerun
+    accepted → attempt 2 with an attempt-scoped `run_started_at`.
+
+    THE CANCEL'S OWN VERDICT DECIDES THE REST (`_cancel` returns a state, not a bool):
+    'moved' is a SKIP (the run stopped being a queued zero-job run while the pass ran
+    — re-running it would be churn on a run that is working, or a second attempt on one
+    that already finished), and 'not_queued' falls through to the direct rerun, because
+    the API's 409 means the run was never queued and there is nothing to cancel first.
     """
     if expected_head:
         try:
@@ -564,12 +1110,25 @@ def _rerun(repo: str, run: Run, number: int, expected_head: str = "") -> str:
             return "failed"
         if not isinstance(now, dict) or (now.get("headRefOid") or "") != expected_head:
             return "head_moved"
+    state = "rerun"
+    if run.status != "completed":
+        # The cancel must be OBSERVED to have settled first: a rerun of a still-live
+        # run is refused, and the refusal is indistinguishable from a real failure.
+        cancelled = _cancel(repo, run)
+        if cancelled == "cancelled":
+            state = "cancelled_rerun"
+        elif cancelled == "not_queued":
+            state = "rerun_not_queued"
+        elif cancelled == "moved":
+            return "target_moved"
+        else:
+            return "failed"
     try:
         ok = _run([GH_BIN, "api", "-X", "POST",
                    f"repos/{repo}/actions/runs/{run.id}/rerun"]).returncode == 0
     except (OSError, subprocess.TimeoutExpired):
         return "failed"
-    return "rerun" if ok else "failed"
+    return state if ok else "failed"
 
 
 def _reopen(repo: str, number: int, expected_head: str = "") -> str:
@@ -644,8 +1203,24 @@ def open_prs(repo: str, include_drafts: bool) -> list[dict]:
 
 def build_plans(repo: str, required: list[str], emitters: dict[str, list[str]],
                 include_drafts: bool, max_attempts: int,
-                queue_starved: bool = False) -> list[PrPlan]:
+                queue_starved: bool = False,
+                deadline: float | None = None) -> list[PrPlan]:
     plans: list[PrPlan] = []
+    # A PASS IS THE CACHE SCOPE. Two passes in one process (a launcher that polls)
+    # must not reuse a verdict measured against a head that has since moved.
+    global _JOB_READ_FAILURES, _PASS_DEADLINE, _CANCEL_SETTLE_SPENT_S
+    _READ_CACHE.clear()
+    _JOB_READ_FAILURES = 0
+    _CANCEL_SETTLE_SPENT_S = 0.0
+    # ONE wall-clock budget for the whole pass (`PASS_BUDGET_S`). `report()` acts after
+    # the scan, so the deadline has to cover both halves — otherwise the reads alone
+    # could sleep past the consumer workflow's timeout and the pass would be killed
+    # before it could emit `RATE-LIMITED (not empty)` or any exit code at all.
+    # `main()` arms it BEFORE its first live read and threads that same deadline in
+    # here, so the budget is measured from the START of the pass. Re-arming on every
+    # call (which this did) discarded the pre-scan half and could hand the scan a
+    # second full budget, which is how the total could exceed the workflow timeout.
+    _PASS_DEADLINE = deadline if deadline is not None else _arm_pass_deadline()
     for pr in open_prs(repo, include_drafts):
         head = pr.get("headRefOid") or ""
         if not head:
@@ -739,7 +1314,26 @@ def report(plans: list[PrPlan], apply: bool, trigger_ok: bool, repo: str,
                      "pending": p.pending, "rerun": [], "reopened": False,
                      "missing_run": p.missing_run, "exhausted": list(p.exhausted),
                      "starved": list(p.starved),
+                     "no_verdict": list(p.no_verdict),
                      "reopen_attempts": 0, "needs_user_actor": False}
+        for nv in p.no_verdict:
+            # THE NAMED REFUSAL. A zero-job run older than the floor cannot produce a
+            # verdict, so the honest output is this line — never an infinite wait, and
+            # never a relax to "any run will do", which would certify a head that
+            # nothing tested.
+            #
+            # ⛔ STDERR, NOT STDOUT. `--json` writes ONE JSON document to stdout and two
+            # in-repo consumers parse that stream (`tools/ci-check-repair-local.sh` and
+            # the workflow's step summary). A notice printed to stdout ahead of the
+            # document makes `json.load` raise; the local fallback swallows it with
+            # `2>/dev/null` and reports "PRs needing repair: ?", freezing its transition
+            # signature so a real change in the backlog is silently suppressed. The
+            # module's own convention already sends the STARVED and needs-credential
+            # lines to stderr; this follows it, and the record carries `no_verdict` too,
+            # so `--json` consumers lose nothing.
+            print(f"NO-VERDICT-WILL-ARRIVE(run {nv['run']}, {nv['status']}, "
+                  f"{nv['jobs']} jobs, {nv['age_seconds']}s)"
+                  f" pr=#{p.number} workflow={nv['workflow']}", file=sys.stderr)
         # A SPENT BUDGET ESCALATES REGARDLESS OF WHAT ELSE IS TRUE OF THE PR, so it
         # is hoisted above the repair branches. When a PR had BOTH an exhausted
         # context and a missing run, the missing-run branch skipped the escalation
@@ -803,9 +1397,25 @@ def report(plans: list[PrPlan], apply: bool, trigger_ok: bool, repo: str,
                     # failure, so it does not escalate below (mirrors `_reopen`).
                     state = _rerun(repo, run, p.number, expected_head=p.head)
                     rec["rerun"].append({"run": run.id, "attempt": run.run_attempt,
-                                         "workflow": run.name, "ok": state == "rerun",
+                                         "workflow": run.name,
+                                         "ok": state in ("rerun", "cancelled_rerun",
+                                                         "rerun_not_queued"),
+                                         **({"cancelled_first": True}
+                                            if state == "cancelled_rerun" else {}),
+                                         # The API's 409 for the orphan shape: the
+                                         # cancel was impossible, so the direct rerun
+                                         # is what was attempted. Named so the record
+                                         # never reads as a clean cancel-then-rerun.
+                                         **({"cancel_refused_409": True}
+                                            if state == "rerun_not_queued" else {}),
                                          **({"head_moved": True}
-                                            if state == "head_moved" else {})})
+                                            if state == "head_moved" else {}),
+                                         # The run stopped being a queued zero-job run
+                                         # while this pass ran (jobs appeared or it
+                                         # settled) — a SKIP, so nothing is destroyed
+                                         # and nothing escalates.
+                                         **({"target_moved": True}
+                                            if state == "target_moved" else {})})
                 else:
                     rec["rerun"].append({"run": run.id, "attempt": run.run_attempt,
                                          "workflow": run.name, "ok": None})
@@ -817,7 +1427,8 @@ def report(plans: list[PrPlan], apply: bool, trigger_ok: bool, repo: str,
                 rec["needs_user_actor"] = True
                 if apply:
                     escalations += 1
-            if any(r["ok"] is False and not r.get("head_moved") for r in rec["rerun"]):
+            if any(r["ok"] is False and not (r.get("head_moved") or r.get("target_moved"))
+                   for r in rec["rerun"]):
                 escalations += 1
         records.append(rec)
     # exit 1 only when something needs acting on and we could not act.
@@ -949,6 +1560,14 @@ def main(argv: list[str] | None = None) -> int:
         candidate = root / args.record
         if candidate.is_file():
             record_path = candidate
+    # ⛔ ARM THE PASS BUDGET BEFORE THE FIRST API-TOUCHING STEP. `resolve_required`
+    # below performs a LIVE read (branch protection) and `read_queue_health` reads the
+    # queue; either can be RATE-LIMITED, and while the deadline was armed inside
+    # `build_plans` their waits were unbounded — 600 s of sleeps on top of the 720 s
+    # armed afterwards, which does not fit the consumer workflow's 15 minutes and is
+    # killed instead of exiting 2. The deadline is then threaded into `build_plans` so
+    # the scan does not restart the clock.
+    pass_deadline = _arm_pass_deadline()
     queue = None if args.no_queue_health else read_queue_health(args.repo)
     # A queue read that failed is reported as UNKNOWN and does NOT block the pass:
     # the repair it performs is still correct, it just cannot name starvation.
@@ -965,7 +1584,8 @@ def main(argv: list[str] | None = None) -> int:
         # PR scan (see require_emitters).
         require_emitters(required, emitters, record_path)
         plans = build_plans(args.repo, required, emitters, args.include_drafts,
-                            args.max_attempts, queue_starved=queue_starved)
+                            args.max_attempts, queue_starved=queue_starved,
+                            deadline=pass_deadline)
         code, records = report(plans, args.apply, can_trigger_events(), args.repo,
                                args.reopen_cooldown_minutes, args.max_attempts)
     except MeasureError as exc:
