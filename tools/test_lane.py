@@ -365,6 +365,29 @@ def assert_pinned_image(image: str) -> str:
 LANE_FALKORDB_ARGS = "THREAD_COUNT 8 TIMEOUT_MAX 30000"
 NAME_PREFIX = "fdb-lane-"
 
+#: ── OWNERSHIP IS ALSO WRITTEN INTO THE CONTAINER, NOT ONLY INTO ITS NAME ────
+#:
+#: The name is `fdb-lane-<sha1(abs worktree path)[:10]>` — a ONE-WAY digest of
+#: the very path that teardown deletes. So the record of ownership is destroyed
+#: by the event that creates the orphan: once `git worktree remove`/prune drops
+#: the entry, the slug can never be resolved again by `_worktree_slugs()`, the
+#: owner reads as INDETERMINATE, and the container lands in the population that
+#: `reap_orphans` may only REPORT (`OWNER_INDETERMINATE_REAP_ENV`). Measured on
+#: the dev box 2026-11-03: 2 of 7 live `fdb-lane-*` containers already had no
+#: worktree claiming them, at 6 minutes and 1.1 hours old.
+#:
+#: So the owner path is ALSO stamped on the container as a docker label at
+#: creation — the mechanism Testcontainers' Ryuk and Kubernetes
+#: `ownerReferences` both use — which survives the deletion of the worktree.
+#: That does NOT settle #8180's open arm: it makes the owner DETERMINED, so the
+#: container qualifies for the one proof the ruling already authorises armed
+#: ("a `fdb-lane-*` container MAY be reaped when the worktree that owns it is
+#: gone") instead of falling into the INDETERMINATE bucket whose default the
+#: owner has not ruled on. Every default stays exactly as `origin/main` set it.
+LABEL_OWNER = "tortoise.test-lane.worktree"
+LABEL_SLUG = "tortoise.test-lane.slug"
+LABEL_CREATED = "tortoise.test-lane.created"
+
 #: ── OWNERSHIP LIVENESS, and the bound that makes it a reap instead of a report ──
 #:
 #: The measured kill (2026-11-03, cell-1): 68 `fdb-lane-*` containers alive, the
@@ -1266,9 +1289,54 @@ def container_name(slug: str) -> str:
     return f"{NAME_PREFIX}{slug}"
 
 
+def _lane_identity() -> tuple[str, Path]:
+    """THIS worktree's container name AND the root it was derived from, from ONE
+    `repo_root()` read.
+
+    Both ownership records this tool writes must describe the SAME worktree: the
+    container NAME is ``fdb-lane-<slug(root)>``, and the label pair is
+    ``<root>`` plus ``slug_for(root)``. `repo_root()` has a documented, PER-CALL
+    degraded mode — ``Path.cwd()`` on a git timeout, on git being absent, on
+    ``OSError``, or on a non-zero `rev-parse` — so reading it once for the name
+    and again for the label lets exactly one of the two degrade, and the two
+    records then name two different worktrees.
+
+    That pair is not cosmetic: `reap_orphans()` treats a label whose slug
+    disagrees with the container name as "no evidence about this container", and
+    once the container's worktree is gone the name no longer resolves either —
+    so a container created across ONE degraded read is kept for life and
+    reported with a cause that blames the label. That is the #8180 leak
+    ("reported on every `up` and reaped by nothing, forever") re-entered through
+    the mechanism meant to close it. Deriving both records from THIS one read
+    makes them agree by construction.
+    """
+    root = repo_root()
+    return container_name(slug_for(root)), root
+
+
 def lane_name() -> str:
     """The one container this tool can act on. Never a parameter."""
-    return container_name(slug_for(repo_root()))
+    return _lane_identity()[0]
+
+
+def _label_args(root: Path | str) -> list[str]:
+    """The ownership stamp written at creation (see `LABEL_OWNER`).
+
+    ``root`` is REQUIRED and is the caller's single `repo_root()` read (see
+    `_lane_identity`): reading it again here is what let the label name a
+    different worktree than the container's own name.
+
+    ``created`` is a DIAGNOSTIC for a human `docker inspect` (or a host-level
+    reader) — nothing decides on it. ``slug`` is NOT: it is the CORROBORATING
+    half of the pair, and `reap_orphans()` reads it back and DECIDES on it (a
+    slug that disagrees with the container it sits on makes the whole label
+    non-evidence), while ``worktree`` decides which owner is resolved.
+    """
+    return [
+        "--label", f"{LABEL_OWNER}={Path(root).resolve()}",
+        "--label", f"{LABEL_SLUG}={slug_for(root)}",
+        "--label", f"{LABEL_CREATED}={datetime.now().isoformat()}",
+    ]
 
 
 def is_managed(name: str) -> bool:
@@ -1679,6 +1747,12 @@ def start(port: int | None = None) -> tuple[str, int]:
     # leaves a container that dies at the NEXT start instead of surviving until
     # someone notices. Reported, and never fatal: a sweep that cannot run must
     # not stop a lane from starting.
+    #
+    # ONE `repo_root()` read for the whole `start()`: the container NAME and the
+    # ownership LABEL are two records of the SAME worktree, and `repo_root()` can
+    # degrade per call (see `_lane_identity`). Read ONCE here, above the sweep,
+    # so no later second read can disagree with the container just created.
+    name, root = _lane_identity()
     if os.environ.get("TORTOISE_TEST_LANE_REAP", "1") == "1":
         try:
             for _line in reap_orphans():
@@ -1686,7 +1760,6 @@ def start(port: int | None = None) -> tuple[str, int]:
         except Exception as _exc:   # a sweep that cannot run must not stop a lane
             print(f"reap: the sweep failed and was skipped ({_exc!r}); "
                   f"nothing else is affected", file=sys.stderr)
-    name = lane_name()
     state = container_state(name)
     if state == "running":
         # #8124: the reuse path must not hand back an engine the pin never
@@ -1872,6 +1945,11 @@ def start(port: int | None = None) -> tuple[str, int]:
         # "container <id> is zombie and can not be killed. Use the `--init`
         # option", leaving a container no `down()` could remove.
         "run", "-d", "--init", "--name", name,
+        # #8180: ownership stamped INTO the container so it outlives the
+        # worktree teardown that destroys the name's meaning (see `LABEL_OWNER`).
+        # `root` is `start()`'s single `repo_root()` read — the same one the name
+        # came from — so the two records cannot name different worktrees.
+        *_label_args(root),
         # #7357: the KERNEL cap (see CONTAINER_MEMORY_ENV). `--init` and the
         # cap are independent: one reaps orphaned children, the other bounds
         # what a runaway instance can take from every neighbour on the host.
@@ -2002,6 +2080,45 @@ def _worktree_slugs() -> dict[str, str] | None:
             path = line[len("worktree "):]
             found[slug_for(path)] = path
     return found
+
+
+def _trusted_label_owner(name: str, stamped: str,
+                         stamped_slug: str) -> tuple[str, str]:
+    """``(owner, contradiction)`` — the label's owner path, ONLY if it describes
+    the container it is stamped on.
+
+    A label is a fact written by SOMEONE (possibly a predecessor version, a
+    copied `docker run`, or a hand-written `--label`), so it is an ownership
+    record only when it CORROBORATES the thing it labels:
+
+      * the pair must be self-consistent — ``slug_for(worktree) == slug`` — which
+        is the only reason `LABEL_SLUG` is written; and
+      * that slug must be THIS container's own name slug, i.e. the label names
+        the very worktree whose digest created this container.
+
+    Anything else is reported and IGNORED as an ownership record: without this
+    a stale or copied label (measured shape: ``worktree=/tmp``) keeps a
+    container forever under a path it never came from. Ignored is not deleted:
+    the container falls back to the name record and then to whatever arm its
+    state licenses.
+
+    ``("", "")`` when there is no label at all: absence is not a contradiction,
+    it is the pre-label population, and it must stay silent.
+    """
+    if not stamped:
+        return "", ""
+    if not stamped_slug:
+        return "", (f"it names {stamped} but carries no {LABEL_SLUG} label, so "
+                     f"the pair cannot be corroborated")
+    digest = slug_for(stamped)
+    if digest != stamped_slug:
+        return "", (f"its {LABEL_SLUG} label ({stamped_slug}) is not the digest "
+                     f"of the worktree it names ({stamped} -> {digest})")
+    if stamped_slug != name[len(NAME_PREFIX):]:
+        return "", (f"its {LABEL_SLUG} label ({stamped_slug}) is not this "
+                     f"container's own slug ({name[len(NAME_PREFIX):]}), so it "
+                     f"describes a DIFFERENT worktree")
+    return stamped, ""
 
 
 _WORKTREE_MARK = "/.worktrees/"
@@ -2518,18 +2635,28 @@ def reap_orphans() -> list[str]:
     if live_paths is not None:
         live_slugs = {slug_for(a) for p in live_paths for a in _ancestors(p)}
     listed = _docker("ps", "-a", "--filter", f"name={NAME_PREFIX}",
-                     "--format", "{{.Names}}\t{{.State}}")
+                     "--format",
+                     '{{.Names}}\t{{.State}}'
+                     '\t{{.Label "' + LABEL_OWNER + '"}}'
+                     '\t{{.Label "' + LABEL_SLUG + '"}}')
     if listed.returncode != 0:
         return ["reap: skipped — `docker ps` failed; NOTHING was removed "
                 "(fail-closed)"]
     states: dict[str, str] = {}
+    stamped_labels: dict[str, dict[str, str]] = {}
     for line in (listed.stdout or "").splitlines():
-        name, _, state = line.partition("\t")
-        name = name.strip()
-        if name:
-            # A missing state is `unknown`, never terminal: the state arm may
-            # only fire on a state docker actually reported.
-            states[name] = state.strip().lower() or "unknown"
+        parts = line.split("\t")
+        name = parts[0].strip()
+        if not name:
+            continue
+        # A missing state is `unknown`, never terminal: the state arm may
+        # only fire on a state docker actually reported.
+        states[name] = ((parts[1].strip().lower() if len(parts) > 1 else "")
+                        or "unknown")
+        stamped_labels[name] = {
+            "owner": parts[2].strip() if len(parts) > 2 else "",
+            "slug": parts[3].strip() if len(parts) > 3 else "",
+        }
     mine = lane_name()
     out: list[str] = []
     for name in sorted(states):
@@ -2543,6 +2670,29 @@ def reap_orphans() -> list[str]:
         # slugs of every worktree a live process holds, in ANY clone on this host,
         # so this is how a cross-clone owner is still recognised as alive.
         slug_for_name = name[len(NAME_PREFIX):]
+        # THE LABEL, when the name can no longer answer. `_worktree_slugs()` maps
+        # a slug back to a path through `git worktree list`, so a container whose
+        # worktree was REMOVED (the exact event that strands it) resolves to
+        # nothing here — and lands in the INDETERMINATE bucket, whose default no
+        # owner has ruled on (`OWNER_INDETERMINATE_REAP_ENV`). The label stamped
+        # at creation survives that teardown, so it upgrades the container from
+        # INDETERMINATE to DETERMINED-AND-GONE, i.e. the ONE proof #8180
+        # authorises armed. It can only ever SPARE a container or move it out of
+        # the unruled bucket — it never widens an arm and never changes a
+        # default.
+        if owner is None:
+            stamped = stamped_labels.get(name, {})
+            trusted, why_not = _trusted_label_owner(
+                name, stamped.get("owner", ""), stamped.get("slug", ""))
+            if trusted:
+                owner = trusted
+            elif why_not:
+                # Reported, not believed. A label that does not describe the
+                # container it sits on is not an ownership record (see
+                # `_trusted_label_owner`); the name record and the age arm are
+                # then all that is left, exactly as before this change.
+                out.append(f"reap: {name} carries an ownership label that is "
+                           f"not evidence — {why_not}")
         state = states[name]
         # Ownership is a DETERMINED owner plus what its recorded worktree says.
         # Resolved ONCE, before either proof, so no arm can report a worktree as
