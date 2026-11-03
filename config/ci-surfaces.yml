@@ -5743,7 +5743,8 @@ surfaces:
   # row), so before this fix the guard ran on `ep`-matching diffs only — not even
   # on the `tortoise/` arm the comment described.
   - test_substrate_map.py
-  # #2148: `tests/test_rail_detach.py` pins the rail's DURABILITY — that
+  # [agent-infra#2148](dispatch, not this repo's #2148 — here that number is
+  # the tier-2 cost gates): `tests/test_rail_detach.py` pins the rail's DURABILITY — that
   # `scripts/admin-merge.sh` runs in its own session (setsid) and outlives the
   # lane that launched it, plus the fail-closed verdict vocabulary (a rail with
   # no `EXIT=` line is `lost`, never `merged`; `ALREADY MERGED` never fabricates
