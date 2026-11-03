@@ -60,6 +60,12 @@ class _Upstream:
         #: reply the bridge relays to stdout VERBATIM, i.e. the one that reaches
         #: the harness's transcript.
         self.echo_answered = False
+        #: Answer the request as a JSON-RPC BATCH (a list) over SSE — the shape the
+        #: module docstring promises to emit element-by-element.
+        self.batch_reply = False
+        #: 307 every request to this URL — a CROSS-ORIGIN hop, which is what makes
+        #: httpx drop the Authorization header (#10727 review, P2).
+        self.redirect_to: str | None = None
 
     async def __call__(self, scope, receive, send):
         if scope["type"] == "lifespan":
@@ -79,6 +85,22 @@ class _Upstream:
         headers = {k.decode().lower(): v.decode() for k, v in scope.get("headers") or ()}
         payload = json.loads(body) if body else None
         self.requests.append({"headers": headers, "payload": payload})
+
+        if self.redirect_to:
+            await _respond(send, 307, None,
+                           extra_headers=[(b"location", self.redirect_to.encode())])
+            return
+
+        if self.batch_reply:
+            reply = {
+                "jsonrpc": "2.0",
+                "id": payload.get("id") if isinstance(payload, dict) else None,
+                "result": {"tools": [{"name": "tortoise_search"}]},
+            }
+            await _respond(send, 200, None, content_type="text/event-stream", raw=(
+                b"data: " + json.dumps([reply]).encode() + b"\n\n"
+            ))
+            return
 
         if self.expire and "mcp-session-id" in headers:
             await _respond(send, 404, {"error": "session not found"})
@@ -573,6 +595,83 @@ class TestFailureModes:
         assert "<redacted>" in emitted, f"no redaction marker: {emitted}"
         assert "tt_internal_secret" not in capsys.readouterr().err
 
+        # The LINE the handler quotes is a SECOND place the value can straddle a
+        # cut: it was sliced to 120 chars BEFORE redaction, so a credential that
+        # crossed that boundary came out in part. The short line above cannot see
+        # it — the key is not in that line at all — so the boundary needs its own
+        # line, with the key placed to straddle char 120.
+        key = "tt" + "_internal_secret"
+
+        def _line(pad: int) -> str:
+            return json.dumps({
+                "jsonrpc": "2.0", "id": 2, "method": "initialize",
+                "params": {"pad": "x" * pad, key: "y" * 50},
+            }) + "\n"
+
+        # COMPUTE the pad: the key's column moves with the serialised wrapper, so a
+        # hand-picked pad silently stops straddling the boundary when the payload
+        # shape changes and the test passes for the wrong reason.
+        # Land the key so the cut leaves >= 8 of its characters: a shorter remnant
+        # is below the fragment window and the test would pass on a leak it cannot
+        # see (the earlier fixture left 5 and did exactly that).
+        want = 120 - 12
+        pad = want - _line(0).index(key)
+        assert pad > 0, f"the payload already exceeds char {want} (pad={pad})"
+        long_line = _line(pad)
+        start = long_line.index(key)
+        assert start < 120 and 120 - start >= 8, (
+            f"the cut must land INSIDE the key and leave >= 8 characters: "
+            f"start={start}, remnant={120 - start}")
+
+        # Keep the scenario-1 stdout capture in place: re-monkeypatching
+        # `sys.stdout` a second time leaves a closed StringIO behind for the
+        # session-scoped redislite-hygiene teardown to write into. This scenario
+        # only reads stderr.
+        monkeypatch.setattr(sys, "stdin", io.StringIO(long_line))
+        capsys.readouterr()  # drop the first scenario's stderr
+        assert mcp_bridge.main([]) == 0
+
+        err = capsys.readouterr().err
+        # Scope the check to the QUOTED segment: the key ends in "internal", which
+        # is also a word in the log prefix ("internal failure forwarding"), so a
+        # whole-stream substring test reports a leak that is only the prefix.
+        marker = "internal failure forwarding "
+        quoted = err.split(marker, 1)[1] if marker in err else ""
+        assert quoted, f"the failure log line was not found in: {err[-300:]}"
+        fragments = [key[i:i + 8] for i in range(len(key) - 7)]
+        assert not any(f in quoted for f in fragments), (
+            f"a FRAGMENT of the value reached stderr: {quoted[:300]}")
+        assert "<redacted>" in quoted, f"no redaction marker on the quoted line: {quoted[:300]}"
+
+    def test_redaction_survives_a_TRUNCATED_body_on_the_REDIRECT_refusal(self):
+        """The redirect refusal is a SECOND builder, added after the repair.
+
+        `_redirect_refusal` was written while every sibling site already redacted
+        first and truncated second, and it sliced the body before redacting — the
+        one reintroduced truncate-before-redact site. A credential straddling the
+        400-char cut therefore emitted `len(key) - 1` characters into the message
+        the harness writes to a transcript and a CI lane to a log. Pinned
+        separately from the `_refusal_message` case so a future edit to either
+        builder cannot quietly leave the other uncovered.
+        """
+        import httpx as _httpx
+
+        from tortoise.mcp_bridge import _redirect_refusal
+        from tortoise.mcp_client import Connection
+
+        key = "tt" + "_boundary_secret_value"
+        sent = Connection("http://h/mcp", key, "TORTOISE_API_KEY", ("TORTOISE_API_KEY",))
+        windows = [key[i:i + 8] for i in range(len(key) - 7)]
+        response = _httpx.Response(
+            401, request=_httpx.Request("POST", "http://other-origin/mcp"))
+
+        for pad in (200, 300, 350, 380, 393, 399, 400, 450):
+            text = _redirect_refusal(response, "x" * pad + key, sent)
+            assert not any(w in text for w in windows), (
+                f"pad={pad}: a FRAGMENT of the value was emitted: {text[-80:]}")
+            if pad <= 380:
+                assert "<redacted>" in text, f"pad={pad}: no evidence left: {text[-80:]}"
+
     def test_an_expired_session_can_be_re_initialized(self, upstream, home, bridge_factory):
         """The recovery the 404 message promises must actually be possible.
 
@@ -611,6 +710,70 @@ class TestFailureModes:
         bridge.send(_INITIALIZE)
         assert bridge.read()["id"] == 1
         assert _auth_headers(stub) == ["Bearer tt_stored"]
+
+    def test_a_batched_reply_is_delivered_not_declared_unanswered(
+        self, upstream, home, bridge_factory,
+    ):
+        """A JSON-RPC BATCH is a reply, and the module promises to emit it.
+
+        RED before the fix: `_response_messages` appended the decoded event as-is,
+        so a batch closed `pending` (its unwrap loop reads a list) and was then
+        rejected by the no-reply guard, which only recognises a dict. The bridge
+        answered `-32603 "no JSON-RPC reply for id(s) [7]"` while holding the real
+        result, and the harness was told its request went unanswered.
+        """
+        url, stub = upstream
+        _write_credential(home, "tt_one", url[: -len("/mcp")])
+        stub.batch_reply = True
+        bridge = bridge_factory()
+
+        bridge.send({"jsonrpc": "2.0", "id": 7, "method": "tools/list"})
+        message = bridge.read()
+
+        assert "error" not in message, (
+            "a batch reply was declared unanswered while it was in hand: "
+            f"{message}"
+        )
+        assert message["id"] == 7, message
+        assert message["result"]["tools"] == [{"name": "tortoise_search"}], message
+
+    def test_a_cross_origin_redirect_does_not_blame_the_credential(
+        self, upstream, home, bridge_factory,
+    ):
+        """A redirect to another origin drops the header; the refusal must say so.
+
+        `follow_redirects=True` is required for `/mcp` -> `/mcp/` (#2864), but httpx
+        strips `Authorization` on a CROSS-ORIGIN hop. The request that gets the 401
+        therefore carried NO credential, and reporting "the bridge DID send a
+        credential - so the value itself was refused" sends the operator to rotate a
+        key that was never on the wire (#10727 review, P2).
+        """
+        _url, stub = upstream
+        target = _Upstream()
+        target.refuse = True
+        served = _serve(target)
+        target_url = next(served)
+        try:
+            stub.redirect_to = target_url
+            bridge = bridge_factory({"TORTOISE_API_KEY": "tt_secret"})
+
+            bridge.send(_INITIALIZE)
+            text = bridge.read()["error"]["message"]
+
+            # The redirect really happened and really carried no credential.
+            assert _auth_headers(stub) == ["Bearer tt_secret"]
+            assert _auth_headers(target) == [None], (
+                "the test's premise is wrong: httpx DID carry the header across "
+                f"origins, so this case does not arise ({_auth_headers(target)})"
+            )
+            assert "DID send a credential" not in text, (
+                f"a credential that never left was blamed for the rejection: {text}"
+            )
+            assert target_url in text, text
+            assert "different origin" in text.lower(), text
+            assert "tt_secret" not in text, f"the credential value was relayed: {text}"
+        finally:
+            served.close()
 
 
 # ── Interop: the real MCP daemon, through the bridge ────────────────────────

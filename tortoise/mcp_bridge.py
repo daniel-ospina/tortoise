@@ -184,7 +184,14 @@ def _response_messages(
         except ValueError:
             _log(f"ignoring non-JSON event-stream payload: {redact(chunk, sent.key)[:120]}")
             continue
-        messages.append(message)
+        # FLATTEN at ingestion (#10727 review, P2): a JSON-RPC BATCH reply arrives
+        # as a list in ONE event, while the non-SSE path above already returns a
+        # flat list of messages. Appending the list would leave `messages` mixing
+        # shapes, and every consumer below — the no-reply guard, the `result`
+        # capture and `_emit` — reads per-message dicts. Appending made a batch
+        # close `pending` (the loop two lines down unwraps it) and then be
+        # declared "no JSON-RPC reply" with the answer in hand. One shape out.
+        messages.extend(message if isinstance(message, list) else [message])
         for item in (message if isinstance(message, list) else [message]):
             if isinstance(item, dict) and "id" in item:
                 pending.discard(item["id"])
@@ -223,6 +230,35 @@ def _refusal_message(status: int, body: str, sent: Connection) -> str:
         f"resolved from {sent.source} — so the value itself was refused (expired, "
         f"revoked, or for another organization), not missing. Fix the credential "
         f"at its source; the next request picks it up without a restart."
+    )
+
+
+def _redirect_refusal(response: httpx.Response, body: str, sent: Connection) -> str:
+    """The named refusal for a request whose credential was dropped by a redirect.
+
+    A DISTINCT state, not a variant of the value fault: the credential resolved,
+    it was simply never sent, so the value is not what got refused. Asserting
+    otherwise is the #10605 defect in mirror image — a message that is accurate
+    about the status and useless about the cause.
+    """
+    final = str(response.request.url)
+    detail = f"HTTP {response.status_code}"
+    if body.strip():
+        # REDACT FIRST, TRUNCATE SECOND — the order is the property (#1092).
+        # Slicing first would cut a credential in half, and `str.replace` cannot
+        # match a value it can no longer see whole, so up to `len(key) - 1`
+        # characters would reach the harness transcript and the CI log. This site
+        # is the reason the rule is stated as a rule and not as a habit: the
+        # redirect refusal was added after every sibling site was repaired.
+        detail += f": {redact(body.strip(), sent.key)[:400]}"
+    return (
+        f"{REFUSAL_CODE}: the Tortoise MCP endpoint rejected this request "
+        f"({detail}) at {final}, a request that carried NO credential — although "
+        f"one resolved from {sent.source}. The endpoint redirected to a DIFFERENT "
+        f"origin, and an Authorization header is deliberately not carried across "
+        f"origins, so the value was never sent and is not what was refused. Point "
+        f"TORTOISE_MCP_URL at {final} directly so the credential goes out on the "
+        f"first hop: the next request picks that up without a restart."
     )
 
 
@@ -303,11 +339,25 @@ def forward(client: httpx.Client, state: dict, payload: Any) -> list[Any]:
                 state["session_id"] = session_id
 
             if response.status_code in _AUTH_STATUSES:
+                body = response.read().decode("utf-8", "replace")
+                # WHAT THE REJECTED REQUEST ACTUALLY CARRIED, not what was
+                # RESOLVED. httpx strips `Authorization` when a redirect changes
+                # the origin, and redirects are followed here (#2864), so a 401
+                # from a different origin answers a request that carried NO
+                # credential. `_refusal_message` would then claim "the bridge DID
+                # send a credential — the value itself was refused" and send the
+                # operator to rotate a key that was never on the wire: the exact
+                # false attribution #10605 exists to remove (#10727 review, P2).
+                if connection.key and not (
+                    response.request.headers.get("authorization") or ""
+                ).strip():
+                    return _errors_for(
+                        payload, -32001,
+                        _redirect_refusal(response, body, connection),
+                    )
                 return _errors_for(
                     payload, -32001,
-                    _refusal_message(response.status_code,
-                                     response.read().decode("utf-8", "replace"),
-                                     connection),
+                    _refusal_message(response.status_code, body, connection),
                 )
             if response.status_code == 404 and state.get("session_id"):
                 expired = state["session_id"]
@@ -396,8 +446,14 @@ def main(argv: list[str] | None = None) -> int:
                 # send and the fault means either could be in the text.
                 detail = _redact_any(repr(exc), connection.key,
                                      resolve_connection().key)
-                _log(f"internal failure forwarding "
-                     f"{_redact_any(line[:120], connection.key, resolve_connection().key)!r}: "
+                # REDACT FIRST, TRUNCATE SECOND — the sibling line below already
+                # does. Slicing the raw stdin line first cut a credential that
+                # straddled char 120 in half, and neither `redact` nor
+                # `_redact_any` can match a value it can no longer see whole, so
+                # up to `len(key) - 1` characters reached stderr.
+                quoted = _redact_any(line.strip(), connection.key,
+                                     resolve_connection().key)
+                _log(f"internal failure forwarding {quoted[:120]!r}: "
                      f"{detail}")
                 messages = _errors_for(
                     payload, -32603, f"MCP bridge internal failure: {detail}")
