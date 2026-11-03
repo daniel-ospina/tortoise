@@ -6,7 +6,7 @@ ones this tool exists for) use a real temp git repo with real branches and a
 real `git worktree add`. The PROCESS CENSUS — the third host input, which decides
 whether a local branch may be demoted — is served by a stub `ps` (see
 `_write_ps_stub`): read from the real table, the answer would depend on whether
-the machine running the suite happens to host live lanes (#10823). Git is isolated from the host (`GIT_CONFIG_GLOBAL` /
+the machine running the suite happens to host live lanes (#10814). Git is isolated from the host (`GIT_CONFIG_GLOBAL` /
 `GIT_CONFIG_SYSTEM` -> /dev/null, HOME -> the temp dir) so a global
 `commit.gpgsign` or `init.defaultBranch` cannot change the result.
 
@@ -114,7 +114,7 @@ cat "$f"
 def _write_ps_stub(directory: Path, rows: list[str]) -> Path:
     """A `ps` stub serving the PROCESS TABLE from `rows` — one census, no host.
 
-    ⛔ THE PROCESS CENSUS IS A HOST INPUT, NOT A FIXTURE INPUT (#10823).
+    ⛔ THE PROCESS CENSUS IS A HOST INPUT, NOT A FIXTURE INPUT (#10814).
     `collision_preflight` decides whether a local branch/worktree may be demoted
     from `fleet_state.pi_processes()` (bare `ps` from `PATH`) and
     `fleet_state.process_cwds()` (`/proc/<pid>/cwd`). On any box that HOSTS lanes
@@ -494,7 +494,7 @@ exec {real} "$@"
     @unittest.skipUnless(Path("/proc/self/cwd").exists(),
                          "the census fixture needs /proc (the kernel's own cwd read)")
     def test_a_live_pi_process_with_an_unreadable_cwd_is_never_an_empty_claim(self):
-        """⛔ THE STUBBED CENSUS STILL FAILS CLOSED (#10823).
+        """⛔ THE STUBBED CENSUS STILL FAILS CLOSED (#10814).
 
         `setUp` serves a process table with no `pi` row so the demotion family
         does not depend on what the host is running. That must not degrade into an
