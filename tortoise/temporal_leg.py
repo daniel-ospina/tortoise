@@ -773,13 +773,18 @@ def window_arm_retention(
     ``evicted_sole_representatives``  the narrower, SLOT-level diagnostic: the
                                    evicted ids whose SESSION held exactly ONE
                                    base-window slot. ⚠️ The count is per
-                                   ``session_id``, NOT per ``(session_date,
-                                   session_id)`` bucket — deliberately, because
-                                   that mismatch with ``held_buckets``' key is
-                                   exactly what makes the next bullet's
-                                   not-sufficient case reachable. ⚠️ It is
-                                   NEITHER sufficient NOR necessary for a
-                                   deletion — read ``deleted_sessions`` for the
+                                   ``session_id``, NOT per the ``(session_date,
+                                   session_id)`` bucket ``held_buckets`` uses:
+                                   "sole representative" is a property of the
+                                   SESSION's visibility, so a session split
+                                   across two raw date strings counts as TWO
+                                   slots and NEITHER of its evicted ids is a
+                                   sole representative. (Expect LESS from this
+                                   field than a bucket-keyed count would give —
+                                   not more; pinned by
+                                   ``test_the_sole_representative_count_is_per_session_not_per_bucket``.)
+                                   ⚠️ It is NEITHER sufficient NOR necessary for
+                                   a deletion — read ``deleted_sessions`` for the
                                    verdict:
                                    * not necessary: a session holding two slots
                                      disappears when both are displaced, with no
@@ -787,11 +792,15 @@ def window_arm_retention(
                                      ``two_slot_tail_session`` pool);
                                    * not sufficient: a sole representative can be
                                      displaced while its session stays visible
-                                     through a DIFFERENT bucket — two hits of one
-                                     session carrying different raw date strings
-                                     are two buckets (see ``held_buckets``), and
-                                     that shape is reachable through the shipped
-                                     caller.
+                                     through a DIFFERENT bucket. The enabler is
+                                     ``held_buckets``' exclusion, which is keyed
+                                     on the ``(session_date, session_id)``
+                                     BUCKET: a promotion may therefore re-add a
+                                     session the reader already holds under a
+                                     different raw date. That shape is reachable
+                                     through the shipped caller — and a
+                                     bucket-keyed sole-rep count reaches it too,
+                                     so this count's key is not what causes it.
     ``additive``                   ``not deleted_sessions`` — no session leaves
                                    the reader window. It is SESSION-level, so it
                                    says nothing about displaced NON-sessions: a
