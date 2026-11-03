@@ -179,20 +179,46 @@ class MeasureError(RuntimeError):
 QUEUED_STATUSES = frozenset({"queued", "waiting", "requested", "pending"})
 
 #: How long a run may sit in a QUEUED status with ZERO jobs before it stops being
-#: "waiting" and becomes "no verdict will arrive". MEASURED on daniel-ospina/tortoise
-#: 2026-11-02T20:14Z: 11 of 16 `pending` runs had zero jobs at 11-22 minutes old,
-#: while 11 runners were online (10 busy, 1 offline) — the wait was not runner
-#: matching, and progressive job creation (this repo's own measured note: a run's
-#: 22-job matrix appeared 51 min after the run) is a DELAY, not a queue slot.
+#: "waiting" and becomes "no verdict will arrive".
 #:
-#: THE FLOOR IS A DECIDED TRADE-OFF, not a measured boundary. 1200 s sits INSIDE the
-#: 51-minute lag this repo measured, so some runs flagged here would have created
-#: jobs on their own; the cost of being early is one bounded, budget-limited rerun,
-#: while the cost of being late is what was measured — a 93-minute `pending` run that
-#: left a PR unmergeable and 1176 s of a rail waiting. Below the floor a zero-job run
-#: is indistinguishable from ordinary lag, and reporting it every window is the noise
-#: that gets a repair report muted.
-ZERO_JOB_MIN_AGE_S = float(os.environ.get("CI_REPAIR_ZERO_JOB_MIN_AGE_S") or 1200)
+#: ⛔ THE FLOOR IS DERIVED FROM THIS REPO'S RECORDED QUEUE CALIBRATION, NOT CHOSEN BY
+#: FEEL. `docs/ops/ci-wall-clock.md` §1 measures the wait for a run's FIRST job over 54
+#: `python-ci` runs: p50 **29.9 min**, p95 77.0 min, max **81.9 min**. A zero-job run
+#: is therefore the NORMAL pre-start state for the whole of the first half hour (the
+#: same 2026-11-02 read that motivated this class had 11 of 16 `pending` runs at zero
+#: jobs at 11-22 min), and a 1200 s floor selects the measured-MEDIAN wait rather than
+#: an anomaly. The same document's §6 derives the repo's queue-wait budget from that
+#: max (81.9 min → 90 min) *"so it fires past the measured-normal population rather
+#: than on it"*, and this floor defers to the SAME derivation: 5400 s is past the
+#: measured maximum, so a run named here has outlasted every first-job wait this repo
+#: has recorded.
+#:
+#: WHY THE ORDERING IS LOAD-BEARING: the repair for this class evaluates to
+#: cancel-then-rerun, and cancelling a run that is merely waiting for a slot discards
+#: the queue position it had reached and puts the replacement behind the same wait —
+#: so below the measured maximum the act makes the median run SLOWER, which is exactly
+#: the harm #9115 forbids. That is also why `classify` refuses the act outright while
+#: the queue reading says PR work is waiting (`queue_congested`), and why the second
+#: half of the bound is structural (`ZERO_JOB_MAX_REPAIRABLE_ATTEMPT`).
+#:
+#: Below the floor a zero-job run is indistinguishable from ordinary lag, and
+#: reporting it every window is the noise that gets a repair report muted.
+ZERO_JOB_MIN_AGE_S = float(os.environ.get("CI_REPAIR_ZERO_JOB_MIN_AGE_S") or 5400)
+
+#: ⛔ THE LOOP BOUND IS STRUCTURAL: THIS TOOL REPAIRS THE FIRST ATTEMPT ONLY.
+#: Cancel-then-rerun turns attempt 1 into attempt 2, so an attempt-2 run that is queued
+#: with zero jobs IS the state the repair was supposed to produce — a fresh attempt
+#: waiting behind the queue. Cancelling it destroys the attempt the previous window
+#: created, spends a second attempt of the budget, and at `max_attempts` reported a run
+#: that was only waiting for a slot as EXHAUSTED, i.e. "a human is needed".
+#: MEASURED 2026-11-03 (`actions/runs?status=queued` on this repo): a QUEUED re-run
+#: attempt DOES carry a stamped `run_started_at` (run 41585740714: `run_attempt` 2,
+#: created 05:45:16Z, `run_started_at` 05:54:22Z, status still `queued`), so such an
+#: attempt IS ageable and no abstention in `attempt_age_seconds` can bound this loop.
+#: This constant bounds it instead: a zero-job run is repaired at most ONCE, and a
+#: later attempt is NAMED (`NO-VERDICT-WILL-ARRIVE`), never cancelled and never
+#: escalated — the queue, not a per-PR action, owns it (#9115).
+ZERO_JOB_MAX_REPAIRABLE_ATTEMPT = 1
 
 #: Retries for a RATE-LIMITED read, and the sleep that paces them. A 403 from the
 #: secondary rate limiter is NOT an empty answer and NOT a permanent failure: the
@@ -654,23 +680,28 @@ def attempt_age_seconds(run: Run, now: float | None = None) -> float | None:
     `job_count` describes the latest attempt, the age that decides the stall class
     has to come from here.
 
-    ⛔ A QUEUED RE-RUN ABSTAINS — IT IS NEVER AGED FROM `created_at`. GitHub leaves
-    `run_started_at` null for as long as a re-run attempt sits QUEUED
-    (open-telemetry/shared-workflows#440), and `created_at` does not move on a rerun,
-    so falling back to it for `run_attempt >= 2` returns ATTEMPT 1's age: the 1200 s
-    floor is already spent the instant the fresh attempt exists, and the run is
-    declared "no verdict will arrive", cancelled, re-run AGAIN and escalated
-    EXHAUSTED — precisely the failure `_zero_job_stalled` documents it prevents, and
-    the state #9115 says must be repaired by nothing. The fallback is therefore kept
-    ONLY for attempt 1 (where `created_at` and the attempt's start are the same
-    event); a queued re-run whose start has not been stamped abstains, and `None`
-    never enters the stall class — so an unmeasurable age never drives a destructive
+    ⛔ A QUEUED RE-RUN IS NEVER AGED FROM `created_at`. `created_at` does not move on
+    a rerun, so falling back to it for `run_attempt >= 2` returns ATTEMPT 1's age: the
+    floor is already spent the instant the fresh attempt exists. The fallback is
+    therefore kept ONLY for attempt 1 (where `created_at` and the attempt's start are
+    the same event), and a re-run whose start has not been stamped abstains — `None`
+    never enters the stall class, so an unmeasurable age never drives a destructive
     act.
 
-    RESIDUAL, stated rather than hidden: a re-run that stays queued and is never
-    stamped is not aged at all, so it reads PENDING and is not named. That is the
-    fail-closed direction (wait, report the pending age, act on nothing) and it
-    resolves itself the moment the attempt starts and GitHub stamps the field.
+    ⛔ THIS ABSTENTION IS NOT THE LOOP BOUND, and reading it as one was wrong. It was
+    justified by a third-party report (open-telemetry/shared-workflows#440) that a
+    queued re-run carries a null `run_started_at`; MEASURED on this repo 2026-11-03,
+    queued re-run attempts DO carry a stamped field (run 41585740714: `run_attempt` 2,
+    created 05:45:16Z, `run_started_at` 05:54:22Z, status still `queued`), so such an
+    attempt IS ageable and the cancel→rerun→cancel sequence is reachable through this
+    path. The bound lives where it can be enforced structurally instead:
+    `ZERO_JOB_MAX_REPAIRABLE_ATTEMPT` — this tool repairs the FIRST attempt only.
+
+    RESIDUAL, stated rather than hidden: a re-run whose start has never been stamped
+    is not aged at all, so it reads PENDING rather than being named by
+    `no_verdict`. That is the fail-closed direction (wait, report the pending age, act
+    on nothing) and it resolves itself the moment the attempt starts and GitHub stamps
+    the field.
     """
     if run.started_at:
         return age_seconds(run.started_at, now)
@@ -778,7 +809,8 @@ def producing_runs(ctx: str, all_runs: list[Run], emitters: dict[str, list[str]]
 def classify(pr: dict, checks: list[dict], all_runs: list[Run], required: list[str],
              emitters: dict[str, list[str]], max_attempts: int,
              queue_starved: bool = False,
-             zero_job_min_age_s: float | None = None) -> PrPlan:
+             zero_job_min_age_s: float | None = None,
+             queue_congested: bool | None = None) -> PrPlan:
     """The whole decision, PURE — no API calls — so it is unit-testable.
 
     For each required context absent from the head's check runs, the producing
@@ -801,6 +833,17 @@ def classify(pr: dict, checks: list[dict], all_runs: list[Run], required: list[s
     page-capped feed did not measure the wait. It stays in `pending` as well,
     deliberately — `pending` drives the deferral of a reopen, and a starved head
     must not be reopened either. `starved` is what makes the reason visible.
+
+    `queue_congested` is the WIDER question the zero-job REPAIR keys on. It defaults
+    to `queue_starved`, so no caller can forget it, and it additionally admits the
+    `PR-BACKLOGGED` reading: PR CI IS executing, but the oldest queued PR run has
+    waited past its budget. That is deliberately a SEPARATE flag from `starved`,
+    because `starved` NAMES a state — "no PR-event run is executing" — which a
+    backlogged-but-moving queue falsifies (`QueueHealth.starves_pr` refuses it for
+    exactly that reason), while the REPAIR decision asks only "is PR work waiting
+    behind the queue rather than behind this run?". A cancel answers yes under either
+    reading by discarding a queue position and adding load to the wait it is stuck
+    in, so neither may authorise one.
     """
     plan = PrPlan(number=int(pr["number"]), head=pr["headRefOid"],
                   in_flight=sorted({r.name or r.path for r in all_runs
@@ -831,6 +874,7 @@ def classify(pr: dict, checks: list[dict], all_runs: list[Run], required: list[s
             # budget every other repair path spends.
             floor = (ZERO_JOB_MIN_AGE_S if zero_job_min_age_s is None
                      else zero_job_min_age_s)
+            crowded = queue_starved if queue_congested is None else queue_congested
             for r in runs:
                 if not _zero_job_stalled(r, floor):
                     continue
@@ -839,14 +883,28 @@ def classify(pr: dict, checks: list[dict], all_runs: list[Run], required: list[s
                         {"run": r.id, "workflow": r.name or r.path, "status": r.status,
                          "jobs": r.job_count,
                          "age_seconds": round(attempt_age_seconds(r) or 0)})
-                # ⛔ A STARVED CONTEXT IS STILL NOT REPAIRED (#9115). This is decided
-                # BEFORE the rerun below and it is load-bearing: under a measured
-                # flood EVERY queued run is a zero-job run, so naming them must not
-                # become "re-run them" — that adds load to the flood it is starving
-                # behind, and it spends each run's attempt budget so the repair that
-                # would have worked after the flood is gone (EXHAUSTED). The module's
-                # recorded rule is that a starved context is repaired by NOTHING.
-                if queue_starved and all(x.status in QUEUED_STATUSES for x in runs):
+                # ⛔ A STARVED/CONGESTED CONTEXT IS STILL NOT REPAIRED (#9115). This
+                # is decided BEFORE the rerun below and it is load-bearing: under a
+                # measured flood EVERY queued run is a zero-job run, so naming them
+                # must not become "re-run them" — that adds load to the flood it is
+                # starving behind, and it spends each run's attempt budget so the
+                # repair that would have worked after the flood is gone (EXHAUSTED).
+                # The module's recorded rule is that a starved context is repaired by
+                # NOTHING, and `queue_congested` extends the same refusal to a queue
+                # that is moving but backlogged: cancelling there discards the queue
+                # position the run had reached and re-queues it at the back.
+                if crowded and all(x.status in QUEUED_STATUSES for x in runs):
+                    continue
+                # ⛔ THE LOOP BOUND IS STRUCTURAL, NOT AN ABSTENTION (see
+                # `ZERO_JOB_MAX_REPAIRABLE_ATTEMPT`). Cancel-then-rerun turns attempt 1
+                # into attempt 2; a queued zero-job run at a LATER attempt is that
+                # fresh attempt waiting for a slot, so cancelling it would destroy the
+                # very attempt the previous window created and — at `max_attempts` —
+                # report a queue wait as EXHAUSTED ("a human is needed"). MEASURED
+                # 2026-11-03: queued re-run attempts DO carry a stamped
+                # `run_started_at`, so they are ageable and no abstention bounds this.
+                # It is NAMED above and left to the queue.
+                if r.run_attempt > ZERO_JOB_MAX_REPAIRABLE_ATTEMPT:
                     continue
                 if r.run_attempt >= max_attempts:
                     if ctx not in plan.exhausted:
@@ -1080,12 +1138,24 @@ def _rerun(repo: str, run: Run, number: int, expected_head: str = "") -> str:
     """Re-run an EXISTING workflow run at the head it was measured at.
 
     Returns 'rerun'|'cancelled_rerun'|'rerun_not_queued'|'head_moved'|'target_moved'
-    |'failed'. The head is re-read immediately before acting, the SAME load-bearing
-    precondition `_reopen` documents: a repair pass over many PRs takes minutes, so a
-    run whose head has already been replaced would be re-run on a superseded sha and
-    burn a CI cycle. If the head cannot be re-read the action is SKIPPED, never
-    guessed. 'head_moved' is a skip, not a failure — the new head's own CI is the
-    repair (mirrors `_reopen`).
+    |'deferred'|'failed'. The head is re-read immediately before acting, the SAME
+    load-bearing precondition `_reopen` documents: a repair pass over many PRs takes
+    minutes, so a run whose head has already been replaced would be re-run on a
+    superseded sha and burn a CI cycle. If the head cannot be re-read the action is
+    SKIPPED, never guessed. 'head_moved' is a skip, not a failure — the new head's
+    own CI is the repair (mirrors `_reopen`).
+
+    'deferred' IS A SKIP TOO, and it exists because the alternative mis-reported one.
+    `_cancel`'s own contract already distinguishes the states in which NOTHING was
+    done — 'no_budget' is documented there as *"Skip; the next window has a fresh
+    budget"*, 'moved' as a skip, 'unreadable'/'refused' as refusals that never act —
+    yet every one of them except 'moved' used to fall through to 'failed', and
+    `report` escalates a failure to exit 1, whose documented meaning is *"some PR needs
+    a repair this credential cannot perform … or a repair has spent its attempt budget
+    and must be escalated to a human"*. With the shipped budgets
+    (`CANCEL_SETTLE_PASS_BUDGET_S` 60 s, `_CANCEL_SETTLE_TOTAL_S` 30 s) a pass whose
+    settles run to their bound exhausts the cancel budget on its second run, so every
+    later run in that pass was reported as needing a human. A skip must stay a skip.
 
     ⛔ A NON-COMPLETED RUN CANNOT BE RE-RUN IN PLACE. MEASURED 2026-11-02 against run
     41523739094 while it was `pending` with zero jobs:
@@ -1099,8 +1169,9 @@ def _rerun(repo: str, run: Run, number: int, expected_head: str = "") -> str:
     THE CANCEL'S OWN VERDICT DECIDES THE REST (`_cancel` returns a state, not a bool):
     'moved' is a SKIP (the run stopped being a queued zero-job run while the pass ran
     — re-running it would be churn on a run that is working, or a second attempt on one
-    that already finished), and 'not_queued' falls through to the direct rerun, because
-    the API's 409 means the run was never queued and there is nothing to cancel first.
+    that already finished), 'not_queued' falls through to the direct rerun, because
+    the API's 409 means the run was never queued and there is nothing to cancel first,
+    and the remaining states are 'deferred' — nothing was done, so nothing escalated.
     """
     if expected_head:
         try:
@@ -1122,7 +1193,11 @@ def _rerun(repo: str, run: Run, number: int, expected_head: str = "") -> str:
         elif cancelled == "moved":
             return "target_moved"
         else:
-            return "failed"
+            # 'no_budget' / 'unsettled' / 'refused' / 'unreadable' — the cancel did not
+            # happen (or could not be observed), so the rerun must not be attempted and
+            # NOTHING was changed. That is a deferral to the next window, not a repair
+            # this credential cannot perform.
+            return "deferred"
     try:
         ok = _run([GH_BIN, "api", "-X", "POST",
                    f"repos/{repo}/actions/runs/{run.id}/rerun"]).returncode == 0
@@ -1204,7 +1279,8 @@ def open_prs(repo: str, include_drafts: bool) -> list[dict]:
 def build_plans(repo: str, required: list[str], emitters: dict[str, list[str]],
                 include_drafts: bool, max_attempts: int,
                 queue_starved: bool = False,
-                deadline: float | None = None) -> list[PrPlan]:
+                deadline: float | None = None,
+                queue_congested: bool | None = None) -> list[PrPlan]:
     plans: list[PrPlan] = []
     # A PASS IS THE CACHE SCOPE. Two passes in one process (a launcher that polls)
     # must not reuse a verdict measured against a head that has since moved.
@@ -1228,7 +1304,8 @@ def build_plans(repo: str, required: list[str], emitters: dict[str, list[str]],
         checks = check_runs_at(repo, head)
         runs = runs_at_head(repo, head)
         plans.append(classify(pr, checks, runs, required, emitters, max_attempts,
-                              queue_starved=queue_starved))
+                              queue_starved=queue_starved,
+                              queue_congested=queue_congested))
     return plans
 
 
@@ -1415,7 +1492,15 @@ def report(plans: list[PrPlan], apply: bool, trigger_ok: bool, repo: str,
                                          # settled) — a SKIP, so nothing is destroyed
                                          # and nothing escalates.
                                          **({"target_moved": True}
-                                            if state == "target_moved" else {})})
+                                            if state == "target_moved" else {}),
+                                         # Nothing was done because the pass could not
+                                         # afford or could not observe the act
+                                         # ('no_budget'/'unsettled'/'refused'/
+                                         # 'unreadable') — the next window has a fresh
+                                         # budget. Also a SKIP: a deferral is not "a
+                                         # repair this credential cannot perform".
+                                         **({"deferred": True}
+                                            if state == "deferred" else {})})
                 else:
                     rec["rerun"].append({"run": run.id, "attempt": run.run_attempt,
                                          "workflow": run.name, "ok": None})
@@ -1427,7 +1512,8 @@ def report(plans: list[PrPlan], apply: bool, trigger_ok: bool, repo: str,
                 rec["needs_user_actor"] = True
                 if apply:
                     escalations += 1
-            if any(r["ok"] is False and not (r.get("head_moved") or r.get("target_moved"))
+            if any(r["ok"] is False and not (r.get("head_moved") or r.get("target_moved")
+                                              or r.get("deferred"))
                    for r in rec["rerun"]):
                 escalations += 1
         records.append(rec)
@@ -1577,6 +1663,16 @@ def main(argv: list[str] | None = None) -> int:
     # holding the queue, nothing executing — silent here while the repo-level line
     # said PR-STARVED (#9118 review).
     queue_starved = bool(getattr(queue, "starves_pr", False))
+    # THE REPAIR QUESTION IS WIDER THAN THE NAMING ONE, and they are answered by two
+    # properties on purpose. `starves_pr` NAMES a state ("no PR-event run is
+    # executing"); a queue that is `PR-BACKLOGGED` — PR CI is executing, but the oldest
+    # queued PR run has waited past its budget — falsifies that claim, so it must not be
+    # folded into `starved`. It IS congestion all the same, and a cancel under it
+    # discards the queue position the run had reached and re-queues it behind the same
+    # wait (the state this tool's own body cites: `CI: OK(queued=60, pr_running=2,
+    # pr_queued=56)`). `delays_pr` is the truthful superset, so the destructive act is
+    # suppressed by it while the report keeps naming `starved` from `starves_pr`.
+    queue_congested = bool(getattr(queue, "delays_pr", queue_starved))
     try:
         required = resolve_required(args.repo, record_path, live=not args.no_live)
         emitters = emitters_from_record(record_path)
@@ -1585,7 +1681,7 @@ def main(argv: list[str] | None = None) -> int:
         require_emitters(required, emitters, record_path)
         plans = build_plans(args.repo, required, emitters, args.include_drafts,
                             args.max_attempts, queue_starved=queue_starved,
-                            deadline=pass_deadline)
+                            deadline=pass_deadline, queue_congested=queue_congested)
         code, records = report(plans, args.apply, can_trigger_events(), args.repo,
                                args.reopen_cooldown_minutes, args.max_attempts)
     except MeasureError as exc:
@@ -1613,6 +1709,12 @@ def main(argv: list[str] | None = None) -> int:
         "queue": (queue.state_line if queue is not None
                   else "CI: UNKNOWN (the queue was not read)"),
         "queue_starved": bool(queue_starved),
+        # Reported beside it because the two are NOT the same question: a congested
+        # queue suppresses the destructive repair even when nobody can be named as
+        # starved (PR-BACKLOGGED). Without this line the report would show
+        # `queue_starved: false` next to a plan that was not repaired, and the reason
+        # would be invisible.
+        "queue_congested": bool(queue_congested),
         # Starved contexts are NOT "needing repair" — no per-PR repair can create a
         # runner slot — so they are counted separately rather than inflating a
         # number whose whole meaning is "a repair will be attempted".
