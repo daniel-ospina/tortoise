@@ -2368,6 +2368,29 @@ def test_a_wedged_box_with_no_provisioner_reports_wedged_not_fill_blocked(env):
     assert rec["_rc"] == 6, rec
 
 
+def test_the_runbook_does_not_promise_exit_6_from_a_status_read():
+    """⛔ THE RUNBOOK'S OWN COMMAND IS A `--status` PLAN, AND THAT PLAN EXITS 0.
+
+    The section told the operator to diagnose with `--status --json` and said the tool reports
+    `verdict=wedged` **(exit 6)** — true of a REAL pass, false of the command printed two lines
+    below it. A reader gating a script on that line gets a green exit from a wedged pool, and a
+    reader who saw the code return 6 from `--status` (which it did) gets the installer refusal
+    instead. R5 of this PR's own scope contract is "the runbook's repair matches what the code
+    reports"; this is that arm, pinned.
+
+    Non-vacuity: the pre-fix section contains the literal `verdict=wedged` (exit 6)`.
+    """
+    doc = (REPO_ROOT / "docs" / "ops" / "ci-runner-x64.md").read_text()
+    section = doc.split("A runner can be ONLINE, IDLE and serve NOTHING", 1)[1]
+    assert "`verdict=wedged` (exit 6)" not in section, (
+        "the wedged section's diagnosis command is a `--status` plan, which exits 0 — name the "
+        "REAL pass as the exit-6 one"
+    )
+    assert "no-change pass cannot be a failed pass" in section, (
+        "the section no longer says WHY a --status plan is exit 0 — re-anchor this pin"
+    )
+
+
 def test_the_measured_triple_is_stated_once_and_every_citation_agrees_with_it():
     """The whole fix rests on ONE run's numbers, and four places used to quote four versions.
 

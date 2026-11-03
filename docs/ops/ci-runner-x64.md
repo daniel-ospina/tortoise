@@ -1020,7 +1020,10 @@ construction), and 100 consecutive `python-ci` runs produced **zero** successes.
 "main is broken" for three days.
 
 **Diagnose it from job history, not from the pool census** — `tools/runner_autoscale.py` now does
-this on every pass and reports `verdict=wedged` (exit 6) instead of `at-ceiling`/`converged`:
+this on every pass and reports `verdict=wedged` instead of `at-ceiling`/`converged` (a **real**
+pass exits 6; the `--status` plan below returns the same verdict and a note, and exits **0** — a
+no-change pass cannot be a failed pass, because the autoscaler installer's install-time probe runs
+exactly this mode and reads a non-zero exit as "the guard cannot MEASURE").
 
 ```bash
 uv run python tools/runner_autoscale.py --repo daniel-ospina/tortoise --status --json \
