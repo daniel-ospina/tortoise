@@ -579,11 +579,18 @@ def session_redis_pids() -> set[int] | None:
 
     Returns None (never an empty set) when the probe or the argv read failed: a
     caller must then clean NOTHING, because a delta computed against an
-    unmeasured baseline is the whole process table.
+    unmeasured baseline is the whole process table. A session root that cannot
+    be resolved — no isolation installed, or a root that is not private — is
+    unmeasured too (`scan_root()` raises ``SharedTmpdirScanError``): the filter
+    key IS what makes a population ours, so without it every pid is unclaimed
+    rather than every pid claimed.
     """
     from tortoise import embedded_reaper  # local: conftest imports this module
 
-    prefix = os.path.realpath(scan_root()).rstrip("/") + "/"
+    try:
+        prefix = os.path.realpath(scan_root()).rstrip("/") + "/"
+    except (OSError, SharedTmpdirScanError):
+        return None
     pids = embedded_reaper._pgrep_redis_servers_or_none()
     if pids is None:
         return None
@@ -605,18 +612,24 @@ def _redis_residue_snapshot() -> tuple[set[int], set[str]] | None:
     if pids is None:
         return None
     dirs: set[str] = set()
+    # ⛔ THE ITERATION IS INSIDE THE GUARD, not just the ``scandir`` call. A
+    # ``readdir`` that fails mid-walk (or an ``is_dir()`` stat on an entry whose
+    # target became inaccessible) raises from the loop, and this snapshot is
+    # taken in ``SessionRedisResidue.__init__`` — i.e. in an AUTOUSE fixture's
+    # SETUP, where an exception is not "cleaned nothing", it ERRORS every test
+    # in the module. Guarding only the constructor of the iterator left that
+    # half unmeasured (found in review of #7522/#10640).
     try:
         root = scan_root()
-        entries = os.scandir(root)
+        with os.scandir(root) as entries:
+            for entry in entries:
+                if entry.is_dir() and (
+                    os.path.exists(os.path.join(entry.path, "redis.socket"))
+                    or os.path.exists(os.path.join(entry.path, "redis.pid"))
+                ):
+                    dirs.add(entry.path)
     except (OSError, SharedTmpdirScanError):
         return None
-    with entries:
-        for entry in entries:
-            if entry.is_dir() and (
-                os.path.exists(os.path.join(entry.path, "redis.socket"))
-                or os.path.exists(os.path.join(entry.path, "redis.pid"))
-            ):
-                dirs.add(entry.path)
     return pids, dirs
 
 
@@ -651,7 +664,17 @@ class SessionRedisResidue:
     escalation, so a signal parameter would be a dead knob), and because a
     two-argument call into a one-argument teardown hook is a ``TypeError``
     inside fixture finalisation: it is not a lost cleanup, it ERRORs every
-    test in the module.
+    test in the module. That arity is therefore pinned STATICALLY
+    (`test_session_residue_invokes_the_kill_hook_with_exactly_one_argument`
+    inspects the default hooks) — `reap()` itself never raises, so a shape
+    error would otherwise be swallowed silently rather than announced.
+
+    ``reap()`` is a teardown, so it can never raise: pytest's
+    ``FixtureDef.finish`` collects a finaliser's exception and re-raises it as
+    a teardown error on the test, so one unmeasurable read here would red every
+    test in the module (the pre-PR bodies swallowed with ``except Exception``
+    for exactly this reason) — but silently, so the failure is logged at debug
+    level before it is dropped.
     """
 
     def __init__(self, snapshot=None, kill=None, alive=None) -> None:
@@ -665,6 +688,16 @@ class SessionRedisResidue:
         return self._before is not None
 
     def reap(self) -> None:
+        """Reap this session's delta. Never raises — it runs in a FINALISER."""
+        try:
+            self._reap()
+        except Exception:
+            # A hygiene teardown must not be able to red a module (the
+            # `FixtureDef.finish` re-raise path), but it must not vanish
+            # either: keep it debuggable with pytest -o log_cli_level=DEBUG.
+            logger.debug("session redis residue reap failed", exc_info=True)
+
+    def _reap(self) -> None:
         if self._before is None:
             return  # unmeasured baseline: never guess at a delta
         after = self._snapshot()

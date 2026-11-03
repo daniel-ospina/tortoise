@@ -602,10 +602,21 @@ def test_the_guard_arm_requires_a_pool_order_composition():
     assert _run._pool_order_arm_on(False, False, True) is False
     assert _run._pool_order_arm_on(False, True, False) is False
 
-    for kwargs in ({"floor_term": True},
-                   {"guard_per_session_cap": 3},
+    for kwargs in (# the arms are pinned EXPLICITLY here, not inherited from
+                   # the environment (#10629 review): cases 1-2 pass neither
+                   # composition, so ``run_evaluation`` would resolve both from
+                   # the documented env twins (``TORTOISE_LME_COVERAGE_LOOP`` /
+                   # ``TORTOISE_LME_SESSION_REINJECTION``) — an exported value
+                   # armed a pool-order composition and made the expected
+                   # refusal DID-NOT-RAISE in the very test that pins the gate.
+                   # Pinning them also asserts the POSITIVE side of the truth
+                   # table above: no composition, knob armed ⇒ refused.
+                   {"coverage_loop": False, "session_reinjection": False,
+                    "floor_term": True},
+                   {"coverage_loop": False, "session_reinjection": False,
+                    "floor_term": False, "guard_per_session_cap": 3},
                    # a reinjection run with the guard ablated calls no guard
-                   {"session_reinjection": True,
+                   {"coverage_loop": False, "session_reinjection": True,
                     "session_reinjection_guard": False,
                     "floor_term": True}):
         with pytest.raises(ArmConflictError) as excinfo:
@@ -615,12 +626,19 @@ def test_the_guard_arm_requires_a_pool_order_composition():
 
 
 def test_floor_term_and_guard_cap_ride_the_fingerprint():
-    """#2513 (#10629 review): the resolved arm gates the checkpoint.
+    """#2513 (#10629 review): the BUILDER contract for the two guard knobs.
 
     ``floor_term`` is ALWAYS present (the arm/guard-bool convention), so a
     checkpoint produced with the lower bound armed can never be resumed with
     it OFF and a pre-feature checkpoint refuses on resume; the cap is present
     only while a pool-order arm runs (no inert value stamped).
+
+    ⛔ Scope (the #10629 review's finding): this calls ``_build_fingerprint``
+    DIRECTLY, so it proves only that the builder handles the keys — it cannot
+    observe that ``run_evaluation`` forwards them, and it stayed green over a
+    dropped `guard_per_session_cap` forward. The WIRING is pinned end to end
+    by ``test_eval_reinjection_cap_resume.py::
+    test_run_path_refuses_a_guard_cap_change_on_resume``.
     """
     from tools.longmem_eval import run as _run
 

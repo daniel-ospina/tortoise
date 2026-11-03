@@ -66,11 +66,21 @@ surface could not be read — never 1, so a caller cannot mistake "unreadable" f
 """
 from __future__ import annotations
 
+import sys
+
+# #5128: refuse a <3.12 interpreter before the imports below — a module-level
+# 3.11+-only import (`from datetime import UTC`) would fail first (D9 shape).
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        f"tools/attest_census.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python tools/attest_census.py`"
+    )
+
 import argparse
 import json
 import re
 import subprocess
-import sys
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -425,7 +435,9 @@ def render(rows: list[Row], repo: str, generated_at: str, truncated: bool = Fals
         " evidence of the live code: it is `RE-REVIEW` when the gate has no green verdict, and `OK`",
         " only because the gate itself already accepted the proof (so no re-post is owed).",
         "",
-        f"### Snapshot counts: {totals}",
+        "## Census totals",
+        "",
+        totals,
         "",
         "| PR | head | record | record head | match | mint | verdict | evidence | gate | outcome |",
         "|---|---|---|---|---|---|---|---|---|---|",

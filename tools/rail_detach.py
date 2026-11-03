@@ -60,9 +60,22 @@ what survives both the SIGKILL to the lane's group and the lane process exiting.
 `tests/test_rail_detach.py` proves the difference by re-running the SAME launch
 with detachment off and killing the launcher's group.
 
-Stdlib only (this runs on the plain `python3` of a cell).
+Stdlib only, and Python >= 3.12 (the repo contract — the module-level
+`from datetime import UTC` is 3.11+, so the #5128 guard below refuses an older
+interpreter by NAME instead of dying on that import).
 """
 from __future__ import annotations
+
+import sys
+
+# #5128: refuse a <3.12 interpreter before the imports below — a module-level
+# 3.11+-only import (`from datetime import UTC`) would fail first (D9 shape).
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        f"tools/rail_detach.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python tools/rail_detach.py`"
+    )
 
 import argparse
 import fcntl
@@ -70,7 +83,6 @@ import json
 import os
 import re
 import subprocess
-import sys
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
