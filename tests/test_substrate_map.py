@@ -186,6 +186,18 @@ def _label_hits_reads(
     return read
 
 
+def _population_drift(read: list[Path]) -> list[Path]:
+    """Every path in `read` that is not a tracked file under `tortoise/`.
+
+    Sorted, so a failure names the offender instead of leaving the reader to
+    reconstruct it from two truncated set reprs — the shape the CI failure at
+    `6a938c002` arrived in (`Extra items in the left set: PosixPath('/proc/…')`,
+    with neither side of the comparison visible).
+    """
+    tracked = set(_tracked_files_under(_TRACKED_DIR))
+    return sorted({p for p in read if p not in tracked})
+
+
 def _checkout_history_is_complete() -> bool:
     """Whether THIS clone can walk its WHOLE history.
 
@@ -1164,9 +1176,11 @@ def test_the_label_population_is_every_tracked_file_not_just_py(monkeypatch) -> 
         "figure while this check keeps reporting the old number and PASSES — "
         "exactly the latent false CLEAN the index-derived population closed"
     )
-    assert set(read) <= set(_tracked_files_under(_TRACKED_DIR)), (
+    drifted = _population_drift(read)
+    assert not drifted, (
         "`_label_hits` read a file that is not tracked under tortoise/ — the "
-        "population drifted off the one §5's `git grep` sentence is stated in"
+        "population drifted off the one §5's `git grep` sentence is stated in: "
+        + ", ".join(str(p) for p in drifted[:5])
     )
 
 
@@ -1228,6 +1242,31 @@ def test_a_read_from_another_thread_is_not_attributed_to_label_hits(monkeypatch)
         "the scoped population drifted off the tracked set under tortoise/ — "
         "the population §5's `git grep` sentence is stated in"
     )
+
+
+def test_a_same_thread_read_outside_the_index_is_still_drift(monkeypatch) -> None:
+    """Non-vacuity for the thread scoping, which is the half main's control cannot see.
+
+    Scoping the recording to one thread is a way to make the population control
+    unfalsifiable — record nothing, assert nothing — and
+    `test_a_read_from_another_thread_is_not_attributed_to_label_hits` does not
+    exclude it: it asserts the scoped list is NON-EMPTY and that everything in it
+    is tracked, both of which stay true of a recorder that drops every path
+    outside the index. A read of a tracked file is not drift, so a recorder that
+    only ever records the tracked population passes that test while reporting
+    CLEAN for a `_label_hits` that had wandered off it.
+
+    This is the missing direction: a read of a path outside the index made on the
+    SAME thread is still recorded and still reported as drift, so the guard keeps
+    its discriminating power over exactly the reads `_label_hits` itself performs.
+    """
+    stray = REPO / "tests" / "test_substrate_map.py"
+
+    def _a_stray_read() -> None:
+        stray.read_text(encoding="utf-8")
+
+    drifted = _population_drift(_label_hits_reads(monkeypatch, during=_a_stray_read))
+    assert drifted == [stray], drifted
 
 
 def test_an_index_git_that_cannot_answer_is_a_state_error_not_an_empty_population(
