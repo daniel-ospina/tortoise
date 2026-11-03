@@ -1577,6 +1577,19 @@ def test_committed_census_rederives_its_own_aggregate():
                   "points_moved_off_neutral_unread")
     for qtype, committed in doc["by_question_type"].items():
         derived = summary["by_question_type"][qtype]
+        # A cell the artifact ADDS beside the reconciled ones is how the five
+        # bucket cells (and ``errors``) shipped editable: the summarizer grows
+        # keys additively by contract, so ``reconciled`` cannot enumerate the
+        # future. Comparing against what the summarizer actually emits keeps
+        # that property — an additive summarizer change adds the key to
+        # ``derived`` only and still passes — while a FABRICATED committed key
+        # has no counterpart and reds, exactly as the top-level ``cells`` loop
+        # already refuses one (#10678 review).
+        unexplained = sorted(set(committed) - set(derived))
+        assert not unexplained, (
+            f"{_ARTIFACT}: by_question_type[{qtype!r}] names cell(s) "
+            f"{unexplained} that nothing derives — a published cell nothing "
+            f"checks can carry any number")
         pair = {k: committed.get(k) for k in reconciled}
         other = {k: derived.get(k) for k in reconciled}
         disagreement = sorted(k for k in reconciled if pair[k] != other[k])
@@ -1589,6 +1602,30 @@ def test_committed_census_rederives_its_own_aggregate():
     # the bucket SHAPE is not: deleting a whole question type is a hand-edit
     # the loop above would otherwise skip silently.
     assert set(summary["by_question_type"]) == set(doc["by_question_type"])
+
+    # Same guard for the two other published dicts: a cell ADDED to one of them
+    # is unchecked by everything above. ``point_coverage``'s three keys are all
+    # derived just below, so its key set is exact; the document root carries the
+    # derivable cells PLUS the declared anchors below (each asserted on its own
+    # line in this test), and anything outside both is a published cell nothing
+    # derives.
+    assert set(coverage_doc := doc["point_coverage"]) == {
+        "points_with_ep", "points_unmeasured", "ratio"}, (
+        f"{_ARTIFACT}: point_coverage names cell(s) "
+        f"{sorted(set(coverage_doc) - {'points_with_ep', 'points_unmeasured', 'ratio'})} "
+        f"that nothing derives")
+    _root_anchors = {
+        "source", "per_question", "per_question_source",
+        "per_question_unread", "point_coverage", "cells", "errors",
+        "inert_by_reason", "inert_questions", "by_question_type",
+        "completed", "belief_layer", "questions_with_ep_ratio",
+        "questions_in_run", "questions_failed",
+    }
+    unanchored = sorted(set(doc) - set(summary) - _root_anchors)
+    assert not unanchored, (
+        f"{_ARTIFACT}: names root cell(s) {unanchored} that neither the "
+        f"summarizer derives nor this pin asserts — a published cell nothing "
+        f"checks is how the headline ratio shipped editable (#10678 review)")
 
     # The disclosure fields describe THESE rows: nothing was unread. UNREAD is
     # ``_optional_int(cell) is None`` — the one predicate the probe's
