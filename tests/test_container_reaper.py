@@ -288,6 +288,20 @@ def test_a_FAILED_removal_is_not_reported_as_a_clean_sweep(box, monkeypatch, cap
     assert "PARTIAL" in capsys.readouterr().err
 
 
+def test_a_DRY_RUN_that_cannot_prove_itself_is_NOT_green(box, monkeypatch, capsys):
+    """The one guard whose whole job is refusing a green light.
+
+    It was dead code in the first version of this change — `unproven` was folded
+    into `skipped` while still empty, so a disagreement reported `ok: true, exit
+    0` (#10813 review P1). Forcing the disagreement proves the guard is wired.
+    """
+    monkeypatch.setattr(cr, "_verdicts", lambda lines, dry_run: {})
+    rc = cr.main(["reap", "--json"])
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 2, out
+    assert out["ok"] is False and out["decided"] is False, out
+
+
 def test_every_line_carries_name_age_owner_and_bytes(box, capsys):
     cr.main(["reap"])
     out = capsys.readouterr().out
@@ -356,8 +370,13 @@ INSTALLER = ROOT / "tools" / "install-container-reaper-timer.sh"
 def _render(env_extra: dict | None = None) -> subprocess.CompletedProcess:
     # ROOT is a lane worktree in a lane run: the pin refusal is correct there, and
     # is proved by its own test below — so it is explicitly waived here.
+    # `PYTHON_BIN` pins the interpreter the installer validates: without it the
+    # installer prefers `/usr/bin/python3`, which is < 3.12 on Debian 12 / Ubuntu
+    # 22.04 and would make this test red for a reason unrelated to the property
+    # under test (#10813 review). The repo's own 3.12 is what the unit runs in CI.
     env = {**os.environ, "REAPER_REPO": str(ROOT),
-           "REAPER_ALLOW_WORKTREE_PIN": "1", **(env_extra or {})}
+           "REAPER_ALLOW_WORKTREE_PIN": "1", "PYTHON_BIN": sys.executable,
+           **(env_extra or {})}
     return subprocess.run(["bash", str(INSTALLER), "--dry-run"], env=env,
                           capture_output=True, text=True, timeout=120)
 

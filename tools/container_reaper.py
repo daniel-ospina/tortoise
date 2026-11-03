@@ -441,7 +441,6 @@ def reap(*, apply: bool, as_json: bool = False) -> int:
     slug_map = tl._worktree_slugs()
     live_paths = tl._live_lane_paths()
     recorded: list[str] = []
-    unproven: list[str] = []
     if apply:
         lines = tl.reap_orphans()
     else:
@@ -450,7 +449,11 @@ def reap(*, apply: bool, as_json: bool = False) -> int:
         recorded = rec
 
     # A sweep that could not decide is NOT a clean sweep (#10806 review P1).
-    skipped = [ln for ln in lines if ln.startswith(_SWEEP_SKIPPED)] + unproven
+    # ⛔ `unproven` is appended BELOW, after the disagreement check — folding it
+    # in HERE (its first version) read the list while it was still empty, so the
+    # one guard whose entire job is "refuse a green light" was dead code that
+    # reported `ok: true` (#10813 review P1, caught by a fresh reviewer).
+    skipped = [ln for ln in lines if ln.startswith(_SWEEP_SKIPPED)]
     failed = [ln for ln in lines if "FAILED to remove" in ln]
     verdicts = _verdicts(lines, dry_run=not apply)
     # WHAT ACTUALLY HAPPENED, from the sweep's own verdict lines — NOT from the
@@ -466,7 +469,7 @@ def reap(*, apply: bool, as_json: bool = False) -> int:
         # run, so a disagreement means this dry run is not evidence of what
         # `--apply` would do. Reporting that as exit 0 would be the same green
         # light this module exists to refuse (#10806 review).
-        unproven.append(
+        skipped.append(
             "the intercepted removals and the sweep's verdicts disagree "
             f"({sorted(recorded)} vs {sorted(acted)}) — this dry run is NOT "
             "proof of what --apply would do")

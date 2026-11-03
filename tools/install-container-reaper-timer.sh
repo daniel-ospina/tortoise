@@ -120,11 +120,8 @@ if [ "${1:-}" != "--status" ]; then
     [ -f "$SOURCE" ] || die "no reaper at $SOURCE"
 fi
 
-case "$SELF_DIR" in
-    */".worktrees/"*)
-        # Installing from a lane worktree is fine; PINNING to it is not.
-        ;;
-esac
+# Installing FROM a lane worktree is fine; PINNING to it is not — that guard is
+# the `$REPO` case immediately below.
 case "$REPO" in
     */.worktrees/*)
         if [ "${REAPER_ALLOW_WORKTREE_PIN:-0}" != "1" ]; then
@@ -343,10 +340,20 @@ status_all() {
 }
 
 uninstall_all() {
+    # ⛔ Never report a removal that did not happen. The old form swallowed both
+    # failures with `|| true` and then printed "removed" — the exact class this
+    # tool refuses everywhere else (#10813 review P3).
+    local rc=0
     sudo systemctl disable --now "$LABEL.timer" 2>/dev/null || true
-    sudo rm -f "$TIMER" "$SERVICE"
-    sudo systemctl daemon-reload || true
-    echo "removed $TIMER and $SERVICE"
+    sudo rm -f "$TIMER" "$SERVICE" || rc=1
+    sudo systemctl daemon-reload || rc=1
+    if [ -f "$TIMER" ] || [ -f "$SERVICE" ]; then rc=1; fi
+    if [ "$rc" -ne 0 ]; then
+        echo "ERROR: uninstall INCOMPLETE — the unit file(s) or the timer state" >&2
+        echo "       could not be removed. Check: systemctl status $LABEL.timer" >&2
+        exit 1
+    fi
+    echo "removed $TIMER and $SERVICE (verified absent)"
 }
 
 case "${1:-}" in

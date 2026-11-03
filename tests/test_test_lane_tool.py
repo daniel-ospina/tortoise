@@ -4677,6 +4677,28 @@ def test_SIGTERM_reaches_the_hook_and_the_run_exits_143(lane, monkeypatch):
     assert reaped == [1], "the hook did not run on the SIGTERM path"
 
 
+def test_a_PEER_run_holding_the_worktree_lock_blocks_the_reap(lane, monkeypatch,
+                                                              capsys):
+    """A peer `run` is not an active redis CLIENT while it is still collecting.
+
+    The client probe answers "idle", so keying the guard on it alone would let the
+    first `run` to exit remove the container under the second one, whose suite
+    then reports connection errors as test verdicts (#10813 review P2). The run
+    lock is the run's own liveness.
+    """
+    _stub_start(monkeypatch, port=16412)
+    reaped: list = []
+    monkeypatch.setattr(tl.subprocess, "run", lambda *a, **k: _R(0, "", ""))
+    monkeypatch.setattr(tl, "stop", lambda: (reaped.append(1), "removed")[1])
+    assert tl._peer_run_is_live("fdb-lane-0123456789") is False
+    with tl._run_lock("fdb-lane-0123456789") as held:
+        assert held
+        assert tl._peer_run_is_live("fdb-lane-0123456789") is True
+        assert tl.main(["run", "--", "-q", "tests/"]) == 0
+        assert reaped == [], "a peer's live container was removed"
+        assert "another `run` holds this worktree" in capsys.readouterr().err
+
+
 def test_a_FAILING_reap_never_changes_the_runs_verdict(lane, monkeypatch, capsys):
     """`stop()` raises `SystemExit` for the unremovable/zombie cases. A hook that
     let that escape would replace a real pytest result with a traceback, and a

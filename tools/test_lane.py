@@ -279,6 +279,7 @@ if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
 
 import argparse
 import contextlib
+import fcntl
 import hashlib
 import json
 import os
@@ -2401,6 +2402,56 @@ def _reap_state_path(name: str) -> Path:
     return REAP_STATE_DIR / f"{name}.unused"
 
 
+#: A `run` in progress holds an EXCLUSIVE `flock` on this file for its whole
+#: child. The exit hook keys on THIS, not on a client socket: a peer `run` in the
+#: same worktree is not an active redis client while it is still collecting
+#: (~41 842 tests at the measured head), so a `CLIENT LIST`-idle reading would
+#: let the first `run` to exit remove the container under the second one
+#: (#10813 review P2). The lock is the run's own liveness — exactly what the
+#: `_container_in_use` probe cannot see.
+def _run_lock_path(name: str) -> Path:
+    return REAP_STATE_DIR / f"{name}.runlock"
+
+
+@contextlib.contextmanager
+def _run_lock(name: str):
+    """Hold the run lock, yielding whether we got it. Never raises."""
+    handle = None
+    try:
+        REAP_STATE_DIR.mkdir(parents=True, exist_ok=True)
+        # The handle must OUTLIVE this block: closing it releases the lock, so a
+        # `with open(...)` here would drop the lock the instant it was taken.
+        handle = Path(_run_lock_path(name)).open("w")   # noqa: SIM115 — see above
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        got = True
+    except OSError:
+        got = False
+    try:
+        yield got
+    finally:
+        if handle is not None:
+            with contextlib.suppress(OSError):
+                fcntl.flock(handle, fcntl.LOCK_UN)
+            with contextlib.suppress(OSError):
+                handle.close()
+
+
+def _peer_run_is_live(name: str) -> bool | None:
+    """Is another `run` holding this worktree's lock right now?
+
+    ``None`` means the lock could not be read — treated as "a peer may be live"
+    so the hook declines to reap (fail-closed), exactly as for the client probe.
+
+    The probe takes and releases the lock, so a peer that arrives in the window
+    between the release and the reap wins the acquire and the hook declines:
+    the race resolves in the SAFE direction only.
+    """
+    with _run_lock(name) as got:
+        if got:
+            return False
+        return None if not _run_lock_path(name).exists() else True
+
+
 def _drop_lease(name: str) -> None:
     """Best-effort removal of a lease record. Never raises.
 
@@ -3459,7 +3510,8 @@ def cmd_run(args: argparse.Namespace) -> int:
     except (ValueError, OSError):        # not the main thread / unsupported
         _prev_term = None
     try:
-        rc = subprocess.run(argv, env=env).returncode
+        with _run_lock(name) as _held:
+            rc = subprocess.run(argv, env=env).returncode
     finally:
         if _prev_term is not None:
             with contextlib.suppress(ValueError, OSError):
@@ -3481,6 +3533,10 @@ def cmd_run(args: argparse.Namespace) -> int:
                     kept = True
                     print(f"test-lane: NOT reaping {name} on exit — a live "
                           f"client is using it", file=sys.stderr)
+                elif _peer_run_is_live(name):
+                    kept = True
+                    print(f"test-lane: NOT reaping {name} on exit — another "
+                          f"`run` holds this worktree", file=sys.stderr)
                 else:
                     print(f"test-lane: reaping {name} on exit -> {stop()}",
                           file=sys.stderr)

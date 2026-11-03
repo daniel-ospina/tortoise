@@ -91,7 +91,9 @@ never disagree about what an orphan is.
 * **Dry run is the default.** `--apply` acts. The dry run is not a second
   implementation: it runs the real sweep with `docker rm` intercepted at
   `test_lane._docker` (the tool's single docker chokepoint), so it can differ
-  from `--apply` in exactly one way — the removal does not happen.
+  from `--apply` in exactly one way that matters — **the removal does not
+  happen**. It is not otherwise side-effect free: the sweep still refreshes its
+  own lease records, which can only *delay* a later removal, never cause one.
 * **Per-container line**: name, age, owner (with `live`/`idle`/`gone`),
   state, bytes of writable layer. The `(virtual …)` half of `docker ps -s` is
   the shared image and is deliberately **not** counted as freed.
@@ -127,6 +129,15 @@ but this file is 3c64e0b6ba22… Refusing to sweep with superseded policy;
 re-run the installer (tools/install-container-reaper-timer.sh).
 systemd[1]: tortoise-container-reaper.service: Main process exited, code=exited, status=4/NOPERMISSION
 ```
+
+⛔ **`tools/test_lane.py` is edited by unrelated PRs all the time**, so on a box
+whose pinned checkout tracks `main` the unit will start failing with exit 4 as
+soon as any such merge lands — loudly, in `systemctl status`, but until someone
+re-runs the installer the backstop is inert. That is a real operational cost of
+pinning the decision half, accepted because the alternative (pinning only the
+actuator) makes an edit to the deletion rule invisible. **Re-run this installer
+after any merge touching `tools/test_lane.py`**, and treat a `FAILED` unit as
+that signal; `--status` reports `POLICY DRIFT` by name.
 
 **Consequence, by design:** editing `tools/container_reaper.py` requires re-running
 the installer. `--status` prints the deployed pin, the deployed hash, this
