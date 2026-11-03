@@ -267,7 +267,12 @@ def collect(state_dir: Path, repo: str, pr: int) -> RailState | None:
         # reported merged — evidence forged by concatenation. Every verdict read
         # is scoped to the LAST attempt.
         cut = full.rfind(ATTEMPT_MARK)
-        log = full[cut:] if cut >= 0 else full
+        # ⛔ NO MARK ⇒ NO SCOPED EVIDENCE. Our launcher always writes the mark
+        # before it spawns, so a log without one is not this attempt's: reading it
+        # whole would let a dead attempt inherit ANY earlier `✅ merged` line — the
+        # forged-evidence shape the scoping exists to prevent. Fail CLOSED (empty
+        # evidence ⇒ refused/lost), never "read everything".
+        log = full[cut:] if cut >= 0 else ""
 
     exits = read_all(text, "EXIT")
     pid = _int_or_none(read_field(text, "PID", "0")) or 0
@@ -425,7 +430,13 @@ def launch(pr: int, *, cwd: Path, state_dir: Path, repo: str | None = None,
                 "never what is checked"
             )
     repo = repo or _resolve_repo(Path(cwd))
-    state_dir = Path(state_dir)
+    # ⛔ RESOLVE, because the child runs with `cwd=<checkout>`: a relative
+    # `--state-dir` would otherwise resolve the artifact/log against the CHECKOUT
+    # while the launcher writes them against the lane's own cwd — splitting one
+    # rail across two paths, where a real merge reads back as `lost` and a failed
+    # redirect (which stops bash before the rail ever runs) still prints STARTED.
+    cwd = Path(cwd).resolve()
+    state_dir = Path(state_dir).resolve()
     state_dir.mkdir(parents=True, exist_ok=True)
     art = artifact_path(state_dir, repo, pr)
     logp = log_path(state_dir, repo, pr)

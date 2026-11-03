@@ -271,6 +271,36 @@ def test_spawning_sentinel_expires_instead_of_wedging_the_pr(tmp_path):
     assert wait_state(sd, 67, rd.MERGED).state == rd.MERGED
 
 
+def test_relative_state_dir_lands_in_one_place(tmp_path, monkeypatch):
+    """The child runs with cwd=<checkout>, so a relative --state-dir must be
+    resolved once: otherwise the launcher writes the artifact one place, the rail
+    writes its log another, and a real merge reads back as `lost`."""
+    co = make_checkout(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    ln = rd.launch(68, cwd=co, state_dir=Path("relstate"), repo="o/r")
+    assert Path(ln.artifact).is_absolute() and Path(ln.log).is_absolute()
+    assert Path(ln.artifact).parent == Path(ln.log).parent == (tmp_path / "relstate").resolve()
+    st = wait_state((tmp_path / "relstate").resolve(), 68, rd.MERGED)
+    assert st.state == rd.MERGED and st.merge_sha == "deadbeefcafe1234"
+
+
+def test_a_log_without_an_attempt_mark_is_no_evidence(tmp_path):
+    """No attempt mark ⇒ not this attempt's log ⇒ no scoped evidence. Reading it
+    whole would let a dead attempt inherit an earlier `✅ merged` line."""
+    co = make_checkout(tmp_path)
+    sd = tmp_path / "state"
+    rd.launch(69, cwd=co, state_dir=sd, repo="o/r")
+    assert wait_state(sd, 69, rd.MERGED).state == rd.MERGED
+    art = rd.artifact_path(sd, "o/r", 69)
+    logp = Path(rd.read_field(art.read_text(), "LOG"))
+    # a foreign/recreated log: same words, no mark
+    logp.write_text("admin-merge: ✅ merged PR #69 at deadbeefcafe1234 (state=MERGED)\n")
+    art.write_text(art.read_text().replace("EXIT=", "EXIT_TORN="))  # attempt 2: no exit
+    st = rd.collect(sd, "o/r", 69)
+    assert st.state != rd.MERGED, st.as_dict()
+    assert st.merge_sha == ""
+
+
 def test_collect_has_no_side_effects(tmp_path):
     co = make_checkout(tmp_path)
     sd = tmp_path / "state"
