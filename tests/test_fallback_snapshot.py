@@ -723,6 +723,10 @@ def test_get_or_build_coalesces_concurrent_readers():
     assert len(out) == 8 and all(v is not None for v in out.values())
     assert len({id(v) for v in out.values()}) == 1, \
         "every reader must be served the same built snapshot"
+    assert fs._FLIGHTS == {}, (
+        "the last waiter out must remove the flight — a leak serves every later "
+        "reader this stale result without ever reaching the store (review round 4, "
+        "P3; nothing pinned the registry before)")
 
 
 def test_get_or_build_reuses_cached_snapshot_without_building():
@@ -806,6 +810,58 @@ def test_get_or_build_coalesces_a_FAILED_build_too():
     assert all(v is None for v in out.values()), \
         "every joiner must get the None contract, so the legacy path runs"
     assert fs._store.get(key) is None, "a failure must never be cached"
+    assert fs._FLIGHTS == {}, (
+        "the flight registry must be empty after a failed cohort, or the next "
+        "reader joins a completed flight and is served its None forever")
+
+
+def test_a_raising_build_serves_the_whole_cohort_the_legacy_path():
+    """A build that RAISES must not split the cohort (review round 4, P3).
+
+    ``build_snapshot`` swallows its own two documented failures (over-cap, query
+    exception), so a raise is an UNEXPECTED error. Left uncaught it propagates to
+    the LEADER while every joiner reads ``result is None`` and quietly takes the
+    legacy path — one failure, two different answers. The leader now publishes the
+    documented None contract to the whole cohort, so every reader takes one path.
+    """
+    import threading
+
+    fs._store.clear()
+    key = ("raise-graph", "raise-ns")
+    start = threading.Barrier(4)
+    out = {}
+    errors = []
+    calls = []
+    lock = threading.Lock()
+
+    def raising(_proj):
+        with lock:
+            calls.append(1)
+        time.sleep(0.15)
+        raise RuntimeError("boom")
+
+    def reader(i):
+        try:
+            start.wait()
+            out[i] = fs.get_or_build(None, key, builder=raising)
+        except Exception as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    threads = [threading.Thread(target=reader, args=(i,)) for i in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=30)
+
+    assert len(calls) == 1, f"a raising build is attempted ONCE — got {len(calls)}"
+    assert errors == [], (
+        "the cohort must NOT see the raise: it degrades to the legacy path, as the "
+        "pre-#10602 per-reader build's None contract did once build_snapshot "
+        "swallowed its own failures")
+    assert len(out) == 4 and all(v is None for v in out.values()), \
+        "every reader gets the documented None contract"
+    assert fs._store.get(key) is None, "a raise must never be cached"
+    assert fs._FLIGHTS == {}, "the registry must be empty after a raising build"
 
 
 def test_get_or_build_does_not_publish_a_build_overtaken_by_a_write():
@@ -854,9 +910,22 @@ def test_degraded_read_with_claim_class_never_uses_the_snapshot(sdk, monkeypatch
         return real(proj, key, **kw)
 
     monkeypatch.setattr(fs, "get_or_build", spy)
+    trace: list[dict] = []
     results = sdk.tortoise_fts_query(
-        query=FTS_MISS, limit=10, claim_class="asserted")
-    assert isinstance(results, list)
+        query=FTS_MISS, limit=10, claim_class="asserted", leg_trace=trace)
+    # ⛔ NOT a bare ``called == []``: that assertion alone passes VACUOUSLY if the
+    # degraded arm stops firing for any reason (a leg starts answering, the miss
+    # stops being a miss, the fallback is gated off) — ``get_or_build`` is equally
+    # not called, and the #2351 invariant it exists to protect goes unpinned while
+    # the test stays green (review round 4, P3: a false PASS). Pin that the LEGACY
+    # arm actually served this read.
+    assert isinstance(results, list) and results, (
+        "the seeded point must survive the class filter — an empty result would "
+        "make every assertion below vacuous")
+    assert any(t.get("reason") == "tfidf_legacy" for t in trace), (
+        "the claim-class read must be served by the LEGACY tf-idf arm; without "
+        "this the test cannot tell 'correctly bypassed the snapshot' from 'never "
+        "reached the degraded path at all'")
     assert called == [], (
         "a claim_class-filtered degraded read must NOT touch the snapshot "
         "(#2351: the lean projection cannot honour it)")

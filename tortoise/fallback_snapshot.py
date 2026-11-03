@@ -213,8 +213,11 @@ class _Flight:
 
     def __init__(self) -> None:
         self.done = threading.Event()
-        #: Only read once ``done`` is set (None means the build produced nothing:
-        #: too big, or its query failed — the legacy path then runs).
+        #: Only read once ``done`` is set. ``None`` means the build produced nothing
+        #: and the legacy path runs — one of its three documented causes: too big
+        #: (``MAX_CORPUS_POINTS``), its query failed, or it RAISED (review round 4,
+        #: P3: an uncaught raise used to reach the leader only, while every joiner
+        #: read this ``None`` — one failure, two different answers).
         self.result: dict | None = None
         self.waiters = 0
 
@@ -275,7 +278,21 @@ def get_or_build(proj, key: tuple, *, store: FallbackSnapshotStore | None = None
             snap = store.get(key)
             if snap is None:
                 generation = store.generation(key)
-                snap = build(proj)
+                try:
+                    snap = build(proj)
+                except Exception:  # noqa: BLE001
+                    # A raise here is NOT one of the two failures ``build_snapshot``
+                    # swallows itself (over-cap, query exception) — it is an
+                    # unexpected error. Uncaught, it would propagate to the LEADER
+                    # while every joiner read ``result is None`` and quietly took the
+                    # legacy path: one failure, two different answers (review round
+                    # 4, P3). Publish the documented None contract to the whole
+                    # cohort instead, so every reader of this key takes the same
+                    # path — and LOG it, because a silent swallow would hide a bug.
+                    logger.exception(
+                        "#10602: corpus build raised — serving this key's cohort "
+                        "the legacy path (key=%r)", key)
+                    snap = None
                 # Publish only if no write invalidated the corpus mid-build (see
                 # STALENESS above) — otherwise this cohort keeps its answer and the
                 # next reader rebuilds, which is the self-healing the pre-#10602
