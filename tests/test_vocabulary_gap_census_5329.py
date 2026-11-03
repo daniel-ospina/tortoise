@@ -3,9 +3,14 @@ must be COUNTED, never silently absorbed.
 
 The boundary refuses a fold on differences read from closed, hand-written word
 lists (``_NEGATION_MARKERS``, ``_CONDITION_MARKERS``/``_CONDITION_PHRASES``,
-``_DATE_WORDS``, ``_CLOCK_UNITS``, ``_SCRIPT_BLOCKS``).  A marker outside every
+``_DATE_WORDS``, ``_CLOCK_UNITS``).  A marker outside every
 list reaches no identity dimension, so the pair reads as a one-sided broadening
 and FOLDS — and before this census the fold left no trace anywhere.
+
+⚠️ ``_SCRIPT_BLOCKS`` is deliberately NOT in that list: an unlisted script is an
+UNKNOWN SCRIPT and refuses the fold (``_UNLISTED_SCRIPT`` in ``_scripts``), so
+nothing about it is absorbed and nothing about it belongs in this census.  The
+census counts the residuals that are still OPEN, and the script one is closed.
 
 What is under test here is the OBSERVABILITY, not the fold decision: the census
 records what the vocabularies did not understand, and the decision is

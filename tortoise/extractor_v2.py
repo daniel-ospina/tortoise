@@ -5804,6 +5804,8 @@ def _apostrophe_free(t: str) -> str:
     return t.replace("'", "")
 # Non-Latin scripts, by the codepoint block that identifies them.
 _SCRIPT_BLOCKS = (
+    ("latin", 0x00C0, 0x024F),
+    ("latin", 0x1E00, 0x1EFF),
     ("greek", 0x0370, 0x03FF),
     ("cyrillic", 0x0400, 0x04FF),
     ("hebrew", 0x0590, 0x05FF),
@@ -5813,6 +5815,29 @@ _SCRIPT_BLOCKS = (
     ("han", 0x4E00, 0x9FFF),
     ("hangul", 0xAC00, 0xD7AF),
 )
+
+
+#: The script a letter belongs to when `_SCRIPT_BLOCKS` does not name one.
+#:
+#: ⛔ `_SCRIPT_BLOCKS` is FINITE, and it used to be the whole reading: a letter
+#: in a block it did not name contributed NOTHING to ``_scripts``, so a claim
+#: carrying one was never compared for language at all, its word read as a
+#: one-sided broadening, and the pair FOLDED — the silent memory loss of
+#: #5329 in its script form (Armenian `ը`, Georgian, Thai, Ethiopic …).
+#:
+#: The list cannot be completed (a longer list only moves where the miss
+#: happens), so the miss no longer has to be CLOSED for the reading to be
+#: safe: an alphabetic character in no known block is an UNKNOWN script, which
+#: is an identity difference, so the fold is REFUSED and both claims survive.
+#: Incompleteness now costs NOISE — a refused fold — instead of a deleted
+#: claim, which is the safe direction (#5080's asymmetry).
+#:
+#: ⚠️ Two claims whose unlisted letters are in DIFFERENT unknown scripts read as
+#: the same sentinel and still fold; that residual needs a model, and it is
+#: strictly narrower than the silence it replaces (which covered every unlisted
+#: script on one side).  Non-letters (an emoji, a currency symbol) are NOT a
+#: script and are untouched.
+_UNLISTED_SCRIPT = "unlisted"
 
 
 # Differences that make two claims RIVALS rather than one claim in two
@@ -7024,10 +7049,23 @@ def _marker_scope(content: str) -> tuple[str, ...]:
 
 def _scripts(content: str) -> frozenset[str]:
     """Scripts the claim's letters are drawn from — a language difference in
-    the one form decidable without a model."""
+    the one form decidable without a model.
+
+    ⚠️ A letter in a block `_SCRIPT_BLOCKS` does not name is `_UNLISTED_SCRIPT`,
+    NOT nothing: contributing nothing meant the claim was never compared for
+    language and an unlisted script silently folded (#5329).  See the comment
+    on that constant.
+    """
     found: set[str] = set()
     for ch in str(content or "").translate(_APOSTROPHES):
-        if ch.isascii() and ch.isalpha():
+        # Alphabetness FIRST: a non-letter (an emoji, a currency or maths symbol,
+        # a combining mark) is not a script at all, and the Latin blocks below
+        # carry a few non-letters (U+00D7 MULTIPLICATION SIGN, U+00F7 DIVISION
+        # SIGN), so a block-first scan would read `×` as latin and refuse a fold
+        # between two non-Latin claims that merely lost one.
+        if not ch.isalpha():
+            continue
+        if ch.isascii():
             found.add("latin")
             continue
         cp = ord(ch)
@@ -7035,6 +7073,10 @@ def _scripts(content: str) -> frozenset[str]:
             if lo <= cp <= hi:
                 found.add(name)
                 break
+        else:
+            # No block names this LETTER: a script this module cannot name, which
+            # must REFUSE the fold rather than vanish (#5329).
+            found.add(_UNLISTED_SCRIPT)
     return frozenset(found)
 
 
@@ -12447,10 +12489,17 @@ def _compact_guarantee_tail(master: dict, lines: list[str]) -> str:
 #
 # The boundary refuses a fold on differences read from CLOSED, hand-written
 # word lists: ``_NEGATION_MARKERS``, ``_CONDITION_MARKERS`` /
-# ``_CONDITION_PHRASES``, ``_DATE_WORDS``, ``_CLOCK_UNITS``, ``_SCRIPT_BLOCKS``.
+# ``_CONDITION_PHRASES``, ``_DATE_WORDS``, ``_CLOCK_UNITS``.
 # Every one is finite, and a marker the lists do not name reaches NO identity
 # dimension — the pair then reads as a one-sided broadening and FOLDS (memory
 # loss: a wrong keep is noise, a wrong drop is a deleted claim).
+#
+# ⚠️ ``_SCRIPT_BLOCKS`` is NOT in that list any more, and its absence is the one
+# place #5329's class was closed rather than counted: a letter in no known block
+# is an UNKNOWN script (``_UNLISTED_SCRIPT``), which IS an identity difference,
+# so the fold is REFUSED and both claims survive. The script list stays finite —
+# its incompleteness now costs a refused fold instead of a dropped claim. It is
+# left out of this census's population for the same reason: nothing is absorbed.
 #
 # The lists are not the bug: closing the class needs a model, not a longer list
 # (#5329's own recommendation), and failing closed on any unknown token would
