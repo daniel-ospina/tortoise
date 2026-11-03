@@ -76,10 +76,12 @@ def _hermetic_gh(tmp_path, monkeypatch):
     """`launch()` reads the PR head with ONE best-effort `gh` call.
 
     ⛔ THIS SUITE USED TO MAKE A REAL `gh pr view` PER LAUNCH — ~1.9 s each on a
-    rate-limited box, 25 launches, and a network dependency in a file whose
-    registration says it is hermetic. The call is INFORMATIONAL (nothing gates
-    on `HEAD`), so a `gh` that answers nothing is the honest stub: `HEAD`
-    records `unreadable` and every verdict assertion below is unaffected.
+    rate-limited box, one per test that launches, and a network dependency in a
+    file whose registration says it is hermetic. The call is INFORMATIONAL
+    (nothing gates on `HEAD`), so a `gh` that answers nothing is the honest stub:
+    `HEAD` records `unreadable` and every verdict assertion below is unaffected.
+    (Stated per-launch, not as a launch COUNT: a count here is stale the moment a
+    test is added — the same reason the `config/ci-surfaces.yml` row carries none.)
     """
     bindir = fake_gh(tmp_path, "#!/usr/bin/env bash\nexit 1\n")
     monkeypatch.setenv("PATH", f"{bindir}{os.pathsep}{os.environ.get('PATH', '')}")
@@ -89,12 +91,12 @@ def launch(state_dir, co, pr=7, **kw):
     return rd.launch(pr, cwd=co, state_dir=state_dir, repo="o/r", **kw)
 
 
-def wait_state(state_dir, pr, want, timeout=15.0):
+def wait_state(state_dir, pr, want, timeout=15.0, pred=None):
     end = time.time() + timeout
     st = None
     while time.time() < end:
         st = rd.collect(state_dir, "o/r", pr)
-        if st is not None and st.state == want:
+        if st is not None and st.state == want and (pred is None or pred(st)):
             return st
         time.sleep(0.05)
     return st
@@ -119,7 +121,14 @@ def test_merged_state_names_the_sha_the_rail_printed(tmp_path):
     co = make_checkout(tmp_path)
     sd = tmp_path / "state"
     launch(sd, co, pr=11)
-    st = wait_state(sd, 11, rd.MERGED)
+    # ⛔ WAIT FOR THE SETTLED READ, not merely the first `merged`. A rail prints
+    # its success line BEFORE it appends `EXIT=`, and `collect` answers `merged`
+    # in that window (`exit_code=None`) — a terminal state, a real merge, but not
+    # yet this test's evidence. Without the predicate this test is a race: it
+    # failed twice in two runs at load 27 on 2026-11-03 while passing in
+    # isolation, i.e. an intermittent red on a CI-gating file for a diff that
+    # changed nothing.
+    st = wait_state(sd, 11, rd.MERGED, pred=lambda s: s.exit_code is not None)
     assert st.state == rd.MERGED
     assert st.exit_code == 0
     assert st.merge_sha == "deadbeefcafe1234"      # from the rail's own log line
@@ -171,6 +180,48 @@ def test_announced_merge_survives_a_missing_exit_line(tmp_path):
     st = wait_state(sd, 55, rd.MERGED)
     assert st.state == rd.MERGED and st.merge_sha == "feedface123456"
     assert "EXIT line was never written" in st.reason
+
+
+def test_a_rail_that_exits_during_the_liveness_probe_keeps_its_exit_code(tmp_path, monkeypatch):
+    """The artifact is read BEFORE the liveness probe, so a rail that appends
+    `EXIT=` and exits *while* that probe runs is seen as GONE holding a read that
+    predates its EXIT — `merged` with `exit_code=None` and the false reason "the
+    EXIT line was never written", for a rail that wrote one.
+
+    The state stayed `merged` (the rail's own success line was in the log), so no
+    gate moved; what was wrong was the exit code and the explanation. It is not
+    theoretical: it made `test_merged_state_names_the_sha_the_rail_printed`
+    flake 2/2 at load 27 on 2026-11-03 while passing in isolation, i.e. an
+    intermittent red on a CI-gating file for a diff that changed nothing.
+
+    The race is reproduced WITHOUT a race — the stub writes the EXIT line and
+    answers "gone" in the same call, which is exactly the interleaving that the
+    real code hit by luck.
+    """
+    co = make_checkout(tmp_path)
+    sd = tmp_path / "state"
+    ln = launch(sd, co, pr=74)
+    assert wait_state(sd, 74, rd.MERGED).state == rd.MERGED   # the rail merged…
+    art = rd.artifact_path(sd, "o/r", 74)
+    # …so strip its bookkeeping and let the probe race it, as it did in the wild.
+    while ln.pid and rd._pid_alive(ln.pid, str(art)):
+        time.sleep(0.05)
+    text = art.read_text()
+    assert "EXIT=" in text and text.count("EXIT=") == 1
+    art.write_text("\n".join(ln for ln in text.splitlines() if not ln.startswith("EXIT=")) + "\n")
+    assert "EXIT=" not in art.read_text()                     # the stale read
+
+    def exits_during_the_probe(pid, marker):
+        with art.open("a", encoding="utf-8") as fh:
+            fh.write(f"EXIT=0\nFINISHED_AT={rd._iso_now()}\n")
+        return False                                          # …and it is GONE
+
+    monkeypatch.setattr(rd, "_pid_alive", exits_during_the_probe)
+    st = rd.collect(sd, "o/r", 74)
+    assert st.state == rd.MERGED
+    assert st.exit_code == 0, st.as_dict()        # pre-fix: None (the stale read)
+    assert st.merge_sha == "deadbeefcafe1234"
+    assert st.reason == "", st.reason            # not the "never written" lie
 
 
 def test_previous_attempts_merge_line_is_not_inherited(tmp_path):

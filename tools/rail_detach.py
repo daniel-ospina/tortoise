@@ -391,62 +391,86 @@ def collect(state_dir: Path, repo: str, pr: int) -> RailState | None:
     art = artifact_path(state_dir, repo, pr)
     if not art.exists():
         return None
-    text = art.read_text(encoding="utf-8", errors="replace")
-    logp = Path(read_field(text, "LOG", str(log_path(state_dir, repo, pr))))
-    log = ""
-    if logp.exists():
-        full = logp.read_text(encoding="utf-8", errors="replace")
-        # ⛔ THE LOG IS APPEND-ONLY ACROSS ATTEMPTS. Parsing the whole file lets a
-        # DEAD attempt inherit a PREVIOUS attempt's `✅ merged` line and be
-        # reported merged — evidence forged by concatenation. Every verdict read
-        # is scoped to the LAST attempt.
-        cut = full.rfind(ATTEMPT_MARK)
-        # ⛔ NO MARK ⇒ NO SCOPED EVIDENCE. Our launcher always writes the mark
-        # before it spawns, so a log without one is not this attempt's: reading it
-        # whole would let a dead attempt inherit ANY earlier `✅ merged` line — the
-        # forged-evidence shape the scoping exists to prevent. Fail CLOSED (empty
-        # evidence ⇒ refused/lost), never "read everything".
-        log = full[cut:] if cut >= 0 else ""
+    logp_default = log_path(state_dir, repo, pr)
+    # ⛔ TWO PASSES, AND THE SECOND IS NOT A RETRY OF A FAILURE — it closes a
+    # STALE READ. `text` is read BEFORE the liveness probe, so a rail that writes
+    # `EXIT=` and exits *while* that probe runs is seen as GONE holding a read
+    # that predates its EXIT: `merged` with `exit_code=None` and the false reason
+    # "the EXIT line was never written", for a rail that wrote one. The state was
+    # still `merged` (the rail's own success line was in the log) so no gate
+    # moved, but the exit code and the explanation were both wrong — and it is
+    # not theoretical: it made `test_merged_state_names_the_sha_the_rail_printed`
+    # flake 2/2 at load 27 on 2026-11-03 while passing in isolation.
+    #
+    # So the "gone" conclusion is only drawn from an artifact re-read AFTER the
+    # probe. One extra read, and only on the path where we are about to declare a
+    # rail dead.
+    for _ in range(2):
+        text = art.read_text(encoding="utf-8", errors="replace")
+        logp = Path(read_field(text, "LOG", str(logp_default)))
+        log = ""
+        if logp.exists():
+            full = logp.read_text(encoding="utf-8", errors="replace")
+            # ⛔ THE LOG IS APPEND-ONLY ACROSS ATTEMPTS. Parsing the whole file lets a
+            # DEAD attempt inherit a PREVIOUS attempt's `✅ merged` line and be
+            # reported merged — evidence forged by concatenation. Every verdict read
+            # is scoped to the LAST attempt.
+            cut = full.rfind(ATTEMPT_MARK)
+            # ⛔ NO MARK ⇒ NO SCOPED EVIDENCE. Our launcher always writes the mark
+            # before it spawns, so a log without one is not this attempt's: reading it
+            # whole would let a dead attempt inherit ANY earlier `✅ merged` line — the
+            # forged-evidence shape the scoping exists to prevent. Fail CLOSED (empty
+            # evidence ⇒ refused/lost), never "read everything".
+            log = full[cut:] if cut >= 0 else ""
 
-    exits = read_all(text, "EXIT")
-    pid = _int_or_none(read_field(text, "PID", "0")) or 0
-    st = RailState(
-        pr=pr,
-        state=WAITING,
-        run_ids=sorted(set(RUN_ID_RE.findall(log)), key=lambda s: int(s)),
-        since=read_field(text, "STARTED_AT"),
-        head=read_field(text, "HEAD"),
-        pid=pid,
-        artifact=str(art),
-        log=str(logp),
-    )
+        exits = read_all(text, "EXIT")
+        pid = _int_or_none(read_field(text, "PID", "0")) or 0
+        st = RailState(
+            pr=pr,
+            state=WAITING,
+            run_ids=sorted(set(RUN_ID_RE.findall(log)), key=lambda s: int(s)),
+            since=read_field(text, "STARTED_AT"),
+            head=read_field(text, "HEAD"),
+            pid=pid,
+            artifact=str(art),
+            log=str(logp),
+        )
 
-    if exits:
-        code = _int_or_none(exits[-1])
-        st.exit_code = code
-        merged, sha = _merge_evidence(log)
-        if merged == MERGED:
-            st.state, st.merge_sha = MERGED, sha
-            if not sha:
-                st.reason = ("merged; the rail could not read the merge commit "
-                             "(admin-merge.sh deliberately does not print it)")
-        else:
-            # Exit 0 with no merge line: the rail DECLINED to merge (a --dry-run,
-            # a --print-bounds, a help exit) or refused. Either way there is no
-            # merge, and saying `merged` would release the next beat's gate on
-            # evidence that does not exist.
-            st.state = REFUSED
-            hits = REFUSAL_RE.findall(log)
-            st.reason = (hits[-1].strip()[:400] if hits else
-                         (f"exited {code} without a merge line — the rail did not "
-                          "merge (e.g. --dry-run), so this is not a merge"
-                          if code == 0 else "no refusal line in the log"))
-        return st
+        if exits:
+            code = _int_or_none(exits[-1])
+            st.exit_code = code
+            merged, sha = _merge_evidence(log)
+            if merged == MERGED:
+                st.state, st.merge_sha = MERGED, sha
+                if not sha:
+                    st.reason = ("merged; the rail could not read the merge commit "
+                                 "(admin-merge.sh deliberately does not print it)")
+            else:
+                # Exit 0 with no merge line: the rail DECLINED to merge (a --dry-run,
+                # a --print-bounds, a help exit) or refused. Either way there is no
+                # merge, and saying `merged` would release the next beat's gate on
+                # evidence that does not exist.
+                st.state = REFUSED
+                hits = REFUSAL_RE.findall(log)
+                st.reason = (hits[-1].strip()[:400] if hits else
+                             (f"exited {code} without a merge line — the rail did not "
+                              "merge (e.g. --dry-run), so this is not a merge"
+                              if code == 0 else "no refusal line in the log"))
+            return st
 
-    # No EXIT line yet. Alive ⇒ waiting; gone ⇒ lost (NEVER merged).
-    if _pid_alive(pid, str(art)):
-        st.state = WAITING
-        return st
+        # No EXIT line yet. Alive ⇒ waiting; gone ⇒ lost (NEVER merged).
+        if _pid_alive(pid, str(art)):
+            st.state = WAITING
+            return st
+
+        # Everything below concludes from the ABSENCE of `EXIT=`, so it needs a
+        # read taken after the probe that just said the writer is gone. Loop once
+        # on the fresh text when the artifact has moved; break when it has not
+        # (including `CHILD_STARTED=`, which the child appends and which changes
+        # nothing a verdict reads).
+        if read_all(art.read_text(encoding="utf-8", errors="replace"), "EXIT") != exits:
+            continue
+        break
     if pid == 0 and read_field(text, "SPAWNING") and not exits:
         # Between `SPAWNING=1` and the `PID=` append the rail IS alive but
         # unnamed. Reporting `lost` there defeats the same guard that refuses a
