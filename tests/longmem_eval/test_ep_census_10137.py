@@ -1481,7 +1481,7 @@ def test_committed_census_rederives_its_own_aggregate():
     both. ``source`` is NOT in this list: it is pinned as an artifact-identity
     anchor beside the sample pin, not derived. Closing the remainder needs the
     probe to publish the failure identities and the per-row shape — filed as
-    the remaining work, not silently left open.
+    #10696, not silently left open.
     """
     doc = json.loads(_ARTIFACT.read_text())
     rows = doc["per_question"]
