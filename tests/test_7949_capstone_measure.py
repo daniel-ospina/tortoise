@@ -4289,6 +4289,96 @@ def test_the_bare_entry_point_call_cite_resolves_to_the_call_it_names():
             "can. Re-derive the number from the tree; do not delete the cite.")
 
 
+# ── A cite into the RUN probe by NUMBER is unpinnable, so it must not be written ──
+#
+# `_BUNDLE_CITE` resolves `sdk|edges|extractor_v2` and `_BUNDLE_TOOL_SOURCES`
+# names only the GATE, so a `probes/capstone_run.py:<line>` cite is read by NO
+# sweep in this file: not resolved, and — unlike a bare `:NNNN` continuation —
+# not even reported `unmatched`, because it carries a file name the sweep never
+# looks for. The bundle's own convention for a number in that position is
+# `README.md:174-180` (*"written here WITHOUT the `file:line` form on purpose …
+# do NOT follow them as pointers at this head"*): the SYMBOL is authoritative,
+# the line is a convenience nothing re-derives.
+#
+# Measured on this branch, twice: the sentence that paragraph replaces was a
+# `capstone_run.py:19` cite, and `tests/test_7949_capstone_verdict_check.py:2089`
+# records that `capstone_run.py:19` and `README.md:615` "stated two different,
+# both-wrong call sites for one fact, and both pin files stayed green".
+_PROBE_NUMERIC_CITE = re.compile(r"capstone_run\.py:(\d+)")
+
+#: The line this leg holds the README to, BY SYMBOL (never by a typed number).
+_PROBE_ENTRY_POINT_FALLBACK = 'required = run.get("steps_required") or list(STEPS)'
+
+
+def test_no_document_cites_the_run_probe_by_a_number_nothing_can_resolve():
+    """A `capstone_run.py:<line>` cite is invisible to every sweep — refuse it.
+
+    `_BUNDLE_CITE` matches `sdk|edges|extractor_v2` only, and
+    `_BUNDLE_TOOL_SOURCES` names just `capstone_verdict_check`, so a number
+    written into the RUN probe was checked by nothing: `grep -c '813'` across
+    both pin files returns 0/0. The README carried one
+    (`probes/capstone_run.py:813`, the `steps_required` fallback). It was
+    accurate the day it was written and had no reader, in the file that already
+    carries the precedent above.
+
+    So this leg does two things and needs both: it REFUSES the numeric form in
+    every bundle document, and it requires the sentence to keep its content by
+    naming the SYMBOL — a bare ban would pass vacuously on a bundle that deleted
+    the claim instead of re-pointing it.
+
+    Non-vacuity: at the pre-fix head the README's cite is present, so the ban
+    reds there; and the symbol leg reds on a README that drops the fallback
+    sentence. If a future lane genuinely wants the number, the route the review
+    named is to add a `_BUNDLE_TOOL_SOURCES` row plus a phrase anchor, and to
+    retarget this ban — never to type the number back in.
+    """
+    probe_lines = (_REPO / "docs/evidence/7949-capstone/probes/capstone_run.py"
+                   ).read_text(encoding="utf-8").splitlines()
+    fallbacks = [i + 1 for i, ln in enumerate(probe_lines)
+                 if _PROBE_ENTRY_POINT_FALLBACK in ln]
+    assert len(fallbacks) == 1, (
+        f"{len(fallbacks)} lines of the run probe carry the `steps_required` "
+        f"fallback ({fallbacks}) — this leg resolves the README's sentence "
+        "against ONE symbol; re-derive which line the paragraph means before "
+        "trusting a number here")
+    fallback_line = fallbacks[0]
+
+    # 1. The class ban: no bundle document may cite the run probe by number.
+    offenders = []
+    for name, path in _BUNDLE_DOCS:
+        for match in _PROBE_NUMERIC_CITE.finditer(
+                path.read_text(encoding="utf-8")):
+            offenders.append(f"{name} -> capstone_run.py:{match.group(1)}")
+    assert not offenders, (
+        "a `capstone_run.py:<line>` cite is read by NO sweep in this file — "
+        "`_BUNDLE_CITE` resolves `sdk|edges|extractor_v2` only and "
+        "`_BUNDLE_TOOL_SOURCES` names only the gate, so the number rots "
+        f"silently: {offenders}. Cite the SYMBOL instead (the bundle's own "
+        "convention, `README.md:174-180`), or add a resolver row for the probe "
+        "before writing a number into it")
+
+    # 2. The claim survives as a symbol — the ban above must not be satisfied
+    #    by deleting the sentence (that would trade a rotting cite for a
+    #    dropped measurement, and `README.md:790`'s paragraph is the only place
+    #    a consumer is told the frozen log predates the conditional split).
+    readme_lines = (_REPO / "docs/evidence/7949-capstone/README.md").read_text(
+        encoding="utf-8").splitlines()
+    carrying = [i + 1 for i, ln in enumerate(readme_lines)
+                if _PROBE_ENTRY_POINT_FALLBACK in ln]
+    assert len(carrying) == 1, (
+        "the README must name the run probe's `steps_required` fallback on "
+        f"exactly one line (found {carrying}); that sentence is what tells a "
+        f"consumer the shipped log predates the conditional split, and the "
+        f"symbol it cites is `capstone_run.py:{fallback_line}` at this head")
+
+    # 3. …and the sentence must still say WHICH probe it is about, because the
+    #    symbol alone (`required = … or list(STEPS)`) appears in both probes.
+    assert "capstone_run.py" in "\n".join(
+        readme_lines[max(0, carrying[0] - 3):carrying[0] + 2]), (
+        "the fallback sentence must still name `capstone_run.py` — both probes "
+        "carry that fallback, and this paragraph is about the RUN probe")
+
+
 # ── E2's blocker names the LIVE half, not the closed render issue ─────────
 #
 # PR #10382 closed #9775's render half: every path that builds a prompt now

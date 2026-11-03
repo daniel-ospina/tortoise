@@ -851,8 +851,9 @@ witnessed steps is printed — an honest finding for `#7949`, never a guess.
   committed in THIS bundle predates that emitter (it was generated `2026-11-02T12:16:06Z`, and
   `#10215` landed `8bc2fbed1a` at 12:22:19Z), so its run block carries `steps_observed` /
   `steps_unobserved` — all eight observed, which V5 accepts either way — and NOT the conditional
-  split. A consumer must not read that log as carrying one (`probes/capstone_run.py:813` falls back
-  to the all-eight list exactly as it would for any pre-#10215 log); every FUTURE run writes it.
+  split. A consumer must not read that log as carrying one (`capstone_run.py`'s
+  `required = run.get("steps_required") or list(STEPS)` falls back to the all-eight list exactly as
+  it would for any pre-#10215 log); every FUTURE run writes it.
 
 ## Reproduce
 
