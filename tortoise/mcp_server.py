@@ -1642,6 +1642,15 @@ def _graph_disclosure_message(info: dict[str, Any]) -> str:
     named_default = (f"`graph={requested!r}` (the same target as omitting it)"
                      if requested is not None else None)
     if source == "server-configured":
+        if info.get("excluded"):
+            # Same requirement as the workspace arm below: the prose must not
+            # offer `graph` on a tool that REFUSES it (`_take_graph_argument`
+            # raises). "this write named no `graph`" is the wrong sentence here
+            # — it implies one COULD have been named (review P3).
+            return (
+                "Graph disclosure: this write takes no `graph` argument, and "
+                "this transport has no workspace — so its target is the graph "
+                "this server is configured with." + preview)
         if named_default:
             return (
                 f"Graph disclosure: this write named {named_default}, and this "
@@ -1753,17 +1762,61 @@ def _excluded_writer_writes_the_default_graph(
     arm they can be on. Leaving them undisclosed left the #10084 defect in place
     on every tool except the one the issue measured (review P2).
 
-    `tortoise_manage_sources` is CONDITIONAL on its own argument, the same shape
-    as `tortoise_graph_set_recording`: `list` is a READ (its target is not a
-    change to the caller's data, and the prose says "this write"), while
-    `enable`/`disable` write org-level state in that graph.
+    `tortoise_manage_sources` is CONDITIONAL on its own ARGUMENTS, because only
+    one branch writes graph data; see
+    `_manage_sources_call_indexes_into_the_default_graph`.
     """
     if name not in _mcp_auth.GRAPH_ARGUMENT_EXCLUDED_DEFAULT_TARGET:
         return False
     if name == "tortoise_manage_sources":
-        action = (arguments or {}).get("action")
-        return str(action or "").strip().lower() != "list"
+        return _manage_sources_call_indexes_into_the_default_graph(arguments)
     return True
+
+
+def _manage_sources_call_indexes_into_the_default_graph(
+        arguments: dict[str, Any] | None) -> bool:
+    """Whether THIS `tortoise_manage_sources` call writes graph DATA (#10084).
+
+    `GRAPH_ARGUMENT_EXCLUDED_DEFAULT_TARGET`'s criterion is *"an excluded WRITE
+    tool whose handler body writes GRAPH DATA into the org default graph"*, and
+    exactly one branch of `tortoise_manage_sources` does:
+
+    * **`enable` on a GitHub source** — `_set_source_state` takes the
+      `spec["connection"] == "github"` arm, starts that source's index job and
+      spawns `_run_indexing` / `_run_docs_indexing`, which walk the repo and
+      project entities/events into the org's default graph. THIS is the call the
+      registry rationale names.
+    * **everything else writes a CONTROL-PLANE flag only** — `disable` on either
+      GitHub source, and both `agent_sessions` directions, reach nothing but
+      `_update_onboarding_state(...)` with an `_ALLOWED_STATE_KEYS` key
+      (`issues_enabled` / `docs_enabled` / `session_recording` /
+      `capture_revised`), whose routing leg is the org's onboarding `jsonb`
+      (`hosted_api._update_onboarding_state`; the graph leg is reached only by
+      the FLOW/step-edge arm). `agent_sessions` is *literally the same write*
+      `tortoise_onboarding_session_recording` makes — and that tool is kept
+      SILENT by `GRAPH_ARGUMENT_EXCLUDED` for "flips a control-plane flag".
+      Disclosing a graph for one spelling and not the other is a
+      self-contradiction in a SERVED sentence, and it asserts a target the call
+      never had — the wrong-graph claim this feature exists to remove.
+
+    So the gate is the PAIR: `action == "enable"` AND a GitHub source. The
+    `connection` marker is read from `_SOURCE_ROSTER` rather than a hand-kept
+    source list, so a source added there cannot silently acquire a graph
+    disclosure. An `agent_sessions` enable and a `disable` get NO disclosure
+    (review P2) — the round-12 seam disclosed them and said "its target is this
+    workspace's default graph" over a config toggle.
+
+    A malformed pair (`source` absent/unknown, or a non-`enable` action) returns
+    False here; those calls answer `_SafeError` and never reach the seam's
+    `status == "ok"` gate anyway.
+    """
+    args = arguments or {}
+    action = str(args.get("action") or "").strip().lower()
+    if action != "enable":
+        return False
+    source = str(args.get("source") or "").strip().lower()
+    spec = _SOURCE_ROSTER.get(source)
+    return bool(spec) and spec.get("connection") == "github"
 
 
 def _disclose_graph_resolution(result: Any, name: str,

@@ -1606,9 +1606,15 @@ GRAPH_ARGUMENT_EXCLUDED: frozenset[str] = frozenset({
 #:   * `tortoise_onboarding_seed` — the two anchor Subjects file into the org
 #:     DEFAULT graph.
 #:   * `tortoise_onboarding_github_index` — "indexes into the DEFAULT graph".
-#:   * `tortoise_manage_sources` — a `source` enable starts the index job that
-#:     writes into that same default graph (`list` is a READ and is skipped by
-#:     the seam, not by this set).
+#:   * `tortoise_manage_sources` — a `source` **enable** of a GITHUB source
+#:     starts the index job that writes into that same default graph. The seam
+#:     gates on that PAIR (`enable` + a `connection == "github"` source), not on
+#:     `action != "list"`: `disable`, and both `agent_sessions` directions, write
+#:     a control-plane flag through `_update_onboarding_state` into the org's
+#:     onboarding `jsonb` — the IDENTICAL write `tortoise_onboarding_session_recording`
+#:     makes, which this set keeps silent — so disclosing a graph for them was a
+#:     self-contradiction that asserted a target the call never had (#10084
+#:     review P2, `mcp_server._manage_sources_call_indexes_into_the_default_graph`).
 #:
 #: ⛔ The remaining excluded writers stay SILENT because they write NO graph at
 #: all, and a graph on them would be the wrong-graph claim this feature removes:

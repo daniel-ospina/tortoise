@@ -369,8 +369,12 @@ def test_every_served_excluded_writer_is_skipped_by_name():
 
 
 # A placeholder argument set that makes each default-target writer's own
-# CONDITION true (only `tortoise_manage_sources` has one).
-_DEFAULT_TARGET_ARGUMENTS = {"tortoise_manage_sources": {"action": "enable"}}
+# CONDITION true (only `tortoise_manage_sources` has one — and its condition is
+# the PAIR, not just the action: only a GitHub `enable` starts an index job that
+# writes graph data).
+_DEFAULT_TARGET_ARGUMENTS = {
+    "tortoise_manage_sources": {"action": "enable", "source": "github_issues"},
+}
 
 
 def test_the_excluded_writers_that_write_the_default_graph_are_disclosed():
@@ -396,24 +400,74 @@ def test_the_excluded_writers_that_write_the_default_graph_are_disclosed():
         assert "pass `graph`" not in text, (name, text)
 
 
-def test_the_manage_sources_read_action_still_gets_no_disclosure():
-    """`tortoise_manage_sources` is excluded-and-disclosed only for its MUTATING
-    actions: `list` is a read, and its target is not a change to the caller's
-    data (the prose says "this write")."""
+def test_the_manage_sources_actions_that_write_no_graph_get_no_disclosure():
+    """`tortoise_manage_sources` is excluded-and-disclosed only for the ONE
+    branch that writes graph DATA: `enable` on a GitHub source, which starts the
+    index job (`_run_indexing` / `_run_docs_indexing`) that projects into the
+    default graph.
+
+    Every other mutating call writes a CONTROL-PLANE flag through
+    `_update_onboarding_state` — an `_ALLOWED_STATE_KEYS` key routed to the org's
+    onboarding `jsonb` — and `agent_sessions` is *literally the same write*
+    `tortoise_onboarding_session_recording` makes, which the registry keeps
+    SILENT for "flips a control-plane flag". The round-12 seam disclosed all of
+    them (`action != "list"`) and emitted "its target is this workspace's
+    default graph" over a config toggle — a target the call never had, which is
+    the wrong-graph claim this feature exists to remove (review P2).
+
+    `list` is a READ: its target is not a change to the caller's data, and the
+    prose says "this write"."""
     from fastmcp.tools import ToolResult
 
     ok = ToolResult(content=[TextContent(type="text", text='{"sources": []}')],
                     structured_content=None, is_error=False)
-    for action in ("list", "LIST", " list "):
-        assert ms._disclose_graph_resolution(
-            ok, "tortoise_manage_sources", None, {"action": action}) is ok, action
-    # Every other action is a WRITE. An ABSENT `action` is not reachable through
-    # the seam (the parameter is required, so dispatch fails before this), so it
-    # is not a case to give a silent arm of its own.
-    with _workspace():
-        out = ms._disclose_graph_resolution(
-            ok, "tortoise_manage_sources", None, {"action": "disable"})
-    assert out is not ok, "a mutating action must be disclosed"
+    silent = [
+        {"action": "list"},
+        {"action": "LIST"},
+        {"action": " list "},
+        # GitHub `disable`: ONLY the per-source enable-intent flag is written
+        # (`_set_source_state` :5841-5844 — no index-job branch).
+        {"action": "disable", "source": "github_issues"},
+        {"action": "disable", "source": "github_documents"},
+        # `agent_sessions`, either direction: the ``session_recording`` /
+        # ``capture_revised`` control-plane write, never a graph write.
+        {"action": "enable", "source": "agent_sessions"},
+        {"action": "disable", "source": "agent_sessions"},
+        # A malformed pair answers `_SafeError` before the seam's ``ok`` gate, so
+        # it is not reachable — pinned here so the gate cannot be widened by a
+        # default-to-True.
+        {"action": "enable"},
+        {"action": "enable", "source": "nope"},
+    ]
+    for args in silent:
+        with _workspace():
+            assert ms._disclose_graph_resolution(
+                ok, "tortoise_manage_sources", None, args) is ok, args
+    # …and the ONE branch that writes the graph IS disclosed, so the pin cannot
+    # pass by the gate being dead.
+    for source in ("github_issues", "github_documents"):
+        with _workspace():
+            out = ms._disclose_graph_resolution(
+                ok, "tortoise_manage_sources", None,
+                {"action": "enable", "source": source})
+        assert out is not ok, source
+        assert _disclosure(out)["source"] == "workspace-default"
+
+
+def test_the_manage_sources_gate_reads_the_index_job_marker_not_a_source_list():
+    """The gate derives "does this source index into the graph" from
+    `_SOURCE_ROSTER`'s own `connection` marker, so a fourth source added there
+    cannot silently acquire a graph disclosure (or lose one)."""
+    github = {s for s, spec in ms._SOURCE_ROSTER.items()
+              if spec.get("connection") == "github"}
+    assert github == {"github_issues", "github_documents"}, github
+    for source in ms._SOURCE_ROSTER:
+        assert ms._manage_sources_call_indexes_into_the_default_graph(
+            {"action": "enable", "source": source}) is (source in github), source
+    # `disable` never indexes, on any source.
+    for source in ms._SOURCE_ROSTER:
+        assert ms._manage_sources_call_indexes_into_the_default_graph(
+            {"action": "disable", "source": source}) is False, source
 
 
 def test_every_disclosed_excluded_writer_refuses_a_graph_bound_key():
@@ -437,6 +491,50 @@ def test_every_disclosed_excluded_writer_refuses_a_graph_bound_key():
         params = set(inspect.signature(handler).parameters)
         assert not (params & ms.GRAPH_SELECTOR_PARAMS), (
             f"{name} takes its own graph selector: {sorted(params)}")
+
+
+def test_an_excluded_writer_on_a_server_configured_transport_is_not_offered_graph():
+    """The `server-configured` arm (stdio, or the self-host daemon's
+    `SELFHOST_ORG_ID`) must use the same "takes no `graph` argument" wording the
+    workspace arm uses.
+
+    That arm is reachable for EVERY excluded default-target writer: on stdio
+    `_current_org_id` is unset and the self-host daemon sets it to
+    `SELFHOST_ORG_ID`, which are exactly the two values the arm's predicate keys
+    on. Its fall-through sentence was "this write **named no `graph`**" — an
+    implication that one COULD have been named, served for a tool whose own
+    `_take_graph_argument` RAISES if one is sent. A model reading that can be led
+    to send an argument the tool refuses (review P3)."""
+    from fastmcp.tools import ToolResult
+
+    ok = ToolResult(content=[TextContent(type="text", text='{"id": "pt_1"}')],
+                    structured_content=None, is_error=False)
+    for org in (None, mcp_auth.SELFHOST_ORG_ID):
+        for name in sorted(mcp_auth.GRAPH_ARGUMENT_EXCLUDED_DEFAULT_TARGET):
+            args = _DEFAULT_TARGET_ARGUMENTS.get(name)
+            with _workspace(org_id=org):
+                out = ms._disclose_graph_resolution(ok, name, None, args)
+            assert out is not ok, (org, name)
+            info = _disclosure(out)
+            assert info["source"] == "server-configured", (org, name, info)
+            assert info["excluded"] is True, (org, name, info)
+            text = _text(out)
+            assert "takes no `graph` argument" in text, (org, name, text)
+            assert "named no `graph`" not in text, (
+                f"{name} on {org!r} is told it 'named no `graph`', which offers "
+                f"an argument the tool refuses: {text}")
+
+
+def test_a_non_excluded_writer_on_a_server_configured_transport_still_says_omitted():
+    """The complement, so the P3 fix cannot be "delete the sentence": a tool
+    that DOES advertise `graph` must keep the omission wording on the same arm,
+    because omission is exactly what happened there."""
+    with _workspace(org_id=None):
+        info = ms._graph_disclosure(None)
+    assert info["source"] == "server-configured"
+    text = ms._graph_disclosure_message(info)
+    assert "named no `graph`" in text, text
+    assert "takes no `graph` argument" not in text, text
 
 
 @pytest.mark.asyncio
