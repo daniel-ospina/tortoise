@@ -843,8 +843,9 @@ class TestAStoreThatWillNotOpenKeepsTheDocumentedArms:
     def test_a_construction_lane_capacity_refusal_is_not_a_store_500(
             self, monkeypatch):
         """A busy pool is not a broken store: the 503 must survive the new arm."""
-        import tortoise.hosted_api as hosted_api
         from fastapi import HTTPException as _HTTPException
+
+        import tortoise.hosted_api as hosted_api
 
         async def _refuse(org, *, attach_projection=False):
             raise _HTTPException(
