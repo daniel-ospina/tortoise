@@ -1455,7 +1455,13 @@ def test_committed_census_rederives_its_own_aggregate():
     """The shipped artifact is auditable against itself: every aggregate cell
     is what the runner's own aggregation produces from the committed
     per-question rows — so a hand-edit to a cell, or a row that stopped
-    reconciling with the totals, reds here instead of shipping.
+    reconciling with the totals, reds here.
+
+    ⚠️ This pin is registered in the NON-GATING eval lane
+    (``config/ci-surfaces.yml``: ``on_demand``, #10194/#10206), so "reds here"
+    is NOT "blocks the merge" — a hand-edit reds when this suite is dispatched
+    (``eval-suite-manual.yml``) or run by a lane. The pin's value is that the
+    wrong number cannot survive a run, not that it cannot merge.
 
     Distinct from ``test_census_probe_cells_match_the_committed_artifact_key_set``
     (key set and ORDER only, never a value): keys alone let a cell carry a
