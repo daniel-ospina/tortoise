@@ -5001,6 +5001,15 @@ _CONTENT_COLUMNS: frozenset[str] = frozenset({
     # printing `title`/`topics` would withhold nothing: the source row's indexed
     # text is built from all three (#10620 review cycle 4, P2).
     "title", "topics",
+    # `point.search_keys` is the SAME datum one table over, and it is the user's
+    # own words: `commit_schema` declares it E3's "2-4 aliases + verbatim
+    # tokens", and `point_identifier_aliases` derives it from `content`
+    # ∪ `search_keys`. So the attribution withholding `content` while printing
+    # this column leaks the turn through the column next door — the incident's
+    # own line (`search_keys=err4032 release`) is extracted content tokens in an
+    # operator log (#10620 review cycle 5, P2). The line still NAMES the column
+    # and its length, which is what makes a refusal diagnosable.
+    "search_keys",
 })
 
 #: How much of the DRIVER's message a failure line carries. The driver names the

@@ -3218,6 +3218,16 @@ def test_record_schema_pin_runs_on_migration_or_doc_change():
         # asserted the same three things twice; the duplicate is removed rather
         # than left to double-run.
         "supabase/migrations/20261029000001_record_point_cache_tier.sql",
+        # #10620 / PR #10648 review P1: the FORWARD migration that NARROWS
+        # `public.point.search_keys` from `jsonb` to `text`, the tenth member of
+        # this family and the only one that had no entry. Same gap as its
+        # neighbours: it sorts outside the `2026101200000` CORE_ALSO prefix, so
+        # without this line a change to this file ALONE selected NO surface
+        # (measured on the pre-fix head: `surfaces: []`, `full: False`) and none
+        # of the three guards that read it — `test_9078`'s
+        # `RECORD_REAPPLY_STEPS`, `test_9231`'s `RECORD_MIGRATIONS` registry pin,
+        # `test_record_schema_placement.py` — ran on it.
+        "supabase/migrations/20261102000001_record_point_search_keys_text.sql",
         # The DOC side of the #7968 pair, restated after #9638 review P1 deleted
         # it: `test_record_schema_placement.py` reads this file's table, so a
         # docs-only edit must select `core` too. Measured on the pre-fix head:

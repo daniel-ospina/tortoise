@@ -36,9 +36,12 @@ The DB-free legs run everywhere. The Postgres legs skip without
 from __future__ import annotations
 
 import contextlib
+import json
 import logging
 import os
+import re
 import uuid
+from pathlib import Path
 
 import pytest
 
@@ -102,14 +105,25 @@ def _replay_refusal(record: dict, monkeypatch) -> str:
 
 
 def test_a_failed_write_names_the_statement_table_and_columns(monkeypatch):
-    """The message an operator reads names WHICH statement refused WHICH column."""
+    """The message an operator reads names WHICH statement refused WHICH column.
+
+    The COLUMN is named and its length is given; its VALUE is withheld, because
+    `search_keys` is the user's own text (see
+    `test_content_columns_are_named_but_never_quoted`). Naming the column is what
+    the driver's own message cannot do.
+    """
     message = _replay_refusal(_point_record("pt-err4032", "err4032 release"),
                               monkeypatch)
 
     assert "INSERT INTO public.point" in message, message
-    assert "search_keys=err4032 release" in message, (
-        "the failing COLUMN and its value must be named — the driver's own "
-        f"message does not contain them: {message}"
+    assert "search_keys=<15 chars withheld>" in message, (
+        "the failing COLUMN must be named — the driver's own message does not "
+        f"contain it: {message}"
+    )
+    assert "search_keys=err4032 release" not in message, (
+        "the user's text reached the log through the column — the ATTRIBUTION "
+        "must not pair the column with its value (the driver's own CONTEXT line "
+        f"may legitimately restate the value it refused): {message}"
     )
     assert "node_key=pt-err4032" in message, (
         f"the entity/point id must be named: {message}"
@@ -156,7 +170,9 @@ def test_the_attribution_pairs_columns_when_the_builder_declared_them():
         "o", "g", node, "pt-1", {"search_keys": "err4032 release"}, {})
     text = record_projection._statement_attribution(statement, 1, 2)
 
-    assert "node_key=pt-1" in text and "search_keys=err4032 release" in text, text
+    assert "node_key=pt-1" in text and "search_keys=<" in text, (
+        f"an ordinary upsert names each column (values withheld where content): {text}"
+    )
 
 
 def test_a_failed_live_write_names_the_record_and_its_id(monkeypatch, caplog):
@@ -172,7 +188,7 @@ def test_a_failed_live_write_names_the_record_and_its_id(monkeypatch, caplog):
             "the record write failed after 1 journal record(s) were materialized "
             "from position 7 (RecordStatementError: record statement 1/3: INSERT "
             "INTO public.point columns(node_key=pt-err4032, "
-            "search_keys=err4032 release) params=9: invalid input syntax for "
+            "search_keys=<15 chars withheld>) params=9: invalid input syntax for "
             "type json)")
 
     monkeypatch.setattr(record_writer, "write_records", _explode)
@@ -190,7 +206,7 @@ def test_a_failed_live_write_names_the_record_and_its_id(monkeypatch, caplog):
     assert "record=PointAdded" in line and "pt-err4032" in line, (
         f"the log line must name the record and its point id: {line}"
     )
-    assert "search_keys=err4032 release" in line, (
+    assert "search_keys=<15 chars withheld>" in line, (
         f"the log line must name the failing column: {line}"
     )
 
@@ -450,6 +466,33 @@ def test_status_itself_degrades_not_only_the_sub_block(monkeypatch):
     assert body["record"]["degraded_reasons"] == {"no_tenant": 3}
 
 
+def test_the_health_docstring_states_the_window_not_a_counter_fold():
+    """`health()`'s own docstring must not teach the reading #10185 forbids.
+
+    This is the ONE place a maintainer reads what degrades `status`, and an
+    earlier revision of this PR stated *"a NON-ZERO record write-failure count
+    … degrades `status`"* — which is the fold `_record_health` deliberately does
+    NOT perform (it folds `record_refusing()`, a bounded window) and which
+    #10185 forbids verbatim. A future lane reading the docstring and "fixing"
+    the code to match it would re-introduce the forever-red flag this half
+    exists to remove, so the sentence is pinned instead of trusted.
+    """
+    from tortoise import hosted_api
+
+    flat = " ".join((hosted_api.health.__doc__ or "").split())
+
+    assert "RECORD_REFUSAL_WINDOW_SECONDS" in flat, (
+        f"the docstring must name the WINDOW that degrades status: {flat[-400:]}"
+    )
+    assert "record.refusing" in flat, (
+        f"the docstring must name the signal it folds: {flat[-400:]}"
+    )
+    assert "write-failure count" not in flat, (
+        "the docstring states the cumulative-counter fold #10185 forbids and "
+        f"the code does not do: {flat[-400:]}"
+    )
+
+
 # ════════════════════════════════════════════════════════════════════════════
 # 3. One flattener, one representation
 # ════════════════════════════════════════════════════════════════════════════
@@ -507,9 +550,13 @@ def test_content_columns_are_named_but_never_quoted():
     assert "content=<" in text and "props=<" in text, text
     assert "bank PIN" not in text, f"a captured turn reached the log: {text}"
     assert "x" * 20 not in text, f"the props tail reached the log: {text}"
-    assert "search_keys=err4032 release" in text, (
-        "a SHORT identifying value must still be printed, or the line stops "
-        f"being diagnosable: {text}"
+    assert "search_keys=<15 chars withheld>" in text, (
+        "`search_keys` is the SAME datum as `content` (E3's \"aliases + verbatim "
+        "tokens\", derived from content ∪ search_keys), so printing it leaks the "
+        f"turn through the column next door: {text}"
+    )
+    assert "err4032 release" not in text, (
+        f"the user's text reached the log: {text}"
     )
 
 
@@ -530,7 +577,7 @@ def test_content_columns_are_real_record_columns():
         f"withheld name(s) that are not a column of any record table: {unknown} — "
         "a stale entry protects nothing")
     for required in ("content", "quote", "props", "_search_text", "title",
-                     "topics"):
+                     "topics", "search_keys"):
         assert required in record_projection._CONTENT_COLUMNS, (
             f"{required!r} carries the user's own text and must be withheld")
 
@@ -688,3 +735,89 @@ def test_a_list_valued_snapshot_lands_flattened_not_as_json():
         )
     finally:
         conn.close()
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# 5. The migration's own array arm — the rows that ALREADY exist
+# ════════════════════════════════════════════════════════════════════════════
+
+MIGRATION_PATH = (Path(__file__).resolve().parent.parent
+                  / "supabase" / "migrations"
+                  / "20261102000001_record_point_search_keys_text.sql")
+
+
+def _shipped_flatten_ddl() -> str:
+    """The `USING` helper, EXTRACTED from the shipped migration — not a copy.
+
+    `USING` cannot carry a subquery, so the array arm is a helper function that
+    the migration creates and then DROPS; it is not in the schema afterwards.
+    The test re-creates the file's OWN SQL, so a drift between the shipped text
+    and the rule the write path applies fails here instead of on a converted row
+    in the record (a converted row is thereafter `replay(journal)`-divergent for
+    good: `rebuild_from_record` copies this column back into the graph).
+    """
+    text = MIGRATION_PATH.read_text(encoding="utf-8")
+    match = re.search(
+        r"CREATE OR REPLACE FUNCTION public\.record_flatten_search_keys"
+        r".*?\n\$\$;", text, re.S)
+    assert match, (
+        f"{MIGRATION_PATH.name} no longer carries the flattening helper its "
+        "`USING` expression needs"
+    )
+    return match.group(0)
+
+
+@pytest.mark.parametrize("value,expected", [
+    (["err4032", "release"], "err4032 release"),
+    (["a", "", "b"], "a b"),          # blank element DROPPED, never `a  b`
+    (["a", " ", "b"], "a b"),         # …a whitespace element is blank too
+    (["  x  "], "x"),                 # each element TRIMMED, never `  x  `
+    (["\ttab\t"], "tab"),
+    ([" "], None),                    # no surviving element -> no value at all
+    ([], None),
+    (["only"], "only"),
+    ("err4032 release", "err4032 release"),
+])
+def test_the_migration_converts_existing_rows_by_the_write_path_rule(value, expected):
+    """One datum, one form: the `USING` arm must equal the writer's rule.
+
+    The migration's header claims the converted value lands in "the one canonical
+    form". It did not: `string_agg(element, ' ')` neither trimmed an element nor
+    dropped a blank one, so a pre-existing array row could land as `a  b` or
+    `  x  ` (or as `" "` where the graph's fold has NO value) — a SECOND shape of
+    the datum, which is the defect this migration exists to remove. The
+    statement-builder path already gets this right (`_record_column_value`
+    restates `flatten_search_keys_prop`); this pins the SQL to the same rule, arm
+    for arm, by executing the shipped text.
+    """
+    conn = _record_schema_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(_shipped_flatten_ddl())
+            try:
+                cur.execute(
+                    "SELECT public.record_flatten_search_keys(%s::jsonb)",
+                    (json.dumps(value),))
+                actual = cur.fetchone()[0]
+            finally:
+                cur.execute("DROP FUNCTION IF EXISTS "
+                            "public.record_flatten_search_keys(jsonb)")
+    finally:
+        conn.close()
+
+    assert actual == expected, (
+        f"{value!r} converted to {actual!r}, expected {expected!r} — the record "
+        "would hold a second representation of a value the graph holds as "
+        f"{expected!r}"
+    )
+
+    if isinstance(value, list):
+        # …and the writer's own rule agrees, which is the property the header
+        # claims and the reason a converted row stays `replay(journal)`-equal.
+        written = record_projection._record_column_value(
+            "point", "search_keys", value)
+        written = None if written is record_projection._OMIT else written
+        assert actual == written, (
+            f"{value!r}: the migration's arm gives {actual!r} while the write "
+            f"path gives {written!r} — the two shapes diverge"
+        )

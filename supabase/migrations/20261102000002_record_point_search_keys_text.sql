@@ -50,11 +50,13 @@
 --     future reader would have to know to unwrap it (`#>> '{}'`), and the record
 --     would still be *unable* to accept the array form the graph can hand it.
 --
--- `flatten_search_keys_prop` remains the ONLY flattener: this migration does not
--- introduce a second one into the write path. The `USING` below is bootstrap
--- arithmetic on rows that already exist, and it flattens arrays with the SAME
--- rule (space-joined, order preserved) so a value that predates the ruling lands
--- in the one canonical form rather than being dropped or reshaped.
+-- `flatten_search_keys_prop` remains the ONLY flattener in the WRITE path: this
+-- migration does not introduce a second one. The `USING` below is bootstrap
+-- arithmetic on rows that already exist, and it applies the SAME rule
+-- (per-element `strip`, blank elements dropped, joined by one space, order
+-- preserved — see the function body) so a value that predates the ruling lands
+-- in the one canonical form rather than being dropped or reshaped into a second
+-- one.
 --
 -- A FORWARD migration, never an edit of 20261012000003: migrations are
 -- append-only history (the `check-migration-append-only` gate refuses an edit to
@@ -91,13 +93,30 @@ RETURNS text
 LANGUAGE sql
 IMMUTABLE
 AS $$
-    -- One datum, one form: the graph's flat space-joined string.
+    -- One datum, one form: the graph's flat space-joined string, by the SAME
+    -- rule `projection/entities.py::flatten_search_keys_prop` (and its restatement
+    -- at `record_projection._record_column_value`) applies per element:
+    --
+    --     " ".join(str(s).strip() for s in value if str(s).strip())
+    --
+    -- `string_agg(element, ' ')` alone is NOT that rule: it keeps a blank
+    -- element (so `["a", "", "b"]` would land as `a  b`, a double space) and
+    -- it does not trim (so `["  x  "]` would land as `  x  `). Either is a
+    -- SECOND shape of the datum, which is the defect this migration exists to
+    -- remove — the record is `replay(journal)` and `rebuild_from_record` copies
+    -- this column back into the graph. So each element is trimmed and blanks are
+    -- DROPPED; the character set is Python's ASCII whitespace, and a non-ASCII
+    -- whitespace element is the one residual (`str.strip()` is Unicode-aware,
+    -- `btrim` here is explicit). With no surviving element the aggregate is NULL,
+    -- which is the graph's own "no value" state (its flattener POPS a blank key).
     SELECT CASE jsonb_typeof($1)
                WHEN 'string' THEN $1 #>> '{}'
                WHEN 'array'  THEN (
-                   SELECT string_agg(element, ' ' ORDER BY ordinality)
+                   SELECT string_agg(btrim(element, E' \t\n\r\v\f'), ' '
+                                     ORDER BY ordinality)
                      FROM jsonb_array_elements_text($1)
                           WITH ORDINALITY AS t(element, ordinality)
+                    WHERE btrim(element, E' \t\n\r\v\f') <> ''
                )
                WHEN 'object' THEN $1::text
                -- A number/boolean is not a search-key set, but it IS a value:

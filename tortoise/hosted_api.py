@@ -6556,9 +6556,14 @@ async def health():
     the process can resolve) and the same class as ``backup_watcher`` (a
     durability seam whose "off" state must be distinguishable from "on"). See
     ``_record_health``; it collects no I/O, and only a REFUSED DSN, an unread
-    counter snapshot, an unread tenancy resolution, or a NON-ZERO record
-    write-failure count (``record.degraded``, #10620 — the record is dropping
-    rows the journal holds) degrades ``status``.
+    counter snapshot, an unread tenancy resolution, or an armed write REFUSED
+    inside ``RECORD_REFUSAL_WINDOW_SECONDS`` (``record.refusing`` feeding
+    ``record.degraded``, #10185/#10620 — the record is dropping rows RIGHT NOW)
+    degrades ``status``. A NON-ZERO ``record_write_failures`` whose last refusal
+    is older than that window does NOT: the counters are cumulative since
+    process start and never reset, so folding the total in would pin the
+    deployment degraded for the life of the process — the forever-red failure
+    #10185 forbids (``test_a_historical_refusal_does_not_degrade_forever``).
 
     Build check (#10447): ``build`` names the build that is SERVING — commit,
     whether the tree was dirty at build time (stamped by the deploy; `null` means
