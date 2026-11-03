@@ -1771,13 +1771,16 @@ def test_the_held_run_shape_this_tool_exists_to_repair_is_completed():
 # is ordinary progressive-job-creation lag; an UNREADABLE count is an abstention.
 
 def aged_run(rid, status="pending", jobs=0, age_s=1800.0, attempt=1,
-             path="python-ci.yml", name="Python CI"):
+             path="python-ci.yml", name="Python CI", started_age_s=None):
     from datetime import UTC, datetime
     created = datetime.fromtimestamp(R.time.time() - age_s, UTC).strftime(
         "%Y-%m-%dT%H:%M:%SZ")
+    started = ("" if started_age_s is None else datetime.fromtimestamp(
+        R.time.time() - started_age_s, UTC).strftime("%Y-%m-%dT%H:%M:%SZ"))
     return R.Run(id=rid, name=name or Path(path).stem, path=f".github/workflows/{path}",
                  status=status, conclusion=None, run_attempt=attempt,
-                 event="pull_request", created_at=created, job_count=jobs)
+                 event="pull_request", created_at=created, job_count=jobs,
+                 started_at=started)
 
 
 def test_aged_zero_job_pending_run_is_named_no_verdict_will_arrive(capsys):
@@ -1819,7 +1822,12 @@ def test_unreadable_job_count_is_an_abstention_never_a_zero():
 
 
 def test_zero_job_run_that_spent_its_attempt_budget_escalates():
-    plan = R.classify(pr(), [], [aged_run(1, jobs=0, age_s=3600.0, attempt=3)],
+    # The attempt's own start is stamped (a re-run that never got stamped abstains —
+    # see `test_a_queued_rerun_without_a_stamped_start_abstains`), so this is the
+    # in-class shape with its budget spent.
+    plan = R.classify(pr(), [],
+                      [aged_run(1, jobs=0, age_s=3600.0, attempt=3,
+                                started_age_s=3600.0)],
                       ["python-ci-gate"], EMITTERS, max_attempts=3)
     assert plan.rerun == [], "the budget is spent — re-running again is a loop"
     assert "python-ci-gate" in plan.exhausted
@@ -1842,7 +1850,7 @@ LIMITED = "HTTP 403: API rate limit exceeded for user ID 1. (secondary rate limi
 
 
 def test_rate_limited_read_raises_a_named_refusal_not_an_empty_result(monkeypatch):
-    monkeypatch.setattr(R, "_run", lambda argv: _fake(1, "", LIMITED))
+    monkeypatch.setattr(R, "_run", lambda argv, **_kw: _fake(1, "", LIMITED))
     monkeypatch.setattr(R, "_sleep", lambda s: None)
     with pytest.raises(R.MeasureError, match="RATE-LIMITED \\(not empty\\)"):
         R.gh_json(["api", "repos/o/r/commits/x/check-runs"], retries=0)
@@ -1852,7 +1860,7 @@ def test_rate_limited_read_is_retried_then_succeeds(monkeypatch):
     calls = {"n": 0}
     slept: list[float] = []
 
-    def fake(argv):
+    def fake(argv, **_kw):
         calls["n"] += 1
         return _fake(1, "", "HTTP 403: API rate limit exceeded. Retry-After: 7") \
             if calls["n"] == 1 \
@@ -1867,7 +1875,7 @@ def test_rate_limited_read_is_retried_then_succeeds(monkeypatch):
 def test_non_rate_limit_failure_is_not_retried_and_not_called_empty(monkeypatch):
     calls = {"n": 0}
 
-    def fake(argv):
+    def fake(argv, **_kw):
         calls["n"] += 1
         return _fake(1, "", "HTTP 404: Not Found")
 
@@ -1878,6 +1886,27 @@ def test_non_rate_limit_failure_is_not_retried_and_not_called_empty(monkeypatch)
     assert calls["n"] == 1
 
 
+def test_a_wait_the_pass_cannot_afford_is_a_refusal_not_a_silent_death(monkeypatch):
+    """⭐ P2 (review): the pass had no wall-clock bound, so the reads alone could sleep
+    past the consumer workflow's `timeout-minutes: 15` and the job would be KILLED —
+    neither `RATE-LIMITED (not empty)` nor an exit code ever emitted.
+
+    Discriminating: pre-fix, `gh_json` slept unconditionally and this raised nothing.
+    """
+    monkeypatch.setattr(R, "_run", lambda argv, **_kw: _fake(1, "", LIMITED))
+    monkeypatch.setattr(R, "_sleep",
+                        lambda s: pytest.fail("must not sleep past the pass budget"))
+    monkeypatch.setattr(R, "_PASS_DEADLINE", R.time.time() + 1.0)
+    with pytest.raises(R.MeasureError, match="RATE-LIMITED \\(not empty\\)"):
+        R.gh_json(["api", "repos/o/r/commits/x/check-runs"], retries=2)
+
+
+def test_a_pass_budget_leaves_room_for_the_repairs_inside_the_workflow_timeout():
+    """The budget is only useful if it is under the consumer's own `timeout-minutes`."""
+    assert R.PASS_BUDGET_S < 15 * 60, (
+        f"a {R.PASS_BUDGET_S}s budget cannot pre-empt a 900s workflow timeout")
+
+
 def test_permission_403_is_not_misread_as_a_rate_limit(monkeypatch):
     """`HTTP 403` is also how a PERMISSION error arrives — retrying it is wrong.
 
@@ -1886,7 +1915,7 @@ def test_permission_403_is_not_misread_as_a_rate_limit(monkeypatch):
     """
     calls = {"n": 0}
 
-    def fake(argv):
+    def fake(argv, **_kw):
         calls["n"] += 1
         return _fake(1, "", "HTTP 403: Resource not accessible by integration")
 
@@ -1914,11 +1943,35 @@ def test_backoff_honours_retry_after_then_reset_then_jitter():
     assert R._rate_limit_sleep_s("X-RateLimit-Reset: 1700000030", 0,
                                  now=1_700_000_000.0) == 30.0
     assert R._rate_limit_sleep_s("X-RateLimit-Reset: 1000", 0, now=970.0) != 30.0
-    # No hint: exponential with FULL jitter, inside [ceiling/2, ceiling].
-    lo, hi = R._rate_limit_sleep_s("secondary rate limit", 1), \
-        R._rate_limit_sleep_s("secondary rate limit", 1)
-    for v in (lo, hi):
-        assert R.RATE_LIMIT_BASE_S <= v <= min(R.RATE_LIMIT_BASE_S * 2, R.RATE_LIMIT_MAX_SLEEP_S)
+    # No hint: GitHub's documented floor ("wait at least one minute") with EQUAL
+    # jitter upward, never below the floor.
+    for attempt in (0, 1, 2):
+        for _ in range(5):
+            v = R._rate_limit_sleep_s("secondary rate limit", attempt)
+            assert R.RATE_LIMIT_MIN_SLEEP_S <= v <= R.RATE_LIMIT_MAX_SLEEP_S, (
+                f"a hint-less wait of {v}s at attempt {attempt} is inside the window "
+                "the limiter is still enforcing — GitHub's floor is one minute")
+
+
+def test_a_hint_less_backoff_reaches_the_documented_minute():
+    """⭐ P2 (review): the first cut backed off ~1 s then ~2 s, so BOTH retries were
+    spent inside ~3 s and a hint-less secondary limit ended as a refusal having never
+    effectively retried. GitHub's documented no-hint handling is *wait at least one
+    minute*.
+
+    Discriminating: pre-fix this returns <= 4.0.
+    """
+    assert R._rate_limit_sleep_s("secondary rate limit", 0) >= 60.0
+    assert R._rate_limit_sleep_s("secondary rate limit", 1) >= 60.0
+
+
+def test_a_server_hint_is_not_shortened_by_the_cap():
+    """⭐ P2 (review): a real `Retry-After: 300` was capped DOWN to 60 s, which is the
+    opposite of "do not retry until after that many seconds has elapsed".
+
+    Discriminating: pre-fix this returns 60.0.
+    """
+    assert R._rate_limit_sleep_s("HTTP 403: Retry-After: 300", 0) == 300.0
 
 
 # ── 14. the zero-job read must not fight a flood, and must not add load ─────
@@ -1945,7 +1998,7 @@ def test_job_reads_stop_after_the_aggregate_failure_bound(monkeypatch):
     workflow timeout: the job gets KILLED instead of exiting 2)."""
     calls = {"n": 0}
 
-    def refuse(argv):
+    def refuse(argv, **_kw):
         calls["n"] += 1
         return _fake(1, "", LIMITED)
 
@@ -2013,6 +2066,30 @@ def test_a_rerun_attempt_past_its_OWN_floor_is_still_named():
     assert [r.id for r in plan.rerun] == [41480218593]
 
 
+def test_a_queued_rerun_without_a_stamped_start_abstains():
+    """⭐ P1 (review): a fresh re-run attempt is `queued` with a NULL `run_started_at`,
+    and `created_at` never moves on a rerun — so ageing the attempt from the run's
+    creation returns ATTEMPT 1's age, and the 1200 s floor is already spent the instant
+    the fresh attempt exists. The run is then declared "no verdict will arrive",
+    cancelled, re-run AGAIN, and escalated EXHAUSTED for a run that was only waiting
+    for a slot — the exact failure `_zero_job_stalled` documents it prevents, and
+    the state #9115 says must be repaired by nothing.
+
+    Discriminating: pre-fix `attempt_age_seconds` falls back to `created_at` here, so
+    this run is named, cancelled and re-run.
+    """
+    run_ = aged_run(41480218593, jobs=0, age_s=1800.0, attempt=2)  # started_at == ""
+    assert run_.started_at == "" and run_.run_attempt == 2
+    assert R.attempt_age_seconds(run_) is None, (
+        "an attempt whose start has not been stamped has NO measurable age")
+    plan = R.classify(pr(), [], [run_], ["python-ci-gate"], EMITTERS, max_attempts=3)
+    assert plan.no_verdict == [], "an unmeasurable age must never enter the stall class"
+    assert plan.rerun == [], "so nothing destructive is authorised from it either"
+    assert plan.exhausted == []
+    assert "python-ci-gate" in plan.pending, (
+        "it is still 'late', not 'dead' — the deferral of a reopen is unchanged")
+
+
 def test_runs_at_head_reads_the_attempt_scoped_start(monkeypatch):
     """`run_started_at` is what makes the age attempt-scoped; it must be carried."""
     monkeypatch.setattr(R, "_READ_CACHE", {})
@@ -2039,23 +2116,49 @@ def test_runs_at_head_reads_the_attempt_scoped_start(monkeypatch):
 # only for a run with a MEASURED zero jobs — there is no job to destroy.
 
 class _Done:
-    def __init__(self, returncode=0):
+    """A `subprocess.CompletedProcess` stand-in that can carry a refusal's stderr."""
+
+    def __init__(self, returncode=0, stdout="", stderr=""):
         self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+
+
+def _api(*, head="a" * 40, status="queued", jobs=0, settle="completed"):
+    """`gh_json` for the cancel path: PR head, LIVE run status, LIVE job count, settle.
+
+    The runs endpoint is answered twice — once by `_cancel`'s pre-act re-measurement and
+    then by the settle polls — so the first answer is the live status and every later
+    one is `settle`.
+    """
+    seen = {"runs": 0}
+
+    def fake(a, **_kw):
+        path = a[-1] if a else ""
+        if a[:1] == ["pr"]:
+            return {"headRefOid": head}
+        if "jobs" in path:
+            return {"total_count": jobs}
+        seen["runs"] += 1
+        return {"status": status if seen["runs"] == 1 else settle}
+    return fake
+
+
+def _verbs(verbs, *, cancel_rc=0, cancel_stderr="", rerun_rc=0):
+    def fake(argv, **_kw):
+        verb = argv[-1].rsplit("/", 1)[-1]
+        verbs.append(verb)
+        if verb == "cancel":
+            return _Done(cancel_rc, stderr=cancel_stderr)
+        return _Done(rerun_rc)
+    return fake
 
 
 def test_a_queued_zero_job_run_is_cancelled_before_it_is_rerun(monkeypatch):
-    monkeypatch.setattr(R, "gh_json", lambda *a, **k: {"headRefOid": "a" * 40})
+    monkeypatch.setattr(R, "gh_json", _api())
     monkeypatch.setattr(R, "_sleep", lambda s: None)
     verbs: list[str] = []
-
-    def fake(argv, **_kw):
-        verbs.append(argv[-1].rsplit("/", 1)[-1])
-        return _Done()
-    monkeypatch.setattr(R, "_run", fake)
-    # The settle wait polls the run; report it completed on the first poll.
-    monkeypatch.setattr(R, "gh_json",
-                        lambda a, **k: ({"headRefOid": "a" * 40} if a[:1] == ["pr"]
-                                        else {"status": "completed"}))
+    monkeypatch.setattr(R, "_run", _verbs(verbs))
     state = R._rerun("o/r", run(41523739094, "python-ci.yml", "pending"), 1,
                      expected_head="a" * 40)
     assert state == "cancelled_rerun"
@@ -2065,14 +2168,17 @@ def test_a_queued_zero_job_run_is_cancelled_before_it_is_rerun(monkeypatch):
 
 
 def test_a_refused_cancel_does_not_spend_the_rerun(monkeypatch):
-    """A cancel the API refuses must not be followed by a rerun it will refuse too."""
-    monkeypatch.setattr(R, "gh_json", lambda *a, **k: {"headRefOid": "a" * 40})
-    verbs: list[str] = []
+    """A cancel the API refuses must not be followed by a rerun it will refuse too.
 
-    def fake(argv, **_kw):
-        verbs.append(argv[-1].rsplit("/", 1)[-1])
-        return _Done(returncode=0 if argv[-1].endswith("/cancel") else 1)
-    monkeypatch.setattr(R, "_run", fake)
+    ⭐ P2 (review): the stub GRANTED the cancel, so the `returncode != 0` branch this
+    test is named for was never entered (deleting the guard left it green), and the
+    un-patched `_sleep` made the failed settle loop cost 9 real seconds per run.
+    """
+    monkeypatch.setattr(R, "gh_json", _api())
+    monkeypatch.setattr(R, "_sleep",
+                        lambda s: pytest.fail("a refused cancel has no settle loop to sleep in"))
+    verbs: list[str] = []
+    monkeypatch.setattr(R, "_run", _verbs(verbs, cancel_rc=1))
     assert R._rerun("o/r", run(1, "ci.yml", "pending"), 1,
                     expected_head="a" * 40) == "failed"
     assert verbs == ["cancel"], "no rerun may be issued after a refused cancel"
@@ -2082,19 +2188,122 @@ def test_a_cancel_that_never_settles_is_not_followed_by_a_rerun(monkeypatch):
     """The settle wait is bounded, and an unsettled run is a failure, not a guess."""
     monkeypatch.setattr(R, "_sleep", lambda s: None)
     verbs: list[str] = []
-
-    def fake(argv, **_kw):
-        verbs.append(argv[-1].rsplit("/", 1)[-1])
-        return _Done()
-    monkeypatch.setattr(R, "_run", fake)
-
-    def fake_json(a, **k):
-        return ({"headRefOid": "a" * 40} if a[:1] == ["pr"]
-                else {"status": "in_progress"})
-    monkeypatch.setattr(R, "gh_json", fake_json)
+    monkeypatch.setattr(R, "_run", _verbs(verbs))
+    monkeypatch.setattr(R, "gh_json", _api(settle="in_progress"))
     assert R._rerun("o/r", run(1, "ci.yml", "pending"), 1,
                     expected_head="a" * 40) == "failed"
     assert verbs == ["cancel"], "an unsettled run must not be re-run blindly"
+
+
+def test_a_run_whose_jobs_appear_before_the_cancel_is_never_cancelled(monkeypatch):
+    """⭐ P1 (review): the cancel rests on a `job_count` measured at the START of the
+    pass and cached for all of it, while `build_plans` scans every PR before `report`
+    acts. The module's OWN floor comment records that the class is known to contain
+    runs that would have created jobs on their own — so a measurement artifact was
+    being acted on destructively.
+
+    Discriminating: pre-fix the cancel is issued from the stale classification.
+    """
+    monkeypatch.setattr(R, "_sleep", lambda s: pytest.fail("must not settle-wait"))
+    verbs: list[str] = []
+    monkeypatch.setattr(R, "_run", _verbs(verbs))
+    # The classification said 0 jobs; the jobs endpoint says 4 AT CANCEL TIME.
+    monkeypatch.setattr(R, "gh_json", _api(jobs=4))
+    assert R._rerun("o/r", run(1, "ci.yml", "pending"), 1,
+                    expected_head="a" * 40) == "target_moved"
+    assert verbs == [], (
+        "cancelling a run that has 4 jobs destroys work — the safety property must be "
+        "measured at the moment of action, not at the start of the pass")
+
+
+def test_a_run_that_completed_before_the_cancel_is_never_cancelled(monkeypatch):
+    """The same hazard in its worst form: a run that FINISHED in the window.
+
+    Pre-fix `_cancel` returned True for an already-`completed` run, so a successful
+    verdict was converted into a fresh attempt and the record claimed
+    `cancelled_first: True` for a cancel that did not happen.
+    """
+    monkeypatch.setattr(R, "_sleep", lambda s: pytest.fail("must not settle-wait"))
+    verbs: list[str] = []
+    monkeypatch.setattr(R, "_run", _verbs(verbs))
+    monkeypatch.setattr(R, "gh_json", _api(status="completed", jobs=0))
+    assert R._rerun("o/r", run(1, "ci.yml", "pending"), 1,
+                    expected_head="a" * 40) == "target_moved"
+    assert verbs == []
+
+
+def test_an_unreadable_pre_act_read_refuses_the_cancel(monkeypatch):
+    """A gate that cannot be read refuses the destructive act — it never guesses."""
+    monkeypatch.setattr(R, "_sleep", lambda s: pytest.fail("must not settle-wait"))
+    verbs: list[str] = []
+
+    def raise_it(a, **k):
+        if a[:1] == ["pr"]:  # the HEAD re-read is fine — the pre-ACT gate is what fails
+            return {"headRefOid": "a" * 40}
+        raise R.MeasureError("RATE-LIMITED (not empty): refused")
+
+    monkeypatch.setattr(R, "gh_json", raise_it)
+    monkeypatch.setattr(R, "_run", _verbs(verbs))
+    assert R._rerun("o/r", run(1, "ci.yml", "pending"), 1,
+                    expected_head="a" * 40) == "failed"
+    assert verbs == [], "an unreadable safety surface must not authorise a cancel"
+
+
+def test_a_cancel_the_api_says_was_never_queued_falls_back_to_the_rerun(monkeypatch):
+    """⭐ P2 (review): `409 Cannot cancel a workflow run that has not been queued yet`
+    is the documented answer for the orphan shape this class targets (orgs/community
+    #206436). Pre-fix it was a terminal 'failed' every window, with no alternative
+    path and the stderr discarded, so the tool escalated the very PR it repairs.
+    """
+    monkeypatch.setattr(R, "_sleep", lambda s: None)
+    verbs: list[str] = []
+    monkeypatch.setattr(R, "_run", _verbs(
+        verbs, cancel_rc=1,
+        cancel_stderr="gh: Cannot cancel a workflow run that has not been queued yet. "
+                      "(HTTP 409)"))
+    monkeypatch.setattr(R, "gh_json", _api())
+    assert R._rerun("o/r", run(1, "ci.yml", "pending"), 1,
+                    expected_head="a" * 40) == "rerun_not_queued"
+    assert verbs == ["cancel", "rerun"], (
+        "the 409 means there is nothing to cancel, so the direct rerun is the "
+        "remaining primitive — not a terminal failure")
+
+
+def test_the_settle_polls_carry_no_retry_and_their_own_timeout(monkeypatch):
+    """⭐ P2 (review): the settle polls used the DEFAULT `retries=2`, so ONE run's
+    settle could cost ~8 minutes (4 polls x 3 attempts x `_run(timeout=120)` plus hint
+    sleeps) against a 15-minute workflow — the in-code claim was false.
+    """
+    monkeypatch.setattr(R, "_sleep", lambda s: None)
+    monkeypatch.setattr(R, "_run", _verbs([]))
+    base = _api()
+    seen: list[tuple[str, dict]] = []
+
+    def fake(a, **k):
+        seen.append((a[-1] if a else "", k))
+        return base(a, **k)
+    monkeypatch.setattr(R, "gh_json", fake)
+    assert R._cancel("o/r", run(1, "ci.yml", "pending")) == "cancelled"
+    runs_reads = [k for path, k in seen if path.endswith("actions/runs/1")]
+    assert len(runs_reads) >= 2, "the pre-act read and the settle poll must both read the run"
+    for _path, kwargs in seen:
+        assert kwargs.get("retries") == 0, (
+            f"a gate/settle read retried a refused read: {kwargs}")
+    for kwargs in runs_reads[1:]:
+        assert kwargs.get("timeout") == R._CANCEL_SETTLE_POLL_TIMEOUT_S, (
+            f"a settle poll used the default 120 s timeout: {kwargs}")
+
+
+def test_a_cancel_is_not_issued_when_the_pass_has_no_settle_budget_left(monkeypatch):
+    """The per-pass budget is spent BEFORE the POST: cancelling without being able to
+    observe the settle would destroy the attempt and then be refused a rerun."""
+    monkeypatch.setattr(R, "_sleep", lambda s: pytest.fail("must not sleep"))
+    verbs: list[str] = []
+    monkeypatch.setattr(R, "_run", _verbs(verbs))
+    monkeypatch.setattr(R, "gh_json", _api())
+    monkeypatch.setattr(R, "_CANCEL_SETTLE_SPENT_S", R.CANCEL_SETTLE_PASS_BUDGET_S)
+    assert R._cancel("o/r", run(1, "ci.yml", "pending")) == "no_budget"
+    assert verbs == [], "nothing may be cancelled with no budget to re-establish a verdict"
 
 
 def test_a_cancelled_rerun_reports_success_and_does_not_escalate(monkeypatch):
@@ -2106,6 +2315,30 @@ def test_a_cancelled_rerun_reports_success_and_does_not_escalate(monkeypatch):
     assert recs[0]["rerun"][0]["ok"] is True
     assert recs[0]["rerun"][0]["cancelled_first"] is True
     assert code == 0, "a completed repair must not escalate"
+
+
+def test_a_moved_target_is_recorded_as_a_skip_and_does_not_escalate(monkeypatch):
+    """A run that started/completed while the pass ran is a SKIP — like 'head_moved'."""
+    monkeypatch.setattr(R, "_rerun", lambda *a, **k: "target_moved")
+    plan = _plan(absent=["python-ci-gate"],
+                 rerun=[run(41523739094, "python-ci.yml", "pending")])
+    code, recs = R.report([plan], apply=True, trigger_ok=True, repo="o/r", cooldown_min=60)
+    assert recs[0]["rerun"][0]["ok"] is False
+    assert recs[0]["rerun"][0]["target_moved"] is True
+    assert code == 0, "the run repaired itself — escalating would be a false alarm"
+
+
+def test_a_409_cancel_is_named_in_the_record(monkeypatch):
+    """The direct-rerun fallback is a success, and the record says WHY (never a clean
+    `cancelled_first` it did not earn)."""
+    monkeypatch.setattr(R, "_rerun", lambda *a, **k: "rerun_not_queued")
+    plan = _plan(absent=["python-ci-gate"],
+                 rerun=[run(41523739094, "python-ci.yml", "pending")])
+    code, recs = R.report([plan], apply=True, trigger_ok=True, repo="o/r", cooldown_min=60)
+    entry = recs[0]["rerun"][0]
+    assert entry["ok"] is True and entry["cancel_refused_409"] is True
+    assert "cancelled_first" not in entry
+    assert code == 0
 
 
 # ── 16. the two per-pass resets and the `no_verdict` record key are load-bearing ──
@@ -2121,11 +2354,18 @@ def test_every_pass_clears_the_read_cache_and_the_job_read_failure_count(monkeyp
     monkeypatch.setattr(R, "open_prs", lambda repo, include_drafts: [])
     monkeypatch.setattr(R, "_READ_CACHE", {("checks", "o/r", "a" * 40): [{"stale": True}]})
     monkeypatch.setattr(R, "_JOB_READ_FAILURES", R.JOB_READ_FAILURE_LIMIT)
+    monkeypatch.setattr(R, "_CANCEL_SETTLE_SPENT_S", R.CANCEL_SETTLE_PASS_BUDGET_S)
+    monkeypatch.setattr(R, "_PASS_DEADLINE", 0.0)
     R.build_plans("o/r", ["python-ci-gate"], EMITTERS, False, 3)
     assert R._READ_CACHE == {}, (
         "a cached read that survives a pass describes a head that may have moved")
     assert R._JOB_READ_FAILURES == 0, (
         "a leaked count makes EVERY later pass abstain on EVERY job count")
+    assert R._CANCEL_SETTLE_SPENT_S == 0.0, (
+        "a leaked settle spend silently disables the cancel on every later pass")
+    assert R._PASS_DEADLINE is not None and R._PASS_DEADLINE > R.time.time(), (
+        "the wall-clock budget must be RE-ARMED per pass, not inherited from the last"
+        " one — a spent deadline turns every later refusal into an instant exit 2")
 
 
 def test_the_json_record_carries_no_verdict_for_machine_readers(monkeypatch, capsys, tmp_path):
