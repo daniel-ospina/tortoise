@@ -199,14 +199,24 @@ client/verify_client.sh                         # clean-venv gate
 ## 8a. Credentials in a long-lived session — the bridge (#10605)
 
 **The defect this closes.** A harness config that carries an `Authorization`
-header is a CAPTURE, not a lookup: `${TORTOISE_API_KEY}` is expanded once, when
-the harness process starts, and the resulting string is replayed for the life of
-that process. A session that lives for hours therefore keeps sending whatever it
-expanded at start-up — empty if the key was not in the environment yet, stale if
-it has rotated — and the server can only answer
-`Unauthorized: invalid or missing Bearer token`. That message is accurate and
-useless: it points at the credential's VALUE when the client never looked again
-(#10605; #5200 is the same class reached by a variable-name mismatch).
+header is a CAPTURE, not a lookup — and the capture has two halves, only one of
+which is the `${VAR}` syntax. The EXPANSION is not the stale part: on the
+harness that reported this, `expandExpr()` **re-runs at every connect**
+(measured from its source twice, and on the wire with 3/3 `initialize` POSTs,
+see #10605). What is frozen is `process.env` itself, captured when the harness
+process starts, plus the per-CONNECTION resolution: the header a config yields
+is resolved once per connection and replayed for that connection's life, so a
+mid-connection rotation is invisible until the next one. An UNSET variable
+expands silently to `""`, so a session whose credential is exported under a
+name the client never reads sends an `Authorization: Bearer` header with
+nothing after the scheme, on every connect — the shape that produced the
+reported 401.
+
+So the server can only answer `Unauthorized: invalid or missing Bearer token`.
+That message is accurate and useless: it points at the credential's VALUE when
+the name, or the source, was never read again after the process started. The
+design consequence is a CONFIG-NAME fix, not a cache-expiry fix (#10605;#5200 is
+the same class reached by a variable-name mismatch).
 
 **The fix, in two layers.**
 

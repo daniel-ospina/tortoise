@@ -1,10 +1,15 @@
 """The stdio ↔ Streamable-HTTP bridge (#10605).
 
-The bridge is the durable half of #10605: a harness config that carries
-`Authorization: Bearer ${VAR}` expands `${VAR}` ONCE, when the harness starts, so
-a long-lived session replays an empty-or-stale header forever. The bridge is a
-local stdio command instead, and resolves the credential on EVERY forwarded
-request.
+The bridge is the durable half of #10605. A harness config that carries
+`Authorization: Bearer ${VAR}` is a CAPTURE in two ways, and it is worth being
+precise because the difference decides the fix: the `${VAR}` EXPANSION re-runs at
+every connect (measured on the reporting harness, #10605), but it expands a
+`process.env` frozen when the harness started — and an UNSET variable expands
+silently to `""`, so a credential exported under a name the client never reads
+sends an empty Bearer on every connect. That name is the reported defect, and a
+name-level fix is what the bridge gives: a local stdio command that resolves the
+credential from its SOURCES on EVERY forwarded request, so a rotation or a
+late-added key takes effect without a restart.
 
 Every assertion here is end-to-end through a REAL subprocess: the tests write a
 JSON-RPC line to the bridge's stdin and read what it wrote to stdout, while the
@@ -28,6 +33,52 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 os.environ.setdefault("TORTOISE_SECRET_PEPPER", "test-static-pepper")
+
+
+def test_no_artifact_restates_the_refuted_capture_mechanism():
+    """#10605 review (F4): the STATED mechanism must be the MEASURED one.
+
+    The PR first said `${TORTOISE_API_KEY}` "is expanded once, when the harness
+    process starts, and the resulting string is replayed for the life of that
+    process". The tracker refuted that twice from the harness source (2026-11-02,
+    2026-11-03) and once on the wire (3/3 `initialize` POSTs): `expandExpr()`
+    RE-RUNS at every connect. What is frozen is `process.env` — captured at
+    process start — plus the per-connection resolution; an unset `${VAR}` expands
+    silently to `""`, which is why the NAME, not a cache, was the defect.
+
+    The three artifacts that carried the false version are the module docstring,
+    this file's docstring, and `docs/client-server-split.md` §8a. A wrong
+    mechanism is not cosmetic: it points the next reader at cache expiry (a
+    re-expansion fix) instead of at the config NAME, which is the fix that
+    actually landed — every one of the three is pinned here so the plausible-but-
+    wrong sentence cannot come back in a later tidy-up.
+    """
+    import tortoise.mcp_bridge as bridge_module
+
+    artifacts = {
+        "tortoise/mcp_bridge.py": bridge_module.__doc__ or "",
+        "tests/test_mcp_bridge.py": __doc__ or "",
+        "docs/client-server-split.md": (
+            REPO_ROOT / "docs" / "client-server-split.md"
+        ).read_text(encoding="utf-8"),
+    }
+    refuted = (
+        "expanded once, when the harness",
+        "replayed for the life of the process",
+        "replays an empty-or-stale header forever",
+    )
+    for name, text in artifacts.items():
+        for phrase in refuted:
+            assert phrase not in text, (
+                f"{name} restates the REFUTED capture mechanism ({phrase!r}) — "
+                "the expansion re-runs at every connect; the frozen thing is "
+                "process.env and the per-connection resolution (#10605)")
+    for name in ("tortoise/mcp_bridge.py", "docs/client-server-split.md"):
+        assert "re-runs at every connect" in artifacts[name].lower(), (
+            f"{name} must state the MEASURED mechanism (the expansion re-runs at "
+            "every connect) rather than leaving the reader to infer it")
+        assert "process.env" in artifacts[name], (
+            f"{name} must name what is actually frozen: process.env")
 
 
 # ── A spec-shaped Streamable-HTTP upstream that records what it receives ──────
@@ -277,6 +328,30 @@ class _Bridge:
         assert self.proc.stdout is not None
         ready, _, _ = select.select([self.proc.stdout], [], [], timeout)
         assert not ready, f"expected no stdout message, got: {self.proc.stdout.readline()!r}"
+
+    @staticmethod
+    def await_requests(stub, count: int, timeout: float = 15.0) -> None:
+        """Block until the stub has received `count` requests (bounded).
+
+        #10727 review nit: asserting `len(stub.requests) == count` immediately
+        after a fixed silence window measured the RUNNER's scheduling, not the
+        bridge — under load the forward had not landed yet and the test redded as
+        if the bridge had not forwarded at all. The silence proof and the
+        forward-landed proof are different claims, so they get different
+        determinism: silence is a bounded window (the peer emits nothing, so
+        there is nothing to wait FOR), while a forward is an EVENT that will
+        arrive, so it is polled to a deadline. This can only turn a correct
+        bridge green; it cannot mask an extra reply line, which `read_nothing`
+        already reds on.
+        """
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if len(stub.requests) >= count:
+                return
+            time.sleep(0.02)
+        raise AssertionError(
+            f"the bridge forwarded {len(stub.requests)} request(s), expected "
+            f"{count} within {timeout}s")
 
     def close(self) -> None:
         if self.proc.stdin:
@@ -530,6 +605,7 @@ class TestRefusal:
 
         bridge.send({"jsonrpc": "2.0", "method": "notifications/initialized"})
         bridge.read_nothing()
+        bridge.await_requests(stub, 1)
         assert len(stub.requests) == 1
 
     def test_a_transport_failure_is_an_error_not_a_crash(self, home, bridge_factory):
