@@ -82,31 +82,36 @@ a reader who finds the number has drifted should search the quoted fragment: tha
 | `GET /v1/events` (hosted, `tortoise/hosted_api.py::events_poll`) | `limit=100` (`le=_MAX_EVENT_PAGE`) | **REFUSES at the edge** | `limit: int = Query(100, ge=1, le=_MAX_EVENT_PAGE)` in `events_poll` refuses 0 at the route; the seam below it (`tortoise/event_store.py::read_after`) refuses both ends — see §3 |
 
 ⚠️ **`get_cross_lens_candidates` MARKS one of its three bounds.** The marker is
-`truncated = len(all_candidates) > limit` in `tortoise/sdk.py::get_cross_lens_candidates`, where `limit`
-derives from `max_candidates` (the same function). Two further bounds on that same surface do not reach
-it at all: `top_k` (clamped to `CROSS_LENS_ANN_TOP_K_MAX`) bounds the per-point ANN pull
-(`limit=top_k + 1`) and `CROSS_LENS_POOL_CAP = 1000` (`tortoise/sdk.py::CROSS_LENS_POOL_CAP`) cuts the
-eligible pool before the candidate cut. A saturated ANN window over a point with more above-threshold
-neighbours than `top_k` is precisely the *"a downstream leg lost rows"* case §4 item 3 requires to flip
-the marker — and it stays `false`. Read `truncated: false` on this surface as *"the candidate cut did
-not fire"*, never as *"nothing was lost"*: the two SILENT bounds are named here rather than folded into
-the marker because folding them in is a code change (the return is already a `dict`, so it is additive
-and needs no surface approval — `issue_insight`'s `_with_truncation` helper performs exactly that
-additive fold, and `tortoise_fts_query` folds a *saturated window* into its marker —
+`truncated = len(all_candidates) > limit` (`tortoise/sdk.py::get_cross_lens_candidates`), where `limit`
+derives from `max_candidates` (same symbol). Two further bounds on that same surface do not reach it at
+all: `top_k`, clamped to `CROSS_LENS_ANN_TOP_K_MAX` (`tortoise/sdk.py::CROSS_LENS_ANN_TOP_K_MAX`),
+bounds the per-point ANN pull (`limit=top_k + 1`, `tortoise/sdk.py::_cross_lens_pairs`), and
+`CROSS_LENS_POOL_CAP = 1000` (`tortoise/sdk.py::CROSS_LENS_POOL_CAP`) cuts the eligible pool
+(`tortoise/sdk.py::_cross_lens_pool`). A saturated ANN window over a
+point with more above-threshold neighbours than `top_k` is precisely the *"a downstream leg lost
+rows"* case §4 item 3 requires to flip the marker — and it stays `false`. Read `truncated: false` on
+this surface as *"the candidate cut did not fire"*, never as *"nothing was lost"*: the two SILENT
+bounds are named here rather than folded into the marker because folding them in is a code change
+(the return is already a `dict`, so it is additive and needs no surface approval — `issue_insight`'s
+`_with_truncation` helper (`tortoise/sdk.py::_with_truncation`) performs exactly that additive fold, and
+`tortoise_fts_query` (`tortoise/sdk.py::tortoise_fts_query`) folds a *saturated window* into its marker —
 `_trunc["incomplete"] = bool(_leg_peak >= str_limit or _lost_legs)`, which is the precedent for the
 ANN-window case specifically), and this document is the census, not the fix.
 
 ⚠️ **`tortoise_query`'s structural arm (`text=None`) is a different surface, and not ONE surface.**
-With `offset`/`page` given it returns a `hasMore`/`total` dict — the `tag` arm and the default arm,
-both in `tortoise/mcp_server.py::tortoise_query`, reaching `tortoise/sdk.py::query`. Unpaginated it
-returns a bare list on the success path (the same two arms through `TortoiseSDK.query`) — except when
-that list is empty, a `kind` was given, **and** `compute_suggestion` has a hint to offer, where
-`tortoise/mcp_server.py::tortoise_query` returns `{"results", "suggestion"}`, a dict carrying no
-`hasMore`/`total`. Boundary refusals (`page < 1`, `offset < 0`, `limit < 1`) and an SDK failure
-surfacing from `_safe` return a structured error dict instead. **This block is not an inventory**:
-none of these branches has a row in the census above, and per the absence rule below they read as
-named-but-not-yet-censused, never as compliant — a complete enumeration is a finding for a census row,
-not a parenthetical here.
+With `offset`/`page` given it returns a `hasMore`/`total` dict — the `tag` arm and the default arm of
+`tortoise/mcp_server.py::tortoise_query`, the latter through `TortoiseSDK.query`
+(`tortoise/sdk.py::query`). Unpaginated it returns a
+bare list on the success path — the `tag` arm and the default arm of
+`tortoise/mcp_server.py::tortoise_query` through `TortoiseSDK.query` (`tortoise/sdk.py::query`) — except
+when that list is empty, a `kind` was given, **and**
+`compute_suggestion` (`tortoise/query_suggestions.py::compute_suggestion`) has a hint to offer, where that same arm
+returns `{"results", "suggestion"}`, a
+dict carrying no `hasMore`/`total`. Boundary refusals (`page < 1`, `offset < 0`, `limit < 1`) and an
+SDK failure surfacing from `_safe` return a structured error dict instead. **This block is not an
+inventory**: none of these branches has a row in the census above, and per the absence rule below
+they read as named-but-not-yet-censused, never as compliant — a complete enumeration is a finding for
+a census row, not a parenthetical here.
 
 ⚠️ **The census is a population, and this table is the part of it that has been measured** — it is
 NOT yet exhaustive. §1 also names *body/log caps* and *ingest chunking*, and no row here covers
