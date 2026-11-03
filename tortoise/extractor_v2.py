@@ -5833,8 +5833,11 @@ _SCRIPT_BLOCKS = (
 #: Without these ranges an accented letter is in NO block, so dropping an accent
 #: (`café`/`cafe`) would refuse a fold that has nothing to do with language.
 _LATIN_SUPPLEMENT_BLOCKS = (
-    (0x00C0, 0x024F),   # Latin-1 Supplement + Latin Extended-A/B
+    (0x00AA, 0x02AF),   # Latin-1 Supplement, Latin Ext-A/B, IPA Extensions
     (0x1E00, 0x1EFF),   # Latin Extended Additional
+    (0xFB00, 0xFB06),   # Latin ligatures (`ﬁ` `ﬂ` — routine in PDF extraction)
+    (0xFF21, 0xFF5A),   # FULLWIDTH LATIN A-Z / a-z (the gap between them is
+                        # punctuation, excluded by the letters-only test)
 )
 
 
@@ -5858,6 +5861,14 @@ _LATIN_SUPPLEMENT_BLOCKS = (
 #: GREEK `α` + a mark, which keeps `ἐν ἀρχῇ`/`εν αρχη` folding and keeps a claim
 #: captured NFC from refusing to fold with the same claim captured NFD.  Only a
 #: base that is ITSELF unlisted is an unknown script.
+#:
+#: ⚠️ Declared residual, so it is not mistaken for coverage: this closes the
+#: LETTER case only. A DIGIT or MARK in an unlisted script reaches no dimension
+#: (Thai `๑๒๓` against `123` reads as a `number` difference, which permits a
+#: SUPERSEDE), because a non-letter in no block is not a script — narrowing that
+#: to treat non-letters as script-bearing would need `Script=Unknown` properties
+#: this stdlib does not expose, and the value dimension already owns the
+#: digit case for every script that IS listed.
 #:
 #: Non-letters are not a script: `×`, `÷`, an emoji and a currency symbol stay
 #: one-sided content tokens, exactly as they were before this reading existed.
@@ -12507,11 +12518,20 @@ def _compact_guarantee_tail(master: dict, lines: list[str]) -> str:
 # loss: a wrong keep is noise, a wrong drop is a deleted claim).
 #
 # ⚠️ ``_SCRIPT_BLOCKS`` is NOT in that list any more, and its absence is the one
-# place #5329's class was closed rather than counted: a letter in no known block
+# place #5329's class was closed rather than counted: a LETTER in no known block
 # is an UNKNOWN script (``_UNLISTED_SCRIPT``), which IS an identity difference,
 # so the fold is REFUSED and both claims survive. The script list stays finite —
-# its incompleteness now costs a refused fold instead of a dropped claim. It is
-# left out of this census's population for the same reason: nothing is absorbed.
+# its incompleteness now costs a refused fold instead of a dropped claim.
+#
+# ⛔ It is left out of this census's population, and that is NOT because "a
+# script token is never absorbed" — that would be false, and subtractive
+# reasoning is how a residual reports as healthy (review ISSUE 2). Two things
+# still absorb a script token and ARE counted here: a one-sided token in a
+# script already present on BOTH sides (the usual broadening direction), and a
+# MARKS-and-DIGITS-only script difference, which reaches no dimension at all
+# because a non-letter in no block is not a script. The script POPULATION is
+# excluded because the letter case — the one this issue named — no longer
+# folds, not because the census cannot see it.
 #
 # The lists are not the bug: closing the class needs a model, not a longer list
 # (#5329's own recommendation), and failing closed on any unknown token would
