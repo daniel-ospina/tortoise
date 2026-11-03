@@ -1834,12 +1834,21 @@ def converge(
     # `--json --status`: a non-zero code here would refuse to arm the schedule on the one box that
     # most needs it, naming a measurement failure that did not happen. Say so in the record, so a
     # reader of the plan knows the real pass will be non-zero.
+    # ⛔ AND THE REAL-PASS CODE IS CONDITIONAL (review round 4, P3). "A REAL pass on this box exits
+    # 6" was a promise about a DIFFERENT pass: a real pass also attempts growth, so a wedged box
+    # that fails to grow keeps `under-target`/exit **4** (`test_a_wedged_box_that_ALSO_failed_to_
+    # grow_keeps_exit_4` pins exactly that), and `main`'s ladder returns 1/3/2/4/5 BEFORE the
+    # exit-6 arm. The notes are what the INSTALLER's operator-facing advisory is written from, so
+    # an unconditional number here becomes an unconditional number there.
     if record["dry_run"] and record["verdict"] in ("wedged", "uncertified"):
         record["notes"].append(
             f"{record['verdict']} is REPORTED, not returned: --status/--dry-run change nothing by "
             "design, so this pass exits 0 (the installer's install-time probe runs exactly this "
             "mode and a non-zero exit reads as 'the guard cannot MEASURE'). A REAL pass on this "
-            f"box exits {'6' if record['verdict'] == 'wedged' else '2'}."
+            f"box exits {'6' if record['verdict'] == 'wedged' else '2'} when nothing else about it "
+            "has already decided the code — a pass that is refused, cannot measure, fails an "
+            "action, fails to grow, or is refused by the provisioner reports ITS OWN code and "
+            "still names this state (see the EXIT block)."
         )
     record["live"] = live
     return record

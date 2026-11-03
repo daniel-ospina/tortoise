@@ -617,15 +617,28 @@ status() {
       # first fix attempt (making `--status` return 6/2) REFUSED to arm the schedule on the one box
       # that most needs it, naming a measurement failure that had not happened. So: arm it, and say
       # what the pass will report each interval.
+      # ⛔ PROMISE THE STATE, NOT A NUMBER (review round 4, P3). This `case` matches the JSON KEY
+      # `wedged`, which says the POOL is wedged — it does NOT say the VERDICT. The override in
+      # `tools/runner_autoscale.py` fires only when the pass has no failure of its own
+      # (`record["verdict"] in (…benign…) and record.get("problem_kind") != "no-listener"`), so a
+      # wedged pool that ALSO fails to grow reports `under-target`/exit **4** with
+      # `"wedged": [...]` still in the record — pinned by this PR's own
+      # `test_a_wedged_box_that_ALSO_failed_to_grow_keeps_exit_4`. "every fire will report exit 6"
+      # was therefore false in exactly the co-occurrence that PR calls the NORMAL shape. `main`'s
+      # ladder returns 1/3/2/4/5 BEFORE the exit-6 arm, so the honest sentence names 6 and says
+      # what outranks it.
       case "$probe_out" in
         *wedged*)
-          echo "NOTE: the pool is WEDGED — MEASURED, not a measurement failure (every fire will report" >&2
-          echo "      exit 6 and change nothing). Repair it as docs/ops/ci-runner-x64.md describes;" >&2
-          echo "      the schedule is armed so the state stops being invisible." >&2 ;;
+          echo "NOTE: the pool is WEDGED — MEASURED, not a measurement failure. A fire exits 6 when" >&2
+          echo "      nothing else about it has already decided the code; a fire that is refused," >&2
+          echo "      cannot measure, fails an action, fails to grow, or is refused by the" >&2
+          echo "      provisioner reports THAT code and still names the registrations (the tool's" >&2
+          echo "      EXIT block says which). Repair it as docs/ops/ci-runner-x64.md describes; the" >&2
+          echo "      schedule is armed so the state stops being invisible." >&2 ;;
         *uncertified*)
-          echo "NOTE: the job outcomes were UNREADABLE — capacity cannot be certified either way, so" >&2
-          echo "      every fire will report exit 2 until 'gh' can read them (a --status probe still" >&2
-          echo "      exits 0 by design; the real pass is the one that is non-zero)." >&2 ;;
+          echo "NOTE: the job outcomes were UNREADABLE — capacity cannot be certified either way. A" >&2
+          echo "      fire exits 2 when nothing else about it has already decided the code, until 'gh'" >&2
+          echo "      can read them (a --status probe stays exit 0 by design)." >&2 ;;
       esac
     else
       echo "probe: FAILED (exit $probe_rc) — this schedule would fire and do NOTHING:" >&2
@@ -823,12 +836,18 @@ if [ "${AUTOSCALE_SKIP_PROBE:-0}" != "1" ]; then
   # of a later surprise. Nothing is refused — the schedule is exactly what stops the state being
   # invisible.
   case "$probe_out" in
+    # ⛔ Same rule as `status()`'s advisory: `*wedged*` matches the KEY, so it cannot promise the
+    # CODE — an exit-code promise here was false on a wedged pool that also failed to grow (exit 4,
+    # pinned by `test_a_wedged_box_that_ALSO_failed_to_grow_keeps_exit_4`).
     *wedged*)
       echo "NOTE: the pool is WEDGED — MEASURED, not a measurement failure. Arming the schedule so" >&2
-      echo "      every fire reports exit 6; repair it as docs/ops/ci-runner-x64.md describes." >&2 ;;
+      echo "      every fire REPORTS the state; a fire exits 6 when nothing else about it has already" >&2
+      echo "      decided the code, and otherwise reports that failure's own code (the tool's EXIT" >&2
+      echo "      block says which). Repair it as docs/ops/ci-runner-x64.md describes." >&2 ;;
     *uncertified*)
-      echo "NOTE: the job outcomes were UNREADABLE — every fire will report exit 2 until 'gh' can read" >&2
-      echo "      them (a --status probe stays exit 0 by design)." >&2 ;;
+      echo "NOTE: the job outcomes were UNREADABLE — every fire reports the state; a fire exits 2 when" >&2
+      echo "      nothing else about it has already decided the code, until 'gh' can read them (a" >&2
+      echo "      --status probe stays exit 0 by design)." >&2 ;;
   esac
 fi
 mkdir -p "$STATE_DIR" "$INSTALL_DIR" || exit 1

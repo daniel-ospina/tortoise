@@ -1425,6 +1425,55 @@ def test_a_wedged_pool_is_ARMED_and_NAMED_not_refused_as_a_measurement_failure(t
     assert "WEDGED" in res.stderr and "MEASURED" in res.stderr, res.stderr
 
 
+def test_a_wedged_pool_is_not_promised_exit_6_when_the_pass_has_failed_to_grow(tmp_path):
+    """⛔ THE ADVISORY MATCHED THE JSON KEY, NOT THE VERDICT — SO IT PROMISED THE WRONG CODE.
+
+    `case "$probe_out" in *wedged*)` matches `"wedged": [...]`, which says the POOL is wedged. It
+    says nothing about the VERDICT: the tool's override fires only when the pass has no failure of
+    its own (`record["verdict"] in (…benign…) and record.get("problem_kind") != "no-listener"`),
+    so a wedged pool that ALSO failed to grow keeps `under-target` and `main`'s ladder returns **4**
+    — pinned by this PR's own
+    `tests/test_runner_autoscale.py::test_a_wedged_box_that_ALSO_failed_to_grow_keeps_exit_4`,
+    which asserts `rec["wedged"] == ["r1"]` **and** `rec["_rc"] == 4` on one record. The installer
+    therefore told the operator "every fire will report exit 6" on a box whose every fire reports
+    4 — and the co-occurrence is the shape the PR calls the NORMAL one.
+
+    The state must still be NAMED (that is what the advisory is for); only the unconditional CODE
+    is withdrawn. The advisory now states 6 with the condition that outranks it.
+
+    Non-vacuity: the pre-fix advisories (both `status()` and install) say "every fire will report
+    exit 6" / "every fire reports exit 6" and never state a condition, so the `flat` arms red on
+    them.
+    """
+    sb = _sandbox(tmp_path)
+    co_occurring = _write_stub(
+        sb["bin"],
+        "py-wedged-but-failed-to-grow",
+        "#!/usr/bin/env bash\n"
+        'if [ "$1" = "-c" ]; then exit 0; fi  # the >= 3.12 floor probe\n'
+        'case " $* " in\n'
+        # The probe is a `--status` read: `--json` on the wire, so the record carries BOTH the
+        # wedged registrations and the pass's own verdict. This is the exit-4 shape.
+        "  *\" --status \"*) echo '{\"repo\": \"o/n\", \"verdict\": \"under-target\", "
+        "\"problem_kind\": \"no-listener\", \"wedged\": [\"r1\"], \"notes\": []}'; exit 0 ;;\n"
+        "esac\n"
+        "echo '{\"repo\": \"o/n\", \"verdict\": \"under-target\", \"problem_kind\": "
+        "\"no-listener\"}'; exit 4\n",
+    )
+    # Install first (the advisory under test lives in BOTH verbs), then read it back.
+    for extra in ([], ["--status"]):
+        res = _run(sb, *extra, env=dict(sb["env"], AUTOSCALE_PYTHON=str(co_occurring)))
+        assert res.returncode == 0, (extra, res.stdout, res.stderr)  # ARMED, not refused
+        flat = " ".join(res.stderr.split())
+        assert "WEDGED" in flat and "MEASURED" in flat, (extra, res.stderr)  # state NAMED
+        assert "every fire will report exit 6" not in flat, (extra, res.stderr)
+        assert "every fire reports exit 6" not in flat, (extra, res.stderr)
+        assert "has already decided the code" in flat, (
+            f"{extra}: the advisory promises exit 6 without saying what outranks it: {res.stderr}"
+        )
+    assert (sb["agents"] / PLIST_NAME).exists(), "the advisory must not cost the install"
+
+
 def test_a_large_crontab_does_not_corrupt_the_install_or_the_status(tmp_path):
     """⛔ `crontab -l | grep -qF` + `set -o pipefail` = the SIGPIPE bug fixed for launchd.
 

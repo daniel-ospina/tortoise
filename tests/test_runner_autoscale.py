@@ -2361,6 +2361,50 @@ def test_a_status_read_of_an_unreadable_history_is_uncertified_and_stays_exit_0(
     assert any("REAL pass" in n and "exits 2" in n for n in rec["notes"]), rec["notes"]
 
 
+def test_the_real_pass_code_is_promised_ONLY_when_nothing_else_decided_it(env):
+    """⛔ THE NOTE MUST NOT PROMISE A CODE THE NEXT PASS DOES NOT ALWAYS RETURN.
+
+    A `--status` read of a wedged pool said "A REAL pass on this box exits 6" — and the shape this
+    PR itself calls the NORMAL co-occurrence returns something else. `converge`'s override fires
+    only when the pass has no failure of its own (`record["verdict"] in (…benign…) and
+    record.get("problem_kind") != "no-listener"`), so a wedged box that ALSO failed to grow keeps
+    `under-target`, and `test_a_wedged_box_that_ALSO_failed_to_grow_keeps_exit_4` pins `_rc == 4`
+    on exactly that record. `main`'s ladder returns 1/3/2/4/5 BEFORE the exit-6 arm.
+
+    The note is not decoration: `tools/install-runner-autoscale-schedule.sh`'s operator-facing
+    advisory is written from the same claim, so an unconditional number here becomes an
+    unconditional promise there — the installer told the operator to expect exit 6 on a box whose
+    fires exit 4. The code is still NAMED; it is now stated with the condition that outranks it.
+
+    Non-vacuity: the pre-fix note ends at "A REAL pass on this box exits 6." — it names no
+    condition, so the `decided the code` arm reds on it.
+    """
+    e = env(pool=[("r1", "online", False, "")], installs=[("gh-runner-x64-1", "r1")])
+    e.run_ids = "1\n2\n3\n"
+    e.jobs_tsv.write_text(_outcomes(SETUP_FAIL), encoding="utf-8")
+
+    # (a) the plain wedged read: 6 is named, WITH the condition that outranks it
+    rec = e.record("--status")
+    assert rec["verdict"] == "wedged" and rec["_rc"] == 0, rec
+    note = next(n for n in rec["notes"] if "REAL pass" in n)
+    assert "exits 6" in note, note
+    assert "has already decided the code" in note, (
+        f"the note promises exit 6 without saying what outranks it: {note}"
+    )
+
+    # (b) THE SAME BOX, AS A REAL PASS — the co-occurrence is the point. The `--status` plan above
+    #     says "exits 6"; the fire on that same box attempts the fill, no listener comes up, and
+    #     the pass reports exit 4. No note claims 6 for it, and the registrations are still named:
+    #     ordering the CODE must never hide the STATE.
+    e.provisioner_adds = 0  # installed, and NO listener came up -> problem_kind=no-listener
+    rec = e.record()
+    assert rec["problem_kind"] == "no-listener", rec
+    assert rec["verdict"] == "under-target", rec
+    assert rec["_rc"] == 4, rec
+    assert rec["wedged"] == ["r1"], rec  # REPORTED, not hidden
+    assert not any("exits 6" in n for n in rec["notes"]), rec["notes"]
+
+
 def test_a_wedged_box_with_no_provisioner_reports_wedged_not_fill_blocked(env):
     """⛔ `fill-blocked` IS BENIGN, SO A WEDGED POOL MUST BE ABLE TO OVERRIDE IT.
 
