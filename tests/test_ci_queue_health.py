@@ -1106,9 +1106,21 @@ def test_congests_pr_is_three_valued_so_a_cancel_cannot_consume_silence():
 
     # A truncated feed drops the OLDEST runs (newest-first), i.e. exactly the ones the
     # wait clause needs — so even an `OK` off it cannot rule a backlog out.
-    cut = classify(flood_queued(4), truncated=True)
+    #
+    # ⛔ THE FIXTURE MUST BE AN `OK` THAT WOULD OTHERWISE ANSWER `False`. `flood_queued(4)`
+    # alone reads `PR-UNWITNESSED` (no PR run executing), so its `congests_pr` is `None`
+    # from the VERDICT test and the `not self.truncated` clause is never reached — this
+    # assertion was green with that guard deleted (measured). A serving PR run is what
+    # makes the verdict `OK` (see `test_a_truncated_feed_with_a_pr_run_executing_is_still_ok`),
+    # so it is the shape that actually pins truncation.
+    cut = classify(
+        flood_queued(4),
+        in_progress=[run(1, "Python CI", event="pull_request", age_seconds=60)],
+        truncated=True,
+    )
+    assert cut.verdict == Q.OK, "the fixture must reach `OK`, or the guard is untested"
     assert cut.congests_pr is None, (
-        "a capped feed is not a measured-clear queue, even though it reads healthy")
+        "a capped feed is not a measured-clear queue, even when its verdict is OK")
 
 
 def test_a_pr_backlog_inside_the_wait_budget_is_ok():

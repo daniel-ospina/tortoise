@@ -2045,20 +2045,29 @@ def test_the_gate_refuses_every_unmeasured_queue_reading():
         base.update(kw)
         return Q.QueueHealth(**base)
 
+    def gate_for(queue):
+        """The shipped pair: one reading, then the decision on it."""
+        return R.queue_congestion_gate(R.queue_congestion_reading(queue))
+
     assert R.queue_congestion_gate(None) is True, (
         "a queue that was never read (or failed to read) refuses the act")
-    assert R.queue_congestion_gate(reading(Q.UNKNOWN)) is True
-    assert R.queue_congestion_gate(reading(Q.PR_UNWITNESSED)) is True
-    assert R.queue_congestion_gate(reading(Q.OK, truncated=True)) is True, (
+    assert R.queue_congestion_gate(reading(Q.UNKNOWN).congests_pr) is True
+    assert R.queue_congestion_gate(reading(Q.PR_UNWITNESSED).congests_pr) is True
+    assert R.queue_congestion_gate(
+        reading(Q.OK, truncated=True).congests_pr) is True, (
         "a NEWEST-FIRST feed cut at the page cap dropped the oldest queued runs — "
         "exactly the ones the wait clause needs, so it cannot rule a backlog out")
-    assert R.queue_congestion_gate(object()) is True, (
+    assert gate_for(object()) is True, (
         "a reading that cannot answer the question at all is not a measured 'clear'")
     # ...and the measured readings keep their answers.
-    assert R.queue_congestion_gate(reading(Q.OK)) is False
-    assert R.queue_congestion_gate(reading(Q.FLOOD)) is True
-    assert R.queue_congestion_gate(reading(Q.PR_STARVED)) is True
-    assert R.queue_congestion_gate(reading(Q.PR_BACKLOGGED)) is True
+    assert gate_for(reading(Q.OK)) is False
+    assert gate_for(reading(Q.FLOOD)) is True
+    assert gate_for(reading(Q.PR_STARVED)) is True
+    assert gate_for(reading(Q.PR_BACKLOGGED)) is True
+    assert R.queue_congestion_reading(None) is None, (
+        "no read at all and an abstained read both answer None — the REPORT is where "
+        "they are told apart, and the gate refuses either")
+    assert R.queue_congestion_reading(object()) is None
 
 
 def test_the_same_run_shared_by_two_contexts_is_named_once():
@@ -2527,7 +2536,7 @@ def test_a_cancel_post_whose_answer_was_lost_is_not_a_skip(monkeypatch):
     `_run` kills the child on expiry (`timeout=120`), and a killed `gh` may already have
     had its request applied — the server's ANSWER is what was lost, not the act. The
     post-POST states are the ones that must not read as "nothing was changed", yet this
-    path answered `refused` → `deferred`, whose record carries no `cancel_landed`.
+    path answered `refused` → `deferred`, whose record carried no effect key at all.
 
     Discriminating: pre-fix this returns `deferred` (indistinguishable from the
     pre-POST `no_budget` skip), and a rerun is issued off a cancel that may have landed.
@@ -2914,7 +2923,8 @@ def test_a_cancel_skipped_for_want_of_budget_defers_the_rerun(monkeypatch):
     and 'unreadable' — into 'failed'. With the shipped budgets a pass whose settles run to
     their bound exhausts the cancel budget on its SECOND run, so every later run was
     reported as needing a human. The pre-POST skip is `deferred`; the post-POST one is
-    `cancel_unobserved`, which the record names as a cancel that LANDED.
+    `cancel_unobserved`, which the record names as an ACCEPTED cancel whose effect was
+    never observed.
     """
     monkeypatch.setattr(R, "_sleep", lambda s: pytest.fail("must not sleep"))
     verbs: list[str] = []
@@ -2940,24 +2950,30 @@ def test_a_deferred_repair_is_recorded_as_a_skip_and_does_not_escalate(monkeypat
     code, recs = R.report([plan], apply=True, trigger_ok=True, repo="o/r", cooldown_min=60)
     entry = recs[0]["rerun"][0]
     assert entry["ok"] is False and entry["deferred"] is True
-    assert "cancel_landed" not in entry, (
-        "a deferral cancels NOTHING — the record must not claim a cancel landed")
+    assert "cancel_accepted" not in entry and "cancel_landed" not in entry, (
+        "a deferral cancels NOTHING — the record must not claim a cancel was even "
+        "accepted")
     assert code == 0, "a skip must stay a skip: nothing was done, so nothing escalated"
 
 
-def test_a_cancel_that_landed_unobserved_is_recorded_as_landed(monkeypatch):
-    """⭐ P2 (review): `deferred` was documented as "nothing was changed", which is
-    FALSE for a cancel whose POST was accepted and whose settle was never observed.
+def test_a_cancel_accepted_but_unobserved_is_recorded_as_ACCEPTED_not_LANDED(monkeypatch):
+    """⭐ P1 (review): an ACCEPTED cancel POST is not an APPLIED cancel.
 
-    That run IS cancelled and gets no replacement attempt; the flag `report` keys on to
-    suppress escalation also carried the claim that nothing happened. Bounded (the next
-    window re-runs the cancelled run as the next attempt), but a record in a module whose
-    standard is "never read as a clean act it did not earn" must not understate it —
-    hence its own state and its own `cancel_landed` key.
+    `deferred` was documented as "nothing was changed", which is FALSE for a cancel whose
+    POST was accepted and whose settle was never observed; but the opposite claim is not
+    measured either. A 2xx means the request was ACCEPTED — GitHub documents that a
+    cancel can simply not take effect, which is why `/force-cancel` exists for a run "not
+    responding to POST …/cancel" — so `completed` is the only evidence of a landed
+    cancel, and this state exists precisely because that read never succeeded.
+
+    The record therefore carries `cancel_accepted` (what was measured) and NEVER
+    `cancel_landed` (what was not), and `skipped` rather than `deferred` so the entry
+    never reads as a clean no-op. Still a SKIP: bounded by the next window, which acts on
+    what is then true.
 
     Discriminating: pre-fix there is no such state, so the entry carries `deferred` with
-    no `cancel_landed` and — because the escalation predicate only excludes `deferred`
-    by name — a plain `cancel_unobserved` escalates to exit 1.
+    no effect key and — because the escalation predicate only excludes `deferred` by name
+    — a plain `cancel_unobserved` escalates to exit 1.
     """
     monkeypatch.setattr(R, "_rerun", lambda *a, **k: "cancel_unobserved")
     plan = _plan(absent=["python-ci-gate"],
@@ -2965,17 +2981,22 @@ def test_a_cancel_that_landed_unobserved_is_recorded_as_landed(monkeypatch):
     code, recs = R.report([plan], apply=True, trigger_ok=True, repo="o/r", cooldown_min=60)
     entry = recs[0]["rerun"][0]
     assert entry["ok"] is False
-    assert entry["cancel_landed"] is True, (
-        "the cancel POST was accepted — the record must say the run was cancelled")
-    assert entry["deferred"] is True, (
+    assert entry["cancel_accepted"] is True, (
+        "the POST was ACCEPTED — the record must say that, and only that")
+    assert "cancel_landed" not in entry, (
+        "no `completed` was ever read, so nothing measured the cancel as APPLIED")
+    assert entry["skipped"] is True, (
         "still a SKIP: the next window owns the replacement attempt")
-    assert code == 0, "the cancel landed and is bounded — this is not 'needs a human'"
+    assert "deferred" not in entry, (
+        "`deferred` means the pass changed NOTHING — a destructive act was requested here")
+    assert code == 0, "an accepted cancel is bounded — this is not 'needs a human'"
 
 
 def test_a_cancel_whose_effect_is_unknown_is_recorded_as_neither(monkeypatch):
     """⭐ P2 #10641 review: the third state — the POST was SENT and the ANSWER was lost.
 
-    Neither claim is true: the run MAY be cancelled (`cancel_landed` would overstate it)
+    Neither claim is true: the run MAY be cancelled (`cancel_accepted` would overstate it
+    too: no answer to the POST was ever read)
     and something MAY have changed (`deferred`'s bare form would understate it). Still a
     SKIP — a lost answer is not "a repair this credential cannot perform", and the next
     window re-reads the run and acts on what is then true.
@@ -2991,8 +3012,11 @@ def test_a_cancel_whose_effect_is_unknown_is_recorded_as_neither(monkeypatch):
     assert entry["ok"] is False
     assert entry["cancel_effect_unknown"] is True, (
         "the POST was sent and the answer was lost — the record must say the effect is unknown")
-    assert "cancel_landed" not in entry, (
-        "the cancel MAY have landed — claiming it did is the same error in the other direction")
+    assert "cancel_landed" not in entry and "cancel_accepted" not in entry, (
+        "the cancel MAY have landed — claiming it did is the same error in the other "
+        "direction")
+    assert entry["skipped"] is True and "deferred" not in entry, (
+        "`deferred` claims nothing was changed, which is not known here either")
     assert code == 0, "unknown is bounded by the next window — this is not 'needs a human'"
 
 

@@ -1127,18 +1127,20 @@ def _cancel(repo: str, run: Run) -> str:
                     kills the child on expiry, and a killed `gh` may already have had
                     its request applied) → the effect is UNKNOWN: the cancel may have
                     landed. Neither 'refused' ("nothing was changed") nor
-                    'cancel_unobserved' ("the cancel landed") is true, so it has its own
+                    'cancel_unobserved' ("the POST was accepted") is true, so it has its own
                     state; the next window re-reads the run and acts on what is then
                     true. ⛔ THE THIRD TRUTH VALUE IS THE POINT — the same discipline
                     `Run.job_count` applies by keeping `None` ≠ `0`
       'cancel_unobserved'
                     the cancel POST was ACCEPTED and the run was never OBSERVED
-                    `completed` inside the settle bound. ⛔ THE CANCEL LANDED: the run
-                    is cancelled with NO replacement attempt. Distinct state, because
-                    reporting this as "nothing was changed" understates a destructive
-                    act that took effect. GitHub documents the shape — a cancel can
-                    simply not take effect, which is why its force-cancel endpoint
-                    exists for a run "not responding to POST …/cancel"
+                    `completed` inside the settle bound. ⛔ AN ACCEPTED POST IS NOT AN
+                    APPLIED CANCEL — GitHub documents that a cancel can simply not take
+                    effect, which is why a force-cancel endpoint exists for a run "not
+                    responding to POST …/cancel" — so this state claims only what was
+                    measured: ACCEPTED, no replacement attempt from this pass, effect
+                    UNOBSERVED. It is distinct from 'deferred' because reporting it as
+                    "nothing was changed" is the other understatement: a destructive act
+                    WAS requested and may have taken effect.
       'no_budget'   this pass's cancel-settle budget is spent BEFORE the POST → SKIP,
                     nothing is cancelled
 
@@ -1189,7 +1191,7 @@ def _cancel(repo: str, run: Run) -> str:
         # settle, the rerun that follows would be refused (`already running`) — so
         # cancelling here would destroy the attempt's verdict without being able to
         # re-establish it. Skip; the next window has a fresh budget. NOTHING was
-        # cancelled in this branch — every post-POST outcome below answers
+        # cancelled in this branch — every outcome INSIDE THE SETTLE LOOP below answers
         # 'cancel_unobserved' instead.
         return "no_budget"
     try:
@@ -1300,19 +1302,22 @@ def _rerun(repo: str, run: Run, number: int, expected_head: str = "") -> str:
     — re-running it would be churn on a run that is working, or a second attempt on one
     that already finished), 'not_queued' falls through to the direct rerun, because
     the API's 409 means the run was never queued and there is nothing to cancel first,
-    'cancel_unobserved' is a skip in which the cancel DID LAND (named distinctly, see
-    below), 'cancel_unknown' is a skip in which the POST was sent and its ANSWER was lost
+    'cancel_unobserved' is a skip in which the cancel POST was ACCEPTED and its effect
+    never observed (named distinctly, see below), 'cancel_unknown' is a skip in which the
+    POST was sent and its ANSWER was lost
     (the cancel MAY have landed — recorded as unknown, never as "nothing changed"),
     'denied' is a READABLE PERMANENT refusal from the API (the class the workflow's
     non-zero exit exists to signal: a repair this credential cannot perform), and the
     remaining states are 'deferred' — nothing was done, so nothing escalated.
 
     ⛔ 'cancel_unobserved' IS NOT 'deferred', AND THE DIFFERENCE IS THE RECORD. Both
-    are skips (neither escalates), but 'deferred' means the pass changed NOTHING,
-    while 'cancel_unobserved' means the cancel POST was accepted and the settle was
-    never observed: the run IS cancelled and gets no replacement attempt. Folding the
-    two together made the record understate a destructive act that took effect — the
-    same reason 'cancel_refused_409' exists.
+    are skips (neither escalates), but 'deferred' means nothing was even ATTEMPTED,
+    while 'cancel_unobserved' means a cancel POST was ACCEPTED and the settle was never
+    observed: an act was requested and may have taken effect, and this pass issued no
+    replacement attempt. Folding the two together made the record understate a
+    destructive act — the same reason 'cancel_refused_409' exists. ⛔ IT DOES NOT CLAIM
+    THE CANCEL LANDED: `completed` is the only evidence of that and this state exists
+    precisely because it was never read, so the entry records `cancel_accepted`.
     """
     if expected_head:
         try:
@@ -1334,11 +1339,12 @@ def _rerun(repo: str, run: Run, number: int, expected_head: str = "") -> str:
         elif cancelled == "moved":
             return "target_moved"
         elif cancelled == "cancel_unobserved":
-            # THE CANCEL LANDED; THE RERUN DID NOT. Reached ONLY after `_cancel`'s POST
-            # was accepted, so the run is genuinely cancelled with no replacement
-            # attempt — a SKIP, but one the record must not describe as "nothing was
-            # changed". The next window sees the cancelled run, takes the DEAD path
-            # and re-runs it as the next attempt, so nothing is stranded.
+            # THE POST WAS ACCEPTED; THE EFFECT WAS NOT OBSERVED. A SKIP, but one the
+            # record must not describe as "nothing was changed". If the cancel did take
+            # effect the next window sees the cancelled run, takes the DEAD path and
+            # re-runs it as the next attempt; if it did not, the run is still there and
+            # the next window re-measures it. Either way nothing is stranded — and
+            # nothing here claims which of the two happened.
             return "cancel_unobserved"
         elif cancelled == "cancel_unknown":
             # THE POST WAS SENT; THE ANSWER WAS LOST. The run MAY be cancelled, so a
@@ -1495,7 +1501,29 @@ def read_queue_health(repo: str):
         return None
 
 
-def queue_congestion_gate(queue) -> bool:
+def queue_congestion_reading(queue) -> bool | None:
+    """Read the DESTRUCTIVE-act gate input ONCE: `True` congested, `False` clear,
+    `None` NOT MEASURED.
+
+    ⛔ THE SINGLE READ IS THE POINT. `main()` needs the three-valued reading twice —
+    once as the DECISION (`queue_congestion_gate`) and once as the REPORT
+    (`queue_congestion_measured`) — and two independent `getattr(queue,
+    "congests_pr", None)` calls are a drift hazard: any future change that makes one
+    of them smarter makes the report line disagree with the decision it describes.
+    So the attribute is read here, once, and threaded into both.
+
+    `None` covers BOTH ways the question goes unanswered — no reading at all
+    (`--no-queue-health`, a failed `read_queue_health`) and a reading that abstained
+    (`UNKNOWN`, `PR-UNWITNESSED`, a truncated newest-first feed, or any object that
+    cannot answer). The gate refuses on either, which is why the distinction is not
+    needed until the REPORT, where `queue_congestion_measured` states it.
+    """
+    if queue is None:
+        return None
+    return getattr(queue, "congests_pr", None)
+
+
+def queue_congestion_gate(congestion: bool | None) -> bool:
     """May the DESTRUCTIVE repair act? An UNMEASURED queue answers NO.
 
     The zero-job class is repaired by cancel-then-rerun, which discards the queue
@@ -1505,25 +1533,25 @@ def queue_congestion_gate(queue) -> bool:
     reads ``False`` for an unmeasured queue on purpose, which is the fail-open
     direction the moment it is consumed as permission.
 
-    This is the one place the three-valued `QueueHealth.congests_pr` is read, and the
-    mapping is the module's own polarity — *"an unmeasured wait is not a
-    measured-healthy one"* — applied to an ACT:
+    Takes the value `queue_congestion_reading` returned — the one place the
+    three-valued `QueueHealth.congests_pr` is read — so the decision and the report
+    can never disagree about which reading they saw. The mapping is the module's own
+    polarity — *"an unmeasured wait is not a measured-healthy one"* — applied to an
+    ACT:
 
-      * ``None`` from the reading (NOT MEASURED: `UNKNOWN`, `PR-UNWITNESSED`, or any
-        verdict off a truncated newest-first feed) → ``True``, the act is refused;
-      * ``queue is None`` — the read never ran (`--no-queue-health`) or it failed
-        (`read_queue_health` returns ``None`` on any exception) → ``True``, for the
-        same reason;
-      * anything not provably ``False`` (including a reading that cannot answer the
-        question at all) → ``True``. Only a MEASURED clear queue lets the cancel run.
+      * ``None`` from the reading — NOT MEASURED, whether because the read never ran
+        (`--no-queue-health`; `read_queue_health` returns ``None`` on any exception)
+        or because it abstained (`UNKNOWN`, `PR-UNWITNESSED`, any verdict off a
+        truncated newest-first feed, an object that cannot answer at all) → ``True``,
+        the act is refused;
+      * anything not provably ``False`` → ``True``. Only a MEASURED, uncut clear
+        reading lets the cancel run.
 
     A report may say "starvation not witnessed" about an unread queue; a cancel may
     not act on it. The two questions stay separate, exactly as `starves_pr` and
     `delays_pr` are.
     """
-    if queue is None:
-        return True
-    return getattr(queue, "congests_pr", None) is not False
+    return congestion is not False
 
 
 def report(plans: list[PrPlan], apply: bool, trigger_ok: bool, repo: str,
@@ -1701,15 +1729,18 @@ def report(plans: list[PrPlan], apply: bool, trigger_ok: bool, repo: str,
                                          # deliberately NOT here — it escalates below.
                                          **({"deferred": True}
                                             if state == "deferred" else {}),
-                                         # THE CANCEL LANDED, THE RERUN DID NOT: the
-                                         # POST was accepted and the settle was never
-                                         # observed, so the run IS cancelled with no
-                                         # replacement attempt. Still a SKIP (the next
-                                         # window re-runs it as the next attempt), but
-                                         # recorded with `cancel_landed` so the entry
-                                         # never reads as "nothing was changed" — the
-                                         # same reason `cancel_refused_409` exists.
-                                         **({"deferred": True, "cancel_landed": True}
+                                         # AN ACCEPTED CANCEL, UNOBSERVED: the POST was
+                                         # accepted and the settle was never observed, so
+                                         # a destructive act was REQUESTED and may have
+                                         # taken effect, and no replacement attempt was
+                                         # issued. Still a SKIP (the next window acts on
+                                         # what is then true), but ⛔ NOT `deferred`: that
+                                         # key means the pass changed NOTHING, which is
+                                         # an understatement here — and `cancel_landed`
+                                         # would be the opposite overstatement, since
+                                         # `completed` is the only evidence of a landed
+                                         # cancel and it was never read.
+                                         **({"skipped": True, "cancel_accepted": True}
                                             if state == "cancel_unobserved" else {}),
                                          # THE EFFECT IS UNKNOWN: the POST was SENT and
                                          # its ANSWER was lost, so the run MAY be
@@ -1717,7 +1748,7 @@ def report(plans: list[PrPlan], apply: bool, trigger_ok: bool, repo: str,
                                          # the run and acts on what is then true), but
                                          # neither of the two claims above is true, so
                                          # it carries its own key and claims neither.
-                                         **({"deferred": True,
+                                         **({"skipped": True,
                                              "cancel_effect_unknown": True}
                                             if state == "cancel_unknown" else {}),
                                          # ⛔ THE OPPOSITE CASE, AND NAMED SO IT CANNOT
@@ -1739,7 +1770,7 @@ def report(plans: list[PrPlan], apply: bool, trigger_ok: bool, repo: str,
                 if apply:
                     escalations += 1
             if any(r["ok"] is False and not (r.get("head_moved") or r.get("target_moved")
-                                              or r.get("deferred"))
+                                              or r.get("deferred") or r.get("skipped"))
                    for r in rec["rerun"]):
                 escalations += 1
         records.append(rec)
@@ -1906,10 +1937,12 @@ def main(argv: list[str] | None = None) -> int:
     # queue (`None`, or `PR-UNWITNESSED`/`UNKNOWN`, or a truncated feed) as "clear" and
     # switches the cancel ON in exactly the state that makes a cancel most harmful:
     # a queue read is refused under the load a cancel would add to, and `delays_pr`
-    # is false-by-design for the unmeasured verdicts. `queue_congestion_gate` is the
-    # three-valued read (measured clear vs. NOT MEASURED) the act needs.
-    congestion = None if queue is None else getattr(queue, "congests_pr", None)
-    queue_congested = queue_congestion_gate(queue)
+    # is false-by-design for the unmeasured verdicts. `queue_congestion_reading` /
+    # `queue_congestion_gate` are the three-valued read (measured clear vs. NOT
+    # MEASURED) the act needs, and the reading is taken ONCE so the decision below and
+    # the `queue_congestion_measured` report line cannot describe different readings.
+    congestion = queue_congestion_reading(queue)
+    queue_congested = queue_congestion_gate(congestion)
     try:
         required = resolve_required(args.repo, record_path, live=not args.no_live)
         emitters = emitters_from_record(record_path)
@@ -1952,11 +1985,13 @@ def main(argv: list[str] | None = None) -> int:
         # `queue_starved: false` next to a plan that was not repaired, and the reason
         # would be invisible.
         "queue_congested": bool(queue_congested),
-        # ...and WHY it was suppressed. `false` = a MEASURED, uncut queue reading found
-        # the queue clear (the only state in which a cancel is allowed); `true` =
-        # congestion was never measured (`UNKNOWN`, `PR-UNWITNESSED`, a truncated feed,
-        # a failed read, or `--no-queue-health`) and the act was REFUSED rather than
-        # authorised by silence.
+        # ...and WHY it was suppressed. ⛔ TWO KEYS BECAUSE THERE ARE TWO QUESTIONS, and
+        # the polarity is the one a reader expects: `true` here means a congestion
+        # READING WAS TAKEN (clear or congested — which of the two is `queue_congested`
+        # above), `false` means none was: `--no-queue-health`, a failed read, `UNKNOWN`,
+        # `PR-UNWITNESSED`, or a truncated feed. On `false` the act was REFUSED rather
+        # than authorised by silence, so a suppressed repair can be told from an
+        # abstention.
         "queue_congestion_measured": congestion is not None,
         # Starved contexts are NOT "needing repair" — no per-PR repair can create a
         # runner slot — so they are counted separately rather than inflating a
