@@ -190,6 +190,16 @@ TURN_WRITE_CITE = f"tortoise/sdk.py:{_sdk_line('_TURN_WRITE_CYPHER = (')}"
 EVIDENCE_DIR = Path("docs/evidence/7949-capstone")
 PREREG_ARTIFACT = "docs/evidence/7949-capstone/preregistration.json"
 E1E2_LOG = "docs/evidence/7949-capstone/e1-e2.log"
+
+#: Where the E1/E2 probes' OWN records live, IN TREE. A row's ``evidence`` is
+#: resolved against the TREE — ``tools/capstone_verdict_check.py`` V4 requires a
+#: repo-relative path with no escape whose file EXISTS — so a record under
+#: ``/tmp`` cannot be the artifact behind a row: the row would be refused as an
+#: inference. The three probes' ``--out`` therefore points here when their numbers
+#: are meant to be scored, and this probe reads the SAME files, so the row cites
+#: the artifact the probe wrote rather than a log name hard-coded in the code
+#: (#9889 acceptance item 5).
+PROBE_RECORDS_DIR = EVIDENCE_DIR / "probes" / "records"
 E4_RECEIPT = "tests/eval/write_path/receipts/w2b-operator-2026-10-19.json"
 E5_RESCORE = "docs/evidence/7949-capstone/e5-rescore.json"
 ARMS_DIR = "tests/eval/write_path/receipts/7947-arms-2026-10-18"
@@ -645,6 +655,16 @@ def build_rows(*, head: str, out_path: str, log_corpus_sha: str,
     the corpus THIS run froze, the row also carries ``artifact_corpus_sha256`` and
     ``tools/capstone_verdict_check.py``'s V7 requires that digest to appear in the
     artifact's own text — a declaration nothing supports is a finding.
+
+    ⛔ ``evidence`` IS THE ROW'S, NOT THIS FUNCTION'S. E1 and E2 used to cite
+    ``E1E2_LOG`` unconditionally — a log name hard-coded here — which made the
+    probe the last place that decided what a row's artifact was, even after the
+    probes that produce those numbers shipped (#9889 acceptance item 5). The row
+    dicts now carry their own ``evidence`` (defaulted to ``E1E2_LOG`` for the
+    landed artifact), so the caller that READ an artifact is the caller that
+    names it. The same goes for ``artifact_corpus_sha256``: a row built from a
+    pair taken on THIS run's corpus declares nothing, because its corpus IS the
+    log's, and V7's strict arm then applies to it.
     """
     def row(criterion: str, *, verdict: str, evidence: str, sha: str | None,
             numerator: int | None, denominator: int | None,
@@ -663,16 +683,22 @@ def build_rows(*, head: str, out_path: str, log_corpus_sha: str,
         return built
 
     return [
-        row("E1", verdict=e1["verdict"], evidence=E1E2_LOG, sha=e1["sha"],
-            numerator=None, denominator=None,
+        row("E1", verdict=e1["verdict"],
+            evidence=e1.get("evidence") or E1E2_LOG, sha=e1["sha"],
+            numerator=e1.get("numerator"), denominator=e1.get("denominator"),
             corpus_sha256=e1["corpus_sha256"],
-            artifact_corpus_sha256=e1["corpus_sha256"], sibling="E2",
-            blocked_by="#5333", note=e1["note"]),
-        row("E2", verdict=e2["verdict"], evidence=E1E2_LOG, sha=e2["sha"],
-            numerator=None, denominator=None,
+            artifact_corpus_sha256=e1.get("artifact_corpus_sha256",
+                                          e1["corpus_sha256"]),
+            sibling=e1.get("sibling", "E2"), blocked_by=e1["blocked_by"],
+            note=e1["note"]),
+        row("E2", verdict=e2["verdict"],
+            evidence=e2.get("evidence") or E1E2_LOG, sha=e2["sha"],
+            numerator=e2.get("numerator"), denominator=e2.get("denominator"),
             corpus_sha256=e2["corpus_sha256"],
-            artifact_corpus_sha256=e2["corpus_sha256"], sibling="E1",
-            blocked_by="#10360", note=e2["note"]),
+            artifact_corpus_sha256=e2.get("artifact_corpus_sha256",
+                                          e2["corpus_sha256"]),
+            sibling=e2.get("sibling", "E1"), blocked_by=e2["blocked_by"],
+            note=e2["note"]),
         row("E3", verdict=e3["verdict"], evidence=out_path, sha=head,
             numerator=e3["numerator"], denominator=e3["denominator"],
             corpus_sha256=log_corpus_sha, blocked_by="#9736", note=e3["note"]),
@@ -685,6 +711,131 @@ def build_rows(*, head: str, out_path: str, log_corpus_sha: str,
             numerator=e5["numerator"], denominator=e5["denominator"],
             corpus_sha256=log_corpus_sha, blocked_by="#9738", note=e5["note"]),
     ]
+
+
+# ── the E1/E2 rows, when the probes' own records exist ──────────────────
+
+def e1_row_from_pair(*, head: str, corpus_sha: str, out_path: str,
+                     before: dict, after_objects: int, after_bare: int,
+                     gate_drops: dict | None, bars: dict) -> tuple[dict, dict]:
+    """E1's row when BOTH arms exist — the pair, scored, with its mechanism.
+
+    ⛔ WHY THIS REPLACES THE LOG PARSE FOR E1. ``e1-e2.log`` carries one arm on
+    another corpus, so the only E1 row it can support is ``BLOCKED``. A before arm
+    taken by ``e1_paired_arm.py`` on THIS run's corpus, at THIS run's head, makes
+    E1 the ratio its criterion names — and :func:`pair_off_arm` has already
+    refused every pair that is not the same corpus at the same commit, so the two
+    numbers below are two arms of one population rather than two runs.
+
+    ⚠️ THE HONEST LIMIT, in the row's own note rather than left for a reader to
+    find: the OFF and ON arms are separate LLM realizations of the corpus, so their
+    difference is NOT attributable to the flag alone. The attribution is the
+    deterministic drop count (:func:`read_gate_drops`); the paired numbers are the
+    population E1's bar is written over.
+
+    The ``measured`` column is the AFTER arm's ``^the <X>`` count over its Objects
+    (``numerator``/``denominator``); the VERDICT is the ratio, and the note prints
+    both arms so the two cannot be read as the same thing.
+    """
+    after_share = (after_bare / after_objects) if after_objects else None
+    result = e1_outcome(before_share=before["share"], after_share=after_share,
+                        objects=min(before["objects"], after_objects), bars=bars)
+    verdict = verdict_word(result)
+    mechanism = ""
+    if gate_drops is not None:
+        mechanism = (
+            f" Mechanism ({gate_drops['path']}): the v4 value gate dropped "
+            f"{gate_drops['drops_total']} of {gate_drops['objects']} Object names "
+            f"({len(gate_drops['drops_among_bare_definite'])} of them "
+            "bare-definite `^the <X>`), with the positive controls alive — the "
+            "deterministic attribution the two-arm ratio cannot make.")
+    after_text = "unmeasured" if after_share is None else f"{after_share:.6f}"
+    note = (f"BOTH arms on {corpus_sha} at {head}: before "
+            f"{before['share']:.6f} ({before.get('bare_definite')}/"
+            f"{before['objects']} Objects, {before['path']}), after {after_text} "
+            f"({after_bare}/{after_objects}) vs {result['bar']} -> "
+            f"{result['outcome']}. The floor of {bars['floors']['e1_objects']} "
+            "Objects is applied to the SMALLER arm, so a pair is refused when "
+            f"either half is under it.{mechanism} "
+            "⚠️ The two arms are separate LLM realizations of the corpus: their "
+            "difference is not attributable to the flag alone, which is what the "
+            "drop count beside it is for. #5333 (may any pass remove or relocate "
+            "an Object) is still the owner ruling the share must move under.")
+    return {
+        "verdict": verdict,
+        "sha": head,
+        "corpus_sha256": corpus_sha,
+        "evidence": out_path,
+        "numerator": after_bare if after_objects else None,
+        "denominator": after_objects or None,
+        "sibling": None,
+        "blocked_by": None if verdict == "GREEN" else "#5333",
+        "note": note,
+    }, result
+
+
+def e2_row_from_record(*, head: str, corpus_sha: str, e2a: dict,
+                       e2b_result: dict, e2b_artifact: str,
+                       bars: dict) -> tuple[dict, dict]:
+    """E2's row when E2a's frozen denominator is carried by a record.
+
+    E2 is a COMPOSITE — E2a (the value-bearing planted units that strictly
+    survive) AND E2b (the fused share) — so the row's verdict is the composite's,
+    not either half's:
+
+    * a MEASURED E2a failure is a RED row. That is the half this bundle could
+      never score, and reporting it ``BLOCKED`` would hide a measured failure
+      behind an unmeasured one;
+    * a passing E2a does NOT green the row on its own: E2b is still a proxy (it
+      counts atomic POINTS on ``e1-e2.log``'s corpus, not surviving planted units
+      on this one), and a passing half beside a proxy half is unmeasured.
+
+    ⛔ The denominator is checked against the FROZEN one instead of used on trust:
+    §3.3's rule derives {of} units, and a record that reads a different total is a
+    rule that moved — a scored number against the wrong denominator is the defect
+    this row exists to catch (``--check-denominator`` is the probe's own version of
+    the same check).
+    """
+    required, of = bars["E2a"]["required"], bars["E2a"]["of"]
+    if e2a["value_units"] != of:
+        raise SystemExit(
+            f"capstone-measure: REFUSED — {e2a['path']} reads "
+            f"{e2a['value_units']} value-bearing units; the pre-registration "
+            f"freezes {of}. A denominator that moved is a rule that moved, and a "
+            "scored number against the wrong denominator is the defect this row "
+            "exists to catch")
+    passed = e2a["value_survived"] >= required
+    e2a_result = outcome(measured=True, below_floor=False, passed=passed,
+                         bar=f"{required} of {of}",
+                         value=f"value_survived={e2a['value_survived']}/{of}")
+    if not passed:
+        verdict, why = verdict_word(e2a_result), (
+            f"E2a is MEASURED and FAILS: {e2a['value_survived']} of {of} "
+            "value-bearing planted units strictly survive, against the frozen "
+            f"bar of {required}")
+    else:
+        verdict, why = "BLOCKED", (
+            f"E2a is measured and PASSES ({e2a['value_survived']} of {of}), but "
+            "E2 is a composite and E2b is still a PROXY: its fused share counts "
+            f"atomic Points on another corpus ({e2b_artifact}), not surviving "
+            "planted units on this one")
+    note = (f"{why}. E2a artifact {e2a['path']} (graph read, "
+            f"`grading.strict_survival_counts`); E2b {e2b_result['outcome']} "
+            f"{e2b_result['value']} vs {e2b_result['bar']}, from {e2b_artifact} "
+            "on ANOTHER corpus revision (its own artifact says which). #10360 is the "
+            "blocker the passing "
+            "half would still leave: nothing enforces retention on the write path")
+    return {
+        "verdict": verdict,
+        "sha": head,
+        "corpus_sha256": corpus_sha,
+        "evidence": e2a["path"],
+        "numerator": e2a["value_survived"],
+        "denominator": of,
+        "sibling": None,
+        "blocked_by": None if verdict == "GREEN" else "#10360",
+        "note": note,
+    }, e2a_result
 
 
 # ── gates ─────────────────────────────────────────────────────────────────
@@ -1675,6 +1826,205 @@ def score_e5(sessions: list[str], out_path: Path) -> dict:
         "artifact": str(out_path),
         "arms_dir": ARMS_DIR,
     }
+
+
+def probe_record_paths(head: str) -> dict[str, str]:
+    """The three probe records an E1/E2 pair is read from — stamped by head.
+
+    ⛔ WHY THE HEAD IS IN THE NAME. E1's criterion is written over "**all**
+    `:Object` nodes written by the run, same arm, same commit", so a before arm
+    taken at one commit and an after arm at another are two populations, not two
+    arms. Stamping the record with the head is what lets :func:`pair_off_arm`
+    refuse that pair instead of averaging it; the same stamp is why a re-run does
+    not silently pick up a predecessor's arm.
+    """
+    stamp = head[:8]
+    return {
+        "off_arm": str(PROBE_RECORDS_DIR / f"e1-off-arm-{stamp}.json"),
+        "gate_drops": str(PROBE_RECORDS_DIR / f"e1-gate-drops-{stamp}.json"),
+        "e2a": str(PROBE_RECORDS_DIR / f"e2a-{stamp}.json"),
+    }
+
+
+def read_probe_record(repo: Path, path: str, *, what: str) -> dict | None:
+    """A probe's own record, or ``None`` when this checkout does not carry one.
+
+    ⛔ ABSENT AND UNREADABLE ARE DIFFERENT STATES (#9513's distinction, one layer
+    down). A record that is not on disk means the probe has not been run here, so
+    the row falls back to its landed artifact — today's behaviour, unchanged. A
+    record that IS on disk and does not parse is a corrupt artifact, and it is
+    REFUSED rather than skipped: a row that silently ignores the file it was told
+    to read reports numbers nothing in this table produced.
+    """
+    file = repo / path
+    if not file.is_file():
+        return None
+    try:
+        record = json.loads(file.read_text())
+    except json.JSONDecodeError as exc:
+        raise SystemExit(
+            f"capstone-measure: REFUSED — {path} is the {what} record this run "
+            f"reads and it does not parse ({exc}); a probe record that is "
+            "silently skipped is a measurement a reader would believe was used") from exc
+    if not isinstance(record, dict):
+        raise SystemExit(f"capstone-measure: REFUSED — {path} is the {what} "
+                         f"record and it is not a JSON object "
+                         f"(got {type(record).__name__})")
+    return record
+
+
+def pair_off_arm(record: dict, *, path: str, head: str, corpus_sha: str) -> dict:
+    """E1's BEFORE arm, admitted only if it is this corpus at THIS commit.
+
+    ``capstone_measure.py`` forces the measured arm ON, so it can only ever
+    produce E1's AFTER half; ``e1_paired_arm.py`` produces the BEFORE half by
+    running the same corpus through the same entry point with the passes OFF.
+    Pairing the two is what makes E1 scoreable — and pairing the WRONG two is the
+    confound this whole bundle exists to stop, so three of the record's own fields
+    are checked rather than trusted:
+
+    * ``head`` — E1 is written over "the run, same arm, same commit". A before arm
+      taken at another commit measures another population, and a ratio across two
+      commits is the same defect as a ratio across two corpora.
+    * ``fixtures_hash`` — G1, applied to the pair: the probe already refuses a
+      corpus that is not the frozen one, so a record whose hash differs from THIS
+      run's corpus is a record of some other corpus wearing an OFF label.
+    * ``arm`` — the read-back the probe printed. Every switch that arms the passes
+      must be OFF in it; a record claiming OFF while its own read-back shows a
+      switch set is the mislabelled arm `e1_paired_arm.off_arm_readback` refuses
+      at write time, arriving through a hand-edited file instead.
+    """
+    held = record.get("arm")
+    if not isinstance(held, dict):
+        raise SystemExit(
+            f"capstone-measure: REFUSED — {path} carries no `arm` read-back, so "
+            "the record cannot show which population it measured; an unlabelled "
+            "arm is not a before arm")
+    armed = {key: value for key, value in held.items()
+             if value not in (None, "", "0")}
+    if armed:
+        raise SystemExit(
+            f"capstone-measure: REFUSED — {path} records an OFF arm while its "
+            f"own read-back holds {armed!r} set; that record measured the ON "
+            "population under an OFF label, and pairing it would put the two "
+            "arms on the same side of E1's ratio")
+    if record.get("head") != head:
+        raise SystemExit(
+            f"capstone-measure: REFUSED — {path} is the before arm at "
+            f"{record.get('head')!r}, this run is at {head!r}. E1 is written "
+            "over the same arm at the same commit; a ratio across two commits is "
+            "two populations, not two arms")
+    if normalise_corpus(record.get("fixtures_hash")) != \
+            normalise_corpus(corpus_sha):
+        raise SystemExit(
+            f"capstone-measure: REFUSED — {path} was measured on corpus "
+            f"{record.get('fixtures_hash')!r}, this run froze "
+            f"{corpus_sha!r}. G1 applies to the PAIR: a bar is a threshold AND "
+            "its corpus (#9076), and two corpora cannot share one ratio")
+    objects, share = record.get("objects"), record.get("share")
+    if isinstance(objects, bool) or not isinstance(objects, int) or objects < 0:
+        raise SystemExit(f"capstone-measure: REFUSED — {path} carries no usable "
+                         f"`objects` count (got {objects!r}); a before arm with "
+                         "no denominator is not a share")
+    if isinstance(share, bool) or not isinstance(share, (int, float)) \
+            or not 0.0 <= float(share) <= 1.0:
+        raise SystemExit(f"capstone-measure: REFUSED — {path} carries no usable "
+                         f"`share` (got {share!r}); E1's bar is written over a "
+                         "share, so a record without one is not a before arm")
+    return {"objects": objects, "share": float(share),
+            "bare_definite": record.get("bare_definite"), "path": path}
+
+
+def read_e2a_record(record: dict, *, path: str, graph: str) -> dict:
+    """E2a's frozen denominator, read off the record the probe wrote.
+
+    The two numbers E2's row needs are ``value_units`` (the **14** value-bearing
+    planted units §3.3's rule derives) and ``value_survived``. They are read, not
+    re-derived: re-deriving them here would be a second implementation of a
+    registered judgement, which is exactly the drift `--check-denominator` exists
+    to catch.
+
+    ⛔ ``graph`` IS CHECKED, and it is the only thing that can be. The survival
+    count is a read of ONE graph; this row is about the graph THIS run wrote, so
+    a record that names any other graph is a reading of some other population
+    wearing this run's label. (The intended usage is the same graph: the probe
+    runs against ``--graph`` after this probe has written it, and the container
+    keeps it alive.)
+
+    A record whose ``injected_anchor`` is true is the FALSIFIER's pass, not a
+    measurement — its counts are the number the injection moved the counter TO —
+    and is refused rather than scored.
+    """
+    if record.get("injected_anchor"):
+        raise SystemExit(
+            f"capstone-measure: REFUSED — {path} is the falsifier's record "
+            "(`--inject-anchor`), whose counts are the number the synthetic "
+            "anchors moved the counter TO. Scoring it would report the "
+            "instrument's own recovery as the pipeline's survival")
+    if record.get("graph") != graph:
+        raise SystemExit(
+            f"capstone-measure: REFUSED — {path} reads graph "
+            f"{record.get('graph')!r}, this run wrote {graph!r}. E2a is a count "
+            "over the Points of ONE graph; a record of another graph is another "
+            "population")
+    units, survived = record.get("value_units"), record.get("value_survived")
+    for name, value in (("value_units", units), ("value_survived", survived)):
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise SystemExit(f"capstone-measure: REFUSED — {path} carries no "
+                             f"usable `{name}` (got {value!r}); a survival "
+                             "count without its denominator is not a reading")
+    if units == 0:
+        raise SystemExit(
+            f"capstone-measure: REFUSED — {path} reads 0 value-bearing units. "
+            "A zero denominator must never print as a result (the probe refuses "
+            "it too, so a record carrying one was written by something else)")
+    if survived > units:
+        raise SystemExit(f"capstone-measure: REFUSED — {path} reports "
+                         f"{survived} surviving of {units} units; a survival "
+                         "count cannot exceed its denominator")
+    return {"value_units": units, "value_survived": survived, "path": path}
+
+
+def read_gate_drops(record: dict, *, path: str, graph: str) -> dict:
+    """E1's mechanism — the deterministic half the two-arm ratio cannot carry.
+
+    ``e1_gate_drops.py`` applies the EXACT predicate the S2.2 pass applies to this
+    run's Object names and counts the drops. It is not a verdict on its own (a gate
+    that drops nothing is a RESULT, not a failure) — it is the attribution E1's
+    paired numbers cannot make, because the OFF and ON arms are separate LLM
+    realizations of the corpus and a difference between them is not attributable to
+    the flag alone.
+
+    Both of the probe's refusals are re-applied here: a record over ZERO Objects
+    is a zero-denominator reading, and a record whose positive controls no longer
+    drop describes a dead predicate. The probe writes no record in either case, so
+    a record that carries one was written by something else.
+    """
+    if record.get("graph") != graph:
+        raise SystemExit(
+            f"capstone-measure: REFUSED — {path} reads graph "
+            f"{record.get('graph')!r}, this run wrote {graph!r}; a drop count "
+            "over another run's Objects attributes this run's mechanism to "
+            "another population")
+    if not record.get("predicate_alive"):
+        raise SystemExit(
+            f"capstone-measure: REFUSED — {path} records the positive controls "
+            "no longer dropping, so its predicate is dead and its drop count "
+            "measures nothing")
+    objects = record.get("objects")
+    if isinstance(objects, bool) or not isinstance(objects, int) or objects <= 0:
+        raise SystemExit(
+            f"capstone-measure: REFUSED — {path} carries objects={objects!r}; a "
+            "zero denominator must never print as '0 drops'")
+    drops = record.get("drops_total")
+    if isinstance(drops, bool) or not isinstance(drops, int) or drops < 0:
+        raise SystemExit(f"capstone-measure: REFUSED — {path} carries no usable "
+                         f"`drops_total` (got {drops!r})")
+    return {"objects": objects, "drops_total": drops,
+            "bare_definite": record.get("bare_definite"),
+            "drops_among_bare_definite":
+                list(record.get("drops_among_bare_definite") or []),
+            "path": path}
 
 
 def measure_e1_e2(repo: Path = ROOT) -> dict:
