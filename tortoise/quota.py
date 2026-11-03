@@ -1171,13 +1171,30 @@ def enforce_org_limit(limits: dict | None, resource: str, sdk=None, *,
         resource: "points" | "api_keys" | "sessions" | "users" | "graphs"
             | "documents".
         sdk: pre-built org SDK (REST callers already hold one) — optional.
+            ⛔ For a TENANT-GRAPH resource (`TENANT_GRAPH_RESOURCES` —
+            `points`, `sessions`, `documents`) omitting BOTH this and
+            `sdk_factory` does NOT leave the count unscoped: `_count_resource`
+            falls back to `_make_sdk(namespace=org_id)` — the org's **DEFAULT**
+            graph (`org_<tid>`) — while a graph-bound credential's write lands
+            in `org_<tid>_<gid>` (`hosted_api._data_graph_name`). That
+            divergence is #8906: with a FULL default graph the gate REFUSES a
+            write into an EMPTY bound graph (and a graph-bound credential can
+            never reach the default graph, so it cannot lower that count), and
+            with an EMPTY default graph it ADMITS a write into a FULL bound one.
+            Pass exactly one of this or `sdk_factory` for those three. Both
+            current callers do — `hosted_api._check_org_limit` builds
+            `sdk_factory=_gate_sdk_for(org, resource)`, `mcp_server` passes
+            `sdk=_get_org_sdk()`. REGISTRY-SCOPED resources (`api_keys`,
+            `users`, `graphs`) are control-plane counts and are unaffected: the
+            registry namespace is the correct target for them.
         sdk_factory: #4051 — called ONLY if and when the count is actually
             taken, for callers that must count the graph the write will open but
             must not build an SDK when the limit is unlimited (the capture lane's
             `sessions` gate is vacuous by #4010 and counted nothing before this —
             it must not start building a graph handle to prove it). Mutually
             exclusive with `sdk`: a non-None `sdk` wins and the factory is never
-            called.
+            called. ⛔ Passing NEITHER is not "count nothing" — see the
+            wrong-graph hazard on `sdk:` above (taken from #8906).
         slot_credit: #4355 — how many slots this write RELEASES as part of the
             same operation, so the admission check is evaluated against the
             post-release count. It exists for exactly ONE caller: the
