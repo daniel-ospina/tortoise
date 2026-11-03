@@ -3392,6 +3392,80 @@ def test_the_would_have_won_boundary_is_the_instant_not_the_string():
     assert record["operator_audit"]["edge_correct"] == 5, record
 
 
+def test_an_unparseable_date_on_the_pin_refuses_instead_of_publishing_an_older():
+    """A PRESENT-but-unreadable ``date`` is not an ABSENT one — it REFUSES.
+
+    ``_instant`` tagged both ``(0, …)``, so a garbled stamp ranked with the undated
+    records: the newest on-pin measurement could never win and an OLDER receipt
+    published E4's number with nothing said — the exact "the row's number is not the
+    artifact you think it is" defect the ordering pin exists to close. An absent date
+    stays permitted (it is a recorded fact); an unreadable one is UNKNOWABLE, so the
+    selection refuses for the reason it already refuses an unreadable file.
+
+    Non-vacuity: at the previous head this returned ``older.json`` (5/15) — the 15/15
+    receipt on the pin was ranked first and never read.
+    """
+    pin = "sha256:" + "d" * 64
+    root = Path(tempfile.mkdtemp())
+    receipts = root / measure.E4_RECEIPT_DIR
+    receipts.mkdir(parents=True)
+    _receipt(receipts / "w2b-operator-older.json", corpus_hash=pin,
+             edge_correct=5, date="2026-10-24T05:00:00Z")
+    _receipt(receipts / "w2b-operator-garbled.json", corpus_hash=pin,
+             edge_correct=15, date="2026-10-24T0")
+
+    with pytest.raises(SystemExit) as exc:
+        measure.select_e4_receipt(root, frozen_pin=pin)
+    message = str(exc.value)
+    assert "w2b-operator-garbled.json" in message, message
+    assert "not an instant" in message, message
+
+
+def test_an_unparseable_date_cannot_silence_the_would_have_won_refusal():
+    """A garbled date must not let an unscorable receipt hide behind "it sorts first".
+
+    With the sentinel, an unscorable on-pin receipt with a PRESENT-but-unreadable date
+    sorted before the winner, so ``key > winner`` was false, the would-have-won refusal
+    never fired, and the newest unread measurement on the frozen corpus was skipped
+    silently — the failure mode that refusal exists for.
+
+    Non-vacuity: at the previous head this returned the scorable receipt, no refusal.
+    """
+    pin = "sha256:" + "d" * 64
+    root = Path(tempfile.mkdtemp())
+    receipts = root / measure.E4_RECEIPT_DIR
+    receipts.mkdir(parents=True)
+    _receipt(receipts / "w2b-operator-valid.json", corpus_hash=pin,
+             edge_correct=5, date="2026-10-24T05:00:00Z")
+    _receipt(receipts / "w2b-operator-garbled.json", corpus_hash=pin,
+             edge_correct=15, date="24/10/2026", audit=False)
+
+    with pytest.raises(SystemExit) as exc:
+        measure.select_e4_receipt(root, frozen_pin=pin)
+    assert "w2b-operator-garbled.json" in str(exc.value), str(exc.value)
+
+
+def test_an_unparseable_date_off_the_pin_is_ignored():
+    """A receipt on ANOTHER corpus is not a candidate, so its broken date is moot.
+
+    The refusal protects the ORDER the winner is chosen from; a record already
+    excluded by ``corpus_hash`` never enters that order, so refusing on it would name
+    a consequence that is not true — the one failure mode a refusal must not have.
+    """
+    pin = "sha256:" + "d" * 64
+    root = Path(tempfile.mkdtemp())
+    receipts = root / measure.E4_RECEIPT_DIR
+    receipts.mkdir(parents=True)
+    _receipt(receipts / "w2b-operator-pin.json", corpus_hash=pin,
+             edge_correct=5, date="2026-10-24T05:00:00Z")
+    _receipt(receipts / "w2b-operator-other.json",
+             corpus_hash="sha256:" + "9" * 64, edge_correct=15, date="nonsense")
+
+    rel, record = measure.select_e4_receipt(root, frozen_pin=pin)
+    assert rel.endswith("w2b-operator-pin.json"), rel
+    assert record["operator_audit"]["edge_correct"] == 5, record
+
+
 def test_a_missing_receipts_directory_refuses_differently_from_an_empty_one():
     """An ABSENT receipts directory is not an EMPTY one.
 
