@@ -1070,21 +1070,77 @@ _TURN_SHAPE_NARRATIVE_HOMES_PRESENT_TENSE_ONLY = (
 #: bounded window keep it from firing on an unrelated seed ("the demo seed
 #: writes ~10 Points") or on the corrected prose ("a graph seeded BEFORE
 #: #10000 … the seed holds ``pointKind``"). ⚠️ The demonstration above is
-#: spelled in CAPITALS on purpose: this file is itself one of the homes below,
-#: so a lower-case sample here would make the pin red on its own comment.
+#: spelled in CAPITALS on purpose: a lower-case sample in this comment block
+#: would match, and this file is itself one of the homes below.
+#:
+#: ⛔ TWO MORE PROPERTIES, both measured (#10675 review round 10, P2):
+#: * **CASE** — without ``IGNORECASE`` an uppercase ``WRITES`` was fail-OPEN.
+#:   That was the sharpest form of the defect: this guard's own failure message
+#:   spelled the claim in capitals, i.e. in a spelling its own regex could not
+#:   match.
+#: * **KIND** — ``_seed_demo_graph`` still writes ``pointKind='claim'`` points
+#:   for the epistemic layer (``hosted_api.py:14027``). Those are TRUE
+#:   present-tense statements, and matching a bare ``pointKind`` reds them as
+#:   if they were the deleted writer. So the kind is CAPTURED and read in code:
+#:   a violation is an UNQUALIFIED kind or ``event``; any other named kind is
+#:   explicitly not this claim. Measured: ``writes ``pointKind='claim'`` `` was
+#:   a false RED before, and is GREEN now.
 _PRESENT_TENSE_DEMO_EVENT_WRITER = re.compile(
     r"(?:demo|dashboard|hosted|sample)[^.\n]{0,40}?seed(?:er)?\s+"
-    r"(?:also\s+)?(?:writes?|mints?|creates?)\b[^.\n]{0,160}?pointKind")
+    r"(?:also\s+)?(?:writes?|mints?|creates?)\b[^.\n]{0,160}?pointKind"
+    r"(?:\s*[=:]\s*[`'\"“]*[a-z_]+)?", re.IGNORECASE)
+
+#: The kind a ``pointKind`` mention names, if it names one — the group read by
+#: :func:`_present_tense_writer_claim`. Split out so the KIND rule above is
+#: stated once, in code, instead of as a lookahead inside the pattern.
+_POINT_KIND = re.compile(r"pointKind\s*[=:]\s*[`'\"“]*([a-z_]+)", re.IGNORECASE)
+
+
+def _present_tense_writer_claim(flat: str) -> str | None:
+    """The forbidden present-tense claim in ``flat``, or ``None``.
+
+    A match is a violation unless it names a kind that is NOT ``event``: the
+    seeder still writes ``claim`` points, so a true sentence about those must
+    not red (#10675 review round 10, P2).
+    """
+    for hit in _PRESENT_TENSE_DEMO_EVENT_WRITER.finditer(flat):
+        kind = _POINT_KIND.search(hit.group())
+        if kind is None or kind.group(1).lower() == "event":
+            return hit.group()
+    return None
+
+#: The guard's OWN block, EXCISED before this file is scanned. Its comments must
+#: quote the pre-``#10000`` wording AND the marker that annotates it, so leaving
+#: them in let the pin satisfy ITSELF: measured, deleting a marker from the
+#: guard's own commentary left the pin GREEN (#10675 review round 10, P3).
+#: Excising the block is what makes "this file is also a home" falsifiable
+#: rather than circular — the alternative, spelling every sample in CAPITALS so
+#: the pattern misses its own comment, only protects the one demonstration and
+#: leaves the rest of the file's prose in the population.
+_GUARD_BLOCK = "# ── the DELETED demo turn writer"
+
+
+def _narrative_text(rel: str) -> str:
+    """The home's text, with this guard's own commentary removed for its file."""
+    raw = (_REPO / rel).read_text(encoding="utf-8")
+    if rel == "tests/test_session_reinjection_rules.py":
+        raw = raw.split(_GUARD_BLOCK, 1)[0]
+    return " ".join(raw.split())
+
 
 #: HOW far from a seed mention the ``#10000`` history marker may sit and still
 #: be read as annotating it. The POSITIVE half below is a WINDOW, not a
-#: file-scoped ``"#10000" in flat``: those five homes carry 6, 4, 5, 17 and 1
-#: ``#10000`` mentions between them (``grep -c '#10000'``, measured at THIS head
-#: — the counts move as lanes correct the prose), so the file-scoped form stays
-#: GREEN when the marker leaves the one sentence that makes the conjunct
-#: defensible — and for THIS file it was strictly tautological, since the
-#: assertion's own message names ``#10000``. Measured: stripping the marker from
-#: each home's explaining sentence reds this window on all five.
+#: file-scoped ``"#10000" in flat``: every one of these homes carries OTHER
+#: ``#10000`` mentions — re-derive with `grep -c '#10000'` rather than trusting a
+#: count written into this comment, which rots the moment any lane edits the
+#: prose (the first version of this note stated a census that the very fix
+#: introducing it had already made stale; #10675 review round 10, P3). A
+#: file-scoped check stays GREEN whenever the marker leaves the one sentence
+#: that makes the conjunct defensible — and for THIS file it was strictly
+#: tautological, since the assertion's own message names ``#10000``. A WINDOW
+#: rather than a paragraph boundary because one home states the shape in one
+#: paragraph and the history in the next (``_create_demo_event``). Measured:
+#: stripping the marker from each home's explaining text reds this on all five.
 _MARKER_WINDOW = 400
 _SEED_MENTION = re.compile(r"demo(?:/dashboard)?[\s-]+seed", re.IGNORECASE)
 
@@ -1112,10 +1168,12 @@ def test_no_home_states_the_deleted_demo_turn_writer_as_current_fact():
         f"the claim it exists for: {missing}")
 
     for rel in _TURN_SHAPE_NARRATIVE_HOMES + _TURN_SHAPE_NARRATIVE_HOMES_PRESENT_TENSE_ONLY:
-        flat = " ".join((_REPO / rel).read_text(encoding="utf-8").split())
-        assert not _PRESENT_TENSE_DEMO_EVENT_WRITER.search(flat), (
-            f"`{rel}` says the demo/dashboard seed WRITES ``pointKind='event'`` "
-            "as current fact — since #10000 it writes no turn node at all "
+        flat = _narrative_text(rel)
+        present = _present_tense_writer_claim(flat)
+        assert present is None, (
+            f"`{rel}` states the demo/dashboard seed as the PRESENT-TENSE "
+            f"writer of a `pointKind='event'` point — quoted: {present!r} — "
+            "but since #10000 it writes no turn node at all "
             "(§9.1/D1). Restate it as history (the clause is kept because a "
             "graph seeded BEFORE #10000 still holds those nodes) rather than "
             "leaving a claim about a writer that no longer exists")
