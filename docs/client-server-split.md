@@ -217,8 +217,8 @@ useless: it points at the credential's VALUE when the client never looked again
    #1708 D5 order: the PROJECT-LOCAL `./.tortoise` that `tortoise init --api-key`
    writes, then `~/.tortoise/credentials.json`. A rotation
    therefore reaches the wire on the next call with no rebuild and no restart. A
-   blank value is "no credential", never `Authorization: Bearer ` with nothing
-   after it; if the endpoint then rejects the call, the client raises
+   blank value is "no credential", never an `Authorization: Bearer` header with
+   nothing after the scheme; if the endpoint then rejects the call, the client raises
    `MCPKeyEmptyError` (code `MCP-KEY-EMPTY`) naming every source it read instead
    of relaying the server's wording. `status()` reports that as the recorded
    `unconfigured` term (a set-up gap, not an outage, #3805). The named refusals
