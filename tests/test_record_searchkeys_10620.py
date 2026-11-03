@@ -13,7 +13,13 @@ hosted deployment's log said:
 A 302-write failure had no attributable cause on the deployment's own log. It
 now names the STATEMENT, its TABLE and COLUMNS with their values, and the
 entity/point id, on top of the driver's own `str(exc)`. `/health` also stopped
-answering `ok` while rows were being dropped (`record.degraded`).
+answering `ok` while rows were being dropped — its verdict is
+`refusing: {reason, age_s}` inside a bounded window, `degraded`, and a reason's
+remedy (`#10185`, the open home for that half: a cumulative counter cannot say
+"now", so the verdict is the AGE of the last refusal, not a fold over totals).
+⚠️ The lane's own number is `#10620`, which is a docs PR, not this defect — the
+health half's issue is `#10185` and R4's is `#9264`/`#9552`. The file keeps its
+name so `config/ci-surfaces.yml` and the CI job list keep pointing at it.
 
 **Reconciliation (the `search_keys` refusal itself).** `public.point.search_keys`
 was `jsonb`; every producer emits the graph's FLAT SPACE-JOINED STRING
