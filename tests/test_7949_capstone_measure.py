@@ -963,6 +963,47 @@ def test_the_e1_and_e2_rows_carry_the_counts_their_criteria_are_written_over():
         "the two populations are the same number — re-derive this pin")
 
 
+
+def test_a_non_string_e4_corpus_yields_a_row_and_not_a_traceback():
+    """A synthetic ``e4`` with a non-string corpus produces a ROW, not an exception.
+
+    ``_same_corpus``'s contract is a VERDICT, and it now coerces both operands itself
+    for exactly this reason. It did not, and neither did the call sites: a caller
+    handing E4 a number escaped as
+    ``AttributeError: 'int' object has no attribute 'removeprefix'`` from inside the
+    comparison — a traceback where the contract is a row the GATE can report (V7 reds
+    a non-string declaration; it is not this function's job to crash).
+
+    Non-vacuity: reds at 6b67974f2 and earlier with that AttributeError.
+    """
+    rows = {row["criterion"]: row for row in _rows(e4={
+        "verdict": "RED", "numerator": 2, "denominator": 15, "sha": "6164c683c",
+        "corpus_sha256": 5, "evidence": measure.E4_RECEIPT, "note": "odd note"})}
+    assert rows["E4"]["corpus_sha256"] == 5, rows["E4"]
+    assert rows["E4"]["artifact_corpus_sha256"] == 5, rows["E4"]
+
+
+def test_build_e4_row_refuses_rather_than_raising_on_a_non_string_pin():
+    """`build_e4_row`'s GUARD must refuse, not raise, on a non-string pin.
+
+    The guard's whole job is a named refusal, and it called ``_same_corpus`` with the
+    caller-supplied pin RAW (only the receipt operand was wrapped), so
+    ``corpus_sha=12345`` raised ``AttributeError: 'int' object has no attribute
+    'removeprefix'`` from INSIDE the `if not _same_corpus(...)` that exists to produce
+    the refusal. Not reachable from `main` (`check_corpus` returns a string), hence its
+    own arm rather than a real-run case; the coercion now lives in `_same_corpus`, so no
+    call site can differ again.
+
+    Non-vacuity: reds at 325b18901 with that AttributeError.
+    """
+    pin = _prereg()["corpus"]["fixtures_hash"]
+    receipt = measure.load_e4(_REPO, frozen_pin=pin)
+    with pytest.raises(SystemExit) as exc:
+        measure.build_e4_row(receipt, bars=measure.parse_bars(_prereg()),
+                             corpus_sha=12345)
+    assert "REFUSED" in str(exc.value), str(exc.value)
+
+
 def test_the_e1_floor_is_applied_to_the_arm_the_row_counts():
     """#10610 review issue 2: the row's floor arm was unreachable.
 
@@ -3770,11 +3811,11 @@ def test_the_bare_continuation_cites_name_what_they_say():
         # are pinned here instead. The sentence wraps over three lines and a row
         # scopes to ONE line, so the claim takes three rows.
         ("E1-E5-PROOFS.md", 'declares `STEPS = ("S0"', (
-            ("132", 'STEPS = ("S0", "S1", "S2.1", "S2.2", "S2.3", "S3", '
+            ("134", 'STEPS = ("S0", "S1", "S2.1", "S2.2", "S2.3", "S3", '
                     '"S5", "S6")'),
         ), "capstone_verdict_check"),
-        ("E1-E5-PROOFS.md", "_step_accounting` (`:524`) refuses a GREEN row whose", (
-            ("524", "def _step_accounting("),
+        ("E1-E5-PROOFS.md", "_step_accounting` (`:526`) refuses a GREEN row whose", (
+            ("526", "def _step_accounting("),
         ), "capstone_verdict_check"),
         # ⛔ A SECOND DOCUMENT PRINTS THE SAME DECLARATION (#10601 review round 2).
         # `docs/00_index.md`'s capstone row cites this gate too, and it moved
@@ -3784,7 +3825,7 @@ def test_the_bare_continuation_cites_name_what_they_say():
         # and the rows above covered ONE document. Every doc that prints a
         # `tools/*.py` number needs its own row here, not just the first one.
         ("docs/00_index.md", "declares the eight steps", (
-            ("132", 'STEPS = ("S0", "S1", "S2.1", "S2.2", "S2.3", "S3", '
+            ("134", 'STEPS = ("S0", "S1", "S2.1", "S2.2", "S2.3", "S3", '
                     '"S5", "S6")'),
         ), "capstone_verdict_check"),
     )
@@ -5614,6 +5655,80 @@ def test_the_would_have_won_boundary_is_the_instant_not_the_string():
 
     rel, record = measure.select_e4_receipt(root, frozen_pin=pin)
     assert rel.endswith("w2b-operator-zulu.json"), rel
+    assert record["operator_audit"]["edge_correct"] == 5, record
+
+
+def test_an_unparseable_date_on_the_pin_refuses_instead_of_publishing_an_older():
+    """A PRESENT-but-unreadable ``date`` is not an ABSENT one — it REFUSES.
+
+    ``_instant`` tagged both ``(0, …)``, so a garbled stamp ranked with the undated
+    records: the newest on-pin measurement could never win and an OLDER receipt
+    published E4's number with nothing said — the exact "the row's number is not the
+    artifact you think it is" defect the ordering pin exists to close. An absent date
+    stays permitted (it is a recorded fact); an unreadable one is UNKNOWABLE, so the
+    selection refuses for the reason it already refuses an unreadable file.
+
+    Non-vacuity: at the previous head this returned ``older.json`` (5/15) — the 15/15
+    receipt on the pin was ranked first and never read.
+    """
+    pin = "sha256:" + "d" * 64
+    root = Path(tempfile.mkdtemp())
+    receipts = root / measure.E4_RECEIPT_DIR
+    receipts.mkdir(parents=True)
+    _receipt(receipts / "w2b-operator-older.json", corpus_hash=pin,
+             edge_correct=5, date="2026-10-24T05:00:00Z")
+    _receipt(receipts / "w2b-operator-garbled.json", corpus_hash=pin,
+             edge_correct=15, date="2026-10-24T0")
+
+    with pytest.raises(SystemExit) as exc:
+        measure.select_e4_receipt(root, frozen_pin=pin)
+    message = str(exc.value)
+    assert "w2b-operator-garbled.json" in message, message
+    assert "not an instant" in message, message
+
+
+def test_an_unparseable_date_cannot_silence_the_would_have_won_refusal():
+    """A garbled date must not let an unscorable receipt hide behind "it sorts first".
+
+    With the sentinel, an unscorable on-pin receipt with a PRESENT-but-unreadable date
+    sorted before the winner, so ``key > winner`` was false, the would-have-won refusal
+    never fired, and the newest unread measurement on the frozen corpus was skipped
+    silently — the failure mode that refusal exists for.
+
+    Non-vacuity: at the previous head this returned the scorable receipt, no refusal.
+    """
+    pin = "sha256:" + "d" * 64
+    root = Path(tempfile.mkdtemp())
+    receipts = root / measure.E4_RECEIPT_DIR
+    receipts.mkdir(parents=True)
+    _receipt(receipts / "w2b-operator-valid.json", corpus_hash=pin,
+             edge_correct=5, date="2026-10-24T05:00:00Z")
+    _receipt(receipts / "w2b-operator-garbled.json", corpus_hash=pin,
+             edge_correct=15, date="24/10/2026", audit=False)
+
+    with pytest.raises(SystemExit) as exc:
+        measure.select_e4_receipt(root, frozen_pin=pin)
+    assert "w2b-operator-garbled.json" in str(exc.value), str(exc.value)
+
+
+def test_an_unparseable_date_off_the_pin_is_ignored():
+    """A receipt on ANOTHER corpus is not a candidate, so its broken date is moot.
+
+    The refusal protects the ORDER the winner is chosen from; a record already
+    excluded by ``corpus_hash`` never enters that order, so refusing on it would name
+    a consequence that is not true — the one failure mode a refusal must not have.
+    """
+    pin = "sha256:" + "d" * 64
+    root = Path(tempfile.mkdtemp())
+    receipts = root / measure.E4_RECEIPT_DIR
+    receipts.mkdir(parents=True)
+    _receipt(receipts / "w2b-operator-pin.json", corpus_hash=pin,
+             edge_correct=5, date="2026-10-24T05:00:00Z")
+    _receipt(receipts / "w2b-operator-other.json",
+             corpus_hash="sha256:" + "9" * 64, edge_correct=15, date="nonsense")
+
+    rel, record = measure.select_e4_receipt(root, frozen_pin=pin)
+    assert rel.endswith("w2b-operator-pin.json"), rel
     assert record["operator_audit"]["edge_correct"] == 5, record
 
 

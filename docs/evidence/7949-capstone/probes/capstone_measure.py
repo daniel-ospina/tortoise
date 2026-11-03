@@ -936,8 +936,13 @@ def build_rows(*, head: str, out_path: str, log_corpus_sha: str,
     # "no declaration": on the real path this is False (`build_e4_row` refused an
     # off-pin receipt before we got here), and an `e4` handed in from another
     # revision still declares itself.
-    e4_off_this_corpus = not _same_corpus(e4["corpus_sha256"] or "",
-                                         log_corpus_sha or "")
+    #
+    # ⛔ `_same_corpus` coerces both operands itself, so this line passes them RAW on
+    # purpose: a non-string `corpus_sha256` must yield a ROW the gate can report (V7
+    # reds a non-string declaration), never an `AttributeError` from inside the
+    # comparison. `build_e4_row` cannot produce one — this is the synthetic-caller
+    # path — but the predicate's job is a verdict, not a traceback.
+    e4_off_this_corpus = not _same_corpus(e4["corpus_sha256"], log_corpus_sha)
 
     return [
         # E1 and E2 carry the counts their OWN criteria are written over — E2 the
@@ -2129,15 +2134,23 @@ def census(uri: str) -> dict:
 
 # ── E4 / E5 / E1+E2 ───────────────────────────────────────────────────────
 
-def _same_corpus(a: str, b: str) -> bool:
+def _same_corpus(a: object, b: object) -> bool:
     """Two corpus hashes name the same corpus, with or without the ``sha256:`` prefix.
 
     The record writes ``sha256:<hex>``; a receipt written by a different code path may
     drop the prefix. Comparing the RAW strings made those two spellings unequal, so a
     receipt on the pinned corpus was reported as "not measured on the frozen corpus" —
     a refusal that names a false reason is the one failure mode a refusal must not have.
+
+    ⛔ Both operands are COERCED HERE, not at the call sites. This predicate's contract
+    is to RETURN A VERDICT — and a caller handing it a non-string (a synthetic `e4`, a
+    caller-supplied pin) must get that verdict, not `AttributeError: 'int' object has
+    no attribute 'removeprefix'` raised from inside the check. Doing it in one place is
+    also why the sites cannot drift apart again: three of them coerced one operand or
+    none, and each shape was a separate review round.
     """
-    return a.removeprefix("sha256:") == b.removeprefix("sha256:")
+    return (str(a or "").removeprefix("sha256:")
+            == str(b or "").removeprefix("sha256:"))
 
 
 def _instant(raw: object) -> tuple[int, object]:
@@ -2150,6 +2163,16 @@ def _instant(raw: object) -> tuple[int, object]:
     the other. Returns ``(0, raw)`` for anything absent or unparseable (so an undated
     record never displaces a dated one) and ``(1, datetime)`` otherwise; the tag is
     compared first, so a datetime is never ordered against a str.
+
+    ⛔ The two tag-0 shapes are NOT the same fact, and the CALLER must separate them:
+    ``(0, "")`` is "no date recorded", which the ordering can state honestly;
+    ``(0, raw)`` is "a date is recorded and it cannot be read", which makes the
+    record's position in the order unknowable. Ranking the second as if it were the
+    first let an OLDER on-pin receipt publish E4's number while a newer measurement
+    sat unread (and silenced the would-have-won refusal when that newer one was also
+    unscorable) — so ``select_e4_receipt`` REFUSES it, on the same reasoning it
+    refuses an unreadable file: nothing can prove the newest measurement on the
+    frozen corpus is not the one whose date could not be parsed.
     """
     text = raw if isinstance(raw, str) else ""
     if not text:
@@ -2195,11 +2218,17 @@ def select_e4_receipt(repo: Path = ROOT, frozen_pin: str = "") -> tuple[str, dic
       and the winner is the last. The date is PARSED where it can be (the writer emits
       a fixed ``…Z`` stamp, but a hand-authored receipt may carry an offset —
       ``…T01:00:00+02:00`` sorts ABOVE ``…T00:30:00Z`` as a STRING while being
-      genuinely EARLIER); a receipt whose ``date`` is absent or unparseable sorts
-      first, so an undated record never displaces a dated one. One helper
-      (``_sort_key``) produces the key for BOTH the winner choice and the
-      would-have-won refusal below, because those two disagreeing is exactly how a
-      silent revert gets in;
+      genuinely EARLIER); a receipt whose ``date`` is ABSENT sorts first, so an
+      undated record never displaces a dated one. One helper (``_sort_key``) produces
+      the key for BOTH the winner choice and the would-have-won refusal below, because
+      those two disagreeing is exactly how a silent revert gets in;
+    * a receipt ON the pin whose ``date`` is PRESENT but unparseable REFUSES the
+      selection. Its position in the order is unknowable, so it can neither be ranked
+      (an older receipt would publish while a newer measurement sat unread) nor be
+      shown not to be the newest unread one (which resurrects the silent skip this
+      selector exists to close). An ABSENT date is different and stays permitted: that
+      is a recorded fact, not an unreadable one. The reason is the same one the next
+      bullet gives for an unreadable file;
     * a file in the receipts directory that cannot be read as a JSON object REFUSES
       the selection: its corpus and date are unknowable, so nothing can prove the
       newest measurement on the frozen corpus is not it;
@@ -2240,6 +2269,11 @@ def select_e4_receipt(repo: Path = ROOT, frozen_pin: str = "") -> tuple[str, dic
     #: corpus and date are unknowable, so nothing can prove the newest measurement on
     #: the frozen corpus is not one of them — a REFUSAL, never a silent skip.
     unreadable: list[str] = []
+    #: Files ON the frozen pin whose ``date`` is present but cannot be parsed. Their
+    #: position in the order is unknowable, so they neither rank nor can be shown not
+    #: to be the newest unread measurement — a REFUSAL, for the same reason an
+    #: unreadable file refuses.
+    unorderable: list[str] = []
     for path in paths:
         try:
             record = json.loads(path.read_text())
@@ -2259,6 +2293,14 @@ def select_e4_receipt(repo: Path = ROOT, frozen_pin: str = "") -> tuple[str, dic
         if not _same_corpus(corpus_hash, frozen_pin):
             skipped.append(f"{path.name} (corpus_hash {corpus_hash[:20]}…)")
             continue
+        raw_date = record.get("date")
+        if raw_date not in (None, "") and _instant(raw_date)[0] != 1:
+            # PRESENT and unreadable. Ranking it first would let an older receipt
+            # publish; ignoring it would let an unscorable newest measurement be
+            # skipped without the would-have-won refusal firing. Both are the defect
+            # this selector exists to close, so the position is unknowable ⇒ refuse.
+            unorderable.append(f"{path.name} (date {raw_date!r} is not an instant)")
+            continue
         key = _sort_key(record, path.name)
         if not isinstance(record.get("operator_audit"), dict):
             unscorable.append((key, path.name))
@@ -2271,6 +2313,14 @@ def select_e4_receipt(repo: Path = ROOT, frozen_pin: str = "") -> tuple[str, dic
             f"Every {E4_RECEIPT_GLOB} there is a candidate receipt, so nothing can "
             "prove the newest measurement on the frozen corpus is not one of them — "
             "repair or remove the file, or re-run the operator probe")
+    if unorderable:
+        raise SystemExit(
+            f"capstone-measure: REFUSED — {len(unorderable)} receipt(s) in "
+            f"{directory} ARE on the frozen corpus ({frozen_pin}) but carry a date "
+            f"that is not an instant: {sorted(unorderable)}. The newest measurement "
+            "on the frozen corpus cannot be ORDERED against them, so no scorable "
+            "receipt can be shown to be the newest one — repair the date, or re-run "
+            "the operator probe")
     if not matched:
         if unscorable:
             raise SystemExit(
@@ -2356,8 +2406,7 @@ def build_e4_row(receipt: dict, *, bars: dict, corpus_sha: str) -> dict:
     and ``verdict``/``failure_origin`` are the receipt's gate verdict over its own
     metrics, not this row's verdict.
     """
-    if not corpus_sha or not _same_corpus(str(receipt.get("corpus_hash") or ""),
-                                         corpus_sha):
+    if not corpus_sha or not _same_corpus(receipt.get("corpus_hash"), corpus_sha):
         raise SystemExit(
             f"capstone-measure: REFUSED — build_e4_row was handed "
             f"{receipt.get('evidence')!r}, whose corpus_hash="
@@ -2679,7 +2728,7 @@ def render_log(*, head: str, prereg_sha: str, bars: dict, corpus_sha: str,
         f"operators_total={e4['operators_total']} "
         f"operators_provenanced={e4['operators_provenanced']}")
     add(f"e4 outcome={e4_out['outcome']} {e4_out['value']} bar={e4_out['bar']}")
-    on_pin = _same_corpus(str(e4["corpus_hash"] or ""), corpus_sha)
+    on_pin = _same_corpus(e4["corpus_hash"], corpus_sha)
     add("e4 provenance: the receipt's own "
         f"date={e4['date']} and commit={e4['commit']} are the RECEIPT's, not this "
         f"run's head. " + (
