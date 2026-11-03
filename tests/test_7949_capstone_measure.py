@@ -3880,22 +3880,38 @@ def test_the_bundle_names_the_live_e2_blocker_and_no_closed_render_absence():
     #    still sent a reader to the CLOSED `#9775`, so the file contradicted
     #    itself on E2's blocker and every gate was green.
     #
-    #    The rule is over rows, not over the `#9775` spellings found today: a row
-    #    that marks E2 BLOCKED must name the live blocker and must not name the
-    #    closed one, whichever words it uses to do it.
-    e2_blocked_rows = [line for line in index.splitlines()
-                       if "E2" in line and "BLOCKED" in line]
-    assert e2_blocked_rows, (
-        "no line of docs/00_index.md marks E2 blocked — this leg is vacuous "
-        "(it would pass on an index that stopped routing E2 at all)")
-    for row in e2_blocked_rows:
-        assert "`#10360`" in row, (
-            "an index row marks E2 blocked without naming the live blocker "
-            f"`#10360`: {row[:400]}")
+    #    ⛔ And the filter is the RECORD's verdict, not the literal word
+    #    `BLOCKED` (#10610 review P2). The leg used to select rows over
+    #    `"E2" in line and "BLOCKED" in line`, which stopped selecting E2's row at
+    #    all once E2 became RED and instead caught the `#9080` row on its
+    #    NEIGHBOUR's word (`E1 BLOCKED` sits on the same line) — so the pin kept
+    #    green-lighting an index whose E2 clause could say anything. The word is now
+    #    derived from the record the row cites, and the retracted verdict is
+    #    asserted absent BESIDE it: an index row that still marks E2 `BLOCKED`
+    #    while the record scores it `RED` is the row-and-its-evidence-disagree
+    #    class this bundle exists to refuse, on the entry point a reader meets
+    #    first.
+    record = json.loads(SCORES.read_text(encoding="utf-8"))
+    e2_word = measure.verdict_word(record["e2"])
+    e2_rows = [line for line in index.splitlines()
+               if "E2" in line and "`#10360`" in line]
+    assert e2_rows, (
+        "no line of docs/00_index.md routes a reader to E2's live blocker "
+        "`#10360` — this leg is vacuous (it would pass on an index that stopped "
+        "routing E2 at all)")
+    for row in e2_rows:
+        assert f"E2 {e2_word}" in row, (
+            "an index row names E2's live blocker without stating E2's OWN "
+            f"verdict — the record scores it {e2_word} "
+            f"({record['e2']['outcome']!r}): {row[:400]}")
         assert "`#9775`" not in row, (
             "an index row still routes a reader to `#9775` as E2's blocker — "
             "#9775's render half is CLOSED (PR #10382), so the live blocker is "
             f"`#10360`: {row[:400]}")
+        if e2_word != "BLOCKED":
+            assert "E2 BLOCKED" not in row, (
+                "an index row marks E2 BLOCKED while the record it cites scores "
+                f"it {e2_word} ({record['e2']['outcome']!r}): {row[:400]}")
 
 
 # ── the header's import claim, MEASURED (#10525 review P3) ───────────────────────────────────
