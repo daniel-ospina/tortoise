@@ -196,6 +196,53 @@ def _no_ambient_store(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path / "cwd")
 
 
+def _redirect_app(target: str):
+    async def app(scope, receive, send):
+        if scope["type"] == "lifespan":
+            while True:
+                message = await receive()
+                if message["type"] == "lifespan.startup":
+                    await send({"type": "lifespan.startup.complete"})
+                elif message["type"] == "lifespan.shutdown":
+                    await send({"type": "lifespan.shutdown.complete"})
+                    return
+        await send({"type": "http.response.start", "status": 307, "headers": [
+            (b"location", target.encode()),
+            (b"content-length", b"0"),
+        ]})
+        await send({"type": "http.response.body", "body": b""})
+
+    return app
+
+
+@pytest.fixture
+def redirecting_daemon(monkeypatch, tmp_path):
+    """(first-origin url, second-origin url): the first 307s to the second, which 401s.
+
+    `_serve` is a plain generator whose `finally` shuts the server down, so the
+    generator has to be KEPT: a `next()` whose generator is then dropped stops the
+    server on garbage collection, and the test measures a refused connection
+    instead of a redirect.
+    """
+    monkeypatch.setenv("TORTOISE_DB_URI", "")
+    monkeypatch.setenv("TORTOISE_DB_PATH", str(tmp_path / "daemon.db"))
+    running = []
+
+    def start(app) -> str:
+        generator = _serve(app)
+        url = next(generator)
+        running.append(generator)
+        return url
+
+    try:
+        second = start(_refuses_every_request)
+        first = start(_redirect_app(second))
+        yield first, second
+    finally:
+        for generator in running:
+            generator.close()
+
+
 @pytest.fixture
 def isolated_home(monkeypatch, tmp_path):
     """A HOME with no stored credential, and no ambient key in the env."""
@@ -840,6 +887,30 @@ class TestCredentialResolution:
         connection = mcp_client.resolve_connection()
         assert connection.key is None, connection
         assert not any("IsADirectoryError" in s for s in connection.sources), connection.sources
+
+    def test_a_cross_origin_redirect_names_the_credential_it_did_not_carry(
+        self, redirecting_daemon, isolated_home, monkeypatch,
+    ):
+        """A credential that RESOLVED but was never sent is its own state.
+
+        httpx strips `Authorization` across an origin change and fastmcp follows
+        redirects, so a 401 from the redirect target answers a request that had
+        none. Classifying from the resolution alone called that an OUTAGE
+        (`tortoise_unavailable`, exit 3) and named a host the operator never
+        configured — while the key was never on the wire at all.
+        """
+        from tortoise import mcp_client
+
+        first, _second = redirecting_daemon
+        monkeypatch.setenv("TORTOISE_MCP_URL", first)
+        monkeypatch.setenv("TORTOISE_API_KEY", "tt_live_key")
+
+        payload = mcp_client.status()
+        text = json.dumps(payload)
+
+        assert payload["status"] == "unconfigured", payload
+        assert "MCP-CREDENTIAL-NOT-CARRIED" in payload["error"], payload
+        assert "tt_live_key" not in text, f"the credential value was printed: {text}"
 
     def test_a_tool_error_mentioning_401_is_not_a_credential_refusal(self, client_env):
         """A TOOL's 401 is the tool's, not the client's — never rewritten.

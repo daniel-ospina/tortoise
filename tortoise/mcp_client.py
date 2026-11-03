@@ -136,6 +136,21 @@ class MCPCredentialHostMismatchError(RuntimeError):
     code = "MCP-CREDENTIAL-HOST-MISMATCH"
 
 
+class MCPCredentialNotCarriedError(RuntimeError):
+    """A credential resolved, but the request that failed carried NONE.
+
+    httpx strips `Authorization` when a redirect changes the origin, and fastmcp
+    follows redirects (the `/mcp` → `/mcp/` hop needs it — #2864). So a 401 from
+    the redirect TARGET answers a request that never had the header, and reporting
+    it as a value fault sends the operator to rotate a key that was never on the
+    wire — the #10605 misdirection, mirrored. Callers branch on `.code`
+    (`"MCP-CREDENTIAL-NOT-CARRIED"`); `status()` maps it to `unconfigured`, because
+    a redirect hop is a set-up fact, not an outage.
+    """
+
+    code = "MCP-CREDENTIAL-NOT-CARRIED"
+
+
 class MCPKeyEmptyError(RuntimeError):
     """No MCP credential resolved, and the endpoint refused the request.
 
@@ -318,6 +333,13 @@ def _raise_if_credential_was_missing(exc: BaseException, sent: Connection | None
         # connect failure), so the live resolution is the only evidence there is.
         sent = resolve_connection()
     elif sent.key is not None:
+        # A credential RESOLVED — but did the failed request actually carry it?
+        # httpx drops `Authorization` across a cross-origin redirect, so a 401 can
+        # answer a request that had none. Classifying from the resolution alone
+        # would call that a value fault (and hide a real outage behind it).
+        carried = _carried_authorization(exc)
+        if carried is False:
+            raise _not_carried(exc, sent) from exc
         return  # a credential WAS sent: the value is the problem, not its absence
     raise _refusal(exc, sent) from exc
 
@@ -341,6 +363,42 @@ def describe_failure(exc: BaseException, provider: _BearerProvider | None = None
     for key in keys:
         text = redact(text, key)
     return text
+
+
+def _carried_authorization(exc: BaseException) -> bool | None:
+    """Did the FAILED request carry an Authorization header? None = unknowable."""
+    request = getattr(exc, "request", None)
+    headers = getattr(request, "headers", None)
+    if headers is None:
+        return None
+    return bool((headers.get("authorization") or "").strip())
+
+
+def _not_carried(exc: BaseException, sent: Connection) -> MCPCredentialNotCarriedError:
+    """The named refusal for a credential that resolved but was never sent."""
+    final = str(getattr(getattr(exc, "request", None), "url", "") or sent.url)
+    if sent.source and ("/" in sent.source):
+        # A FILE-sourced credential decides its own endpoint (co-source, #2369
+        # D1.1), so telling the operator to set an env URL is advice that cannot
+        # work: the store's `api_url` wins. Name the value to record instead.
+        remedy = (
+            f"record {_store_base(final)} as `api_url` in {sent.source} — a stored "
+            f"credential takes its endpoint from that same file, so an environment "
+            f"URL cannot aim it at {final}."
+        )
+    else:
+        remedy = (
+            f"point the endpoint at {final} directly (TORTOISE_MCP_URL, or the "
+            f"store's `api_url`) so the credential goes out on the FIRST hop."
+        )
+    return MCPCredentialNotCarriedError(
+        f"{MCPCredentialNotCarriedError.code}: the MCP endpoint rejected this "
+        f"request as unauthenticated, and the request that failed carried NO "
+        f"credential — although one resolved from {sent.source}. The endpoint "
+        f"redirected to a different origin ({final}) and Authorization is "
+        f"deliberately not carried across origins, so the value was never sent "
+        f"and is not what was refused. Fix: {remedy}"
+    )
 
 
 class _BearerProvider(httpx.Auth):
@@ -559,7 +617,8 @@ def _run_guarded(coro, provider: _BearerProvider):
     """`_run`, with a credential fault re-raised as its NAMED refusal."""
     try:
         result = _run(coro)
-    except (MCPKeyEmptyError, MCPCredentialHostMismatchError):
+    except (MCPKeyEmptyError, MCPCredentialHostMismatchError,
+            MCPCredentialNotCarriedError):
         raise
     except Exception as exc:  # noqa: BLE001, RUF100
         _classify_failure(exc, provider)
@@ -597,7 +656,8 @@ def status() -> dict[str, Any]:
 
     try:
         return _run_guarded(_probe(), provider)
-    except (MCPKeyEmptyError, MCPCredentialHostMismatchError) as exc:
+    except (MCPKeyEmptyError, MCPCredentialHostMismatchError,
+            MCPCredentialNotCarriedError) as exc:
         # Both are CONFIGURATION facts, not outages: report them under the recorded
         # `unconfigured` term so a caller's exit code (4 — a set-up gap) cannot
         # read as "the store is down" (3).

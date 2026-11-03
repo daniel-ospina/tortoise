@@ -77,9 +77,13 @@ import httpx
 from tortoise.mcp_client import (
     REFUSAL_CODE,
     Connection,
+    _store_base,
     redact,
     resolve_connection,
 )
+
+#: the named code for "a credential resolved but this request carried none".
+NOT_CARRIED_CODE = "MCP-CREDENTIAL-NOT-CARRIED"
 
 #: Seconds per forwarded request. A `tortoise_search` carries the server's wait
 #: budget, so this is deliberately generous; raise it with
@@ -252,14 +256,27 @@ def _redirect_refusal(response: httpx.Response, body: str, sent: Connection) -> 
         # is the reason the rule is stated as a rule and not as a habit: the
         # redirect refusal was added after every sibling site was repaired.
         detail += f": {redact(body.strip(), sent.key)[:400]}"
+    if "/" in str(sent.source):
+        # A FILE-sourced credential decides its OWN endpoint (co-source, #2369
+        # D1.1), so "point TORTOISE_MCP_URL at it" is advice that cannot work: the
+        # store's `api_url` wins and the operator repeats the failure forever.
+        remedy = (
+            f"record {_store_base(final)} as `api_url` in {sent.source} — a stored "
+            f"credential takes its endpoint from that same file — or run the bridge "
+            f"from a directory whose store already names {final}."
+        )
+    else:
+        remedy = (
+            f"point TORTOISE_MCP_URL at {final} directly so the credential goes out "
+            f"on the first hop: the next request picks that up without a restart."
+        )
     return (
-        f"{REFUSAL_CODE}: the Tortoise MCP endpoint rejected this request "
+        f"{NOT_CARRIED_CODE}: the Tortoise MCP endpoint rejected this request "
         f"({detail}) at {final}, a request that carried NO credential — although "
         f"one resolved from {sent.source}. The endpoint redirected to a DIFFERENT "
         f"origin, and an Authorization header is deliberately not carried across "
-        f"origins, so the value was never sent and is not what was refused. Point "
-        f"TORTOISE_MCP_URL at {final} directly so the credential goes out on the "
-        f"first hop: the next request picks that up without a restart."
+        f"origins, so the value was never sent and is not what was refused. Fix: "
+        f"{remedy}"
     )
 
 
