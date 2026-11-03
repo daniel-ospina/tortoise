@@ -39,7 +39,7 @@ import requests
 
 import tortoise.model_adapters as ma
 from tests._provider_env import pin_provider_routing_env
-from tests.test_hosted_api import client as client  # noqa: F401  (its fixture seeds the org)
+from tests.test_hosted_api import client as client  # its fixture seeds the org
 
 
 @pytest.fixture(autouse=True)
