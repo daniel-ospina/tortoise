@@ -6826,6 +6826,136 @@ def test_every_pytest_capture_leg_resolves_its_artifacts_per_job():
                 )
 
 
+def _capture_tokens(step_list, pattern):
+    """Every token `pattern` captures across the job's EXECUTABLE step lines.
+
+    Comment lines are dropped first, for the same reason `capture_site` drops them:
+    the migration's own rationale quotes the literals it retired, and a rationale is
+    not a read.
+    """
+    body = "\n".join(
+        line
+        for step in step_list
+        for line in (step.get("run") or "").splitlines()
+        if not line.lstrip().startswith("#") and _re.search(pattern, line)
+    )
+    out = []
+    for match in _re.finditer(pattern, body):
+        out.append(next(g for g in match.groups() if g))
+    return out
+
+
+def _steps_named(step_list, prefix):
+    return "\n".join(
+        step.get("run") or "" for step in step_list
+        if str(step.get("name", "")).startswith(prefix)
+    )
+
+
+def _pairing_offenders(job_id, steps):
+    """The artifact a leg WRITES and the artifact the leg READS must be one file.
+
+    Returns a list of `(artifact, written, read)` triples for every mismatch, so the
+    test can also feed it the pre-fix shapes and watch it name them (non-vacuity for
+    the pairing, not just for the literals).
+    """
+    offenders = []
+    # (a) the log: one token across the writer (the redirect) and EVERY reader — the
+    # `tail`, the reporter's `--log`, and the skip-guard's positional.
+    logs = set(_capture_tokens(steps, r'>\s*(?:"([^"]+)"|(\S+))\s+2>&1'))
+    logs |= set(_capture_tokens(steps, r'--log\s+(?:"([^"]+)"|(\S+))'))
+    logs |= set(_capture_tokens(steps, r'(?m)^\s*tail\s+-[a-zA-Z]*\s*\d+\s+(?:"([^"]+)"|(\S+))\s*$'))
+    logs |= set(_capture_tokens(steps, r'skip-guard\.py\s+(?:"([^"]+)"|(\$?\w+))'))
+    if len(logs) != 1:
+        offenders.append(("log", sorted(logs), sorted(logs)))
+
+    # (b) the manifest: the token the emit step WRITES is the token the guard READS.
+    # The committed `config/ci-expected-nodeids/*.txt` a leg may also pass is a
+    # DIFFERENT, static register and is deliberately not required in the write set.
+    written = set(_capture_tokens(steps, r'--output\s+(?:"([^"]+)"|(\S+))'))
+    read = set(_capture_tokens(steps, r'--manifest\s+(?:"([^"]+)"|(\S+))'))
+    if written and not written <= read:
+        offenders.append(("manifest", sorted(written), sorted(read)))
+
+    # (c) the junit the guard reconciles is the junit the RUN step wrote — the
+    # pre-phase and the main run may legitimately use different variables (`test`
+    # writes `$PYTEST_JUNIT_LF` for its last-failed pass), so this is a SUBSET check
+    # on the guard's side, not an equality over the job.
+    run_junit = set(_capture_tokens(
+        [s for s in steps if str(s.get("name", "")).startswith("Run")],
+        r'--junitxml=(?:"([^"]+)"|(\S+))'))
+    guard_junit = set(_capture_tokens(
+        [s for s in steps if str(s.get("name", "")).startswith("Skip-fail guard")],
+        r'--junitxml=(?:"([^"]+)"|(\S+))'))
+    if guard_junit and not guard_junit <= run_junit:
+        offenders.append(("junit", sorted(guard_junit), sorted(run_junit)))
+    return offenders
+
+
+def test_every_migrated_leg_reads_the_artifacts_it_writes():
+    """#10280 review: the PAIRING is the contract, the path is not.
+
+    `test_every_pytest_capture_leg_resolves_its_artifacts_per_job` proves no leg names
+    a host-global literal. That is necessary and not sufficient: a leg can write
+    `$PYTEST_LOG` and then grade itself against `"$RUNNER_TEMP/other.log"`, or emit
+    `$PYTEST_MANIFEST` and pass a renamed manifest to the guard — every literal scan
+    stays green, and the leg is once again graded against a file it did not write.
+    This file already records that lesson twice, per job
+    (`test`'s `--output "$PYTEST_MANIFEST"` / `--manifest "$PYTEST_MANIFEST"` pair and
+    `test_test_slow_legs_write_per_job_pytest_artifacts`); the three legs migrated in
+    #10280 inherit it here, from ONE derivation, so a fourth leg added to
+    `_PER_JOB_ARTIFACT_JOBS` is covered without a bespoke test.
+
+    Non-vacuous by construction: `_pairing_offenders` is fed MUTATED copies of the
+    head's own steps below, and each mutation is one of the three mismatches.
+    """
+    wf = _load_python_ci()
+    for job_id in _PER_JOB_ARTIFACT_JOBS:
+        steps = wf["jobs"][job_id]["steps"]
+        assert _pairing_offenders(job_id, steps) == [], (
+            f"{job_id}: an artifact this leg WRITES is not the artifact it READS "
+            f"{_pairing_offenders(job_id, steps)} (written, read) — a per-job path with "
+            "a mismatched reader is still a leg graded against the wrong file")
+        # every migrated job's log is the resolver's variable, never a literal
+        assert set(_capture_tokens(steps, r'--log\s+(?:"([^"]+)"|(\S+))')) == {
+            "$PYTEST_LOG"
+        }, f"{job_id}: the reporter must read the resolver's log variable"
+
+    # ⛔ NON-VACUITY: three mutations, each the shape the assertions above exist for.
+    # Each is scoped to ONE step, because a whole-job `str.replace` would rename the
+    # writer and the reader together — leaving the pairing intact and the mutation
+    # vacuous (measured: that is exactly how the first cut of (b) passed).
+    trackb = wf["jobs"]["test-track-b"]["steps"]
+
+    def mutated(step_prefix, replace_from, replace_to):
+        out = []
+        for step in trackb:
+            if str(step.get("name", "")).startswith(step_prefix):
+                step = {**step, "run": (step.get("run") or "").replace(
+                    replace_from, replace_to)}
+            out.append(step)
+        return out
+
+    # (a) the guard reads a DIFFERENT manifest than the one the emit step wrote
+    bad_manifest = mutated("Skip-fail guard", '--manifest "$PYTEST_MANIFEST"',
+                           '--manifest "$RUNNER_TEMP/other.txt"')
+    assert bad_manifest != trackb, "the mutation must change the steps"
+    assert [o for o in _pairing_offenders("test-track-b", bad_manifest)
+            if o[0] == "manifest"], (
+        "the pairing check must red when the guard reads a manifest this leg did not "
+        "emit — that is the shape that made the required check grade a co-tenant's file")
+    # (b) the guard reconciles a junit the run step never wrote
+    bad_junit = mutated("Skip-fail guard", '--junitxml="$PYTEST_JUNIT"',
+                        '--junitxml="$RUNNER_TEMP/other.xml"')
+    assert [o for o in _pairing_offenders("test-track-b", bad_junit) if o[0] == "junit"], (
+        "the pairing check must red when the guard's junitxml is not the run's")
+    # (c) the reporter is pointed at a log the leg never wrote
+    bad_log = mutated("Run Track B tests", '--log "$PYTEST_LOG"',
+                      '--log "$RUNNER_TEMP/other.log"')
+    assert [o for o in _pairing_offenders("test-track-b", bad_log) if o[0] == "log"], (
+        "the pairing check must red when the reporter reads a log the leg never wrote")
+
+
 # ── #3239: a hung pytest job holds the per-PR concurrency slot ────────────
 # The `concurrency:` group is per-PR with `cancel-in-progress: true`, so a
 # stale-head run that will not die blocks the CURRENT head's run — and
