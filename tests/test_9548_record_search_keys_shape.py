@@ -513,16 +513,22 @@ def test_the_record_applies_the_live_search_keys_shape_and_reads_it_back(
         monkeypatch):
     """PRODUCTION-FIRST: `write_failed` stops climbing, `write_ok` climbs.
 
-    Drives the seam the armed deployment drives (`write_records` → the same
-    `RecordWriter.write`), on the app-role DSN `replay` requires, and asserts
-    all three things a green unit test alone cannot:
+    Drives the LIVE DOOR the armed deployment drives
+    (`record_writer.write_live_record` — the one the three journal-append sites
+    call), on the app-role DSN `replay` requires, and asserts all three things a
+    green unit test alone cannot:
 
     * every write returns APPLIED (the `write_ok` half — there is no separate
       counter for it; the outcome on the returned `RecordWrite` IS the record of
       a successful write, and `monitoring.record_write_failure_counts()` is the
       failure half);
-    * `write_failed` did NOT move (before #9548 every one of these writes moved
-      it by one, and the row was dropped);
+    * `write_failed` did NOT move — and this assertion now DISCRIMINATES.
+      ⛔ `write_failed` is incremented in exactly ONE place: `write_live_record`'s
+      own `except`. `RecordWriter.write` merely raises, so an earlier version of
+      this test driving `write_records` compared two identical integers for ANY
+      input, including the pre-fix code — a decorative assertion wearing the
+      fix's headline claim (#9548 review round 4, P2). Driving the live door is
+      what makes `after == before` mean "no row was dropped";
     * the row is REALLY there and the record's own reader gives back the graph's
       flat string.
     """
@@ -538,18 +544,17 @@ def test_the_record_applies_the_live_search_keys_shape_and_reads_it_back(
 
     before = _failures()
     applied = 0
-    for record in records:
-        write = record_writer.write_records(
-            [record], org_id=tenant[0], graph_id=tenant[1])
+    for index, record in enumerate(records):
+        # One record per call, each with its OWN journal ordinal (`seq`), so
+        # `journal_event`'s `(org, graph, seq)` upsert never absorbs a
+        # sibling's position row. `write_live_record` commits and closes the
+        # connection the seam opens for it (unlike `write_records`, whose caller
+        # owns the transaction and which therefore increments NO counter).
+        write = record_writer.write_live_record(
+            record, seq=index + 1, tenant=tenant)
+        assert write is not None, "the record was not armed — nothing attempted"
         assert write.outcome is record_writer.RecordWriteOutcome.APPLIED, (
-            f"the live shape was refused: {write!r}")
-        # The seam does NOT commit — only the caller knows what else is in the
-        # transaction (§3). `write_live_record` commits and closes here; a test
-        # that skips it leaves seq=1's journal row open and the NEXT write
-        # blocks on `ON CONFLICT (org_id, graph_id, seq)` (measured).
-        if write.connection is not None:
-            write.connection.commit()
-            write.connection.close()
+            f"the live shape was refused ({write.refusal!r}): {write!r}")
         applied += 1
     after = _failures()
     assert applied == len(records)

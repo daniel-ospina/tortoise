@@ -140,6 +140,11 @@ def tenant() -> tuple[str, str]:
 #:     `public.point.search_keys` is `jsonb`: ``invalid input syntax for type
 #:     json``. Two record types re-project the same snapshot
 #:     (``PointAdded``/``PointPromoted``), so the TYPE is not the unit.
+#:     **FIXED (#9548)** — `_jsonb_or_scalar` now serialises a scalar `str` for a
+#:     `jsonb` COLUMN (the type read from the migrations), so the graph's flat
+#:     string binds as a JSON string and the column's shape is unchanged. The
+#:     entry and its detection are gone (see the empty map below); 302 live rows
+#:     had been dropped by it.
 #:   * ``capture_redactions`` — the capture receipt's integer COUNT, while
 #:     `public.session.capture_redactions` was `jsonb`: ``column
 #:     "capture_redactions" is of type jsonb but expression is of type integer``.

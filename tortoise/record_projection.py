@@ -1507,6 +1507,21 @@ def _jsonb_columns_for_dir(migrations_dir: Path) -> frozenset[str]:
         for column, type_name in _ADDED_COLUMN_TYPED_RE.findall(body):
             if type_name.lower() == "jsonb":
                 found.add((table, column))
+    if not any(table in THE_RECORD_TABLES
+               for table, _body in _TABLE_RE.findall(sql)):
+        # ⛔ FAIL CLOSED, like `table_columns()`. An EMPTY set is the worst
+        # answer this function can give: it silently stops the #9548 encoding
+        # and the row drops come back with no signal at all. A partial tree (a
+        # migration missing) still yields a map — narrower, and the pin on
+        # #9264's narrowing is what notices — so only the "no schema at all"
+        # case is refused here.
+        raise RecordProjectionError(
+            "the record schema is not on disk — no CREATE TABLE for any record "
+            f"table was found in {migrations_dir}. The jsonb encoding rule "
+            "reads the DECLARED column types from those files, and an empty "
+            "answer would silently stop serialising a scalar bound to a jsonb "
+            "column — the row-drop class #9548 exists to end."
+        )
     for table, column, type_name in _ALTER_COLUMN_TYPE_RE.findall(sql):
         if table not in THE_RECORD_TABLES:
             continue
@@ -1786,26 +1801,38 @@ class Statement:
         return f"{self.sql} -- {self.params!r}"
 
     def value_types(self) -> str:
-        """`column=python_type→declared_shape` for every parameter it binds.
+        """`column=python_type[→jsonb(shape)]` for every parameter it binds.
 
         Two halves, and the SECOND is the one that identifies #9548. The Python
         type alone stopped being diagnostic the moment this fix landed: a `str`
         bound to a `jsonb` column IS the correct shape now (the column takes a
         JSON scalar), so `search_keys=str` reads identically for a good binding
-        and for the defect it was added for. Pairing it with the DECLARED column
-        type (`→jsonb`, read from the migrations) keeps the report able to tell
-        them apart.
+        and for the defect it was added for. So a `jsonb`-column `str` parameter
+        also reports whether it IS a JSON document: `→jsonb` when it parses,
+        `→jsonb(NOT a JSON document)` when it does not — which is exactly the
+        pre-fix binding, visible in the log line. Never raises: a schema that
+        cannot be read must not replace the driver's cause with its own.
         """
-        jsonb = jsonb_columns()
+        try:
+            jsonb = jsonb_columns()
+        except Exception:      # noqa: BLE001 — attribution must not mask a cause
+            jsonb = frozenset()
         pairs: list[str] = []
         seen: set[int] = set()
         for index, name in enumerate(self.param_columns):
             if not name or index in seen or index >= len(self.params):
                 continue
             seen.add(index)
-            declared = "→jsonb" if name in jsonb else ""
-            pairs.append(
-                f"{name}={type(self.params[index]).__name__}{declared}")
+            value = self.params[index]
+            declared = ""
+            if name in jsonb:
+                declared = "→jsonb"
+                if isinstance(value, str):
+                    try:
+                        json.loads(value)
+                    except (TypeError, ValueError):
+                        declared = "→jsonb(NOT a JSON document)"
+            pairs.append(f"{name}={type(value).__name__}{declared}")
         return ", ".join(pairs)
 
     def attribution(self) -> str:
