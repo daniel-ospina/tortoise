@@ -37,13 +37,16 @@
 >
 > The deployed-surface grader is **agent-infra's**, not this repo's — `scripts/check-farm-drift.sh` in
 > an agent-infra checkout (it is not itself farmed, so no copy under `~/.pi/agent/scripts` exists).
-> Do **not** read `pi-bootstrap/setup.sh`'s exit status as that verdict: an install fails only on the
-> checker's `1`, and on `2` (cannot verify) or `3` (no deploy can fix it) it prints `this is NOT a
-> pass` and still ends with `Done!` — exactly as it does, silently, when the checkout predates the
-> checker. `setup.sh` is also what converges the farm, so it must run from a checkout **at the pin**:
-> from any other tree it re-farms ahead-of-pin bytes, and the grader answers `COMPARING AGAINST THE
-> WRONG TREE`. Advance the pin deliberately first if the box has none materialised — advancing the pin
-> alone leaves the farm stale. Direct invocation from a pi session may be refused as
+> Two things make its verdict easy to miss. First, **the installer's failing exit is not the farm
+> verdict**: `setup.sh` (mac, under `$HOME`) and `cell-install.sh` (cell, under
+> `${CELL_HOME:-/tmp/cell-home}`) exit 1 from other steps too, while the farm leg fails the install on
+> the checker's `1` alone — and on `2` (cannot verify) or `3` (no deploy can fix it) it prints `this is
+> NOT a pass` and still ends with `Done!`. Second, **run the installer whose base is the farm this box
+> executes**: a `$HOME`-rooted run on a `CELL_HOME`-rooted box lands in the grader's FIRST-INSTALL arm
+> and prints `farm: OK` with the pin identity unverified — the false PASS this block is about, one
+> variable over. That farm is materialised only by the installer, so run it from a checkout **at the
+> pin**: from a tree at any other commit it re-farms bytes that are not the pin's, and advancing the
+> pin alone leaves the farm stale. Direct invocation from a pi session may be refused as
 > `script-indirection`, with a message that never mentions drift (agent-infra#3173, the #709 false
 > positive) — so **a refusal is not a clean result**. Do **not** add a tortoise-side mirror — a second
 > owner of that predicate was refused (tortoise#10722, closed superseded); the farm arrays and
