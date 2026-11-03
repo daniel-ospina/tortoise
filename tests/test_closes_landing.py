@@ -173,6 +173,12 @@ def test_a_base_branch_with_no_pr_is_unresolved_not_a_pass():
     (finding,) = cl.classify(pr, _by_head(pr), DEFAULT)
     assert finding.verdict == "unresolved"
     assert finding.carrier is None
+    # …and the ONE cause where a PR really is missing says so. `carrier_path`
+    # returns None for three causes, so the sentence has to be about THIS one
+    # (#10634 review P3).
+    assert "no PR with that head branch exists" in finding.detail
+    assert "CYCLE" not in finding.detail
+    assert "MAX_STACK_DEPTH" not in finding.detail
 
 
 def test_a_cycle_is_unresolved_not_a_pass():
@@ -180,6 +186,22 @@ def test_a_cycle_is_unresolved_not_a_pass():
     a = _pr(50, "b-branch", "Closes #100", head="a-branch")
     (finding,) = cl.classify(a, _by_head(a, b), DEFAULT)
     assert finding.verdict == "unresolved"
+    # The WORDING is pinned, not just the verdict: the cycle arm used to reuse the
+    # "no PR with that head branch exists" sentence, which is FALSE here — the PR
+    # with that head branch is the other half of the cycle — and the remedy it
+    # implies (open a PR on that base) cannot repair a cycle. Only the verdict was
+    # asserted, so the false sentence survived a file that pins wording for its
+    # four sibling arms (#10634 review P3).
+    assert "no PR with that head branch exists" not in finding.detail
+    assert "CYCLE" in finding.detail
+    # …naming BOTH halves, which is the whole diagnosis: the reader cannot see the
+    # cycle from either PR alone.
+    assert "PR #50" in finding.detail and "PR #51" in finding.detail
+    assert "targets `b-branch`" in finding.detail
+    assert "targets `a-branch`" in finding.detail
+    # …and the remedy that exists, rather than "open a PR" (which would re-form
+    # the cycle): re-target a link at the default branch.
+    assert "Re-target" in finding.detail and DEFAULT in finding.detail
 
 
 def test_the_worst_verdict_wins():
@@ -1326,6 +1348,22 @@ def test_the_stack_depth_cap_is_off_by_at_most_nothing(depth, verdict):
     assert finding.verdict == verdict
 
 
+def test_the_depth_cap_message_says_measurement_stopped_not_that_a_pr_is_missing():
+    """The cap is the THIRD cause of `carrier is None`, and every PR in it exists.
+
+    Reusing the "no PR with that head branch exists" sentence here told the reader
+    evidence was missing when the walk had simply stopped, and pointed at a PR
+    that is not missing (#10634 review P3). The sibling test above pins the
+    verdict; this pins the sentence.
+    """
+    subject, by_head = _stack(cl.MAX_STACK_DEPTH - 1)
+    (finding,) = cl.classify(subject, by_head, DEFAULT)
+    assert finding.verdict == "unresolved"
+    assert "no PR with that head branch exists" not in finding.detail
+    assert str(cl.MAX_STACK_DEPTH) in finding.detail
+    assert "not a missing PR" in finding.detail
+
+
 # ── collect_stack: the LIVE walk (two hops, and a base with no PR) ───────────
 
 def _fake_gh_by_head(table):
@@ -1825,6 +1863,18 @@ _COMMONMARK_SHAPES = [
     ("- ```\n   > Closes #100\n", "a literal `>` inside a depth-0 item fence"),
     ("- ```\n>   Closes #100\n", "a blockquote line ends a depth-0 item fence"),
     ("> - ```\n   > Closes #100\n", "indented quote marker ends a quoted item"),
+    # …and a LIST MARKER inside a quote is a real item, so the fence opened under
+    # it has an ITEM edge: when the item ends, the renderer ends the containing
+    # block there AND reads the dedented fence line as a FRESH fence opener — so
+    # the claim after it is CODE. Tracking only markers on the raw line never saw
+    # `> - item`, the fence kept its block open, and the keyword read as prose:
+    # `lands` on a body the renderer shows as `<pre><code>` (#10634 review P1).
+    ("> - item\n>   ```\n> ```\n> Closes #100\n",
+     "a quoted list item's fence ends with the item; the dedented fence re-opens"),
+    ("> 1. item\n>    ```\n> ```\n> Closes #100\n",
+     "…same shape with an ORDERED marker"),
+    ("> - item\n>   ```\n  > ```\n>   Closes #100\n",
+     "…and with a closer carrying a 2-column pre-marker indent"),
     # …and inside a QUOTE that sits inside an ITEM: the item's content column is
     # expressed in `rest` space, so a 4-column run there is NOT a fence (the
     # renderer shows <pre><code>) and the claim after it is PROSE. Passing the
@@ -1867,6 +1917,21 @@ _COMMONMARK_SHAPES = [
     # soft line break INSIDE one container, so stopping at "any line starting
     # with >" would lose these real claims (the under-report direction).
     ("> a `Closes\n> #100` b\n", "a span across two lines of ONE paragraph"),
+    # …and §5.1's LAZY CONTINUATION is still that one paragraph: a line carrying
+    # NO `>` marker continues the quote's paragraph, so opener and closer are ONE
+    # span and the renderer puts the keyword in <code>. Requiring an EQUAL depth
+    # ended the span early, left both runs unmatched, and the keyword survived as
+    # "prose" in BOTH arms — `lands`, exit 0, no annotation (#10634 review P1).
+    ("> The old body said `Closes\n#100` and nothing fired.\n",
+     "a span across a LAZY continuation line of a quote"),
+    ("> > a `Closes\n> b #100` c\n",
+     "…and across a lazy line one quote shallower"),
+    # …and a run the LINE bound leaves literal is still closed by the next run of
+    # its length in the paragraph, which is what the renderer does: this keyword is
+    # PROSE, and a per-line scan that paired line 2's own runs blanked it away —
+    # a lost claim in the FINDING arm (#10634 review P3).
+    ("a`\n`Closes #100`\n",
+     "a stray run pairs with the NEXT run of its length"),
     ("> - item `Closes\n>   #100` here\n",
      "a span across two lines of ONE quoted list item"),
     # …and the claims that ARE prose
@@ -1932,6 +1997,31 @@ def test_the_ITEM_EDGE_is_measured_in_the_space_the_item_lives_in():
     marker_line_fence_in_quote = "> - ```\n>   Closes #100\n"
     assert cl.parse_closing_refs(marker_line_fence_in_quote, None, strict=True) == []
     assert cl.parse_closing_refs(marker_line_fence_in_quote) == []
+
+
+def test_a_stray_run_costs_the_RENDERER_its_pairing_not_a_lost_claim():
+    """The LENIENT arm's line bound must still honour the run the renderer paired.
+
+    The renderer pairs a stray run left open on one line with the FIRST run of the
+    same length after it — which can be the opener of a balanced pair on the next
+    line — so the keyword here is PROSE and a per-line scan that blanked line 2
+    reported nothing:
+
+        a`
+        `Closes #100`      ->  <p>a<code> </code>Closes #100`</p>
+
+    That was a lost claim (no warning for a real closure) in the FINDING arm, the
+    direction `_span_limit`'s docstring exists to protect, and it is what
+    `_strip_inline_code`'s `pending` set closes (#10634 review P3).
+    """
+    body = "a`\n`Closes #100`\n"
+    assert cl.parse_closing_refs(body) == [100]          # the FINDING arm sees it
+    assert cl.parse_closing_refs(body, None, strict=True) == [100]   # …and it is prose
+    # The pairing is per PARAGRAPH, not global: a blank line ends it, so the
+    # keyword in the next paragraph's real code span stays a quotation. Without
+    # this the `pending` set would trade the under-report for an over-report that
+    # outlives the paragraph it belongs to.
+    assert cl.parse_closing_refs("a`\n\n`Closes #100`\n") == []
 
 
 if __name__ == "__main__":  # pragma: no cover
