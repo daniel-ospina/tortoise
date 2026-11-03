@@ -51,14 +51,15 @@ E1–E5 all have evidence attached to this issue — not when the children close
 closing is a claim; this epic is where the claim is checked against the pipeline
 running end to end."*
 
-> **Verdict: 0/5 rows green. THREE rows are RED with measured numbers, TWO are BLOCKED
-> because the frozen metric cannot be scored on the artifact that exists. The epic is NOT
-> closeable, and this bundle says so mechanically — at `9152448d7`, re-measured 2026-11-02:**
+> **Verdict: 0/5 rows green. FOUR rows are RED with measured numbers, ONE is BLOCKED (E1, and its
+> refusal is itself a measurement — see "What E1 took, precisely" below). The epic is NOT
+> closeable, and this bundle says so mechanically — E3/E4/E5 at `9152448d7`, re-measured 2026-11-02,
+> and E1/E2 from the `#9889` record:**
 >
 > | row | frozen bar | measured | verdict |
 > |---|---|---|---|
-> | **E1** | `after_share <= 0.50 × before_share`, over all `:Object` nodes, floor **30** | this run has no BEFORE arm (one capture cannot decide `after <= 0.5 × before` without confounding the gate with LLM non-determinism); its AFTER arm read **64 Objects**, clearing the frozen floor of 30, with a bare-definite share of 14/64 = 0.21875. The only row-scoped artifact is still `e1-e2.log` (25 Objects, below the floor → REFUSED) | ⛔ **BLOCKED** (`#5333`) |
-> | **E2** | E2a `>= 13 of 14` value-bearing units; E2b fused share `<= 0.05` | E2a: the frozen **14-unit** denominator is carried by **no committed artifact** (the artifact counts 42 value literals, before = after); E2b: **1/114 = 0.008772** | ⛔ **BLOCKED** (`#10360`) |
+> | **E1** | `after_share <= 0.50 × before_share`, over all `:Object` nodes, floor **30** | before **0.3590** (78 Objects) and **0.5652** (69 Objects), after **0.2131** (61 Objects) — the record `docs/evidence/9889/e1-e2-scores.json`; bound **0.1795** → FAIL vs bound **0.2826** → PASS, so the pairings DISAGREE | ⛔ **BLOCKED** (n=1 per arm — not decided, not the floor) |
+> | **E2** | E2a `>= 13 of 14` value-bearing units; E2b fused share `<= 0.05` | E2a **8/14** strictly survive (the falsifier reaches **14/14** over the same population); E2b **1/114 = 0.008772** | ⛔ **RED** (8 of 14) |
 > | **E3** | `= 1.000` (zero unanchored), floor **30** derived nodes | **157 / 397 = 0.395466** as registered (this run's own graph, `capstone_measure_9152448d_…`). The `Source->Object` identity link carries no `sourceVersion` BY DESIGN (owner option A, `#5199`), so `:Object mention links` can never anchor and the frozen `= 1.000` is unreachable as registered — the metric needs re-registration (`#9736`, OPEN, owner-gated) | ⛔ **RED** |
 > | **E4** | `= 15 of 15` planted operator edges wired AND persisted | **2 / 15** on the `2026-10-19` receipt, which is on a DIFFERENT corpus (`943a99ec…`) from the frozen one, and whose retrievability rate is UNMEASURED (`#9596`) | ⛔ **RED** |
 > | **E5** | ratio `>= 0.90` **AND** raw absolute `>= 0.80` | ratio **1.0833** (passes) but raw absolute **0.4800** (fails), n = 25 | ⛔ **RED** (S3 selection recovery, `#5087`) |
@@ -577,25 +578,32 @@ does not compute it. #9775's render half — the state-value carve-out on every 
 is closed (PR #10382); what still blocks E2 is `#10360`: nothing enforces retention, and the 1-of-14
 value loss sits upstream of the filter.
 
-**What E1 would take, precisely.** The measurement run DOES produce a pre-registered-corpus
-population large enough to score E1 — **64 `:Object` nodes**, and this pass's bare-definite share
-is printed in the log as the `e1-aux` line (14/64 = 0.21875, against the E1b proxy 90/90). What it does not
-produce is a **before** arm: E1's criterion is a
-*ratio between two arms*, and two independent captures would confound the gate with LLM
-non-determinism — which is exactly why the bare-definite share is not quoted as a trend: the same
-probe on the same corpus has produced double-digit bare counts on one pass and zero on the next
-(14/64 = 0.21875 in the shipped log; **0/59** at the superseded stamp `7c9c34d84`, whose log is not in the tree
-— retrievable with `git show 8a8bbcba2:docs/evidence/7949-capstone/capstone-measured-7c9c34d8.log`,
+**What E1 took, precisely — and why it is still REFUSED.** This paragraph was
+written when the run had one arm. `#9889` has since produced the before arm on the
+frozen corpus, twice: **78 Objects / 0.3590** and **69 Objects / 0.5652**, against
+the same run's after arm of **61 Objects / 0.2131**
+(`docs/evidence/9889/e1-e2-scores.json`). Both before arms clear E1's own floors, so
+the ratio exists and IS the criterion: `0.2131 <= 0.5 x 0.3590 = 0.1795` **fails**,
+while `0.2131 <= 0.5 x 0.5652 = 0.2826` **passes**. The residual problem is the one
+the paragraph below already names from the other side — across-run LLM
+non-determinism — and it is now measured rather than asserted: the two OFF runs of
+the SAME arm are **20.6 pp** apart on the same corpus. A verdict that flips with
+which before run you pair against is not decided, so E1 stays `BLOCKED` until
+**n >= 2 per arm**. That is cheaper than the controlled single-extraction design
+`#9076` built (`assert_one_gate_population`), which remains the stronger instrument
+and is the next step if n >= 2 keeps disagreeing. (The `0/59` / `6/50` figures are the superseded log's own bare-definite counts, quoted as history —
+retrievable with `git show 8a8bbcba2:docs/evidence/7949-capstone/capstone-measured-7c9c34d8.log`,
 because superseding DELETES the tree entry and not the history; what it costs is citability as a
 row's `evidence`, which V4 resolves against the tree. **That route is ref-qualified like the one
 above:** `8a8bbcba2` is branch-only, so after the squash-merge the same `git fetch origin
 refs/pull/9823/head` + `git show` applies; and the `0/59` figure is stated here, so it does not
-depend on the retrieval).
-So E1 needs the controlled design #9076 built — one extraction, both arms applied to the SAME
-candidate population (`assert_one_gate_population`) — pointed at `tests/eval/write_path` and made
-to persist. That is work, and it is recorded here rather than approximated by a ratio of two runs
-that nobody controlled. The mechanism that must move the share is an owner ruling on
-removal/relocation (**#5333**).
+depend on the retrieval.)
+
+The controlled design `#9076` built — one extraction, both arms applied to the SAME candidate
+population (`assert_one_gate_population`) — pointed at `tests/eval/write_path` and made to persist
+is the stronger instrument, and it is the next step if n >= 2 keeps disagreeing; it is recorded here
+rather than substituted for the ratio above, because that ratio is already COMPUTED and simply not
+DECIDED. The mechanism that must move the share is an owner ruling on removal/relocation (**#5333**).
 
 ## Two artifacts, and why `capstone.log` is not overwritten
 
@@ -901,7 +909,7 @@ the same lesson (cite the symbol, not the line).
 | S0 READ | `_edus_from_conversation` `:10203` | `stats["edus"]`, `stats["chunks"]` | ✅ |
 | S1 NARRATE | `run_s1` `:10243` | `stats["llm"]["by_stage"]["s1"]`, `story_arc` | ✅ (`story_arc` is off-receipt; `by_stage` carries it) |
 | S2.1 EXTRACT | `run_s2` `:10267` | `by_stage["s2"]`, item counts | ✅ (`embed_list` is off-receipt; `by_stage` carries it) |
-| S2.2 VET | `_run_vet_pass` `:10296` | `result["vet"]` — built at `extractor_v2.py:10586-10590`, copied onto the receipt at the meta fold `sdk.py:15484` as `stats["step_witness"]["vet"]` | ✅ reachable (#9116 seam) — and WITNESSED by the shipped post-seam run: `stats["step_witness"]["vet"]` `enabled=true`, `s2={"candidates": 40, "by_outcome": {"KEEP": 40}}` (the SUPERSEDED `e0fc940b5` log is the one that predates the seam) |
+| S2.2 VET | `_run_vet_pass` `:10296` | `result["vet"]` — built at `extractor_v2.py:10586-10590`, copied onto the receipt at the meta fold `sdk.py:16250` as `stats["step_witness"]["vet"]` | ✅ reachable (#9116 seam) — and WITNESSED by the shipped post-seam run: `stats["step_witness"]["vet"]` `enabled=true`, `s2={"candidates": 40, "by_outcome": {"KEEP": 40}}` (the SUPERSEDED `e0fc940b5` log is the one that predates the seam) |
 | S2.3 CLASSIFY | `_apply_classify_kinds` `:10312` | `result["classify_later"]` — built at `extractor_v2.py:10576-10582`, copied at the same fold as `stats["step_witness"]["classify_later"]` | ✅ reachable (#9116 seam) — and WITNESSED by the shipped post-seam run: `enabled: true`, `s2 = {"adjudication_calls": 1, "assigned_llm": 7, …}` (`assigned_llm` is the evidence it did work, so this is not an idle pass) |
 | S3 RESOLVE | `search_graph` `:10328` | `result["search"]`, copied as `stats["step_witness"]["search"]` (mode/degraded/queries_run/hits); `stats["search_queries"]`/`stats["search_degraded"]` were already on the receipt | ✅ |
 | S5 CONNECT | `execute_embed` `:10548` (+ `run_s4` `:10349` gap filler) | `stats["s4_merge"]` | ✅ (gap-filler counters) — `capstone_measure.py` uses the graph write + `stats["operator_endpoints_minted"]` |
