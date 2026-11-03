@@ -963,6 +963,87 @@ class TestTheCensusNamesItsEvidenceHome:
         assert doc.is_file(), f"the contract doc is missing: {doc}"
         return doc.read_text(encoding="utf-8")
 
+    @classmethod
+    def _census_section(cls) -> str:
+        """§2 (the census + its park/deferral notes), the artifact a lane reads.
+
+        Bounded by its own headings so a line citation elsewhere in the doc is
+        out of this pin's scope — the census is what a lane auditing #8447
+        starts from, and it is where the drift was measured.
+        """
+        text = cls._doc_text()
+        assert "## 2. The census" in text, "§2 (the census) is gone"
+        assert "## 3. `OVERRIDES:`" in text, "§3 (the departures) is gone"
+        return text.split("## 2. The census", 1)[1].split(
+            "## 3. `OVERRIDES:`", 1)[0]
+
+    def test_the_census_cites_symbols_not_line_numbers(self):
+        """A line number in the census goes stale on the next unrelated merge.
+
+        Pre-fix every evidence cell was a coordinate (`hosted_api.py:10209`,
+        `sdk.py:34655`, ...). They were exact when written and wrong 57 lines
+        later — the merge from `origin/main` moved the code, not the doc — so a
+        lane following the census was pointed into unrelated event code. That
+        is the re-derive-from-a-stale-map failure (#6134) this doc exists to
+        prevent, one field over from the state word this class already pins.
+
+        The fix is the form the register in `tortoise/truncation.py` already
+        uses and this PR's own scan pin already chose: cite `<module>::<name>`,
+        which does not move when somebody inserts a blank line above it.
+        """
+        import re
+
+        stale = sorted(re.findall(r"[\w./-]+\.(?:py|ya?ml):\d[\w-]*",
+                                  self._census_section()))
+        assert not stale, (
+            "the census cites absolute line numbers, which go stale on every "
+            "unrelated edit to the file they point into — cite "
+            f"`<module>::<function>` instead: {stale}")
+
+    def test_every_symbol_the_census_cites_resolves_in_the_tree(self):
+        """A symbol citation is only staleness-proof if it EXISTS.
+
+        The line-number form was replaced because it drifts; a symbol form has
+        the opposite failure mode — a rename or a move leaves the census naming
+        something that is not there. This resolves every `<module>::<name>` the
+        census cites against the module's own AST (functions, classes and
+        module-level bindings such as `TOOL_REGISTRY`), so a rename reds here
+        instead of silently misdirecting a lane.
+        """
+        import ast
+        import re
+        from pathlib import Path
+
+        root = Path(__file__).resolve().parent.parent
+        cited = sorted(set(re.findall(r"(tortoise/[\w/]+\.py)::([A-Za-z_]\w*)",
+                                     self._census_section())))
+        assert cited, (
+            "the census cites no `<module>::<name>` evidence at all — the "
+            "pointer form regressed to something this pin cannot check")
+
+        unresolved: list[str] = []
+        for module, name in cited:
+            path = root / module
+            if not path.is_file():
+                unresolved.append(f"{module} (module does not exist)")
+                continue
+            bound: set[str] = set()
+            for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef,
+                                     ast.ClassDef)):
+                    bound.add(node.name)
+                elif isinstance(node, ast.Assign):
+                    bound.update(t.id for t in node.targets
+                                 if isinstance(t, ast.Name))
+                elif isinstance(node, ast.AnnAssign) and isinstance(
+                        node.target, ast.Name):
+                    bound.add(node.target.id)
+            if name not in bound:
+                unresolved.append(f"{module}::{name}")
+        assert not unresolved, (
+            "the census cites symbols the tree does not bind (renamed, moved or "
+            f"invented), so its evidence cells point at nothing: {unresolved}")
+
     def test_the_hosted_points_row_says_marks_and_says_the_total_is_withheld(self):
         """The census row and the tree must say the same thing.
 
@@ -1028,8 +1109,8 @@ class TestTheMarkerSiteRegisterIsComplete:
 
     ⚠️ "Derived from the tree" includes the NAME the marker is called under.
     The tree already imports `truncation.mark_truncation` under three local
-    aliases besides `_mark_truncation` (`_seed_mark` at ``sdk.py:35495``,
-    `_lost_mark` at ``:35698``, `_lost_mark2` at ``:35723``), so a filter that
+    aliases besides `_mark_truncation` (`_seed_mark`, `_lost_mark`,
+    `_lost_mark2`, all bound by `tortoise_fts_query`), so a filter that
     hard-codes the two names it happens to recognise sees 3 of the 6 call sites
     and would leave the pin green while a NEW site was written in the aliasing
     pattern the tree already uses three times. The name set is therefore read
@@ -1193,7 +1274,7 @@ class TestTheMarkerSiteRegisterIsComplete:
         doc = self._module_docstring()
         assert "tortoise/sdk.py::issue_insight" in doc, (
             "the register omits `issue_insight`, which calls `_mark_truncation` "
-            "at sdk.py:34655 on a plain `[:limit]` cut — no offset, no cursor")
+            "on a plain `[:limit]` cut — no offset, no cursor")
 
     def test_the_register_states_no_cardinality_that_can_re_stale(self):
         """A count is a claim that goes stale; the site list cannot.

@@ -56,15 +56,15 @@ Measured on this tree:
 
 | surface | bound | state | evidence |
 |---|---|---|---|
-| `TortoiseSDK.get_cross_lens_candidates` (MCP: `tortoise_find_cross_lens_candidates`) | `limit` | **MARKS** | `tortoise/sdk.py:28131-28135` — returns `truncated`, `cap` and `count` alongside the rows (`truncated = len(all_candidates) > limit`) |
-| `event_store.read_after` | `limit` | **REFUSES** | `tortoise/event_store.py:974` — `if not 1 <= limit <= MAX_PAGE: raise ValueError(...)`, with the message stating *why* coercion would be indistinguishable from a drained stream |
-| `GET /v1/search` (hosted) | `limit` | **MARKS** | `tortoise/hosted_api.py:10681-10690` — `response.update(truncation_field(trunc_out))`, i.e. `truncated` + `total_available` (PR #10500, merged). ⚠️ `count` is still rows **delivered**, not matched — the marker, not `count`, is the instrument |
-| MCP `tortoise_search` (`tool_registry.py:474`) · `GET /search` (selfhost, `selfhost_api.py:365`) | `limit` | **SILENT** | both return a bare list (`response_model=list[PointResponse]` on the route); recorded as a **deliberate limit** on #8447's 2026-11-01 comment (§6) and restated in `config/surface-manifest.yml:139-141` (*"returns a bare list, so it does not carry the field; wrapping a list in an object is a declared return-type change"*), because a marker here IS a return-shape change |
-| `TortoiseSDK.list_batches` (MCP: `tortoise_list_batches`) | `limit=20` | **SILENT** | `tortoise/sdk.py:26725` — `return items[:limit]`; the method's contract is `-> list[dict]` (`:26676`), so there is no field in which to say "there are more" |
-| `TortoiseSDK.suggest_entry_points` (MCP: `tortoise_suggest_entry_points`) | `limit=5` | **SILENT** | `tortoise/sdk.py:33753` — `results = results[:limit]`, returning `results` at `:33801`; declared `-> list[dict]` (`:33699`) |
-| `GET /v1/points` (hosted, `hosted_api.py:10209`) | `limit=50` (`Query(50, ge=1, le=1000)`) | **MARKS** | `hosted_api.py:10247` asks the store for `limit+1` (an internal probe row, dropped before delivery) and `list_points`' own `mark_truncation`/`truncation_field` calls publish `truncated` via `truncation.py`; `total_available` is deliberately WITHHELD (`exact=False` — a probe proves *more exist*, not *how many*), so a truncated page takes the third state. `count` is still rows **delivered**, and the cap VALUES are unchanged |
-| `GET /points` (selfhost, `selfhost_api.py:315`) | `limit=50` | **SILENT** | `response_model=list[PointResponse]` — a bare list on the route |
-| `GET /v1/events` (hosted, `hosted_api.py:10094-10098`) | `limit=100` (`le=_MAX_EVENT_PAGE`) | **REFUSES at the edge** | `limit: int = Query(100, ge=1, le=_MAX_EVENT_PAGE)` (`:10098`) refuses 0 at the route; the seam below it (`read_after`) refuses both ends — see §3 |
+| `TortoiseSDK.get_cross_lens_candidates` (MCP: `tortoise_find_cross_lens_candidates`) | `limit` | **MARKS** | `tortoise/sdk.py::get_cross_lens_candidates` — returns `truncated`, `cap` and `count` alongside the rows (`truncated = len(all_candidates) > limit`) |
+| `event_store.read_after` | `limit` | **REFUSES** | `tortoise/event_store.py::read_after` — `if not 1 <= limit <= MAX_PAGE: raise ValueError(...)`, with the message stating *why* coercion would be indistinguishable from a drained stream |
+| `GET /v1/search` (hosted) | `limit` | **MARKS** | `tortoise/hosted_api.py::search` — `response.update(truncation_field(trunc_out))`, i.e. `truncated` + `total_available` (PR #10500, merged). ⚠️ `count` is still rows **delivered**, not matched — the marker, not `count`, is the instrument |
+| MCP `tortoise_search` (`tortoise/tool_registry.py::TOOL_REGISTRY`) · `GET /search` (selfhost, `tortoise/selfhost_api.py::search`) | `limit` | **SILENT** | both return a bare list (`response_model=list[PointResponse]` on the route); recorded as a **deliberate limit** on #8447's 2026-11-01 comment (§6) and restated in `config/surface-manifest.yml` → `response_fields[tortoise_search].truncated` (*"returns a bare list, so it does not carry the field; wrapping a list in an object is a declared return-type change"*), because a marker here IS a return-shape change |
+| `TortoiseSDK.list_batches` (MCP: `tortoise_list_batches`) | `limit=20` | **SILENT** | `tortoise/sdk.py::list_batches` — `return items[:limit]`; the method's contract is `-> list[dict]`, so there is no field in which to say "there are more" |
+| `TortoiseSDK.suggest_entry_points` (MCP: `tortoise_suggest_entry_points`) | `limit=5` | **SILENT** | `tortoise/sdk.py::suggest_entry_points` — `results = results[:limit]` on a plain `[:limit]` cut with no offset and no cursor; declared `-> list[dict]` |
+| `GET /v1/points` (hosted, `tortoise/hosted_api.py::list_points`) | `limit=50` (`Query(50, ge=1, le=1000)`) | **MARKS** | the same function asks the store for `limit+1` (an internal probe row, dropped before delivery) and its own `mark_truncation`/`truncation_field` calls (`tortoise/truncation.py::truncation_field`) publish `truncated`; `total_available` is deliberately WITHHELD (`exact=False` — a probe proves *more exist*, not *how many*), so a truncated page takes the third state. `count` is still rows **delivered**, and the cap VALUES are unchanged |
+| `GET /points` (selfhost, `tortoise/selfhost_api.py::list_points`) | `limit=50` | **SILENT** | `response_model=list[PointResponse]` — a bare list on the route |
+| `GET /v1/events` (hosted, `tortoise/hosted_api.py::events_poll`) | `limit=100` (`le=_MAX_EVENT_PAGE`) | **REFUSES at the edge** | `limit: int = Query(100, ge=1, le=_MAX_EVENT_PAGE)` in `events_poll` refuses 0 at the route; the seam below it (`tortoise/event_store.py::read_after`) refuses both ends — see §3 |
 
 ⚠️ **The census is a population, and this table is the part of it that has been measured** — it is
 NOT yet exhaustive. §1 also names *body/log caps* and *ingest chunking*, and no row here covers
@@ -83,8 +83,9 @@ non-breaking place to put an incompleteness marker:
 For the two SDK-implemented ones, that second option is an MCP/SDK **surface** change, and the
 repo's hard rule requires Daniel's approval before any surface change (`AGENTS.md` → *MCP/SDK
 Surface Approval*). `tortoise_search` is the third of the same class — an MCP tool
-(`tortoise/tool_registry.py:474`), not a route — and the manifest's own note calls its list→object
-change *"an MCP Surface Approval decision"* (`config/surface-manifest.yml:140-141`). So the three
+(`tortoise/tool_registry.py::TOOL_REGISTRY`), not a route — and the manifest's own note calls its
+list→object change *"an MCP Surface Approval decision"* (`config/surface-manifest.yml` →
+`response_fields[tortoise_search].truncated`). So the three
 are recorded here as:
 
 > **NEEDS-APPROVAL(`tortoise_list_batches`, `tortoise_suggest_entry_points`, `tortoise_search`)** —
@@ -96,8 +97,9 @@ are recorded here as:
 **SILENT** with the same return-shape dependency. The deferral record names **exactly two**
 surfaces: `tortoise_search` and selfhost `GET /search` — **#8447's 2026-11-01 comment** §6, verbatim:
 *"Deliberate limit: `tortoise_search` (MCP) and `selfhost_api`'s `/search` are list-shaped, so they
-still cannot say it"*, with §1 rows #13/#14 as the same pair and `config/surface-manifest.yml:139-141`
-restating the MCP half. It is **not** a scope note on any PR body.
+still cannot say it"*, with §1 rows #13/#14 as the same pair and `config/surface-manifest.yml` →
+`response_fields[tortoise_search].truncated` restating the MCP half. It is **not** a scope note on
+any PR body.
 
 ⚠️ **`selfhost GET /points` is NOT in that record.** It is the same shape and needs the same
 decision, but no artifact has decided it yet — so it is recorded here as **SILENT and undecided**,
