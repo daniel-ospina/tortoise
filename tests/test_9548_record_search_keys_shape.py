@@ -44,6 +44,7 @@ that red on the pre-fix code on the PR path.
 from __future__ import annotations
 
 import json
+import re
 import sys
 import uuid
 from pathlib import Path
@@ -61,6 +62,12 @@ RECORD_DB_ENV = "TEST_RECORD_DB_URI"
 #: string. Every arm below is built from it, so no arm can accidentally test a
 #: shape the product never writes.
 GRAPH_KEYS = "err4032 release deploy"
+
+#: The record table a plan statement writes: `INSERT INTO public.<t>` /
+#: `UPDATE public.<t>`. Used to ask "is this parameter's name a real column of
+#: the table it is bound to?" — the check that sees a MIS-NAMING, which a
+#: name-to-parameter COUNT cannot.
+_STATEMENT_TABLE_RE = re.compile(r"^(?:INSERT\s+INTO|UPDATE)\s+public\.([a-z_]+)")
 
 
 def _record(tenant, *, search_keys, content="the deploy released err4032"):
@@ -202,35 +209,110 @@ def test_every_statement_s_param_columns_align_with_its_params():
     re-creating defect 2 on the table with the most `jsonb` columns. `Point`'s key
     is a literal string, so the round-trip test above cannot see it.
 
-    ⚠️ SCOPE, stated rather than implied: this builds the TWO record types whose
-    plans carry a `_SqlExpr` (a resolved `:Source` key, #9956) — the only shapes
-    in which a column can expand into several parameters. It does not walk the
-    rest of `RECORD_MUTATIONS`, and `tests/test_record_projection.py` asserts
-    nothing about `param_columns` either; a NEW builder that expands a value is
-    this pin's responsibility to grow.
+    ⚠️ SCOPE, stated rather than implied: this builds the record types whose
+    plans carry a `_SqlExpr` (a resolved `:Source` key, #9956) — the shapes in
+    which a column can expand into several parameters — plus one `UPDATE`, so
+    `_patch_statement` is walked too. It does not walk the rest of
+    `RECORD_MUTATIONS`, and `tests/test_record_projection.py` asserts nothing
+    about `param_columns` either; a NEW builder that expands a value is this
+    pin's responsibility to grow.
+
+    ⛔ THREE INVARIANTS, because a COUNT alone is weaker than this test's name
+    (raised as remaining scope 4 on the round-8 review). Correction of a
+    mis-*naming* keeps `len(param_columns) == len(params)` exactly — labelling
+    every predicate parameter `node_key` on a `source` patch is 5 names against
+    5 params — so the count cannot see the failure mode this attribution exists
+    to prevent. The other two can: the `%s` count catches a builder that binds
+    fewer parameters than its SQL demands, and the column check catches a name
+    that belongs to no record column at that statement's table.
     """
     from tortoise import record_projection as rp
 
     tenant = _tenant()
+    columns = rp.table_columns()
+    #: Names the builders derive from the STATEMENT's own scope, not from the
+    #: migrations. Each is also a real record column today; the union keeps this
+    #: pin about MIS-NAMING rather than about the schema's spelling.
+    derived = frozenset({"org_id", "graph_id", "node_label", "node_key",
+                         "props"})
     misaligned: list[tuple] = []
+    unbound: list[tuple] = []
+    unnameable: list[tuple] = []
     seen = 0
     for record_type, build in sorted(_RECORD_BUILDERS.items()):
         for statement in rp.replay_plan([build(tenant)], org_id=tenant[0],
                                         graph_id=tenant[1], position=True):
             if not statement.param_columns:
-                # The journal row carries no attribution today; that is a
-                # declared gap, not an alignment claim (see #9548's remaining
-                # scope), so it is skipped rather than counted as aligned.
+                # The journal row, the relation builders and every DELETE
+                # builder carry no attribution today; that is a DECLARED gap
+                # (`Statement.param_columns` states it), so it is skipped rather
+                # than counted as aligned.
                 continue
             seen += 1
             if len(statement.param_columns) != len(statement.params):
                 misaligned.append(
                     (record_type, statement.sql[:60],
                      len(statement.param_columns), len(statement.params)))
+            if statement.sql.count("%s") != len(statement.params):
+                unbound.append(
+                    (record_type, statement.sql[:60],
+                     statement.sql.count("%s"), len(statement.params)))
+            table = _STATEMENT_TABLE_RE.match(statement.sql)
+            real = columns.get(table.group(1) if table else "", frozenset())
+            for position, name in enumerate(statement.param_columns):
+                if name in real or name in derived:
+                    continue
+                unnameable.append((record_type, table and table.group(1),
+                                   position, name, sorted(real)[:4]))
     assert seen >= 2, f"no statement carried an attribution to check ({seen})"
     assert not misaligned, (
         "param_columns and params disagree (record, sql, names, params): "
         f"{misaligned} — the failure attribution would name the wrong column")
+    assert not unbound, (
+        "the SQL binds a different number of `%s` than `params` carries "
+        f"(record, sql, placeholders, params): {unbound} — the attribution's "
+        "index would not be the placeholder's index")
+    assert not unnameable, (
+        "a parameter is named after no column of its own statement's table "
+        f"(record, table, position, name, real columns…): {unnameable}")
+
+
+def test_a_patch_statement_names_its_predicate_from_the_match_tuple():
+    """`_patch_statement` derives its predicate names from `match` (scope 4).
+
+    The alignment pin above CANNOT see this: a repeat of `node_key` for every
+    match parameter keeps the count aligned while reporting an `id` predicate as
+    `node_key`, so the failure log names a column the failing binding never
+    touched. `source` is the one label whose predicate is `("id", "node_key")`
+    (`_ENTITY_MATCH_COLUMNS`) — the only shape where a repeat and the truth are
+    distinguishable at all.
+    """
+    from tortoise import record_projection as rp
+
+    match = rp._ENTITY_MATCH_COLUMNS["source"]
+    assert match == ("id", "node_key"), (
+        f"this pin needs a predicate whose columns are NOT all `node_key`: "
+        f"{match}")
+    assert len(set(match)) == len(match), (
+        f"a repeated match column cannot distinguish a repeat from the truth: "
+        f"{match}")
+    tenant = _tenant()
+    plan = rp.replay_plan([{
+        "type": "EntityMutated", "op": "revise", "label": "Source",
+        "id": "src_9548", "state": {"title": "the revised title"},
+        "ts": "2026-10-31T00:00:00Z",
+    }], org_id=tenant[0], graph_id=tenant[1], position=False)
+    patches = [s for s in plan if s.sql.startswith("UPDATE public.source")]
+    assert len(patches) == 1, (
+        f"expected one source patch statement, got "
+        f"{[s.sql[:80] for s in plan]}")
+    statement = patches[0]
+    names = statement.param_columns
+    assert len(names) == len(statement.params), (names, statement.params)
+    assert names[-len(match):] == match, (
+        f"the predicate parameters must be named from `match` {match}, got "
+        f"{names[-len(match):]} — labelling every one of them `node_key` keeps "
+        f"the count aligned but reports the `id` binding as `node_key`: {names}")
 
 
 def test_the_jsonb_map_is_not_reparsed_per_parameter(monkeypatch):
@@ -390,8 +472,22 @@ def _register_builders() -> None:
     def _point(tenant):
         return _record(tenant, search_keys=GRAPH_KEYS)
 
+    def _source_patch(tenant):
+        # The only plan that reaches `_patch_statement` with a MULTI-COLUMN
+        # predicate (`_ENTITY_MATCH_COLUMNS["source"]`), i.e. the only shape in
+        # which the predicate naming can be seen at all.
+        return {
+            "type": "EntityMutated",
+            "op": "revise",
+            "label": "Source",
+            "id": "src_9548",
+            "state": {"title": "the revised title"},
+            "ts": "2026-10-31T00:00:00Z",
+        }
+
     _RECORD_BUILDERS["SourceCreated"] = _source
     _RECORD_BUILDERS["PointAdded"] = _point
+    _RECORD_BUILDERS["EntityMutated:source-revise"] = _source_patch
 
 
 _register_builders()

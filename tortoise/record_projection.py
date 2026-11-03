@@ -1795,10 +1795,17 @@ class Statement:
     #: Aligned with ``params``: when this tuple is NON-EMPTY it has exactly one
     #: entry per parameter, and ``param_columns[i]`` is the record COLUMN the
     #: i-th parameter is bound to. An EMPTY tuple means the statement carries NO
-    #: attribution (the journal row, the relation/direct-edge/narrative builders)
-    #: — a declared gap, not a claim of alignment: nothing here could name those
-    #: parameters, and inventing `""` placeholders would make the map look total
-    #: while still naming nothing. Exists for ATTRIBUTION, not execution.
+    #: attribution — a declared gap, not a claim of alignment: inventing `""`
+    #: placeholders would make the map look total while still naming nothing.
+    #: WHICH builders leave it empty is a fact about THIS TREE, not about the
+    #: shape, and it is stated as such: `_upsert_statement` and
+    #: `_patch_statement` name every parameter; the journal row, the
+    #: relation/direct-edge/narrative builders and every DELETE builder emit
+    #: `()`. ⚠️ The deletes are nameable and still unnamed — their parameters are
+    #: exactly `org_id, graph_id, *match`, the same three names the other two
+    #: builders derive — so a failure inside one still reports its statement
+    #: with no column. That is the remaining half of this field's job, not a
+    #: limit of the design. Exists for ATTRIBUTION, not execution.
     #: ⚠️ WHY IT EXISTS AT ALL: when Postgres refuses a parameter it names the
     #: offending VALUE's position in the statement text (`...  'event', 'arm b
     #: content', 'live', 'err4032 r...`) and never the column, so a failure log
