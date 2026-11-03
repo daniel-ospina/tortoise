@@ -1509,8 +1509,10 @@ def test_committed_census_rederives_its_own_aggregate():
     assert summary["questions"] == doc["questions"]
     assert summary["questions_with_ep"] == doc["questions_with_ep"]
 
-    # …and their QUOTIENT, which is the bundle's HEADLINE (README:22 quotes
-    # it; README:14 opens with the number). Derived exactly as the probe
+    # …and their QUOTIENT, which is the bundle's HEADLINE (the README quotes
+    # it verbatim as "questions_with_ep / questions = 24 / 24 = 1.00", under
+    # the heading sentence "The number this issue was opened to produce").
+    # Derived exactly as the probe
     # derives it — ``probes/census.py:268-270``: ``with_ep / q``, and ``None``
     # when the denominator is not a usable count — the same way the sibling
     # ``point_coverage.ratio`` is derived below. Without this the one number
