@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import atexit
 import contextlib
+import contextvars
 import functools
 import hmac
 import inspect
