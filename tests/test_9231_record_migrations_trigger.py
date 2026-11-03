@@ -273,6 +273,11 @@ def test_every_record_migration_the_wheel_ships_is_named():
 _MIGRATION_HEADER_RE = re.compile(r"^--\s*Migration\s+(?P<stamp>\d{14})", re.M)
 
 
+def _text_of(name: str) -> str:
+    """A shipped migration's bytes, by its registered NAME."""
+    return (_SHIPPED / name).read_text(encoding="utf-8")
+
+
 def test_every_record_migration_header_names_its_own_stamp():
     """The FILENAME is the version; the header must not claim a different one.
 
@@ -308,10 +313,6 @@ def test_every_record_migration_header_names_its_own_stamp():
         "`RECORD_MIGRATIONS` ships; a header naming another stamp sends the "
         "next reader (or the next renumber, #9698) to the wrong migration"
     )
-
-
-def _text_of(name: str) -> str:
-    return (_SHIPPED / name).read_text(encoding="utf-8")
 
 
 def test_a_missing_name_degrades_silently_for_a_forward_migration(tmp_path: Path):
