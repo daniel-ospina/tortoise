@@ -1005,7 +1005,7 @@ built on those two booleans calls the BROKEN runner the *idlest and healthiest* 
 Measured 2026-11-03 on `/opt/gh-runner-x64-{4,6,7,8}`: every job died 5–21 s in, before any step,
 with
 
-```
+```text
 Complete job name: <job>
 ##[error]Access to the path '/opt/gh-runner-x64-7/_work/_temp/_github_workflow' is denied.
 ```
