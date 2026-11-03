@@ -1091,6 +1091,48 @@ def test_emit_manifest_pins_confcutdir_to_an_out_of_tree_selection(tmp_path):
     assert pins == [f"--confcutdir={case}"], pins
 
 
+def test_the_confcutdir_pin_does_not_bound_a_selection_spanning_trees(tmp_path):
+    # A LIMIT, asserted so the docstring and the code cannot drift apart. The
+    # pin is ONE directory and pytest loads a `conftest.py` sitting AT it
+    # (`_is_in_confcutdir` is `path not in confcutdir.parents`, and a directory
+    # is never in its own parents — pytest 9.1.1, `_config/__init__.py:699-712`),
+    # so only dirs STRICTLY ABOVE it are excluded. For a selection that spans
+    # two trees the deepest common ancestor is their shared parent — i.e. the
+    # very directory a leaked `/tmp/conftest.py` lives in — so the pin bounds
+    # nothing there.
+    #
+    # No caller produces this shape today (CI passes a repo-relative `$FILES`,
+    # every out-of-tree caller passes a SINGLE tree), which is why
+    # `_selection_confcutdir` documents the limit instead of refusing. This
+    # assertion is the tripwire: whoever widens the guarantee (refuse, or
+    # collect once per tree) must change it AND the docstring together.
+    a, b = tmp_path / "tt_a", tmp_path / "tt_b"
+    a.mkdir()
+    b.mkdir()
+    pin = _skip_guard._selection_confcutdir(
+        [str(a / "test_x.py"), str(b / "test_y.py")])
+    assert pin == str(tmp_path), pin
+
+
+def test_the_confcutdir_pin_does_not_bound_a_mixed_in_and_out_of_tree_selection(
+        tmp_path, monkeypatch):
+    # The other spanning shape, and the worse one: a repo-relative file plus an
+    # out-of-tree one share only an ancestor ABOVE the invocation directory, so
+    # the pin no longer sits inside the invocation tree at all. In production
+    # (cwd = the repo, the other file under `/tmp`) that ancestor is the
+    # filesystem root, whose `.parents` is EMPTY — nothing is excluded and the
+    # pre-pin behaviour stands. Reproduced under `tmp_path` so the assertion
+    # does not depend on where the checkout lives.
+    repo = tmp_path / "repo"
+    (repo / "tests").mkdir(parents=True)
+    other = tmp_path / "other"
+    other.mkdir()
+    monkeypatch.chdir(repo)
+    pin = _skip_guard._selection_confcutdir(
+        ["tests/test_a.py", str(other / "test_b.py")])
+    assert pin == str(tmp_path), pin
+
+
 def test_emit_manifest_does_not_inherit_a_conftest_above_the_selection(tmp_path):
     # The CI shape that redded PR #10636's `test-slow (d)` shard (2026-11-02):
     # the self-hosted runner's shared `/tmp` carried a leaked `conftest.py`, and
