@@ -6899,6 +6899,167 @@ def test_the_stale_case_count_guard_is_not_vacuous(tmp_path):
         ("test_gone.py", 4, None)]
 
 
+#: A row's own STALENESS CHAIN — "This count has gone stale THIRTEEN times
+#: (17 -> 19 -> … -> 38)". The chain is the row's history of control-adding cycles,
+#: and its own ⛔ ENTRY RULE fixes what the LAST element means: "every entry in that
+#: chain is the count AFTER that cycle's controls, never before". So the chain's
+#: terminus and the `grep -c` count the SAME row cites are two statements about ONE
+#: number, and they can drift apart while the citation alone stays true.
+_STALENESS_CHAIN_RE = re.compile(
+    r"\bstale\b[^()]{0,120}\((?P<chain>\d+(?:\s*(?:->|\u2192)\s*\d+)+)\)",
+    re.IGNORECASE)
+_CHAIN_TERMINUS_RE = re.compile(r"\d+")
+
+
+def _durations_rows_whose_chain_disagrees_with_its_citation(text: str):
+    """`(key, cited, chain_terminus)` rows whose own history ends at another count.
+
+    Only rows that do BOTH are judged: cite the instrument AND carry a chain. A row
+    may legitimately cite a count with no chain (its first cycle) and carry history
+    of a WEIGHT with no citation, and neither is a contradiction.
+    """
+    out = []
+    for key, note in _durations_row_comments(text):
+        cited = _CASE_COUNT_CLAIM_RE.search(note)
+        chain = _STALENESS_CHAIN_RE.search(note)
+        if cited is None or chain is None:
+            continue
+        terminus = int(_CHAIN_TERMINUS_RE.findall(chain.group("chain"))[-1])
+        if terminus != int(cited.group("n")):
+            out.append((key, int(cited.group("n")), terminus))
+    return out
+
+
+def test_no_durations_row_staleness_chain_ends_on_a_count_it_denies():
+    """#10726 review ISSUE 1: the chain must terminate on the count the row cites.
+
+    The ENTRY RULE makes the chain's last entry the count *after* the last cycle's
+    controls, i.e. the file's CURRENT count — which is what the row also cites when
+    it holds the instrument. The fold merged `config/ci-surfaces.yml` row-by-row as
+    a union, and a row is ONE key, so a branch based before a landed control (here
+    `#10452`, whose `test_a_same_thread_read_outside_the_index_is_still_drift` came
+    through) can re-take an OLDER copy of the note: at head
+    `test_substrate_map.py` cited `39` in the same sentence whose chain terminated
+    on `38` — the row contradicting itself, and the paragraph that documents the
+    landed control silently dropped. Nothing gating caught it (the CITATION matched,
+    so the guard above stayed green); this is the second half of that claim.
+    """
+    text = cs.MANIFEST.read_text(encoding="utf-8")
+    offenders = _durations_rows_whose_chain_disagrees_with_its_citation(text)
+    assert offenders == [], (
+        "a durations row's staleness chain terminates on a count it denies in the "
+        "same note — the ENTRY RULE says the last entry IS the current count, so "
+        "either the chain must be extended through the cycle that moved the count "
+        f"or the citation is wrong: (key, cited, chain_terminus): {offenders}"
+    )
+
+
+def test_the_staleness_chain_terminus_guard_is_not_vacuous():
+    """The guard above must bite on the shipped shape and stay quiet on its siblings.
+
+    `shipped` is the pre-fix `test_substrate_map.py` row, quoted from the head this
+    review found it at: `39` cited, `THIRTEEN … -> 38` chained. Measured pre-fix the
+    guard reports `('test_substrate_map.py', 39, 38)`; post-fix it reports nothing.
+    """
+    shipped = (
+        "durations:\n"
+        "  test_substrate_map.py: 0.9  # #5086: 39 cases (`grep -c '^def test_'` -> 39;"
+        " pytest collects 39). ⛔ This count has gone stale THIRTEEN times (17 -> 19 ->"
+        " 37 -> 38) — and the chain above terminates on that asserted 38.\n"
+        "surfaces: []\n")
+    assert _durations_rows_whose_chain_disagrees_with_its_citation(shipped) == [
+        ("test_substrate_map.py", 39, 38)]
+    repaired = shipped.replace("37 -> 38", "37 -> 38 -> 39").replace(
+        "asserted 38", "asserted 39")
+    assert _durations_rows_whose_chain_disagrees_with_its_citation(repaired) == []
+    legitimate = (
+        "durations:\n"
+        # a citation with NO chain is a row's first cycle, not a contradiction
+        "  test_a.py: 1.0  # 3 cases (`grep -c '^def test_'` -> 3).\n"
+        # a chain about a WEIGHT, with no instrument cited, is provenance
+        "  test_b.py: 2.0  # this weight has gone stale 3 times (1.0 -> 1.4 -> 2.0).\n"
+        "surfaces: []\n")
+    assert _durations_rows_whose_chain_disagrees_with_its_citation(legitimate) == []
+
+
+#: A row asserting that its OWN committed weight is "deliberately unchanged" —
+#: "The 3.7 weight sits inside that range and is deliberately unchanged". The number
+#: is a claim about the row it sits in, so it can be falsified by that row's value.
+#: A note that quotes a PREVIOUS weight ("was 3.7", the sweep's provenance) must not
+#: be read as a claim — the sweep suffix never puts `deliberately unchanged` after
+#: the number, which is what this anchors on.
+_WEIGHT_UNCHANGED_CLAIM_RE = re.compile(
+    r"\bthe\s+(?P<w>\d+(?:\.\d+)?)\s*weight\b[^.;]{0,160}?\bdeliberately\s+unchanged",
+    re.IGNORECASE)
+
+
+def _durations_rows_claiming_an_unchanged_weight_they_do_not_hold(text: str):
+    """`(key, claimed, value)` rows whose note calls a weight unchanged at another number."""
+    out = []
+    for key, note in _durations_row_comments(text):
+        claim = _WEIGHT_UNCHANGED_CLAIM_RE.search(note)
+        if claim is None:
+            continue
+        row = next((ln for ln in text.splitlines()
+                    if (m := _DURATIONS_ROW_RE.match(ln)) and m.group("key") == key),
+                   None)
+        if row is None:  # pragma: no cover — every judged note came from a row
+            continue
+        value = float(_DURATIONS_ROW_RE.match(row).group("value"))
+        if abs(float(claim.group("w")) - value) > 1e-9:
+            out.append((key, float(claim.group("w")), value))
+    return out
+
+
+def test_no_durations_row_calls_an_unchanged_weight_one_it_does_not_hold():
+    """#10726 review ISSUE 1: a note may not deny the weight its own row declares.
+
+    The union merge took an older copy of the `test_substrate_map.py` note AND the
+    sweep then re-based that row's weight from `3.7` to `0.9`. Both halves are
+    individually defensible; together the row read `0.9` and then said "The 3.7
+    weight sits inside that range and is deliberately unchanged" — which is how a
+    reader concludes the committed weight is 3.7. The sweep cannot attribute a
+    mid-note claim to the value it rewrote, so this pin is what stops the next one
+    from shipping quietly.
+    """
+    text = cs.MANIFEST.read_text(encoding="utf-8")
+    offenders = _durations_rows_claiming_an_unchanged_weight_they_do_not_hold(text)
+    assert offenders == [], (
+        "a durations row's note calls a weight 'deliberately unchanged' at a number "
+        "the row does not hold — the note is a stale copy of the row it sits in: "
+        f"(key, claimed, row's value): {offenders}"
+    )
+
+
+def test_the_unchanged_weight_claim_check_is_not_vacuous():
+    """The guard above must bite on the shipped shape and stay quiet on its siblings.
+
+    `shipped` is the pre-fix `test_substrate_map.py` row: value `0.9`, note "The 3.7
+    weight sits inside that range and is deliberately unchanged". Measured pre-fix
+    the guard reports `('test_substrate_map.py', 3.7, 0.9)`; post-fix, nothing.
+    """
+    shipped = (
+        "durations:\n"
+        "  test_substrate_map.py: 0.9  # the range stays the file's own spread. The 3.7"
+        " weight sits inside that range and is deliberately unchanged;"
+        " `tools/ci_timing.py --refresh-durations` replaces it from junit.\n"
+        "surfaces: []\n")
+    assert _durations_rows_claiming_an_unchanged_weight_they_do_not_hold(shipped) == [
+        ("test_substrate_map.py", 3.7, 0.9)]
+    legitimate = (
+        "durations:\n"
+        # a claim that AGREES with its row is the honest form
+        "  test_a.py: 3.7  # 3.7 is the reading; the 3.7 weight is deliberately"
+        " unchanged by this sweep.\n"
+        # the sweep's own provenance quotes a PREVIOUS weight — not a claim
+        "  test_b.py: 0.9  # ci-timing junit-census+top-15 2026-11-02 (run 1); was 3.7\n"
+        # "deliberately unchanged" about the FILE, with no weight claim at all
+        "  test_c.py: 2.0  # the file's cost is deliberately unchanged.\n"
+        "surfaces: []\n")
+    assert _durations_rows_claiming_an_unchanged_weight_they_do_not_hold(
+        legitimate) == []
+
+
 #: `WATCHDOG_FLOOR_MIN` as a row NOTE states it: "`WATCHDOG_FLOOR_MIN` (19 min)".
 _WATCHDOG_FLOOR_CLAIM_RE = re.compile(r"`WATCHDOG_FLOOR_MIN`\s*\((?P<minutes>\d+) min\)")
 
