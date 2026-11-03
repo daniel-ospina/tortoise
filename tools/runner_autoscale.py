@@ -222,11 +222,18 @@ EXIT  0 converged / at-ceiling / over-ceiling / nothing to do / a REFUSAL (an an
         either (it runs the tool in its no-change mode, which never attempts a provision), so the
         unit is the only signal — and the journal carries the callee's own refusal words.
       6 `wedged` — the box's registrations are ONLINE and read `busy=false`, and yet the repo's
-        last completed runs show them answering every job with a SETUP failure. This is not a
-        capacity number: it is the one state where the reading above is actively misleading, so
-        it is reported INSTEAD of `at-ceiling`/`converged` rather than alongside them. Nothing is
-        restarted or removed (the pass keeps its prohibitions); the operator's repair is written
-        in `docs/ops/ci-runner-x64.md`. ⛔ EXIT 0 HERE WOULD BE THE FALSE-PASS CLASS THIS FILE
+        last completed runs show them answering every job with a SETUP failure. ⛔ THE SIGNATURE IS
+        A SHORT FAILURE WITH NO STEP (`<= 30 s`), NOT A PROVEN CAUSE: a host OOM produces the
+        identical tuple (measured on `pi-runner-x64-2` in #10591 — 5 s, `steps: 0`, annotation
+        `Out of memory`), and the jobs endpoint's `steps` array does not separate the two. The
+        CAUSE comes from the job's own message: a denied `_work/_temp` takes the work-dir repair
+        and an OOM needs memory — both in `docs/ops/ci-runner-x64.md`, because pointing every
+        operator at the work dir sent the OOM case into a `rm -rf` that changes nothing. This is
+        not a capacity number: it is the one state where the reading above is actively
+        misleading, so it is reported INSTEAD of `at-ceiling`/`converged` rather than alongside
+        them. Nothing is restarted or removed (the pass keeps its prohibitions); the operator's
+        repair is written in `docs/ops/ci-runner-x64.md`. ⛔ EXIT 0 HERE WOULD BE THE FALSE-PASS
+        CLASS THIS FILE
         EXISTS TO PREVENT: a runner that fails every job in 1 s is `busy=false` almost all the
         time, so a pool census built on `status`/`busy` calls it the IDLEST-LOOKING runner on the
         box and reports spare capacity. Measured 2026-11-03 on run 41578276118 — 29 jobs: 11
@@ -236,8 +243,14 @@ EXIT  0 converged / at-ceiling / over-ceiling / nothing to do / a REFUSAL (an an
         logged "capacity ... no change" for three days and 100 consecutive runs produced ZERO
         successes. `uncertified` (also exit 2) is the sibling state: the job outcomes could not be
         READ, so capacity cannot be certified either way — never `converged`.
+        ⛔ BOTH CODES ABOVE ARE FOR A REAL PASS ONLY. A `--status`/`--dry-run` pass REPORTS the same
+        verdict (`wedged`/`uncertified`, the named registrations, and a note saying a real pass
+        exits 6/2) and returns **0** — it changes nothing by design, and the autoscaler installer
+        probes exactly that mode; see the `under-target` line above and `main`'s exit ladder.
         ⛔ WHICH CODE WINS when a registration is wedged AND the pass ALSO hit a failure of its
-        own: `wedged` overrides the BENIGN verdicts only. It does NOT override exit 4
+        own: `wedged` overrides the BENIGN verdicts only — `converged`, `at-ceiling`,
+        `under-target` WITHOUT `problem_kind=no-listener`, and `fill-blocked`. It does NOT
+        override exit 4
         (`under-target` with `problem_kind=no-listener` — a runner was INSTALLED and nothing came
         up), exit 5 (`fill-refused-by-provisioner`), exit 3 (an action failure), exit 2
         (unmeasured), exit 1 (refused) or `over-ceiling`. In each of those the pass already
@@ -245,7 +258,9 @@ EXIT  0 converged / at-ceiling / over-ceiling / nothing to do / a REFUSAL (an an
         on — and the co-occurrence is the NORMAL shape, not a corner: the measured box had four
         wedged registrations WHILE the fill loop ran on the same pass. The wedged registrations
         are still NAMED in `record["wedged"]` and in the pass note, so nothing is hidden by the
-        ordering; only the exit CODE is ordered.
+        ordering; only the exit CODE is ordered. ⛔ `fill-blocked` USED TO BE ABSENT FROM THIS
+        LIST, which made the sentence false in the other direction: that branch is taken before
+        any count is looked at, so a wedged pool on a box with no provisioner reported exit 0.
 """
 
 from __future__ import annotations
@@ -668,7 +683,14 @@ def read_pool(repo: str) -> dict[str, PoolEntry]:
 # 100 consecutive `python-ci` runs produced 0 successes, so the required aggregate was red on
 # every PR and nothing could merge. A capacity model that counts these as spare capacity is a
 # FALSE PASS on the only question it exists to answer.
-WEDGED_SETUP_S = 30  # a job that ends this fast never ran a step: no suite finishes in 30 s
+# ⛔ THE DURATION IS A HEURISTIC FOR "NO STEP RAN", NEVER PROOF OF IT, and saying otherwise sent
+# an operator to repair the wrong thing. A suite takes minutes, so a job that ends in <= 30 s did
+# not run one — but a HOST OOM ends in 5 s with `steps: 0` as well (measured on `pi-runner-x64-2`,
+# #10591: 10:04:05Z -> 10:04:10Z, annotation `Out of memory`), and the jobs endpoint's `steps`
+# array does NOT tell the two apart (empty/zero in both). So this number names the
+# SETUP-FAILURE SIGNATURE; which CAUSE it is comes from the job's own message, and both repairs
+# (denied `_work/_temp` vs a memory-starved host) are in `docs/ops/ci-runner-x64.md`.
+WEDGED_SETUP_S = 30  # <= this many seconds: too fast for a suite, so no step can have run one
 WEDGED_MIN_FAILURES = 3  # measured spread, not a single flake
 WEDGED_PROBE_RUNS = 3  # BOUNDED: the last 3 completed runs, one page of jobs each
 
@@ -759,7 +781,8 @@ def wedged_runners(
     """Registrations in `pool` that answer every job with a SETUP failure.
 
     The predicate is deliberately narrow, because its finding is a claim about a MACHINE:
-      * failed in `<= setup_s` (no step can have run a suite that fast), AND
+      * failed in `<= setup_s` (too fast for a suite — the SETUP-failure signature; a host OOM
+        produces the same tuple, so the duration names the SHAPE and never the cause, #10591), AND
       * at least `min_failures` of them (a spread, not one flake), AND
       * ZERO successes in the same window — one green job proves the work dir is writable, which
         is the whole question. A slow-but-working runner therefore never matches, and neither does
@@ -1280,10 +1303,13 @@ def converge(
         record["wedged"] = wedged
         record["notes"].append(
             f"wedged: {', '.join(wedged)} — the last completed runs show every job on these "
-            f"registrations ending in a SETUP failure (<= {WEDGED_SETUP_S}s, so no step ran), with "
-            "no success in the window. `status`/`busy` read healthy for exactly that reason: a job "
-            "that dies in 1s leaves the runner idle. Nothing was restarted or removed (this tool "
-            "never touches a registration on a reading); the repair is in docs/ops/ci-runner-x64.md"
+            f"registrations ending in a SETUP failure (<= {WEDGED_SETUP_S}s, too fast for a suite) "
+            "with no success in the window. ⛔ THAT IS THE SIGNATURE, NOT THE CAUSE: a host OOM "
+            "produces the identical tuple (#10591), and the duration alone cannot tell them apart "
+            "— so pick the repair from the job's OWN message (denied `_work/_temp` vs `Out of "
+            "memory`; both are in docs/ops/ci-runner-x64.md). `status`/`busy` read healthy for "
+            "exactly that reason: a job that dies in 1s leaves the runner idle. Nothing was "
+            "restarted or removed (this tool never touches a registration on a reading)"
         )
     machine = machine or os.environ.get("RUNNER_AUTOSCALE_MACHINE") or os.uname().machine
     wait_s = int(
@@ -1690,17 +1716,36 @@ def converge(
     # not a corner: the measured box had four wedged registrations AND the fill loop running on the
     # same pass. So exit 4 keeps the code; the registrations are still named in `record["wedged"]`
     # and its note, so both facts are REPORTED and only the exit CODE is ordered.
+    # ⛔ `fill-blocked` IS BENIGN TOO, AND LEAVING IT OUT MADE THE RULE ABOVE FALSE. A box whose
+    # provisioner does not resolve takes the `fill-blocked` branch below BEFORE any count is
+    # looked at, so a wedged pool on such a box reported that verdict and exited 0 — the same
+    # false PASS one verdict over, on a box whose registrations serve nothing. It is in the tuple
+    # for the same reason `under-target` is: it is a benign statement about something ELSE.
     if (
         wedged
-        and record["verdict"] in ("converged", "at-ceiling", "under-target")
+        and record["verdict"] in ("converged", "at-ceiling", "under-target", "fill-blocked")
         and record.get("problem_kind") != "no-listener"
     ):
         record["verdict"] = "wedged"
     elif record.get("capacity_certified") is False and record["verdict"] in (
         "converged",
         "at-ceiling",
+        "fill-blocked",
     ):
         record["verdict"] = "uncertified"
+    # ⛔ A NO-CHANGE PASS REPORTS THE STATE AND STAYS EXIT 0 — see the EXIT block. The verdict is
+    # still `wedged`/`uncertified` (a reader cannot mistake the pool for `converged`), but
+    # `--status`/`--dry-run` change nothing by design and the autoscaler installer PROBES exactly
+    # `--json --status`: a non-zero code here would refuse to arm the schedule on the one box that
+    # most needs it, naming a measurement failure that did not happen. Say so in the record, so a
+    # reader of the plan knows the real pass will be non-zero.
+    if record["dry_run"] and record["verdict"] in ("wedged", "uncertified"):
+        record["notes"].append(
+            f"{record['verdict']} is REPORTED, not returned: --status/--dry-run change nothing by "
+            "design, so this pass exits 0 (the installer's install-time probe runs exactly this "
+            "mode and a non-zero exit reads as 'the guard cannot MEASURE'). A REAL pass on this "
+            f"box exits {'6' if record['verdict'] == 'wedged' else '2'}."
+        )
     record["live"] = live
     return record
 
@@ -1900,9 +1945,20 @@ def main(argv: list[str] | None = None) -> int:
     # Exit 0 here is the floor of the false-PASS class above — a scheduled pass reporting a box
     # that serves NOTHING as converged. `uncertified` is already covered by the `unmeasurable`
     # arm's exit 2 (we could not look).
-    if record["verdict"] == "wedged":
+    # ⛔ AND A NO-CHANGE PASS STAYS EXIT 0 (`record["dry_run"]`), WHICH IS A DECISION, NOT AN
+    # OVERSIGHT. It is the EXIT block's own `under-target` rule — a `--status`/`--dry-run` plan
+    # changes nothing by design, so it cannot be a failed pass — pinned by
+    # `tests/test_runner_autoscale.py::test_a_status_read_that_ends_under_target_is_not_a_failed_schedule`.
+    # The consumer that makes it load-bearing is `tools/install-runner-autoscale-schedule.sh`: its
+    # install-time `probe()` runs exactly `--json --status` and reads ANY non-zero exit as "the
+    # guard cannot MEASURE on this box" → `REFUSED` → nothing armed. Letting 6/2 through here
+    # therefore refused to arm the schedule on the one box that most needs it (the measured wedged
+    # pool), naming a measurement failure that did not happen. The state is not hidden: the
+    # verdict, `record["wedged"]` and the pass note all still say `wedged`, and the installer
+    # prints it as an advisory. A REAL pass (what the timer fires) is non-zero as below.
+    if record["verdict"] == "wedged" and not record["dry_run"]:
         return 6
-    if record["verdict"] == "uncertified":
+    if record["verdict"] == "uncertified" and not record["dry_run"]:
         return 2
     return 0
 

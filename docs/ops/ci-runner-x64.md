@@ -755,7 +755,7 @@ belongs to). It drives the script as a subprocess in a hermetic env — a temp b
    ⛔ **WHAT THE UNION DOES AND DOES NOT BUY, stated plainly so the next stall is not read as
    closed.** The repair hardening fixed the *manual* and *provisioner-adjacent* path only: a repair
    can no longer strip `ubuntu-latest`, and nothing else in this repo calls `--repair-labels`
-   (`tools/runner_autoscale.py:1215` invokes the installer as `--count … --fallback auto`, never
+   (`tools/runner_autoscale.py:1238` invokes the installer as `--count … --fallback auto`, never
    `--repair-labels`, and its own `_preserve_labels` already kept the label). It does NOT stop the
    remover above: the gate's `fallback_off` still strips `ubuntu-latest` from this pool on its next
    tick, from `scripts/ci_runner_gate.sh` in **agent-infra**, which is not in this checkout. So the
@@ -1027,9 +1027,27 @@ uv run python tools/runner_autoscale.py --repo daniel-ospina/tortoise --status -
   | jq '{verdict, wedged, notes}'
 ```
 
-**Repair** (per wedged instance; the work dir is the runner's own scratch space, nothing else
-lives there, and a running job must not be interrupted — check `busy=false` on that registration
-first):
+**Before repairing, name the cause** — ⛔ **THE TUPLE ABOVE IS A SIGNATURE, NOT A CAUSE, AND THE
+TWO KNOWN CAUSES NEED DIFFERENT REPAIRS.** `(runner_name, failure, ≤ 30 s, no success in the window)` is exactly what a
+**host OOM** produces as well: measured on `pi-runner-x64-2` in #10591
+(`started_at 10:04:05Z`, `completed_at 10:04:10Z`, annotation **`Out of memory`**). The jobs
+endpoint's `steps` array does **not** separate them (empty/zero for both), so the discriminator is
+the job's own message — read it before choosing a repair:
+
+```bash
+# the failing job's own annotation (an OOM is reported here; `job_id` from the run's jobs list)
+gh api repos/daniel-ospina/tortoise/check-runs/<job_id>/annotations --jq '.[].message'
+```
+
+- **`Access to the path '…/_work/_temp/_github_workflow' is denied.`** → the work dir. Take the
+  repair below.
+- **`Out of memory`** (or the runner's own shutdown-signal line) → the **HOST** is memory-starved:
+  the `rm -rf` below is a **no-op** there and the wedge simply persists. Give the box memory (or
+  take runners off it) before re-checking; #10591 is the recorded case.
+
+**Repair (work-dir cause)** (per wedged instance; the work dir is the runner's own scratch space,
+nothing else lives there, and a running job must not be interrupted — check `busy=false` on that
+registration first):
 
 ```bash
 # Run ON the box that hosts the registration. `name` comes from `--status --json` -> `wedged[]`;
@@ -1045,6 +1063,13 @@ sudo systemctl start "$unit.service"
 Stop serving from a wedged registration **while it is broken** rather than reverting the pool's
 role: detaching the fallback label (`ubuntu-latest`) from it takes it out of the scheduler's reach
 and is reversible — `--repair-labels` re-derives the set from the gate's condition.
+
+⛔ **AND IT IS NOT A DURABLE STATE — the gate re-applies the label on its NEXT TICK.** The paragraph
+at the top of this file that this section's neighbour edits records it plainly: the pool gate
+re-derives the label set every tick and `current_mode` counts *any* runner carrying `ubuntu-latest`
+as `local`, so a hand detach survives only until that tick. Record it as a **time-boxed** action —
+taken for the duration of the repair — and re-read the runner's labels afterwards instead of
+assuming it is still out of the scheduler's reach.
 
 ```bash
 gh api -X DELETE "repos/daniel-ospina/tortoise/actions/runners/<ID>/labels/ubuntu-latest"

@@ -2284,6 +2284,90 @@ def test_a_wedged_box_that_ALSO_failed_to_grow_keeps_exit_4(env):
     assert any("SETUP failure" in n and "r1" in n for n in rec["notes"]), rec["notes"]
 
 
+def test_a_status_read_of_a_wedged_pool_reports_it_and_stays_exit_0(env):
+    """⛔ REPORTED, NOT RETURNED: a no-change pass names the wedge and exits 0 — on purpose.
+
+    The file's EXIT contract already says a `--status`/`--dry-run` plan "changes nothing by
+    design, so it cannot be a failed pass" (pinned by
+    `test_a_status_read_that_ends_under_target_is_not_a_failed_schedule`), and
+    `tools/install-runner-autoscale-schedule.sh` PROBES exactly `--json --status`, reading ANY
+    non-zero exit as `REFUSED: the guard cannot MEASURE on this box` → nothing armed. Both new
+    overrides ignored that: they fire in `--status` mode (the probe is taken before the `dry_run`
+    guards), so on the measured wedged pool the installer refused to arm the schedule that
+    reports the wedge, naming a measurement failure that did not happen — the one box that most
+    needs the reporting instrument is the box it would not arm.
+
+    The state is not softened by this: the verdict is still `wedged` (never `at-ceiling`/
+    `converged`), the names are in `record["wedged"]`, and the note says a real pass exits 6.
+
+    Non-vacuity: on the pre-fix tool this case records `_rc == 6`, so the exit arm reds.
+    """
+    e = env(pool=[("r1", "online", False, "")], installs=[("gh-runner-x64-1", "r1")])
+    e.run_ids = "1\n2\n3\n"
+    e.jobs_tsv.write_text(_outcomes(SETUP_FAIL), encoding="utf-8")
+    rec = e.record("--status")
+    assert rec["dry_run"] is True, rec
+    assert rec["wedged"] == ["r1"], rec  # REPORTED, not hidden
+    assert rec["verdict"] == "wedged", rec  # ... and never a capacity verdict
+    assert rec["_rc"] == 0, rec  # ... and the plan is still a plan
+    assert any("REAL pass" in n and "exits 6" in n for n in rec["notes"]), rec["notes"]
+    assert e.provisioned() == [], e.provisioned()
+
+
+def test_a_status_read_of_an_unreadable_history_is_uncertified_and_stays_exit_0(env):
+    """The `uncertified` sibling of the pin above: `--status` must not exit 2 on it either.
+
+    An unreadable job history makes a REAL pass exit 2 (fail-closed, never `converged`), but the
+    same read is now a dependency of the installer's probe — so exit 2 in `--status` would refuse
+    to arm the schedule on any box with a transient `gh` blip. The plan reports `uncertified` and
+    exits 0, and a real pass is the one that is non-zero.
+
+    Non-vacuity: on the pre-fix tool this case records `_rc == 2`.
+    """
+    e = env(
+        pool=[("r1", "online", False, ""), ("r2", "online", False, ""), ("r3", "online", False, "")],
+        installs=[
+            ("gh-runner-x64-1", "r1"),
+            ("gh-runner-x64-2", "r2"),
+            ("gh-runner-x64-3", "r3"),
+        ],
+    )
+    e.run_ids = "1\n"
+    e.jobs_tsv = e.root / "missing-jobs.tsv"  # the fake's `cat` exits non-zero
+    rec = e.record("--status")
+    assert rec["dry_run"] is True, rec
+    assert rec["verdict"] == "uncertified", rec
+    assert rec["capacity_certified"] is False, rec
+    assert rec["_rc"] == 0, rec
+    assert any("REAL pass" in n and "exits 2" in n for n in rec["notes"]), rec["notes"]
+
+
+def test_a_wedged_box_with_no_provisioner_reports_wedged_not_fill_blocked(env):
+    """⛔ `fill-blocked` IS BENIGN, SO A WEDGED POOL MUST BE ABLE TO OVERRIDE IT.
+
+    That branch is taken BEFORE any count is looked at: with no provisioner on the box the pass
+    never reaches the `converged`/`at-ceiling`/`under-target` verdicts, so it kept `fill-blocked`
+    and exited 0 — a scheduled pass reporting "nothing to do here" over a pool whose registrations
+    serve nothing, which is the false PASS this whole block exists to prevent (one verdict over
+    from the one it names).
+
+    Non-vacuity: on the pre-fix tool `verdict` stays `fill-blocked` and `_rc` is 0, so both arms
+    red.
+    """
+    e = env(
+        provisioner_absent=True,
+        pool=[("r1", "online", False, "")],
+        installs=[("gh-runner-x64-1", "r1")],
+    )
+    e.run_ids = "1\n2\n3\n"
+    e.jobs_tsv.write_text(_outcomes(SETUP_FAIL), encoding="utf-8")
+    rec = e.record()
+    assert rec["problem_kind"] == "no-provisioner", rec
+    assert rec["wedged"] == ["r1"], rec
+    assert rec["verdict"] == "wedged", rec
+    assert rec["_rc"] == 6, rec
+
+
 def test_the_measured_triple_is_stated_once_and_every_citation_agrees_with_it():
     """The whole fix rests on ONE run's numbers, and four places used to quote four versions.
 

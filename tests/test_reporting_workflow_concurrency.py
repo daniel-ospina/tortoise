@@ -4340,7 +4340,7 @@ def test_no_observer_job_keeps_the_pools_fallback_label_in_any_runs_on_form() ->
     # guarantee that the pool cannot serve the pinned label any more. Since the 2026-10-29
     # mitigation (#6897 suspended; `docs/ops/ci-runner-x64.md`, the label contract) the installer
     # CAN attach `ubuntu-24.04` under `CI_RUNNER_OS_LABEL=on|auto`, and `_preserve_labels` DROPS it
-    # on every re-registration (`tools/runner_autoscale.py:1746-1751`; a deliberate
+    # on every re-registration (`tools/runner_autoscale.py:1791-1797`; a deliberate
     # `--repair-labels` pass with the flag set is what re-attaches it), so the four observers are
     # pool-eligible while
     # the mitigation is engaged — an accepted cost
