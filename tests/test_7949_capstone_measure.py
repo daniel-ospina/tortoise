@@ -4757,6 +4757,57 @@ def test_an_on_pin_receipt_that_cannot_be_scored_REFUSES_instead_of_falling_back
     assert "operator_audit" in message, message
 
 
+def test_an_unscorable_on_pin_receipt_that_cannot_win_is_ignored_not_refused():
+    """The refusal must name a TRUE consequence, or the refusal is itself the bug.
+
+    An on-pin receipt older than the newest scorable one can never win — the ordering
+    puts the winner last — so ignoring it changes nothing. Refusing on it would tell a
+    reader that an older receipt would have published the row's number when the newest
+    measurement on the pin was in fact read: a refusal naming a false reason, which is
+    the one failure mode ``_same_corpus``'s own docstring says a refusal must not have.
+    """
+    pin = "sha256:" + "d" * 64
+    root = Path(tempfile.mkdtemp())
+    receipts = root / measure.E4_RECEIPT_DIR
+    receipts.mkdir(parents=True)
+    # OLDER and unscorable — it cannot win, so it must not refuse the selection.
+    _receipt(receipts / "w2b-operator-2026-01-01.json", corpus_hash=pin,
+             edge_correct=9, date="2026-01-01T00:00:00Z", audit=False)
+    _receipt(receipts / "w2b-operator-2026-05-01.json", corpus_hash=pin,
+             edge_correct=5, date="2026-05-01T00:00:00Z")
+
+    rel, record = measure.select_e4_receipt(root, frozen_pin=pin)
+    assert rel.endswith("w2b-operator-2026-05-01.json"), rel
+    assert record["operator_audit"]["edge_correct"] == 5
+
+
+def test_a_truncated_receipt_refuses_rather_than_letting_an_older_one_win():
+    """A half-written file must REFUSE, not be skipped for an older on-pin receipt.
+
+    The operator lane writes its receipt with a plain non-atomic ``write_text``
+    (``tests/eval/write_path/runner.py``), so a lane killed mid-write leaves exactly
+    this file. It cannot be parsed, so neither its corpus nor its date is knowable:
+    publishing an older on-pin receipt's number would be the silent revert this
+    selector exists to prevent, and nothing downstream would say so.
+    """
+    pin = "sha256:" + "d" * 64
+    root = Path(tempfile.mkdtemp())
+    receipts = root / measure.E4_RECEIPT_DIR
+    receipts.mkdir(parents=True)
+    _receipt(receipts / "w2b-operator-2026-01-01.json", corpus_hash=pin,
+             edge_correct=5, date="2026-01-01T00:00:00Z")
+    (receipts / "w2b-operator-2026-09-01.json").write_text('{"run_id": "trunc')
+
+    with pytest.raises(SystemExit) as exc:
+        measure.select_e4_receipt(root, frozen_pin=pin)
+    message = str(exc.value)
+    assert "REFUSED" in message, message
+    assert "w2b-operator-2026-09-01.json" in message, (
+        "the refusal must NAME the unreadable file, or a reader cannot tell which "
+        "artifact to repair: " + message)
+    assert "unreadable" in message, message
+
+
 def test_the_newest_frozen_pin_receipt_wins_because_the_ordering_is_the_property():
     """`matched[-1]` is a claim the docs make; pin it or `matched[0]` stays green.
 
@@ -4877,7 +4928,7 @@ def _receipt_audit(rel: str) -> dict:
     return json.loads((_REPO / rel).read_text())["operator_audit"]
 
 
-def test_the_e4_number_is_the_frozen_receipts_two_and_not_the_old_ones():
+def test_the_e4_number_is_the_frozen_receipts_five_and_not_the_old_ones():
     """The defect, pinned as a NUMBER: the old artifact says 2, the selected one 5.
 
     ⛔ THIS IS THE ONE DELIBERATE HARD PIN in this family, and it is labelled as one:
@@ -4953,8 +5004,33 @@ def test_main_binds_every_name_it_hands_render_log_and_load_e4_carries_its_keys(
     handed = {kw.value.id for kw in calls[0].keywords
               if isinstance(kw.value, ast.Name)}
     assert handed, "no keyword argument of the render_log call is a bare name"
-    first_bind: dict[str, int] = {}
-    for node in ast.walk(main):
+    # (a) every NAME main hands render_log resolves, and a LOCAL one is bound BEFORE
+    # the call. Module-level names resolve without a local binding, so seed them; and
+    # main's OWN scope only — a Store inside a nested def/lambda/class does not bind a
+    # name in main, so descending into one would let a dead binding satisfy the check.
+    module_level: set[str] = set()
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            module_level.add(node.name)
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            module_level.update((alias.asname or alias.name).split(".")[0]
+                                for alias in node.names)
+        elif isinstance(node, ast.Assign):
+            module_level.update(target.id for target in node.targets
+                                if isinstance(target, ast.Name))
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            module_level.add(node.target.id)
+    first_bind: dict[str, int] = dict.fromkeys(module_level, 0)
+
+    def _own_scope(node: ast.AST):
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef,
+                                  ast.Lambda, ast.ClassDef)):
+                continue
+            yield child
+            yield from _own_scope(child)
+
+    for node in [main, *_own_scope(main)]:
         if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
             first_bind[node.id] = min(first_bind.get(node.id, node.lineno),
                                       node.lineno)

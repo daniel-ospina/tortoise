@@ -2148,14 +2148,20 @@ def select_e4_receipt(repo: Path = ROOT, frozen_pin: str = "") -> tuple[str, dic
       stamp sorts above its ``Z`` equivalent), which is why the pin — not the date —
       is what makes the choice safe: every match is on the frozen corpus, so the
       number cannot differ by corpus whichever one wins;
-    * every candidate that is unreadable, not an object or carries no
-      ``corpus_hash`` is NAMED in the refusal, so a missing artifact cannot read as
-      "no candidate";
+    * a file in the receipts directory that cannot be read as a JSON object REFUSES
+      the selection: its corpus and date are unknowable, so nothing can prove the
+      newest measurement on the frozen corpus is not it;
     * a candidate that IS on the frozen pin but carries no ``operator_audit`` REFUSES
-      the selection instead of being skipped. Skipping it would silently let an
-      OLDER on-pin receipt publish the row's number while the newest measurement on
-      the same corpus sat unread — the same "the row's number is not the artifact you
-      think it is" defect this selector exists to close, one level down.
+      **when it would have won** — i.e. when it sorts after the newest scorable
+      receipt. Skipping that one would let an OLDER on-pin receipt publish the row's
+      number while the newest measurement on the same corpus sat unread, which is the
+      same "the row's number is not the artifact you think it is" defect this selector
+      exists to close, one level down. One that sorts BEFORE the winner provably cannot
+      change the result and is ignored, because a refusal that names a consequence that
+      is not true is the one failure mode a refusal must not have;
+    * a candidate carrying no ``corpus_hash``, or one measured on another corpus, is
+      ignored and NAMED in the no-match refusal, so a missing artifact cannot read as
+      "no candidate".
     """
     if not frozen_pin:
         raise SystemExit("capstone-measure: REFUSED — E4 was asked to select its "
@@ -2166,18 +2172,23 @@ def select_e4_receipt(repo: Path = ROOT, frozen_pin: str = "") -> tuple[str, dic
     paths = sorted(directory.glob(E4_RECEIPT_GLOB)) if directory.is_dir() else []
     matched: list[tuple[str, str, Path, dict]] = []
     skipped: list[str] = []
-    #: Candidates that ARE on the frozen pin but cannot be scored. They are a REFUSAL,
-    #: never a silent skip: dropping one would let an OLDER on-pin receipt speak for
-    #: the newest measurement on the same corpus.
-    unscorable: list[str] = []
+    #: Candidates that ARE on the frozen pin but carry no ``operator_audit``, so they
+    #: cannot be scored. Kept with their ORDERING key: one that sorts after the winner
+    #: is a REFUSAL (it would have won), one that sorts before it provably cannot affect
+    #: the result and is ignored — refusing on those would name a false reason.
+    unscorable: list[tuple[tuple[str, str, str], str]] = []
+    #: Files in the receipts directory that could not be read as a JSON object. Their
+    #: corpus and date are unknowable, so nothing can prove the newest measurement on
+    #: the frozen corpus is not one of them — a REFUSAL, never a silent skip.
+    unreadable: list[str] = []
     for path in paths:
         try:
             record = json.loads(path.read_text())
         except (OSError, json.JSONDecodeError) as exc:
-            skipped.append(f"{path.name} (unreadable: {exc})")
+            unreadable.append(f"{path.name} (unreadable: {exc})")
             continue
         if not isinstance(record, dict):
-            skipped.append(f"{path.name} ({type(record).__name__}, not a record)")
+            unreadable.append(f"{path.name} ({type(record).__name__}, not a record)")
             continue
         corpus_hash = record.get("corpus_hash")
         if not isinstance(corpus_hash, str) or not corpus_hash:
@@ -2186,28 +2197,42 @@ def select_e4_receipt(repo: Path = ROOT, frozen_pin: str = "") -> tuple[str, dic
         if not _same_corpus(corpus_hash, frozen_pin):
             skipped.append(f"{path.name} (corpus_hash {corpus_hash[:20]}…)")
             continue
+        key = (str(record.get("date") or ""),
+               str(record.get("run_id") or ""), path.name)
         if not isinstance(record.get("operator_audit"), dict):
-            unscorable.append(path.name)
+            unscorable.append((key, path.name))
             continue
-        matched.append((str(record.get("date") or ""),
-                        str(record.get("run_id") or ""), path, record))
-    if unscorable:
+        matched.append((key[0], key[1], path, record))
+    if unreadable:
         raise SystemExit(
-            f"capstone-measure: REFUSED — {len(unscorable)} receipt(s) in "
-            f"{directory} ARE on the frozen corpus ({frozen_pin}) but carry no "
-            f"operator_audit, so they cannot be scored: {sorted(unscorable)}. "
-            "Skipping them would let an OLDER on-pin receipt publish the row's "
-            "number while the newest measurement on the same corpus sat unread — "
-            "repair or remove the receipt, or re-run the operator probe")
+            f"capstone-measure: REFUSED — {len(unreadable)} file(s) in "
+            f"{directory} could not be read as a receipt: {sorted(unreadable)}. "
+            f"Every {E4_RECEIPT_GLOB} there is a candidate receipt, so nothing can "
+            "prove the newest measurement on the frozen corpus is not one of them — "
+            "repair or remove the file, or re-run the operator probe")
     if not matched:
         raise SystemExit(
             f"capstone-measure: REFUSED — no operator receipt in "
             f"{directory} was measured on the frozen corpus "
             f"({frozen_pin}). {len(paths)} candidate(s) were scanned and none "
-            f"matched: {skipped or 'none present'}. E4 is a bar over the "
+            f"matched: {skipped or 'none present'}"
+            + (f"; unscorable on the pin: "
+               f"{sorted(name for _key, name in unscorable)}" if unscorable else "")
+            + ". E4 is a bar over the "
             "pre-registered corpus; scoring it from another revision would report "
             "a number this run's corpus cannot support")
     matched.sort(key=lambda entry: (entry[0], entry[1], entry[2].name))
+    winner = (matched[-1][0], matched[-1][1], matched[-1][2].name)
+    would_have_won = sorted(name for key, name in unscorable if key > winner)
+    if would_have_won:
+        raise SystemExit(
+            f"capstone-measure: REFUSED — {len(would_have_won)} receipt(s) in "
+            f"{directory} ARE on the frozen corpus ({frozen_pin}) and sort AFTER the "
+            f"newest scorable one, but carry no operator_audit so they cannot be "
+            f"scored: {would_have_won}. Skipping them would let an OLDER on-pin "
+            "receipt publish the row's number while the newest measurement on the "
+            "same corpus sat unread — repair or remove the receipt, or re-run the "
+            "operator probe")
     _date, _run_id, path, record = matched[-1]
     return path.relative_to(repo).as_posix(), record
 
