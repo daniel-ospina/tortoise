@@ -12,7 +12,9 @@ hosted deployment's log said:
 
 A 302-write failure had no attributable cause on the deployment's own log. It
 now names the STATEMENT, its TABLE and COLUMNS with their values, and the
-entity/point id, on top of the driver's own `str(exc)`. `/health` also stopped
+entity/point id, plus the driver's PRIMARY message — never its `DETAIL`/`CONTEXT`,
+which quote the refused row and would put back the very value the attribution half
+withholds (`_primary_message`). `/health` also stopped
 answering `ok` while rows were being dropped — its verdict is
 `refusing: {reason, age_s}` inside a bounded window, `degraded`, and a reason's
 remedy (`#10185`, the open home for that half: a cumulative counter cannot say
@@ -676,7 +678,10 @@ def test_an_unreadable_verdict_is_never_published_as_not_refusing(monkeypatch):
         "the counter snapshot was READ — its key must not be borrowed to carry "
         "a different read's failure"
     )
-    assert record["refusing"] is None
+    assert "refusing" not in record, (
+        "an unevaluated read must not publish the `refusing` key at all: the "
+        f"block's own `null` means 'nothing is refusing' (#10648 P3) — {record.get('refusing')!r}"
+    )
     assert record["degraded"] is None, (
         "NOT EVALUATED is not 'not refusing': `false` here claims a quiet window "
         "the block never checked"
@@ -1193,6 +1198,17 @@ MIGRATION_PATH = (Path(__file__).resolve().parent.parent
                   / "supabase" / "migrations"
                   / "20261102000002_record_point_search_keys_text.sql")
 
+#: Where the array arm's non-`str` element divergence is STATED. NOT the
+#: migration header: that file had already landed on `main` when the statement
+#: was written, and migrations are append-only history
+#: (`.github/scripts/check-migration-append-only` refuses an edit to a landed
+#: one), so the paragraph lives in the doc a future lane actually reads. The leg
+#: below pins it there (#10648 review P1).
+DIVERGENCE_DOC_PATH = (Path(__file__).resolve().parent.parent
+                       / "docs" / "epics"
+                       / "2026-10-10-7879-postgres-record"
+                       / "08-hosted-prerequisites.md")
+
 
 def _shipped_flatten_ddl() -> str:
     """The `USING` helper, EXTRACTED from the shipped migration — not a copy.
@@ -1365,22 +1381,28 @@ def test_the_array_arms_non_str_elements_are_the_stated_divergence():
         "point", "search_keys", ["a", {"k": "v"}]) == "a {'k': 'v'}"
 
 
-def test_the_migration_header_states_the_non_str_element_divergence():
-    """The divergence must be READABLE, not just asserted (#10648 review P3).
+def test_the_divergence_is_STATED_in_the_doc_the_next_lane_reads():
+    """The divergence must be READABLE, not just asserted (#10648 review P1/P3).
 
-    The header is what a future lane reads before deciding the arm is "the SAME
-    rule" and tidying it. It used to claim exactly that, so the two element
-    shapes that break the equality were invisible: this pins the paragraph, and
-    names BOTH ends (`a None` / `a {'k': 'v'}` on the Python side) so a rewrite
-    of the text cannot quietly drop the reason the arms differ.
+    The paragraph is what a future lane reads before deciding the arm is "the
+    SAME rule" and tidying it. It used to live in the migration HEADER, which
+    cannot be edited: the file had already landed on `main`, and the repo's
+    append-only-migrations gate refuses an `M` on a landed one
+    (`.github/scripts/check-migration-append-only`). So the statement moved to
+    the doc the next lane reads, and this pins it THERE — names BOTH ends
+    (`a None` / `a {'k': 'v'}` on the Python side) so a rewrite of the text
+    cannot quietly drop the reason the arms differ.
     """
-    header = MIGRATION_PATH.read_text(encoding="utf-8")
+    stated = DIVERGENCE_DOC_PATH.read_text(encoding="utf-8")
 
-    assert "NON-`str` ELEMENT" in header, (
-        "the migration header no longer states the non-`str` array-element "
+    assert "NON-`str` ELEMENT" in stated, (
+        "the divergence doc no longer states the non-`str` array-element "
         "divergence, and the arm still diverges "
         "(`test_the_array_arms_non_str_elements_are_the_stated_divergence`)")
     for named in ("a None", "a {'k': 'v'}", "are_the_stated_divergence"):
-        assert named in header, (
-            f"the header's divergence paragraph no longer names {named!r}, so a "
-            "reader cannot tell which shape is the exception")
+        assert named in stated, (
+            f"the divergence paragraph no longer names {named!r}, so a reader "
+            "cannot tell which shape is the exception")
+    assert "NON-`str` ELEMENT" not in MIGRATION_PATH.read_text(encoding="utf-8"), (
+        "the landed migration's header must stay UNEDITED (append-only "
+        "history); the statement belongs in the doc above")
