@@ -665,13 +665,16 @@ def record_tenant_for_graph(plan: dict | None) -> tuple[str, str] | None:
       REFUSED there rather than resolved, INCLUDING one bound to the default
       graph's own row (pinned by ``test_9340_graph_tool_argument.py``::
       ``test_a_bound_credential_cannot_ask_for_the_default_graph``). So the
-      ``kind='default'`` row handled below reaches this function only for a
-      credential bound to that very row, or for one with no binding at all —
-      and where the credential IS bound the ambient scope already names
-      ``(org, default)``. (Where it is NOT bound the ambient scope can name
-      NOTHING; see the ⚠️ paragraph below, which is a different answer from
-      this one and was written because this sentence used to claim both
-      shapes at once — #10723 review P3.)
+      ``kind='default'`` row handled below reaches this function for exactly ONE
+      population: a credential with NO binding at all. The bound case is not a
+      second population — it is refused in ``plan_graph_target`` before it can
+      return a plan (fold review cycle 5, P2: the sentence used to offer "bound
+      to that very row" as a live disjunct, but a bound credential carries a
+      real ``public.graphs`` id and the default row carries the ``"default"``
+      sentinel, so that pairing cannot arise — the ``"default"`` REF path
+      returns ``None``, never a plan). (Where the credential is NOT bound the
+      ambient scope can name NOTHING; see the ⚠️ paragraph below, which is the
+      answer for this — the only — reachable shape.)
 
     Installing a tenant here would therefore be a SECOND write of the same
     scope in the ambient-present case, and the only way it could differ is by
