@@ -9977,8 +9977,14 @@ durations:
   # driver-withhold fix added three DB-free legs (a driver-shaped `22P02`
   # DETAIL/CONTEXT leg, a `23514` CHECK whose DETAIL is the failing row, and the
   # same withhold driven through the real `RecordWriter.write` wrap), so it now
-  # collects **48 / 34 run / 14 skip** — re-derive with `--collect-only -q`
-  # rather than carrying any of these figures. Unarmed it is ~8-10 s;
+  # collects **48 / 34 run / 14 skip**. #10648's review then added four more:
+  # the source-upsert leg that proves ONE line withholds a document title on
+  # BOTH halves, the subset pin between `_IDENTITY_CONTENT_KEYS` and
+  # `_CONTENT_COLUMNS`, the DB-armed non-`str` array-element divergence leg, and
+  # its DB-free header pin — so the file collects **52 / 37 run / 15 skip**
+  # (measured at `a40653185`).
+  # Re-derive with `--collect-only -q`
+  # rather than carrying any of these figures. Unarmed it is ~5 s;
   # the 4.5 s budget keeps headroom for the armed legs on a cold container. An
   # earlier revision of this note said 42 / 28 / 14 — stale, and quietly short of
   # the file it describes.
