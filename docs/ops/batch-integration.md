@@ -155,7 +155,8 @@ Both switches are strict `"1"` (any other spelling is not consent for a destruct
 owns it is gone" and to owner-**determinate** containers, and the reopen asking for the other two arms
 is pending on that issue. So do not expect `up` to reclaim a peer's stranded container on its own:
 read the `reap:` lines it prints — each one names the owner, the age, the measured gap and why it was
-kept. To release one container, do it from **its own** worktree:
+kept, and where a read FAILED it says the fact is UNKNOWN rather than stating a conclusion that read
+never produced. To release one container, do it from **its own** worktree:
 
 ```bash
 cd <the owning worktree> && uv run python tools/test_lane.py down

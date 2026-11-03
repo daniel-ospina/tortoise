@@ -2660,14 +2660,29 @@ def reap_orphans() -> list[str]:
             age = _started_epoch(name)
             if live_paths is None or age is None:
                 # Unreadable liveness or age, and both are needed to prove the
-                # lane is gone. REPORT, never destroy (fail-closed).
-                out.append(
-                    f"reap: kept {name} — its owning worktree exists ({owner}) "
-                    f"and no live process holds it, but "
-                    + ("the liveness surface (/proc) could not be read"
-                       if live_paths is None
-                       else "its start time could not be read")
-                    + "; report only, fail-closed")
+                # lane is gone. REPORT, never destroy (fail-closed) — and the
+                # line must not state an unreadable read AS A RESULT (#10693
+                # review, P2). `held` above is
+                # `live_paths is not None and any(...)`, so when `/proc` could
+                # not be read it is False BY CONSTRUCTION, never by a read:
+                # saying "no live process holds it" there is the exact reading
+                # `_live_lane_paths`' docstring forbids ("an unreadable
+                # liveness surface must never be read as 'nothing is alive'").
+                # It is not hypothetical — on a host with no `/proc` EVERY
+                # ownered peer container takes this branch, so a live lane
+                # mid-run was reported as unheld. Arm 3 already words this
+                # correctly; these are the same two shapes.
+                if live_paths is None:
+                    out.append(
+                        f"reap: kept {name} — its owning worktree exists "
+                        f"({owner}) and whether a live process holds it is "
+                        f"UNKNOWN (the liveness surface /proc could not be "
+                        f"read); report only, fail-closed")
+                else:
+                    out.append(
+                        f"reap: kept {name} — its owning worktree exists "
+                        f"({owner}) and no live process holds it, but its start "
+                        f"time could not be read; report only, fail-closed")
                 continue
             # The container must be older than the grace before its idleness is
             # even interesting: a container created moments ago belongs to a lane

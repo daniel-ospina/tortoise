@@ -1057,6 +1057,97 @@ def test_arm_2_fails_CLOSED_when_the_moment_of_action_liveness_goes_UNREADABLE(
     assert "could not be re-established at the moment of action" in "\n".join(out), out
 
 
+def test_arm_2_reports_an_UNREADABLE_proc_as_UNKNOWN_not_as_unheld(
+        tmp_path, monkeypatch):
+    """The report must not state an unreadable read AS A RESULT (#10693 review).
+
+    Arm 2's `held` is `live_paths is not None and any(...)`, so when
+    `_live_lane_paths()` returns `None` (it could not read `/proc`) `held` is
+    False **by construction, never by a read** — yet this branch used to print
+    "…and no live process holds it, but the liveness surface (/proc) could not
+    be read", asserting the conclusion and then retracting it in the same
+    sentence. `_live_lane_paths`' own docstring forbids that reading ("an
+    unreadable liveness surface must never be read as 'nothing is alive'"), and
+    arm 3 states the same situation correctly as UNKNOWN.
+
+    It is not hypothetical: on a host with no `/proc` (macOS) EVERY ownered peer
+    container lands here, so a live lane mid-run was reported as unheld with a
+    `rm -f` remedy one line below — fail-closed in ACTION, misleading in REPORT,
+    and the report is what this default ships.
+
+    Mutation: restore the shared "and no live process holds it, but …" wording
+    for the `live_paths is None` case and the first assert fails."""
+    owner = tmp_path / "live-lane-worktree"
+    owner.mkdir()
+    removed: list = []
+
+    def fake(*a, **k):
+        if a[0] == "ps":
+            return _R(0, "fdb-lane-unread0001\trunning\n", "")
+        if a[0] == "rm":
+            removed.append(a[1:])
+        return _R(0, "", "")
+
+    monkeypatch.setattr(tl, "_docker", fake)
+    monkeypatch.setattr(tl, "_touch_lease", lambda _n: None)
+    monkeypatch.setattr(tl, "lane_name", lambda: "fdb-lane-mine")
+    monkeypatch.setattr(tl, "_worktree_slugs", lambda: {"unread0001": str(owner)})
+    monkeypatch.setattr(tl, "_live_lane_paths", lambda: None)   # /proc unreadable
+    monkeypatch.setattr(tl, "_container_in_use", lambda _n: False)
+    monkeypatch.setattr(tl, "container_state", lambda _n: "running")
+    monkeypatch.setattr(tl, "_started_epoch", lambda _n: time.time() - 9 * 3600)
+    monkeypatch.setattr(tl, "_unused_gap", lambda _n, **k: 40.0)
+    # ARMED, so the only thing keeping it is the fail-closed guard itself.
+    monkeypatch.setenv(tl.LANE_GONE_REAP_ENV, "1")
+    out = tl.reap_orphans()
+    joined = "\n".join(out)
+    assert removed == [], (removed, out)
+    assert "no live process holds it" not in joined, (
+        f"an unreadable /proc was reported as 'no live process holds it' — the "
+        f"result of a read that never happened: {joined}")
+    assert "whether a live process holds it is UNKNOWN" in joined, out
+    assert "/proc could not be read" in joined, out
+    assert "report only, fail-closed" in joined, out
+
+
+def test_arm_2_keeps_its_accurate_claim_when_only_the_AGE_is_unreadable(
+        tmp_path, monkeypatch):
+    """The other half of the branch: `/proc` WAS read and reported no holder, so
+    "no live process holds it" is a measured fact there — only the start time
+    failed. The fix must not swing to "UNKNOWN" for a fact that was read.
+
+    This pins the pair, so a future edit cannot collapse the two cases into one
+    sentence again in either direction."""
+    owner = tmp_path / "live-lane-worktree"
+    owner.mkdir()
+    removed: list = []
+
+    def fake(*a, **k):
+        if a[0] == "ps":
+            return _R(0, "fdb-lane-ageless001\trunning\n", "")
+        if a[0] == "rm":
+            removed.append(a[1:])
+        return _R(0, "", "")
+
+    monkeypatch.setattr(tl, "_docker", fake)
+    monkeypatch.setattr(tl, "_touch_lease", lambda _n: None)
+    monkeypatch.setattr(tl, "lane_name", lambda: "fdb-lane-mine")
+    monkeypatch.setattr(tl, "_worktree_slugs", lambda: {"ageless001": str(owner)})
+    monkeypatch.setattr(tl, "_live_lane_paths", lambda: set())   # READ, nothing alive
+    monkeypatch.setattr(tl, "_container_in_use", lambda _n: False)
+    monkeypatch.setattr(tl, "container_state", lambda _n: "running")
+    monkeypatch.setattr(tl, "_started_epoch", lambda _n: None)   # age unreadable
+    monkeypatch.setattr(tl, "_unused_gap", lambda _n, **k: 40.0)
+    monkeypatch.setenv(tl.LANE_GONE_REAP_ENV, "1")
+    out = tl.reap_orphans()
+    joined = "\n".join(out)
+    assert removed == [], (removed, out)
+    assert "no live process holds it" in joined, out
+    assert "its start time could not be read" in joined, out
+    assert "UNKNOWN" not in joined, out
+    assert "report only, fail-closed" in joined, out
+
+
 def test_arm_3_fails_CLOSED_when_proc_cannot_be_read(tmp_path, monkeypatch):
     """Arm 3's cheap first guard, pinned where it is load-bearing.
 
