@@ -899,7 +899,7 @@ def test_a_list_valued_snapshot_lands_flattened_not_as_json():
 
 MIGRATION_PATH = (Path(__file__).resolve().parent.parent
                   / "supabase" / "migrations"
-                  / "20261102000001_record_point_search_keys_text.sql")
+                  / "20261102000002_record_point_search_keys_text.sql")
 
 
 def _shipped_flatten_ddl() -> str:

@@ -3227,7 +3227,7 @@ def test_record_schema_pin_runs_on_migration_or_doc_change():
         # of the three guards that read it — `test_9078`'s
         # `RECORD_REAPPLY_STEPS`, `test_9231`'s `RECORD_MIGRATIONS` registry pin,
         # `test_record_schema_placement.py` — ran on it.
-        "supabase/migrations/20261102000001_record_point_search_keys_text.sql",
+        "supabase/migrations/20261102000002_record_point_search_keys_text.sql",
         # The DOC side of the #7968 pair, restated after #9638 review P1 deleted
         # it: `test_record_schema_placement.py` reads this file's table, so a
         # docs-only edit must select `core` too. Measured on the pre-fix head:

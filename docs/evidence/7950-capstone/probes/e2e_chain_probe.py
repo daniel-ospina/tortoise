@@ -88,7 +88,7 @@ RECORD_MIGRATIONS = [
     # the DEAD duplicate of the bootstrap's, kept EQUAL on purpose (#9550): the same
     # Postgres stands up both, so a list that disagrees here would drift the moment
     # the duplicate is revived.
-    "20261102000001_record_point_search_keys_text.sql",
+    "20261102000002_record_point_search_keys_text.sql",
 ]
 DSN = os.environ.get(
     "CAPSTONE_PG_DSN", "postgresql://postgres:cap@127.0.0.1:15499/capstone")

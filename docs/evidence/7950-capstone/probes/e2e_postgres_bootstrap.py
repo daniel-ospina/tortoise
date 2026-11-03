@@ -96,7 +96,7 @@ MIGRATIONS = [
     # `InvalidTextRepresentation` (22P02): every point row carrying search keys is
     # refused and DROPPED, which is the 302-row incident. A probe that measured
     # that schema would certify a record the shipped writes cannot fill.
-    "20261102000001_record_point_search_keys_text.sql",
+    "20261102000002_record_point_search_keys_text.sql",
 ]
 DSN = "postgresql://postgres:cap@127.0.0.1:15499/capstone"
 

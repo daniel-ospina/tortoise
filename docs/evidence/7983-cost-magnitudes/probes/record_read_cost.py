@@ -110,7 +110,7 @@ MIGRATIONS = [
     # the SHIPPED schema's. `text` is varlena like `jsonb`, so the delta is the
     # de-TOASTing header rather than a type change (jsonb carries a 1-byte version
     # tag on top) — small, but this probe's whole output is small differences.
-    "20261102000001_record_point_search_keys_text.sql",
+    "20261102000002_record_point_search_keys_text.sql",
 ]
 
 #: §17.4.1's published rates, restated so the arithmetic below is auditable and

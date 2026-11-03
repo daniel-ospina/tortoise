@@ -1883,7 +1883,7 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # silent-drop class, and nine sibling entries exist for exactly it.
              # Pinned by
              # tests/test_ci_selection.py::test_record_schema_pin_runs_on_migration_or_doc_change.
-             "supabase/migrations/20261102000001_record_point_search_keys_text.sql",
+             "supabase/migrations/20261102000002_record_point_search_keys_text.sql",
              # Re-stated at the migration pair, NOT replaced by it (#9638 review
              # P1): the DOC side is an independent member of this set. The
              # #9555/R7 entry above was inserted over this path, so a
