@@ -24,8 +24,9 @@ than re-dated. The control that this was a READ and not a typed table: the four 
 cited files that no merge touched between those heads — `selfhost_api.py`, `tool_registry.py`,
 `event_store.py`, `config/surface-manifest.yml` — have unchanged numbers because the code did not move.
 
-**Re-derived once more at `origin/main = d3f148a56` (2026-11-03), for the seven `hosted_api.py` anchors
-only.** `d19a5ddc2` ("feat(10180): the verb that moves the default graph…") added 1,585 and removed 141
+**Re-derived once more at `origin/main = d3f148a56` (2026-11-03), for every `hosted_api.py` anchor — all
+seven re-derivations below, and all nine citation sites that carry them.**
+`d19a5ddc2` ("feat(10180): the verb that moves the default graph…") added 1,585 and removed 141
 lines to `tortoise/hosted_api.py`, and **no other cited file moved** (`git diff --stat d72983b99
 d3f148a56` over the eight cited paths reports `hosted_api.py` alone). Those seven therefore shift by a
 *uniform* +649, read at the anchor: `/v1/events` `10217`→`10866`, its `Query(…, le=_MAX_EVENT_PAGE)`
@@ -172,9 +173,9 @@ being tracked.
 
 ⚠️ **hosted `GET /v1/points` is NOT one of these, and is not parked on an approval.** Its body is a
 **dict**, not a list — `return {"points": results, "count": len(results)}` (`hosted_api.py:10973`) —
-and the route declares no `response_model` (`:10265-10266`), so a marker rides it **additively**,
+and the route declares no `response_model` (`:10914-10915`), so a marker rides it **additively**,
 exactly as it rides `/v1/search`: build the body, then `response.update(truncation_field(…))`
-(`:10804`, `:10813`). #10500 recorded that shape as a `response_fields` row in
+(`:11453`, `:11462`). #10500 recorded that shape as a `response_fields` row in
 `config/surface-manifest.yml` (`:121-143`), **not** as an MCP/SDK surface approval — and its own
 note draws the line there: wrapping a *list* in an object is the return-type change; adding a field
 to an object body is not. So this one is **SILENT and fixable without an approval**: recorded here
