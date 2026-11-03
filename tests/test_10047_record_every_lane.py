@@ -1122,7 +1122,11 @@ def test_no_lane_ANYWHERE_in_the_package_writes_records_through_an_unbound_sdk()
     handle held in a DICT/LIST and written through a SUBSCRIPT; a class-body
     opener; an install performed in a THIRD method (the class-attribute map merges
     worst-wins, so an install there cannot arm a handle another method opened —
-    install in the writer, or in the opener); and a SUBCLASS writing through a
+    install in the writer, or in the opener); a CLASS nested inside a FUNCTION
+    that holds its handle on `self` (the scan's `_class_attribute_handles` walk
+    reads `tree.body`, i.e. the package's module-level classes; the nested class
+    is still judged as its own scope when one function both opens and writes);
+    and a SUBCLASS writing through a
     handle its base class's `__init__` opened (the class map is keyed per class).
     What IS scanned: methods, an SDK held on `self` (opened in one method, written
     in another, and armed by a positional, keyword or method-form install), the
