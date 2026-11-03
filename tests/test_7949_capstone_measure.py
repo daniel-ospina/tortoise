@@ -937,20 +937,41 @@ def test_the_e1_and_e2_rows_carry_the_counts_their_criteria_are_written_over():
 def test_a_non_string_e4_corpus_yields_a_row_and_not_a_traceback():
     """A synthetic ``e4`` with a non-string corpus produces a ROW, not an exception.
 
-    ``build_rows`` is a pure table builder, and the two sibling ``_same_corpus`` call
-    sites (``build_e4_row``, ``render_log``) already coerce their operands to ``str``.
-    This one did not, so a caller handing E4 a number escaped as
-    ``AttributeError: 'int' object has no attribute 'removeprefix'`` from inside
-    ``_same_corpus`` — a traceback where the contract is a row the GATE can report
-    (V7 reds a non-string declaration; it is not this function's job to crash).
+    ``_same_corpus``'s contract is a VERDICT, and it now coerces both operands itself
+    for exactly this reason. It did not, and neither did the call sites: a caller
+    handing E4 a number escaped as
+    ``AttributeError: 'int' object has no attribute 'removeprefix'`` from inside the
+    comparison — a traceback where the contract is a row the GATE can report (V7 reds
+    a non-string declaration; it is not this function's job to crash).
 
-    Non-vacuity: reds at the previous head (09a08e28f) with that AttributeError.
+    Non-vacuity: reds at 6b67974f2 and earlier with that AttributeError.
     """
     rows = {row["criterion"]: row for row in _rows(e4={
         "verdict": "RED", "numerator": 2, "denominator": 15, "sha": "6164c683c",
         "corpus_sha256": 5, "evidence": measure.E4_RECEIPT, "note": "odd note"})}
     assert rows["E4"]["corpus_sha256"] == 5, rows["E4"]
     assert rows["E4"]["artifact_corpus_sha256"] == 5, rows["E4"]
+
+
+def test_build_e4_row_refuses_rather_than_raising_on_a_non_string_pin():
+    """`build_e4_row`'s GUARD must refuse, not raise, on a non-string pin.
+
+    The guard's whole job is a named refusal, and it called ``_same_corpus`` with the
+    caller-supplied pin RAW (only the receipt operand was wrapped), so
+    ``corpus_sha=12345`` raised ``AttributeError: 'int' object has no attribute
+    'removeprefix'`` from INSIDE the `if not _same_corpus(...)` that exists to produce
+    the refusal. Not reachable from `main` (`check_corpus` returns a string), hence its
+    own arm rather than a real-run case; the coercion now lives in `_same_corpus`, so no
+    call site can differ again.
+
+    Non-vacuity: reds at 325b18901 with that AttributeError.
+    """
+    pin = _prereg()["corpus"]["fixtures_hash"]
+    receipt = measure.load_e4(_REPO, frozen_pin=pin)
+    with pytest.raises(SystemExit) as exc:
+        measure.build_e4_row(receipt, bars=measure.parse_bars(_prereg()),
+                             corpus_sha=12345)
+    assert "REFUSED" in str(exc.value), str(exc.value)
 
 
 def test_the_e1_and_e2_siblings_carry_the_same_denominator():
@@ -3430,11 +3451,11 @@ def test_the_bare_continuation_cites_name_what_they_say():
         # are pinned here instead. The sentence wraps over three lines and a row
         # scopes to ONE line, so the claim takes three rows.
         ("E1-E5-PROOFS.md", 'declares `STEPS = ("S0"', (
-            ("118", 'STEPS = ("S0", "S1", "S2.1", "S2.2", "S2.3", "S3", '
+            ("120", 'STEPS = ("S0", "S1", "S2.1", "S2.2", "S2.3", "S3", '
                     '"S5", "S6")'),
         ), "capstone_verdict_check"),
-        ("E1-E5-PROOFS.md", "_step_accounting` (`:379`) refuses a GREEN row whose", (
-            ("379", "def _step_accounting("),
+        ("E1-E5-PROOFS.md", "_step_accounting` (`:381`) refuses a GREEN row whose", (
+            ("381", "def _step_accounting("),
         ), "capstone_verdict_check"),
     )
     # The SAME document states two of its claims as the RULE's own text rather than a
