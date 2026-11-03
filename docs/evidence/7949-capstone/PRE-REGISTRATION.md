@@ -576,6 +576,19 @@ Exit 0 only when **all** of these hold:
    `evidence_issue` that measured it — an entry without them is a waiver with no content. This is the
    rule that stops a step being quietly dropped from the capstone's gate (`#10215`).
 
+8. **A registered class the run measured ZERO nodes of cannot satisfy `= 1.000` (#9736).** E3's row
+   is scored by SUMMING its classes, so a class with no nodes contributes `0/0` to BOTH halves and
+   vanishes: the row then reports `share = 1.000` over a population NARROWER than the one registered.
+   That is reachable on every post-D10 graph, because `:Document` is a retired label (the writer
+   remaps it onto `:Source`) and §10.1 records that the scored run wrote none at all — a leg that
+   `0/0` makes permanently unable to fail. So the probe derives the empty legs from the census
+   (`e3_unmeasured_legs`, over `DERIVED_LABELS` and never `:Object`) and a row naming one **fails**
+   rather than passing by arithmetic, with the leg disclosed in its bar and note. **This decides no
+   spelling and moves no threshold**: a row that already failed stays failed (the shipped `148/383`
+   is RED before and after), a row whose every registered class carried nodes is scored exactly as
+   before, and whether the honest document class is `Document` or `Source`-as-document — and whether
+   that anchor belongs in the denominator at all — remains `#9736`'s owner-gated ruling.
+
 The pins block below is the machine-readable copy; the prose in §1–§3 is the argument. Both are
 checked, so neither can rot alone.
 
