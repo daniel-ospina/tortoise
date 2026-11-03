@@ -13255,18 +13255,29 @@ def _seed_demo_graph(org_id: str) -> dict:
     #
     # ⚠️ NOT RETROACTIVE, the same posture as the `tags` note above: the sentinel
     # short-circuits before any write, so a demo graph seeded BEFORE this keeps
-    # its `epi_turn*` nodes AND its `s.turn_count=3` — the two are removed by
-    # DIFFERENT statements, and only the node delete is irreversible-safe.
+    # its `epi_turn*` nodes AND its session's declared turn counter, which still
+    # reads 3 — the two are undone by DIFFERENT statements, and only the node
+    # delete is irreversible-safe.
     # ⛔ RE-SEEDING DOES NOT REPAIR THEM — a re-seed writes nothing for those
     # ids and deletes nothing (unlike the `tags` case, whose `MERGE` re-writes
     # `p.tags`). Deleting the sentinel and re-seeding, the idiom the note above
     # documents, is WORSE than a no-op here: the seed then reaches the
     # `:Session` write, sets `s.turn_count=0`, and leaves the three nodes — a
-    # Session declaring 0 that still serves 3, which the read refuses.
+    # Session declaring 0 beside three stored turns.
+    # ⛔ That half-state is QUIET, not loud, and that is why it is spelled out:
+    # `record_read.served_turn_count` refuses it on ONE arm only — a record that
+    # cannot be read at all (its stale-superset arm). An unarmed deployment
+    # publishes `turns: 0` BESIDE those three `turn_points` (a self-contradicting
+    # 200 — the shape the counter note above exists to eliminate), and an armed
+    # one serves the legacy 3. All three arms are pinned by
+    # `tests/test_10000_turns_record_only.py`'s predicate test, so this paragraph
+    # is falsifiable rather than prose an operator has to trust.
     #
     # The graph-side repair is BOTH halves in ONE step: `DETACH DELETE` the
     # three `epi_turn*` nodes AND reset `s.turn_count=0` — or retire the demo
-    # `:Session` along with them. The node delete ALONE is not the repair: it
+    # `:Session` along with them. ⛔ That is a READ-BEFORE-WRITE rule, not two
+    # suggestions: doing the re-seed without the delete lands the quiet
+    # half-state above. The node delete ALONE is not the repair either: it
     # leaves `declared=3, served=0`, so on an armed, journaling deployment the
     # demo session's read refuses with `record_unavailable` (503), and on an
     # unarmed one it serves `{"turns": 3, "turn_points": []}` — the exact split

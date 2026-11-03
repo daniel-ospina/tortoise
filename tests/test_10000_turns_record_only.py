@@ -3185,11 +3185,13 @@ def test_the_repair_note_names_BOTH_halves_of_a_legacy_demo_graph():
     """P2 (#10000 review): the NOT RETROACTIVE note named a NODE-ONLY delete.
 
     A demo graph seeded before this change keeps the three `epi_turn*` nodes
-    AND `s.turn_count=3`, and the two are undone by DIFFERENT statements. The
-    node delete alone leaves `declared=3, served=0`: on an armed, journaling
-    deployment the demo session's read refuses with `record_unavailable` (503);
-    on an unarmed one it serves `{"turns": 3, "turn_points": []}` — the exact
-    split the counter note beside the `:Session` write exists to eliminate. So
+    AND its counter at 3, and the two are undone by DIFFERENT statements. The
+    node delete ALONE — not the re-seed half-state, which is the quieter one
+    pinned by the predicate test below — leaves `declared=3, served=0`: on an
+    armed, journaling deployment the demo session's read refuses with
+    `record_unavailable` (503); on an unarmed one it serves
+    `{"turns": 3, "turn_points": []}` — the exact split the counter note beside
+    the `:Session` write exists to eliminate. So
     the note a destructive purge lane reads must name the counter as part of the
     repair instead of presenting the node delete alone as it, and it must name
     the lane that owns the destructive step (§9.1 residual (a), `#10017`).
@@ -3250,16 +3252,26 @@ def test_the_shared_read_predicate_accepts_0_and_rejects_a_short_claim():
     counter pin above and by
     `tests/test_write_session_and_turns_3551.py::test_demo_seed_is_excluded_from_the_primitive`.
     What this test buys is the other half: it proves the semantic the seeder's 0
-    relies on — that 0 is an honest answer and a non-zero count with nothing
-    behind it is not.
+    relies on — that 0 is an honest answer, and that a non-zero count with
+    nothing behind it is caught **on the armed arm only**. The unarmed arm
+    publishes the session's own count, so the graph-only lane cannot catch it;
+    that is a property of the seam, not of this change.
 
     Asserted at the predicate rather than through HTTP, so it holds on the
     record-armed and the graph lane alike with no database:
       * declared 0, served 0 — the honest pair the seed now writes: no refusal,
         and the published count is the served count;
-      * declared 3, served 0 — the pair the seed used to write: the published
-        count DISAGREES with the rows (or the read refuses). Pinned so this test
-        guards the real defect rather than a tautology.
+      * declared 3, served 0 — the pair the seed used to write. UNARMED the
+        predicate publishes the session's own 3 beside zero rows (a
+        self-contradicting 200 — the defect, not a refusal); ARMED it refuses,
+        and that refusal is the 503 the demo session produced before the count
+        was 0. Both arms are pinned, because which one an operator sees is a
+        property of the deployment, not of the seeder;
+      * declared 0, served 3 — the HALF-REPAIRED legacy state the seeder's
+        `NOT RETROACTIVE` note names (sentinel deleted and re-seeded, nodes left
+        behind). Only a record-read FAILURE refuses it; the ordinary arms are
+        quiet, which is exactly why that note says the repair must move BOTH
+        halves instead of promising a loud 503.
     """
     from tortoise.record_read import TurnAnswer, served_turn_count
 
@@ -3268,13 +3280,18 @@ def test_the_shared_read_predicate_accepts_0_and_rejects_a_short_claim():
     assert reason == "", f"declaring 0 and serving 0 was refused: {reason!r}"
     assert published == 0, f"published {published!r} beside 0 rows"
 
+    # ⛔ THE UNARMED ARM IS THE DEFECT, NOT A REFUSAL, and this arm used to say
+    # otherwise: it asserted `!= (0, "")`, which `(3, "")` satisfies while the
+    # message claimed the count "must NOT read as an honest answer" — a property
+    # `served_turn_count` does not have on its first branch (#10000 review P3).
+    # Asserted BY VALUE now, so it pins the real behaviour rather than a
+    # tautology that any non-zero output passes.
     published3, reason3 = served_turn_count(
         answer=None, served=0, declared=3, read_failed=False)
-    assert (published3, reason3) != (0, ""), (
-        "declaring 3 while serving 0 must NOT read as an honest answer — "
-        "either the count disagrees with the rows or the read refuses. Got "
-        f"({published3!r}, {reason3!r}); if this abstains, the completeness "
-        "guard is not armed and the counter's value stops mattering")
+    assert (published3, reason3) == (3, ""), (
+        "the unarmed arm no longer publishes the session's own count, so the "
+        "counter would stop mattering on the graph-only lane. Got "
+        f"({published3!r}, {reason3!r})")
 
     # The ARMED arm refuses rather than publishing the contradiction, which is
     # the 503 the demo session produced before the count was set to 0.
@@ -3285,3 +3302,27 @@ def test_the_shared_read_predicate_accepts_0_and_rejects_a_short_claim():
     assert (armed, armed_reason) != (3, ""), (
         "the armed arm published a count its rows do not back: "
         f"({armed!r}, {armed_reason!r})")
+
+    # ── the HALF-REPAIRED legacy state the seeder's `NOT RETROACTIVE` note
+    # names: the Session declares 0 while three stored rows remain (a sentinel
+    # delete followed by a re-seed leaves exactly this). Pinned on all three
+    # arms because the note tells a destructive purge lane what to expect, and
+    # only ONE arm is loud — without these, the note's claim about which arm
+    # refuses is unfalsifiable prose.
+    half_unarmed = served_turn_count(
+        answer=None, served=3, declared=0, read_failed=False)
+    assert half_unarmed == (0, ""), (
+        "the unarmed half-repaired state publishes the session's 0 beside its "
+        f"three rows — a quiet contradiction, not a refusal. Got {half_unarmed!r}")
+    half_armed = served_turn_count(
+        answer=TurnAnswer(answered=False, kind=TurnAnswer.NO_ACCOUNT),
+        served=3, declared=0, read_failed=False)
+    assert half_armed == (3, ""), (
+        "the armed half-repaired state serves the legacy 3 (the append arm) "
+        f"rather than refusing. Got {half_armed!r}")
+    half_failed, half_failed_reason = served_turn_count(
+        answer=None, served=3, declared=0, read_failed=True)
+    assert half_failed is None and "stale superset" in half_failed_reason, (
+        "a record that cannot be read is the ONE arm that refuses the "
+        "half-repaired state, and the seeder's note says so. If this stops "
+        f"refusing, that note is wrong: ({half_failed!r}, {half_failed_reason!r})")
