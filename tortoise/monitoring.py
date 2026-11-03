@@ -2180,7 +2180,10 @@ CONTROL_PLANE_OAUTH_BACKLOG = 64
 #: its documented ``status: degraded`` arm **when the read-status/residency flag
 #: is on** (with both flags off, ``tortoise_fts_query`` re-raises and the route's
 #: own 500 arm answers, exactly as before) — a domain error from ``_data_sdk``
-#: propagates unchanged either way.
+#: propagates unchanged either way. That last clause is ENFORCED, not asserted:
+#: the construction seam raises ``hosted_api._ProjectionOpenError`` for the
+#: projection OPEN only, so the routes' impairment arm cannot absorb a fault from
+#: ``_data_sdk`` itself (#10602 review P3).
 #: Both costs are accepted for a construction that
 #: otherwise blocks the loop on every dashboard load; if read pressure ever
 #: saturates this lane, size it or give reads their own pool rather than
@@ -2191,6 +2194,136 @@ CONTROL_PLANE_OAUTH_BACKLOG = 64
 CONTROL_PLANE_GRAPH_WORKER_NAME = "tortoise-graph"
 CONTROL_PLANE_GRAPH_WORKERS = 8
 CONTROL_PLANE_GRAPH_BACKLOG = 128
+
+#: #10602: a SIXTH pool — the READ path's own blocking round trip.
+#:
+#: The measured defect (comment 6582118507 on #10602): the app answered a search
+#: in 3.7–14.6 s while a DIRECT ``GRAPH.QUERY`` on the same graph, same second,
+#: answered in 41–80 ms — and a single-id point read moved with it. The store was
+#: never the queue; the request was WAITING FOR A WORKER SLOT on the loop's
+#: SHARED default executor (``min(32, cpu+4)`` — 6 on prod's 2 vCPU), where the
+#: module's ~180 other ``asyncio.to_thread`` sites run under an UNBOUNDED wait.
+#: #3060 gave long/stallable WORK dedicated pools and #3498/#3773 gave the graph
+#: HELPERS one, but the read path's own round trip kept riding the shared pool,
+#: so it paid every other tenant's stall and every other tenant paid its.
+#:
+#: Why a pool of its OWN and not the ``graph`` lane: the graph lane's occupancy
+#: is a PINNED contract — exactly ONE submission per read request, its SDK
+#: construction (``test_read_routes_submit_one_graph_pool_submission``) — and a
+#: read slot is a different resource class from a construction slot: a
+#: construction is a cold ~28-round-trip open, a read is the hot query. Sharing
+#: one pool would make a burst of cold opens and a burst of searches bid for the
+#: same 8 workers, which is the isolation argument #3498 review P1 used to split
+#: ``telemetry`` out, applied one layer down.
+#:
+#: Width 8 mirrors ``CONTROL_PLANE_GRAPH_WORKERS`` — the same I/O-bound class on
+#: the same production box — so the read lane can never become a NARROWER
+#: bottleneck than the lane that already carries every read request's SDK
+#: construction. The widened default executor is deliberately NOT the fix: a
+#: bigger shared pool is the same defect with a longer fuse (it still has no
+#: bound and still shares its queue with ~180 sites).
+CONTROL_PLANE_READ_WORKER_NAME = "tortoise-read"
+CONTROL_PLANE_READ_WORKERS = 8
+CONTROL_PLANE_READ_BACKLOG = 128
+
+#: #10602: the read lane's WAIT BOUND — the whole point of owning the lane.
+#:
+#: A submitted read spends its bound QUEUED OR RUNNING (``_await_future`` starts
+#: the clock at submission), so a stranded slot fails the ONE request legibly
+#: (503 ``graph_unavailable``, retryable) instead of queueing forever and
+#: breaching the TRANSPORT budget later with "the work may still complete" —
+#: which for a submission that never ran is a false statement, and which is what
+#: the ticket measured as a 504 ``-32009`` after 10–15 s.
+#:
+#: 8.0 s, not the graph lane's derived bound. What this bound MEASURES is the
+#: hot QUERY against an already-attached projection: the routes that use this
+#: lane attach their projection on the CONSTRUCTION submission
+#: (``_data_sdk_offloaded(..., attach_projection=True)``, whose ``graph``-lane
+#: bound is ``probe_setup_timeout()`` + a margin), so the cold open — and the
+#: index BUILD a restored/DR graph can trigger — never lands inside this clock
+#: (cycle-2 review: an 8 s bound over a callable that contains a 20 s cold-start
+#: allowance would refuse a HEALTHY store's first read). The measured store
+#: answer is 41–80 ms, so 8 s is a saturation gate with ~100x headroom, not a
+#: per-query timeout.
+#:
+#: ⚠️ NAMED RESIDUALS — the measurement above covers TWO of the four converted
+#: round trips (``list_points``, ``get_point``). The other two are NOT hot
+#: queries, and this bound is knowingly applied to them anyway (#10602 review
+#: P2; the reviewer's ask was a per-call bound OR a residual named here):
+#:
+#: * ``/v1/search`` (``sdk.tortoise_fts_query``) — its COLD phase IS covered now
+#:   (``hosted_api._read_offload`` re-arms once for a request-owned one-time
+#:   embedder load, #4055), but its CPU legs (query encode + the three search
+#:   legs) are still measured against this clock, and the 500 ms cap they intend
+#:   is not enforceable because ``search_engine``'s ``shutdown(wait=True)``
+#:   joins running legs — filed as #10613, not fixed here.
+#: * ``/v1/topics/{t}/summary`` (``sdk.topic_summarize``) — EP classification +
+#:   neighborhood traversal whose cost is CALLER-controlled (``max_seeds`` up to
+#:   200, ``max_hops`` up to 3). No measurement of its legitimate p99 exists in
+#:   the tracker, which is why it has no bound of its own yet rather than a
+#:   guessed one: inventing a number here would refuse work that is inside its
+#:   own budget — the exact defect the paragraphs above were written to stop.
+#:   If it bites, give it its own ``topic_summary_read_timeout_s()`` the way the
+#:   record leg got ``record_read_timeout_s()``.
+#:
+#: A bound miss on either is a 503 ``graph_unavailable`` for work that may be
+#: merely slow (retryable, and the abandoned callable keeps its slot — CPython
+#: cannot cancel a started thread), so a handful of max-parameter summaries can
+#: hold all 8 slots. That is the accepted saturation policy, not a surprise;
+#: what would be wrong is claiming this number measured them.
+#:
+#: It sits BELOW ``mcp_auth._TRANSPORT_WAIT_BOUND_S``
+#: (10 s) deliberately, so the lane's legible refusal is what the caller sees
+#: when the pool is the reason — not a transport timeout that mis-describes
+#: queued work as in-flight. The ordering is pinned by
+#: ``test_read_bound_sits_below_the_transport_wait_bound`` (the same shape as
+#: ``test_fetch_deadline_sits_below_the_offload_bound``).
+CONTROL_PLANE_READ_TIMEOUT_S = 8.0
+
+
+def read_offload_timeout_s() -> float:
+    """#10602: the read lane's wait bound, resolved at CALL time.
+
+    A function, not a frozen default argument, for the same reason
+    ``graph_offload_timeout_s`` / ``probe_setup_timeout`` are: a module-global
+    read at import time cannot be monkeypatched, and the bound a lane refuses
+    on must be the bound a test can shrink to prove the refusal path.
+    """
+    return CONTROL_PLANE_READ_TIMEOUT_S
+
+
+#: #10602 review P2: the RECORD leg's bound — a DIFFERENT resource class from
+#: the hot query above, so it gets its own bound rather than sharing one.
+#:
+#: What it must cover: ``get_point``'s armed phase submits
+#: ``record_serve.serve_point``, whose callee is a Postgres round trip bounded by
+#: ``record_serve.RECORD_STATEMENT_TIMEOUT_MS`` (15 s) — the ceiling the record
+#: itself declares legitimate. Reusing the hot-query bound (8 s, justified by a
+#: 41–80 ms measured graph answer) refused a record read that was still INSIDE
+#: its own declared budget; that is the same "a bound that does not cover its
+#: callee" error the cycle-2 review raised for the projection cold open.
+#:
+#: Why 9.0 and not ``15 s + margin``: the record's 15 s ceiling sits ABOVE
+#: ``mcp_auth._TRANSPORT_WAIT_BOUND_S`` (10 s), so no read-lane bound can cover
+#: it without breaching the transport budget and re-introducing the misleading
+#: 504 ("the work may still complete", for a submission that never ran) this
+#: lane exists to replace. So this bound takes everything the transport budget
+#: physically allows — the full 10 s minus a margin, so the lane's LEGIBLE
+#: refusal is still what a saturated caller sees — and the residual (a record
+#: read between 9 s and its 15 s ceiling is refused) is named rather than
+#: papered over. Closing it properly means moving
+#: ``RECORD_STATEMENT_TIMEOUT_MS`` below the transport budget, which is a
+#: ``record_serve`` decision, not this lane's.
+CONTROL_PLANE_RECORD_READ_TIMEOUT_S = 9.0
+
+
+def record_read_timeout_s() -> float:
+    """#10602 review P2: the record leg's bound, resolved at CALL time.
+
+    Same monkeypatch argument as :func:`read_offload_timeout_s` — the bound a
+    lane refuses on must be the bound a test can shrink to prove it.
+    """
+    return CONTROL_PLANE_RECORD_READ_TIMEOUT_S
 
 #: Margin added to the projection cold-start allowance for the DATA-PLANE graph
 #: lane (#3773). The bound is resolved at CALL time (``graph_offload_timeout_s``)
@@ -2383,11 +2516,25 @@ class ControlPlaneOffloadError(RuntimeError):
     NOT and WILL NOT run; ``False`` for a plain bound miss, where a RUNNING
     worker still completes the callable (the seam abandons only the await)
     and a non-cancellable lane keeps a QUEUED submission alive.
+
+    ``in_flight`` (#10602 review P2) carries that abandoned submission — the
+    ``concurrent.futures.Future`` — when the callable is STILL RUNNING. It is
+    ``None`` whenever ``refused`` is ``True`` (there is no work to wait on).
+    It exists so a caller that owns a COLD PHASE inside its callable can RE-AWAIT
+    the work it already paid for (``reawait_control_plane_call``) instead of
+    re-submitting it: a re-submission while the first attempt still runs
+    executes the callable TWICE concurrently, counts it twice in any ledger the
+    copied context carries (the tally is a mutable object shared by reference)
+    and holds a second slot of the lane exactly when that lane is at its bound.
     """
 
-    def __init__(self, message: str, *, refused: bool = False) -> None:
+    def __init__(self, message: str, *, refused: bool = False,
+                 in_flight=None) -> None:
         super().__init__(message)
         self.refused = refused
+        #: The abandoned submission, when it is still RUNNING (never for a
+        #: refused/cancelled one). ``concurrent.futures.Future`` or ``None``.
+        self.in_flight = in_flight
 
 
 class ContextConfinementError(RuntimeError):
@@ -2547,7 +2694,10 @@ def control_plane_worker(pool: str = "auth") -> _SingleSlotWorker:
     for the attacker-reachable OAuth client-resolution lane, so a CIMD fetch
     flood cannot park the auth slots either; ``pool="graph"`` (#3773) is the
     graph-lane pool — FalkorDB work, data-plane AND registry reads (#3718) —
-    kept off auth capacity for the same isolation reason; ``pool="org"`` (#7678) keeps the
+    kept off auth capacity for the same isolation reason; ``pool="read"``
+    (#10602) is the READ path's own lane, so a search/window read can never
+    queue behind the shared default executor's other tenants (and they can
+    never queue behind it); ``pool="org"`` (#7678) keeps the
     org-create lane's SEQUENTIAL gate reads off auth capacity so a create-org
     request is not the sum of its queue waits behind authentication work. The graph pool's callables SET
     ContextVars (the #2600 actor bind), so it must be reached ONLY through the
@@ -2569,6 +2719,10 @@ def control_plane_worker(pool: str = "auth") -> _SingleSlotWorker:
         return daemon_worker(CONTROL_PLANE_GRAPH_WORKER_NAME,
                              workers=CONTROL_PLANE_GRAPH_WORKERS,
                              max_backlog=CONTROL_PLANE_GRAPH_BACKLOG)
+    if pool == "read":
+        return daemon_worker(CONTROL_PLANE_READ_WORKER_NAME,
+                             workers=CONTROL_PLANE_READ_WORKERS,
+                             max_backlog=CONTROL_PLANE_READ_BACKLOG)
     if pool == "oauth":
         return daemon_worker(CONTROL_PLANE_OAUTH_WORKER_NAME,
                              workers=CONTROL_PLANE_OAUTH_WORKERS,
@@ -2830,6 +2984,9 @@ async def run_control_plane_call(fn, *, op: str,
             raise ControlPlaneOffloadError(
                 f"control-plane call {op!r} {reason}",
                 refused=refused,
+                # Only a still-RUNNING submission is re-awaitable; a refused or
+                # cancelled one has no work behind it (#10602 review P2).
+                in_flight=(None if refused or future.done() else future),
             ) from exc
         outcome = "completed"
         return result
@@ -2837,6 +2994,84 @@ async def run_control_plane_call(fn, *, op: str,
         # The AWAITING task was cancelled — neither success nor a pool failure.
         outcome = "cancelled"
         raise
+    finally:
+        record_control_plane_offload(
+            op, time.monotonic() - started, outcome=outcome, pool=pool
+        )
+
+
+async def reawait_control_plane_call(future, *, op: str, timeout: float,
+                                     pool: str = "auth"):
+    """Re-await an ALREADY-SUBMITTED callable under a fresh bound (#10602).
+
+    The counterpart of :func:`run_control_plane_call` for the one case a bound
+    miss is not the end of the work: the callable is still RUNNING and the
+    caller has drained whatever COLD PHASE it was waiting on (the #4055 embedder
+    load). Re-awaiting ``exc.in_flight`` keeps that work instead of throwing it
+    away and doing it again:
+
+    * a RE-SUBMISSION would run the callable a second time **concurrently** —
+      double the CPU on a lane that is at its bound (the abandoned attempt keeps
+      its slot until it finishes, CPython cannot cancel a started thread), and
+    * it would also count the work twice in any ledger the copied context
+      carries, because a tally is a mutable OBJECT shared by reference.
+
+    ``mcp_auth.await_under_wait_bound`` is the same shape one seam over: it
+    shields the TASK and re-awaits THAT task after draining, never a new one.
+
+    Raises :class:`ControlPlaneOffloadError` on a second bound miss (``refused``
+    is ``False`` — the work is still running, so it is abandoned, not dropped)
+    and lets a ``CancelledError`` from the awaiting task propagate, exactly as
+    ``run_control_plane_call`` does. A ``domain`` exception from the callable
+    propagates unchanged — INCLUDING a builtin ``TimeoutError`` it raised
+    ITSELF (#10602 review P2, see the discrimination below). Every terminal
+    state is recorded once, by the same single writer (#5840), so a re-armed
+    read stays visible as two attempts at the op rather than one invisible one.
+    """
+    started = time.monotonic()
+    outcome = "domain_error"
+    try:
+        try:
+            result = await _await_future(future, timeout=timeout)
+        except TimeoutError as exc:
+            # Distinguish the two sources of TimeoutError that meet here, as the
+            # sibling above does (#10602 review P2):
+            #   1. `fn` raised it       -> a DOMAIN error, propagate
+            #   2. our bound expired    -> fail closed (``bound_miss_running``)
+            # The CLASS cannot tell them apart. ``_await_future`` awaits
+            # ``asyncio.wrap_future(future)``, so the callable's own exception
+            # is re-raised unchanged, while the bound's expiry is the only
+            # ``TimeoutError`` this coroutine MINTS — and it mints it from a
+            # CancelledError inside ``wait_for``'s timeout scope (CPython
+            # ``asyncio/timeouts.py::Timeout.__aexit__``: the conversion happens
+            # only in the EXPIRING state with a ``CancelledError`` in hand). So
+            # the FUTURE is the only witness: a done, non-cancelled future
+            # carrying an exception means the work RAN and failed on its own.
+            #
+            # Filing that as a bound miss would answer 503
+            # ``graph_unavailable`` for a callable that ran HERE, and increment
+            # ``bound_miss_running`` — the saturation child — for a pool that was
+            # never saturated (a ``socket.timeout`` escaping the graph driver is
+            # the plausible route: it IS builtin ``TimeoutError`` since 3.10).
+            future_exc = (future.exception()
+                          if future.done() and not future.cancelled() else None)
+            if future_exc is not None and not isinstance(
+                    future_exc, _WorkerBacklogFull):
+                raise
+            if not future.done():
+                future.add_done_callback(_log_abandoned_outcome(op))
+            outcome = "bound_miss_running"
+            raise ControlPlaneOffloadError(
+                f"control-plane call {op!r} exceeded its {timeout}s "
+                f"re-armed bound",
+                refused=False,
+                in_flight=(None if future.done() else future),
+            ) from exc
+        except asyncio.CancelledError:
+            outcome = "cancelled"
+            raise
+        outcome = "completed"
+        return result
     finally:
         record_control_plane_offload(
             op, time.monotonic() - started, outcome=outcome, pool=pool

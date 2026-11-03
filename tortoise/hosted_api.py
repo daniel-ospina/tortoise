@@ -166,7 +166,10 @@ from tortoise.monitoring import (  # #2850/2953 liveness-readiness decouple
     loop_heartbeat_info,
     loop_heartbeat_task,
     note_heartbeat_task,
+    read_offload_timeout_s,
+    reawait_control_plane_call,
     record_analytics_outcome,  # #3820 analytics-sink outcome counter
+    record_read_timeout_s,
     record_telemetry_drop,  # #4095 allowlist-drop counter (the /metrics seam)
     run_control_plane_call,
     run_on_daemon_worker,
@@ -8117,7 +8120,85 @@ def _data_sdk(org: dict) -> TortoiseSDK:
     return sdk
 
 
-async def _data_sdk_offloaded(org: dict) -> TortoiseSDK:
+class _ProjectionOpenError(RuntimeError):
+    """The projection COLD OPEN failed inside the construction submission.
+
+    ``_data_sdk_with_projection`` bundles TWO different things into ONE worker
+    call, and a read route must map only ONE of them as a store impairment
+    (#10602 review P3):
+
+    * ``_data_sdk`` — the tenancy resolver (``_make_sdk``,
+      ``_assert_graph_owned``, ``_bind_record_tenant``). A fault there is OUR
+      bug or a structural refusal, and it must propagate UNCHANGED, exactly as
+      it did before the attach existed;
+    * ``sdk._get_proj()`` — the OPEN: connect, version probe,
+      ``_ensure_indexes()``. Its failure IS the store, which is why the SDK's
+      own ``tortoise_fts_query`` arm maps *any* exception from ``_get_proj()``
+      to ``status: degraded`` (``tortoise/sdk.py``).
+
+    Without a distinct type the route can only choose between two wrong
+    answers: a blanket ``except Exception`` that serves a tenancy fault to the
+    client as a STORE OUTAGE (unfalsifiable from the wire, and the mirror of the
+    misattribution rule this change applies everywhere else), or a narrow
+    class-based arm that stops recognising a real outage. Naming the SOURCE of
+    the failure keeps both honest.
+
+    The original rides along as ``__cause__``, so the driver's message and the
+    traceback reach the log unchanged.
+    """
+
+
+#: Exceptions that keep their own meaning when the attach raises them — a
+#: refusal the SDK itself produced is not a store-open failure.
+_ATTACH_PASSTHROUGH = (HTTPException,)
+
+
+def _data_sdk_with_projection(org: dict) -> TortoiseSDK:
+    """#10602: ``_data_sdk`` PLUS the projection attach, in ONE worker call.
+
+    The attach is the COLD half of a read: ``Projection.__init__`` connects,
+    probes the version and runs ``_ensure_indexes()`` — and when an index is
+    MISSING it BUILDS it over the whole graph (the O(1) fast path exists only
+    once the index is there; a restored/DR graph reaches the fresh branch with
+    arrays and no index — see ``projection``'s own note). That is the phase this
+    repo budgets with ``probe_setup_timeout()`` (20 s, up to 300 s) and why the
+    graph lane's bound is ``probe_setup_timeout() + margin``: *"a cold projection
+    open is a legitimate ~28-round-trip phase"* that must never be
+    false-degraded into a retryable 503.
+
+    So the attach rides the CONSTRUCTION lane (whose bound already covers it),
+    and the read submission on the ``read`` lane contains only the QUERY. That
+    is what makes the read lane's shorter bound honest — without it, the bound
+    would be measuring an index build, and a DR graph's first read would be
+    refused as a capacity failure while the store is healthy (cycle-2 review,
+    P1).
+
+    Failure closes the SDK first: the handle was opened by ``_data_sdk``, so a
+    raise from ``_get_proj()`` would otherwise leak it. Then it is RE-RAISED as
+    :class:`_ProjectionOpenError`, so as to be distinguishable from the errors of
+    ``_data_sdk`` itself (#10602 review P3).
+    """
+    sdk = _data_sdk(org)
+    try:
+        sdk._get_proj()
+    except BaseException as exc:
+        with contextlib.suppress(Exception):
+            sdk.close()
+        # Attribute the failure to its SOURCE (#10602 review P3). Only the
+        # ATTACH's failure is a store condition — `_data_sdk`'s own errors have
+        # already been raised above, outside this `try`, and keep propagating
+        # unchanged. A refusal the SDK raised on purpose
+        # (``_ATTACH_PASSTHROUGH``) keeps its own meaning; a cancellation or a
+        # ``KeyboardInterrupt`` is not a store verdict either.
+        if isinstance(exc, Exception) and not isinstance(
+                exc, _ATTACH_PASSTHROUGH):
+            raise _ProjectionOpenError(str(exc)) from exc
+        raise
+    return sdk
+
+
+async def _data_sdk_offloaded(org: dict, *,
+                              attach_projection: bool = False) -> TortoiseSDK:
     """#3773: ``_data_sdk`` off the event loop (context-isolated).
 
     The write handlers built their per-request SDK inline, so in embedded mode
@@ -8130,8 +8211,19 @@ async def _data_sdk_offloaded(org: dict) -> TortoiseSDK:
     The #2600 actor bind runs LOOP-side first: the off-loaded call executes
     under a context COPY, so its own bind does not reach the loop — and the
     later off-loaded write's ``asyncio.to_thread`` copies the LOOP's context.
+
+    ``attach_projection`` (#10602) bundles ``sdk._get_proj()`` into the SAME
+    submission — still ONE ``graph``-lane submission per request (the pinned
+    occupancy), but now carrying the cold open, so the read that follows on the
+    read lane is a hot query against an attached projection. Only the read
+    routes that are about to query the data plane pass it; a route that never
+    touches the projection (a registry or control-plane read) must not pay a
+    connect it does not use.
     """
     _bind_actor_context(org)
+    if attach_projection:
+        return await _graph_offload(
+            lambda: _data_sdk_with_projection(org), op="data_sdk.attach")
     return await _graph_offload(lambda: _data_sdk(org), op="data_sdk")
 
 
@@ -9749,9 +9841,16 @@ async def _cp_offload(fn, *, op: str, best_effort: bool = False,
         raise _control_plane_unavailable() from None
 
 
-def _graph_unavailable() -> HTTPException:
+def _graph_unavailable(_exc: object | None = None) -> HTTPException:
     """#3773: fail-closed 503 for a saturated / bound-missed GRAPH-lane offload
     (a data-plane helper or a registry read, #3718).
+
+    ``_exc`` is the ``ControlPlaneOffloadError`` the read seam caught, when a
+    caller's refusal factory wants to read ``refused`` / ``in_flight`` from it
+    (#10602 review P2). The graph-lane body does NOT vary by it — a refused and
+    a bound-missed graph submission are both retryable capacity failures — but
+    the parameter exists so every ``_read_offload(unavailable=…)`` factory has
+    ONE calling convention instead of a signature the seam has to sniff.
 
     Deliberately NOT ``_control_plane_unavailable``: that body's copy is
     sign-in specific and would mislead a client retrying a graph write. A
@@ -9886,6 +9985,230 @@ async def _graph_offload(fn, *, op: str, timeout: float | None = None):
         confine_context(fn), op=op, pool="graph",
         timeout=graph_offload_timeout_s() if timeout is None else timeout,
         unavailable=_graph_unavailable)
+
+
+def _record_read_unavailable() -> HTTPException:
+    """#10602 review P2: the fail-closed 503 for an armed read's RECORD phase.
+
+    ⛔ NAMED ``_record_read`` DELIBERATELY. A module-level ``_record_unavailable``
+    already exists — #8447's session-detail refusal, defined LATER in this file —
+    and a second definition with that name was SHADOWED by it (the last binding
+    wins at import). The #10602 refusal then shipped #8447's copy, whose message
+    is about "this session" and "a complete copy" on a POINT read: the intended
+    body was dead code and no test could see it, because both spellings answer
+    ``record_unavailable`` and the pin only asserts the error_code. The two
+    refusals are for different surfaces; they must not share a name.
+
+    ``get_point`` submits ``record_serve.serve_point`` — in ``record`` mode that
+    callable contains no graph work at all, and in ``prefer`` mode its record
+    phase contains none either (the cache is deferred to
+    ``CacheAnswerRequired``, so the cold open keeps its own construction lane).
+    Reporting a *record* bound miss with ``graph_unavailable`` collapses the two
+    meanings this route's own arms keep apart: "the record could not answer"
+    (503, absence NOT established — the §17.2 rule mirrored onto the record) and
+    "the graph pool had no worker" (503 ``graph_unavailable``). A client that
+    can tell them apart retries the right thing, and an operator is not sent to
+    look at a store the read never touched.
+
+    Same 503 status as its sibling: the record round trip is retryable in both
+    directions. Only the BODY differs, and it carries the route's own
+    "absence is NOT established" wording so the two refusals cannot be confused
+    on the wire.
+    """
+    return HTTPException(
+        status_code=503,
+        detail={
+            "error_code": "record_unavailable",
+            "message": ("The record service is temporarily unavailable — try "
+                        "again in a moment; absence is NOT established."),
+        },
+    )
+
+
+async def _read_offload(fn, *, op: str, unavailable=None, timeout=None):
+    """#10602: run ONE read-path graph ROUND TRIP on the dedicated read lane.
+
+    The read handlers used to submit their blocking query with the house
+    ``asyncio.to_thread(...)``. That submits to the loop's SHARED default
+    executor (``min(32, cpu+4)`` — 6 on prod's 2 vCPU), whose queue is
+    UNBOUNDED and which ~180 other ``to_thread`` sites share. The measured
+    consequence (#10602, comment 6582118507): a 40–80 ms store behind a
+    3.7–14.6 s answer, with a single-id point read degrading in the same 32 s
+    step — the request was waiting for a WORKER SLOT, not for the store.
+
+    #3060 answered this class for long/stallable WORK (``_CAPTURE_EXECUTOR``,
+    ``_DREAM_EXECUTOR``, …) and #3498/#3773 for the graph HELPERS
+    (``_graph_offload``); the read path is the tenant that was left on the
+    shared pool. This is the same seam for it: the ``read`` pool
+    (``monitoring.CONTROL_PLANE_READ_*``), a BOUNDED wait
+    (``read_offload_timeout_s()``, deliberately below the transport bound), and
+    the graph lane's fail-closed 503 (``_graph_unavailable``) so a stranded slot
+    fails LEGIBLY rather than queueing forever.
+
+    Preserved, deliberately — these are the four properties a concurrency change
+    here is most likely to break:
+
+    * **contextvars** — the callable runs under a COPY of the caller's context
+      (``monitoring.confine_context``), exactly as ``_submit_off_loop`` and
+      ``_graph_offload`` do, because a pool thread is process-lifetime: a
+      ContextVar set at its top
+      level would leak into the NEXT request the worker serves. That copy is
+      also what carries the loop-side ``_bind_actor_context`` / ``_bind_record_tenant``
+      binds into the worker.
+    * **``bind_metering_context``** — unchanged in meaning: the retrieval legs
+      inside ``search_engine`` still bind the two metering vars explicitly for
+      THEIR sub-threads, and the copied context carries a capture's ``_ACTIVE``
+      counter (a mutable object shared by reference) exactly as the
+      ``asyncio.to_thread`` copy did. No rebinding happens here.
+    * **``_submit_off_loop``'s contract** — untouched. That helper exists for the
+      capture/dream pools and its callers depend on receiving the CONCURRENT
+      future; this seam needs a bounded await instead, which is
+      ``run_control_plane_call``'s job — the same pairing ``_graph_offload``
+      already uses rather than a second helper.
+    * **graceful shutdown** — the ``read`` pool is a ``daemon_worker`` (daemon
+      threads, bounded backlog, process-lifetime), so a read wedged on a
+      black-holed socket cannot make uvicorn/Fly shutdown join it — the #2850
+      reason the offload seams are daemon pools and not a second
+      ``ThreadPoolExecutor``.
+
+    Only WHERE the round trip runs changes: the callable and its result are the
+    same objects the route returned before, so every route's own error mapping
+    (its 500 arm, its ``status: degraded`` arm) is preserved. A lane refusal is a
+    503 ``graph_unavailable`` — retryable, and NOT the empty-shape refusal #3892
+    forbids.
+
+    ``unavailable`` overrides that refusal BODY (#10602 review P2), for the one
+    caller whose callable is not graph work: ``get_point``'s ARMED record phase,
+    which is a record round trip. It is called with the
+    ``ControlPlaneOffloadError`` that was caught, so the factory can tell a
+    REFUSED submission (never ran) from a BOUND MISS (asked, still running) and
+    name each honestly — the distinction ``ControlPlaneOffloadError.refused``
+    exists for (`#10602 review P2`). The read lane still owns the bound and the
+    fail-closed shape either way — only the name of the dependency that was
+    refused changes.
+
+    ``timeout`` (#10602 review P2) overrides the WAIT BOUND for a caller whose
+    callable is a different RESOURCE CLASS. Default: ``read_offload_timeout_s()``,
+    the hot-query bound, justified by a 41–80 ms measured graph answer. The
+    record leg passes ``record_read_timeout_s()`` instead, because its callee
+    declares a 15 s ceiling — a bound that does not cover its callee refuses
+    work that was inside its own budget. Same override argument the graph lane's
+    ``_graph_offload`` makes for the cold projection open.
+
+    ⛔ #4055 (review P1) — A REQUEST-OWNED ONE-TIME EMBEDDER LOAD IS SETUP, NOT
+    THE WORK THIS BOUND MEASURES, and ``/v1/search``'s callable contains one:
+    ``sdk.tortoise_fts_query`` calls ``EmbeddingModel.get()`` synchronously in
+    the worker (a cold bge-small load is measured at ~57 s, budgeted
+    ``_LOAD_TIMEOUT_S`` = 90 s). Judging that by this lane's 8 s answers **503
+    ``graph_unavailable`` for a HEALTHY graph while the embedder is merely
+    loading** — a capacity error naming the wrong dependency. The transport
+    seam already refuses to make that mistake: ``mcp_auth.await_under_wait_bound``
+    drains a load that is OWNED BY THIS REQUEST AND STILL IN FLIGHT *outside* the
+    budget and re-arms the bound **at most once**. This seam reuses those same
+    helpers rather than re-deriving the rule, so the two bounds cannot disagree
+    about what "setup" means. Without it the lane would be the third instance of
+    the class this change already fixed twice (the projection cold open, the
+    record leg): a bound that does not cover its callee's cold phase.
+
+    ⚠️ The exemption is deliberately NARROW — identity, not a time window: a
+    load this request did not OWN (a background pre-warm, a concurrent
+    request's) is never exempted, because then the read really is waiting on
+    init it did not trigger.
+
+    ⛔ #10602 review P1 — THE CONTEXT COPY IS TAKEN PER ATTEMPT, NOT ONCE.
+    ``Context.run`` refuses RE-ENTRY (``RuntimeError: cannot enter context: …
+    is already entered``), and a re-submission is the case where that could
+    bite: a bound miss abandons the await, never the thread (CPython cannot
+    cancel a started thread). A single copy shared by a retry would raise a bare
+    ``RuntimeError``, which is NOT a ``ControlPlaneOffloadError``: it would
+    escape this seam and the routes' blanket ``except Exception`` would answer
+    **500** ("Search failed", no ``error_code``, not retryable). A fresh wrap
+    per submission keeps the property the copy exists for (no ContextVar leaks
+    into the next request the process-lifetime worker serves) and cannot
+    collide with an attempt it replaces.
+
+    That wrap is ``monitoring.confine_context`` — the SHARED seam main's #10642
+    introduced for exactly this class, not the hand-rolled
+    ``functools.partial(contextvars.copy_context().run, fn)`` idiom. Two reasons
+    it must go through the seam rather than inline: the idiom stores ONE
+    ``Context``, which is the re-entry trap itself (the seam re-materialises a
+    fresh copy on every invocation, so no caller can reintroduce the one-shot
+    shape without deleting a documented seam), and main's merge deleted this
+    module's ``import contextvars`` when it migrated both pre-existing sites —
+    so an inline ``copy_context()`` here is not merely a style choice, it is a
+    ``NameError`` on every read route at the merge commit.
+
+    ⛔ #10602 review P2 — A RE-ARM IS ONLY HONEST WHEN THE SUBMISSION NEVER RAN,
+    AND IT IS NEVER A SECOND SUBMISSION WHILE THE FIRST IS RUNNING.
+    ``ControlPlaneOffloadError.refused`` is the seam's own discriminator:
+    ``True`` means the callable did not and will not run (backlog full, or
+    cancelled while queued), so re-submitting is free; ``False`` means the bound
+    abandoned only the AWAIT and the worker is STILL RUNNING the callable.
+    Re-submitting there would run the query TWICE concurrently — doubling the
+    CPU on a lane that is at its bound (the abandoned attempt keeps its slot
+    until it finishes), holding TWO of the lane's slots for one request, and
+    counting one read as two in the retrieval ledger (the tally is a mutable
+    object shared by reference through the copied context). So the cold-setup
+    case RE-AWAITS the submission it already owns (``exc.in_flight``, via
+    ``reawait_control_plane_call``) — the same shape
+    ``mcp_auth.await_under_wait_bound`` uses one seam over, where it shields the
+    task and re-awaits THAT task after draining.
+    """
+    bound = read_offload_timeout_s() if timeout is None else timeout
+    # #4055: the identity + clock the exemption compares against. ``owner`` is
+    # whatever this request bound as its one-time-load owner (``None`` unarmed,
+    # which never exempts — ``_cold_setup_ran_during`` enforces that).
+    #
+    # The probe is GUARDED, matching ``mcp_auth._cold_setup_ran_during`` /
+    # ``_drain_cold_setup``: the embedder is optional, and a wait-bound seam
+    # must not fail the read because a probe's import did. An unavailable probe
+    # yields ``owner=None``, which never exempts — fail-closed, never fail-open.
+    try:
+        from tortoise.embeddings import current_load_owner
+    except Exception:  # noqa: BLE001, RUF100 — optional embedder; no bound may depend on it
+        owner = None
+    else:
+        owner = current_load_owner()
+    reference = time.monotonic()
+    exempted = False
+    while True:
+        # A FRESH copy per ATTEMPT (see the docstring's #10602 review P1 note).
+        # The copy is taken by the SHARED seam, `monitoring.confine_context`
+        # (main #10642) — never the hand-rolled
+        # `functools.partial(contextvars.copy_context().run, fn)` idiom. That
+        # idiom is one-shot per stored Context, which is the trap this loop
+        # would have reintroduced a second copy of; and going through the seam
+        # is also what keeps this module from owning a private
+        # `import contextvars` (main deleted it, and a locally-added
+        # `copy_context()` here `NameError`d in every read route at the merge
+        # commit).
+        submitted = _monitoring.confine_context(fn)
+        try:
+            return await run_control_plane_call(
+                submitted, op=op, pool="read", timeout=bound)
+        except ControlPlaneOffloadError as exc:
+            # The refusal factory sees the error so it can name a REFUSED lane
+            # and a RUNNING bound miss differently (#10602 review P2).
+            refuse = (_graph_unavailable if unavailable is None
+                      else unavailable)
+            # Re-arm AT MOST ONCE, exactly as the transport seam does, so a
+            # genuinely slow read still breaches — and only for a submission
+            # that is still RUNNING behind a cold phase THIS request owns. A
+            # refused submission never started the load, so `refused` and the
+            # cold-setup probe agree by construction; checking both keeps the
+            # gate honest if either changes.
+            if (exempted or exc.refused or exc.in_flight is None
+                    or not _mcp_auth._cold_setup_ran_during(
+                        reference, owner)):
+                raise refuse(exc) from None
+            exempted = True
+            await _mcp_auth._drain_cold_setup()
+            # RE-AWAIT the submission already in flight — never a second copy.
+            try:
+                return await reawait_control_plane_call(
+                    exc.in_flight, op=op, pool="read", timeout=bound)
+            except ControlPlaneOffloadError as again:
+                raise refuse(again) from None
 
 
 async def _capture_session_probe_off_loop(org: dict, session_id: str):
@@ -10932,7 +11255,7 @@ async def list_points(
     # first statement even though the query below was already off-loaded. Same
     # `_data_sdk_offloaded` twin the write lane uses (#3773) — it returns the
     # identical SDK (`_data_sdk`), so only WHERE the call runs changes.
-    sdk = await _data_sdk_offloaded(org)
+    sdk = await _data_sdk_offloaded(org, attach_projection=True)
     conditions = ["n.is_operator = false"]
     # #432 Task 2: retracted points (status='retracted') are EXCLUDED from the
     # default listing surface — tombstone contract: retrievable by id via
@@ -10960,10 +11283,12 @@ async def list_points(
     # socket client) — `_get_proj()` opens/attaches it and `g.query` is the
     # round trip — so BOTH ride one worker hand-off. Nothing between the two
     # touches thread-unsafe state, and the query string/params were already
-    # built on the loop. Same `asyncio.to_thread` pattern the write handlers
-    # and /v1/search use.
-    rows = await asyncio.to_thread(
-        lambda: sdk._get_proj().g.query(query, params=params).result_set)
+    # built on the loop. #10602: on the dedicated, BOUNDED read lane rather
+    # than the shared default executor (the write handlers keep their own
+    # lanes; this one is the read path's).
+    rows = await _read_offload(
+        lambda: sdk._get_proj().g.query(query, params=params).result_set,
+        op="list_points")
     results = []
     for r in rows:
         d = r[0]
@@ -11002,7 +11327,12 @@ async def get_point(point_id: str, org: dict = Depends(get_current_org_gated)): 
     misconfiguration.** Session and JWT credentials resolve no record tenant by
     design, so in `record` mode that is a **500** (there is no cache branch to
     fall back to) while in `prefer` mode it is a NAMED, COUNTED fallback —
-    `record-tenant-unresolved`, the third of the three reasons.
+    `record-tenant-unresolved`, the third of the FIVE reasons
+    (`record_serve.FALLBACK_REASONS`). The remaining two are conditions of the
+    READ LANE, not of the record: `record-read-lane-refused` (the submission
+    never ran, so the record was never asked) and `record-read-bound-miss` (the
+    submission RAN and did not answer inside the lane's bound — asked, not
+    unasked, and not an outage claim either).
 
     ⚠️ A record-served answer carries the record's PRIMARY field set, and the
     differences from the cache answer are named here in full. `content_hash` is
@@ -11038,42 +11368,34 @@ async def get_point(point_id: str, org: dict = Depends(get_current_org_gated)): 
     # 503 arm below exists to forbid — and on an embedded deployment the SDK's
     # construction itself probes (and may start) the store.
     #
-    # ⚠️ The other two modes construct it EXACTLY as before, through the
-    # bounded graph-lane seam (#3498) — which supplies the graph pool slot, the
-    # wait bound and the fail-closed 503. An earlier cut of this change built the
-    # handle from inside a worker thread with a bare sync `_data_sdk`, which made
-    # `record` lazy but silently dropped all three from the DEFAULT path; the
-    # laziness belongs to `record` alone.
+    # ⚠️ `prefer` constructs NO handle up front either (#10602 review, P2). Its
+    # cache is a FALLBACK, and the record answers most reads: an eager open would
+    # make every record-served read pay a graph-pool slot for a cold open it
+    # never uses, and on a restored graph that open is the phase budgeted by
+    # `probe_setup_timeout()` (20 s, up to 300 s) — in front of the record
+    # consult, so a read the record answers in milliseconds could cross
+    # `mcp_auth._TRANSPORT_WAIT_BOUND_S` and come back as the 504 -32009 "the
+    # work may still complete" body this change exists to replace. So the handle
+    # is built on the CONSTRUCTION lane (#3498) only once the record has not
+    # answered — a fallback read pays it, a record-served read pays nothing.
+    #
+    # `off` constructs it eagerly, as before: there the cache IS the only answer.
+    # Every construction goes through `_data_sdk_offloaded(...,
+    # attach_projection=True)`, which supplies the graph pool slot, the wait
+    # bound, and — for the cold attach — the construction lane whose bound
+    # already covers it, so the read lane never measures an index build
+    # (cycle-2 review, P1).
     mode = record_serve.serve_mode()
     sdk = None
-    # ⚠️ A `prefer` read must be able to answer from the RECORD even when the
-    # CACHE cannot be opened: the lenient mode exists to survive an unavailable
-    # store, and an eager 403 GRAPH_NOT_FOUND here would make it strictly LESS
-    # able to answer than `record` — every prefer read would pay a graph-pool
-    # slot and, with the graph stopped, would never consult the record at all.
-    # So a `prefer` construction failure is CAPTURED and re-raised only when the
-    # cache is actually needed (the record missed or was unavailable). `off`
-    # keeps propagating it, exactly as before.
-    cache_open_error: Exception | None = None
-    if mode == record_serve.MODE_PREFER:
-        try:
-            sdk = await _data_sdk_offloaded(org)
-        except Exception as e:  # the seam's 403/503, or the driver's own
-            cache_open_error = e
-    elif mode == record_serve.MODE_OFF:
-        sdk = await _data_sdk_offloaded(org)
+    if mode == record_serve.MODE_OFF:
+        sdk = await _data_sdk_offloaded(org, attach_projection=True)
 
     def _cache_props() -> dict | None:
         if sdk is None:
-            # The handle could not be built (see `cache_open_error`): this is
-            # only reachable when the CACHE is genuinely needed, so the caller
-            # gets the ORIGINAL error — the 403/503 the seam raised — rather
-            # than a plausible empty answer or a rewritten status.
-            # ⚠️ Never `raise captured or RuntimeError(...)`: truthiness decides
-            # that, and an exception class defining `__bool__`/`__len__` would be
-            # silently replaced by an uncaused 500.
-            if cache_open_error is not None:
-                raise cache_open_error
+            # Unreachable by construction: `off` builds eagerly above, and both
+            # armed arms build (below) before they read. It is a LOUD programming
+            # error rather than a plausible empty answer — the failure mode §17.2
+            # forbids is an impairment reported as absence.
             raise RuntimeError(
                 "the cache handle is unavailable and the cache is required")
         # #3718 residual 2: sync FalkorDB read off the loop (see list_points).
@@ -11118,27 +11440,95 @@ async def get_point(point_id: str, org: dict = Depends(get_current_org_gated)): 
             # on outages, fire permanently on a condition the record never
             # caused.
             # ⚠️ Count AFTER the cache answers — the same invariant as
-            # `record_serve._fell_back`. A cache failure raises out of here, so a
-            # request that was never answered contributes no increment (this arm
-            # is the most-travelled counting path in `prefer` mode: it is taken
-            # for every request whose org has no nameable default row).
+            # `record_serve.answered_by_cache`. A cache failure raises out of
+            # here, so a request that was never answered contributes no
+            # increment (this arm is the most-travelled counting path in
+            # `prefer` mode: it is taken for every request whose org has no
+            # nameable default row). The handle is built HERE, lazily, because
+            # this is the first point at which the cache is genuinely needed.
             reason = record_serve.FALLBACK_RECORD_TENANT_UNRESOLVED
-            props_from_cache = await asyncio.to_thread(_cache_props)
-            record_serve.note_fallback(reason)
-            served = record_serve.ServedAnswer(
+            sdk = await _data_sdk_offloaded(org, attach_projection=True)
+            props_from_cache = await _read_offload(_cache_props,
+                                                  op="get_point.cache")
+            served = record_serve.answered_by_cache(
                 read=record_serve.READ_POINT_BY_ID,
-                coordinate=f"Point:{point_id}", served_from="cache",
-                props=props_from_cache,
-                fallback_reason=reason)
+                coordinate=f"Point:{point_id}", props=props_from_cache,
+                reason=reason)
         else:
+            # #10602 review P2: the record's OWN round trip used to queue on the
+            # shared default executor, so the anchored read degraded in the same
+            # 32 s step as everything else. It rides the read lane now — but the
+            # cache FALLBACK is DEFERRED, because its cold open is budgeted on
+            # the construction lane (`probe_setup_timeout()` + margin), not on
+            # this lane's 8 s query bound. `cache_answer=None` is the deferred
+            # shape: `serve_point` still decides and NAMES the fallback reason,
+            # and raises `CacheAnswerRequired` for it (#10602 review, P2).
+            # #10602 review P2: a lane BOUND MISS on this arm is not graph
+            # capacity — and in `prefer` mode it is a MISS-SHAPED outcome, not a
+            # hard refusal. `prefer` is the LENIENT mode; its contract (the route
+            # docstring) is to fall back on "an outage or a miss", and the
+            # deferred-cache shape exists for exactly that. A refused submission
+            # never ran, so the cache answer is still a legitimate answer to this
+            # read: reporting 503 here would make the lenient mode STRICTER than
+            # the strict one under lane saturation, which is a property no caller
+            # can reason about. `record` mode keeps its refusal — it has no
+            # cache branch to fall back to.
+            #
+            # ⛔ The REASON is its own fourth one (review P2): a refused lane
+            # means the record was NEVER ASKED, so it must not be counted as
+            # `record-unavailable` — that reason is the alertable OUTAGE counter,
+            # and misfiling a pool condition there sends ops to Postgres for a
+            # saturation the database never caused.
+            #
+            # ⚠️ …and only `exc.refused` earns that reason. A plain BOUND MISS
+            # (`refused=False`) leaves the record callable RUNNING: the record
+            # WAS asked and did not answer inside the bound, which is neither
+            # "never asked" nor the outage counter the refused arm stays out of.
+            # It has its own fifth reason (`record-read-bound-miss`) so an
+            # operator reading the counter climbs is sent to the right place
+            # (#10602 review P2).
+            def _record_refusal(exc=None):
+                if mode == record_serve.MODE_PREFER:
+                    never_ran = getattr(exc, "refused", False) is True
+                    return record_serve.CacheAnswerRequired(
+                        record_serve.FALLBACK_RECORD_LANE_REFUSED if never_ran
+                        else record_serve.FALLBACK_RECORD_BOUND_MISS)
+                return _record_read_unavailable()
+
             try:
-                served = await asyncio.to_thread(
-                    record_serve.serve_point, tenant=tenant, point_id=point_id,
-                    cache_answer=_cache_props, mode=mode)
+                served = await _read_offload(
+                    lambda: record_serve.serve_point(
+                        tenant=tenant, point_id=point_id,
+                        cache_answer=(None if mode == record_serve.MODE_PREFER
+                                      else _cache_props),
+                        mode=mode),
+                    op="get_point.serve",
+                    # The callable is the RECORD's round trip, not graph work:
+                    # a bound miss here must not be reported as graph capacity.
+                    unavailable=_record_refusal,
+                    # …and it is a different RESOURCE CLASS: its callee declares
+                    # a 15 s ceiling, so it must not be judged by the hot
+                    # query's 8 s bound (#10602 review P2).
+                    timeout=record_read_timeout_s())
+            except record_serve.CacheAnswerRequired as needed:
+                # `prefer` only: the record missed or could not be asked. The
+                # reason is the SEAM's; the read is the ROUTE's, on the lanes it
+                # belongs to — construction (cold open + attach) then read (the
+                # hot query), so the 8 s read bound never measures an index
+                # build and a record-served read never pays the open at all.
+                sdk = await _data_sdk_offloaded(org, attach_projection=True)
+                props_from_cache = await _read_offload(_cache_props,
+                                                      op="get_point.cache")
+                served = record_serve.answered_by_cache(
+                    read=record_serve.READ_POINT_BY_ID,
+                    coordinate=f"Point:{point_id}", props=props_from_cache,
+                    reason=needed.reason)
             except record_serve.RecordUnavailable as e:
-                # 'record' mode has no cache branch. Answering 404 here would
-                # turn an IMPAIRED read into a finding of absence — the exact
-                # defect §17.2 exists to forbid, mirrored onto the record.
+                # 'record' mode has no cache branch (in `prefer` the seam
+                # raises `CacheAnswerRequired` instead of this). Answering 404
+                # here would turn an IMPAIRED read into a finding of absence —
+                # the exact defect §17.2 exists to forbid, mirrored onto the
+                # record.
                 raise HTTPException(
                     status_code=503,
                     # `str(e)`, not `type(e).__name__`: `RecordUnavailable`
@@ -11170,7 +11560,11 @@ async def get_point(point_id: str, org: dict = Depends(get_current_org_gated)): 
                 raise
 
     if served is None:
-        props = await asyncio.to_thread(_cache_props)
+        # #10602: the single-id point read's graph round trip rides the same
+        # dedicated read lane as the listing/search reads — the ticket's own
+        # evidence is that a point read degraded in the SAME 32 s step as
+        # search, because both waited for a shared-executor slot.
+        props = await _read_offload(_cache_props, op="get_point.cache")
     else:
         props = served.props
     if not props:
@@ -11424,23 +11818,81 @@ async def search(q: str, limit: int = Query(10, ge=1, le=100), org: dict = Depen
     # re-raises and this route's own 500 arm answers, exactly as before. A
     # domain error from `_data_sdk` itself propagates unchanged either way.
     # Relayed to #3718 (issuecomment-6330213773).
-    sdk = await _data_sdk_offloaded(org)
+    # ⛔ #10602 review P1 (fix): `attach_projection=True` makes the
+    # CONSTRUCTION touch the store (`Projection.__init__` connects), whereas
+    # `_data_sdk` alone only resolves a name. So this line can now fail for a
+    # reason the `try:` below can no longer cover — and until it was wrapped,
+    # a store that would not OPEN escaped as an unhandled Starlette 500, making
+    # BOTH documented arms of the `OVERRIDES:` block above unreachable on this
+    # route: `tortoise_fts_query` was never entered (so `_STATUS_DEGRADED` was
+    # never set) and this route's own `except Exception: 500 "Search failed"`
+    # sat inside a `try` the failure now preceded. The OPEN's failure is
+    # therefore mapped through those SAME two outcomes here, so the promise in
+    # the block above stays true.
+    #
+    # ⛔ …and ONLY the OPEN's failure (#10602 review P3). The seam raises
+    # `_ProjectionOpenError` for `sdk._get_proj()`, so this arm cannot absorb a
+    # fault from `_data_sdk` itself — a broken tenancy resolver answering
+    # `200 status: degraded` would be a FAULT reported as a store OUTAGE: the
+    # mirror of the impairment-as-absence rule every other arm here enforces,
+    # and unfalsifiable from the wire (the two are the same body). Such a fault
+    # propagates unchanged, exactly as it did before the attach existed, which
+    # is what the `OVERRIDES:` promise says. A construction-lane CAPACITY
+    # refusal is not a store condition either and keeps its own 503 (hence the
+    # `HTTPException` arm first).
     try:
-        # #1676 (launch capacity): tortoise_fts_query is CPU-blocking — the
-        # query encode (sdk.py model.encode, ~10-50ms for bge-small) runs
-        # inline plus the 3 search legs. In a single-worker async server this
-        # serializes ALL requests on the event loop. Offload to a worker
-        # thread so concurrent searches overlap their encode/DB work (same
-        # asyncio.to_thread pattern used throughout this file).
-        results = await asyncio.to_thread(
-            sdk.tortoise_fts_query, q, limit=limit,
-            read_status_out=status_out, _truncation_out=trunc_out)
-    except Exception:
+        sdk = await _data_sdk_offloaded(org, attach_projection=True)
+    except HTTPException:
+        raise
+    except _ProjectionOpenError:
         import logging
         logging.getLogger("tortoise.api").exception("search failed")
-        raise HTTPException(status_code=500, detail="Search failed")  # noqa: B904
-    finally:
-        sdk.close()
+        if status_out is None:
+            # Both flags off: the documented pre-#10602 fallback, byte for byte.
+            raise HTTPException(status_code=500, detail="Search failed")  # noqa: B904
+        # Flags on: the store will not OPEN, which is an OUTAGE, not an empty
+        # result — the same answer `sdk.tortoise_fts_query`'s own `_get_proj()`
+        # arm produces (``tortoise/sdk.py``: *"A store that will not OPEN is
+        # `degraded` (off by OUTAGE) … Never an empty result, and never a
+        # raise"*), so the two cannot drift into disagreeing about ONE store.
+        # Keep them in step: `status` = degraded, and the empty is marked
+        # INCOMPLETE so a 0-row outage is never reported as a complete empty.
+        from tortoise.truncation import mark_truncation as _lost_mark
+        status_out["status"] = _STATUS_DEGRADED
+        _lost_mark(trunc_out, returned=0, candidates=0, incomplete=True)
+        results = []
+    else:
+        try:
+            # #1676 (launch capacity): tortoise_fts_query is CPU-blocking — the
+            # query encode (sdk.py model.encode, ~10-50ms for bge-small) runs
+            # inline plus the 3 search legs. In a single-worker async server this
+            # serializes ALL requests on the event loop. Offload to a worker
+            # thread so concurrent searches overlap their encode/DB work — on the
+            # dedicated, BOUNDED read lane (#10602), never the shared default
+            # executor, where this 40–80 ms round trip sat behind other tenants'
+            # stalls and became a 3.7–14.6 s answer. Same callable, same result;
+            # only WHERE it runs changes.
+            results = await _read_offload(
+                lambda: sdk.tortoise_fts_query(
+                    q, limit=limit, read_status_out=status_out,
+                    _truncation_out=trunc_out),
+                op="search")
+        except HTTPException:
+            # #10602 review P1: the read lane's capacity refusal is an
+            # ``HTTPException`` (503 ``graph_unavailable``) and it is raised
+            # INSIDE this ``try`` — so this blanket arm would repaint the ONE
+            # legible, retryable refusal this change exists to deliver as a
+            # non-retryable 500 "Search failed" (with no ``error_code``), plus a
+            # full ``exception()`` traceback per refused request at the
+            # saturation moment. The construction refusal sits in its own arm
+            # above, which is why the 503 copy was previously unreachable here.
+            raise
+        except Exception:
+            import logging
+            logging.getLogger("tortoise.api").exception("search failed")
+            raise HTTPException(status_code=500, detail="Search failed")  # noqa: B904
+        finally:
+            sdk.close()
     # Normalize to the public response shape (kind from pointKind).
     out = []
     for r in results:
@@ -11501,17 +11953,39 @@ async def topic_summary(
     _require_scope(org, "graphs:read", "topic_summary")
     # #3718 (construction half of #4660, second batch): built off the loop — see
     # the `search` handler for the full rationale and the `OVERRIDES:` line.
-    sdk = await _data_sdk_offloaded(org)
+    #
+    # ⛔ #10602 review P1 (fix): the attach makes this line touch the store, so
+    # it can fail where `_data_sdk` alone could not. Its documented outcome on
+    # this route is the 500 arm below; that arm sat inside a `try` the failure
+    # now preceded, so it is mapped here too — for the OPEN's failure only
+    # (`_ProjectionOpenError`, #10602 review P3): a fault from `_data_sdk`
+    # itself propagates unchanged, as it did before, and a construction-lane
+    # CAPACITY refusal keeps its 503.
+    try:
+        sdk = await _data_sdk_offloaded(org, attach_projection=True)
+    except HTTPException:
+        raise
+    except _ProjectionOpenError:
+        import logging
+        logging.getLogger("tortoise.api").exception("topic summary failed")
+        raise HTTPException(status_code=500, detail="Topic summary failed")  # noqa: B904
     try:
         # #1676 (launch capacity): topic_summarize is CPU-blocking (EP
         # classification + neighborhood traversal) — offload to a worker
-        # thread so the event loop stays free (same as the /v1/search fix).
-        result = await asyncio.to_thread(
-            sdk.topic_summarize, topic,
-            max_seeds=max_seeds, max_hops=max_hops,
-            include_relationships=include_relationships,
-        )
+        # thread so the event loop stays free. #10602: on the dedicated,
+        # BOUNDED read lane (same as /v1/search), not the shared pool.
+        result = await _read_offload(
+            lambda: sdk.topic_summarize(
+                topic,
+                max_seeds=max_seeds, max_hops=max_hops,
+                include_relationships=include_relationships,
+            ),
+            op="topic_summary")
         return result
+    except HTTPException:
+        # #10602 review P1: same arm as /v1/search — a read-lane refusal keeps
+        # its 503 ``graph_unavailable`` body instead of a 500.
+        raise
     except Exception:
         import logging
         logging.getLogger("tortoise.api").exception("topic summary failed")
