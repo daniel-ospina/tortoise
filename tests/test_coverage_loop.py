@@ -126,12 +126,37 @@ def _no_embedder(monkeypatch):
     (``compute_embedding`` → None) and the query path sees no embedder
     (``EmbeddingModel.get`` → None), so the vector strategy never runs and
     the differential isolates the sparse loop mechanics. No model load, no
-    network — deterministic on any machine with the docker lane."""
+    network — deterministic on any machine with the docker lane.
+
+    Also pin the ARM TWINS out (#10629 review): this module asserts the
+    kernels the guard RECEIVES (``test_floor_term_arm_reaches_the_coverage_
+    loop_guard`` and siblings), and ``retrieve_for_question`` resolves every
+    one of those arms from the environment when the caller passes nothing.
+    A measurement lane arming the sealed A/B through the documented env twins
+    would otherwise get a FALSE RED in the very test that pins the arm:
+
+    * ``TORTOISE_LME_FLOOR_TERM`` — an exported value silently arms the lower
+      bound under every OFF-leg assertion (measured: the ``--no-floor-term``
+      leg of the arm-reach test reds with ``floor_term=True``).
+    * ``TORTOISE_LME_COVERAGE_LOOP`` — ``retrieve_for_question`` reads it
+      whenever the caller passes ``coverage_loop=None``, so an exported value
+      arms the loop a run-invariance test is asserting is OFF.
+    * ``TORTOISE_LME_SESSION_REINJECTION`` — the other pool-order owner; an
+      exported value arms the composition ``run_evaluation`` refuses to
+      combine with the loop.
+    * ``TORTOISE_LME_GUARD_PER_SESSION_CAP`` — the env half of the cap this
+      module's arm-reach test pins as the product default.
+    """
     import tortoise.embeddings as _emb
     monkeypatch.setattr(_emb, "compute_embedding",
                         staticmethod(lambda content: None))
     monkeypatch.setattr(_emb.EmbeddingModel, "get",
                         staticmethod(lambda: None))
+    for _arm_env in ("TORTOISE_LME_FLOOR_TERM",
+                     "TORTOISE_LME_COVERAGE_LOOP",
+                     "TORTOISE_LME_SESSION_REINJECTION",
+                     "TORTOISE_LME_GUARD_PER_SESSION_CAP"):
+        monkeypatch.delenv(_arm_env, raising=False)
 
 
 def _question(question: str = QUESTION, *,

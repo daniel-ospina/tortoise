@@ -4577,6 +4577,17 @@ def run_evaluation(
         # with the lower bound armed must never be resumed with it OFF, or
         # two window compositions would blend into one artifact.
         floor_term=bool(floor_term),
+        # #2513 (#10629 review ISSUE 1): the guard's per-session UPPER cap —
+        # the sub-knob of the same window rule, forwarded here so the value
+        # `_resolve_guard_per_session_cap` resolved (and `retrieve_for_question`
+        # serves) is the value a resume is gated on. Omitted from this call,
+        # the knob was RESOLVED, SPENT and RECORDED but never FINGERPRINTED:
+        # `_fingerprint_diffs` key-unions, so absent-vs-absent is no diff and a
+        # cap-3 checkpoint was silently resumed by a cap-1 run — the exact
+        # false-PASS class the sibling `reinjection_total_cap` forward closed.
+        # Conditional presence (``None`` while no pool-order arm runs) keeps
+        # an inert value off the fingerprint, as documented at the parameter.
+        guard_per_session_cap=guard_per_session_cap,
         # C4 (#2517/#2568, #2513): the resolved re-injection arm + guard
         # ablation ride the fingerprint as ALWAYS-PRESENT resolved bools
         # (the sibling-arm convention) — a fingerprint-bearing pre-feature
