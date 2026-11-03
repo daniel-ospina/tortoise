@@ -57,7 +57,10 @@ OBSERVED rate needs an end-to-end run — wave scoping §6's T-2, re-homed to
 census counts whether a value can be re-read verbatim from an address; it says
 nothing about whether the reader then sums it correctly.
 
-Hermetic: no DB, no network, no model. Reads committed JSON only.
+Hermetic: no DB, no network, no model. Reads committed JSON only — plus one
+`git ls-files` call per bare-basename cite in the FINAL sweep (it needs a `git`
+binary and a readable git dir; the sweep says so BY NAME when it cannot ask, so
+an environment failure is never read as a broken cite).
 """
 
 from __future__ import annotations
@@ -1265,21 +1268,50 @@ def _resolve_cite_path(spelled: str) -> str | None:
     not touch them (and invisible to CI, which has no `.worktrees`). Tracked
     files are exactly the ones a cite can legitimately name, and `git ls-files`
     is also the cheap form: one subprocess instead of three full-tree walks.
+    ⛔ "Could not ask git" and "this cite does not resolve" are DIFFERENT
+    failures and must not share a message (#10742 review, measured). 23 of the 31
+    cites in the two artifacts are bare basenames that resolve only through `git
+    ls-files`, so a machine without a usable `git` (a mounted/exported checkout, a
+    minimal image, a `safe.directory` refusal at exit 128) red the sweep with 23
+    entries that are ALL CORRECT, under a message that says the cites are broken.
+    `_GIT_FAILURE` carries the reason; the test reports it as an ENVIRONMENT
+    failure before it looks at a single cite.
     """
     if (_REPO / spelled).is_file():
         return spelled
     name = Path(spelled).name
+    tracked = _git_ls_files(name)
+    if tracked is None:
+        return None
+    hits = [ln for ln in tracked if Path(ln).name == name and (_REPO / ln).is_file()]
+    return hits[0] if len(hits) == 1 else None
+
+
+#: Why the last `git ls-files` could not be asked, or None when it worked. Set by
+#: `_git_ls_files` so the sweep can tell an environment failure from a bad cite.
+_GIT_FAILURE: list[str] = []
+
+
+def _git_ls_files(name: str) -> list[str] | None:
+    """Tracked paths named ``name``, or None when git could not be asked.
+
+    Read-only: `git ls-files` never writes, so the sweep stays non-mutating (the
+    earlier tree-wide glob was read-only too, and was dropped only because it
+    resolved 113 copies of `extractor_v2.py` from the canonical checkout).
+    """
     try:
-        tracked = subprocess.run(
+        done = subprocess.run(
             ["git", "-C", str(_REPO), "ls-files", "--", f"**/{name}", name],
             capture_output=True, text=True, timeout=60, check=False)
-    except (OSError, subprocess.SubprocessError):
+    except (OSError, subprocess.SubprocessError) as exc:
+        _GIT_FAILURE.append(f"`git ls-files` could not run: {type(exc).__name__} {exc}")
         return None
-    if tracked.returncode != 0:
+    if done.returncode != 0:
+        _GIT_FAILURE.append(
+            f"`git ls-files` exited {done.returncode}: "
+            f"{(done.stderr or done.stdout).strip()[:200]}")
         return None
-    hits = [ln for ln in tracked.stdout.splitlines()
-            if Path(ln).name == name and (_REPO / ln).is_file()]
-    return hits[0] if len(hits) == 1 else None
+    return done.stdout.splitlines()
 
 
 def _cites(text: str) -> list[tuple[str, int]]:
@@ -1460,6 +1492,7 @@ def test_every_non_extractor_v2_cite_in_EITHER_artifact_resolves_at_this_head():
     stale: list[str] = []
     unmapped: list[str] = []
     unresolvable: list[str] = []
+    _GIT_FAILURE.clear()
     for artifact in (Path(__file__).resolve().relative_to(_REPO).as_posix(),
                      _RUNBOOK):
         body = (_REPO / artifact).read_text(encoding="utf-8")
@@ -1483,6 +1516,12 @@ def test_every_non_extractor_v2_cite_in_EITHER_artifact_resolves_at_this_head():
                 f"  (\"{path}\", {n}): # ⛔ {label}: reads {got!r}, wanted "
                 f"{expected!r} — found on line(s) {found}")
 
+    assert not _GIT_FAILURE, (
+        "the cite sweep could not ASK GIT, so it verified nothing — this is an "
+        "ENVIRONMENT failure, not a broken cite: every bare-basename spelling "
+        "(`extractor_v2.py:NNNN`, `retrieval.py:NNNN`, `sdk.py:NNNN`) resolves "
+        "through `git ls-files`. Fix the checkout/`git`, do NOT edit the cites. "
+        f"{_GIT_FAILURE[0]}")
     assert not unresolvable, (
         "a cite spells a file that does not resolve to exactly one path in this "
         f"repo, so nothing can verify it: {unresolvable}")
