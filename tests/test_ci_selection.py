@@ -4858,6 +4858,47 @@ def test_expensive_eval_integration_is_in_the_on_demand_lane():
         "for the lane existing")
 
 
+def test_every_fast_file_the_fold_adds_carries_a_durations_row():
+    """The map's own ENTRY RULE, pinned for the files this fold adds (#10726).
+
+    `config/ci-surfaces.yml`'s `durations:` block states the rule in its own
+    words — *"a fast file added by a PR must carry a weight at all (the
+    #3400/#4348 trap, where a default is not a reading)"* and *"the map's ENTRY
+    RULE requires the row to EXIST"* — and TWO of the nine test files this fold
+    adds (`test_attest_census.py` from #10687, `test_rail_detach.py` from #10691)
+    were registered in `surfaces: → core`, which puts them in `fast_pool()`, with
+    NO row at all. They packed at `DEFAULT_FAST_WEIGHT` instead of a reading.
+
+    Nothing reds on that today: `duration_coverage_issues()` is a RATIO against
+    an inclusive 0.90 floor and the map is far above it, so `--integrity` exits 0
+    either way. That is exactly why it needs a pin rather than a floor — the
+    rule's failure mode is SILENT, and it is the same silent-drop shape the rest
+    of this file exists to make loud.
+
+    The assertion is PRESENCE, not the value: `tools/ci_timing.py
+    --refresh-durations` is the sole writer of measured rows and will replace
+    these numbers from junit, so pinning a weight here would red the sweep.
+    """
+    m = load_manifest()
+    fold_added = [
+        "test_attest_census.py",   # #10687
+        "test_rail_detach.py",     # #10691
+    ]
+    pool = set(fast_pool(m))
+    missing = [f for f in fold_added if f not in m["durations"]]
+    assert not missing, (
+        "a test file this fold ADDS has no `durations:` row, so it packs at the "
+        f"flat {DEFAULT_FAST_WEIGHT}s default — a default is not a reading "
+        f"(#3400/#4348, and this map's own ENTRY RULE): {missing}")
+    # Guard against the pin going vacuous: a row for a file that is NOT in the
+    # fast pool would prove nothing about the packing this rule is about.
+    not_pooled = [f for f in fold_added if f not in pool]
+    assert not not_pooled, (
+        f"the pin above is vacuous for {not_pooled}: they are not in "
+        "`fast_pool()`, so a `durations:` row for them is not what fixes the "
+        "packing — re-derive the list this test names")
+
+
 def test_slow_files_emitted_on_every_return_path():
     # #1371: the changes job reads slow_files from every selection mode — a
     # missing key would KeyError the nightly/schedule run or empty test-slow.
