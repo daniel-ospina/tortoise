@@ -941,21 +941,34 @@ def _test_node_names(path: Path) -> set[str] | None:
     def _decorator_never_reds(decorator: ast.expr) -> bool:
         """An UNCONDITIONAL skip/xfail decorator — it removes the node's red.
 
-        `xfail(strict=True)` is NOT excluded: a strict xfail REDS when the test
-        unexpectedly passes, so the node still carries a red and remains a pin.
+        `xfail` has two ways to stay able to FAIL, and both must be kept as pins
+        (review cycle 9, P2):
+          * `xfail(strict=True)` REDS on an unexpected pass — it carries a red; and
+          * `xfail(cond, …)` is CONDITIONAL, exactly like `skipif(cond)`: when
+            `cond` is falsy the test runs normally and can red, so its FIRST
+            POSITIONAL argument (or a `condition=`/`cond=` keyword) is a
+            condition, not a reason.
+        Only a bare `xfail()` / `xfail(reason=…)` with no condition and no strict
+        is unable to red.
         """
         name = _dotted_decorator(decorator)
         if name in never_red_skips:
             return True
-        if name in never_red_xfails:
-            if isinstance(decorator, ast.Call):
-                for keyword in decorator.keywords:
-                    if keyword.arg == "strict" and isinstance(
-                        keyword.value, ast.Constant
-                    ):
-                        return not keyword.value.value
-            return True
-        return False
+        if name not in never_red_xfails:
+            return False
+        strict = False
+        conditional = bool(getattr(decorator, "args", ()))
+        if isinstance(decorator, ast.Call):
+            for keyword in decorator.keywords:
+                if keyword.arg in ("condition", "cond"):
+                    conditional = True
+                elif keyword.arg == "strict" and isinstance(
+                    keyword.value, ast.Constant
+                ):
+                    strict = bool(keyword.value.value)
+        if strict:
+            return False  # reds on an unexpected pass, so it is a real watch
+        return not conditional
 
     def _never_reds(node: ast.AST) -> bool:
         """Collected, but it can never FAIL — so it is not a watch."""
@@ -1077,16 +1090,17 @@ def _test_node_names(path: Path) -> set[str] | None:
         if (
             not isinstance(node, ast.ClassDef)
             or _disabled(node.name)
+            # A CLASS-level unconditional skip/xfail — the class's own decorator,
+            # OR a class-body `pytestmark` — collects every method and runs none,
+            # so each reads as a pin while nothing watches it: the same fail-open
+            # as a skipped function, one hop out (review cycles 9-10, P2). ONE
+            # clause per shape; the decorator is not tested twice.
+            or _never_reds(node)
+            or _pytestmark_never_reds(node.body)
             # ... and the module-scope CLASS handle (`TestCls.__test__ = False`),
             # which pytest honours and `_member_exclusions` has already read as a
             # plain name (review cycle 7, P2).
             or node.name in module_plain
-            # A CLASS-level unconditional skip/xfail — decorator OR class-body
-            # `pytestmark` — collects every method and runs none, so each reads
-            # as a pin while nothing watches it. Same fail-open as a skipped
-            # function, one hop out (review cycle 10, P2).
-            or _never_reds(node)
-            or _pytestmark_never_reds(node.body)
         ):
             continue
         collected = _is_case(node.name)
@@ -5994,6 +6008,10 @@ def test_an_unconditional_skip_or_xfail_is_not_a_pin(tmp_path):
         "def test_strict_xfail():\n"
         "    assert True\n"
         "\n"
+        "@pytest.mark.xfail(False)\n"
+        "def test_conditionally_xfailed():\n"
+        "    assert True\n"
+        "\n"
         "@pytest.mark.skipif(False, reason='conditional')\n"
         "def test_conditionally_skipped():\n"
         "    assert True\n"
@@ -6008,10 +6026,16 @@ def test_an_unconditional_skip_or_xfail_is_not_a_pin(tmp_path):
         "\n"
         "    def test_kept(self):\n"
         "        assert True\n"
+        "\n"
+        "@pytest.mark.skip(reason='whole class')\n"
+        "class TestSkippedGroup:\n"
+        "    def test_inside(self):\n"
+        "        assert True\n"
     )
     assert _test_node_names(module) == {
         "test_plain",
         "test_strict_xfail",
+        "test_conditionally_xfailed",
         "test_conditionally_skipped",
         "test_skips_in_body",
         "TestGroup::test_kept",
