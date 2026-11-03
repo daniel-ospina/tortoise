@@ -47948,7 +47948,18 @@ def _validate_extracted_from(props: dict, *, door: str) -> None:
 # `:15765`, …) and a hook inside the method re-stales them.  `functools.wraps`
 # keeps the name, docstring and signature, so every `self._extract_session_llm`
 # call site and every test that inspects the method resolve to the wrapper.
-from .extractor_v2 import _run_scoped_vocabulary_gap as _run_scoped_vocab_gap_10626
+#
+# The import is FUNCTION-local and the wiring is one module-level CALL, not a
+# module-level `import`: a bare import down here is `E402` (module level import
+# not at top of file), which the repo's ruff baseline selects — and moving it to
+# the import block would shift every line of this file, re-staling the same
+# #7949 cites the wrapper exists to leave alone.
+def _wire_vocabulary_gap_run_reader_10626() -> None:
+    """Rebind the M2 entry through the #10626 run-level reader (once)."""
+    from .extractor_v2 import _run_scoped_vocabulary_gap as _scope_run
 
-TortoiseSDK._extract_session_llm = _run_scoped_vocab_gap_10626(
-    TortoiseSDK._extract_session_llm)
+    TortoiseSDK._extract_session_llm = _scope_run(
+        TortoiseSDK._extract_session_llm)
+
+
+_wire_vocabulary_gap_run_reader_10626()

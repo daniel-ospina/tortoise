@@ -12764,25 +12764,36 @@ class _VocabularyGapRunAccumulator:
         }
 
 
-#: The accumulator for the run executing in THIS context, installed by
-#: ``_run_scoped_vocabulary_gap`` and read by ``_record_vocabulary_gap``.
-#: A ``ContextVar`` rather than ``threading.local`` for the reason the block
-#: comment above gives: the boundary can run on a worker thread, and a context
-#: this repo already copies into its capture pool follows the run there.
-#:
-#: ``import contextvars`` sits HERE, not in the module's import block: every line
-#: added above `def extract_session_v2(` re-stales the #7949 bundle's
-#: line-number cites (measured: a hook inside that function shifts eight), which
-#: is the same constraint the tail of this module already works under.
-import contextvars as _contextvars
+#: The ContextVar carrying the run accumulator, created on FIRST USE so this
+#: block adds NO import line above `def extract_session_v2(` — the #7949 bundle's
+#: cites are typed against this file's line numbers and every line added there
+#: re-stales them (measured: a hook inside that function shifts eight; the same
+#: constraint the tail of this module already works under).  The `contextvars`
+#: import is therefore FUNCTION-local — the idiom `_VocabularyGapCensus._record`
+#: already uses for `logging` — and `_vocabulary_gap_run_scope` creates the
+#: ContextVar exactly once, under a lock.
+_VOCABULARY_GAP_RUN_ACCUMULATOR: Any = None
+_VOCABULARY_GAP_RUN_SCOPE_LOCK = threading.Lock()
 
-_VOCABULARY_GAP_RUN_ACCUMULATOR = _contextvars.ContextVar(
-    "tortoise_vocabulary_gap_run_accumulator", default=None)
+
+def _vocabulary_gap_run_scope():
+    """The ``ContextVar`` carrying the run accumulator (created once)."""
+    global _VOCABULARY_GAP_RUN_ACCUMULATOR
+    var = _VOCABULARY_GAP_RUN_ACCUMULATOR
+    if var is None:
+        with _VOCABULARY_GAP_RUN_SCOPE_LOCK:
+            var = _VOCABULARY_GAP_RUN_ACCUMULATOR
+            if var is None:
+                import contextvars
+
+                var = _VOCABULARY_GAP_RUN_ACCUMULATOR = contextvars.ContextVar(
+                    "tortoise_vocabulary_gap_run_accumulator", default=None)
+    return var
 
 
 def _vocabulary_gap_run_accumulator() -> _VocabularyGapRunAccumulator | None:
     """The run accumulator for the calling context, else ``None``."""
-    return _VOCABULARY_GAP_RUN_ACCUMULATOR.get()
+    return _vocabulary_gap_run_scope().get()
 
 
 def _record_vocabulary_gap(absorbed: list[str]) -> None:
@@ -12935,7 +12946,8 @@ def _run_scoped_vocabulary_gap(run):
     @wraps(run)
     def _run_with_census(*args, **kwargs):
         accumulator = _VocabularyGapRunAccumulator()
-        token = _VOCABULARY_GAP_RUN_ACCUMULATOR.set(accumulator)
+        scope = _vocabulary_gap_run_scope()
+        token = scope.set(accumulator)
         try:
             result = run(*args, **kwargs)
         finally:
@@ -12943,7 +12955,7 @@ def _run_scoped_vocabulary_gap(run):
             # (none today) cannot silently detach its caller's ledger, and the
             # accumulator cannot leak into the NEXT run in this context — that
             # would report one run's folds on another run's receipt.
-            _VOCABULARY_GAP_RUN_ACCUMULATOR.reset(token)
+            scope.reset(token)
         reading = accumulator.reading()
         if isinstance(result, dict):
             _attach(result, reading)
