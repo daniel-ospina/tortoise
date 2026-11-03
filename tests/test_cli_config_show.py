@@ -1512,9 +1512,10 @@ def test_the_chmod_remedy_is_quoted(capsys, tmp_path):
     evil_dir.mkdir()
     target = evil_dir / ".tortoise"        # the resolver's CWD candidate IS this file
     target.write_text(GLOBAL)
-    # mode-000 FILE: `is_file()` passes and `read_text()` fails inside the
-    # resolver's try, so it arrives as `_ConfigError` (deterministic on every
-    # platform — a mode-000 PARENT is swallowed by pathlib's `is_file()` in 3.12)
+    # mode-000 FILE, parent traversable: `is_file()` passes and `read_text()`
+    # fails inside the resolver's try, so it arrives as `_ConfigError`. (A
+    # mode-000 PARENT is NOT swallowed by `is_file()` — it re-raises EACCES;
+    # that route is `test_the_unreadable_remedy_names_which_object_blocks`.)
     target.chmod(0o000)
     try:
         import os
@@ -1562,6 +1563,59 @@ def test_the_chmod_remedy_is_display_escaped_too(monkeypatch, capsys, tmp_path):
         assert not any(ln.strip().startswith("FAKE") for ln in out.splitlines())
     finally:
         target.chmod(0o600)
+
+
+def test_the_unreadable_remedy_names_which_object_blocks(capsys, tmp_path):
+    """`unreadable` has TWO routes and only one of them is about the FILE.
+
+    A mode-000 PARENT DIRECTORY makes `Path.is_file()` re-raise EACCES — pathlib
+    swallows only ENOENT/ENOTDIR/EBADF/ELOOP — so the store is unreachable
+    THROUGH the directory: the file's own mode cannot even be read, and
+    `chmod 600 <dir>/credentials.json` exits 1 with "Permission denied". The
+    report must therefore name the object whose mode actually blocks, per
+    route, and emit the `chmod` that can work. Before the fix both routes
+    printed `chmod 600 <file>`.
+    """
+    import os
+    import shlex
+
+    # ── route 1: the FILE's mode is the problem (parent traversable) ──
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    file_store = repo / ".tortoise"          # the resolver's CWD candidate
+    file_store.write_text(GLOBAL)
+    file_store.chmod(0o000)
+    try:
+        os.chdir(repo)
+        assert _run() == 1
+        out = capsys.readouterr().out
+        line = next(ln for ln in out.splitlines() if "chmod " in ln)
+        assert "chmod 600 " in line
+        inside = line.split("chmod 600 ", 1)[1].rstrip("`).")
+        assert shlex.split(inside) == [str(file_store)]
+    finally:
+        file_store.chmod(0o600)
+
+    # ── route 2: the DIRECTORY's mode is the problem (the file is 0600) ──
+    dir_store = _global(tmp_path)            # mode 600 — the FILE is fine
+    assert dir_store.is_file()
+    dir_store.parent.chmod(0o000)
+    try:
+        with pytest.raises(PermissionError):
+            dir_store.is_file()              # EACCES re-raises, not swallowed
+        assert os.access(dir_store.parent, os.X_OK) is False
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir(exist_ok=True)
+        os.chdir(elsewhere)                  # so the CWD candidate is absent
+        assert _run() == 1
+        out = capsys.readouterr().out
+        assert "chmod 600" not in out
+        line = next(ln for ln in out.splitlines() if "chmod 700 " in ln)
+        inside = line.split("chmod 700 ", 1)[1].split("`", 1)[0]
+        # the DIRECTORY, not the child file nothing can stat
+        assert shlex.split(inside) == [str(dir_store.parent)]
+    finally:
+        dir_store.parent.chmod(0o700)
 
 
 def test_a_blank_org_field_is_absent_not_mistyped(capsys, tmp_path):
@@ -1756,7 +1810,12 @@ def test_the_whitespace_relation_carries_the_endpoint_verdict(
 def test_an_unreadable_store_is_not_offered_for_deletion(capsys, tmp_path):
     """The file is INTACT and may hold the signup_token — a full credential and the
     only way back into the org. "repair or delete it" made deletion the
-    actionable-sounding option."""
+    actionable-sounding option.
+
+    The state constructed here is the mode-000 PARENT-DIRECTORY route, so the
+    remedy must name the DIRECTORY: `chmod 600 <dir>/credentials.json` fails
+    with "Permission denied" (the path is not reachable at all), and it would
+    also assert a fact about the file's mode the tool cannot check."""
     d = tmp_path / ".tortoise"
     d.mkdir()
     (d / "credentials.json").write_text(GLOBAL)
@@ -1765,8 +1824,13 @@ def test_an_unreadable_store_is_not_offered_for_deletion(capsys, tmp_path):
         assert _run() == 1
         out = capsys.readouterr().out
         assert "Do NOT delete it" in out
-        assert "chmod 600" in out
         assert "repair or delete it" not in out
+        import shlex
+        line = next(ln for ln in out.splitlines() if "chmod 700" in ln)
+        inside = line.split("chmod 700 ", 1)[1].split("`", 1)[0]
+        # the DIRECTORY, not the child file that cannot even be stat'ed
+        assert shlex.split(inside) == [str(d)]
+        assert "chmod 600" not in out
     finally:
         d.chmod(0o700)
 

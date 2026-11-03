@@ -150,15 +150,6 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # undeclared mutation in the tree).
     "test_9664_capstone_connector_to_record.py": [
         r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
-    # #10655 `tortoise config show`: the suite never opens a graph — every URI
-    # mutation exists to feed the REPORT (a redacted DSN, an unusable target, a
-    # trio, a path-shaped fallback), so it forces the EMBEDDED lane on purpose.
-    # A URI redirect would fold these assertions onto a shared server graph whose
-    # target the test does not control, and the report would be asserting about a
-    # store it was not given. The setenv IS the point; the fixture-param
-    # monkeypatch auto-restores (no lane leak).
-    "test_cli_config_show.py": [
-        r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"'],
     # #9567 capstone: the D11/D12 quota case forces the EMBEDDED lane (delenv
     # the URI, then pin TORTOISE_DB_PATH to a tmp_path db) so the gate's count
     # never rides a shared server graph. The delenv IS the point; the
@@ -819,8 +810,15 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # URI with `monkeypatch.delenv` before every test and its teardown restores
     # the ambient value — so the red was the mutation SHAPE, not an observed
     # lane flip. Do not cite it as a measured leak (review finding, baf951165).
+    # TWO patterns because the census matches a site by its FIRST source line: the
+    # one-line form puts the variable on the `setenv(` line, while the wrapped
+    # `monkeypatch.setenv(` + name-on-the-next-line form (the log-side pin in
+    # `test_the_db_uri_log_line_does_not_print_a_query_credential`) matches only
+    # the bare open-paren. Declaring just the first reds the census on the wrapped
+    # site — measured on the PR head, 11 mutation sites in this one module.
     "test_cli_config_show.py": [
-        r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"'],
+        r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"',
+        r'monkeypatch\.setenv\(\s*$'],
 }
 
 # Carve-out TEST-MODULE stems (Task 5 wires these into TEST_NO_REDIRECT_STEMS;
