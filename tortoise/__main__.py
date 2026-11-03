@@ -3413,9 +3413,9 @@ def _cmd_config(args) -> int:
         unusable_fields: list[str] = []
         for field in ("org_id", "org_name"):
             value = (winner_cfg or {}).get(field)
-            if isinstance(value, str) and value:
+            if isinstance(value, str) and value.strip():
                 cred[field] = value
-            elif value is not None:
+            elif value is not None and not (isinstance(value, str) and not value.strip()):
                 # Present but not a usable string. Reporting "(absent)" here was a
                 # false claim about the store twice over: the field IS there, and
                 # the "init --api-key writes only the key" hint does not describe
@@ -3425,8 +3425,8 @@ def _cmd_config(args) -> int:
         if unusable_fields:
             cred["org_field_warning"] = (
                 "the resolved store carries " + ", ".join(unusable_fields)
-                + " — not a string, so it cannot be used. Fix the field in the "
-                "store; nothing here can repair it")
+                + " — not a NON-EMPTY string, so it cannot be used. Fix the field "
+                "in the store; nothing here can repair it")
         # `recover` does NOT read the token from the winning store — it scans
         # `<cwd>/.tortoise` then `~/.tor…/credentials.json` regardless of which
         # store supplied the KEY (#1752's divergence case). Asking the winner
@@ -3735,8 +3735,17 @@ def _cmd_config(args) -> int:
         print("   Or set TORTOISE_API_KEY to override for one shell.")
         if blocked_path and cwd_cfg is not None and _same_path(
                 Path(blocked_path), cwd_cfg):
-            print("   The transmitting verbs (`session capture/drain/import`) are "
-                  "unaffected: they skip this candidate.")
+            # Those verbs resolve `global_only=True`, so "unaffected" is only true
+            # when the GLOBAL candidate itself resolves. Asserting it without
+            # looking told a reader to rely on transcript upload while it was
+            # broken by the other store.
+            if state_global in _STORE_REFUSING or blocked_path == str(global_cfg):
+                print("   The transmitting verbs (`session capture/drain/import`) "
+                      "FAIL TOO: they resolve the global store, which is refusing "
+                      "as well.")
+            else:
+                print("   The transmitting verbs (`session capture/drain/import`) are "
+                      "unaffected: they skip this candidate and use the global store.")
     if cwd is None:
         print("\n· the current directory could not be resolved — the `./.tortoise` "
               "candidate was not evaluated. Re-run from a directory that exists.")
