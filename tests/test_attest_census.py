@@ -503,7 +503,11 @@ def test_the_positive_marker_clause_does_fire_when_the_gate_reported_red(monkeyp
     )
     assert ac.main(["--reviews-dir", str(tmp_path), "--out", str(tmp_path / "o.md")]) == 0
     text = (tmp_path / "o.md").read_text()
-    assert "the gate ran and found no head-bound published marker" in text
+    # A red conclusion does NOT establish that the marker surface was read (cycle 6): the gate
+    # fails before reading markers when its key is unset, when every candidate fails HMAC, when
+    # the comment fetch 403s, or when the diff hash cannot be computed.
+    assert "whether a published marker exists is answered by the gate's own annotation" in text
+    assert "found no head-bound published marker" not in text
 
 
 def test_a_directory_named_like_a_record_is_unreadable_not_a_crash(tmp_path):
@@ -552,7 +556,19 @@ def test_prose_carrying_a_colon_is_not_evidence():
     for prose in ("TODO: verify", "evidence: none", " : ", "see PR body: n/a", "comment:abc"):
         r = ac.Record(path=Path("/x.json"), head_sha=LIVE, mint="fresh", verdict="clean", evidence=prose)
         assert r.real_evidence is False, prose
-        assert ac.classify(LIVE, r, *RED)[0] != ac.RESTORE, prose
+        outcome, why = ac.classify(LIVE, r, *RED)
+        assert outcome != ac.RESTORE, prose
+        # The reason must name the REAL defect: a clean verdict with an unusable pointer is not
+        # "a non-clean verdict" (cycle 6 measured the row contradicting its own verdict column).
+        assert "not an artifact pointer" in why, why
+        assert "is not a clean verdict" not in why, why
+
+
+def test_an_unresolvable_reviews_dir_home_is_rc_2_not_a_traceback(tmp_path):
+    # `pathlib.expanduser` raises RuntimeError for `~nosuchuser` — rc 1 would break the contract.
+    import pytest
+
+    assert ac.main(["--reviews-dir", "~nosuchuser12345/rev", "--out", str(tmp_path / "o.md")]) == 2
 
 
 def test_both_real_registry_evidence_shapes_are_accepted():

@@ -223,6 +223,14 @@ def classify(
         return RE_REVIEW, "record is mint:\"carried\" — a pointer to an older review, not evidence of this head (#10177)"
     if record.evidence in (None, "", False):
         return NOTHING, "record carries no evidence (evidence: null) — nothing to restore"
+    # ⛔ Name the ACTUAL defect: a clean verdict with an unusable pointer is not "a non-clean
+    # verdict" (cycle 6: the row asserted the opposite of its own `verdict` column, so a lane
+    # concluded the review had found issues and re-reviewed for the wrong reason).
+    if not isinstance(record.evidence, str) or _EVIDENCE_REF.match(record.evidence.strip()) is None:
+        return NOTHING, (
+            f"record verdict {record.verdict!r} is clean at the live head, but its evidence "
+            f"({record.evidence!r}) is not an artifact pointer — it cannot be quoted as proof"
+        )
     return NOTHING, f"record verdict {record.verdict!r} is not a clean verdict — nothing to restore"
 
 
@@ -450,7 +458,11 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
 
     owner, _, name = args.repo.partition("/")
-    reviews_dir = Path(args.reviews_dir).expanduser()
+    try:
+        reviews_dir = Path(args.reviews_dir).expanduser()
+    except RuntimeError as exc:  # `~nosuchuser` — expanduser raises, and that must not be rc 1
+        print(f"attest_census: cannot resolve --reviews-dir {args.reviews_dir!r}: {exc}", file=sys.stderr)
+        return 2
     generated_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     try:
@@ -520,10 +532,16 @@ def main(argv: list[str] | None = None) -> int:
             # actually RAN AND REPORTED can support it: an absent check-run, or a non-red,
             # non-green attempt (`cancelled`/`stale`), is not a read of the marker surface.
             if row.outcome == NOTHING and rec is None:
-                gate_verdict = row.gate_conclusion in ("failure", "timed_out", "action_required")
+                # ⛔ A RED CONCLUSION DOES NOT PROVE THE MARKER SURFACE WAS READ. The gate fails
+                # before reading any marker when its key is unset, when every candidate marker
+                # fails HMAC, when the comment fetch 403s, and when the diff hash cannot be
+                # computed (each says so in its own annotation). So state what the run knows:
+                # the gate is red, and its own annotation is the thing to read next (cycle 6).
+                gate_red = row.gate_conclusion in ("failure", "timed_out", "action_required")
                 row.why += (
-                    "; the gate ran and found no head-bound published marker"
-                    if gate_verdict
+                    f"; the gate concluded {row.gate_conclusion} — whether a published marker exists is "
+                    "answered by the gate's own annotation, not by this census"
+                    if gate_red
                     else f"; the gate reported nothing readable on this head ({row.gate_conclusion or 'no run'}), "
                     "so the published-marker surface was not judged"
                 )
@@ -533,9 +551,6 @@ def main(argv: list[str] | None = None) -> int:
         # line was deleted — measured by review cycle 2.)
         if row.outcome == UNREADABLE:
             unreadable += 1
-        if rec is not None and rec.error and row.outcome != UNREADABLE:
-            # UNREADABLE's `why` already carries the record's reason — do not print it twice.
-            row.notes.append(f"record {rec.path.name}: {rec.error}")
         if rec is not None and rec.head_sha and len(rec.head_sha) != 40:
             row.notes.append(f"record head_sha {rec.head_sha!r} is not a 40-char sha — not bindable")
         rows.append(row)
@@ -563,7 +578,11 @@ def main(argv: list[str] | None = None) -> int:
         return 0 if unreadable == 0 else 2
 
     text = render(rows, args.repo, generated_at)
-    out = Path(args.out)
+    try:
+        out = Path(args.out).expanduser()
+    except RuntimeError as exc:  # symmetric with --reviews-dir: an unresolvable ~ is rc 2, not rc 1
+        print(f"attest_census: cannot resolve --out {args.out!r}: {exc}", file=sys.stderr)
+        return 2
     try:
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(text)
