@@ -734,14 +734,13 @@ def _test_node_names(path: Path) -> set[str] | None:
     resolution: each reads like a pin while no run would reach it.
 
     ⚠️ THE LIMIT OF THAT, stated because the alternative is an overclaim (review
-    cycles 4-5, extended cycle 9): the base chain is resolved IN THIS FILE, and
-    pytest's collection is a decision over the whole MRO. SIX shapes therefore
-    remain REVIEW-TIME, not gate verdicts, and they err in BOTH directions:
+    cycles 4-5, extended cycle 9, narrowed cycle 10): the base chain is resolved
+    IN THIS FILE, and pytest's collection is a decision over the whole MRO. FIVE
+    shapes therefore remain REVIEW-TIME, not gate verdicts, and they err in BOTH
+    directions:
 
       * a class defining ``__new__`` and an ABSTRACT class — pytest collects no
-        test under them, this gate accepts them; and a node marked
-        ``skip``/``xfail`` — pytest COLLECTS it and never RUNS it, so the pin
-        would red nowhere while reading as watched (the fail-open direction);
+        test under them, this gate accepts them (the fail-open direction);
       * a base imported from ANOTHER file that defines ``__init__`` — pytest
         REFUSES the subclass, this gate accepts it;
       * an imported base carrying ``__test__ = False`` — pytest collects
@@ -967,9 +966,14 @@ def _test_node_names(path: Path) -> set[str] | None:
             for decorator in getattr(node, "decorator_list", ())
         )
 
-    def _module_never_reds() -> bool:
-        """`pytestmark = pytest.mark.skip` at module scope: nothing can red."""
-        for top in tree.body:
+    def _pytestmark_never_reds(body: list[ast.stmt]) -> bool:
+        """`pytestmark = pytest.mark.skip` in THIS statement list: nothing reds.
+
+        Takes the statement list rather than the module so the SAME rule can be
+        applied at module scope and in a class body — a class-level
+        ``pytestmark`` marks every method under it (review cycle 10, P2).
+        """
+        for top in body:
             targets: list[ast.expr]
             value: ast.expr | None
             if isinstance(top, ast.Assign):
@@ -989,6 +993,10 @@ def _test_node_names(path: Path) -> set[str] | None:
             if any(_decorator_never_reds(entry) for entry in entries):
                 return True
         return False
+
+    def _module_never_reds() -> bool:
+        """`pytestmark = pytest.mark.skip` at module scope: nothing can red."""
+        return _pytestmark_never_reds(tree.body)
 
     if _module_never_reds():
         return set()  # a module-wide skip marker: no collectable node can red
@@ -1073,6 +1081,12 @@ def _test_node_names(path: Path) -> set[str] | None:
             # which pytest honours and `_member_exclusions` has already read as a
             # plain name (review cycle 7, P2).
             or node.name in module_plain
+            # A CLASS-level unconditional skip/xfail — decorator OR class-body
+            # `pytestmark` — collects every method and runs none, so each reads
+            # as a pin while nothing watches it. Same fail-open as a skipped
+            # function, one hop out (review cycle 10, P2).
+            or _never_reds(node)
+            or _pytestmark_never_reds(node.body)
         ):
             continue
         collected = _is_case(node.name)
@@ -6016,3 +6030,40 @@ def test_a_module_wide_pytestmark_skip_pins_nothing(tmp_path):
         "    assert True\n"
     )
     assert _test_node_names(module) == set()
+
+
+def test_a_class_level_skip_pins_nothing_under_it(tmp_path):
+    """A CLASS-level skip collects every method and runs none — the same
+    fail-open as a skipped function, one hop out (review cycle 10, P2).
+
+    pytest was MEASURED on these exact shapes (`1 failed, 2 skipped`): the
+    class-decorator and class-body-`pytestmark` methods are collected and can
+    never red, while the unmarked class still fails. So the same nodes must be
+    refused here, and the clean class must survive (no over-block).
+    """
+    module = tmp_path / "test_class_skipped.py"
+    module.write_text(
+        "import pytest\n"
+        "\n"
+        "@pytest.mark.skip(reason='class decorator')\n"
+        "class TestDecorated:\n"
+        "    def test_in(self):\n"
+        "        assert False\n"
+        "\n"
+        "class TestMarked:\n"
+        "    pytestmark = pytest.mark.skip(reason='class body')\n"
+        "\n"
+        "    def test_in(self):\n"
+        "        assert False\n"
+        "\n"
+        "class TestMarkedList:\n"
+        "    pytestmark = [pytest.mark.xfail(reason='class body list')]\n"
+        "\n"
+        "    def test_in(self):\n"
+        "        assert False\n"
+        "\n"
+        "class TestClean:\n"
+        "    def test_kept(self):\n"
+        "        assert False\n"
+    )
+    assert _test_node_names(module) == {"TestClean::test_kept"}
