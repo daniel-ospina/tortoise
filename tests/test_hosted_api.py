@@ -98,6 +98,11 @@ TEST_TEAM = {
     "max_sessions": None,
 }
 
+# #10602: a SECOND org, used only where a test needs two reads on DIFFERENT
+# snapshot identities (``_namespace`` is the org_id, and it is the
+# fallback-snapshot key). Same shape as TEST_TEAM, different tenant.
+_SECOND_TEAM = {**TEST_TEAM, "org_id": "team-002"}
+
 
 # ── Fixtures ─────────────────────────────────────────────────────────────────
 
@@ -8391,7 +8396,7 @@ class TestSearchOffloadConcurrency:
                     t0 = time.monotonic()
                     await asyncio.wait_for(asyncio.gather(
                         search("falkordb traversal", limit=10, org=TEST_TEAM),
-                        search("graph performance", limit=10, org=TEST_TEAM),
+                        search("graph performance", limit=10, org=_SECOND_TEAM),
                     ), timeout=15)
                     return time.monotonic() - t0
 
@@ -13347,6 +13352,22 @@ class TestOverLimitSurfacesOfferTheHumanPath:
         # customer ceiling. Offering the upgrade path here would promise a
         # plan that cannot lift a data fault.
         "unreadable for resource",
+        # #4051 (this lane): the gate builds the SDK whose graph it counts
+        # (`quota._resolve_count_sdk` calls the `sdk_factory`), so a
+        # CONSTRUCTION fault is now a reachable fail-closed arm — the third of
+        # the same SERVER-fault category as "quota count failed" directly above
+        # (that is the arm `_count_resource` raises when the count itself fails;
+        # this is the arm that fires one step earlier, when the handle a
+        # graph-scoped count reads through cannot be made) and "unreadable for
+        # resource" (corrupt state on our side, never a customer ceiling — no
+        # plan lifts it).
+        # `_check_org_limit` wraps it as "Quota check failed: ...", which IS the
+        # exempted prefix — but this guard reads raise-site LITERALS, and the wrap
+        # happens at the HTTPException site in another module, so the literal here
+        # needs its own entry or the arm reads as an unregistered ceiling refusal.
+        # Registered the same way the previous arm was (#10142, f8970b536): a new
+        # fail-closed arm gets a category entry, not a rewritten message.
+        "quota count sdk unavailable",
         "resolve_org_limits requires a org_id", "cohort is larger than the",
         "cannot bound anything", "cannot be evaluated",
         "an unscoped cap would apply", "Import artifact exceeds the size cap",
@@ -13740,14 +13761,25 @@ class TestBoundedEventCursorBoundaries:
             e["event_id"] for e in first["events"]}
 
     def test_page_two_of_two_is_short_and_that_is_the_signal(self, client):
-        """Boundary 3 — page 2 of 2: a short page means drained."""
+        """Boundary 3 — page 2 of 2: short in THIS population, and PROVED complete.
+
+        Scoped to the population these tests declare (four `PointAdded` events,
+        no duplicate ids). A short page is NOT in general a completion signal —
+        `tortoise/event_store.py::read_after` says so explicitly: a duplicate
+        `event_id` is dropped AFTER the query's `LIMIT`, so a page of `limit`
+        rows can legitimately come back with fewer distinct rows while more
+        remain beyond it. What makes completion a claim HERE is the follow-up
+        page, not the row count.
+        """
         self._seed(client, 4)
         first = client.get("/v1/events", params={"limit": 3, "types": "PointAdded"}).json()
         second = client.get(
             "/v1/events", params={"limit": 3, "types": "PointAdded", "after": first["next_cursor"]}).json()
         assert len(second["events"]) < 3
-        # A short page is a completion claim, and it must be TRUE: one more poll
-        # finds nothing rather than a row the short page silently dropped.
+        # The completion instrument is the EMPTY follow-up page, not the short
+        # count: one more poll must find nothing rather than a row the short
+        # page silently dropped. A short page alone proves nothing about a
+        # drained stream (`read_after`'s duplicate-drop window).
         third = client.get(
             "/v1/events", params={"limit": 3, "types": "PointAdded", "after": second["next_cursor"]}).json()
         assert third["events"] == []

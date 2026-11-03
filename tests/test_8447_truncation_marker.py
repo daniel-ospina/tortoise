@@ -226,6 +226,12 @@ class TestHostedResponseCarriesIt:
         import tortoise.hosted_api as hosted_api
 
         class _FakeSDK:
+            def _get_proj(self):
+                # #10602 review P1: `/v1/search` builds its SDK with the
+                # projection attached on the construction lane, so a fake that
+                # substitutes `_data_sdk` must model the attach.
+                return object()
+
             def tortoise_fts_query(self, q, limit=10, read_status_out=None,
                                    _truncation_out=None, **_ignored):
                 if _truncation_out is not None:
@@ -1200,11 +1206,15 @@ class TestTheMarkerSiteRegisterIsComplete:
     The list is derived from the tree (an AST scan), never restated here, so
     this test cannot itself go stale: adding a marker site without adding it to
     the register reds, which is exactly what the docstring's ⛔ rule promises.
+    That promise was exercised by the merge that landed `hosted_api.py::search`'s
+    outage arm on `main` — a NEW site the register did not name, caught here and
+    not by review.
 
     ⚠️ "Derived from the tree" includes the NAME the marker is called under.
-    The tree already imports `truncation.mark_truncation` under three local
+    The tree already imports `truncation.mark_truncation` under four local
     aliases besides `_mark_truncation` (`_seed_mark`, `_lost_mark`,
-    `_lost_mark2`, all bound by `tortoise_fts_query`), so a filter that
+    `_lost_mark2` bound by `tortoise_fts_query`; `_lost_mark` again in
+    `hosted_api.py::search`), so a filter that
     hard-codes the two names it happens to recognise sees 3 of the 6 call sites
     and would leave the pin green while a NEW site was written in the aliasing
     pattern the tree already uses three times. The name set is therefore read
@@ -1294,16 +1304,20 @@ class TestTheMarkerSiteRegisterIsComplete:
                 for module, _lineno, _name, owner in cls._scan(root)}
 
     def test_the_scan_sees_every_marker_call_site_in_the_tree(self):
-        """All SIX call sites, not the three a two-name filter can match.
+        """All SEVEN call sites, not the three a two-name filter can match.
 
         The tree calls the marker under `mark_truncation`, `_mark_truncation`,
-        and three further aliases introduced by
-        `from .truncation import mark_truncation as …`. Pre-fix the scan matched
-        two hard-coded names, so the three aliased calls were invisible to it —
-        the mount point for a new site that would have gone unpinned while the
-        class docstring promised it could not. Asserted by the alias NAME, not
-        by line number, because a line pin breaks on every unrelated edit to
-        `sdk.py` while an alias pin only breaks when a site is added or moved.
+        and four further alias bindings introduced by
+        `from .truncation import mark_truncation as …` — three inside `sdk.py`
+        and one in `hosted_api.py` (`search`'s out-of-`ImportFrom` alias
+        `_lost_mark`, which `main` added after this register was written).
+        Pre-fix the scan matched two hard-coded names, so the aliased calls were
+        invisible to it — the mount point for a new site that would have gone
+        unpinned while the class docstring promised it could not. Asserted by
+        the alias NAME, not by line number, because a line pin breaks on every
+        unrelated edit to `sdk.py` while an alias pin only breaks when a site is
+        added or moved. The same alias NAME can legitimately appear in two
+        modules, so the key is `(module, name)`.
         """
         from collections import Counter
 
@@ -1311,6 +1325,7 @@ class TestTheMarkerSiteRegisterIsComplete:
                        for module, _lineno, name, _owner in self._scan())
         assert seen == Counter({
             ("tortoise/hosted_api.py", "mark_truncation"): 1,
+            ("tortoise/hosted_api.py", "_lost_mark"): 1,   # search, outage arm
             ("tortoise/sdk.py", "_mark_truncation"): 2,
             ("tortoise/sdk.py", "_seed_mark"): 1,     # as _seed_mark
             ("tortoise/sdk.py", "_lost_mark"): 1,     # as _lost_mark
@@ -1340,11 +1355,12 @@ class TestTheMarkerSiteRegisterIsComplete:
             "tortoise/new_marker_site.py::a_new_bounded_read"
         }
 
-    def test_the_scan_finds_the_three_sites_the_register_names(self):
-        """Guard against a vacuous scan: the AST really does see all three."""
+    def test_the_scan_finds_the_four_sites_the_register_names(self):
+        """Guard against a vacuous scan: the AST really does see all four."""
         sites = self._call_sites()
         assert sites == {
             "tortoise/hosted_api.py::list_points",
+            "tortoise/hosted_api.py::search",
             "tortoise/sdk.py::issue_insight",
             "tortoise/sdk.py::tortoise_fts_query",
         }, sites
