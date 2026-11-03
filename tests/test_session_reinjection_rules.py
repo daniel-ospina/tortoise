@@ -614,12 +614,19 @@ def test_the_guard_arm_requires_a_pool_order_composition():
 
 
 def test_floor_term_and_guard_cap_ride_the_fingerprint():
-    """#2513 (#10629 review): the resolved arm gates the checkpoint.
+    """#2513 (#10629 review): the BUILDER contract for the two guard knobs.
 
     ``floor_term`` is ALWAYS present (the arm/guard-bool convention), so a
     checkpoint produced with the lower bound armed can never be resumed with
     it OFF and a pre-feature checkpoint refuses on resume; the cap is present
     only while a pool-order arm runs (no inert value stamped).
+
+    ⛔ Scope (the #10629 review's finding): this calls ``_build_fingerprint``
+    DIRECTLY, so it proves only that the builder handles the keys — it cannot
+    observe that ``run_evaluation`` forwards them, and it stayed green over a
+    dropped `guard_per_session_cap` forward. The WIRING is pinned end to end
+    by ``test_eval_reinjection_cap_resume.py::
+    test_run_path_refuses_a_guard_cap_change_on_resume``.
     """
     from tools.longmem_eval import run as _run
 
