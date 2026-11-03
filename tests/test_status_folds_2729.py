@@ -432,7 +432,10 @@ class TestFoldBehaviour:
         try:
             sdk.create_entity("object", "T2", objectKind="venture:tranche")
             sdk.create_event("closed", "github.issue.closed", object="T2")
-            assert _object_status(sdk, "T2") == "live"
+            # #9974 R1: a status-less birth stores NO status; "the connector
+            # fold did not relabel it" is now `is None` (absent READS live), and
+            # a written `live` would mean something DID write.
+            assert _object_status(sdk, "T2") is None
         finally:
             sdk.close()
 
@@ -544,7 +547,7 @@ class TestFormWidenedDispatch:
         try:
             sdk.create_entity("object", "B4", objectKind="tranche")
             sdk.create_event("closed", "github.issue.closed", object="B4")
-            assert _object_status(sdk, "B4") == "live"
+            assert _object_status(sdk, "B4") is None  # #9974 R1: not written
         finally:
             sdk.close()
 
@@ -556,7 +559,7 @@ class TestFormWidenedDispatch:
             assert _object_status(sdk, "B5") == "released"
             sdk.create_entity("object", "B6", objectKind="Tranche")
             sdk.create_event("closed", "github.issue.closed", object="B6")
-            assert _object_status(sdk, "B6") == "live"
+            assert _object_status(sdk, "B6") is None  # #9974 R1: not written
         finally:
             sdk.close()
 
@@ -630,7 +633,7 @@ class TestExtractionPipelineFold:
             sdk.create_entity("object", "ISSUE", objectKind="dev:issue")
             sdk.create_event("opened", "github.issue.open",
                              about_entities=["ISSUE"])
-            assert _object_status(sdk, "ISSUE") == "live"
+            assert _object_status(sdk, "ISSUE") is None  # #9974 R1: not written
         finally:
             sdk.close()
 
@@ -672,7 +675,7 @@ class TestOwnershipSurvivesRegistryOutage:
         try:
             sdk.create_entity("object", "O1", objectKind="venture:tranche")
             sdk.create_event("closed", "github.issue.closed", object="O1")
-            assert _object_status(sdk, "O1") == "live"
+            assert _object_status(sdk, "O1") is None  # #9974 R1: not written
         finally:
             sdk.close()
 
@@ -716,7 +719,7 @@ class TestFoldQueryTypeSafety:
         try:
             sdk.create_entity("object", "N3", objectKind=5)
             sdk.create_event("released", "venture:disbursement", object="N3")
-            assert _object_status(sdk, "N3") == "live"
+            assert _object_status(sdk, "N3") is None  # #9974 R1: not written
             # The write itself landed (the Event exists) rather than raising
             # and losing the whole write.
             rows = sdk._get_proj().g.query(
