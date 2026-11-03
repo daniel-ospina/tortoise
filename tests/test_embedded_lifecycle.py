@@ -111,15 +111,17 @@ def _server_cmdline(pid: int) -> str | None:
         except OSError:
             return None  # a real /proc answered: this pid is gone
     try:
-        return _subprocess.run(
-            ["ps", "-o", "command=", "-p", str(pid)],
+        run = _subprocess.run(
+            ["ps", "-ww", "-o", "command=", "-p", str(pid)],
             capture_output=True, text=True, timeout=5, check=False,
-        ).stdout.strip() or None
+        )
     except (OSError, _subprocess.TimeoutExpired):
         return None
-    if out.returncode != 0:
-        return None  # no pid matched: a COMPLETED measurement of "it is gone"
-    return out.stdout.strip() or None
+    # ``ps`` rc 1 ("no pid matched") and an EMPTY argv are the same answer:
+    # a COMPLETED measurement of "it is gone", not an unreadable host. ``-ww``
+    # is the widening flag — without it the argv is cut to the terminal width
+    # and the ``redislite/bin/redis-server`` token can fall off the end.
+    return run.stdout.strip() or None
 
 
 def _server_still_alive(pid: int) -> bool:
@@ -143,9 +145,14 @@ def _spawn_marked_sleeper(*argv: str):
 
 
 def _hide_procfs(monkeypatch) -> None:
-    """Make this Linux host look like a mac: no procfs, ``ps`` only."""
-    monkeypatch.setattr(sys.modules[__name__], "_PROC_CMDLINE_PATH",
-                        "/nonexistent/procfs-for-test/{pid}/cmdline")
+    """Make this Linux host look like a mac: no procfs, ``ps`` only.
+
+    Flips the module's own :data:`_HAVE_PROC` gate — the flag
+    :func:`_server_cmdline` reads at CALL time, which is what makes the
+    fallback exercised on a host that HAS procfs instead of only on the mac
+    that lacks it.
+    """
+    monkeypatch.setattr(sys.modules[__name__], "_HAVE_PROC", False)
 
 
 @pytest.mark.parametrize("what", ["cmdline", "still_alive", "recycling_guard"])
@@ -162,8 +169,8 @@ def test_server_probe_is_portable_without_procfs(monkeypatch, what):
     executable on any host: it hides procfs AND makes the ``/proc`` arm answer
     ``None`` (what it answers on a host that has none) *before* it asserts, so
     a ``/proc``-only read cannot satisfy it — the Linux CI host included. That
-    is a correction of this test's own first form, which gated the arms on
-    ``_cmdline_from_proc`` and therefore passed on Linux only and failed
+    is a correction of this test's own first form, which gated the arms on a
+    ``/proc``-only read and therefore passed on Linux only and failed
     deterministically on the mac it was written for (3 arms x 10 s). The arms
     themselves red on the pre-fix code by NAME and by BEHAVIOUR:
 
@@ -191,15 +198,13 @@ def test_server_probe_is_portable_without_procfs(monkeypatch, what):
         # child, not a pid that was never there) AND it reds a ``/proc``-only
         # pre-check on a Linux host, where such a read is invisible to review.
         _hide_procfs(monkeypatch)
-        monkeypatch.setattr(sys.modules[__name__], "_cmdline_from_proc",
-                            lambda pid: None)
         assert wait_for(lambda: _server_cmdline(proc.pid) is not None,
                         timeout_s=10), (
             "the child never became observable through the ps fallback — on a "
             "host without procfs that is the false-PASS shape this probe "
             "removes")
-        if what == "ps_arm":
-            got = _cmdline_from_ps(proc.pid)
+        if what == "cmdline":
+            got = _server_cmdline(proc.pid)
             assert got is not None, (
                 "no argv from ps when /proc is absent — the probe is still "
                 "Linux-only")
