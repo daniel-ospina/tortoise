@@ -2486,8 +2486,9 @@ def test_a_peer_rerun_inside_the_pass_window_is_never_cancelled(monkeypatch):
     """⭐ P2 (review): the act-time re-measurement re-read the run's STATUS and JOB
     COUNT but DISCARDED its attempt identity.
 
-    A fresh re-run attempt is `queued`, has `0` jobs and a null `run_started_at` —
-    byte-identical to the stalled run the classification was made from. So a peer (or
+    A fresh re-run attempt is `queued` with `0` jobs — identical to the stalled run on
+    the two fields the act-time gate originally compared, so it was
+    byte-indistinguishable from the stall the classification was made from. So a peer (or
     a human) re-running the same run id between `build_plans` and `report` acting was
     cancelled and re-run AGAIN: a normally-progressing attempt destroyed, a second
     attempt of the budget spent, and with `max_attempts = 3` the context escalated
