@@ -1100,7 +1100,7 @@ def test_an_empty_carrier_is_not_a_supersession():
     `public.object_current_status` reads the carriers with `IS NOT NULL`, so a
     row whose `superseded_by` is `''` answers `'superseded'` there. The GRAPH
     does not agree, and the graph is what this cache is a cache OF. Measured on
-    a live engine at this head:
+    a live engine before #10192's write-door guard:
 
         update_entity(obj, supersededBy="")   ->  status='live',  supersededBy=''
         update_entity(obj, supersededBy="v2") ->  status='live',  supersededBy='v2'
@@ -1109,6 +1109,12 @@ def test_an_empty_carrier_is_not_a_supersession():
     the record VIEW is the side that over-reports on this edge (a defect in the
     view, named in `DERIVED_FROM_RECORD`'s bound). Deriving on an empty carrier
     would resurrect a node as TERMINAL that the graph holds LIVE.
+
+    ⚠️ #10192 makes those two shapes UNWRITABLE through the tenant doors
+    (`sdk._refuse_bare_lifecycle_carrier`), so an empty-carrier row is now
+    LEGACY-ONLY rather than mintable. The derivation below is still the right
+    answer for a legacy row — and the answer must not move: the row, not the
+    write door, is what this table reads.
     """
     for label in ("Object", "Subject"):
         node = _node(label, {"id": "e-1", "name": "epsilon",

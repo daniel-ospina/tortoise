@@ -3711,6 +3711,125 @@ def _entity_door_props(kind_key: str, name: str, props: dict) -> dict:
     return out
 
 
+# ── #10192: a lifecycle CARRIER needs the STATUS it implies ────────────────
+#
+# ``:Object`` / ``:Subject`` carry TWO PRIMARY lifecycle carriers
+# (``supersededBy``, ``supersededAt``) and one DERIVED, never-stored ``status``
+# (``record_projection``'s ``never_store={"object": {"status"}}``). The
+# record's procedural fold derives that status from the CARRIERS ALONE —
+# ``20261012000004_record_procedural.sql``: ``CASE WHEN superseded_by IS NOT
+# NULL OR superseded_at IS NOT NULL THEN 'superseded' ELSE 'live' END`` — and
+# it cannot read the graph. So a carrier written WITHOUT a status makes the
+# record answer ``'superseded'`` for a node the graph holds ``'live'``, and
+# every consumer of that fold then treats a LIVE entity as TERMINAL (#9974's
+# record-sourced rebuild: ``live._terminal_excluded`` drops it from recall and
+# ``entity_identity.resolve_entity_id`` refuses its name).
+#
+# MEASURED at this head (embedded lane), all four ACCEPTED before this guard:
+#   update_entity(o, supersededBy='v2')                    -> ('live', 'v2', None)
+#   update_entity(o, supersededAt='2026-01-01T00:00:00Z')  -> ('live', None, '…')
+#   update_entity(o, supersededBy='')                      -> ('live', '', None)
+#   create_object('eta', props={'supersededBy': 'eta-v2'}) -> ('live', 'eta-v2')
+# Each journals ``EntityMutated op=supersede`` with the carrier and nothing
+# else (``classify_entity_mutation_op``: "a record carrying ``supersededBy`` IS
+# a supersession whatever else it carries"), and each then reaches
+# ``public.object`` as a carrier with ``superseded_at``/``superseded_by`` NULL
+# on the other side — which is exactly the row #9974's rebuild reads.
+#
+# THE INCOHERENCE IS A WRITE-DOOR DEFECT, so it is refused AT THE DOOR: the two
+# stores cannot disagree if the incoherent state is unwritable, and the refusal
+# is fail-closed (it can never CREATE a wrong state). REFUSE, never COMPLETE —
+# silently adding ``status='superseded'`` would change what a call that SUCCEEDS
+# means, in the one destructive direction (a live entity disappears from
+# recall), and it does not even close the blank-pointer row (with
+# ``supersededBy=''`` the rebuild derives nothing, so the node would resurrect
+# instead of bury — a new divergence traded for the old one). The relational
+# shape for "these columns must agree" is a CHECK that RAISES and never fills
+# the missing half in (PostgreSQL 18 §5.5: "If a user attempts to store data in
+# a column that would violate a constraint, an error is raised").
+#
+# BOTH entity doors carry it — ``_update_entity`` AND ``_create_entity``, whose
+# ``_upsert_object``/``_upsert_subject`` MERGE ON MATCH and therefore reach an
+# EXISTING node: a guard on one door is bypassable in one call (the #5475
+# third-door lesson).
+#
+# ⛔ WHAT THIS IS NOT, stated because both neighbours are reachable and neither
+# is in scope:
+#   * NOT a ban on the carriers. A CLEARED carrier (``supersededBy=None`` /
+#     ``supersededAt=None``) is the documented, RECORD-CARRIED un-supersede and
+#     stays writable — ``None`` is not a carrier.
+#   * NOT a repair of the mirror shape (``status='superseded'`` with NO
+#     carrier). That one makes a rebuild REVIVE a node rather than bury a live
+#     one, it is already named as #9974's open window in
+#     ``cache_projection.DERIVED_FROM_RECORD``, and
+#     ``update_entity(subject, status='superseded')`` is a shape in use
+#     (``tests/test_ingest_event_endpoint.py``) — refusing it here would be an
+#     over-block.
+#   * NOT a change to the record's fold. ``public.*_current_status`` keeps its
+#     ``IS NOT NULL`` predicate: it is the record's DECLARED derivation, it
+#     cannot see the graph, and a second rule there would give the cache and
+#     the record two different folds — the defect #9974 exists to remove.
+_LIFECYCLE_CARRIER_PROPS: tuple[str, ...] = ("supersededBy", "supersededAt")
+
+#: The one ``status`` value a lifecycle carrier is coherent with — the value the
+#: fold's own successor arm writes (``_fold_object_superseded``) and the value
+#: ``_SUBJECT_STATUS_VALUES`` already declares for the Subject twin.
+_LIFECYCLE_SUPERSEDED_STATUS = "superseded"
+
+
+def _bare_lifecycle_carriers(props: dict) -> list[str]:
+    """The lifecycle carriers this write SETS, in declaration order (#10192).
+
+    A carrier set to ``None`` is a CLEAR (``SET n += {k: null}`` removes the
+    property live, and the fold's identical ``SET n += {k: null}`` removes it
+    on replay), so it is not a carrier this guard has anything to say about.
+    An EMPTY-STRING carrier IS a set: ``'' IS NOT NULL`` in the record's own
+    predicate, so it reads as a supersession there while naming no successor.
+    """
+    return [k for k in _LIFECYCLE_CARRIER_PROPS
+            if k in props and props[k] is not None]
+
+
+def _refuse_bare_lifecycle_carrier(props: dict, *, door: str) -> None:
+    """#10192: refuse a lifecycle CARRIER written without ``status='superseded'``.
+
+    Pure with respect to the graph and to ``props`` (it never mutates the
+    caller's bag — the write below is byte-identical for an accepted call).
+    The caller decides WHICH targets this applies to: ``_update_entity`` must
+    probe the node first (it is the generic door onto EVERY label, and
+    ``supersededBy`` on a ``:Point``/``:Source`` is an ordinary free-form prop
+    the record has no lifecycle column for), while ``_create_entity`` knows
+    its ``label`` by construction.
+
+    The message states what happened, why, and what to do — the #5475 Option-A
+    refusal shape, so a writer is never left paralysed by a correct refusal.
+    """
+    carriers = _bare_lifecycle_carriers(props)
+    if not carriers:
+        return
+    if props.get("status") == _LIFECYCLE_SUPERSEDED_STATUS:
+        return
+    _blank = sorted(k for k in carriers if props[k] == "")
+    raise ValueError(
+        f"{carriers!r} cannot be written through {door} without "
+        f"status={_LIFECYCLE_SUPERSEDED_STATUS!r} (#10192). A lifecycle "
+        "carrier is the RECORD's only evidence of the lifecycle status "
+        "(`status` is a derived cache and never a record column), so a "
+        "carrier on its own makes the record's procedural fold "
+        "(public.object_current_status / public.subject_current_status) "
+        "answer 'superseded' for a node the graph holds LIVE — and a "
+        "record-sourced rebuild then materializes a TERMINAL node, dropping "
+        "it from recall and refusing its name. Write the coherent triple in "
+        "ONE call — status='superseded' together with "
+        "supersededBy=/supersededAt= — or clear the carriers (pass None) to "
+        "un-supersede." + (
+            f" {_blank!r} is also refused as an empty successor pointer: "
+            "'' is not NULL, so it reads as a supersession to the fold while "
+            "naming no successor." if _blank else ""
+        )
+    )
+
+
 # ── #9964: the kind decides the layer ──────────────────────────────────────
 #
 # ONE authority answers "which layer does this kind belong to?"
@@ -35741,6 +35860,49 @@ class TortoiseSDK:
                 _refuse_invisible_kind("pointKind", props.get(spelling),
                                        door=door)
 
+    def _refuse_bare_lifecycle_carrier_on_entity(self, id_val: str,
+                                                props: dict) -> None:
+        """#10192: the TARGET-AWARE half of the carrier guard, for `_update_entity`.
+
+        ``_update_entity`` is the documented tenant route onto EVERY canonical
+        label, so the carrier rule cannot be applied to its props
+        unconditionally: on a ``:Point`` / ``:Source`` / ``:Event``,
+        ``supersededBy`` is an ordinary free-form property the record has no
+        lifecycle column for, and refusing it would be an over-block on a
+        write this guard has no business with (the #9287 / #3998 lesson — a
+        label-agnostic gate at this seam failed unrelated writes, measured).
+        ``:Object`` and ``:Subject`` are the ONLY labels `public.object` /
+        `public.subject` carry the two PRIMARY columns for, so they are the
+        only targets whose carrier can reach the record's fold.
+
+        ATOMICITY: the caller places this before the door's FIRST write (the
+        ``:Point`` status arm), so a refused call leaves the node byte-
+        identical AND appends no ``EntityMutated`` record — the journal is the
+        record's only producer, so a refusal that journaled would still hand
+        the carrier to the record.
+
+        COST: the two ``{id:$id}`` index probes are paid ONLY by a write that
+        actually carries a non-NULL carrier and does not already say
+        ``status='superseded'`` — i.e. exactly the writes this refuses. An
+        ordinary ``update_entity`` pays nothing, and a COHERENT supersession
+        pays nothing either.
+        """
+        if not _bare_lifecycle_carriers(props):
+            return
+        if props.get("status") == _LIFECYCLE_SUPERSEDED_STATUS:
+            return
+        g = self._get_proj().g
+        for label in ("Object", "Subject"):
+            # `{id:$id}` is the PRIMARY key of both labels
+            # (`_CANONICAL_ENTITY_ID_PROPS`), the same predicate the lifecycle
+            # write itself resolves by; neither label has a secondary key.
+            hits = g.query(
+                f"MATCH (n:{label} {{id:$id}}) RETURN count(n)",
+                params={"id": id_val},
+            ).result_set
+            if hits and hits[0][0]:
+                _refuse_bare_lifecycle_carrier(props, door="update_entity")
+
     def _refuse_unapproved_kinds_in_props(self, props: dict) -> None:
         """Run the #5475 gate over EVERY kind property a write is carrying.
 
@@ -35865,6 +36027,19 @@ class TortoiseSDK:
                                     reject_belief_props=True)
         if is_episodic is not None:
             props["is_episodic"] = is_episodic  # server-managed (explicit param only)
+        # ── #10192: the SECOND entity door for the lifecycle-carrier guard ──
+        # `_upsert_object` / `_upsert_subject` MERGE ON MATCH, so this funnel
+        # reaches an EXISTING node too — a guard on `_update_entity` alone is
+        # bypassable in one call (`create_object('x', props={'supersededBy':
+        # 'y'})`, measured ACCEPTED at this head, leaves the node `status='live'`
+        # with the carrier set). Gated on the LABEL: `create_document` /
+        # `create_source` reach this same funnel, and `:Source`/`:Document` have
+        # no lifecycle columns in the record (the carrier would be an ordinary
+        # prop). `status` is always present on an Object/Subject event here —
+        # `_entity_door_props` seeds `'live'` and a caller prop overrides it —
+        # so the guard can read it directly.
+        if label in ("Object", "Subject"):
+            _refuse_bare_lifecycle_carrier(props, door="create_entity")
         proj = self._get_proj()
         # Build event dict. (#2296 review) The ENVELOPE owns `type`: the
         # `**props` splat would otherwise let a caller prop of that name become
@@ -36467,6 +36642,15 @@ class TortoiseSDK:
         # ``['dev','marketing']``. Same rule, same funnel, same refusal as the
         # create doors because it is the SAME helper.
         self._refuse_unapproved_kinds_in_props(props)
+        # ── #10192: a lifecycle CARRIER needs the STATUS it implies ──
+        # Placed HERE, before the method's FIRST write (the ``:Point`` status
+        # arm below), so the refusal is ATOMIC: a refused call leaves the node
+        # unchanged AND journals nothing (the journal is the record's only
+        # producer). Target-aware: `_update_entity` is the generic tenant route
+        # onto every label, and only `:Object`/`:Subject` carry the record's two
+        # PRIMARY lifecycle columns; on any other label a carrier is an ordinary
+        # free-form prop. See `_refuse_bare_lifecycle_carrier_on_entity`.
+        self._refuse_bare_lifecycle_carrier_on_entity(id_val, props)
         # #9287: ``update_entity`` is the SECOND documented UPDATE door onto a
         # ``:Point`` (``commit_schema`` lists the pair: ``update_point`` /
         # ``_update_entity``) and it writes caller props with a live

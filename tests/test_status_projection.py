@@ -888,3 +888,263 @@ class TestReadSide:
                 f"missing {terminal_names - with_all}")
         finally:
             sdk.close()
+
+
+# ── #10192: a lifecycle CARRIER needs the STATUS it implies ───────────
+
+class TestLifecycleCarrierNeedsStatus:
+    """#10192 — a carrier written without ``status='superseded'`` is REFUSED.
+
+    **The defect, measured at this head (embedded lane) before the guard.** A
+    ``:Object``/``:Subject`` carries TWO PRIMARY lifecycle carriers
+    (``supersededBy`` / ``supersededAt``) and one DERIVED, never-stored
+    ``status``. The record's procedural fold derives the status from the
+    CARRIERS ALONE — ``20261012000004_record_procedural.sql``::
+
+        CASE WHEN superseded_by IS NOT NULL OR superseded_at IS NOT NULL
+             THEN 'superseded' ELSE 'live' END
+
+    — and it cannot read the graph. So all four of these were ACCEPTED and each
+    left the record answering ``'superseded'`` for a node the graph holds
+    ``'live'``::
+
+        update_entity(o, supersededBy='v2')                    -> ('live', 'v2', None)
+        update_entity(o, supersededAt='2026-01-01T00:00:00Z')  -> ('live', None, '…')
+        update_entity(o, supersededBy='')                      -> ('live', '', None)
+        create_object('eta', props={'supersededBy': 'eta-v2'}) -> ('live', 'eta-v2')
+
+    #9974's record-sourced rebuild faithfully reproduces that fold, so the
+    disagreement surfaced as a WRONG GRAPH: a LIVE entity came back TERMINAL
+    (``live._terminal_excluded`` dropped it from recall,
+    ``entity_identity.resolve_entity_id`` refused its name).
+
+    **What this pins.** The fix is a WRITE-DOOR refusal, not a change to the
+    record's fold and not a silent "helpful" expansion of the caller's write
+    (see ``sdk._refuse_bare_lifecycle_carrier``'s own bound). Four things have
+    to hold, and each has its own test below:
+
+    1. every bare-carrier shape is REFUSED (pointer-only, stamp-only,
+       empty-carrier, and ``status='live'`` + pointer);
+    2. the refusal is ATOMIC — the node is byte-identical afterwards AND no
+       ``EntityMutated`` record is appended (the journal is the record's only
+       producer, so a journaling refusal would still hand the carrier over);
+    3. the SECOND entity door (``create_entity``, whose ``_upsert_object``
+       MERGEs ON MATCH and therefore reaches an EXISTING node) refuses too —
+       the #5475 third-door lesson;
+    4. a COHERENT supersession (the triple in one call), a CLEARED
+       supersession (the documented record-carried un-supersede) and a carrier
+       on a NON-lifecycle label all stay writable — the over-block this guard
+       must never become.
+    """
+
+    #: The bare-carrier shapes the issue names, each with the status the call
+    #: (deliberately) does NOT set. ``supersededBy=''`` is the empty carrier:
+    #: ``'' IS NOT NULL`` in the record's own predicate, so it reads as a
+    #: supersession there while naming no successor.
+    BARE_SHAPES = (
+        {"supersededBy": "successor-B"},
+        {"supersededAt": "2026-01-01T00:00:00Z"},
+        {"supersededBy": ""},
+        {"status": "live", "supersededBy": "successor-B"},
+    )
+
+    @staticmethod
+    def _seed(sdk: TortoiseSDK, label: str, name: str) -> str:
+        if label == "Object":
+            return sdk.create_object(name, objectKind="core:strategy")["id"]
+        return sdk.create_subject(name, subjectKind="core:team")["id"]
+
+    @staticmethod
+    def _carriers(sdk: TortoiseSDK, label: str, name: str):
+        return sdk._get_proj().g.query(
+            f"MATCH (n:{label} {{name:$n}}) "
+            "RETURN n.status, n.supersededBy, n.supersededAt",
+            params={"n": name}).result_set
+
+    @staticmethod
+    def _mutations(journal: Path) -> list[dict]:
+        """``EntityMutated`` records on disk — the only carrier of a supersede."""
+        from tortoise.log import EventLog
+        return [r for r in EventLog(str(journal)).read_all()
+                if r.get("type") == "EntityMutated"]
+
+    def _sdk(self, tmp_path: Path) -> tuple[TortoiseSDK, Path]:
+        events = tmp_path / "events"
+        events.mkdir()
+        journal = events / "events.jsonl"
+        return (TortoiseSDK(str(tmp_path / "t10192.db"),
+                            event_log_path=str(journal)), journal)
+
+    @pytest.mark.parametrize("label", ["Object", "Subject"])
+    @pytest.mark.parametrize("shape", BARE_SHAPES,
+                             ids=["pointer-only", "stamp-only",
+                                  "empty-carrier", "live-status-plus-pointer"])
+    def test_a_bare_carrier_is_refused_and_writes_nothing(
+            self, tmp_path, label, shape):
+        """R1/R2/R3: the refusal fires, and it is ATOMIC on both stores."""
+        sdk, journal = self._sdk(tmp_path)
+        try:
+            oid = self._seed(sdk, label, "carrier-target")
+            before = self._carriers(sdk, label, "carrier-target")
+            assert before == [["live", None, None]], before
+            journal_before = len(self._mutations(journal))
+
+            with pytest.raises(ValueError) as exc:
+                sdk.update_entity(oid, **shape)
+
+            msg = str(exc.value)
+            # The message states what happened, why, and what to do (#5475
+            # Option A): the coherent triple, and how to un-supersede.
+            assert "superseded" in msg, msg
+            assert "status='superseded'" in msg, msg
+            assert "supersededBy=" in msg or "supersededAt=" in msg, msg
+
+            # ATOMIC on the GRAPH: byte-identical, no half write.
+            assert self._carriers(sdk, label, "carrier-target") == before, (
+                "a REFUSED carrier write mutated the node — the refusal must "
+                "precede the first write on the door")
+            # ATOMIC on the RECORD: `state` is what reaches `public.object`,
+            # so a journaled refusal would still hand the carrier over.
+            assert len(self._mutations(journal)) == journal_before, (
+                "a REFUSED carrier write journaled an EntityMutated record — "
+                "the record would still receive the carrier")
+        finally:
+            sdk.close()
+
+    @pytest.mark.parametrize("shape", BARE_SHAPES,
+                             ids=["pointer-only", "stamp-only",
+                                  "empty-carrier", "live-status-plus-pointer"])
+    def test_the_create_door_refuses_a_bare_carrier(self, tmp_path, shape):
+        """R4: the SECOND entity door — `_upsert_object` MERGEs ON MATCH.
+
+        A guard on `update_entity` alone is bypassable in one call, and the
+        create door reaches an EXISTING node (`ON MATCH`), so it is not even a
+        create-only hole.
+        """
+        sdk, journal = self._sdk(tmp_path)
+        try:
+            journal_before = len(self._mutations(journal))
+            with pytest.raises(ValueError) as exc:
+                sdk.create_object("born-incoherent", props=dict(shape))
+            assert "create_entity" in str(exc.value), str(exc.value)
+            assert self._carriers(sdk, "Object", "born-incoherent") == [], (
+                "a REFUSED create still minted the node")
+            assert len(self._mutations(journal)) == journal_before
+
+            # …and the SUBJECT twin, through `create_entity(type='subject')`.
+            with pytest.raises(ValueError):
+                sdk.create_entity("subject", "born-incoherent-subject",
+                                  subjectKind="core:team", **shape)
+            assert self._carriers(
+                sdk, "Subject", "born-incoherent-subject") == []
+        finally:
+            sdk.close()
+
+    def test_the_create_door_refusal_reaches_an_existing_node(self, tmp_path):
+        """R4, the shape that makes it a real bypass: ON MATCH.
+
+        A bare carrier handed to `create_object` for a name that ALREADY
+        exists is not a create — `_upsert_object` MERGEs the live node — so
+        before the guard it wrote the carrier onto a registered, live entity.
+        """
+        sdk, _journal = self._sdk(tmp_path)
+        try:
+            sdk.create_object("already-there", objectKind="core:strategy")
+            before = self._carriers(sdk, "Object", "already-there")
+            assert before == [["live", None, None]], before
+            with pytest.raises(ValueError):
+                sdk.create_object("already-there",
+                                  props={"supersededBy": "successor-B"})
+            assert self._carriers(sdk, "Object", "already-there") == before
+        finally:
+            sdk.close()
+
+    @pytest.mark.parametrize("label", ["Object", "Subject"])
+    def test_the_coherent_triple_is_accepted_and_journals_it(
+            self, tmp_path, label):
+        """R1 (no over-block): the ONE write the fold's premise names.
+
+        The triple in a single state map — the shape both in-tree producers
+        (`_fold_object_superseded`, `_apply_subject_supersession`) already
+        write — must stay writable, must land, and must journal ONE
+        `EntityMutated op=supersede` whose `state` carries all three keys, so
+        the record and the graph agree by construction.
+        """
+        sdk, journal = self._sdk(tmp_path)
+        try:
+            oid = self._seed(sdk, label, "coherent-target")
+            before = len(self._mutations(journal))
+            sdk.update_entity(oid, status="superseded",
+                              supersededBy="successor-B",
+                              supersededAt="2026-01-01T00:00:00Z")
+            assert self._carriers(sdk, label, "coherent-target") == [
+                ["superseded", "successor-B", "2026-01-01T00:00:00Z"]], (
+                "the coherent triple did not land — the guard over-blocked")
+
+            new = self._mutations(journal)[before:]
+            supersedes = [r for r in new
+                          if r.get("op") == "supersede"
+                          and r.get("label") == label]
+            assert len(supersedes) == 1, new
+            state = supersedes[0]["state"]
+            assert state.get("status") == "superseded", state
+            assert state.get("supersededBy") == "successor-B", state
+            assert state.get("supersededAt") == "2026-01-01T00:00:00Z", state
+        finally:
+            sdk.close()
+
+    def test_a_born_superseded_create_is_still_writable(self, tmp_path):
+        """R1: the coherent create is a legitimate shape and stays accepted."""
+        sdk, _journal = self._sdk(tmp_path)
+        try:
+            sdk.create_object("born-superseded", status="superseded",
+                              supersededBy="successor-B",
+                              supersededAt="2026-01-01T00:00:00Z")
+            assert self._carriers(sdk, "Object", "born-superseded") == [
+                ["superseded", "successor-B", "2026-01-01T00:00:00Z"]]
+        finally:
+            sdk.close()
+
+    @pytest.mark.parametrize("label", ["Object", "Subject"])
+    def test_clearing_a_supersession_is_still_writable(self, tmp_path, label):
+        """R1: the record-CARRIED un-supersede — `None` is not a carrier.
+
+        `cache_projection.DERIVED_FROM_RECORD`'s "NOT MONOTONE" bullet: an
+        explicit `status='live'` + both carriers `None` journals
+        `op=supersede` with null state and the record mutation CLEARS both
+        columns, so a rebuild derives nothing — matching the graph. Refusing
+        it would be the over-block this contract's R1 forbids.
+        """
+        sdk, _journal = self._sdk(tmp_path)
+        try:
+            oid = self._seed(sdk, label, "clearable")
+            sdk.update_entity(oid, status="superseded",
+                              supersededBy="successor-B",
+                              supersededAt="2026-01-01T00:00:00Z")
+            sdk.update_entity(oid, status="live", supersededBy=None,
+                              supersededAt=None)
+            assert self._carriers(sdk, label, "clearable") == [
+                ["live", None, None]], "the un-supersede did not clear"
+        finally:
+            sdk.close()
+
+    def test_a_carrier_on_a_non_lifecycle_label_is_not_gated(self, tmp_path):
+        """R1/R5: `update_entity` reaches EVERY label — the guard is
+        TARGET-AWARE.
+
+        `:Point` / `:Source` / `:Event` have no lifecycle columns in the
+        record, so a `supersededBy` prop on them is an ordinary free-form
+        property. A label-agnostic gate here would refuse a write it has no
+        business with — the #9287/#3998 lesson, measured at this seam.
+        """
+        sdk, _journal = self._sdk(tmp_path)
+        try:
+            pid = sdk.create_point("observation", "a point about carriers")["id"]
+            sdk.update_entity(pid, supersededBy="free-form-value")
+            rows = sdk._get_proj().g.query(
+                "MATCH (n:Point {id:$id}) RETURN n.supersededBy, n.status",
+                params={"id": pid}).result_set
+            assert rows == [["free-form-value", None]] or \
+                rows == [["free-form-value", "live"]], rows
+        finally:
+            sdk.close()
