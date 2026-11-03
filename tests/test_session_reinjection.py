@@ -14,7 +14,9 @@ Hermetic contract proven here (docker lane, dense leg pinned out):
         the guard, not the fetched items (falsifier 1),
   * (b) default OFF == explicit OFF, byte-identical ranked ids,
   * (c) fail-open: a fetch failure, a zero-new-ids fetch, AND a forced
-        merge-stage exception each return the base pool unchanged,
+        merge-stage exception each return the base pool unchanged; a census
+        (measurement) failure leaves the merged pool INTACT and records
+        ``measured: False`` — a measurement never decides the arm,
   * (d) caps: the C5 per-session raw-chunk cap holds on the re-injected
         pool. ⚠️ The C5 re-cap counts only raw chunks, so this test pins
         the arm at the NON-default chunk grain (``_pin_chunk_grain``); the
@@ -279,9 +281,11 @@ def test_reinjection_flips_a_starved_session_into_top5(seeded_sdk):
     assert "srBp0" not in off_ids[:5], (
         "the monopolised pool must starve session B out of the top-5")
     assert off["session_recall@k"]["5"] == 0.5
-    # off-arm census is the zeroed shape (reconstructable per question)
+    # off-arm census is the zeroed shape (reconstructable per question) — and
+    # ``measured: False``, because NO census runs on this arm
     assert off["session_reinjection"] is False
     st_off = off["session_reinjection_stats"]
+    assert st_off["reader_window_displacement"]["measured"] is False
     assert st_off["seeded"] == 0
     assert st_off["injected_total"] == 0
     assert st_off["injected_merged"] == 0
@@ -460,6 +464,135 @@ def test_floor_term_arm_reaches_the_reinjection_merge(seeded_sdk,
     assert seen == [{"floor_term": False,
                      "per_session_cap": DEFAULT_POOL_SESSION_CAP}], seen
     assert off["session_reinjection_stats"]["floor_term"] is False
+def test_census_failure_is_UNMEASURED_and_does_not_decide_the_arm(
+        seeded_sdk, monkeypatch):
+    """#10540: the reader-window census is a MEASUREMENT, so its failure must
+    not decide whether the treatment is applied.
+
+    The census has its own ``except`` and sits AFTER ``pool = _merged``, and
+    the two halves of that are what this pins — they fail DIFFERENTLY:
+
+      * if it is moved back onto the arm's decision path, the merge reverts to
+        the control pool and the injected ids vanish from ``hits``;
+      * if its exception is instead allowed to reach the OUTER fail-open
+        handler, the merged pool still stands (``hits`` keep the injected
+        ids) and only the MERGED counters are cleared — that handler's own
+        contract is "the SEED and FETCH censuses are NOT wiped", so
+        ``fetch_ok`` is deliberately still True on that path.
+
+    Where its own ``except`` handles the failure — the path this test
+    measures — the census must read the UNMEASURED shape (``measured: False``
+    and ``None`` values), never the zeroed one: a zero there would be
+    indistinguishable from "no crowding" and from a merge-stage failure at
+    the same time. (On the outer-handler branch the census is simply never
+    written and keeps its initialised zeroed shape — ``measured: False`` since
+    the never-attempted path stopped claiming a measurement — so this key's
+    assertion fails with it on the ``None``-vs-``0`` values; the COUNTERS are
+    what identify the branch (they clear to 0 while ``hits`` still carry the
+    injected ids).)
+    """
+    from tools.longmem_eval.retrieve import retrieve_for_question
+    from tortoise import session_reinjection as _sr
+
+    q = _question()
+    measure = dict(ks=(5,), top_k=10, pool_size=60,
+                   session_reinjection=True)
+    # the same run with the census WORKING is the counterfactual: a census
+    # failure may change the census key and the LATENCY, and no other
+    # OUTCOME key.
+    ok = retrieve_for_question(seeded_sdk, q, **measure)
+    st_ok = ok["session_reinjection_stats"]
+    assert st_ok["reader_window_displacement"]["measured"] is True
+    assert st_ok["injected_merged"] > 0
+
+    def _boom(*a, **kw):
+        raise RuntimeError("census blew up")
+
+    monkeypatch.setattr(_sr, "reader_window_displacement", _boom)
+    ret = retrieve_for_question(seeded_sdk, q, **measure)
+    st = ret["session_reinjection_stats"]
+    # (1) the ARM was still applied, byte-identically: a census failure did
+    # not revert the pool, clear the merged counters, or let its exception
+    # reach the outer fail-open handler (which would clear ``injected_merged``
+    # to 0 and leave the initialised zeroed census shape instead).
+    # ``fetch_ok`` is never CLEARED by either handler — the outer handler's
+    # contract is "only the MERGED counters are cleared" — so on this path it
+    # stays True. It is not True on EVERY fail-open path: a fetch that itself
+    # reports not-ok leaves it False (``test_fetch_failure_keeps_the_base_pool``).
+    # So this assertion documents that contract rather than discriminating a
+    # branch.
+    assert st["fetch_ok"] is True
+    assert [h["id"] for h in ret["hits"]] == [h["id"] for h in ok["hits"]]
+    assert st["injected_merged"] == st_ok["injected_merged"] > 0
+    assert (st["injected_per_session_merged"]
+            == st_ok["injected_per_session_merged"] != {})
+    assert ({h["id"] for h in ret["hits"]}
+            == {h["id"] for h in ok["hits"]})
+    # (2) the census records UNMEASURED, not a zero that reads as "no
+    # crowding" — ``window`` still reports what was attempted
+    assert st["reader_window_displacement"] == {
+        "window": 40, "injected_in_window": None, "base_displaced": None,
+        "sessions_lost": None, "sessions_before": None,
+        "sessions_after": None, "measured": False}
+
+
+def test_an_unrun_census_is_never_reported_as_a_measured_zero(
+        seeded_sdk, monkeypatch):
+    """#10540 (review P2): ``measured`` is ``True`` IFF the census actually ran.
+
+    The zeroed shape is minted BEFORE the arm decides, so it is what ships on
+    every path that never reaches the census: the whole OFF arm (half of every
+    A/B run), every TR question, and an ON-arm question whose fetch injected
+    nothing (plus a not-ok fetch and a merge-stage failure, which have their
+    own tests). On those paths ``sessions_before == 0`` is a PLACEHOLDER —
+    the shipped comment two lines above the shape says exactly that — so
+    ``measured: True`` makes three distinct states report one value: "the
+    census ran and found no crowding", "no census was taken", and "the arm
+    did nothing at all".
+
+    Two consequences the flag exists to prevent, both silent: a consumer that
+    filters on ``measured`` (the documented way to read this key) folds half a
+    corpus's OFF-arm questions into the crowding sample, and a consumer that
+    computes ``len(sessions_lost) / sessions_before`` divides by zero on 100%
+    of the OFF arm. Pre-fix this test fails on the FIRST assertion with
+    ``measured: True``; the counts asserted beside it are what keep the fix
+    minimal — the arm delta the shipped comment protects stays byte-identical.
+
+    The counterfactual (``measured: True`` with real counts) is not re-taken
+    here: ``test_census_failure_is_UNMEASURED_and_does_not_decide_the_arm``
+    reads it on the SAME question with the arm ON.
+    """
+    from tools.longmem_eval.retrieve import retrieve_for_question
+    from tortoise import session_reinjection as _sr
+
+    def _census(**kwargs):
+        ret = retrieve_for_question(seeded_sdk, ks=(5,), top_k=10,
+                                    pool_size=60, **kwargs)
+        return ret["session_reinjection_stats"]["reader_window_displacement"]
+
+    off = _census(question=_question(), session_reinjection=False)
+    tr = _census(question=_question(question_type="temporal-reasoning"),
+                 session_reinjection=True)
+    monkeypatch.setattr(
+        _sr, "source_session_chunk_pass",
+        lambda *a, **kw: {"ok": True, "by_session": {}, "total": 0,
+                          "dropped_by_cap": 0, "total_cap_hit": False})
+    nothing_injected = _census(question=_question(), session_reinjection=True)
+
+    for name, d in (("off", off), ("tr", tr),
+                    ("on-but-nothing-injected", nothing_injected)):
+        assert d["measured"] is False, (name, d)
+        # the VALUES are untouched by the fix: a zeroed design, not a
+        # measurement — so the per-question arm delta stays reconstructable
+        assert (d["sessions_before"], d["sessions_after"]) == (0, 0), name
+        assert d["sessions_lost"] == [] and d["base_displaced"] == 0, name
+        assert d["injected_in_window"] == 0, name
+    # ``window`` still reports what WOULD have been censused — the reader's
+    # resolved item cap, which for a TR question is the pinned ``tr_top_k``
+    # (the arm is excluded there, so the number is the only honest one)
+    from tools.longmem_eval.retrieve import DEFAULT_TR_TOP_K
+    assert off["window"] == 40, off["window"]
+    assert tr["window"] == DEFAULT_TR_TOP_K, tr["window"]
 
 
 def test_one_batched_fetch_per_fired_question(seeded_sdk, monkeypatch):
@@ -719,7 +852,10 @@ _CENSUS_KEYS = {
     # #2513 (#10629 review): the arm THIS composition spent — recorded per
     # outcome so a re-injection run's receipt says whether the lower bound
     # was armed and under which window cap, not only what the run declared.
-    "floor_term", "guard_per_session_cap"}
+    "floor_term", "guard_per_session_cap",
+    # #10540: the reader-window crowding census (pool-scope keys above
+    # could not see it)
+    "reader_window_displacement"}
 
 
 def test_reader_item_and_token_caps_hold_on_the_reinjected_pool(seeded_sdk):

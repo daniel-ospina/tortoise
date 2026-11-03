@@ -64,17 +64,172 @@ def _isolate_atexit_budget():
     embedded_lifecycle._atexit_deadline = None
 
 
-def _count_redis_servers() -> int:
-    """Count live redislite redis-server processes (pgrep)."""
-    import subprocess
+#: Does this host expose ``/proc``? Decided ONCE, at import: a /proc-less
+#: host (macOS — this file otherwise runs there) must fall back to ``ps``,
+#: because a /proc-only read returns ``None`` for EVERY pid there. That is
+#: not a slow answer, it is the false-PASS shape: ``_server_still_alive``
+#: would say "no leak" about a server that is still running, and the
+#: assertion it guards would pass vacuously.
+#:
+#: The two arms are deliberately NOT interchangeable: on a host WITH
+#: ``/proc`` an ``OSError`` means the pid is gone, and falling through to
+#: ``ps`` would fork per poll (~120 times) to re-learn it.
+#:
+#: A module constant rather than an inline probe because a test flips it
+#: (:func:`_hide_procfs`) — the portability this probe now claims must be
+#: EXECUTED on a Linux CI host, not asserted in prose.
+_HAVE_PROC = os.path.exists("/proc/self/cmdline")
+
+
+def _cmdline_from_proc(pid: int) -> str | None:
+    """The ``/proc`` arm — Linux, one read and no fork."""
     try:
-        out = subprocess.run(
-            ["pgrep", "-f", "redislite/bin/redis-server"],
-            capture_output=True, text=True, timeout=10,
-        )
-    except (subprocess.TimeoutExpired, OSError):
-        return -1
-    return len([l for l in out.stdout.splitlines() if l.strip().isdigit()])  # noqa: E741
+        with open(f"/proc/{pid}/cmdline", "rb") as fh:
+            return fh.read().replace(b"\0", b" ").decode(
+                "utf-8", "replace").strip()
+    except OSError:
+        return None  # a real /proc answered: this pid is gone
+
+
+def _cmdline_from_ps(pid: int) -> str | None:
+    """The no-procfs arm — macOS/BSD, and the ONLY source there.
+
+    ``-ww`` is not cosmetic: ``ps`` truncates its output to the terminal width,
+    and a truncated argv can put the ``redislite/bin/redis-server`` match out
+    of reach. The same flag is kept by ``tortoise/embedded_reaper.py``.
+    """
+    try:
+        out = _subprocess.run(["ps", "-ww", "-o", "command=", "-p", str(pid)],
+                              capture_output=True, text=True, timeout=5)
+    except (OSError, _subprocess.SubprocessError):
+        return None
+    return out.stdout.strip() or None  # rc 1 (no pid) leaves stdout empty
+
+
+def _server_cmdline(pid: int) -> str | None:
+    """The ``pid``'s command line, or ``None`` when no argv could be read.
+
+    Two source questions are asked of a server pid — "is THIS pid still
+    there?" (liveness) and "is it still the redislite server we started?"
+    (the pid-recycling guard). Only the SECOND needs an argv, and liveness is
+    read portably by :func:`_pid_alive`, so the argv read must not carry a
+    platform dependency of its own:
+
+    * ``/proc/<pid>/cmdline`` (NUL-separated argv) on Linux — one read, no
+      fork, asked up to ~120 times by the poll below;
+    * ``ps -ww -o command= -p <pid>`` (space-joined argv) where ``/proc`` does
+      not exist — macOS/BSD, a platform this suite supports
+      (``tortoise/embedded_reaper.py``: *"macOS has no /proc"*) and on which
+      the ``/proc``-only form made a LIVE server invisible. That is the same
+      failure class this probe was rewritten to remove, moved from "shared
+      runner" to "the developer's machine": the main test then passed
+      vacuously and its positive control reddened after a full 30 s.
+      ``tests/test_fork_slot_wedge_3845.py``'s ``_ps_command`` keeps the same
+      fallback for the same reason.
+
+    ``None`` from the ``ps`` arm means "no argv available" — the pid is gone
+    (``ps`` rc 1) or ``ps`` itself could not answer. A host with neither
+    procfs NOR ``ps`` therefore has no attribution capability, and the
+    positive control below reds loudly on it — deliberately, rather than
+    collapsing "cannot read" into "gone" and letting the main test pass for
+    the wrong reason (#5049 rule 4: an under-specified substrate is a harness
+    defect, which is a FAIL; a silent pass is not). ``ps`` is POSIX-mandated,
+    so that arm is unreachable on any host this suite runs on.
+    """
+    return _cmdline_from_proc(pid) if _HAVE_PROC else _cmdline_from_ps(pid)
+
+
+def _server_still_alive(pid: int) -> bool:
+    """True when ``pid`` is a LIVE redislite server (not a recycled pid).
+
+    Liveness comes from :func:`_pid_alive` (``kill(0)``) — the portable
+    primitive this module already keeps for exactly this reason — and the argv
+    match is the recycling guard on top of it. Reading liveness out of the
+    argv made "gone" and "no procfs on this host" the same answer.
+    """
+    if not _pid_alive(pid):
+        return False
+    cmdline = _server_cmdline(pid)
+    return cmdline is not None and "redislite/bin/redis-server" in cmdline
+
+
+def _spawn_marked_sleeper(*argv: str):
+    """A live child whose argv carries ``argv`` — an observable non-server."""
+    return _subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(120)", *argv])
+
+
+def _hide_procfs(monkeypatch) -> None:
+    """Make this Linux host look like a mac: no procfs, ``ps`` only."""
+    monkeypatch.setattr(sys.modules[__name__], "_HAVE_PROC", False)
+
+
+@pytest.mark.parametrize("what", ["ps_arm", "still_alive", "recycling_guard"])
+def test_server_probe_is_portable_without_procfs(monkeypatch, what):
+    """#10632 rev-e P2: the probe must not need ``/proc`` to work.
+
+    On macOS there is no procfs, and the pre-fix ``/proc``-only helper
+    returned ``None`` for a LIVE server — so the main atexit test's ``leaked``
+    was always ``False`` (a vacuous pass, the exact defect this probe was
+    rewritten to remove) while its positive control spun the full deadline and
+    then reddened.
+
+    ⚠️ What each arm can and cannot prove, stated so the fail is not
+    over-claimed. The PRE-CHECK below is what makes the portability claim
+    executable on any host: it hides procfs AND makes the ``/proc`` arm answer
+    ``None`` (what it answers on a host that has none) *before* it asserts, so
+    a ``/proc``-only read cannot satisfy it — the Linux CI host included. That
+    is a correction of this test's own first form, which gated the arms on
+    ``_cmdline_from_proc`` and therefore passed on Linux only and failed
+    deterministically on the mac it was written for (3 arms x 10 s). The arms
+    themselves red on the pre-fix code by NAME and by BEHAVIOUR:
+
+    * ``ps_arm`` — calls :func:`_cmdline_from_ps` directly, so the fallback is
+      exercised for real against a live process. Pre-fix that function does not
+      exist (``AttributeError``). Reds if the fallback is removed or broken.
+    * ``still_alive`` — with ``_HAVE_PROC`` False, a live pid whose argv names
+      the server must still be VISIBLE. Pre-fix ``_HAVE_PROC`` does not exist.
+      Reds if the dispatch stops honouring the flag.
+    * ``recycling_guard`` — the same pid, argv NOT naming the server, still
+      reads ``False``: the fallback did not degrade to bare liveness.
+    """
+    if what == "recycling_guard":
+        proc = _spawn_marked_sleeper("not-a-redis-server")
+    else:
+        proc = _spawn_marked_sleeper("redislite/bin/redis-server")
+    try:
+        # Simulate the mac BEFORE the pre-check, on every host: no procfs, and
+        # the ``/proc`` arm answers ``None`` for a live pid — which is exactly
+        # what it does where ``/proc`` does not exist. The pre-check can then
+        # only be satisfied by the DISPATCHED source, so it still proves the
+        # child became observable through a real read (a ``ps`` read of a live
+        # child, not a pid that was never there) AND it reds a ``/proc``-only
+        # pre-check on a Linux host, where such a read is invisible to review.
+        _hide_procfs(monkeypatch)
+        monkeypatch.setattr(sys.modules[__name__], "_cmdline_from_proc",
+                            lambda pid: None)
+        assert wait_for(lambda: _server_cmdline(proc.pid) is not None,
+                        timeout_s=10), (
+            "the child never became observable through the ps fallback — on a "
+            "host without procfs that is the false-PASS shape this probe "
+            "removes")
+        if what == "ps_arm":
+            got = _cmdline_from_ps(proc.pid)
+            assert got is not None, (
+                "the ps fallback returned no argv for a LIVE pid — the probe "
+                "is still Linux-only")
+            assert "redislite/bin/redis-server" in got, got
+        elif what == "still_alive":
+            assert _server_still_alive(proc.pid) is True, (
+                "a LIVE redislite server is invisible without /proc — the "
+                "main atexit test would pass vacuously")
+        else:
+            assert _server_still_alive(proc.pid) is False, (
+                "the ps fallback dropped the pid-recycling guard and reports "
+                "any live pid as the server")
+    finally:
+        proc.kill()
+        proc.wait()
 
 # Files that legitimately construct FalkorDB / FalkorProjection / Redislite
 # directly. Epic #1647 P4 (Task 10): the list IS the embedded surface —
@@ -231,34 +386,111 @@ def test_projection_context_manager_closes_db(monkeypatch, tmp_path):
     assert calls == ["close"]
 
 
-def test_falkordb_atexit_closes_server_on_process_exit(tmp_path):
-    """End-to-end: a bare FalkorDB client whose process exits normally must
-    NOT leave a server behind (atexit close). Skips the strict count
-    assertion when other test suites are running concurrently (their server
-    churn makes the global count noisy) — the check is only meaningful on a
-    quiet machine."""
-    import subprocess  # noqa: I001
-    import sys as _sys
-    from tortoise.embedded_reaper import active_suite_tokens
+def _spawn_atexit_probe(tmp_path: Path, *, bypass_atexit: bool) -> int:
+    """Run a bare FalkorDB client in a CHILD process; return its server pid.
+
+    The child prints the pid of the redislite server its construction started
+    and then exits. ``bypass_atexit`` makes it leave via ``os._exit`` — the
+    exit seam's own bypass — so the positive control can prove a leaked
+    server is VISIBLE to this probe.
+
+    Attribution is by PID on purpose. The previous form counted every
+    ``redislite/bin/redis-server`` on the machine and allowed a ``+1``
+    tolerance, skipping only when another *pytest suite marker* was live:
+    that reads other lanes' servers as this suite's leak, so it measured 6 ->
+    8 on a shared CI runner and reddened a required check on a diff that
+    touches no embedded code at all. A pid names exactly one server.
+    """
+    db_path = tmp_path / ("atexit-bypass.db" if bypass_atexit else "atexit.db")
     script = (  # noqa: UP031
-        "import sys; sys.path.insert(0, %r); "
+        "import os, sys; sys.path.insert(0, %r); "
         "from tortoise import FalkorDB; "
-        "import tempfile, os; "
-        "FalkorDB(os.path.join(tempfile.mkdtemp(), 'atexit.db'))\n"
-    ) % str(Path(__file__).resolve().parent.parent)
+        "c = FalkorDB(%r); "
+        "pid = c.client.pid; "
+        "os.kill(pid, 0); "  # the server is REAL — non-vacuity for the parent
+        "print('SERVER_PID', pid, flush=True); "
+        "%s"
+    ) % (str(Path(__file__).resolve().parent.parent), str(db_path),
+         "os._exit(0)" if bypass_atexit else "")
     env = dict(os.environ)
     env.pop("TORTOISE_DB_URI", None)
-    before = _count_redis_servers()
-    subprocess.run([_sys.executable, "-c", script], capture_output=True,
-                   text=True, timeout=120, env=env)
-    time.sleep(3)  # let the server shut down + count settle
-    after = _count_redis_servers()
-    other_suites = len(active_suite_tokens()) > 1
-    if other_suites:
-        pytest.skip("other suites active — server-count assertion invalid")
-    # atexit closed the server: the count must not grow (tolerance 1 for
-    # races with unrelated background processes).
-    assert after <= before + 1, f"server leaked: {before} -> {after}"
+    run = _subprocess.run([sys.executable, "-c", script], capture_output=True,
+                          text=True, timeout=120, env=env)
+    assert run.returncode == 0, f"probe child failed: {run.stderr[-2000:]}"
+    reported = [ln for ln in run.stdout.splitlines()
+                if ln.startswith("SERVER_PID")]
+    assert reported, f"probe child never reported a server pid: {run.stdout!r}"
+    server_pid = int(reported[-1].split()[1])
+    assert server_pid > 0, f"probe reported a non-pid: {server_pid}"
+    return server_pid
+
+
+def test_falkordb_atexit_closes_server_on_process_exit(tmp_path):
+    """End-to-end: a bare FalkorDB client whose process exits normally must
+    NOT leave a server behind (atexit close).
+
+    The measurement is THIS client's server pid, not a host-global process
+    count, so it needs no "quiet machine" precondition and cannot skip — see
+    :func:`_spawn_atexit_probe` for why the count form was wrong. The child
+    asserts the pid it reports is live, so a construction that started no
+    server fails here rather than passing vacuously.
+    """
+    server_pid = _spawn_atexit_probe(tmp_path, bypass_atexit=False)
+    # Event/condition wait, not sleep-and-hope (#5049 rule 1, first half):
+    # atexit close is asynchronous (SIGTERM, then a grace window), so poll the
+    # condition until it holds.
+    #
+    # ⛔ The expiry keeps its FAIL leg, and that is a RECORDED DECISION, not an
+    # oversight: `docs/plans/2026-09-26-5049-verdicts-from-conditions.md`
+    # ("Review status", residual table) — "_assert_server_dies_with_parent
+    # keeps a 30 s wall-clock FAIL | Deliberate: the parent has already exited
+    # there, so 'server still alive' is the defect; the FAIL leg is preserved
+    # (rule 1 governs the *parent-exit* waits only)", and Task 3's Acceptance
+    # says the same. THIS site is that shape: the owning child has already
+    # exited (`_subprocess.run` returned) before the first poll, so a live
+    # server pid is a leaked server, not a slow machine. Converting it to
+    # INCONCLUSIVE would leave the property this test names with no assertion
+    # at all — the probe's own positive control
+    # (`test_atexit_probe_reports_a_bypassed_close_as_a_leak`) proves the
+    # measurement can SEE a leak, which is what makes "still alive" a defect
+    # rather than an unobserved condition.
+    _wait = wait_for(lambda: not _server_still_alive(server_pid),
+                     timeout_s=_SERVER_DEATH_TIMEOUT_S)
+    leaked = _server_still_alive(server_pid)
+    if leaked:  # never leave the leak behind for the reaper to find
+        with contextlib.suppress(OSError):
+            os.kill(server_pid, _signal.SIGKILL)
+    assert not leaked, (
+        f"atexit did not close the embedded server: pid {server_pid} still "
+        f"alive {_SERVER_DEATH_TIMEOUT_S:g}s after the owning process exited "
+        f"(condition observed: {_wait}; lifetime read as a defect because the "
+        "owner has already exited — #5049 rule 1 governs parent-exit waits, "
+        "not this one)")
+
+
+def test_atexit_probe_reports_a_bypassed_close_as_a_leak(tmp_path):
+    """Positive control for the probe above: the measurement can SEE a leak.
+
+    ``os._exit`` skips atexit handlers, so the daemonized server survives its
+    owner. If this test ever stops seeing the leak, the sibling test's
+    ``assert not leaked`` has stopped discriminating and passes for the wrong
+    reason. The control's own server is killed here.
+    """
+    server_pid = _spawn_atexit_probe(tmp_path, bypass_atexit=True)
+    try:
+        # Condition wait, FAIL leg kept: a probe that cannot see a leak it
+        # CREATED is a harness defect (#5049 rule 4), which is a FAIL — not a
+        # deadline-dependent product verdict. The server is left behind by
+        # `os._exit`, so "not visible" can only mean the probe is broken.
+        wait_for(lambda: _server_still_alive(server_pid),
+                 timeout_s=_SERVER_DEATH_TIMEOUT_S)
+        assert _server_still_alive(server_pid), (
+            "the probe cannot see a server that os._exit() left behind — the "
+            f"atexit assertion in this module is vacuous (pid {server_pid}; "
+            "_server_cmdline found no argv from /proc or ps)")
+    finally:
+        with contextlib.suppress(OSError):
+            os.kill(server_pid, _signal.SIGKILL)
 
 
 def test_no_new_raw_embedded_constructions():

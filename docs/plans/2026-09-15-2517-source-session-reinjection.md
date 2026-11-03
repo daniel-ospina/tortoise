@@ -438,10 +438,15 @@ contract; single-source the chunk kind and the `match_source` leg across the eva
   enumerated keys `{on, seed_window, seed_limit, seed_sessions: [str], seeded: int,
   injected_per_session: {sid: int}, injected_total: int,
   injected_per_session_merged: {sid: int}, injected_merged: int, dropped_by_cap: int,
+  reader_window_displacement: {window, injected_in_window, base_displaced,
+  sessions_lost: [str] | null, sessions_before, sessions_after, measured},
   fetch_ok: bool, total_cap_hit: bool, guard: bool, latency_ms, tr_excluded}`
   (per-session dicts + `injected_merged` are the non-derivable signals; `seeded`/
   `injected_total` are documented reader conveniences, never a second source of
-  truth); `r1_knobs` + **always-present resolved-bool fingerprint** entries for both
+  truth). `sessions_lost` is `null` on the census-failure path (its siblings are
+  `null` there too) and `measured: False` on every path where no census ran —
+  including the whole OFF arm, where the counts are a zeroed DESIGN and not a
+  measurement, so a consumer must filter on `measured` before deriving a rate; `r1_knobs` + **always-present resolved-bool fingerprint** entries for both
   keys (§2); the Layer-1 projection entry in `outcomes_to_report`
   (`run.py:4923` precedent) **together with the `tests/test_longmem_runner.py:365/433`
   golden update in this same task** (the golden pins the exact outcome dict, so a
