@@ -87,15 +87,25 @@ class FallbackSnapshotStore:
         #: process, so the blast radius of the global counter was the whole box.
         self._generation = 0
         #: key -> write counter, bumped by ``invalidate(key)`` for THAT key only.
-        #: Deliberately NOT pruned: an entry is a tuple + an int (~100 bytes), and
-        #: it is bounded by the number of distinct (graph, namespace) keys the
-        #: process has ever invalidated — dwarfed by the snapshots it exists to
-        #: protect (``MAX_SNAPSHOT_ENTRIES`` bodies of whole-corpus rows). Pruning
-        #: would have to prove no build is in flight for a key, and that check needs
-        #: ``_FLIGHTS_GUARD`` while ``self._lock`` is held — the inverse of the
-        #: ``_FLIGHTS_GUARD`` → ``self._lock`` order ``get_or_build`` takes, i.e. a
-        #: deadlock. Trading 100 bytes per graph for a lock-order hazard is a bad
-        #: trade; the growth is negligible and the ordering stays one-way.
+        #: Deliberately NOT pruned yet, and the reason is stated honestly because the
+        #: first version of this comment got it WRONG (review round 7, P3): it claimed
+        #: pruning "needs ``_FLIGHTS_GUARD`` while ``self._lock`` is held — the inverse
+        #: of the order ``get_or_build`` takes, i.e. a deadlock". That order does not
+        #: exist: the two locks are NEVER nested anywhere (``_flight_begin``/
+        #: ``_flight_end`` touch only ``_FLIGHTS_GUARD``; every store-lock acquisition
+        #: in ``get_or_build`` sits outside those guard blocks). Pruning under
+        #: ``self._lock`` → ``_FLIGHTS_GUARD`` would therefore be safe.
+        #:
+        #: The real trade: growth is MONOTONIC and UNCAPPED in the number of distinct
+        #: (graph, namespace) keys this process has ever invalidated (~200 bytes each —
+        #: a tuple plus an int), NOT bounded by ``MAX_SNAPSHOT_ENTRIES``; ``clear()`` is
+        #: the only thing that empties it and has no production call site. That is
+        #: accepted here because the per-entry cost is 5 orders of magnitude below the
+        #: snapshot bodies it protects (50k-row corpora), and pruning it would be new
+        #: concurrency surface on a P0 read path for no measured gain. It IS a real
+        #: follow-up for a long-lived process serving very many graphs (bound the dict
+        #: to keys present in ``_store`` or in flight, which the never-nested lock order
+        #: permits). Do not read this as "negligible by construction".
         self._key_generation: dict[tuple, int] = {}
 
     def generation(self, key: tuple) -> tuple[int, int]:
@@ -267,6 +277,14 @@ def get_or_build(proj, key: tuple, *, store: FallbackSnapshotStore | None = None
     build it joined — the very rows it would have read itself — never by the TTL.
 
     ``builder``/``store`` are test seams.
+
+    ⛔ PRECONDITION: ``builder`` must NOT call ``get_or_build`` for the same ``key``.
+    A nested call would join the caller's own flight and block forever in
+    ``flight.done.wait()`` — which is deliberately unbounded — permanently losing
+    the worker thread with no log (review round 7, P3: measured, not theoretical).
+    Unreachable today: the only builder is ``build_snapshot``, which makes no such
+    call. This line exists so the next reshape that routes a builder through this
+    seam fails loudly instead of wedging a flight.
     """
     store = _store if store is None else store
     build = build_snapshot if builder is None else builder
