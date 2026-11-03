@@ -342,14 +342,21 @@ def test_a_pick_outside_the_reader_window_is_not_counted_as_graded():
 
 def test_the_sole_representative_count_is_per_session_not_per_bucket():
     """The count is per ``session_id``, NOT per ``(session_date, session_id)``
-    bucket (the key ``held_buckets`` uses) — and that mismatch is exactly what
-    makes the not-sufficient case reachable: a session split across two raw date
-    strings has TWO base-window slots as far as this count is concerned, so
-    neither of its evicted ids is a sole representative even though each
+    bucket (the key ``held_buckets`` uses), so a session split across two raw
+    date strings has TWO base-window slots as far as this count is concerned and
+    NEITHER of its evicted ids is a sole representative even though each
     ``(date, session)`` bucket held one.
 
-    The pre-registered pools cannot see this: ``_pool()`` stamps one date on
-    every hit, so both definitions agree on all six of them.
+    That makes the field report LESS than a bucket-keyed count would — on this
+    pool 0 where a bucket-keyed count gives 2 — and it is the NOT-NECESSARY
+    direction: a session is DELETED with no sole representative reported. It says
+    nothing about the NOT-SUFFICIENT direction, which is enabled by
+    ``held_buckets``' BUCKET keying (a promotion may re-add a session the reader
+    already holds under a different raw date) and is flagged identically by both
+    counts — see ``tortoise.temporal_leg.window_arm_retention``.
+
+    The pre-registered pools cannot see any of this: ``_pool()`` stamps one date
+    on every hit, so both definitions agree on all six of them.
     """
     pool = [
         {"id": f"sa{i}", "session_id": "sA", "session_date": "2023-04-15",
