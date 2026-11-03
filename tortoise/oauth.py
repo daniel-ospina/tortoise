@@ -49,7 +49,7 @@ import re
 import secrets
 from datetime import datetime, timedelta, timezone
 from typing import NoReturn
-from urllib.parse import parse_qs, urlencode, urlparse, urlsplit, urlunsplit
+from urllib.parse import parse_qs, unquote_plus, urlencode, urlparse, urlsplit, urlunsplit
 
 # #8218 — the client-identity decision (SCOPE §9 class 4(i)) is its own module so
 # the invariant has ONE enumerable home; the consent page only renders it.
@@ -2787,19 +2787,29 @@ def consent_bounce_url(app_origin: str, raw_query: str) -> str:
     # downstream and a `+`/`%2B`/`%20` normalisation here is the silent CSRF mismatch this hop
     # refuses everywhere else.
     present = parse_qs(raw_query, keep_blank_values=True).get(CONSENT_ATTEMPT_KEY_PARAM, [])
-    if any(v.strip() for v in present):
-        inner = CONSENT_START_PATH + (("?" + raw_query) if raw_query else "")
-    else:
-        kept = [seg for seg in raw_query.split("&") if seg] if raw_query else []
-        kept = [
-            seg for seg in kept
-            if not (
-                seg.split("=", 1)[0] == CONSENT_ATTEMPT_KEY_PARAM
-                and not (seg.split("=", 1)[1].strip() if "=" in seg else "")
-            )
-        ]
-        base = "&".join(kept)
-        inner = CONSENT_START_PATH + (("?" + base) if base else "")
+    has_real = any(v.strip() for v in present)
+    # ⛔ THE FILTER RUNS IN *BOTH* BRANCHES, and it decides blankness the SAME way the branch
+    # above does (fold review cycle 6, P2: the two halves disagreed). Raw text is not the test:
+    # `attempt_key=+` is a NON-empty raw segment whose DECODED value is a single space, so a
+    # raw-text filter kept it, the branch (which reads `parse_qs`) called it blank, and the mint
+    # was appended after it — reproducing the doubled pair this change exists to remove, with
+    # `start.ts` reading the truthy `" "` first. The mirror shape was worse: `attempt_key=`
+    # followed by a REAL key took the "present" branch and returned `raw_query` untouched, so a
+    # blank first value out-ranked a real key and the ownership proof degraded to a guessable
+    # constant. So: drop every blank pair (`unquote_plus(...).strip()`), then append the mint only
+    # when no real value survived. Other segments stay BYTE-IDENTICAL (split/partition/join, never
+    # a re-encode) because `redirect_uri` and `client_id` are compared byte-for-byte downstream.
+    kept: list[str] = []
+    for seg in (raw_query.split("&") if raw_query else []):
+        if not seg:
+            continue
+        key, _sep, val = seg.partition("=")
+        if key == CONSENT_ATTEMPT_KEY_PARAM and not unquote_plus(val).strip():
+            continue
+        kept.append(seg)
+    base = "&".join(kept)
+    inner = CONSENT_START_PATH + (("?" + base) if base else "")
+    if not has_real:
         inner += ("&" if "?" in inner else "?") + urlencode(
             {CONSENT_ATTEMPT_KEY_PARAM: secrets.token_urlsafe(32)})
     return (app_origin.rstrip("/") + CONSENT_SIGNIN_PATH + "?"

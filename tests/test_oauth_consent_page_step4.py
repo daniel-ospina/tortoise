@@ -1266,6 +1266,28 @@ def test_the_bounce_does_not_append_a_SECOND_key_when_the_flow_already_has_one()
         "a blank key left more than one value (or a blank first value), which makes the "
         f"AS-minted key inert for the page: {keys}")
 
+    # ⛔ The two adversarial shapes the fold review measured (cycle 6, P2) — both defeated the
+    # FIRST revision of this fix, and neither is expressible as `attempt_key=` alone.
+    # (a) a raw non-empty segment whose DECODED value is whitespace: `+` decodes to a space.
+    for blankish in ("+", "%20", "%09"):
+        emitted_ws = consent_bounce_url(
+            APP_ORIGIN, f"client_id=c1&state=s1&{CONSENT_ATTEMPT_KEY_PARAM}={blankish}")
+        inner_ws = parse_qs(urlsplit(parse_qs(urlsplit(emitted_ws).query)["next"][0]).query,
+                            keep_blank_values=True)
+        ws_keys = inner_ws[CONSENT_ATTEMPT_KEY_PARAM]
+        assert len(ws_keys) == 1 and ws_keys[0].strip(), (
+            f"{CONSENT_ATTEMPT_KEY_PARAM}={blankish} is blank once decoded, so it must be "
+            f"replaced by the mint and not out-rank it; got {ws_keys}")
+    # (b) a blank pair BEFORE a real key must not out-rank that real key.
+    emitted_pair = consent_bounce_url(
+        APP_ORIGIN, f"client_id=c1&state=s1&{CONSENT_ATTEMPT_KEY_PARAM}=&{CONSENT_ATTEMPT_KEY_PARAM}=K1")
+    inner_pair = parse_qs(urlsplit(parse_qs(urlsplit(emitted_pair).query)["next"][0]).query,
+                          keep_blank_values=True)
+    pair_keys = inner_pair[CONSENT_ATTEMPT_KEY_PARAM]
+    assert pair_keys == ["K1"], (
+        "a blank attempt_key ahead of a real one must be dropped, not preserved and "
+        f"out-ranking it (start.ts reads the FIRST value): {pair_keys}")
+
 
 def test_the_bounce_carries_the_attempt_key_the_flow_is_bound_to(api_client) -> None:
     """#10487: the AS mints the attempt key on the ONE leg where none exists yet.

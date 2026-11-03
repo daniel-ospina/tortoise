@@ -486,14 +486,16 @@ class TestCredentialResolution:
         mcp_client.list_tools()
 
         # ⛔ NO Authorization header at all — not merely "no empty one".
+        # `seen` holds the recorded header as a STRING (or None), never a dict, so
+        # the assertion must read the strings (fold review cycle 6, P2: the first
+        # revision tested `isinstance(entry, dict)`, which is always False here, so
+        # the pin could not tell "the blank path ran" from "a real credential from
+        # the ambient environment went on the wire" — a vacuous assertion in the
+        # very test added to stop that).
         assert not any(h and not h.strip().removeprefix("Bearer").strip() for h in seen), (
             f"an EMPTY Bearer reached the server: {seen!r}"
         )
-        assert not any(
-            isinstance(entry, dict)
-            and str(entry.get("authorization", "")).strip()
-            for entry in seen
-        ), (
+        assert not any(h and h.strip() for h in seen), (
             "a blank credential was replaced by a REAL one from the ambient "
             f"environment, so this pin did not exercise the blank path: {seen!r}"
         )
