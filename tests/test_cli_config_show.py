@@ -1598,8 +1598,8 @@ def test_the_db_uri_log_line_does_not_print_a_query_credential(
     """`resolve_db_path` logs the RAW value; a `?password=…` in a path-shaped
     TORTOISE_DB_URI reached stderr in clear, one line above the redacted field."""
     _global(tmp_path)
-    monkeypatch.setenv(
-        "TORTOISE_DB_URI", "/tmp/x.db?password=topsecret&api_key=tt_leak")
+    monkeypatch.setenv("TORTOISE_DB_URI",
+                       "/tmp/x.db?password=topsecret&api_key=tt_leak")
     assert _run(("config", "show", "--json")) == 0
     cap = capsys.readouterr()
     assert "topsecret" not in cap.out + cap.err
