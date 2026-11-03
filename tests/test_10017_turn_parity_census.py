@@ -2391,3 +2391,68 @@ def test_a_DROPPED_interior_line_whose_turn_the_graph_never_held_is_exit_ZERO(
     assert "unparsable : 2026-11-02.jsonl:1" in out
     assert "NOT a parity pass" in out
     assert "verdict    : CLEAN" in out
+
+
+# ── the malformed disclosure must not state a comparison the report lacks ────
+# Review P3 (cycle 2). The `malformed :` line used to assert UNCONDITIONALLY that
+# "any turn it may have described is missing_in_record". Two of the four arms
+# carry no usable `session_id` at all, so they describe no turn a graph can hold
+# — and a CLEAN report could print that sentence with no `missing_in_record` row
+# anywhere in it. That is the "an artifact must not state a comparison a skipped
+# leg never performed" class this tool polices elsewhere, so the claim is now
+# stated per line, and pinned here in BOTH directions.
+
+def test_a_malformed_line_naming_NO_session_does_not_claim_a_missing_turn(
+        tmp_path, capsys, monkeypatch):
+    """A no-`session_id` line holds no session, so no graph turn can depend on
+    it. The disclosure must say that — not claim a `missing_in_record` row the
+    CLEAN report does not contain.
+
+    Mutation that goes RED here: restoring the unconditional
+    "any turn it may have described is missing_in_record" sentence.
+    """
+    root = tmp_path / "session-events"
+    root.mkdir()
+    _local_record(root, {"s1": _conversation(("user", "hi"))},
+                  name="2026-11-01.jsonl")
+    (root / "2026-11-02.jsonl").write_text(
+        json.dumps({"conversation": []}) + "\n", encoding="utf-8")
+    monkeypatch.setattr(tpc, "read_graph_turns", lambda *a, **k: {
+        "nodes": {"s1_t0": _graph_node("s1_t0", "s1", content="[user] hi")},
+        "unidentifiable": []})
+    code = tpc.main(["--uri", "docker://:@127.0.0.1:1/g",
+                     "--local-record-dir", str(root)])
+    out = capsys.readouterr().out
+    assert code == 0, out
+    assert "malformed  : 2026-11-02.jsonl:1" in out
+    assert "no graph turn can depend on it" in out
+    # The false claim this test exists for: no `missing_in_record` anywhere.
+    assert "missing_in_record" not in out
+    assert "verdict    : CLEAN" in out
+
+
+def test_a_malformed_line_NAMING_a_session_does_claim_its_missing_turn(
+        tmp_path, capsys, monkeypatch):
+    """The other half: a line that DOES name a session makes that session's
+    graph turns `missing_in_record`, and the disclosure must say so by name.
+
+    Mutation that goes RED here: dropping the `session`-aware branch (the
+    line then reads as harmless while the session is in fact refused).
+    """
+    root = tmp_path / "session-events"
+    root.mkdir()
+    _local_record(root, {"s1": _conversation(("user", "hi"))},
+                  name="2026-11-01.jsonl")
+    (root / "2026-11-02.jsonl").write_text(
+        json.dumps({"session_id": "s2"}) + "\n", encoding="utf-8")
+    monkeypatch.setattr(tpc, "read_graph_turns", lambda *a, **k: {
+        "nodes": {"s1_t0": _graph_node("s1_t0", "s1", content="[user] hi"),
+                  "s2_t0": _graph_node("s2_t0", "s2", content="[user] lost")},
+        "unidentifiable": []})
+    code = tpc.main(["--uri", "docker://:@127.0.0.1:1/g",
+                     "--local-record-dir", str(root)])
+    out = capsys.readouterr().out
+    assert code == 2, out
+    assert "malformed  : 2026-11-02.jsonl:1" in out
+    assert "any graph turn session s2 holds is missing_in_record" in out
+    assert "verdict    : REFUSED" in out

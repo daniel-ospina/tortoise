@@ -1079,6 +1079,7 @@ def read_local_record_turns(directory, node_keys: Iterable[str] | None = None
     # blanks" that drifted would produce exactly the misaligned key space this
     # leg exists to close.
     try:
+        from tortoise.ids import session_id_or_absent
         from tortoise.sdk import (
             _capture_turn_role_text,
             _capture_turn_texts_with_redactions,
@@ -1237,21 +1238,25 @@ def read_local_record_turns(directory, node_keys: Iterable[str] | None = None
             if not isinstance(entry, dict):
                 malformed_lines.append({
                     "at": where,
+                    "session": None,
                     "error": f"not a JSON object ({type(entry).__name__})"})
                 continue
-            # ⛔ THE SUBSTRATE'S RULE, NOT TRUTHINESS (review P2).
-            # `session_events_drain` normalises
-            # `raw_sid if isinstance(raw_sid, str) and raw_sid.strip() else None`
-            # and then DEAD-LETTERS the record, so a WHITESPACE-only id never
-            # reaches the graph. Plain truthiness accepted `"   "` as a session
-            # named three spaces — a session no door can mint, whose keys can
-            # therefore never match a graph turn. One rule, spelled once.
+            # ⛔ THE SUBSTRATE'S RULE, IMPORTED — not re-spelled (review P3).
+            # `session_id_or_absent` is the ONE canonical spelling
+            # (`tortoise/ids.py`); `session_events_drain` normalises with the
+            # same rule inline and the spool delegates to it. Re-typing
+            # `isinstance(...) and ....strip()` here made a FOURTH copy, and a
+            # copy that drifted is the failure class this leg exists to close:
+            # if #9599's open padded-id question is ever resolved by TRIMMING,
+            # the substrate would file `abc_t*` while a local copy kept keying
+            # `" abc "_t*` — a permanent false refusal with no repair path
+            # (#3870 forbids deleting the audit lines). One import, no copy.
             raw_sid = entry.get("session_id")
-            sid = (raw_sid if isinstance(raw_sid, str) and raw_sid.strip()
-                   else None)
+            sid = session_id_or_absent(raw_sid)
             if sid is None:
                 malformed_lines.append({
                     "at": where,
+                    "session": None,
                     "error": f"no usable `session_id` ({type(raw_sid).__name__})"
                              " — dead-lettered by the filing leg, so it filed "
                              "no turn and can hide none"})
@@ -1267,6 +1272,7 @@ def read_local_record_turns(directory, node_keys: Iterable[str] | None = None
                 # session. An explicit `[]` is real data and stays tolerated.
                 malformed_lines.append({
                     "at": where,
+                    "session": sid,
                     "error": f"session {sid} carries NO `conversation` key — "
                              "dead-lettered by the filing leg "
                              "(no_conversation), so its transcript never "
@@ -1276,6 +1282,7 @@ def read_local_record_turns(directory, node_keys: Iterable[str] | None = None
             if not isinstance(conversation, list):
                 malformed_lines.append({
                     "at": where,
+                    "session": sid,
                     "error": f"session {sid} `conversation` is "
                              f"{type(conversation).__name__}, not a list"})
                 continue
@@ -2023,11 +2030,22 @@ def main(argv: list[str] | None = None) -> int:
               f"DROPPED, not recovered; any turn it described is "
               f"missing_in_record, so this is NOT a parity pass")
     for bad in report["record"].get("malformed_lines") or []:
-        # Parsed but malformed: dropped for the same reason, and dead-lettered
-        # by the filing leg, so it filed no turn and can hide none.
+        # ⛔ THE SENTENCE MUST MATCH THE REPORT IT PRINTS WITH (review P3).
+        # The older wording asserted "any turn it may have described is
+        # missing_in_record" UNCONDITIONALLY — but two of the four arms carry no
+        # usable `session_id` at all, so they describe no turn a graph can hold,
+        # and a CLEAN report could print that sentence with no
+        # `missing_in_record` row anywhere in it. That is the "an artifact must
+        # not state a comparison a skipped leg never performed" class this tool
+        # polices elsewhere, so the claim is now stated per line.
+        if False:
+            effect = (f"any graph turn session {bad['session']} holds is "
+                      f"missing_in_record, so this is NOT a parity pass")
+        else:
+            effect = ("the line names no session, so no graph turn can depend "
+                      "on it — dropped and counted, NOT a parity pass")
         print(f"malformed  : {bad['at']} ({bad['error']}) — the line was "
-              f"DROPPED, not recovered; any turn it may have described is "
-              f"missing_in_record, so this is NOT a parity pass")
+              f"DROPPED, not recovered; {effect}")
     for empty_day in report["record"].get("empty_days") or []:
         # Disclosed, never silent: a complete verified archive of no records
         # cannot hide a turn, but a tolerance nobody can see reads like a day
