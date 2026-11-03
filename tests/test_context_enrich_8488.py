@@ -560,8 +560,8 @@ def _attestable(point: dict) -> bool:
     would false-red on a legitimate record:
 
       1. NOT an operator — the call site enters the identity/text check only
-         on ``not op`` (``projection/entities.py:2484``), where ``op`` is the
-         Point's ``operator`` dict. An operator attests no text at all, so
+         on ``not op`` (``projection/entities.py:2484``), where ``op`` is
+         ``p.get("operator")`` (``:2452``) — the Point's ``operator`` dict. An operator attests no text at all, so
          this is the FIRST gate; leaving it out let clause 4 rescue the
          population only by accident (operators happen to carry no
          ``content``);
@@ -577,7 +577,7 @@ def _attestable(point: dict) -> bool:
          (``:963-971``), where the text is ``embeddingText or content``;
       5. text that cannot be HASHED — ``_content_hash`` is
          ``text.encode("utf-8")``, which raises on a lone surrogate; the
-         replay catches that and returns (``:976-990``). Such a record is
+         replay catches that and returns (``:979-982``). Such a record is
          uncomparable, not divergent.
 
     NOT modelled, deliberately: the call-site WIDTH refusal
@@ -673,7 +673,7 @@ def test_the_attestable_predicate_pins_each_replay_gate_boundary():
     assert _attestable(dict(base, embeddingText=None))
     assert not _attestable(dict(base, embeddingText=None, content=None))
     # 6. text the replay cannot HASH (`_content_hash` -> `.encode('utf-8')`
-    #    raises on a lone surrogate, caught at `:976-990`) is uncomparable.
+    #    raises on a lone surrogate, caught at `:979-982`) is uncomparable.
     assert not _attestable(dict(base, embeddingText="\ud800"))
     assert not _attestable(dict(base, embeddingText=None, content="\ud800"))
 
@@ -749,7 +749,7 @@ def test_a_mismatched_enriched_pair_is_DETECTED_on_replay(
     # below so they cannot SKEW (review cycle 3, P3). It mirrors the replay's
     # gates in order — not an operator (`projection/entities.py:2484`), a
     # restorable vector (`:2483`), no identity (`:943-952`), no string hash or
-    # text (`:963-971`), unhashable text (`:976-990`). A re-emitted snapshot —
+    # text (`:963-971`), unhashable text (`:979-982`). A re-emitted snapshot —
     # `stamp_journal_embedding(creating=False)` — deliberately carries NEITHER a
     # hash nor an identity (its own docstring says so), so counting it here
     # would demand a contract production never makes and would false-red on a
