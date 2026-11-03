@@ -428,14 +428,18 @@ def test_a_tenantless_credential_is_never_resolved_into_the_other_tenant(
 
     cp = _two_tenant_cp()
     _wire(monkeypatch, cp)
-    real = sc.default_graph_id_for_credential
+    # The seam under test is the PAIR (`namespace`, `id`) from ONE read since
+    # #10452 review F2 — the session lane no longer calls the id-only helper,
+    # because half a pair from this read and half from the `organizations` row
+    # is the graph/data split. Break the seam where the resolver asks it.
+    real = sc.default_graph_for_credential
 
     def _a_is_unnameable(control_plane, org_id, *a, **kw):
         if org_id == ORG_A:
-            return None          # no active default row this lane can read
+            return (None, None)  # no active default row this lane can read
         return real(control_plane, org_id, *a, **kw)
 
-    monkeypatch.setattr(sc, "default_graph_id_for_credential",
+    monkeypatch.setattr(sc, "default_graph_for_credential",
                         _a_is_unnameable)
 
     b = _session_org(monkeypatch, cp, pin=ORG_B)
@@ -469,12 +473,16 @@ def test_negative_control_a_swapped_resolution_reddens_the_checker(monkeypatch):
     cp = _two_tenant_cp()
     _wire(monkeypatch, cp)
 
-    real = sc.default_graph_id_for_credential
+    # #10452 review F2: the seam is the PAIR from one read (`default_graph_for_credential`),
+    # which is what the session and OAuth resolvers now call.
+    real = sc.default_graph_for_credential
 
     def _swapped(control_plane, org_id, *a, **kw):
-        return ROW_B if org_id == ORG_A else real(control_plane, org_id, *a, **kw)
+        if org_id == ORG_A:
+            return (None, ROW_B)
+        return real(control_plane, org_id, *a, **kw)
 
-    monkeypatch.setattr(sc, "default_graph_id_for_credential", _swapped)
+    monkeypatch.setattr(sc, "default_graph_for_credential", _swapped)
 
     a = _session_org(monkeypatch, cp, pin=ORG_A)
     assert a["default_graph_id"] == ROW_B, (
