@@ -679,10 +679,12 @@ def read_node(conn: Any, *, org_id: str, graph_id: str, label: str,
     ⚠️ The map is the record's PRIMARY set **plus** the §2.6 cache names that
     ``node_from_row`` DERIVES from those columns (`status`, from a supersession
     carrier) — #9974 — **plus** the same `status` derived from the record's own
-    HISTORY, through TWO legs of `EVENT_STREAM_FOLDS`, both applied here:
+    HISTORY, through THREE legs of `EVENT_STREAM_FOLDS`, all applied here:
     the connector/pack lifecycle where an event kind names the `:Object`
-    (#10198), and an explicit `EntityMutated` `state.status` — a caller's own
-    lifecycle write, for an `:Object` OR a `:Subject` (#9974). So the schema's refused names CAN appear here,
+    (#10198), an explicit `EntityMutated` `state.status` — a caller's own
+    lifecycle write, for an `:Object` OR a `:Subject` (#9974), and the CREATION
+    record's `payload ->> 'status'` (`ObjectRegistered`/`SubjectAdded`, the BIRTH
+    writer, #9974). So the schema's refused names CAN appear here,
     synthesized rather than stored, and a consumer must not read their presence
     as "the record holds a column for this": ``_refused('object')`` still lists
     `status`. That is the projection's contract for a record-sourced node (the
@@ -721,17 +723,20 @@ def read_node(conn: Any, *, org_id: str, graph_id: str, label: str,
     # derived from the record's HISTORY, which no layer row carries — so a read
     # that stopped at `node_from_row` would answer without the status a
     # `rebuild_from_record` materializes, breaking this function's own "the same
-    # map" contract. TWO legs reach that stream and both are applied here:
+    # map" contract. THREE legs reach that stream and all are applied here:
     #   * the connector/pack lifecycle (#10198) — an `EventRecorded` whose
     #     `eventKind` a fold maps onto `Object.status` (`:Object` only, as the
     #     live fold is);
     #   * an explicit `EntityMutated` `state.status` (#9974) — the caller's own
     #     lifecycle write for an `:Object` OR a `:Subject`, whose only carrier is
     #     `public.journal_event.payload`. Narrowed to the events that can
-    # name THIS Object: a single-row read folds only the events that could
-    # possibly name it. ⚠️ That narrows the FOLD, not the read — the table's
-    # only index is keyed on the event's own subject, so the predicate filters
-    # after the scope scan (see `read_lifecycle_events`).
+    #     name THIS Object: a single-row read folds only the events that could
+    #     possibly name it. ⚠️ That narrows the FOLD, not the read — the table's
+    #     only index is keyed on the event's own subject, so the predicate filters
+    #     after the scope scan (see `read_lifecycle_events`).
+    #   * a CREATION record (#9974) — `ObjectRegistered`/`SubjectAdded`, whose
+    #     `payload ->> 'status'` is the BIRTH value the record may not store.
+    #     Selected by the same id coordinate (the snapshot's record key).
     target = node.props.get("name")
     # ⛔ The gate is the FOLD's membership, not a NAME. Since #9881 an Object's
     # record key is the `id` (`chk_object_node_key_is_contract_key`: `node_key =
