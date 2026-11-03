@@ -132,33 +132,55 @@ def test_gate_still_passes_a_bound_key_under_the_limit():
     _check_org_limit(dict(GRAPH_BOUND_ORG), "points")  # must not raise
 
 
-def test_a_FULL_default_graph_cannot_refuse_a_write_into_an_EMPTY_bound_graph():
-    """#8906 — the P0's LIVE symptom, which no case above covers.
+def test_the_gate_does_not_refuse_a_bound_key_whose_own_graph_has_ROOM():
+    """#8906 — the FALSE-REFUSAL direction, measured AT THE GATE.
 
-    The two cases above cut ONE direction each (bound graph at/under its own
-    cap, default graph always EMPTY), so a gate that read the DEFAULT graph
-    would pass both while the credential class was frozen — which is exactly why
-    this defect survived: `test_gate_still_passes_a_bound_key_under_the_limit`
-    seeds the default graph with 0, so it cannot observe whether the default
-    graph is consulted at all.
+    ⛔ SCOPE, so this is not over-read: the call below is `_check_org_limit`,
+    the seam the five points doors inherit — no HTTP write is driven. A
+    regression that refused at a DOOR (a second `enforce_org_limit(org,
+    "points")` added at one of the five call sites) is therefore invisible
+    here; #8906's Test section asks for the write, and this arm measures the
+    gate decision that write turns into. Driving a real write instead needs a
+    graph-bound credential plus the REST lane's tenancy resolution — a route
+    fixture this gate-level file does not stand up — so the NAME is narrowed to
+    the seam it measures (it previously claimed a write it never performed).
 
-    #8906 measured the other cut in production: the org's DEFAULT graph sat at
+    #8906 measured this cut in production: the org's DEFAULT graph sat at
     `max_points` (every REST write behind it refused forever, with no delete
     path to lower it) while the graph-bound key's OWN graph was still absorbing
     ~200 counted Points in 48 minutes. The refusal body was
     `Team points limit reached`, so the fleet's writes stopped for a reason
     that had nothing to do with the graph they were writing into.
 
-    This is therefore the discriminating arm: SAME credential, SAME limit, and
-    only the two graphs' populations swapped. Admitting the top half while
-    refusing the bottom half is possible only if the gate counts the graph the
-    request WRITES — a gate that reads either graph alone cannot produce both
-    verdicts.
+    ⚠️ WHAT THIS ADDS, stated narrowly — the obvious version of that claim is
+    FALSE and this file's neighbouring case falsifies it. A gate that read the
+    DEFAULT graph ALONE does not survive the suite:
+    `test_gate_counts_the_custom_graph_a_bound_key_writes_into` (custom=5,
+    default=0, requires a 402) reds on it with `Failed: DID NOT RAISE`. MEASURED
+    by restoring the pre-#10637 `_gate_sdk_for` body (`return
+    _make_sdk(namespace=org_id)` for the bound arm): `6 failed, 18 passed` —
+    this arm one of the six, so that mutation is NOT this arm's evidence. And a
+    gate that counted ONLY the custom graph passes both halves below (an
+    org-wide key's count is pinned by
+    `test_org_wide_key_still_counts_the_default_graph`, not here).
 
-    RED pre-fix (measured by restoring the pre-#10637 gate: `_gate_sdk_for`
-    returning `_make_sdk(namespace=org_id)`): the first call raises
-    `HTTPException 402` — the full default graph refuses a write into an empty
-    bound graph. GREEN after #10637, which resolves the count through the same
+    The increment only this arm catches is a gate that consults the default
+    graph IN ADDITION — the still-open sdk-less form `enforce_org_limit(org,
+    resource)`, which counts `org_<tid>` with no `sdk` and no `sdk_factory`.
+    Re-adding that call alongside the fixed `sdk_factory=` one leaves every
+    other case GREEN (the default graph is 0 in all of them, so nothing moves)
+    and reds this arm alone. MEASURED, 2026-11-03, one line added to
+    `_check_org_limit`:
+
+        enforce_org_limit(org, resource)   # default graph, in ADDITION
+
+        $ TORTOISE_TEST_CARVE_OUT=1 uv run --quiet python -m pytest \
+              tests/test_4051_gate_graph.py -q -p no:cacheprovider
+        1 failed, 23 passed
+        FAILED ...::test_the_gate_does_not_refuse_a_bound_key_whose_own_graph_has_ROOM
+        HTTPException: 402: Team points limit reached (5)
+
+    GREEN after #10637, which resolves the count through the same
     `_data_graph_name(org)` the opener writes.
 
     The five REST points doors (`/v1/points`, `/v1/objects`, `/v1/subjects`,
@@ -166,15 +188,24 @@ def test_a_FULL_default_graph_cannot_refuse_a_write_into_an_EMPTY_bound_graph():
     graph is resolved INSIDE `_check_org_limit`, so the seam is one and every
     door inherits it. A door that bypassed `_check_org_limit` for
     `enforce_org_limit(org, "points")` with neither `sdk` nor `sdk_factory`
-    would reopen the defect; that gap is tracked separately rather than
-    re-asserted per door here.
+    would reopen the defect: that form is still accepted, 0 of the four
+    production `enforce_org_limit` call sites use it, and the gap is recorded on
+    #10725's "structural half" comment (that issue is CLOSED for its DOOR half
+    only — this half is unfixed, not re-asserted per door here).
     """
     # Direction 1 (#8906's false refusal): default FULL, write graph EMPTY.
     _seed(DEFAULT_GRAPH, 5)  # GRAPH_BOUND_ORG's max_points == 5
     _seed(CUSTOM_GRAPH, 0)
+    assert _count(DEFAULT_GRAPH) == 5, "fixture: default graph must be at the cap"
+    assert _count(CUSTOM_GRAPH) == 0, "fixture: write graph must be empty"
     _check_org_limit(dict(GRAPH_BOUND_ORG), "points")  # must NOT raise
 
-    # Direction 2 (#8906's cap hole): the same numbers, swapped.
+    # Direction 2 — the ANTI-VACUITY CONTROL for direction 1, kept rather than
+    # dropped: a gate that stopped counting altogether would ADMIT the call
+    # above silently, and only this half shows the same seam still refuses. It
+    # repeats `test_gate_counts_the_custom_graph_a_bound_key_writes_into` on
+    # purpose — the redundancy is what makes this arm's verdict locally
+    # interpretable rather than dependent on a case three functions up.
     _seed(DEFAULT_GRAPH, 0)
     _seed(CUSTOM_GRAPH, 5)
     with pytest.raises(HTTPException) as ei:
