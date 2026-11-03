@@ -314,26 +314,24 @@ def _fence_open(rest: str, content_col: int = 0) -> tuple[str, int] | None:
     return (ch, n)
 
 
-def _is_closer(rest: str, opener: tuple[str, int], content_col: int = 0) -> bool:
+def _is_closer(rest: str, opener: tuple[str, int]) -> bool:
     """A closer carries the same character, a run at least as long, and NOTHING
     but whitespace after it (an "info string" on a closing fence is content).
 
-    `content_col` is the CONTAINING BLOCK's content column inside `rest` — §4.5:
+    `rest` is the line from the CONTAINING BLOCK's content column — the caller
+    slices there and enforces §4.5's "up to three spaces of indentation" itself:
     "The closing code fence may be preceded by up to three spaces of indentation,
     and may be followed only by spaces or tabs … their indentation need not match
-    that of the opening fence". So the allowance is measured from the CONTENT
-    COLUMN, NEVER from the opening run's own indent: a top-level fence opened at
-    two columns does not license a four-space closer (the renderer keeps both
-    lines inside `<pre><code>`), while a fence inside a list item whose content
-    column is 2 does (Example 137 vs. the content-column rule). Measuring from
-    the run's indent accepted a closer the renderer calls CONTENT, which left the
-    block open exactly one line too few — a `lands` on a quoted keyword.
+    that of the opening fence". The allowance belongs to the CONTENT COLUMN, NEVER
+    to the opening run's own indent: a top-level fence opened at two columns does
+    not license a four-space closer (the renderer keeps both lines inside
+    `<pre><code>`), while a fence inside a list item whose content column is 2
+    does. Measuring from the run's indent accepted a closer the renderer calls
+    CONTENT, which left the block open exactly one line too few — a `lands` on a
+    quoted keyword.
     """
     ch, n = opener
-    body = rest.expandtabs(4)
-    if len(body) - len(body.lstrip(" ")) - content_col > _MAX_FENCE_INDENT:
-        return False
-    m = re.match(r"(`{3,}|~{3,})\s*$", body.lstrip(" "))
+    m = re.match(r"(`{3,}|~{3,})\s*$", rest.expandtabs(4))
     return bool(m) and m.group(1)[0] == ch and len(m.group(1)) >= n
 
 
@@ -429,7 +427,7 @@ def _fence_line_column(line: str, depth: int) -> tuple[int, int, int]:
     return consumed, i - start, i
 
 
-def _fence_candidate(prefix: str, rest: str, indent: int,
+def _fence_candidate(prefix: str, rest: str,
                      list_cols: list[int]) -> _Fence | None:
     """The fence `(prefix, rest)` opens, or None if the line is prose.
 
@@ -583,7 +581,7 @@ def strip_code(body: str, strict: bool = False) -> str:
             marker = _LIST_MARKER_RE.match(line)
             if marker:
                 list_cols.append(len(marker.group(0)))
-        fence = _fence_candidate(prefix, rest, indent, list_cols)
+        fence = _fence_candidate(prefix, rest, list_cols)
         if fence:
             out.append("")
             continue
