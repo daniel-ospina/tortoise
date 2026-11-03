@@ -2567,9 +2567,9 @@ def reap_orphans() -> list[str]:
             age_h = (time.time() - age) / 3600.0
             if age_h < OWNER_GRACE_H:
                 out.append(f"reap: kept {name} — its owning lane holds nothing "
-                           f"in {owner} and no client is connected, but the "
-                           f"container is only {age_h:.1f}h old "
-                           f"(< {OWNER_GRACE_H:g}h grace)")
+                           f"in {owner}, but the container is only "
+                           f"{age_h:.1f}h old (< {OWNER_GRACE_H:g}h grace); the "
+                           f"client probe has not run yet")
                 continue
             busy = _container_in_use(name)
             if busy is None:
@@ -2619,7 +2619,8 @@ def reap_orphans() -> list[str]:
             out.append(
                 f"reap: {'removed' if rm.returncode == 0 else 'FAILED to remove'} "
                 f"{name} — the lane that owns {owner} is GONE (no live process "
-                f"holds it, no client is connected, and it has done no work for "
+                f"holds it, no client attached within "
+                f"{ACTIVE_CLIENT_IDLE_S}s, and it has done no work for "
                 f"{gap_h:.1f}h > {OWNER_GRACE_H:g}h). The worktree still exists, "
                 f"which is why this used to survive")
             continue
@@ -2717,7 +2718,8 @@ def reap_orphans() -> list[str]:
         out.append(
             f"reap: {'removed' if rm.returncode == 0 else 'FAILED to remove'} "
             f"{name} — no worktree in this clone or live process on this host "
-            f"owns it, it has no client, and it has done no work for "
+            f"owns it, it has no client attached within "
+            f"{ACTIVE_CLIENT_IDLE_S}s, and it has done no work for "
             f"{gap_h:.1f}h (> {ORPHAN_MAX_AGE_H:g}h backstop)")
     return out
 
