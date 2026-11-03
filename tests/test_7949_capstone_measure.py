@@ -3074,8 +3074,11 @@ def test_e4_is_selected_by_the_receipts_own_corpus_hash_not_by_its_filename():
     edited the constant; a filename constant cannot tell the two apart.
 
     Constructed so the WRONG choice is the appealing one: the other-corpus receipt is
-    the newest and carries the best number, so "newest file" and "best number" both
-    select it. Only the corpus hash selects correctly.
+    BOTH the newest file and the sole best number, so "newest file" and "best number"
+    each select it. Only the corpus hash selects correctly. (The fixture used to also
+    carry a newest-but-unscorable candidate ON the pin, which only worked because the
+    selector skipped it silently — that skip is now a REFUSAL and is pinned by
+    ``test_an_on_pin_receipt_that_cannot_be_scored_REFUSES_instead_of_falling_back``.)
     """
     pin = "sha256:" + "d" * 64
     root = Path(tempfile.mkdtemp())
@@ -3083,16 +3086,45 @@ def test_e4_is_selected_by_the_receipts_own_corpus_hash_not_by_its_filename():
     receipts.mkdir(parents=True)
     _receipt(receipts / "w2b-operator-2026-01-01.json", corpus_hash=pin,
              edge_correct=5, date="2026-01-01T00:00:00Z")
+    # NEWEST *and* sole best number — the appealing wrong answer.
     _receipt(receipts / "w2b-operator-2026-02-01.json",
              corpus_hash="sha256:" + "9" * 64, edge_correct=99,
              date="2026-02-01T00:00:00Z")
-    _receipt(receipts / "w2b-operator-2026-03-01.json", corpus_hash=pin,
-             edge_correct=99, date="2026-03-01T00:00:00Z", audit=False)
 
     rel, record = measure.select_e4_receipt(root, frozen_pin=pin)
     assert rel == f"{measure.E4_RECEIPT_DIR}/w2b-operator-2026-01-01.json", rel
     assert record["operator_audit"]["edge_correct"] == 5
     assert record["corpus_hash"] == pin
+
+
+def test_an_on_pin_receipt_that_cannot_be_scored_REFUSES_instead_of_falling_back():
+    """An on-pin receipt with no ``operator_audit`` refuses; it is never skipped.
+
+    The measured hazard: a NEWER receipt on the frozen corpus arrives truncated or with
+    a drifted schema, so it cannot be scored. Skipping it silently let an OLDER on-pin
+    receipt publish the row's number — the row would then report a measurement of the
+    right corpus taken at the wrong head, with nothing anywhere saying so. (In the green
+    direction the same path could report a stale 15/15 while the newest measurement on
+    the pin was unreadable.) The selection must REFUSE and NAME the offender.
+    """
+    pin = "sha256:" + "d" * 64
+    root = Path(tempfile.mkdtemp())
+    receipts = root / measure.E4_RECEIPT_DIR
+    receipts.mkdir(parents=True)
+    _receipt(receipts / "w2b-operator-2026-01-01.json", corpus_hash=pin,
+             edge_correct=5, date="2026-01-01T00:00:00Z")
+    # NEWER and ON the pin, but unscorable.
+    _receipt(receipts / "w2b-operator-2026-03-01.json", corpus_hash=pin,
+             edge_correct=15, date="2026-03-01T00:00:00Z", audit=False)
+
+    with pytest.raises(SystemExit) as exc:
+        measure.select_e4_receipt(root, frozen_pin=pin)
+    message = str(exc.value)
+    assert "REFUSED" in message, message
+    assert "w2b-operator-2026-03-01.json" in message, (
+        "the refusal must NAME the on-pin receipt it could not score, or a reader "
+        "cannot tell which artifact to repair: " + message)
+    assert "operator_audit" in message, message
 
 
 def test_the_newest_frozen_pin_receipt_wins_because_the_ordering_is_the_property():
@@ -3255,6 +3287,72 @@ def test_main_builds_the_e4_row_from_the_selector_and_never_from_the_constant():
     assert "load_e4()" not in source, (
         "an un-pinned load_e4() call would score E4 from whatever receipt is newest, "
         "not from one on the frozen corpus")
+
+
+def test_main_binds_every_name_it_hands_render_log_and_load_e4_carries_its_keys():
+    """The render path is EXECUTED by nothing else, so pin its two data contracts.
+
+    Two defects shipped in the first cut of this change with 79 tests green, because
+    no test ever ran ``render_log`` or ``main``:
+
+    * ``main`` called ``render_log(..., e4=receipt, e4_out=e4_result, ...)`` after the
+      refactor deleted the statement that bound ``e4_result`` — so every real run
+      raised ``NameError`` at the END, after the corpus pass and before the log was
+      written: all the work, no artifact;
+    * ``render_log`` read ``e4["corpus_sha256"]`` from the ``load_e4`` mapping, whose
+      field is ``corpus_hash`` — a ``KeyError`` on the same path (twice: the human
+      section and the machine record's ``e4_receipt.corpus_hash``).
+
+    The wiring pin beside this one greps source TEXT, which is exactly why both stayed
+    green. These are the two properties that were actually violated: every name
+    ``main`` hands ``render_log`` is bound in ``main`` BEFORE the call, and every key
+    ``render_log`` subscripts off its ``e4`` parameter is a key ``load_e4`` really
+    returns (checked against a real call, not a hand-kept list).
+    """
+    tree = ast.parse(PROBE.read_text())
+    functions = {node.name: node for node in tree.body
+                 if isinstance(node, ast.FunctionDef)}
+    main, render = functions["main"], functions["render_log"]
+
+    # (a) every NAME main hands render_log is bound, and bound BEFORE the call.
+    calls = [node for node in ast.walk(main)
+             if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+             and node.func.id == "render_log"]
+    assert len(calls) == 1, f"main must call render_log exactly once: {len(calls)}"
+    call_line = calls[0].lineno
+    handed = {kw.value.id for kw in calls[0].keywords
+              if isinstance(kw.value, ast.Name)}
+    assert handed, "no keyword argument of the render_log call is a bare name"
+    first_bind: dict[str, int] = {}
+    for node in ast.walk(main):
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
+            first_bind[node.id] = min(first_bind.get(node.id, node.lineno),
+                                      node.lineno)
+        elif isinstance(node, ast.arg):
+            first_bind[node.arg] = min(first_bind.get(node.arg, node.lineno),
+                                       node.lineno)
+    unbound = sorted(name for name in handed
+                     if first_bind.get(name, call_line + 1) >= call_line)
+    assert not unbound, (
+        f"main hands render_log name(s) it never binds before the call: {unbound} — "
+        "that is a NameError at the END of a full corpus run, after the work and "
+        "before the log is written, and no test that does not execute main sees it")
+
+    # (b) every STRING key render_log reads off `e4` is a key load_e4 returns.
+    pin = _prereg()["corpus"]["fixtures_hash"]
+    supplied = set(measure.load_e4(_REPO, frozen_pin=pin))
+    read = {node.slice.value for node in ast.walk(render)
+            if isinstance(node, ast.Subscript)
+            and isinstance(node.value, ast.Name)
+            and node.value.id == "e4"
+            and isinstance(node.slice, ast.Constant)
+            and isinstance(node.slice.value, str)}
+    assert read, "render_log no longer subscripts `e4` — this pin is stale"
+    missing = sorted(read - supplied)
+    assert not missing, (
+        f"render_log reads key(s) {missing} off `e4`, but main hands it the load_e4() "
+        f"mapping whose keys are {sorted(supplied)} — a KeyError on the render path, "
+        "which nothing executes")
 
 
 def test_a_row_cites_the_receipt_the_selector_chose():
