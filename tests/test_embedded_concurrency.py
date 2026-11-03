@@ -386,7 +386,8 @@ def _make_flat_tmpdir() -> str:
 
 
 def _spawn_orphan_pid(tmpdir: str | None = None,
-                      guarded: bool = True) -> tuple[int, str]:
+                      guarded: bool = True,
+                      code: str | None = None) -> tuple[int, str]:
     """Spawn a no-path embedded server and SIGKILL the parent WITHOUT
     close() -> a genuine orphan. Returns (server_pid, socket_path).
 
@@ -412,33 +413,59 @@ def _spawn_orphan_pid(tmpdir: str | None = None,
     fails CLOSED there, so it converges via the window instead — see #3767.)
     A test that pins the window's two-sweep contract therefore uses
     `guarded=False`; a test that pins the #3599 fast path uses `guarded=True`.
+
+    #10703: `code` overrides the child's SOURCE, so the two refusal arms below
+    can be driven deliberately instead of waiting for a host to refuse a fork.
+    The arms themselves are the contract: a spawn that never reaches READY is
+    a host precondition, and `orphan spawn failed: ''` — the pre-#10703
+    message — is not a diagnosis.
     """
     env = dict(os.environ)
     env.pop("TORTOISE_DB_URI", None)
     if tmpdir:
         env["TMPDIR"] = tmpdir
-    ctor = ("from tortoise import FalkorDB" if guarded
-            else "from redislite.falkordb_client import FalkorDB")
-    code = (
-        "import os,time; os.environ.pop('TORTOISE_DB_URI',None);\n"
-        f"{ctor}; db=FalkorDB();\n"
-        "print('READY', db.client.pid, db.client.socket_file, flush=True);"
-        " time.sleep(30)"
-    )
+    if code is None:
+        ctor = ("from tortoise import FalkorDB" if guarded
+                else "from redislite.falkordb_client import FalkorDB")
+        code = (
+            "import os,time; os.environ.pop('TORTOISE_DB_URI',None);\n"
+            f"{ctor}; db=FalkorDB();\n"
+            "print('READY', db.client.pid, db.client.socket_file, flush=True);"
+            " time.sleep(30)"
+        )
     p = subprocess.Popen([sys.executable, "-c", code],
                          stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                          text=True, env=env)
+
+    def _child_stderr() -> str:
+        """The child's OWN stderr — the only datum that says why it never
+        reached READY (#10703).
+
+        Read AFTER the child is reaped: a live child keeps the pipe open, so
+        reading first would block on a spawn that is merely slow. An empty
+        capture is reported as such rather than as an empty string, so a
+        failure can never again read as a bare `orphan spawn failed: ''` with
+        the diagnosis silently discarded.
+        """
+        try:
+            err = (p.stderr.read() or "").strip()
+        except (OSError, ValueError):  # pipe already closed/torn down
+            return " [child stderr unreadable]"
+        if not err:
+            return " [child wrote nothing to stderr]"
+        return f"\n--- child stderr (tail) ---\n{err[-2000:]}"
+
     import select
     if not select.select([p.stdout], [], [], 30)[0]:
         p.kill()
         p.wait()
-        raise AssertionError("orphan spawn timed out")
+        raise AssertionError("orphan spawn timed out" + _child_stderr())
     line = p.stdout.readline().strip()
     parts = line.split()
     if len(parts) < 3 or parts[0] != "READY":
         p.kill()
         p.wait()
-        raise AssertionError(f"orphan spawn failed: {line!r}")
+        raise AssertionError(f"orphan spawn failed: {line!r}" + _child_stderr())
     pid = int(parts[1])
     sock = parts[2]
     time.sleep(1)  # let the daemon fully detach before killing the parent
@@ -447,8 +474,32 @@ def _spawn_orphan_pid(tmpdir: str | None = None,
     if not _pid_alive(pid):
         raise AssertionError(
             f"spawned orphan {pid} died before the test ran (spawn failure, "
-            "not a reaper failure)")
+            "not a reaper failure)" + _child_stderr())
     return pid, sock
+
+
+def test_a_spawn_failure_names_the_childs_own_stderr():
+    """#10703: `orphan spawn failed: ''` throws away the only diagnosis.
+
+    Measured cost: five of these failed in one carve-out run (run 41598689679,
+    shard `test-carve-out (c)`) and the child's own traceback — the datum that
+    says whether the host refused a fork, the socket path was too long, or the
+    store refused to open — sat unread in the child's `stderr`. Four dispatch
+    cycles then had to guess between "host precondition" and "regression".
+
+    Mutations that red this: dropping the stderr read (the message reverts to
+    the empty-line form), reading the pipe while the child is still running,
+    or reporting the parent's own output instead of the child's.
+    """
+    marker = "10703-sentinel-the-child-refused-to-start"
+    with pytest.raises(AssertionError) as exc:
+        _spawn_orphan_pid(
+            code=f"import sys; sys.stderr.write({marker!r}); sys.exit(3)")
+    msg = str(exc.value)
+    assert "orphan spawn failed" in msg, msg
+    assert marker in msg, (
+        "the child's own stderr must be in the failure message — "
+        f"`orphan spawn failed: ''` is the defect being fixed; got: {msg}")
 
 
 @pytest.fixture(autouse=True)
