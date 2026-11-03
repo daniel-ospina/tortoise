@@ -397,7 +397,8 @@ NAME_PREFIX = "fdb-lane-"
 #: never the proof, and it can never fire on an owner this host can OBSERVE is
 #: alive: every observed use (a live process holding the owning worktree, or an
 #: attached client — both positive reads) refreshes the lease, so a live lane's
-#: container is spared at any age (#10693 review F1). `:2192` states the lease.
+#: container is spared at any age (#10693 review F1). The lease itself is stated
+#: in full on `REAP_STATE_DIR`.
 #:
 #: ⛔ WHAT THE **DEFAULT** AUTHORISES (#10693 review F2) — the ownership evidence
 #: above is necessary and NOT sufficient. #8180's owner ruling is the operative
@@ -2328,11 +2329,11 @@ def _touch_lease(name: str) -> None:
     already-expired lease.
 
     The sweep-side stamps are the other half of the same rule (#10693 review F1)
-    and they are what makes `:396`'s promise true: the documented
-    `uri="$(... test_lane.py uri)"; eval "$uri"` form calls `start()` ONCE, so
-    a lane that then runs pytest against the exported URI for hours would age its
-    lease past `OWNER_GRACE_H` while being completely alive. A sweep that
-    OBSERVES the hold or the client refreshes the epoch, so the gap is "time
+    and they are what makes the promise above (`REAP_STATE_DIR`) true: the
+    documented `uri="$(... test_lane.py uri)"; eval "$uri"` form calls `start()`
+    ONCE, so a lane that then runs pytest against the exported URI for hours
+    would age its lease past `OWNER_GRACE_H` while being completely alive. A sweep
+    that OBSERVES the hold or the client refreshes the epoch, so the gap is "time
     since the container was last demonstrably in use". Stamping only ever
     SHORTENS a gap — it can never enable a removal — so it is safe on every
     fail-closed/keep path. Cost: one `inspect` per observed-in-use container per
