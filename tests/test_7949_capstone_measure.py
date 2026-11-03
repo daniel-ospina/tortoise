@@ -768,11 +768,20 @@ def test_the_e1_e2_record_refuses_a_corpus_off_the_frozen_pin(tmp_path):
 
 # ── the table shape, and the two rules that keep a row honest ────────────
 
+#: The E4 row fixture's artifact: a receipt ON the run's own corpus, because
+#: `build_e4_row` REFUSES anything else — handing E4 the retired off-pin constant here
+#: would re-assert the defect this fixture is meant to model (a row whose note says
+#: "the SAME receipt, on the SAME corpus" while its fields declare another revision).
+_E4_ON_PIN = "tests/eval/write_path/receipts/w2b-operator-2026-10-24-8503-b.json"
+
+
 def _rows(out_path: str = "docs/evidence/9889/e1-e2-scores.json",
-          *, e2_verdict: str = "RED") -> list[dict]:
+          *, e2_verdict: str = "RED",
+          log_corpus_sha: str = "sha256:" + "d" * 64,
+          e4: dict | None = None) -> list[dict]:
     parsed = measure.measure_e1_e2(_REPO)
     return measure.build_rows(
-        head="a" * 40, out_path=out_path, log_corpus_sha="sha256:" + "d" * 64,
+        head="a" * 40, out_path=out_path, log_corpus_sha=log_corpus_sha,
         e1={"verdict": measure.verdict_word(measure.e1_outcome(**_e1_kwargs())),
             "sha": "c" * 40, "corpus_sha256": "e" * 64,
             "numerator": measure.e1_pass_objects(parsed),
@@ -783,9 +792,9 @@ def _rows(out_path: str = "docs/evidence/9889/e1-e2-scores.json",
             "numerator": 8, "denominator": 14, "note": "E2 note"},
         e3={"verdict": "RED", "numerator": 23, "denominator": 70,
             "note": "E3 note"},
-        e4={"verdict": "RED", "numerator": 2, "denominator": 15,
-            "sha": "6164c683c", "corpus_sha256": "sha256:" + "f" * 64,
-            "note": "E4 note"},
+        e4={"verdict": "RED", "numerator": 5, "denominator": 15,
+            "sha": "a999be41e", "corpus_sha256": log_corpus_sha,
+            "evidence": _E4_ON_PIN, "note": "E4 note"} if e4 is None else e4,
         e5={"verdict": "RED", "numerator": 12, "denominator": 25,
             "note": "E5 note"})
 
@@ -842,31 +851,78 @@ def test_a_row_cites_the_artifact_it_was_written_to():
     rows = {row["criterion"]: row for row in _rows(out_path=out)}
     assert rows["E3"]["evidence"] == out
     assert rows["E1"]["evidence"] == measure.E1_E2_SCORES
-    assert rows["E4"]["evidence"] == measure.E4_RECEIPT
+    assert rows["E4"]["evidence"] == _E4_ON_PIN
     assert rows["E5"]["evidence"] == measure.E5_RESCORE
 
 
-def test_a_row_measured_on_another_corpus_declares_it(tmp_path):
-    """E4 cites an artifact on another corpus revision — and says so.
+def test_a_row_measured_on_another_corpus_declares_it():
+    """E1/E2 no longer take this path; E4 was taken OFF it by #10679.
+
+    The declaration is what V7 checks against the artifact's own text, so a row
+    that carries ``corpus_sha256`` differing from the log's must also carry
+    ``artifact_corpus_sha256``. A row that tried to look like the run's own corpus
+    instead would be claiming a measurement it did not take.
 
     E1/E2 no longer take this path: they measure the FROZEN corpus, so their
     artifact digest IS the run's and the V7 declaration must be ABSENT (a
-    declaration nothing needs is a claim the gate would then check). E4 does
-    still cite a receipt from another revision, and must declare it.
+    declaration nothing needs is a claim the gate would then check).
+
+    ⛔ E4 is deliberately NOT in that set any more: ``build_e4_row`` refuses a receipt
+    whose ``corpus_hash`` is not the frozen pin, so on the real path E4's row IS the
+    run's corpus and the declaration must be ABSENT. It was emitted unconditionally
+    while E4 read the off-pin constant, and it survived the selector — asserting "a
+    different revision" about the one row that cannot be scored on one, in a field V7
+    never reads (its same-corpus arm short-circuits first). The off-pin shape is still
+    covered, by handing ``build_rows`` an off-pin ``e4`` directly: the condition is on
+    the operands, not a hard ``None`` that would also neuter the rule.
     """
+    log_corpus = "sha256:" + "d" * 64
     rows = {row["criterion"]: row for row in _rows()}
     for criterion in ("E1", "E2"):
         row = rows[criterion]
-        # E1/E2 now measure the FROZEN corpus, so their artifact digest IS the
-        # run's — the V7 declaration is no longer needed and must not appear.
+    for criterion in ("E1", "E2"):
+        row = rows[criterion]
+        # E1/E2 now measure the FROZEN corpus (the #9889 record), so their artifact
+        # digest IS the run's — the V7 declaration is no longer needed and must not
+        # appear.
         assert "artifact_corpus_sha256" not in row, criterion
-    row = rows["E4"]
-    assert measure.normalise_corpus(row["corpus_sha256"]) != \
-        measure.normalise_corpus("sha256:" + "d" * 64), "E4"
-    assert row.get("artifact_corpus_sha256") == row["corpus_sha256"], "E4"
-    for criterion in ("E3", "E5"):
-        assert rows[criterion]["corpus_sha256"] == "sha256:" + "d" * 64, criterion
+    # #10679: E4 is selected BY the frozen pin (`build_e4_row` refuses any receipt
+    # whose `corpus_hash` is not that pin), so E4's row IS the run's corpus too.
+    for criterion in ("E3", "E4", "E5"):
+        assert rows[criterion]["corpus_sha256"] == log_corpus, criterion
         assert "artifact_corpus_sha256" not in rows[criterion], criterion
+
+    off_pin = {row["criterion"]: row for row in _rows(e4={
+        "verdict": "RED", "numerator": 2, "denominator": 15,
+        "sha": "6164c683c", "corpus_sha256": "sha256:" + "f" * 64,
+        "evidence": measure.E4_RECEIPT, "note": "off-pin E4 note"})}
+    assert off_pin["E4"]["artifact_corpus_sha256"] == "sha256:" + "f" * 64, \
+        off_pin["E4"]
+    assert off_pin["E4"]["evidence"] == measure.E4_RECEIPT
+
+
+def test_the_real_e4_row_declares_no_other_corpus_revision():
+    """The row ``main`` actually builds carries NO ``artifact_corpus_sha256``.
+
+    That field told a machine consumer (``run.rows[E4].artifact_corpus_sha256``) that
+    E4's artifact measured a different corpus revision than the run froze, while the
+    note beside it said the two ARE the same — and V7 could never catch it, because
+    ``_same_corpus`` short-circuits before the declaration is read. So the arm went
+    from VERIFIED (pre-fix: an off-pin constant whose digest had to appear in the
+    artifact) to an unverified, redundant claim on the one row that cannot be scored
+    off the pin at all. This drives the real selector -> row -> table path, so a
+    reversion reds here and not only in a fixture.
+
+    Non-vacuity: at the previous head ``build_rows`` stamped the field unconditionally
+    from ``e4["corpus_sha256"]``, so the first assertion is red there; the fixture case
+    above is what reds if the condition becomes a blanket removal.
+    """
+    pin = _prereg()["corpus"]["fixtures_hash"]
+    e4 = measure.build_e4_row(measure.load_e4(_REPO, frozen_pin=pin),
+                              bars=measure.parse_bars(_prereg()), corpus_sha=pin)
+    rows = {row["criterion"]: row for row in _rows(log_corpus_sha=pin, e4=e4)}
+    assert "artifact_corpus_sha256" not in rows["E4"], rows["E4"]
+    assert measure._same_corpus(rows["E4"]["corpus_sha256"], pin), rows["E4"]
 
 
 def test_the_e1_and_e2_rows_carry_the_counts_their_criteria_are_written_over():
@@ -1340,7 +1396,11 @@ def test_the_renderer_renders_a_log_from_the_committed_record(monkeypatch):
     """
     census_data = _canned_census(monkeypatch)
     e1 = measure.measure_e1_e2(_REPO)
-    e4 = measure.load_e4(_REPO)
+    # #10679 made the pin MANDATORY: an un-pinned `load_e4()` is refused outright
+    # (a receipt whose corpus cannot be checked is not evidence for a bar written
+    # over the pre-registered corpus). This case renders the committed record, so
+    # it pins to that record's own frozen corpus.
+    e4 = measure.load_e4(_REPO, frozen_pin=_prereg()["corpus"]["fixtures_hash"])
 
     def render(record: dict) -> str:
         bars = measure.parse_bars(record)
@@ -5281,3 +5341,797 @@ def test_the_measured_arm_readback_must_CARRY_its_off_switches(tmp_path, capsys)
     assert "carries no TORTOISE_VALUE_GATE" in err, err
     assert "missing key is not an unset one" in err, err
 
+# ── E4's artifact is selected by its OWN corpus hash, never by a filename ──────
+
+
+def _receipt(path: Path, *, corpus_hash: str, edge_correct: int, date: str,
+             planted: int = 15, audit: bool = True) -> Path:
+    record = {"run_id": path.stem, "date": date, "commit": "a" * 9,
+              "corpus_hash": corpus_hash, "verdict": "regression",
+              "failure_origin": "gate_regression"}
+    if audit:
+        record["operator_audit"] = {"planted": planted, "edge_correct": edge_correct,
+                                    "content_ok": 8, "operators_total": 27,
+                                    "operators_provenanced": 27}
+    path.write_text(json.dumps(record))
+    return path
+
+
+def test_e4_is_selected_by_the_receipts_own_corpus_hash_not_by_its_filename():
+    """The E4 row's artifact is the receipt MEASURED ON THE FROZEN CORPUS.
+
+    Non-vacuity, and the defect this pins. The probe used to read one hard-coded
+    filename — ``w2b-operator-2026-10-19.json`` — whose own ``corpus_hash`` is
+    ``943a99ec…``, not the frozen ``dd7e8520…``, and scored E4 at **2/15** from it
+    while three later receipts written AFTER ``#8503``'s fix, all five-on-fifteen and
+    all on the frozen corpus, sat unread in the same directory. Before the fix this
+    test's NEWER, other-corpus receipt is what the row would have carried had anyone
+    edited the constant; a filename constant cannot tell the two apart.
+
+    Constructed so the WRONG choice is the appealing one: the other-corpus receipt is
+    BOTH the newest file and the sole best number, so "newest file" and "best number"
+    each select it. Only the corpus hash selects correctly. (The fixture used to also
+    carry a newest-but-unscorable candidate ON the pin, which only worked because the
+    selector skipped it silently — that skip is now a REFUSAL and is pinned by
+    ``test_an_on_pin_receipt_that_cannot_be_scored_REFUSES_instead_of_falling_back``.)
+    """
+    pin = "sha256:" + "d" * 64
+    root = Path(tempfile.mkdtemp())
+    receipts = root / measure.E4_RECEIPT_DIR
+    receipts.mkdir(parents=True)
+    _receipt(receipts / "w2b-operator-2026-01-01.json", corpus_hash=pin,
+             edge_correct=5, date="2026-01-01T00:00:00Z")
+    # NEWEST *and* sole best number — the appealing wrong answer.
+    _receipt(receipts / "w2b-operator-2026-02-01.json",
+             corpus_hash="sha256:" + "9" * 64, edge_correct=99,
+             date="2026-02-01T00:00:00Z")
+
+    rel, record = measure.select_e4_receipt(root, frozen_pin=pin)
+    assert rel == f"{measure.E4_RECEIPT_DIR}/w2b-operator-2026-01-01.json", rel
+    assert record["operator_audit"]["edge_correct"] == 5
+    assert record["corpus_hash"] == pin
+
+
+def test_an_on_pin_receipt_that_cannot_be_scored_REFUSES_instead_of_falling_back():
+    """An on-pin receipt with no ``operator_audit`` refuses; it is never skipped.
+
+    The measured hazard: a NEWER receipt on the frozen corpus arrives truncated or with
+    a drifted schema, so it cannot be scored. Skipping it silently let an OLDER on-pin
+    receipt publish the row's number — the row would then report a measurement of the
+    right corpus taken at the wrong head, with nothing anywhere saying so. (In the green
+    direction the same path could report a stale 15/15 while the newest measurement on
+    the pin was unreadable.) The selection must REFUSE and NAME the offender.
+    """
+    pin = "sha256:" + "d" * 64
+    root = Path(tempfile.mkdtemp())
+    receipts = root / measure.E4_RECEIPT_DIR
+    receipts.mkdir(parents=True)
+    _receipt(receipts / "w2b-operator-2026-01-01.json", corpus_hash=pin,
+             edge_correct=5, date="2026-01-01T00:00:00Z")
+    # NEWER and ON the pin, but unscorable.
+    _receipt(receipts / "w2b-operator-2026-03-01.json", corpus_hash=pin,
+             edge_correct=15, date="2026-03-01T00:00:00Z", audit=False)
+
+    with pytest.raises(SystemExit) as exc:
+        measure.select_e4_receipt(root, frozen_pin=pin)
+    message = str(exc.value)
+    assert "REFUSED" in message, message
+    assert "w2b-operator-2026-03-01.json" in message, (
+        "the refusal must NAME the on-pin receipt it could not score, or a reader "
+        "cannot tell which artifact to repair: " + message)
+    assert "operator_audit" in message, message
+
+
+def test_an_unscorable_on_pin_receipt_that_cannot_win_is_ignored_not_refused():
+    """The refusal must name a TRUE consequence, or the refusal is itself the bug.
+
+    An on-pin receipt older than the newest scorable one can never win — the ordering
+    puts the winner last — so ignoring it changes nothing. Refusing on it would tell a
+    reader that an older receipt would have published the row's number when the newest
+    measurement on the pin was in fact read: a refusal naming a false reason, which is
+    the one failure mode ``_same_corpus``'s own docstring says a refusal must not have.
+    """
+    pin = "sha256:" + "d" * 64
+    root = Path(tempfile.mkdtemp())
+    receipts = root / measure.E4_RECEIPT_DIR
+    receipts.mkdir(parents=True)
+    # OLDER and unscorable — it cannot win, so it must not refuse the selection.
+    _receipt(receipts / "w2b-operator-2026-01-01.json", corpus_hash=pin,
+             edge_correct=9, date="2026-01-01T00:00:00Z", audit=False)
+    _receipt(receipts / "w2b-operator-2026-05-01.json", corpus_hash=pin,
+             edge_correct=5, date="2026-05-01T00:00:00Z")
+
+    rel, record = measure.select_e4_receipt(root, frozen_pin=pin)
+    assert rel.endswith("w2b-operator-2026-05-01.json"), rel
+    assert record["operator_audit"]["edge_correct"] == 5
+
+
+def test_a_truncated_receipt_refuses_rather_than_letting_an_older_one_win():
+    """A half-written file must REFUSE, not be skipped for an older on-pin receipt.
+
+    The operator lane writes its receipt with a plain non-atomic ``write_text``
+    (``tests/eval/write_path/runner.py``), so a lane killed mid-write leaves exactly
+    this file. It cannot be parsed, so neither its corpus nor its date is knowable:
+    publishing an older on-pin receipt's number would be the silent revert this
+    selector exists to prevent, and nothing downstream would say so.
+    """
+    pin = "sha256:" + "d" * 64
+    root = Path(tempfile.mkdtemp())
+    receipts = root / measure.E4_RECEIPT_DIR
+    receipts.mkdir(parents=True)
+    _receipt(receipts / "w2b-operator-2026-01-01.json", corpus_hash=pin,
+             edge_correct=5, date="2026-01-01T00:00:00Z")
+    (receipts / "w2b-operator-2026-09-01.json").write_text('{"run_id": "trunc')
+
+    with pytest.raises(SystemExit) as exc:
+        measure.select_e4_receipt(root, frozen_pin=pin)
+    message = str(exc.value)
+    assert "REFUSED" in message, message
+    assert "w2b-operator-2026-09-01.json" in message, (
+        "the refusal must NAME the unreadable file, or a reader cannot tell which "
+        "artifact to repair: " + message)
+    assert "unreadable" in message, message
+
+
+def test_a_non_utf8_receipt_refuses_instead_of_tracebacks():
+    """A non-UTF-8 file raises ``UnicodeDecodeError`` — a ``ValueError``, NOT a
+    ``JSONDecodeError`` — so a guard catching only the latter let the traceback escape
+    instead of the documented refusal naming the file.
+    """
+    pin = "sha256:" + "d" * 64
+    root = Path(tempfile.mkdtemp())
+    receipts = root / measure.E4_RECEIPT_DIR
+    receipts.mkdir(parents=True)
+    _receipt(receipts / "w2b-operator-2026-01-01.json", corpus_hash=pin,
+             edge_correct=5, date="2026-01-01T00:00:00Z")
+    (receipts / "w2b-operator-latin1.json").write_bytes(
+        '{"run_id": "caf\u00e9"}'.encode("latin-1"))
+
+    with pytest.raises(SystemExit) as exc:
+        measure.select_e4_receipt(root, frozen_pin=pin)
+    message = str(exc.value)
+    assert "REFUSED" in message, message
+    assert "w2b-operator-latin1.json" in message, message
+
+
+def test_a_directory_whose_only_on_pin_receipt_is_unscorable_names_that_cause():
+    """When nothing matches because every on-pin receipt is unscorable, say THAT.
+
+    The generic no-match refusal claimed no receipt "was measured on the frozen
+    corpus" (one was), printed "none present" about a directory that holds a
+    candidate, and blamed "scoring it from another revision" — three false statements
+    in one message, with the actual cause (no ``operator_audit``) never named. A
+    refusal that names a false reason is the failure mode this family exists to
+    remove, so this arm is the reason the branch exists at all.
+    """
+    pin = "sha256:" + "d" * 64
+    root = Path(tempfile.mkdtemp())
+    receipts = root / measure.E4_RECEIPT_DIR
+    receipts.mkdir(parents=True)
+    _receipt(receipts / "w2b-operator-2026-01-01.json", corpus_hash=pin,
+             edge_correct=5, date="2026-01-01T00:00:00Z", audit=False)
+
+    with pytest.raises(SystemExit) as exc:
+        measure.select_e4_receipt(root, frozen_pin=pin)
+    message = str(exc.value)
+    assert "operator_audit" in message, message
+    assert "w2b-operator-2026-01-01.json" in message, message
+    assert "none present" not in message, message
+    assert "another revision" not in message, message
+
+
+def test_build_e4_row_refuses_a_receipt_off_the_pin():
+    """The note says "Its corpus_hash IS the frozen corpus", so it must BE that.
+
+    ``build_e4_row`` rendered that sentence unconditionally, so any caller passing an
+    off-pin receipt emitted a claim the row's own fields refute — and ``build_rows``
+    then stamped ``artifact_corpus_sha256`` from it, so nothing downstream re-checked.
+    Both operands are guarded: a mismatch refuses, and an EMPTY pin refuses too,
+    because ``_same_corpus("", "")`` is ``True`` and the both-empty shape would
+    otherwise slip through the very check that exists to make the sentence true.
+    """
+    bars = measure.parse_bars(_prereg())
+    receipt = {"evidence": "x.json", "planted": 15, "edge_correct": 5,
+               "content_ok": 11, "operators_total": 33, "date": "d",
+               "commit": "abc", "corpus_hash": "sha256:" + "9" * 64,
+               "verdict": "regression", "failure_origin": "gate_regression"}
+    with pytest.raises(SystemExit) as exc:
+        measure.build_e4_row(receipt, bars=bars, corpus_sha="sha256:" + "d" * 64)
+    assert "REFUSED" in str(exc.value), str(exc.value)
+    with pytest.raises(SystemExit) as exc:
+        measure.build_e4_row({**receipt, "corpus_hash": ""}, bars=bars,
+                             corpus_sha="")
+    assert "REFUSED" in str(exc.value), str(exc.value)
+
+
+def test_the_newest_frozen_pin_receipt_wins_because_the_ordering_is_the_property():
+    """`matched[-1]` is a claim the docs make; pin it or `matched[0]` stays green.
+
+    Both candidates match the pin, so the corpus check cannot decide between them and
+    only the ordering can. They differ in `edge_correct`, so picking the wrong end
+    changes the ROW's number — which is the measured property, not the sort.
+    """
+    pin = "sha256:" + "d" * 64
+    root = Path(tempfile.mkdtemp())
+    receipts = root / measure.E4_RECEIPT_DIR
+    receipts.mkdir(parents=True)
+    _receipt(receipts / "w2b-operator-older.json", corpus_hash=pin,
+             edge_correct=13, date="2026-10-24T05:46:51Z")
+    _receipt(receipts / "w2b-operator-newer.json", corpus_hash=pin,
+             edge_correct=5, date="2026-10-24T06:10:47Z")
+    rel, record = measure.select_e4_receipt(root, frozen_pin=pin)
+    assert rel.endswith("w2b-operator-newer.json"), rel
+    assert record["operator_audit"]["edge_correct"] == 5, record
+
+
+def test_the_ordering_compares_instants_and_not_date_strings():
+    """An offset stamp sorts ABOVE its ``Z`` equivalent as a STRING while being EARLIER.
+
+    Measured: ``2026-10-24T01:00:00+02:00`` is 2026-10-23T23:00Z, genuinely BEFORE
+    ``2026-10-24T00:30:00Z``, but lexically AFTER it. The two fixtures below are chosen
+    so a raw-string ordering and a parsed-instant ordering pick DIFFERENT files, and
+    they differ in ``edge_correct`` — so the published E4 numerator moves if the
+    comparison regresses. Reverting ``_sort_key`` to a string compare leaves every
+    other case green; this one is what reds.
+
+    The undated third receipt pins the documented sentinel: an absent ``date`` sorts
+    FIRST, so an undated record never displaces a dated one.
+    """
+    pin = "sha256:" + "d" * 64
+    root = Path(tempfile.mkdtemp())
+    receipts = root / measure.E4_RECEIPT_DIR
+    receipts.mkdir(parents=True)
+    _receipt(receipts / "w2b-operator-offset.json", corpus_hash=pin,
+             edge_correct=13, date="2026-10-24T01:00:00+02:00")  # 2026-10-23T23:00Z
+    _receipt(receipts / "w2b-operator-zulu.json", corpus_hash=pin,
+             edge_correct=5, date="2026-10-24T00:30:00Z")
+    _receipt(receipts / "w2b-operator-undated.json", corpus_hash=pin,
+             edge_correct=99, date="")
+
+    rel, record = measure.select_e4_receipt(root, frozen_pin=pin)
+    assert rel.endswith("w2b-operator-zulu.json"), (
+        f"the LATER instant must win; a raw-string compare picks the +02:00 stamp: {rel}")
+    assert record["operator_audit"]["edge_correct"] == 5, record
+
+
+def test_the_would_have_won_boundary_is_the_instant_not_the_string():
+    """The ignore/refuse boundary must be decided on the same key as the winner.
+
+    An unscorable on-pin receipt that is genuinely EARLIER than the winner can never
+    win, so it is ignored. Under a raw-string compare its ``+02:00`` stamp sorts ABOVE
+    the winner's ``Z`` stamp and the selection REFUSES — a refusal that names a
+    consequence that is not true, over a run that is perfectly fine.
+    """
+    pin = "sha256:" + "d" * 64
+    root = Path(tempfile.mkdtemp())
+    receipts = root / measure.E4_RECEIPT_DIR
+    receipts.mkdir(parents=True)
+    # Chronologically EARLIER (2026-10-23T23:00Z) but lexically later, and unscorable.
+    _receipt(receipts / "w2b-operator-offset.json", corpus_hash=pin,
+             edge_correct=13, date="2026-10-24T01:00:00+02:00", audit=False)
+    _receipt(receipts / "w2b-operator-zulu.json", corpus_hash=pin,
+             edge_correct=5, date="2026-10-24T00:30:00Z")
+
+    rel, record = measure.select_e4_receipt(root, frozen_pin=pin)
+    assert rel.endswith("w2b-operator-zulu.json"), rel
+    assert record["operator_audit"]["edge_correct"] == 5, record
+
+
+def test_a_missing_receipts_directory_refuses_differently_from_an_empty_one():
+    """An ABSENT receipts directory is not an EMPTY one.
+
+    Both produced the identical "none present" refusal, so a wrong root or a partial
+    checkout pointed the reader at a missing receipt when the real cause was a missing
+    tree — the mirror of the case where "none present" was printed about a directory
+    that did hold an on-pin candidate. Both arms are pinned here, because the point is
+    the DISTINCTION, not either message on its own.
+    """
+    pin = "sha256:" + "d" * 64
+    absent = Path(tempfile.mkdtemp())
+    with pytest.raises(SystemExit) as exc:
+        measure.select_e4_receipt(absent, frozen_pin=pin)
+    missing = str(exc.value)
+    assert "REFUSED" in missing, missing
+    assert str(absent / measure.E4_RECEIPT_DIR) in missing, missing
+    assert "does not exist" in missing, missing
+    assert "candidate(s) were scanned" not in missing, (
+        "an absent directory must not report a scan count — there was nothing to "
+        f"scan: {missing}")
+
+    empty = Path(tempfile.mkdtemp())
+    (empty / measure.E4_RECEIPT_DIR).mkdir(parents=True)
+    with pytest.raises(SystemExit) as exc:
+        measure.select_e4_receipt(empty, frozen_pin=pin)
+    scanned = str(exc.value)
+    assert "candidate(s) were scanned" in scanned, scanned
+    assert "none present" in scanned, scanned
+    assert "does not exist" not in scanned, scanned
+
+
+def test_e4_refuses_rather_than_falling_back_to_another_corpus():
+    """No receipt on the pin = no measurement, named — never "the newest file".
+
+    A fallback would report a number this run's corpus cannot support, which is the
+    whole class of defect the row had. The refusal names the pin and every candidate
+    it scanned, so an artifact that is missing or unreadable cannot read as "none
+    present".
+    """
+    pin = "sha256:" + "d" * 64
+    root = Path(tempfile.mkdtemp())
+    receipts = root / measure.E4_RECEIPT_DIR
+    receipts.mkdir(parents=True)
+    _receipt(receipts / "w2b-operator-2026-02-01.json",
+             corpus_hash="sha256:" + "9" * 64, edge_correct=99,
+             date="2026-02-01T00:00:00Z")
+    with pytest.raises(SystemExit) as exc:
+        measure.select_e4_receipt(root, frozen_pin=pin)
+    message = str(exc.value)
+    assert pin in message, message
+    assert "w2b-operator-2026-02-01.json" in message, message
+    assert str(receipts) in message, (
+        "the refusal must name the directory it actually scanned, not the module "
+        f"constant: {message}")
+
+
+def test_a_receipt_not_named_w2b_operator_is_still_found():
+    """The name is not trusted to say which files are receipts.
+
+    A frozen-pin receipt whose filename does not match the old glob was invisible, so
+    the refusal printed "none present" about a directory that held a valid artifact.
+    """
+    pin = "sha256:" + "d" * 64
+    root = Path(tempfile.mkdtemp())
+    receipts = root / measure.E4_RECEIPT_DIR
+    receipts.mkdir(parents=True)
+    _receipt(receipts / "operator-2026-10-24.json", corpus_hash=pin,
+             edge_correct=5, date="2026-10-24T06:10:47Z")
+    rel, record = measure.select_e4_receipt(root, frozen_pin=pin)
+    assert rel.endswith("operator-2026-10-24.json"), rel
+    assert record["operator_audit"]["edge_correct"] == 5
+
+
+def test_a_pin_spelled_without_the_sha256_prefix_still_matches():
+    """Two spellings of the same hash name the same corpus (a false refusal is a bug)."""
+    pin = "dd7e85200f4809f701b9e9c11816b541acea63afd0b2472998975e2ebcb035dc"
+    root = Path(tempfile.mkdtemp())
+    receipts = root / measure.E4_RECEIPT_DIR
+    receipts.mkdir(parents=True)
+    _receipt(receipts / "w2b-operator-x.json", corpus_hash=f"sha256:{pin}",
+             edge_correct=5, date="2026-10-24T06:10:47Z")
+    rel, _record = measure.select_e4_receipt(root, frozen_pin=pin)
+    assert rel.endswith("w2b-operator-x.json"), rel
+
+
+def test_a_receipt_that_is_json_but_not_an_object_refuses_instead_of_tracebacks():
+    root = Path(tempfile.mkdtemp())
+    receipts = root / measure.E4_RECEIPT_DIR
+    receipts.mkdir(parents=True)
+    (receipts / "w2b-operator-list.json").write_text("[]")
+    with pytest.raises(SystemExit) as exc:
+        measure.select_e4_receipt(root, frozen_pin="sha256:" + "d" * 64)
+    assert "not a record" in str(exc.value), str(exc.value)
+
+
+def test_e4_refuses_to_select_without_the_frozen_pin():
+    """An un-pinned selection cannot check the artifact, so it is refused."""
+    with pytest.raises(SystemExit) as exc:
+        measure.select_e4_receipt(_REPO, frozen_pin="")
+    assert "frozen corpus pin" in str(exc.value)
+
+
+def test_the_e4_row_reads_a_receipt_on_the_frozen_pin_and_not_the_old_constant():
+    """The row's artifact is on the FROZEN pin, and is not the pre-#8503 constant.
+
+    The pin is read out of the record (never typed) and compared with the receipt's
+    own ``corpus_hash`` — that equality is the property. The NUMBER is not pinned
+    here: the bar is 15/15, so the day a 15/15 receipt lands this row goes GREEN and a
+    hard-coded ``== 5`` would red on the epic's own success (and the cheapest green
+    would be to edit the assertion). The 2 → 5 movement is pinned by its own test.
+    """
+    pin = _prereg()["corpus"]["fixtures_hash"]
+    e4 = measure.load_e4(_REPO, frozen_pin=pin)
+    assert measure._same_corpus(e4["corpus_hash"], pin), e4
+    assert e4["evidence"] != measure.E4_RECEIPT, (
+        "E4 is reading the pre-#8503 receipt on a DIFFERENT corpus revision again — "
+        "the row's number is not a measurement of the frozen corpus")
+    assert e4["evidence"].startswith("tests/eval/write_path/receipts/")
+    # the row built from it cites THAT file, and its number is that file's number
+    row = measure.build_e4_row(e4, bars=measure.parse_bars(_prereg()),
+                               corpus_sha=pin)
+    assert row["evidence"] == e4["evidence"], row
+    assert (row["numerator"], row["denominator"]) == (
+        _receipt_audit(e4["evidence"])["edge_correct"],
+        _receipt_audit(e4["evidence"])["planted"]), row
+
+
+def _receipt_audit(rel: str) -> dict:
+    return json.loads((_REPO / rel).read_text())["operator_audit"]
+
+
+def test_the_e4_number_is_the_frozen_receipts_five_and_not_the_old_ones():
+    """The defect, pinned as a NUMBER: the old artifact says 2, the selected one 5.
+
+    ⛔ THIS IS THE ONE DELIBERATE HARD PIN in this family, and it is labelled as one:
+    the test above deliberately does not pin E4's number (so a 15/15 receipt cannot
+    red it on the epic's own success), and THAT is why this one exists — the number
+    the row used to publish has to be recorded somewhere or the correction has no
+    evidence behind it.
+
+    It records that the row used to report **2/15** from `w2b-operator-2026-10-19.json`
+    (corpus `943a99ec…`, pre-`#8503`) while the frozen-corpus receipts read **5/15**.
+    When either number moves — a 15/15 receipt landing, or the connect step improving —
+    this test reds ON PURPOSE: the epic's record then has to be re-read, and the fix is
+    to re-derive BOTH numbers here with the receipts in front of you, never to delete
+    the comparison. It reads the two artifacts rather than asserting one in isolation,
+    so it cannot be greened by editing a single literal.
+    """
+    old = _receipt_audit(measure.E4_RECEIPT)
+    assert old["edge_correct"] == 2 and old["planted"] == 15, old
+    pin = _prereg()["corpus"]["fixtures_hash"]
+    selected = measure.load_e4(_REPO, frozen_pin=pin)
+    assert selected["edge_correct"] == 5 and selected["planted"] == 15, selected
+    assert selected["edge_correct"] > old["edge_correct"]
+
+
+def test_main_builds_the_e4_row_from_the_selector_and_never_from_the_constant():
+    """The union of selection and row is pinned, so a reversion cannot stay green.
+
+    The reviewer's finding: `main` built the row inline, so replacing
+    ``"evidence": receipt["evidence"]`` with the constant left all tests passing while
+    the published row cited a file it was not measured on. This asserts the source
+    ``main`` runs calls ``build_e4_row(load_e4(frozen_pin=...))`` — the two names, on
+    the path that actually produces the table.
+    """
+    tree = ast.parse(PROBE.read_text())
+    main = next(node for node in tree.body
+                if isinstance(node, ast.FunctionDef) and node.name == "main")
+
+    # What main assigns from a call, by target name — resolves `receipt` to load_e4.
+    assigned_from: dict[str, str] = {}
+    for node in ast.walk(main):
+        if (isinstance(node, ast.Assign) and isinstance(node.value, ast.Call)
+                and isinstance(node.value.func, ast.Name)):
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    assigned_from[target.id] = node.value.func.id
+
+    loads = [node for node in ast.walk(main)
+             if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+             and node.func.id == "load_e4"]
+    assert loads, "main never calls load_e4 — E4 would come from somewhere unpinned"
+    for call in loads:
+        assert any(kw.arg == "frozen_pin" for kw in call.keywords), (
+            "an un-pinned load_e4() call would score E4 from whatever receipt is "
+            "newest, not from one on the frozen corpus")
+
+    row_calls = [node for node in ast.walk(main)
+                 if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                 and node.func.id == "build_e4_row"]
+    assert len(row_calls) == 1, (
+        f"main must build the E4 row exactly once: {len(row_calls)}")
+    source_arg = row_calls[0].args[0] if row_calls[0].args else None
+    assert isinstance(source_arg, ast.Name), (
+        "main must build E4's row from a plain name, so this pin can follow it")
+    assert assigned_from.get(source_arg.id) in {"load_e4", "select_e4_receipt"}, (
+        f"main builds E4's row from {source_arg.id}, which is not what "
+        "load_e4()/select_e4_receipt() returned — building it from anything else is "
+        "the reversion this pin exists to catch (the earlier version of this test "
+        "grepped source TEXT, which is why the render-path defects stayed green)")
+
+
+def test_main_binds_every_name_it_hands_render_log_and_load_e4_carries_its_keys():
+    """The render path is EXECUTED by nothing else, so pin its two data contracts.
+
+    Two defects shipped in the first cut of this change with 79 tests green, because
+    no test ever ran ``render_log`` or ``main``:
+
+    * ``main`` called ``render_log(..., e4=receipt, e4_out=e4_result, ...)`` after the
+      refactor deleted the statement that bound ``e4_result`` — so every real run
+      raised ``NameError`` at the END, after the corpus pass and before the log was
+      written: all the work, no artifact;
+    * ``render_log`` read ``e4["corpus_sha256"]`` from the ``load_e4`` mapping, whose
+      field is ``corpus_hash`` — a ``KeyError`` on the same path (twice: the human
+      section and the machine record's ``e4_receipt.corpus_hash``).
+
+    The wiring pin beside this one greps source TEXT, which is exactly why both stayed
+    green. These are the two properties that were actually violated: every name
+    ``main`` hands ``render_log`` is bound in ``main`` BEFORE the call, and every key
+    ``render_log`` subscripts off its ``e4`` parameter is a key ``load_e4`` really
+    returns (checked against a real call, not a hand-kept list).
+    """
+    tree = ast.parse(PROBE.read_text())
+    functions = {node.name: node for node in tree.body
+                 if isinstance(node, ast.FunctionDef)}
+    main, render = functions["main"], functions["render_log"]
+
+    # (a) every NAME main hands render_log is bound, and bound BEFORE the call.
+    calls = [node for node in ast.walk(main)
+             if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+             and node.func.id == "render_log"]
+    assert len(calls) == 1, f"main must call render_log exactly once: {len(calls)}"
+    call_line = calls[0].lineno
+    handed = {kw.value.id for kw in calls[0].keywords
+              if isinstance(kw.value, ast.Name)}
+    assert handed, "no keyword argument of the render_log call is a bare name"
+    # (a) every NAME main hands render_log resolves, and a LOCAL one is bound BEFORE
+    # the call. Module-level names resolve without a local binding, so seed them; and
+    # main's OWN scope only — a Store inside a nested def/lambda/class does not bind a
+    # name in main, so descending into one would let a dead binding satisfy the check.
+    module_level: set[str] = set()
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            module_level.add(node.name)
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            module_level.update((alias.asname or alias.name).split(".")[0]
+                                for alias in node.names)
+        elif isinstance(node, ast.Assign):
+            module_level.update(target.id for target in node.targets
+                                if isinstance(target, ast.Name))
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            module_level.add(node.target.id)
+    first_bind: dict[str, int] = dict.fromkeys(module_level, 0)
+
+    def _own_scope(node: ast.AST):
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef,
+                                  ast.Lambda, ast.ClassDef)):
+                continue
+            yield child
+            yield from _own_scope(child)
+
+    for node in [main, *_own_scope(main)]:
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
+            first_bind[node.id] = min(first_bind.get(node.id, node.lineno),
+                                      node.lineno)
+        elif isinstance(node, ast.arg):
+            first_bind[node.arg] = min(first_bind.get(node.arg, node.lineno),
+                                       node.lineno)
+    unbound = sorted(name for name in handed
+                     if first_bind.get(name, call_line + 1) >= call_line)
+    assert not unbound, (
+        f"main hands render_log name(s) it never binds before the call: {unbound} — "
+        "that is a NameError at the END of a full corpus run, after the work and "
+        "before the log is written, and no test that does not execute main sees it")
+
+    # (b) every STRING key render_log reads off `e4` is a key load_e4 returns.
+    pin = _prereg()["corpus"]["fixtures_hash"]
+    supplied = set(measure.load_e4(_REPO, frozen_pin=pin))
+    read = {node.slice.value for node in ast.walk(render)
+            if isinstance(node, ast.Subscript)
+            and isinstance(node.value, ast.Name)
+            and node.value.id == "e4"
+            and isinstance(node.slice, ast.Constant)
+            and isinstance(node.slice.value, str)}
+    assert read, "render_log no longer subscripts `e4` — this pin is stale"
+    missing = sorted(read - supplied)
+    assert not missing, (
+        f"render_log reads key(s) {missing} off `e4`, but main hands it the load_e4() "
+        f"mapping whose keys are {sorted(supplied)} — a KeyError on the render path, "
+        "which nothing executes")
+
+    # (c) `e4=` must be the load_e4() MAPPING, not the built row. Arm (b) proves the
+    # keys render_log reads exist in load_e4's return; it says nothing about WHAT main
+    # hands over, so swapping `e4=receipt` for `e4=e4` (the row `main` also binds) left
+    # it green while render_log raised `KeyError` on 11 of its 13 reads. The row is the
+    # table shape (`corpus_sha256`, `citations`); the mapping is the receipt's fields.
+    e4_kwarg = next(kw for kw in calls[0].keywords if kw.arg == "e4")
+    assert isinstance(e4_kwarg.value, ast.Name), (
+        "main must pass a plain name as e4=, so this pin can follow it")
+    from_loader = {target.id for node in [main, *_own_scope(main)]
+                   if isinstance(node, ast.Assign)
+                   and isinstance(node.value, ast.Call)
+                   and isinstance(node.value.func, ast.Name)
+                   and node.value.func.id in {"load_e4", "select_e4_receipt"}
+                   for target in node.targets if isinstance(target, ast.Name)}
+    assert e4_kwarg.value.id in from_loader, (
+        f"main hands render_log e4={e4_kwarg.value.id}, which is not the value of a "
+        "load_e4()/select_e4_receipt() call — render_log reads the RECEIPT's fields "
+        "off it, so handing it the built row is a KeyError at the END of a full "
+        "corpus run, after the work and before the log is written")
+
+
+#: One canned receipt in `load_e4`'s own shape — the ONLY field the E4 narration
+#: branches on is `corpus_hash`, so the rest exist to be formatted.
+_E4_RECEIPT_FIXTURE = {
+    "evidence": "tests/eval/write_path/receipts/w2b-operator-2026-01-01.json",
+    "planted": 15, "edge_correct": 5, "content_ok": 11, "operators_total": 33,
+    "operators_provenanced": 33, "run_id": "w2b-canned",
+    "date": "2026-01-01T00:00:00Z", "commit": "a" * 9,
+    "corpus_hash": "sha256:" + "d" * 64,
+    "judge_pin": "w2-write-path-mechanical-v2", "verdict": "regression",
+    "failure_origin": "gate_regression",
+}
+
+
+def _render_a_log(monkeypatch, *, receipt: dict, corpus_sha: str) -> str:
+    """One REAL `render_log` call over canned data — no DB, no network, no model.
+
+    `render_log` takes dicts and scalars only, so the whole renderer executes here;
+    everything it formats is either derived from the frozen record (`parse_bars`) or
+    the canned census the sibling cases already use.
+    """
+    return measure.render_log(
+        head="a" * 40, prereg_sha="b" * 40,
+        bars=measure.parse_bars(_prereg()), corpus_sha=corpus_sha,
+        graph="canned",
+        runs=[{"session_id": "wp01", "ok": True, "extraction_mode": "mechanical",
+               "extracted": 1, "errors": 0, "elapsed_s": 0.5, "turns": 1,
+               "stats": {}}],
+        observed={}, unobserved={},
+        census_data=_canned_census(monkeypatch),
+        e1={"before_share": 0.6, "after_share": 0.6, "objects_numerator": 15,
+            "objects_total": 25, "sha": "c" * 40, "corpus": "corpus",
+            "corpus_sha256": "sha256:" + "e" * 64, "declared_prereg": "no",
+            "declared_result": "UNPREREGISTERED", "real_facts": 90,
+            "state_values": 42, "fused": 7, "atomic_points": 9,
+            # #10610's record-shaped fields. `render_log` narrates the paired
+            # record, so its canned input must carry them: it prints the AFTER
+            # arm's object count, the `decidable` flag and the before-arm spread
+            # (the three facts that stop a one-arm reading being mistaken for a
+            # verdict), and it walks the pairings. Canned from the same shape
+            # `measure_e1_e2` returns.
+            "after_objects": 25, "after_numerator": 0,
+            "decidable": False, "before_spread_pp": None,
+            "below_floor": False,
+            # the E2a/E2b record slots `render_log` narrates from the same dict
+            "e2a_units": 14, "e2a_survived": 8, "e2a_falsifier_survived": 14,
+            "pairings": [{"before_share": 0.6, "after_share": 0.6,
+                          "before_objects": 25, "after_objects": 25,
+                          "before_bare_definite": 15, "after_bare_definite": 0,
+                          "bound": 0.3, "after": 0.6, "passed": False,
+                          "ratio": 1.0, "before_graph": "canned"}]},
+        e1_aux={"bare_definite": 0, "share": 0.0},
+        e1_out={"outcome": "REFUSED", "value": "15/25", "bar": "x"},
+        e1b_out={"outcome": "CONTROL", "value": "90", "bar": "x"},
+        e2a_out={"outcome": "BLOCKED", "value": "42", "bar": "x"},
+        e2b_out={"outcome": "BLOCKED", "value": "9", "bar": "x"},
+        e3={"numerator": 148, "denominator": 383, "below_floor": False,
+            "outcome": "RED", "bar": "= 1.000"},
+        e3_out={"outcome": "RED", "value": "148/383", "bar": "= 1.000"},
+        e4=receipt,
+        e4_out=measure.e4_outcome_for(receipt, measure.parse_bars(_prereg())),
+        e5={"arms_dir": "d", "artifact": "a.json", "raw_loss": 0.52,
+            "raw_loss_count": 13, "raw_n": 25, "narrative_loss": 0.48,
+            "narrative_loss_count": 12, "narrative_n": 25,
+            "recall": {"raw": {"recalled": 12, "planted": 25},
+                       "narrative": {"recalled": 13, "planted": 25}},
+            "warning": [], "partial_receipts": []},
+        e5_out={"ratio": 1.0833, "ratio_ok": True, "raw_recovery": 0.48,
+                "raw_ok": False, "narrative_recovery": 0.52,
+                "outcome": "RED", "bar": "x"},
+        rows=[], out_path="canned.log")
+
+
+def test_the_e4_narration_says_which_corpus_the_receipt_was_scored_on(monkeypatch):
+    """`render_log`'s `on_pin` branch — the sentence EVERY future scored log prints.
+
+    The scanned receipt is now selected BY the frozen pin, so the renderer's sentence
+    must say so. It printed the opposite unconditionally: *"Its corpus_hash … is NOT
+    the frozen corpus … scored as a NON-GREEN measurement on ITS OWN corpus revision"* —
+    true of the pre-fix constant, false of every receipt `load_e4` can now return, and
+    printed into the log of the very run that fixed it.
+
+    Nothing pinned either sentence (`git grep render_log tests/ tools/` found only the
+    AST wiring pin, which reads the call site and never executes the renderer), so a
+    reversion to the unconditional sentence left every case green.
+
+    Non-vacuity: the pre-fix renderer prints the off-pin sentence for BOTH receipts, so
+    the first two assertions red ("IS the frozen corpus" absent, "is NOT the frozen"
+    present). The two receipts differ ONLY in `corpus_hash`, so nothing else can decide
+    which sentence is emitted.
+    """
+    pin = _prereg()["corpus"]["fixtures_hash"]
+    on_pin = dict(_E4_RECEIPT_FIXTURE, corpus_hash=pin)
+    off_pin = dict(_E4_RECEIPT_FIXTURE, corpus_hash="sha256:" + "9" * 64)
+
+    rendered_on = _render_a_log(monkeypatch, receipt=on_pin, corpus_sha=pin)
+    assert f"Its corpus_hash={pin} IS the frozen corpus ({pin})" in rendered_on, \
+        "an on-pin receipt must be narrated as on the frozen corpus"
+    assert "selected BY that hash" in rendered_on, rendered_on[-2000:]
+    assert "V7's declared-mismatch arm is not taken for it" in rendered_on
+    assert "is NOT the frozen corpus" not in rendered_on, (
+        "a receipt selected BY the frozen pin must never be narrated as off it — this "
+        "is the sentence the fix exists for")
+
+    rendered_off = _render_a_log(monkeypatch, receipt=off_pin, corpus_sha=pin)
+    assert f"Its corpus_hash={off_pin['corpus_hash']} is NOT the frozen corpus ({pin})" \
+        in rendered_off, "an off-pin receipt must still be narrated as off the pin"
+    assert "NON-GREEN measurement on ITS OWN corpus revision" in rendered_off
+    assert "IS the frozen corpus" not in rendered_off, (
+        "an off-pin receipt must never be handed the on-pin sentence")
+
+
+def test_the_frozen_records_stale_E4_sentence_is_disclosed_and_not_edited():
+    """The record a MACHINE consumer reads still says 2/15 — and must NOT be edited.
+
+    `PRE-REGISTRATION.md` §10.3 ends *"E4's denominator (15), its threshold (= 15 of 15)
+    and its row are unchanged"* and `preregistration.json`'s
+    `criteria[E4].post_registration_measurement` still hands a consumer
+    `edge_correct=2 of 15 … so it measures its own corpus revision`. "its row are
+    unchanged" is no longer true of the row the probe builds, so the bundle would
+    publish a current number and a frozen record that contradicts it — the defect
+    class this change exists to close — in the one file no human reads.
+
+    The fix is NOT to edit the record: `preregistration.json` pins the document by
+    BYTES (`document_sha256`) and the `#10463` ruling this bundle records says an
+    amendment is a NEW linked record, never an edit to the frozen one. So this pin
+    holds BOTH halves: the record still carries the 2/15 sentence (an edit reds here
+    as well as in `test_capstone_preregistration_9075.py`), and the README DISCLOSES
+    it — naming §10.3, the machine record, the `document_sha256`/`#10463` reason it is
+    untouched, and the selector that makes the current row 5/15.
+
+    Non-vacuity: the pre-fix README carries no disclosure at all, so the README
+    assertions red.
+    """
+    doc = (PREREG.parent / "PRE-REGISTRATION.md").read_text()
+    record = json.loads(PREREG.read_text())
+    readme = README_DOC.read_text()
+
+    # (a) the frozen record is UNEDITED — asserted, so this cannot drift silently.
+    assert "and its row are unchanged" in doc, (
+        "PRE-REGISTRATION.md §10.3 no longer states the frozen sentence this bundle "
+        "discloses; re-cut the disclosure, do NOT edit the hash-pinned record")
+    e4 = next(c for c in record["criteria"] if c["id"] == "E4")
+    assert "edge_correct=2 of 15" in e4["post_registration_measurement"], e4
+
+    # (b) the bundle discloses it, in the section a reader of that E4 row lands in.
+    section = readme.split("## E4 — the committed operator receipt", 1)[1]
+    section = section.split("## E5 —", 1)[0]
+    assert "The frozen record still publishes the pre-fix figure for E4" in section, (
+        "README §E4 must disclose that the frozen record still carries 2/15")
+    assert "its row are unchanged" in section, (
+        "the disclosure must quote the sentence that went stale, so a reader who "
+        "meets it in the record knows which one this refers to")
+    assert "criteria[E4].post_registration_measurement" in section, (
+        "the disclosure must name the machine-readable copy, not only the prose")
+    assert "document_sha256" in section and "#10463" in section, (
+        "the disclosure must state WHY the record is not edited (byte-pinned; the "
+        "#10463 new-record rule), not merely that it is not")
+    assert "5/15 via `select_e4_receipt`" in section, (
+        "the disclosure must hand the reader the CURRENT row and the selector that "
+        "produced it, or it only moves the contradiction one paragraph down")
+
+
+def test_a_row_cites_the_receipt_the_selector_chose():
+    """The evidence path on the ROW follows the selection, not the constant."""
+    rows = measure.build_rows(
+        head="a" * 40, out_path="docs/evidence/7949-capstone/e1-e2.log",
+        log_corpus_sha="sha256:" + "d" * 64,
+        e1={"verdict": "BLOCKED", "sha": "c" * 40, "corpus_sha256": "e" * 64,
+            "numerator": 15, "denominator": 25, "note": "E1 note"},
+        e2={"verdict": "BLOCKED", "sha": "c" * 40, "corpus_sha256": "e" * 64,
+            "numerator": 8, "denominator": 14, "note": "E2 note"},
+        e3={"verdict": "RED", "numerator": 23, "denominator": 70, "note": "E3 note"},
+        e4={"verdict": "RED", "numerator": 5, "denominator": 15, "sha": "a" * 9,
+            "corpus_sha256": "sha256:" + "d" * 64, "note": "E4 note",
+            "evidence": "tests/eval/write_path/receipts/w2b-operator-selected.json"},
+        e5={"verdict": "RED", "numerator": 12, "denominator": 25, "note": "E5 note"})
+    by_criterion = {row["criterion"]: row for row in rows}
+    assert (by_criterion["E4"]["evidence"]
+            == "tests/eval/write_path/receipts/w2b-operator-selected.json")
+
+
+def test_a_row_with_no_evidence_path_is_refused_not_defaulted_to_the_constant():
+    """The reviewer's P1: a missing key must not silently cite the old artifact.
+
+    ``build_rows`` used ``e4.get("evidence", E4_RECEIPT)``, so any caller that omitted
+    the key produced a row whose NUMBERS came from the pinned receipt and whose
+    CITATION pointed at the pre-#8503 one — the exact defect this change closes, left
+    open in the function that builds the table, and invisible to the gate (V4 passes,
+    V7 passes on the matching corpus, V10 checks only the denominator).
+    """
+    with pytest.raises(KeyError):
+        measure.build_rows(
+            head="a" * 40, out_path="docs/evidence/7949-capstone/e1-e2.log",
+            log_corpus_sha="sha256:" + "d" * 64,
+            e1={"verdict": "BLOCKED", "sha": "c" * 40, "corpus_sha256": "e" * 64,
+                "note": "E1 note"},
+            e2={"verdict": "BLOCKED", "sha": "c" * 40, "corpus_sha256": "e" * 64,
+                "note": "E2 note"},
+            e3={"verdict": "RED", "numerator": 23, "denominator": 70,
+                "note": "E3 note"},
+            e4={"verdict": "RED", "numerator": 5, "denominator": 15,
+                "sha": "a" * 9, "corpus_sha256": "sha256:" + "d" * 64,
+                "note": "E4 note"},
+            e5={"verdict": "RED", "numerator": 12, "denominator": 25,
+                "note": "E5 note"})

@@ -64,7 +64,7 @@ running end to end."*
 > | **E1** | `after_share <= 0.50 × before_share`, over all `:Object` nodes, floor **30** | this run has no BEFORE arm (one capture cannot decide `after <= 0.5 × before` without confounding the gate with LLM non-determinism); its AFTER arm read **64 Objects**, clearing the frozen floor of 30, with a bare-definite share of 14/64 = 0.21875. The only row-scoped artifact is still `e1-e2.log` (25 Objects, below the floor → REFUSED) | ⛔ **BLOCKED** (`#5333`) |
 > | **E2** | E2a `>= 13 of 14` value-bearing units; E2b fused share `<= 0.05` | E2a: the frozen **14-unit** denominator is carried by **no committed artifact** (the artifact counts 42 value literals, before = after); E2b: **1/114 = 0.008772** | ⛔ **BLOCKED** (`#10360`) |
 > | **E3** | `= 1.000` (zero unanchored), floor **30** derived nodes | **157 / 397 = 0.395466** as registered (this run's own graph, `capstone_measure_9152448d_…`). The `Source->Object` identity link carries no `sourceVersion` BY DESIGN (owner option A, `#5199`), so `:Object mention links` can never anchor and the frozen `= 1.000` is unreachable as registered — the metric needs re-registration (`#9736`, OPEN, owner-gated) | ⛔ **RED** |
-> | **E4** | `= 15 of 15` planted operator edges wired AND persisted | **2 / 15** on the `2026-10-19` receipt, which is on a DIFFERENT corpus (`943a99ec…`) from the frozen one, and whose retrievability rate is UNMEASURED (`#9596`) | ⛔ **RED** |
+> | **E4** | `= 15 of 15` planted operator edges wired AND persisted | **5 / 15** on the **frozen** pin — the receipt is selected by its own `corpus_hash` against the run's corpus (`select_e4_receipt`, #10679); the `2 / 15` this table shipped until 2026-11-02 was a receipt on `943a99ec…`, a NON-frozen revision — and its retrievability rate is UNMEASURED (`#9596`) | ⛔ **RED** |
 > | **E5** | ratio `>= 0.90` **AND** raw absolute `>= 0.80` | ratio **1.0833** (passes) but raw absolute **0.4800** (fails), n = 25 | ⛔ **RED** (S3 selection recovery, `#5087`) |
 >
 > E1's and E2's proxies are printed rather than dropped (E1b 90/90 real facts; E2b 1/114) — and
@@ -276,8 +276,8 @@ though the receipt cannot witness them.
 | S0 READ | ✅ | `stats.edus=159`, `stats.chunks=7` across the seven sessions |
 | S1 NARRATE | ✅ | `stats.llm.by_stage.s1` calls = 7 |
 | S2.1 EXTRACT | ✅ | `stats.llm.by_stage.s2` calls = 7; `entities=77 events=38 points=141` |
-| S2.2 VET | ❌ **#9116** | measured at `e0fc940b5`, BEFORE the seam: the pass was ENABLED (`TORTOISE_VET=1`, forced in-process and read back), and its surface **exists** — `extract_session_v2` emits `result["vet"]` UNCONDITIONALLY at `tortoise/extractor_v2.py:10586-10590` — but the meta fold then forwarded `stats` alone, so whether it DID any work was not observable through the receipt (measured: 142 stats keys and 18 receipt keys inspected, `vet` in neither). The fold now COPIES the stage's own counts as `stats["step_witness"]["vet"]` (`tortoise/sdk.py:16236`), so this ❌ is the frozen run's answer, not the seam's reachability |
-| S2.3 CLASSIFY | ❌ **#9116** | same layer, same run: `result["classify_later"]` is built at `extractor_v2.py:10576-10582` and was dropped at the same fold, which now copies it as `stats["step_witness"]["classify_later"]` (`tortoise/sdk.py:16236`) |
+| S2.2 VET | ❌ **#9116** | measured at `e0fc940b5`, BEFORE the seam: the pass was ENABLED (`TORTOISE_VET=1`, forced in-process and read back), and its surface **exists** — `extract_session_v2` emits `result["vet"]` UNCONDITIONALLY at `tortoise/extractor_v2.py:10586-10590` — but the meta fold then forwarded `stats` alone, so whether it DID any work was not observable through the receipt (measured: 142 stats keys and 18 receipt keys inspected, `vet` in neither). The fold now COPIES the stage's own counts as `stats["step_witness"]["vet"]` (`tortoise/sdk.py:16250`), so this ❌ is the frozen run's answer, not the seam's reachability |
+| S2.3 CLASSIFY | ❌ **#9116** | same layer, same run: `result["classify_later"]` is built at `extractor_v2.py:10576-10582` and was dropped at the same fold, which now copies it as `stats["step_witness"]["classify_later"]` (`tortoise/sdk.py:16250`) |
 | S3 RESOLVE | ✅ | `stats.search_queries=105 > 0` and `stats.search_degraded=false` on every session (a degraded search is not S3) |
 | S5 CONNECT | ✅ | the graph write: 433 derived nodes (`Point` 338, `Object` 50, `Event` 45); `stats.operator_endpoints_minted=0`; operator-shaped relationships `IMPL=57 INPUT=58 NAND=10` |
 | S6 COMMIT | ✅ | 338 `:Point` nodes persisted, 170 carrying the commit's `eventId` stamp, 358 `:GraphEvent`s |
@@ -363,7 +363,7 @@ list, no classify items, or a fail-open `except`) while doing nothing, and that 
 indistinguishable through a surface that is missing. The cause now says the pass was **ENABLED** and
 that whether it did work is not observable here; the `#9116` attribution — the surface is emitted
 unconditionally at `:10576`/`:10586` and now reaches the receipt through the seam at the meta fold
-`sdk.py:16236` (`"stats": _capture_stats_with_step_witness(out, len(extracted))`) — is updated
+`sdk.py:16250` (`"stats": _capture_stats_with_step_witness(out, len(extracted))`) — is updated
 accordingly, and the "where the fix must target" line with it.
 
 Pinned by `test_a_witnessed_vet_surface_makes_s2_2_observed` (8/8 witnessed when the surface is
@@ -389,7 +389,7 @@ derivation target labels are `_DERIVATION_REFERENCES_LABELS` (`edges.py:747`: `E
 got one of them backwards: `extractedFrom` points FROM the derived node
 (`(Point)-[:extractedFrom]->(GraphEvent|Event)`), while `references` points AT it
 (`(Source)-[:references]->(Event|Document)` — `link_source_to_event`, `edges.py:2832-2857`,
-reached from the capture path at `sdk.py:16517` (`proj.link_source_to_event(source_key,
+reached from the capture path at `sdk.py:16531` (`proj.link_source_to_event(source_key,
 event_id)`)). So the rule now applied — printed in the log,
 applied by one Cypher query per label — is:
 
@@ -437,7 +437,7 @@ does not re-emit the pre-amendment figure as if it were this run's — and it sa
 
 ⛔ **E3's Point denominator mixes classes that CANNOT derive, and the figure is taken over the
 writer class — not over the link.** Of the 338 `Point` nodes: **159 mechanical turn rows**
-(`_write_capture_turns`, `_TURN_WRITE_CYPHER` at `sdk.py:2451`, wired only by `CONTAINS`),
+(`_write_capture_turns`, `_TURN_WRITE_CYPHER` at `sdk.py:2452`, wired only by `CONTAINS`),
 **141 extraction claims**, **29 operator Points** and **9 other Points** — each class read off the
 property its **writer** stamps (`is_episodic`, `is_operator`, an `extractedFrom` edge), none
 hand-typed, and each printed with its own anchored count.
@@ -487,15 +487,48 @@ corpus_hash=sha256:943a99ec619b4c67b8e31fefb90316ea023bbaddd1905d835b9d930243518
 judge_pin=w2-write-path-mechanical-v2  verdict=regression  failure_origin=gate_regression
 ```
 
-⇒ **E4 = 2/15, RED.** Two provenance facts a reader needs, both stated in the log rather than
+⇒ **E4 = 2/15 on `943a99ec…`** — the receipt above is kept as the SHIPPED LOG's record, and it
+was NOT measured on the frozen corpus.
+
+⛔ **SUPERSEDED as the row's artifact (2026-11-02).** This receipt's `corpus_hash` is not the
+frozen `fixtures_hash`, so the row above was a measurement of a different corpus revision — on
+code that predates `#8503`'s fix. `probes/capstone_measure.py` now selects E4's receipt **by its
+own `corpus_hash`** (`select_e4_receipt`): the newest receipt on the frozen pin wins, and no match
+REFUSES instead of falling back. Three receipts on the frozen pin (`w2b-operator-2026-10-24-8503-{preleg,a,b}.json`,
+all after `#8503`) read **5/15**, with `content_ok` 11–13 and `operators_total` 29–33 across the
+three (the row reads `b`: `content_ok=11`, `operators_total=33`, commit `a999be41e`).
+So **E4 is 5/15, still RED** against the 15/15 bar. The verdict did not move; the number did, and
+it is now a measurement of the pre-registered corpus. The scored log below keeps its 2/15 because
+a superseded run is replaced by RE-RUNNING the probe, not by editing the log it wrote.
+
+Two provenance facts a reader needs, both stated in the log rather than
 smoothed over: the FILE postdates the pre-registration (added 2026-10-22) but the MEASUREMENT
 does not (`date=2026-10-19T01:39:26Z`), and its `corpus_hash` is **not** the frozen
-`fixtures_hash`. The row is therefore a non-green measurement on **its own** corpus revision,
-and the gate (V7) requires that digest to appear in the cited artifact — a declaration the
-artifact does not record is a finding. The mechanism is #8503 — **CLOSED 2026-10-24**, and that closure
-records the *disproof*, so `#8503` is this row's **measurement record, not a live blocker** —
-and the residual owner is **`#9596`**: the planted edges are not formed at all, and the
-receipt's retrievability rate is unmeasured.
+`fixtures_hash`. **The shipped log's row** is therefore a non-green measurement on **its own**
+corpus revision (`943a99ec…`), and the gate (V7) requires that digest to appear in the cited
+artifact the row declares — which is why *that* row carries `artifact_corpus_sha256`. The
+**current** row does not take that arm: it is selected BY the frozen pin, so its
+`corpus_sha256` IS the log's corpus and V7's short-circuit applies to it (§*The gate: two
+questions, two exits* states which arm each row takes). The mechanism is #8503 — **CLOSED
+2026-10-24**, and that closure records the *disproof*, so `#8503` is that row's **measurement
+record, not a live blocker** (which is why the row's `blocked_by` is `#9596` and not `#8503`:
+#10537's V12 looks every blocker up in `blocker-states.json`, where a CLOSED one is a finding).
+The planted edges are not formed at all, and the receipt's retrievability rate is unmeasured
+(`#9596`).
+
+⚠️ **The frozen record still publishes the pre-fix figure for E4, and is deliberately NOT
+edited.** `PRE-REGISTRATION.md` §10.3 says *"E4 is not amended"*, scores it at **2 of 15**, and
+closes with *"its row are unchanged"*; `preregistration.json`'s
+`criteria[E4].post_registration_measurement` still hands a machine consumer `edge_correct=2 of 15
+… so it measures its own corpus revision`. Both sentences are scoped to
+`capstone-measured-e0fc940b.log`, so neither is a false statement about that log — but the record
+is the one file a consumer reads without a human in the loop, and it now disagrees with the row
+this bundle publishes while carrying no pointer to the selector. It is **not** silently edited:
+`preregistration.json` pins the document by BYTES (`document_sha256`), and the `#10463` ruling
+recorded further down this bundle says an amendment is a **NEW linked record, never an edit to
+the frozen one**. This section is that changes record — read the record's E4 figure as *that
+log's*, read the row's as **5/15 via `select_e4_receipt`**, and treat the §10.3 sentence about
+"its row" as true of the log it names and not of the row the probe now builds.
 
 ## E5 — the falsifier, re-scored against this commit's gold
 
@@ -724,8 +757,9 @@ stop.
 
 **One gate change shipped with this run, and it only ever ADDS a check.** V7 used to require every
 measured row's `corpus_sha256` to equal the log's corpus. This table cannot satisfy that honestly:
-E4 cites an operator receipt measured on *another* corpus revision, and before `#9889` so did
-E1/E2 (they now measure the FROZEN corpus and need no declaration; E4's record says so for itself).
+E4 used to cite an operator receipt measured on *another* corpus revision — `#10679` now selects
+it BY the frozen pin, so its row carries the run's own corpus and does NOT take this arm — and
+before `#9889` so did E1/E2 (they now measure the FROZEN corpus and need no declaration).
 Refusing those rows would hide the only numbers they have;
 accepting them on the row's word would let any red row name any corpus. So a **non-green** row may
 declare `artifact_corpus_sha256`, and V7 then requires (a) it equals the row's own
@@ -805,7 +839,8 @@ witnessed steps is printed — an honest finding for `#7949`, never a guess.
   model anchors, and the bar is **still** not reached (`148/383 = 0.38642`, §10.1) — #9736 remains
   the owner-gated attribution of the residual.
 - **No E4 edge denominator of our own.** E4's number is the committed operator receipt's
-  (`2/15`), whose corpus revision is not the frozen one; the run's own operator-shaped
+  (`5/15` on the frozen pin since the artifact is selected by its `corpus_hash`; `2/15` was the
+  pre-`#8503` receipt on another revision); the run's own operator-shaped
   relationships (`IMPL=65 INPUT=68 NAND=14` — the log's `step S5`
   line carry the same three numbers) are a *step witness*, not the 15-edge gold.
 - **Nothing about E5's population reconciliation.** The instrument's `n` is 25 bound qualifiers;
@@ -897,7 +932,7 @@ way: a table whose rows carry the literal string `HEAD` is red by this repo's ow
 ## The entry point the run drives (and the receipt the #9116 seam opened)
 
 The pipeline's OWN path is `TortoiseSDK.capture_session` →
-`sdk._extract_session_v2` (`sdk.py:15408`; called at `:14445`) →
+`sdk._extract_session_v2` (`sdk.py:15422`; called at `:14459`) →
 `extractor_v2.extract_session_v2` (`extractor_v2.py:10085`), which calls, in one pass.
 
 📌 **Cite convention for this bundle's own cites.** Every `file:line` THIS bundle adds is
@@ -939,7 +974,7 @@ steps unobserved and refused at G5 for EVERY input. That was a property of the c
 not of §4.4 or of the pipeline: the steps' surfaces are BUILT unconditionally, and the surface the
 probe was handed did not say so. The drop was one layer ABOVE the extractor — it builds
 `result["vet"]` and `result["classify_later"]`, and the SDK's meta fold
-(`tortoise/sdk.py:16236`, `"stats": _capture_stats_with_step_witness(out, len(extracted))` inside
+(`tortoise/sdk.py:16250`, `"stats": _capture_stats_with_step_witness(out, len(extracted))` inside
 `_extract_session_v2`) forwarded `stats` and `error_census` only.
 
 **#9116 LANDED that seam** — `_capture_step_witness` (``tortoise/sdk.py``) copies each stage's own
@@ -975,7 +1010,7 @@ gated the pass off, or the stage produced nothing.
 |---|---|
 | `#9075` pre-register the corpus/split/scoring | **CLOSED COMPLETED** — landed `a6085af84` (#9507); the record is in this directory and G0 reads it |
 | `#9076` E1+E2 on one run | **CLOSED COMPLETED** — its artifact is `e1-e2.log`, and the rows above show why it is not scorable against the frozen bars |
-| `#9077` E4 on the real extraction leg | **CLOSED COMPLETED** — its receipt is cited by E4 (`2/15`) |
+| `#9077` E4 on the real extraction leg | **CLOSED COMPLETED** — its frozen-pin receipts are what E4 now selects (`5/15`); the `2/15` receipt it originally cited is on a different corpus revision |
 | `#5199` the version anchor stops at Points | **CLOSED COMPLETED** — the anchor is on the derivation link by design; #9736 owns the metric contradiction that leaves behind |
 | `#7947` the raw-vs-narrative measurement | **CLOSED COMPLETED** — E5 re-scores its arms |
 | `#9116` the capture receipt's step surface | **LANDED** — this PR's seam copies each stage's own facts onto `stats["step_witness"]`, so `capture_session`'s receipt now names all eight; `S2.2` is witnessed by any post-seam re-run, and `S2.3` is WITNESSED by this one — the shipped log's `step S2.3 WITNESSED` line carries `assigned_llm: 7`, so the classify pass is NOT idle on this corpus (`#10215` restated V5/G5 as all-eight-accounted, and this run is 8/8 witnessed) |
