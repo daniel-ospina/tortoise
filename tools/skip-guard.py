@@ -967,7 +967,8 @@ def _selection_confcutdir(files: list[str], cwd: str | None = None) -> str:
       made of deep files alone (`tests/eval/retrieval/test_x.py`), making the
       manifest disagree with the run.
     * selection OUTSIDE it (a temp tree, a test fixture) -> the selection's own
-      deepest common ancestor, so no shared ancestor (`/tmp`, `$HOME`) can
+      deepest common ancestor. For a selection living in ONE tree that IS the
+      tree, so every ancestor above it (`/tmp`, `$HOME`) is excluded and cannot
       contribute a conftest.
 
     `cwd` is the directory the manifest's collect-only child will RUN in — the
@@ -977,11 +978,29 @@ def _selection_confcutdir(files: list[str], cwd: str | None = None) -> str:
     `$FILES` resolved against the caller's cwd names a tree the child never
     runs in — and the pin then prunes the wrong ancestry (review P2, #10636).
 
-    ⚠️ The pin can only ever be as tight as the selection's own common
-    ancestor: for entries with nothing in common below `/` (two disjoint
-    top-level trees) `os.path.commonpath` returns `/`, whose `parents` are
-    empty, so NO ancestor is pruned. Every caller today selects inside one
-    tree; a cross-tree selection needs its own `--confcutdir`.
+    WHAT THAT BOUND DOES NOT COVER — `--confcutdir` is a single directory, and
+    pytest loads a `conftest.py` sitting AT it: `_is_in_confcutdir` is
+    `path not in self._confcutdir.parents`, and a directory is never in its own
+    parents. So only directories STRICTLY ABOVE the pin are excluded, and a
+    selection that SPANS trees has no pin of its own:
+
+    * two out-of-tree trees under one shared parent -> the deepest common
+      ancestor is that shared parent, which is exactly where a leaked
+      `/tmp/conftest.py` lives, so it IS imported — the pin bounds nothing;
+    * a mixed repo-relative + out-of-tree selection -> the deepest common
+      ancestor sits above the invocation directory too (the filesystem root in
+      production, whose `parents` is empty), so NOTHING is excluded and the
+      pre-pin behaviour stands.
+
+    No caller produces either shape (`.github/workflows/*` pass repo-relative
+    `$FILES`, `tools/embedded_evidence.py` passes repo-relative `tests/…`, and
+    every out-of-tree caller here passes a SINGLE tree), which is why this is a
+    documented limit rather than a wider fix. Both shapes are pinned by
+    `test_the_confcutdir_pin_does_not_bound_a_selection_spanning_trees` /
+    `…_a_mixed_in_and_out_of_tree_selection` so this paragraph and the code
+    below cannot drift apart. If a caller ever needs a spanning selection to be
+    bounded, this is the place to refuse it or to collect once per tree — do
+    not narrow the claim instead.
     """
     invocation = os.path.abspath(cwd if cwd is not None else os.getcwd())
     roots = []
@@ -1024,7 +1043,9 @@ def emit_manifest(files: list[str], marker: str, output: Path,
     it. `_selection_confcutdir` pins that chain to the selection's own tree —
     the invocation directory for a repo-relative `$FILES` (i.e. exactly the
     run step's chain, `tests/conftest.py` included), the selection's deepest
-    common ancestor for an out-of-tree one. Without it, a leaked
+    common ancestor for an out-of-tree one (which bounds a single-tree
+    selection only — `_selection_confcutdir` names the shapes a single
+    directory cannot bound). Without it, a leaked
     `/tmp/conftest.py` on a self-hosted runner turned every collect-only into
     `rc=4` ("ImportError while loading conftest '/tmp/conftest.py'").
 

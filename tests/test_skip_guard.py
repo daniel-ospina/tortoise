@@ -1136,6 +1136,49 @@ def test_emit_manifest_resolves_a_repo_relative_selection_against_the_running_cw
     assert "test_ok.py::test_ok" in out.read_text(encoding="utf-8")
 
 
+def test_the_confcutdir_pin_does_not_bound_a_selection_spanning_trees(tmp_path):
+    # A LIMIT, asserted so the docstring and the code cannot drift apart. The
+    # pin is ONE directory and pytest loads a `conftest.py` sitting AT it
+    # (`_is_in_confcutdir` is `path not in confcutdir.parents`, and a directory
+    # is never in its own parents — pytest 9.1.1, `_config/__init__.py:669-682`),
+    # so only dirs STRICTLY ABOVE it are excluded. For a selection that spans
+    # two trees the deepest common ancestor is their shared parent — i.e. the
+    # very directory a leaked `/tmp/conftest.py` lives in — so the pin bounds
+    # nothing there.
+    #
+    # No caller produces this shape today (CI passes a repo-relative `$FILES`,
+    # every out-of-tree caller passes a SINGLE tree), which is why
+    # `_selection_confcutdir` documents the limit instead of refusing. This
+    # assertion is the tripwire: whoever widens the guarantee (refuse, or
+    # collect once per tree) must change it AND the docstring together.
+    a, b = tmp_path / "tt_a", tmp_path / "tt_b"
+    a.mkdir()
+    b.mkdir()
+    pin = _skip_guard._selection_confcutdir(
+        [str(a / "test_x.py"), str(b / "test_y.py")])
+    assert pin == str(tmp_path), pin
+
+
+def test_the_confcutdir_pin_does_not_bound_a_mixed_in_and_out_of_tree_selection(
+        tmp_path, monkeypatch):
+    # The other spanning shape, and the worse one: a repo-relative file plus an
+    # out-of-tree one share only an ancestor ABOVE the invocation directory, so
+    # the pin no longer sits inside the invocation tree at all. In production
+    # (cwd = the repo, the other file under `/tmp`) that ancestor is the
+    # filesystem root, whose `.parents` is EMPTY — nothing is excluded and the
+    # pre-pin behaviour stands. Reproduced under `tmp_path` so the assertion
+    # does not depend on where the checkout lives.
+    repo = tmp_path / "repo"
+    (repo / "tests").mkdir(parents=True)
+    other = tmp_path / "other"
+    other.mkdir()
+    monkeypatch.chdir(repo)
+    pin = _skip_guard._selection_confcutdir(
+        ["tests/test_a.py", str(other / "test_b.py")])
+    assert pin == str(tmp_path), pin
+
+
+
 def test_emit_manifest_does_not_inherit_a_conftest_above_the_selection(tmp_path):
     # The CI shape that redded PR #10636's `test-slow (d)` shard (2026-11-02):
     # the self-hosted runner's shared `/tmp` carried a leaked `conftest.py`, and
@@ -1152,6 +1195,21 @@ def test_emit_manifest_does_not_inherit_a_conftest_above_the_selection(tmp_path)
         "raise RuntimeError('a conftest above the selection must not be "
         "imported')\n",
         encoding="utf-8")
+    # ⚠️ The conftest ALONE does not reproduce the red, and a version of this
+    # test carrying only the conftest was non-discriminating: it passed on the
+    # PRE-fix tool. pytest's `confcutdir` is not unset when `--confcutdir` is
+    # absent — `Config.parse` defaults it to `inipath.parent` else `rootpath`
+    # (pytest 9.1.1, `_pytest/config/__init__.py:1598-1603`), and for an
+    # out-of-tree arg with no ini above it the `rootpath` is already the case
+    # dir, so nothing above it loads anyway. The runner's `/tmp` leaked BOTH
+    # files: the ini is what lifts the default cutoff above the selection (a
+    # `pyproject.toml` counts as `inipath` only when it carries
+    # `[tool.pytest.ini_options]`), and the conftest is then imported through
+    # it. MEASURED against the pre-fix tool with both files present: `rc=4`,
+    # `ImportError while loading conftest '<tmp>/conftest.py'`, no manifest —
+    # the `test-slow (d)` red. With the pin: `rc=0` and the manifest written.
+    (tmp_path / "pyproject.toml").write_text(
+        "[tool.pytest.ini_options]\n", encoding="utf-8")
     case = tmp_path / "case"
     case.mkdir()
     (case / "test_ok.py").write_text(
@@ -1160,6 +1218,11 @@ def test_emit_manifest_does_not_inherit_a_conftest_above_the_selection(tmp_path)
     rc = _skip_guard.emit_manifest([str(case / "test_ok.py")], "not track_b", out)
     assert rc == 0, rc
     assert out.exists(), "the collection completed — the manifest must be written"
+    # Kept as a SUBSTRING on purpose: that leaked ini also becomes `inipath`, so
+    # `rootpath` moves to `tmp_path` and the nodeid is `case/test_ok.py::test_ok`
+    # (`test_ok.py::test_ok` where no ini is found). The pin bounds CONFTEST
+    # loading only — it does not restore `rootpath` — so an exact-equality
+    # assertion here would be pinning the leak, not the fix.
     assert "test_ok.py::test_ok" in out.read_text(encoding="utf-8")
 
 
