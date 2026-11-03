@@ -8769,20 +8769,19 @@ def _gate_sdk_for(org: dict, resource: str):
       `None`, and NOT because the gate's reading is harmless: what holds is that
       **no write can occur either way** — `_data_sdk` refuses the request 403
       GRAPH_NOT_FOUND — so returning `None` cannot widen access. Substituting a
-      graph here WOULD be a fail-open widening. ⚠️ At the three
-      `/v1/{points,objects,subjects}` sites the gate runs before that 403, so the
-      default-graph count is still taken first and a 402 can pre-empt the 403 —
-      the same ordering the residual below records for the RESOLVED arm; this
-      arm is not exempt from it.
+      graph here WOULD be a fail-open widening. At the three
+      `/v1/{points,objects,subjects}` sites that 403 now precedes the gate (#8906
+      moved `_data_sdk_offloaded` ahead of `_check_org_limit`), and those sites
+      pass `sdk=` anyway, so this arm is not reachable from them at all.
 
-    ⛔ KNOWN RESIDUAL (recorded, not fixed): on the three `/v1/{points,objects,
-    subjects}` sites the gate runs BEFORE `_data_sdk`'s `_assert_graph_owned`, so
-    for a binding whose namespace RESOLVES but is not owned (a DB-inconsistency
-    window, never client input — `graph_namespace` is auth-stamped) the gate now
-    counts that graph and a 402 can pre-empt the 403. Closing it means either
-    moving the gate after the SDK open at those three sites or gating the graph
-    SDK on a completed ownership check; both are their own change. The commit
-    lane is NOT in this class: it opens `_data_sdk` before its gate.
+    ✅ The RESIDUAL this docstring used to record is CLOSED for all three
+    `/v1/{points,objects,subjects}` sites by #8906's reorder: they await
+    `_data_sdk_offloaded(org)` BEFORE the gate, so `_data_sdk`'s GRAPH_NOT_FOUND
+    and `_assert_graph_owned` 403s are both raised first and no 402 can pre-empt
+    them. The commit lane was never in the class (it opens `_data_sdk` before its
+    gate). What remains true generally: a caller that OMITS `sdk=` at a
+    tenant-graph door is gated before any ownership check, so a future door that
+    forgets the keyword re-opens this ordering window.
     """
     if resource not in _GRAPH_SCOPED_QUOTA_RESOURCES:
         return None
@@ -8821,9 +8820,11 @@ def _check_org_limit(org: dict, resource: str, *,
     two deliberate non-uses — an UNRESOLVED binding (``_data_graph_name`` →
     ``None``) — and that arm is not a wrong-graph count: no write can occur
     either way (``_data_sdk`` refuses 403), so substituting a graph would be a
-    fail-open widening. Its only cost is ordering (at the three
-    ``/v1/{points,objects,subjects}`` sites a 402 can pre-empt that 403); both
-    non-uses are recorded in ``_gate_sdk_for``'s own docstring. That fallback is
+    fail-open widening. At the REST doors that arm is unreachable and costs
+    nothing in ordering — those three sites pass `sdk=` and have already awaited
+    `_data_sdk` (which raises the 403) BEFORE the gate, which is exactly why
+    #8906 reordered them. Both non-uses are recorded in ``_gate_sdk_for``'s own
+    docstring. That fallback is
     what #10637 landed and what
     makes this keyword an optimisation rather than the whole fix; before it, an
     omitted sdk made ``_count_resource`` mint ``_make_sdk(namespace=org_id)`` —
