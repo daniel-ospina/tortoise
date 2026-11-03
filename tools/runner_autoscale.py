@@ -222,7 +222,10 @@ EXIT  0 converged / at-ceiling / over-ceiling / nothing to do / a REFUSAL (an an
         either (it runs the tool in its no-change mode, which never attempts a provision), so the
         unit is the only signal — and the journal carries the callee's own refusal words.
       6 `wedged` — the box's registrations are ONLINE and read `busy=false`, and yet the repo's
-        last completed runs show them answering every job with a SETUP failure. This is not a
+        last completed runs show them failing every job within seconds, in the FIRST workflow step
+        (`Set up job` concludes `success`, the next step dies in ~1 s and every later step is
+        SKIPPED — so no suite ever executes), with no success on that registration in the window.
+        This is not a
         capacity number: it is the one state where the reading above is actively misleading, so
         it is reported INSTEAD of `at-ceiling`/`converged` rather than alongside them. Nothing is
         restarted or removed (the pass keeps its prohibitions); the operator's repair is written
@@ -236,6 +239,15 @@ EXIT  0 converged / at-ceiling / over-ceiling / nothing to do / a REFUSAL (an an
         logged "capacity ... no change" for three days and 100 consecutive runs produced ZERO
         successes. `uncertified` (also exit 2) is the sibling state: the job outcomes could not be
         READ, so capacity cannot be certified either way — never `converged`.
+        ⛔ BOTH OF THOSE CODES ARE FOR A REAL PASS. A `--status`/`--dry-run` plan changes NOTHING,
+        so it cannot be a failed pass (EXIT 0, above) — and it still REPORTS the verdict (`wedged`
+        / `uncertified`, never `at-ceiling`/`converged`) and exits 0. That is not a loophole, it
+        is what keeps two contracts from colliding: `tools/install-runner-autoscale-schedule.sh`
+        probes exactly `--json --status` and reads ANY non-zero exit as "the guard cannot MEASURE
+        on this box, so a schedule here would fire and do nothing" — so a non-zero here REFUSED to
+        arm the autoscaler on the very box whose pool is wedged, the box that most needs the
+        schedule, which then reports exit 6 every interval once armed. Reporting the verdict while
+        keeping the plan at 0 gives the installer its answer and the scheduled pass its signal.
         ⛔ WHICH CODE WINS when a registration is wedged AND the pass ALSO hit a failure of its
         own: `wedged` overrides the BENIGN verdicts only. It does NOT override exit 4
         (`under-target` with `problem_kind=no-listener` — a runner was INSTALLED and nothing came
@@ -661,14 +673,16 @@ def read_pool(repo: str) -> dict[str, PoolEntry]:
 #
 #   ##[error]Access to the path '/opt/gh-runner-x64-7/_work/_temp/_github_workflow' is denied.
 #
-# printed after `Complete job name:` and before any step — 16 of 29 jobs in one run (17 of that
-# run's 29 were self-hosted, and only ONE of the 17 succeeded), every one in 6-21 s, while
+# printed after `Complete job name:`, before ANY step's script runs — the jobs API shows `Set up
+# job` concluding `success`, the NEXT step failing ~1 s later, and every later step `skipped`. 16 of
+# 29 jobs in one run (17 of that run's 29 were self-hosted, and only ONE of the 17 succeeded), every
+# one in 6-21 s, while
 # GitHub-hosted jobs in the SAME run went 11/11 green. Every registration read
 # `online, busy=false`. The pool gate logged "capacity ... no change" for three days over it and
 # 100 consecutive `python-ci` runs produced 0 successes, so the required aggregate was red on
 # every PR and nothing could merge. A capacity model that counts these as spare capacity is a
 # FALSE PASS on the only question it exists to answer.
-WEDGED_SETUP_S = 30  # a job that ends this fast never ran a step: no suite finishes in 30 s
+WEDGED_SETUP_S = 30  # a job that ends this fast never EXECUTED a suite: none finishes in 30 s
 WEDGED_MIN_FAILURES = 3  # measured spread, not a single flake
 WEDGED_PROBE_RUNS = 3  # BOUNDED: the last 3 completed runs, one page of jobs each
 
@@ -698,12 +712,19 @@ def _seconds(started: str, completed: str) -> int | None:
     return int((b - a).total_seconds())
 
 
-def read_job_outcomes(repo: str, runs: int = WEDGED_PROBE_RUNS) -> list[tuple[str, str, int]]:
-    """`(runner_name, conclusion, seconds)` for the jobs of the last `runs` completed runs.
+def read_job_outcomes(
+    repo: str, runs: int = WEDGED_PROBE_RUNS
+) -> list[tuple[str, str, int, str]]:
+    """`(runner_name, conclusion, seconds, failed_steps)` for the last `runs` completed runs' jobs.
 
     BOUNDED and stated: `runs` runs, one page of up to 100 jobs per run — a run with more than 100
     jobs is read up to 100. Unreadable RAISES (`Unmeasurable`): "we could not look" is not "the
     pool is fine", and the caller turns that into `uncertified`, never into `converged`.
+
+    The 4th element is EVIDENCE, not a gate: the names of the step(s) that actually concluded
+    `failure`, straight from the `steps` array GitHub returns in the SAME response. The predicate
+    below keys on the duration, but the pass note quotes this so the operator reads which step died
+    instead of being told a cause that was only inferred from a number.
     """
     gh = gh_bin()
     if not gh:
@@ -731,7 +752,8 @@ def read_job_outcomes(repo: str, runs: int = WEDGED_PROBE_RUNS) -> list[tuple[st
                 f"repos/{repo}/actions/runs/{run_id}/jobs?per_page=100",
                 "--jq",
                 '.jobs[] | [.runner_name // "", .conclusion // "", .started_at // "", '
-                '.completed_at // ""] | @tsv',
+                '.completed_at // "", ([.steps[]? | select(.conclusion == "failure") '
+                '| .name] | join(" | "))] | @tsv',
             ],
             f"job-outcome probe (run {run_id})",
         )
@@ -745,21 +767,31 @@ def read_job_outcomes(repo: str, runs: int = WEDGED_PROBE_RUNS) -> list[tuple[st
             seconds = _seconds(started, completed)
             if seconds is None:
                 continue
-            outcomes.append((name, conclusion, seconds))
+            failed_steps = parts[4].strip() if len(parts) > 4 else ""
+            outcomes.append((name, conclusion, seconds, failed_steps))
     return outcomes
 
 
 def wedged_runners(
     pool: dict[str, PoolEntry],
-    outcomes: list[tuple[str, str, int]],
+    outcomes: list[tuple[str, str, int] | tuple[str, str, int, str]],
     *,
     setup_s: int = WEDGED_SETUP_S,
     min_failures: int = WEDGED_MIN_FAILURES,
 ) -> list[str]:
-    """Registrations in `pool` that answer every job with a SETUP failure.
+    """Registrations in `pool` whose every job died within `setup_s` and none succeeded.
 
-    The predicate is deliberately narrow, because its finding is a claim about a MACHINE:
-      * failed in `<= setup_s` (no step can have run a suite that fast), AND
+    ⛔ WHAT IS MEASURED, AND WHAT IS NOT. The gate is the DURATION plus ZERO SUCCESSES — it is not
+    proof that no step ran. On the measured incident `Set up job` DID run and succeed; the jobs API
+    at run 41578276118 shows it `success`, the first workflow step `failure` ~1 s later, and every
+    later step `skipped` (those step names ride along on each outcome so the pass note quotes the
+    one that actually failed). What `<= setup_s` encodes is the narrow reproducible half: no suite
+    finishes in 30 s, so a job that DIES that fast did not run one. A registration whose FIRST step
+    legitimately fails in a second is indistinguishable from a wedged one by this signal alone —
+    which is why the finding is report-only (nothing is restarted, relabelled or removed) and why
+    the note quotes the observed failing step instead of asserting the cause.
+
+    The rest is deliberately narrow, because its finding is a claim about a MACHINE:
       * at least `min_failures` of them (a spread, not one flake), AND
       * ZERO successes in the same window — one green job proves the work dir is writable, which
         is the whole question. A slow-but-working runner therefore never matches, and neither does
@@ -767,7 +799,7 @@ def wedged_runners(
     """
     ok: dict[str, int] = {}
     fast_failures: dict[str, int] = {}
-    for name, conclusion, seconds in outcomes:
+    for name, conclusion, seconds, *_ in outcomes:
         if conclusion == "success":
             ok[name] = ok.get(name, 0) + 1
         elif conclusion == "failure" and seconds <= setup_s:
@@ -777,6 +809,20 @@ def wedged_runners(
         for name in pool
         if fast_failures.get(name, 0) >= min_failures and not ok.get(name, 0)
     )
+
+
+def observed_failing_steps(
+    outcomes: list[tuple[str, str, int] | tuple[str, str, int, str]], names: list[str]
+) -> list[str]:
+    """The step names those registrations actually failed in — bounded, deduped, in read order."""
+    seen: list[str] = []
+    for name, conclusion, _seconds_, *rest in outcomes:
+        if name not in names or conclusion != "failure":
+            continue
+        step = rest[0].strip() if rest else ""
+        if step and step not in seen:
+            seen.append(step)
+    return seen
 
 
 def fallback_engaged(pool: dict[str, PoolEntry]) -> bool:
@@ -1267,23 +1313,49 @@ def converge(
     # any action so the record describes the box as it was found, and bounded to 3 runs so a pass
     # costs 4 API reads, not a paginated crawl.
     wedged: list[str] = []
+    outcomes: list[tuple[str, str, int, str]] = []
     try:
-        wedged = wedged_runners(pool, read_job_outcomes(repo))
+        outcomes = read_job_outcomes(repo)
+        wedged = wedged_runners(pool, outcomes)
         record["capacity_certified"] = True
     except Unmeasurable as exc:
         record["capacity_certified"] = False
         record["notes"].append(
             f"job outcomes UNREADABLE ({exc}) — capacity cannot be certified either way; this is "
             "NOT a healthy reading"
+            + (
+                " (a `--status`/`--dry-run` plan changes nothing, so it exits 0; a REAL pass "
+                "reports exit 2)"
+                if dry_run
+                else ""
+            )
         )
     if wedged:
         record["wedged"] = wedged
+        # ⛔ THE EVIDENCE, NOT THE INFERENCE: quote the step GitHub records as FAILED (same
+        # response, `.steps[]`). A duration alone cannot tell a broken work dir from a first step
+        # that legitimately failed in a second, so the note shows what was observed and leaves the
+        # judgement to the operator's repair in docs/ops/ci-runner-x64.md.
+        failed_steps = observed_failing_steps(outcomes, wedged)
         record["notes"].append(
             f"wedged: {', '.join(wedged)} — the last completed runs show every job on these "
-            f"registrations ending in a SETUP failure (<= {WEDGED_SETUP_S}s, so no step ran), with "
-            "no success in the window. `status`/`busy` read healthy for exactly that reason: a job "
-            "that dies in 1s leaves the runner idle. Nothing was restarted or removed (this tool "
-            "never touches a registration on a reading); the repair is in docs/ops/ci-runner-x64.md"
+            f"registrations ending in failure within <= {WEDGED_SETUP_S}s and no success in the "
+            "window, so no suite ever executed"
+            + (
+                f" (observed failing step: {'; '.join(failed_steps[:2])} — `Set up job` "
+                "concluded success and every later step was skipped)"
+                if failed_steps
+                else ""
+            )
+            + ". `status`/`busy` read healthy for exactly that reason: a job that dies in 1s "
+            "leaves the runner idle. Nothing was restarted or removed (this tool never touches a "
+            "registration on a reading); the repair is in docs/ops/ci-runner-x64.md"
+            + (
+                ". ⛔ THIS IS A `--status`/`--dry-run` PLAN: it changes nothing, so it exits 0 "
+                "(the install-time probe must stay PASS). A REAL pass reports exit 6"
+                if dry_run
+                else ""
+            )
         )
     machine = machine or os.environ.get("RUNNER_AUTOSCALE_MACHINE") or os.uname().machine
     wait_s = int(
@@ -1896,10 +1968,20 @@ def main(argv: list[str] | None = None) -> int:
     # are answers, and an install-time probe on such a box must stay PASS.
     if record["verdict"] == "fill-refused-by-provisioner":
         return 5
-    # ⛔ EXIT 6: the registrations are online and idle and answer every job with a setup failure.
-    # Exit 0 here is the floor of the false-PASS class above — a scheduled pass reporting a box
-    # that serves NOTHING as converged. `uncertified` is already covered by the `unmeasurable`
-    # arm's exit 2 (we could not look).
+    # ⛔ EXIT 6: the registrations are online and idle and fail every job within seconds, in their
+    # first workflow step (see `wedged_runners`). Exit 0 here is the floor of the false-PASS class
+    # above — a scheduled pass reporting a box that serves NOTHING as converged. `uncertified` is
+    # already covered by the `unmeasurable` arm's exit 2 (we could not look).
+    # ⛔ BUT A NO-CHANGE PASS CANNOT BE A FAILED PASS, and both codes therefore apply to a REAL pass
+    # only. `--status`/`--dry-run` change nothing by design, and
+    # tools/install-runner-autoscale-schedule.sh probes exactly `--json --status`, reading ANY
+    # non-zero exit as "the guard cannot MEASURE on this box, so a schedule here would fire and do
+    # nothing" (its install-time refusal). Non-zero here therefore REFUSED to arm the autoscaler on
+    # the wedged box — the one that most needs the schedule, whose every armed pass then reports 6.
+    # A plan KEEPS THE VERDICT (`wedged`/`uncertified`, never `at-ceiling`/`converged`, so the
+    # reading is never a false pass — R1/R3 intact) and exits 0.
+    if record["verdict"] in ("wedged", "uncertified") and record.get("dry_run"):
+        return 0
     if record["verdict"] == "wedged":
         return 6
     if record["verdict"] == "uncertified":

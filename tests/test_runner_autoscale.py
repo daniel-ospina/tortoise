@@ -2180,15 +2180,21 @@ def test_a_FAILED_restart_is_MEASURED_before_anything_is_re_registered(env):
     assert not any("still offline after restart" in a for a in rec.get("actions", [])), rec
 
 
-# ── wedged: a registration that answers every job with a SETUP failure is not capacity ────────
+# ── wedged: a registration that fails every job in seconds is not capacity ───────────────────
 def _outcomes(*rows: str, runs: int = 3) -> str:
     """One page of jobs, served for each of `runs` completed runs (the fake serves one file)."""
     return "".join(f"{row}\n" for row in rows)
 
 
-SETUP_FAIL = "r1\tfailure\t2026-11-03T05:53:24Z\t2026-11-03T05:53:27Z"  # 3 s, no step ran
-GREEN = "r1\tsuccess\t2026-11-03T05:53:24Z\t2026-11-03T05:58:30Z"  # 306 s
-SLOW_RED = "r1\tfailure\t2026-11-03T05:53:24Z\t2026-11-03T06:03:30Z"  # 606 s: a suite DID run
+# The 5th column is the `steps[]` evidence GitHub returns in the same response. On the measured
+# incident `Set up job` concluded `success`, the NEXT step failed ~1 s later, and every later step
+# was `skipped` — so a step DID run, and only the suite steps did not.
+SETUP_FAIL = (
+    "r1\tfailure\t2026-11-03T05:53:24Z\t2026-11-03T05:53:27Z"
+    "\tResolve per-job pytest artifact paths (#10280)"
+)  # 3 s, died in its first workflow step
+GREEN = "r1\tsuccess\t2026-11-03T05:53:24Z\t2026-11-03T05:58:30Z\t"  # 306 s
+SLOW_RED = "r1\tfailure\t2026-11-03T05:53:24Z\t2026-11-03T06:03:30Z\tRun carve-out suite"  # 606 s
 
 
 def test_a_runner_that_answers_every_job_with_a_setup_failure_is_never_capacity(env):
@@ -2197,6 +2203,9 @@ def test_a_runner_that_answers_every_job_with_a_setup_failure_is_never_capacity(
     Measured 2026-11-03: 16 of 29 jobs in one run died in 6–21 s on four registrations that each
     read `online, busy=false`, so a census built on `status`/`busy` reported spare capacity while
     the pool served nothing. The pass must name it and must not report `at-ceiling`/`converged`.
+
+    (The failing jobs were NOT step-less: `Set up job` succeeds and the FIRST workflow step dies —
+    see `test_the_wedged_note_quotes_the_OBSERVED_failing_step`.)
     """
     e = env(pool=[("r1", "online", False, "")], installs=[("gh-runner-x64-1", "r1")])
     e.run_ids = "1\n2\n3\n"
@@ -2205,7 +2214,7 @@ def test_a_runner_that_answers_every_job_with_a_setup_failure_is_never_capacity(
     assert rec["wedged"] == ["r1"], rec
     assert rec["verdict"] == "wedged", rec
     assert rec["_rc"] == 6, rec
-    assert any("SETUP failure" in n and "r1" in n for n in rec["notes"]), rec["notes"]
+    assert any("wedged:" in n and "r1" in n for n in rec["notes"]), rec["notes"]
     # Nothing was restarted, relabelled or removed: the tool's prohibitions are untouched.
     assert not any("restart" in a for a in rec["actions"]), rec["actions"]
 
@@ -2281,7 +2290,90 @@ def test_a_wedged_box_that_ALSO_failed_to_grow_keeps_exit_4(env):
     assert rec["_rc"] == 4, rec
     # ⛔ BOTH FACTS ARE STILL REPORTED — only the exit CODE is ordered, so nothing is hidden.
     assert rec["wedged"] == ["r1"], rec
-    assert any("SETUP failure" in n and "r1" in n for n in rec["notes"]), rec["notes"]
+    assert any("wedged:" in n and "r1" in n for n in rec["notes"]), rec["notes"]
+
+
+def test_a_status_read_on_a_wedged_pool_reports_it_and_still_exits_0(env):
+    """A PLAN CANNOT BE A FAILED PASS — the same rule `under-target` already lives under.
+
+    `--status`/`--dry-run` change NOTHING, and `tools/install-runner-autoscale-schedule.sh` probes
+    exactly `--json --status`, reading ANY non-zero exit as "the guard cannot MEASURE on this box,
+    so a schedule here would fire and do nothing" and refusing to arm. Applying the new exit 6 to a
+    plan therefore REFUSED to arm the autoscaler on the wedged box — the box that most needs the
+    schedule, whose every armed pass then reports 6 — with a message naming the wrong cause.
+
+    The verdict must still be truthful, or the fix has become the false pass it removes: the plan
+    reports `wedged` (names in `record["wedged"]` + the note) and exits 0.
+
+    Non-vacuity: on the pre-fix tool this case records `_rc == 6`.
+    """
+    e = env(pool=[("r1", "online", False, "")], installs=[("gh-runner-x64-1", "r1")])
+    e.run_ids = "1\n2\n3\n"
+    e.jobs_tsv.write_text(_outcomes(SETUP_FAIL), encoding="utf-8")
+    rec = e.record("--status")
+    assert rec["dry_run"] is True, rec
+    assert rec["verdict"] == "wedged", rec  # never at-ceiling/converged: R1 holds in plan mode
+    assert rec["wedged"] == ["r1"], rec
+    assert rec["_rc"] == 0, rec
+    assert any("REAL pass reports exit 6" in n for n in rec["notes"]), rec["notes"]
+    assert e.provisioned() == [], e.provisioned()
+
+
+def test_a_status_read_with_an_unreadable_job_history_stays_exit_0(env):
+    """Same rule for `uncertified`: the install path must not gain a new failure mode.
+
+    "We could not look" is never healthy (R3), so the verdict stays `uncertified` — but a plan that
+    changed nothing cannot fail, and refusing to arm the schedule on a transient `gh` blip would
+    make an install depend on a read it never needed before.
+
+    Non-vacuity: on the pre-fix tool this case records `_rc == 2`.
+    """
+    e = env(pool=[("r1", "online", False, "")], installs=[("gh-runner-x64-1", "r1")])
+    e.run_ids = "1\n"
+    e.jobs_tsv = e.root / "missing-jobs.tsv"  # the fake's `cat` exits non-zero
+    rec = e.record("--status")
+    assert rec["dry_run"] is True, rec
+    assert rec["verdict"] == "uncertified", rec
+    assert rec["capacity_certified"] is False, rec
+    assert rec["_rc"] == 0, rec
+    assert e.provisioned() == [], e.provisioned()
+
+
+def test_the_wedged_note_quotes_the_OBSERVED_failing_step(env):
+    """Evidence, not inference: a duration cannot say WHICH step died, and the API can.
+
+    The pre-fix note told the operator "no step ran" and sent them to `rm -rf` a work dir on the
+    strength of a duration. The jobs response carries `.steps[]`, so the measured incident reads:
+    `Set up job` success, the next step failure ~1 s later, every later step `skipped`. The note
+    must quote that step — and must not re-assert the causal claim it cannot prove.
+
+    Non-vacuity: on the pre-fix tool the note contains "so no step ran" and no step name, so both
+    assertions below fail.
+    """
+    e = env(pool=[("r1", "online", False, "")], installs=[("gh-runner-x64-1", "r1")])
+    e.run_ids = "1\n2\n3\n"
+    e.jobs_tsv.write_text(_outcomes(SETUP_FAIL), encoding="utf-8")
+    rec = e.record()
+    note = next(n for n in rec["notes"] if n.startswith("wedged:"))
+    assert "Resolve per-job pytest artifact paths (#10280)" in note, note
+    assert "Set up job" in note, note
+    assert "no step ran" not in note, note
+    assert "no step can" not in note, note
+
+
+def test_observed_failing_steps_reads_only_the_named_registrations():
+    """The evidence helper is scoped: another registration's steps must not ride into the note."""
+    outcomes = [
+        ("r1", "failure", 3, "Resolve per-job pytest artifact paths"),
+        ("r2", "failure", 3, "someone else's step"),
+        ("r1", "failure", 3, "Resolve per-job pytest artifact paths"),
+        ("r1", "success", 300, ""),
+    ]
+    assert RA.observed_failing_steps(outcomes, ["r1"]) == [
+        "Resolve per-job pytest artifact paths"
+    ]
+    # a 3-tuple outcome (no `steps` evidence available) is tolerated, not crashed on
+    assert RA.observed_failing_steps([("r1", "failure", 3)], ["r1"]) == []
 
 
 def test_the_measured_triple_is_stated_once_and_every_citation_agrees_with_it():
