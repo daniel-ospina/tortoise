@@ -1953,6 +1953,78 @@ def test_backoff_honours_retry_after_then_reset_then_jitter():
                 "the limiter is still enforcing — GitHub's floor is one minute")
 
 
+def test_the_hint_less_backoff_window_grows_instead_of_a_fixed_minute():
+    """⭐ P2 (review): the "EQUAL jitter … so a fleet of lanes does not retry in
+    lockstep" claim was a NO-OP at the shipped defaults.
+
+    `min(max(RATE_LIMIT_BASE_S * 2**attempt, floor), MAX)` with a 2 s base started
+    BELOW the 60 s floor, so the ceiling was clamped UP to the floor and
+    `uniform(60, 60)` returned exactly 60.0 at both attempts `RATE_LIMIT_RETRIES = 2`
+    can reach — every lane waited the same minute (the lockstep burst the comment says
+    it prevents) and the delay never grew, which is GitHub's other documented half
+    (*"use exponentially increasing delays for repeated failures"*).
+
+    This asserts the PROPERTY, not the range: a constant satisfies
+    `MIN <= v <= MAX` (and so would deleting `random` and returning 60.0).
+    Discriminating: pre-fix `max(draws) == floor` and `len(set(draws)) == 1`.
+    """
+    floor = R.RATE_LIMIT_MIN_SLEEP_S
+    # The documented one-minute floor is not exceeded at the first retry: nothing in
+    # the guidance justifies waiting MORE than a minute before the first retry.
+    assert {R._rate_limit_sleep_s("secondary rate limit", 0) for _ in range(20)} == {floor}
+    for attempt in (1, 2):
+        ceiling = min(floor * 2 ** attempt, R.RATE_LIMIT_MAX_SLEEP_S)
+        draws = [R._rate_limit_sleep_s("secondary rate limit", attempt) for _ in range(64)]
+        assert all(floor <= v <= ceiling for v in draws), (
+            f"attempt {attempt} drew {sorted(draws)[:1]}…{sorted(draws)[-1:]}, outside "
+            f"[{floor}, {ceiling}]")
+        assert len(set(draws)) > 1, (
+            "a CONSTANT wait is a fleet retrying in lockstep — the burst the jitter "
+            "window exists to break")
+        assert max(draws) > floor, "the jitter window is empty; the ceiling equals the floor"
+    # ... and it GROWS: the second retry can wait longer than the first.
+    growth = min(floor * 2, R.RATE_LIMIT_MAX_SLEEP_S)
+    second = [R._rate_limit_sleep_s("secondary rate limit", 2) for _ in range(64)]
+    assert max(second) > growth, (
+        "the delay must increase across attempts, not repeat the same minute")
+    # Past the retry budget the growth is capped rather than unbounded.
+    assert all(R._rate_limit_sleep_s("secondary rate limit", 6) <= R.RATE_LIMIT_MAX_SLEEP_S
+               for _ in range(20))
+
+
+def test_the_wall_clock_budget_is_armed_before_the_first_live_read(monkeypatch, tmp_path):
+    """⭐ P2 (review): `_PASS_DEADLINE` was armed inside `build_plans`, but `main()`
+    calls `resolve_required(..., live=True)` BEFORE it, and that path performs a LIVE
+    read (branch protection).
+
+    With the deadline still `None`, `_spend_rate_limit_wait` skipped the budget
+    comparison entirely and slept the full wait — up to 600 s UNBUDGETED on top of the
+    720 s armed afterwards, i.e. ~1380 s against the consumer workflow's
+    `timeout-minutes: 15`, where the job is KILLED and neither
+    `RATE-LIMITED (not empty)` nor any exit code is ever emitted. That is the same
+    lost-measurement failure `PASS_BUDGET_S` exists to prevent, on the read that
+    happens FIRST.
+
+    Discriminating: pre-fix `_sleep` IS called here (the deadline is still `None`, so
+    the wait reads as affordable).
+    """
+    rec = tmp_path / "required-contexts.json"
+    rec.write_text(json.dumps({"required_contexts": ["docs"],
+                               "emitters": {"docs": [["ci.yml", "docs"]]}}))
+    monkeypatch.setattr(R, "read_queue_health", lambda repo: None)
+    monkeypatch.setattr(R, "open_prs", lambda repo, include_drafts: [])
+    monkeypatch.setattr(R, "_run", lambda argv, **_kw: _fake(1, "", LIMITED))
+    slept: list[float] = []
+    monkeypatch.setattr(R, "_sleep", slept.append)
+    monkeypatch.setattr(R, "_PASS_DEADLINE", None)
+    how_long_may_a_pass_sleep = 0.0     # every wait is unaffordable
+    monkeypatch.setattr(R, "PASS_BUDGET_S", how_long_may_a_pass_sleep)
+    R.main(["--repo", "o/r", "--record", str(rec), "--json"])
+    assert slept == [], (
+        "the pass budget must already be armed when the FIRST live read runs — an "
+        "unarmed deadline makes that read's waits unbounded")
+
+
 def test_a_hint_less_backoff_reaches_the_documented_minute():
     """⭐ P2 (review): the first cut backed off ~1 s then ~2 s, so BOTH retries were
     spent inside ~3 s and a hint-less secondary limit ended as a refusal having never
@@ -2124,12 +2196,14 @@ class _Done:
         self.stderr = stderr
 
 
-def _api(*, head="a" * 40, status="queued", jobs=0, settle="completed"):
+def _api(*, head="a" * 40, status="queued", jobs=0, settle="completed", attempt=1):
     """`gh_json` for the cancel path: PR head, LIVE run status, LIVE job count, settle.
 
     The runs endpoint is answered twice — once by `_cancel`'s pre-act re-measurement and
     then by the settle polls — so the first answer is the live status and every later
-    one is `settle`.
+    one is `settle`. `run_attempt` is carried because the pre-act gate compares it with
+    the attempt the run was CLASSIFIED on: a fresh re-run attempt is `queued` with `0`
+    jobs, so status and job count alone cannot tell it apart from the stalled run.
     """
     seen = {"runs": 0}
 
@@ -2140,7 +2214,8 @@ def _api(*, head="a" * 40, status="queued", jobs=0, settle="completed"):
         if "jobs" in path:
             return {"total_count": jobs}
         seen["runs"] += 1
-        return {"status": status if seen["runs"] == 1 else settle}
+        return {"status": status if seen["runs"] == 1 else settle,
+                "run_attempt": attempt}
     return fake
 
 
@@ -2247,6 +2322,50 @@ def test_an_unreadable_pre_act_read_refuses_the_cancel(monkeypatch):
     assert R._rerun("o/r", run(1, "ci.yml", "pending"), 1,
                     expected_head="a" * 40) == "failed"
     assert verbs == [], "an unreadable safety surface must not authorise a cancel"
+
+
+def test_a_peer_rerun_inside_the_pass_window_is_never_cancelled(monkeypatch):
+    """⭐ P2 (review): the act-time re-measurement re-read the run's STATUS and JOB
+    COUNT but DISCARDED its attempt identity.
+
+    A fresh re-run attempt is `queued`, has `0` jobs and a null `run_started_at` —
+    byte-identical to the stalled run the classification was made from. So a peer (or
+    a human) re-running the same run id between `build_plans` and `report` acting was
+    cancelled and re-run AGAIN: a normally-progressing attempt destroyed, a second
+    attempt of the budget spent, and with `max_attempts = 3` the context escalated
+    EXHAUSTED — the loop `attempt_age_seconds`/`_zero_job_stalled` abstain to prevent.
+
+    Discriminating: pre-fix the cancel is issued (this stub's only difference from
+    `test_a_queued_zero_job_run_is_cancelled_before_it_is_rerun` is the live attempt).
+    """
+    monkeypatch.setattr(R, "_sleep", lambda s: pytest.fail("must not settle-wait"))
+    verbs: list[str] = []
+    monkeypatch.setattr(R, "_run", _verbs(verbs))
+    # Classification says attempt 1; the live run is attempt 2 with 0 jobs.
+    monkeypatch.setattr(R, "gh_json", _api(status="queued", jobs=0, attempt=2))
+    assert R._rerun("o/r", run(1, "ci.yml", "pending", attempt=1), 1,
+                    expected_head="a" * 40) == "target_moved"
+    assert verbs == [], (
+        "a different attempt is a different measurement — cancelling it destroys an "
+        "attempt that is only waiting for a runner slot")
+
+
+def test_the_attempt_identity_is_read_before_the_cancel(monkeypatch):
+    """A gate that cannot report the attempt is unreadable, not a licence to cancel."""
+    monkeypatch.setattr(R, "_sleep", lambda s: pytest.fail("must not settle-wait"))
+    verbs: list[str] = []
+
+    def fake(a, **_kw):
+        if a[:1] == ["pr"]:
+            return {"headRefOid": "a" * 40}
+        if "jobs" in a[-1]:
+            return {"total_count": 0}
+        return {"status": "queued"}          # no `run_attempt` in the payload
+
+    monkeypatch.setattr(R, "gh_json", fake)
+    monkeypatch.setattr(R, "_run", _verbs(verbs))
+    assert R._cancel("o/r", run(1, "ci.yml", "pending")) == "unreadable"
+    assert verbs == [], "an unverifiable attempt identity must not authorise a cancel"
 
 
 def test_a_cancel_the_api_says_was_never_queued_falls_back_to_the_rerun(monkeypatch):

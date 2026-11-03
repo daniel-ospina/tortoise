@@ -198,12 +198,13 @@ ZERO_JOB_MIN_AGE_S = float(os.environ.get("CI_REPAIR_ZERO_JOB_MIN_AGE_S") or 120
 #: secondary rate limiter is NOT an empty answer and NOT a permanent failure: the
 #: measured failure this exists for is a caller polling a REFUSED read for 1176 s and
 #: reporting "unreachable is not empty" hours later than it had to. `Retry-After` and
-#: `X-RateLimit-Reset` are honoured where `gh` surfaces them; otherwise the backoff
-#: starts at GitHub's documented floor and grows exponentially with EQUAL jitter, so
+#: `X-RateLimit-Reset` are honoured where `gh` surfaces them; otherwise the window
+#: starts at GitHub's documented floor and DOUBLES per attempt with equal jitter, so
 #: a fleet of lanes does not retry in lockstep and re-create the burst that triggered
-#: the limiter.
+#: the limiter. There is deliberately no separate base constant: a base of 2 s gave
+#: `max(2 * 2**attempt, floor)` = the floor for every attempt `RATE_LIMIT_RETRIES`
+#: can reach, i.e. an EMPTY jitter window and one fixed 60 s wait for every lane.
 RATE_LIMIT_RETRIES = int(os.environ.get("CI_REPAIR_RATE_LIMIT_RETRIES") or 2)
-RATE_LIMIT_BASE_S = 2.0
 #: ⛔ THE NO-HINT FLOOR IS GITHUB'S OWN, NOT A GUESS. Documented handling for a
 #: refusal with no `retry-after`/`x-ratelimit-reset` is *"wait at least one minute
 #: before retrying"* (docs.github.com › rest/using-the-rest-api ›
@@ -236,9 +237,28 @@ _RATE_LIMIT_RE = re.compile(r"rate limit|secondary rate|HTTP 429", re.I)
 #: it raises the refusal it would otherwise have been killed before emitting. 720 s of
 #: the 900 s workflow leaves room for the repairs, the JSON write and teardown.
 PASS_BUDGET_S = float(os.environ.get("CI_REPAIR_PASS_BUDGET_S") or 720.0)
-#: When the current pass must stop sleeping — set once per pass by `build_plans`,
-#: `None` (unbounded) when the module is used directly (tests, other callers).
+#: When the current pass must stop sleeping — armed ONCE per pass, by the EARLIEST
+#: step of the pass that can see it (`main`, before its first API-touching read), and
+#: `None` when no pass is armed (the module used directly: tests, other callers).
+#: ⛔ ARMING IT LATE IS THE DEFECT THIS SHAPE EXISTS FOR: `main()` performs a LIVE
+#: read (`resolve_required` → branch protection) BEFORE `build_plans`, and while the
+#: deadline was armed inside `build_plans` that first read was UNBOUNDED — up to 600 s
+#: of unbudgeted sleeps, on top of the 720 s armed afterwards, against the consumer
+#: workflow's `timeout-minutes: 15`, where the job is KILLED and the measurement is
+#: lost exactly as `PASS_BUDGET_S` says it must not be.
 _PASS_DEADLINE: float | None = None
+
+
+def _arm_pass_deadline() -> float:
+    """Arm this pass's wall-clock budget and return the deadline.
+
+    Called by `main()` before its first API-touching step, and by `build_plans` when
+    no deadline was threaded in (a direct caller — tests, other tools — still gets a
+    bound, and each of ITS calls is a pass boundary).
+    """
+    global _PASS_DEADLINE
+    _PASS_DEADLINE = time.time() + PASS_BUDGET_S
+    return _PASS_DEADLINE
 
 #: ⛔ THE JOB READS HAVE THEIR OWN AGGREGATE BOUND. The main reads retry a refusal
 #: (they are few and each one gates the whole pass); a job count is a PER-RUN probe
@@ -389,9 +409,10 @@ def _rate_limit_sleep_s(detail: str, attempt: int, now: float | None = None) -> 
 
     Order of authority: the server's own instruction first (`Retry-After` seconds,
     then `X-RateLimit-Reset` as an absolute epoch), then exponential backoff from
-    GitHub's documented no-hint floor with EQUAL jitter (`uniform(floor, ceiling)`,
-    never below `RATE_LIMIT_MIN_SLEEP_S`). Honouring the hint is the documented
-    handling and so is the floor: *"honor the `retry-after` header … if it is not
+    GitHub's documented no-hint floor with EQUAL jitter over a window that DOUBLES per
+    attempt (`uniform(RATE_LIMIT_MIN_SLEEP_S, floor * 2**attempt)`, capped, so the
+    first retry spends the documented minute and every later one can wait longer).
+    Honouring the hint is the documented handling and so is the floor: *"honor the `retry-after` header … if it is not
     present, wait at least one minute"*, with exponentially increasing delays for
     repeated secondary-limit failures (docs.github.com › rest/using-the-rest-api ›
     best-practices-for-using-the-rest-api, › rate-limits-for-the-rest-api). A
@@ -413,9 +434,17 @@ def _rate_limit_sleep_s(detail: str, attempt: int, now: float | None = None) -> 
         reset_in = float(m.group(1)) - (now if now is not None else time.time())
         return max(1.0, min(reset_in, RATE_LIMIT_MAX_SLEEP_S))
     floor = RATE_LIMIT_MIN_SLEEP_S
-    ceiling = min(max(RATE_LIMIT_BASE_S * (2 ** attempt), floor),
-                  RATE_LIMIT_MAX_SLEEP_S)
-    return random.uniform(min(floor, ceiling), ceiling)
+    # ⛔ THE WINDOW IS DERIVED FROM THE FLOOR, OR "EQUAL JITTER" IS A NO-OP. Growing
+    # from a 2 s base started BELOW the 60 s floor, so the ceiling was clamped UP to
+    # the floor and `uniform(60, 60)` returned exactly 60.0 at both attempts the retry
+    # budget can reach — every lane waited the same minute (the lockstep burst this
+    # function exists to break) and the delay never grew across attempts, which is
+    # GitHub's other documented half: *"use exponentially increasing delays for
+    # repeated failures"*. Doubling FROM the floor keeps the vendor's one-minute rule
+    # intact and makes every attempt after the first draw from a non-empty window
+    # (60-120 s, 60-240 s, …) up to the cap.
+    ceiling = min(floor * (2 ** attempt), RATE_LIMIT_MAX_SLEEP_S)
+    return random.uniform(floor, ceiling)
 
 
 def _spend_rate_limit_wait(wait_s: float, detail: str, args: list[str]) -> None:
@@ -908,8 +937,8 @@ def _timeline_reopen_state(repo: str, number: int, cooldown_min: int,
     return recent, total
 
 
-def _live_zero_job(repo: str, run_id: int) -> tuple[str | None, int | None]:
-    """(status, job count) re-measured AT THE MOMENT OF ACTION — never cached.
+def _live_zero_job(repo: str, run_id: int) -> tuple[str | None, int | None, int | None]:
+    """(status, job count, attempt) re-measured AT THE MOMENT OF ACTION — never cached.
 
     `_READ_CACHE` still holds the classification-time answer, which is the whole
     hazard: `build_plans` scans EVERY open PR before `report` acts, so a run measured
@@ -917,17 +946,29 @@ def _live_zero_job(repo: str, run_id: int) -> tuple[str | None, int | None]:
     the other PRs — and this module's own floor comment records that the class it
     cancels is KNOWN to contain runs that would have created jobs on their own.
 
-    Both reads carry `retries=0`: this is a GATE, not a measurement worth spending the
+    ⛔ THE ATTEMPT IS PART OF THE MEASUREMENT, NOT DECORATION. A status of `queued`
+    with `0` jobs is ALSO the shape of a FRESH RE-RUN ATTEMPT (its `run_started_at` is
+    null until it starts), so a peer re-run of the same run id inside the pass window
+    presents a payload identical to the one the classification was made from. Asking
+    only "is it still a queued zero-job run" would then cancel an attempt that was
+    progressing normally, spend a second attempt of the budget, and (with
+    `max_attempts = 3`) escalate the context EXHAUSTED — the loop the classification
+    side abstains to prevent. Returning `run_attempt` lets the caller compare it with
+    the attempt it classified and treat a different attempt as a DIFFERENT measurement.
+
+    All reads carry `retries=0`: this is a GATE, not a measurement worth spending the
     pass budget on. An unreadable gate refuses the act (`_cancel` answers
     'unreadable') and the refusal is reported.
     """
     data = gh_json(["api", f"repos/{repo}/actions/runs/{run_id}"], retries=0)
     status = data.get("status") if isinstance(data, dict) else None
+    attempt = data.get("run_attempt") if isinstance(data, dict) else None
     jobs = gh_json(["api", f"repos/{repo}/actions/runs/{run_id}/jobs?per_page=1"],
                    retries=0)
     total = jobs.get("total_count") if isinstance(jobs, dict) else None
     return (status if isinstance(status, str) else None,
-            total if isinstance(total, int) else None)
+            total if isinstance(total, int) else None,
+            attempt if isinstance(attempt, int) else None)
 
 
 def _cancel(repo: str, run: Run) -> str:
@@ -940,7 +981,9 @@ def _cancel(repo: str, run: Run) -> str:
                     shape — the cancel is impossible, and a direct rerun is the only
                     remaining primitive
       'moved'       the pre-act re-measurement no longer shows a QUEUED zero-job run
-                    (jobs appeared, it started, or it completed) → SKIP, never act
+                    of the SAME ATTEMPT (jobs appeared, it started, it completed, or
+                    a peer re-ran it — a different attempt is a different
+                    measurement) → SKIP, never act
       'unreadable'  the pre-act re-measurement could not be read → SKIP, never act
       'refused'     the cancel POST failed for any other reason → SKIP
       'unsettled'   the cancel landed but the run never reported `completed` in bound
@@ -958,8 +1001,12 @@ def _cancel(repo: str, run: Run) -> str:
     report `cancelled_first: True` for a cancel that did not happen, converting a
     finished verdict into a fresh attempt. So the run and its job count are re-read
     UNCACHED (`_live_zero_job`) and the POST is issued only while the run is still in
-    a QUEUED status with a MEASURED zero — the same discipline `_rerun` already
-    applies to the head immediately before its own action.
+    a QUEUED status with a MEASURED zero AND the attempt it classified — the same
+    discipline `_rerun` already applies to the head immediately before its own action.
+    The ATTEMPT is compared for the reason the classification side abstains on it: a
+    fresh re-run attempt is `queued` with `0` jobs and a null `run_started_at`, so a
+    peer re-run of the same run id inside the pass window is INDISTINGUISHABLE from
+    the stalled run by status and job count alone.
 
     Only 'cancelled' means the run is OBSERVED `completed`: a rerun issued against a
     run the API still considers live is refused (`403 This workflow is already
@@ -968,11 +1015,17 @@ def _cancel(repo: str, run: Run) -> str:
     """
     global _CANCEL_SETTLE_SPENT_S
     try:
-        status, jobs = _live_zero_job(repo, run.id)
+        status, jobs, attempt = _live_zero_job(repo, run.id)
     except (MeasureError, subprocess.TimeoutExpired, OSError):
         return "unreadable"
-    if status is None or jobs is None:
+    if status is None or jobs is None or attempt is None:
         return "unreadable"
+    if attempt != run.run_attempt:
+        # A DIFFERENT ATTEMPT IS A DIFFERENT MEASUREMENT. Someone (the API, a human
+        # re-run, another lane) replaced the attempt this run was classified on, so
+        # the queued-zero-job reading above does not describe the run that would be
+        # cancelled — it describes a fresh attempt that is just waiting for a slot.
+        return "moved"
     if (status not in QUEUED_STATUSES or status in _APPROVAL_PARKED_STATUSES
             or jobs != 0):
         # SKIP. The classification is minutes old; this is the reading that decides
@@ -1150,7 +1203,8 @@ def open_prs(repo: str, include_drafts: bool) -> list[dict]:
 
 def build_plans(repo: str, required: list[str], emitters: dict[str, list[str]],
                 include_drafts: bool, max_attempts: int,
-                queue_starved: bool = False) -> list[PrPlan]:
+                queue_starved: bool = False,
+                deadline: float | None = None) -> list[PrPlan]:
     plans: list[PrPlan] = []
     # A PASS IS THE CACHE SCOPE. Two passes in one process (a launcher that polls)
     # must not reuse a verdict measured against a head that has since moved.
@@ -1162,7 +1216,11 @@ def build_plans(repo: str, required: list[str], emitters: dict[str, list[str]],
     # the scan, so the deadline has to cover both halves — otherwise the reads alone
     # could sleep past the consumer workflow's timeout and the pass would be killed
     # before it could emit `RATE-LIMITED (not empty)` or any exit code at all.
-    _PASS_DEADLINE = time.time() + PASS_BUDGET_S
+    # `main()` arms it BEFORE its first live read and threads that same deadline in
+    # here, so the budget is measured from the START of the pass. Re-arming on every
+    # call (which this did) discarded the pre-scan half and could hand the scan a
+    # second full budget, which is how the total could exceed the workflow timeout.
+    _PASS_DEADLINE = deadline if deadline is not None else _arm_pass_deadline()
     for pr in open_prs(repo, include_drafts):
         head = pr.get("headRefOid") or ""
         if not head:
@@ -1502,6 +1560,14 @@ def main(argv: list[str] | None = None) -> int:
         candidate = root / args.record
         if candidate.is_file():
             record_path = candidate
+    # ⛔ ARM THE PASS BUDGET BEFORE THE FIRST API-TOUCHING STEP. `resolve_required`
+    # below performs a LIVE read (branch protection) and `read_queue_health` reads the
+    # queue; either can be RATE-LIMITED, and while the deadline was armed inside
+    # `build_plans` their waits were unbounded — 600 s of sleeps on top of the 720 s
+    # armed afterwards, which does not fit the consumer workflow's 15 minutes and is
+    # killed instead of exiting 2. The deadline is then threaded into `build_plans` so
+    # the scan does not restart the clock.
+    pass_deadline = _arm_pass_deadline()
     queue = None if args.no_queue_health else read_queue_health(args.repo)
     # A queue read that failed is reported as UNKNOWN and does NOT block the pass:
     # the repair it performs is still correct, it just cannot name starvation.
@@ -1518,7 +1584,8 @@ def main(argv: list[str] | None = None) -> int:
         # PR scan (see require_emitters).
         require_emitters(required, emitters, record_path)
         plans = build_plans(args.repo, required, emitters, args.include_drafts,
-                            args.max_attempts, queue_starved=queue_starved)
+                            args.max_attempts, queue_starved=queue_starved,
+                            deadline=pass_deadline)
         code, records = report(plans, args.apply, can_trigger_events(), args.repo,
                                args.reopen_cooldown_minutes, args.max_attempts)
     except MeasureError as exc:
