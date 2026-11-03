@@ -2326,7 +2326,14 @@ def retrieve_for_question(
     _sr_reader_window = (eff_item_cap if eff_item_cap is not None
                          else DEFAULT_REINJECTION_SEED_WINDOW)
     # per-outcome census (§2): the OFF arm records the same zeroed shape so
-    # the arm delta stays reconstructable per question.
+    # the arm delta stays reconstructable per question. That zeroed
+    # ``sessions_before``/``sessions_after`` is a DESIGN, not a measurement —
+    # no census is taken on this arm — so a consumer deriving a rate from it
+    # (``len(sessions_lost) / sessions_before``) must guard the zero rather
+    # than read it as "the reader's window held no sessions". Filling in the
+    # base window's real counts here was considered and declined: the two arms
+    # would then report DIFFERENT quantities under the same key, which is what
+    # breaks the per-question arm delta this comment exists to record.
     sr_seeds: list[str] = []
     sr_seeded = 0
     sr_injected_per_session: dict[str, int] = {}
