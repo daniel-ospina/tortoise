@@ -453,10 +453,13 @@ def _module_functions(tree) -> dict:
 def _tree_at(path: str, mtime_ns: int, size: int):
     """A parsed module, cached on the file's OWN identity.
 
-    Keyed on `(mtime, size)` rather than the path alone, deliberately: the
-    mutation pins in this file ADD and REMOVE modules, and a path-keyed cache
-    would serve a stale tree (or miss the new file) and turn a real red into a
-    false green — the failure mode a cache must never introduce into a guard.
+    Keyed on `(mtime, size)` rather than the path alone, deliberately: a rewrite
+    within one process invalidates instead of serving a stale tree. What makes
+    that sufficient is that each pytest RUN is a fresh process — the mutation
+    pins in this file use `_flagged(source)` on a synthetic string and never
+    touch the filesystem, so a probe added or removed between runs is always
+    re-parsed. The failure this guards against is a cache that turns a real red
+    into a false green, which a stale tree would do silently.
     """
     return ast.parse(Path(path).read_text())
 
@@ -606,15 +609,25 @@ def _org_scoped_sdk_sites(tree) -> dict[str, int]:
     looked for `_make_sdk` alone. The `_data_sdk` pair counts too — it binds on
     the way out, so it is clean by construction, but counting it is what makes
     "how many lanes open an org SDK?" a measurement instead of a guess.
+
+    `_make_sdk` is in `_SDK_OPENERS`, so the membership test below MUST exclude
+    it or the namespace predicate above is dead code: every `_make_sdk(...)`
+    would count as an "org-scoped site" — including the registry/base lanes that
+    pass a string-literal namespace. Measured at #10046 review round 3: 94 of
+    175 counted "sites" were literal-namespace constructions, i.e. 54% of the
+    count was not org-scoped at all, which let the non-vacuity floor stand on
+    registry lanes alone. Corrected, the package has 81 org-scoped sites across
+    two modules.
     """
     sites: dict[str, int] = {}
+    unconditional = (_SDK_OPENERS - {"_make_sdk"}) | _INSTALLING_OPENERS
     for name, node in _module_functions(tree).items():
         for call in ast.walk(node):
             if not isinstance(call, ast.Call):
                 continue
             called = getattr(call.func, "id", None)
             if ((called == "_make_sdk" and _namespace_is_org_scoped(call))
-                    or called in _SDK_OPENERS | _INSTALLING_OPENERS):
+                    or called in unconditional):
                 sites[name] = sites.get(name, 0) + 1
     return sites
 
@@ -753,6 +766,14 @@ def test_no_hosted_lane_writes_records_through_an_unbound_sdk():
 #: the walk follows the INSTALL rather than a hand-written path.
 _PACKAGE_ROOT = Path(ha.__file__).resolve().parent
 
+#: The modules measured to contribute an ORG-SCOPED SDK construction site. The
+#: package-wide leg asserts this list is still a SUBSET of what it finds, which is
+#: the only per-module drift signal available: every per-module rule built from
+#: the scan's own predicates is tautological, so the inventory has to be the
+#: external reference. A legitimate new org-scoped lane may ADD a module without
+#: touching this; a module that stops matching reds.
+_ORG_SCOPED_MODULES = frozenset({"hosted_api.py", "quota.py"})
+
 
 def _joined(items: list[str]) -> str:
     """The multi-line assertion body: one item per line, indented under it."""
@@ -772,10 +793,14 @@ def test_no_lane_ANYWHERE_in_the_package_writes_records_through_an_unbound_sdk()
     nothing, which is exactly the silent-invisible class #10046 was filed for
     ("the gap is invisible until such a tenant tries to write").
 
-    Measured before this leg was added: 264 modules, 149 (module, lane) entries —
-    175 call sites — and 0 unbound record writes, so widening the scan cannot red
-    on the code as it stands. Its whole job is the module that does not exist
-    yet.
+    Measured when this leg was added: 264 modules, 81 org-scoped construction
+    sites across TWO modules, and 0 unbound record writes, so widening the scan
+    cannot red on the code as it stands. Its whole job is the module that does
+    not exist yet. (An earlier revision reported "149 entries / 175 sites":
+    that count was inflated by a doubled predicate — `_make_sdk` is a member of
+    `_SDK_OPENERS`, so the membership test matched EVERY `_make_sdk(...)` call
+    and 94 of the 175 were registry/base literals. Fixed in
+    `_org_scoped_sdk_sites`.)
 
     WHAT THIS SCAN CANNOT SEE, stated rather than implied: it judges a write by
     the handle's OPENER, and only openers in the declared vocabularies are
@@ -799,7 +824,7 @@ def test_no_lane_ANYWHERE_in_the_package_writes_records_through_an_unbound_sdk()
     sites: dict[str, int] = {}
     unbound: list[str] = []
     unparsed: list[str] = []
-    silent: list[str] = []
+    contributing: set[str] = set()
     for path in modules:
         rel = path.relative_to(_PACKAGE_ROOT)
         try:
@@ -812,37 +837,32 @@ def test_no_lane_ANYWHERE_in_the_package_writes_records_through_an_unbound_sdk()
         opened_here = _org_scoped_sdk_sites(tree)
         for lane, count in opened_here.items():
             sites[f"{rel}:{lane}"] = count
+        if opened_here:
+            contributing.add(str(rel))
         unbound.extend(f"{rel}: {site}"
                        for site in _unbound_record_writes(tree))
-        # Per-MODULE non-vacuity, because the global floor below cannot see drift
-        # on the axis this leg was widened for: only 3 modules contribute sites
-        # and `hosted_api.py` alone holds 168 of 175, so a criteria change that
-        # stopped matching in every OTHER module would still clear the floor
-        # with the one leg it already covered. A module that calls `_make_sdk` at
-        # all — including the string-literal namespaces the org-scoped predicate
-        # excludes — but contributes no site is where that drift would show.
-        # Guarded on `opened_here` first so the walk is skipped for the modules
-        # that DID contribute (hosted_api.py is the largest file in the package
-        # and never needs it).
-        if not opened_here and any(
-                isinstance(call, ast.Call)
-                and getattr(call.func, "id", None) == "_make_sdk"
-                for call in ast.walk(tree)):
-            silent.append(str(rel))
-
-    assert silent == [], (
-        "these modules open an SDK but contribute NO org-scoped site, so the "
-        "scan's AST criteria have stopped matching here and `unbound == []` says "
-        "nothing about them. Either the criteria need updating, or the opener is "
-        "a registry/base lane the predicate should exclude:" + _joined(silent))
 
     assert unparsed == [], (
         "the package walk could not parse these modules, so it cannot answer "
         "whether they install a record tenant:" + _joined(unparsed))
 
+    # The MODULE axis, which a global site floor cannot see: only two modules
+    # contribute sites and `hosted_api.py` holds 80 of the 81, so criteria drift
+    # that stopped matching anywhere else would still clear the floor below with
+    # the one module it already covered. A SUPERSET assertion (not equality) is
+    # the honest form — a legitimate new org-scoped lane may ADD a module freely,
+    # while a module that stops matching reds.
+    missing = sorted(_ORG_SCOPED_MODULES - contributing)
+    assert missing == [], (
+        "these modules used to contribute an ORG-SCOPED SDK construction site and "
+        "now contribute none, so the scan's AST criteria have stopped matching "
+        "in them and `unbound == []` says nothing about their lanes. Either the "
+        "criteria need updating, or the module genuinely lost its last lane — "
+        "in which case update `_ORG_SCOPED_MODULES` deliberately:" + _joined(missing))
+
     # Non-vacuity, the same rule the single-module leg states: a scan that
-    # matched nothing is not a pass.
-    assert sum(sites.values()) >= 40, (
+    # matched nothing is not a pass. 60 against a measured 81.
+    assert sum(sites.values()) >= 60, (
         f"the package scan found only {sum(sites.values())} org-scoped SDK "
         "construction sites — the AST criteria no longer match how lanes open "
         "their SDK, so `unbound == []` below certifies nothing")
@@ -909,14 +929,20 @@ def test_every_sdk_shaped_name_in_the_package_is_classified():
         "here) or `_NOT_A_LANE_OPENER` (not an org-scoped lane construction "
         "site):" + _joined(unclassified))
 
-    # The declaration cannot rot into a lie — checked over EVERY opener
-    # vocabulary, not just the two that were easy to reach. The suffix-era
-    # version checked only `_AMBIENT_OPENERS | _NOT_A_LANE_OPENER`, so renaming
-    # `_org_sdk_from_name` would have left the stale entry standing while the new
-    # name reached `_handle_state` as `None` (a silent exemption, and the very
-    # false PASS this file exists to stop).
+    # The declaration cannot rot into a lie — checked over every vocabulary whose
+    # members are MODULE-LEVEL FUNCTIONS. The suffix-era version checked only
+    # `_AMBIENT_OPENERS | _NOT_A_LANE_OPENER`, so renaming `_org_sdk_from_name`
+    # would have left the stale entry standing while the new name reached
+    # `_handle_state` as `None` (a silent exemption, and the very false PASS this
+    # file exists to stop). `_SDK_OPENERS` is included for the same reason — and
+    # for an opener spelled WITHOUT an `_sdk` token (`_open_org_graph`), which
+    # `unclassified` above cannot see at all.
+    # `_TENANT_INSTALLERS` is EXCLUDED deliberately: it mixes module-level
+    # functions with `TortoiseSDK` METHOD names (`_bind_record_tenant` is called
+    # as `sdk._bind_record_tenant`), so a `tree.body` lookup would report every
+    # method as vanished.
     vanished = sorted(
-        name for name in (_UNBOUND_OPENERS | _INSTALLING_OPENERS
+        name for name in (_SDK_OPENERS | _UNBOUND_OPENERS | _INSTALLING_OPENERS
                           | _AMBIENT_OPENERS | _NOT_A_LANE_OPENER)
         if name not in shaped)
     assert vanished == [], (
