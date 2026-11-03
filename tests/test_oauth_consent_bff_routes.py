@@ -1696,6 +1696,46 @@ def _key_from(location: str | None) -> str:
     return keys[0]
 
 
+def test_the_AS_bounce_key_is_the_key_start_records_and_the_flow_completes() -> None:
+    """The JOINT seam: the bounce URL the AS actually emits, fed to the route that must adopt it.
+
+    The two halves are pinned separately (the bounce carries a key; `start` adopts a presented
+    key), and pinned separately they can both be green while the seam between them is broken —
+    measured: with the AS append deleted, the adoption test still PASSED, because `presentedKey ||
+    newAttemptKey()` predates it. What a cold visitor actually executes is `consent_bounce_url` →
+    `start` → sign-in → `start`, and only a test that crosses the boundary can red when the key
+    is lost or shadowed on the way in.
+    """
+    from tortoise.oauth import consent_bounce_url
+
+    emitted = consent_bounce_url("https://app.premiselabs.co", urllib.parse.urlencode(_PARAMS))
+    inner_url = urllib.parse.parse_qs(urllib.parse.urlsplit(emitted).query)["next"][0]
+    inner_q = urllib.parse.parse_qs(urllib.parse.urlsplit(inner_url).query, keep_blank_values=True)
+    as_key = inner_q["attempt_key"][0]
+    assert len(inner_q["attempt_key"]) == 1, inner_q["attempt_key"]
+
+    # Exactly the params the bounce hands the app, nothing added by this test.
+    params = {k: v[0] for k, v in inner_q.items()}
+    for name, value in _PARAMS.items():
+        assert params[name] == value, (name, params[name], value)
+
+    cold = _run("start_cold_browser", params=params)
+    assert cold["status"] == 302, cold
+    assert _key_from(cold["location"]) == as_key, (
+        "start replaced the AS-minted key, so the browser and the row now disagree — every later "
+        "leg of this flow is the #10487 dead end")
+
+    back = _run("start_signed_in", seededAttempts=cold["attempts"],
+                sessionUserId="user-1", params=params)
+    assert back["status"] == 302, f"the cold visitor's own return leg was refused: {back}"
+    assert "api.premiselabs.co/oauth/authorize" in (back["location"] or ""), back["location"]
+    advance_key = urllib.parse.parse_qs(
+        urllib.parse.urlsplit(back["location"]).query).get("attempt_key", [""])[0]
+    assert advance_key == as_key, (
+        "the advance target lost the AS-minted key, so the consent page cannot mint for this flow")
+    assert back["attempts"][0]["user_id"] == "user-1"
+
+
 def test_start_ADOPTS_a_presented_attempt_key_so_a_cold_flow_can_return() -> None:
     """#10487: the key must belong to the FLOW, not to one URL the route happened to emit.
 
