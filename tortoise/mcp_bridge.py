@@ -429,8 +429,19 @@ def forward(client: httpx.Client, state: dict, payload: Any) -> list[Any]:
             # id as a complete answer, so a BATCH whose second id went unanswered
             # produced no output for it at all — the harness then waits on that id
             # forever, which is the exact silence this guard exists to prevent.
-            answered = {m.get("id") for m in messages if isinstance(m, dict)}
-            missing = [i for i in dict.fromkeys(expected_ids) if i not in answered]
+            # HASHABLE IDS ONLY. A JSON-RPC `id` may legitimately be an array or an
+            # object, and those are unhashable — a set/dict-keyed lookup over them
+            # raises `TypeError`, which `main()` turns into a fabricated
+            # "internal failure" for BOTH ids, discarding an answer the server DID
+            # give. `_response_messages` already filters this way for `pending`
+            # (`isinstance(request_id, (str, int))`); this guard follows the same
+            # convention rather than departing from it.
+            answered = {m["id"] for m in messages
+                        if isinstance(m, dict)
+                        and isinstance(m.get("id"), (str, int))}
+            missing = [i for i in dict.fromkeys(
+                i for i in expected_ids if isinstance(i, (str, int)))
+                if i not in answered]
             if missing:
                 # A request MUST be answered. A reply with no JSON-RPC message for
                 # it (odd status, unparseable body, an SSE stream carrying only a

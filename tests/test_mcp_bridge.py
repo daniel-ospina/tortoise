@@ -861,6 +861,49 @@ class TestFailureModes:
             f"an answered id was reported as unanswered: {named}")
 
 
+    def test_a_batch_reply_with_an_unhashable_id_does_not_break_the_guard(self):
+        """A JSON-RPC `id` may be an array or an object, and those are unhashable.
+
+        Keying the answered-set on such an id raises `TypeError`, which `main()`
+        turns into a fabricated "internal failure" for EVERY id in the batch —
+        discarding an answer the server did give. The guard follows the same
+        `(str, int)` filter `_response_messages` already uses for `pending`.
+        """
+        import httpx
+
+        from tortoise.mcp_bridge import forward
+
+        body = json.dumps([
+            {"jsonrpc": "2.0", "id": ["not", "hashable"], "result": {}},
+            {"jsonrpc": "2.0", "id": 11, "result": {"tools": [{"name": "tortoise_search"}]}},
+        ])
+        response = httpx.Response(
+            200, content=body.encode(),
+            headers={"content-type": "application/json"},
+        )
+
+        class _Client:
+            def stream(self, *_a, **_k):
+                class _Ctx:
+                    def __enter__(self_inner):
+                        return response
+
+                    def __exit__(self_inner, *_exc):
+                        return False
+
+                return _Ctx()
+
+        messages = forward(_Client(), {}, [
+            {"jsonrpc": "2.0", "id": 11, "method": "tools/list"},
+            {"jsonrpc": "2.0", "id": 12, "method": "tools/call"},
+        ])
+
+        ids = [m.get("id") for m in messages if isinstance(m, dict)]
+        assert 11 in ids, f"the answered id was discarded: {messages}"
+        assert 12 in ids, f"the unanswered id got no error: {messages}"
+        answered = next(m for m in messages if isinstance(m, dict) and m.get("id") == 11)
+        assert answered.get("result") == {"tools": [{"name": "tortoise_search"}]}, answered
+
     def test_a_partially_answered_batch_still_captures_the_protocol_version(self):
         """The early return must not drop the tail's `initialize` side effect.
 
