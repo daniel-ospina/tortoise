@@ -2148,9 +2148,14 @@ def select_e4_receipt(repo: Path = ROOT, frozen_pin: str = "") -> tuple[str, dic
       stamp sorts above its ``Z`` equivalent), which is why the pin — not the date —
       is what makes the choice safe: every match is on the frozen corpus, so the
       number cannot differ by corpus whichever one wins;
-    * every candidate that is unreadable, not an object, carries no
-      ``operator_audit`` or no ``corpus_hash`` is NAMED in the refusal, so a missing
-      artifact cannot read as "no candidate".
+    * every candidate that is unreadable, not an object or carries no
+      ``corpus_hash`` is NAMED in the refusal, so a missing artifact cannot read as
+      "no candidate";
+    * a candidate that IS on the frozen pin but carries no ``operator_audit`` REFUSES
+      the selection instead of being skipped. Skipping it would silently let an
+      OLDER on-pin receipt publish the row's number while the newest measurement on
+      the same corpus sat unread — the same "the row's number is not the artifact you
+      think it is" defect this selector exists to close, one level down.
     """
     if not frozen_pin:
         raise SystemExit("capstone-measure: REFUSED — E4 was asked to select its "
@@ -2161,6 +2166,10 @@ def select_e4_receipt(repo: Path = ROOT, frozen_pin: str = "") -> tuple[str, dic
     paths = sorted(directory.glob(E4_RECEIPT_GLOB)) if directory.is_dir() else []
     matched: list[tuple[str, str, Path, dict]] = []
     skipped: list[str] = []
+    #: Candidates that ARE on the frozen pin but cannot be scored. They are a REFUSAL,
+    #: never a silent skip: dropping one would let an OLDER on-pin receipt speak for
+    #: the newest measurement on the same corpus.
+    unscorable: list[str] = []
     for path in paths:
         try:
             record = json.loads(path.read_text())
@@ -2170,9 +2179,6 @@ def select_e4_receipt(repo: Path = ROOT, frozen_pin: str = "") -> tuple[str, dic
         if not isinstance(record, dict):
             skipped.append(f"{path.name} ({type(record).__name__}, not a record)")
             continue
-        if not isinstance(record.get("operator_audit"), dict):
-            skipped.append(f"{path.name} (no operator_audit)")
-            continue
         corpus_hash = record.get("corpus_hash")
         if not isinstance(corpus_hash, str) or not corpus_hash:
             skipped.append(f"{path.name} (no corpus_hash)")
@@ -2180,8 +2186,19 @@ def select_e4_receipt(repo: Path = ROOT, frozen_pin: str = "") -> tuple[str, dic
         if not _same_corpus(corpus_hash, frozen_pin):
             skipped.append(f"{path.name} (corpus_hash {corpus_hash[:20]}…)")
             continue
+        if not isinstance(record.get("operator_audit"), dict):
+            unscorable.append(path.name)
+            continue
         matched.append((str(record.get("date") or ""),
                         str(record.get("run_id") or ""), path, record))
+    if unscorable:
+        raise SystemExit(
+            f"capstone-measure: REFUSED — {len(unscorable)} receipt(s) in "
+            f"{directory} ARE on the frozen corpus ({frozen_pin}) but carry no "
+            f"operator_audit, so they cannot be scored: {sorted(unscorable)}. "
+            "Skipping them would let an OLDER on-pin receipt publish the row's "
+            "number while the newest measurement on the same corpus sat unread — "
+            "repair or remove the receipt, or re-run the operator probe")
     if not matched:
         raise SystemExit(
             f"capstone-measure: REFUSED — no operator receipt in "
@@ -2222,6 +2239,18 @@ def load_e4(repo: Path = ROOT, *, frozen_pin: str = "") -> dict:
     }
 
 
+def e4_outcome_for(receipt: dict, bars: dict) -> dict:
+    """The E4 outcome for a receipt — ONE derivation, two call sites.
+
+    ``build_e4_row`` and ``main``'s ``render_log`` call both need it. Deriving it
+    twice is how the log comes to print an outcome the row was not built from — the
+    exact "the number is not the one you think it is" class this probe exists to
+    refuse — so there is one definition here and no second transcription.
+    """
+    return e4_outcome(edge_correct=receipt["edge_correct"],
+                      planted=receipt["planted"], bars=bars)
+
+
 def build_e4_row(receipt: dict, *, bars: dict, corpus_sha: str) -> dict:
     """E4's row, from a receipt ``load_e4`` selected on the frozen corpus.
 
@@ -2237,8 +2266,15 @@ def build_e4_row(receipt: dict, *, bars: dict, corpus_sha: str) -> dict:
     and ``verdict``/``failure_origin`` are the receipt's gate verdict over its own
     metrics, not this row's verdict.
     """
-    result = e4_outcome(edge_correct=receipt["edge_correct"],
-                        planted=receipt["planted"], bars=bars)
+    if not _same_corpus(str(receipt.get("corpus_hash") or ""), corpus_sha):
+        raise SystemExit(
+            f"capstone-measure: REFUSED — build_e4_row was handed "
+            f"{receipt.get('evidence')!r}, whose corpus_hash="
+            f"{receipt.get('corpus_hash')!r} is not the frozen corpus "
+            f"({corpus_sha}). The note below states that equality, so building the "
+            "row from a receipt that does not carry the pin would print a sentence "
+            "the row's own fields refute")
+    result = e4_outcome_for(receipt, bars)
     return {
         "verdict": verdict_word(result),
         "numerator": receipt["edge_correct"],
@@ -2549,7 +2585,7 @@ def render_log(*, head: str, prereg_sha: str, bars: dict, corpus_sha: str,
         f"operators_total={e4['operators_total']} "
         f"operators_provenanced={e4['operators_provenanced']}")
     add(f"e4 outcome={e4_out['outcome']} {e4_out['value']} bar={e4_out['bar']}")
-    on_pin = _same_corpus(str(e4["corpus_sha256"] or ""), corpus_sha)
+    on_pin = _same_corpus(str(e4["corpus_hash"] or ""), corpus_sha)
     add("e4 provenance: the receipt's own "
         f"date={e4['date']} and commit={e4['commit']} are the RECEIPT's, not this "
         f"run's head. " + (
@@ -2651,7 +2687,7 @@ def render_log(*, head: str, prereg_sha: str, bars: dict, corpus_sha: str,
                 "content_ok": e4["content_ok"],
                 "operators_total": e4["operators_total"],
                 "measured_commit": e4["commit"],
-                "corpus_hash": e4["corpus_sha256"],
+                "corpus_hash": e4["corpus_hash"],
                 "source": e4["evidence"],
             },
             "e5_rescore": {
@@ -2857,6 +2893,7 @@ def main(argv: list[str] | None = None) -> int:
 
     # ── E4 ────────────────────────────────────────────────────────────────
     receipt = load_e4(frozen_pin=corpus_sha)
+    e4_result = e4_outcome_for(receipt, bars)
     e4 = build_e4_row(receipt, bars=bars, corpus_sha=corpus_sha)
 
     # ── E5 ────────────────────────────────────────────────────────────────
