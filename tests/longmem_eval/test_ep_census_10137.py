@@ -1659,7 +1659,8 @@ def test_committed_census_rederives_its_own_aggregate():
                 f"{r.get('points_moved_off_neutral')!r} point(s) off the "
                 f"neutral mean but names a no_op_reason "
                 f"{r.get('no_op_reason')!r} — a pass that moved points cannot "
-                f"also report that it wrote nothing (README:214)")
+                f"also report that it wrote nothing (README, \"in all 24 because"
+                f" no question\")")
 
     # ONE artifact-identity anchor: the sample this bundle was cut from.
     # Update together with the artifact, never on its own. ``source`` sits here
