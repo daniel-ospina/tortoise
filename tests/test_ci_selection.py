@@ -3153,6 +3153,59 @@ def test_temporal_leg_change_runs_its_pins_and_keeps_the_core_pool():
         r["surfaces"])
 
 
+def test_mcp_client_change_keeps_the_core_pool_that_guards_its_words():
+    # #10605 / PR #10727 review (P2). `tortoise/mcp_client.py` was registered as
+    # an exact SOURCE_PATTERNS["api"] entry so that `tests/test_mcp_client.py`
+    # (its named self-guard, formerly a `_SELF_GUARD_DEBT` row) runs on a
+    # client-only diff. A named-surface match REPLACES the `core` fallback
+    # (#2938), and nothing added the other half — so the same edit DOWNGRADED the
+    # selection. MEASURED with the repo's own selector: on origin/main a
+    # `tortoise/mcp_client.py`-only diff selected `['core']` / 735 test files;
+    # at the PR head it selected `['api']` / 337. Among the dropped files are the
+    # only two `core`-registered suites that execute the shipped
+    # `tortoise-client` CLI against THIS module's driver words —
+    # `tests/test_client_status_vocabulary.py` (`available | empty | degraded |
+    # unconfigured`, and this PR adds the third word to `status()`) and
+    # `tests/test_client_cli_probe.py` (`client/tortoise_client/cli.py` imports
+    # `describe_failure` from here) — plus
+    # `tests/test_uri_env_mutations_declared.py`, whose registry this PR edits.
+    # The #2938/#1349 silent-drop class, in the other direction: the fix for one
+    # silent drop created another.
+    #
+    # Mutation check: deleting the `tortoise/mcp_client.py` row from `CORE_ALSO`
+    # puts surfaces back to `['api']` and drops both CLI guards -> the third and
+    # fourth asserts red. Deleting the SOURCE_PATTERNS row instead fails the
+    # first two (the self-guard half this PR legitimately adds).
+    #
+    # `test_files` is the STRING "ALL" under the FULL matrix, so coverage goes
+    # through `runs()` — promoting the module to `SHARED_MODULES` is a strictly
+    # WIDER selection and must not red this pin. Pool sizes are DATED ANCHORS;
+    # the suite grows, so no count is asserted.
+    r = _sel(["tortoise/mcp_client.py"])
+
+    def runs(name: str) -> bool:
+        return r["full"] is True or name in r["test_files"]
+
+    assert "api" in r["surfaces"], (
+        "a mcp_client-only diff must select `api`, where its own guard "
+        "(`tests/test_mcp_client.py`) is registered "
+        "(SOURCE_PATTERNS['api'] entry removed?)", r["surfaces"])
+    assert runs("test_mcp_client.py"), (
+        "a mcp_client-only diff does not run the module's own guard "
+        "(SOURCE_PATTERNS['api'] entry removed?)", r)
+    assert "core" in r["surfaces"], (
+        "a mcp_client-only diff dropped the core pool it selects on main "
+        "(CORE_ALSO entry removed?) — the `api` match REPLACES the `core` "
+        "fallback (#2938)", r["surfaces"])
+    for guard in ("test_client_status_vocabulary.py",
+                  "test_client_cli_probe.py"):
+        assert runs(guard), (
+            f"a mcp_client-only diff does not run {guard}, the core-registered "
+            "suite that executes the `tortoise-client` CLI against this "
+            "module's driver words (CORE_ALSO entry for "
+            "`tortoise/mcp_client.py` removed?)", r)
+
+
 def test_supabase_control_change_selects_the_org_purge_rpc_guard():
     # #7968 / PR #8179 review P1: `purge_org_control_plane` lives in
     # `tortoise/supabase_control.py`, which IS a SOURCE_PATTERNS["api"] entry —
