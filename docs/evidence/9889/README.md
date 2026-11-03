@@ -258,8 +258,8 @@ metric's own precision.
 3. **The ON arm here is n=1.** Two OFF runs, one ON run. A second ON run was not
    taken inside this pass, so the ON arm's own spread is unmeasured — read the
    ON share as one realization, not as the arm's value.
-4. **The E1/E2 rows in the verdict table USED to parse `e1-e2.log`; they no
-   longer do.** This was written as an open limitation when the probes landed
+4. **The E1/E2 rows in the verdict table USED to parse `e1-e2.log`; no row the
+   builder emits does.** This was written as an open limitation when the probes landed
    (#10342); the re-point followed and is landed
    (`docs/evidence/7949-capstone/probes/capstone_measure.py` cites
    `E1_E2_SCORES` for both rows, and `E1E2_LOG` no longer exists there). Kept as

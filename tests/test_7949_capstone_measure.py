@@ -1560,6 +1560,76 @@ def test_the_shipped_measurement_log_is_structurally_clean():
     assert codes == ["V9"], codes
 
 
+def test_the_scored_logs_pre_repoint_rows_are_disclosed():
+    """#10610 review at `2d9e8608` (P3): a frozen log is not re-rendered — so DISCLOSE it.
+
+    `#9889` item 5 moved the E1/E2 rows off `e1-e2.log`, and this README says so — but the
+    artifact `capstone_verdict_check.py` is run against is the SCORED log, which is frozen
+    at its own stamp, and §"Two artifacts" below forbids editing it (a row moves only by
+    RE-RUNNING the probe). So the shipped log still carries both rows on the hard-coded
+    name, with E2 `BLOCKED` by the now-CLOSED `#9775` — the eleven-day state `#9889` exists
+    to end, and the only reading an artifact gave.
+
+    The fix is disclosure, and this pin holds the disclosure to the log's ACTUAL rows in
+    BOTH directions: while the rows are pre-re-point the artifact table must say so, and
+    the README's "cited by no row" / "no longer read" claims must be qualified to the rows
+    the builder EMITS; once a re-recorded log carries the record's rows, the disclosure
+    must go rather than survive as a stale sentence. Neither direction is assumed: the
+    premise is read out of the committed log.
+
+    Non-vacuity: at the pre-fix head the artifact table carried no such line and the three
+    claims were unqualified, so both legs red (measured).
+    """
+    readme = (_REPO / "docs/evidence/7949-capstone/README.md").read_text()
+    log = _newest_log(_scored_logs())
+    record = cvc.extract_block(log.read_text())
+    rows = {row["criterion"]: row for row in record["rows"]}
+    superseded = "docs/evidence/7949-capstone/e1-e2.log"
+    stale = sorted(c for c in ("E1", "E2") if rows[c]["evidence"] == superseded)
+    assert stale in ([], ["E1", "E2"]), (
+        "only ONE of the shipped log's E1/E2 rows is pre-re-point — a state no stamp can "
+        f"describe: { {c: rows[c]['evidence'] for c in ('E1', 'E2')} }")
+
+    flat = [re.sub(r"\s+", " ", line) for line in readme.splitlines()]
+    table_rows = [line for line in flat if line.startswith(f"| `{log.name}`")]
+    assert len(table_rows) == 1, (
+        f"the artifact table no longer describes {log.name} in exactly one row: "
+        f"{table_rows} — this leg's subject is gone, so it would pass by vacancy")
+    row = table_rows[0]
+
+    # The disclosure's sub-claim is CHECKED, not trusted: `#9775` really is closed and the
+    # record really is the builder's evidence, so requiring them here names a state a
+    # reader can verify rather than a phrase they must take on faith.
+    if stale:
+        assert rows["E2"]["blocked_by"] == "#9775", rows["E2"]["blocked_by"]
+        for anchor in ("PREDATE", "#9889", superseded, "#9775",
+                       "docs/evidence/9889/e1-e2-scores.json"):
+            assert anchor in row, (
+                f"the artifact table row for {log.name} does not disclose that its E1/E2 "
+                f"rows predate the #9889 re-point (missing {anchor!r}). A reader who follows "
+                "the evidence chain lands on a CLOSED blocker and a superseded log with "
+                f"nothing saying so — the row reads: {row[:500]}")
+        squashed = re.sub(r"\s+", " ", readme)
+        for claim in ("cited by no row", "no longer read `e1-e2.log`"):
+            hits = list(re.finditer(re.escape(claim), squashed))
+            assert hits, (
+                f"the README no longer states {claim!r} at all — this leg would pass by "
+                "vacancy on a document that stopped describing the move")
+            for match in hits:
+                tail = squashed[match.end():match.end() + 60]
+                assert "current builder emits" in tail, (
+                    f"the README claim {claim!r} is UNQUALIFIED while the FROZEN scored "
+                    f"log {log.name} still carries both rows on `e1-e2.log` and E2 BLOCKED "
+                    f"by the CLOSED `#9775`: {tail!r}\n"
+                    "Qualify it to the rows the current builder emits, and let the "
+                    "artifact table disclose the frozen rows (a frozen log moves only by "
+                    "re-running the probe).")
+    else:
+        assert "PREDATE" not in row, (
+            f"{log.name} now carries the record's E1/E2 rows, so the disclosure that they "
+            "predate the #9889 re-point is FALSE — remove it with the re-record")
+
+
 def test_the_durations_row_quotes_the_case_count_it_weights():
     """The shard weight's provenance must describe the file that SHIPS.
 
@@ -4669,7 +4739,8 @@ def test_an_e2b_population_under_its_floor_is_REFUSED_not_FAILED(tmp_path):
     assert e2["decided_by"] == "E2b floor", e2
 
 
-def test_the_readmes_floor_provenance_claim_matches_the_code():
+def test_the_readmes_floor_provenance_claim_matches_the_code(monkeypatch,
+                                                             tmp_path):
     """#10610 review P2: the README's floor-provenance sentence vs its READER.
 
     The paragraph describes **Probe 1, `e1_paired_arm.py`**, and that probe's
@@ -4721,6 +4792,31 @@ def test_the_readmes_floor_provenance_claim_matches_the_code():
     # `denominator_floors`. Non-vacuity: routing `min_before_share` through
     # `parse_bars` reds here with that same exception.
     assert probe.min_before_share(broken) == frozen, probe.min_before_share(broken)
+
+    # ⛔ …and the sentence is about a RUN, so drive `main()`. #10610 review at
+    # `2d9e8608` (P3): `parse_bars` reads `e1_min_before_share` too (this PR put it
+    # in the map), and `main()` resolved the map-backed `object_floor` FIRST — so
+    # for the exact shapes above the run died on a bare `ValueError` from a helper
+    # and the `REFUSED:` message this paragraph describes was unreachable from the
+    # production path. The helper-only assertion above could not see that split.
+    # Non-vacuity: on the pre-fix head `main()` propagates `ValueError` here, so
+    # the `SystemExit` expectation reds.
+    monkeypatch.setattr(
+        probe, "read_preregistration",
+        lambda sha: {**prereg, "denominator_floors": {
+            **prereg["denominator_floors"], "e1_min_before_share": "0.20"}})
+    monkeypatch.setattr(probe, "resolve_head", lambda: "0" * 40)
+    monkeypatch.setattr(probe, "corpus_pin", lambda record: "sha256:frozen")
+    monkeypatch.setattr(probe, "backend_ready", lambda: (True, "ok"))
+    for key in (*probe.ARM_KEYS, probe.SEAM_KEY):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("TORTOISE_DB_URI", "docker://:@127.0.0.1:1/tortoise_test")
+    with pytest.raises(SystemExit) as refused:
+        probe.main(["--graph", "g", "--out", str(tmp_path / "off.json")])
+    assert "REFUSED" in str(refused.value), refused.value
+    assert "e1_min_before_share" in str(refused.value), refused.value
+    assert not (tmp_path / "off.json").exists(), (
+        "a refused run writes no record")
 
 
 @pytest.mark.parametrize("key", ["TORTOISE_VET", "TORTOISE_CLASSIFY_LATER"])
