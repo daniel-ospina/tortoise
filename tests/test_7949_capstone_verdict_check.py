@@ -2945,9 +2945,13 @@ def _multi_artifact_record(row: dict | None = None) -> dict:
 def test_a_non_green_row_on_another_corpus_must_declare_that_revision():
     """A row whose number comes from a DIFFERENT artifact must say so.
 
-    The capstone's rows do not all come from one run: E1/E2 cite #9076's arm run
-    and E4 an operator receipt, and neither measured the corpus the capstone run
-    froze. Refusing those rows outright would hide the only numbers they have;
+    The capstone's rows do not all come from one run: E1/E2 cite #9076's arm run,
+    and neither measured the corpus the capstone run froze. E4 is deliberately NOT
+    in that set any more — since #7949's selector the probe refuses an off-pin
+    receipt, so the CURRENT E4 row's corpus is the log's; the arm still matters for
+    logs written before the selector (the shipped `capstone-measured-e0fc940b.log`
+    carries exactly that shape). Refusing those rows outright would hide the only
+    numbers they have;
     accepting them on the row's word would let any red row name any corpus. So the
     row DECLARES the revision, and the declaration is checked against the artifact.
     """

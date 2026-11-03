@@ -61,7 +61,7 @@ running end to end."*
 > | **E1** | `after_share <= 0.50 × before_share`, over all `:Object` nodes, floor **30** | before **0.3590** (78 Objects) and **0.5652** (69 Objects), after **0.2131** (61 Objects) — the record `docs/evidence/9889/e1-e2-scores.json`; bound **0.1795** → FAIL vs bound **0.2826** → PASS, so the pairings DISAGREE | ⛔ **BLOCKED** (n=1 per arm — not decided, not the floor) |
 > | **E2** | E2a `>= 13 of 14` value-bearing units; E2b fused share `<= 0.05` | E2a **8/14** strictly survive (the falsifier reaches **14/14** over the same population); E2b **1/114 = 0.008772** | ⛔ **RED** (8 of 14) |
 > | **E3** | `= 1.000` (zero unanchored), floor **30** derived nodes | **157 / 397 = 0.395466** as registered (this run's own graph, `capstone_measure_9152448d_…`). The `Source->Object` identity link carries no `sourceVersion` BY DESIGN (owner option A, `#5199`), so `:Object mention links` can never anchor and the frozen `= 1.000` is unreachable as registered — the metric needs re-registration (`#9736`, OPEN, owner-gated) | ⛔ **RED** |
-> | **E4** | `= 15 of 15` planted operator edges wired AND persisted | **2 / 15** on the `2026-10-19` receipt, which is on a DIFFERENT corpus (`943a99ec…`) from the frozen one, and whose retrievability rate is UNMEASURED (`#9596`) | ⛔ **RED** |
+> | **E4** | `= 15 of 15` planted operator edges wired AND persisted | **5 / 15** on the **frozen** pin (the `2 / 15` this table shipped until 2026-11-02 was a receipt on `943a99ec…`, a NON-frozen revision — `select_e4_receipt` now chooses by the receipt's own `corpus_hash` and REFUSES when none matches; its retrievability rate is UNMEASURED, `#9596`) | ⛔ **RED** |
 > | **E5** | ratio `>= 0.90` **AND** raw absolute `>= 0.80` | ratio **1.0833** (passes) but raw absolute **0.4800** (fails), n = 25 | ⛔ **RED** (S3 selection recovery, `#5087`) |
 >
 > E1's and E2's proxies are printed rather than dropped (E1b 90/90 real facts; E2b 1/114) — and
@@ -506,7 +506,21 @@ corpus_hash=sha256:943a99ec619b4c67b8e31fefb90316ea023bbaddd1905d835b9d930243518
 judge_pin=w2-write-path-mechanical-v2  verdict=regression  failure_origin=gate_regression
 ```
 
-⇒ **E4 = 2/15, RED.** Two provenance facts a reader needs, both stated in the log rather than
+⇒ **E4 = 2/15 on `943a99ec…`** — the receipt above is kept as the SHIPPED LOG's record, and it
+was NOT measured on the frozen corpus.
+
+⛔ **SUPERSEDED as the row's artifact (2026-11-02).** This receipt's `corpus_hash` is not the
+frozen `fixtures_hash`, so the row above was a measurement of a different corpus revision — on
+code that predates `#8503`'s fix. `probes/capstone_measure.py` now selects E4's receipt **by its
+own `corpus_hash`** (`select_e4_receipt`): the newest receipt on the frozen pin wins, and no match
+REFUSES instead of falling back. Three receipts on the frozen pin (`w2b-operator-2026-10-24-8503-{preleg,a,b}.json`,
+all after `#8503`) read **5/15**, with `content_ok` 11–13 and `operators_total` 29–33 across the
+three (the row reads `b`: `content_ok=11`, `operators_total=33`, commit `a999be41e`).
+So **E4 is 5/15, still RED** against the 15/15 bar. The verdict did not move; the number did, and
+it is now a measurement of the pre-registered corpus. The scored log below keeps its 2/15 because
+a superseded run is replaced by RE-RUNNING the probe, not by editing the log it wrote.
+
+Two provenance facts a reader needs, both stated in the log rather than
 smoothed over: the FILE postdates the pre-registration (added 2026-10-22) but the MEASUREMENT
 does not (`date=2026-10-19T01:39:26Z`), and its `corpus_hash` is **not** the frozen
 `fixtures_hash`. The row is therefore a non-green measurement on **its own** corpus revision,
@@ -960,7 +974,7 @@ gated the pass off, or the stage produced nothing.
 |---|---|
 | `#9075` pre-register the corpus/split/scoring | **CLOSED COMPLETED** — landed `a6085af84` (#9507); the record is in this directory and G0 reads it |
 | `#9076` E1+E2 on one run | **CLOSED COMPLETED** — its artifact is `e1-e2.log`, and the rows above show why it is not scorable against the frozen bars |
-| `#9077` E4 on the real extraction leg | **CLOSED COMPLETED** — its receipt is cited by E4 (`2/15`) |
+| `#9077` E4 on the real extraction leg | **CLOSED COMPLETED** — its frozen-pin receipts are what E4 now selects (`5/15`); the `2/15` receipt it originally cited is on a different corpus revision |
 | `#5199` the version anchor stops at Points | **CLOSED COMPLETED** — the anchor is on the derivation link by design; #9736 owns the metric contradiction that leaves behind |
 | `#7947` the raw-vs-narrative measurement | **CLOSED COMPLETED** — E5 re-scores its arms |
 | `#9116` the capture receipt's step surface | **LANDED** — this PR's seam copies each stage's own facts onto `stats["step_witness"]`, so `capture_session`'s receipt now names all eight; `S2.2` is witnessed by any post-seam re-run, and `S2.3` is WITNESSED by this one — the shipped log's `step S2.3 WITNESSED` line carries `assigned_llm: 7`, so the classify pass is NOT idle on this corpus (`#10215` restated V5/G5 as all-eight-accounted, and this run is 8/8 witnessed) |

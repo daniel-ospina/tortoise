@@ -81,8 +81,10 @@ marked green off closed children, with no artifact at all. This closes that.
         "every green row cites an evidence file whose before/after denominators
         are the same corpus" — and the LOG must name a corpus to compare with.
         A NON-GREEN row may cite an artifact measured on a DIFFERENT corpus
-        revision (E1/E2 cite the #9076 run, E4 cites an operator receipt whose
-        ``corpus_hash`` is not the frozen ``fixtures_hash``); it must then
+        revision (E1/E2 cite the #9076 run; E4 USED to cite an operator receipt on
+        an unpinned revision — the current probe refuses an off-pin receipt
+        outright, so only logs written before #7949's selector still carry that
+        shape); it must then
         DECLARE that revision in ``artifact_corpus_sha256``, the declaration must
         equal the row's own ``corpus_sha256``, and the digest must appear IN the
         cited artifact's text — so the claim is checked against the artifact
@@ -1081,11 +1083,15 @@ def check(record: dict, *, repo: Path,
             else:
                 # ⛔ A MULTI-ARTIFACT TABLE, CHECKED RATHER THAN TRUSTED. This
                 # bundle's numbers do not all come from one run: E1/E2 come from
-                # #9076's arm run and E4 from an operator receipt, and neither
-                # was measured on the corpus THIS run froze (their own records
-                # say which corpus they ran — `corpus_sha256=` in e1-e2.log,
-                # `corpus_hash` in the receipt). Refusing those rows outright
-                # would hide the only numbers E1/E2/E4 have; accepting them on
+                # #9076's arm run and were NOT measured on the corpus THIS run froze
+                # (their own records say which corpus they ran — `corpus_sha256=` in
+                # e1-e2.log). E4 no longer takes this arm: since #7949's selector the
+                # probe refuses an off-pin receipt (`build_e4_row`), so the CURRENT
+                # row's corpus IS the log's and this same-corpus branch never fires
+                # for it — the arm stays live for logs written BEFORE the selector,
+                # whose E4 row genuinely declares another revision (the shipped
+                # `capstone-measured-e0fc940b.log` is one). Refusing those rows outright
+                # would hide the only numbers E1/E2 have; accepting them on
                 # the row's word would let any red row name any corpus. So the
                 # row DECLARES the artifact's revision and the declaration is
                 # verified against the ARTIFACT ITSELF — a stronger test than the
