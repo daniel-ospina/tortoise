@@ -1839,11 +1839,13 @@ def test_the_zero_job_floor_is_past_the_measured_queue_wait():
     """⭐ P1 (review): the floor must sit PAST the measured-normal population.
 
     `docs/ops/ci-wall-clock.md` §1 (54 `python-ci` runs) measures the wait for a run's
-    FIRST job: p50 29.9 min, p95 77.0 min, max 81.9 min — and §6 derives the repo's
-    queue-wait budget from that max *"so it fires past the measured-normal population
-    rather than on it"*. The floor was 1200 s, i.e. it selected the MEDIAN wait, and
-    the repair for this class is cancel-then-rerun: at the median it makes the median
-    run slower and adds one more run to the queue it is starved behind.
+    FIRST job: p50 29.9 min, p95 77.0 min, max 81.9 min. The budget derivation this
+    floor defers to lives in `tools/ci_queue_health.py` (`DEFAULT_MAX_PR_WAIT_SECONDS
+    = 90 * 60.0`, "the first round number past" that max) — NOT in `ci-wall-clock.md`
+    §6, which says of its own document "It does not bound queue wait". The floor was
+    1200 s, i.e. it selected the MEDIAN wait, and the repair for this class is
+    cancel-then-rerun: at the median it makes the median run slower and adds one more
+    run to the queue it is starved behind.
 
     Discriminating: at the pre-fix 1200 s this assertion is red.
     """
@@ -2230,13 +2232,22 @@ def test_a_rerun_attempt_past_its_OWN_floor_is_still_named():
 
 
 def test_a_queued_rerun_without_a_stamped_start_abstains():
-    """⭐ P1 (review): a fresh re-run attempt is `queued` with a NULL `run_started_at`,
-    and `created_at` never moves on a rerun — so ageing the attempt from the run's
-    creation returns ATTEMPT 1's age, and the 1200 s floor is already spent the instant
-    the fresh attempt exists. The run is then declared "no verdict will arrive",
-    cancelled, re-run AGAIN, and escalated EXHAUSTED for a run that was only waiting
-    for a slot — the exact failure `_zero_job_stalled` documents it prevents, and
-    the state #9115 says must be repaired by nothing.
+    """An attempt whose start was NEVER STAMPED has no measurable age ⇒ abstain.
+
+    ⛔ The premise this test was originally written on is REFUTED, and the refutation is
+    recorded in `attempt_age_seconds`: the claim that a queued re-run carries a NULL
+    `run_started_at` came from a third-party report
+    (open-telemetry/shared-workflows#440) and was NOT reproduced on this repo —
+    measured 2026-11-03, run 41585740714 carried `run_attempt` 2 with a stamped
+    `run_started_at` (05:54:22Z vs created 05:45:16Z) while still `queued`. So a
+    queued re-run IS normally ageable, and this abstention is NOT the bound on the
+    cancel→rerun→cancel loop (that bound is structural:
+    `ZERO_JOB_MAX_REPAIRABLE_ATTEMPT`).
+
+    What the test pins is the fail-closed direction for the residual shape: an attempt
+    that was never stamped must not be aged from `created_at` (which never moves on a
+    rerun, so it would return ATTEMPT 1's age and authorise a destructive act on a
+    fresh attempt). It waits, reports nothing, and changes nothing.
 
     Discriminating: pre-fix `attempt_age_seconds` falls back to `created_at` here, so
     this run is named, cancelled and re-run.
@@ -2351,19 +2362,57 @@ def test_a_refused_cancel_does_not_spend_the_rerun(monkeypatch):
 
 
 def test_a_cancel_that_never_settles_is_not_followed_by_a_rerun(monkeypatch):
-    """The settle wait is bounded, and an unsettled run is SKIPPED, not guessed.
+    """The settle wait is bounded, and an UNOBSERVED settle is SKIPPED, not guessed.
 
-    ⭐ P2 (review): 'unsettled' used to fall through to 'failed', which `report`
-    escalates to exit 1 — "a PR needs a repair this credential cannot perform". An
-    observation that never landed is a deferral to the next window.
+    ⭐ P2 (review): the cancel POST was ACCEPTED, so the run IS cancelled and gets no
+    replacement attempt — the state is `cancel_unobserved` ('the cancel landed, the
+    rerun did not'), NOT `deferred` ('nothing was changed'). It is still a SKIP: an
+    observation that never landed is not "a PR needs a repair this credential cannot
+    perform", and the next window re-runs the now-cancelled run as the next attempt.
     """
     monkeypatch.setattr(R, "_sleep", lambda s: None)
     verbs: list[str] = []
     monkeypatch.setattr(R, "_run", _verbs(verbs))
     monkeypatch.setattr(R, "gh_json", _api(settle="in_progress"))
     assert R._rerun("o/r", run(1, "ci.yml", "pending"), 1,
-                    expected_head="a" * 40) == "deferred"
-    assert verbs == ["cancel"], "an unsettled run must not be re-run blindly"
+                    expected_head="a" * 40) == "cancel_unobserved"
+    assert verbs == ["cancel"], "an unobserved settle must not be re-run blindly"
+
+
+def test_a_post_cancel_budget_exhaustion_is_not_the_pre_cancel_skip(monkeypatch):
+    """⭐ P2 (review): `no_budget` was ONE state with two opposite meanings.
+
+    Checked BEFORE the POST it means nothing was cancelled; reached INSIDE the settle
+    loop (the budget can be spent by a read the loop itself awaited) it means the cancel
+    ALREADY LANDED and only the observation ran out. `_cancel` answered 'no_budget' for
+    both, so the caller could not tell a pass that changed nothing from one that had
+    just cancelled a run and left it with no replacement attempt.
+
+    Discriminating: pre-fix this returns 'no_budget', indistinguishable from the
+    pre-POST skip.
+    """
+    monkeypatch.setattr(R, "_sleep", lambda s: None)
+    verbs: list[str] = []
+    monkeypatch.setattr(R, "_run", _verbs(verbs))
+    budget = R.CANCEL_SETTLE_PASS_BUDGET_S
+    # Spend the remainder on the FIRST settle poll, so the loop's own budget check trips
+    # on the next iteration — AFTER the cancel POST has been accepted.
+    monkeypatch.setattr(R, "_CANCEL_SETTLE_SPENT_S", budget - 0.5)
+
+    def fake(a, **_kw):
+        path = a[-1] if a else ""
+        if a[:1] == ["pr"]:
+            return {"headRefOid": "a" * 40}
+        if "jobs" in path:
+            return {"total_count": 0}
+        if a[-2].endswith("/runs/1"):
+            R._CANCEL_SETTLE_SPENT_S = budget + 1.0  # a slow read inside the loop
+            return {"status": "queued", "run_attempt": 1}
+        return {"status": "queued", "run_attempt": 1}
+
+    monkeypatch.setattr(R, "gh_json", fake)
+    assert R._cancel("o/r", run(1, "ci.yml", "pending")) == "cancel_unobserved"
+    assert verbs == ["cancel"], "the POST was issued before the budget ran out"
 
 
 def test_a_run_whose_jobs_appear_before_the_cancel_is_never_cancelled(monkeypatch):
@@ -2560,10 +2609,11 @@ def test_a_cancel_skipped_for_want_of_budget_defers_the_rerun(monkeypatch):
     """⭐ P2 (review): the half the suite never covered — `_cancel` → `_rerun`.
 
     `_cancel`'s own contract calls 'no_budget' a SKIP (*"Skip; the next window has a
-    fresh budget"*), but `_rerun` folded it — with 'unsettled', 'refused' and
-    'unreadable' — into 'failed'. With the shipped budgets a pass whose settles run to
+    fresh budget"*), but `_rerun` folded it — with the unobserved-settle state, 'refused'
+    and 'unreadable' — into 'failed'. With the shipped budgets a pass whose settles run to
     their bound exhausts the cancel budget on its SECOND run, so every later run was
-    reported as needing a human.
+    reported as needing a human. The pre-POST skip is `deferred`; the post-POST one is
+    `cancel_unobserved`, which the record names as a cancel that LANDED.
     """
     monkeypatch.setattr(R, "_sleep", lambda s: pytest.fail("must not sleep"))
     verbs: list[str] = []
@@ -2589,7 +2639,36 @@ def test_a_deferred_repair_is_recorded_as_a_skip_and_does_not_escalate(monkeypat
     code, recs = R.report([plan], apply=True, trigger_ok=True, repo="o/r", cooldown_min=60)
     entry = recs[0]["rerun"][0]
     assert entry["ok"] is False and entry["deferred"] is True
+    assert "cancel_landed" not in entry, (
+        "a deferral cancels NOTHING — the record must not claim a cancel landed")
     assert code == 0, "a skip must stay a skip: nothing was done, so nothing escalated"
+
+
+def test_a_cancel_that_landed_unobserved_is_recorded_as_landed(monkeypatch):
+    """⭐ P2 (review): `deferred` was documented as "nothing was changed", which is
+    FALSE for a cancel whose POST was accepted and whose settle was never observed.
+
+    That run IS cancelled and gets no replacement attempt; the flag `report` keys on to
+    suppress escalation also carried the claim that nothing happened. Bounded (the next
+    window re-runs the cancelled run as the next attempt), but a record in a module whose
+    standard is "never read as a clean act it did not earn" must not understate it —
+    hence its own state and its own `cancel_landed` key.
+
+    Discriminating: pre-fix there is no such state, so the entry carries `deferred` with
+    no `cancel_landed` and — because the escalation predicate only excludes `deferred`
+    by name — a plain `cancel_unobserved` escalates to exit 1.
+    """
+    monkeypatch.setattr(R, "_rerun", lambda *a, **k: "cancel_unobserved")
+    plan = _plan(absent=["python-ci-gate"],
+                 rerun=[run(41523739094, "python-ci.yml", "pending")])
+    code, recs = R.report([plan], apply=True, trigger_ok=True, repo="o/r", cooldown_min=60)
+    entry = recs[0]["rerun"][0]
+    assert entry["ok"] is False
+    assert entry["cancel_landed"] is True, (
+        "the cancel POST was accepted — the record must say the run was cancelled")
+    assert entry["deferred"] is True, (
+        "still a SKIP: the next window owns the replacement attempt")
+    assert code == 0, "the cancel landed and is bounded — this is not 'needs a human'"
 
 
 # ── 16. the two per-pass resets and the `no_verdict` record key are load-bearing ──
