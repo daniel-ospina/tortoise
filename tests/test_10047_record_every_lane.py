@@ -711,8 +711,22 @@ def _position_of(node) -> tuple[int, int]:
     already pins in the flat spelling. And starting the nested fold from
     `inherited` rather than from this state let an install inside the nested body
     arm a write that had already run.
+
+    ⚠️ The def-position alone is NOT the whole answer (#10723 review round 3 P2):
+    a closure executes at CALL time, so a handle opened AFTER its `def` is the one
+    the closure actually sees. `def _w(): sdk.create_point(...)` followed by
+    `sdk = _make_sdk(namespace=org_id)` is ordinary ordering, and folding only to
+    the def position went silently green on it — a regression against
+    `origin/main` and against round 1. `_AFTER_SCOPE` is how the enclosing
+    scope's END is read, so an unbound definition on EITHER side of the def wins.
     """
     return (getattr(node, "lineno", 0), getattr(node, "col_offset", 0))
+
+
+# Read an enclosing scope to its END rather than to a position — the second half
+# of the worst-wins rule above. Only an UNBOUND answer at the end changes the
+# result, so this can over-report a cross-scope install and can never hide one.
+_AFTER_SCOPE = (float("inf"), float("inf"))
 
 
 def _enclosing_scope(node, parents, lane) -> object:
@@ -998,16 +1012,20 @@ def _unbound_record_writes(tree) -> list[str]:
             after the scoped fold, with neither direction pinned.
             """
             scope = _enclosing_scope(call, parents, lane)
-            # The state a nested scope STARTS from. For a closure capture this is
-            # the enclosing binding as it stands AT the nested `def`'s own
-            # position — not `inherited`, and not the enclosing function's final
-            # state (#10723 review round 2 P2, both halves): starting from
-            # `inherited` made an install inside the nested body arm a write that
-            # already ran, and folding the enclosing scope to its END let an
-            # install after the nested def cover the closure's write. A
-            # PARAMETER — here or in any enclosing function — is a value the
-            # caller supplied, so its state is not knowable: `inherited` answers
-            # and the walk stops.
+            # The state a nested scope STARTS from, composed over the WHOLE
+            # ancestor chain (#10723 review rounds 1, 2 and 3 — each round found
+            # one half of this rule):
+            #   · a PARAMETER, here or in any enclosing function, is a value the
+            #     caller supplied, so its state is not knowable — `inherited`
+            #     answers and the walk stops;
+            #   · otherwise each ancestor contributes WORST-WINS: an unbound
+            #     answer at the nested def's position OR at that scope's END wins
+            #     (a closure runs at call time, so a handle opened after the def
+            #     is the one it sees), and a bound answer is taken only from the
+            #     def position;
+            #   · the walk does NOT stop at the first ancestor that has an event,
+            #     because a too-late event in a middle scope would otherwise
+            #     reset the answer instead of inheriting the outer binding.
             initial = inherited.get(key)
             anchor = scope
             while anchor is not lane:
@@ -1020,9 +1038,14 @@ def _unbound_record_writes(tree) -> list[str]:
                     break
                 enclosing_events = scopes.get(id(enclosing), {}).get(key)
                 if enclosing_events is not None:
-                    initial = _handle_state_at(
-                        enclosing_events, _position_of(anchor), inherited.get(key))
-                    break
+                    at_def = _handle_state_at(
+                        enclosing_events, _position_of(anchor), initial)
+                    at_end = _handle_state_at(
+                        enclosing_events, _AFTER_SCOPE, initial)
+                    if at_def is False or at_end is False:
+                        initial = False
+                    elif at_def is not None:
+                        initial = at_def
                 anchor = enclosing
             own_events = scopes.get(id(scope), {}).get(key)
             if own_events is None:
@@ -1758,6 +1781,50 @@ def _lane(org_id):
     assert _flagged(install_in_finally), (
         "an install in a `finally` must not retroactively cover the write in "
         "its `try` — the nested spelling of the rule this file already pins")
+
+    # #10723 review round 3, P2 — a REGRESSION round 2 introduced. A closure runs
+    # at CALL time, so the def-position alone is not the answer: opening the
+    # handle AFTER the `def` is ordinary ordering, and folding only to the def
+    # position went green on it. Both directions of the def must be read.
+    def_before_binding = '''
+def _lane(org_id):
+    def _write():
+        sdk.create_point("Subject", {})
+    sdk = _make_sdk(namespace=org_id)
+    _write()
+'''
+    assert _flagged(def_before_binding), (
+        "declaring the writer before opening its handle is ordinary ordering — "
+        "the closure still sees the unbound handle at call time")
+
+    rebound_unbound_after_the_def = '''
+def _lane(org_id):
+    sdk = _data_sdk(org)
+    def _write():
+        sdk.create_point("Subject", {})
+    sdk = _make_sdk(namespace=org_id)
+    _write()
+'''
+    assert _flagged(rebound_unbound_after_the_def), (
+        "a rebind to an UNBOUND opener after the def wins: the write reaches "
+        "the handle the closure actually sees at call time")
+
+    # #10723 review round 3, P3 — the walk must not stop at the first ancestor
+    # that has an event, or a too-late event in a MIDDLE scope resets the answer
+    # instead of inheriting the outer binding.
+    late_install_one_scope_out = '''
+def _lane(org_id):
+    sdk = _make_sdk(namespace=org_id)
+    def _mid():
+        def _inner():
+            sdk.create_point("Subject", {})
+        _inner()
+        _bind_default_graph_record_tenant(sdk, org_id)
+    _mid()
+'''
+    assert _flagged(late_install_one_scope_out), (
+        "an install after the inner write, in the MIDDLE scope, must not clear "
+        "the outer unbound definition")
 
 
 def test_a_nested_def_writing_through_a_PARAMETER_is_still_silent():
