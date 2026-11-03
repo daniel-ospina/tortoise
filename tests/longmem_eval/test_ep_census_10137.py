@@ -1187,10 +1187,13 @@ def test_a_failed_question_beside_a_resumed_one_is_not_red(tmp_path):
     pre-arm) one — the ordinary mixed population that made the whole-census
     cross-check red a correct artifact (#10678 review 3, P2).
 
-    ``inert_by_reason`` counts BOTH of them as ``activation_failed``, so
-    comparing that census against the never-read rows alone refuses an artifact
-    the probe just produced correctly. ``cells.measured`` is the witness that
-    separates them: the failed read row has cells, the resumed row has none.
+    BOTH rows are never-read by the cell predicate (``per_question_unread`` is
+    2, asserted below — a fail-open manifest carries no census cells either),
+    yet their reasons DIFFER: ``activation_failed`` and ``no_manifest``. A
+    cross-check that assumes the never-read population carries ONE reason
+    therefore refuses an artifact the probe just produced correctly. The reason
+    is also what lets ``_row_shapes`` restore ``measured``: the fail-open row IS
+    measured, the resumed one is not.
     """
     doc = {"fingerprint": {"activate_beliefs": True},
            "outcomes": [
