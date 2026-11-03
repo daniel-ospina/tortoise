@@ -932,6 +932,295 @@ class TestCredentialResolution:
         mcp_client._raise_if_credential_was_missing(
             ToolError("upstream provider returned 401 Unauthorized"), sent)
 
+    def test_an_sdk_that_refuses_the_redirect_gets_the_same_named_refusal(
+        self, monkeypatch, isolated_home,
+    ):
+        """Both SDK behaviours reach ONE refusal, or a version bump breaks it.
+
+        Measured on this PR's own CI (#10727): the lane's `.venv` holds mcp 1.29,
+        which FOLLOWS the cross-origin hop and lands on a 401 with a stripped
+        header, while CI installs mcp 1.30, which REFUSES the hop outright with
+        `Redirect to <url> not followed…`. Same operator problem, arrived at by
+        two routes — and classifying only the first turned the set-up gap back
+        into an outage (`tortoise_unavailable`, exit 3) on the SDK CI actually
+        runs. Driven from the exception TEXT on purpose: the branch must hold on
+        the version this box happens NOT to have.
+        """
+        from tortoise import mcp_client
+
+        monkeypatch.setenv("TORTOISE_MCP_URL", "http://127.0.0.1:9/mcp")
+        monkeypatch.setenv("TORTOISE_API_KEY", "tt_live_key")
+        provider = mcp_client._BearerProvider(mcp_client.resolve_connection().url)
+        provider.sent = mcp_client.resolve_connection()
+        refusal = mcp_client.MCPCredentialNotCarriedError(
+            "Redirect to http://127.0.0.1:5/mcp not followed; use that URL as the "
+            "endpoint if it is the intended server")
+
+        with pytest.raises(mcp_client.MCPCredentialNotCarriedError) as raised:
+            mcp_client._classify_failure(refusal, provider)
+
+        text = str(raised.value)
+        assert "MCP-CREDENTIAL-NOT-CARRIED" in text, text
+        assert "http://127.0.0.1:5/mcp" in text, (
+            f"the refusal must name the endpoint to aim at: {text}")
+        assert "rebuild the client" in text, text
+        assert "tt_live_key" not in text, f"the credential value was printed: {text}"
+        # The declined hop DID carry the credential to the first endpoint; saying
+        # "never sent" is a falsehood the operator can check.
+        assert "never sent" not in text, text
+        assert "http://127.0.0.1:9/mcp" in text, text
+
+    def test_a_redirect_downgrade_refusal_is_not_a_credential_refusal(
+        self, monkeypatch, isolated_home,
+    ):
+        """The SDK's OTHER `not followed` refusal must not be swallowed by this one.
+
+        mcp 1.30 emits two refusals from one function: the cross-origin one this
+        branch exists for, and `not followed: it would downgrade this HTTPS
+        endpoint to plain HTTP`, whose own remedy is the OPPOSITE — use https, or
+        fix the proxy settings. A prefix-only match classified the downgrade as a
+        credential/endpoint gap and told the operator to aim the client at the
+        `http` URL, i.e. to send the bearer over cleartext.
+        """
+        from tortoise import mcp_client
+
+        monkeypatch.setenv("TORTOISE_MCP_URL", "https://mcp.example.com/mcp")
+        monkeypatch.setenv("TORTOISE_API_KEY", "tt_live_key")
+        provider = mcp_client._BearerProvider(mcp_client.resolve_connection().url)
+        provider.sent = mcp_client.resolve_connection()
+        downgrade = RuntimeError(
+            "Redirect to http://mcp.example.com/mcp/ not followed: it would "
+            "downgrade this HTTPS endpoint to plain HTTP.\nTry "
+            "https://mcp.example.com/mcp/ instead, or fix the proxy settings.")
+
+        # No raise: this is a proxy/scheme fault, and the SDK's own message is the
+        # honest one. The credential classification must stay out of it.
+        mcp_client._classify_failure(downgrade, provider)
+
+    def test_a_tool_error_quoting_the_redirect_refusal_is_not_a_credential_refusal(
+        self, monkeypatch, isolated_home,
+    ):
+        """A TOOL that relays a nested SDK refusal is the tool's failure.
+
+        The other two classifiers exempt `ToolError` so a tool's own text can
+        mention 401/Unauthorized without being rewritten. The redirect branch must
+        hold that line too: a Tortoise tool proxying another MCP server can quote
+        the refusal verbatim, and rewriting it into `unconfigured` moves a failing
+        tool into the credential bucket (the #3805 inversion).
+        """
+        from fastmcp.exceptions import ToolError
+
+        from tortoise import mcp_client
+
+        monkeypatch.setenv("TORTOISE_MCP_URL", "http://127.0.0.1:9/mcp")
+        monkeypatch.setenv("TORTOISE_API_KEY", "tt_live_key")
+        provider = mcp_client._BearerProvider(mcp_client.resolve_connection().url)
+        provider.sent = mcp_client.resolve_connection()
+        relayed = ToolError(
+            "fetch failed: Redirect to https://other.example/x not followed; use "
+            "that URL as the endpoint if it is the intended server")
+
+        mcp_client._classify_failure(relayed, provider)
+
+    def test_a_refused_hop_with_no_credential_names_the_absence_not_a_value(
+        self, monkeypatch, isolated_home,
+    ):
+        """No credential resolved = no "resolved from <nothing>" in the message.
+
+        The refusal text names the source a credential came from, so on the keyless
+        path it has to say the absence out loud rather than interpolate `None`.
+        """
+        from tortoise import mcp_client
+
+        monkeypatch.delenv("TORTOISE_API_KEY", raising=False)
+        monkeypatch.delenv("TORTOISE_MCP_API_KEY", raising=False)
+        monkeypatch.setenv("TORTOISE_MCP_URL", "https://mcp.example.com/mcp")
+        provider = mcp_client._BearerProvider(mcp_client.resolve_connection().url)
+        provider.sent = mcp_client.resolve_connection()
+        assert provider.sent.key is None, "this test needs the keyless path"
+        refusal = RuntimeError(
+            "Redirect to https://other.example/mcp not followed; use that URL as "
+            "the endpoint if it is the intended server")
+
+        with pytest.raises(mcp_client.MCPCredentialNotCarriedError) as raised:
+            mcp_client._classify_failure(refusal, provider)
+
+        text = str(raised.value)
+        assert "resolved from None" not in text, text
+        assert "No credential resolved either" in text, text
+        assert "https://other.example/mcp" in text, text
+
+    def test_a_withheld_credential_explains_a_declined_redirect_too(
+        self, monkeypatch, isolated_home,
+    ):
+        """Co-source conflict first: a withheld value must not be credited with a hop.
+
+        The declined-redirect branch runs before the auth check, so without an
+        explicit withheld case here a co-source conflict reports as "your endpoint
+        redirects" — and the text credits the WITHHELD value with reaching a host
+        it was deliberately never sent to, the same class of falsehood the
+        "never sent" wording was.
+        """
+        from tortoise import mcp_client
+
+        monkeypatch.setenv("TORTOISE_API_KEY", "tt_live_key")
+        provider = mcp_client._BearerProvider("https://client.example/mcp")
+        withheld = mcp_client.Connection(
+            url="https://other.example/mcp", key="tt_live_key",
+            source="~/.tortoise/credentials.json", sources=("store",),
+        )
+        provider.sent = withheld
+        provider.withheld = withheld
+        declined = RuntimeError(
+            "Redirect to https://third.example/mcp not followed; use that URL as "
+            "the endpoint if it is the intended server")
+
+        with pytest.raises(mcp_client.MCPCredentialHostMismatchError) as raised:
+            mcp_client._classify_failure(declined, provider)
+
+        text = str(raised.value)
+        assert "MCP-CREDENTIAL-HOST-MISMATCH" in text, text
+        assert "https://other.example/mcp" in text, text
+        assert "https://client.example/mcp" in text, text
+        assert "tt_live_key" not in text, f"the credential value was printed: {text}"
+
+    def test_a_declined_hop_names_the_client_endpoint_not_the_credential_origin(
+        self, monkeypatch, isolated_home,
+    ):
+        """The destination is where the request WENT, not the credential's source.
+
+        `sent` is the credential's PROVENANCE; under co-source the two can be
+        different hosts. Naming `sent.url` as the destination credits the value
+        with a delivery it never made — the same falsehood as "never sent".
+        """
+        from tortoise import mcp_client
+
+        monkeypatch.setenv("TORTOISE_API_KEY", "tt_live_key")
+        sent = mcp_client.Connection(
+            url="https://elsewhere.example/mcp", key="tt_live_key",
+            source="TORTOISE_API_KEY", sources=("TORTOISE_API_KEY",),
+        )
+
+        text = str(mcp_client._not_carried(
+            RuntimeError("boom"), sent, "https://target.example/mcp",
+            hop_refused=True, request_url="https://client.example/mcp",
+        ))
+
+        assert "https://client.example/mcp" in text, text
+        assert "https://elsewhere.example/mcp" not in text, (
+            f"the credential's origin was named as the request destination: {text}")
+
+    def test_a_redirect_target_that_echoes_the_credential_is_redacted(
+        self, monkeypatch, isolated_home,
+    ):
+        """A `Location` is SERVER text: quoting it must not quote the value.
+
+        The refusal quotes the redirect target, and a target is whatever the server
+        sent — including a URL that carries the credential. Every other quoted
+        server string in this module is redacted; the target is one of them.
+        """
+        from tortoise import mcp_client
+
+        monkeypatch.setenv("TORTOISE_API_KEY", "tt_live_key")
+        sent = mcp_client.Connection(
+            url="https://client.example/mcp", key="tt_live_key",
+            source="TORTOISE_API_KEY", sources=("TORTOISE_API_KEY",),
+        )
+
+        text = str(mcp_client._not_carried(
+            RuntimeError("boom"), sent,
+            "https://target.example/mcp?key=tt_live_key",
+            hop_refused=True, request_url="https://client.example/mcp",
+        ))
+
+        assert "tt_live_key" not in text, f"the credential value was printed: {text}"
+        assert "target.example" in text, f"the target must still be named: {text}"
+
+    def test_a_redirect_target_echoing_a_value_the_bare_request_never_sent(
+        self, monkeypatch, isolated_home,
+    ):
+        """The target is redacted with every known value, not just `sent.key`.
+
+        A `Location` can echo a value this process learned AFTER the request went
+        out bare (a rotated-in key, a store the request never read). `sent.key` is
+        None on that path, so redacting with it alone printed the value verbatim —
+        the same hole as the keyless `_refusal` echo.
+        """
+        from tortoise import mcp_client
+
+        monkeypatch.setenv("TORTOISE_API_KEY", "tt_known_after_the_fact")
+        bare = mcp_client.Connection(
+            url="https://client.example/mcp", key=None, source=None, sources=("none",),
+        )
+
+        text = str(mcp_client._not_carried(
+            RuntimeError("boom"), bare,
+            "https://target.example/mcp?key=tt_known_after_the_fact",
+            hop_refused=True, request_url="https://client.example/mcp",
+        ))
+
+        assert "tt_known_after_the_fact" not in text, (
+            f"a value this process knows was printed: {text}")
+        assert "target.example" in text, text
+
+    def test_a_declined_hop_through_the_classifier_names_the_client_endpoint(
+        self, monkeypatch, isolated_home,
+    ):
+        """The CALL SITE must pass the client's endpoint, not the credential's.
+
+        `_not_carried` naming the right URL is only half the contract: the remedy
+        text names where the request went, so a call site that forwards `sent.url`
+        credits a credential with reaching its OWN origin host while the client is
+        wired elsewhere — a false delivery claim, and one no helper-level test can
+        see. Driven through `_classify_failure`, with `sent.url` deliberately
+        different from the client endpoint.
+        """
+        from tortoise import mcp_client
+
+        monkeypatch.setenv("TORTOISE_API_KEY", "tt_live_key")
+        provider = mcp_client._BearerProvider("https://client.example/mcp")
+        provider.sent = mcp_client.Connection(
+            url="https://elsewhere.example/mcp", key="tt_live_key",
+            source="TORTOISE_API_KEY", sources=("TORTOISE_API_KEY",),
+        )
+        declined = RuntimeError(
+            "Redirect to https://target.example/mcp not followed; use that URL as "
+            "the endpoint if it is the intended server")
+
+        with pytest.raises(mcp_client.MCPCredentialNotCarriedError) as raised:
+            mcp_client._classify_failure(declined, provider)
+
+        text = str(raised.value)
+        assert "the request went to https://client.example/mcp" in text, (
+            f"the destination must be the client's endpoint: {text}")
+        assert "reached https://client.example/mcp" in text, text
+        assert "https://elsewhere.example/mcp" not in text, text
+
+    def test_a_keyless_refusal_still_redacts_a_value_this_process_knows(
+        self, monkeypatch, isolated_home,
+    ):
+        """A bare request can still be answered with a leaked-value echo.
+
+        The keyless refusal quotes SERVER text, and the server echoes what it saw —
+        which a request that went out bare can still carry if the value came from
+        somewhere else in this process (a previous request, the store, the
+        environment). Redacting only the credential of the FAILED request left such
+        an echo printed verbatim.
+        """
+        from tortoise import mcp_client
+
+        monkeypatch.setenv("TORTOISE_API_KEY", "tt_live_key")
+        bare = mcp_client.Connection(
+            url="https://mcp.example.com/mcp", key=None, source=None, sources=("none",),
+        )
+
+        text = str(mcp_client._refusal(
+            RuntimeError("401 Unauthorized: key tt_live_key is invalid"), bare))
+
+        assert "tt_live_key" not in text, f"the credential value was printed: {text}"
+        assert "<redacted>" in text, text
+        assert "no session restart" in text, "the remediation text must survive"
+
     def test_a_keyless_endpoint_still_needs_no_credential(
         self, recorded_daemon, monkeypatch, isolated_home,
     ):
