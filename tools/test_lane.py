@@ -2230,7 +2230,10 @@ REAP_STATE_DIR = (Path(os.environ.get("CELL_HOME", os.path.expanduser("~")))
 
 
 def _reap_state_path(name: str) -> Path:
-    # The name is `fdb-lane-<...>` from `is_managed()`, so it cannot traverse.
+    # Cannot traverse: docker container names may not contain `/` (the daemon's
+    # name grammar is `[a-zA-Z0-9][a-zA-Z0-9_.-]*`), so the single path segment
+    # is the whole invariant. `is_managed()` only checks the `fdb-lane-` PREFIX
+    # and would not stop a slash on its own.
     return REAP_STATE_DIR / f"{name}.unused"
 
 
@@ -2337,7 +2340,8 @@ def _touch_lease(name: str) -> None:
     since the container was last demonstrably in use". Stamping only ever
     SHORTENS a gap — it can never enable a removal — so it is safe on every
     fail-closed/keep path. Cost: one `inspect` per observed-in-use container per
-    sweep, bounded by the number of live lanes (counted in the PR's residual 3).
+    sweep, bounded by the number of live lanes — paid only for containers the
+    sweep observed IN USE, never on the common keep path.
 
     What it deliberately does NOT claim: that the lease follows every step of a
     live lane. No sweep can see a lane that names nothing on this host, so a

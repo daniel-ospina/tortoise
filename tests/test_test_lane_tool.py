@@ -229,6 +229,14 @@ def test_the_reaper_never_removes_a_container_no_worktree_here_claims(monkeypatc
 
     monkeypatch.setattr(tl, "_docker", fake)
     monkeypatch.setattr(tl, "_worktree_slugs", lambda: {})
+    # A READABLE liveness surface with no live lane on it. Without this the
+    # second half of this test does not test what it says on a host with no
+    # `/proc` (macOS): `_live_lane_paths` then returns `None`, arm 3 takes its
+    # "ownership is NOT determined" fail-closed branch BEFORE the client probe,
+    # and the container is kept for the wrong reason — so the client clause this
+    # docstring claims to pin was never reached, and the test was red on every
+    # macOS checkout (`assert 'active client' in …`).
+    monkeypatch.setattr(tl, "_live_lane_paths", lambda: set())
     # YOUNG: the backstop is a bound, not a hair trigger. An unowned container
     # inside ORPHAN_MAX_AGE_H is REPORTED and removed by nothing.
     monkeypatch.setattr(tl, "_started_epoch", lambda _n: time.time())
@@ -1000,6 +1008,94 @@ def test_arm_2_re_reads_liveness_and_STAMPS_the_lease_at_the_moment_of_action(
     assert removed == [], (removed, out)
     assert "became live mid-sweep" in "\n".join(out), out
     assert touched == ["fdb-lane-latelane"], (touched, out)
+
+
+def test_arm_2_fails_CLOSED_when_the_moment_of_action_liveness_goes_UNREADABLE(
+        tmp_path, monkeypatch):
+    """`None` is NOT "nothing is alive", and it must never fall through the
+    moment-of-action `or` chain to a `docker rm -f`.
+
+    Everything else in this sweep says the lane is gone: the owning worktree
+    exists, the container is hours old, the gap is far past `OWNER_GRACE_H`, no
+    client is attached, and the operator has ARMED the removal. The only
+    difference is that the second liveness read returns `None` — `/proc` became
+    unreadable between the sweep snapshot and the moment of action. The
+    container must be KEPT and reported: an unreadable liveness surface is the
+    one fail-open step a destructive path must not have.
+
+    Mutation: drop `now_live is None or` from the moment-of-action chain in
+    `reap_orphans` and this reaps — red."""
+    owner = tmp_path / "live-lane-worktree"
+    owner.mkdir()
+    removed: list = []
+    reads = {"n": 0}
+
+    def fake(*a, **k):
+        if a[0] == "ps":
+            return _R(0, "fdb-lane-losinglane\trunning\n", "")
+        if a[0] == "rm":
+            removed.append(a[1:])
+        return _R(0, "", "")
+
+    def live():
+        reads["n"] += 1
+        # (1) readable with no holder, (2) the surface goes away mid-sweep.
+        return set() if reads["n"] == 1 else None
+
+    monkeypatch.setattr(tl, "_docker", fake)
+    monkeypatch.setattr(tl, "_touch_lease", lambda _n: None)
+    monkeypatch.setattr(tl, "lane_name", lambda: "fdb-lane-mine")
+    monkeypatch.setattr(tl, "_worktree_slugs", lambda: {"losinglane": str(owner)})
+    monkeypatch.setattr(tl, "_live_lane_paths", live)
+    monkeypatch.setattr(tl, "_container_in_use", lambda _n: False)
+    monkeypatch.setattr(tl, "container_state", lambda _n: "running")
+    monkeypatch.setattr(tl, "_started_epoch", lambda _n: time.time() - 5 * 3600)
+    monkeypatch.setattr(tl, "_unused_gap", lambda _n, **k: 40.0)
+    monkeypatch.setenv(tl.LANE_GONE_REAP_ENV, "1")
+    out = tl.reap_orphans()
+    assert removed == [], (removed, out)
+    assert "could not be re-established at the moment of action" in "\n".join(out), out
+
+
+def test_arm_3_fails_CLOSED_when_proc_cannot_be_read(tmp_path, monkeypatch):
+    """Arm 3's cheap first guard, pinned where it is load-bearing.
+
+    A container no worktree in this clone claims, hours old, no client, and the
+    operator has ARMED `OWNER_INDETERMINATE_REAP_ENV` — arm 3 would remove it.
+    The one fact standing in the way is that `/proc` could not be read, so
+    ownership is NOT determined: the recorded #5084/#8180 ruling is to report
+    and delete nothing.
+
+    Until now this branch had no test of its own: it was reached only by
+    accident on a host without `/proc` (macOS), which read as a different
+    test's failure. Mutation: delete the `live_slugs is None` guard and this
+    test no longer keeps the container (the later `slug_for_name in live_slugs`
+    faults on `None`) — red."""
+    wt = tmp_path / ".worktrees" / "cross-cell-lane"
+    wt.mkdir(parents=True)
+    name = f"fdb-lane-{tl.slug_for(wt)}"
+    removed: list = []
+
+    def fake(*a, **k):
+        if a[0] == "ps":
+            return _R(0, f"{name}\trunning\n", "")
+        if a[0] == "rm":
+            removed.append(a[1:])
+        return _R(0, "", "")
+
+    monkeypatch.setattr(tl, "_docker", fake)
+    monkeypatch.setattr(tl, "_touch_lease", lambda _n: None)
+    monkeypatch.setattr(tl, "lane_name", lambda: "fdb-lane-mine")
+    monkeypatch.setattr(tl, "_worktree_slugs", lambda: {})   # owner indeterminate
+    monkeypatch.setattr(tl, "_live_lane_paths", lambda: None)
+    monkeypatch.setattr(tl, "_container_in_use", lambda _n: False)
+    monkeypatch.setattr(tl, "container_state", lambda _n: "running")
+    monkeypatch.setattr(tl, "_started_epoch", lambda _n: time.time() - 40 * 3600)
+    monkeypatch.setattr(tl, "_unused_gap", lambda _n: 40.0)
+    monkeypatch.setenv(tl.OWNER_INDETERMINATE_REAP_ENV, "1")
+    out = tl.reap_orphans()
+    assert removed == [], (removed, out)
+    assert "/proc could not be read" in "\n".join(out), out
 
 
 def test_arm_3_refreshes_the_lease_on_every_OBSERVED_use(tmp_path, monkeypatch):
