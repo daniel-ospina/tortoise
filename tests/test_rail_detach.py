@@ -61,6 +61,30 @@ def make_checkout(tmp_path: Path, body: str = FAKE_RAIL) -> Path:
     return co
 
 
+def fake_gh(tmp_path: Path, script: str, sub: str = "bin") -> Path:
+    """A `gh` on PATH — the launcher's one external call, made hermetic."""
+    bindir = tmp_path / sub
+    bindir.mkdir(exist_ok=True)
+    gh = bindir / "gh"
+    gh.write_text(script, encoding="utf-8")
+    gh.chmod(0o755)
+    return bindir
+
+
+@pytest.fixture(autouse=True)
+def _hermetic_gh(tmp_path, monkeypatch):
+    """`launch()` reads the PR head with ONE best-effort `gh` call.
+
+    ⛔ THIS SUITE USED TO MAKE A REAL `gh pr view` PER LAUNCH — ~1.9 s each on a
+    rate-limited box, 25 launches, and a network dependency in a file whose
+    registration says it is hermetic. The call is INFORMATIONAL (nothing gates
+    on `HEAD`), so a `gh` that answers nothing is the honest stub: `HEAD`
+    records `unreadable` and every verdict assertion below is unaffected.
+    """
+    bindir = fake_gh(tmp_path, "#!/usr/bin/env bash\nexit 1\n")
+    monkeypatch.setenv("PATH", f"{bindir}{os.pathsep}{os.environ.get('PATH', '')}")
+
+
 def launch(state_dir, co, pr=7, **kw):
     return rd.launch(pr, cwd=co, state_dir=state_dir, repo="o/r", **kw)
 
@@ -451,3 +475,67 @@ def test_cli_collect_exit_codes(tmp_path, capsys):
     assert rd.main(["collect", "42", "--repo", "o/r", "--state-dir", str(sd),
                     "--assert-merged"]) == 0
     capsys.readouterr()
+
+
+# ── liveness must be TRUE on every box, and `gh` must never wedge the lock ───
+def test_a_killed_rail_is_lost_on_a_box_without_procfs(tmp_path, monkeypatch):
+    """`os.kill(pid, 0)` SUCCEEDS ON A ZOMBIE.
+
+    Where procfs cannot answer, the old fallback was "kill(0) said yes, so it is
+    alive" — which on macOS (where the lanes run) made a SIGKILLed rail read
+    `waiting` FOREVER: `lost` was unreachable, and the duplicate-rail guard then
+    refused every later `start` on that PR. The state letter now comes from a
+    bounded local `ps` probe instead, so this holds without procfs.
+    """
+    monkeypatch.setattr(rd, "_proc_stat_letter", lambda pid: None)
+    monkeypatch.setattr(rd, "_proc_cmdline", lambda pid: None)
+    proc = subprocess.Popen(["sleep", "30"], start_new_session=True,
+                            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL)
+    marker = "/state/rail-o-r-9.md"
+    try:
+        os.kill(proc.pid, signal.SIGKILL)
+        deadline = time.time() + 15
+        while time.time() < deadline and rd._pid_alive(proc.pid, marker):
+            time.sleep(0.05)
+        # THE PREMISE, asserted rather than assumed: this pid still answers
+        # kill(0) — so `False` below came from the state letter, not from ESRCH.
+        os.kill(proc.pid, 0)
+        assert rd._pid_alive(proc.pid, marker) is False
+    finally:
+        proc.wait()
+
+
+def test_an_unbounded_gh_cannot_wedge_the_duplicate_rail_lock(tmp_path, monkeypatch):
+    """`_head_sha` runs while the duplicate-rail flock is HELD.
+
+    So an unbounded `gh` stalled on a saturating cell does not delay one launch —
+    it holds the lock every later `start` for that PR must take, turning the
+    #3061 guard into the thing that makes the PR unrailable. The call is
+    informational (`HEAD` gates nothing), so a timeout costs nothing.
+    """
+    bindir = fake_gh(tmp_path, "#!/usr/bin/env bash\nsleep 8\n", sub="slowbin")
+    monkeypatch.setenv("PATH", f"{bindir}{os.pathsep}{os.environ.get('PATH', '')}")
+    monkeypatch.setattr(rd, "GH_PROBE_TIMEOUT_S", 0.5)
+    co = make_checkout(tmp_path)
+    sd = tmp_path / "state"
+    t0 = time.time()
+    ln = launch(sd, co, pr=71)
+    elapsed = time.time() - t0
+    assert elapsed < rd.GH_PROBE_TIMEOUT_S + 3, f"launch blocked {elapsed:.1f}s on `gh`"
+    assert ln.head == "unreadable"           # informational only; nothing gates on it
+    assert wait_state(sd, 71, rd.MERGED).state == rd.MERGED   # the rail still ran
+
+
+def test_an_unanswering_gh_repo_view_refuses_instead_of_hanging(tmp_path, monkeypatch):
+    """The other `gh` call: naming the target. A timeout must REFUSE (an unnamed
+    target is exactly what the GH_REPO check exists to prevent), not hang."""
+    bindir = fake_gh(tmp_path, "#!/usr/bin/env bash\nsleep 8\n", sub="slowbin2")
+    monkeypatch.setenv("PATH", f"{bindir}{os.pathsep}{os.environ.get('PATH', '')}")
+    monkeypatch.setattr(rd, "GH_PROBE_TIMEOUT_S", 0.5)
+    co = make_checkout(tmp_path)
+    t0 = time.time()
+    with pytest.raises(rd.Refused) as ei:
+        rd.launch(72, cwd=co, state_dir=tmp_path / "state")
+    assert "did not answer within" in str(ei.value)
+    assert time.time() - t0 < rd.GH_PROBE_TIMEOUT_S + 3

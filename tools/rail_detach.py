@@ -51,6 +51,11 @@ STATES
               as merged: a rail that vanished has no verdict, and inventing one is
               the #2235 fail-open shape.
 
+"gone" has to be TRUE on every box this runs on, and it is not free: on a host
+without procfs `os.kill(pid, 0)` answers yes for a ZOMBIE. `_pid_alive` therefore
+reads the state letter from procfs where it exists and from a bounded local `ps`
+probe where it does not, so a killed rail reads `lost` on macOS too.
+
 WHY NOT `nohup`/`&`
 -------------------
 `&` inherits the lane's process GROUP, so the harness's group kill takes the rail
@@ -86,6 +91,17 @@ DETACH_NEW_SESSION = True
 # launch and short enough that a launch killed in that window cannot wedge a PR.
 SPAWNING_TTL_S = 60
 
+# Every `gh` call here is INFORMATIONAL and every one of them is bounded. An
+# unbounded one is not a slow read, it is a WEDGE: `_head_sha` runs while this
+# process holds the duplicate-rail flock, so a `gh` stalled on a saturating cell
+# blocks that lock and every later `start` for the PR queues behind it — the
+# guard becomes the thing that makes the PR unrailable. `collect` deliberately
+# never calls `gh` (it answers from the artifact), so a status read is unaffected.
+GH_PROBE_TIMEOUT_S = 10
+# The local liveness probe (`ps`), used only where there is no procfs. Local,
+# so this is a runaway guard rather than a network budget.
+PS_PROBE_TIMEOUT_S = 5
+
 RAIL_REL = "scripts/admin-merge.sh"
 DEFAULT_STATE_DIR = Path(
     os.environ.get("CELL_HOME") or os.path.expanduser("~")
@@ -106,6 +122,9 @@ ALREADY_MERGED_RE = re.compile(r"PR #(\d+) is ALREADY MERGED")
 REFUSAL_RE = re.compile(r"(?:✗|BLOCK|REFUSING|REFUSED)[^\n]*")
 
 WAITING, MERGED, REFUSED, LOST = "waiting", "merged", "refused", "lost"
+
+# Memoised answer to "can this box's `ps` report a pid's state letter?".
+_PS_USABLE: bool | None = None
 
 
 # ── paths ────────────────────────────────────────────────────────────────────
@@ -148,6 +167,84 @@ def _age_seconds(iso: str) -> float | None:
     return (datetime.now(UTC) - then).total_seconds()
 
 
+def _ps_stat(pid: int) -> str | None:
+    """The `stat` field `ps` reports for `pid` ('' when it knows no such pid),
+    or None when the probe itself cannot be trusted.
+
+    ⛔ WHY THIS EXISTS: `os.kill(pid, 0)` SUCCEEDS ON A ZOMBIE. On a box with
+    procfs the `/proc/<pid>/stat` state letter answers that, but the fallback
+    used to be "kill(0) said yes, so it is alive" — which on a box WITHOUT
+    procfs (macOS, where the lanes run) made a SIGKILLed rail read `waiting`
+    FOREVER: `lost` was unreachable, and the duplicate-rail guard then refused
+    every later `start` on that PR. Measured 2026-11-03: a killed rail's bash
+    still answers kill(0), `ps -o stat=` reports `Z`, and the PR never
+    recovers.
+
+    FAIL DIRECTION IS `alive`: an unreadable probe returns None and the caller
+    keeps reporting the rail as live. Reading a live rail as dead would let a
+    SECOND rail through (#3061); reading a dead one as live only leaves the
+    existing wedge, now bounded by the rest of this module's recovery paths.
+    """
+    out = _ps("-o", "pid=,stat=", "-p", str(pid))
+    if out is None:
+        return None
+    fields = out.split()
+    if len(fields) < 2 or fields[0] != str(pid):
+        # Either `ps` found nothing or it is not speaking the format we asked
+        # for. Tell those apart before concluding "gone".
+        return "" if _ps_usable() else None
+    return fields[1]
+
+
+def _ps(*args: str) -> str | None:
+    """`ps` stdout, or None when it could not be run/parsed at all."""
+    try:
+        out = subprocess.run(
+            ["ps", *args], capture_output=True, text=True,
+            timeout=PS_PROBE_TIMEOUT_S,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return out.stdout
+
+
+def _ps_usable() -> bool:
+    """Does `ps` answer for a pid it must be able to see (our own)?
+
+    A bare `ps -p <missing>` exit code cannot tell "no such process" from "this
+    ps does not accept that format" — macOS returns 1 for BOTH (measured), so
+    trusting it would read a live rail as dead on a box with a different `ps`.
+    Memoised: this costs at most one extra probe per process.
+    """
+    global _PS_USABLE
+    if _PS_USABLE is None:
+        out = _ps("-o", "pid=,stat=", "-p", str(os.getpid()))
+        fields = (out or "").split()
+        _PS_USABLE = len(fields) >= 2 and fields[0] == str(os.getpid())
+    return _PS_USABLE
+
+
+def _proc_stat_letter(pid: int) -> str | None:
+    """The state letter from `/proc/<pid>/stat`, or None where there is no
+    procfs (macOS) / it cannot be read."""
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text()
+        return stat.rsplit(") ", 1)[1].split()[0]
+    except (OSError, IndexError):
+        return None
+
+
+def _proc_cmdline(pid: int) -> str | None:
+    """`/proc/<pid>/cmdline` as text, or None where procfs does not answer."""
+    cmdline = Path(f"/proc/{pid}/cmdline")
+    if not cmdline.exists():
+        return None
+    try:
+        return cmdline.read_bytes().replace(b"\x00", b" ").decode("utf-8", "replace")
+    except OSError:
+        return None
+
+
 def _pid_alive(pid: int, marker: str) -> bool:
     """Alive AND still ours — `os.kill(pid, 0)` alone reports a RECYCLED pid as
     a live rail, which would report `waiting` forever on a dead rail."""
@@ -158,20 +255,13 @@ def _pid_alive(pid: int, marker: str) -> bool:
     except OSError:
         return False
     # A ZOMBIE still answers kill(0) and its cmdline is EMPTY — reporting it alive
-    # would leave a killed rail reading `waiting` forever. /proc/<pid>/stat field 3
-    # is the state letter; `Z` is gone-as-far-as-a-verdict-is-concerned.
-    try:
-        stat = Path(f"/proc/{pid}/stat").read_text()
-        if stat.rsplit(") ", 1)[1].split()[0] == "Z":
-            return False
-    except (OSError, IndexError):
-        pass
-    cmdline = Path(f"/proc/{pid}/cmdline")
-    if cmdline.exists():
-        try:
-            raw = cmdline.read_bytes().replace(b"\x00", b" ").decode("utf-8", "replace")
-        except OSError:
-            return False
+    # would leave a killed rail reading `waiting` forever. `Z` is gone-as-far-as-
+    # a-verdict-is-concerned.
+    proc_letter = _proc_stat_letter(pid)
+    if proc_letter == "Z":
+        return False
+    raw = _proc_cmdline(pid)
+    if raw is not None:
         # An EMPTY cmdline is a process that exists but has not exec'd yet (the
         # fork/exec window) — alive, not dead. Reporting `lost` there is how a
         # healthy rail reads as killed (#observed live 2026-11-03).
@@ -179,7 +269,21 @@ def _pid_alive(pid: int, marker: str) -> bool:
             return True
         # The child's argv carries the rail path; a recycled pid will not.
         return Path(marker).name in raw or marker in raw
-    return True  # no /proc (non-Linux): the kill probe is all we have
+    if proc_letter is not None:
+        # procfs answers but the cmdline did not: the process is real and not a
+        # zombie, and its argv was unreadable — keep the rail's claim.
+        return True
+    # ⛔ NO PROCFS: the kill probe above is NOT enough — it answers yes for a
+    # zombie, so a killed rail would read `waiting` forever (see `_ps_stat`).
+    # Only the STAT letter is consulted here, never the command line: bash
+    # may have exec'd the body's last command, so a LIVE rail can legitimately
+    # present an argv that does not carry the artifact path.
+    stat = _ps_stat(pid)
+    if stat is None:
+        return True  # unmeasurable ⇒ keep the rail's claim alive (see _ps_stat)
+    if not stat:
+        return False  # `ps` knows no such pid ⇒ it is gone
+    return not stat.startswith("Z")
 
 
 def _int_or_none(s: str) -> int | None:
@@ -252,7 +356,9 @@ class RailState:
 
 def collect(state_dir: Path, repo: str, pr: int) -> RailState | None:
     """Read the artifact and the rail's log. NO side effects: no writes, no
-    network, no process signals. Returns None when no artifact exists."""
+    network, no process signals. The only external call is a local `ps` state
+    read, and only on a box without procfs. Returns None when no artifact
+    exists."""
     art = artifact_path(state_dir, repo, pr)
     if not art.exists():
         return None
@@ -367,10 +473,17 @@ class Refused(Exception):
 
 def _resolve_repo(cwd: Path) -> str:
     env_repo = os.environ.get("GH_REPO", "")
-    out = subprocess.run(
-        ["gh", "repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"],
-        cwd=str(cwd), capture_output=True, text=True,
-    )
+    try:
+        out = subprocess.run(
+            ["gh", "repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"],
+            cwd=str(cwd), capture_output=True, text=True,
+            timeout=GH_PROBE_TIMEOUT_S,
+        )
+    except subprocess.TimeoutExpired:
+        raise Refused(
+            f"`gh repo view` did not answer within {GH_PROBE_TIMEOUT_S}s — refusing to "
+            "detach a rail at a target this launch could not name"
+        ) from None
     if out.returncode == 0 and out.stdout.strip():
         repo = out.stdout.strip()
         if env_repo and env_repo != repo:
@@ -385,11 +498,18 @@ def _resolve_repo(cwd: Path) -> str:
 
 
 def _head_sha(cwd: Path, repo: str, pr: int) -> str:
-    out = subprocess.run(
-        ["gh", "pr", "view", str(pr), "--repo", repo, "--json", "headRefOid",
-         "-q", ".headRefOid"],
-        cwd=str(cwd), capture_output=True, text=True,
-    )
+    """The head sha for the artifact, or `unreadable`. INFORMATIONAL ONLY —
+    nothing gates on it — and BOUNDED, because this call is made while the
+    duplicate-rail flock is held (see GH_PROBE_TIMEOUT_S)."""
+    try:
+        out = subprocess.run(
+            ["gh", "pr", "view", str(pr), "--repo", repo, "--json", "headRefOid",
+             "-q", ".headRefOid"],
+            cwd=str(cwd), capture_output=True, text=True,
+            timeout=GH_PROBE_TIMEOUT_S,
+        )
+    except subprocess.TimeoutExpired:
+        return "unreadable"
     return out.stdout.strip() if out.returncode == 0 else "unreadable"
 
 
