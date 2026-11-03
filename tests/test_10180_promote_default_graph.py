@@ -1025,7 +1025,22 @@ def test_the_quota_gate_counts_the_promoted_graph(monkeypatch):
     # A control-plane-counted resource must not pay for an SDK it never touches.
     opened.clear()
     ha._check_org_limit(_credential(), "api_keys")
-    assert opened == [] and seen["factory"] is None
+    assert opened == [], (
+        "a control-plane resource's gate must not open a data SDK")
+    # ⛔ CORRECTED ASSERTION (merged semantics, #4051 + #10180). This half read
+    # `seen["factory"] is None` and was WRONG at the merge: `_check_org_limit`
+    # now passes the seam unconditionally (`sdk_factory=lambda: _gate_sdk_for(
+    # org, resource)`, `hosted_api.py`), so the argument is never `None` — the
+    # assertion could not express "nothing was built". It was carried over
+    # mechanically from the pre-merge `seen["sdk"] is None`, where `sdk` was
+    # legitimately absent for a registry-scoped resource. The property the old
+    # line PROTECTED is untouched and is asserted where it now lives: the
+    # resolver itself builds nothing, so a gate that lazily resolves a
+    # control-plane resource still pays no SDK.
+    assert seen["factory"]() is None, (
+        "a control-plane resource's resolver must build no data SDK")
+    assert opened == [], (
+        "resolving a control-plane resource must open no graph even when called")
 
 
 def test_a_graph_bound_credential_keeps_the_historical_quota_count(monkeypatch):
@@ -1046,12 +1061,28 @@ def test_a_graph_bound_credential_keeps_the_historical_quota_count(monkeypatch):
     import tortoise.quota as quota
 
     _hosted(monkeypatch)
+    seen: dict = {}
+    # ⛔ THE DOUBLE MUST NOT SWALLOW THE OBSERVATION IT ASSERTS ON. The
+    # pre-merge body stubbed `enforce_org_limit` to a no-op and then asserted
+    # that an SDK had been OPENED — which that stub makes impossible, so
+    # `opened` could only ever be `[]` and the case was RED at the merge head
+    # (`test_a_graph_bound_credential_keeps_the_historical_quota_count`, found
+    # running the touched suites at 6b67396a2). Recording #4051's resolver and
+    # resolving it is what turns "which graph does the gate COUNT" into a
+    # measurement rather than a comment.
     monkeypatch.setattr(
-        quota, "enforce_org_limit", lambda *a, **k: None)
+        quota, "enforce_org_limit",
+        lambda limits, resource, sdk=None, sdk_factory=None, **kw: seen.update(
+            {"resource": resource, "sdk": sdk, "factory": sdk_factory}))
     opened = _capture_make_sdk(monkeypatch)
     ha._check_org_limit(
         _credential(graph_id=NEW_ID,
                     graph_namespace=f"org_{TEAM}_{NEW_ID}"), "points")
+    assert opened == [], (
+        "the gate must resolve lazily — nothing opens before a count is taken")
+    assert seen["factory"] is not None, (
+        "a graph-bound key's cap must be given a graph-scoped resolver")
+    assert seen["factory"]() is not None
     assert opened == [{"graph_name": f"org_{TEAM}_{NEW_ID}"}], (
         "a graph-bound key must be counted on the graph it WRITES, not the "
         "org default (#4051)")
