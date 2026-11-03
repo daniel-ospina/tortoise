@@ -542,3 +542,24 @@ def test_an_unanswering_gh_repo_view_refuses_instead_of_hanging(tmp_path, monkey
         rd.launch(72, cwd=co, state_dir=tmp_path / "state")
     assert "did not answer within" in str(ei.value)
     assert rd.GH_PROBE_TIMEOUT_S <= time.time() - t0 < rd.GH_PROBE_TIMEOUT_S + 3
+
+
+def test_an_unmeasurable_liveness_probe_keeps_the_rail_alive(tmp_path, monkeypatch):
+    """No procfs AND no `ps`: unmeasurable must read ALIVE, never dead.
+
+    Reading a live rail as dead would let a SECOND rail through (#3061) — the
+    same reason `_ps_usable()` refuses to infer "no such process" from an exit
+    code it cannot tell apart from "this `ps` cannot answer". The cost is the
+    documented one: a dead rail on such a box stays `waiting`.
+    """
+    proc = subprocess.Popen(["/bin/sleep", "10"], start_new_session=True,
+                            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL)
+    try:
+        monkeypatch.setattr(rd, "_proc_stat_letter", lambda pid: None)
+        monkeypatch.setattr(rd, "_proc_cmdline", lambda pid: None)
+        monkeypatch.setattr(rd, "_PS_USABLE", None)
+        monkeypatch.setenv("PATH", "/nonexistent")   # `ps` cannot be run at all
+        assert rd._pid_alive(proc.pid, "/state/rail-o-r-8.md") is True
+    finally:
+        proc.wait()
