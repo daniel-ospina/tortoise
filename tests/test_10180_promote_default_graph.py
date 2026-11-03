@@ -1023,9 +1023,14 @@ def test_the_quota_gate_counts_the_promoted_graph(monkeypatch):
         "the points cap must count the graph the writes land in")
 
     # A control-plane-counted resource must not pay for an SDK it never touches.
+    # The seam is a RESOLVER, not a built SDK (#4051): `_check_org_limit` passes
+    # `sdk_factory=` for every resource, so "pays for nothing" is proven by
+    # CALLING it — a registry-scoped resource must resolve to `None` before any
+    # `_make_sdk` runs, which is what leaves `opened` empty.
     opened.clear()
     ha._check_org_limit(_credential(), "api_keys")
-    assert opened == [] and seen["factory"] is None
+    assert opened == [] and seen["factory"]() is None, (
+        "a control-plane resource's resolver must build no data SDK")
 
 
 def test_a_graph_bound_credential_keeps_the_historical_quota_count(monkeypatch):
@@ -1046,12 +1051,24 @@ def test_a_graph_bound_credential_keeps_the_historical_quota_count(monkeypatch):
     import tortoise.quota as quota
 
     _hosted(monkeypatch)
+    seen: dict = {}
+    # #4051's seam is LAZY — the counter receives a resolver and builds nothing
+    # until it actually needs a count. A double that never calls the resolver
+    # observes no SDK at all, so this case must resolve it explicitly or it
+    # asserts a build the merged code correctly skips (that is how the union
+    # merge reddened this test on CI: `opened == []` against the eager shape).
     monkeypatch.setattr(
-        quota, "enforce_org_limit", lambda *a, **k: None)
+        quota, "enforce_org_limit",
+        lambda limits, resource, sdk=None, sdk_factory=None, **kw: seen.update(
+            {"resource": resource, "sdk": sdk, "factory": sdk_factory}))
     opened = _capture_make_sdk(monkeypatch)
     ha._check_org_limit(
         _credential(graph_id=NEW_ID,
                     graph_namespace=f"org_{TEAM}_{NEW_ID}"), "points")
+    assert seen["resource"] == "points"
+    assert seen["sdk"] is None and seen["factory"] is not None, (
+        "the points cap must be given a graph-scoped resolver, not a built SDK")
+    assert seen["factory"]() is not None
     assert opened == [{"graph_name": f"org_{TEAM}_{NEW_ID}"}], (
         "a graph-bound key must be counted on the graph it WRITES, not the "
         "org default (#4051)")
