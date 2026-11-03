@@ -1693,14 +1693,18 @@ def start(port: int | None = None) -> tuple[str, int]:
     # leaves a container that dies at the NEXT start instead of surviving until
     # someone notices. Reported, and never fatal: a sweep that cannot run must
     # not stop a lane from starting.
-    if os.environ.get("TORTOISE_TEST_LANE_REAP", "1") == "1":
-        for _line in reap_orphans():
-            print(_line, file=sys.stderr)
-    # ONE `repo_root()` read for the whole `start()`: the container NAME and the
-    # ownership LABEL are two records of the SAME worktree, and `repo_root()` can
-    # degrade per call (see `_lane_identity`). Threaded into every removal guard
-    # below so no later second read can disagree with the container just created.
+    # ONE `repo_root()` read for the whole `start()`: the container NAME, the
+    # ownership LABEL and the ORPHAN SWEEP's identity are three records of the
+    # SAME worktree, and `repo_root()` can degrade per call (see
+    # `_lane_identity`). Read ONCE here and threaded into the sweep and into
+    # every removal guard below, so no later second read can disagree with the
+    # container just created — the sweep's "this is THIS worktree's container"
+    # test is then this very name. Reading the root again inside the sweep is
+    # what made this comment false (#10712 round-5 finding 1).
     name, root = _lane_identity()
+    if os.environ.get("TORTOISE_TEST_LANE_REAP", "1") == "1":
+        for _line in reap_orphans(name=name, root=root):
+            print(_line, file=sys.stderr)
     state = container_state(name)
     if state == "running":
         # #8124: the reuse path must not hand back an engine the pin never
@@ -1964,7 +1968,8 @@ def _assert_removal_allowed(name: str, root: Path | str | None = None) -> None:
     does not own (and so the rule lives in one place instead of at call sites).
 
     ``root`` is the root the CALLER already derived `name` from (``start()``
-    takes exactly one `repo_root()` read — see `_lane_identity`). Passing it
+    takes exactly one `repo_root()` read for its name, its label AND its orphan
+    sweep — see `_lane_identity`). Passing it
     keeps the guard honest under a second degraded read: without it the guard
     would compare the name against a FRESH `repo_root()`, and a read that
     degraded between the two would refuse to clean up the container this very
@@ -2458,17 +2463,26 @@ def _drain_age_candidates(age_candidates: list[tuple[str, str]],
     return out
 
 
-def _worktree_slugs() -> dict[str, str] | None:
+def _worktree_slugs(root: Path | str | None = None) -> dict[str, str] | None:
     """`slug -> worktree path` for every worktree git still knows about.
 
-    `None` means the ownership record could NOT be read. That is deliberately
-    distinct from `{}` ("git answered, and nothing claims any container"): the
-    first must never authorize a delete, the second may. #8180 fail-closed rule.
+    ``root`` is the caller's `repo_root()` read when it has one. `start()`
+    derives its container NAME, its ownership LABEL and THIS SWEEP's identity
+    from ONE read (`_lane_identity`), so the sweep must not take a second one:
+    `repo_root()` degrades PER CALL, and a read that degrades between them is
+    the divergence #10712 round-5 finding 1 records. ``None`` means "read it
+    here", which is what a direct caller with no identity in hand uses.
+
+    A `None` RETURN means the ownership record could NOT be read. That is
+    deliberately distinct from `{}` ("git answered, and nothing claims any
+    container"): the first must never authorize a delete, the second may. #8180
+    fail-closed rule.
     """
     try:
         r = subprocess.run(
             ["git", "worktree", "list", "--porcelain"],
-            cwd=str(repo_root()), capture_output=True, text=True,
+            cwd=str(root if root is not None else repo_root()),
+            capture_output=True, text=True,
             timeout=GIT_TIMEOUT, env=_git_env(),
         )
     except (OSError, subprocess.SubprocessError):
@@ -2509,8 +2523,18 @@ def _started_epoch(name: str) -> float | None:
         return None
 
 
-def reap_orphans() -> list[str]:
+def reap_orphans(name: str | None = None,
+                 root: Path | str | None = None) -> list[str]:
     """Remove `fdb-lane-*` containers that are PROVABLY out of service.
+
+    ``name`` / ``root`` are the caller's ALREADY-DERIVED identity, and `start()`
+    passes them: it takes ONE `repo_root()` read for the whole call
+    (`_lane_identity`) and threads it into the label, into this sweep and into
+    every removal guard, so the sweep's "this is THIS worktree's container" test
+    is the SAME name the container was just created with — `mine == name` by
+    construction, not by two reads happening to agree. Omitted (a direct caller,
+    a test, a future trigger with no lane in hand), they are derived here via
+    `lane_name()` and a fresh `repo_root()`.
 
     TWO proofs are armed. The first is OWNERSHIP — a recorded-worktree
     existence read (``Path(owner).is_dir()``) — resolved from the container's
@@ -2625,7 +2649,7 @@ def reap_orphans() -> list[str]:
     is not reported (it was never a candidate), so a caller reports what
     actually happened instead of counting.
     """
-    slugs = _worktree_slugs()
+    slugs = _worktree_slugs(root) if root is not None else _worktree_slugs()
     if slugs is None:
         return ["reap: skipped — `git worktree list` failed, so ownership "
                 "cannot be determined; NOTHING was removed (fail-closed)"]
@@ -2651,13 +2675,23 @@ def reap_orphans() -> list[str]:
             return ["reap: skipped — `docker ps` failed; NOTHING was removed "
                     "(fail-closed)"]
         for line in (listed.stdout or "").splitlines():
-            name, _, state = line.partition("\t")
-            name = name.strip()
-            if name:
+            # ⛔ NOT `name`: `name` is this function's PARAMETER — the caller's
+            # already-derived identity (`start()` passes it; see the docstring)
+            # — and every arm below reads it. Reusing it as a loop variable here
+            # silently replaced this worktree's name with the LAST container the
+            # fallback listed, so `mine` then declared some OTHER container "this
+            # is THIS worktree's container" and skipped the reap that was due.
+            # The pre-fix `mine` came from `lane_name()`, which is why the clobber
+            # was invisible until #10712 round-5 finding 1 made the identity a
+            # parameter (it broke `test_start_sweeps_orphans_and_reports_them_on_
+            # stderr`, whose `ps` fake answers untabbed — this branch).
+            listed_name, _, listed_state = line.partition("\t")
+            listed_name = listed_name.strip()
+            if listed_name:
                 # A missing state is `unknown`, never terminal: the state arm may
                 # only fire on a state docker actually reported.
-                states[name] = state.strip().lower() or "unknown"
-    mine = lane_name()
+                states[listed_name] = listed_state.strip().lower() or "unknown"
+    mine = lane_name() if name is None else name
     out: list[str] = []
     #: Candidates for the age BACKSTOP, resolved AFTER the whole scan so the
     #: idle probe's single window covers all of them (and costs nothing when

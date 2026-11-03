@@ -924,6 +924,64 @@ def test_the_NAME_and_the_ownership_LABEL_come_from_ONE_root_read(monkeypatch,
         "is what `reap_orphans()` corroborates the label against")
 
 
+def test_start_reads_the_root_ONCE_with_the_sweep_ENABLED(monkeypatch,
+                                                          tmp_path, capsys):
+    """#10712 round-5 finding 1: the single-read invariant must hold in the
+    SHIPPED configuration, not only with the sweep switched off.
+
+    The sweep runs by default (`TORTOISE_TEST_LANE_REAP` unset ⇒ `"1"`), and it
+    used to take TWO `repo_root()` reads of its own (`_worktree_slugs()` and
+    `lane_name()`) BEFORE `start()` took the one the comment is about — so
+    `start()` read the root three times, and the sweep's "this is THIS
+    worktree's container" test used a DIFFERENT read's name than the container
+    just created.
+
+    The sibling test above cannot see that: the module-wide fixture sets
+    `TORTOISE_TEST_LANE_REAP=0`, so its `len(reads) == 1` describes the sweep-off
+    configuration. This one enables the sweep (the default) and asserts both
+    halves — ONE read for the whole `start()`, and `mine == name` by
+    construction, proven by the sweep short-circuiting on the container it was
+    just told about.
+    """
+    first, second = tmp_path / "read-one", tmp_path / "read-two"
+    first.mkdir()
+    second.mkdir()
+    mine = tl.container_name(tl.slug_for(first))
+    reads: list[Path] = []
+
+    def flipping_root():
+        reads.append(first if not reads else second)
+        return reads[-1]
+
+    monkeypatch.setattr(tl, "repo_root", flipping_root)
+    monkeypatch.setenv("TORTOISE_TEST_LANE_REAP", "1")     # the DEFAULT
+    monkeypatch.setattr(tl, "_worktree_slugs", lambda *_a, **_k: {})
+
+    def fake(*a, **k):
+        if a[0] == "ps":
+            # Exactly ONE container: this lane's own, by construction.
+            return _R(0, f"{mine}\trunning\t\t\n", "")
+        if a[0] == "inspect":
+            return _R(0, "absent\n", "")
+        if a[0] == "run":
+            return _R(0, "deadbeef\n", "")
+        if a[0] == "port":
+            return _R(0, "0.0.0.0:16390\n", "")
+        return _R(0, "PONG\n", "")
+
+    monkeypatch.setattr(tl, "_docker", fake)
+    name, _port = tl.start(port=16390)
+
+    assert len(reads) == 1, (
+        f"`start()` must read `repo_root()` ONCE for its name, its label AND "
+        f"its orphan sweep; it read {len(reads)}: {reads}")
+    assert name == mine, name
+    _out, err = capsys.readouterr()
+    assert "this is THIS worktree's container" in err, (
+        f"the sweep must recognise the container `start()` is about to create "
+        f"as ITS OWN (mine == name); it reported instead: {err}")
+
+
 def test_the_label_writer_cannot_read_the_root_itself():
     """The single-read invariant is only true if `_label_args` cannot read the
     root itself: a root parameter is what makes "ONE `repo_root()` read" a
@@ -1480,8 +1538,17 @@ def test_an_OWNER_GONE_running_container_needs_IDLE_evidence(monkeypatch,
     the same positive idle evidence the age arm has: a client connected means
     KEEP.
 
-    MUTATION: drop the `_idle_recheck` from `_drain_owner_gone` and this removes
-    a container a test is using.
+    MUTATION: let this arm delete on ownership alone — delete the `if not idle:`
+    refusal AND the removal-time `_idle_recheck` block — and this removes a
+    container a test is using. (Verified: that mutation is red here.)
+
+    ⛔ WHAT THIS DOES **NOT** PIN: the removal-time `_idle_recheck` on its own
+    (#10712 round-5 finding 2). This fake presents a foreign client at EVERY
+    sample, so `_idle_evidence` already decides "not proven" on the first one
+    and the arm never reaches its re-check — deleting ONLY that block left this
+    test GREEN (verified), so the earlier `MUTATION:` line that named it was
+    false. The two guards are defence in depth, and the re-check has its own pin
+    in `test_owner_gone_idleness_is_RE_VERIFIED_at_the_moment_of_action` below.
     """
     gone = tmp_path / "deleted-worktree"
     removed: list = []
@@ -1504,6 +1571,62 @@ def test_an_OWNER_GONE_running_container_needs_IDLE_evidence(monkeypatch,
     out = tl.reap_orphans()
     assert removed == [], out
     assert "is gone" in out[0] and "NOT proven" in out[0], out
+
+
+def test_owner_gone_idleness_is_RE_VERIFIED_at_the_moment_of_action(
+        monkeypatch, tmp_path):
+    """#10712 round-5 finding 2: the DEFAULT-ARMED arm's removal-time re-check.
+
+    `test_an_OWNER_GONE_running_container_needs_IDLE_evidence` does NOT pin the
+    `_idle_recheck` in `_drain_owner_gone`: its fake presents a foreign client at
+    EVERY sample, so `_idle_evidence` already decides "not proven" and the arm
+    never reaches the re-check. That left arm 1 — the arm armed with NO operator
+    action, unlike the opt-in age arm whose twin rule is pinned by
+    `test_idleness_is_RE_VERIFIED_at_the_moment_of_action` — with no test that
+    fails if its removal-time re-check disappears.
+
+    This is that test's mirror through arm 1: an owner-gone container (the label
+    names a path that does not exist, and the label CORROBORATES itself so it is
+    evidence), IDLE at both probe samples, with a foreign client appearing only
+    at the re-sample — a lane that started using it after the shared window.
+
+    MUTATION: delete the `if idle: _idle_recheck(...)` block from
+    `_drain_owner_gone` and this REMOVES a container a lane just started using
+    (verified: exactly this test, and only this test, goes red in the suite).
+    """
+    gone = tmp_path / "deleted-worktree"          # never created: owner is gone
+    slug = tl.slug_for(gone)
+    name = tl.container_name(slug)
+    removed: list = []
+    state = {"calls": 0}
+
+    def fake(*a, **k):
+        if a[0] == "ps":
+            # LABEL_OWNER + LABEL_SLUG both name the dead worktree, so the pair
+            # is corroborated evidence and the owner-gone arm is REACHED.
+            return _R(0, f"{name}\trunning\t{gone}\t{slug}\n", "")
+        if a[0] == "rm":
+            removed.append(a[1:])
+            return _R(0, "", "")
+        if a[0] == "exec" and a[2:] == ("redis-cli", "INFO", "stats"):
+            state["calls"] += 1
+            return _R(0, f"total_connections_received:{100 + state['calls']}\r\n",
+                      "")
+        if a[0] == "exec" and a[2:] == ("redis-cli", "CLIENT", "LIST"):
+            # Idle for the two probe samples; a client has appeared by the
+            # removal-time re-check (the third `INFO`).
+            extra = "" if state["calls"] <= 2 else "\nid=7 cmd=get"
+            return _R(0, "id=1 cmd=client|list" + extra, "")
+        raise AssertionError(f"unexpected docker call: {a}")
+
+    monkeypatch.setattr(tl, "_docker", fake)
+    monkeypatch.setattr(tl, "_worktree_slugs", lambda: {})   # deregistered
+    monkeypatch.setattr(tl, "lane_name", lambda: "fdb-lane-mine")
+    monkeypatch.setattr(tl, "IDLE_PROBE_WINDOW_S", 0.0)
+    out = tl.reap_orphans()
+    assert removed == [], f"a lane that started using it must be spared: {out}"
+    assert "is gone" in out[0], out
+    assert "at removal time" in out[0], out
 
 
 def test_the_idle_probe_gives_each_exec_its_OWN_short_timeout(monkeypatch):
@@ -1724,7 +1847,7 @@ def test_start_sweeps_orphans_and_reports_them_on_stderr(
     monkeypatch.setenv("TORTOISE_TEST_LANE_REAP", "1")
     monkeypatch.setattr(tl, "lane_name", lambda: "fdb-lane-mine")
     monkeypatch.setattr(tl, "container_state", lambda _n, **_k: "absent")
-    monkeypatch.setattr(tl, "_worktree_slugs", lambda: {"dead": str(dead)})
+    monkeypatch.setattr(tl, "_worktree_slugs", lambda *_a, **_k: {"dead": str(dead)})
     removed: list = []
 
     def fake(*a, **k):
