@@ -44,7 +44,7 @@ from tortoise import abuse
 from tortoise.abuse import ALERT_TYPES, SupabaseAbuseStore, _alert_dict
 from tortoise.auth import lookup_hash
 from tests._http_fixtures import patched_tortoise_sdk
-from tests._verdict import verdict_client
+from tests._verdict import verdict_client, verdict_async_client
 from tests.fake_control_plane import FakeControlPlane
 
 TEAM = "team-abuse-1"
@@ -2045,8 +2045,6 @@ class TestPerRequestHooksLeaveTheSharedPool:
         overrides ``get_current_org``, which is exactly why it cannot see this
         hop — this test deliberately goes through a real API key.
         """
-        import httpx
-
         app = env["app"]
         width = _default_executor_width()
         answer: dict = {}
@@ -2063,9 +2061,8 @@ class TestPerRequestHooksLeaveTheSharedPool:
                             f"running blockers — the pool was never full, so this "
                             f"run proves nothing about the request path (#10618)")
                     await asyncio.sleep(0.01)
-                transport = httpx.ASGITransport(app=app)
-                async with httpx.AsyncClient(
-                        transport=transport, base_url="http://test") as ac:
+                async with verdict_async_client(
+                        app, base_url="http://test") as ac:
                     started = time.monotonic()
                     try:
                         response = await asyncio.wait_for(
