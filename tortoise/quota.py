@@ -1005,9 +1005,16 @@ def _count_resource(org_id: str, resource: str, sdk=None) -> int:
         # ── Tenant-graph-scoped counts (sessions, points) ──
         if sdk is None:
             # #8906: this fallback is the DEFAULT graph `org_{org_id}`, NOT the
-            # request's — a custom-graph-bound key writes elsewhere. Any caller
-            # reaching here for a tenant-graph resource is counting the wrong
-            # graph; see `enforce_org_limit`'s `sdk:` doc for the full contract.
+            # request's — a custom-graph-bound key writes elsewhere. A caller
+            # reaching here for a tenant-graph resource with a RESOLVED request
+            # SDK absent is therefore counting a graph the request does not
+            # write; see `enforce_org_limit`'s `sdk:`/`sdk_factory:` docs for the
+            # full contract. ⚠️ The ONE deliberate exception is
+            # `hosted_api._gate_sdk_for`'s unresolved-binding arm, which answers
+            # `None` ON PURPOSE (no write can occur — `_data_sdk` refuses 403 —
+            # so substituting a graph here WOULD be a fail-open widening); it
+            # reaches this line by design and is not the defect this comment
+            # describes.
             sdk = _make_sdk(namespace=org_id)
         if resource == "documents":
             # #1726 Slice 1, re-pointed by D10 (ONTOLOGY v3.15 §4.4): the

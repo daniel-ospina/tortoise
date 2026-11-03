@@ -8801,33 +8801,34 @@ def _check_org_limit(org: dict, resource: str, *,
     """Enforce per-org limits. Raises 402 (payment required) when at capacity.
 
     resource: 'points' | 'api_keys' | 'sessions' | 'users' | 'graphs'
+        | 'documents'  (the declared universe is ``quota.GATEABLE_RESOURCES``)
     slot_credit (#4355): slots this same operation RELEASES — the rotate
     primitive passes 1 so the admission check is evaluated post-release. Only
     the rotate path may pass a non-zero credit, and only after
     ``quota.api_key_occupies_slot`` proved the displaced row is counted.
-    sdk (#8906): the SDK this request WRITES through. Count on it, never on a
-    fresh one. The contract lives at the seam that owns the trap —
-    ``quota.enforce_org_limit``'s ``sdk:`` doc explains which graph an OMITTED
-    sdk counts. At THIS seam an omitted one resolves the credential's DEFAULT
-    graph (#10180's ``_org_sdk_for_credential`` — right for an org-wide
-    credential, including one whose default a promotion MOVED), and for a
-    GRAPH-BOUND credential that default is the historical ``org_{org_id}``
-    (``_default_graph_name`` answers None there by construction) — while the key
-    itself writes ``_data_graph_name(org)`` = its own ``graph_namespace``
-    (``org_{org_id}_{gid}``), two graphs that differ for that credential class
-    by construction (the mint matrix refuses a ``kind='default'`` binding, so a
-    custom binding's namespace is never ``org_{org_id}``). For such a key the
-    omitted-sdk gate therefore compared the cap against a graph the request
-    never touches, in BOTH directions: a full default graph refused every write
-    to an EMPTY one (the permanent REST freeze), and a full custom graph was
-    admitted because the default was small. This is the house rule MCP and
-    capture already obey (`mcp_server._enforce_quota`: "Count on the SAME org
-    SDK the tool writes to … so the count and the write can never target
-    different databases"). ⚠️ Which OTHER credentials diverge from the default
-    graph is NOT a lane rule — it depends on the org's storage key
-    (``organizations.graph_name``) — so do not infer "hosted agrees / selfhost
-    does not" from the lane name. The authoritative rule, and the classes that
-    diverge, are in the seam doc; this site deliberately does not restate them.
+    sdk (#8906): the SDK this request WRITES through — pass it for every
+    resource. It WINS over the omitted-sdk fallback, and the point of passing it
+    is IDENTITY, not the graph: the count then runs on the very handle the write
+    uses, so the two cannot disagree even if the default resolution moves
+    between two constructions of it. The contract for what an OMITTED sdk
+    counts lives at the seam that owns the trap
+    (``quota.enforce_org_limit``'s ``sdk:``/``sdk_factory:`` docs) — at this
+    seam the fallback is ``_gate_sdk_for(org, resource)``, which mirrors the
+    OPENER's own two call forms: a graph-BOUND credential's ``graph_namespace``
+    (so the count follows the BINDING), an org-wide credential's promotion-aware
+    default (#10180 — so the count follows a PROMOTION), and ``None`` for the
+    registry-scoped resources. That fallback is what #10637 landed and what
+    makes this keyword an optimisation rather than the whole fix; before it, an
+    omitted sdk made ``_count_resource`` mint ``_make_sdk(namespace=org_id)`` —
+    the org's DEFAULT graph ``org_{org_id}`` — while a custom-graph-bound key
+    wrote its own ``org_{org_id}_{gid}``, so the cap was compared against a
+    graph the request never touched, in BOTH directions (a full default graph
+    refused every write to an EMPTY one — the permanent REST freeze — and a full
+    custom graph was admitted because the default was small). That history is
+    why #8906's doors pass this keyword; the rule it restores is the MCP house
+    rule (`mcp_server._enforce_quota`: "Count on the SAME org SDK the tool
+    writes to … so the count and the write can never target different
+    databases").
     Registry-scoped resources (api_keys/users/graphs) are unaffected by ``sdk``
     for the count, so callers may pass it for every resource.
 

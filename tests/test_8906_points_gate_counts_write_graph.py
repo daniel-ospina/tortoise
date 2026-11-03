@@ -53,10 +53,21 @@ lazy ``sdk_factory=`` and ``_check_org_limit``'s fallback is
 of the org default. So the behavioural arms below no longer FALSIFY ``main`` —
 they pin the outcome (#8906 stays closed if that fallback is ever weakened) and
 they still falsify the pre-#10637 gate, which is what the falsification table in
-the PR body measured. The two structural arms (``/v1/demo`` one handle,
-`/v1/sessions`' vacuous gate) are the leaves ``#10637`` does NOT cover: an
-omitted-sdk fallback can be right and still cost a second handle, and a vacuous
-gate has no fallback to be right about.
+the PR body measured.
+
+⚠️ What is and is NOT pinned, stated exactly (six doors thread ``sdk=``:
+``/v1/points``, ``/v1/objects``, ``/v1/subjects``, ``/v1/sessions/commit``,
+``/v1/demo`` and the capture ``/v1/sessions`` gate): **behaviour** is pinned at
+all six by the arms below, but **one-handle identity is pinned structurally at
+two** — ``/v1/demo`` and the capture ``sessions`` gate. The four
+``resource="points"`` doors are NOT pinned for identity: deleting ``sdk=sdk``
+there now leaves this suite green, because ``#10637``'s fallback resolves the
+same graph for those credentials (that is the double-handle cost, not a wrong
+count). Identity is pinned where behaviour CANNOT see it at all — the demo
+door splits only if the default resolution moves between two constructions, and
+the capture gate is vacuous by ``#4010`` so it never counts. Add a structural
+arm beside the behavioural one if a points door ever stops opening a single
+handle.
 """
 from __future__ import annotations
 
@@ -469,7 +480,7 @@ def test_capture_sessions_gate_is_handed_the_capture_handle(env, monkeypatch):
               ]},
         headers=e.headers())
     assert r.status_code in (200, 201), r.text[:400]
-    assert seen.get("gate", "absent") is not None, (
+    assert seen.get("gate") is not None, (
         "the capture door's `sessions` gate ran without an sdk — an omitted one "
         "counts the org DEFAULT graph, so a finite session cap would compare "
         "the cap against a graph this key never writes (#8906)")
