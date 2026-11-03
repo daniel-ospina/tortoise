@@ -34,11 +34,12 @@
 # and the selection narrows to `core` instead of the full matrix its blast radius needs
 # (CI uses the same flag for the same reason, #4378).
 #
-# WHAT IT DOES NOT DO. It never runs the `test-slow` or `test-carve-out` legs: those
-# need the docker FalkorDB lane / the embedded carve-out targeting (see AGENTS.md →
-# Testing), so the summary NAMES the files they would run and leaves running them to
-# CI or an explicit invocation. It also never moves a test file between surfaces —
-# that is `config/ci-surfaces.yml`'s curation decision (#10127), not a tool's.
+# WHAT IT DOES NOT DO. It never runs the `test-slow`, `test-carve-out` or `uri_requiring`
+# legs: those need the docker FalkorDB lane / the embedded carve-out targeting (see
+# AGENTS.md → Testing), so the summary COUNTS the slow files and says whether the
+# carve-out leg would trigger, and leaves running them to CI or an explicit invocation.
+# It also never moves a test file between surfaces — that is `config/ci-surfaces.yml`'s
+# curation decision (#10127), not a tool's.
 #
 # USAGE
 #
@@ -51,6 +52,7 @@
 #   tools/run_affected.sh origin/main~10...HEAD
 #   tools/run_affected.sh --files-from /tmp/changed.txt
 #   tools/run_affected.sh --allow-full         # accept a `full: true` selection
+#   tools/run_affected.sh --help               # this table (exit 0, from any directory)
 #
 # DEFAULT RANGE: `origin/main...HEAD` (three-dot = merge-base, so commits landing on
 # main since your branch forked do not appear as "your" changed files).
@@ -58,10 +60,14 @@
 # EXIT CODES (distinct so a caller can tell a refusal from an empty answer from a red
 # test run):
 #
-#   0  selection printed / ran; also the "the range has no changed files" case
-#   2  usage error — unknown option, two modes, bad/missing range, `--files-from`
-#      that does not exist, or a POSITIONAL ARGUMENT THAT IS A PATH (the #9109 trap;
-#      use `--files-from`)
+#   0  selection printed / ran; also the "the range has no changed files" case, and —
+#      with `--run` — an EMPTY selection, which says so and invokes NO pytest (a bare
+#      `uv run pytest` collects the whole tree, so this is not a whole-suite run)
+#   2  usage error — a malformed or conflicting operand (unknown option, two modes, two
+#      ranges, two `--files-from`, a range combined with `--files-from`, an EMPTY or
+#      `-`-prefixed range, a bad/missing/nonexistent `--files-from`, extra pytest args
+#      without `--run`, or a POSITIONAL ARGUMENT THAT IS A PATH — the #9109 trap), AND a
+#      range git cannot resolve (an unfetched or unparsable ref); the message names which
 #   3  REFUSED: the selector answered `full: true` and `--allow-full` was not given
 #   4  the selector itself failed (non-zero, or unparsable JSON)
 #   *  with `--run`: pytest's own exit code, unchanged
@@ -71,6 +77,12 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# `${BASH_SOURCE[0]}` keeps the INVOCATION spelling, so `usage()` must resolve it to an
+# absolute path BEFORE the `cd` below: otherwise a relative invocation from another
+# directory (`cd tests && bash ../tools/run_affected.sh --help`) makes its `sed` read a
+# path that no longer exists from where we are, the pipeline fails under `set -e`, and
+# `--help` reports ITSELF as a usage error (exit 2).
+SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
 # A range operand is a SHELL argument, so a relative one is relative to where the caller
 # invoked the tool. Keep that directory: after `cd` below, `[[ -e "$RANGE" ]]` would only
 # ever match a path that happens to exist at the repo root — and the trap shape
@@ -89,7 +101,11 @@ RANGE_GIVEN=0
 PYTEST_ARGS=()
 
 usage() {
-  sed -n '/^# USAGE$/,/^# Pinned by/p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  # Read the header STRUCTURALLY: from `# USAGE` to the first non-comment line. The end
+  # address used to be a prose phrase (`/^# behavioural doc/`), and an end address that
+  # stops matching makes GNU sed run to EOF — so rewording one comment line would make
+  # `--help` dump the whole script body as "help". Anchoring on structure cannot drift.
+  awk '/^# USAGE$/{f=1} f && !/^#/{exit} f' "$SELF" | sed 's/^# \{0,1\}//'
 }
 
 die() {
@@ -109,6 +125,8 @@ while [[ $# -gt 0 ]]; do
       [[ $# -ge 2 ]] || die 2 "--files-from needs a FILE operand"
       [[ -n "$2" ]] || die 2 "--files-from needs a NON-EMPTY FILE operand — an empty \
 operand would silently fall through to the range branch and answer a different question"
+      [[ "$FILES_FROM_GIVEN" == "0" ]] \
+        || die 2 "two lists given (--files-from $FILES_FROM and '$2') — one source of truth"
       FILES_FROM="$2"; FILES_FROM_GIVEN=1; shift 2 ;;
     --range)
       [[ $# -ge 2 ]] || die 2 "--range needs a RANGE operand"
@@ -158,6 +176,15 @@ else
   # test is made against the CALLER's directory as well as the repo root, because a
   # relative operand is caller-relative — `mylist.txt` beside a caller in another
   # directory is the shape the trap actually takes.
+  # The range must be OPERAND-ish before it reaches git: an empty operand and a
+  # `-`-prefixed one are both silently catastrophic there. `RANGE=""` matches
+  # `[[ -e "$CALLER_PWD/" ]]` and would be reported as the #9109 path trap with a
+  # malformed remedy, and `git diff --output=…` takes a leading `-` as an OPTION, writes
+  # the diff elsewhere, leaves the list empty and answers "nothing to run" with exit 0.
+  [[ -n "$RANGE" ]] || die 2 "a range must be NON-EMPTY (an empty operand is not a range)"
+  [[ "$RANGE" != -* ]] \
+    || die 2 "a range must not start with '-' (got '$RANGE') — git would read it as an OPTION"
+
   if [[ "$RANGE" != *".."* ]]; then
     if git rev-parse --verify --quiet "${RANGE}^{commit}" >/dev/null 2>&1; then
       RANGE="${RANGE}...HEAD"
@@ -328,6 +355,14 @@ if [[ "$MODE" == "run" ]]; then
   while IFS= read -r line; do
     [[ -n "$line" ]] && SELECTED+=("$line")
   done < "$PATHS"
+  # An EMPTY non-`full` selection must not fall through to a bare `uv run pytest`, which
+  # collects the WHOLE tree (pyproject.toml declares no `testpaths`) — i.e. run everything
+  # while the summary just said it needed nothing. Latent today (every non-full path
+  # carries tier-1), so this is a guard for the next surface tuning, not a live bug.
+  if [[ ${#SELECTED[@]} -eq 0 ]]; then
+    printf '%s\n' "run_affected: the selection is EMPTY — nothing to run (pytest not invoked)" >&2
+    exit 0
+  fi
   # `uv run pytest` — the same command AGENTS.md → Testing documents, so a lane that
   # iterates here is running what CI runs (minus the slow / carve-out / URI-requiring
   # legs, above). NOT `exec`: exec replaces this shell, so the EXIT trap that removes

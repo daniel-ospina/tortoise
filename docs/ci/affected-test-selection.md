@@ -43,7 +43,11 @@ The default range is `origin/main...HEAD` — three dots, i.e. `git merge-base`,
 on `main` since your branch forked are not counted as *your* changed files. The name list is computed
 with `git diff --no-renames`, exactly as `python-ci.yml` computes it: with rename detection on, a moved
 `tortoise/sdk.py` is reported only under its new name, so a shared module's blast radius would silently
-narrow to the `core` surface. `$RANGE` given twice is a usage error rather than "last one wins".
+narrow to the `core` surface. `$RANGE` given twice is a usage error rather than "last one wins", and
+so is `--files-from` given twice: one source of truth per run, never a silent replacement. An
+**empty** range is refused too (it is not a range, and it used to match the caller-path probe below
+and be reported as trap 1), as is a `-`-prefixed one, which `git diff` would take as an OPTION
+(`--output=…` writes the diff elsewhere, leaves the list empty and answers "nothing to run").
 
 `--print` writes the selected files to **stdout** (one `tests/…py` path per line, ready to pipe) and a
 **one-line summary to stderr**: how many files, which surfaces produced them, and what the slow /
@@ -89,9 +93,9 @@ git diff --name-only origin/main...HEAD | uv run python tools/ci_selection.py --
 
 ## Trap 2 — a big number is the selector working
 
-The selection is **surface**-based, not import-graph based. `core` alone is **738 test files** out of
-**1,219** in the tree (737 / 1,218 before this lane registered its own test file), and a docs-prose
-diff still pulls its surface's smoke set. Measured at this head:
+The selection is **surface**-based, not import-graph based. `core` alone is **738 test files** (737
+before this lane registered its own), and a docs-prose diff still pulls its surface's smoke set.
+Measured at this head:
 
 | Changed path | Selection | Files |
 |---|---|---|
@@ -131,8 +135,8 @@ in the selection at fixture setup, which reads as "my diff broke things" when it
 
 | Code | Meaning |
 |---|---|
-| `0` | selection printed / ran; also "the range has no changed files" (said explicitly) |
-| `2` | usage error — unknown option, two modes at once, two ranges, `--files-from` together with a range, bad range, missing `--files-from`, or a **path** passed where a range belongs (trap 1) |
+| `0` | selection printed / ran; also "the range has no changed files" (said explicitly), an **empty** selection under `--run` — said explicitly, and pytest is NOT invoked (a bare `uv run pytest` collects the whole tree) — and `--help` |
+| `2` | usage error — a malformed or conflicting operand (unknown option, two modes at once, two ranges, two `--files-from`, `--files-from` together with a range, bad range, an **empty** or `-`-prefixed range, missing/empty/nonexistent `--files-from`, extra pytest args without `--run`, or a **path** passed where a range belongs — trap 1) — **and** a range git cannot resolve (unfetched or unparsable ref). The message names which |
 | `3` | **refused**: the selector answered `full: true` and `--allow-full` was not given |
 | `4` | the selector itself failed (non-zero, or unparsable JSON) |
 | other | with `--run`: pytest's own exit code, unchanged |
@@ -193,9 +197,14 @@ The pins (`tests/test_run_affected.py`) cover: `--print` emits pytest-pathable `
 exist on disk; the printed set **is** the selector's own answer for the same list (no second
 implementation); a `full: true` selection is refused with exit 3 and the reason named; `--allow-full`
 accepts it; a path operand — absolute **or** relative to the caller — is refused as the #9109 trap;
-`--files-from` plus a range is a usage error; an unparsable selector payload exits 4 with a named
-message rather than a traceback; `--run` forwards `--`-args to pytest and returns pytest's own exit
+`--files-from` plus a range is a usage error; a second `--files-from` is a usage error, not a silent
+replacement; an empty and a `-`-prefixed range are both refused before `git diff` sees them (the
+`-`-prefixed pin also asserts git wrote nothing to the path the range carried); an unparsable selector
+payload exits 4 with a named message rather than a traceback; `--run` forwards `--`-args to pytest and returns pytest's own exit
 code; the changed list comes from `git diff --no-renames` (a renamed shared module must not narrow the
 selection); a dirty worktree is WARNED about by name without touching the repo; `--range` twice and
 `--files-from` plus a range are usage errors; a caller-relative `--files-from` path resolves; the
-script's only selector invocation is the stdin form; an empty range says so.
+script's only selector invocation is the stdin form; an empty range says so; an EMPTY selection under
+`--run` says so and never turns into a whole-tree pytest run; `--help` prints the full table with exit 0
+when invoked by a **relative** path from another directory (`cd tests && bash ../tools/run_affected.sh
+--help`), so the invocation spelling cannot turn help into a usage error or truncate the table.

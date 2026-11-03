@@ -411,3 +411,106 @@ def test_an_empty_files_from_operand_is_a_usage_error(tmp_path):
         f"{proc.returncode} {proc.stdout[:200]}")
     assert proc.stdout.strip() == "", f"nothing should be selected: {proc.stdout!r}"
     assert "NON-EMPTY" in proc.stderr, proc.stderr
+
+
+def test_a_second_files_from_is_a_usage_error(tmp_path):
+    """A second list used to REPLACE the first silently and answer for that list alone."""
+    first = _write_list(tmp_path, "list-one.txt", DOCS_ONLY)
+    second = _write_list(tmp_path, "list-two.txt", "README.md\n")
+    proc = _run(["--files-from", str(first), "--files-from", str(second), "--summary"],
+                tmp_path)
+
+    assert proc.returncode == 2, (
+        f"two lists must be a usage error, not the last one winning: {proc.returncode} "
+        f"{proc.stdout[:200]}")
+    assert "two lists" in proc.stderr, proc.stderr
+
+
+def test_an_empty_range_operand_is_a_usage_error(tmp_path):
+    """`--range ""` matched the path probe (`-e <caller>/`) and named the wrong trap."""
+    proc = _run(["--range", "", "--summary"], tmp_path)
+
+    assert proc.returncode == 2, proc.stderr
+    assert "NON-EMPTY" in proc.stderr, (
+        f"an empty range must be named as such, not reported as a path: {proc.stderr!r}")
+    assert "#9109" not in proc.stderr, (
+        "an empty operand is not the path trap — naming it as one hands the caller a "
+        "malformed remedy")
+
+
+def test_a_dash_prefixed_range_is_refused_before_git_sees_it(tmp_path):
+    """`git diff --output=…` treats a leading `-` as an OPTION: empty list, exit 0."""
+    sentinel = tmp_path / "git-must-not-write-here.txt"
+    proc = _run(["--range", f"--output={sentinel}..x", "--summary"], tmp_path)
+
+    assert proc.returncode == 2, (
+        "a '-' prefixed range must be refused, not handed to git as an option: "
+        f"{proc.returncode} {proc.stdout[:200]}")
+    assert "must not start with '-'" in proc.stderr, proc.stderr
+    # git writes to the WHOLE `--output=` value, so the file it would create carries the
+    # range's `..x` suffix — `sentinel.exists()` alone would be true either way, i.e. an
+    # assertion that can never fail. Match the prefix, and say so if anything was written.
+    assert not list(tmp_path.glob("git-must-not-write-here.txt*")), (
+        "git ran and wrote its output to a path the range controlled")
+
+
+def test_an_empty_selection_does_not_turn_run_into_the_whole_suite(tmp_path):
+    """A bare `uv run pytest` (no paths) collects the ENTIRE tree."""
+    real_uv = subprocess.run(["bash", "-lc", "command -v uv"], capture_output=True,
+                             text=True, timeout=120).stdout.strip()
+    assert real_uv, "`uv` must be on PATH for this pin"
+    stub_bin = tmp_path / "stub-bin-empty"
+    stub_bin.mkdir()
+    stub = stub_bin / "uv"
+    stub.write_text(
+        "#!/bin/sh\n"
+        'case "$*" in\n'
+        "  *ci_selection.py*) printf '%s' '{\"surfaces\": [], \"full\": false, "
+        "\"test_files\": [], \"slow_files\": [], \"slow_run\": false, "
+        "\"slow_selected\": [], \"carve_out_run\": false}'; exit 0 ;;\n"
+        "esac\n"
+        f'exec "{real_uv}" "$@"\n',
+        encoding="utf-8",
+    )
+    stub.chmod(0o755)
+
+    proc = _run(["--files-from", str(_write_list(tmp_path, "empty-sel.txt", DOCS_ONLY)),
+                 "--run", "--", "--version"], tmp_path,
+                env_extra={"PATH": f"{stub_bin}:{os.environ['PATH']}"})
+
+    assert proc.returncode == 0, proc.stderr
+    assert "EMPTY" in proc.stderr, proc.stderr
+    assert "pytest" not in proc.stdout, (
+        f"pytest must NOT be invoked on an empty selection — a bare `uv run pytest` "
+        f"collects the whole tree: {proc.stdout[-300:]}")
+
+
+def test_help_prints_the_whole_table_from_any_directory():
+    """`--help` reads its OWN file to print the table, so the invocation SPELLING matters.
+
+    `${BASH_SOURCE[0]}` is the spelling the caller used, not an absolute path, and
+    `usage()` runs after the script's own `cd "$REPO_ROOT"`: a relative invocation from
+    another directory made `sed` read a path that no longer resolves, the pipeline failed
+    under `set -e`, and `--help` exited 2 — the exact code the table defines as a usage
+    error, so the help path reported ITSELF as one. It also stopped the table one line
+    early, mid-clause.
+    """
+    proc = subprocess.run(
+        ["bash", "../tools/run_affected.sh", "--help"],
+        capture_output=True, text=True, cwd=str(ROOT / "tests"), env={**os.environ},
+        timeout=600,
+    )
+
+    assert proc.returncode == 0, (
+        f"--help must not report itself as a usage error (exit 2): {proc.returncode} "
+        f"{proc.stderr[:300]}")
+    assert "EXIT CODES" in proc.stdout, proc.stdout[:300]
+    assert "behavioural doc lives in docs/ci/affected-test-selection.md" in proc.stdout, (
+        f"the header block must print in full, not stop mid-clause: {proc.stdout[-200:]}")
+    # The block's END, pinned STRUCTURALLY rather than by prose. `usage()` once ended its
+    # sed range on a phrase; a phrase that stops matching makes GNU sed run to EOF and
+    # print the whole script BODY as help — while still containing `EXIT CODES` and the
+    # closing prose line, so presence assertions alone stayed green. The boundary is the
+    # pin, and it stays correct if the closing comment is legitimately reworded.
+    assert "set -euo pipefail" not in proc.stdout, (
+        f"--help printed the script body, not just the header block: {proc.stdout[-300:]}")
