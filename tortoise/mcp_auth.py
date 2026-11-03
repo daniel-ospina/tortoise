@@ -660,14 +660,18 @@ def record_tenant_for_graph(plan: dict | None) -> tuple[str, str] | None:
       :func:`plan_graph_target` answers that ref with ``None``, and refuses it
       whenever ``_current_graph_id`` is set, because its default-ref branch
       compares the bound id against the ``"default"`` SENTINEL
-      (`_DEFAULT_GRAPH_ID`, :338) while a resolved credential carries a real
-      ``public.graphs`` id. A bound credential is therefore REFUSED there
-      rather than resolved, INCLUDING one bound to the default graph's own row
-      (pinned by ``test_9340_graph_tool_argument.py``::
+      (`_DEFAULT_GRAPH_ID`, the module constant) while a resolved credential
+      carries a real ``public.graphs`` id. A bound credential is therefore
+      REFUSED there rather than resolved, INCLUDING one bound to the default
+      graph's own row (pinned by ``test_9340_graph_tool_argument.py``::
       ``test_a_bound_credential_cannot_ask_for_the_default_graph``). So the
       ``kind='default'`` row handled below reaches this function only for a
       credential bound to that very row, or for one with no binding at all —
-      and in both shapes the ambient scope already names ``(org, default)``.
+      and where the credential IS bound the ambient scope already names
+      ``(org, default)``. (Where it is NOT bound the ambient scope can name
+      NOTHING; see the ⚠️ paragraph below, which is a different answer from
+      this one and was written because this sentence used to claim both
+      shapes at once — #10723 review P3.)
 
     Installing a tenant here would therefore be a SECOND write of the same
     scope in the ambient-present case, and the only way it could differ is by
@@ -685,7 +689,7 @@ def record_tenant_for_graph(plan: dict | None) -> tuple[str, str] | None:
     ``default_graph_id``. In that shape the honest answer is the fail-closed
     ``no_tenant`` refusal, NOT an install — because a default row's
     ``plan["graph_id"]`` is the ``"default"`` SENTINEL (`_DEFAULT_GRAPH_ID`,
-    :338), and
+    the module constant), and
     :func:`tortoise.record_writer.record_tenant_for` accepts any non-empty
     string in that field, so installing it would hand the record an
     FK-invalid tenant and turn an attributable DECLINE into an unattributable

@@ -680,6 +680,34 @@ def _parent_map(node) -> dict[int, object]:
     return parents
 
 
+def _binds_as_parameter(scope, key: str) -> bool:
+    """Is `key` a PARAMETER of `scope` — i.e. handed in, not resolved here?
+
+    The distinction `state_at` rests on (#10723 review P1). A handle spelled in
+    a callee's signature is a value the caller supplied; its state cannot be
+    read from the callee, which is the declared indirection `_dream_worker`
+    needs and the reason events are grouped per scope at all. A handle the
+    callee merely CLOSES OVER is not that: it is a local of an enclosing
+    function, statically resolvable one AST hop out.
+    """
+    if not isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        return False
+    args = scope.args
+    for arg in (*args.posonlyargs, *args.args, *args.kwonlyargs,
+                args.vararg, args.kwarg):
+        if arg is not None and arg.arg == key:
+            return True
+    return False
+
+
+# A closure capture is judged by the enclosing function's WHOLE body rather
+# than by a position: the nested `def` binds no order relative to that body
+# (it may be called before or after a later rebind), so the fail-closed
+# reading — an unbound definition anywhere in the enclosing function keeps
+# the handle unbound — is the one this guard can defend.
+_STATE_AT_SCOPE_END = (float("inf"), float("inf"))
+
+
 def _enclosing_scope(node, parents, lane) -> object:
     """The innermost `def`/`class` around `node` inside `lane` (else `lane`).
 
@@ -839,7 +867,21 @@ def _sdk_handles(node) -> dict[str, list[tuple[tuple[int, int], bool, bool]]]:
 
 
 def _org_scoped_sdk_sites(tree) -> dict[str, int]:
-    """`{lane: count}` for every place a lane opens an ORG-SCOPED SDK.
+    """`{lane: count}` for every NON-AMBIENT org-scoped SDK construction site.
+
+    ⚠️ "Non-ambient" is load-bearing, and this docstring said "org-scoped"
+    without it until #10723's review (P3) — the count and the claim were not the
+    same thing. `unconditional` is `(_SDK_OPENERS - {"_make_sdk"}) |
+    _INSTALLING_OPENERS`, so a member of `_AMBIENT_OPENERS` is NOT counted:
+    `_get_org_sdk` is the package's second org-scoped opener and it is excluded
+    here even though this same file's `_AMBIENT_OPENERS` comment states it "DO
+    return a real org-scoped SDK a lane writes through". The exclusion is
+    correct — its tenant is the request's AMBIENT scope, which no AST read can
+    observe, so there is nothing here to measure — but the CONSEQUENCE is that
+    `_ORG_SCOPED_MODULES` never lists `mcp_server.py` (109 `_get_org_sdk` call
+    sites, the package's largest record-write surface) or `mcp_auth.py` (its
+    definition). Read this as "how many sites can this scan actually judge?",
+    never as a census of every org-scoped construction in the package.
 
     Any construction helper, not the `_make_sdk` spelling only (#10380 review
     P2.1): `_open_org_graph_sdk(org_id)` is the canonical way to open the org's
@@ -938,14 +980,33 @@ def _unbound_record_writes(tree) -> list[str]:
             The loop variables are bound as DEFAULTS on purpose: the callables are
             used within this iteration only, and binding them keeps the closure
             from reading a later lane's maps if that ever changes (ruff B023).
+
+            When the writing scope has NO event for `key`, two different shapes
+            reach here and they must not be answered the same way (#10723 review
+            P1). A PARAMETER is handed in — the state is not knowable here, so
+            `inherited` answers and the walk stops. A CLOSURE CAPTURE of an
+            enclosing function's local IS resolvable, and answering `inherited`
+            for it was a silent fail-open: a nested `def` writing through the
+            enclosing lane's unbound `sdk` was RED on `origin/main` and green
+            after the scoped fold, with neither direction pinned.
             """
-            scope_events = scopes.get(
-                id(_enclosing_scope(call, parents, lane)), {})
-            lane_events = scope_events.get(key)
-            if lane_events is None:
-                return inherited.get(key)
-            return _handle_state_at(
-                lane_events, (call.lineno, call.col_offset), inherited.get(key))
+            scope = _enclosing_scope(call, parents, lane)
+            own_events = scopes.get(id(scope), {}).get(key)
+            if own_events is not None:
+                return _handle_state_at(
+                    own_events, (call.lineno, call.col_offset), inherited.get(key))
+            current = scope
+            while current is not lane:
+                if _binds_as_parameter(current, key):
+                    return inherited.get(key)
+                current = _enclosing_scope(current, parents, lane)
+                if _binds_as_parameter(current, key):
+                    return inherited.get(key)
+                enclosing_events = scopes.get(id(current), {}).get(key)
+                if enclosing_events is not None:
+                    return _handle_state_at(
+                        enclosing_events, _STATE_AT_SCOPE_END, inherited.get(key))
+            return inherited.get(key)
 
         for call in ast.walk(node):
             if not isinstance(call, ast.Call):
@@ -1272,6 +1333,21 @@ def test_every_sdk_shaped_name_in_the_package_is_classified():
         "in `_NOT_A_LANE_OPENER_METHODS` (with the reason) or, if it opens an "
         "org graph, in `_UNBOUND_OPENERS`:" + _joined(unclassified_methods))
 
+    # Non-vacuity for the METHOD half, the analogue of `len(shaped) >= 20`
+    # above (#10723 review P3). Without it, a class walk or a name shape that
+    # silently stops matching makes `unclassified_methods` empty and this leg
+    # passes while certifying nothing — and `_NOT_A_LANE_OPENER_METHODS` is the
+    # one vocabulary the `vanished` check deliberately excludes.
+    assert shaped_methods, (
+        "no SDK-shaped METHODS were found in the package — the class-scoped "
+        "walk or `_SDK_NAME_RE` has stopped matching, so "
+        "`_NOT_A_LANE_OPENER_METHODS` certifies nothing")
+    vanished_methods = sorted(_NOT_A_LANE_OPENER_METHODS - shaped_methods)
+    assert vanished_methods == [], (
+        "these declared opener METHODS no longer exist as class-scoped "
+        "definitions, so the classification is stale and its exemptions are "
+        "unchecked:" + _joined(vanished_methods))
+
     # The declaration cannot rot into a lie — checked over every module-level
     # vocabulary whose members are MODULE-LEVEL FUNCTIONS. The suffix-era
     # version checked only
@@ -1568,6 +1644,71 @@ def _conditional_rebind(org):
     assert _flagged(conditional_rebind), (
         "the control the round-6 worst-wins rule protects: a CONDITIONAL rebind "
         "may not run, so the unbound definition still reaches the write")
+
+
+def test_a_nested_def_writing_through_the_ENCLOSING_lane_handle_is_caught():
+    """P1 (#10723 review): a CLOSURE CAPTURE is not a handed-in parameter.
+
+    `_handle_events_by_scope` groups handle events by the function that
+    EXECUTES them, which is right for the callback-factory shape — `_drain`
+    receives the handle as a PARAMETER, so its state genuinely is not knowable
+    here. A nested `def` writing through the ENCLOSING function's local is not
+    that shape: the binding is statically resolvable, one AST hop out. The fold
+    made that lane GREEN while it was RED on `origin/main`, and nothing pinned
+    either direction — a silent fail-open in the guard that exists to catch
+    exactly this.
+
+    Mutation this reddens on: dropping the outward walk in `state_at` (the
+    enclosing-scope lookup, or the `_binds_as_parameter` stop) — the closure
+    capture goes green with an unbound definition sitting right above it.
+    """
+    closure = '''
+def _lane(org_id):
+    sdk = _make_sdk(namespace=org_id)
+    def _write():
+        sdk.create_point("Subject", {})
+    _write()
+'''
+    assert _flagged(closure), (
+        "a nested `def` writing through the enclosing lane's unbound SDK must "
+        "be flagged: `sdk` is a closure capture whose binding is statically "
+        "resolvable, not a handed-in parameter")
+
+    armed_above = '''
+def _lane(org_id):
+    sdk = _make_sdk(namespace=org_id)
+    _bind_default_graph_record_tenant(sdk, org_id)
+    def _write():
+        sdk.create_point("Subject", {})
+    _write()
+'''
+    assert _flagged(armed_above) == [], (
+        "the control: the enclosing lane ARMED the handle, so the closure "
+        "capture is covered and must not be reported")
+
+
+def test_a_nested_def_writing_through_a_PARAMETER_is_still_silent():
+    """The declared indirection the scoped fold exists for, preserved.
+
+    `_dream_worker`'s shape: a callback factory hands the handle IN, so the
+    callee's parameter names a value this scan cannot resolve. Walking outward
+    for a closure capture must stop at a parameter, or the fold's own fix is
+    undone the moment the two shapes are confused.
+
+    Mutation this reddens on: deleting the `_binds_as_parameter` stop in
+    `state_at` — the enclosing lane's unbound `_make_sdk` then answers for a
+    handle that was passed in, reporting a lane the scan cannot see.
+    """
+    parameter = '''
+def _lane(org_id):
+    def _drain(sdk):
+        sdk.create_point("Subject", {})
+    _drain(_open_sdk(org_id))
+'''
+    assert _flagged(parameter) == [], (
+        "a helper writing through a PARAMETER is the declared indirection — "
+        "the outward walk must stop there rather than resolving a foreign "
+        "binding")
 
 
 def test_a_literal_namespace_is_not_an_org_scoped_site():
