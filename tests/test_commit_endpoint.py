@@ -95,6 +95,21 @@ def client():
         # close → clear overrides at exit (replaces the local
         # _patch/_restore_tortoise_sdk_init copies).
         with patched_tortoise_sdk(db_path), verdict_client(app) as tc:
+            # #9567 D12 — the org dict must be STORE-BACKED, which is what
+            # `get_current_org` guarantees in production and what this
+            # override stands in for. `_check_org_limit` now fills any missing
+            # ALLOWANCE key from `quota.resolve_org_limits` on every gated door
+            # (points/documents/sessions), and that resolver reads THIS
+            # registry row — a missing row is a fail-closed QuotaCheckError
+            # (500), never a silent "unlimited". Without it every points-gated
+            # commit 500s on `Team 'team-001' not found in registry` instead of
+            # reaching the cap it is testing. `MERGE` with no properties (the
+            # `tests/test_hosted_api.py` fixture's shape): the resolver then
+            # takes the tier default and emits NO allowance key, so the org
+            # dict the tests override is unchanged.
+            import tortoise.hosted_api as ha_mod
+            ha_mod._make_sdk(namespace="registry")._get_registry().query(
+                "MERGE (t:Team {id:$id})", params={"id": TEST_ORG_ID})
             yield tc
 
 
