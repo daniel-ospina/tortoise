@@ -154,9 +154,10 @@ Both switches are strict `"1"` (any other spelling is not consent for a destruct
 **nothing in this repo sets them** — #8180's owner ruling scopes deletion to "when the worktree that
 owns it is gone" and to owner-**determinate** containers, and the reopen asking for the other two arms
 is pending on that issue. So do not expect `up` to reclaim a peer's stranded container on its own:
-read the `reap:` lines it prints — each one names the owner, the age, the measured gap and why it was
-kept, and where a read FAILED it says the fact is UNKNOWN rather than stating a conclusion that read
-never produced. To release one container, do it from **its own** worktree:
+read the `reap:` lines it prints — the evidence-chain lines name the owner, the container's age, the
+measured unused gap and why it was kept, and where a read FAILED the line names the fact that could not
+be read rather than stating a conclusion that read never produced. To release one container, do it
+from **its own** worktree:
 
 ```bash
 cd <the owning worktree> && uv run python tools/test_lane.py down
@@ -166,11 +167,18 @@ The sweep itself is gated on `TORTOISE_TEST_LANE_REAP` being `"1"` (the default)
 anything else and the sweep does not run at all, so the stranded containers are neither reported nor
 reclaimed.
 
-A container a **live** lane is using is never a candidate: the sweep probes a process holding the
-worktree (via `/proc`, so a cross-clone lane is visible too) and asks the container itself for an
-attached client. Unreadable evidence (`/proc` unreadable, `docker` refusing, a non-listing reply) is
-**report-only** — never a removal. The age figures are a backstop over that evidence, never a
-substitute for it.
+The two **liveness** proofs — the arms behind `TORTOISE_TEST_LANE_REAP_LANE_GONE` and
+`TORTOISE_TEST_LANE_REAP_OWNER_INDETERMINATE` — never treat a container a **live** lane is using as a
+candidate: before deciding, the sweep probes a process holding the worktree (via `/proc`, so a
+cross-clone lane is visible too) and asks the container itself for an attached client. Unreadable
+evidence there (`/proc` unreadable, `docker` refusing, a non-listing reply) is **report-only** — never a
+removal. The age figures are a backstop over that evidence, never a substitute for it.
+
+⛔ **That guarantee does not extend to the worktree-gone proof above** — the one arm that removes by
+**default**. It consults ownership only (`Path(owner).is_dir()`): no `/proc` scan, no client probe. A
+worktree that was removed, moved, or is briefly on an unmounted mount therefore reads as "owner gone"
+while the lane's process — and its connected client — are still alive, and the removal takes a live
+lane's database mid-run. That gap is **#10697**; close it before widening this default.
 
 The **same lane** must serve Phase 1 and Phase 3. A batch measured on a different lane from its
 baseline is not comparable to it.

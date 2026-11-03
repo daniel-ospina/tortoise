@@ -2756,9 +2756,15 @@ def reap_orphans() -> list[str]:
                 # releases the container from its own worktree, and the armed
                 # switch names the reopen that would make removal the default.
                 out.append(
+                    # The report must carry BOTH measures: the container's age
+                    # (`age_h`) and the lease gap (`gap_h`) are deliberately
+                    # different facts here, and the age is not implied by the
+                    # gap — a lane reuses the running container, so a 9 h old
+                    # container can have a 3 h unused gap (#10693 review, P3).
                     f"reap: kept {name} — nothing holds {owner} (no live process "
                     f"names it, no client attached within "
-                    f"{ACTIVE_CLIENT_IDLE_S}s, unused {gap_h:.1f}h > "
+                    f"{ACTIVE_CLIENT_IDLE_S}s, {age_h:.1f}h old, unused "
+                    f"{gap_h:.1f}h > "
                     f"{OWNER_GRACE_H:g}h), but its owning worktree still EXISTS "
                     f"and #8180 authorises a reap only when that worktree is "
                     f"gone. Release it from its own worktree: `cd {owner} && uv "
@@ -2884,10 +2890,15 @@ def reap_orphans() -> list[str]:
             # (review F2). Report the whole chain instead: an operator can act
             # on it, and the armed switch is the operator's explicit widening.
             out.append(
+                # `age_txt` (container uptime) is carried here for the same
+                # reason as in arm 2: uptime and the lease gap are distinct
+                # measures, and the doc promises the report names both
+                # (#10693 review, P3).
                 f"reap: kept {name} — no worktree in this clone names it, no "
                 f"live process on this host owns it, no client attached within "
-                f"{ACTIVE_CLIENT_IDLE_S}s, and it has done no work for "
-                f"{gap_h:.1f}h (> {ORPHAN_MAX_AGE_H:g}h) — but its owner cannot "
+                f"{ACTIVE_CLIENT_IDLE_S}s, it is {age_txt}, and it has done no "
+                f"work for {gap_h:.1f}h (> {ORPHAN_MAX_AGE_H:g}h) — but its "
+                f"owner cannot "
                 f"be determined HERE (#8180: report only, fail-closed). It may "
                 f"belong to another clone/CELL_HOME on this box; remove it only "
                 f"if you can attribute it, or rule on #8180 to arm "

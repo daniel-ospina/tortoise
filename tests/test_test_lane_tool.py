@@ -1313,13 +1313,20 @@ def test_arm_3_defaults_to_REPORT_ONLY_and_names_the_opt_in(monkeypatch):
     monkeypatch.setattr(tl, "_live_lane_paths", lambda: set())
     monkeypatch.setattr(tl, "_container_in_use", lambda _n: False)
     monkeypatch.setattr(tl, "container_state", lambda _n: "running")
-    monkeypatch.setattr(tl, "_started_epoch", lambda _n: time.time() - 40 * 3600)
+    monkeypatch.setattr(tl, "_started_epoch", lambda _n: time.time() - 30 * 3600)
     monkeypatch.setattr(tl, "_unused_gap", lambda _n, **k: 40.0)
     out = tl.reap_orphans()
     joined = "\n".join(out)
     assert removed == [], (removed, out)
     assert tl.OWNER_INDETERMINATE_REAP_ENV in joined, out
     assert "40.0h" in joined and "report only" in joined, out
+    # #10693 review ISSUE 2 (P3): the doc promises the evidence chain names the
+    # container's AGE as well as the measured gap, and the two are deliberately
+    # DIFFERENT measures (`StartedAt` is not idleness — a lane reuses the running
+    # container). This container is 30 h old with a 40 h gap, so an assertion on
+    # the age cannot be satisfied by the gap: delete `{age_txt}` from the report
+    # and this line reds.
+    assert "30.0h old" in joined, out
 
 
 def test_arm_2_defaults_to_REPORT_ONLY_and_names_the_remedy(tmp_path, monkeypatch):
@@ -1360,6 +1367,11 @@ def test_arm_2_defaults_to_REPORT_ONLY_and_names_the_remedy(tmp_path, monkeypatc
     assert f"cd {owner} && uv run python tools/test_lane.py down" in joined, out
     assert tl.LANE_GONE_REAP_ENV in joined, out
     assert "still EXISTS" in joined, out
+    # #10693 review ISSUE 2 (P3): same contract as arm 3 — the evidence chain
+    # carries the container's age AND the lease gap. Here they differ on purpose
+    # (9 h old, 3 h unused gap), so dropping the age from the report reds this
+    # and cannot be masked by the gap string.
+    assert "9.0h old" in joined and "3.0h" in joined, out
 
 
 def test_worktree_of_extracts_the_root_from_a_shell_wrapper_cmdline(tmp_path):
