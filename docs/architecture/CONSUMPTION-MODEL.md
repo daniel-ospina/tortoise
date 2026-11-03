@@ -162,8 +162,8 @@ private-beta users, after the storage architecture + extractor + MCP deployments
 
 | tier | STORAGE allowance (bytes) | STORAGE overage | EXTRACTION allowance (tokens / period) | EXTRACTION overage | `write_ops` (transition) |
 |---|---|---|---|---|---|
-| `anon` (unclaimed) | `TBD-BY-MEASUREMENT(bytes retained by a zero-email team in its first period — measured on the free-tier cohort)` | **none** — no purchase path at `anon`; the door is a claim, not a card | `TBD-BY-MEASUREMENT(tokens per first-session capture — measured on new signups)` | **none** (same reason) | unchanged today (`1000`) |
-| `free` | `TBD-BY-MEASUREMENT(p50 and p95 bytes retained after 30 days on the free cohort)` | **none** — `pricing.json` `overage: false` | `TBD-BY-MEASUREMENT(tokens/capture × captures per active free user per month)` | **none** | unchanged today (`10000`) |
+| `anon` (unclaimed) | `TBD-BY-MEASUREMENT(bytes retained by a zero-email team in its first period — measured on the free-tier cohort)` | **none** — no purchase path at `anon`; the door is a claim, not a card, so the cap **refuses** (`#4815`) | `TBD-BY-MEASUREMENT(tokens per first-session capture — measured on new signups)` | **none** (same reason) | unchanged today (`1000`) |
+| `free` | `TBD-BY-MEASUREMENT(p50 and p95 bytes retained after 30 days on the free cohort)` | **none** — `pricing.json` `overage: false`, so reaching the cap **refuses** (`#4815`) | `TBD-BY-MEASUREMENT(tokens/capture × captures per active free user per month)` | **none** — the same carve-out, not a soft edge | unchanged today (`10000`) |
 | `solo` | `TBD-BY-MEASUREMENT(same population as free, one tier up)` | **prepaid credits** | `TBD-BY-MEASUREMENT(as free, on the paying cohort)` | **prepaid credits** | unchanged today (`10000`) |
 | `pro` | `TBD-BY-MEASUREMENT(power-user cohort p50/p95)` | **prepaid credits** | `TBD-BY-MEASUREMENT(power-user capture rate × measured tokens/capture)` | **prepaid credits** | unchanged today (`50000`) |
 | `team` | `TBD-BY-MEASUREMENT(team cohort p50/p95, multi-graph)` | **prepaid credits** | `TBD-BY-MEASUREMENT(team cohort)` | **prepaid credits** | unchanged today (`200000`) |
@@ -186,19 +186,22 @@ private-beta users, after the storage architecture + extractor + MCP deployments
 
 ---
 
-## 5 · What happens at the boundary — and why nothing refuses
+## 5 · What happens at the boundary — and why no PAID tier is ever refused
 
-**The recorded decisions leave exactly one shape available, and it is not a hard cap.**
+**The recorded decisions leave exactly one shape available on a paid tier, and it is not a hard cap.**
 
 | recorded decision | what it forbids |
 |---|---|
 | owner, 2026-08-09 — *"NO capture caps. Tiers are feature baselines; usage is metered separately"* | refusing a capture on a consumption meter |
-| owner, 2026-09-22 — tiers price features, **never refusal** | a hard ceiling that refuses on a consumption dimension |
-| owner, 2026-09-26 (`#4495`) — *"Exceeding the storage allowance is **PURCHASED OVERAGE, not refusal**"*, via **prepaid credits** | postpaid auto-billing and a refusal at the allowance edge |
+| owner, 2026-09-22 (`#4815`) — tiers price features, **never refusal** — *on a **paid** tier* | a hard ceiling that refuses a **paying** customer on a consumption dimension |
+| **the same ruling's carve-out** — `#4815`: *"The free and anon tiers are **not** covered by this ruling and keep `overage: false` (**refuse at the cap**)"* | reading "never refusal" as universal: `free`/`anon` **do** refuse at their cap, and extending the paid ruling to them is a **reopen of `#4815`**, not a doc change |
+| owner, 2026-09-26 (`#4495`) — *"Exceeding the storage allowance is **PURCHASED OVERAGE, not refusal**"*, via **prepaid credits** | postpaid auto-billing and a refusal at the allowance edge **where an overage path exists** (`solo`/`pro`/`team`) |
 | `#4010` — sessions unlimited at every tier; `#3853` — no retention window | any bound that shrinks what a customer may keep, however it is denominated |
 
-⇒ **Both billable dimensions are soft: crossing the allowance never refuses the customer's data. The only
-behaviours at the boundary are the three below, and each has a different owner.**
+⇒ **Both billable dimensions are soft on every PAID tier: crossing the allowance never refuses a paying
+customer's data. `free` and `anon` are NOT covered by that ruling — they keep `overage: false` and refuse at the
+cap (`#4815`), and what this document adds for them is a measurement, not a reprieve. The only behaviours at the
+boundary on a tier with an overage path are the three below, and each has a different owner.**
 
 | at the boundary | behaviour | who it protects | what the customer sees |
 |---|---|---|---|
@@ -206,16 +209,28 @@ behaviours at the boundary are the three below, and each has a different owner.*
 | allowance reached, **no** credits | **proceed**, and surface a *degraded-but-complete* state: the customer is over their allowance and is told so on the next read of their usage, with the purchase path | the customer's work (we do not stop them), and our revenue (they cannot silently grow) | a `402`-**class** signal only on the *non-consumption* doors they can already not use — never on capture or commit |
 | a **safety** bound, not a billing bound — a per-org rate or transient byte throttle | **429 + `Retry-After`**, self-healing in ≤ 60 s | the shared instance and every *other* tenant (noisy neighbour) | a `Retry-After` and a limit/scope/value body |
 
-**The third row is the important distinction and the one lanes keep confusing.** A **throttle delays; it never
-refuses the data.** The lane already runs two of them — `RateLimitMiddleware.PATH_LIMITS` (300 req/min/key on
+**`free` and `anon` have no overage path, so none of the three rows above applies to them: they refuse at the
+cap, today.** `product/pricing.json` carries `tiers.free.overage: false` and `tiers.anon.overage: false`, and the
+cap that binds first is `max_graph_nodes` — enforced as a **write refusal**, not a meter
+(`tortoise/billing.py:702` maps it to the points quota, `:728` to `graph_size_cap`, and `:1178` reads it from the
+tier ladder). A lane asking *"may I refuse a free tenant at its allowance?"* gets **yes**, from `#4815` — the
+same ruling that says never to refuse a paying one. `#4495` already records that this stock cap binds before the
+ops allowance and so makes part of the paid allowance unusable; that defect is the measurement pass's to fix, not
+an argument for refusing more. **Extending never-refusal to `free`/`anon` is a reopen of `#4815`**, argued on that
+issue.
+
+**The third row of the boundary table is the important distinction and the one lanes keep confusing.** A **throttle
+delays; it never refuses the data.** The lane already runs two of them — `RateLimitMiddleware.PATH_LIMITS` (300 req/min/key on
 commit) and the 10 MiB/min/org byte throttle (`#9798`, with its own `OVERRIDES:` line on `#4051`) — and both are
 classified as *safety*, not *billing*, precisely so that adding one is never mistaken for reversing the
 never-refusal ruling. **A per-tenant rate is not a consumption cap**, and this document does not raise or lower
 either existing number.
 
-⛔ **There is no row in this table that refuses a capture, a commit, a point, or a read because of a consumed
-dimension.** If a future proposal needs one, it is a **reopen** of the 2026-09-22 and 2026-09-26 rulings, argued in
-front of the owner — never a lane's tuning decision.
+⛔ **On a paid tier, no row in this table refuses a capture, a commit, a point, or a read because of a consumed
+dimension.** If a future proposal needs one *there*, it is a **reopen** of the 2026-09-22 (`#4815`) and 2026-09-26
+rulings, argued in front of the owner — never a lane's tuning decision. On `free`/`anon` the cap refusal is the
+current recorded behaviour, not a gap: adding an overage path to those tiers would itself be a reopen of `#4815`,
+and it too goes to the owner.
 
 ---
 
@@ -273,8 +288,8 @@ This document **implements** these; it reverses none of them. Run first, before 
 |---|---|---|
 | storage is billed in **MB/GB**, node unit retired | owner 2026-09-26, `STORAGE-ARCHITECTURE.md` §0 (carries `OVERRIDES:`) | **obeys** — §2 STORAGE dimension, bytes |
 | extraction usage is billed in **tokens**; overage **purchased with prepaid credits** | owner 2026-09-26, `EXTRACTOR-V4-ARCHITECTURE.md` §0 (carries `OVERRIDES:`) | **obeys** — §2 EXTRACTION dimension; §5 behaviour |
-| storage overage is **purchase, not refusal** | owner 2026-09-26, `STORAGE-ARCHITECTURE.md` §0 | **obeys** — §5 forbids a refusal at the allowance edge |
-| tiers price **features**, never refusal | owner 2026-09-22 | **obeys** — §5 |
+| storage overage is **purchase, not refusal** | owner 2026-09-26, `STORAGE-ARCHITECTURE.md` §0 | **obeys** — §5 forbids a refusal at the allowance edge **where an overage path exists** (`solo`/`pro`/`team`) |
+| tiers price **features**, never refusal — **on a paid tier**; `free`/`anon` keep `overage: false` and refuse at the cap | owner 2026-09-22 (`#4815`) | **obeys** — §5 states both halves and quotes the carve-out rather than generalising it |
 | **no capture caps**; usage is metered separately | owner 2026-08-09 | **obeys** — no consumption cap on either session write lane |
 | **no** session cap; **no** retention window of any length | `#4010`, `#3853` | **obeys** — §7 |
 | prices are calibrated by the owner **after beta**, from measured consumption | owner 2026-09-26 | **obeys** — every number `TBD-BY-MEASUREMENT` |
