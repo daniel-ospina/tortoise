@@ -2637,6 +2637,14 @@ def reap_orphans() -> list[str]:
                 "(fail-closed)"]
     states: dict[str, str] = {n: v["state"] for n, v in labels.items()}
     if not states:
+        # A LEGACY/non-tabbed `ps` shim, NOT a supported path: docker's format
+        # above always yields four tab-separated parts, so `_ownership_labels`
+        # cannot return `{}` for a box that has containers — this branch runs
+        # only when docker answered with no line at all (`ps -a` below then also
+        # answers nothing) or under a fake that emits untabbed output. It is
+        # kept because a `{}` that fell through to "nothing is running" would
+        # demote labelled containers to name-only resolution, which the
+        # `_ownership_labels` docstring forbids (#10712 review, advisory 2).
         listed = _docker("ps", "-a", "--filter", f"name={NAME_PREFIX}",
                          "--format", "{{.Names}}\t{{.State}}")
         if listed.returncode != 0:
