@@ -48,8 +48,9 @@ WHY THE GATE STATE IS READ PER-COMMIT, NOT FROM THE ROLLUP
 instrument twice over: a re-run ADDS a red attempt rather than clearing one, so
 the rollup of a green commit can carry old `FAILURE` contexts; and the newest
 attempt per check NAME is only resolvable by check-run `id`. So the gate state is
-read the way AGENTS.md §"Reading verification state" says to read it — newest
-attempt by id, over `filter=all` — scoped with `check_name=` so the payload stays
+read the way the fleet's recorded rule says to read it
+(`docs/plans/2026-09-26-5215-merge-throughput.md` §622: group per check, newest
+attempt by `id`) — newest attempt by id, over `filter=all` — scoped with `check_name=` so the payload stays
 small enough for a rate-limited box. `--no-gate` drops only the PER-PR check-run reads (the
 expensive half); `gh pr list` is still required, so a fully offline run produces no report.
 
@@ -66,11 +67,28 @@ surface could not be read — never 1, so a caller cannot mistake "unreadable" f
 """
 from __future__ import annotations
 
+import sys
+
+# #5128 shape: refuse a <3.12 interpreter BEFORE the imports below. This is load-bearing here
+# rather than cosmetic — `from datetime import UTC` is a 3.11+ stdlib name, so on the ambient
+# `/usr/bin/python3` the tool would die with an unattributed ImportError before any of its own
+# messaging ran. The gate that enforces this shape is tests/test_entry_point_python_guard.py.
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    # The exit code is 2, not `SystemExit(<str>)`'s 1: this file publishes `never 1` (0 completed /
+    # 2 unreadable), so a refusal reported through 1 would be indistinguishable, by exit code,
+    # from "the census found a problem" — and an old interpreter is an environment error.
+    print(
+        f"tools/attest_census.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python tools/attest_census.py`",
+        file=sys.stderr,
+    )
+    raise SystemExit(2)
+
 import argparse
 import json
 import re
 import subprocess
-import sys
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
