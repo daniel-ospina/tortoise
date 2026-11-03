@@ -245,6 +245,32 @@ def _headers(connection: Connection, state: dict, payload: Any) -> dict[str, str
     return headers
 
 
+def _redact_any(text: str, *keys: str | None) -> str:
+    """Redact against every key that could have been on the wire."""
+    for key in keys:
+        text = redact(text, key)
+    return text
+
+
+def _redact_message(message: Any, key: str | None) -> Any:
+    """`message` with any credential VALUE replaced, at any depth.
+
+    A reply that ANSWERS the request id is relayed to stdout as-is, and a server
+    is free to quote the key it rejected inside `error.message`. Every other path
+    in this module redacts; this is the one that writes to the harness, so it is
+    the one that matters most.
+    """
+    if not key:
+        return message
+    if isinstance(message, str):
+        return redact(message, key)
+    if isinstance(message, dict):
+        return {k: _redact_message(v, key) for k, v in message.items()}
+    if isinstance(message, list):
+        return [_redact_message(item, key) for item in message]
+    return message
+
+
 def _protocol_version_from(result: Any) -> str | None:
     """The protocol version an `initialize` result negotiated, if this is one."""
     if isinstance(result, dict):
@@ -322,6 +348,7 @@ def forward(client: httpx.Client, state: dict, payload: Any) -> list[Any]:
             f"MCP transport failure talking to {url}: {redact(str(exc), connection.key)}",
         )
 
+    messages = [_redact_message(message, connection.key) for message in messages]
     for message in messages:
         if isinstance(message, dict) and "result" in message:
             version = _protocol_version_from(message["result"])
@@ -355,7 +382,9 @@ def main(argv: list[str] | None = None) -> int:
                 payload = json.loads(line)
             except ValueError as exc:
                 _emit({"jsonrpc": "2.0", "id": None,
-                       "error": {"code": -32700, "message": f"Parse error: {exc}"}})
+                       "error": {"code": -32700,
+                                 "message": f"Parse error: "
+                                            f"{_redact_any(str(exc), connection.key)}"}})
                 continue
             try:
                 messages = forward(client, state, payload)
@@ -363,9 +392,15 @@ def main(argv: list[str] | None = None) -> int:
                 # ANY internal fault is answered, not raised: a bridge that exits
                 # on a bad frame leaves the harness waiting with no diagnosis, and
                 # the exit is indistinguishable from a crash loop.
-                _log(f"internal failure forwarding {line[:120]!r}: {exc!r}")
+                # The START key and the LIVE one: a rotation between the
+                # send and the fault means either could be in the text.
+                detail = _redact_any(repr(exc), connection.key,
+                                     resolve_connection().key)
+                _log(f"internal failure forwarding "
+                     f"{_redact_any(line[:120], connection.key, resolve_connection().key)!r}: "
+                     f"{detail}")
                 messages = _errors_for(
-                    payload, -32603, f"MCP bridge internal failure: {exc!r}")
+                    payload, -32603, f"MCP bridge internal failure: {detail}")
             for message in messages:
                 _emit(message)
     _log("stdin closed — bridge exiting")

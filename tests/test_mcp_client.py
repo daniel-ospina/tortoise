@@ -765,6 +765,29 @@ class TestCredentialResolution:
         assert "tt_echoed_secret_value" not in printed, printed
         assert "<redacted>" in printed, printed
 
+    def test_describe_failure_redacts_the_key_that_was_SENT_after_a_rotation(
+        self, recorded_daemon, isolated_home, monkeypatch,
+    ):
+        """The printer must strip the SENT key, not merely the live one.
+
+        `list_tools()`/`call_tool()` build their provider internally, so a CLI
+        printing an error has no provider at hand. If the rotation happened
+        between the send and the print — this issue's headline scenario — redacting
+        only the LIVE resolution leaves the value that was actually on the wire.
+        """
+        from tortoise import mcp_client
+
+        url, _ = recorded_daemon
+        monkeypatch.setenv("TORTOISE_MCP_URL", url)
+        monkeypatch.setenv("TORTOISE_API_KEY", "tt_sent_key_0123456789abcdef")
+        assert mcp_client.list_tools()
+        monkeypatch.setenv("TORTOISE_API_KEY", "tt_new_key_fedcba9876543210")
+
+        text = mcp_client.describe_failure(
+            RuntimeError("rejected credential Bearer tt_sent_key_0123456789abcdef"))
+        assert "tt_sent_key_0123456789abcdef" not in text, text
+        assert "<redacted>" in text, text
+
     def test_a_tool_error_mentioning_401_is_not_a_credential_refusal(self, client_env):
         """A TOOL's 401 is the tool's, not the client's — never rewritten.
 

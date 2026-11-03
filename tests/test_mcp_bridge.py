@@ -56,6 +56,10 @@ class _Upstream:
         #: Echo the credential in a 200 body that answers NO id (the no-reply guard
         #: quotes that body back, so it is a second place the value can surface).
         self.echo_in_body = False
+        #: Answer the request's OWN id with a body that echoes the credential — the
+        #: reply the bridge relays to stdout VERBATIM, i.e. the one that reaches
+        #: the harness's transcript.
+        self.echo_answered = False
 
     async def __call__(self, scope, receive, send):
         if scope["type"] == "lifespan":
@@ -100,6 +104,15 @@ class _Upstream:
             await _respond(send, 401, {
                 "jsonrpc": "2.0", "id": None,
                 "error": {"code": -32001, "message": message},
+            })
+            return
+
+        if self.echo_answered:
+            await _respond(send, 200, {
+                "jsonrpc": "2.0",
+                "id": payload.get("id") if isinstance(payload, dict) else None,
+                "error": {"code": -32001, "message": (
+                    f"rejected credential {headers.get('authorization', '')}")},
             })
             return
 
@@ -504,6 +517,61 @@ class TestFailureModes:
                 f"pad={pad}: a FRAGMENT of the value was emitted: {text[-80:]}")
             if pad <= 380:  # the marker fits inside the 400-char budget
                 assert "<redacted>" in text, f"pad={pad}: no evidence left: {text[-80:]}"
+
+    def test_a_relayed_reply_never_carries_the_credential(self, upstream, home, bridge_factory):
+        """The reply that ANSWERS the id is written to stdout verbatim.
+
+        That is the one path that reaches the harness's transcript, and it is the
+        one path redaction had not reached: a server that quotes the rejected key
+        inside `error.message` handed the VALUE to the harness — the exact
+        client the bridge exists to keep the key away from.
+        """
+        url, stub = upstream
+        _write_credential(home, "tt_relayed_secret", url[: -len("/mcp")])
+        stub.echo_answered = True
+        bridge = bridge_factory()
+
+        bridge.send(_INITIALIZE)
+        message = bridge.read()
+
+        text = json.dumps(message)
+        assert "tt_relayed_secret" not in text, f"the relayed reply carried the value: {text}"
+        assert "<redacted>" in text, f"the evidence was dropped instead of redacted: {text}"
+
+    def test_an_internal_failure_never_prints_the_credential(
+        self, monkeypatch, home, capsys,
+    ):
+        """An exception can carry the header verbatim (UnicodeEncodeError does).
+
+        The generic failure handler emitted `{exc!r}` to BOTH stderr and a
+        `-32603` on stdout, so a non-ASCII key exposed the whole credential to a
+        bridge that had merely failed to send it. Measured here by injecting a
+        fault whose text contains the key.
+        """
+        import io
+
+        from tortoise import mcp_bridge
+
+        _write_credential(home, "tt_internal_secret", "http://127.0.0.1:9")
+        monkeypatch.setenv("TORTOISE_MCP_URL", "http://127.0.0.1:9/mcp")
+        monkeypatch.setattr(
+            mcp_bridge, "forward",
+            lambda *_a, **_k: (_ for _ in ()).throw(
+                UnicodeEncodeError("ascii", "Bearer tt_internal_secret", 7, 9,
+                                   "ordinal not in range(128)")))
+
+        class _Out(io.StringIO):
+            pass
+
+        out = _Out()
+        monkeypatch.setattr(sys, "stdin", io.StringIO('{"jsonrpc":"2.0","id":1,"method":"initialize"}\n'))
+        monkeypatch.setattr(sys, "stdout", out)
+        assert mcp_bridge.main([]) == 0
+
+        emitted = out.getvalue()
+        assert "tt_internal_secret" not in emitted, f"the value reached stdout: {emitted}"
+        assert "<redacted>" in emitted, f"no redaction marker: {emitted}"
+        assert "tt_internal_secret" not in capsys.readouterr().err
 
     def test_an_expired_session_can_be_re_initialized(self, upstream, home, bridge_factory):
         """The recovery the 404 message promises must actually be possible.
