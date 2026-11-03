@@ -40,13 +40,12 @@
 > Do **not** read `pi-bootstrap/setup.sh`'s exit status as that verdict: an install fails only on the
 > checker's `1`, and on `2` (cannot verify) or `3` (no deploy can fix it) it prints `this is NOT a
 > pass` and still ends with `Done!` — exactly as it does, silently, when the checkout predates the
-> checker. Run `setup.sh` from a **pin-consistent** checkout; from any other tree it re-farms
-> ahead-of-pin bytes and the grader answers `COMPARING AGAINST THE WRONG TREE`, whose own next step is
-> the one that converges the box: farm from the pinned tree, **or advance the pin deliberately**
-> (`scripts/harness-apply-pass.sh`, or `scripts/cloud-cell-supervisor.sh apply` on a cell). Direct
-> invocation from a pi session is unreliable — the worktree guard intermittently refuses it as
+> checker. `setup.sh` is also what converges the farm, so it must run from a checkout **at the pin**:
+> from any other tree it re-farms ahead-of-pin bytes, and the grader answers `COMPARING AGAINST THE
+> WRONG TREE`. Advance the pin deliberately first if the box has none materialised — advancing the pin
+> alone leaves the farm stale. Direct invocation from a pi session may be refused as
 > `script-indirection`, with a message that never mentions drift (agent-infra#3173, the #709 false
-> positive), so **a refusal is not a clean result**. Do **not** add a tortoise-side mirror — a second
+> positive) — so **a refusal is not a clean result**. Do **not** add a tortoise-side mirror — a second
 > owner of that predicate was refused (tortoise#10722, closed superseded); the farm arrays and
 > `is_declared_local` live in agent-infra.
 
