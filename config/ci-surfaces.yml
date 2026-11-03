@@ -9961,11 +9961,18 @@ durations:
   test_9350_capture_provenance_journalled.py: 17.6
   test_9548_record_arming_health.py: 0.1
   # #10620 — the DB-free legs are sub-second; the Postgres legs pay the
-  # connect + replay. At this head the file collects 42 legs (two parametrized
-  # ones: 6 reasons, 12 conversion shapes) — 28 run everywhere, 14 skip without
-  # `TEST_RECORD_DB_URI` (the 2 row legs + the 12-shape conversion leg, which the
-  # armed `test-record-postgres` job runs). Unarmed it is ~3 s; the 4.5 s budget
-  # keeps headroom for the armed legs on a cold container.
+  # connect + replay. MEASURED at `8e3ccbb1d` (the head this line lands AFTER, so
+  # the reading is bound to a sha and never to "this head"): the file collected
+  # **44** legs (two parametrized ones: 6 reasons, 12 conversion shapes) —
+  # **30** run everywhere, **14** skip without `TEST_RECORD_DB_URI` (the 2 row
+  # legs + the 12-shape conversion leg, which the armed `test-record-postgres`
+  # job runs). The leg that lands WITH this line
+  # (`test_an_unreadable_verdict_is_never_published_as_not_refusing`) adds one, so
+  # the file at its own face collects **45 / 31 run / 14 skip** — re-derive with
+  # `--collect-only -q` rather than carrying either figure. Unarmed it is ~8-10 s;
+  # the 4.5 s budget keeps headroom for the armed legs on a cold container. An
+  # earlier revision of this note said 42 / 28 / 14 — stale, and quietly short of
+  # the file it describes.
   test_record_searchkeys_10620.py: 4.5
   test_9555_narrative_carrier.py: 3.4
   test_backfill_references_5141.py: 0.1

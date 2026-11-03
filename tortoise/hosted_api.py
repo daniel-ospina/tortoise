@@ -6295,6 +6295,14 @@ def _record_health() -> dict:
       * ``counters_error`` — why the counter snapshot could not be read, or ``None``.
         Kept distinct from ``error`` so the documented pairing
         (*``error`` non-null ⇔ set-but-unusable value*) stays true.
+      * ``refusal_error`` — why the refusal VERDICT could not be read, or ``None``.
+        The same reasoning, one field further: ``record_refusing()`` is not a
+        DSN, and a failed read of it published as ``error`` would send an
+        operator to rotate a secret that is fine (#9548 review P2's exact
+        misdiagnosis). ⚠️ When it is non-``null`` the verdict was NOT
+        EVALUATED, so ``degraded`` is ``None`` and not ``False`` — ``False``
+        states "no armed write was refused inside the window", which is a claim
+        a read that never happened cannot make.
       * ``tenancy_error`` — why ``single_tenant_declared`` could not be read, or
         ``None``. ``False`` means "multi-tenant", which is the SAFE answer, so
         publishing it for a read that failed would render a broken safety check
@@ -6357,6 +6365,7 @@ def _record_health() -> dict:
                 "degraded": None, "degraded_reasons": None,
                 "refusing": None,
                 "counters_error": reason, "tenancy_error": reason,
+                "refusal_error": reason,
                 "fetched_at": datetime.now(UTC).isoformat(),
                 "error": reason}
     # NOTE the shape: keys are assigned, never `**counters`-spread. A spread
@@ -6389,6 +6398,12 @@ def _record_health() -> dict:
         "refusing": None,
         "counters_error": None,
         "tenancy_error": None,
+        # WHY the refusal verdict could not be read, or ``None``. Its own key for
+        # the reason ``counters_error``/``tenancy_error`` have one: ``error`` is
+        # reserved for a value that was SET and REFUSED, and filing a failed
+        # monitoring read there is what sends an operator to rotate a healthy
+        # secret (#9548 review P2, #10648 review — observation 1).
+        "refusal_error": None,
         "error": None,
         # WHEN this block was read. A consumer that keeps the body (an operator
         # capturing the arming evidence for a destructive run, #10017's purge
@@ -6464,19 +6479,37 @@ def _record_health() -> dict:
         # a monitoring fix into a 500 on the endpoint Fly probes. No current
         # raiser exists (`record_refusing` touches one module global and
         # `time.monotonic`); the guard is the contract, not a bug workaround.
+        refusal_error = None
         try:
             refusing = record_refusing()
         except Exception as exc:  # liveness must answer, always
             refusing = None
+            refusal_error = f"refusal state unreadable: {str(exc)[:160]}"
             block["ok"] = False
-            block["error"] = f"refusal state unreadable: {str(exc)[:160]}"
+            # NOT ``error``: that field's documented meaning is *a value was SET
+            # and the seam REFUSED it*, and a monitoring read is neither — the
+            # runbook's remedy for ``error`` is "fix the DSN", which is the
+            # wrong runbook row for an unreadable module global (#10648 review,
+            # observation 1).
+            block["refusal_error"] = refusal_error
         block["refusing"] = refusing
-        reason = refusing["reason"] if refusing else None
-        block["degraded"] = bool(refusing)
-        block["degraded_reasons"] = (
-            {reason: failures.get(reason, 0)} if isinstance(reason, str) else {})
-        if refusing:
-            block["ok"] = False
+        if refusal_error is not None:
+            # ⛔ NOT EVALUATED is not "not refusing". ``degraded`` stays ``None``
+            # (the documented "could not be evaluated"), because ``False`` here
+            # would publish the claim "no armed write was refused inside the
+            # window" for a read that never happened — the fail-open shape
+            # #10185 exists to end, one field over from an unread counter
+            # reading as a zero.
+            block["degraded"] = None
+            block["degraded_reasons"] = None
+        else:
+            reason = refusing["reason"] if refusing else None
+            block["degraded"] = bool(refusing)
+            block["degraded_reasons"] = (
+                {reason: failures.get(reason, 0)}
+                if isinstance(reason, str) else {})
+            if refusing:
+                block["ok"] = False
     try:
         block["single_tenant_declared"] = record_writer.single_tenant_declared()
     except Exception as exc:

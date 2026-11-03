@@ -415,7 +415,8 @@ def test_the_next_leg_does_not_inherit_that_refusal():
     )
 
 
-def _health(monkeypatch, failures: dict[str, int], *, refusing=None) -> dict:
+def _health(monkeypatch, failures: dict[str, int], *, refusing=None,
+            refusing_raises: BaseException | None = None) -> dict:
     """The record block with the counters stubbed and the refusal state given.
 
     `refusing` is the OUTPUT of ``monitoring.record_refusing()`` — ``None`` for
@@ -423,6 +424,9 @@ def _health(monkeypatch, failures: dict[str, int], *, refusing=None) -> dict:
     window-based (#10185), so a cumulative count alone must NOT redden it; the
     two are passed separately here precisely because the block must not conflate
     them.
+
+    `refusing_raises` makes that read RAISE instead, which is the other half of
+    ``_record_health``'s "never raises" contract.
     """
     from tortoise import hosted_api, monitoring
 
@@ -431,7 +435,13 @@ def _health(monkeypatch, failures: dict[str, int], *, refusing=None) -> dict:
     # `_record_health` imports this name FROM `monitoring` at call time, so the
     # stub belongs on `monitoring` — patching `hosted_api` would bind a module
     # attribute the local import never reads, and the stub would be inert.
-    monkeypatch.setattr(monitoring, "record_refusing", lambda: refusing)
+    if refusing_raises is not None:
+        def _boom():
+            raise refusing_raises
+
+        monkeypatch.setattr(monitoring, "record_refusing", _boom)
+    else:
+        monkeypatch.setattr(monitoring, "record_refusing", lambda: refusing)
     monkeypatch.setattr(hosted_api, "_WATCHER", None)
     monkeypatch.setattr(hosted_api, "_WATCHER_START_ERROR", None)
     monkeypatch.setattr(hosted_api, "_WATCHER_EXPECTED", False)
@@ -478,6 +488,57 @@ def test_a_historical_refusal_does_not_degrade_forever(monkeypatch):
     assert record["record_write_failures"] == {"write_failed": 302}, (
         "NOTHING is reset or hidden: the history stays readable"
     )
+
+
+def test_an_unreadable_verdict_is_never_published_as_not_refusing(monkeypatch):
+    """A failed verdict read is its OWN cause, and NOT EVALUATED is not `false`.
+
+    `_record_health` promises it never raises, so the read is guarded — but the
+    pre-fix guard filed the cause in `error`, the one field whose documented
+    meaning is *a value was SET and the seam REFUSED it* (remedy: "fix the
+    DSN"), which is how #9548's operator got sent to rotate a healthy secret.
+    It also left `degraded` at `bool(None)` = `False`, publishing the claim "no
+    armed write was refused inside the window" about a read that never happened.
+
+    Both directions are pinned here: the cause lands in `refusal_error` (not in
+    `error`, not in `counters_error` — the counter snapshot WAS read), the
+    verdict reads `None`, and the endpoint still answers 200 with a degraded
+    `status` rather than 5xxing.
+    """
+    import asyncio
+
+    from tortoise import hosted_api
+
+    record = _health(monkeypatch, {"write_failed": 302},
+                     refusing_raises=RuntimeError("refusal state exploded"))
+
+    assert record["ok"] is False, (
+        "a surface that cannot read its own verdict must not read healthy"
+    )
+    assert record["error"] is None, (
+        "`error` means SET-and-REFUSED and its remedy is 'fix the DSN'; a "
+        "monitoring read filed there sends the operator to rotate a healthy secret"
+    )
+    assert "refusal state exploded" in record["refusal_error"], (
+        f"the cause needs its own key: {record.get('refusal_error')!r}"
+    )
+    assert record["counters_error"] is None, (
+        "the counter snapshot was READ — its key must not be borrowed to carry "
+        "a different read's failure"
+    )
+    assert record["refusing"] is None
+    assert record["degraded"] is None, (
+        "NOT EVALUATED is not 'not refusing': `false` here claims a quiet window "
+        "the block never checked"
+    )
+    assert record["degraded_reasons"] is None
+    assert record["record_write_failures"] == {"write_failed": 302}, (
+        "the failure must not hide the history it could read"
+    )
+
+    body = asyncio.run(hosted_api.health())
+    assert body["status"] == "degraded", body["record"]
+    assert body["record"]["ok"] is False, body["record"]
 
 
 @pytest.mark.parametrize("reason", [
