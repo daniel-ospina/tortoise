@@ -68,7 +68,8 @@ class _BoomCursor:
     assert the attribution of a failure that never happens.
     """
 
-    def __init__(self, message: str, refuse_on: str = "INSERT INTO public.point") -> None:
+    def __init__(self, message: str | BaseException,
+                 refuse_on: str = "INSERT INTO public.point") -> None:
         self.message = message
         self.refuse_on = refuse_on
         self.executed: list[tuple[str, object]] = []
@@ -77,6 +78,8 @@ class _BoomCursor:
         self.executed.append((sql, params))
         if self.refuse_on not in sql:
             return
+        if isinstance(self.message, BaseException):
+            raise self.message
         raise RuntimeError(self.message)
 
 
@@ -84,6 +87,36 @@ _JSON_REFUSAL = (
     'invalid input syntax for type json\nDETAIL:  Token "err4032" is invalid.\n'
     "CONTEXT:  JSON data, line 1: err4032 release"
 )
+
+
+class _DriverDiag:
+    """The fields `psycopg2.extensions.Diagnostics` exposes on a driver error."""
+
+    def __init__(self, primary: str, detail: str | None = None,
+                 context: str | None = None) -> None:
+        self.message_primary = primary
+        self.message_detail = detail
+        self.context = context
+
+
+class _DriverError(Exception):
+    """A psycopg2-SHAPED refusal: SQLSTATE on `pgcode`, the fields on `diag`.
+
+    ``str(exc)`` is the DRIVER's own formatting — the primary message first, then
+    the optional ``DETAIL:`` and ``CONTEXT:`` lines — which is the shape that put
+    a refused value back into the very line this module withholds it from.
+    """
+
+    def __init__(self, primary: str, *, code: str = "22P02",
+                 detail: str | None = None, context: str | None = None) -> None:
+        self.pgcode = code
+        self.diag = _DriverDiag(primary, detail, context)
+        parts = [primary]
+        if detail:
+            parts.append(f"DETAIL:  {detail}")
+        if context:
+            parts.append(f"CONTEXT:  {context}")
+        super().__init__("\n".join(parts))
 
 
 def _point_record(key: str, search_keys: object) -> dict:
@@ -119,10 +152,11 @@ def test_a_failed_write_names_the_statement_table_and_columns(monkeypatch):
         "the failing COLUMN must be named — the driver's own message does not "
         f"contain it: {message}"
     )
-    assert "search_keys=err4032 release" not in message, (
-        "the user's text reached the log through the column — the ATTRIBUTION "
-        "must not pair the column with its value (the driver's own CONTEXT line "
-        f"may legitimately restate the value it refused): {message}"
+    assert "err4032 release" not in message, (
+        "the user's text reached the log — from the ATTRIBUTION (a column paired "
+        "with its value) or from the DRIVER's own `CONTEXT:`/`DETAIL:` fields, "
+        "which quote the very value that was refused: "
+        f"{message}"
     )
     assert "node_key=pt-err4032" in message, (
         f"the entity/point id must be named: {message}"
@@ -171,6 +205,122 @@ def test_the_attribution_pairs_columns_when_the_builder_declared_them():
 
     assert "node_key=pt-1" in text and "search_keys=<" in text, (
         f"an ordinary upsert names each column (values withheld where content): {text}"
+    )
+
+
+def test_the_driver_clause_carries_the_sqlstate_and_never_the_row_dump(monkeypatch):
+    """⛔ `str(exc)` on a driver error is NOT the terse message (#10648 review P2).
+
+    The protocol carries the primary message (`M`) *and* two optional fields that
+    quote the data: `DETAIL` (for `22P02`, the refused token) and `CONTEXT` (the
+    fragment being read). psycopg2's `str(exc)` is those fields CONCATENATED — so
+    interpolating it re-emitted `err4032 release` at the end of a line whose whole
+    job was to withhold it, while the attribution half carefully printed
+    `search_keys=<15 chars withheld>`.
+
+    This is the same rule the sibling record module already states and enforces for
+    its own driver messages (`record_backup._connection_failure`, #9601 review
+    cycle 9): the exception TYPE and the SQLSTATE, never the driver's text.
+    """
+    cursor = _BoomCursor(_DriverError(
+        "invalid input syntax for type json",
+        detail='Token "err4032" is invalid.',
+        context="JSON data, line 1: err4032 release"))
+    monkeypatch.setattr(record_projection, "scope_connection",
+                        lambda conn, org_id: cursor)
+
+    with pytest.raises(record_projection.RecordStatementError) as caught:
+        record_projection.replay([_point_record("pt-err4032", "err4032 release")],
+                                 object(), org_id="org-t", graph_id="graph-t",
+                                 position=False)
+
+    message = str(caught.value)
+    assert "22P02" in message, (
+        f"the SQLSTATE is what makes a fault classifiable — it must survive: {message}"
+    )
+    assert "invalid input syntax for type json" in message, (
+        f"the primary message IS the fault clause the 302-row drop lacked: {message}"
+    )
+    assert "err4032 release" not in message, (
+        f"the driver's `CONTEXT:` field quoted the refused value: {message}"
+    )
+    assert 'Token "err4032"' not in message, (
+        f"the driver's `DETAIL:` field quoted the refused token: {message}"
+    )
+    assert "DETAIL:" not in message and "CONTEXT:" not in message, (
+        f"neither optional field belongs on this line: {message}"
+    )
+
+
+def test_a_check_violation_never_carries_the_failing_row(monkeypatch):
+    """The other class of the same leak: a CHECK's DETAIL is the WHOLE ROW.
+
+    For `chk_*_props_*` PostgreSQL's `DETAIL` reads `Failing row contains (…)` —
+    i.e. every column of the row, `content` and `props` included, which are
+    exactly the two the attribution withholds. A withheld column name whose value
+    arrives one field later withholds nothing.
+    """
+    cursor = _BoomCursor(_DriverError(
+        'new row for relation "point" violates check constraint '
+        '"chk_point_props_no_derived"',
+        code="23514",
+        detail='Failing row contains (pt-1, org-t, graph-t, a private claim, '
+               '{"note": "secret"}).'))
+    monkeypatch.setattr(record_projection, "scope_connection",
+                        lambda conn, org_id: cursor)
+
+    with pytest.raises(record_projection.RecordStatementError) as caught:
+        record_projection.replay([_point_record("pt-1", "err4032 release")],
+                                 object(), org_id="org-t", graph_id="graph-t",
+                                 position=False)
+
+    message = str(caught.value)
+    assert "23514" in message, f"the SQLSTATE must survive: {message}"
+    assert "violates check constraint" in message, (
+        f"the primary message must survive: {message}"
+    )
+    assert "Failing row" not in message, (
+        f"the whole row reached the log through the driver's DETAIL: {message}"
+    )
+    assert "a private claim" not in message and "secret" not in message, (
+        f"`content`/`props` leaked through the row dump: {message}"
+    )
+
+
+def test_a_scope_failure_on_the_live_door_never_logs_the_drivers_detail(monkeypatch):
+    """The SAME withhold at the other seam: the wrap that reaches the log.
+
+    `replay()` raises `RecordStatementError` for a *statement* failure, but
+    `scope_connection()` runs before the first statement and its driver error
+    propagates raw into `RecordWriter.write`'s catch-all, which is what composes
+    the LIVE warning (`record_writer.py:_bounded_cause`). Both seams carry the
+    driver's text into a log stream, so both narrow it to the primary message.
+    """
+    refusal = _DriverError(
+        "invalid input syntax for type json",
+        detail='Token "err4032" is invalid.',
+        context="JSON data, line 1: err4032 release")
+
+    def _refuse_scope(conn, org_id):
+        raise refusal
+
+    monkeypatch.setattr(record_projection, "scope_connection", _refuse_scope)
+    writer = record_writer.RecordWriter(dsn="postgresql://u:p@db.example.com/db")
+
+    with pytest.raises(record_writer.RecordWriteError) as caught:
+        writer.write([_point_record("pt-err4032", "err4032 release")],
+                     org_id="org-t", graph_id="graph-t", conn=object(),
+                     position=False)
+
+    message = str(caught.value)
+    assert "invalid input syntax for type json" in message, (
+        f"the fault clause must survive the wrap: {message}"
+    )
+    assert "err4032 release" not in message, (
+        f"the live warning carried the driver's CONTEXT line: {message}"
+    )
+    assert "DETAIL:" not in message and "CONTEXT:" not in message, (
+        f"neither driver field belongs in the log: {message}"
     )
 
 

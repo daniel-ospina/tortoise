@@ -1164,9 +1164,22 @@ def _bounded_cause(exc: BaseException,
     which `invalid input syntax for type json` was absent). One number, in one
     place: `_failure_line` composes to it, so a line the projection composed
     reaches a log whole.
+
+    ⛔ AND A DRIVER'S TEXT IS NARROWED, NOT CARRIED (#10648 review P2). A raw
+    driver exception reaches this function by a second route — `replay()` composes
+    its own line for a STATEMENT failure, but `scope_connection()` runs before the
+    first statement, so its driver error propagates here untouched. On a driver
+    error ``str(exc)`` is the protocol's fields CONCATENATED, and the optional
+    `DETAIL`/`CONTEXT` fields quote the refused row (`Failing row contains (…)`)
+    or the fragment (`JSON data, line 1: …`). The same withhold therefore has to
+    hold at this seam, and it is applied by the SHAPE of the exception rather than
+    by its type: an exception carrying `diag`/`pgcode` is one of the driver's, and
+    only its primary message is kept (`record_projection._primary_message`). This
+    module's own errors are untouched — they are its own text, not a driver's.
     """
-    text = _bounded_text(str(exc), limit)
-    return text
+    if getattr(exc, "diag", None) is not None or getattr(exc, "pgcode", None):
+        return _bounded_text(record_projection._primary_message(exc), limit)
+    return _bounded_text(str(exc), limit)
 
 
 #: The payload fields a record's identity can live in, most specific first.

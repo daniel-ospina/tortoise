@@ -694,11 +694,18 @@ class RecordStatementError(RecordProjectionError):
     string) over five hours, and the deployment's own log could not name it.
 
     The message therefore carries, all of it derived from the statement that
-    actually ran rather than from a guess: the driver's own ``str(exc)``
-    verbatim, the statement's ordinal, its verb and table, and the columns it
-    wrote with their (bounded) values. ``str(exc)`` is the half that names the
-    FAULT (``invalid input syntax for type json``); the columns are the half that
-    names the SUBJECT. Neither alone answers "which column, which row, why".
+    actually ran rather than from a guess: the driver's own PRIMARY message
+    (:func:`_driver_fault` — its SQLSTATE and its terse ``M`` field, never the
+    ``DETAIL``/``CONTEXT`` fields that quote the refused row), the statement's
+    ordinal, its verb and table, and the columns it wrote with their (bounded)
+    values. The primary message is the half that names the FAULT (``invalid input
+    syntax for type json``); the columns are the half that names the SUBJECT.
+    Neither alone answers "which column, which row, why".
+
+    ⛔ ``str(exc)`` IS NOT CARRIED, on purpose (#10648 review P2): on a driver
+    error it is the protocol's fields CONCATENATED, so the value this line
+    withholds (`search_keys=<15 chars withheld>`) came back verbatim through the
+    driver's own `CONTEXT` clause. See :func:`_primary_message`.
 
     ⛔ THE LINE IS COMPOSED TO FIT THE WRAPPING CONSUMER'S BUDGET
     (:func:`_failure_line`), because `record_writer._bounded_cause` keeps the
@@ -5087,6 +5094,59 @@ def _bounded(text: str, limit: int) -> str:
     return f"{flat[:limit]}…({len(text)} chars)"
 
 
+def _primary_message(exc: BaseException) -> str:
+    """The driver's TERSE message — the protocol's ``M`` field, never ``D``/``W``.
+
+    ⛔ `str(exc)` ON A DRIVER ERROR IS NOT THE MESSAGE (#10648 review, P2). The
+    protocol carries a primary human-readable message (``M``: *"accurate but
+    terse (typically one line)"*) and two OPTIONAL fields that quote the DATA:
+    ``DETAIL`` (for `22P02`, the refused token; for a `CHECK` violation, the whole
+    row) and ``CONTEXT``/``W`` (the fragment being read). psycopg2 concatenates
+    them into ``str(exc)``, so interpolating it re-emitted the very value this
+    module's attribution half withholds — the line read
+    ``search_keys=<15 chars withheld> … err4032 release``.
+
+    The rule restored here is the one the sibling record module already records
+    and enforces (`record_backup._connection_failure`, #9601 review cycle 9):
+    carry the exception TYPE and the SQLSTATE, **never ``str(exc)``**, because a
+    driver's text reaches the log stream — and `hosted_api` states the same rule
+    twice for its own driver calls.
+
+    ``diag.message_primary`` is preferred where the driver exposes it (psycopg2's
+    `extensions.Diagnostics`, which also exposes the ``message_detail``/
+    ``context`` fields this function refuses); the first line of ``str(exc)`` is
+    the fallback, and is the same field for every driver that formats the
+    protocol's fields as lines. PostgreSQL notes a field may contain newlines and
+    should be read as paragraph breaks, so the head of the string is the close
+    equivalent when no structured accessor exists.
+    """
+    diag = getattr(exc, "diag", None)
+    primary = getattr(diag, "message_primary", None) if diag is not None else None
+    if primary:
+        return str(primary)
+    text = str(exc)
+    return text.splitlines()[0] if text else ""
+
+
+def _driver_fault(exc: BaseException) -> str:
+    """``<Type> [<SQLSTATE>]: <primary message>`` — the FAULT, never the row dump.
+
+    The half of a failure line a class name alone never carried (``InvalidText
+    Representation`` and nothing else is how 302 point rows were dropped without
+    the log naming a column) — reduced to what is safe to log: the driver's type,
+    its SQLSTATE and its terse message (:func:`_primary_message`).
+
+    The attribution half of the same line withholds `content`, `props` and
+    `search_keys` by name-and-length; carrying ``str(exc)`` here put those same
+    values back through the driver's `DETAIL`/`CONTEXT` fields, so the withhold
+    was true of each half and false of the line.
+    """
+    code = getattr(exc, "pgcode", None)
+    primary = _primary_message(exc)
+    name = type(exc).__name__ + (f" {code}" if code else "")
+    return f"{name}: {primary}" if primary else name
+
+
 def _column_pair(column: str, value: Any) -> str:
     """`column=value` for an identifying column, `column=<N chars>` for content.
 
@@ -5282,7 +5342,7 @@ def replay(records: Sequence[Mapping[str, Any]], conn: Any, *, org_id: str,
             raise RecordStatementError(
                 _failure_line(
                     _statement_attribution(statement, index, total),
-                    f"{type(exc).__name__}: {exc!s}",
+                    _driver_fault(exc),
                 )
             ) from exc
     report = ReplayReport(events=len(records), statements=0)
