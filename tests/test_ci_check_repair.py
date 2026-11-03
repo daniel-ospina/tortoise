@@ -1921,6 +1921,102 @@ def test_a_backlogged_queue_names_the_zero_job_run_but_never_repairs_it():
         "be a false statement in the instrument that exists to refuse them")
 
 
+def test_an_unmeasured_queue_never_authorises_the_cancel(monkeypatch, capsys, tmp_path):
+    """⭐ P1 (review): `bool(getattr(queue, "delays_pr", queue_starved))` read
+    SILENCE AS PERMISSION on a DESTRUCTIVE act.
+
+    `read_queue_health` returns `None` on ANY exception, and `delays_pr` is
+    `False`-by-design for the unmeasured verdicts (`UNKNOWN`, `PR-UNWITNESSED`, a
+    truncated feed). Folding either into the permissive branch meant the state where
+    congestion was NEVER MEASURED — positively correlated with the load that makes a
+    cancel harmful, since a queue read is refused under exactly that load — was the
+    state that switched cancel-then-rerun ON: an aged attempt-1 zero-job run is
+    cancelled and re-run, discarding its queue position and spending an attempt.
+
+    `job_count` distinguishes `None` from `0` one function away precisely so an
+    unreadable read can never authorise anything; the congestion sector of the same
+    decision now answers three-valued too.
+
+    Discriminating: pre-fix this summary shows `queue_congested: false` and run
+    41480218593 in `rerun`.
+    """
+    monkeypatch.setattr(R, "read_queue_health", lambda repo: None)
+    monkeypatch.setattr(R, "open_prs", lambda repo, include_drafts: [pr(1)])
+    monkeypatch.setattr(R, "check_runs_at", lambda repo, head: [])
+    monkeypatch.setattr(R, "runs_at_head", lambda repo, head: [
+        aged_run(41480218593, jobs=0, age_s=5700.0, path="ci.yml", name="CI")])
+
+    assert R.main(["--repo", "o/r", "--no-live", "--json",
+                   "--record", str(_flood_record(tmp_path))]) == 0
+    summary = json.loads(capsys.readouterr().out)
+    assert [d["run"] for d in summary["prs"][0]["no_verdict"]] == [41480218593], \
+        "it is still NAMED — refusing to act is not refusing to report"
+    assert summary["queue_congested"] is True, (
+        "an unmeasured queue must reach the gate as REFUSED, not as 'clear'")
+    assert summary["queue_congestion_measured"] is False, (
+        "the report must not claim a congestion reading it never took")
+    assert summary["prs"][0]["rerun"] == [], (
+        "silence is not permission: no cancel may be authorised by a queue nobody "
+        "read")
+
+
+def test_a_measured_clear_queue_still_authorises_the_cancel(monkeypatch, capsys,
+                                                            tmp_path):
+    """The other pole, so the fix is not a blanket refusal that would strand the class.
+
+    A MEASURED, uncut reading that found the queue clear is the state this repair was
+    written for, and there the cancel must still fire — otherwise the zero-job class
+    goes unrepairable and the fix trades one fail-open for a fail-shut.
+    """
+    from tools import ci_queue_health as Q
+
+    clear = Q.QueueHealth(
+        verdict=Q.OK, queued_total=0, in_progress_total=0, dominant_workflow=None,
+        dominant_queued=0, pr_running=0, pr_queued=0,
+        oldest_pr_queued_age_seconds=None)
+    assert clear.congests_pr is False, "the fixture must actually be a measured clear"
+
+    monkeypatch.setattr(R, "read_queue_health", lambda repo: clear)
+    monkeypatch.setattr(R, "open_prs", lambda repo, include_drafts: [pr(1)])
+    monkeypatch.setattr(R, "check_runs_at", lambda repo, head: [])
+    monkeypatch.setattr(R, "runs_at_head", lambda repo, head: [
+        aged_run(41480218593, jobs=0, age_s=5700.0, path="ci.yml", name="CI")])
+
+    assert R.main(["--repo", "o/r", "--no-live", "--json",
+                   "--record", str(_flood_record(tmp_path))]) == 0
+    summary = json.loads(capsys.readouterr().out)
+    assert summary["queue_congested"] is False
+    assert summary["queue_congestion_measured"] is True
+    assert [r["run"] for r in summary["prs"][0]["rerun"]] == [41480218593]
+
+
+def test_the_gate_refuses_every_unmeasured_queue_reading():
+    """The mapping itself, verdict by verdict, so no single state can regress alone."""
+    from tools import ci_queue_health as Q
+
+    def reading(verdict, **kw):
+        base = dict(verdict=verdict, queued_total=0, in_progress_total=0,
+                    dominant_workflow=None, dominant_queued=0, pr_running=0,
+                    pr_queued=0, oldest_pr_queued_age_seconds=None)
+        base.update(kw)
+        return Q.QueueHealth(**base)
+
+    assert R.queue_congestion_gate(None) is True, (
+        "a queue that was never read (or failed to read) refuses the act")
+    assert R.queue_congestion_gate(reading(Q.UNKNOWN)) is True
+    assert R.queue_congestion_gate(reading(Q.PR_UNWITNESSED)) is True
+    assert R.queue_congestion_gate(reading(Q.OK, truncated=True)) is True, (
+        "a NEWEST-FIRST feed cut at the page cap dropped the oldest queued runs — "
+        "exactly the ones the wait clause needs, so it cannot rule a backlog out")
+    assert R.queue_congestion_gate(object()) is True, (
+        "a reading that cannot answer the question at all is not a measured 'clear'")
+    # ...and the measured readings keep their answers.
+    assert R.queue_congestion_gate(reading(Q.OK)) is False
+    assert R.queue_congestion_gate(reading(Q.FLOOD)) is True
+    assert R.queue_congestion_gate(reading(Q.PR_STARVED)) is True
+    assert R.queue_congestion_gate(reading(Q.PR_BACKLOGGED)) is True
+
+
 def test_the_same_run_shared_by_two_contexts_is_named_once():
     runs = [aged_run(7, path="ci.yml", name="CI", jobs=0, age_s=5700.0)]
     plan = R.classify(pr(), [], runs, ["docs", "test-isolation"], EMITTERS, max_attempts=3)

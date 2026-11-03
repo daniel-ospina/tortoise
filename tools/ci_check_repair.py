@@ -895,6 +895,12 @@ def classify(pr: dict, checks: list[dict], all_runs: list[Run], required: list[s
     behind the queue rather than behind this run?". A cancel answers yes under either
     reading by discarding a queue position and adding load to the wait it is stuck
     in, so neither may authorise one.
+
+    ⛔ THE DEFAULT IS FOR CALLERS THAT DID NOT ASK THE QUESTION, NOT A LICENCE TO ACT.
+    `None` falls back to `queue_starved` for unit callers; the real entry point never
+    leaves it unanswered — `main()` maps an UNMEASURED queue (`None`, `UNKNOWN`,
+    `PR-UNWITNESSED`, a truncated feed, `--no-queue-health`) to `True` through
+    `queue_congestion_gate`, because on a destructive act silence is not permission.
     """
     plan = PrPlan(number=int(pr["number"]), head=pr["headRefOid"],
                   in_flight=sorted({r.name or r.path for r in all_runs
@@ -1418,11 +1424,16 @@ def build_plans(repo: str, required: list[str], emitters: dict[str, list[str]],
 def read_queue_health(repo: str):
     """The repo-level queue reading (#9115), or ``None`` when it cannot be read.
 
-    A failed queue read is NOT a verdict and NOT an outage of this tool: it
-    degrades the classification to exactly what it was before #9115 (a queued run
-    reads PENDING) and says so in the report. Inventing `flood=False` silently
-    would be the same fail-open in the opposite direction — a starved head
+    A failed queue read is NOT a verdict and NOT an outage of this tool: a queued run
+    reads PENDING and the report says the queue was not read. Inventing `flood=False`
+    silently would be the same fail-open in the opposite direction — a starved head
     reported as healthy — so `None` is threaded through and printed.
+
+    ⛔ ``None`` USED TO DEGRADE THE PASS TO EXACTLY ITS PRE-#9115 SELF, AND IT NO
+    LONGER DOES. Since the zero-job repair gained a DESTRUCTIVE step (cancel-then-
+    rerun), ``None`` also has to answer "is the queue congested?" — and it answers NO
+    MEASUREMENT, so the act is refused (`queue_congestion_gate`). A queue this tool
+    could not read never authorises a cancel.
     """
     try:
         root = str(Path(__file__).resolve().parent.parent)
@@ -1435,6 +1446,37 @@ def read_queue_health(repo: str):
         return ci_queue_health.read_health(repo)
     except Exception:  # a queue read must never fail the repair pass
         return None
+
+
+def queue_congestion_gate(queue) -> bool:
+    """May the DESTRUCTIVE repair act? An UNMEASURED queue answers NO.
+
+    The zero-job class is repaired by cancel-then-rerun, which discards the queue
+    position the run had reached and re-queues the replacement behind the same wait,
+    plus one attempt of the budget. That act is therefore gated on congestion, and a
+    gate is NOT a report: `QueueHealth.delays_pr` answers the reporting question and
+    reads ``False`` for an unmeasured queue on purpose, which is the fail-open
+    direction the moment it is consumed as permission.
+
+    This is the one place the three-valued `QueueHealth.congests_pr` is read, and the
+    mapping is the module's own polarity — *"an unmeasured wait is not a
+    measured-healthy one"* — applied to an ACT:
+
+      * ``None`` from the reading (NOT MEASURED: `UNKNOWN`, `PR-UNWITNESSED`, or any
+        verdict off a truncated newest-first feed) → ``True``, the act is refused;
+      * ``queue is None`` — the read never ran (`--no-queue-health`) or it failed
+        (`read_queue_health` returns ``None`` on any exception) → ``True``, for the
+        same reason;
+      * anything not provably ``False`` (including a reading that cannot answer the
+        question at all) → ``True``. Only a MEASURED clear queue lets the cancel run.
+
+    A report may say "starvation not witnessed" about an unread queue; a cancel may
+    not act on it. The two questions stay separate, exactly as `starves_pr` and
+    `delays_pr` are.
+    """
+    if queue is None:
+        return True
+    return getattr(queue, "congests_pr", None) is not False
 
 
 def report(plans: list[PrPlan], apply: bool, trigger_ok: bool, repo: str,
@@ -1742,7 +1784,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--no-live", action="store_true", help="skip the live protection read")
     ap.add_argument("--no-queue-health", action="store_true",
                     help="skip the repo-level queue read (#9115); a queued run then "
-                         "reads PENDING exactly as it did before, and the report says so")
+                         "reads PENDING, and because congestion is left UNMEASURED the "
+                         "destructive zero-job repair (cancel-then-rerun) is REFUSED "
+                         "for the pass — a cancel may not be authorised by a queue "
+                         "nobody read. The report says so (queue_congestion_measured)")
     ap.add_argument("--json", action="store_true")
     args = ap.parse_args(argv)
 
@@ -1796,7 +1841,15 @@ def main(argv: list[str] | None = None) -> int:
     # wait (the state this tool's own body cites: `CI: OK(queued=60, pr_running=2,
     # pr_queued=56)`). `delays_pr` is the truthful superset, so the destructive act is
     # suppressed by it while the report keeps naming `starved` from `starves_pr`.
-    queue_congested = bool(getattr(queue, "delays_pr", queue_starved))
+    # ⛔ AND SILENCE IS NOT PERMISSION. This used to be
+    # `bool(getattr(queue, "delays_pr", queue_starved))`, which reads an UNMEASURED
+    # queue (`None`, or `PR-UNWITNESSED`/`UNKNOWN`, or a truncated feed) as "clear" and
+    # switches the cancel ON in exactly the state that makes a cancel most harmful:
+    # a queue read is refused under the load a cancel would add to, and `delays_pr`
+    # is false-by-design for the unmeasured verdicts. `queue_congestion_gate` is the
+    # three-valued read (measured clear vs. NOT MEASURED) the act needs.
+    congestion = None if queue is None else getattr(queue, "congests_pr", None)
+    queue_congested = queue_congestion_gate(queue)
     try:
         required = resolve_required(args.repo, record_path, live=not args.no_live)
         emitters = emitters_from_record(record_path)
@@ -1839,6 +1892,12 @@ def main(argv: list[str] | None = None) -> int:
         # `queue_starved: false` next to a plan that was not repaired, and the reason
         # would be invisible.
         "queue_congested": bool(queue_congested),
+        # ...and WHY it was suppressed. `false` = a MEASURED, uncut queue reading found
+        # the queue clear (the only state in which a cancel is allowed); `true` =
+        # congestion was never measured (`UNKNOWN`, `PR-UNWITNESSED`, a truncated feed,
+        # a failed read, or `--no-queue-health`) and the act was REFUSED rather than
+        # authorised by silence.
+        "queue_congestion_measured": congestion is not None,
         # Starved contexts are NOT "needing repair" — no per-PR repair can create a
         # runner slot — so they are counted separately rather than inflating a
         # number whose whole meaning is "a repair will be attempted".

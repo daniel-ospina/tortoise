@@ -1065,6 +1065,52 @@ def test_delays_pr_is_the_superset_a_per_pr_repair_must_ask():
         "not running about a repo where it demonstrably is")
 
 
+def test_congests_pr_is_three_valued_so_a_cancel_cannot_consume_silence():
+    """⭐ P1 (review): the REPORT's two-valued polarity is the wrong one for a GATE.
+
+    `delays_pr` reads `False` for an unmeasured queue, and for a state line that is
+    right — no instrument should claim a congestion it did not read. But
+    `tools/ci_check_repair.py` consumes a congestion flag to decide whether to CANCEL a
+    queued run and re-run it, which discards the queue position the run had reached and
+    spends an attempt of its budget. On that question "never measured" must NOT read
+    as "clear": that is the same fail-open `Run.job_count` refuses one function away by
+    keeping `None` distinct from `0`.
+
+    So `congests_pr` is `True`/`False`/`None` — and `None` (unmeasured) is what makes the
+    gate refuse, while `delays_pr` keeps its two-valued reporting polarity untouched.
+    """
+    flood = classify(flood_queued(12) + starving_pr_runs(9))
+    assert flood.verdict == Q.FLOOD
+    assert flood.congests_pr is True and flood.delays_pr is True
+
+    backlogged = classify(starving_pr_runs(20, age_seconds=9000),
+                          in_progress=serving_pr_runs(1))
+    assert backlogged.verdict == Q.PR_BACKLOGGED
+    assert backlogged.congests_pr is True
+
+    clear = classify(flood_queued(4))
+    assert clear.verdict == Q.OK
+    assert clear.congests_pr is False, "a MEASURED clear queue is the only 'False'"
+    assert clear.delays_pr is False
+
+    # UNMEASURED: never a 'False'. `delays_pr` stays False here by design (the report
+    # does not claim what it did not read); the gate reads `None`.
+    unknown = Q.QueueHealth(
+        verdict=Q.UNKNOWN, queued_total=0, in_progress_total=0,
+        dominant_workflow=None, dominant_queued=0, pr_running=0, pr_queued=0,
+        oldest_pr_queued_age_seconds=None,
+    )
+    assert unknown.congests_pr is None and unknown.delays_pr is False
+    assert unknown.to_dict()["congests_pr"] is None, (
+        "the JSON emit must carry the abstention, not a fabricated false")
+
+    # A truncated feed drops the OLDEST runs (newest-first), i.e. exactly the ones the
+    # wait clause needs — so even an `OK` off it cannot rule a backlog out.
+    cut = classify(flood_queued(4), truncated=True)
+    assert cut.congests_pr is None, (
+        "a capped feed is not a measured-clear queue, even though it reads healthy")
+
+
 def test_a_pr_backlog_inside_the_wait_budget_is_ok():
     """The false-alarm bound: a busy queue that starts PR work promptly is healthy."""
     health = classify(starving_pr_runs(20, age_seconds=1800),
