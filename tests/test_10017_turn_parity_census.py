@@ -21,6 +21,7 @@ row the store returns). An unpinned door is exactly how an unscoped read
 from __future__ import annotations
 
 import ast
+import json
 import sys
 import types
 from pathlib import Path
@@ -61,6 +62,38 @@ def _record_row(tid: str, **over) -> dict:
     }
     row.update(over)
     return row
+
+
+@pytest.mark.parametrize("graph_over,record_over,field", [
+    # ⛔ THE P0 SHAPE OF THE EXACT-FIELD `None` POLARITY (review P2, measured).
+    # A record row PRESENT with a NULL transcript against a graph turn that
+    # holds text is NOT parity: the row has the right key and no text, so a
+    # delete destroys the only copy. The mutation that makes it fail open is
+    # `gval is None **or** rval is None -> continue`, which kept all 94 tests
+    # green — none of the five field-mismatch cases carries a `None` on one
+    # side. Only `graph None AND record None` may be skipped.
+    ({"content": "[user] SECRET REAL TEXT"}, {"content": None}, "text"),
+    ({"speaker": "assistant"}, {"speaker": None}, "speaker"),
+])
+def test_a_record_row_PRESENT_with_a_NULL_field_is_a_mismatch_not_parity(
+        graph_over, record_over, field):
+    nodes = {"s1_t0": _graph_node("s1_t0", "s1", **graph_over)}
+    rows = {"s1_t0": _record_row("s1_t0", **record_over)}
+    report = _census(nodes, rows)
+    assert report["verdict"] == "REFUSED"
+    assert _problems(report, "s1")[0]["field"] == field
+    assert _problems(report, "s1")[0]["problem"] == "field_mismatch"
+
+
+def test_the_exact_fields_skip_ONLY_when_BOTH_sides_are_None():
+    """The other half of the polarity above: `None` on BOTH sides is a real
+    match (a turn that carried nothing), and must keep passing — so the pin
+    above cannot be satisfied by refusing every `None`."""
+    nodes = {"s1_t0": _graph_node("s1_t0", "s1", content=None, speaker=None)}
+    rows = {"s1_t0": _record_row("s1_t0", content=None, speaker=None)}
+    report = _census(nodes, rows)
+    assert report["verdict"] == "CLEAN"
+    assert _problems(report, "s1") == []
 
 
 def _stores(nodes: dict[str, dict], rows: dict[str, dict]) -> tuple[dict, dict]:
@@ -342,12 +375,46 @@ def test_missing_tenant_refuses_to_guess(monkeypatch):
 
 
 def test_unreadable_side_exits_three_never_zero(monkeypatch, tmp_path):
-    """The P0 shape: an unreadable record must not certify parity vacuously."""
+    """The P0 shape: an unreadable record must not certify parity vacuously.
+
+    ⛔ THE AXIS IS THE RECORD, NOT THE GRAPH (review observation, fixed here).
+    With an EMPTY stub graph this passed for the wrong reason: the zero-node
+    guard returns 3 before the record leg is ever opened, so a record that
+    raises was never reached and the docstring named an axis the body did not
+    exercise. The graph now holds one turn, so the only path to exit 3 is the
+    raising record read — asserted below rather than assumed.
+    """
+    calls = []
+
     def boom(*a, **k):
+        calls.append(a)
         raise tpc.CensusError("the record could not be opened")
-    monkeypatch.setattr(tpc, "read_graph_turns", lambda *a, **k: {"nodes": {}})
+    monkeypatch.setattr(tpc, "read_graph_turns", lambda *a, **k: {
+        "nodes": {"s1_t0": _graph_node("s1_t0", "s1")}})
     monkeypatch.setattr(tpc, "read_record_turns", boom)
     assert tpc.main(_argv()) == 3
+    assert calls, "the RECORD leg was never opened — exit 3 came from elsewhere"
+
+
+def test_graph_name_help_names_the_graph_leg_only(capsys):
+    """A flag's help must not claim a scope the code does not have (review P3).
+
+    `--graph-name` is passed to `read_graph_turns` only — the record tenant is
+    `--org-id`/`--graph-id` — while the argparse help read "applies to BOTH
+    legs", contradicting the module contract at the same head. The help is the
+    stale half, so it is pinned here against the real parser output rather than
+    the docstring: on the pre-fix string this fails on `BOTH legs`.
+    """
+    with pytest.raises(SystemExit) as exc:
+        tpc.main(["--help"])
+    assert exc.value.code == 0
+    text = capsys.readouterr().out
+    at = text.index("  --graph-name")
+    rest = text[at + 1:]
+    block = " ".join(rest[:rest.index("\n  --")].split())
+    assert "BOTH legs" not in block
+    assert "GRAPH leg only" in block
+    assert "--org-id/--graph-id" in block
 
 
 def test_main_maps_clean_to_zero_and_refused_to_two(monkeypatch, tmp_path):
@@ -616,9 +683,12 @@ class _PagedG:
         return _R(page)
 
 
-def _turn_row(inner_id: int, tid: str, sid: str) -> list:
+def _turn_row(inner_id: int, tid: str, sid: str, et=None) -> list:
+    # 11 columns: the 10 the census has always read, plus `t.embeddingText`
+    # (#8488). Two spellings of the row shape is how the enriched column would
+    # silently drop out of the read (review cycle 4, P2).
     return [inner_id, tid, f"[user] body of {tid}", "user", "draft",
-            "2026-10-25T00:00:00+00:00", "event", None, False, [sid]]
+            "2026-10-25T00:00:00+00:00", "event", None, False, [sid], et]
 
 
 def _patch_proj(monkeypatch, g):
@@ -1056,3 +1126,1268 @@ def test_a_generator_key_set_is_consumed_exactly_once(monkeypatch):
 
     assert "s1_t0" in out["rows_by_key"]
     assert calls["params"][2] == ["s1_t0"]
+
+
+# ── the LOCAL record leg (owner ruling 2026-11-01: the local JSONL IS the
+#    authority while hosted setup is postponed) ───────────────────────────────
+
+def _local_record(tmp_path, sessions: dict[str, list[dict]],
+                  name: str = "2026-11-02.jsonl") -> Path:
+    """One day-addressed capture-log file, shaped exactly as the real one."""
+    path = tmp_path / name
+    lines = []
+    for sid, conversation in sessions.items():
+        lines.append(json.dumps({
+            "session_id": sid,
+            "conversation": conversation,
+            "metadata": {"capturedAt": "2026-11-02T00:00:00Z"},
+            "harness": "pi", "machine_id": "m", "model": "x",
+        }))
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return path
+
+
+def _conversation(*turns):
+    return [{"role": role, "content": text} for role, text in turns]
+
+
+def test_the_local_leg_keys_by_position_and_uses_the_writers_own_frame(
+        tmp_path):
+    """`entry i` IS `t<i>`, and the text is the WRITER's frame, not a copy."""
+    _local_record(tmp_path, {"s1": _conversation(("user", "hi"),
+                                                 ("assistant", "yes"))})
+    record = tpc.read_local_record_turns(tmp_path)
+    assert sorted(record["rows_by_key"]) == ["s1_t0", "s1_t1"]
+    assert record["rows_by_key"]["s1_t0"]["content"] == "[user] hi"
+    assert record["rows_by_key"]["s1_t1"]["speaker"] == "assistant"
+    # The one declaration this leg makes, stated by name and never faked.
+    assert record["declared_absent"] == ["status", "created_at",
+                                        "point_kind", "embedding"]
+
+
+def test_local_parity_passes_when_the_record_holds_every_turn(tmp_path):
+    _local_record(tmp_path, {"s1": _conversation(("user", "hi"),
+                                                 ("assistant", "yes"))})
+    record = tpc.read_local_record_turns(tmp_path)
+    nodes = {"s1_t0": _graph_node("s1_t0", "s1", content="[user] hi"),
+             "s1_t1": _graph_node("s1_t1", "s1", content="[assistant] yes",
+                                  speaker="assistant")}
+    report = tpc.census({"nodes": nodes}, record, sample=5)
+    assert report["verdict"] == "CLEAN"
+    assert report["dry_run"]["would_delete_turn_nodes"] == 2
+    # The weaker comparison is VISIBLE in the artifact, never a silent pass.
+    assert report["declared_absent"] == ["created_at", "embedding",
+                                         "point_kind", "status"]
+    assert report["compared_fields"] == ["key", "content", "speaker"]
+    # WHICH authority produced this verdict is in the artifact (review P2).
+    assert report["record"]["leg"] == "local"
+    assert report["record"]["dir"].endswith(str(tmp_path.resolve())[-8:])
+
+
+def test_a_record_may_not_declare_the_transcript_absent():
+    """`content`/`speaker` ARE the transcript — declining them is not a leg."""
+    record = {"rows_by_key": {"s1_t0": _record_row("s1_t0")},
+              "non_turn_shaped": 0, "declared_absent": ["content"]}
+    with pytest.raises(tpc.CensusError, match="IS the transcript"):
+        tpc.census({"nodes": {"s1_t0": _graph_node("s1_t0", "s1")}}, record,
+                   sample=5)
+
+
+def test_local_parity_refuses_a_turn_the_record_does_not_hold(tmp_path):
+    """A graph turn with no local entry is the backfill case, never a delete."""
+    _local_record(tmp_path, {"s1": _conversation(("user", "hi"))})
+    record = tpc.read_local_record_turns(tmp_path)
+    nodes = {"s1_t0": _graph_node("s1_t0", "s1", content="[user] hi"),
+             "s1_t1": _graph_node("s1_t1", "s1", content="[user] second")}
+    report = tpc.census({"nodes": nodes}, record, sample=5)
+    assert report["verdict"] == "REFUSED"
+    assert report["dry_run"]["would_delete_turn_nodes"] == 0
+    assert [p["problem"] for p in _problems(report, "s1")] == \
+        ["missing_in_record"]
+
+
+def test_a_shifted_window_mismatches_on_text_and_never_certifies(tmp_path):
+    """A re-capture that prepends a turn shifts every index — it must FAIL."""
+    _local_record(tmp_path, {"s1": _conversation(("user", "EXTRA"),
+                                                 ("user", "hi"))})
+    record = tpc.read_local_record_turns(tmp_path)
+    nodes = {"s1_t0": _graph_node("s1_t0", "s1", content="[user] hi")}
+    report = tpc.census({"nodes": nodes}, record, sample=5)
+    assert report["verdict"] == "REFUSED"
+    assert _problems(report, "s1")[0]["field"] == "text"
+
+
+def test_an_interior_unparsable_line_is_DROPPED_disclosed_and_still_FAILS_CLOSED(
+        tmp_path):
+    """Review P1: dropping the line is fail-closed; refusing the LEG was not.
+
+    The old posture refused the whole read, and on the authority store it was
+    measured against (ten lost-newline merges) that meant #10017's gate could
+    never open — an instrument that answers nothing is not a guard. The
+    replacement must satisfy BOTH halves, and this pin asserts both, because
+    the disclosure alone is not a safety property:
+
+      (a) the line is dropped, NAMED in `unparsable_lines`, and the readable
+          sessions of the same record still read; and
+      (b) a graph turn for the session the dropped line described is
+          `missing_in_record` -> REFUSED. That is what makes the drop safe,
+          and it holds because the POPULATION COMES FROM THE GRAPH.
+    """
+    _local_record(tmp_path, {"s1": _conversation(("user", "hi"))},
+                  name="2026-11-01.jsonl")
+    bad = tmp_path / "2026-11-02.jsonl"
+    good = json.dumps({"session_id": "s3",
+                       "conversation": _conversation(("user", "x"))})
+    # `s2`'s record lost its newline, so it merged into `s3`'s line.
+    bad.write_text('{"session_id": "s2", "conversation": [{"role": "user",\n'
+                   + good + "\n", encoding="utf-8")
+    record = tpc.read_local_record_turns(tmp_path)
+    # `s1` and `s3` are readable; only the truncated `s2` line was dropped.
+    assert list(record["rows_by_key"]) == ["s1_t0", "s3_t0"]
+    assert record["torn_tail"] == []
+    assert [b["at"] for b in record["unparsable_lines"]] == [
+        "2026-11-02.jsonl:1"]
+
+    # (b) the fail-closed consequence: s2 has turns in the graph, its record
+    # line was dropped, so the session is missing_in_record -> REFUSED. A drop
+    # can never reach CLEAN over a turn the graph holds.
+    nodes = {"s2_t0": _graph_node("s2_t0", "s2", content="[user] lost")}
+    report = tpc.census({"nodes": nodes}, record, sample=5)
+    assert report["verdict"] == "REFUSED"
+    assert "missing_in_record" in [p["problem"] for p in _problems(report, "s2")]
+
+
+def test_a_dropped_interior_line_is_never_PARTIALLY_recovered(tmp_path):
+    """The parseable half of a merged line is NOT used.
+
+    A lost newline between two concurrent appends produces ONE line holding two
+    session records: the leading one is truncated and the trailing one parses.
+    Recovering that trailing record would certify a session whose sibling
+    record was lost — a false pass — so the whole line is dropped, and BOTH
+    sessions are then absent (the graph's copy is what decides them).
+    """
+    # A SETTLED day, so this is corruption and not the tolerance-able tail.
+    # `s2`'s record lost its newline, so it merged into `s3`'s line: TWO
+    # records on ONE line, the leading one truncated and the trailing one
+    # perfectly parseable.
+    truncated = '{"session_id": "s2", "conversation": [{"role": "user"'
+    trailing = json.dumps({"session_id": "s3",
+                           "conversation": _conversation(("user", "b"))})
+    merged = truncated + trailing
+    (tmp_path / "2026-11-01.jsonl").write_text(merged + "\n", encoding="utf-8")
+    _local_record(tmp_path, {"s1": _conversation(("user", "hi"))})
+    record = tpc.read_local_record_turns(tmp_path)
+    # NEITHER half is recovered: not the truncated `s2`, and not the
+    # parseable `s3` that shares its line.
+    assert list(record["rows_by_key"]) == ["s1_t0"]
+    assert len(record["unparsable_lines"]) == 1
+    assert record["unparsable_lines"][0]["at"] == "2026-11-01.jsonl:1"
+
+
+def test_a_torn_tail_is_COUNTED_and_reported_never_silently_dropped(tmp_path):
+    path = _local_record(tmp_path, {"s1": _conversation(("user", "hi"))})
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write('{"session_id": "s2", "conversa')  # mid-write, no newline
+    record = tpc.read_local_record_turns(tmp_path)
+    assert list(record["rows_by_key"]) == ["s1_t0"]
+    assert len(record["torn_tail"]) == 1
+    assert record["torn_tail"][0]["at"] == "2026-11-02.jsonl:2"
+
+
+def test_an_interior_torn_line_in_the_NEWEST_file_is_dropped_not_a_tail(
+        tmp_path):
+    """Tail tolerance is the LAST line only — not every line of that file.
+
+    An interior unparsable line is now DROPPED and named (review P1) rather than
+    refusing the leg, but the distinction the old pin drew is still held: it is
+    NOT a `torn_tail`, so the artifact never calls corruption a mid-write tip.
+    """
+    _local_record(tmp_path, {"s1": _conversation(("user", "hi"))},
+                  name="2026-11-01.jsonl")
+    newest = tmp_path / "2026-11-02.jsonl"
+    newest.write_text('{"session_id": "s2", "conversa\n'
+                      '{"session_id": "s3", "conversation": []}\n',
+                      encoding="utf-8")
+    record = tpc.read_local_record_turns(tmp_path)
+    assert record["torn_tail"] == []
+    assert [b["at"] for b in record["unparsable_lines"]] == [
+        "2026-11-02.jsonl:1"]
+
+
+def test_a_duplicated_session_is_HELD_BACK_not_a_whole_record_refusal(
+        tmp_path):
+    """Review P2: one resumed session must not gate the WHOLE census.
+
+    Two windows for one session cannot be placed positionally — but that is a
+    RECOGNISED state (`tools/build_window_transcript.py` refuses it by name, and
+    #3870 forbids deleting the record lines that would clear it), so refusing
+    the entire population made the gate unopenable over ONE resumed session with
+    no legitimate exit. It is held back into its own partition instead.
+
+    Mutation that goes RED here: restoring the whole-record `raise` (the leg
+    would never return, so the assertions below cannot run).
+    """
+    _local_record(tmp_path, {"s1": _conversation(("user", "a"))},
+                  name="2026-11-01.jsonl")
+    _local_record(tmp_path, {"s1": _conversation(("user", "b")),
+                            "s2": _conversation(("user", "c"))},
+                  name="2026-11-02.jsonl")
+    record = tpc.read_local_record_turns(tmp_path)
+    # The duplicated session leaves the positional key space…
+    assert sorted(record["rows_by_key"]) == ["s2_t0"]
+    # …and is DISCLOSED, with the window count, rather than silently dropped.
+    assert record["duplicate_window"] == [{"session": "s1", "windows": 2}]
+    assert record["sessions"] == 1
+
+
+def test_a_duplicated_session_the_graph_holds_REFUSES_by_name(tmp_path):
+    """…and when the graph really holds its turns, the cause is the DUPLICATE.
+
+    Reported as `duplicate_window`, never as `missing_in_record`: the latter
+    points the operator at a graph/backfill, which would write the wrong
+    window's turns into the record under keys that do not describe them.
+
+    Mutation that goes RED here: dropping the `held_duplicates` arm (the turns
+    then surface as `missing_in_record`).
+    """
+    _local_record(tmp_path, {"s1": _conversation(("user", "a"))},
+                  name="2026-11-01.jsonl")
+    _local_record(tmp_path, {"s1": _conversation(("user", "a"))},
+                  name="2026-11-02.jsonl")
+    record = tpc.read_local_record_turns(tmp_path)
+    nodes = {"s1_t0": _graph_node("s1_t0", "s1", content="[user] a")}
+    report = tpc.census({"nodes": nodes}, record, sample=5)
+    assert report["verdict"] == "REFUSED"
+    assert report["refused_for"] == ["duplicate_window"]
+    problem = _problems(report, "s1")[0]
+    assert problem["problem"] == "duplicate_window"
+    assert "NOT a graph/backfill gap" in problem["detail"]
+    # The graph's turn is IN the delete set but NOT eligible: a REFUSED run must
+    # never read as "there is nothing to delete".
+    assert report["dry_run"]["would_delete_turn_nodes"] == 0
+    assert report["dry_run"]["held_back_turn_nodes"] == 1
+    assert report["record"]["duplicate_window"] == [
+        {"session": "s1", "windows": 2, "graph_turn_nodes": 1}]
+    # ⛔ NO SYNTHETIC NODE ID (review P2). `node` is what every consumer treats
+    # as a turn id — `purge_legacy_turns.classify_sessions` collects it into
+    # `sample_ids` — so a placeholder like `s1_t*` names a node nothing can
+    # resolve. Mutation that goes RED here: `"node": f"{sid}_t*"`.
+    assert problem["node"] is None
+
+
+def test_the_duplicate_refusal_reaches_the_consumer_as_DUPLICATE_WINDOW(
+        tmp_path):
+    """The census's own warning must survive into the plan's classification.
+
+    `classify_sessions` used to fall through to MISMATCH ("the record holds a
+    DIFFERENT transcript"), which INVERTS this arm's advice — the remedy for
+    MISMATCH is a field repair and for RECORD-BEHIND a backfill, and both write
+    the wrong window over a duplicate. This drives the REAL census report into
+    the REAL classifier, so it cannot pass on a hand-built fixture.
+
+    Mutations that go RED here: `"node": f"{sid}_t*"` (a fabricated id reaches
+    `sample_ids`), and deleting the `duplicate` branch in `classify_sessions`.
+    """
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
+    import purge_legacy_turns as purge
+
+    _local_record(tmp_path, {"s1": _conversation(("user", "a"))},
+                  name="2026-11-01.jsonl")
+    _local_record(tmp_path, {"s1": _conversation(("user", "a"))},
+                  name="2026-11-02.jsonl")
+    record = tpc.read_local_record_turns(tmp_path)
+    nodes = {"s1_t0": _graph_node("s1_t0", "s1", content="[user] a")}
+    report = tpc.census({"nodes": nodes}, record, sample=5)
+    assert report["verdict"] == "REFUSED"
+
+    out = purge.classify_sessions(report)
+    assert out["eligible"] == []
+    entry = next(e for e in out["excluded"] if e["session"] == "s1")
+    assert entry["class"] == purge.CLASS_DUPLICATE_WINDOW
+    # The fabricated placeholder is GONE from the surface a consumer reads.
+    assert entry["sample_ids"] == []
+    assert out["counts"][purge.CLASS_DUPLICATE_WINDOW] == 1
+    assert out["counts"][purge.CLASS_MISMATCH] == 0
+
+
+def test_a_duplicated_session_with_NO_graph_turn_does_NOT_block_the_census(
+        tmp_path):
+    """A refusal with no repair path is not a guard: a duplicate no graph node
+    needs placed stays disclosed, and the census still reaches CLEAN."""
+    _local_record(tmp_path, {"s_dup": _conversation(("user", "a"))},
+                  name="2026-11-01.jsonl")
+    _local_record(tmp_path, {"s_dup": _conversation(("user", "a")),
+                            "s1": _conversation(("user", "hi"))},
+                  name="2026-11-02.jsonl")
+    record = tpc.read_local_record_turns(tmp_path)
+    nodes = {"s1_t0": _graph_node("s1_t0", "s1", content="[user] hi")}
+    report = tpc.census({"nodes": nodes}, record, sample=5)
+    assert report["verdict"] == "CLEAN"
+    assert report["record"]["duplicate_window"] == [
+        {"session": "s_dup", "windows": 2, "graph_turn_nodes": 0}]
+
+
+def test_an_empty_or_absent_local_record_refuses(tmp_path):
+    with pytest.raises(tpc.CensusError, match="the local record is"):
+        tpc.read_local_record_turns(tmp_path)
+    with pytest.raises(tpc.CensusError, match="does not exist"):
+        tpc.read_local_record_turns(tmp_path / "nope")
+
+
+def test_an_EMPTY_local_record_dir_never_falls_back_to_the_hosted_leg(
+        tmp_path, monkeypatch, capsys):
+    """Review P2: `--local-record-dir "$UNSET_VAR"` is a SET-BUT-EMPTY flag
+    value, not an absent one — the empty-vs-unset distinction every CLI
+    convention (and `os.LookupEnv` / `${VAR-}` vs `${VAR:-}`) exists to keep.
+
+    Truthiness sent it down the hosted branch, so an ambient
+    `TORTOISE_RECORD_DSN` — the store the 2026-11-01 ruling says is NOT the
+    authority — was measured instead, and could exit 0 CLEAN over it.
+
+    Mutation that goes RED here: restoring `if args.local_record_dir:` (the run
+    then reaches the graph guard / the hosted leg and exits 3, not 1).
+    """
+    monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://x/y")
+    monkeypatch.setenv("TORTOISE_RECORD_ORG_ID", "o")
+    monkeypatch.setenv("TORTOISE_RECORD_GRAPH_ID", "g")
+    code = tpc.main(["--db-path", str(tmp_path / "g.db"),
+                     "--local-record-dir", ""])
+    assert code == 1
+    err = capsys.readouterr().err
+    assert "EMPTY" in err
+    assert "NOT the authority" in err
+    # Whitespace-only is the same state: no path is being named.
+    assert tpc.main(["--db-path", str(tmp_path / "g.db"),
+                     "--local-record-dir", "   "]) == 1
+
+
+def test_an_EMPTY_record_dsn_never_falls_back_to_the_AMBIENT_one(
+        tmp_path, monkeypatch, capsys):
+    """Review P1: the SAME empty-vs-unset rule the local flag already had.
+
+    `--record-dsn "$UNSET_VAR"` is a SET-BUT-EMPTY value. `args.record_dsn or
+    os.environ.get(...)` treated it as absent, so an ambient
+    `TORTOISE_RECORD_DSN` (a drill/scratch/stale record, `docs/infra-runbook.md`
+    treats that as a real category) was measured under the OPERATOR'S OWN
+    tenant and could exit 0 CLEAN over a store they never named.
+
+    Mutation that goes RED here: restoring `args.record_dsn or os.environ.get(`
+    (the run then takes the hosted leg and exits 3 at the unreachable graph,
+    not 1 at the flag).
+    """
+    monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://ambient/db")
+    code = tpc.main(["--db-path", str(tmp_path / "g.db"),
+                     "--record-dsn", "",
+                     "--org-id", "o", "--graph-id", "g"])
+    assert code == 1
+    err = capsys.readouterr().err
+    assert "EMPTY" in err
+    assert "TORTOISE_RECORD_DSN" in err
+    # Whitespace-only is the same state: no store is being named.
+    assert tpc.main(["--db-path", str(tmp_path / "g.db"),
+                     "--record-dsn", "   ",
+                     "--org-id", "o", "--graph-id", "g"]) == 1
+    # …and an ABSENT flag still honours the documented ambient default.
+    assert tpc.main(["--db-path", str(tmp_path / "g.db"),
+                     "--org-id", "o", "--graph-id", "g"]) != 1
+
+
+def test_the_local_leg_reads_only_the_keys_it_was_asked_for(tmp_path):
+    _local_record(tmp_path, {"s1": _conversation(("user", "a"),
+                                                 ("user", "b"))})
+    record = tpc.read_local_record_turns(tmp_path, node_keys={"s1_t1"})
+    assert list(record["rows_by_key"]) == ["s1_t1"]
+
+
+def test_the_cli_refuses_an_explicitly_ambiguous_record_choice(tmp_path):
+    """Two record legs is not a preference — it is a wrong-authority risk."""
+    code = tpc.main(["--db-path", str(tmp_path / "g.db"),
+                     "--record-dsn", "postgresql://x/y",
+                     "--org-id", "o", "--graph-id", "g",
+                     "--local-record-dir", str(tmp_path)])
+    assert code == 1
+
+
+def test_an_AMBIENT_record_dsn_does_not_block_the_local_leg(tmp_path,
+                                                            monkeypatch):
+    """Review P1: the flag must work on a box that exports the documented DSN."""
+    monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://x/y")
+    monkeypatch.delenv("TORTOISE_RECORD_ORG_ID", raising=False)
+    monkeypatch.delenv("TORTOISE_RECORD_GRAPH_ID", raising=False)
+    _local_record(tmp_path, {"s1": _conversation(("user", "hi"))})
+    # The graph side is unreachable here, so the leg is reached (exit 3);
+    # what matters is that it is NOT the usage refusal (exit 1).
+    assert tpc.main(["--db-path", str(tmp_path / "g.db"),
+                     "--local-record-dir", str(tmp_path)]) == 3
+
+
+def test_a_sealed_archive_day_is_read_not_silently_invisible(tmp_path):
+    """Review P1: the seal MOVES old days to archive/<day>.jsonl.gz."""
+    import gzip
+    archive = tmp_path / "archive"
+    archive.mkdir()
+    sealed = {"session_id": "s_old",
+              "conversation": _conversation(("user", "old hi"))}
+    (archive / "2026-10-01.jsonl.gz").write_bytes(
+        gzip.compress((json.dumps(sealed) + "\n").encode()))
+    _local_record(tmp_path, {"s_new": _conversation(("user", "new hi"))})
+    record = tpc.read_local_record_turns(tmp_path)
+    assert sorted(record["rows_by_key"]) == ["s_new_t0", "s_old_t0"]
+    assert record["files"] == ["2026-11-02.jsonl",
+                              "archive/2026-10-01.jsonl.gz"]
+
+
+def test_both_shapes_in_both_directories_are_read_not_just_two(tmp_path):
+    """Review P2: the local record is FOUR surfaces, not two.
+
+    The substrate's own enumerator reads both shapes in both directories
+    (`session_events_drain._candidate_files`: `for directory in (root /
+    "archive", root)`), because a plain file under `archive/` and a `.gz` left in
+    `root` are both readable substrates. This leg read only
+    `root/*.jsonl` + `archive/*.jsonl.gz`, so the other two were dropped
+    without a diagnostic while `files` reported itself as the coverage.
+    """
+    import gzip
+
+    def _gz(path, sid):
+        path.write_bytes(gzip.compress(
+            (json.dumps({"session_id": sid,
+                         "conversation": _conversation(("user", sid))})
+             + "\n").encode()))
+
+    archive = tmp_path / "archive"
+    archive.mkdir()
+    _local_record(tmp_path, {"s_plain_root": _conversation(("user", "a"))},
+                  name="2026-11-02.jsonl")
+    _gz(tmp_path / "2026-11-01.jsonl.gz", "s_gz_root")
+    _local_record(tmp_path,
+                  {"s_plain_archive": _conversation(("user", "c"))},
+                  name="archive/2026-10-31.jsonl")
+    _gz(archive / "2026-10-30.jsonl.gz", "s_gz_archive")
+
+    record = tpc.read_local_record_turns(tmp_path)
+
+    assert sorted(record["rows_by_key"]) == [
+        "s_gz_archive_t0", "s_gz_root_t0",
+        "s_plain_archive_t0", "s_plain_root_t0"]
+    assert record["files"] == [
+        "2026-11-01.jsonl.gz", "2026-11-02.jsonl",
+        "archive/2026-10-30.jsonl.gz", "archive/2026-10-31.jsonl"]
+
+
+def test_a_day_in_both_shapes_with_the_same_session_is_HELD_BACK(tmp_path):
+    """A sealed `.gz` plus a re-created plain file is read once per shape, as
+    the drain reads it — and where their session ids OVERLAP the leg cannot tell
+    which window is `t0`, so the session is held back (never merged, never
+    picked) instead of refusing the whole record (review P2)."""
+    import gzip
+    archive = tmp_path / "archive"
+    archive.mkdir()
+    same = {"session_id": "s1",
+            "conversation": _conversation(("user", "hi")),
+            "metadata": {"capturedAt": "2026-10-01T00:00:00Z"}}
+    _local_record(tmp_path, {"s1": same["conversation"]},
+                  name="2026-10-01.jsonl")
+    (archive / "2026-10-01.jsonl.gz").write_bytes(
+        gzip.compress((json.dumps(same) + "\n").encode()))
+
+    record = tpc.read_local_record_turns(tmp_path)
+    assert record["rows_by_key"] == {}
+    assert record["duplicate_window"] == [{"session": "s1", "windows": 2}]
+
+
+def test_a_corrupt_archive_refuses_rather_than_hiding_a_session(tmp_path):
+    archive = tmp_path / "archive"
+    archive.mkdir()
+    (archive / "2026-10-01.jsonl.gz").write_bytes(b"not gzip")
+    with pytest.raises(tpc.CensusError, match="could not be read"):
+        tpc.read_local_record_turns(tmp_path)
+
+
+def test_a_turn_past_the_capture_cap_uses_the_writers_clipped_text(tmp_path):
+    """Review P2: the WINDOW half of the stored-text rule must be pinned."""
+    from tortoise.sdk import _capture_turn_texts_with_redactions
+    long_body = "x" * 6001
+    conversation = _conversation(("user", long_body))
+    _local_record(tmp_path, {"s1": conversation})
+    record = tpc.read_local_record_turns(tmp_path)
+    stored = _capture_turn_texts_with_redactions(
+        __import__("tortoise.sdk", fromlist=["_capture_turn_window"])
+        ._capture_turn_window(conversation))[0][0]
+    assert len(stored) < len(long_body)  # the window really clipped it
+    assert record["rows_by_key"]["s1_t0"]["content"] == stored
+    nodes = {"s1_t0": _graph_node("s1_t0", "s1", content=stored)}
+    assert tpc.census({"nodes": nodes}, record, sample=5)["verdict"] == "CLEAN"
+
+
+def test_the_cli_reaches_exit_three_when_the_local_record_refuses(tmp_path,
+                                                                 monkeypatch):
+    """A refusal on the RECORD axis is exit 3 — an absence is NOT established."""
+    monkeypatch.delenv("TORTOISE_RECORD_DSN", raising=False)
+    code = tpc.main(["--db-path", str(tmp_path / "g.db"),
+                     "--local-record-dir", str(tmp_path / "no-such-dir")])
+    assert code == 3
+
+
+def test_a_turn_past_the_SESSION_cap_uses_the_FILED_window(tmp_path):
+    """Review P2: the graph's `t<i>` are minted over the POSTed list, not the
+    file's — a session past `MAX_SESSION_TURNS` must be keyed through the SAME
+    window the filing leg applies.
+
+    Pre-fix, this record read `t0` = the file's FIRST turn while the graph's
+    `t0` is the window's first turn (the drain drops the oldest past the cap),
+    so every turn of every over-cap session mismatched on TEXT — a permanent
+    false refusal on exactly the population this gate exists for, blaming the
+    record for the filing leg's transform.
+
+    Mutation that goes RED here: rendering `conversation` instead of
+    `_filing_window(conversation)` (every key becomes `field_mismatch text`).
+    """
+    from tortoise.quota import MAX_SESSION_TURNS
+
+    conversation = _conversation(
+        *[("user", f"t{i}") for i in range(MAX_SESSION_TURNS + 1)])
+    _local_record(tmp_path, {"s1": conversation})
+    record = tpc.read_local_record_turns(tmp_path)
+
+    assert len(record["rows_by_key"]) == MAX_SESSION_TURNS
+    # `t0` is the WINDOW's first turn (record entry 1) — the first turn is gone.
+    assert record["rows_by_key"]["s1_t0"]["content"] == "[user] t1"
+    assert record["rows_by_key"][f"s1_t{MAX_SESSION_TURNS - 1}"]["content"] \
+        == f"[user] t{MAX_SESSION_TURNS}"
+    # Disclosed, never silent: the artifact says which keys came from a window.
+    assert record["filed_window"] == [
+        {"session": "s1", "record_turns": MAX_SESSION_TURNS + 1,
+         "filed_turns": MAX_SESSION_TURNS}]
+
+    nodes = {"s1_t0": _graph_node("s1_t0", "s1", content="[user] t1"),
+             "s1_t1": _graph_node("s1_t1", "s1", content="[user] t2")}
+    report = tpc.census({"nodes": nodes}, record, sample=5)
+    assert report["verdict"] == "CLEAN", report["parity"]["failed_sessions"]
+    assert report["record"]["filed_window"] == record["filed_window"]
+
+
+def test_a_BLANK_turn_is_dropped_by_the_filing_leg_and_the_keys_shift(
+        tmp_path):
+    """The other half of the same transform: `_window` DROPS a turn whose
+    content is blank, so the graph's `t1` is the record's THIRD entry."""
+    conversation = [{"role": "user", "content": "a"},
+                    {"role": "user", "content": "   "},
+                    {"role": "user", "content": "b"}]
+    _local_record(tmp_path, {"s1": conversation})
+    record = tpc.read_local_record_turns(tmp_path)
+
+    assert sorted(record["rows_by_key"]) == ["s1_t0", "s1_t1"]
+    assert record["rows_by_key"]["s1_t0"]["content"] == "[user] a"
+    assert record["rows_by_key"]["s1_t1"]["content"] == "[user] b"
+    assert record["filed_window"] == [
+        {"session": "s1", "record_turns": 3, "filed_turns": 2}]
+
+    nodes = {"s1_t0": _graph_node("s1_t0", "s1", content="[user] a"),
+             "s1_t1": _graph_node("s1_t1", "s1", content="[user] b")}
+    report = tpc.census({"nodes": nodes}, record, sample=5)
+    assert report["verdict"] == "CLEAN", report["parity"]["failed_sessions"]
+
+
+def test_the_CLI_prints_the_filed_window_disclosure(tmp_path, capsys,
+                                                    monkeypatch):
+    """The transform must be VISIBLE on stdout, not only in the code path — an
+    undisclosed re-keying reads like a clean positional match.
+
+    Mutation that goes RED here: deleting the `filed window:` print loop.
+    """
+    conversation = [{"role": "user", "content": "a"},
+                    {"role": "user", "content": "  "},
+                    {"role": "user", "content": "b"}]
+    _local_record(tmp_path, {"s1": conversation})
+    monkeypatch.setattr(tpc, "read_graph_turns", lambda *a, **k: {
+        "nodes": {"s1_t0": _graph_node("s1_t0", "s1", content="[user] a"),
+                  "s1_t1": _graph_node("s1_t1", "s1", content="[user] b")},
+        "unidentifiable": []})
+    code = tpc.main(["--uri", "docker://:@127.0.0.1:1/g",
+                     "--local-record-dir", str(tmp_path)])
+    out = capsys.readouterr().out
+    assert code == 0, out
+    assert "filed window: session s1" in out
+    assert "POSTed 2 of the record's 3 turn(s)" in out
+
+
+def test_the_local_leg_redacts_like_the_writer_so_a_secret_is_not_a_mismatch(
+        tmp_path):
+    """Review P1: the stored text is windowed+SCRUBBED, then framed."""
+    from tortoise.sdk import _capture_turn_texts_with_redactions
+    conversation = _conversation(
+        ("user", "the uri is docker://:falkordb@localhost:6379/tortoise"))
+    _local_record(tmp_path, {"s1": conversation})
+    record = tpc.read_local_record_turns(tmp_path)
+    stored = _capture_turn_texts_with_redactions(conversation)[0][0]
+    assert record["rows_by_key"]["s1_t0"]["content"] == stored
+    # …and it is NOT the raw re-frame, which is what made this a false refusal.
+    assert "falkordb@localhost" not in record["rows_by_key"]["s1_t0"]["content"]
+
+
+def test_a_vector_bearing_graph_node_certifies_because_embedding_is_declared(
+        tmp_path):
+    """Review P1: the local record carries no vector; that is DECLARED, not a
+    per-turn field_mismatch on every embedded deployment."""
+    _local_record(tmp_path, {"s1": _conversation(("user", "hi"))})
+    record = tpc.read_local_record_turns(tmp_path)
+    nodes = {"s1_t0": _graph_node("s1_t0", "s1", content="[user] hi",
+                                  embedding=[0.1, 0.2])}
+    report = tpc.census({"nodes": nodes}, record, sample=5)
+    assert report["verdict"] == "CLEAN"
+    assert "embedding" in report["declared_absent"]
+
+
+def test_a_declared_field_that_is_not_compared_refuses():
+    """Review P2: an invented narrowing claim must not reach the artifact."""
+    record = {"rows_by_key": {"s1_t0": _record_row("s1_t0")},
+              "non_turn_shaped": 0, "declared_absent": ["widget"]}
+    with pytest.raises(tpc.CensusError, match="not a field this census"):
+        tpc.census({"nodes": {"s1_t0": _graph_node("s1_t0", "s1")}}, record,
+                   sample=5)
+
+
+def test_a_sealed_day_of_NO_RECORDS_is_tolerated_and_DISCLOSED(tmp_path):
+    """P1 (re-pinned): a COMPLETE archive of an empty payload is a day that
+    provably held no records — the seal writes exactly that (`eligible()` has
+    no size floor, `seal_one` compresses whatever it read), so refusing it
+    blocked the census permanently on a state only deleting evidence could
+    clear. Tolerated, and COUNTED so it cannot read as a silent skip.
+
+    Mutation that goes RED here: restoring the old `not any(line.strip())`
+    refusal in the `.gz` branch.
+    """
+    import gzip
+    archive = tmp_path / "archive"
+    archive.mkdir()
+    (archive / "2026-10-01.jsonl.gz").write_bytes(gzip.compress(b""))
+    _local_record(tmp_path, {"s1": _conversation(("user", "hi"))})
+    record = tpc.read_local_record_turns(tmp_path)
+    assert list(record["rows_by_key"]) == ["s1_t0"]
+    assert record["empty_days"] == ["archive/2026-10-01.jsonl.gz"]
+    report = tpc.census({"nodes": {"s1_t0": _graph_node("s1_t0", "s1",
+                                                         content="[user] hi")}},
+                        record, sample=5)
+    assert report["verdict"] == "CLEAN"
+    # …and the tolerance is IN THE ARTIFACT, not just in the code path.
+    assert report["record"]["empty_days"] == ["archive/2026-10-01.jsonl.gz"]
+
+
+def test_a_tolerated_empty_day_still_cannot_hide_a_graph_turn(tmp_path):
+    """The non-vacuity of the tolerance: the population comes from the GRAPH,
+    so a day that is provably empty cannot certify a turn it should have
+    carried — that turn is `missing_in_record` and the census REFUSES."""
+    import gzip
+    archive = tmp_path / "archive"
+    archive.mkdir()
+    (archive / "2026-10-01.jsonl.gz").write_bytes(gzip.compress(b""))
+    # The record needs at least one real session: a record with NO session at
+    # all is refused by the ZERO-sessions guard before comparison, which would
+    # make this test pass for the wrong reason.
+    _local_record(tmp_path, {"s2": _conversation(("user", "other"))})
+    record = tpc.read_local_record_turns(tmp_path)
+    report = tpc.census({"nodes": {"s1_t0": _graph_node("s1_t0", "s1",
+                                                         content="[user] hi")}},
+                        record, sample=5)
+    assert report["verdict"] == "REFUSED"
+    assert report["parity"]["failed_sessions"][0]["problems"][0]["problem"] \
+        == "missing_in_record"
+
+
+def test_a_ZERO_BYTE_archive_refuses_because_the_write_never_completed(
+        tmp_path):
+    """The REAL hazard, separated from the empty-day state by SIZE: a 20-byte
+    `gzip.compress(b"")` is complete, a 0-byte file is a torn write whose day
+    is now unreadable (the seal already unlinked the plain source).
+
+    Mutation that goes RED here: dropping the `st_size == 0` arm (a 0-byte
+    file decompresses to `b""` WITHOUT raising, so it would be swallowed by
+    the empty-day tolerance).
+    """
+    archive = tmp_path / "archive"
+    archive.mkdir()
+    (archive / "2026-10-01.jsonl.gz").write_bytes(b"")
+    _local_record(tmp_path, {"s1": _conversation(("user", "hi"))})
+    with pytest.raises(tpc.CensusError, match="ZERO bytes"):
+        tpc.read_local_record_turns(tmp_path)
+
+
+def test_a_zero_byte_PLAIN_day_is_TOLERATED_and_DISCLOSED_like_its_archive(
+        tmp_path):
+    """Review P1: an empty day is ONE state, not two.
+
+    `reflect-hook.writeFallback` does `appendFileSync(filePath, ...)` — create
+    AND write in ONE call — so a 0-byte day file has never held a record. And
+    the seal compresses that very file to a 20-byte empty archive which the
+    `.gz` arm TOLERATES. Refusing here made the identical provenance flip
+    REFUSED -> tolerated after `DEFAULT_KEEP_DAYS`, i.e. the verdict an owner
+    signs changed with the wall clock.
+
+    Tolerated is safe because the POPULATION COMES FROM THE GRAPH (pinned by
+    the non-vacuity test below), and it is DISCLOSED rather than silent.
+
+    Mutation that goes RED here: restoring the `raise CensusError(...EMPTY...)`
+    arm for a settled plain day.
+    """
+    _local_record(tmp_path, {"s1": _conversation(("user", "hi"))},
+                  name="2026-11-01.jsonl")
+    (tmp_path / "2026-10-30.jsonl").write_text("", encoding="utf-8")
+    record = tpc.read_local_record_turns(tmp_path)
+    assert list(record["rows_by_key"]) == ["s1_t0"]
+    # DISCLOSED, not a silent skip — this is the half that makes it honest.
+    assert record["empty_days"] == ["2026-10-30.jsonl"]
+
+
+def test_a_tolerated_empty_PLAIN_day_still_cannot_hide_a_graph_turn(tmp_path):
+    """The non-vacuity of the plain-day tolerance: the population comes from
+    the GRAPH, so an empty day whose turn WAS captured cannot certify it —
+    that turn is `missing_in_record` and the census REFUSES."""
+    _local_record(tmp_path, {"s2": _conversation(("user", "other"))},
+                  name="2026-11-01.jsonl")
+    (tmp_path / "2026-10-30.jsonl").write_text("", encoding="utf-8")
+    record = tpc.read_local_record_turns(tmp_path)
+    report = tpc.census({"nodes": {"s1_t0": _graph_node("s1_t0", "s1",
+                                                         content="[user] hi")}},
+                        record, sample=5)
+    assert report["verdict"] == "REFUSED"
+    assert report["parity"]["failed_sessions"][0]["problems"][0]["problem"] \
+        == "missing_in_record"
+    assert report["dry_run"]["would_delete_turn_nodes"] == 0
+
+
+def test_a_line_with_NO_conversation_key_is_DROPPED_and_still_fails_CLOSED(
+        tmp_path):
+    """Review P2: ABSENT is not EMPTY.
+
+    The writer always emits `conversation`, so coercing a missing key to `[]`
+    would make a LOST transcript read as `missing_in_record` — pointing the
+    operator at the graph/backfill for a turn whose transcript had been dropped.
+    It is NOT coerced. Nor does it refuse the whole leg: the filing leg
+    DEAD-LETTERS `no_conversation` (`session_events_drain`), so this line never
+    reached the graph and contributes no key. It is dropped and named, and the
+    affected session reads as `missing_in_record` → REFUSED.
+
+    Mutation that goes RED here: restoring `if conversation is None:
+    conversation = []` (the session becomes an empty CLEAN session), or
+    restoring the whole-leg `raise CensusError` (the two asserts below).
+    """
+    (tmp_path / "2026-11-02.jsonl").write_text(
+        json.dumps({"session_id": "s1"}) + "\n"
+        + json.dumps({"session_id": "s2",
+                      "conversation": _conversation(("user", "hi"))}) + "\n",
+        encoding="utf-8")
+    record = tpc.read_local_record_turns(tmp_path)
+    assert record["malformed_lines"][0]["at"] == "2026-11-02.jsonl:1"
+    assert "NO `conversation` key" in record["malformed_lines"][0]["error"]
+    # ... and the drop is fail-CLOSED for the session it described. The SIBLING
+    # session is still certifiable, which is the whole point: one lost
+    # transcript no longer makes the leg unopenable.
+    assert list(record["rows_by_key"]) == ["s2_t0"]
+    report = tpc.census(
+        {"nodes": {"s1_t0": _graph_node("s1_t0", "s1", content="[user] hi")}},
+        record, sample=5)
+    assert report["verdict"] == "REFUSED"
+    assert report["parity"]["failed_sessions"][0]["problems"][0]["problem"] \
+        == "missing_in_record"
+
+
+def test_an_explicitly_EMPTY_conversation_is_a_real_session_with_no_turns(
+        tmp_path):
+    """The other half of the same distinction: `[]` is the writer saying this
+    session held no turns, which is data, not loss."""
+    (tmp_path / "2026-11-02.jsonl").write_text(
+        json.dumps({"session_id": "s1", "conversation": []}) + "\n",
+        encoding="utf-8")
+    (tmp_path / "2026-11-01.jsonl").write_text(
+        json.dumps({"session_id": "s2",
+                    "conversation": _conversation(("user", "hi"))}) + "\n",
+        encoding="utf-8")
+    record = tpc.read_local_record_turns(tmp_path)
+    assert record["sessions"] == 2
+    assert list(record["rows_by_key"]) == ["s2_t0"]
+
+
+def test_the_NEWEST_plain_day_may_be_empty_while_a_writer_creates_it(
+        tmp_path):
+    """The newest file is the one a live writer is in the middle of creating
+    (create → write window), and it is disclosed like any other empty day."""
+    _local_record(tmp_path, {"s1": _conversation(("user", "hi"))},
+                  name="2026-11-01.jsonl")
+    (tmp_path / "2026-11-02.jsonl").write_text("", encoding="utf-8")
+    record = tpc.read_local_record_turns(tmp_path)
+    assert list(record["rows_by_key"]) == ["s1_t0"]
+    assert record["empty_days"] == ["2026-11-02.jsonl"]
+
+
+def test_an_unlistable_surface_refuses_instead_of_reading_as_empty(
+        tmp_path, monkeypatch):
+    """`Path.glob` swallows scandir OSError; the leg must not."""
+    _local_record(tmp_path, {"s1": _conversation(("user", "hi"))})
+    archive = tmp_path / "archive"
+    archive.mkdir()
+    real_iterdir = Path.iterdir
+
+    def boom(self):
+        if self.name == "archive":
+            raise PermissionError(13, "Permission denied")
+        return real_iterdir(self)
+
+    monkeypatch.setattr(Path, "iterdir", boom)
+    with pytest.raises(tpc.CensusError, match="could not be LISTED"):
+        tpc.read_local_record_turns(tmp_path)
+
+
+def test_a_torn_line_is_NOT_A_TAIL_outside_the_newest_plain_file(tmp_path):
+    """The tail exception is the append-only tip, not every settled day.
+
+    Review P1 changed the CONSEQUENCE (drop + disclose, not refuse-the-leg) but
+    not this distinction: a settled day's unparsable line is corruption, so it
+    lands in `unparsable_lines`, never in `torn_tail`.
+    """
+    old = tmp_path / "2026-11-01.jsonl"
+    old.write_text(json.dumps({"session_id": "s1",
+                               "conversation": _conversation(("user", "a"))})
+                   + '\n{"session_id": "s2", "conversa', encoding="utf-8")
+    _local_record(tmp_path, {"s3": _conversation(("user", "c"))})
+    record = tpc.read_local_record_turns(tmp_path)
+    assert record["torn_tail"] == []
+    assert [b["at"] for b in record["unparsable_lines"]] == [
+        "2026-11-01.jsonl:2"]
+
+
+def test_a_torn_line_inside_a_sealed_archive_is_DROPPED_and_NAMED(tmp_path):
+    """A `.gz` day is written whole and verified by the seal: never a tail.
+
+    Dropped + disclosed (review P1), and the disclosed path is ROOT-RELATIVE so
+    it is addressable — `archive/2026-10-01.jsonl.gz`, not a bare file name that
+    also matches a root day (review P2).
+    """
+    import gzip
+    archive = tmp_path / "archive"
+    archive.mkdir()
+    body = (json.dumps({"session_id": "s1",
+                        "conversation": _conversation(("user", "a"))})
+            + '\n{"session_id": "s2", "conversa')
+    (archive / "2026-10-01.jsonl.gz").write_bytes(gzip.compress(body.encode()))
+    _local_record(tmp_path, {"s3": _conversation(("user", "c"))})
+    record = tpc.read_local_record_turns(tmp_path)
+    assert record["torn_tail"] == []
+    assert [b["at"] for b in record["unparsable_lines"]] == [
+        "archive/2026-10-01.jsonl.gz:2"]
+
+
+def test_a_torn_PLAIN_line_under_archive_is_corruption_not_a_tail(tmp_path):
+    """The tail exemption is the LIVE directory only — and this is the pin
+    that holds that conjunct (review P2).
+
+    `plain` is filtered on BOTH `f.parent == root` and `not ...".gz"`, and the
+    only archive-side torn-line pin uses a `.gz`, which the second conjunct
+    excludes anyway — so deleting `f.parent == root` left all 94 tests green
+    while a torn line in a SETTLED `archive/<day>.jsonl` became a tail.
+    A plain file under `archive/` is not an in-flight append: the writer never
+    touches it, so an unparsable line there is corruption.
+    """
+    archive = tmp_path / "archive"
+    archive.mkdir()
+    (archive / "2026-10-31.jsonl").write_text(
+        json.dumps({"session_id": "s1",
+                    "conversation": _conversation(("user", "a"))})
+        + '\n{"session_id": "s2", "conversa', encoding="utf-8")
+    # A newer plain day in the LIVE directory, so the newest-plain term alone
+    # would have allowed a tail — only the parent filter can separate this.
+    _local_record(tmp_path, {"s3": _conversation(("user", "c"))})
+    record = tpc.read_local_record_turns(tmp_path)
+    assert record["torn_tail"] == []
+    assert [b["at"] for b in record["unparsable_lines"]] == [
+        "archive/2026-10-31.jsonl:2"]
+
+
+def test_a_same_day_plain_collision_is_disclosed_not_silently_dropped(tmp_path):
+    """One queue key per day+shape: the displaced copy is NAMED (review P2).
+
+    `found` is keyed on `(day-without-suffix, suffix)` with no directory
+    component and `root` is scanned second, so `archive/<day>.jsonl` loses to
+    the root's own file of the same day. The verdict stays fail-closed, but a
+    narrowed surface the artifact does not name reads as full coverage — the
+    class round 9 closed for the shape axis.
+    """
+    archive = tmp_path / "archive"
+    archive.mkdir()
+    (archive / "2026-11-02.jsonl").write_text(
+        json.dumps({"session_id": "s_arch",
+                    "conversation": _conversation(("user", "arch"))}) + "\n",
+        encoding="utf-8")
+    _local_record(tmp_path, {"s_root": _conversation(("user", "root"))})
+    record = tpc.read_local_record_turns(tmp_path)
+    assert record["files"] == ["2026-11-02.jsonl"]
+    assert record["skipped_files"] == ["archive/2026-11-02.jsonl"]
+    assert "s_root_t0" in record["rows_by_key"]
+    assert "s_arch_t0" not in record["rows_by_key"]
+
+
+def test_an_enriched_turn_refuses_because_no_record_can_restore_it(tmp_path):
+    """#8488: `embeddingText` is an LLM rewrite the conversation cannot rebuild."""
+    _local_record(tmp_path, {"s1": _conversation(("user", "hi"))})
+    record = tpc.read_local_record_turns(tmp_path)
+    nodes = {"s1_t0": _graph_node("s1_t0", "s1", content="[user] hi",
+                                  embeddingText="ctx: hi (rewritten)")}
+    with pytest.raises(tpc.CensusError, match="embeddingText"):
+        tpc.census({"nodes": nodes}, record, sample=5)
+
+
+def test_both_graph_cyphers_SELECT_the_enriched_text(monkeypatch):
+    """Cycle-4 P2: dropping `t.embeddingText` restored a false CLEAN silently."""
+    assert "t.embeddingText" in tpc._GRAPH_EPISODIC_CYPHER
+    assert "t.embeddingText" in tpc._GRAPH_EPISODIC_IDS_CYPHER
+
+
+def test_the_graph_leg_carries_embedding_text_onto_the_node(monkeypatch):
+    """…and the READ must actually put it on the node dict."""
+    class _G:
+        def query(self, cypher, params=None):
+            is_count = "count(t)" in cypher
+            class R:
+                result_set = ([[1]] if is_count else
+                              [_turn_row(1, "s1_t0", "s1",
+                                         et="ctx rewrite of s1_t0")])
+            return R()
+
+    _patch_proj(monkeypatch, _G())
+    graph = tpc.read_graph_turns("docker://x", None, "g")
+    assert graph["nodes"]["s1_t0"]["embeddingText"] == "ctx rewrite of s1_t0"
+    with pytest.raises(tpc.CensusError, match="does not compare that field"):
+        tpc.census(graph, {"rows_by_key": {"s1_t0": _record_row("s1_t0")},
+                           "non_turn_shaped": 0}, sample=5)
+
+
+def test_a_whitespace_only_SEALED_day_holds_no_records_and_is_tolerated(
+        tmp_path):
+    """Cycle-4 P2 re-pinned to the corrected model: `raw` is `['']`-truthy, so
+    a blank sealed day slipped the RECORD-level guard. It holds no records and
+    its archive is complete, so it is tolerated and disclosed here — the
+    zero-records record is caught by the ZERO-sessions guard instead."""
+    import gzip
+    archive = tmp_path / "archive"
+    archive.mkdir()
+    (archive / "2026-10-01.jsonl.gz").write_bytes(gzip.compress(b"\n"))
+    _local_record(tmp_path, {"s1": _conversation(("user", "hi"))})
+    record = tpc.read_local_record_turns(tmp_path)
+    assert record["empty_days"] == ["archive/2026-10-01.jsonl.gz"]
+    assert list(record["rows_by_key"]) == ["s1_t0"]
+
+
+def test_a_record_that_parses_ZERO_sessions_refuses(tmp_path):
+    """The guard that makes the empty-day tolerance safe at the RECORD level:
+    days may be tolerably empty, but a record with no session anywhere is not
+    evidence of parity."""
+    (tmp_path / "2026-11-02.jsonl").write_text("\n\n", encoding="utf-8")
+    with pytest.raises(tpc.CensusError, match="ZERO sessions"):
+        tpc.read_local_record_turns(tmp_path)
+
+
+# ── the four thin shape arms (review P3: none had a pin; then review P2 turned
+#    them from whole-leg refusals into DISCLOSED DROPS — fail-closed by
+#    construction, because the filing leg dead-letters every one of them) ─────
+
+def test_a_line_that_is_not_a_JSON_OBJECT_is_DROPPED_not_crashed(tmp_path):
+    """`not isinstance(entry, dict)` guarded an uncaught `AttributeError` from
+    `entry.get`, which would escape `main`'s `except CensusError` as a traceback
+    + exit 1 — indistinguishable from a tool bug. The guard now DROPS and names
+    the line instead of refusing the leg; the crash must not come back.
+
+    Mutation that goes RED here: deleting the `isinstance(entry, dict)` arm.
+    """
+    (tmp_path / "2026-11-02.jsonl").write_text(
+        "[1, 2]\n"
+        + json.dumps({"session_id": "s1",
+                      "conversation": _conversation(("user", "hi"))}) + "\n",
+        encoding="utf-8")
+    record = tpc.read_local_record_turns(tmp_path)
+    assert "not a JSON object" in record["malformed_lines"][0]["error"]
+    assert list(record["rows_by_key"]) == ["s1_t0"]
+
+
+def test_a_line_with_NO_session_id_is_DROPPED(tmp_path):
+    """A turn's key cannot be derived — and the filing leg dead-letters
+    `no_session_id`, so the line never reached the graph and can hide no turn.
+    """
+    (tmp_path / "2026-11-02.jsonl").write_text(
+        json.dumps({"conversation": []}) + "\n"
+        + json.dumps({"session_id": "s1",
+                      "conversation": _conversation(("user", "hi"))}) + "\n",
+        encoding="utf-8")
+    record = tpc.read_local_record_turns(tmp_path)
+    assert "no usable `session_id`" in record["malformed_lines"][0]["error"]
+    assert record["sessions"] == 1
+
+
+def test_a_WHITESPACE_ONLY_session_id_is_BLANK_not_a_session_named_spaces(
+        tmp_path):
+    """Review P2: truthiness is not the platform's rule.
+
+    `session_events_drain` normalises
+    `raw_sid if isinstance(raw_sid, str) and raw_sid.strip() else None` and then
+    dead-letters the record, so `"   "` can never name a session in the graph.
+    Plain truthiness ACCEPTED it, inventing a session no door can mint — its
+    keys could never match a graph turn, so it was a silently uncomparable
+    session rather than a refusal.
+
+    Mutation that goes RED here: restoring `if not isinstance(sid, str) or not
+    sid` (the `"   "` file is then read as one session named three spaces).
+    """
+    (tmp_path / "2026-11-02.jsonl").write_text(
+        json.dumps({"session_id": "   ", "conversation": []}) + "\n"
+        + json.dumps({"session_id": "s1",
+                      "conversation": _conversation(("user", "hi"))}) + "\n",
+        encoding="utf-8")
+    record = tpc.read_local_record_turns(tmp_path)
+    assert record["sessions"] == 1
+    assert list(record["rows_by_key"]) == ["s1_t0"]
+    assert "no usable `session_id`" in record["malformed_lines"][0]["error"]
+
+
+def test_a_conversation_that_is_not_a_LIST_is_DROPPED(tmp_path):
+    """A dict where the array belongs is a malformed record, not a transcript."""
+    (tmp_path / "2026-11-02.jsonl").write_text(
+        json.dumps({"session_id": "s1", "conversation": {"role": "user"}})
+        + "\n"
+        + json.dumps({"session_id": "s2",
+                      "conversation": _conversation(("user", "hi"))}) + "\n",
+        encoding="utf-8")
+    record = tpc.read_local_record_turns(tmp_path)
+    assert "not a list" in record["malformed_lines"][0]["error"]
+    assert record["sessions"] == 1
+    assert list(record["rows_by_key"]) == ["s2_t0"]
+
+
+def test_expect_empty_reaches_a_verdict_when_the_local_record_is_absent(
+        tmp_path, monkeypatch):
+    """Cycle-5 P2: a drained graph must be confirmable on the local leg too."""
+    from tortoise.projection import FalkorProjection
+
+    class _Empty:
+        def __init__(self, inner=None):
+            self.g = _G()
+
+    class _G:
+        def query(self, cypher, params=None):
+            class R:
+                result_set = ([[0]] if "count(t)" in cypher else [])
+            return R()
+
+    monkeypatch.setattr(FalkorProjection, "from_uri",
+                        classmethod(lambda cls, *a, **k: _Empty()))
+    out = tmp_path / "out.json"
+    code = tpc.main(["--uri", "docker://x", "--graph-name", "g",
+                     "--local-record-dir", str(tmp_path / "absent"),
+                     "--expect-empty", "--json", str(out)])
+    assert code == 0               # the record leg was SKIPPED, not an absence
+    import json as _json
+    report = _json.loads(out.read_text())
+    assert report["record"]["leg"] == "local-skipped"
+    # ⛔ Review P3: a skipped leg compared NOTHING. It used to report all seven
+    # fields compared (`declared_absent` was empty on the skipped dict) and
+    # suppressed the NOT COMPARED line — an artifact claiming a comparison that
+    # never happened, on the shape the branch below it polices.
+    assert report["record"]["skipped"] is True
+    assert report["compared_fields"] == []
+    assert report["declared_absent"] == sorted(tpc._LOCAL_RECORD_DECLARED_ABSENT)
+
+
+def test_expect_empty_does_NOT_skip_the_hosted_leg(tmp_path, monkeypatch):
+    """Cycle-6 P1: an unreachable hosted DSN must not certify via the skip."""
+    from tortoise.projection import FalkorProjection
+
+    class _G:
+        def query(self, cypher, params=None):
+            class R:
+                result_set = ([[0]] if "count(t)" in cypher else [])
+            return R()
+
+    class _Empty:
+        def __init__(self, *a, **k):
+            self.g = _G()
+
+    monkeypatch.setattr(FalkorProjection, "from_uri",
+                        classmethod(lambda cls, *a, **k: _Empty()))
+    code = tpc.main(["--uri", "docker://x", "--graph-name", "g",
+                     "--record-dsn", "postgresql://nowhere.invalid:1/x",
+                     "--org-id", "o", "--graph-id", "g", "--expect-empty"])
+    assert code == 3               # the record leg was DIALED, and it refused
+    # …and without the flag the same empty graph still refuses.
+    assert tpc.main(["--uri", "docker://x", "--graph-name", "g",
+                     "--local-record-dir", str(tmp_path / "absent")]) == 3
+
+
+def test_the_USAGE_block_documents_every_flag_the_parser_accepts():
+    """Review P2: the module docstring IS this gate's definition, and it had
+    drifted — it documented only the hosted flags, so the flag the owner ruling
+    makes the AUTHORITY (`--local-record-dir`) was absent from the contract a
+    reader decides on.
+
+    Scoped to the USAGE block on purpose: checking `flag in __doc__` passed
+    while a flag was cited in prose and missing from the contract (measured —
+    deleting the USAGE entry left a mention in the PARITY DEFINITION, so the
+    weaker assertion stayed green).
+
+    Mutation that goes RED here: removing EVERY mention of
+    `--local-record-dir` from the USAGE block (both the flag entry and the
+    authority example). Removing only the entry stays green because the
+    example above it still documents the flag — which is the true statement,
+    and why the mutation is spelled out this way rather than as "delete the
+    line".
+    """
+    import re
+    source = Path(tpc.__file__).read_text(encoding="utf-8")
+    doc = tpc.__doc__ or ""
+    assert "USAGE" in doc, "the contract has no USAGE block — the scan is broken"
+    usage = doc.split("USAGE", 1)[1]
+    flags = sorted(set(re.findall(r'add_argument\(\s*"(--[a-z][a-z0-9-]*)"',
+                                  source)))
+    assert flags, "no parser flags found — the scan is broken, not the doc"
+    undocumented = []
+    for f in flags:
+        # ⛔ A SUBSTRING TEST OVER THE WHOLE BLOCK IS VACUOUS (review P2).
+        # `--graph-name` passed it on prose inside `--expect-empty`
+        # ("a drained graph and a wrong `--graph-name` / `--db-path` are
+        # indistinguishable") while having no flag ENTRY at all — meaning and
+        # default undocumented. Scoping to a *flag position* closes it: a flag
+        # counts on an ENTRY line (4-space indent, aliases such as
+        # `--org-id/--graph-id` allowed) or in the SYNOPSIS (8-space indent),
+        # never inside an entry's explanatory prose (deeply indented).
+        entry = re.search(rf"^    \S*(?<![\w-]){re.escape(f)}(?![\w-])",
+                          usage, re.M)
+        # EXACTLY 8 spaces: `^        .*` would also match a deeply indented
+        # continuation line, which is prose — that reopened the very hole this
+        # pin exists to close (measured: renaming the `--graph-name` entry to
+        # `--NOT-A-FLAG` still passed, on the "A wrong --graph-name is
+        # indistinguishable" sentence inside the entry body).
+        synopsis = re.search(rf"^ {{8}}[^ \n].*(?<![\w-]){re.escape(f)}(?![\w-])",
+                             usage, re.M)
+        if not (entry or synopsis):
+            undocumented.append(f)
+    assert not undocumented, (
+        f"flags accepted but with no USAGE ENTRY of their own (a prose "
+        f"mention does not count): {undocumented}")
+
+
+def test_the_docstring_states_the_local_legs_DECLARED_ABSENT_fields():
+    """The other half of the same drift: the artifact declares these absent, so
+    the contract must name them — a reader must not expect them compared."""
+    doc = tpc.__doc__ or ""
+    for name in tpc._LOCAL_RECORD_DECLARED_ABSENT:
+        assert name in doc, f"declared-absent field {name!r} is not in the doc"
+    assert "DECLARED ABSENT" in doc or "declared_absent" in doc
+    # The exact contradiction finding 2 named: the contract listed `kind`,
+    # `status` and `createdAt` under COMPARED EXACTLY for BOTH legs while the
+    # local leg declares all three absent. The qualification that resolves it
+    # must be in the contract, not only in the code.
+    assert "HOSTED leg ONLY" in doc, (
+        "the contract must qualify which leg compares kind/status/createdAt")
+
+
+def test_the_CLI_prints_the_tolerated_empty_days(tmp_path, capsys, monkeypatch):
+    """The tolerance must be VISIBLE on stdout, not just in the code path: an
+    undisclosed skip reads exactly like a day that went missing.
+
+    Mutation that goes RED here: deleting the `empty day  :` print loop.
+    """
+    import gzip
+    archive = tmp_path / "session-events" / "archive"
+    archive.mkdir(parents=True)
+    (archive / "2026-10-01.jsonl.gz").write_bytes(gzip.compress(b""))
+    _local_record(tmp_path / "session-events",
+                  {"s1": _conversation(("user", "hi"))})
+    monkeypatch.setattr(tpc, "read_graph_turns", lambda *a, **k: {
+        "nodes": {"s1_t0": _graph_node("s1_t0", "s1", content="[user] hi"),
+                  }, "unidentifiable": []})
+    code = tpc.main(["--uri", "docker://:@127.0.0.1:1/g",
+                     "--local-record-dir", str(tmp_path / "session-events")])
+    out = capsys.readouterr().out
+    assert code == 0, out
+    assert "empty day  : archive/2026-10-01.jsonl.gz" in out
+    assert "NOT a parity pass" in out
+
+
+# ── the exit-code contract for a DROPPED interior line (review P3) ───────────
+#
+# The PR body's arm table claimed an unparsable INTERIOR line is a `CensusError`
+# (exit 3). It is not: the line is dropped and named, and the verdict is then
+# decided by the POPULATION — `missing_in_record` -> exit 2 when the graph holds
+# a turn for it, exit 0 when it does not. That is the same three-way contract
+# `diff` publishes (0 = no differences, 1 = differences found, 2 = trouble):
+# "the comparison found a difference" is NOT "the instrument could not read".
+# Collapsing the two on the authority store pointed the operator at a leg
+# refusal that does not exist there (the real record carries such lines) and hid
+# that the run had in fact reached a verdict.
+#
+# Both halves are pinned at the CLI boundary on purpose — the exit code is the
+# datum the artifact reports and the only thing an operator acts on.
+
+def _record_with_one_DROPPED_interior_line(tmp_path) -> Path:
+    """A SETTLED day holding `s2`'s merged line plus a readable `s3`."""
+    root = tmp_path / "session-events"
+    root.mkdir()
+    _local_record(root, {"s1": _conversation(("user", "hi"))},
+                  name="2026-11-01.jsonl")
+    good = json.dumps({"session_id": "s3",
+                       "conversation": _conversation(("user", "x"))})
+    # `s2`'s record lost its newline, so it merged into `s3`'s line: the whole
+    # line is unparsable and is dropped (never partially recovered).
+    (root / "2026-11-02.jsonl").write_text(
+        '{"session_id": "s2", "conversation": [{"role": "user",\n'
+        + good + "\n", encoding="utf-8")
+    return root
+
+
+def test_a_DROPPED_interior_line_reaches_a_VERDICT_at_exit_TWO_never_exit_three(
+        tmp_path, capsys, monkeypatch):
+    """The graph holds a turn for the dropped session: REFUSED, exit 2.
+
+    `CensusError`/exit 3 is the arm for "the record could not be read", and it
+    is what this state used to produce — on the authority store, whose real
+    record carries lost-newline merges, that made the gate unopenable and
+    misreported a reached verdict as an unreadable leg.
+
+    Mutation that goes RED here: restoring the whole-leg refusal for an interior
+    unparsable line (a `CensusError` raised in `read_local_record_turns`) — the
+    run then exits 3 with the refusal text, not 2 with a parity refusal.
+    """
+    root = _record_with_one_DROPPED_interior_line(tmp_path)
+    monkeypatch.setattr(tpc, "read_graph_turns", lambda *a, **k: {
+        "nodes": {"s2_t0": _graph_node("s2_t0", "s2", content="[user] lost")},
+        "unidentifiable": []})
+    code = tpc.main(["--uri", "docker://:@127.0.0.1:1/g",
+                     "--local-record-dir", str(root)])
+    captured = capsys.readouterr()
+    out, err = captured.out, captured.err
+    assert code == 2, out + err
+    assert code != 3, ("exit 3 means the record could not be READ — the line "
+                       "was dropped and a verdict WAS reached")
+    assert "unparsable : 2026-11-02.jsonl:1" in out
+    assert "DROPPED, not recovered" in out
+    assert "verdict    : REFUSED" in out
+
+
+def test_a_DROPPED_interior_line_whose_turn_the_graph_never_held_is_exit_ZERO(
+        tmp_path, capsys, monkeypatch):
+    """The other half: nothing in the population needs the dropped line.
+
+    The population comes from the GRAPH, so a line holding no graph turn cannot
+    hide one — the run stays CLEAN (exit 0) and says what it dropped. A pin that
+    only covered the refusal half would pass over a fix that just downgraded
+    exit 3 to exit 2 unconditionally.
+    """
+    root = _record_with_one_DROPPED_interior_line(tmp_path)
+    monkeypatch.setattr(tpc, "read_graph_turns", lambda *a, **k: {
+        "nodes": {"s1_t0": _graph_node("s1_t0", "s1", content="[user] hi"),
+                  "s3_t0": _graph_node("s3_t0", "s3", content="[user] x")},
+        "unidentifiable": []})
+    code = tpc.main(["--uri", "docker://:@127.0.0.1:1/g",
+                     "--local-record-dir", str(root)])
+    out = capsys.readouterr().out
+    assert code == 0, out
+    assert "unparsable : 2026-11-02.jsonl:1" in out
+    assert "NOT a parity pass" in out
+    assert "verdict    : CLEAN" in out

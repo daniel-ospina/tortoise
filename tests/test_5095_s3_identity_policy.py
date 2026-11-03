@@ -529,21 +529,102 @@ class TestTheReportCannotContradictItself:
                       if str(r["searched_for"]).startswith("point ")]
         assert point_recs and point_recs[0]["found"] is None, point_recs
 
-    def test_a_partial_lookup_with_nothing_unchecked_says_so(self):
+    def test_a_counted_lookup_does_not_claim_what_the_candidates_record_says(self):
+        """The COUNTED sentence, for candidates the lookup never reached.
+
+        Split out of `test_a_partial_lookup_with_nothing_unchecked_says_so`, whose
+        former first half asserted this — a `unresolved` run with a NON-zero
+        numerator — and not the shape its name described (#5095 review round 1,
+        residual 1).
+
+        ⛔ It must NOT claim what the candidate's own record says: a candidate
+        whose query was cut can still be folded onto a prior by S5
+        (`found: true`), so a sentence saying its "record says UNRESOLVED" — the
+        wording rejected in #5095 review round 3, never shipped — would be false
+        about that record. The assertion below pins the sentence exactly, which
+        forbids that by construction.
+        """
         out = v2.extract_session_v2(_FakeModel(), _conv(), session_id="s1")
-        assert out["identity"]["unresolved_total"] >= 1
+        ident = out["identity"]
+        assert ident["unresolved_total"] >= 1
         messages = [w for w in out["warnings"] if "S3 identity" in w]
         assert messages, out["warnings"]
-        assert "did not run for" in messages[0]
-        # ⛔ and it must NOT claim what the candidate's own record says: a
-        # candidate whose query was cut can still be folded onto a prior by S5
-        # (`found: true`), so "their record says UNRESOLVED" was a false claim
-        # about that record (#5095 review round 3).
-        assert "their record says" not in messages[0]
-        # the zero-numerator shape is a DIFFERENT sentence, never the one above
+        # Pin the WHOLE sentence, built from the report's own numbers, rather than
+        # a paraphrase of the prohibition. A cut candidate can still be folded onto
+        # a prior by S5 (`found: true`), so nothing may be claimed about any
+        # candidate's record; exact equality forbids that by construction, and it
+        # bites on a changed numerator, denominator, state or added clause. The
+        # former body closed with `assert "their record says" not in messages[0]`
+        # — a phrase no producer ever emitted, so it could never bite (the
+        # inert-assertion class removed from the arm-3 test in round 5; #10633
+        # review, non-blocking observation 1).
+        _denominator = sum(ident["candidates"].get(section, 0)
+                           for section in fp.LEG_BY_SECTION)
+        _reason = f" ({ident['reason']})" if ident["reason"] else ""
+        assert messages[0] == (
+            f"S3 identity {ident['state']}{_reason}: the existing-item lookup "
+            f"did not run for {ident['unresolved_total']} of {_denominator} "
+            f"candidate(s)"), messages[0]
+
+    def test_a_partial_lookup_with_nothing_unchecked_says_so(self, monkeypatch):
+        """`partial` with a ZERO numerator gets the `partial` sentence — end to end.
+
+        The budget cuts only the trailing story-topic queries, so this is the
+        ORDINARY shape, and "says so" is a claim about the SENTENCE. The former
+        body read `plan_identity`'s counters and asserted no message at all, so
+        the sentence its name promised was pinned by nothing here (#5095 review
+        round 1, residual 1).
+
+        ⛔ The load-bearing property is that the branch keys on the STATE, not on
+        the counter: both runs below carry `unresolved_total == 0` and must still
+        get DIFFERENT sentences — `partial` (bounded; every candidate's own query
+        ran) and `unresolved` (nothing ran at all).
+        """
+        cover = {"derived": {"object": 1, "point": 3},
+                 "ran": {"object": 1, "point": 2}, "failed": {"object": 0, "point": 0}}
+        keys = [v2._query_key("object", "ACME Corp"),
+                v2._query_key("point", "the budget is 40k")]
+        # `monkeypatch` is the restorer here: it re-records the second patch and
+        # puts the original back at teardown, so neither patch can leak into a
+        # sibling test (the former body carried an unused `monkeypatch` parameter
+        # and restored by hand in a `try:`/`finally:` — #10633 review,
+        # non-blocking observation 2).
+        monkeypatch.setattr(v2, "search_graph", lambda *a, **k: _search(
+            query_coverage=cover,
+            query_results={"ran": [q for q in keys if q], "failed": []}))
+        partial = v2.extract_session_v2(_FakeModel(), _conv(), session_id="s1")
+        monkeypatch.setattr(v2, "search_graph", lambda *a, **k: _search(
+            degraded=True, reason="S3 skipped: no graph client"))
+        unrun = v2.extract_session_v2(_NoCandidates(), _conv(), session_id="s1")
+
+        assert partial["identity"]["state"] == fp.LOOKUP_PARTIAL, partial["identity"]
+        assert partial["identity"]["unresolved_total"] == 0, partial["identity"]
+        assert unrun["identity"]["state"] == fp.LOOKUP_UNRESOLVED, unrun["identity"]
+        assert unrun["identity"]["unresolved_total"] == 0, unrun["identity"]
+
+        messages = [w for w in partial["warnings"] if "S3 identity" in w]
+        assert len(messages) == 1, partial["warnings"]
+        assert "part of the lookup did not run or did not complete" in messages[0], messages[0]
+        assert "no candidate was left unchecked" in messages[0], messages[0]
+        assert "did not run for " not in messages[0], messages[0]
+        assert "proposed no candidate" not in messages[0], messages[0]
+
+        other = [w for w in unrun["warnings"] if "S3 identity" in w]
+        assert len(other) == 1, unrun["warnings"]
+        assert "proposed no candidate" in other[0], other[0]
+        # ⛔ Compared on the SENTENCE BODY, not the whole line: the two lines
+        # already differ by the `(reason)` suffix an `unresolved` lookup carries,
+        # so a whole-string `!=` would pass even with both states collapsed onto
+        # one sentence — and that collapse is exactly the pre-fix shape.
+        assert "no candidate was left unchecked" not in other[0], (
+            "one zero counter, two states, must not collapse onto one sentence — "
+            "branching on the counter instead of the state is the defect this "
+            f"PR removes; got {other[0]!r}")
+
+        # the shape witness, independent of the extraction rig: coverage in,
+        # counters out.
         partial_zero = fp.plan_identity(
-            _search(query_coverage={"derived": {"point": 13},
-                                    "ran": {"point": 12}, "failed": {"point": 0}}),
+            _search(query_coverage=cover),
             candidates={"points": 3}, unresolved={"points": 0})
         assert partial_zero["state"] == fp.LOOKUP_PARTIAL
         assert partial_zero["unresolved_total"] == 0
@@ -725,6 +806,18 @@ class _FakeModel:
                 '"link_before_create": []}')
 
 
+class _NoCandidates(_FakeModel):
+    """Same adapter, no candidate at all — the `unresolved` + zero-numerator shape."""
+
+    def complete(self, *, system, user, max_tokens=None):
+        self.last_finish_reason = "stop"
+        if "STORY SUMMARIZER" in system:
+            return "A narrative."
+        return ('{"entities": [], "events": [], "operators": [], '
+                '"points": [], "chain_notes": [], '
+                '"link_before_create": []}')
+
+
 def _conv():
     return [{"role": "user", "content": "the budget is 40k"},
             {"role": "assistant", "content": "noted"}]
@@ -779,6 +872,50 @@ class TestIdentityOnTheResult:
         assert "part of the lookup did not run or did not complete" in messages[0], messages[0]
         assert "no candidate was left unchecked" in messages[0], messages[0]
         assert "did not run over the whole candidate set" not in messages[0]
+
+    def test_an_unrun_lookup_with_no_candidate_never_claims_the_budget_cut(self):
+        """`unresolved` with a ZERO numerator is a third fact (#5095 review round 5).
+
+        The lookup did not run AT ALL and there was no candidate whose own query
+        could have — and the `partial` sentence asserted both of those falsely:
+        "part of the lookup did not run or did not complete, but every
+        candidate's own query ran — no candidate was left unchecked". The
+        pre-fix code reached that sentence because the block branched on
+        `unresolved_total` alone, so this run carried a warning that contradicted
+        the reason it printed in the same line.
+
+        ⛔ The discriminating assertion is the sentence's OWN text: an earlier
+        draft of this test asserted `"budget" not in message`, which no arm has
+        ever emitted — inert against the defect it named (review round 5).
+        """
+        out = v2.extract_session_v2(_NoCandidates(), _conv(), session_id="s1")
+        block = out["identity"]
+        assert block["state"] == fp.LOOKUP_UNRESOLVED, block
+        assert block["unresolved_total"] == 0, block
+        messages = [w for w in out["warnings"] if "S3 identity" in w]
+        assert len(messages) == 1, out["warnings"]
+        assert "the lookup did not run, and this run proposed no candidate" in messages[0], (
+            messages[0])
+        # The `partial` sentence, verbatim, is what must NOT be reachable here.
+        assert "part of the lookup" not in messages[0], messages[0]
+        assert "every candidate's own query" not in messages[0], messages[0]
+
+    def test_a_state_the_warning_does_not_describe_claims_nothing(self, monkeypatch):
+        """The residual arm's only protection is this test (#5095 review round 6).
+
+        A state added to `failure_policy.LOOKUP_STATES` later must not INHERIT the
+        `partial` or the counted sentence — that is the defect class this whole
+        change removes, and without this pin the arm would be protected by a
+        comment alone. The arm states only what it was handed.
+        """
+        monkeypatch.setattr(fp, "lookup_state", lambda search: "future_state")
+
+        out = v2.extract_session_v2(_NoCandidates(), _conv(), session_id="s1")
+        messages = [w for w in out["warnings"] if "S3 identity" in w]
+        assert len(messages) == 1, out["warnings"]
+        assert "describes no sentence for that state" in messages[0], messages[0]
+        assert "part of the lookup" not in messages[0], messages[0]
+        assert "did not run for " not in messages[0], messages[0]
 
     def test_a_resolved_run_reports_resolved_and_does_not_warn(self):
         """The flag-side of R1: the disposition must not fire on a healthy run.

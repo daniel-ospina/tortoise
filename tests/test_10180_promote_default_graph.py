@@ -998,10 +998,16 @@ def test_the_quota_gate_counts_the_promoted_graph(monkeypatch):
 
     _hosted(monkeypatch)
     seen: dict = {}
-    monkeypatch.setattr(
-        quota, "enforce_org_limit",
-        lambda limits, resource, sdk=None, **kw: seen.update(
-            {"resource": resource, "sdk": sdk}))
+
+    def _stub(limits, resource, sdk=None, sdk_factory=None, **kw):
+        # #4051 made the SDK LAZY: the gate hands over `sdk_factory` and builds
+        # the SDK only if the count is actually taken. This stub must therefore
+        # INVOKE the factory — a stub that only reads `sdk=` would observe the
+        # eager mechanism #10452 was written against and pin nothing at all.
+        assert sdk is None and sdk_factory is not None, (sdk, sdk_factory)
+        seen.update({"resource": resource, "sdk": sdk_factory()})
+
+    monkeypatch.setattr(quota, "enforce_org_limit", _stub)
     # A read here would also break the gate's fail-CLOSED contract: a read
     # failure would fall back to the demoted graph, i.e. count the wrong graph
     # silently. Prove there is no read at all.
@@ -1021,20 +1027,38 @@ def test_the_quota_gate_counts_the_promoted_graph(monkeypatch):
     assert opened == [] and seen["sdk"] is None
 
 
-def test_a_graph_bound_credential_keeps_the_historical_quota_count(monkeypatch):
-    """A graph-bound credential's `graph_namespace` IS a custom graph's — the
-    default-graph question does not apply to it, and `_default_graph_name`
-    answering it would count a graph the credential never bound."""
+def test_a_graph_bound_credential_counts_the_custom_graph_it_bound(monkeypatch):
+    """#4051 OWNS this arm: a graph-bound credential's `graph_namespace` IS a
+    custom graph's, so the promoted-default question does not apply to it
+    (`_default_graph_name` answers None) — and the count follows the graph the
+    write actually opens, NOT the org's default.
+
+    ⛔ This REPLACES #10180's pin of the historical `namespace=org_id` count for
+    this credential class; the two cannot both hold. #4051 exists precisely
+    because that historical count left the gate vacuous for a graph-bound key (a
+    custom graph already over `max_points` still passed — measured 5 points
+    against a limit of 5 with the default graph empty). The newer fix wins the
+    arm; `tests/test_4051_gate_graph.py` pins it independently, and the fold
+    ledger records `DROPPED(#10452: the graph-bound arm's historical
+    `namespace=org_id` count, superseded by #10637 / #4051)`.
+    """
     import tortoise.quota as quota
 
     _hosted(monkeypatch)
-    monkeypatch.setattr(
-        quota, "enforce_org_limit", lambda *a, **k: None)
+
+    def _stub(limits, resource, sdk=None, sdk_factory=None, **kw):
+        # LAZY (#4051): the gate builds the SDK through the factory, so the stub
+        # must call it for `_make_sdk` to be observed at all.
+        assert sdk is None and sdk_factory is not None, (sdk, sdk_factory)
+        sdk_factory()
+
+    monkeypatch.setattr(quota, "enforce_org_limit", _stub)
     opened = _capture_make_sdk(monkeypatch)
     ha._check_org_limit(
         _credential(graph_id=NEW_ID,
                     graph_namespace=f"org_{TEAM}_{NEW_ID}"), "points")
-    assert opened == [{"namespace": TEAM}]
+    assert opened == [{"graph_name": f"org_{TEAM}_{NEW_ID}"}]
+    # …and the promoted-default mechanism still must not reach this credential:
     assert ha._default_graph_name(
         _credential(graph_id=NEW_ID,
                     graph_namespace=f"org_{TEAM}_{NEW_ID}")) is None

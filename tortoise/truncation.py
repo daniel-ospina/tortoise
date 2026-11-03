@@ -85,9 +85,27 @@ the marker. The distinguishing property is not the shape of the response, it is
 whether the dropped rows are REACHABLE: the offset/cursor paths
 (``TortoiseSDK.paginated_query`` -> ``{results, total, hasMore}``, the hosted
 cursor walks) already report ``total``/``hasMore`` and hand the caller the next
-page, so they are never marked here. The limit-capped search path has no
-offset and no cursor — a row dropped at ``result_ids[:limit]`` is unreachable
-by any subsequent call — so that is the only place the marker is written.
+page, so they are never marked here. The criterion is REACHABILITY, and it is
+applied per surface rather than stated once: the marker is written where a row
+dropped at the cap is unreachable by any subsequent call. Every site that meets
+it today is named below by ``<module>::<function>``, and
+``tests/test_8447_truncation_marker.py::TestTheMarkerSiteRegisterIsComplete``
+derives that list from the tree so this register cannot re-stale — it has
+already shipped wrong twice, both times as a claim about how MANY sites there
+are rather than naming them:
+
+- ``tortoise/sdk.py::tortoise_fts_query`` — the limit-capped search path
+  (``result_ids[:limit]``, no offset and no cursor; ``/v1/search``).
+- ``tortoise/sdk.py::issue_insight`` — ``semantic_hits[:limit]`` over its own
+  default bound of 2, with no offset and no cursor (the
+  ``tortoise_issue_insight`` surface).
+- ``tortoise/hosted_api.py::list_points`` — hosted ``GET /v1/points``, a
+  store-side ``LIMIT`` with no offset and no cursor.
+
+Every such site must be on a DICT body; a field cannot ride a bare ``list``, so
+a list-shaped surface needs a return-shape decision first
+(``config/surface-manifest.yml``). ⛔ A new marker site joins this list — it
+does not mint a third predicate.
 """
 from __future__ import annotations
 
@@ -152,9 +170,12 @@ def mark_truncation(sink: dict | None, *, returned: int,
                     incomplete: bool = False) -> None:
     """Record whether a read DROPPED rows at its cap, on the caller's sink.
 
-    ``candidates``  rows the read held after every filter and BEFORE the
-                    ``limit`` cut — the honest population the cap was applied
-                    to.
+    ``candidates``  the candidate set the producer could SEE, after every
+                    filter and BEFORE the ``limit`` cut. ⚠️ It may itself be
+                    BOUNDED (hosted ``GET /v1/points`` passes a ``limit+1``
+                    probe row), which is exactly why ``exact`` is a separate
+                    input: pass ``exact=True`` only when the producer proved
+                    this is the WHOLE match population.
     ``returned``    rows actually delivered.
     ``exact``       the producer PROVED the candidate set is the whole match
                     population (no retrieval leg filled its own window). The

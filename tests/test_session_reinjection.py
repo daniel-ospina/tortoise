@@ -53,7 +53,10 @@ import pytest
 # register_kind("session-transcript") apply.
 import tools.longmem_eval.ingest  # noqa: F401
 from tests import _live_utils
-from tortoise.retrieval import SESSION_TRANSCRIPT_KIND
+from tortoise.retrieval import (
+    DEFAULT_POOL_SESSION_CAP,
+    SESSION_TRANSCRIPT_KIND,
+)
 from tortoise.sdk import TortoiseSDK
 
 MINI = Path(__file__).resolve().parent / "fixtures" / "longmemeval_mini.json"
@@ -420,6 +423,45 @@ def test_merge_stage_exception_keeps_the_base_pool(seeded_sdk, monkeypatch):
     assert st["injected_per_session_merged"] == {}
 
 
+def test_floor_term_arm_reaches_the_reinjection_merge(seeded_sdk,
+                                                    monkeypatch):
+    """#2513 (#10629 review P2): the SECOND composition carries the arm too.
+
+    The seam first landed armable from the direct composition only, so a
+    re-injection A/B would have run with the lower bound OFF while the receipt
+    said armed. Both compositions spend ``_floor_arm_guard_kwargs``; this pins
+    the re-injection half by execution (the coverage-loop half lives in
+    ``tests/test_coverage_loop.py``).
+    """
+    from tools.longmem_eval.retrieve import retrieve_for_question
+    from tortoise import session_reinjection as _sr
+    from tortoise.retrieval import DEFAULT_POOL_SESSION_CAP
+
+    seen: list[dict] = []
+    real = _sr.reinjection_merge_order
+
+    def _capture(pool, added, **kw):
+        seen.append({k: kw.get(k) for k in ("floor_term", "per_session_cap")})
+        return real(pool, added, **kw)
+
+    monkeypatch.setattr(_sr, "reinjection_merge_order", _capture)
+    on = retrieve_for_question(seeded_sdk, _question(), ks=(5,), top_k=10,
+                               pool_size=60, session_reinjection=True,
+                               floor_term=True, guard_per_session_cap=1)
+    assert seen == [{"floor_term": True, "per_session_cap": 1}], seen
+    st = on["session_reinjection_stats"]
+    assert st["floor_term"] is True
+    assert st["guard_per_session_cap"] == 1
+
+    # the default path rides the SAME expression, with the product cap
+    seen.clear()
+    off = retrieve_for_question(seeded_sdk, _question(), ks=(5,), top_k=10,
+                                pool_size=60, session_reinjection=True)
+    assert seen == [{"floor_term": False,
+                     "per_session_cap": DEFAULT_POOL_SESSION_CAP}], seen
+    assert off["session_reinjection_stats"]["floor_term"] is False
+
+
 def test_one_batched_fetch_per_fired_question(seeded_sdk, monkeypatch):
     from tools.longmem_eval.retrieve import retrieve_for_question
     from tortoise import session_reinjection as _sr
@@ -673,7 +715,11 @@ _CENSUS_KEYS = {
     "on", "seed_window", "seed_limit", "seed_sessions", "seeded",
     "injected_per_session", "injected_total",
     "injected_per_session_merged", "injected_merged", "dropped_by_cap",
-    "fetch_ok", "total_cap_hit", "guard", "latency_ms", "tr_excluded"}
+    "fetch_ok", "total_cap_hit", "guard", "latency_ms", "tr_excluded",
+    # #2513 (#10629 review): the arm THIS composition spent — recorded per
+    # outcome so a re-injection run's receipt says whether the lower bound
+    # was armed and under which window cap, not only what the run declared.
+    "floor_term", "guard_per_session_cap"}
 
 
 def test_reader_item_and_token_caps_hold_on_the_reinjected_pool(seeded_sdk):
@@ -760,6 +806,40 @@ def test_both_arms_on_aborts_with_message_and_nonzero_exit(
     assert excinfo.value.code == 1
     assert "arm conflict" in capsys.readouterr().err
     assert not (tmp_path / "r.json").exists()
+
+
+def test_floor_term_cli_flags_reach_the_methodology(monkeypatch, tmp_path):
+    """#2513 (#10629 review P2): the flags the published A/B command passes
+    EXIST and are recorded (methodology == actual).
+
+    ``--floor-term`` / ``--no-floor-term`` are tri-state (explicit beats the
+    env) and ``--guard-per-session-cap`` reaches the guard's cap; arming
+    either without a pool-order arm is REFUSED (exit 1), never a silent
+    no-op.
+    """
+    from tools.longmem_eval import run as _run
+
+    base = ["--data", str(MINI), "--limit", "1", "--split", "s", "--mock",
+            "--skip-preflight", "--output", str(tmp_path / "r.json")]
+    monkeypatch.delenv("TORTOISE_LME_FLOOR_TERM", raising=False)
+    rep = _run.run_main([*base, "--session-reinjection", "--floor-term",
+                         "--guard-per-session-cap", "3"])
+    k = rep["methodology"]
+    assert k["floor_term"] is True
+    assert k["guard_per_session_cap"] == 3
+
+    # tri-state: an explicit --no-floor-term beats the env twin
+    monkeypatch.setenv("TORTOISE_LME_FLOOR_TERM", "1")
+    rep = _run.run_main([*base, "--session-reinjection", "--no-floor-term"])
+    k = rep["methodology"]
+    assert k["floor_term"] is False
+    assert k["guard_per_session_cap"] == DEFAULT_POOL_SESSION_CAP
+
+    # no pool-order arm → the guard never runs → the run REFUSES the knobs
+    monkeypatch.delenv("TORTOISE_LME_FLOOR_TERM", raising=False)
+    with pytest.raises(SystemExit) as excinfo:
+        _run.run_main([*base, "--floor-term"])
+    assert excinfo.value.code == 1
 
 
 def test_run_level_tristate_and_methodology(monkeypatch, tmp_path):
