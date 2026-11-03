@@ -117,6 +117,12 @@ class _Upstream:
         #: 307 every request to this URL — a CROSS-ORIGIN hop, which is what makes
         #: httpx drop the Authorization header (#10727 review, P2).
         self.redirect_to: str | None = None
+        #: The status the redirect answers with: 307/308 PRESERVE the request (and
+        #: so may be followed), 301/302/303 do not.
+        self.redirect_status = 307
+        #: Redirect only the FIRST request, so a FOLLOWED hop can be observed on
+        #: the second (a persistent redirect would loop).
+        self.redirect_once = False
 
     async def __call__(self, scope, receive, send):
         if scope["type"] == "lifespan":
@@ -135,10 +141,15 @@ class _Upstream:
                 break
         headers = {k.decode().lower(): v.decode() for k, v in scope.get("headers") or ()}
         payload = json.loads(body) if body else None
-        self.requests.append({"headers": headers, "payload": payload})
+        self.requests.append({
+            "path": scope.get("path"),
+            "headers": headers,
+            "payload": payload,
+            "body": body,
+        })
 
-        if self.redirect_to:
-            await _respond(send, 307, None,
+        if self.redirect_to and not (self.redirect_once and len(self.requests) > 1):
+            await _respond(send, self.redirect_status, None,
                            extra_headers=[(b"location", self.redirect_to.encode())])
             return
 
@@ -293,16 +304,22 @@ def _write_credential(home: Path, key: str, api_url: str | None = None) -> Path:
 
 
 class _Bridge:
-    def __init__(self, url: str, home: Path, extra_env: dict[str, str] | None = None):
+    def __init__(self, url: str, home: Path, cwd: Path,
+                 extra_env: dict[str, str] | None = None):
         env = {k: v for k, v in os.environ.items()
                if k not in ("TORTOISE_API_KEY", "TORTOISE_MCP_API_KEY")}
         env.update({"HOME": str(home), "TORTOISE_MCP_URL": url})
+        # The repo on `sys.path` so `-m tortoise.mcp_bridge` resolves from the
+        # tmp cwd below (the child's PROJECT-LOCAL store leg is `cwd/.tortoise`).
+        existing = env.get("PYTHONPATH")
+        env["PYTHONPATH"] = (
+            f"{REPO_ROOT}{os.pathsep}{existing}" if existing else str(REPO_ROOT))
         env.update(extra_env or {})
         self.stderr_lines: list[str] = []
         self.proc = subprocess.Popen(
             [sys.executable, "-m", "tortoise.mcp_bridge"],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True, bufsize=1, env=env, cwd=str(REPO_ROOT),
+            text=True, bufsize=1, env=env, cwd=str(cwd),
         )
         threading.Thread(target=self._drain_stderr, daemon=True).start()
 
@@ -364,11 +381,23 @@ class _Bridge:
 
 
 @pytest.fixture
-def bridge_factory(upstream, home):
+def bridge_factory(upstream, home, tmp_path):
     bridges: list[_Bridge] = []
 
-    def _make(extra_env: dict[str, str] | None = None) -> _Bridge:
-        bridge = _Bridge(upstream[0], home, extra_env)
+    def _make(extra_env: dict[str, str] | None = None,
+              cwd: Path | None = None) -> _Bridge:
+        # ⛔ THE CHILD'S cwd IS A TMP DIRECTORY, never REPO_ROOT. The module under
+        # test reads the PROJECT-LOCAL store first (`Path.cwd()/.tortoise`, #1708
+        # D5), so spawning in the checkout let a developer's `tortoise init
+        # --api-key` store — the documented hosted flow, gitignored so its
+        # presence is normal — outrank every fixture: the per-test key was
+        # ignored, `TORTOISE_MCP_URL` was ignored too once the store supplied the
+        # credential (co-source, #2369 D1.1), and the suite sent the host's live
+        # key to the live hosted endpoint (#10727 review, P2).
+        if cwd is None:
+            cwd = tmp_path / f"bridge-cwd-{len(bridges)}"
+            cwd.mkdir()
+        bridge = _Bridge(upstream[0], home, cwd, extra_env)
         bridges.append(bridge)
         return bridge
 
@@ -386,6 +415,36 @@ _INITIALIZE = {
 
 def _auth_headers(stub: _Upstream) -> list[str | None]:
     return [r["headers"].get("authorization") for r in stub.requests]
+
+
+def test_the_child_resolves_the_project_local_store_from_its_OWN_cwd(
+    upstream, home, bridge_factory, tmp_path,
+):
+    """The child's PROJECT-LOCAL store must be the test's, never the checkout's.
+
+    `resolve_connection` reads `Path.cwd()/.tortoise` FIRST (#1708 D5), so a bridge
+    spawned with `cwd=REPO_ROOT` let a developer's `tortoise init --api-key` store
+    — the documented hosted flow, gitignored so its presence is normal — outrank
+    every fixture: the per-test key was ignored, `TORTOISE_MCP_URL` was ignored
+    once the store supplied the credential (co-source, #2369 D1.1), and the suite
+    sent the host's live key to the live hosted endpoint. Each bridge now spawns
+    in its own tmp cwd, and this pin reds if that ever regresses: on a worktree
+    with no `REPO_ROOT/.tortoise` the child would resolve NOTHING (no header at
+    all), and on a checkout that has one it would resolve the HOST's key.
+    """
+    url, stub = upstream
+    project = tmp_path / "child-cwd"
+    project.mkdir()
+    (project / ".tortoise").write_text(
+        json.dumps({"api_key": "tt_from_child_cwd", "api_url": url[: -len("/mcp")]}))
+    # `home` carries no store: the project-local leg is the only source here.
+    bridge = bridge_factory(cwd=project)
+
+    bridge.send(_INITIALIZE)
+    assert bridge.read()["id"] == 1
+    assert _auth_headers(stub) == ["Bearer tt_from_child_cwd"], (
+        "the child did not resolve the store in ITS OWN cwd — it is reading the "
+        f"checkout's `./.tortoise` instead ({_auth_headers(stub)})")
 
 
 # ── The defect: a captured credential never rotates ─────────────────────────
@@ -739,10 +798,11 @@ class TestFailureModes:
         sent = Connection("http://h/mcp", key, "TORTOISE_API_KEY", ("TORTOISE_API_KEY",))
         windows = [key[i:i + 8] for i in range(len(key) - 7)]
         response = _httpx.Response(
-            401, request=_httpx.Request("POST", "http://other-origin/mcp"))
+            307, request=_httpx.Request("POST", "http://h/mcp"))
 
         for pad in (200, 300, 350, 380, 393, 399, 400, 450):
-            text = _redirect_refusal(response, "x" * pad + key, sent)
+            text = _redirect_refusal(
+                response, "x" * pad + key, sent, "http://other-origin/mcp")
             assert not any(w in text for w in windows), (
                 f"pad={pad}: a FRAGMENT of the value was emitted: {text[-80:]}")
             if pad <= 380:
@@ -813,16 +873,21 @@ class TestFailureModes:
         assert message["id"] == 7, message
         assert message["result"]["tools"] == [{"name": "tortoise_search"}], message
 
-    def test_a_cross_origin_redirect_does_not_blame_the_credential(
+    def test_a_cross_origin_redirect_is_REFUSED_before_the_body_is_sent(
         self, upstream, home, bridge_factory,
     ):
-        """A redirect to another origin drops the header; the refusal must say so.
+        """A CROSS-ORIGIN redirect must not deliver the JSON-RPC body anywhere.
 
-        `follow_redirects=True` is required for `/mcp` -> `/mcp/` (#2864), but httpx
-        strips `Authorization` on a CROSS-ORIGIN hop. The request that gets the 401
-        therefore carried NO credential, and reporting "the bridge DID send a
-        credential - so the value itself was refused" sends the operator to rotate a
-        key that was never on the wire (#10727 review, P2).
+        httpx re-issues a 307/308 with the SAME body and strips only
+        `Authorization`, so `follow_redirects=True` delivered the tool arguments
+        (and `Mcp-Session-Id` / `MCP-Protocol-Version`) to whatever origin the
+        `Location` named, and only then reported a (correct) refusal about a
+        credential that never left — the exfiltration shape GHSA-5h93-6whr-6q8j
+        was filed for, and the reason the MCP SDKs follow same-origin redirects
+        only. The refusal must therefore be raised WITHOUT a second request: the
+        foreign origin sees ZERO requests.
+
+        RED before the fix: the target recorded one request carrying the body.
         """
         _url, stub = upstream
         target = _Upstream()
@@ -836,21 +901,72 @@ class TestFailureModes:
             bridge.send(_INITIALIZE)
             text = bridge.read()["error"]["message"]
 
-            # The redirect really happened and really carried no credential.
+            assert target.requests == [], (
+                "the JSON-RPC body was REPLAYED to a foreign origin before the "
+                f"refusal was reported ({target.requests})")
             assert _auth_headers(stub) == ["Bearer tt_secret"]
-            assert _auth_headers(target) == [None], (
-                "the test's premise is wrong: httpx DID carry the header across "
-                f"origins, so this case does not arise ({_auth_headers(target)})"
-            )
+            assert "MCP-CREDENTIAL-NOT-CARRIED" in text, text
+            assert "DID NOT follow" in text, text
             assert "DID send a credential" not in text, (
-                f"a credential that never left was blamed for the rejection: {text}"
-            )
-            assert target_url in text, text
+                f"a credential that never left was blamed for the rejection: {text}")
+            assert target_url.rstrip("/") in text, text
             assert "different origin" in text.lower(), text
             assert "tt_secret" not in text, f"the credential value was relayed: {text}"
         finally:
             served.close()
 
+    def test_a_same_origin_redirect_is_still_followed(
+        self, upstream, home, bridge_factory,
+    ):
+        """Tightening to same-origin must keep the hop the endpoint NEEDS.
+
+        The server answers `/mcp` with `/mcp/` (#2864), which is a SAME-ORIGIN 307.
+        A bridge that refused every redirect would trade the leak for an endpoint
+        that cannot be reached at its documented URL, so the followed hop is
+        pinned on the wire: two requests, the second at the new path, carrying the
+        credential AND the same JSON-RPC body (a 307 preserves the request).
+        """
+        url, stub = upstream
+        assert url.endswith("/mcp"), url
+        # The ENV key leg keeps the harness URL (`.../mcp`), which is the endpoint
+        # the server answers with a `/mcp/` redirect (#2864). A STORE credential
+        # would already resolve to `api_url + "/mcp/"`, so it could not show the hop.
+        stub.redirect_to = "/mcp/"
+        stub.redirect_once = True
+        bridge = bridge_factory({"TORTOISE_API_KEY": "tt_one"})
+
+        bridge.send(_INITIALIZE)
+        message = bridge.read()
+
+        assert message.get("id") == 1, message
+        assert [r["path"] for r in stub.requests] == ["/mcp", "/mcp/"], (
+            f"the same-origin hop was not followed: {[r['path'] for r in stub.requests]}")
+        assert _auth_headers(stub) == ["Bearer tt_one", "Bearer tt_one"]
+        assert stub.requests[1]["body"] == stub.requests[0]["body"]
+
+    def test_a_method_changing_redirect_is_not_followed(
+        self, upstream, home, bridge_factory,
+    ):
+        """301/302/303 do not preserve a JSON-RPC POST, so they are refused.
+
+        Only 307/308 mean "the same request, at another URL". Re-sending the body
+        on a `302 Found` would follow a policy the endpoint did not state (and
+        turning the POST into a GET cannot carry a request at all), so the hop is
+        answered by name and nothing is re-sent.
+        """
+        url, stub = upstream
+        assert url.endswith("/mcp"), url
+        stub.redirect_to = "/mcp/"
+        stub.redirect_status = 302
+        bridge = bridge_factory({"TORTOISE_API_KEY": "tt_one"})
+
+        bridge.send(_INITIALIZE)
+        text = bridge.read()["error"]["message"]
+
+        assert len(stub.requests) == 1, (
+            f"a method-changing redirect was followed: {[r['path'] for r in stub.requests]}")
+        assert "307/308" in text, text
+        assert "Nothing was re-sent" in text, text
 
     def test_the_redirect_remedy_is_actionable_for_a_STORED_credential(
         self, upstream, home, bridge_factory,
@@ -876,6 +992,9 @@ class TestFailureModes:
             text = bridge.read()["error"]["message"]
 
             assert "MCP-CREDENTIAL-NOT-CARRIED" in text, text
+            assert target.requests == [], (
+                "the stored credential's request was replayed to the redirect "
+                f"target ({target.requests})")
             assert "api_url" in text and "credentials.json" in text, (
                 f"a stored credential was told to use an env URL it ignores: {text}")
             assert "point TORTOISE_MCP_URL" not in text, text
@@ -1144,7 +1263,12 @@ def test_against_the_real_mcp_daemon(tmp_path, home, monkeypatch):
     app = Starlette(lifespan=_lifespan, routes=[Mount("/mcp", app=mcp_app)])
     for url in _serve(app):
         _write_credential(home, "tt_real", url[: -len("/mcp")])
-        bridge = _Bridge(url, home)
+        # Its own tmp cwd, for the same reason as `bridge_factory`: the child reads
+        # the PROJECT-LOCAL store first, so a checkout's `./.tortoise` must not be
+        # in scope (#10727 review, P2).
+        cwd = tmp_path / "daemon-cwd"
+        cwd.mkdir(exist_ok=True)
+        bridge = _Bridge(url, home, cwd)
         try:
             bridge.send(_INITIALIZE)
             assert "serverInfo" in bridge.read()["result"]

@@ -80,8 +80,20 @@ Named limitations (deliberate, not accidental):
   type carried it (a JSON body or an event-stream `data:` frame) — the stdio
   transport is one message per line.
 
-Redirects are followed (the endpoint answers `/mcp` with `/mcp/` — #2864), and a
-request that comes back with no JSON-RPC reply is answered with a named error
+Redirects are followed ONLY when they stay on the endpoint's own ORIGIN (same
+scheme, host and port) AND preserve the request (307/308) — the `/mcp` → `/mcp/`
+hop the endpoint answers (#2864) is exactly that shape. A redirect to a DIFFERENT
+origin is refused BEFORE the body is re-sent: httpx re-issues a 307/308 with the
+same bytes, so following one would replay the JSON-RPC payload (tool arguments,
+`tortoise_search` queries, `create_point` content) and the session headers to
+whatever host the `Location` names, while `Authorization` is deliberately dropped
+across origins — the leak GHSA-5h93-6whr-6q8j was filed for, and the policy every
+MCP SDK now implements (same-origin 307/308 only, `python-sdk` #3397). A
+`301`/`302`/`303` is not followed either: re-POSTing a JSON-RPC body on a status
+that means "moved" would be a policy the endpoint did not state, and turning the
+POST into a GET cannot carry a request at all.
+
+A request that comes back with no JSON-RPC reply is answered with a named error
 rather than with silence: a bridge that writes nothing leaves the harness waiting
 forever, which is indistinguishable from a slow call.
 
@@ -113,6 +125,18 @@ NOT_CARRIED_CODE = "MCP-CREDENTIAL-NOT-CARRIED"
 _DEFAULT_TIMEOUT = 120.0
 
 _AUTH_STATUSES = (401, 403)
+
+#: Every redirect status the bridge must make a DECISION about (never silently
+#: follow, never silently ignore).
+_REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
+
+#: The two statuses that mean "same request, different URL". Only these preserve
+#: a JSON-RPC POST; `301`/`302`/`303` do not, and are refused by name.
+_METHOD_PRESERVING_REDIRECTS = frozenset({307, 308})
+
+#: How many same-origin hops one forwarded message may take before the bridge
+#: reports a loop. `/mcp` → `/mcp/` is one; three is already generous.
+_MAX_REDIRECT_HOPS = 3
 
 
 def _log(message: str) -> None:
@@ -291,15 +315,74 @@ def _refusal_message(status: int, body: str, sent: Connection) -> str:
     )
 
 
-def _redirect_refusal(response: httpx.Response, body: str, sent: Connection) -> str:
-    """The named refusal for a request whose credential was dropped by a redirect.
+def _origin(url: str) -> tuple[str, str, int | None]:
+    """(scheme, host, port) for a URL — the ORIGIN, not the endpoint.
+
+    Deliberately coarser than `mcp_client._same_endpoint`: the PATH may differ,
+    because `/mcp` → `/mcp/` is the same-origin hop this bridge must keep
+    following (#2864). `httpx.URL.port` fills in the scheme's default port, so
+    `http://h` and `http://h:80` are one origin.
+    """
+    parsed = httpx.URL(url)
+    return (parsed.scheme.lower(), parsed.host.lower(), parsed.port)
+
+
+def _same_origin(a: str, b: str) -> bool:
+    """True when two URLs share scheme, host and port (path ignored)."""
+    try:
+        return _origin(a) == _origin(b)
+    except (httpx.InvalidURL, ValueError):  # malformed: never assume it is ours
+        return False
+
+
+def _redirect_target(url: str, location: str) -> str | None:
+    """The absolute URL a `Location` header names, or None if unusable.
+
+    Relative locations are resolved against the URL that was asked, which is what
+    makes a same-origin `/mcp/` hop (a bare path) land on the right host.
+    """
+    location = (location or "").strip()
+    if not location:
+        return None
+    try:
+        return str(httpx.URL(url).join(location))
+    except (httpx.InvalidURL, ValueError):
+        return None
+
+
+def _redirect_remedy(target: str, sent: Connection) -> str:
+    """Advice that can work for the SOURCE the credential came from."""
+    if sent.source and "/" in str(sent.source):
+        # A FILE-sourced credential decides its OWN endpoint (co-source, #2369
+        # D1.1), so "point TORTOISE_MCP_URL at it" is advice that cannot work: the
+        # store's `api_url` wins and the operator repeats the failure forever.
+        return (
+            f"record {_store_base(target)} as `api_url` in {sent.source} — a stored "
+            f"credential takes its endpoint from that same file — or run the bridge "
+            f"from a directory whose store already names {target}."
+        )
+    return (
+        f"point TORTOISE_MCP_URL at {target} directly so the credential goes out "
+        f"on the first hop: the next request picks that up without a restart."
+    )
+
+
+def _redirect_refusal(
+    response: httpx.Response, body: str, sent: Connection, target: str,
+) -> str:
+    """The named refusal for a CROSS-ORIGIN redirect the bridge refused to follow.
 
     A DISTINCT state, not a variant of the value fault: the credential resolved,
     it was simply never sent, so the value is not what got refused. Asserting
     otherwise is the #10605 defect in mirror image — a message that is accurate
     about the status and useless about the cause.
+
+    AND: the refusal names the delivery that did NOT happen. Following the hop is
+    what would have re-sent the JSON-RPC body to `target` (httpx re-issues 307/308
+    with the same bytes); refusing it before the second request is what keeps the
+    payload and the session headers off a foreign host.
     """
-    final = str(response.request.url)
+    final = redact(target, sent.key)
     detail = f"HTTP {response.status_code}"
     if body.strip():
         # REDACT FIRST, TRUNCATE SECOND — the order is the property (#1092).
@@ -309,27 +392,37 @@ def _redirect_refusal(response: httpx.Response, body: str, sent: Connection) -> 
         # is the reason the rule is stated as a rule and not as a habit: the
         # redirect refusal was added after every sibling site was repaired.
         detail += f": {redact(body.strip(), sent.key)[:400]}"
-    if "/" in str(sent.source):
-        # A FILE-sourced credential decides its OWN endpoint (co-source, #2369
-        # D1.1), so "point TORTOISE_MCP_URL at it" is advice that cannot work: the
-        # store's `api_url` wins and the operator repeats the failure forever.
-        remedy = (
-            f"record {_store_base(final)} as `api_url` in {sent.source} — a stored "
-            f"credential takes its endpoint from that same file — or run the bridge "
-            f"from a directory whose store already names {final}."
-        )
-    else:
-        remedy = (
-            f"point TORTOISE_MCP_URL at {final} directly so the credential goes out "
-            f"on the first hop: the next request picks that up without a restart."
-        )
     return (
-        f"{NOT_CARRIED_CODE}: the Tortoise MCP endpoint rejected this request "
-        f"({detail}) at {final}, a request that carried NO credential — although "
-        f"one resolved from {sent.source}. The endpoint redirected to a DIFFERENT "
-        f"origin, and an Authorization header is deliberately not carried across "
-        f"origins, so the value was never sent and is not what was refused. Fix: "
-        f"{remedy}"
+        f"{NOT_CARRIED_CODE}: the Tortoise MCP endpoint answered this request "
+        f"({detail}) with a redirect to {final}, a DIFFERENT origin, so the bridge "
+        f"DID NOT follow it: the JSON-RPC payload and the session headers are never "
+        f"replayed to another host, and an Authorization header is deliberately not "
+        f"carried across origins — the credential resolved from {sent.source} was "
+        f"never sent to {final} and is not what was refused. Fix: "
+        f"{_redirect_remedy(final, sent)}"
+    )
+
+
+def _method_redirect_refusal(
+    response: httpx.Response, body: str, sent: Connection, target: str,
+) -> str:
+    """The refusal for a redirect that cannot carry a JSON-RPC POST (301/302/303).
+
+    Not the credential class: nothing was refused, and on a same-origin hop the
+    credential WOULD have been carried. Replaying the body on a "moved" status
+    would also follow a policy the endpoint never stated — 307/308 is how a server
+    says "same request, new URL" — so the hop is refused and named.
+    """
+    final = redact(target, sent.key)
+    detail = f"HTTP {response.status_code}"
+    if body.strip():
+        # REDACT FIRST, TRUNCATE SECOND — the rule stated on `_redirect_refusal`.
+        detail += f": {redact(body.strip(), sent.key)[:400]}"
+    return (
+        f"MCP endpoint answered {detail} with a redirect to {final}, which this "
+        f"bridge does not follow: a JSON-RPC request is a POST, and only 307/308 "
+        f"mean 'the same request, at another URL'. Nothing was re-sent. Fix: "
+        f"{_redirect_remedy(final, sent)}"
     )
 
 
@@ -417,116 +510,150 @@ def forward(client: httpx.Client, state: dict, payload: Any) -> list[Any]:
     expected_ids = _request_ids(payload)
     connection = resolve_connection()
     url = connection.url
+    body = json.dumps(payload).encode()
+    hops = 0
     try:
-        with client.stream(
-            "POST", url, content=json.dumps(payload).encode(),
-            headers=_headers(connection, state, payload),
-        ) as response:
-            session_id = response.headers.get("mcp-session-id")
-            if session_id:
-                state["session_id"] = session_id
+        while True:
+            with client.stream(
+                "POST", url, content=body,
+                headers=_headers(connection, state, payload),
+            ) as response:
+                session_id = response.headers.get("mcp-session-id")
+                if session_id:
+                    state["session_id"] = session_id
 
-            if response.status_code in _AUTH_STATUSES:
-                body = response.read().decode("utf-8", "replace")
-                # WHAT THE REJECTED REQUEST ACTUALLY CARRIED, not what was
-                # RESOLVED. httpx strips `Authorization` when a redirect changes
-                # the origin, and redirects are followed here (#2864), so a 401
-                # from a different origin answers a request that carried NO
-                # credential. `_refusal_message` would then claim "the bridge DID
-                # send a credential — the value itself was refused" and send the
-                # operator to rotate a key that was never on the wire: the exact
-                # false attribution #10605 exists to remove (#10727 review, P2).
-                if connection.key and not (
-                    response.request.headers.get("authorization") or ""
-                ).strip():
+                if response.status_code in _REDIRECT_STATUSES:
+                    # DECIDED HERE, BEFORE A SECOND REQUEST EXISTS. httpx with
+                    # `follow_redirects=True` re-issues a 307/308 with the same
+                    # body to whatever host the `Location` names (dropping only
+                    # `Authorization`), which delivers the JSON-RPC payload and
+                    # the session headers to a foreign origin and classifies the
+                    # 401 it gets back AFTER the fact — the leak is the delivery,
+                    # not the wording (#10727 review, P2; GHSA-5h93-6whr-6q8j).
+                    # The client is built with `follow_redirects=False`, so this
+                    # is the only place a hop can happen: same-origin 307/308 is
+                    # followed, everything else is refused without being sent.
+                    text = redact(
+                        response.read().decode("utf-8", "replace"), connection.key)
+                    target = _redirect_target(
+                        url, response.headers.get("location", ""))
+                    if target is None:
+                        return _errors_for(
+                            payload, -32603,
+                            f"MCP endpoint answered HTTP {response.status_code} with "
+                            f"no usable Location header — the bridge does not follow "
+                            f"a redirect it cannot resolve. Nothing was re-sent.",
+                        )
+                    if response.status_code not in _METHOD_PRESERVING_REDIRECTS:
+                        return _errors_for(
+                            payload, -32603,
+                            _method_redirect_refusal(
+                                response, text, connection, target),
+                        )
+                    if not _same_origin(url, target):
+                        return _errors_for(
+                            payload, -32001,
+                            _redirect_refusal(
+                                response, text, connection, target),
+                        )
+                    if hops >= _MAX_REDIRECT_HOPS:
+                        return _errors_for(
+                            payload, -32603,
+                            f"MCP endpoint answered {hops + 1} same-origin "
+                            f"redirects in a row (last: {redact(target, connection.key)}) "
+                            f"— refusing to follow a loop.",
+                        )
+                    hops += 1
+                    url = target
+                    continue
+
+                if response.status_code in _AUTH_STATUSES:
+                    rejected = response.read().decode("utf-8", "replace")
                     return _errors_for(
                         payload, -32001,
-                        _redirect_refusal(response, body, connection),
+                        _refusal_message(response.status_code, rejected, connection),
                     )
-                return _errors_for(
-                    payload, -32001,
-                    _refusal_message(response.status_code, body, connection),
-                )
-            if response.status_code == 404 and state.get("session_id"):
-                expired = state["session_id"]
-                # CLEAR it: the recovery this message asks for is a fresh
-                # `initialize`, and a re-sent dead id would 404 forever.
-                state["session_id"] = None
-                state["protocol_version"] = None
-                return _errors_for(
-                    payload, -32002,
-                    f"HTTP 404 with Mcp-Session-Id {expired} — the MCP session "
-                    f"expired or the endpoint moved. The bridge has dropped that id, "
-                    f"so an `initialize` from the harness starts a fresh session.",
-                )
-            if response.status_code >= 400:
-                return _errors_for(
-                    payload, -32603,
-                    f"MCP endpoint returned HTTP {response.status_code}: "
-                    f"{redact(response.read().decode('utf-8', 'replace'), connection.key)[:400]}",
-                )
+                if response.status_code == 404 and state.get("session_id"):
+                    expired = state["session_id"]
+                    # CLEAR it: the recovery this message asks for is a fresh
+                    # `initialize`, and a re-sent dead id would 404 forever.
+                    state["session_id"] = None
+                    state["protocol_version"] = None
+                    return _errors_for(
+                        payload, -32002,
+                        f"HTTP 404 with Mcp-Session-Id {expired} — the MCP session "
+                        f"expired or the endpoint moved. The bridge has dropped that id, "
+                        f"so an `initialize` from the harness starts a fresh session.",
+                    )
+                if response.status_code >= 400:
+                    return _errors_for(
+                        payload, -32603,
+                        f"MCP endpoint returned HTTP {response.status_code}: "
+                        f"{redact(response.read().decode('utf-8', 'replace'), connection.key)[:400]}",
+                    )
 
-            messages, snippet = _response_messages(response, expected_ids, connection)
-            # ANSWERED AS A SET, not as "any". `not any(...)` treated one answered
-            # id as a complete answer, so a BATCH whose second id went unanswered
-            # produced no output for it at all — the harness then waits on that id
-            # forever, which is the exact silence this guard exists to prevent.
-            # HASHABLE IDS, WITHOUT DROPPING ANY. A JSON-RPC `id` may be an array or
-            # an object; a set-keyed comparison over those raises `TypeError` (a
-            # fabricated "internal failure" that discards real answers), and
-            # filtering them out of the comparison leaves the request with no
-            # answer AND no error — the silence this guard exists to prevent.
-            # `_id_key` makes every JSON value a key and keeps `1` distinct from
-            # `"1"`, so no id can fall through either hole.
-            answered = {_id_key(m["id"]) for m in messages
-                        if isinstance(m, dict) and m.get("id") is not None}
-            expected_keys = {_id_key(i) for i in expected_ids}
-            # Dedupe on the KEY, not the raw id: `dict.fromkeys(expected_ids)`
-            # raises on exactly the unhashable ids this helper exists to support.
-            seen: set[str] = set()
-            missing: list[Any] = []
-            for request_id in expected_ids:
-                key = _id_key(request_id)
-                if key in seen:
-                    continue
-                seen.add(key)
-                if key not in answered:
-                    missing.append(request_id)
-            if missing:
-                # A request MUST be answered. A reply with no JSON-RPC message for
-                # it (odd status, unparseable body, an SSE stream carrying only a
-                # notification) would otherwise be written back as NOTHING — the
-                # harness waits forever and the bridge looks merely slow.
-                #
-                # The ANSWERED messages are kept, in order: a batch where id 1 was
-                # answered and id 2 was not must deliver id 1's result AND an error
-                # for id 2, or fixing one silence creates another. Only messages
-                # carrying one of THIS request's ids are relayed, so an id-less
-                # server notification does not lead a reply a request/response
-                # harness has no way to correlate.
-                #
-                # ⛔ REDACTED HERE EXPLICITLY. This early return bypasses the
-                # `_redact_message` sweep at the end of `forward()` — the sweep that
-                # exists BECAUSE a relayed reply may quote the credential the server
-                # rejected. Applying the guard without it traded a silence for a
-                # leak on the busiest relay path, which is strictly worse.
-                relayed = [_redact_message(m, connection.key) for m in messages
-                           if isinstance(m, dict) and m.get("id") is not None
-                           and _id_key(m["id"]) in expected_keys]
-                # ⛔ AND SO IS THE PROTOCOL-VERSION CAPTURE. It lives in the tail,
-                # which this return skips, so a batched `initialize` whose sibling
-                # id went unanswered would negotiate a version and then never send
-                # `MCP-Protocol-Version` again for the life of the session.
-                _capture_protocol_version(relayed, state)
-                return [
-                    *relayed,
-                    *_errors_for_ids(
-                        missing, -32603,
-                        f"the MCP endpoint answered HTTP {response.status_code} with no "
-                        f"JSON-RPC reply for id(s) {missing}"
-                        + (f": {snippet[:300]}" if snippet.strip() else ""),
-                    ),
-                ]
+                messages, snippet = _response_messages(response, expected_ids, connection)
+                # ANSWERED AS A SET, not as "any". `not any(...)` treated one answered
+                # id as a complete answer, so a BATCH whose second id went unanswered
+                # produced no output for it at all — the harness then waits on that id
+                # forever, which is the exact silence this guard exists to prevent.
+                # HASHABLE IDS, WITHOUT DROPPING ANY. A JSON-RPC `id` may be an array or
+                # an object; a set-keyed comparison over those raises `TypeError` (a
+                # fabricated "internal failure" that discards real answers), and
+                # filtering them out of the comparison leaves the request with no
+                # answer AND no error — the silence this guard exists to prevent.
+                # `_id_key` makes every JSON value a key and keeps `1` distinct from
+                # `"1"`, so no id can fall through either hole.
+                answered = {_id_key(m["id"]) for m in messages
+                            if isinstance(m, dict) and m.get("id") is not None}
+                expected_keys = {_id_key(i) for i in expected_ids}
+                # Dedupe on the KEY, not the raw id: `dict.fromkeys(expected_ids)`
+                # raises on exactly the unhashable ids this helper exists to support.
+                seen: set[str] = set()
+                missing: list[Any] = []
+                for request_id in expected_ids:
+                    key = _id_key(request_id)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    if key not in answered:
+                        missing.append(request_id)
+                if missing:
+                    # A request MUST be answered. A reply with no JSON-RPC message for
+                    # it (odd status, unparseable body, an SSE stream carrying only a
+                    # notification) would otherwise be written back as NOTHING — the
+                    # harness waits forever and the bridge looks merely slow.
+                    #
+                    # The ANSWERED messages are kept, in order: a batch where id 1 was
+                    # answered and id 2 was not must deliver id 1's result AND an error
+                    # for id 2, or fixing one silence creates another. Only messages
+                    # carrying one of THIS request's ids are relayed, so an id-less
+                    # server notification does not lead a reply a request/response
+                    # harness has no way to correlate.
+                    #
+                    # ⛔ REDACTED HERE EXPLICITLY. This early return bypasses the
+                    # `_redact_message` sweep at the end of `forward()` — the sweep that
+                    # exists BECAUSE a relayed reply may quote the credential the server
+                    # rejected. Applying the guard without it traded a silence for a
+                    # leak on the busiest relay path, which is strictly worse.
+                    relayed = [_redact_message(m, connection.key) for m in messages
+                               if isinstance(m, dict) and m.get("id") is not None
+                               and _id_key(m["id"]) in expected_keys]
+                    # ⛔ AND SO IS THE PROTOCOL-VERSION CAPTURE. It lives in the tail,
+                    # which this return skips, so a batched `initialize` whose sibling
+                    # id went unanswered would negotiate a version and then never send
+                    # `MCP-Protocol-Version` again for the life of the session.
+                    _capture_protocol_version(relayed, state)
+                    return [
+                        *relayed,
+                        *_errors_for_ids(
+                            missing, -32603,
+                            f"the MCP endpoint answered HTTP {response.status_code} with no "
+                            f"JSON-RPC reply for id(s) {missing}"
+                            + (f": {snippet[:300]}" if snippet.strip() else ""),
+                        ),
+                    ]
+                break
     except httpx.HTTPError as exc:
         return _errors_for(
             payload, -32603,
@@ -554,7 +681,14 @@ def main(argv: list[str] | None = None) -> int:
         f"{REFUSAL_CODE} refusal"
     )
 
-    with httpx.Client(timeout=timeout, follow_redirects=True) as client:
+    # `follow_redirects=False` IS the security property, not a default: httpx
+    # re-issues a cross-origin 307/308 with the SAME body and drops only
+    # `Authorization`, so letting the client follow one delivers the JSON-RPC
+    # payload and the session headers to whatever host the `Location` names
+    # (GHSA-5h93-6whr-6q8j). `forward()` decides each hop itself — same-origin
+    # 307/308 only — so the redirect the endpoint really needs (`/mcp` → `/mcp/`,
+    # #2864) still works.
+    with httpx.Client(timeout=timeout, follow_redirects=False) as client:
         for line in sys.stdin:
             line = line.strip()
             if not line:
