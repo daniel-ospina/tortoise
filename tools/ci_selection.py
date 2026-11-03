@@ -1483,6 +1483,13 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # guard. Same silent-drop class as tools/tmpdir_sweep.py above,
              # and the same defect #4174 describes a gate having.
              "tools/drift-guard.py",
+             # #10597: tools/closes_landing.py owns
+             # tests/test_closes_landing.py (registered `core`) and is reached by
+             # a workflow step — but `tools/` is swallowed by NON_PYTHON_PREFIXES
+             # and no SOURCE_PATTERNS entry matches it, so a tool-only fix selects
+             # NO surface, drops to tier-1 smoke, and never runs the suite that
+             # pins the instrument. Same class as the drift-guard entry above.
+             "tools/closes_landing.py",
              # #5084 review P1: tools/test_lane.py owns
              # tests/test_test_lane_tool.py (registered `core`), but `tools/` is
              # swallowed by NON_PYTHON_PREFIXES and no SOURCE_PATTERNS entry
