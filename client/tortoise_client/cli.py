@@ -27,10 +27,13 @@ this surface only:
 
 The four terms are `tortoise.status_vocabulary` — the ONE recorded
 client-boundary term set, imported rather than redeclared (the client wheel
-stages that module as a shared file). The driver (`tortoise/mcp_client.py`) is
-deliberately UNCHANGED: it has two outcomes and no notion of a missing endpoint,
-so this probe supplies the missing fact and maps the driver's word onto the
-recorded set. The pre-#3805 words (`ok` / `tortoise_unavailable` /
+stages that module as a shared file). The driver (`tortoise/mcp_client.py`) has
+two outcomes of its own: the pre-#3805 outage word `tortoise_unavailable` (kept
+verbatim, translated by `status_vocabulary.resolve`) and — since #10605 — the
+recorded `unconfigured` term for a credential-less auth refusal, because "this
+client has no key" is a set-up gap rather than an outage. Everything else the
+probe reports is derived here: the driver still has no notion of a missing
+ENDPOINT. The pre-#3805 words (`ok` / `tortoise_unavailable` /
 `not_configured`) are translated, never re-minted — see
 `status_vocabulary.resolve` (and `LEGACY_WORDS` for the flat table).
 
@@ -75,17 +78,16 @@ _STATUS_EXIT_CODES = {
 def _probe_payload() -> dict:
     """The probe payload, carrying the recorded client-boundary term (#3805).
 
-    The driver (`tortoise.mcp_client.status`) is deliberately UNCHANGED: it has
-    no notion of a missing endpoint (an unset TORTOISE_MCP_URL falls back to
-    the self-host default) and reports `tortoise_unavailable` for any failure
-    to answer. Splitting 'we were never pointed at a memory' (`unconfigured`)
-    from 'the memory is down' (`degraded`) is a presentation decision of this
-    probe — the exact boundary the D5 landing draws — so the driver keeps its
-    contract and its callers keep skipping cleanly, while the human/agent
-    surface gets a distinct signal.
+    The driver (`tortoise.mcp_client.status`) has no notion of a missing
+    ENDPOINT (an unset TORTOISE_MCP_URL falls back to the self-host default), so
+    `configured` below is this probe's contribution, and it decides the driver's
+    two-outcome outage word only. The one term the DRIVER owns is the
+    credential-less refusal (`unconfigured`, #10605): it already arrives here as
+    a recorded term and is passed through untouched, which is why this probe
+    never has to guess whether a missing key was the cause.
 
-    BOUNDARY, stated rather than implied: on THIS probe, 'TORTOISE_MCP_URL is
-    unset' IS the definition of unconfigured. A self-hoster who runs the
+    BOUNDARY, stated rather than implied: for the UNAVAILABLE word, 'TORTOISE_MCP_URL
+    is unset' IS the definition of unconfigured on this probe. A self-hoster who runs the
     default daemon without setting the variable and then loses that daemon
     reads as `unconfigured`, not `degraded` — the endpoint was never declared,
     so the probe cannot tell 'intended the default' from 'never set up' and does

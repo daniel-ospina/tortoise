@@ -1292,6 +1292,12 @@ surfaces:
   # would run on no change that can break it.
   - test_own_key_selfservice_2446.py
   - test_mcp_client.py
+  # #10605: the stdio↔HTTP bridge's guards (per-request credential resolution,
+  # the named MCP-KEY-EMPTY refusal, session propagation). Registered here
+  # because `tortoise/mcp_bridge.py` is an exact `api` SOURCE_PATTERNS entry —
+  # a bridge-only diff replaces the `core` fallback, so the guard has to run
+  # from this surface or it runs nowhere (the #7076 self-guard class).
+  - test_mcp_bridge.py
   - test_mcp_http.py
   - test_mcp_rename_table.py  # #4282: Phase 0.3 rename table — old name → new name, per tool
   - test_mcp_route_challenge.py  # #2864: RFC 9728 challenge on /mcp 401s + /mcp route canonicalization (docker lane)

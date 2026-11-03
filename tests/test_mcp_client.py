@@ -2,10 +2,13 @@
 
 Real HTTP against an in-process uvicorn daemon (auth_mode="none", embedded
 FalkorDBLite). Verifies status/available/list_tools/call_tool + graceful
-degradation when the daemon is down.
+degradation when the daemon is down, and (#10605) that the Bearer credential
+is resolved PER REQUEST and that an unresolvable credential is a NAMED refusal
+rather than an empty header.
 """
 from __future__ import annotations
 
+import json
 import os
 import threading
 import time
@@ -15,17 +18,56 @@ os.environ.setdefault("TORTOISE_SECRET_PEPPER", "test-static-pepper")
 import pytest
 
 
-@pytest.fixture
-def daemon_url(monkeypatch, tmp_path):
-    """Start the MCP daemon (auth none, embedded DB) on an ephemeral port.
+class _RecordAuthorization:
+    """ASGI middleware recording each request's Authorization header.
+
+    The header a long-lived client actually puts ON THE WIRE is the only
+    observation that distinguishes "resolved per request" from "expanded once
+    at construction" (#10605). Recorded at the SERVER, never by inspecting
+    client internals — a client-side spy cannot prove what was transmitted.
+    """
+
+    def __init__(self, app, record: list):
+        self.app = app
+        self.record = record
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http":
+            self.record.append(next(
+                (v.decode() for k, v in scope.get("headers") or () if k == b"authorization"),
+                None,
+            ))
+        await self.app(scope, receive, send)
+
+
+def _serve(app) -> str:
+    """Run `app` under uvicorn on an ephemeral port; yield its /mcp URL."""
+    import uvicorn
+
+    config = uvicorn.Config(app, host="127.0.0.1", port=0, log_level="error")
+    server = uvicorn.Server(config)
+    t = threading.Thread(target=server.run, daemon=True)
+    t.start()
+    deadline = time.time() + 20
+    while not server.started and time.time() < deadline:
+        time.sleep(0.05)
+    assert server.started, "daemon did not start"
+    port = server.servers[0].sockets[0].getsockname()[1]
+    try:
+        yield f"http://127.0.0.1:{port}/mcp"
+    finally:
+        server.should_exit = True
+        t.join(timeout=10)
+
+
+def _mcp_app(record: list | None = None):
+    """The MCP daemon app (auth none, embedded DB), optionally recording auth.
 
     Forces embedded DB env (conftest sets TORTOISE_DB_URI to a test container
     that isn't running — the daemon's SDK would retry-connect and hang).
     """
-    monkeypatch.setenv("TORTOISE_DB_URI", "")
-    monkeypatch.setenv("TORTOISE_DB_PATH", str(tmp_path / "daemon.db"))
-    import uvicorn  # noqa: I001
     from contextlib import asynccontextmanager
+
     from starlette.applications import Starlette
     from starlette.routing import Mount
 
@@ -42,27 +84,84 @@ def daemon_url(monkeypatch, tmp_path):
             yield
 
     app = Starlette(lifespan=_lifespan, routes=[Mount("/mcp", app=mcp_app)])
+    return _RecordAuthorization(app, record) if record is not None else app
 
-    config = uvicorn.Config(app, host="127.0.0.1", port=0, log_level="error")
-    server = uvicorn.Server(config)
-    t = threading.Thread(target=server.run, daemon=True)
-    t.start()
-    deadline = time.time() + 20
-    while not server.started and time.time() < deadline:
-        time.sleep(0.05)
-    assert server.started, "daemon did not start"
-    port = server.servers[0].sockets[0].getsockname()[1]
-    url = f"http://127.0.0.1:{port}/mcp"
-    yield url
-    server.should_exit = True
-    t.join(timeout=10)
+
+@pytest.fixture
+def daemon_url(monkeypatch, tmp_path):
+    """Start the MCP daemon (auth none, embedded DB) on an ephemeral port."""
+    monkeypatch.setenv("TORTOISE_DB_URI", "")
+    monkeypatch.setenv("TORTOISE_DB_PATH", str(tmp_path / "daemon.db"))
+    yield from _serve(_mcp_app())
+
+
+@pytest.fixture
+def recorded_daemon(monkeypatch, tmp_path):
+    """(url, record) — the MCP daemon plus every Authorization header it saw."""
+    monkeypatch.setenv("TORTOISE_DB_URI", "")
+    monkeypatch.setenv("TORTOISE_DB_PATH", str(tmp_path / "daemon.db"))
+    record: list = []
+    for url in _serve(_mcp_app(record)):
+        yield url, record
+
+
+_REFUSAL = {
+    "jsonrpc": "2.0",
+    "id": None,
+    "error": {
+        "code": -32001,
+        "message": (
+            "Unauthorized: invalid or missing Bearer token. Expected format: "
+            "Authorization: Bearer tt_<key>/tk_<key> (or an OAuth access token "
+            "for #524 OAuth clients)"
+        ),
+    },
+}
+
+
+async def _refuses_every_request(scope, receive, send):
+    """An MCP endpoint that 401s exactly as the hosted one does (auth required)."""
+    if scope["type"] == "lifespan":
+        while True:
+            message = await receive()
+            if message["type"] == "lifespan.startup":
+                await send({"type": "lifespan.startup.complete"})
+            elif message["type"] == "lifespan.shutdown":
+                await send({"type": "lifespan.shutdown.complete"})
+                return
+    body = json.dumps(_REFUSAL).encode()
+    await send({"type": "http.response.start", "status": 401, "headers": [
+        (b"content-type", b"application/json"),
+        (b"content-length", str(len(body)).encode()),
+    ]})
+    await send({"type": "http.response.body", "body": body})
+
+
+@pytest.fixture
+def refusing_daemon(monkeypatch, tmp_path):
+    """An MCP endpoint that rejects every request as unauthenticated."""
+    monkeypatch.setenv("TORTOISE_DB_URI", "")
+    monkeypatch.setenv("TORTOISE_DB_PATH", str(tmp_path / "daemon.db"))
+    yield from _serve(_refuses_every_request)
+
+
+@pytest.fixture
+def isolated_home(monkeypatch, tmp_path):
+    """A HOME with no stored credential, and no ambient key in the env."""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("TORTOISE_API_KEY", raising=False)
+    monkeypatch.delenv("TORTOISE_MCP_API_KEY", raising=False)
+    return home
 
 
 @pytest.fixture
 def client_env(monkeypatch, daemon_url):
     """Point mcp_client at the daemon (no auth)."""
     monkeypatch.setenv("TORTOISE_MCP_URL", daemon_url)
-    monkeypatch.setenv("TORTOISE_API_KEY", "")
+    monkeypatch.delenv("TORTOISE_API_KEY", raising=False)
+    monkeypatch.delenv("TORTOISE_MCP_API_KEY", raising=False)
 
 
 class TestStatus:
@@ -119,3 +218,230 @@ class TestTools:
         parsed = _json.loads(text)
         assert isinstance(parsed, dict)
         assert parsed.get("id"), f"expected point id in result, got: {parsed}"
+
+
+class TestCredentialResolution:
+    """#10605: the Bearer credential is resolved PER REQUEST, never once.
+
+    The defect class: a client (or a harness config's ``${VAR}``) that captures
+    the credential at construction/start-up keeps sending the captured value —
+    empty or stale — for the life of the process. Every assertion here reads
+    the header the SERVER received, so "resolved per request" is proven on the
+    wire rather than inferred from client internals.
+    """
+
+    def test_a_rotated_env_key_reaches_the_wire_on_the_next_request(
+        self, recorded_daemon, monkeypatch,
+    ):
+        """RED before the fix: a live client resent the key captured at build time."""
+        import asyncio
+
+        from tortoise import mcp_client
+
+        url, seen = recorded_daemon
+        monkeypatch.setenv("TORTOISE_MCP_URL", url)
+        monkeypatch.setenv("TORTOISE_API_KEY", "tt_first")
+        client = mcp_client.get_client()
+
+        async def _two_round_trips():
+            # ONE client across both requests — the long-lived-session shape.
+            async with client:
+                await client.list_tools()
+                monkeypatch.setenv("TORTOISE_API_KEY", "tt_second")
+                await client.list_tools()
+
+        asyncio.run(_two_round_trips())
+
+        sent = [h for h in seen if h]
+        assert sent, "no Authorization header reached the server at all"
+        assert sent[0] == "Bearer tt_first", sent
+        assert sent[-1] == "Bearer tt_second", (
+            "the rotated key did not reach the wire — the client is still sending "
+            f"the value it captured at construction: {sent}"
+        )
+
+    def test_a_rotated_stored_credential_reaches_the_wire(
+        self, recorded_daemon, isolated_home, monkeypatch,
+    ):
+        """The other documented store: ~/.tortoise/credentials.json, rewritten live.
+
+        This is the shape the onboarding CLI writes (`_key_resolution_expr`), so
+        a CI lane or bridge process that holds one client for hours must pick a
+        rotated file up without a restart.
+        """
+        import asyncio
+
+        from tortoise import mcp_client
+
+        url, seen = recorded_daemon
+        cred = isolated_home / ".tortoise" / "credentials.json"
+        cred.parent.mkdir()
+        # #2369 D1.1 co-source: a STORE-sourced key takes its endpoint from the
+        # same file, so the store records the origin the daemon serves (the code
+        # appends `/mcp/`, which is the canonical route).
+        base = url[: -len("/mcp")]
+        cred.write_text(json.dumps({"api_key": "tt_stored_one", "api_url": base}))
+        # isolated_home removed the env key, so the FILE is the only source — and
+        # the env URL is deliberately NOT how this test points at the daemon.
+        client = mcp_client.get_client()
+
+        async def _two_round_trips():
+            async with client:
+                await client.list_tools()
+                cred.write_text(json.dumps({"api_key": "tt_stored_two", "api_url": base}))
+                await client.list_tools()
+
+        asyncio.run(_two_round_trips())
+
+        sent = [h for h in seen if h]
+        assert sent[0] == "Bearer tt_stored_one", sent
+        assert sent[-1] == "Bearer tt_stored_two", (
+            "the rotated stored credential did not reach the wire: "
+            f"{sent} — the client re-reads the store only at construction"
+        )
+
+    def test_a_blank_key_is_never_sent_as_an_empty_bearer(
+        self, recorded_daemon, monkeypatch,
+    ):
+        """A whitespace credential must not become `Bearer   ` on the wire.
+
+        `"   "` is truthy, so the pre-fix client forwarded `Authorization:
+        Bearer    ` — an empty bearer the server can only answer with its own
+        "invalid or missing Bearer token" message, which misdirects the reader
+        onto the server's auth policy instead of the client's empty value.
+        """
+        from tortoise import mcp_client
+
+        url, seen = recorded_daemon
+        monkeypatch.setenv("TORTOISE_MCP_URL", url)
+        monkeypatch.setenv("TORTOISE_API_KEY", "   ")
+
+        mcp_client.list_tools()
+
+        assert not any(h and not h.strip().removeprefix("Bearer").strip() for h in seen), (
+            f"an EMPTY Bearer reached the server: {seen!r}"
+        )
+
+    def test_an_unresolvable_credential_against_an_auth_endpoint_is_a_named_refusal(
+        self, refusing_daemon, monkeypatch, isolated_home,
+    ):
+        """The refusal names the CLIENT cause, not the server's auth policy.
+
+        No credential resolves and the endpoint rejects the call, so the error
+        must be the named `MCP-KEY-EMPTY` refusal listing the sources checked —
+        not a forwarded "invalid or missing Bearer token", which is the message
+        the issue measured as "accurate and useless".
+        """
+        from tortoise import mcp_client
+
+        monkeypatch.setenv("TORTOISE_MCP_URL", refusing_daemon)
+
+        with pytest.raises(mcp_client.MCPKeyEmptyError) as caught:
+            mcp_client.list_tools()
+
+        message = str(caught.value)
+        assert caught.value.code == "MCP-KEY-EMPTY"
+        assert "TORTOISE_API_KEY" in message
+        assert "credentials.json" in message
+        # The server's rejection still travels WITH the refusal (evidence, not
+        # replacement). fastmcp wraps the body in its own RuntimeError, so the
+        # status line — not the body text — is what survives here; the bridge
+        # (`tortoise/mcp_bridge.py`), which owns its HTTP calls, carries the body.
+        assert "401" in message, message
+
+    def test_status_reports_the_refusal_as_unconfigured(
+        self, refusing_daemon, monkeypatch, isolated_home,
+    ):
+        """`status()` never raises: it reports the named refusal in its payload."""
+        from tortoise import mcp_client
+
+        monkeypatch.setenv("TORTOISE_MCP_URL", refusing_daemon)
+        payload = mcp_client.status()
+
+        assert payload["status"] == mcp_client.STATUS_UNCONFIGURED, payload
+        assert "MCP-KEY-EMPTY" in payload["error"], payload
+
+    def test_a_sent_credential_does_not_become_the_refusal(
+        self, refusing_daemon, monkeypatch, isolated_home,
+    ):
+        """A key WAS sent: the refusal must never claim there was none.
+
+        This is the branch that keeps `MCP-KEY-EMPTY` honest — without it, any
+        regression that raised on every auth rejection would still pass the rest
+        of this class, and a user with a merely expired key would be told to set
+        the variable they already set.
+        """
+        from tortoise import mcp_client
+
+        monkeypatch.setenv("TORTOISE_MCP_URL", refusing_daemon)
+        monkeypatch.setenv("TORTOISE_API_KEY", "tt_expired")
+
+        with pytest.raises(Exception) as caught:
+            mcp_client.list_tools()
+
+        assert not isinstance(caught.value, mcp_client.MCPKeyEmptyError), caught.value
+        assert "401" in str(caught.value), caught.value
+        # …and the probe reports an outage, not a set-up gap.
+        payload = mcp_client.status()
+        assert payload["status"] == "tortoise_unavailable", payload
+
+    def test_a_corrupt_credential_store_is_named_not_erased(
+        self, refusing_daemon, monkeypatch, isolated_home,
+    ):
+        """A store that exists but will not parse is NOT "no credential".
+
+        #1708 D6 makes a corrupt store loud in the engine path; this reader has
+        the same store, so it must name the failure instead of telling the
+        operator to set a key that is already on disk.
+        """
+        from tortoise import mcp_client
+
+        store = isolated_home / ".tortoise" / "credentials.json"
+        store.parent.mkdir()
+        store.write_text("{ this is not json")
+        monkeypatch.setenv("TORTOISE_MCP_URL", refusing_daemon)
+
+        with pytest.raises(mcp_client.MCPKeyEmptyError) as caught:
+            mcp_client.list_tools()
+
+        message = str(caught.value)
+        assert str(store) in message
+        assert "JSONDecodeError" in message, message
+
+    def test_a_stored_key_keeps_its_own_host(self, recorded_daemon, monkeypatch, isolated_home):
+        """#2369 D1.1 co-source: an env URL must not redirect a stored key.
+
+        A committed harness config can set `TORTOISE_MCP_URL`; if the stored key
+        honoured it, that config could aim the user's credential at any host.
+        """
+        from tortoise import mcp_client
+
+        url, seen = recorded_daemon
+        store = isolated_home / ".tortoise" / "credentials.json"
+        store.parent.mkdir()
+        base = url[: -len("/mcp")]
+        store.write_text(json.dumps({"api_key": "tt_stored", "api_url": base}))
+        # A dead endpoint in the environment, which the store-sourced key ignores.
+        monkeypatch.setenv("TORTOISE_MCP_URL", "http://127.0.0.1:1/mcp")
+
+        assert "tortoise_create_point" in mcp_client.list_tools()
+        sent = [h for h in seen if h]
+        assert sent and set(sent) == {"Bearer tt_stored"}, sent
+
+    def test_a_keyless_endpoint_still_needs_no_credential(
+        self, recorded_daemon, monkeypatch, isolated_home,
+    ):
+        """A self-host daemon with auth off is NOT unconfigured — no refusal.
+
+        Pins the boundary the refusal must not cross: absent credential + no
+        rejection = a working keyless endpoint, not an error (#1708 / the
+        documented self-host path).
+        """
+        from tortoise import mcp_client
+
+        url, seen = recorded_daemon
+        monkeypatch.setenv("TORTOISE_MCP_URL", url)
+
+        assert "tortoise_create_point" in mcp_client.list_tools()
+        assert all(h is None for h in seen), seen
+

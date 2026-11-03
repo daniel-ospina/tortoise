@@ -31,7 +31,7 @@ makes it physically true — the license boundary moves to the network.
 | Component | Distribution | License | Content |
 |---|---|---|---|
 | **Server** | `tortoise-graph` (existing, 0.2.0) | BSL-1.1 | engine (sdk, projection, EP), daemon, MCP server, hosted/self-host APIs, CLIs (`tortoise`, `tortoise-serve`, `tortoise-ingest`) |
-| **Client** | `tortoise-client` (new) | Apache-2.0 | thin MCP driver (`tortoise/mcp_client.py`), shared config + error types, the recorded status vocabulary (`tortoise/status_vocabulary.py`, #3805), minimal CLI |
+| **Client** | `tortoise-client` (new) | Apache-2.0 | thin MCP driver (`tortoise/mcp_client.py`), the stdio bridge (`tortoise/mcp_bridge.py`, #10605), shared config + error types, the recorded status vocabulary (`tortoise/status_vocabulary.py`, #3805), minimal CLI |
 
 Industry precedent (verified 2026-08-13, issue comment): **MongoDB** (server
 SSPL, all drivers Apache-2.0 — an app using the driver is "a separate
@@ -76,6 +76,8 @@ then build with `python -m build` (falls back to `pip wheel`). Engine
 modules are never staged. The wheel ships exactly:
 
 - `tortoise/mcp_client.py` — the network driver (canonical copy)
+- `tortoise/mcp_bridge.py` — the stdio ↔ Streamable-HTTP bridge (canonical
+  copy, #10605 — see §8a)
 - `tortoise/config.py` — shared config (canonical copy)
 - `tortoise/exceptions.py` — shared error types (canonical copy)
 - `tortoise/status_vocabulary.py` — the one recorded status vocabulary
@@ -193,6 +195,76 @@ client/verify_client.sh                         # clean-venv gate
 | `import tortoise.sdk` / `import tortoise.projection` | raises ImportError |
 | `pip list` | no falkordb / falkordblite / numpy / scipy / fastapi |
 | Existing suites (`tests/test_mcp_client.py`, `tests/test_tortoise_client.py`) | pass against `tortoise-graph` (unchanged server tree) |
+
+## 8a. Credentials in a long-lived session — the bridge (#10605)
+
+**The defect this closes.** A harness config that carries an `Authorization`
+header is a CAPTURE, not a lookup: `${TORTOISE_API_KEY}` is expanded once, when
+the harness process starts, and the resulting string is replayed for the life of
+that process. A session that lives for hours therefore keeps sending whatever it
+expanded at start-up — empty if the key was not in the environment yet, stale if
+it has rotated — and the server can only answer
+`Unauthorized: invalid or missing Bearer token`. That message is accurate and
+useless: it points at the credential's VALUE when the client never looked again
+(#10605; #5200 is the same class reached by a variable-name mismatch).
+
+**The fix, in two layers.**
+
+1. `tortoise/mcp_client.py` resolves the Bearer value **per request** (an httpx
+   `auth_flow` provider — the `token()`-callback shape the MCP SDKs converge on,
+   rather than a captured string), reading `TORTOISE_API_KEY`, then the fleet
+   alias `TORTOISE_MCP_API_KEY`, then `~/.tortoise/credentials.json`. A rotation
+   therefore reaches the wire on the next call with no rebuild and no restart. A
+   blank value is "no credential", never `Authorization: Bearer ` with nothing
+   after it; if the endpoint then rejects the call, the client raises
+   `MCPKeyEmptyError` (code `MCP-KEY-EMPTY`) naming every source it read instead
+   of relaying the server's wording. `status()` reports that as the recorded
+   `unconfigured` term (a set-up gap, not an outage, #3805).
+2. `tortoise/mcp_bridge.py` is a local **stdio ↔ Streamable-HTTP** bridge, so a
+   harness can declare a command instead of a header:
+
+   ```json
+   {"mcpServers": {"tortoise": {
+       "command": "python3", "args": ["-m", "tortoise.mcp_bridge"],
+       "env": {"TORTOISE_MCP_URL": "https://api.premiselabs.co/mcp/"}}}}
+   ```
+
+   No key in the config, no `${VAR}` to expand, nothing to go stale. Its auth
+   refusals are named too, and split by cause: `MCP-KEY-EMPTY` when nothing
+   resolved (fixable without a restart) versus a value-fault message when a
+   credential WAS sent and the server refused it.
+
+**WHICH SOURCE IS ACTUALLY LIVE — stated, because "reads the live environment" is
+too generous.** The bridge is a CHILD process, so its environment is a snapshot
+of the harness's at spawn: a key exported in another shell after the session
+started is not visible to it. Re-reading the environment helps a process that
+sets its own `os.environ` mid-run (a notebook, a login flow); the source that
+genuinely rotates under a long-lived session — and the one a hosted user has on
+disk, written by `tortoise init` — is the **credential file**, re-read per
+request. The env leg is precedence, not liveness.
+
+**CO-SOURCE (#2369 D1.1).** When the key comes from the credential file, the
+endpoint comes from that SAME file (`api_url`), never from a `TORTOISE_MCP_URL`
+the environment supplies: a harness config can be committed to a repository, so
+letting it choose the host for a stored credential would be an exfiltration path.
+
+**What this does NOT do (residual, recorded on #10605).** The onboarding
+generator (`tortoise/__main__.py::_harness_mcp_config`) and this repo's committed
+`.mcp.json` still emit the `Authorization: Bearer ${TORTOISE_API_KEY}` capture for
+the **hosted** shape. That is deliberate and product-facing, not an oversight:
+the hosted recipe must work for a user who has installed *nothing* locally, and
+the bridge needs a Python package present. Switching those recipes — and the
+fleet's own harness configs, which agent-infra owns — is the follow-up that
+retires the capture everywhere; until it lands the bridge is the recipe for
+anyone with the client installed, and the named refusal is what everyone else now
+gets instead of a misleading 401.
+
+Both modules are staged into the client-only wheel (`client/build_client.sh`), and
+both have guards registered on the `api` CI surface:
+`tests/test_mcp_client.py` (`TestCredentialResolution`) and
+`tests/test_mcp_bridge.py` — the latter drives a real bridge subprocess and
+asserts the header the UPSTREAM received, so "resolved per request" is measured
+on the wire rather than inferred.
 
 ## 9. Migration
 

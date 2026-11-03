@@ -1393,7 +1393,6 @@ _SELF_GUARD_DEBT: dict[str, str] = {
     "tests/test_github_map.py": "tortoise/github_map.py",
     "tests/test_kind_classifier.py": "tortoise/kind_classifier.py",
     "tests/test_kind_index.py": "tortoise/kind_index.py",
-    "tests/test_mcp_client.py": "tortoise/mcp_client.py",
     "tests/test_sentry.py": "tortoise/sentry.py",
     "tests/test_source_credibility.py": "tortoise/source_credibility.py",
     "tests/test_subgraph_render.py": "tortoise/subgraph_render.py",
