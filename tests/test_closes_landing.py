@@ -154,6 +154,19 @@ def test_one_inert_ref_and_one_landing_ref_are_reported_separately():
 
 # ── (c) what cannot be measured is never a pass ──────────────────────────────
 
+def test_resolve_carrier_is_the_documented_wrapper_over_carrier_path():
+    """#10634 cycle 7 (P3): once `classify` began calling `carrier_path`, the
+    documented `resolve_carrier` had no caller and no direct test — it would have
+    rotted silently. It is the module's public shape, so it is pinned directly."""
+    subj = _pr(400, SIBLING, "Closes #100")
+    carrier = _pr(401, DEFAULT, "", head=SIBLING)
+    table = _by_head(subj, carrier)
+    assert cl.resolve_carrier(subj, table, DEFAULT) is carrier
+    assert cl.resolve_carrier(carrier, table, DEFAULT) is carrier   # already on default
+    assert cl.resolve_carrier(_pr(402, "nowhere", ""), table, DEFAULT) is None
+    assert [p.number for p in cl.carrier_path(subj, table, DEFAULT)] == [400, 401]
+
+
 def test_a_base_branch_with_no_pr_is_unresolved_not_a_pass():
     pr = _pr(40, SIBLING, "Closes #100")
     (finding,) = cl.classify(pr, _by_head(pr), DEFAULT)
@@ -338,6 +351,11 @@ def test_a_merged_carrier_does_NOT_claim_the_work_landed_when_the_subject_is_ope
     assert "Close #100 by hand" not in finding.detail
     assert "still OPEN" in finding.detail
     assert "NOT on `main`" in finding.detail
+    # The REMEDY must exist for THIS state (#10634 cycle 2, P2): an OPEN PR has
+    # nothing to re-open — it needs its base retargeted, and the keyword then
+    # fires normally. "Re-open PR #100" was impossible and contradicted itself.
+    assert "nothing to re-open" in finding.detail, finding.detail
+    assert "Re-open PR #100" not in finding.detail, finding.detail
 
 
 def test_a_subject_that_merged_into_the_sibling_AFTER_the_carrier_is_stranded():
@@ -352,7 +370,309 @@ def test_a_subject_that_merged_into_the_sibling_AFTER_the_carrier_is_stranded():
     assert finding.verdict == "unresolved", finding
     assert "did land" not in finding.detail
     assert "Close #100 by hand" not in finding.detail
-    assert "AFTER" in finding.detail
+    assert "BEFORE PR #102 merged into" in finding.detail, finding.detail
+    # …and a MERGED PR cannot be re-opened at all (#10634 cycle 2, P2).
+    assert "cannot be re-opened" in finding.detail, finding.detail
+    assert "Re-open PR #102" not in finding.detail, finding.detail
+
+
+def test_a_subject_merged_AFTER_the_middle_link_was_carried_up_is_stranded():
+    """#10634 cycle 4 (P1): the pairwise ORDER, not just the two endpoints. Subject
+    merged 12:00 into `act-a`, but `act-a` was already carried up at 11:00, so the
+    commits are on neither `act-b` nor `main`. Comparing each link with the CARRIER
+    alone passed it (12:00 < 14:00) and printed "the work did land \u2026 Close #100
+    by hand"."""
+    subj = _pr(300, "act-a", "Closes #100", state="MERGED",
+               merged_at="2026-11-02T12:00:00Z")
+    mid = _pr(301, "act-b", "", head="act-a", state="MERGED",
+              merged_at="2026-11-02T11:00:00Z")
+    carrier = _pr(302, DEFAULT, "", head="act-b", state="MERGED",
+                  merged_at="2026-11-02T14:07:51Z")
+    (finding,) = cl.classify(subj, _by_head(subj, mid, carrier), DEFAULT)
+    assert finding.verdict == "unresolved", finding
+    assert "did land" not in finding.detail, finding.detail
+    assert "Close #100 by hand" not in finding.detail, finding.detail
+    # …and the diagnosis must not invert the stamps it is quoting.
+    assert "BEFORE PR #300 merged into `act-a`" in finding.detail, finding.detail
+    # A MERGED carrier goes to the merged-carrier arm, not the blocked one — that
+    # split is what keeps "the carrier can still be updated" off a merged PR
+    # (#10634 cycle 6).
+    assert "targets `main` and has ALREADY merged" in finding.detail, finding.detail
+    assert "carrier can still be updated" not in finding.detail, finding.detail
+    assert "AFTER PR #302 merged" not in finding.detail, finding.detail
+
+
+def test_a_CLOSED_middle_link_blocks_the_ride_even_with_an_OPEN_carrier():
+    """#10634 cycle 4 (P2): the un-merged-carrier arm never consulted the path, so a
+    stack whose middle was CLOSED-unmerged promised "only lands when PR #carrier
+    merges" while nothing could put the subject's commits in that branch."""
+    subj = _pr(800, "a1", "Closes #100", state="MERGED",
+               merged_at="2026-11-02T09:00:00Z")
+    mid = _pr(801, "a2", "", head="a1", state="CLOSED")
+    carrier = _pr(802, DEFAULT, "", head="a2", state="OPEN")
+    (finding,) = cl.classify(subj, _by_head(subj, mid, carrier), DEFAULT)
+    assert finding.verdict == "unresolved", finding
+    assert "only lands when PR #802 merges" not in finding.detail, finding.detail
+    assert "PR #801 (base `a2`) was CLOSED WITHOUT MERGING" in finding.detail, finding.detail
+    # #10634 cycle 5 (P2): the carrier is OPEN, so the sentence may not report a
+    # merge that has not happened (this branch states the direction and nothing
+    # about WHEN).
+    assert "branch PR #802 merges into" in finding.detail, finding.detail
+    assert "branch PR #802 merged" not in finding.detail, finding.detail
+    # …and (P3) the stack is not DEAD — but the re-open is offered only as what it
+    # is: a repair of the path ABOVE the link, never "the repair" of the commits
+    # (#10634 cycle 7).
+    assert "AS IT STANDS" in finding.detail, finding.detail
+    assert "PR #801 can be re-opened" in finding.detail, finding.detail
+    assert "is the repair" not in finding.detail, finding.detail
+
+
+def test_a_MERGED_middle_link_above_an_UNMERGED_subject_is_a_break_with_no_stamps():
+    """#10634 cycle 8 (P1): the state break a TIMESTAMP test cannot see. The middle
+    link merged while the subject is still OPEN, so the subject's commits enter
+    `b1` afterwards and are in neither `b2` nor `main` — no `merged_at` comparison
+    can show it, only the STATES can. It used to print `inert` + "…only lands when
+    PR #102 merges … Re-state the keyword on PR #102": complying closes #7 over
+    stranded work."""
+    subj = _pr(100, "b1", "Closes #7")
+    mid = _pr(101, "b2", "", head="b1", state="MERGED",
+              merged_at="2026-11-02T09:00:00Z")
+    carrier = _pr(102, DEFAULT, "", head="b2", state="OPEN")
+    (finding,) = cl.classify(subj, _by_head(subj, mid, carrier), DEFAULT)
+    assert finding.verdict == "unresolved", finding
+    assert "only lands when PR #102 merges" not in finding.detail, finding.detail
+    assert "Re-state the keyword on PR #102" not in finding.detail, finding.detail
+    assert "has ALREADY merged while PR #100 is still OPEN" in finding.detail, finding.detail
+
+
+def test_a_MERGED_keyword_carrying_carrier_over_an_OPEN_subject_is_not_a_pass():
+    """#10634 cycle 9 (P1): with the carrier's own link excluded from the predicate,
+    a MERGED, keyword-carrying carrier returned `lands` (exit 0, no warning) over
+    an OPEN subject — whose commits are in no branch that carrier merged. The
+    keyword does not change whether the work rode in, so the keyword-less twin of
+    this record set is `unresolved`; 18 configurations were false passes, all this
+    one link."""
+    subj = _pr(1, "lane-1", "Closes #7")                     # still OPEN
+    carrier = _pr(2, DEFAULT, "Closes #7", head="lane-1", state="MERGED",
+                  merged_at="2026-11-02T09:00:00Z")
+    (finding,) = cl.classify(subj, _by_head(subj, carrier), DEFAULT)
+    assert finding.verdict == "unresolved", finding
+    assert "closes #7 when it lands" not in finding.detail, finding.detail
+    assert "ALREADY FIRED" in finding.detail, finding.detail
+
+
+def test_a_merged_carrier_reports_the_closure_that_ALREADY_fired():
+    """#10634 cycle 9 (P2): the past-tense carrier said "it closes #N when it lands"
+    and "would be closed" for a keyword that has already fired — a promise about an
+    event in the past, and a remedy ("state Closes #N") that is useless on a CLOSED
+    issue. Here the subject merged after the carrier, so the issue IS closed."""
+    subj = _pr(21, "b1", "Closes #7", state="MERGED",
+               merged_at="2026-11-02T20:00:00Z")
+    carrier = _pr(23, DEFAULT, "Closes #7", head="b1", state="MERGED",
+                  merged_at="2026-11-02T09:00:00Z")
+    (finding,) = cl.classify(subj, _by_head(subj, carrier), DEFAULT)
+    assert finding.verdict == "unresolved", finding
+    assert "ALREADY FIRED when PR #23 merged" in finding.detail, finding.detail
+    assert "will be closed" not in finding.detail, finding.detail
+    assert "is therefore closed" in finding.detail, finding.detail
+    assert "re-open #7" in finding.detail, finding.detail
+    # …and the ORDER it names must be the one the stamps show.
+    assert "BEFORE PR #21 merged into" in finding.detail, finding.detail
+
+
+def test_the_break_diagnosis_names_the_link_whose_stamps_disagree():
+    """#10634 cycle 9 (P2): the fallback printed "AFTER" over a LATER carrier stamp
+    (08:00 is not after 12:00) because the last intermediate's late merge was the
+    real break. It must name the link the stamps actually disagree on."""
+    subj = _pr(21, "b1", "Closes #7", state="MERGED",
+               merged_at="2026-11-02T08:00:00Z")
+    mid = _pr(22, "b2", "", head="b1", state="MERGED",
+              merged_at="2026-11-02T15:00:00Z")
+    carrier = _pr(23, DEFAULT, "Closes #7", head="b2", state="MERGED",
+                  merged_at="2026-11-02T12:00:00Z")
+    (finding,) = cl.classify(subj, _by_head(subj, mid, carrier), DEFAULT)
+    assert finding.verdict == "unresolved", finding
+    assert "PR #23 (base `main`) merged at 2026-11-02T12:00:00Z, BEFORE PR #22" in finding.detail, finding.detail
+    assert "AFTER PR #23 merged" not in finding.detail, finding.detail
+
+
+def test_a_keyword_carrying_carrier_does_not_buy_a_pass_over_a_BROKEN_path():
+    """#10634 cycle 8 (P2): the `carried` arm granted `lands` (exit 0, no warning) on
+    a provably broken stack — the keyword FIRES, but the work does not ride in, and
+    the issue is closed over stranded work. `lands` means "it rides in and closes"
+    (module docstring), so the pass must be refused."""
+    subj = _pr(100, "b1", "Closes #7", state="MERGED",
+               merged_at="2026-11-02T13:00:00Z")
+    mid1 = _pr(101, "b2", "", head="b1", state="OPEN")
+    mid2 = _pr(102, "b3", "", head="b2", state="MERGED",
+               merged_at="2026-11-02T11:00:00Z")
+    carrier = _pr(103, DEFAULT, "Closes #7", head="b3", state="OPEN")
+    (finding,) = cl.classify(subj, _by_head(subj, mid1, mid2, carrier), DEFAULT)
+    assert finding.verdict == "unresolved", finding
+    assert "it closes #7 when it lands" in finding.detail, finding.detail
+    assert "would be closed over work that is not on" in finding.detail, finding.detail
+
+
+def test_a_HEALTHY_MERGED_stack_whose_carrier_restates_the_keyword_lands():
+    """#10634 cycle 13 (P2): the `lands` arm's merged-carrier tense was live code no
+    test reached (0 hits in the suite), so a regression to the future tense — "it
+    closes #7 when it lands", a promise about an event in the PAST, on an issue that
+    is already closed — would have passed unnoticed. It is also the exit-0 path:
+    the module must NOT flag a correctly stacked-and-merged PR."""
+    subj = _pr(1, "sib", "Closes #7", state="MERGED",
+               merged_at="2026-11-02T09:00:00Z")
+    carrier = _pr(2, DEFAULT, "Closes #7", head="sib", state="MERGED",
+                  merged_at="2026-11-02T14:00:00Z")
+    (finding,) = cl.classify(subj, _by_head(subj, carrier), DEFAULT)
+    assert finding.verdict == "lands", finding
+    assert "ALREADY FIRED when PR #2 merged" in finding.detail, finding.detail
+    assert "so #7 is closed" in finding.detail, finding.detail
+    assert "closes #7 when it lands" not in finding.detail, finding.detail
+
+
+def test_a_keyword_carrying_carrier_over_a_HEALTHY_stack_still_lands():
+    """The other direction: the refusal must not swallow a real pass (all links open
+    is a stack in progress, not a break)."""
+    subj = _pr(110, "b1", "Closes #7")
+    mid = _pr(111, "b2", "", head="b1")
+    carrier = _pr(112, DEFAULT, "Closes #7", head="b2")
+    (finding,) = cl.classify(subj, _by_head(subj, mid, carrier), DEFAULT)
+    assert finding.verdict == "lands", finding
+
+
+def test_a_timing_break_with_an_OPEN_carrier_is_not_promised_a_ride():
+    """#10634 cycle 5 (P1): the blocked arm screened only CLOSED-unmerged links, so a
+    TIMING break with the carrier still OPEN promised "#100's work only lands when
+    PR #202 merges" — but #202 merges `act-b`, which never contained #100's commits
+    (they entered `act-a` at 12:00, after `act-a` had been carried up at 11:00).
+    Complying closes #100 over stranded work."""
+    subj = _pr(100, "act-a", "Closes #100", state="MERGED",
+               merged_at="2026-11-02T12:00:00Z")
+    mid = _pr(201, "act-b", "", head="act-a", state="MERGED",
+              merged_at="2026-11-02T11:00:00Z")
+    carrier = _pr(202, DEFAULT, "", head="act-b", state="OPEN")
+    (finding,) = cl.classify(subj, _by_head(subj, mid, carrier), DEFAULT)
+    assert finding.verdict == "unresolved", finding
+    assert "only lands when PR #202 merges" not in finding.detail, finding.detail
+    assert "BEFORE PR #100 merged into `act-a`" in finding.detail, finding.detail
+    # A timing break cannot be repaired by editing the OPEN carrier's body, and no
+    # re-open is asserted as sufficient (#10634 cycle 7).
+    assert "carrier can still be updated" not in finding.detail, finding.detail
+    assert "is the repair" not in finding.detail, finding.detail
+
+
+def test_a_three_hop_timing_break_is_caught_through_a_non_adjacent_middle():
+    """The same break one hop further up: #201 merged 14:00, #202 (which carries its
+    base up) merged 11:00, carrier still OPEN."""
+    subj = _pr(210, "a0", "Closes #100", state="MERGED",
+               merged_at="2026-11-02T09:00:00Z")
+    mid1 = _pr(211, "a1", "", head="a0", state="MERGED",
+               merged_at="2026-11-02T14:00:00Z")
+    mid2 = _pr(212, "a2", "", head="a1", state="MERGED",
+               merged_at="2026-11-02T11:00:00Z")
+    carrier = _pr(213, DEFAULT, "", head="a2", state="OPEN")
+    (finding,) = cl.classify(subj, _by_head(subj, mid1, mid2, carrier), DEFAULT)
+    assert finding.verdict == "unresolved", finding
+    assert "only lands when PR #213 merges" not in finding.detail, finding.detail
+    assert "BEFORE PR #211 merged into `a1`" in finding.detail, finding.detail
+
+
+def test_a_CLOSED_middle_link_under_a_MERGED_carrier_never_offers_an_update():
+    """#10634 cycle 6 (P2): the blocked arm printed "the carrier can still be
+    updated" unconditionally, so with a CLOSED-unmerged middle link and an
+    ALREADY-MERGED carrier it prescribed an impossible action — nothing pushed to
+    a merged PR reaches the default branch. The LINK can still be re-opened, so the
+    case stays in this arm."""
+    subj = _pr(810, "a1", "Closes #100", state="MERGED",
+               merged_at="2026-11-02T09:00:00Z")
+    mid = _pr(811, "a2", "", head="a1", state="CLOSED")
+    carrier = _pr(812, DEFAULT, "", head="a2", state="MERGED",
+                  merged_at="2026-11-02T14:07:51Z")
+    (finding,) = cl.classify(subj, _by_head(subj, mid, carrier), DEFAULT)
+    assert finding.verdict == "unresolved", finding
+    assert "carrier can still be updated" not in finding.detail, finding.detail
+    # …and no carrier edit is offered AT ALL here (cycle 7): the arm's premise is
+    # that the commits are not in the branch the carrier merges, so editing its
+    # body would close the issue over stranded work.
+    assert "PR #811 can be re-opened" in finding.detail, finding.detail
+    # The commits ARE in that link's head (`a1`), so re-opening it is the repair and
+    # the sentence must not call it insufficient (#10634 cycle 11) — nor restate the
+    # same action as a second, different remedy.
+    assert "carries #810's commits up with it" in finding.detail, finding.detail
+    assert "only restores the path above it" not in finding.detail, finding.detail
+    assert "cannot be re-opened: open a PR from" not in finding.detail, finding.detail
+
+
+def test_a_reopen_is_NOT_called_sufficient_when_an_OPEN_link_sits_below_it():
+    """#10634 cycle 12 (P2): the strong tail tested only "the links below did not
+    BREAK", and `_path_break` calls an OPEN intermediate "in progress" — but here
+    the question is whether the commits are already IN the closed link's head, and
+    an OPEN link between the subject and it means they never got there. The
+    sentence then claimed a ride its own diagnosis denied."""
+    subj = _pr(100, "h1", "Closes #7", state="MERGED",
+               merged_at="2026-11-02T09:00:00Z")
+    open_link = _pr(101, "h2", "", head="h1")
+    closed = _pr(102, "h3", "", head="h2", state="CLOSED")
+    carrier = _pr(103, DEFAULT, "", head="h3")
+    (finding,) = cl.classify(subj, _by_head(subj, open_link, closed, carrier), DEFAULT)
+    assert finding.verdict == "unresolved", finding
+    assert "carries #100's commits up with it" not in finding.detail, finding.detail
+    assert "only restores the path above it" in finding.detail, finding.detail
+
+
+def test_a_reopen_is_NOT_called_sufficient_over_a_TIMING_break_below_it():
+    """The other unpinned conjunct: a merged subject whose lower link merged BEFORE
+    it, below the closed link, so the commits are not in that head either."""
+    subj = _pr(110, "h1", "Closes #7", state="MERGED",
+               merged_at="2026-11-02T11:00:00Z")
+    lower = _pr(111, "h2", "", head="h1", state="MERGED",
+                merged_at="2026-11-02T09:00:00Z")
+    closed = _pr(112, "h3", "", head="h2", state="CLOSED")
+    carrier = _pr(113, DEFAULT, "", head="h3")
+    (finding,) = cl.classify(subj, _by_head(subj, lower, closed, carrier), DEFAULT)
+    assert finding.verdict == "unresolved", finding
+    assert "carries #110's commits up with it" not in finding.detail, finding.detail
+    assert "only restores the path above it" in finding.detail, finding.detail
+
+
+def test_a_TWO_HOP_stack_with_an_unmerged_middle_link_is_not_claimed_landed():
+    """#10634 cycle 3 (P2): `_subject_landed` compared the SUBJECT's stamp with the
+    CARRIER's and never looked at the links between, so a two-hop stack whose
+    MIDDLE PR never merged fell into "the work did land \u2026 Close #100 by hand" —
+    `act-a`'s commits cannot be inside a merge of `act-b` if nothing carried them
+    there. Same harm as the single-hop P1, one hop over."""
+    subj = _pr(200, "act-a", "Closes #100", state="MERGED",
+               merged_at="2026-11-02T10:00:00Z")
+    mid = _pr(201, "act-b", "", head="act-a", state="OPEN")
+    carrier = _pr(202, DEFAULT, "", head="act-b", state="MERGED",
+                  merged_at="2026-11-02T14:07:51Z")
+    (finding,) = cl.classify(subj, _by_head(subj, mid, carrier), DEFAULT)
+    assert finding.verdict == "unresolved", finding
+    assert "did land" not in finding.detail, finding.detail
+    assert "Close #100 by hand" not in finding.detail, finding.detail
+    assert "PR #201 (base `act-b`) was not merged" in finding.detail, finding.detail
+    # …and the scope of the claim: "nothing in the CURRENT STACK", not an absolute
+    # (retargeting the subject at the default branch still carries it) — #10634 c6.
+    assert "nothing in the current stack" in finding.detail, finding.detail
+
+
+def test_a_TWO_HOP_stack_whose_middle_link_landed_in_time_still_claims_landed():
+    """The other direction: the middle link merged BEFORE the carrier, so the work
+    did ride it. Without this the guard could pass by refusing every 2-hop stack."""
+    subj = _pr(210, "act-a", "Closes #100", state="MERGED",
+               merged_at="2026-11-02T09:00:00Z")
+    mid = _pr(211, "act-b", "", head="act-a", state="MERGED",
+              merged_at="2026-11-02T11:00:00Z")
+    carrier = _pr(212, DEFAULT, "", head="act-b", state="MERGED",
+                  merged_at="2026-11-02T14:07:51Z")
+    (finding,) = cl.classify(subj, _by_head(subj, mid, carrier), DEFAULT)
+    assert finding.verdict == "inert", finding
+    assert "Close #100 by hand" in finding.detail, finding.detail
+    # #10634 cycle 8 (P3): the SUBJECT merged here, so no remedy may tell the reader
+    # to re-open it — an impossible action, and the cycle-2 class this file pins for
+    # the other arms.
+    assert "Re-open" not in finding.detail, finding.detail
+    assert "cannot be re-opened" not in finding.detail, finding.detail
 
 
 def test_a_closed_unmerged_subject_under_a_merged_carrier_says_SO_and_offers_reopen():
@@ -366,19 +686,19 @@ def test_a_closed_unmerged_subject_under_a_merged_carrier_says_SO_and_offers_reo
     assert finding.verdict == "unresolved", finding
     assert "CLOSED WITHOUT MERGING" in finding.detail, finding.detail
     assert "still CLOSED" not in finding.detail, finding.detail
-    assert "re-open PR #106" in finding.detail, finding.detail
+    assert "Re-open PR #106" in finding.detail, finding.detail
     assert "did land" not in finding.detail
 
 
 @pytest.mark.parametrize("state,subject_merged_at,expected,forbidden,why", [
     ("OPEN", None,
-     "retarget PR #110 at `main`", "re-open PR #110",
+     "Retarget PR #110's base at `main`", "Re-open PR #110",
      "an OPEN PR has nothing to re-open — the BASE is what must move"),
     ("MERGED", "2026-11-02T15:00:00Z",
-     "can be neither re-opened nor retargeted", "re-open PR #110",
+     "cannot be re-opened", "Re-open PR #110",
      "a MERGED PR can be neither re-opened nor retargeted"),
     ("CLOSED", None,
-     "re-open PR #110 with base `main`", "can be neither re-opened",
+     "Re-open PR #110, retarget it at `main`", "cannot be re-opened",
      "a CLOSED-unmerged PR CAN be re-opened, and that is the cheap route"),
 ])
 def test_the_stranded_remedy_names_an_action_that_EXISTS_in_that_subject_state(
@@ -483,6 +803,40 @@ def test_a_keyword_inside_a_WIDER_backtick_span_is_a_quotation_not_a_claim():
     (finding,) = cl.classify(subject, _by_head(subject, quoting), DEFAULT)
     assert finding.verdict == "inert", finding
     assert "Re-state the keyword" in finding.detail
+    # The claim is scoped to what the tool can SHOW (#10634 cycle 2, P3): the
+    # carrier does contain the keyword, in a shape the tool does not count, so an
+    # unqualified "carries no `Closes #100`" is a fact the reader can falsify —
+    # and a warn-only instrument the reader stops believing gets switched off.
+    assert "this tool can show fires" in finding.detail, finding.detail
+    assert "carries no `Closes #100` this tool" in finding.detail, finding.detail
+
+    # …the same clause, for the shape the fix was written for: a carrier whose
+    # keyword is separated from its reference by a BLANK LINE.
+    blank_carrier = _pr(132, DEFAULT, "Closes\n\n#100\n", head=SIBLING)
+    (blank,) = cl.classify(subject, _by_head(subject, blank_carrier), DEFAULT)
+    assert blank.verdict == "inert", blank
+    assert "this tool can show fires" in blank.detail, blank.detail
+
+
+def test_a_closed_unmerged_subject_on_a_sibling_base_is_not_promised_a_carrier():
+    """#10634 cycle 2 (P2): the sibling-base arm said "#100's work only lands when
+    PR #carrier merges" for a subject that was CLOSED WITHOUT MERGING — its
+    commits are in no branch the carrier merges, so complying closes #100 with the
+    work stranded on the closed PR's head: the harm the P1 fix removed one branch
+    over. Verdict `inert` stays (the keyword still does not fire); the CLAIM and
+    the remedy must match the state."""
+    subject = _pr(30, SIBLING, "Closes #100", state="CLOSED")
+    carrier = _pr(31, DEFAULT, "", state="OPEN", head=SIBLING)
+    (finding,) = cl.classify(subject, _by_head(subject, carrier), DEFAULT)
+    assert finding.verdict == "inert", finding
+    assert "only lands when PR #31 merges" not in finding.detail, finding.detail
+    assert "CLOSED WITHOUT MERGING" in finding.detail, finding.detail
+    assert "Re-open PR #30" in finding.detail, finding.detail
+    # The CLAIMS are scoped too (#10634 cycle 6): "nothing this tool can show",
+    # never an absolute, and never an unqualified "carries no".
+    assert "nothing this tool can show puts its work in `act-10465`" in finding.detail, finding.detail
+    assert "carries no `Closes #100` this tool can show fires" in finding.detail, finding.detail
+    assert "retarget it at `main`" in finding.detail, finding.detail
 
 
 # ── the UNMEASURED arm the workflow's dead-man keys on ───────────────────────
@@ -608,14 +962,33 @@ def test_a_fence_character_that_does_not_match_does_not_close():
     assert cl.parse_closing_refs("```\nCloses #1\n~~~\nCloses #2\n```\n") == []
 
 
-# ── cycle 3: a CLOSED subject on a SIBLING base is judged by its carrier ────
+# ── cycle 10 SUPERSEDES cycle 3: a CLOSED-unmerged subject cannot buy a pass ─
 
-def test_a_closed_subject_on_a_sibling_base_is_judged_by_its_carrier():
+def test_a_closed_unmerged_subject_does_not_buy_a_pass_on_its_carrier_keyword():
+    """SUPERSEDES the cycle-3 rule "a CLOSED subject on a sibling base is judged by
+    its carrier", which allowed `lands` here.
+
+    Cycle 3 asked only "does the carrier restate the keyword?", and the answer is
+    yes. Cycle 9 established the stronger contract `lands` now carries: the keyword
+    FIRES **and** the work RIDES IN. A subject CLOSED WITHOUT MERGING never put its
+    commits in `SIBLING`, so the carrier merging `SIBLING` closes #100 over work
+    that is on neither branch — exit 0, no warning, no annotation. The keyword
+    cannot change whether the work rode in (the keyword-less twin of this record
+    set is already `inert`), so the pass was the silent-stranding case this tool
+    exists to surface.
+
+    The carrier's own assertion remains worth saying: the closure WILL fire, and
+    the reader needs the re-open/retarget action rather than "re-state the keyword".
+    """
     subject = _pr(63, SIBLING, "Closes #100", state="CLOSED")
     carrier = _pr(64, DEFAULT, "Closes #100", head=SIBLING)
     (finding,) = cl.classify(subject, _by_head(subject, carrier), DEFAULT)
-    assert finding.verdict == "lands"
+    assert finding.verdict == "unresolved", finding
     assert finding.carrier == 64
+    assert "CLOSED WITHOUT MERGING" in finding.detail, finding.detail
+    assert "it closes #100 when it lands" in finding.detail, finding.detail
+    assert "Re-open PR #63" in finding.detail, finding.detail
+    assert "would be closed over work that is not on" in finding.detail, finding.detail
 
 
 # ── cycle 3: the resolved repo slug is what makes a qualified claim visible ──
@@ -879,7 +1252,7 @@ def _stack(depth, keyword_on_top="Closes #100"):
     (cl.MAX_STACK_DEPTH - 1, "unresolved"),
 ])
 def test_the_stack_depth_cap_is_off_by_at_most_nothing(depth, verdict):
-    """`resolve_carrier` must return None — not loop, and not `lands` — when the
+    """The carrier walk must return None — not loop, and not `lands` — when the
     top of the stack sits beyond the cap. The boundary is pinned on BOTH sides so
     an off-by-one in the loop cannot silently turn the deepest real stacks into
     `unresolved`, or a runaway walk into a pass."""
@@ -899,7 +1272,7 @@ def _fake_gh_by_head(table):
 
 
 def test_collect_stack_walks_more_than_one_hop(monkeypatch):
-    """`resolve_carrier` is pinned on in-memory records, but `collect_stack` is
+    """The walk is pinned on in-memory records, but `collect_stack` is
     what BUILDS them from `gh`: a two-hop live stack must terminate at the
     default-branch PR, or `classify` is handed an incomplete map and reports
     `unresolved` on a stack that is fine."""

@@ -56,7 +56,7 @@ jobs:
         with:
           python-version: '3.12'
       # The #9018 contract step: the `Closes-coherence` step below reaches `gh` for
-      # every measurement. `runner-tools.sh ensure gh` fails CLOSED, so on a pool
+      # every measurement. The ensure-gh subcommand fails CLOSED, so on a pool
       # runner without it THIS step reds the job (it has no `continue-on-error`),
       # before the advisory step could run — the same contract 17 other jobs carry
       # (see tests/test_runner_tool_contract.py).

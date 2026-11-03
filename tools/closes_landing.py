@@ -112,6 +112,7 @@ import re
 import subprocess
 import time
 from dataclasses import asdict, dataclass
+from itertools import pairwise
 from pathlib import Path
 
 # ── core: pure, network-free, and the part the tests drive ────────────────────
@@ -506,11 +507,24 @@ def resolve_carrier(pr: PullRequest, by_head: dict[str, PullRequest],
     branch with no PR, a cycle, or a stack deeper than MAX_STACK_DEPTH) — the
     caller reports that as `unresolved`, never as a pass.
     """
+    path = carrier_path(pr, by_head, default_branch)
+    return path[-1] if path else None
+
+
+def carrier_path(pr: PullRequest, by_head: dict[str, PullRequest],
+                 default_branch: str) -> list[PullRequest] | None:
+    """`resolve_carrier`, but keeping EVERY hop: [pr, …, the default-base PR].
+
+    `classify` needs the intermediate links, not just the top: a subject's
+    commits reach the default branch only THROUGH them, so "the work did land"
+    cannot be judged from the two endpoints alone (#10634 cycle 3).
+    """
     seen: set[int] = {id(pr)}
+    path = [pr]
     cur = pr
     for _ in range(MAX_STACK_DEPTH):
         if cur.base == default_branch:
-            return cur
+            return path
         nxt = by_head.get(cur.base)
         if nxt is None:
             return None
@@ -522,6 +536,7 @@ def resolve_carrier(pr: PullRequest, by_head: dict[str, PullRequest],
         if id(nxt) in seen:
             return None  # a cycle: no PR in it targets the default branch
         seen.add(id(nxt))
+        path.append(nxt)
         cur = nxt
     return None
 
@@ -532,7 +547,8 @@ def classify(pr: PullRequest, by_head: dict[str, PullRequest],
     refs = parse_closing_refs(pr.body, repo)
     if not refs:
         return []
-    carrier = resolve_carrier(pr, by_head, default_branch)
+    path = carrier_path(pr, by_head, default_branch)
+    carrier = path[-1] if path else None
     # Only the `lands` arm needs this, and it is the SAME body for every ref, so
     # it is computed once (review c6).
     strict_refs = set(parse_closing_refs(pr.body, repo, strict=True))
@@ -623,16 +639,82 @@ def classify(pr: PullRequest, by_head: dict[str, PullRequest],
             ))
             continue
         carried = issue in parse_closing_refs(carrier.body, repo, strict=True)
+        broken_below = _path_break(path)
+        if carried and broken_below:
+            # The keyword FIRES, but the work does not ride: `lands` means "it
+            # rides in and closes" (module docstring), so a closure over a stranded
+            # branch is not a pass — it is the silent case this tool exists to
+            # catch, with a green exit code on top (#10634 cycle 8).
+            findings.append(Finding(
+                issue=issue, pr=pr.number, base=pr.base, verdict="unresolved",
+                carrier=carrier.number,
+                detail=(f"PR #{pr.number} says `Closes #{issue}` with base "
+                        f"`{pr.base}`; PR #{carrier.number} targets "
+                        f"`{default_branch}` and carries the same keyword, so "
+                        f"{_closure_tense(carrier, issue)} — but {broken_below}. "
+                        f"{_closure_consequence(pr, carrier, issue, default_branch)}"
+                        ),
+            ))
+            continue
+        if carried and pr.closed_unmerged:
+            # The keyword FIRES on the carrier, but the subject was CLOSED WITHOUT
+            # MERGING, so its own commits are in no branch the carrier carries up
+            # (#10634 cycle 10). `lands` means the work rides in as well, so this
+            # cannot be a pass — and `_path_break` cannot see it, because the
+            # subject is only ever a LOWER link and the carrier link is the one
+            # being skipped while the carrier is open.
+            findings.append(Finding(
+                issue=issue, pr=pr.number, base=pr.base, verdict="unresolved",
+                carrier=carrier.number,
+                detail=(f"PR #{pr.number} says `Closes #{issue}` with base "
+                        f"`{pr.base}`; PR #{carrier.number} targets "
+                        f"`{default_branch}` and carries the same keyword, so "
+                        f"{_closure_tense(carrier, issue)} — but PR #{pr.number} "
+                        f"was CLOSED WITHOUT MERGING, so its own work is in no "
+                        f"branch PR #{carrier.number} carries up. "
+                        f"{_closure_consequence(pr, carrier, issue, default_branch)}"
+                        ),
+            ))
+            continue
         if carried:
             findings.append(Finding(
                 issue=issue, pr=pr.number, base=pr.base, verdict="lands",
                 carrier=carrier.number,
                 detail=(f"PR #{pr.number} says `Closes #{issue}` with base "
                         f"`{pr.base}`; PR #{carrier.number} targets "
-                        f"`{default_branch}` and carries the same keyword, so it "
-                        f"closes #{issue} when it lands."),
+                        f"`{default_branch}` and carries the same keyword, so "
+                        f"{_closure_tense(carrier, issue)}."),
             ))
         else:
+            # A broken LINK blocks the ride even while the carrier is still OPEN
+            # (#10634 cycles 4-7): an intermediate that was CLOSED WITHOUT MERGING,
+            # or a hop that merged BEFORE the PR whose base it carries up, means
+            # the subject's commits never reached the branch the carrier merges —
+            # so "only lands when PR #N merges" promises a ride the record set
+            # refutes. `unresolved` (nothing CAN carry it), never a pass.
+            #
+            # The remedy names ONLY what the record set supports. Re-opening a
+            # closed link restores the path ABOVE it, not the commits below it, so
+            # it is offered as a partial repair rather than "the repair"; editing
+            # an OPEN carrier's body cannot help (the arm's premise is that the
+            # commits are not in the branch it merges), and a MERGED carrier cannot
+            # be updated at all — both were prescribed here before this cycle.
+            closed_links = [link for link in path[1:-1] if link.closed_unmerged]
+            if closed_links or (not carrier.merged and _path_break(path)):
+                tail = _reopen_tail(pr, path, closed_links, issue,
+                                    default_branch)
+                findings.append(Finding(
+                    issue=issue, pr=pr.number, base=pr.base,
+                    verdict="unresolved", carrier=carrier.number,
+                    detail=(f"PR #{pr.number} says `Closes #{issue}` with base "
+                            f"`{pr.base}`; PR #{carrier.number} targets "
+                            f"`{default_branch}`, but "
+                            f"{_not_landed_why(pr, carrier, path)} — so #{issue}'s "
+                            f"work is not on `{default_branch}`, and nothing in "
+                            f"this stack AS IT STANDS will carry it there. "
+                            f"{tail}"),
+                ))
+                continue
             # The remedy depends on a state the reader cannot see from the
             # finding alone: an OPEN carrier can still be amended, a MERGED one
             # cannot — telling a lane to "re-state the keyword on" an already
@@ -645,7 +727,7 @@ def classify(pr: PullRequest, by_head: dict[str, PullRequest],
             # carrier landed is stranded there. Telling that reader to "Close #N
             # by hand" marks an issue done whose work is nowhere near the default
             # branch: the exact silent-stranding this tool exists to surface.
-            subject_landed = _subject_landed(pr, carrier)
+            subject_landed = _subject_landed(pr, path)
             if carrier.merged and not subject_landed:
                 findings.append(Finding(
                     issue=issue, pr=pr.number, base=pr.base,
@@ -653,10 +735,29 @@ def classify(pr: PullRequest, by_head: dict[str, PullRequest],
                     detail=(f"PR #{pr.number} says `Closes #{issue}` with base "
                             f"`{pr.base}`; PR #{carrier.number} targets "
                             f"`{default_branch}` and has ALREADY merged, but "
-                            f"{_not_landed_why(pr, carrier)} — so #{issue}'s work "
-                            f"is NOT on `{default_branch}`. The keyword cannot "
-                            f"fire any more: "
-                            f"{_stranded_remedy(pr, issue, default_branch)}"),
+                            f"{_not_landed_why(pr, carrier, path)} — so #{issue}'s work "
+                            f"is NOT on `{default_branch}`. GitHub has not fired "
+                            f"the keyword, and nothing in the current stack "
+                            f"will: {_stranded_remedy(pr, issue, default_branch)}"),
+                ))
+                continue
+            # A SUBJECT closed WITHOUT merging can never put its own work in the
+            # base branch, so the sibling-base arm must not promise that the
+            # carrier lands it (#10634 cycle 2, P2). GitHub still does not fire
+            # the keyword, so the verdict stays `inert`; only the CLAIM and the
+            # remedy change. The `carried` arm above is deliberately untouched: a
+            # carrier that restates the keyword is right whatever the subject did.
+            if pr.closed_unmerged:
+                findings.append(Finding(
+                    issue=issue, pr=pr.number, base=pr.base, verdict="inert",
+                    carrier=carrier.number,
+                    detail=(f"PR #{pr.number} says `Closes #{issue}` but its base "
+                            f"is `{pr.base}`, NOT `{default_branch}` — GitHub "
+                            f"will NOT close #{issue}. PR #{pr.number} was "
+                            f"CLOSED WITHOUT MERGING, so nothing this tool can "
+                            f"show puts its work in `{pr.base}`, and PR "
+                            f"#{carrier.number} carries no `Closes #{issue}` this "
+                            f"tool can show fires. {_stranded_remedy(pr, issue, default_branch)}"),
                 ))
                 continue
             if carrier.merged:
@@ -681,67 +782,226 @@ def classify(pr: PullRequest, by_head: dict[str, PullRequest],
     return findings
 
 
-def _subject_landed(pr: PullRequest, carrier: PullRequest) -> bool:
-    """Whether the SUBJECT's own work rode `carrier` to the default branch.
+def _closure_tense(carrier: PullRequest, issue: int) -> str:
+    """The closure in the tense the record set supports (#10634 cycle 9).
+
+    A MERGED carrier already fired the keyword, so "it closes #N when it lands"
+    promises an event in the past. When the path is healthy that is simply the
+    truth (the issue closed); when it is broken the consequence below says what to
+    do about a CLOSED issue.
+    """
+    if carrier.merged:
+        return (f"the closure ALREADY FIRED when PR #{carrier.number} merged, so "
+                f"#{issue} is closed")
+    return f"it closes #{issue} when it lands"
+
+
+def _closure_consequence(pr: PullRequest, carrier: PullRequest, issue: int,
+                         default_branch: str) -> str:
+    """What to DO when the closure fired (or will) over stranded work."""
+    if carrier.merged:
+        return (f"#{issue} is therefore closed even though its work is not on "
+                f"`{default_branch}`: re-open #{issue} first, then carry the "
+                f"stranded commits to `{default_branch}`, and close it when they "
+                f"land.")
+    return (f"So #{issue} would be closed over work that is not on "
+            f"`{default_branch}`. {_stranded_remedy(pr, issue, default_branch)}")
+
+
+def _reopen_tail(pr: PullRequest, path: list[PullRequest],
+                 closed_links: list[PullRequest], issue: int,
+                 default_branch: str) -> str:
+    """The trailing text of the blocked arm: the repair, exactly once.
+
+    When the first closed LINK's head branch already holds the subject's commits —
+    which `_subject_landed` decides over the links BELOW it, so an OPEN link between
+    the subject and the closed one correctly fails the test — re-opening that link
+    and retargeting it at the default branch IS the repair, and saying "that only
+    restores the path above it" contradicts the remedy in the same sentence
+    (#10634 cycle 11). When the links below it DID break, the weaker wording is the
+    true one and `_stranded_remedy` supplies the action. With no closed link the
+    remedy is simply `_stranded_remedy`.
+    """
+    if not closed_links:
+        return _stranded_remedy(pr, issue, default_branch)
+    link = closed_links[0]
+    # IDENTITY, like every other comparison in the walk: offline records all carry
+    # number=0, so value equality can resolve to the wrong index.
+    at = next(i for i, hop in enumerate(path) if hop is link)
+    if _subject_landed(pr, path[:at]):
+        return (f"PR #{link.number} can be re-opened and retargeted at "
+                f"`{default_branch}` — that carries #{pr.number}'s commits up with "
+                f"it, and `Closes #{issue}` still has to be stated on the PR that "
+                f"lands.")
+    return (f"PR #{link.number} can be re-opened and retargeted at "
+            f"`{default_branch}`, but that only restores the path above it: the "
+            f"commits must reach `{link.head}` too. "
+            f"{_stranded_remedy(pr, issue, default_branch)}")
+
+
+def _path_break(path: list[PullRequest]) -> str | None:
+    """The FIRST link BELOW the carrier that provably breaks the ride, or None.
+
+    ONE predicate for the whole question, because a broken path means the same
+    thing whether it is used to REFUSE a `lands` or to explain a remedy (#10634
+    cycle 8). Three shapes, each provable from the record set and none needing
+    ancestry:
+
+    * an intermediate that was never merged (its branch's commits were not carried
+      up at all);
+    * an upper link merged while the PR BELOW it never merged — the lower PR's
+      commits enter a branch that had ALREADY been carried up, so they are on
+      neither side (this is the shape a timestamp test cannot see: an OPEN hop has
+      no `merged_at`);
+    * an upper link that merged BEFORE the lower one (the same harm, by ORDER).
+
+    The carrier's own link is skipped ONLY while the carrier is unmerged: an open
+    stack is in progress, not broken, and an open carrier is never blamed for a
+    break below it. Once the carrier HAS merged its link counts like any other —
+    excluding it let a merged, keyword-carrying carrier pass `lands` over work that
+    never rode in (#10634 cycle 9: 18 configurations were false passes, all of them
+    this one link).
+    """
+    carrier = path[-1]
+    for lower, upper in pairwise(path):
+        if upper is carrier and not carrier.merged:
+            # "The carrier has not merged yet" is the normal, healthy state of an
+            # open stack — never a break, and never blamed on the carrier.
+            #
+            # ⚠️ BELT-AND-BRACES: the `not upper.merged` branch below reaches the
+            # same verdict whenever the carrier is unmerged, so deleting this block
+            # changes no verdict and no text (only the discarded
+            # `carrier.closed_unmerged` edge differs, and `classify` answers that
+            # earlier). Kept as an explicit statement of the healthy case (#10634
+            # cycle 10).
+            continue
+        if not upper.merged:
+            # A CLOSED-unmerged link will never merge, so it is a break whatever the
+            # carrier is doing.
+            if upper.closed_unmerged:
+                return (f"PR #{upper.number} (base `{upper.base}`) was CLOSED "
+                        f"WITHOUT MERGING, so nothing from PR #{path[0].number} "
+                        f"ever reached `{carrier.base}`, the branch PR "
+                        f"#{carrier.number} "
+                        f"{'merged' if carrier.merged else 'merges'} into")
+            # An OPEN intermediate is only a break once the carrier has landed
+            # WITHOUT it: while the carrier is still open the stack is simply in
+            # progress, which is the normal state of a live stack — refusing that
+            # would turn every multi-hop PR into a warning (cycle 8).
+            if not carrier.merged:
+                continue
+            return (f"PR #{upper.number} (base `{upper.base}`) was not merged, so "
+                    f"nothing from PR #{path[0].number} ever reached "
+                    f"`{carrier.base}`, the branch PR #{carrier.number} merged "
+                    f"into")
+        if not lower.merged:
+            return (f"PR #{upper.number} (base `{upper.base}`) has ALREADY merged "
+                    f"while PR #{lower.number} is {_state_words(lower)}, so "
+                    f"#{lower.number}'s commits were never in the branch "
+                    f"#{upper.number} carried up")
+        if upper.merged_at and lower.merged_at and upper.merged_at < lower.merged_at:
+            return (f"PR #{upper.number} (base `{upper.base}`) merged at "
+                    f"{upper.merged_at}, BEFORE PR #{lower.number} merged into "
+                    f"`{lower.base}` at {lower.merged_at}, so #{lower.number}'s "
+                    f"commits were never in the branch PR #{upper.number} "
+                    f"carried up")
+    return None
+
+
+def _state_words(pr: PullRequest) -> str:
+    """The module's own wording for a PR's own state."""
+    if pr.closed_unmerged:
+        return "CLOSED WITHOUT MERGING"
+    return f"still {pr.state.upper()}"
+
+
+def _subject_landed(pr: PullRequest, path: list[PullRequest]) -> bool:
+    """Whether the SUBJECT's own work rode the carrier to the default branch.
 
     Neither fact needed here is ancestry, so this is deliberately conservative:
-    `pr.merged` says the subject merged into ITS OWN base, and the two
-    `merged_at` stamps say in which ORDER. A subject still open (or closed
-    unmerged) when the carrier landed cannot be inside it; a subject that merged
-    into the sibling base AFTER the carrier landed is stranded on the sibling.
-    Both are "not landed", and "merged, and no later than the carrier" is the
-    only shape this tool can defend (#10634 review P1). With no stamps (offline
-    records) the merged state is all there is.
+    `merged` says each PR merged into ITS OWN base, and the `merged_at` stamps
+    say in which ORDER — checked PAIRWISE up the stack, because a PR's commits
+    reach the default branch only through every hop above it (#10634 cycles 3-4).
+    Both weaker versions claimed "the work did land" for work that was stranded:
+    judging the two ENDPOINTS alone passed a stack whose middle never merged, and
+    comparing every link with the CARRIER alone passed a subject that merged into
+    its base AFTER that base had already been carried up (12:00 subject, 11:00
+    mid, 14:00 carrier). A hop that merged later than the PR it carries is the
+    same harm as a hop that never merged. With no stamps (offline records) the
+    merged states are all there is.
     """
+    carrier = path[-1]
     if not (carrier.merged and pr.merged):
         return False
-    if pr.merged_at and carrier.merged_at:
-        return pr.merged_at <= carrier.merged_at
+    for lower, upper in pairwise(path):
+        if not upper.merged:
+            return False
+        if lower.merged_at and upper.merged_at and upper.merged_at < lower.merged_at:
+            return False
     return True
 
 
 def _stranded_remedy(pr: PullRequest, issue: int, default_branch: str) -> str:
-    """What the reader can ACTUALLY do, given the subject's OWN state.
+    """The action that actually EXISTS for the subject's own state.
 
-    "re-open PR #N retargeted at `<default>`" was printed for all three states,
-    and it is an action that exists in exactly one of them (#10634 review P2):
-    an OPEN PR has nothing to re-open (its BASE must be retargeted), and a
-    MERGED one can be neither re-opened nor retargeted — for that reader the
-    only route is new work off the default branch. Prescribing an impossible
-    action is how an instrument teaches the reader to ignore it, and it hides
-    the achievable one; same defect class as the `inert` arm's P2-4.
+    One arm, three states, and "re-open PR #N" is only possible for one of them
+    (#10634 cycle 2, P2): an OPEN PR has nothing to re-open — it needs its BASE
+    retargeted, and the keyword then fires normally — and a MERGED one cannot be
+    re-opened at all. Prescribing either is the impossible-action class this whole
+    branch exists to avoid, and it reads as the tool being broken.
     """
     if pr.closed_unmerged:
-        return (f"re-open PR #{pr.number} with base `{default_branch}` and state "
-                f"`Closes #{issue}` on it, or open a PR from this head with "
-                f"base `{default_branch}`.")
+        return (f"Re-open PR #{pr.number}, retarget it at `{default_branch}`, "
+                f"and state `Closes #{issue}` on it")
     if pr.merged:
-        return (f"PR #{pr.number} has already merged, so it can be neither "
-                f"re-opened nor retargeted — take its commits onto a branch off "
-                f"`{default_branch}` (cherry-pick), open a PR for that branch, "
-                f"and state `Closes #{issue}` on it.")
-    return (f"retarget PR #{pr.number} at `{default_branch}` (GitHub's 'Change "
-            f"base' on the PR), or open a PR from this head with base "
-            f"`{default_branch}`, and state `Closes #{issue}` on it.")
+        return (f"PR #{pr.number} has merged and cannot be re-opened: open a PR "
+                f"from `{pr.base}`'s current tip that targets "
+                f"`{default_branch}` for the stranded commits, and state "
+                f"`Closes #{issue}` on it")
+    return (f"Retarget PR #{pr.number}'s base at `{default_branch}` and state "
+            f"`Closes #{issue}` on it — it is still open, so there is nothing "
+            f"to re-open")
 
 
-def _not_landed_why(pr: PullRequest, carrier: PullRequest) -> str:
-    """The subject's own state, in the words the reader can check.
+def _not_landed_why(pr: PullRequest, carrier: PullRequest,
+                    path: list[PullRequest]) -> str:
+    """The LINK that breaks the chain, in the words the reader can check.
 
-    A closed-unmerged subject is reported in the module's OWN wording for that
-    state ("CLOSED WITHOUT MERGING", see the carrier arm above): "still CLOSED"
-    describes a transient state when it is a final one, and it hides that
-    re-opening is an option (#10634 review).
+    The link half is `_path_break` — the SAME predicate the `lands` arm refuses on,
+    so the diagnosis and the refusal cannot disagree (#10634 cycle 8). When no link
+    below the carrier is broken, the SUBJECT's own state is the reason; a
+    closed-unmerged subject is reported in the module's OWN wording for that state
+    ("CLOSED WITHOUT MERGING", see the carrier arm above), because "still CLOSED"
+    describes a transient state when it is a final one and it hides that re-opening
+    is an option (#10634 review).
     """
+    link = _path_break(path)
+    if link:
+        return link
     if not pr.merged:
-        if pr.closed_unmerged:
-            return (f"PR #{pr.number} itself was CLOSED WITHOUT MERGING, so its "
-                    f"commits were not in the branch PR #{carrier.number} merged")
-        return (f"PR #{pr.number} itself is still {pr.state.upper()}, so its "
-                f"commits were not in the branch PR #{carrier.number} merged")
-    return (f"PR #{pr.number} merged into `{pr.base}` at {pr.merged_at}, AFTER "
-            f"PR #{carrier.number} merged at {carrier.merged_at}, so its "
-            f"commits landed on the sibling branch too late to ride it")
+        return (f"PR #{pr.number} itself is {_state_words(pr)}, so its commits "
+                f"were not in the branch PR #{carrier.number} "
+                f"{'merged' if carrier.merged else 'merges'} into")
+    # Only a BREAK at a link reaches here now that the predicate sees every pair —
+    # and it may name an ORDER only when the stamps show one (#10634 cycle 9: the
+    # unguarded version printed "AFTER" over a LATER carrier stamp, and over two
+    # identical stamps).
+    #
+    # ⚠️ BELT-AND-BRACES, and the one documented exception to "a guard must be seen
+    # to fail" in this module: `_path_break` now evaluates every pair, so no stamp
+    # comparison can reach this line with a NON-increasing order — mutating the
+    # condition away leaves the suite green, because the shape is unreachable, not
+    # because the guard is wrong. It is kept so the sentence cannot start lying if
+    # `_path_break` ever narrows again (it did, twice, in cycles 8 and 9).
+    if pr.merged_at and carrier.merged_at and pr.merged_at > carrier.merged_at:
+        return (f"PR #{pr.number} merged into `{pr.base}` at {pr.merged_at}, AFTER "
+                f"PR #{carrier.number} merged at {carrier.merged_at}, so its "
+                f"commits landed on the sibling branch too late to ride it")
+    # Unreachable in principle (the predicate sees every pair), and phrased so it
+    # stays TRUE if it ever is reached: it asserts only what put us in this
+    # function, never a state word that could read "is still MERGED".
+    return (f"PR #{pr.number} did not ride PR #{carrier.number} to "
+            f"`{carrier.base}`")
 
 
 def worst_verdict(findings: list[Finding]) -> str:
