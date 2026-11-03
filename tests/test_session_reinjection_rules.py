@@ -1131,6 +1131,54 @@ def test_reader_window_displacement_ignores_sessions_outside_the_window():
     assert out["sessions_after"] == 6
 
 
+def test_reader_window_displacement_ignores_the_phantom_namespace():
+    """An identity-less hit is keyed ``idx:-1`` (or ``idx:point:{id}`` since
+    #3591) by ``session_key_of``, and that key names NO graph session —
+    ``retrieval.session_key_of`` documents the whole namespace as phantom and
+    ``coverage_loop.coverage_gap`` excludes it from its window census.
+
+    Unfiltered, the phantom lands in ``sessions_before`` (inflating the
+    denominator of any derived rate) and, once it is pushed out of the merged
+    window, in ``sessions_lost`` — the function's own LOAD-BEARING key, whose
+    contract is "a session with no hit in the merged window has no evidence
+    the reader can cite". A phantom is the falsest possible entry there: the
+    reader could never have cited it. The path is reachable from the eval lane
+    (``retrieve.py``'s pool annotator always emits ``lme_session_index``,
+    defaulted to ``-1``), so this is not a hypothetical bucket.
+
+    Two injected items push the two phantom hits out of the 8-item window, so
+    pre-fix (no filter): ``sessions_lost == ['idx:-1']`` and
+    ``sessions_before == 4``; post-fix both assertions below hold. (The
+    injected items' own session is a REAL bucket in ``after`` — 4 there is
+    the injected session plus the three base ones, not a phantom.)
+    """
+    from tortoise.retrieval import session_key_of
+
+    pool = [{"id": f"{s}#{i}", "session_id": s}
+            for s in ("sA", "sB", "sC") for i in range(2)]
+    # the annotator's shape for a hit with no session identity: no
+    # ``session_id``, ``lme_session_index`` defaulted to -1
+    pool += [{"id": "x1", "lme_session_index": -1},
+             {"id": "x2", "lme_session_index": -1}]
+    assert {session_key_of(h) for h in pool[-2:]} == {"idx:-1"}
+    injected = [{"id": f"inj#{i}", "session_id": "inj"} for i in range(2)]
+    merged = injected + pool
+
+    out = reader_window_displacement(pool, merged, window=8)
+    assert out["injected_in_window"] == 2  # the push-out really happened
+    assert out["sessions_lost"] == [], (
+        "idx:-1 names no graph session — it must never be reported LOST")
+    assert out["sessions_before"] == 3, (
+        "the phantom also inflates the denominator")
+    assert out["sessions_after"] == 4  # 3 base sessions + the injected one
+
+    # the other half: a phantom that STAYS inside the window is not a session
+    # PRESENT either (``coverage_loop``'s #3591 note — the opposite reading)
+    full = reader_window_displacement(pool, merged, window=20)
+    assert (full["sessions_before"], full["sessions_after"]) == (3, 4), full
+    assert full["sessions_lost"] == []
+
+
 def test_reader_window_displacement_is_zero_without_injection():
     pool = _corpus()
     out = reader_window_displacement(pool, list(pool), window=40)
