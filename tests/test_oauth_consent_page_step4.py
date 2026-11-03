@@ -1233,6 +1233,36 @@ def test_the_page_is_not_RENDERED_when_the_AS_cannot_verify_what_it_mints(
         bounced.headers["location"])
 
 
+def test_the_bounce_does_not_append_a_SECOND_key_when_the_flow_already_has_one() -> None:
+    """The two callers are not alike, and an unconditional append made the URL ambiguous (#10487).
+
+    The bounce (`oauth_authorize`) carries no key, but the page's own sign-in link
+    (`consent_page_html` → SIGNIN_URL) is rendered ONLY for a keyed flow, so its raw query always
+    carries one. Appending there emitted `…&attempt_key=K&attempt_key=<minted>`: benign only while
+    every reader takes the FIRST value, and a re-run of this very dead end the day one takes the
+    last. A present-but-BLANK value counts as absent — it selects the bounce branch upstream.
+    """
+    from urllib.parse import parse_qs, urlsplit
+
+    from tortoise.oauth import CONSENT_ATTEMPT_KEY_PARAM, consent_bounce_url
+
+    raw = f"client_id=c1&state=s1&{CONSENT_ATTEMPT_KEY_PARAM}=K-page"
+    emitted = consent_bounce_url(APP_ORIGIN, raw)
+    inner = parse_qs(urlsplit(parse_qs(urlsplit(emitted).query)["next"][0]).query,
+                     keep_blank_values=True)
+    assert inner[CONSENT_ATTEMPT_KEY_PARAM] == ["K-page"], (
+        "the bounce emitted a SECOND attempt key beside the flow's own: "
+        f"{inner[CONSENT_ATTEMPT_KEY_PARAM]}")
+
+    # …and a blank value is treated as absent, because it selects the bounce branch upstream.
+    blank = consent_bounce_url(APP_ORIGIN, f"client_id=c1&state=s1&{CONSENT_ATTEMPT_KEY_PARAM}=")
+    inner_blank = parse_qs(urlsplit(parse_qs(urlsplit(blank).query)["next"][0]).query,
+                           keep_blank_values=True)
+    keys = inner_blank[CONSENT_ATTEMPT_KEY_PARAM]
+    assert len(keys) == 2 and keys[1].strip(), (
+        f"a blank key suppressed the minted one, leaving the visitor keyless: {keys}")
+
+
 def test_the_bounce_carries_the_attempt_key_the_flow_is_bound_to(api_client) -> None:
     """#10487: the AS mints the attempt key on the ONE leg where none exists yet.
 
