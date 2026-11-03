@@ -1015,7 +1015,7 @@ def _rebuild_outcome(row, unread_shape: str | None = None) -> dict:
     A read row carries its manifest as a dict of cells. A NEVER-read row (every
     census cell null) cannot distinguish the two shapes a producer can emit —
     no ``belief_activation`` at all, and a manifest carrying none of the census
-    cells — because the probe collapses both (see ``_unread_shapes``). Choosing
+    cells — because the probe collapses both (see ``_row_shapes``). Choosing
     one for both would be the false claim above, so the shape is an INPUT the
     caller derives from the artifact. A caller that forgets it gets a REFUSAL,
     never the old silent guess: a ``None`` default that fell back to
