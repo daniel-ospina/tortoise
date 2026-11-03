@@ -1360,6 +1360,9 @@ def test_the_same_key_on_a_different_host_is_not_called_one_identity(
     # the SAME malformed value on both sides is UNKNOWN, never "different"
     ("api.premiselabs.co", "api.premiselabs.co", None),
     ("https://api.premiselabs.co", "api.premiselabs.co", None),
+    # plaintext vs TLS is NOT the same endpoint (it decides whether a transport
+    # failure carries across surfaces)
+    ("http://h.example:8443", "https://h.example:8443", False),
 ])
 def test_endpoint_comparison_is_normalised_like_the_hook(
         capsys, tmp_path, cli_url, hook_url, agree):
@@ -1846,6 +1849,28 @@ def test_a_keyless_harness_file_is_not_called_unusable(monkeypatch, capsys, tmp_
     out = capsys.readouterr().out
     assert "unusable harness store" not in out
     assert "no api-key in this file" in out
+
+
+def test_an_empty_api_url_does_not_claim_both_surfaces_fail(
+        monkeypatch, capsys, tmp_path):
+    """The harness falls back to the default host when TORTOISE_API_URL is blank,
+    so it still works — asserting a joint failure contradicted the same report."""
+    _global(tmp_path)
+    monkeypatch.setenv("TORTOISE_API_KEY", GLOBAL_KEY)
+    monkeypatch.setenv("TORTOISE_API_URL", "")
+    assert _run() == 0
+    out = capsys.readouterr().out
+    assert "BOTH fail the same way" not in out
+    assert "Only one side is affected" in out
+
+
+def test_the_same_unparseable_value_on_both_sides_says_so(
+        monkeypatch, capsys, tmp_path):
+    monkeypatch.setenv("TORTOISE_API_KEY", GLOBAL_KEY)
+    monkeypatch.setenv("TORTOISE_API_URL", "api.premiselabs.co")
+    assert _run() == 0
+    out = capsys.readouterr().out
+    assert "BOTH fail the same way" in out
 
 
 def test_an_empty_api_url_env_is_disclosed(monkeypatch, capsys, tmp_path):

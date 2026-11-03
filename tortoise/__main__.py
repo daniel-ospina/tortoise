@@ -3096,7 +3096,7 @@ def _same_endpoint(a: object, b: object) -> bool | None:
     """
     from urllib.parse import urlsplit
 
-    def parts(value: object) -> tuple[str, int, str] | None:
+    def parts(value: object) -> tuple[str, str, int, str] | None:
         if not isinstance(value, str) or not value.strip():
             return None
         # `urlsplit` is LAZY about the authority: `.port` re-parses the netloc and
@@ -3107,14 +3107,23 @@ def _same_endpoint(a: object, b: object) -> bool | None:
             host = split.hostname
             if not host:
                 return None
-            default = 443 if split.scheme in ("https", "") else 80
+            scheme = split.scheme.lower()
+            if not scheme:
+                # No scheme: the value is not a URL at all, so the comparison
+                # cannot be made (and `//h` vs `https://h` are not the same
+                # endpoint anyway).
+                return None
+            default = 443 if scheme == "https" else 80
             port = split.port
             # `port or default` would fold an explicit 0 into the scheme default;
             # `:0` is not a usable endpoint, so treat it as unknown rather than
             # silently equal to `:443`. The PATH is part of the endpoint too:
             # `https://h/v1` and `https://h/v2` are different endpoints, and the
             # verdict is printed while the user is chasing a per-surface refusal.
-            return (host.lower(), default if port is None else port,
+            # The SCHEME is part of the endpoint: plaintext vs TLS is exactly what
+            # decides whether a transport failure carries across surfaces, which is
+            # the question this verdict is printed to answer.
+            return (scheme, host.lower(), default if port is None else port,
                     split.path.rstrip("/"))
         except ValueError:
             return None
@@ -3907,7 +3916,13 @@ def _cmd_config(args) -> int:
         print("  → the SAME key, but the endpoint comparison cannot be made: one or"
               " both api_url values are not URLs (or are empty). Check the two"
               " api_url lines above — a missing scheme (`https://host`) is the usual"
-              " cause, and both surfaces then fail the same way.")
+              " cause.")
+        if isinstance(api_url, str) and api_url == harness_url_raw:
+            # Only when the two RAW values are identical is a joint failure real.
+            print("     Both surfaces carry that same value, so BOTH fail the same"
+                  " way.")
+        else:
+            print("     Only one side is affected — see the api_url lines above.")
     elif relation == "same-key-different-host":
         print("  → the SAME key as the CLI but a DIFFERENT endpoint — a refusal on"
               " one says nothing about the other")
@@ -3958,9 +3973,10 @@ def _cmd_org_info(args) -> int:
             data = json.loads(resp.read())
     # ORDER MATTERS: HTTPError (an OSError) first, then the transport OSErrors,
     # then the rest. `http.client.RemoteDisconnected` is BOTH a
-    # ConnectionResetError (OSError) and an HTTPException, and it is the shape a
-    # cold start most often produces — so it must take the RETRY path, not be
-    # reported as an invalid response.
+    # ConnectionResetError (OSError) and an HTTPException, so it must take the
+    # TRANSPORT path — it is a dropped connection, not a bad response body. The
+    # RETRY itself stays gated on a TIMEOUT (`_is_timeout_reason`): a reset is a
+    # different failure and is reported plainly rather than retried.
     except HTTPError as e:
         # `errors="replace"`: a proxy/captive portal answering 4xx with a
         # latin-1 or binary body would otherwise raise UnicodeDecodeError INSIDE
