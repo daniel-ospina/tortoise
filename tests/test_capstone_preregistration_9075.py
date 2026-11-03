@@ -539,10 +539,10 @@ def _seed_with_the_real_bundle(repo: Path) -> Path:
     return bundle
 
 
-def _write_and_commit(repo: Path, name: str, epoch: int) -> Path:
+def _write_and_commit(repo: Path, name: str, epoch: int, body: str = "x\n") -> Path:
     target = repo / "docs" / "evidence" / "7949-capstone" / name
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text("x\n")
+    target.write_text(body)
     _git(repo, "add", str(target.relative_to(repo)))
     _git(repo, "commit", "-q", "-m", f"add {name}", epoch=epoch)
     return target
@@ -945,7 +945,8 @@ def _head_sha(repo: Path) -> str:
 
 
 def _unordered_add_fixture(repo: Path, *, side_epoch: int, readd: bool = True,
-                           readd_sort: str = "after") -> tuple[Path, Path, str, str]:
+                           readd_sort: str = "after",
+                           log_body: str = "x\n") -> tuple[Path, Path, str, str]:
     """A log whose FIRST add-commit is on a lineage that diverged BEFORE the registration.
 
     `side` branches from the seed, so its add-commit is neither an ancestor nor a descendant of the
@@ -956,6 +957,10 @@ def _unordered_add_fixture(repo: Path, *, side_epoch: int, readd: bool = True,
     a descendant. `readd_sort` grinds the re-add's sha to a chosen side of `side_sha`, because the
     verdict must not depend on the order of the SHA TEXT (the premise cycle 25 fixed by keying the
     pass on every add-commit; it is kept here so a future `sorted(...)[0]` representative reds).
+
+    `log_body` is the ENTRY's content, so a caller can give the log a REAL machine record (e.g.
+    `_capstone_body()`, which proves it measured nothing) and then ask what the content arm does
+    with it — the shape `test_the_armed_rule_refuses_an_unscored_log_it_cannot_order` needs.
     """
     seed = repo / "README.md"
     seed.write_text("x\n")
@@ -966,7 +971,7 @@ def _unordered_add_fixture(repo: Path, *, side_epoch: int, readd: bool = True,
         capture_output=True, text=True, check=True,
     ).stdout.strip()
     _git(repo, "checkout", "-q", "-b", "side")
-    log = _write_and_commit(repo, "e1-e2.log", epoch=side_epoch)
+    log = _write_and_commit(repo, "e1-e2.log", epoch=side_epoch, body=log_body)
     side_sha = _head_sha(repo)
     _git(repo, "checkout", "-q", trunk)
     prereg = _write_and_commit(repo, check.PREREG_NAME, epoch=1_700_000_200)
@@ -1071,6 +1076,58 @@ def test_an_unordered_add_dated_after_the_registration_is_still_refused(tmp_path
     assert min(epochs.values()) > prereg_epoch
     failures = _armed(prereg, [log])
     assert failures and "UNORDERED" in failures[0], failures
+
+
+def test_the_armed_rule_refuses_an_unscored_log_it_cannot_order(tmp_path, monkeypatch):
+    """REGRESSION (#10546 review at `99d79dd4b`, FINDING 1): the armed contract is NARROWER.
+
+    `_check_ordering_proposed` advertised the RULED path's sentence — "``[]`` when every log is
+    either after the registration or provably unscored" — while the UNORDERED refusal (cycle 26,
+    ISSUE 1) runs BEFORE the content arm and is deliberately unconditional. So on the armed path a
+    log that PROVABLY produced no number was refused with nothing exempted, and the `#9089`
+    exemption the function advertises was unreachable for it: the promise and the code disagreed,
+    in the direction that reads as a waiver the arm will not grant.
+
+    The narrowing is the repair, not a widening. The content exemption's own topology bound needs a
+    snapshot of the log AT the registration (`_blob_at(prereg_sha, …)`, the value `_late_touches`
+    compares against) and an off-lineage log has none — `_blob_at` is empty, so EVERY touch commit,
+    its entry included, reads as "late", and an ungated "measured nothing" read would be the
+    strip-the-number-after-green hole that bound exists to close. Both verdicts are asserted so a
+    later lane cannot widen the arm by restoring the promise, and the last assertion pins the
+    function's own `__doc__` to the narrowing — which is what reds on the pre-fix text.
+
+    External corroboration for the direction: in OSF registrations a later re-addition or edit of a
+    file does not by itself prove the file existed before the registration (help.osf.io/article/
+    626) — provenance binds to the ENTRY event, which is exactly what an unordered add-commit
+    fails to prove.
+    """
+    repo = _repo(tmp_path, monkeypatch)
+    prereg, log, side_sha, _ = _unordered_add_fixture(
+        repo, side_epoch=1_700_000_100, readd=False, log_body=_capstone_body())
+    # The content arm has something to grant here, and it is the REAL predicate — not a stub: every
+    # numerator/denominator is null and `run.status=REFUSED`.
+    assert check._log_declares_no_measurement(log) == (True, "")
+    prereg_sha = check._added_commits(prereg)[0][1]
+    assert not check._is_ancestor(side_sha, prereg_sha)
+    assert not check._is_ancestor(prereg_sha, side_sha)
+    # …and there is NO snapshot of it on the registration's ancestry, which is why this path cannot
+    # grant what the ruled path grants.
+    assert check._blob_at(prereg_sha, log) == ""
+    assert check._late_touches(log, prereg_sha), "every touch reads as late for an off-lineage log"
+
+    armed_exempt: list[str] = []
+    armed = _armed(prereg, [log], None, armed_exempt)
+    assert len(armed) == 1 and "UNORDERED" in armed[0], armed
+    assert armed_exempt == [], armed_exempt
+    # The RULED path reads the pair on the BASE, where the order IS published, so its content arm is
+    # reachable there: the divergence between the two rules is deliberate and is what the docstring
+    # must say.
+    ruled_exempt: list[str] = []
+    assert check.check_ordering(prereg, [log], None, ruled_exempt) == []
+    assert ruled_exempt == [log.name], ruled_exempt
+    # The contract the function states about ITSELF must carry the narrowing.
+    doc = check._check_ordering_proposed.__doc__ or ""
+    assert "INSIDE the registration's own lineage" in doc, doc
 
 
 def test_a_late_edit_cannot_erase_the_disclosure_requirement(tmp_path, monkeypatch):

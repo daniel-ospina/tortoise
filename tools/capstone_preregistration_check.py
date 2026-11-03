@@ -2329,6 +2329,11 @@ def check_ordering(prereg: Path, logs: list[Path], pins: dict | None = None,
                    unmeasured: list[str] | None = None) -> list[str]:
     """``[]`` when every log is either after the registration or provably unscored.
 
+    ⚠️ THAT SENTENCE IS THE RULED RULE'S. The armed rule narrows "provably unscored" to logs INSIDE
+    the registration's lineage — it refuses an off-lineage unscored log by CAUSE (#10546 review at
+    `99d79dd4b`, FINDING 1; the narrowing and its reason are stated in
+    ``_check_ordering_proposed``, which is where this claim was once false).
+
     ⛔ TWO RULES, ONE FUNCTION, AND EXACTLY ONE OF THEM IS REACHABLE BY DEFAULT (#10546 review cycle
     17/23). The default is the RULED one — `#10463` comment `6564634454`, *"same second is not
     before — an ordering that cannot be shown is not an ordering"*, implemented on the base by
@@ -2724,7 +2729,33 @@ def _check_ordering_proposed(prereg: Path, logs: list[Path], pins: dict | None =
                    unreadable_atomic: list[str] | None = None,
                    allow_atomic_disclosure: bool = False,
                    unmeasured: list[str] | None = None) -> list[str]:
-    """``[]`` when every log is either after the registration or provably unscored.
+    """``[]`` when every log is either PROVABLY ordered after the registration, or provably
+    unscored INSIDE the registration's own lineage.
+
+    ⛔ THE SECOND HALF IS NARROWER THAN THE RULED PATH'S, AND THAT IS THE CONTRACT (#10546 review at
+    `99d79dd4b`, FINDING 1). This docstring used to promise ``[]`` for *"every log either after the
+    registration or provably unscored"* — the RULED path's sentence — while the UNORDERED refusal
+    below (review cycle 26, ISSUE 1) runs BEFORE the content arm and is deliberately unconditional.
+    A log whose add-commit is off the registration's lineage was therefore REFUSED with nothing
+    exempted, and the ``#9089`` exemption this function advertises was unreachable for it: the
+    promise and the code disagreed, in the direction that reads as a waiver the arm will not grant.
+
+    Measured, both verdicts on ONE tree (side add 1700000100 → registration 1700000200 → ``--no-ff``
+    merge, the log a real machine record with every numerator/denominator null and
+    ``run.status=REFUSED``): ARMED refuses it by cause and appends nothing to ``exempted``; RULED
+    exempts it by content. ``test_the_armed_rule_refuses_an_unscored_log_it_cannot_order`` pins both.
+
+    ⛔ AND THE NARROWING IS NOT A GAP TO TIDY LATER — the exemption CANNOT be widened to cover the
+    off-lineage case. Its own topology bound needs a snapshot of the log AT the registration
+    (``_blob_at(prereg_sha, …)``, the value ``_late_touches`` compares against) and an off-lineage
+    log has none: ``_blob_at`` is empty there, so EVERY touch commit — its entry included — reads as
+    "late", and an ungated "measured nothing" read would be the strip-the-number-after-green hole
+    that bound exists to close. The ruled path may grant it because it compares the pair on the BASE,
+    where the order is published; this path compares this contribution's own history, where an
+    entry git cannot order carries no such attribution. External corroboration: in OSF
+    registrations a later re-addition or edit of a file does not by itself prove the file existed
+    before the registration (help.osf.io/article/626) — provenance binds to the entry event, which
+    is exactly what an unordered add-commit fails to prove.
 
     ``atomic_disclosures`` is the machine record's ``atomic_add_ordering`` block — the record, NOT
     the pins block (see ``ATOMIC_ADD_KEY`` for why the distinction is load-bearing).
