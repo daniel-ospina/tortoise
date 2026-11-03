@@ -1295,9 +1295,21 @@ def _report_problem(report) -> str:
     if not isinstance(report.get("compared_fields"), list):
         return ("compared_fields is missing or is not a list, so the width of "
                 "the comparison this plan rests on is not established")
+    # The ELEMENT type too: a non-string here survives the container check and
+    # then reaches `', '.join(...)` in the preview arm's own print, which is a
+    # TypeError traceback AFTER the signable plan file has been written — the
+    # exact shape the parity-entry checks below exist to prevent.
+    for index, field in enumerate(report["compared_fields"]):
+        if not isinstance(field, str):
+            return (f"compared_fields[{index}]: {type(field).__name__} is not "
+                    f"a field name")
     if not isinstance(report.get("declared_absent"), list):
         return ("declared_absent is missing or is not a list, so which fields "
                 "were NOT compared is not established")
+    for index, field in enumerate(report["declared_absent"]):
+        if not isinstance(field, str):
+            return (f"declared_absent[{index}]: {type(field).__name__} is not "
+                    f"a field name")
     for key in ("clean_sessions", "failed_sessions"):
         if not isinstance(report["parity"].get(key), list):
             return f"parity.{key} is missing or is not a list"
