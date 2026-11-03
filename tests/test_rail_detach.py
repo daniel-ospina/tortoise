@@ -61,16 +61,42 @@ def make_checkout(tmp_path: Path, body: str = FAKE_RAIL) -> Path:
     return co
 
 
+def fake_gh(tmp_path: Path, script: str, sub: str = "bin") -> Path:
+    """A `gh` on PATH — the launcher's one external call, made hermetic."""
+    bindir = tmp_path / sub
+    bindir.mkdir(exist_ok=True)
+    gh = bindir / "gh"
+    gh.write_text(script, encoding="utf-8")
+    gh.chmod(0o755)
+    return bindir
+
+
+@pytest.fixture(autouse=True)
+def _hermetic_gh(tmp_path, monkeypatch):
+    """`launch()` reads the PR head with ONE best-effort `gh` call.
+
+    ⛔ THIS SUITE USED TO MAKE A REAL `gh pr view` PER LAUNCH — ~1.9 s each on a
+    rate-limited box, one per test that launches, and a network dependency in a
+    file whose registration says it is hermetic. The call is INFORMATIONAL
+    (nothing gates on `HEAD`), so a `gh` that answers nothing is the honest stub:
+    `HEAD` records `unreadable` and every verdict assertion below is unaffected.
+    (Stated per-launch, not as a launch COUNT: a count here is stale the moment a
+    test is added — the same reason the `config/ci-surfaces.yml` row carries none.)
+    """
+    bindir = fake_gh(tmp_path, "#!/usr/bin/env bash\nexit 1\n")
+    monkeypatch.setenv("PATH", f"{bindir}{os.pathsep}{os.environ.get('PATH', '')}")
+
+
 def launch(state_dir, co, pr=7, **kw):
     return rd.launch(pr, cwd=co, state_dir=state_dir, repo="o/r", **kw)
 
 
-def wait_state(state_dir, pr, want, timeout=15.0):
+def wait_state(state_dir, pr, want, timeout=15.0, pred=None):
     end = time.time() + timeout
     st = None
     while time.time() < end:
         st = rd.collect(state_dir, "o/r", pr)
-        if st is not None and st.state == want:
+        if st is not None and st.state == want and (pred is None or pred(st)):
             return st
         time.sleep(0.05)
     return st
@@ -95,7 +121,14 @@ def test_merged_state_names_the_sha_the_rail_printed(tmp_path):
     co = make_checkout(tmp_path)
     sd = tmp_path / "state"
     launch(sd, co, pr=11)
-    st = wait_state(sd, 11, rd.MERGED)
+    # ⛔ WAIT FOR THE SETTLED READ, not merely the first `merged`. A rail prints
+    # its success line BEFORE it appends `EXIT=`, and `collect` answers `merged`
+    # in that window (`exit_code=None`) — a terminal state, a real merge, but not
+    # yet this test's evidence. Without the predicate this test is a race: it
+    # failed twice in two runs at load 27 on 2026-11-03 while passing in
+    # isolation, i.e. an intermittent red on a CI-gating file for a diff that
+    # changed nothing.
+    st = wait_state(sd, 11, rd.MERGED, pred=lambda s: s.exit_code is not None)
     assert st.state == rd.MERGED
     assert st.exit_code == 0
     assert st.merge_sha == "deadbeefcafe1234"      # from the rail's own log line
@@ -147,6 +180,48 @@ def test_announced_merge_survives_a_missing_exit_line(tmp_path):
     st = wait_state(sd, 55, rd.MERGED)
     assert st.state == rd.MERGED and st.merge_sha == "feedface123456"
     assert "EXIT line was never written" in st.reason
+
+
+def test_a_rail_that_exits_during_the_liveness_probe_keeps_its_exit_code(tmp_path, monkeypatch):
+    """The artifact is read BEFORE the liveness probe, so a rail that appends
+    `EXIT=` and exits *while* that probe runs is seen as GONE holding a read that
+    predates its EXIT — `merged` with `exit_code=None` and the false reason "the
+    EXIT line was never written", for a rail that wrote one.
+
+    The state stayed `merged` (the rail's own success line was in the log), so no
+    gate moved; what was wrong was the exit code and the explanation. It is not
+    theoretical: it made `test_merged_state_names_the_sha_the_rail_printed`
+    flake 2/2 at load 27 on 2026-11-03 while passing in isolation, i.e. an
+    intermittent red on a CI-gating file for a diff that changed nothing.
+
+    The race is reproduced WITHOUT a race — the stub writes the EXIT line and
+    answers "gone" in the same call, which is exactly the interleaving that the
+    real code hit by luck.
+    """
+    co = make_checkout(tmp_path)
+    sd = tmp_path / "state"
+    ln = launch(sd, co, pr=74)
+    assert wait_state(sd, 74, rd.MERGED).state == rd.MERGED   # the rail merged…
+    art = rd.artifact_path(sd, "o/r", 74)
+    # …so strip its bookkeeping and let the probe race it, as it did in the wild.
+    while ln.pid and rd._pid_alive(ln.pid, str(art)):
+        time.sleep(0.05)
+    text = art.read_text()
+    assert "EXIT=" in text and text.count("EXIT=") == 1
+    art.write_text("\n".join(ln for ln in text.splitlines() if not ln.startswith("EXIT=")) + "\n")
+    assert "EXIT=" not in art.read_text()                     # the stale read
+
+    def exits_during_the_probe(pid, marker):
+        with art.open("a", encoding="utf-8") as fh:
+            fh.write(f"EXIT=0\nFINISHED_AT={rd._iso_now()}\n")
+        return False                                          # …and it is GONE
+
+    monkeypatch.setattr(rd, "_pid_alive", exits_during_the_probe)
+    st = rd.collect(sd, "o/r", 74)
+    assert st.state == rd.MERGED
+    assert st.exit_code == 0, st.as_dict()        # pre-fix: None (the stale read)
+    assert st.merge_sha == "deadbeefcafe1234"
+    assert st.reason == "", st.reason            # not the "never written" lie
 
 
 def test_previous_attempts_merge_line_is_not_inherited(tmp_path):
@@ -451,3 +526,91 @@ def test_cli_collect_exit_codes(tmp_path, capsys):
     assert rd.main(["collect", "42", "--repo", "o/r", "--state-dir", str(sd),
                     "--assert-merged"]) == 0
     capsys.readouterr()
+
+
+# ── liveness must be TRUE on every box, and `gh` must never wedge the lock ───
+def test_a_killed_rail_is_lost_on_a_box_without_procfs(tmp_path, monkeypatch):
+    """`os.kill(pid, 0)` SUCCEEDS ON A ZOMBIE.
+
+    Where procfs cannot answer, the old fallback was "kill(0) said yes, so it is
+    alive" — which on macOS (where the lanes run) made a SIGKILLed rail read
+    `waiting` FOREVER: `lost` was unreachable, and the duplicate-rail guard then
+    refused every later `start` on that PR. The state letter now comes from a
+    bounded local `ps` probe instead, so this holds without procfs.
+    """
+    monkeypatch.setattr(rd, "_proc_stat_letter", lambda pid: None)
+    monkeypatch.setattr(rd, "_proc_cmdline", lambda pid: None)
+    proc = subprocess.Popen(["sleep", "30"], start_new_session=True,
+                            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL)
+    marker = "/state/rail-o-r-9.md"
+    try:
+        os.kill(proc.pid, signal.SIGKILL)
+        deadline = time.time() + 15
+        while time.time() < deadline and rd._pid_alive(proc.pid, marker):
+            time.sleep(0.05)
+        # THE PREMISE, asserted rather than assumed: this pid still answers
+        # kill(0) — so `False` below came from the state letter, not from ESRCH.
+        os.kill(proc.pid, 0)
+        assert rd._pid_alive(proc.pid, marker) is False
+    finally:
+        proc.wait()
+
+
+def test_an_unbounded_gh_cannot_wedge_the_duplicate_rail_lock(tmp_path, monkeypatch):
+    """`_head_sha` runs while the duplicate-rail flock is HELD.
+
+    So an unbounded `gh` stalled on a saturating cell does not delay one launch —
+    it holds the lock every later `start` for that PR must take, turning the
+    #3061 guard into the thing that makes the PR unrailable. The call is
+    informational (`HEAD` gates nothing), so a timeout costs nothing.
+    """
+    bindir = fake_gh(tmp_path, "#!/usr/bin/env bash\nsleep 8\n", sub="slowbin")
+    monkeypatch.setenv("PATH", f"{bindir}{os.pathsep}{os.environ.get('PATH', '')}")
+    monkeypatch.setattr(rd, "GH_PROBE_TIMEOUT_S", 0.5)
+    co = make_checkout(tmp_path)
+    sd = tmp_path / "state"
+    t0 = time.time()
+    ln = launch(sd, co, pr=71)
+    elapsed = time.time() - t0
+    # The LOWER bound is the vacuity guard: an instant `gh` would mean the stub
+    # below never ran and this test proves nothing about the timeout.
+    assert rd.GH_PROBE_TIMEOUT_S <= elapsed < rd.GH_PROBE_TIMEOUT_S + 3, \
+        f"launch took {elapsed:.1f}s — not the {rd.GH_PROBE_TIMEOUT_S}s bound"
+    assert ln.head == "unreadable"           # informational only; nothing gates on it
+    assert wait_state(sd, 71, rd.MERGED).state == rd.MERGED   # the rail still ran
+
+
+def test_an_unanswering_gh_repo_view_refuses_instead_of_hanging(tmp_path, monkeypatch):
+    """The other `gh` call: naming the target. A timeout must REFUSE (an unnamed
+    target is exactly what the GH_REPO check exists to prevent), not hang."""
+    bindir = fake_gh(tmp_path, "#!/usr/bin/env bash\nsleep 8\n", sub="slowbin2")
+    monkeypatch.setenv("PATH", f"{bindir}{os.pathsep}{os.environ.get('PATH', '')}")
+    monkeypatch.setattr(rd, "GH_PROBE_TIMEOUT_S", 0.5)
+    co = make_checkout(tmp_path)
+    t0 = time.time()
+    with pytest.raises(rd.Refused) as ei:
+        rd.launch(72, cwd=co, state_dir=tmp_path / "state")
+    assert "did not answer within" in str(ei.value)
+    assert rd.GH_PROBE_TIMEOUT_S <= time.time() - t0 < rd.GH_PROBE_TIMEOUT_S + 3
+
+
+def test_an_unmeasurable_liveness_probe_keeps_the_rail_alive(tmp_path, monkeypatch):
+    """No procfs AND no `ps`: unmeasurable must read ALIVE, never dead.
+
+    Reading a live rail as dead would let a SECOND rail through (#3061) — the
+    same reason `_ps_usable()` refuses to infer "no such process" from an exit
+    code it cannot tell apart from "this `ps` cannot answer". The cost is the
+    documented one: a dead rail on such a box stays `waiting`.
+    """
+    proc = subprocess.Popen(["/bin/sleep", "10"], start_new_session=True,
+                            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL)
+    try:
+        monkeypatch.setattr(rd, "_proc_stat_letter", lambda pid: None)
+        monkeypatch.setattr(rd, "_proc_cmdline", lambda pid: None)
+        monkeypatch.setattr(rd, "_PS_USABLE", None)
+        monkeypatch.setenv("PATH", "/nonexistent")   # `ps` cannot be run at all
+        assert rd._pid_alive(proc.pid, "/state/rail-o-r-8.md") is True
+    finally:
+        proc.wait()

@@ -2575,7 +2575,7 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # tests/test_ci_selection.py::
              # test_ci_catch_history_tool_change_selects_core_not_tier1.
              "tools/ci_catch_history.py",
-             # #2148: `tools/` is a flat NON_PYTHON_PREFIXES entry and no
+             # [agent-infra#2148](dispatch): `tools/` is a flat NON_PYTHON_PREFIXES entry and no
              # SOURCE_PATTERNS row matches `tools/rail_detach.py`, so a
              # TOOL-ONLY change filtered to `changed == []` and took the
              # docs-only early return — the durability pin registered under
