@@ -17,6 +17,24 @@ until someone configures a limit — which is the ordering the storage architect
 requires (*"the meter must be wired into the gate before any allowance is
 configured"*, ``docs/architecture/STORAGE-ARCHITECTURE.md``: §"The byte path").
 
+**⚠️ "INERT" IS ABOUT WHAT IT REFUSES, NOT ABOUT WHAT IT READS (#9567 review
+round 10).** Arming nothing means no dimension can be over its allowance — it does
+NOT mean the gate is free. ``hosted_api._check_org_limit`` fills the missing keys
+at the REST seam from ``quota.resolve_org_limits``, so every gated REST request
+(``points``, ``documents``, ``sessions``) performs ONE control-plane read, and a
+fault in that read is a ``QuotaCheckError`` → HTTP 500 **even with no allowance
+configured**. That is an over-block on our own bookkeeping fault, and the read
+side of the ``#3981`` tension this module states below: the ruling forbids
+refusing a paying org over a METERING fault, while a cap that serves past our
+fault is a cap that can be evaded during an outage. We chose refuse-and-name it
+for the read, so that a config read we cannot complete never degrades silently to
+"unlimited" — the cost is that an outage of the orgs/Team read refuses gated
+writes rather than serving them while nothing is armed. This is a DISCLOSED
+judgement, not an oversight; the alternative (mirroring the carry into every REST
+limits builder) is the drift ``#3874`` rules out, and the fix if the read ever
+matters operationally is a short-TTL memo on the resolver — NOT a silent
+"unlimited" on a failed read.
+
 **⛔ ONE REGISTRY, NOT TWO (#1178).** The dimensions are NOT redeclared here.
 ``cost_dimensions.DIMENSIONS`` declares them (``graph_storage``,
 ``postgres_storage``, ``capture_extraction``); this module only states, per
@@ -35,7 +53,10 @@ convergence point) fills any key the lane's hand-assembled dict is missing from
 ``quota.resolve_org_limits`` — the ONE resolver allowed to emit an allowance
 (#3874's rule: *"there is ONE resolver, so the two cannot drift"*). So arming an
 allowance in the resolver reaches BOTH lanes with no second edit, instead of
-refusing on MCP while REST silently serves past it.
+refusing on MCP while REST silently serves past it. The REST fill runs in
+``_check_org_limit``, which REST doors must call OFF the event loop — it is one
+control-plane round-trip per gated request, not a dict lookup (#9567 review
+round 10).
 
 **Three outcomes per configured dimension, and only three:**
 
@@ -481,7 +502,7 @@ def carry_resolved_allowances(
         resolved = resolver(org_id)
     except QuotaCheckError:
         raise
-    except Exception as e:  # noqa: BLE001 — mapped, never an unmapped 500
+    except Exception as e:  # mapped below, never an unmapped 500
         _logger.error(
             "team allowances unresolvable (fail-closed): team=%s error=%r",
             org_id, e)

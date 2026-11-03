@@ -566,3 +566,68 @@ def test_a_resolver_fault_refuses_rather_than_reading_unlimited():
     with pytest.raises(QuotaCheckError) as exc:
         carry_resolved_allowances(_limits(), resolver=_broken)
     assert "allowances could not be resolved" in str(exc.value), str(exc.value)
+
+
+# ── #9567 D12 (review round 10) — the REST seam's REFUSAL SHAPE ───────────
+#
+# Round 9 put the carry at the ONE REST convergence point (`_check_org_limit`)
+# but ABOVE the `try` that maps quota faults. Both of the carry's documented
+# fail-closed faults therefore escaped the function unmapped — on the capture
+# route that is the route's generic handler reporting OUR fault to the tenant as
+# `"internal capture error — see server logs"`, i.e. their capture failing. The
+# two tests below pin the mapped shape.
+
+def _fault_resolver(_org_id: str):
+    raise RuntimeError("control plane unreachable")
+
+
+def test_a_resolver_fault_at_the_rest_seam_is_the_documented_500(monkeypatch):
+    """A carry fault must reach the caller as ``HTTPException(500, "Quota check
+    failed: …")`` — this module's documented fail-closed refusal — never as a
+    bare ``QuotaCheckError``.
+
+    Mutation this REDs: hoist ``carry_resolved_allowances(org)`` above the
+    ``try:`` in ``hosted_api._check_org_limit`` (the round-9 shape) and the bare
+    ``QuotaCheckError`` escapes instead of the mapped ``HTTPException`` — the
+    #4051 class. Asserted on ``sessions``: the capture door the seam serves.
+    """
+    from fastapi import HTTPException
+
+    from tortoise import quota
+    from tortoise.hosted_api import _check_org_limit
+
+    monkeypatch.setattr(quota, "resolve_org_limits", _fault_resolver)
+    with pytest.raises(HTTPException) as exc:
+        _check_org_limit(_rest_org(), "sessions")
+    assert exc.value.status_code == 500, exc.value
+    detail = str(exc.value.detail)
+    assert detail.startswith("Quota check failed:"), detail
+    assert "allowances could not be resolved" in detail, detail
+
+
+def test_a_missing_allowance_gate_module_is_the_documented_500(monkeypatch):
+    """The gate's drift check is DELIBERATELY LOUD AT IMPORT, and
+    ``quota.enforce_org_limit`` wraps the same import so the loudness lands
+    inside ``QuotaCheckError`` (#4051). The REST seam imported it bare, on EVERY
+    door — ``api_keys``/``users``/``graphs`` included — so an import-time drift
+    escaped ``_check_org_limit`` as an ``ImportError``/``KeyError``.
+
+    Mutation this REDs: drop the inner ``try/except`` around the seam's
+    ``from tortoise.allowance_gate import …`` and the import failure propagates
+    instead of the mapped refusal.
+    """
+    import sys
+
+    from fastapi import HTTPException
+
+    from tortoise.hosted_api import _check_org_limit
+
+    monkeypatch.setitem(sys.modules, "tortoise.allowance_gate", None)
+    with pytest.raises(HTTPException) as exc:
+        # A NON-gated door: the import runs on every door, so the mapping must
+        # hold there too (`users` is outside ALLOWANCE_GATED_RESOURCES).
+        _check_org_limit(_rest_org(), "users")
+    assert exc.value.status_code == 500, exc.value
+    detail = str(exc.value.detail)
+    assert detail.startswith("Quota check failed:"), detail
+    assert "allowance gate could not be loaded" in detail, detail

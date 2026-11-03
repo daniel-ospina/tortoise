@@ -7908,16 +7908,21 @@ def _check_org_limit(org: dict, resource: str, *,
     #resolved by `quota.resolve_org_limits` — the REST lanes build their dicts
     #from their own store reads and never read those columns, and an uncarried
     #allowance is UNLIMITED to the gate (see `tortoise/allowance_gate.py`).
+
+    ⚠️ For a resource in ``ALLOWANCE_GATED_RESOURCES`` that fill is ONE
+    control-plane read, so an ``async def`` request path MUST run this call off
+    the event loop (``asyncio.to_thread`` / ``_graph_offload``) — a synchronous
+    read inline on this API's single uvicorn worker parks every concurrent
+    request (the #2988/#3498 class). Every call site does: the points doors ride
+    ``_graph_offload``, and the capture door awaits
+    ``asyncio.to_thread(_check_org_limit, org, "sessions")`` (#9567 review
+    round 10). Both of the fill's fail-closed faults (a resolver fault, and the
+    gate's loud import-time drift) are mapped to this function's documented
+    ``HTTPException(500, "Quota check failed: …")`` — never an unmapped 500.
     """
     org_id = org.get("org_id")
     if not org_id:
         return  # internal/no-org context — skip
-    from tortoise.quota import (
-        QuotaCheckError,
-        QuotaExceededError,
-        enforce_org_limit,
-        quota_refusal_payload,
-    )
     # ── #9567 D12: the RULED-dimension allowances must reach THIS dict ──────
     # Every REST lane assembles its own limits dict from its own store read
     # (registry `Team`, supabase `resolve_api_key`, `_membership_org`,
@@ -7930,13 +7935,36 @@ def _check_org_limit(org: dict, resource: str, *,
     # declares (`ALLOWANCE_GATED_RESOURCES`) so a users/graphs/api_keys check
     # pays no read, and skipped entirely when the lane already carried all three
     # (the MCP lane does).
-    from tortoise.allowance_gate import (
-        ALLOWANCE_GATED_RESOURCES,
-        carry_resolved_allowances,
+    from tortoise.quota import (
+        QuotaCheckError,
+        QuotaExceededError,
+        enforce_org_limit,
+        quota_refusal_payload,
     )
-    if resource in ALLOWANCE_GATED_RESOURCES:
-        org = carry_resolved_allowances(org)
     try:
+        # ⚠️ The allowance gate's IMPORT and CARRY live INSIDE this ``try``
+        # (review round 10). They used to sit above it, so their two documented
+        # fail-closed faults — a resolver fault (`carry_resolved_allowances`
+        # maps it to ``QuotaCheckError``) and the gate's DELIBERATELY LOUD
+        # import-time drift (``_dimension()`` raises on a renamed/removed
+        # declared dimension) — escaped this function unmapped. On the capture
+        # route that is the tenant's own capture reported as failed with
+        # "internal capture error", i.e. OUR fault presented as THEIR write
+        # failing — the #4051 class this module promises never to produce.
+        # ``quota.enforce_org_limit`` wraps the same import for the same reason;
+        # this is the one seam that did not.
+        try:
+            from tortoise.allowance_gate import (
+                ALLOWANCE_GATED_RESOURCES,
+                carry_resolved_allowances,
+            )
+        except Exception as e:  # mapped to the documented refusal below
+            raise QuotaCheckError(
+                f"the allowance gate could not be loaded "
+                f"({type(e).__name__}: {e}) — refusing rather than checking a "
+                f"limit whose guard cannot be imported") from e
+        if resource in ALLOWANCE_GATED_RESOURCES:
+            org = carry_resolved_allowances(org)
         enforce_org_limit(org, resource, slot_credit=slot_credit)
     except QuotaExceededError as e:
         # #4614: the refusal is a STRUCTURED, distinguishable state — a `code`
@@ -15492,9 +15520,10 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
                 status_code=500, detail=f"Quota check failed: {e}") from None
 
     # ⚠️ #10133 — the SAME VACUOUS PROXY the commit lane lost in #4051: since
-    # #4010 every resolver supplies `max_sessions: None`, so this call can never
-    # 402 (it does not even count). It is NOT the org-limit gate for this lane;
-    # the binding one is the points ESTIMATE gate above, which is conditional on
+    # #4010 every resolver supplies `max_sessions: None`, so the COUNTING half
+    # of this call can never 402 (it does not even count). It is NOT the
+    # org-limit gate for this lane; the binding one is the points ESTIMATE gate
+    # above, which is conditional on
     # `(not session_existed or retry_failed_capture) and not store_only`. What
     # this call still does is refuse (500) a limits dict with no `max_sessions`
     # key at all — the #310 GAP-B presence check the MCP capture bridge relies on
@@ -15502,7 +15531,21 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # Removing it needs that contract re-pointed at `max_points` AND a decision
     # for the store-only lanes, so it is tracked separately rather than copied
     # half-way here.
-    _check_org_limit(org, "sessions")
+    #
+    # ⚠️ #9567 D12 (review round 10) — OFF THE LOOP. This call is no longer the
+    # zero-I/O vacuous proxy the paragraph above describes: on the doors the
+    # allowance gate declares (`ALLOWANCE_GATED_RESOURCES`) it now FILLS any
+    # missing allowance key from `quota.resolve_org_limits` — a SYNC
+    # control-plane read (`_orgs_row_fail_soft` → `httpx` with a retry ladder
+    # under schema drift, or `_make_sdk(namespace="registry")` + a `Team`
+    # query). Run inline it would park the single uvicorn worker on every REST
+    # capture — including the store-only (#3892/#4258) and replay lanes that
+    # reach here having done NO other I/O — the #2988/#3498 class this file
+    # offloads everywhere else (see :15456). So it rides `asyncio.to_thread`,
+    # the same idiom the cohort cap three lines above uses; `to_thread` copies
+    # the context, so the tenant contextvars reach the gate intact. Safe on the
+    # MCP path too (it awaits this impl under its own loop in a worker thread).
+    await asyncio.to_thread(_check_org_limit, org, "sessions")
     # Optional frontmatter-metadata validation (#1362) — warn-only, gated by
     # TORTOISE_VALIDATE_FRONTMATTER=1 (default OFF). The SessionRequest is a
     # payload (no frontmatter block), so the shape validator runs over a

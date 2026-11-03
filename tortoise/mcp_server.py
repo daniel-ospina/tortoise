@@ -6008,7 +6008,7 @@ def tortoise_session_capture(conversation: list[dict],
         from tortoise.allowance_gate import (
             carry_allowance_keys as _carry_allowance_keys,
         )
-    except Exception as e:  # noqa: BLE001 — mapped, never an unmapped 500
+    except Exception as e:  # mapped to the refusal below, never an unmapped 500
         logging.getLogger("tortoise.allowance_gate").error(
             "capture allowance gate unavailable (fail-closed, capture "
             "refused): team=%s error=%r", org_id, e)
