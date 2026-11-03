@@ -714,14 +714,12 @@ def build_rows(*, head: str, out_path: str, log_corpus_sha: str,
     # off-pin receipt before we got here), and an `e4` handed in from another
     # revision still declares itself.
     #
-    # ⛔ The operands are COERCED to `str`, like `build_e4_row`'s and `render_log`'s
-    # own `_same_corpus` calls. Without it a non-string `corpus_sha256` escapes as
-    # `AttributeError: 'int' object has no attribute 'removeprefix'` — a traceback
-    # where the contract is a ROW the gate can report (V7 reds a non-string
-    # declaration). `build_e4_row` cannot produce one, so that is a synthetic-caller
-    # path, but the two siblings coerce and this line is not the place to differ.
-    e4_off_this_corpus = not _same_corpus(str(e4["corpus_sha256"] or ""),
-                                         str(log_corpus_sha or ""))
+    # ⛔ `_same_corpus` coerces both operands itself, so this line passes them RAW on
+    # purpose: a non-string `corpus_sha256` must yield a ROW the gate can report (V7
+    # reds a non-string declaration), never an `AttributeError` from inside the
+    # comparison. `build_e4_row` cannot produce one — this is the synthetic-caller
+    # path — but the predicate's job is a verdict, not a traceback.
+    e4_off_this_corpus = not _same_corpus(e4["corpus_sha256"], log_corpus_sha)
 
     return [
         row("E1", verdict=e1["verdict"], evidence=E1E2_LOG, sha=e1["sha"],
@@ -1896,15 +1894,23 @@ def census(uri: str) -> dict:
 
 # ── E4 / E5 / E1+E2 ───────────────────────────────────────────────────────
 
-def _same_corpus(a: str, b: str) -> bool:
+def _same_corpus(a: object, b: object) -> bool:
     """Two corpus hashes name the same corpus, with or without the ``sha256:`` prefix.
 
     The record writes ``sha256:<hex>``; a receipt written by a different code path may
     drop the prefix. Comparing the RAW strings made those two spellings unequal, so a
     receipt on the pinned corpus was reported as "not measured on the frozen corpus" —
     a refusal that names a false reason is the one failure mode a refusal must not have.
+
+    ⛔ Both operands are COERCED HERE, not at the call sites. This predicate's contract
+    is to RETURN A VERDICT — and a caller handing it a non-string (a synthetic `e4`, a
+    caller-supplied pin) must get that verdict, not `AttributeError: 'int' object has
+    no attribute 'removeprefix'` raised from inside the check. Doing it in one place is
+    also why the sites cannot drift apart again: three of them coerced one operand or
+    none, and each shape was a separate review round.
     """
-    return a.removeprefix("sha256:") == b.removeprefix("sha256:")
+    return (str(a or "").removeprefix("sha256:")
+            == str(b or "").removeprefix("sha256:"))
 
 
 def _instant(raw: object) -> tuple[int, object]:
@@ -1913,7 +1919,8 @@ def _instant(raw: object) -> tuple[int, object]:
     A STRING compare is not an ordering here: ``…T01:00:00+02:00`` sorts ABOVE
     ``…T00:30:00Z`` lexically while being genuinely EARLIER. The key decides both which
     receipt wins and whether an unscorable one refuses the selection, so a wrong
-    returns ``(0, raw)`` for anything absent or unparseable (so an undated
+    compare makes the two disagree — a false refusal one way, a reopened silent skip
+    the other. Returns ``(0, raw)`` for anything absent or unparseable (so an undated
     record never displaces a dated one) and ``(1, datetime)`` otherwise; the tag is
     compared first, so a datetime is never ordered against a str.
 
@@ -2159,8 +2166,7 @@ def build_e4_row(receipt: dict, *, bars: dict, corpus_sha: str) -> dict:
     and ``verdict``/``failure_origin`` are the receipt's gate verdict over its own
     metrics, not this row's verdict.
     """
-    if not corpus_sha or not _same_corpus(str(receipt.get("corpus_hash") or ""),
-                                         corpus_sha):
+    if not corpus_sha or not _same_corpus(receipt.get("corpus_hash"), corpus_sha):
         raise SystemExit(
             f"capstone-measure: REFUSED — build_e4_row was handed "
             f"{receipt.get('evidence')!r}, whose corpus_hash="
@@ -2428,7 +2434,7 @@ def render_log(*, head: str, prereg_sha: str, bars: dict, corpus_sha: str,
         f"operators_total={e4['operators_total']} "
         f"operators_provenanced={e4['operators_provenanced']}")
     add(f"e4 outcome={e4_out['outcome']} {e4_out['value']} bar={e4_out['bar']}")
-    on_pin = _same_corpus(str(e4["corpus_hash"] or ""), corpus_sha)
+    on_pin = _same_corpus(e4["corpus_hash"], corpus_sha)
     add("e4 provenance: the receipt's own "
         f"date={e4['date']} and commit={e4['commit']} are the RECEIPT's, not this "
         f"run's head. " + (
