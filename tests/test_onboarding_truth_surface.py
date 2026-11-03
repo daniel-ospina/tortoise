@@ -274,13 +274,22 @@ class TestRestartPendingProjection:
         monkeypatch.setattr(
             ha, "_registry_existing_graphs",
             lambda: {"org_org-3451"} if namespace else set())
+        # #10180: the fake must mirror the helper's FULL keyword surface.
+        # `_open_org_graph_sdk` gained `moved=` (the projection resolves the
+        # org's default namespace ONCE and hands the same answer to both the
+        # existence verdict and this open), and a fake that only accepted
+        # `listed=` raised TypeError on the call — which the projection's
+        # `except Exception` swallowed into the graph-down 'unavailable'
+        # markers, so every assertion below read 'unavailable' instead of the
+        # derived bool. Same for the raising fake, which has to fail for its
+        # OWN reason (the RuntimeError) rather than on the call signature.
         if graph_down:
-            def _boom(oid, *, listed=None):
+            def _boom(oid, *, listed=None, moved=None):
                 raise RuntimeError("graph down")
             monkeypatch.setattr(ha, "_open_org_graph_sdk", _boom)
         else:
             monkeypatch.setattr(ha, "_open_org_graph_sdk",
-                                lambda oid, *, listed=None: None)
+                                lambda oid, *, listed=None, moved=None: None)
             monkeypatch.setattr(ha, "_make_sdk",
                                 lambda namespace=None: _FakeSDK(_FakeProj()))
             monkeypatch.setattr(
