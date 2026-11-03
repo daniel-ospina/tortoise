@@ -372,6 +372,13 @@ class TestExfiltration:
         with verdict_client(env["app"]) as tc:
             for _ in range(101):
                 assert tc.get("/v1/team/keys", headers=_auth()).status_code == 200
+        # #10618: R3 is recorded by the OFFLOADED post-auth hook, so it can land
+        # just AFTER the request returns — poll instead of assuming
+        # completion-on-return (the pre-#10618 `to_thread` guarantee is gone).
+        assert _await_records(
+            lambda: len([c for c in env["notified"]
+                         if c[0] == "abuse_read_velocity"]) == 1), (
+            f"R3 velocity notify never landed; notified={env['notified']!r}")
         velocity = [c for c in env["notified"]
                     if c[0] == "abuse_read_velocity"]
         assert len(velocity) == 1
@@ -389,9 +396,13 @@ class TestExfiltration:
                 tc.get("/v1/team/keys", headers=_auth(TOKEN_A))
             for _ in range(40):
                 tc.get("/v1/team/keys", headers=_auth(TOKEN_B))
-            assert not [c for c in env["notified"]
-                        if c[0] == "abuse_read_velocity"]
             tc.get("/v1/team/keys", headers=_auth(TOKEN_B))  # 101st team read
+        # #10618: the team notify comes from the OFFLOADED hook — poll (§ see
+        # `_await_records`), then assert it fired exactly once.
+        assert _await_records(
+            lambda: len([c for c in env["notified"]
+                         if c[0] == "abuse_read_velocity"]) == 1), (
+            f"team velocity notify never landed; notified={env['notified']!r}")
         velocity = [c for c in env["notified"]
                     if c[0] == "abuse_read_velocity"]
         assert len(velocity) == 1 and velocity[0][2]["scope"] == "team"
@@ -415,14 +426,26 @@ class TestGeo:
         fake = env["fake"]
         with verdict_client(env["app"]) as tc:
             tc.get("/v1/team/keys", headers={**_auth(), "CF-IPCountry": "US"})
-            assert [c[0] for c in env["notified"]] == ["abuse_new_ip"]
+            # #10618: R4 runs in the OFFLOADED hook, so poll for the notify
+            # (and, implicitly, for the hook's own `_GEO_CACHE` write that the
+            # next two GETs' "already seen" behaviour depends on).
+            assert _await_records(
+                lambda: [c[0] for c in env["notified"]] == ["abuse_new_ip"]), (
+                f"R4 notify never landed; notified={env['notified']!r}")
             tc.get("/v1/team/keys", headers={**_auth(), "CF-IPCountry": "US"})
+            # negative assertion: give a MISSED notify the same bounded window
+            # to arrive before declaring the country quiet.
+            _await_records(lambda: len(env["notified"]) > 1, timeout=0.5)
             assert len(env["notified"]) == 1  # seen country stays quiet
             tc.get("/v1/team/keys", headers={**_auth(), "CF-IPCountry": "DE"})
-            assert len(env["notified"]) == 2
-        ip_events = [e for e in fake.tables["abuse_events"]
-                     if e["event_type"] == "auth_ip"]
-        assert {e["country"] for e in ip_events} == {"US", "DE"}
+            assert _await_records(lambda: len(env["notified"]) == 2), (
+                f"the new-country notify for DE never landed; "
+                f"notified={env['notified']!r}")
+        assert _await_records(
+            lambda: {e["country"] for e in fake.tables.get("abuse_events") or []
+                     if e["event_type"] == "auth_ip"} == {"US", "DE"}), (
+            f"auth_ip events never landed; "
+            f"tables={fake.tables.get('abuse_events')!r}")
         # R4 notifies the OWNER (email resolved from the team row)
         geo = [c for c in env["notified"] if c[0] == "abuse_new_ip"]
         assert geo and all(c[1]["email"] == "owner@abuse.test" for c in geo)
@@ -1985,7 +2008,8 @@ def test_the_client_seam_turns_a_wait_bound_refusal_into_an_inconclusive_skip(
 # ~180 other `to_thread` tenants, so a stalled pool parked the request before it
 # could reach its handler — the #10602 shape ("a 40–80 ms store behind a 3.7–14.6 s
 # answer"). These pin the seam, not a number: the hooks ride the bounded
-# `telemetry` control-plane lane, the short bound is DELIVERY-preserving, and a
+# `abuse` control-plane pool (NOT `telemetry`, which also carries the
+# unrecoverable `billing_notify`), the short bound is DELIVERY-preserving, and a
 # refused submission is REPORTED rather than silently dropped.
 
 #: #10618: the bound an authenticated read must answer inside while every
@@ -2140,11 +2164,16 @@ class TestPerRequestHooksLeaveTheSharedPool:
             self, monkeypatch, caplog):
         """#10618 review P2: a BOUND MISS must not emit a line per request.
 
-        ``_cp_offload(best_effort=True)`` warns on every miss, and this hook
-        runs on EVERY authenticated request, so saturation would produce one
+        ``_cp_offload(best_effort=True)`` warns on EVERY miss
+        (``control-plane offload %r failed (best-effort, swallowed)``), and this
+        hook runs on EVERY authenticated request, so saturation would produce one
         WARNING per request — burying the single attributable refusal line.
         The seam still meters the miss (``bound_miss_running``), so nothing is
         invisible.
+
+        ⛔ The assertion is on the SEAM's noise, not only on our own marker: a
+        filter on ``ABUSE_OFFLOAD_REFUSED`` alone would pass while the pre-fix
+        shape screamed per call (#10618 cycle-2 review, measured).
         """
         import logging
 
@@ -2160,11 +2189,14 @@ class TestPerRequestHooksLeaveTheSharedPool:
         with caplog.at_level(logging.DEBUG):
             asyncio.run(ha._telemetry_hook_off_loop(lambda: None,
                                                     op="abuse.post_auth"))
-        lines = [r.getMessage() for r in caplog.records
-                 if "ABUSE_OFFLOAD_REFUSED" in r.getMessage()]
-        assert lines == [], (
-            "a bound miss is NOT a drop and must not claim one was lost; "
-            f"got {lines} (#10618)")
+        noisy = [r.getMessage() for r in caplog.records
+                 if "ABUSE_OFFLOAD_REFUSED" in r.getMessage()
+                 or "control-plane offload" in r.getMessage()
+                 or "best-effort, swallowed" in r.getMessage()]
+        assert noisy == [], (
+            "a bound miss is NOT a drop: it must neither claim one was lost nor "
+            "emit the seam's per-call WARNING (one per authenticated request is "
+            f"the amplification #10618 forbids); got {noisy}")
 
     def test_a_refused_hook_is_reported_never_silently_dropped(
             self, monkeypatch, caplog):
@@ -2196,9 +2228,8 @@ class TestPerRequestHooksLeaveTheSharedPool:
             f"records={[r.getMessage() for r in caplog.records]}")
 
     def test_the_refusal_line_is_shed_logged(self, monkeypatch, caplog):
-        """#10618: one line per window, not one per request — the telemetry pool
-        is reachable by any tenant, so a saturation refuses a hook per request
-        for EVERY tenant (the ``operator_alert._log_shed`` rule the #4456
+        """#10618: one line per window, not one per request — a saturation of the
+        ``abuse`` pool refuses a hook per request for EVERY tenant (the ``operator_alert._log_shed`` rule the #4456
         billing floor already follows)."""
         import logging
 

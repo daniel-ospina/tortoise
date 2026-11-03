@@ -3187,7 +3187,7 @@ _DREAM_QUEUE_TTL_S = 600
 # `min(32, cpu+4)` = 6) and stall unrelated tenants BEFORE their handlers —
 # #10618 removed the last PER-REQUEST tenant of that pool (`first_api_call` and
 # `_abuse_post_auth`, both awaited on every authenticated request; they ride the
-# bounded telemetry lane now), which shortens no fuse: the shared pool is still
+# bounded ``abuse`` lane now), which shortens no fuse: the shared pool is still
 # unbounded-wait and still `min(32, cpu+4)`. While `/health` stays green by
 # design (#2850), nothing would notice. That
 # is the #3060 starvation path relocated, not removed. Dream therefore gets its
@@ -7040,9 +7040,10 @@ async def get_current_org(request: Request) -> dict:
         # tortoise/analytics.py); distinct_id is the key creator's user UUID
         # (joins web + server funnels), with org_id fallback for legacy/
         # bootstrap keys that predate created_by.
-        # #10618: activation telemetry, so it rides the bounded telemetry lane
-        # — NOT the loop's shared default executor, which is what made this
-        # per-request hop able to park a request BEFORE its handler.
+        # #10618: activation telemetry, so it rides the bounded ``abuse`` lane
+        # (`_telemetry_hook_off_loop`) — NOT the loop's shared default executor,
+        # which is what made this per-request hop able to park a request BEFORE
+        # its handler.
         if first_api_call_pending(org_id):
             try:  # noqa: SIM105
                 await _telemetry_hook_off_loop(
@@ -7232,9 +7233,10 @@ async def _get_current_org_supabase(request: Request, token: str) -> dict:
         # #528: activation telemetry — first successful API auth per org.
         # created_by (key creator's user UUID) joins web + server funnels,
         # with org_id fallback for keys that predate created_by.
-        # #10618: activation telemetry, so it rides the bounded telemetry lane
-        # — NOT the loop's shared default executor, which is what made this
-        # per-request hop able to park a request BEFORE its handler.
+        # #10618: activation telemetry, so it rides the bounded ``abuse`` lane
+        # (`_telemetry_hook_off_loop`) — NOT the loop's shared default executor,
+        # which is what made this per-request hop able to park a request BEFORE
+        # its handler.
         if first_api_call_pending(org_id):
             try:  # noqa: SIM105
                 await _telemetry_hook_off_loop(
@@ -7249,7 +7251,7 @@ async def _get_current_org_supabase(request: Request, token: str) -> dict:
         request.state.tier = org["tier"]
         _publish_default_namespace(org)
         # #308: R3 read velocity + R4 geo (best-effort). #10618: it rides the
-        # bounded telemetry lane, never the loop's shared default executor —
+        # bounded ``abuse`` lane, never the loop's shared default executor —
         # this hook is awaited on EVERY authenticated request.
         await _abuse_post_auth(request, org)
         # #2600: canonical actor_user_id alias (UUID-gated, reads created_by
@@ -8887,7 +8889,7 @@ async def _abuse_post_auth(request: Request, org: dict) -> None:
     """Async wrapper — never raises into the auth path.
 
     #10618: awaited on EVERY authenticated request, so it rides the bounded
-    ``telemetry`` lane (``_telemetry_hook_off_loop``) and never the loop's
+    ``abuse`` lane (``_telemetry_hook_off_loop``) and never the loop's
     shared default executor. ``request.headers``/``request.method`` are read
     HERE, on the loop: ``Request`` is not thread-safe and a worker must not
     touch it.
@@ -8911,7 +8913,7 @@ def _abuse_record_points_sync(org: dict, n: int) -> None:
 
 async def _abuse_record_points(request: Request, org: dict, n: int) -> None:
     try:  # noqa: SIM105
-        # #10618: the bounded telemetry lane, never the shared default pool.
+        # #10618: the bounded ``abuse`` lane, never the shared default pool.
         await _telemetry_hook_off_loop(
             functools.partial(_abuse_record_points_sync, org, n),
             op="abuse.record_points")
@@ -8927,7 +8929,7 @@ def _abuse_evaluate_keys_sync(org_id: str) -> None:
 
 async def _abuse_evaluate_keys(org_id: str) -> None:
     try:  # noqa: SIM105
-        # #10618: the bounded telemetry lane, never the shared default pool.
+        # #10618: the bounded ``abuse`` lane, never the shared default pool.
         await _telemetry_hook_off_loop(
             functools.partial(_abuse_evaluate_keys_sync, org_id),
             op="abuse.evaluate_keys")
