@@ -5131,10 +5131,10 @@ def _primary_message(exc: BaseException) -> str:
 def _driver_fault(exc: BaseException) -> str:
     """``<Type> [<SQLSTATE>]: <primary message>`` — the FAULT, never the row dump.
 
-    The half of a failure line a class name alone never carried (``InvalidText
-    Representation`` and nothing else is how 302 point rows were dropped without
-    the log naming a column) — reduced to what is safe to log: the driver's type,
-    its SQLSTATE and its terse message (:func:`_primary_message`).
+    The half of a failure line a class name alone never carried (the deployment
+    logged ``(InvalidTextRepresentation)`` and nothing else while 302 point rows
+    were dropped, without naming a column) — reduced to what is safe to log: the
+    driver's type, its SQLSTATE and its terse message (:func:`_primary_message`).
 
     The attribution half of the same line withholds `content`, `props` and
     `search_keys` by name-and-length; carrying ``str(exc)`` here put those same
