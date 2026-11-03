@@ -84,6 +84,12 @@ E2A_RECORD = "e2a-value-units.json"
 E2A_FALSIFIER = "e2a-value-units-falsifier.json"
 GATE_DROPS = "e1-gate-drops.json"
 PREREG = Path("docs/evidence/7949-capstone/preregistration.json")
+# The three switches `e1_paired_arm.py` forces OFF for a before arm and refuses to
+# run over when they are already set (#9889 acceptance item 4). The driver re-reads
+# them from each artifact's own `arm` block, because it is the driver that puts the
+# number in a scored row.
+_ARM_VARS = ("TORTOISE_VET", "TORTOISE_CLASSIFY_LATER", "TORTOISE_VALUE_GATE")
+_ARM_OFF_STATES = ("none", "null", "", "0", "false", "unset", "<unset>")
 
 
 def _read_json(path: Path) -> dict:
@@ -197,6 +203,18 @@ def read_off_arms(repo: Path, floors: dict) -> list[dict]:
     and an Object count under `e1_objects` is a denominator too small to move a
     share — both are REFUSED by the probe that produced them. Asserted again
     here, because this driver is what puts the number in a scored row.
+
+    The THIRD refusal the probe makes is asserted here too, and it is the one
+    that decides whether the row means anything at all: the arm must have been
+    OFF. `e1_paired_arm.py` refuses to run when any of the three variables is
+    already set (#9889 acceptance item 4), and it writes the env it read back
+    into `arm` — so the record CARRIES the proof. Collecting that field without
+    reading it (which this function did) let two ON realizations be scored as
+    "before" against an ON "after", producing a DECIDED `FAIL` from a comparison
+    that measured nothing: the inert counter #9889's own O/I/T forbids. A
+    missing `arm` is refused rather than inherited, on the same rule the
+    falsifier's `as_written` block is refused on — an absent provenance is not a
+    default one.
     """
     arms: list[dict] = []
     for name in OFF_ARMS:
@@ -211,13 +229,25 @@ def read_off_arms(repo: Path, floors: dict) -> list[dict]:
         if share < floors["e1_min_before_share"]:
             raise _refuse(f"{name} share {share:.4f} is under the frozen "
                           f"e1_min_before_share {floors['e1_min_before_share']}")
+        arm = record.get("arm")
+        if not isinstance(arm, dict):
+            raise _refuse(f"{name} carries no `arm` block, so nothing in it shows "
+                          "the passes were OFF — a before arm's provenance cannot "
+                          "be assumed")
+        for var in _ARM_VARS:
+            state = arm.get(var)
+            if str(state).strip().lower() not in _ARM_OFF_STATES:
+                raise _refuse(
+                    f"{name} was measured with {var}={state!r}, so it is not a "
+                    "before arm — scoring it as one compares a treatment against "
+                    "itself and still reports a decided E1")
         arms.append({
             "artifact": f"{EVIDENCE / name}",
             "graph": record.get("graph"),
             "objects": objects,
             "bare_definite": record.get("bare_definite"),
             "share": share,
-            "arm": record.get("arm"),
+            "arm": arm,
         })
     return arms
 
@@ -279,6 +309,7 @@ def e1_pairings(before_arms: list[dict], after: dict, floors: dict) -> dict:
         pairings.append({
             "before_artifact": arm["artifact"],
             "before_graph": arm["graph"],
+            "before_arm": arm.get("arm"),
             "before_share": arm["share"],
             "before_objects": arm["objects"],
             "before_bare_definite": arm.get("bare_definite"),
@@ -546,15 +577,29 @@ def score(repo: Path = _ROOT) -> dict:
         "atomic_points": after["atomic_points"],
         "share": round(e2b_share, 6),
         "below_floor": after["atomic_points"] < e2b_floor,
+        "floor": e2b_floor,
         "artifact": after["artifact"],
     }
-    e2["outcome"] = ("PASS" if (e2["e2a"]["outcome"] == "PASS"
-                                and e2b_share <= bars["E2b"]["max_fused_share"]
-                                and not e2["e2b"]["below_floor"])
-                     else "FAIL")
-    e2["decided_by"] = ("E2a" if e2["e2a"]["outcome"] != "PASS" else
-                        "E2b" if (e2b_share > bars["E2b"]["max_fused_share"]
-                                  or e2["e2b"]["below_floor"]) else "both")
+    # A population under the frozen floor was never scoreable, so it is REFUSED —
+    # not FAIL. `capstone_measure.e2_outcome`, the row builder that consumes this
+    # record, returns REFUSED → BLOCKED for the identical operands; recording FAIL
+    # here made the artifact say "a scored failure" about the same numbers the row
+    # beside it calls unmeasured — the row-and-its-evidence-disagree class this
+    # bundle exists to refuse.
+    if e2["e2b"]["below_floor"]:
+        e2["outcome"] = "REFUSED"
+        e2["decidable"] = False
+        e2["decided_by"] = "E2b floor"
+        e2["why"] = (f"the E2b population is {after['atomic_points']} atomic "
+                      f"Points, under the frozen floor of {e2b_floor}, so its "
+                      "fused share is REFUSED rather than scored")
+    else:
+        e2["outcome"] = ("PASS" if (e2["e2a"]["outcome"] == "PASS"
+                                    and e2b_share <= bars["E2b"]["max_fused_share"])
+                         else "FAIL")
+        e2["decided_by"] = ("E2a" if e2["e2a"]["outcome"] != "PASS" else
+                            "E2b" if (e2b_share > bars["E2b"]["max_fused_share"])
+                            else "both")
     return {
         "schema": "e1-e2-scores/1",
         "corpus_sha256": floors["fixtures_hash"],

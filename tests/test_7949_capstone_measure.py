@@ -4255,3 +4255,113 @@ def test_the_e2a_bar_is_parsed_from_the_record_not_typed(tmp_path):
     record = scores_probe.score(repo)
     assert record["e2"]["e2a"]["required"] == 5, record["e2"]["e2a"]
     assert record["e2"]["e2a"]["outcome"] == "PASS", record["e2"]["e2a"]
+
+
+def _bundle(tmp_path: Path) -> Path:
+    """A throwaway copy of both evidence bundles — the fixture this family uses."""
+    repo = tmp_path / "repo"
+    shutil.copytree(_REPO / "docs/evidence/9889", repo / "docs/evidence/9889")
+    shutil.copytree(_REPO / "docs/evidence/7949-capstone",
+                    repo / "docs/evidence/7949-capstone")
+    return repo
+
+
+def test_a_before_arm_that_was_not_OFF_is_refused(tmp_path, capsys):
+    """#10610 review P1: the before arm's OWN arm-readback is now checked.
+
+    `e1_paired_arm.py` refuses to run with any of the three switches already set
+    (this issue's acceptance item 4) and writes the env it read back into `arm`,
+    so the record CARRIES the proof that the arm was OFF. The driver collected
+    that field and never read it, so two ON realizations scored as "before"
+    against an ON "after" produced a DECIDED `FAIL` — a comparison of a
+    treatment against itself, reported as a measurement.
+
+    Non-vacuity: the pre-fix driver scores this bundle (measured: `e1.outcome ==
+    FAIL`, `decidable is True`), so the `pytest.raises` arm reds without the fix.
+    """
+    repo = _bundle(tmp_path)
+    path = repo / "docs/evidence/9889/e1-paired-off-arm-1.json"
+    record = json.loads(path.read_text())
+    assert record["arm"]["TORTOISE_VET"] is None      # the shipped arm is OFF
+    record["arm"]["TORTOISE_VET"] = "1"                # …now it is ON
+    path.write_text(json.dumps(record))
+    with pytest.raises(SystemExit) as refused:
+        scores_probe.score(repo)
+    assert refused.value.code == 2, refused.value
+    err = capsys.readouterr().err
+    assert "not a before arm" in err, err
+    assert "TORTOISE_VET='1'" in err, err
+
+    # …and the shipped bundle still scores, so the arm discriminates an ON record
+    # from the OFF record that ships rather than refusing the whole form.
+    record["arm"]["TORTOISE_VET"] = None
+    path.write_text(json.dumps(record))
+    assert scores_probe.score(repo)["e1"]["outcome"] in ("REFUSED", "PASS", "FAIL")
+
+
+def test_a_before_arm_with_no_arm_block_is_refused(tmp_path, capsys):
+    """An ABSENT provenance is not an inherited one — the `as_written` rule too."""
+    repo = _bundle(tmp_path)
+    path = repo / "docs/evidence/9889/e1-paired-off-arm-2.json"
+    record = json.loads(path.read_text())
+    record.pop("arm")
+    path.write_text(json.dumps(record))
+    with pytest.raises(SystemExit) as refused:
+        scores_probe.score(repo)
+    assert refused.value.code == 2, refused.value
+    err = capsys.readouterr().err
+    assert "carries no `arm` block" in err, err
+    assert "provenance cannot" in err, err
+
+
+def test_an_e2b_population_under_its_floor_is_REFUSED_not_FAILED(tmp_path):
+    """#10610 review P2: the artifact may not agree with the row that reads it.
+
+    `capstone_measure.e2_outcome` — the row builder this record feeds — returns
+    REFUSED → BLOCKED for an under-floor E2b population, on its own docstring's
+    rule that "REFUSED is neither a pass nor a fail". Recording `FAIL` here made
+    the evidence say "a scored failure" about the same operands the row beside it
+    calls unmeasurable.
+
+    Non-vacuity: with `below_floor` folded into the FAIL branch instead (the
+    pre-fix shape) this record yields `outcome == "FAIL"` and `decidable` True.
+    """
+    repo = _bundle(tmp_path)
+    log = repo / "docs/evidence/9889/on-arm.log"
+    text = log.read_text()
+    assert "fused=1/114" in text
+    log.write_text(text.replace("fused=1/114", "fused=1/10"))
+    record = scores_probe.score(repo)
+    e2 = record["e2"]
+    assert e2["e2b"]["below_floor"] is True, e2["e2b"]
+    assert e2["e2b"]["atomic_points"] == 10, e2["e2b"]
+    assert e2["e2b"]["floor"] == 30, e2["e2b"]
+    assert e2["outcome"] == "REFUSED", e2
+    assert e2["decidable"] is False, e2
+    assert "under the frozen floor of 30" in e2["why"], e2
+    assert e2["decided_by"] == "E2b floor", e2
+
+
+def test_the_readmes_floor_provenance_claim_matches_the_code():
+    """#10610 review P2: the README stated the OPPOSITE of what `parse_bars` does.
+
+    The sentence was the only stated justification for the one place this driver
+    bypassed the bar map, so a reader following it would have re-added the
+    bypass. Asserted against BOTH surfaces, so neither can drift alone.
+    """
+    readme = (_REPO / "docs/evidence/9889/README.md").read_text()
+    assert "which `parse_bars` does not expose" not in readme
+    claim = [line for line in readme.splitlines()
+             if "e1_min_before_share" in line and "parse_bars" in line]
+    assert claim, "the README no longer states where the share floor is read from"
+    floors = cvc_bars = None
+    with tempfile.TemporaryDirectory() as tmp:
+        repo = Path(tmp)
+        shutil.copytree(_REPO / "docs/evidence/7949-capstone",
+                        repo / "docs/evidence/7949-capstone")
+        prereg = json.loads(
+            (repo / "docs/evidence/7949-capstone/preregistration.json").read_text())
+        floors = scores_probe._parse_bars(prereg)["floors"]
+    # the code surface the README now claims: the share floor IS in the map
+    assert isinstance(floors["e1_min_before_share"], float), floors
+

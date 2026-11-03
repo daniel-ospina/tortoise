@@ -21,6 +21,12 @@
    {
     "before_artifact": "docs/evidence/9889/e1-paired-off-arm-1.json",
     "before_graph": "capstone_off_54922a800_1793378986",
+    "before_arm": {
+     "TORTOISE_VET": null,
+     "TORTOISE_CLASSIFY_LATER": null,
+     "TORTOISE_VALUE_GATE": null,
+     "TORTOISE_S2_DECISION_SEAM": null
+    },
     "before_share": 0.358974358974359,
     "before_objects": 78,
     "before_bare_definite": 28,
@@ -34,6 +40,12 @@
    {
     "before_artifact": "docs/evidence/9889/e1-paired-off-arm-2.json",
     "before_graph": "capstone_off_54922a800_1793379347",
+    "before_arm": {
+     "TORTOISE_VET": null,
+     "TORTOISE_CLASSIFY_LATER": null,
+     "TORTOISE_VALUE_GATE": null,
+     "TORTOISE_S2_DECISION_SEAM": null
+    },
     "before_share": 0.5652173913043478,
     "before_objects": 69,
     "before_bare_definite": 39,
@@ -81,6 +93,7 @@
    "atomic_points": 114,
    "share": 0.008772,
    "below_floor": false,
+   "floor": 30,
    "artifact": "docs/evidence/9889/on-arm.log"
   },
   "decided_by": "E2a"
