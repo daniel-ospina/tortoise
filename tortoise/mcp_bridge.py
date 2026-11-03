@@ -127,6 +127,17 @@ def _errors_for(payload: Any, code: int, message: str) -> list[dict]:
     if not ids:
         _log(f"{message} (no response: the message was a notification)")
         return []
+    return _errors_for_ids(ids, code, message)
+
+
+def _errors_for_ids(ids: list[Any], code: int, message: str) -> list[dict]:
+    """A JSON-RPC error for EACH given id, and only those.
+
+    Split out from `_errors_for` so the no-reply guard can answer exactly the ids
+    that went unanswered. `_errors_for(payload, …)` derives its ids from the
+    payload, so answering a PARTIAL batch with it would emit an error for the id
+    the server DID answer — inventing a failure for a request that succeeded.
+    """
     return [{"jsonrpc": "2.0", "id": request_id,
              "error": {"code": code, "message": message}} for request_id in ids]
 
@@ -397,19 +408,40 @@ def forward(client: httpx.Client, state: dict, payload: Any) -> list[Any]:
                 )
 
             messages, snippet = _response_messages(response, expected_ids, connection)
-            if expected_ids and not any(
-                isinstance(m, dict) and m.get("id") in expected_ids for m in messages
-            ):
+            # ANSWERED AS A SET, not as "any". `not any(...)` treated one answered
+            # id as a complete answer, so a BATCH whose second id went unanswered
+            # produced no output for it at all — the harness then waits on that id
+            # forever, which is the exact silence this guard exists to prevent.
+            answered = {m.get("id") for m in messages if isinstance(m, dict)}
+            missing = [i for i in dict.fromkeys(expected_ids) if i not in answered]
+            if missing:
                 # A request MUST be answered. A reply with no JSON-RPC message for
                 # it (odd status, unparseable body, an SSE stream carrying only a
                 # notification) would otherwise be written back as NOTHING — the
                 # harness waits forever and the bridge looks merely slow.
-                return _errors_for(
-                    payload, -32603,
-                    f"the MCP endpoint answered HTTP {response.status_code} with no "
-                    f"JSON-RPC reply for id(s) {expected_ids}"
-                    + (f": {snippet[:300]}" if snippet.strip() else ""),
-                )
+                #
+                # The ANSWERED messages are kept, in order: a batch where id 1 was
+                # answered and id 2 was not must deliver id 1's result AND an error
+                # for id 2, or fixing one silence creates another. Only messages
+                # carrying one of THIS request's ids are relayed, so an id-less
+                # server notification does not lead a reply a request/response
+                # harness has no way to correlate.
+                #
+                # ⛔ REDACTED HERE EXPLICITLY. This early return bypasses the
+                # `_redact_message` sweep at the end of `forward()` — the sweep that
+                # exists BECAUSE a relayed reply may quote the credential the server
+                # rejected. Applying the guard without it traded a silence for a
+                # leak on the busiest relay path, which is strictly worse.
+                return [
+                    *(_redact_message(m, connection.key) for m in messages
+                      if isinstance(m, dict) and m.get("id") in expected_ids),
+                    *_errors_for_ids(
+                        missing, -32603,
+                        f"the MCP endpoint answered HTTP {response.status_code} with no "
+                        f"JSON-RPC reply for id(s) {missing}"
+                        + (f": {snippet[:300]}" if snippet.strip() else ""),
+                    ),
+                ]
     except httpx.HTTPError as exc:
         return _errors_for(
             payload, -32603,
