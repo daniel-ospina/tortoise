@@ -53,9 +53,9 @@ byte-identical (or the default install location does not exist, said out loud); 
 is STALE; 2 = cannot verify — which includes the case where files ARE installed and NONE of them
 is a path the pinned tree carries, because then nothing was compared and an unanswered question is
 never a clean one. A file in the deployed directory with NO counterpart in the pinned tree is
-``local`` — cell bring-up writes its own helpers there (``lane-arm.sh``, ``tortoise-graph.sh`` and
-friends exist only there), and calling those drift would make the check cry wolf on every healthy
-cell.
+``local`` — cell bring-up writes its own helpers there (``lane-arm.sh`` and
+``install-lane-arm-timer.sh`` are absent from the pinned tree on the box this was measured on),
+and calling those drift would make the check cry wolf on every healthy cell.
 
 Every number that varies with the box's pin is stated as a SHAPE, not a count: the pin moves under
 a lane (it did, mid-authoring), and a docstring quoting "139 commits" or "4 of 5 files" becomes
@@ -194,6 +194,13 @@ DEPLOYED_ENTRY_LOCAL = "local"
 #: Directory names never compared: ``__pycache__`` is interpreter bytecode, not installed
 #: content, and it is rebuilt from the file it caches — flagging it would be drift with no repair.
 DEPLOYED_SKIP_DIRS = frozenset({"__pycache__"})
+#: The walk's ceiling. `--deployed-check` is meant to be scheduled, so it must not be turned into
+#: an unbounded traversal by a one-level-wrong install: a deployed dir that is a symlink to
+#: ``~/.pi/agent`` was measured at 23,642 files, still running at 100 s with no verdict. Past the
+#: ceiling the answer is cannot-verify, never a silent partial pass.
+DEPLOYED_MAX_FILES = 5000
+#: Depth ceiling, so a symlink construction the visited-set misses still terminates.
+DEPLOYED_MAX_DEPTH = 12
 
 # Tools this repo names in its own docs and hooks. Only used to make a *stale checkout* legible
 # (`diagnose` asks agent-infra whether it has them); never to gate the link itself — the link
@@ -662,27 +669,76 @@ def pin_remedy(infra: Path, pin: Path | None) -> str:
     return f"cd {infra} && git fetch origin && git checkout {sha}"
 
 
-def _deployed_files(deployed: Path) -> tuple[list[tuple[str, Path]], int]:
-    """Every REGULAR file installed under ``deployed``, plus how many entries were LINKED.
+def _deployed_files(deployed: Path) -> tuple[list[tuple[str, Path]], int, list[str]]:
+    """Walk the installed tree. Returns ``(files, linked, problems)``.
 
-    Sorted by relative path so the report is stable run to run (a check whose output reorders
-    itself is a check whose diff a reviewer cannot read). A SYMLINK is counted and skipped, never
-    compared: its content is whatever it resolves to, so a link cannot be stale — and following
-    one would let a link out of the installed tree decide a verdict about the installed tree.
+    ⛔ NOT ``os.walk(deployed)`` (PR review round 2, both reviewers, MEASURED). ``os.walk``'s
+    default ``onerror=None`` SWALLOWS ``os.scandir`` failures, so an unreadable SUBDIRECTORY is
+    silently absent: a tree with a pinned file at the top and a STALE copy inside a ``chmod 000``
+    directory reported ``deployed: ok … (1 ok, 0 stale)`` at exit **0** — round 1's false-green
+    shape, reproduced one layer ABOVE the code that forbids it ("zero files compared is an
+    UNANSWERED question"). ``os.walk`` also never descends a symlinked subdirectory, so a ``lib/``
+    linked to an old copy contributed nothing and the tally said ``0 linked``.
+
+    Hence an explicit scandir recursion. Any listing error is a PROBLEM (cannot-verify, never a
+    silent skip); a symlinked FILE is RETURNED so its target's bytes are compared (round 1 rejected
+    "a link cannot be stale" one level up — the fixed directory branch resolves and judges, so the
+    file branch does too); a symlinked DIRECTORY is followed behind a realpath visited-set; and the
+    walk is BOUNDED, because a one-level-wrong install puts a link to ``~/.pi/agent`` here and
+    measured at 23,642 files with no verdict after 100 s. A check meant to be scheduled must not be
+    turned into an unbounded traversal by a typo.
     """
     found: list[tuple[str, Path]] = []
+    problems: list[str] = []
     linked = 0
-    for root, dirnames, filenames in os.walk(deployed):
-        dirnames[:] = sorted(d for d in dirnames if d not in DEPLOYED_SKIP_DIRS)
-        for name in sorted(filenames):
-            path = Path(root) / name
-            if path.is_symlink():
+    seen: set[str] = set()
+
+    def walk(directory: Path, prefix: str, depth: int) -> None:
+        nonlocal linked
+        real = os.path.realpath(directory)
+        if real in seen:
+            problems.append(f"{directory} leads back to {real}, already walked (a symlink loop)")
+            return
+        seen.add(real)
+        if depth > DEPLOYED_MAX_DEPTH:
+            problems.append(f"{directory} is nested deeper than {DEPLOYED_MAX_DEPTH} levels")
+            return
+        try:
+            with os.scandir(directory) as handle:
+                listing = sorted(handle, key=lambda e: e.name)
+        except OSError as exc:
+            problems.append(f"{directory} cannot be listed ({exc})")
+            return
+        for entry in listing:
+            path = Path(entry.path)
+            rel = prefix + entry.name
+            try:
+                is_link = entry.is_symlink()
+                if entry.is_dir(follow_symlinks=True):
+                    if entry.name not in DEPLOYED_SKIP_DIRS:
+                        walk(path, rel + "/", depth + 1)
+                    continue
+                if not entry.is_file(follow_symlinks=True):
+                    if is_link:
+                        # a link that resolves to neither a file nor a directory: the fleet
+                        # cannot read it, and skipping it silently is what #10114 is about.
+                        problems.append(f"{path} is a symlink -> {os.readlink(path)}, unresolved")
+                    continue
+            except OSError as exc:
+                problems.append(f"{path} cannot be examined ({exc})")
+                continue
+            if is_link:
                 linked += 1
-                continue
-            if not path.is_file():
-                continue
-            found.append((path.relative_to(deployed).as_posix(), path))
-    return found, linked
+            if len(found) >= DEPLOYED_MAX_FILES:
+                problems.append(
+                    f"more than {DEPLOYED_MAX_FILES} files under {deployed} — refusing to walk on "
+                    "(a link to the wrong tree, most likely)"
+                )
+                return
+            found.append((rel, path))
+
+    walk(deployed, "", 0)
+    return found, linked, problems
 
 
 def deployed_drift(
@@ -711,10 +767,13 @@ def deployed_drift(
 
     A file with NO counterpart in the pinned tree is ``local``, not drift, and this is load-bearing
     rather than lenient: agent-infra's cell bring-up writes its own helpers into the same directory
-    (``lane-arm.sh``, ``tortoise-graph.sh``, ``tortoise_graph_client.py``,
-    ``install-lane-arm-timer.sh`` — none of which the pinned tree carries), so a check that flagged
-    them would cry wolf on every healthy cell and be switched off within a week, which is how a
-    guard ends up back where #10114 started.
+    (``lane-arm.sh`` and ``install-lane-arm-timer.sh`` are absent from the pinned tree on the box
+    this was written on), so a check that flagged them would cry wolf on every healthy cell and be
+    switched off within a week, which is how a guard ends up back where #10114 started. ⛔ Name
+    only paths actually verified absent at a pin: ``tortoise-graph.sh`` was named here in the first
+    draft and IS carried by the pinned tree — which made the check's own ``✗ stale:
+    tortoise-graph.sh`` line look ignorable. Whether a given path is "cell-local" is a fact about
+    the pin, not about the filename, so the rule is stated rather than enumerated.
     """
     target = default_deployed_dir() if deployed is None else deployed
     try:
@@ -806,7 +865,12 @@ def deployed_drift(
         ), []
 
     entries: list[tuple[str, str]] = []
-    files, linked = _deployed_files(target)
+    files, linked, problems = _deployed_files(target)
+    if problems:
+        return DEPLOYED_CANNOT_VERIFY, (
+            f"the installed tree at {target} cannot be read IN FULL — {problems[0]}"
+            + (f" (and {len(problems) - 1} more)" if len(problems) > 1 else "")
+        ), entries
     for rel, path in files:
         spec = f"{sha}:{LINK_NAME}/{rel}"
         blob = _git_bytes(infra, "cat-file", "blob", spec)
@@ -828,9 +892,12 @@ def deployed_drift(
         # tree does not carry this path" → `local` → and on a box whose object store is damaged (a
         # partial/promisor clone whose remote is unreachable, a corrupt object) the whole run
         # reported `nothing-installed` at exit **0**: a green verdict over a tree that was never
-        # compared, which is the silent-green class this mode exists to end. Presence and
-        # readability are asked SEPARATELY: `rev-parse --verify -q` answers 0 = present,
-        # 1 = absent (measured), anything else = git could not say.
+        # compared, which is the silent-green class this mode exists to end. THREE outcomes are
+        # separated, by asking presence and TYPE rather than a single rc:
+        #   rev-parse --verify -q <spec>  -> 0 present / 1 absent / else git cannot say
+        #   cat-file -t <spec>            -> "blob" / "tree" (present but NOT a blob is REAL drift)
+        # `rev-parse --verify` rejects the `^{blob}` suffix form ("Needed a single revision",
+        # measured), which is why the type is asked separately.
         exists = _git(infra, "rev-parse", "--verify", "-q", spec)
         if exists is None or blob is None:
             return DEPLOYED_CANNOT_VERIFY, (
@@ -845,6 +912,14 @@ def deployed_drift(
                 f"git could not say whether {rel} exists at the pin {sha[:12]} (exit "
                 f"{exists.returncode}) — cannot verify"
             ), entries
+        kind = _git(infra, "cat-file", "-t", spec)
+        if kind is not None and kind.returncode == 0 and kind.stdout.strip() == "tree":
+            # A file is installed where the pin carries a DIRECTORY: the executed path is not the
+            # pinned object, which is real structural drift and belongs in the drift exit code. It
+            # used to be reported as "present but its bytes cannot be read", sending an operator
+            # after a corrupt clone while the actual fault stayed in place.
+            entries.append((rel, DEPLOYED_ENTRY_STALE))
+            continue
         return DEPLOYED_CANNOT_VERIFY, (
             f"{rel} IS at the pin {sha[:12]} but its bytes cannot be read from {infra} "
             f"(git exit {blob.returncode}) — cannot verify (an unreadable object is not an absent "

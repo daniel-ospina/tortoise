@@ -1788,7 +1788,13 @@ class TestDeployedDrift:
     def test_a_file_the_pinned_tree_does_not_carry_is_LOCAL_not_drift(
         self, repo: Path, git_infra: Path, tmp_path: Path
     ) -> None:
-        """Cell bring-up writes its own helpers into the same directory — measured, 4 of 5."""
+        """Cell bring-up writes its own helpers into the same directory — the `local` rule.
+
+        Stated as a SHAPE, never as a count: whether a given path is cell-local is a fact about the
+        box's PIN, and the pin moves (it moved mid-authoring of this very change). A docstring
+        quoting "4 of 5" goes false without anyone editing it — and did: the first draft's list
+        named `tortoise-graph.sh` as absent from the pinned tree, which it is not.
+        """
         pin = git_commit(git_infra, "the pinned commit")
         deployed = self._install(tmp_path, git_infra, ("record-review.sh",))
         (deployed / "cell-helper.sh").write_text("#!/bin/sh\n# cell-local\n")
@@ -1804,8 +1810,8 @@ class TestDeployedDrift:
     ) -> None:
         """The reason the reference is ``cat-file blob <pin>`` and not ``<infra>/scripts``.
 
-        Measured on the box this was written for: ``$AGENT_INFRA_PATH`` is 139 commits BEHIND the
-        pin. A working-tree comparison would therefore report the correctly-installed file as
+        Measured on the box this was written for: ``$AGENT_INFRA_PATH`` was well over a hundred
+        commits BEHIND the pin. A working-tree comparison would therefore report the correctly-installed file as
         stale, and its remedy would send an operator to "fix" the one file that is already right.
         Here the checkout is left at the OLD commit and the installed copy holds the PINNED bytes:
         the verdict must be ``ok``.
@@ -1993,10 +1999,145 @@ class TestDeployedDrift:
             assert result.returncode == 2, (mode, result.returncode, result.stdout, result.stderr)
             assert "no --deployed-check was selected" in result.stderr, (mode, result.stderr)
 
-    def test_a_symlinked_installed_file_is_not_compared(
+    def test_an_UNREADABLE_subdirectory_is_cannot_verify_not_a_pass(
         self, repo: Path, git_infra: Path, tmp_path: Path
     ) -> None:
-        """A link cannot be stale — its bytes are whatever it resolves to."""
+        """``os.walk``'s ``onerror=None`` silently drops an unreadable subtree.
+
+        Measured in review: a tree with a pinned file at the top and a STALE copy inside a
+        ``chmod 000`` directory reported ``deployed: ok (1 ok, 0 stale)`` at exit 0 — the round-1
+        false-green shape, reached one layer above the code that forbids it. Skipped as root,
+        because root can read a mode-000 directory and the fixture would prove nothing.
+        """
+        if os.geteuid() == 0:
+            pytest.skip("root can read a mode-000 directory — the fixture cannot reproduce this")
+        pin = git_commit(git_infra, "the pinned commit")
+        deployed = self._install(tmp_path, git_infra, ("record-review.sh",))
+        hidden = deployed / "lib"
+        hidden.mkdir()
+        (hidden / "record-review.sh").write_text("#!/bin/sh\necho STALE\n")
+        hidden.chmod(0o000)
+        try:
+            result = self._deployed_check(
+                repo, git_infra, self._env(self._home(tmp_path, pin)), "--deployed", str(deployed)
+            )
+        finally:
+            hidden.chmod(0o755)
+        assert result.returncode == 2, (result.returncode, result.stdout, result.stderr)
+        assert "cannot be read IN FULL" in result.stdout, result.stdout
+
+    def test_a_symlinked_installed_FILE_is_compared_through_its_target(
+        self, repo: Path, git_infra: Path, tmp_path: Path
+    ) -> None:
+        """A link's bytes are what the fleet executes, so they CAN be stale.
+
+        The first draft skipped every link on reasoning round 1 had already refuted one level up
+        (a symlinked deployed DIRECTORY is resolved and judged). A link at a path the pinned tree
+        DOES carry, pointing at stale bytes, must not read as a pass.
+        """
+        pin = git_commit(git_infra, "the pinned commit")
+        stale = tmp_path / "elsewhere" / "record-review.sh"
+        stale.parent.mkdir()
+        stale.write_text("#!/bin/sh\necho STALE\n")
+        deployed = tmp_path / "deployed"
+        deployed.mkdir()
+        (deployed / "record-review.sh").symlink_to(stale)
+        result = self._deployed_check(
+            repo, git_infra, self._env(self._home(tmp_path, pin)), "--deployed", str(deployed)
+        )
+        assert result.returncode == 1, (result.returncode, result.stdout, result.stderr)
+        assert "stale: record-review.sh" in result.stdout, result.stdout
+
+    def test_a_pinned_PATH_that_is_a_DIRECTORY_while_a_file_is_installed_is_STALE(
+        self, repo: Path, git_infra: Path, tmp_path: Path
+    ) -> None:
+        """Structural drift is drift, not an unreadable object.
+
+        ``rev-parse --verify -q <rev>:<path>`` succeeds for a TREE as well as a blob, so the first
+        fix folded "the pin carries a DIRECTORY here" into "present but its bytes cannot be read"
+        — exit 2 with a cause that names a corrupt clone while the real fault is a shape change.
+        """
+        moved = git_infra / "scripts" / "admin-merge.sh"
+        moved.unlink()
+        (git_infra / "scripts" / "admin-merge.sh").mkdir()
+        (git_infra / "scripts" / "admin-merge.sh" / "inner.sh").write_text("#!/bin/sh\n")
+        pin = git_commit(git_infra, "the commit that turned a file into a directory")
+        deployed = tmp_path / "deployed"
+        deployed.mkdir()
+        (deployed / "admin-merge.sh").write_text("#!/bin/sh\necho ran-admin-merge.sh\n")
+        result = self._deployed_check(
+            repo, git_infra, self._env(self._home(tmp_path, pin)), "--deployed", str(deployed)
+        )
+        assert result.returncode == 1, (result.returncode, result.stdout, result.stderr)
+        assert "stale: admin-merge.sh" in result.stdout, result.stdout
+
+    def test_CRLF_in_an_installed_file_is_STALE(
+        self, repo: Path, git_infra: Path, tmp_path: Path
+    ) -> None:
+        """Why ``_git_bytes`` exists: ``text=True`` decodes with UNIVERSAL NEWLINES.
+
+        Under a text-mode comparison a CRLF-mangled shell script (`bash: $'\\r': command not
+        found`) hashes identically to the pinned blob. Bytes do not.
+        """
+        pin = git_commit(git_infra, "the pinned commit")
+        pinned = (git_infra / "scripts" / "record-review.sh").read_bytes()
+        deployed = tmp_path / "deployed"
+        deployed.mkdir()
+        (deployed / "record-review.sh").write_bytes(pinned.replace(b"\n", b"\r\n"))
+        result = self._deployed_check(
+            repo, git_infra, self._env(self._home(tmp_path, pin)), "--deployed", str(deployed)
+        )
+        assert result.returncode == 1, (result.returncode, result.stdout, result.stderr)
+        assert "stale: record-review.sh" in result.stdout, result.stdout
+
+    def test_a_FAILED_walk_is_cannot_verify_not_a_silent_partial_pass(
+        self, repo: Path, git_infra: Path, tmp_path: Path
+    ) -> None:
+        """A symlink loop terminates and refuses, rather than hanging or reporting a pass."""
+        pin = git_commit(git_infra, "the pinned commit")
+        deployed = self._install(tmp_path, git_infra, ("record-review.sh",))
+        (deployed / "loop").symlink_to(deployed)
+        result = self._deployed_check(
+            repo, git_infra, self._env(self._home(tmp_path, pin)), "--deployed", str(deployed)
+        )
+        assert result.returncode == 2, (result.returncode, result.stdout, result.stderr)
+        assert "cannot be read IN FULL" in result.stdout, result.stdout
+
+    def test_a_present_but_UNREADABLE_TREE_is_cannot_verify_not_local(
+        self, repo: Path, git_infra: Path, tmp_path: Path
+    ) -> None:
+        """The ``rev-parse`` error branch: corrupt the TREE, leave the commit readable.
+
+        Round 1 fixed the ``cat-file`` conflation; a mutant that folded ``rev-parse``'s error codes
+        into ``local`` still passed every test, because no fixture ever made ``rev-parse`` fail.
+        This one does: ``cat-file -e <sha>^{commit}`` still answers, so the run reaches the per-file
+        probe and ``rev-parse --verify -q`` exits 128 — which must be cannot-verify, never `local`.
+        """
+        pin = git_commit(git_infra, "the pinned commit")
+        deployed = self._install(tmp_path, git_infra, ("record-review.sh",))
+        tree = subprocess.run(
+            ["git", "-C", str(git_infra), "rev-parse", f"{pin}:scripts"],
+            check=True, capture_output=True, text=True,
+        ).stdout.strip()
+        loose = git_infra / ".git" / "objects" / tree[:2] / tree[2:]
+        assert loose.is_file(), f"expected a loose tree object at {loose}"
+        loose.chmod(0o644)
+        loose.write_bytes(b"corrupted-on-purpose")
+        result = self._deployed_check(
+            repo, git_infra, self._env(self._home(tmp_path, pin)), "--deployed", str(deployed)
+        )
+        assert result.returncode == 2, (result.returncode, result.stdout, result.stderr)
+        assert "cannot verify" in result.stdout, result.stdout
+
+    def test_a_symlinked_installed_file_is_counted_and_compared(
+        self, repo: Path, git_infra: Path, tmp_path: Path
+    ) -> None:
+        """A link at a path the pinned tree does NOT carry is `local` — and it is still COUNTED.
+
+        The invariant is not "links are skipped" (they are compared through — see the test above);
+        it is that a link cannot make a `local` path fail, and that the tally names how many links
+        were traversed rather than dropping them silently, which is what the first draft did.
+        """
         pin = git_commit(git_infra, "the pinned commit")
         deployed = self._install(tmp_path, git_infra, ("record-review.sh",))
         (deployed / "linked-tool.sh").write_text("#!/bin/sh\n# not the pinned bytes\n")
