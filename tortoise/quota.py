@@ -1089,19 +1089,24 @@ def enforce_org_limit(limits: dict | None, resource: str, sdk=None, *,
             write can never target different databases"), and the omission is
             silent — nothing fails loudly when a new door forgets it, which is
             why the contract is stated HERE rather than at each caller.
-            ⚠️ The bound-DEFAULT class is lane-dependent, so do not generalise
-            it — its namespace is the org's STORAGE KEY
+            ⚠️ The bound-DEFAULT class is NOT a lane rule — a bound-default key
+            agrees with the fallback only while the org's storage key is
+            ``org_{org_id}``. Its namespace IS the org's STORAGE KEY
             (``organizations.graph_name``), which the hosted org-provisioning
             paths (``create_org`` / ``register_user`` / ``agent_signup`` / tenant
-            onboarding) set to ``org_{org_id}``; the hosted default ``graphs``
-            row COPIES that key rather than constructing it
+            onboarding) set to ``org_{org_id}`` since #1903; the hosted default
+            ``graphs`` row COPIES that key rather than constructing it
             (``supabase_control.insert_graph``), so a legacy/pre-guard key bound
             to the default node opens whatever the key holds and agrees with the
-            fallback only while it is ``org_{org_id}``. In the SELFHOST/registry
-            lane ``sdk.org_create`` stores ``graph_name = org_{name}`` (#2023 —
-            the divergence is called out in ``hosted_api._data_sdk``'s
-            docstring), so a bound-default key there diverges from
-            ``org_{org_id}`` exactly as a custom binding does.
+            fallback only while it is ``org_{org_id}``. That is not hypothetical
+            in the hosted lane either: a pre-#1903 org whose storage key is
+            ``team_{…}`` diverges, and ``hosted_api`` already guards that class
+            (``_make_sdk(namespace=org_id)`` "would therefore open, and so MINT, a
+            different, absent graph"). In the SELFHOST/registry lane
+            ``sdk.org_create`` stores ``graph_name = org_{name}`` (#2023 — the
+            divergence is called out in ``hosted_api._data_sdk``'s docstring), so
+            a bound-default key there diverges from ``org_{org_id}`` exactly as
+            a custom binding does.
             Registry resources (``api_keys``/``users``/``graphs``) are
             unaffected BY THE COUNT: they resolve the registry either way — a
             passed registry-named sdk is reused and any other sdk is discarded

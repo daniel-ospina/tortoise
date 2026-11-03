@@ -8514,9 +8514,11 @@ def _check_org_limit(org: dict, resource: str, *,
     capture already obey (`mcp_server._enforce_quota`: "Count on the SAME org
     SDK the tool writes to … so the count and the write can never target
     different databases"). ⚠️ Which OTHER credentials diverge from the default
-    graph is LANE-dependent (hosted default-node bindings agree; selfhost
-    ``org_{name}`` bindings do not) — read the seam doc before generalising. And
-    registry-scoped resources (api_keys/users/graphs) are unaffected by ``sdk``
+    graph is NOT a lane rule — it depends on the org's storage key
+    (``organizations.graph_name``) — so do not infer "hosted agrees / selfhost
+    does not" from the lane name. The authoritative rule, and the classes that
+    diverge, are in the seam doc; this site deliberately does not restate them.
+    Registry-scoped resources (api_keys/users/graphs) are unaffected by ``sdk``
     for the count, so callers may pass it for every resource.
 
     Fail-closed decision (#686)
