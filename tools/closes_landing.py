@@ -161,8 +161,49 @@ def _closing_re(sep: str) -> re.Pattern[str]:
 _CLOSING_RE = _closing_re(_CLOSING_SEPARATORS["lenient"])
 _CLOSING_RE_ONELINE = _closing_re(_CLOSING_SEPARATORS["strict"])
 
+#: A BLANK line, i.e. the end of a paragraph. An inline code span cannot cross
+#: it (§6.1 keeps a span inside one paragraph), so it is where the STRICT inline
+#: scan stops looking for a closing backtick run (`_span_limit`).
+_BLANK_LINE_RE = re.compile(r"\n[ \t]*\n")
 
-def _strip_inline_code(text: str) -> str:
+
+def _span_limit(text: str, start: int, strict: bool) -> int:
+    """Where the search for a code span's CLOSING run stops.
+
+    §6.1: a code span is INLINE, and "line endings are converted to spaces" —
+    so a span whose opener and closer sit on two lines of the SAME paragraph is
+    ONE span, and the renderer agrees:
+
+        "Example: `Closes\n#10541` is the quoted form."
+        -> <p>Example: <code>Closes #10541</code> is the quoted form.</p>
+
+    A span cannot cross a BLANK line (§6.1's content stays inside one paragraph),
+    so the blank line is the renderer-accurate boundary — but the two callers
+    want OPPOSITE things from an unsure case, and this is the one place the
+    module's asymmetry has to be spelled out in code:
+
+    * `strict` is the PASS arms (the carrier body, and the subject's own `lands`
+      arm). Under-stripping there is a `lands` on a shape GitHub ignores — the
+      one outcome this module forbids — so it searches to the end of the
+      PARAGRAPH: an over-strip only costs a pass that was never demonstrable
+      (`unresolved`, a warning), never a false closure.
+    * lenient is the FINDING arms. Blanking between two stray runs that a
+      renderer keeps literal (an indented code line pairing with a tick in a
+      later paragraph, `    a `b\nprose `c Closes #100`) would LOSE a real
+      closure — the harmful direction for a warning — so it refuses to pair
+      across a line break at all and over-reports the multi-line span instead.
+      For the shapes in `_COMMONMARK_SHAPES` that costs a false warning and was
+      measured to cost a claim in none: the renderer's CODE shapes here are all
+      reported by the strict arm's paragraph bound below.
+    """
+    if strict:
+        blank = _BLANK_LINE_RE.search(text, start)
+        return len(text) if blank is None else blank.start()
+    line_end = text.find("\n", start)
+    return len(text) if line_end < 0 else line_end
+
+
+def _strip_inline_code(text: str, *, strict: bool = False) -> str:
     """Blank every INLINE code span, whatever the delimiter's run length.
 
     CommonMark opens a code span with a run of N backticks and closes it with a
@@ -172,11 +213,11 @@ def _strip_inline_code(text: str) -> str:
     each side counted as a claim — and on the CARRIER side that buys a `lands`
     (#10634 review P3-2).
 
-    An unmatched run is literal text (CommonMark, not a span), and a span may
-    not reach past the END OF ITS LINE: a run in an indented code block (which
-    the lenient strip deliberately keeps) would otherwise pair with a run on a
-    later line and blank the real prose between them — the direction that loses
-    a closure. Over-reporting a keyword inside a long span is the safe one.
+    An unmatched run is literal text (CommonMark, not a span). How far the closer
+    search may travel is `_span_limit`'s question, and it differs per arm: a
+    span that crosses a SOFT LINE BREAK (one paragraph, §6.1) was left unstripped
+    by a per-line bound, so `` `Closes\n#10541` `` bought a `lands` in both pass
+    arms (#10634 review P2, fail-open).
     """
     out: list[str] = []
     i, n = 0, len(text)
@@ -189,8 +230,7 @@ def _strip_inline_code(text: str) -> str:
         while i < n and text[i] == "`":
             i += 1
         run = i - opener
-        line_end = text.find("\n", i)
-        limit = n if line_end < 0 else line_end
+        limit = _span_limit(text, i, strict)
         closer = -1
         j = i
         while j < limit:
@@ -613,7 +653,7 @@ def parse_closing_refs(body: str, repo: str | None = None,
     (#10597 review P2-3). With no `repo`, a slug is treated as foreign: the
     function cannot tell, and inventing a finding is worse than missing one.
     """
-    text = _strip_inline_code(strip_code(body or "", strict))
+    text = _strip_inline_code(strip_code(body or "", strict), strict=strict)
     seen: list[int] = []
     # The separator spelling follows the QUESTION: a pass (strict) refuses a
     # keyword whose reference sits across a blank line; a finding (lenient)
