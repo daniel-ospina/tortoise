@@ -64,13 +64,14 @@ class TestCreateEntity:
         assert "node" in r and "nudges" in r  # write surface returns nudges
         node = r["node"]
         assert node.get("subjectKind") == "company"
-        assert node.get("status") == "live"
+        # #9974 R1: a status-less birth stores NO status (absent READS live).
+        assert node.get("status") is None, node
         assert sdk.get_entity(node["id"])["name"] == "Acme Corp"
 
     def test_routes_object(self, sdk):
         node = sdk.create_entity("object", "Widget", objectKind="product")["node"]
         assert node.get("objectKind") == "product"
-        assert node.get("status") == "live"
+        assert node.get("status") is None, node
 
     def test_routes_document(self, sdk):
         node = sdk.create_entity("document", "Q3 Plan", documentKind="planDoc")["node"]
@@ -99,7 +100,8 @@ class TestCreateEntity:
         a = sdk.create_subject("Alpha", "company")
         b = sdk.create_entity("subject", "Beta", subjectKind="company")["node"]
         assert a.get("subjectKind") == b.get("subjectKind") == "company"
-        assert a.get("status") == b.get("status") == "live"
+        assert a.get("status") == b.get("status"), (a, b)
+        assert a.get("status") is None, a
         assert "nudges" not in a  # legacy contract: node only
         ev = sdk.create_event("review", "meeting")
         assert ev.get("eventKind") == "meeting"
