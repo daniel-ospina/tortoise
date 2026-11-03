@@ -200,6 +200,12 @@ TURN_WRITE_CITE = f"tortoise/sdk.py:{_sdk_line('_TURN_WRITE_CYPHER = (')}"
 EVIDENCE_DIR = Path("docs/evidence/7949-capstone")
 PREREG_ARTIFACT = "docs/evidence/7949-capstone/preregistration.json"
 E1E2_LOG = "docs/evidence/7949-capstone/e1-e2.log"
+#: E4's evidence is selected by the receipt's OWN ``corpus_hash``, never by a filename
+#: (see ``select_e4_receipt``). ``E4_RECEIPT`` names the receipt the row USED to cite and
+#: is kept as that record — it is NOT a fallback for any row, and ``build_rows`` refuses an
+#: ``e4`` mapping that does not carry its own ``evidence``.
+E4_RECEIPT_DIR = "tests/eval/write_path/receipts"
+E4_RECEIPT_GLOB = "*.json"
 E4_RECEIPT = "tests/eval/write_path/receipts/w2b-operator-2026-10-19.json"
 E5_RESCORE = "docs/evidence/7949-capstone/e5-rescore.json"
 ARMS_DIR = "tests/eval/write_path/receipts/7947-arms-2026-10-18"
@@ -708,7 +714,7 @@ def build_rows(*, head: str, out_path: str, log_corpus_sha: str,
         row("E3", verdict=e3["verdict"], evidence=out_path, sha=head,
             numerator=e3["numerator"], denominator=e3["denominator"],
             corpus_sha256=log_corpus_sha, blocked_by="#9736", note=e3["note"]),
-        row("E4", verdict=e4["verdict"], evidence=E4_RECEIPT, sha=e4["sha"],
+        row("E4", verdict=e4["verdict"], evidence=e4["evidence"], sha=e4["sha"],
             numerator=e4["numerator"], denominator=e4["denominator"],
             corpus_sha256=e4["corpus_sha256"],
             artifact_corpus_sha256=e4["corpus_sha256"], blocked_by="#8503",
@@ -1866,25 +1872,106 @@ def census(uri: str) -> dict:
 
 # ── E4 / E5 / E1+E2 ───────────────────────────────────────────────────────
 
-def load_e4(repo: Path = ROOT) -> dict:
-    """E4's number, read VERBATIM out of the committed operator receipt."""
-    path = repo / E4_RECEIPT
-    if not path.is_file():
-        raise SystemExit(f"capstone-measure: REFUSED — E4's receipt {E4_RECEIPT} "
-                         "does not exist; a row with no artifact is an inference, "
-                         "not evidence")
-    record = json.loads(path.read_text())
-    audit = record.get("operator_audit")
-    if not isinstance(audit, dict):
-        raise SystemExit(f"capstone-measure: REFUSED — {E4_RECEIPT} carries no "
-                         "operator_audit block")
+def _same_corpus(a: str, b: str) -> bool:
+    """Two corpus hashes name the same corpus, with or without the ``sha256:`` prefix.
+
+    The record writes ``sha256:<hex>``; a receipt written by a different code path may
+    drop the prefix. Comparing the RAW strings made those two spellings unequal, so a
+    receipt on the pinned corpus was reported as "not measured on the frozen corpus" —
+    a refusal that names a false reason is the one failure mode a refusal must not have.
+    """
+    return a.removeprefix("sha256:") == b.removeprefix("sha256:")
+
+
+def select_e4_receipt(repo: Path = ROOT, frozen_pin: str = "") -> tuple[str, dict]:
+    """E4's artifact: the operator receipt measured on the FROZEN corpus.
+
+    Why this is not a filename constant. E4's bar is *"the planted-operator corpus
+    goes from 0/4 to 4/4"* — on the **pre-registered corpus**, like every other
+    row. A hard-coded path broke that silently: the roll-up cited
+    ``w2b-operator-2026-10-19.json``, whose own ``corpus_hash`` is ``943a99ec…``
+    — not the frozen ``dd7e8520…`` — and scored E4 at **2/15** from it, while three
+    later receipts written AFTER ``#8503``'s fix, all on the frozen corpus, read
+    **5/15**. So the published row was measured on a different corpus than the one
+    the record froze, and on code that predates the fix. Nothing observed it: the
+    row carried the mismatching ``corpus_hash`` as a disclosure and the gate
+    passes a disclosed mismatch (V7).
+
+    A filename constant is also an evidence hole: point it at any other receipt and
+    the row reports that receipt's number with no signal that the artifact moved.
+
+    Selection is therefore by the receipt's OWN ``corpus_hash``:
+
+    * ``frozen_pin`` must be a real pin — an un-pinned selection is refused;
+    * every ``*.json`` in the receipts directory is read (the name is not trusted to
+      say which files are receipts), and the one whose hash **matches** the pin wins;
+      no match REFUSES rather than falling back to "the newest file";
+    * among matches the ordering is by the record's own ISO-8601 ``date`` string and
+      then ``run_id``, and the winner is the last. The writer emits ``…Z``; a receipt
+      whose ``date`` is absent sorts first, so an undated record never displaces a
+      dated one. That ordering is a STRING compare on an unparsed date (a ``+02:00``
+      stamp sorts above its ``Z`` equivalent), which is why the pin — not the date —
+      is what makes the choice safe: every match is on the frozen corpus, so the
+      number cannot differ by corpus whichever one wins;
+    * every candidate that is unreadable, not an object, carries no
+      ``operator_audit`` or no ``corpus_hash`` is NAMED in the refusal, so a missing
+      artifact cannot read as "no candidate".
+    """
+    if not frozen_pin:
+        raise SystemExit("capstone-measure: REFUSED — E4 was asked to select its "
+                         "receipt without the frozen corpus pin; a receipt whose "
+                         "corpus cannot be checked is not evidence for a bar "
+                         "written over the pre-registered corpus")
+    directory = repo / E4_RECEIPT_DIR
+    paths = sorted(directory.glob(E4_RECEIPT_GLOB)) if directory.is_dir() else []
+    matched: list[tuple[str, str, Path, dict]] = []
+    skipped: list[str] = []
+    for path in paths:
+        try:
+            record = json.loads(path.read_text())
+        except (OSError, json.JSONDecodeError) as exc:
+            skipped.append(f"{path.name} (unreadable: {exc})")
+            continue
+        if not isinstance(record, dict):
+            skipped.append(f"{path.name} ({type(record).__name__}, not a record)")
+            continue
+        if not isinstance(record.get("operator_audit"), dict):
+            skipped.append(f"{path.name} (no operator_audit)")
+            continue
+        corpus_hash = record.get("corpus_hash")
+        if not isinstance(corpus_hash, str) or not corpus_hash:
+            skipped.append(f"{path.name} (no corpus_hash)")
+            continue
+        if not _same_corpus(corpus_hash, frozen_pin):
+            skipped.append(f"{path.name} (corpus_hash {corpus_hash[:20]}…)")
+            continue
+        matched.append((str(record.get("date") or ""),
+                        str(record.get("run_id") or ""), path, record))
+    if not matched:
+        raise SystemExit(
+            f"capstone-measure: REFUSED — no operator receipt in "
+            f"{directory} was measured on the frozen corpus "
+            f"({frozen_pin}). {len(paths)} candidate(s) were scanned and none "
+            f"matched: {skipped or 'none present'}. E4 is a bar over the "
+            "pre-registered corpus; scoring it from another revision would report "
+            "a number this run's corpus cannot support")
+    matched.sort(key=lambda entry: (entry[0], entry[1], entry[2].name))
+    _date, _run_id, path, record = matched[-1]
+    return path.relative_to(repo).as_posix(), record
+
+
+def load_e4(repo: Path = ROOT, *, frozen_pin: str = "") -> dict:
+    """E4's number, read VERBATIM out of the receipt measured on the frozen corpus."""
+    rel, record = select_e4_receipt(repo, frozen_pin=frozen_pin)
+    audit = record["operator_audit"]
     for key in ("planted", "edge_correct", "content_ok", "operators_total"):
         value = audit.get(key)
         if not isinstance(value, int) or isinstance(value, bool):
-            raise SystemExit(f"capstone-measure: REFUSED — {E4_RECEIPT} "
+            raise SystemExit(f"capstone-measure: REFUSED — {rel} "
                              f"operator_audit[{key!r}] is not an integer count: "
                              f"{value!r}")
     return {
+        "evidence": rel,
         "planted": audit["planted"],
         "edge_correct": audit["edge_correct"],
         "content_ok": audit["content_ok"],
@@ -1897,6 +1984,45 @@ def load_e4(repo: Path = ROOT) -> dict:
         "judge_pin": record.get("judge_pin"),
         "verdict": record.get("verdict"),
         "failure_origin": record.get("failure_origin"),
+    }
+
+
+def build_e4_row(receipt: dict, *, bars: dict, corpus_sha: str) -> dict:
+    """E4's row, from a receipt ``load_e4`` selected on the frozen corpus.
+
+    Factored out of ``main`` so the union of *selection* and *row* is one pinned
+    unit: the row's ``evidence`` is the receipt it was measured from, and while this
+    was inline a reversion to a constant cited a path the row was not measured on
+    with every test still green.
+
+    ⛔ Three things are separate and the note keeps them separate: the corpus hash is
+    the FROZEN one (that is why the receipt was selected), the receipt's own ``date``
+    and ``commit`` are the RECEIPT's (it was written on an earlier head than this
+    run — saying they "equal the frozen corpus" was a sentence the fields refute),
+    and ``verdict``/``failure_origin`` are the receipt's gate verdict over its own
+    metrics, not this row's verdict.
+    """
+    result = e4_outcome(edge_correct=receipt["edge_correct"],
+                        planted=receipt["planted"], bars=bars)
+    return {
+        "verdict": verdict_word(result),
+        "numerator": receipt["edge_correct"],
+        "denominator": receipt["planted"],
+        "sha": receipt["commit"],
+        "evidence": receipt["evidence"],
+        "corpus_sha256": receipt["corpus_hash"],
+        "note": (f"{result['value']}; bar {result['bar']}; content_ok="
+                 f"{receipt['content_ok']} operators_total="
+                 f"{receipt['operators_total']} on the SAME receipt, from "
+                 f"{receipt['evidence']}. Its corpus_hash={receipt['corpus_hash']} "
+                 f"IS the frozen corpus ({corpus_sha}) — the receipt is selected by "
+                 f"that hash, so this row cannot be scored on another revision. The "
+                 f"receipt's own date={receipt['date']} and commit={receipt['commit']} "
+                 f"are the RECEIPT's, not this run's head. verdict="
+                 f"{receipt['verdict']} failure_origin={receipt['failure_origin']} "
+                 f"is the receipt's own gate verdict over its metrics, not this "
+                 f"row's: the planted edges are still not all formed (#8503), and "
+                 f"the receipt's retrievability rate is UNMEASURED (#9596)"),
     }
 
 
@@ -2128,7 +2254,7 @@ def render_log(*, head: str, prereg_sha: str, bars: dict, corpus_sha: str,
         "atomic POINTS rather than surviving planted units")
     add("")
     add("## E4 — the committed operator receipt, read verbatim")
-    add(f"e4 receipt={E4_RECEIPT} run_id={e4['run_id']} date={e4['date']} "
+    add(f"e4 receipt={e4['evidence']} run_id={e4['run_id']} date={e4['date']} "
         f"commit={e4['commit']} corpus_hash={e4['corpus_hash']} "
         f"judge_pin={e4['judge_pin']} verdict={e4['verdict']} "
         f"failure_origin={e4['failure_origin']}")
@@ -2232,7 +2358,8 @@ def render_log(*, head: str, prereg_sha: str, bars: dict, corpus_sha: str,
                 "content_ok": e4["content_ok"],
                 "operators_total": e4["operators_total"],
                 "measured_commit": e4["commit"],
-                "source": E4_RECEIPT,
+                "corpus_hash": e4["corpus_sha256"],
+                "source": e4["evidence"],
             },
             "e5_rescore": {
                 "raw_loss_rate": e5["raw_loss"],
@@ -2443,25 +2570,8 @@ def main(argv: list[str] | None = None) -> int:
     }
 
     # ── E4 ────────────────────────────────────────────────────────────────
-    receipt = load_e4()
-    e4_result = e4_outcome(edge_correct=receipt["edge_correct"],
-                           planted=receipt["planted"], bars=bars)
-    e4 = {
-        "verdict": verdict_word(e4_result),
-        "numerator": receipt["edge_correct"],
-        "denominator": receipt["planted"],
-        "sha": receipt["commit"],
-        "corpus_sha256": receipt["corpus_hash"],
-        "note": (f"{e4_result['value']}; bar {e4_result['bar']}; content_ok="
-                 f"{receipt['content_ok']} operators_total="
-                 f"{receipt['operators_total']} on the SAME receipt. Its own "
-                 f"date={receipt['date']}, commit={receipt['commit']} and "
-                 f"corpus_hash={receipt['corpus_hash']} differ from the frozen "
-                 f"corpus ({corpus_sha}), and its verdict={receipt['verdict']} "
-                 f"failure_origin={receipt['failure_origin']}: the planted edges "
-                 f"are not formed at all (#8503), and the receipt's "
-                 f"retrievability rate is UNMEASURED (#9596)"),
-    }
+    receipt = load_e4(frozen_pin=corpus_sha)
+    e4 = build_e4_row(receipt, bars=bars, corpus_sha=corpus_sha)
 
     # ── E5 ────────────────────────────────────────────────────────────────
     e5 = score_e5(sessions, Path(args.e5_out))
