@@ -144,7 +144,7 @@ Production graph: **~25,000 quota nodes in 3–4 active days** (~27 per emitting
 
 **The problem it solves:** extraction **rephrases**. A `Point` is the model's rendering of what was said, not what was said. During the LongMemEval work, **raw facts were being deformed** — and that deformation is silently baked into the belief layer, where nothing downstream can detect it.
 
-**The layer:** the **minimal verbatim span** each `Point` was derived from, kept **verbatim in Postgres (the owner's *"supabase"* = the DATABASE, not the object bucket)**, not in the graph, and **linked to the `Point`/`Object` it supports**. Distinct from the other three by granularity and purpose: <!-- v4-mechanism: span_link -->
+**The layer:** the **minimal verbatim span** each `Point` was derived from, kept **verbatim in Postgres (the owner's *"supabase"* = the DATABASE, not the object bucket)**, not in the graph, and **linked to the `Point`/`Object` it supports**. Distinct from the other three by granularity and purpose: <!-- v4-mechanism: span_link state: not-implemented -->
 
 | layer | what it is | granularity | purpose |
 |---|---|---|---|
@@ -207,7 +207,7 @@ Production graph: **~25,000 quota nodes in 3–4 active days** (~27 per emitting
 
 #### 2.4.1 ⭐ Why the LINK is the load-bearing half — and the pattern has a name (2026-09-24)
 
-**Owner, 2026-09-24:** *"do we vectorise the source or link to it?"* **Both — but the order is the decision, and the link comes first.** <!-- v4-mechanism: span_link -->
+**Owner, 2026-09-24:** *"do we vectorise the source or link to it?"* **Both — but the order is the decision, and the link comes first.** <!-- v4-mechanism: span_link state: not-implemented -->
 
 The mechanism is **parent-document retrieval** / **small-to-big**: *embed the small units; keep the parent by ID with no vector; fetch it by walking up.* The field converges on **link, not embed** — a parent is stored by ID **without** embedding, because the reference is what the reader needs, not a second copy of the thing. *(Databricks: "search children, return parents".)*
 
@@ -220,6 +220,27 @@ The mechanism is **parent-document retrieval** / **small-to-big**: *embed the sm
 |---|---|---|
 | **1** | **Every committed `Point`/`Object` must carry a reachable link to its `Source` span.** A node that cannot walk up cannot be served as evidence | **the link is how the evidence reaches the model** — without it, the 15.9-pt finding is unreachable and all we can serve is the derived claim |
 | **2** | **A `Source` MAY additionally carry one summary vector** (the S1 narrative, kept in Postgres) | it buys one query class nothing else serves — *"which SOURCE is about X"*. Framework practice, **not** a measurement. Storage §9.4 |
+
+> **⛔ DRIFT MARKER — rule 1 above is the TARGET, not the shipped code.** The
+> write path stamps `span_start`/`span_end` — the offsets
+> `extractor_v2._value_verbatim_span` returns, appended to the point entry only
+> when they are not `None` — only when **four** gates hold: the point carries a
+> value, a source turn resolves, the quote is VERBATIM in it, **and** the
+> addressed text itself carries a value. `source_turn_id` is **not** one of
+> those gates and must not be read as one: the model path writes the key
+> unconditionally (its value is `None` when no turn resolves), and the S5 mint
+> path writes it only when a turn resolves — so "the link is stamped everywhere"
+> is exactly the false-present reading this marker exists to prevent.
+> Every other committed point is written with **no span** — a point resolved by
+> the token-overlap band carries a `source_turn_id` and still no offsets, which
+> is why the two are stated separately above and not as one "address"; measured
+> on `execute_embed`, **1 of 3** committed points carries a span. So *"every
+> committed `Point`/`Object` must carry a reachable link"* is unbuilt for the
+> general point, and `config/v4-mechanisms.yml` records `span_link` as
+> `not-implemented` with the widening owned by **#2684** (§2.4's own
+> coordination note). A lane reading rule 1 as shipped will serve a claim that
+> cannot walk up and call it evidence — that is the exact reading this marker
+> exists to prevent.
 
 **And what is explicitly NOT the mechanism:** *"are these two sources the same?"* is **never** answered by a vector — similarity detects the same **topic**, not the same **document**. Identity is **canonicalised URL + content hash** (storage §9.4 ③).
 
@@ -571,7 +592,7 @@ unfirable (block at the top of §10).
 >
 > *"S2 sounds ok, but seems like it just needs a counter filter (Jev doing adversarial review), so we have step S2.1 LLM entities list and S2.2 jev"*
 
-**Jev, asked to FALSIFY, not confirm.** Two **levels**, and they are different shapes — one is many cheap decisions, the other is a single batch verdict. <!-- v4-mechanism: vet -->
+**Jev, asked to FALSIFY, not confirm.** Two **levels**, and they are different shapes — one is many cheap decisions, the other is a single batch verdict. <!-- v4-mechanism: vet state: implemented -->
 
 #### Level 1 — per-candidate (many, cheap, evaluated in parallel)
 
@@ -754,11 +775,11 @@ A four-way audit of the write path found **FOUR distinct dedups at FOUR differen
 | id | key | where | exists? |
 |---|---|---|---|
 | **D-a** | **source** | **URL only** | ⚠️ **URL-keyed only** — a content-hash is a provenance anchor (`#4005`), **not a dedup key** |
-| **D-b** | **within-batch exact** | `execute_embed` (`extractor_v2.py:3967-3969`) — the `_norm(content)`-keyed `point_ids` map, first wins | ✅ <!-- v4-mechanism: exact_dedup --> |
+| **D-b** | **within-batch exact** | `execute_embed` (`extractor_v2.py:3967-3969`) — the `_norm(content)`-keyed `point_ids` map, first wins | ✅ <!-- v4-mechanism: exact_dedup state: implemented --> |
 | **D-c** | **vs store, raw content hash** | `sdk.py:12412` (`_find_point_by_content`; the shared predicate builder is `_dedup_match_clauses`, `:12364`) | ✅ |
-| **D-d** | **semantic** | `classify_consolidation` (`extractor_v2.py:3021+`) — the paraphrase NOOP arm | ✅ <!-- v4-mechanism: against_priors_consolidation --> |
+| **D-d** | **semantic** | `classify_consolidation` (`extractor_v2.py:3021+`) — the paraphrase NOOP arm | ✅ <!-- v4-mechanism: against_priors_consolidation state: implemented --> |
 
-**⇒ `S0a NORMALIZE + HASH → S0b SOURCE DEDUP` is the largest single volume lever available, and it is mechanical and free: `tortoise/source_identity.py` is its implementation (`normalize_source_url`, `resolve_source_key`), wired in `projection/entities.py` and acceptance-tested by `tests/test_source_dedup_registration.py`, which is why `config/v4-mechanisms.yml` carries it as `implemented`.** Catching the same conversation firehose twice is a **whole-narrative** save, not a claim-level one. What stays absent is narrower than the step: **D-a above is still URL-keyed**, and resolving a spelling to the `:Source` that owns its identity is not hashing the narrative. <!-- v4-mechanism: source_dedup -->
+**⇒ `S0a NORMALIZE + HASH → S0b SOURCE DEDUP` is the largest single volume lever available, and it is mechanical and free: `tortoise/source_identity.py` is its implementation (`normalize_source_url`, `resolve_source_key`), wired in `projection/entities.py` and acceptance-tested by `tests/test_source_dedup_registration.py`, which is why `config/v4-mechanisms.yml` carries it as `implemented`.** Catching the same conversation firehose twice is a **whole-narrative** save, not a claim-level one. What stays absent is narrower than the step: **D-a above is still URL-keyed**, and resolving a spelling to the `:Source` that owns its identity is not hashing the narrative. <!-- v4-mechanism: source_dedup state: implemented -->
 
 #### The five correctness constraints
 
@@ -774,7 +795,7 @@ A four-way audit of the write path found **FOUR distinct dedups at FOUR differen
 
 | operation | site | who |
 |---|---|---|
-| **DETECT** the near-duplicate pair **+ apply the §16.4 never-across guard** | **`S2.2a-β`** | mechanical <!-- v4-mechanism: near_dup_detect --> |
+| **DETECT** the near-duplicate pair **+ apply the §16.4 never-across guard** | **`S2.2a-β`** | mechanical <!-- v4-mechanism: near_dup_detect state: implemented --> |
 | record the **VERDICT** `MERGE` for a pair that survives the guard | **`S2.2b VET`** | the Jev arbiter (`vet_gate.py:OUTCOMES`) |
 | execute the **FUSION** — the union of both sides' attachments | **`S3`** | the resolve/consolidation tail, after the gate |
 
@@ -805,7 +826,7 @@ S6  COMMIT
 1. **Key unification** — one hash, one normalization.
 2. **Sound-only** — applies only where the key is provably exact.
 3. **Union-merge** — merging **unions the attachments** (edges, provenance, sources).
-4. ⛔ **An ATOMIC write** — `create_point(dedup=True)` is a **check-then-CREATE**, and there is **no uniqueness constraint on `Point`**. **Two concurrent writers both see "absent" and both create.** **Nothing in the current write path closes that window**; the Postgres target's single transaction does. <!-- v4-mechanism: atomic_point_write -->
+4. ⛔ **An ATOMIC write** — `create_point(dedup=True)` is a **check-then-CREATE**, and there is **no uniqueness constraint on `Point`**. **Two concurrent writers both see "absent" and both create.** **Nothing in the current write path closes that window**; the Postgres target's single transaction does. <!-- v4-mechanism: atomic_point_write state: not-implemented -->
 
 **⛔ AND THE MERGE RULE IS NOT NEGOTIABLE — UNION THE ATTACHMENTS; NEVER LOSE EITHER SIDE'S EVIDENCE.** Near-duplicate claims **may** be merged, arbitrated by **Jev over the claim plus the narrative and raw data**, **on a high bar and only when nothing distinguishing is lost** (→ §16.4). **A merge never crosses a difference in a number, a name, a negation or a condition, and both sides' evidence survives.**
 
@@ -970,7 +991,7 @@ New entities + connections + **metadata**. The metadata includes **lifecycle eve
 - **The record states the truth** — `execute_embed`'s `link_before_create` uses `failure_policy.created_record`, whose `found` is `false` **only** when THAT candidate's own query ran and matched nothing; otherwise it is `None`. Per candidate, not per run: a bounded lookup leaves some candidates checked and others not.
 - **The run reports it** — `extract_session_v2` returns an always-present `identity` block (state, reason, the coverage counters, per-class candidate and unresolved counts) and warns loudly when a candidate's own identity query did not run (and, separately, when the lookup was bounded but every candidate's query ran, and when the lookup did not run at all with no candidate to check — three different facts, and each gets its own sentence **on a run that reaches this block**; the empty-conversation early return precedes it and has no candidate, so it emits no `S3 identity` line). Nothing is suppressed: **I1's *"never mint it"* is still not enforced**, and duplicates are still minted.
 
-**What is still absent, and it is the whole of the remaining code half:** the `HOLD` gate itself — a **create** gate inside S5, which is *not* `execute_embed({})` (that is the sole carrier for retractions, supersessions and chain notes, so suppressing it wholesale drops memory I2 forbids dropping); and the persistence that carries a run's held set forward. `#5087` (E1) remains the code-owner of both, and `config/v4-mechanisms.yml` keeps `failure_policy` at `not-implemented` for exactly this reason. <!-- v4-mechanism: failure_policy -->
+**What is still absent, and it is the whole of the remaining code half:** the `HOLD` gate itself — a **create** gate inside S5, which is *not* `execute_embed({})` (that is the sole carrier for retractions, supersessions and chain notes, so suppressing it wholesale drops memory I2 forbids dropping); and the persistence that carries a run's held set forward. `#5087` (E1) remains the code-owner of both, and `config/v4-mechanisms.yml` keeps `failure_policy` at `not-implemented` for exactly this reason. <!-- v4-mechanism: failure_policy state: not-implemented -->
 
 ---
 
@@ -1082,7 +1103,7 @@ Points X, Y, Z   ← the reasons. Carry "why".
 
 v3's **E2** requires state-value facts be preserved verbatim (*"personal best 5K time = 27:12, as of <date>"*) rather than filtered as "counts are noise." `STATE_VALUE_CARVE_OUT` in `_granularity_text()` is the code anchor for exactly this.
 
-**⇒ Any mechanical filter MUST carry this carve-out, or it will drop the facts users care about most.** See `STORAGE-ARCHITECTURE.md` §7 for the low-cost storage question. <!-- v4-mechanism: state_value_carve_out -->
+**⇒ Any mechanical filter MUST carry this carve-out, or it will drop the facts users care about most.** See `STORAGE-ARCHITECTURE.md` §7 for the low-cost storage question. <!-- v4-mechanism: state_value_carve_out state: implemented -->
 
 #### ✅ The carve-out MUST cover decision-relevant numbers
 
@@ -1758,7 +1779,7 @@ From migration `e9b2c7d1f3a4_drop_entity_memory_links.py` (2026-05-26):
 | **S5 CONNECT — two sets, within-batch *and* to-graph** (D6) | LLM does **within-batch only**, max 2, backwards; **to-graph is mechanical** (ANN + entity join) | ⚠️ **A direct challenge to D6** — D6 is the decision that stands; the challenge is evidence for the owner, **not** a change we may make. |
 | **S3 MATCH → AND ATTACH** | entity resolution is a **join key**, and the link rows were deleted as pure storage cost | ✅ **consistent** — and it says our attach step should cost little. |
 | **minting an `Object` per entity** | entities are extracted to **link facts** (*"Extract anything that could help link related facts together"*) and kept in a mapping table | ⚠️ **The strongest available support for the `^the <X>` finding.** Their entity extraction *purpose* is linking; ours has become node creation. |
-| **connection fan-out** | bounded everywhere, with a timeout that drops an arm | ✅ **The cap is the design** — `PER_ENTITY_FANOUT_CAP = 200` (`tortoise/fanout.py`), consumed by `assembly.py` / `subgraph.py`. The cap sits above the current worst hub (123), so it binds nothing today and cannot lose data now. <!-- v4-mechanism: fanout_cap --> |
+| **connection fan-out** | bounded everywhere, with a timeout that drops an arm | ✅ **The cap is the design** — `PER_ENTITY_FANOUT_CAP = 200` (`tortoise/fanout.py`), consumed by `assembly.py` / `subgraph.py`. The cap sits above the current worst hub (123), so it binds nothing today and cannot lose data now. <!-- v4-mechanism: fanout_cap state: implemented --> |
 
 **⇒ The three questions below: question 1 is OPEN; question 2 resolves to a STORED edge; question 3 resolves to a hard fan-out cap of `PER_ENTITY_FANOUT_CAP = 200`:**
 
@@ -1779,7 +1800,7 @@ From migration `e9b2c7d1f3a4_drop_entity_memory_links.py` (2026-05-26):
 
 ## 15. Open questions
 
-**Cross-batch connection — by LLM or mechanically — is open** (§13.8). The other two questions this document raises are answered by the design: **hard fan-out caps apply** (200, `PER_ENTITY_FANOUT_CAP`, §13.8 question 3), and **`aboutObject` is a STORED edge**, not a derived join (§13.8 question 2, §16) — the one remaining unknown, *are those tools ever called?*, cannot be answered pre-launch and is therefore deferred. <!-- v4-mechanism: fanout_cap -->
+**Cross-batch connection — by LLM or mechanically — is open** (§13.8). The other two questions this document raises are answered by the design: **hard fan-out caps apply** (200, `PER_ENTITY_FANOUT_CAP`, §13.8 question 3), and **`aboutObject` is a STORED edge**, not a derived join (§13.8 question 2, §16) — the one remaining unknown, *are those tools ever called?*, cannot be answered pre-launch and is therefore deferred. <!-- v4-mechanism: fanout_cap state: implemented -->
 
 ---
 
@@ -1805,7 +1826,7 @@ reached, and of the review cycles that followed, is in
 
 ### 16.4 ⭐ O4 applied — what "merge near-duplicates" means here, bounded by the evidence
 
-**Owner ruling:** *"yes we can merge near duplicate claims. maybe we can have jev with the claim and the narrative/raw data/both arbiter that."* <!-- v4-mechanism: near_dup_merge -->
+**Owner ruling:** *"yes we can merge near duplicate claims. maybe we can have jev with the claim and the narrative/raw data/both arbiter that."* <!-- v4-mechanism: near_dup_merge state: implemented -->
 
 **Design, as bounded by the research (research §16.3 — `STORAGE-ARCHITECTURE.md`):**
 
