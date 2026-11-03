@@ -943,7 +943,7 @@ def _parse_hook_nodeids(text: str) -> tuple[list[str], int | None]:
     return nodeids, errors
 
 
-def _selection_confcutdir(files: list[str]) -> str:
+def _selection_confcutdir(files: list[str], cwd: str | None = None) -> str:
     """The directory `--confcutdir` must be pinned to for this selection.
 
     pytest resolves `conftest.py` by walking EVERY ancestor of each selected
@@ -969,15 +969,31 @@ def _selection_confcutdir(files: list[str]) -> str:
     * selection OUTSIDE it (a temp tree, a test fixture) -> the selection's own
       deepest common ancestor, so no shared ancestor (`/tmp`, `$HOME`) can
       contribute a conftest.
+
+    `cwd` is the directory the manifest's collect-only child will RUN in — the
+    caller's own cwd when omitted (the CLI case), and NOT necessarily the
+    caller's cwd otherwise: `tools/embedded_evidence.py` spawns the child with
+    `cwd=REPO_ROOT` from wherever it was itself invoked, so a repo-relative
+    `$FILES` resolved against the caller's cwd names a tree the child never
+    runs in — and the pin then prunes the wrong ancestry (review P2, #10636).
+
+    ⚠️ The pin can only ever be as tight as the selection's own common
+    ancestor: for entries with nothing in common below `/` (two disjoint
+    top-level trees) `os.path.commonpath` returns `/`, whose `parents` are
+    empty, so NO ancestor is pruned. Every caller today selects inside one
+    tree; a cross-tree selection needs its own `--confcutdir`.
     """
-    invocation = os.path.abspath(os.getcwd())
+    invocation = os.path.abspath(cwd if cwd is not None else os.getcwd())
     roots = []
     for entry in files:
-        path = Path(entry)
+        # Resolve against the child's cwd, not this process's: a repo-relative
+        # `$FILES` means "relative to where pytest will run", which is `cwd`.
+        candidate = entry if os.path.isabs(entry) else os.path.join(invocation, entry)
         try:
-            roots.append(os.path.abspath(path if path.is_dir() else path.parent))
+            roots.append(os.path.abspath(
+                candidate if os.path.isdir(candidate) else os.path.dirname(candidate)))
         except OSError:  # pragma: no cover — an unreadable path is not a dir
-            roots.append(os.path.abspath(path.parent))
+            roots.append(os.path.abspath(os.path.dirname(candidate)))
     try:
         deepest = os.path.commonpath(roots)
     except ValueError:  # pragma: no cover — mixed drives on Windows
@@ -988,7 +1004,8 @@ def _selection_confcutdir(files: list[str]) -> str:
 
 
 def emit_manifest(files: list[str], marker: str, output: Path,
-                  runner=None, ignores: tuple[str, ...] = ()) -> int:
+                  runner=None, ignores: tuple[str, ...] = (),
+                  cwd: str | None = None) -> int:
     """Generate the expected-nodeid manifest for the given file list.
 
     Spawns `pytest <files> --collect-only -q -m <marker> -p no:cacheprovider`
@@ -1010,6 +1027,10 @@ def emit_manifest(files: list[str], marker: str, output: Path,
     common ancestor for an out-of-tree one. Without it, a leaked
     `/tmp/conftest.py` on a self-hosted runner turned every collect-only into
     `rc=4` ("ImportError while loading conftest '/tmp/conftest.py'").
+
+    ``cwd`` is the directory the collect-only child runs in; it is BOTH the
+    spawn cwd and the base the pin is computed against, so the two can never
+    disagree (passing them separately is how they drifted: #10636 review P2).
 
     Fail-closed corners:
     - empty files -> exit 0, NO output file (the CI guard skips manifest
@@ -1046,7 +1067,7 @@ def emit_manifest(files: list[str], marker: str, output: Path,
     cmd = [sys.executable, "-m", "pytest", *files, "--collect-only", "-q",
            "-m", marker, "-p", "no:cacheprovider",
            *[f"--ignore={ig}" for ig in ignores],
-           f"--confcutdir={_selection_confcutdir(files)}"]
+           f"--confcutdir={_selection_confcutdir(files, cwd)}"]
     if runner is None:
         # The hook is delivered out-of-tree via -p + PYTHONPATH so the run's
         # own conftest is untouched and nothing is written into the repo.
@@ -1060,7 +1081,7 @@ def emit_manifest(files: list[str], marker: str, output: Path,
                 os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
             proc = subprocess.run(
                 [*cmd, "-p", "_fts_manifest_hook"],
-                capture_output=True, text=True, env=env)
+                capture_output=True, text=True, env=env, cwd=cwd)
             rc, collected = proc.returncode, proc.stdout
             _err = proc.stderr
             # Read INSIDE the TemporaryDirectory: the completion proof is the
