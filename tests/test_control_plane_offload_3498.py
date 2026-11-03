@@ -134,6 +134,67 @@ def test_control_plane_pool_runs_calls_concurrently():
     assert len(set(names)) >= 2, f"pool serialised four calls onto {names}"
 
 
+# ── #10618 cycle-4: `drain()` — the completion barrier a harness quiesces with ──
+
+
+def test_drain_waits_for_running_work_not_for_free_workers():
+    """``drain()`` is a COMPLETION barrier: it returns only once work submitted
+    before it has actually run.
+
+    ⛔ A no-op per worker is the idiom that looks equivalent and MEASURED as
+    insufficient (the #10618 cycle-4 review's own suggested fix, falsified here):
+    with N workers a free worker consumes several no-ops while another still
+    holds a real item, so every no-op completes with real work still in flight.
+    These pools are process-lifetime (#10618/#3060), so work CAN outlive the
+    caller that submitted it — a harness that quiesces with the sentinel shape
+    leaks that work into the next test's process globals (#5049 rule 4).
+    """
+    pool = monitoring._SingleSlotWorker("test-drain-running", workers=4)
+    entered = threading.Event()
+    release = threading.Event()
+    drained = threading.Event()
+
+    def _slow():
+        entered.set()
+        release.wait(10)
+        return "done"
+
+    def _drain() -> None:
+        if pool.drain(timeout=10.0):
+            drained.set()
+
+    pool.submit(_slow)
+    assert entered.wait(5), "the pool never started the submitted callable"
+    drainer = threading.Thread(target=_drain, daemon=True)
+    drainer.start()
+    assert not drained.wait(0.3), (
+        "drain() returned while a submitted callable was still RUNNING — it is "
+        "counting only the queue, not in-flight work, which is the sentinel bug")
+    release.set()
+    assert drained.wait(10), (
+        "drain() never returned after the work completed — a completion barrier "
+        "that hangs is worse than none")
+
+
+def test_drain_is_not_held_open_by_a_refused_submission():
+    """A REFUSED submission never reaches a worker, so it can never run late —
+    it must not hold a drainer open (that would turn fail-fast refusal into a
+    teardown hang)."""
+    tiny = monitoring._SingleSlotWorker("test-drain-refused", workers=1,
+                                        max_backlog=1)
+    release = threading.Event()
+    assert tiny.drain(timeout=5.0)
+    accepted = tiny.submit(lambda: release.wait(5))
+    refused = tiny.submit(lambda: None)
+    assert isinstance(refused.exception(), TimeoutError), (
+        "premise: the second submission must be REFUSED by the bounded backlog")
+    release.set()
+    assert tiny.drain(timeout=10.0), (
+        "a refused submission has no worker to run on, so it must not hold "
+        "drain() open")
+    assert accepted.done()
+
+
 def test_offload_records_op_and_duration():
     async def _run():
         return await monitoring.run_control_plane_call(lambda: "ok", op="unit")

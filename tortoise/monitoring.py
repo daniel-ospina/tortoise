@@ -1783,6 +1783,12 @@ class _SingleSlotWorker:
         self._name = name
         self._max_backlog = self.MAX_BACKLOG if max_backlog is None else max_backlog
         self._queue: queue.Queue[tuple | None] = queue.Queue(maxsize=self._max_backlog)
+        # In-flight register backing ``drain()``: every ACCEPTED submission is
+        # recorded here and removed once its callable has completed (queued OR
+        # running counts as in flight). Guarded by ``_drain_cond``, which is also
+        # how a drainer learns the pool went idle.
+        self._inflight: set[concurrent.futures.Future] = set()
+        self._drain_cond = threading.Condition()
         # ``workers == 1`` keeps the historical thread name EXACTLY (ops
         # recipes and tests match on it); a pool suffixes each thread with its
         # index so a trace can tell the pool members apart.
@@ -1815,11 +1821,58 @@ class _SingleSlotWorker:
                 return
             fn, future = item
             if not future.set_running_or_notify_cancel():
+                self._settle(future)
                 continue
             try:
                 future.set_result(fn())
             except BaseException as exc:
                 future.set_exception(exc)
+            finally:
+                self._settle(future)
+
+    def _settle(self, future: concurrent.futures.Future) -> None:
+        """Mark ``future`` complete and wake a ``drain()`` waiter."""
+        with self._drain_cond:
+            self._inflight.discard(future)
+            self._drain_cond.notify_all()
+
+    def drain(self, timeout: float | None = None) -> bool:
+        """Wait until every callable submitted BEFORE this call has COMPLETED.
+
+        A COMPLETION barrier, not a queue barrier: queued AND running work
+        counts, so it returns only once nothing submitted earlier can still act.
+
+        ⛔ ``submit`` a no-op per worker and await those futures is NOT
+        equivalent, and was measured to fail: with N workers, a no-op is dequeued
+        by whichever worker is free, so a fast worker consumes several no-ops
+        while another worker still holds a real item — every no-op completes
+        while that item is still in flight. Only an in-flight register can
+        answer "is anything still able to run?".
+
+        Why this exists (#10618 cycle-4 review): these pools are
+        PROCESS-LIFETIME daemon threads, so work can outlive the caller that
+        submitted it (a bound miss abandons the await, not the submission). A
+        test that ends with work still in flight leaks it into whatever global
+        the callable resolves when it eventually runs — an order-dependent
+        outcome, i.e. a harness defect (#5049 rule 4). Draining is how a harness
+        quiesces the pool BEFORE tearing its seams down.
+
+        Returns ``False`` only on a ``timeout`` expiry (never raises); ``None``
+        waits indefinitely. NON-destructive: the threads keep running, since the
+        pools are process-lifetime on purpose (#10618/#3060) — unlike
+        ``Executor.shutdown(wait=True)``, which would terminate them.
+        """
+        deadline = None if timeout is None else time.monotonic() + timeout
+        with self._drain_cond:
+            while self._inflight:
+                if deadline is None:
+                    self._drain_cond.wait()
+                    continue
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                self._drain_cond.wait(remaining)
+        return True
 
     def submit(self, fn):
         """Queue ``fn``; return a Future the CALLER bounds with a timeout.
@@ -1836,6 +1889,11 @@ class _SingleSlotWorker:
             future.set_exception(
                 _WorkerBacklogFull(
                     f"{self._name} backlog full ({self._max_backlog}) — worker wedged"))
+            return future
+        # Registered only for ACCEPTED work: a refused submission never reaches a
+        # worker, so it can never run late and must not hold a drainer open.
+        with self._drain_cond:
+            self._inflight.add(future)
         return future
 
 
@@ -2750,8 +2808,12 @@ async def run_control_plane_call(fn, *, op: str,
     client-resolution lane, ``"graph"`` (#3773) for FalkorDB work — data-plane
     AND registry reads (#3718); ``_get_registry()`` uses the existing
     connection, so a registry read belongs here, not on ``"auth"`` — a separate
-    pool for the same isolation reason — or ``"org"``
-    (#7678) for the org-create lane's sequential gate reads and provision write.
+    pool for the same isolation reason — ``"org"``
+    (#7678) for the org-create lane's sequential gate reads and provision write —
+    or ``"abuse"`` (#10618) for the per-request ``#308`` abuse hooks, its own
+    lane because ``"telemetry"`` also carries the UNRECOVERABLE
+    ``billing_notify`` (a refusal there is a permanent loss), so sharing it would
+    let an attacker-suppressible hook starve a cannot-be-re-fired notify.
 
     Fail-closed: a missed bound or a saturated backlog raises
     :class:`ControlPlaneOffloadError`. A builtin ``TimeoutError`` raised by

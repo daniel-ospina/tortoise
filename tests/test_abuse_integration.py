@@ -128,7 +128,30 @@ def env(monkeypatch, fake, notified):
         # relative order as the old restore → set_engine pair.
         try:
             with patched_tortoise_sdk(db_path):
-                yield {"fake": fake, "notified": notified, "app": app}
+                body_error: BaseException | None = None
+                try:
+                    yield {"fake": fake, "notified": notified, "app": app}
+                except BaseException as exc:
+                    body_error = exc
+                    raise
+                finally:
+                    # #10618 cycle-4 review: QUIESCE the process-lifetime
+                    # ``abuse`` pool BEFORE this test's seams come down. A hook
+                    # still queued when the test ends resolves the module-global
+                    # ``abuse.READ_TRACKER`` at CALL time, so it is counted by
+                    # the NEXT test's tracker — which permanently offsets that
+                    # test's exact-count barriers (an off-by-one that no amount
+                    # of polling can fix). An order-dependent outcome is a
+                    # harness defect, not a product verdict (#5049 rule 4), so
+                    # failing to quiesce is an error here rather than a green
+                    # pass on a dirty pool.
+                    if not _drain_abuse_pool() and body_error is None:
+                        raise AssertionError(
+                            "the abuse offload pool did not quiesce within "
+                            f"{_ABUSE_POOL_DRAIN_TIMEOUT_S}s of teardown — a hook "
+                            "from this test is still in flight, so the next "
+                            "test's READ_TRACKER could measure this test's reads "
+                            "(#10618; #5049 rule 4)")
         finally:
             abuse.set_engine(None)
 
@@ -180,6 +203,45 @@ def _await_no_record(predicate, *, after=None, window: float = 1.0,
             "assertion needs as its completion barrier, so the negative below "
             "would measure nothing (#10618)")
     return not _await_records(predicate, timeout=window, interval=interval)
+
+
+#: Bound for the teardown quiesce of the ``abuse`` pool. Generous by design:
+#: the pool is a handful of workers whose unit of work is one small round trip
+#: against the fake plane, so a drained pool costs milliseconds. Expiry is a
+#: HARNESS defect (#5049 rule 4), never a product verdict.
+_ABUSE_POOL_DRAIN_TIMEOUT_S = 10.0
+
+
+def _drain_abuse_pool(timeout: float = _ABUSE_POOL_DRAIN_TIMEOUT_S) -> bool:
+    """Quiesce the process-lifetime ``abuse`` pool before teardown (#10618).
+
+    WHY THIS IS NEEDED AT ALL. The ``tortoise-abuse`` workers are daemon
+    threads created once per process (`monitoring._DAEMON_WORKERS`), and this
+    change makes the per-request hooks OUTLIVE the request by design (a bound
+    miss abandons the await, not the submission). So a hook from one test can
+    still be queued or running when that test ends — and because the hooks
+    resolve the module-global ``abuse.READ_TRACKER`` at CALL time, it is the
+    NEXT test's tracker (installed fresh by the ``env`` fixture) that counts
+    the read. Every barrier in this file that waits for an exact count (``== N``)
+    would then never be satisfiable, and the poll would expire on a machine-load
+    artefact — the flake class #5049 rule 1 forbids producing a product FAIL
+    from, whose root cause here is order dependence (rule 4).
+
+    WHY ``drain()`` AND NOT A SENTINEL OR A SLEEP. One no-op submitted per
+    worker is the idiom that looks right and is NOT: with N workers a free
+    worker consumes several no-ops while another still holds a real item, so
+    every no-op completes with real work still in flight (measured — the
+    three-leg pin below failed on exactly that). `_SingleSlotWorker.drain()`
+    waits on an in-flight register instead, so queued AND running work counts.
+    A sleep would be a guess about load, and `shutdown(wait=True)` would be
+    wrong: the pool is process-lifetime on purpose (#10618/#3060).
+
+    Returns False only when the pool did not quiesce within `timeout`; the
+    caller decides whether that is a harness failure.
+    """
+    from tortoise.monitoring import control_plane_worker
+
+    return control_plane_worker("abuse").drain(timeout)
 
 
 # ── R5: REST suspension enforcement ─────────────────────────────────────────
@@ -2365,3 +2427,97 @@ class TestPerRequestHooksLeaveTheSharedPool:
         assert len(hits) == 1, (
             f"the refusal floor must shed within its window; got {len(hits)} "
             f"lines (#10618)")
+
+
+# ── #10618 cycle-4: the pool must be QUIESCED between tests ─────────────────
+# The ``tortoise-abuse`` workers are process-lifetime daemon threads and this
+# change makes the hooks OUTLIVE the request on purpose (a bound miss abandons
+# the AWAIT, not the submission). So a hook can still be queued or running when
+# its test ends — and the hooks resolve the module-global ``abuse.READ_TRACKER``
+# at CALL time, which by then is the NEXT test's tracker. Every «completion
+# barrier» in this file waits for an EXACT count (``== 100`` at
+# `test_fanout_team_velocity`, ``== 2`` at `TestGeo`, ``== 1`` at
+# `test_no_header_fail_open` and both `TestSessionLane` pins), so one leaked
+# read makes the barrier permanently unsatisfiable and the poll expires into a
+# product-looking FAIL on a load artefact — the #5049 rule 1 shape, whose root
+# cause here is order dependence (rule 4).
+
+#: How long the test's own hook stays in flight, i.e. how long after its
+#: request ended it is still able to write into a newly installed tracker.
+_LATE_HOOK_SLEEP_S = 0.25
+
+
+class TestTheAbusePoolIsQuiescedBetweenTests:
+    def test_a_hook_left_in_flight_lands_in_the_next_tests_tracker_and_the_drain_stops_it(
+            self, env):
+        """The `env` teardown drain is LOAD-BEARING, proven in three legs.
+
+        (1) the hazard is real — a hook running when its test ends is counted by
+            whoever's tracker is installed when it lands (this is why the
+            exact-count barriers were reachable only by luck);
+        (2) WITHOUT the drain that leak still happens (the pre-fix shape), so a
+            regression here is not theoretical;
+        (3) WITH `_drain_abuse_pool()` nothing survives it.
+
+        The middle leg is what makes this discriminating rather than vacuous: a
+        drain that returned without waiting would pass (3) as long as nothing was
+        in flight, so (1)+(2) establish that something was.
+        """
+        import threading
+
+        import tortoise.monitoring as mon
+
+        pool = mon.control_plane_worker("abuse")
+
+        def _submit_a_late_read() -> None:
+            started = threading.Event()
+
+            def _late_read() -> None:
+                started.set()
+                time.sleep(_LATE_HOOK_SLEEP_S)
+                abuse.record_read("key-a", TEAM)
+
+            pool.submit(_late_read)
+            assert started.wait(_LATE_HOOK_SLEEP_S * 8), (
+                "the hook submitted to the abuse pool never started, so this "
+                "test's premise — a hook still in flight after its request "
+                "ended — was not established (#10618)")
+
+        def _install_a_fresh_tracker() -> abuse.ReadVelocityTracker:
+            # exactly what the `env` fixture does for the next test
+            abuse.READ_TRACKER = abuse.ReadVelocityTracker()
+            return abuse.READ_TRACKER
+
+        def _count(tracker) -> int:
+            return len(tracker._by_org.get(TEAM) or [])
+
+        # (1) the hazard, reproduced: the hook outlives its request and lands in
+        # the freshly installed tracker.
+        _submit_a_late_read()
+        leaked = _install_a_fresh_tracker()
+        assert _await_records(lambda: _count(leaked) == 1), (
+            "the in-flight hook never reached the freshly installed tracker, so "
+            "the leak this test is about did not reproduce — the assertions "
+            f"below would measure nothing; tracker={leaked._by_org!r}")
+
+        # (2) the pre-fix shape: a teardown that does NOT quiesce leaves that
+        # leak in place, and a stray read is exactly what makes an `== N`
+        # barrier unsatisfiable.
+        _submit_a_late_read()
+        stale = _install_a_fresh_tracker()
+        assert _await_records(lambda: _count(stale) == 1), (
+            "an un-quiesced teardown no longer leaks — then the drain below is "
+            "not what fixes the barrier, and this pin needs rewriting rather "
+            f"than silently passing; tracker={stale._by_org!r}")
+
+        # (3) the fix: a hook submitted BEFORE the drain cannot land after it.
+        _submit_a_late_read()
+        assert _drain_abuse_pool(), (
+            f"the abuse pool did not quiesce within {_ABUSE_POOL_DRAIN_TIMEOUT_S}s")
+        clean = _install_a_fresh_tracker()
+        assert not _await_records(lambda: _count(clean) != 0, timeout=0.5), (
+            "a hook submitted before the drain landed AFTER it, in the next "
+            "test's READ_TRACKER — every exact-count barrier in this file "
+            "(`== 100` / `== 2` / `== 1`) would then be off by one and its poll "
+            f"would expire into a FAIL (#10618 cycle-4 review P3); "
+            f"tracker={clean._by_org!r}")
