@@ -234,6 +234,28 @@ def _get_org_sdk() -> TortoiseSDK:
         return TortoiseSDK(
             graph_name=ns,
             event_log_path=_journal_path_for(namespace=None, graph_name=ns))
+    # ── ORG-WIDE: the org's DEFAULT graph ──
+    # #10180: that pointer can MOVE. A promotion
+    # (`POST /v1/graphs/{id}/promote`) moves `kind='default'` AND
+    # `organizations.graph_name` to the promoted graph's own namespace, and the
+    # credential carries that namespace as `_current_graph_namespace` (the same
+    # field REST's `_data_sdk` opens by). Open it by name when it has moved, so
+    # this lane writes where the record tenant points; otherwise open the
+    # historical `namespace=org_id` graph — byte-identical, and the ONLY case
+    # that exists for a deployment whose org never promoted.
+    #
+    # The gate is shared (`supabase_control.moved_default_namespace`), so MCP,
+    # REST and the quota counter cannot disagree. It is also why the resolver
+    # cache's 60s TTL is the read window a promotion has on this lane: a call
+    # made with an already-cached resolution keeps the graph it resolved.
+    from tortoise.supabase_control import moved_default_namespace
+
+    moved = moved_default_namespace(org_id, ns)
+    if moved:
+        return TortoiseSDK(
+            graph_name=moved,
+            event_log_path=_journal_path_for(
+                namespace=None, graph_name=moved))
     sdk = TortoiseSDK(
         namespace=org_id,
         event_log_path=_journal_path_for(namespace=org_id, graph_name=None))

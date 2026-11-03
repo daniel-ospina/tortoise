@@ -304,6 +304,43 @@ def test_an_unfinished_suite_is_refused(wt: Path) -> None:
     assert "suite-incomplete" in check.stdout
 
 
+def test_a_killed_suite_is_superseded_by_a_green_re_run_of_the_same_command(
+        wt: Path) -> None:
+    """The RESUMED-LANE case, which is the one the artifact exists for.
+
+    A lane killed at its cap leaves `exit: None` records (`test_an_unfinished_
+    suite_is_refused` is that half). The lane that picks the worktree up re-runs
+    those exact commands — and it used to be unable to produce a valid report at
+    all: the stale killed record held `check` at exit 1 however green every
+    re-run was, so the merge path refused a report whose every command had real
+    captured evidence (measured on tortoise#10452: 3 killed records from a
+    predecessor lane, 5 completed re-runs, verdict still INVALID).
+
+    FAIL-ON: drop `_superseded_by_later_run` and this check returns 1 again;
+    the pair below keeps it from becoming "incomplete records are fine now" —
+    a re-run of a DIFFERENT command supersedes nothing."""
+    assert tool(wt, "init").returncode == 0
+    assert tool(wt, "run", "--cmd", GREEN).returncode == 0
+    state = state_of(wt)
+    state["suites"][0]["exit"] = None  # the killed runner's record
+    put_state(wt, state)
+    assert tool(wt, "check").returncode == 1  # …and nothing re-ran it yet
+
+    # A DIFFERENT command finishing does NOT supersede it.
+    other = r"printf 'ok\n===== 2 passed in 0.10s =====\n'"
+    assert tool(wt, "run", "--cmd", other).returncode == 0
+    check = tool(wt, "check")
+    assert check.returncode == 1, check.stdout
+    assert "suite-incomplete:suite-1" in check.stdout
+
+    # The SAME command, completed, does — and then the report is valid.
+    assert tool(wt, "run", "--cmd", GREEN).returncode == 0
+    check = tool(wt, "check")
+    assert check.returncode == 0, check.stdout
+    assert "suite-incomplete" not in check.stdout
+    assert "37 passed" in (wt / REPORT_NAME).read_text(encoding="utf-8")
+
+
 def test_a_corrupt_state_is_reported_not_silently_trusted(wt: Path) -> None:
     """A record this tool cannot read is refused by `check` and replaced LOUDLY by `run`."""
     assert tool(wt, "init").returncode == 0
