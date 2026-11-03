@@ -5081,11 +5081,15 @@ def _statement_attribution(statement: Statement, index: int, total: int) -> str:
         # Both verbs are covered. `_UPDATE_SETS_RE` was added with the INSERT arm
         # and left UNREFERENCED, so an unattributed UPDATE fell through to a bare
         # `params=N` — no column names at all — which is exactly the case the
-        # regex was written for (#10620 review, finding 3). No builder declines
-        # its columns for an UPDATE today (`_patch_statement` always states them),
-        # so this arm is unreachable until one does; it is wired rather than
-        # deleted because the failure it prevents is a blank diagnosis, and a
-        # dead regex is not evidence the case cannot return.
+        # regex was written for (#10620 review, finding 3).
+        #
+        # ⛔ The UPDATE arm is REACHABLE, not speculative: `_tier_demote_statement`
+        # (the record's half of a graph-tier removal) emits
+        # `UPDATE public.point SET cache_tier = %s …` and states NO `columns`,
+        # because that statement has no builder-declared pairing to state. So a
+        # failed tier demotion in the delete path was the one shape that named
+        # no column at all; `test_an_unattributed_update_names_its_set_column`
+        # drives that real builder, not a hand-built statement.
         names: list[str] = []
         if verb == "INSERT INTO":
             inserted = _INSERT_COLUMNS_RE.match(statement.sql)

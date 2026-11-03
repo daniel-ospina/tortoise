@@ -29,6 +29,7 @@ The DB-free legs run everywhere. The Postgres legs skip without
 """
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import uuid
@@ -188,7 +189,7 @@ def test_a_failed_live_write_names_the_record_and_its_id(monkeypatch, caplog):
     )
 
 
-def test_an_unattributed_UPDATE_still_names_the_columns_it_set():
+def test_an_unattributed_update_names_its_set_column():
     """`_UPDATE_SETS_RE` must be WIRED, not a dead regex (#10620 review, P2).
 
     When a statement declines its positional pairing (`columns is None`), the
@@ -196,9 +197,34 @@ def test_an_unattributed_UPDATE_still_names_the_columns_it_set():
     from the start; the UPDATE arm fell through to a bare `params=N`, naming no
     column at all — which is exactly the case the regex was written for.
 
-    No builder declines an UPDATE's columns today, so this drives the helper
-    directly with the shape a future one would emit.
+    ⛔ This drives the REAL builder that reaches the arm.
+    `_tier_demote_statement` (the record's half of a graph-tier removal) emits
+    `UPDATE public.point SET cache_tier = %s …` with no `columns`, so this is not
+    a hypothetical shape: a failed tier demotion in the delete path named no
+    column at all. An earlier draft of this test hand-built the statement and
+    asserted in its docstring that no builder declines an UPDATE's columns —
+    which is false, and would have licensed deleting the arm again.
     """
+    statement = record_projection._tier_demote_statement("o", "g", "pt-1")
+
+    assert statement.columns is None, (
+        "the premise: this builder states no pairing, so the fallback runs"
+    )
+    text = record_projection._statement_attribution(statement, 1, 2)
+
+    assert "UPDATE public.point" in text, text
+    assert "columns(cache_tier)" in text, (
+        f"an unattributed UPDATE must still name the column it SET: {text}"
+    )
+    assert "params=4" in text, text
+    assert "pt-1" not in text, (
+        "declining the pairing means NO values — a mis-paired value is worse "
+        f"than none: {text}"
+    )
+
+
+def test_an_unattributed_update_names_every_set_column():
+    """Several `SET` terms with a jsonb merge are all named, in order."""
     statement = record_projection.Statement(
         "UPDATE public.point SET content = %s, search_keys = %s, "
         "props = props || %s::jsonb WHERE org_id = %s AND graph_id = %s",
@@ -230,6 +256,29 @@ def test_the_identity_reader_never_invents_a_value():
 # ════════════════════════════════════════════════════════════════════════════
 # 2. Health honesty — a dropped row is not a healthy deployment
 # ════════════════════════════════════════════════════════════════════════════
+
+
+@pytest.fixture(autouse=True)
+def _no_ambient_record_refusal():
+    """Nothing here may assert test ORDER through process-global refusal state.
+
+    Two pieces of state are global and BOTH are cleared, because they are
+    different facts: the cumulative counter (mirrored verbatim into `/health`)
+    and the refusal stamp the window verdict is computed from (#10185). Clearing
+    only the first leaves a refusal counted by another file reddening these legs
+    for five minutes.
+    """
+    from tortoise import monitoring
+
+    def _clear() -> None:
+        monitoring.clear_record_last_refusal()
+        for reason in monitoring.record_write_failure_counts():
+            with contextlib.suppress(KeyError):  # already gone — nothing to do
+                monitoring.RECORD_WRITE_FAILURE_COUNT.remove(reason)
+
+    _clear()
+    yield
+    _clear()
 
 
 def _health(monkeypatch, failures: dict[str, int], *, refusing=None) -> dict:
@@ -295,6 +344,32 @@ def test_a_historical_refusal_does_not_degrade_forever(monkeypatch):
     assert record["record_write_failures"] == {"write_failed": 302}, (
         "NOTHING is reset or hidden: the history stays readable"
     )
+
+
+@pytest.mark.parametrize("reason", [
+    "write_failed", "no_tenant", "malformed_dsn", "circuit_open",
+    "no_journal", "seam_unimportable",
+])
+def test_every_counter_reason_reaches_the_payload_with_its_own_identity(
+        monkeypatch, reason):
+    """The runbook's SIX-row reason table has a code side (#10620 review, 2).
+
+    `no_journal` and `seam_unimportable` are the two the first cut omitted, and
+    they are the two whose remedy is NOT a replay — a reason that never reaches
+    the payload cannot name its own fix. Driven through the PUBLIC writer, so an
+    allowlist hidden inside the window reader fails here instead of silently
+    dropping a reason from the operator's diagnosis.
+    """
+    from tortoise import monitoring
+
+    monitoring.record_record_write_failure(reason)
+    refusing = monitoring.record_refusing()
+    record = _health(monkeypatch, {reason: 1}, refusing=refusing)
+
+    assert record["degraded"] is True, reason
+    assert record["ok"] is False, reason
+    assert record["refusing"]["reason"] == reason, record["refusing"]
+    assert set(record["degraded_reasons"]) == {reason}, record["degraded_reasons"]
 
 
 def test_zero_failures_stays_ok(monkeypatch):
