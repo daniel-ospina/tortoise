@@ -283,6 +283,7 @@ import hashlib
 import json
 import os
 import re
+import signal
 import socket
 import subprocess
 import time
@@ -2834,6 +2835,25 @@ def reap_orphans(own_name: str | None = None) -> list[str]:
             # `start()` already refuses to append a report to `unknown`.
             prior = ("" if state not in _TERMINAL_STATES
                      else _termination_report(name, live=False))
+            # ⛔ The container's OWN statement, asked before EVERY removal — this
+            # arm included (#10806 review). Proof 1 fires on "the owning worktree
+            # is gone", which is a fact about a DIRECTORY; a process can still be
+            # reading the DB (a lane whose worktree was reaped out from under it,
+            # or a cross-clone reader), and `_container_in_use` is the one datum
+            # that does not depend on knowing the owner. A RUNNING container that
+            # reports a live client is SPARED and reported; a TERMINAL one cannot
+            # have one, so the probe is skipped rather than failing on a dead
+            # server. `None` (unreadable) also spares: unreadable is not "unused".
+            busy = (False if state in _TERMINAL_STATES
+                    else _container_in_use(name))
+            if busy is not False:
+                out.append(
+                    f"reap: kept {name} — its owning worktree {owner} is gone, "
+                    f"but the container reports "
+                    + ("a live client" if busy else "nothing about its clients "
+                       "(unreadable)") +
+                    "; not removing a database that may be in use")
+                continue
             rm = _docker("rm", "-f", name)
             out.append(f"reap: {'removed' if rm.returncode == 0 else 'FAILED to remove'} "
                        f"{name} — its owning worktree {owner} is gone"
@@ -3173,6 +3193,17 @@ def reap_orphans(own_name: str | None = None) -> list[str]:
     return out
 
 
+def _raise_on_term(signum, frame):
+    """Turn SIGTERM into an exception so `cmd_run`'s `finally` can reap.
+
+    Without this a lane stopped the normal way (SIGTERM from its supervisor) ends
+    the process without unwinding, so the exit hook never runs and the container
+    leaks — exactly the population the hook exists to reclaim. Exit 143 is the
+    shell convention for SIGTERM, matching `cmd_run`'s 128+N reporting.
+    """
+    raise SystemExit(128 + signum)
+
+
 def stop() -> str:
     """Remove THIS LANE's container. Takes no argument, by design.
 
@@ -3395,16 +3426,83 @@ def cmd_run(args: argparse.Namespace) -> int:
         file=sys.stderr,
     )
     sys.stderr.flush()
-    rc = subprocess.run(argv, env=env).returncode
-    # The lane has just USED its container for however long the child ran, so the
-    # lease is re-stamped at the END of the use as well as at `start()` (#10693
-    # review F1). Load-bearing, not decoration: with the epoch written only at
-    # `start()`, the gap is measured from the BEGINNING of the last use, so a run
-    # longer than OWNER_GRACE_H ends already expired and the next peer sweep may
-    # reap the container in the between-steps window the grace exists to cover.
-    # One full-suite step is measured at ~2 h wall, i.e. the boundary is reached
-    # by normal work. Stamped for ANY `rc`: a failing run used the container too.
-    _touch_lease(name)
+    # ── THE EXIT HOOK (#8180's ACTUATOR half — the tortoise side of the seam) ──
+    # `run` is the ONE command every lane issues for a suite
+    # (`uv run python tools/test_lane.py run -- tests/ -v`, the spelling AGENTS.md
+    # documents), so it is where a lane ENDS — and therefore where its container
+    # must go. Without this the container is left to the next lane's `start()`
+    # sweep or to the scheduled reaper: two BACKSTOPS, not the primary. The
+    # FAILURE path is the one that leaks most (a killed or red run is exactly when
+    # nobody runs `down`), which is why the hook is in `finally`.
+    #
+    # Two rules it must not break:
+    #   1. it must never change the run's VERDICT — a removal that fails is
+    #      REPORTED and the pytest exit code stands (`stop()` raises `SystemExit`
+    #      for the unremovable/deps cases, which would otherwise replace a real
+    #      result with a traceback);
+    #   2. it must be escapable — `--keep-container` for a post-mortem, because a
+    #      red run is exactly when the DB is worth interrogating.
+    #   3. it must not take the DB out from under a PEER process. Two `run`s in one
+    #      worktree (a lane plus a `task` child) share ONE container, so the one that
+    #      exits first would otherwise remove the other's live target and its
+    #      connection errors would be reported as test verdicts.
+    # A SIGKILL cannot be hooked — that is what the timer is for. Ctrl-C raises
+    # `KeyboardInterrupt` and unwinds through `finally`. **SIGTERM does NOT**: the
+    # default disposition terminates the process without unwinding, so this hook
+    # would never run for a lane stopped the normal way — hence the handler below
+    # (the child gets its own, since `exec` resets dispositions).
+    keep = bool(getattr(args, "keep_container", False))
+    rc: int | None = None
+    _prev_term = None
+    try:
+        _prev_term = signal.signal(signal.SIGTERM, _raise_on_term)
+    except (ValueError, OSError):        # not the main thread / unsupported
+        _prev_term = None
+    try:
+        rc = subprocess.run(argv, env=env).returncode
+    finally:
+        if _prev_term is not None:
+            with contextlib.suppress(ValueError, OSError):
+                signal.signal(signal.SIGTERM, _prev_term)
+        kept = keep          # set True below on every path that leaves it up
+        if not keep:
+            # The in-use guard, read from the CONTAINER's own statement: a peer
+            # (a `task` child shelled into the same worktree) shares this
+            # container, and removing it would fail ITS run with connection
+            # errors that read as test verdicts. `None` (unreadable) fails closed.
+            in_use = _container_in_use(name)
+            try:
+                if in_use is None:
+                    kept = True
+                    print(f"test-lane: NOT reaping {name} on exit — its client "
+                          f"list could not be read (fail-closed; the scheduled "
+                          f"reaper will decide)", file=sys.stderr)
+                elif in_use:
+                    kept = True
+                    print(f"test-lane: NOT reaping {name} on exit — a live "
+                          f"client is using it", file=sys.stderr)
+                else:
+                    print(f"test-lane: reaping {name} on exit -> {stop()}",
+                          file=sys.stderr)
+            except SystemExit as _exc:
+                # The hook never speaks for the run.
+                kept = True
+                print(f"test-lane: could not reap {name} on exit ({_exc}); "
+                      f"the scheduled reaper (tools/container_reaper.py) will "
+                      f"collect it", file=sys.stderr)
+        if kept:
+            # ⛔ The container SURVIVED this run, so its lease must be re-stamped
+            # (the #10693 F1 rule: the epoch is the END of the last use). Putting
+            # the stamp only on the `--keep-container` branch left every
+            # not-reaped path (peer in use, unreadable client list, failed
+            # removal) with a lease measured from the START of the run — already
+            # past OWNER_GRACE_H after a full-suite step, so the next sweep could
+            # reap a container this one deliberately spared (#10806 review).
+            _touch_lease(name)
+    # There is deliberately NO `rc is None` branch: `subprocess.run` returning
+    # always sets it, and if it RAISED (Ctrl-C), the `finally` above has already
+    # run and the exception propagates past this line. A branch here would be
+    # unreachable code asserting a path that does not exist (#10806 review).
     if rc < 0:
         print(
             f"test-lane: pytest was KILLED by signal {-rc} (no pytest count "
@@ -3510,6 +3608,15 @@ def build_parser() -> argparse.ArgumentParser:
     ):
         sp = sub.add_parser(name, help=help_, parents=[parent])
         if name == "run":
+            # #8180 actuator: `run` is where a lane ENDS, so its container is
+            # reaped on the way out — on the failure path too. This flag is the
+            # escape hatch for a post-mortem, never the default: a container left
+            # up "in case" is the leak this closes.
+            sp.add_argument("--keep-container", action="store_true",
+                            help="leave this lane's container running after the "
+                                 "run (default: reap it on exit, on the failure "
+                                 "path too). Use it to interrogate a red run's "
+                                 "DB, then `down`.")
             # REMAINDER, not a named option: everything after the separator is
             # pytest's own argv and must reach it verbatim (`-q`, `-k expr`,
             # `--timeout=900`, a path…). argparse would otherwise consume the
@@ -3526,7 +3633,16 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    return int(args.func(args))
+    try:
+        return int(args.func(args))
+    except SystemExit as exc:
+        # `_raise_on_term` raises `SystemExit(128 + SIGTERM)` so that `cmd_run`'s
+        # `finally` can run — that exception must become this process's EXIT CODE,
+        # not a traceback. A `SystemExit` carrying a STRING is a refusal message
+        # (`stop()`, `start()`) and keeps its normal behaviour.
+        if isinstance(exc.code, int):
+            return exc.code
+        raise
 
 
 if __name__ == "__main__":

@@ -159,6 +159,9 @@ def test_reaper_reaps_an_unowned_container_and_keeps_a_live_owner(
     # (the measured conflation: 68 containers outlived their lanes by days).
     monkeypatch.setattr(tl, "_live_lane_paths", lambda: {str(alive)})
     monkeypatch.setattr(tl, "_started_epoch", lambda _n: 0.0)
+    # The client probe is a SEPARATE gate (#10806) and has its own test below;
+    # stating it here keeps this test about ownership.
+    monkeypatch.setattr(tl, "_container_in_use", lambda _n: False)
     out = tl.reap_orphans()
     joined = "\n".join(out)
     assert "removed fdb-lane-dead" in joined, out
@@ -598,6 +601,7 @@ def test_reaper_reports_NO_termination_facts_for_a_RUNNING_owner_gone_removal(
     monkeypatch.setattr(tl, "_docker", fake)
     monkeypatch.setattr(tl, "lane_name", lambda: "fdb-lane-mine")
     monkeypatch.setattr(tl, "_worktree_slugs", lambda: {"lively": "/gone/worktree"})
+    monkeypatch.setattr(tl, "_container_in_use", lambda _n: False)
     monkeypatch.setattr(tl, "_termination_report",
                         lambda _n, live: "KILLED FOR MEMORY (OOMKilled=true)")
     out = tl.reap_orphans()
@@ -1946,6 +1950,41 @@ def test_wait_ready_does_not_overshoot_its_budget_when_the_host_probe_black_hole
     assert seen == [], f"the exec probe was issued past the deadline: {seen}"
 
 
+def test_proof_1_SPARES_a_container_a_live_client_is_using(monkeypatch):
+    """#10806 review: "the owning worktree is gone" is a fact about a DIRECTORY.
+
+    Proof 1 fired without ever asking the container, so a lane whose worktree was
+    reaped out from under it — or a cross-clone reader — had its live database
+    deleted on the 15-minute clock. `_container_in_use` is the one liveness datum
+    that does not need to know the owner, and `None` (unreadable) must spare too:
+    unreadable is not "unused".
+    """
+    removed: list = []
+
+    def fake(*a, **k):
+        if a[0] == "ps":
+            return _R(0, "fdb-lane-lively\trunning\n", "")
+        if a[0] == "rm":
+            removed.append(a[2])
+        return _R(0, "", "")
+
+    monkeypatch.setattr(tl, "_docker", fake)
+    monkeypatch.setattr(tl, "lane_name", lambda: "fdb-lane-mine")
+    monkeypatch.setattr(tl, "_worktree_slugs", lambda: {"lively": "/gone/wt"})
+    monkeypatch.setattr(tl, "_live_lane_paths", lambda: {"/somewhere/else"})
+    for answer in (True, None):
+        removed.clear()
+        monkeypatch.setattr(tl, "_container_in_use", lambda _n, a=answer: a)
+        out = "\n".join(tl.reap_orphans())
+        assert "removed fdb-lane-lively" not in out, out
+        assert removed == [], (
+            f"a container reporting {answer!r} for its clients was removed")
+    # …and with no client it IS removed, so the gate has not disabled proof 1.
+    monkeypatch.setattr(tl, "_container_in_use", lambda _n: False)
+    assert "removed fdb-lane-lively" in "\n".join(tl.reap_orphans())
+    assert removed == ["fdb-lane-lively"], removed
+
+
 def test_start_sweeps_orphans_and_reports_them_on_stderr(
         tmp_path, lane, monkeypatch, capsys):
     """The call site that makes ownership reaping BITE (#8180). Every reaper
@@ -1960,6 +1999,8 @@ def test_start_sweeps_orphans_and_reports_them_on_stderr(
     monkeypatch.setattr(tl, "lane_name", lambda: "fdb-lane-mine")
     monkeypatch.setattr(tl, "container_state", lambda _n: "absent")
     monkeypatch.setattr(tl, "_worktree_slugs", lambda: {"dead": str(dead)})
+    # The client probe is its own gate (#10806) with its own test below.
+    monkeypatch.setattr(tl, "_container_in_use", lambda _n: False)
     removed: list = []
 
     def fake(*a, **k):
@@ -4359,13 +4400,28 @@ def test_the_env_fallback_does_not_call_a_readable_ceiling_unreadable(
 # stubbed here like everywhere else in this file.
 
 def _stub_start(monkeypatch, *, port: int = 16406):
-    """Pin the resolved lane, so the seam under test is the child env, not Docker."""
+    """Pin the resolved lane, so the seam under test is the child env, not Docker.
+
+    `_container_in_use` is pinned to "no live client" because the exit hook reads
+    it before reaping (#10806 review): left real, it would issue a docker call in
+    every one of these tests and answer `None` (unreadable), which fails closed
+    and suppresses the reap the hook tests assert. Its own behaviour has a test.
+    """
     monkeypatch.setattr(tl, "start", lambda _p=None: (LANE_FIXTURE_NAME, port))
+    monkeypatch.setattr(tl, "_container_in_use", lambda _n: False)
 
 
 def _capture_run(monkeypatch, *, returncode: int = 0) -> dict:
-    """Capture the child invocation. Returns the record the assertions read."""
-    seen: dict = {}
+    """Capture the child invocation. Returns the record the assertions read.
+
+    `stop` is stubbed here because every test below pins the CHILD INVOCATION
+    (argv, env, exit-code mapping), not the exit path — and the exit hook
+    (#8180) would otherwise reach the real docker on every one of them. The
+    hook's own tests, further down, pin the hook through this same stub: what
+    they assert is that `stop` is CALLED (and when), never what `stop` does —
+    `stop()` is tested directly, elsewhere in this file.
+    """
+    seen: dict = {"stopped": []}
 
     def fake_run(argv, env=None, **kwargs):
         seen["argv"] = list(argv)
@@ -4374,6 +4430,8 @@ def _capture_run(monkeypatch, *, returncode: int = 0) -> dict:
         return _R(returncode, "", "")
 
     monkeypatch.setattr(tl.subprocess, "run", fake_run)
+    monkeypatch.setattr(tl, "stop",
+                        lambda: (seen["stopped"].append("stop"), "removed")[1])
     return seen
 
 
@@ -4462,7 +4520,7 @@ def test_run_re_stamps_the_lease_AFTER_the_child(lane, monkeypatch):
 
     monkeypatch.setattr(tl.subprocess, "run", fake_run)
     monkeypatch.setattr(tl, "_touch_lease", lambda n: events.append(("lease", n)))
-    assert tl.main(["run", "--", "-q", "tests/"]) == 0
+    assert tl.main(["run", "--keep-container", "--", "-q", "tests/"]) == 0
     assert events == [("child", None), ("lease", LANE_FIXTURE_NAME)], events
 
 
@@ -4482,7 +4540,7 @@ def test_a_run_LONGER_than_the_grace_ends_with_a_FRESH_lease(lane, monkeypatch):
     assert tl._unused_gap(name) > 2.9          # the pre-run lease, past the grace
     _stub_start(monkeypatch, port=16413)
     _capture_run(monkeypatch)                  # a child that ran and returned
-    assert tl.main(["run", "--", "-q", "tests/"]) == 0
+    assert tl.main(["run", "--keep-container", "--", "-q", "tests/"]) == 0
     gap = tl._unused_gap(name)
     assert gap is not None and gap < 0.1, gap
 
@@ -4507,6 +4565,135 @@ def test_run_reports_a_SIGNAL_kill_as_128_plus_N_not_a_negative_code(
     assert "NOT a test failure" in err
 
 
+# ── THE EXIT HOOK (#8180's actuator half) ───────────────────────────────────
+# `run` is where a lane ENDS, so it is where its container goes. These pin the
+# three properties that make the hook safe to be the DEFAULT on every lane:
+# it runs on the failure path too, it can be escaped, and it never speaks for
+# the run's verdict.
+
+
+def test_run_REAPS_its_own_container_on_exit_BY_DEFAULT(lane, monkeypatch):
+    """The primary fix for the leak: a normal `run` leaves NO container.
+
+    Measured before this hook: every lane that ran the suite and was then closed
+    (`cmux workspace close` never calls `down`) left exactly one `fdb-lane-*`
+    container behind, forever — 189 of them across three cells, each reaped by
+    hand. Mutation: delete the `finally:` reap and the container survives every
+    normal run."""
+    _stub_start(monkeypatch, port=16412)
+    events: list = []
+
+    def fake_run(argv, env=None, **kwargs):
+        events.append("child")
+        return _R(0, "", "")
+
+    monkeypatch.setattr(tl.subprocess, "run", fake_run)
+    monkeypatch.setattr(tl, "stop",
+                        lambda: (events.append("reap"), "removed")[1])
+    assert tl.main(["run", "--", "-q", "tests/"]) == 0
+    assert events == ["child", "reap"], events
+
+
+def test_run_REAPS_on_the_FAILURE_path_too(lane, monkeypatch):
+    """A RED run is when nobody runs `down`, so it is the path that leaks most."""
+    _stub_start(monkeypatch, port=16412)
+    reaped: list = []
+    monkeypatch.setattr(tl.subprocess, "run", lambda *a, **k: _R(1, "", ""))
+    monkeypatch.setattr(tl, "stop", lambda: (reaped.append(1), "removed")[1])
+    assert tl.main(["run", "--", "-q", "tests/"]) == 1   # the verdict survives
+    assert reaped == [1], "a failing run left its container behind"
+
+
+def test_keep_container_ESCAPES_the_hook_and_still_stamps_the_lease(
+        lane, monkeypatch):
+    """A post-mortem needs the DB. The escape must be explicit, and it must
+    still write the lease — a container deliberately kept for inspection is
+    exactly the one a peer's sweep must not take."""
+    _stub_start(monkeypatch, port=16412)
+    leases: list = []
+    reaped: list = []
+    monkeypatch.setattr(tl.subprocess, "run", lambda *a, **k: _R(0, "", ""))
+    monkeypatch.setattr(tl, "stop", lambda: (reaped.append(1), "removed")[1])
+    monkeypatch.setattr(tl, "_touch_lease", lambda n: leases.append(n))
+    assert tl.main(["run", "--keep-container", "--", "-q", "tests/"]) == 0
+    assert reaped == [], "--keep-container still reaped"
+    assert leases == [LANE_FIXTURE_NAME], leases
+
+
+def test_the_hook_NEVER_takes_a_container_a_peer_is_using(lane, monkeypatch, capsys):
+    """Two `run`s in one worktree (a lane plus a `task` child) share ONE container.
+
+    Without the in-use guard the one that exits first removes the other's live
+    target, and its connection errors are reported as test verdicts — a leaked
+    container traded for a false red. `None` (unreadable) fails closed the same
+    way: this hook is not the decision-maker of last resort, the timer is.
+    """
+    _stub_start(monkeypatch, port=16412)
+    reaped: list = []
+    monkeypatch.setattr(tl.subprocess, "run", lambda *a, **k: _R(0, "", ""))
+    monkeypatch.setattr(tl, "stop", lambda: (reaped.append(1), "removed")[1])
+    leases: list = []
+    monkeypatch.setattr(tl, "_touch_lease", lambda n: leases.append(n))
+    for answer, why in ((True, "a live client is using it"),
+                        (None, "could not be read")):
+        reaped.clear()
+        leases.clear()
+        monkeypatch.setattr(tl, "_container_in_use", lambda _n, a=answer: a)
+        assert tl.main(["run", "--", "-q", "tests/"]) == 0
+        assert reaped == [], f"reaped while the client list said {answer!r}"
+        assert why in capsys.readouterr().err
+        # The container SURVIVED, so its lease must be re-stamped at the END of
+        # the use — otherwise a container spared here enters the next sweep
+        # already past OWNER_GRACE_H (#10806 review P2-4).
+        assert leases == [LANE_FIXTURE_NAME], (
+            f"a spared container was left with a stale lease: {leases}")
+
+
+def test_SIGTERM_reaches_the_hook_and_the_run_exits_143(lane, monkeypatch):
+    """A lane stopped by its supervisor gets SIGTERM, and the DEFAULT disposition
+    terminates without unwinding — so without a handler the hook never runs and
+    the container leaks. This is the only net-new behaviour in the hook with no
+    other test (#10806 review P2).
+
+    The assertion is on the SIGNAL, not on the reap: the run raises `SystemExit`
+    from the handler, which means the `finally` unwound.
+    """
+    import signal as _signal
+    _stub_start(monkeypatch, port=16412)
+    reaped: list = []
+    seen: list = []
+
+    def fake_run(argv, env=None, **kwargs):
+        seen.append(_signal.getsignal(_signal.SIGTERM))
+        os.kill(os.getpid(), _signal.SIGTERM)      # what a supervisor sends
+        return _R(0, "", "")
+
+    monkeypatch.setattr(tl.subprocess, "run", fake_run)
+    monkeypatch.setattr(tl, "stop", lambda: (reaped.append(1), "removed")[1])
+    rc = tl.main(["run", "--", "-q", "tests/"])
+    assert rc == 143, rc                            # 128 + SIGTERM
+    assert seen and seen[0] is not _signal.SIG_DFL, (
+        "SIGTERM was still at its default disposition when the child started")
+    assert reaped == [1], "the hook did not run on the SIGTERM path"
+
+
+def test_a_FAILING_reap_never_changes_the_runs_verdict(lane, monkeypatch, capsys):
+    """`stop()` raises `SystemExit` for the unremovable/zombie cases. A hook that
+    let that escape would replace a real pytest result with a traceback, and a
+    lane would report a removal problem as a test failure."""
+    _stub_start(monkeypatch, port=16412)
+    monkeypatch.setattr(tl.subprocess, "run", lambda *a, **k: _R(0, "", ""))
+
+    def boom():
+        raise SystemExit("could not remove it")
+
+    monkeypatch.setattr(tl, "stop", boom)
+    assert tl.main(["run", "--", "-q", "tests/"]) == 0
+    err = capsys.readouterr().err
+    assert f"could not reap {LANE_FIXTURE_NAME} on exit" in err
+    assert "container_reaper.py" in err      # names the backstop that will
+
+
 def test_run_names_the_target_BEFORE_the_child_starts(
         lane, monkeypatch, capsys):
     """The resolved lane is on stderr before pytest runs, so a run that is killed
@@ -4525,7 +4712,11 @@ def test_run_names_the_target_BEFORE_the_child_starts(
         return _R(0, "", "")
 
     monkeypatch.setattr(tl.subprocess, "run", fake_run)
-    tl.main(["run", "--", "-q"])
+    # `--keep-container`: this test counts CHILD invocations, and the exit hook
+    # reaches docker through the same `subprocess.run` seam it just faked — so
+    # the reap would register as a second "child". The hook's own behaviour is
+    # pinned by the tests below.
+    tl.main(["run", "--keep-container", "--", "-q"])
     assert len(at_child_start) == 1
     assert LANE_FIXTURE_NAME in at_child_start[0]
     assert "TORTOISE_DB_URI=docker://:@127.0.0.1:16406/" in at_child_start[0]
