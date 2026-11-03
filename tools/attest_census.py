@@ -1,0 +1,475 @@
+#!/usr/bin/env python3
+"""attest_census.py — one read answers "does this PR's code-review proof exist, and
+does it describe the code that is actually on the PR right now?"
+
+THE QUESTION THIS EXISTS FOR
+----------------------------
+The `ai-review-gate` required check reds with "No AI review evidence found in PR
+#N body or comments." That message has two very different causes and they must
+never be confused:
+
+  * REPAIR — a review really happened, a record really exists on a box
+    (`~/.pi/agent/reviews/<owner>-<repo>-<pr>.json`) bound to the PR's CURRENT
+    head, and only its published copy is missing (a 403 refused the post). The
+    proof can be re-posted verbatim.
+  * FABRICATION — no record, or a record bound to a head the code has since
+    moved past. There is nothing to re-post: the honest answer is a fresh review
+    (re-review the DELTA), never a copied verdict.
+
+This tool decides which, mechanically, from three facts only:
+
+  1. record exists?                       (canonical path, then the legacy `<pr>.json`)
+  2. record.head_sha == PR headRefOid?    (byte-for-byte, 40 lowercase hex)
+  3. record carries a REAL verdict with evidence — `verdict` in the clean allow-list
+     (`clean` / `clean-micro` / `clean-low`), `evidence` a NON-EMPTY STRING, and
+     `mint` != "carried".
+
+BINDING IS BY HEAD, DELIBERATELY NARROWER THAN THE GATE
+-------------------------------------------------------
+`ai-review-gate` also accepts a marker bound to the current **diff** digest (#1351), so a record at
+an older head whose diff still matches can still satisfy the gate. This census does not: its job is
+"does a verdict describe the code that is live now", and the safe direction is `RE-REVIEW` (pay for
+a review) rather than `RESTORE` (re-publish an unmatched verdict). Rows may therefore UNDER-report
+restorable rows — never over-report them.
+
+⛔ It never mints, never writes a record, and never posts anything. It is a
+READER. A `RESTORE` row means "the artifact you would re-post already exists and
+describes the live head" — a human or lane still has to do the posting, and must
+quote the record's own verdict verbatim.
+
+WHY THE GATE STATE IS READ PER-COMMIT, NOT FROM THE ROLLUP
+----------------------------------------------------------
+`gh pr list --json statusCheckRollup` looks cheaper (one call) but is the wrong
+instrument twice over: a re-run ADDS a red attempt rather than clearing one, so
+the rollup of a green commit can carry old `FAILURE` contexts; and the newest
+attempt per check NAME is only resolvable by check-run `id`. So the gate state is
+read the way AGENTS.md §"Reading verification state" says to read it — newest
+attempt by id, over `filter=all` — scoped with `check_name=` so the payload stays
+small enough for a rate-limited box. `--no-gate` keeps the registry half usable
+offline.
+
+USAGE
+-----
+    uv run python tools/attest_census.py                    # tortoise open PRs → operations/attest-census.md
+    uv run python tools/attest_census.py --no-gate          # registry only (no API calls but `gh pr list`)
+    uv run python tools/attest_census.py --json             # machine-readable rows on stdout
+    uv run python tools/attest_census.py --repo daniel-ospina/agent-infra
+
+Exit code is 0 for a completed census (this is a report, not a gate) and 2 when a
+surface could not be read — never 1, so a caller cannot mistake "unreadable" for
+"found a problem".
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import re
+import subprocess
+import sys
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from pathlib import Path
+
+SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+GATE_CHECK = "ai-review-gate"
+
+# Verdicts that are a *clean* claim. Kept as a set rather than a substring test:
+# "NOT CLEAN" contains "CLEAN", and this file exists to refuse exactly this kind
+# of vocabulary accident.
+CLEAN_VERDICTS = {"clean", "clean-micro", "clean-low"}
+
+RESTORE = "RESTORE"
+RE_REVIEW = "RE-REVIEW"
+NOTHING = "NOTHING-TO-RESTORE"
+OK = "OK"
+IN_FLIGHT = "IN-FLIGHT"
+UNREADABLE = "UNREADABLE"
+
+
+class RegistryUnreadable(RuntimeError):
+    """The registry DIRECTORY could not be listed.
+
+    ⛔ This must never be folded into "no record": a missing or unreadable
+    `--reviews-dir` makes every PR look unrestorable, which is the same
+    absence-as-verdict error the census exists to prevent, at directory scale.
+    """
+
+
+
+@dataclass
+class Record:
+    path: Path
+    head_sha: str = ""
+    mint: str = ""
+    verdict: str = ""
+    evidence: object = None
+    diff_sha256: str = ""
+    reviewed_at: str = ""
+    error: str = ""
+
+    @property
+    def real_evidence(self) -> bool:
+        """The record attests that a reviewer actually reported something.
+
+        Requires ALL of: a verdict in the clean allow-list, an evidence reference that
+        is a NON-EMPTY STRING (an empty list/dict/`"null"` is not an artifact), and
+        `mint != "carried"`. The mint exclusion is deliberate: #10177 measured a carry
+        re-binding an older `clean` onto a head whose own review found a P1 — a carried
+        record is a *pointer to another review*, and re-posting it as proof of this head
+        is the laundering this tool exists to refuse.
+        """
+        return (
+            bool(self.verdict)
+            and self.verdict in CLEAN_VERDICTS
+            and isinstance(self.evidence, str)
+            and self.evidence.strip() != ""
+            and self.evidence.strip().lower() != "null"
+            and self.mint != "carried"
+        )
+
+
+@dataclass
+class Row:
+    pr: int
+    head: str
+    branch: str
+    title: str
+    record: Record | None
+    gate_status: str = ""
+    gate_conclusion: str = ""
+    gate_checked: bool = False
+    outcome: str = ""
+    why: str = ""
+    notes: list[str] = field(default_factory=list)
+
+
+# ── pure classifier (unit-tested) ────────────────────────────────────────────
+
+
+def classify(
+    head: str, record: Record | None, gate_status: str, gate_conclusion: str, gate_known: bool = True
+) -> tuple[str, str]:
+    """Return (outcome, why) for one PR. No I/O — this is the whole rule.
+
+    Precedence, and why: a record we could not READ or could not TIE to a head is
+    `UNREADABLE`, never `NOTHING-TO-RESTORE` — the latter asserts "there is no
+    artifact", and a failed read is not evidence of absence.
+    """
+    gate_green = gate_known and gate_conclusion in ("success", "neutral", "skipped")
+    gate_in_flight = gate_known and gate_status not in ("", "completed")
+
+    if record is not None and record.error:
+        return UNREADABLE, f"record {record.path.name} could not be used: {record.error}"
+
+    if record is None:
+        if gate_green:
+            return OK, "gate green; no local record (evidence lives on GitHub only)"
+        if gate_in_flight:
+            return IN_FLIGHT, "gate has not concluded"
+        return NOTHING, "no record on this box at any head, and no head-bound published marker"
+
+    rec_head = record.head_sha
+    if not SHA_RE.match(rec_head or ""):
+        return UNREADABLE, (
+            f"record {record.path.name} carries no usable head_sha ({rec_head!r}) — it cannot be "
+            "bound to this head, so it is neither restorable nor provably absent"
+        )
+    if rec_head == head and record.real_evidence:
+        if gate_green:
+            return OK, f"record binds live head and carries {record.verdict}/{record.evidence}"
+        if gate_in_flight:
+            return IN_FLIGHT, "record binds live head; gate has not concluded"
+        return RESTORE, (
+            f"record binds the live head with {record.verdict} + evidence {record.evidence} — "
+            "the artifact exists; re-post its own verdict verbatim"
+        )
+
+    if rec_head and rec_head != head:
+        if gate_green:
+            return OK, f"gate green (record is stale at {rec_head[:12]}…, irrelevant)"
+        return RE_REVIEW, f"record binds {rec_head[:12]}…, PR head is {head[:12]}… — the code moved"
+
+    # Record exists, head matches (or is unreadable), but the verdict/evidence
+    # is not a review of this code.
+    if gate_green:
+        return OK, "gate green"
+    if gate_in_flight:
+        return IN_FLIGHT, "gate has not concluded"
+    if record.mint == "carried":
+        return RE_REVIEW, "record is mint:\"carried\" — a pointer to an older review, not evidence of this head (#10177)"
+    if record.evidence in (None, "", False):
+        return NOTHING, "record carries no evidence (evidence: null) — nothing to restore"
+    return NOTHING, f"record verdict {record.verdict!r} is not a clean verdict — nothing to restore"
+
+
+# ── readers ──────────────────────────────────────────────────────────────────
+
+
+def load_record(
+    reviews_dir: Path, owner: str, repo: str, pr: int
+) -> Record | None:
+    """Find this PR's record, or None when the registry genuinely has none.
+
+    ⛔ Three things this must never do, each a measured defect:
+      * fold an UNREADABLE registry into "no record" — raises `RegistryUnreadable`;
+      * fold a CORRUPT record into "no record" — returns a Record carrying `.error`
+        (which `classify` maps to `UNREADABLE`, never `NOTHING-TO-RESTORE`);
+      * accept another repo's/PR's record — a record whose own `repo`/`pr` fields
+        disagree is returned with `.error`, so it can never become evidence.
+    Filenames are matched CASE-INSENSITIVELY: `gh` treats `DMeer` and `dmeer` as the
+    same repo while the registry path is case-sensitive, so an exact-case lookup
+    reports a false absence (measured on `daniel-ospina-DMeer-*.json`).
+    """
+    try:
+        entries = [e for e in reviews_dir.iterdir() if e.name.endswith(".json")]
+    except FileNotFoundError as exc:
+        raise RegistryUnreadable(f"registry directory does not exist: {reviews_dir}") from exc
+    except OSError as exc:
+        raise RegistryUnreadable(f"registry directory cannot be listed: {reviews_dir} ({exc})") from exc
+
+    wanted = [f"{owner}-{repo}-{pr}.json".lower(), f"{pr}.json"]
+    chosen: Path | None = None
+    for want in wanted:
+        for entry in entries:
+            if entry.name.lower() == want:
+                chosen = entry
+                break
+        if chosen is not None:
+            break
+    if chosen is None:
+        return None
+
+    try:
+        raw = chosen.read_text()
+    except OSError as exc:  # permission denied, dangling link, a directory, ...
+        return Record(path=chosen, error=f"unreadable: {exc}")
+    try:
+        data = json.loads(raw)
+    except ValueError as exc:
+        return Record(path=chosen, error=f"unreadable: not JSON ({exc})")
+    if not isinstance(data, dict):
+        return Record(path=chosen, error=f"unreadable: top-level JSON is {type(data).__name__}, not an object")
+
+    rec = Record(
+        path=chosen,
+        head_sha=str(data.get("head_sha") or ""),
+        mint=str(data.get("mint") or ""),
+        verdict=str(data.get("verdict") or data.get("outcome") or ""),
+        evidence=data.get("evidence"),
+        diff_sha256=str(data.get("diff_sha256") or ""),
+        reviewed_at=str(data.get("reviewed_at") or ""),
+    )
+    # Identity: a record names its own PR and repo; one that disagrees is another
+    # artifact entirely (mirrors/forks/lineage repos collide on small PR numbers).
+    rec_repo = data.get("repo")
+    if isinstance(rec_repo, str) and rec_repo.strip() and rec_repo.strip().lower() != f"{owner}/{repo}".lower():
+        rec.error = f"foreign record: repo={rec_repo!r}, census repo is {owner}/{repo}"
+    rec_pr = data.get("pr")
+    if isinstance(rec_pr, int) and rec_pr != pr:
+        rec.error = f"foreign record: pr={rec_pr}, census pr is {pr}"
+    return rec
+
+
+def gh_json(args: list[str]) -> object:
+    """Run `gh` and parse JSON. A non-JSON answer is a TRANSPORT failure (RuntimeError),
+    never an uncaught ValueError — the exit-code contract (0/2, never 1) depends on it."""
+    out = subprocess.run(["gh", *args], capture_output=True, text=True)
+    if out.returncode != 0:
+        raise RuntimeError(f"gh {' '.join(args[:3])}… failed rc={out.returncode}: {out.stderr.strip()[:300]}")
+    try:
+        return json.loads(out.stdout)
+    except ValueError as exc:
+        raise RuntimeError(f"gh {' '.join(args[:3])}… returned non-JSON ({exc}): {out.stdout[:200]!r}") from exc
+
+
+def read_gate(repo: str, head: str) -> tuple[str, str]:
+    """Newest `ai-review-gate` check-run on the exact head, by id (never the rollup)."""
+    payload = gh_json(
+        [
+            "api",
+            "-X",
+            "GET",
+            f"repos/{repo}/commits/{head}/check-runs",
+            "-f",
+            f"check_name={GATE_CHECK}",
+            "-f",
+            "per_page=100",
+            "-f",
+            "filter=all",
+        ]
+    )
+    runs = [r for r in payload.get("check_runs", []) if r.get("name") == GATE_CHECK]
+    if not runs:
+        return "", ""
+    newest = max(runs, key=lambda r: r.get("id", 0))
+    return str(newest.get("status") or ""), str(newest.get("conclusion") or "")
+
+
+# ── render ───────────────────────────────────────────────────────────────────
+
+
+def render(rows: list[Row], repo: str, generated_at: str) -> str:
+    counts: dict[str, int] = {}
+    for r in rows:
+        counts[r.outcome] = counts.get(r.outcome, 0) + 1
+    order = [RESTORE, RE_REVIEW, NOTHING, IN_FLIGHT, OK, UNREADABLE]
+    totals = " · ".join(f"{k}={counts[k]}" for k in order if counts.get(k))
+
+    lines = [
+        "# Attestation census — open PRs",
+        "",
+        f"Repo `{repo}` · generated {generated_at} by `tools/attest_census.py`.",
+        "",
+        "One row per open PR: its head, whether a review record exists on **this box**, whether that",
+        "record's head equals the PR's head, what the record claims, and what the `ai-review-gate`",
+        "check says. `RESTORE` is the only outcome that licenses re-posting a proof — and even then the",
+        "verdict is quoted from the record, never synthesised. A record at any other head is",
+        "`RE-REVIEW`: the code moved.",
+        "",
+        f"**{totals}**",
+        "",
+        "| PR | head | record | record head | match | mint | verdict | evidence | gate | outcome |",
+        "|---|---|---|---|---|---|---|---|---|---|",
+    ]
+    for r in rows:
+        rec = r.record
+        rec_cell = "—" if rec is None else (rec.path.name if rec.error == "" else "CORRUPT")
+        rhead = "—"
+        match = "—"
+        if rec is not None:
+            rhead = (rec.head_sha[:12] + "…") if rec.head_sha else "—"
+            match = "yes" if rec.head_sha == r.head else ("no" if rec.head_sha else "—")
+        mint = "—" if rec is None else (rec.mint or "—")
+        verdict = "—" if rec is None else (rec.verdict or "—")
+        ev = "—" if rec is None else ("null" if rec.evidence in (None, "", False) else str(rec.evidence))
+        gate = "not-read" if not r.gate_checked else (r.gate_conclusion or r.gate_status or "absent")
+        lines.append(
+            f"| #{r.pr} | `{r.head[:12]}…` | {rec_cell} | {rhead} | {match} | {mint} | {verdict} | {ev} | {gate} | **{r.outcome}** |"
+        )
+
+    flagged = [r for r in rows if r.outcome in (RESTORE, RE_REVIEW, NOTHING, UNREADABLE, IN_FLIGHT)]
+    if flagged:
+        lines += ["", "## What each flagged row needs", ""]
+        for r in flagged:
+            lines.append(f"- **#{r.pr}** `{r.branch}` — {r.outcome}: {r.why}")
+            for n in r.notes:
+                lines.append(f"  - {n}")
+    lines += [
+        "",
+        "## Reading rules",
+        "",
+        "- A `RE-REVIEW` row is **not** restorable, however green the old verdict was: the reviewed artifact is gone.",
+        "- A `NOTHING-TO-RESTORE` row means exactly that. Never infer a review from a green test run.",
+        "- `mint:\"carried\"` is never evidence of a review of this head (#10177: a carry re-bound an older `clean`",
+        "  onto a head whose own review had found a P1).",
+        "- A record minted on **another box** is invisible here: `~/.pi/agent/reviews/` is per-machine. Rows are",
+        "  this box's view, and the census says so rather than implying a fleet-wide clean bill.",
+        "",
+    ]
+    return "\n".join(lines)
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("--repo", default="daniel-ospina/tortoise")
+    ap.add_argument("--reviews-dir", default=str(Path.home() / ".pi/agent/reviews"))
+    ap.add_argument("--limit", type=int, default=100)
+    ap.add_argument("--no-gate", action="store_true", help="skip the per-PR check-run read (offline / quota-safe)")
+    ap.add_argument("--json", action="store_true", help="machine-readable rows on stdout instead of markdown")
+    ap.add_argument("--out", default="operations/attest-census.md")
+    args = ap.parse_args(argv)
+
+    owner, _, name = args.repo.partition("/")
+    reviews_dir = Path(args.reviews_dir).expanduser()
+    generated_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    try:
+        prs = gh_json(
+            ["pr", "list", "--repo", args.repo, "--state", "open", "--limit", str(args.limit),
+             "--json", "number,headRefOid,headRefName,title"]
+        )
+    except RuntimeError as exc:
+        print(f"attest_census: could not list PRs: {exc}", file=sys.stderr)
+        return 2
+    if not isinstance(prs, list) or not all(isinstance(p, dict) for p in prs):
+        print("attest_census: `gh pr list` returned an unexpected payload — refusing to census it", file=sys.stderr)
+        return 2
+
+    # ⛔ Assert the REGISTRY is readable BEFORE classifying anything: an unlistable
+    # `--reviews-dir` would otherwise render every PR as "no record", i.e. report a
+    # whole-registry read failure as "nothing to restore" for the entire fleet.
+    try:
+        load_record(reviews_dir, owner, name, 0)
+    except RegistryUnreadable as exc:
+        print(f"attest_census: {exc} — refusing to report absence from an unreadable registry", file=sys.stderr)
+        return 2
+
+    rows: list[Row] = []
+    unreadable = 0
+    for pr in prs:
+        head = str(pr.get("headRefOid") or "")
+        rec = load_record(reviews_dir, owner, name, int(pr["number"]))
+        row = Row(
+            pr=int(pr["number"]),
+            head=head,
+            branch=str(pr.get("headRefName") or ""),
+            title=str(pr.get("title") or ""),
+            record=rec,
+        )
+        if not SHA_RE.match(head):
+            row.outcome, row.why = UNREADABLE, f"PR head {head!r} is not a 40-char sha"
+            unreadable += 1
+        elif args.no_gate:
+            row.outcome, row.why = classify(head, rec, "", "", gate_known=False)
+            row.why += " (gate NOT read: --no-gate)"
+        else:
+            try:
+                row.gate_status, row.gate_conclusion = read_gate(args.repo, head)
+                row.gate_checked = True
+            except RuntimeError as exc:
+                row.outcome, row.why = UNREADABLE, f"check-run read failed: {exc}"
+        if row.gate_checked:
+            row.outcome, row.why = classify(head, rec, row.gate_status, row.gate_conclusion)
+        # A row the tool itself calls UNREADABLE is a surface it could not read, so the
+        # run must not report 0 ("complete census") while displaying one.
+        if row.outcome == UNREADABLE:
+            unreadable += 1
+        if rec is not None and rec.error:
+            row.notes.append(f"record {rec.path.name}: {rec.error}")
+        if rec is not None and rec.head_sha and len(rec.head_sha) != 40:
+            row.notes.append(f"record head_sha {rec.head_sha!r} is not a 40-char sha — not bindable")
+        rows.append(row)
+
+    rows.sort(key=lambda r: r.pr, reverse=True)
+
+    if args.json:
+        print(json.dumps({
+            "repo": args.repo,
+            "generated_at": generated_at,
+            "reviews_dir": str(reviews_dir),
+            "rows": [
+                {
+                    "pr": r.pr, "head": r.head, "branch": r.branch, "outcome": r.outcome, "why": r.why,
+                    "gate_status": r.gate_status, "gate_conclusion": r.gate_conclusion, "gate_checked": r.gate_checked,
+                    "record": None if r.record is None else {
+                        "path": str(r.record.path), "head_sha": r.record.head_sha, "mint": r.record.mint,
+                        "verdict": r.record.verdict, "evidence": r.record.evidence,
+                        "real_evidence": r.record.real_evidence,
+                    },
+                }
+                for r in rows
+            ],
+        }, indent=2))
+        return 0 if unreadable == 0 else 2
+
+    text = render(rows, args.repo, generated_at)
+    out = Path(args.out)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(text)
+    print(text)
+    print(f"attest_census: wrote {out}", file=sys.stderr)
+    return 0 if unreadable == 0 else 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
