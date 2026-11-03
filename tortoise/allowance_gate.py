@@ -123,18 +123,18 @@ admits as a real zero. During such an outage the allowance reads a genuine zero
 and the tenant keeps spending, i.e. the write-side mirror of the read fault this
 module refuses on. ``get_unmetered_increments`` cannot close it as-is (it is
 org-CUMULATIVE with no window, so gating on it would refuse forever after one past
-drop); closing it needs a WINDOW-scoped drop counter, which is a follow-up and is
-declared here rather than left to be discovered.
+drop); closing it needs a WINDOW-scoped drop counter, which is a follow-up tracked
+by #10776 and declared here rather than left to be discovered.
 
 ⚠️ **RESIDUAL, named rather than hidden:** the ``sessions`` door is
 ``_check_org_limit(org, "sessions")`` in ``hosted_api._capture_session_impl``,
-and it runs unconditionally — including the store-only lanes (keyless #3892,
-extraction-disabled #4258) and replays, which make no provider call and cannot
+and it runs unconditionally — including the store-only lanes (keyless #3892 and
+extraction-disabled #4258, both CLOSED) and replays, which make no provider call and cannot
 move the token meter. So an exhausted token allowance would also refuse a
 zero-token capture on that one door. Narrowing it needs the check moved into the
 branch that actually extracts, which is a change INSIDE that handler and a
-follow-up; it is stated here so the boundary is a known one rather than a
-surprise at arming time.
+follow-up (tracked by #10776, with #3892/#4258 above now closed); it is stated here
+so the boundary is a known one rather than a surprise at arming time.
 """
 from __future__ import annotations
 
@@ -272,7 +272,7 @@ class MeterUnavailable(RuntimeError):
     a refusal must not present to the tenant as their usage. It is still a
     REFUSAL (fail closed, #686), and it is LOGGED AT ERROR with the org and the
     reason: the durable disclosure needs its own ``served=False`` surface and
-    drop class on #4779 — reusing the swallow-site reporter would assert the
+    drop class on #10776 — reusing the swallow-site reporter would assert the
     opposite of what happened — and that is a follow-up, not something this gate
     may fake.
     """
@@ -315,7 +315,8 @@ def _describe_fault(reason: str) -> str:
     ``report_unmetered_increment`` is the swallow-site reporter: its text asserts
     "the request was served" and it hard-codes ``DROP_CLASS_WINDOW_UNRESOLVABLE``,
     so reusing it here would assert the opposite of a refusal and file the wrong
-    class. The durable ``served=False`` surface + class is a #4779 follow-up.
+    class. The durable ``served=False`` surface + class is tracked by #10776
+    (#4779, its original home, is CLOSED).
     """
     return f"the {reason} fault is on our side"
 
@@ -344,7 +345,7 @@ def _extraction_tokens(org_id: str) -> MeterReading | None:
             # ⚠️ OUR fault, not the tenant's: the ledger or the billing window
             # failed. The gate still REFUSES (#686 fail-closed), the refusal
             # names the fault, and it is logged at ERROR for the operator (the
-            # durable #4779 surface is a follow-up) —
+            # durable #10776 surface is a follow-up) —
             # ``metering._current_period``'s own docstring records the opposing
             # ruling ("refusing a paying org over our own bookkeeping fault is
             # exactly the #3981 ruling forbids"), and this is the reconciliation:
