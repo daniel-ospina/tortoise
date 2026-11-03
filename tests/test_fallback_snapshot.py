@@ -910,7 +910,7 @@ def test_put_if_generation_refuses_a_write_that_landed_after_the_read():
     key = ("atomic-graph", "atomic-ns")
 
     # The build starts under generation N…
-    generation = fs._store.generation()
+    generation = fs._store.generation(key)
     # …a write lands while it runs (i.e. before it reaches its put)…
     fs._store.invalidate(key)
     # …and the build's insert must therefore be refused.
@@ -919,7 +919,70 @@ def test_put_if_generation_refuses_a_write_that_landed_after_the_read():
     assert fs._store.get(key) is None, "the overtaken snapshot must NOT be cached"
 
     # A put under an unchanged generation still caches (the guard is not a veto).
-    generation = fs._store.generation()
+    generation = fs._store.generation(key)
     assert fs._store.put_if_generation(key, _snap_stub("fresh"), generation) is True
     warm = fs._store.get(key)
     assert warm is not None and warm["tag"] == "fresh"
+
+
+def test_a_write_to_ANOTHER_graph_must_not_refuse_this_keys_insert():
+    """The guard is PER-KEY, not one process-global counter (review round 4, P1).
+
+    ``_store`` is a module-level singleton shared by every tenant in a hosted
+    process, so a global counter meant a write to ANY other graph refused the cache
+    insert of every build overlapping it. Measured before the fix: 20 sequential
+    reads of key A with ONE ``invalidate(keyB)`` inside each build window → 20
+    builds / 0 cache hits, against 19/20 with no foreign write. In a writing fleet —
+    #10602's own scenario — that turns the warm cache into a rebuild-per-read.
+    """
+    fs._store.clear()
+    key = ("mine-graph", "mine-ns")
+    other = ("their-graph", "their-ns")
+
+    generation = fs._store.generation(key)
+    fs._store.invalidate(other)  # a DIFFERENT graph's write lands mid-build
+    assert fs._store.put_if_generation(key, _snap_stub("mine"), generation) is True, (
+        "a write to another graph must not cost this key its cache insert — that is "
+        "the global-counter regression (rebuild-per-read in a writing fleet)")
+    warm = fs._store.get(key)
+    assert warm is not None and warm["tag"] == "mine"
+
+    # …and a write to THIS key still refuses it (the guard is not weakened).
+    generation = fs._store.generation(key)
+    fs._store.invalidate(key)
+    assert fs._store.put_if_generation(key, _snap_stub("stale"), generation) is False
+
+    # clear() resets the whole store, so it must refuse every key.
+    generation = fs._store.generation(key)
+    fs._store.clear()
+    assert fs._store.put_if_generation(key, _snap_stub("pre-clear"), generation) is False, (
+        "clear() is a whole-store reset — a build captured before it must not cache")
+
+
+def test_get_or_build_still_caches_when_another_graph_writes_mid_build():
+    """End-to-end form of the same pin, through ``get_or_build`` itself.
+
+    The unit test above pins ``put_if_generation``; this pins the path callers
+    actually take, so a future reshape that reintroduces a global stamp is caught
+    at the seam that matters.
+    """
+    fs._store.clear()
+    key = ("mine2-graph", "mine2-ns")
+    other = ("their2-graph", "their2-ns")
+    builds = []
+
+    def builder(_proj):
+        builds.append(1)
+        fs._store.invalidate(other)  # foreign graph writes while we build
+        return _snap_stub("mine2")
+
+    first = fs.get_or_build(None, key, builder=builder)
+    assert first is not None and first["tag"] == "mine2"
+    assert len(builds) == 1
+    assert fs._store.get(key) is not None, (
+        "a foreign write during the build must NOT leave this key uncached "
+        "(a global generation counter would — rebuild-per-read)")
+    second = fs.get_or_build(None, key, builder=lambda _p: _snap_stub("rebuilt"))
+    assert second is not None and second["tag"] == "mine2", (
+        "the second read must be a CACHE HIT, not a rebuild")
+    assert len(builds) == 1, "no second build — the foreign write did not evict us"

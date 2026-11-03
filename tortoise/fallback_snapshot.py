@@ -69,22 +69,48 @@ class FallbackSnapshotStore:
     def __init__(self) -> None:
         self._store: dict[tuple, dict] = {}
         self._lock = threading.RLock()
-        #: Monotone counter bumped by every invalidation/clear. A build captures it
-        #: before reading the corpus and re-checks it before caching the result, so a
-        #: write that lands MID-BUILD can never be undone by that build's ``put``
-        #: (#10602 review round 2). Deliberately ONE global counter rather than a
-        #: per-key one: it is an integer with no growth, and it errs toward NOT caching
-        #: (a write to another graph costs a rebuild, never staleness).
+        #: Whole-store EPOCH, bumped only by ``clear()`` (a reset, not a write).
+        #: A build captures it with the key's own stamp and re-checks both before
+        #: caching the result, so a write that lands MID-BUILD can never be undone
+        #: by that build's ``put`` (#10602 review round 2).
+        #:
+        #: ⛔ PER-KEY, NOT ONE GLOBAL COUNTER (review round 4, P1). The first
+        #: version compared a SINGLE process-global integer, and ``invalidate()``
+        #: bumped it for every key — so a write to ANY other graph refused the
+        #: cache insert of every build overlapping it. Measured: 20 sequential
+        #: reads of key A with ONE ``invalidate(keyB)`` inside each build window →
+        #: **20 builds, 0 cache hits**, against 19/20 with no foreign write. In a
+        #: writing fleet — #10602's own scenario — that turns a warm cache into a
+        #: rebuild-per-read on the one path that only runs when the store is already
+        #: under strain, i.e. WORSE than the pre-change unconditional ``put``.
+        #: `_store` is a module-level singleton shared by every tenant in a hosted
+        #: process, so the blast radius of the global counter was the whole box.
         self._generation = 0
+        #: key -> write counter, bumped by ``invalidate(key)`` for THAT key only.
+        #: Deliberately NOT pruned: an entry is a tuple + an int (~100 bytes), and
+        #: it is bounded by the number of distinct (graph, namespace) keys the
+        #: process has ever invalidated — dwarfed by the snapshots it exists to
+        #: protect (``MAX_SNAPSHOT_ENTRIES`` bodies of whole-corpus rows). Pruning
+        #: would have to prove no build is in flight for a key, and that check needs
+        #: ``_FLIGHTS_GUARD`` while ``self._lock`` is held — the inverse of the
+        #: ``_FLIGHTS_GUARD`` → ``self._lock`` order ``get_or_build`` takes, i.e. a
+        #: deadlock. Trading 100 bytes per graph for a lock-order hazard is a bad
+        #: trade; the growth is negligible and the ordering stays one-way.
+        self._key_generation: dict[tuple, int] = {}
 
-    def generation(self) -> int:
-        """Current invalidation generation (see ``get_or_build``'s STALENESS note)."""
+    def generation(self, key: tuple) -> tuple[int, int]:
+        """Invalidation stamp for ``key`` (see ``get_or_build``'s STALENESS note).
+
+        A ``(epoch, key_stamp)`` pair: the epoch moves on ``clear()``, the stamp only
+        on ``invalidate(key)`` for THIS key. A write to another graph must not refuse
+        this key's cache insert (review round 4, P1).
+        """
         with self._lock:
-            return self._generation
+            return (self._generation, self._key_generation.get(key, 0))
 
     def invalidate(self, key: tuple) -> None:
         with self._lock:
-            self._generation += 1
+            self._key_generation[key] = self._key_generation.get(key, 0) + 1
             self._store.pop(key, None)
 
     def get(self, key: tuple) -> dict | None:
@@ -119,17 +145,18 @@ class FallbackSnapshotStore:
         while len(self._store) > MAX_SNAPSHOT_ENTRIES:
             self._store.pop(next(iter(self._store)), None)
 
-    def put_if_generation(self, key: tuple, snap: dict, generation: int) -> bool:
-        """Insert ``snap`` only if nothing was invalidated since ``generation``.
+    def put_if_generation(self, key: tuple, snap: dict, generation: tuple[int, int]) -> bool:
+        """Insert ``snap`` only if THIS key was not invalidated since ``generation``.
 
         The generation COMPARE and the insert happen inside the SAME lock hold, so a
         write whose ``invalidate()`` lands between the two cannot be silently undone
         by this ``put`` (review round 2: the compare and the insert were separate
-        critical sections, which left exactly that window). Returns whether it was
-        cached.
+        critical sections, which left exactly that window). The comparison is
+        PER-KEY (review round 4, P1): a write to another graph must not refuse this
+        insert. Returns whether it was cached.
         """
         with self._lock:
-            if self._generation != generation:
+            if (self._generation, self._key_generation.get(key, 0)) != generation:
                 return False
             self._put_locked(key, snap)
             return True
@@ -137,6 +164,7 @@ class FallbackSnapshotStore:
     def clear(self) -> None:
         with self._lock:
             self._generation += 1
+            self._key_generation.clear()
             self._store.clear()
 
 
@@ -246,7 +274,7 @@ def get_or_build(proj, key: tuple, *, store: FallbackSnapshotStore | None = None
             # miss above and this flight opening.
             snap = store.get(key)
             if snap is None:
-                generation = store.generation()
+                generation = store.generation(key)
                 snap = build(proj)
                 # Publish only if no write invalidated the corpus mid-build (see
                 # STALENESS above) — otherwise this cohort keeps its answer and the
