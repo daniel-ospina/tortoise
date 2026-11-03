@@ -1761,14 +1761,17 @@ def operator_drop_notes(drops: dict, posture: str) -> list[str]:
             "operator drops (#8503): the EXTRACTOR logged no operator drop and "
             "no supersede refusal in any session — so an edge_missing verdict "
             "in this receipt is not an EXTRACTOR-side drop. ⛔ This does NOT "
-            "cover three seams: the commit layer (apply_payload_operators logs "
+            "cover two seams: the commit layer (apply_payload_operators logs "
             "its skips through _logger, with no warnings sink on the capture); "
-            "a session whose snapshot failed to read (it emits no warnings at "
-            "all; graph_census's per-session error names those); and a "
-            "point-level `supersedes` ref on a point that folds as NOOP, which "
-            "is dropped where the ref is collected, before the resolver runs, "
-            "so it logs nothing. All three are INVISIBLE to this block, which "
-            "is a named blind spot, not a clean bill"
+            "and a session whose snapshot failed to read (it emits no warnings "
+            "at all; graph_census's per-session error names those). Both are "
+            "INVISIBLE to this block, which is a named blind spot, not a clean "
+            "bill. (#9906 closed the THIRD: a point-level `supersedes` ref on a "
+            "point that folds as NOOP or MERGE is now carried onto the fold's "
+            "surviving point instead of being dropped before the resolver runs, "
+            "and a ref whose point emits no node at all is named as a refusal — "
+            "so that class is measured here rather than silent. Do not re-add it "
+            "to this list without re-opening the collection site.)"
         ]
     if not refusals:
         # ⛔ THE DROPS-ONLY CASE IS THE ONE THIS NOTE EXISTS FOR: returning []
@@ -1929,6 +1932,12 @@ _SUPERSEDE_REFUSAL_MARKERS = (
     "empty retraction ref",
     "does not resolve to an S3 search result",
     "lifecycle=superseded with no supersedes ref",
+    # #9906: the ONE remaining way a point-level ref is dropped — its point
+    # emitted no node at all (no content), so there is no survivor to carry the
+    # CORRECTS record. Named by the extractor so the receipt cannot read it as a
+    # clean zero; the marker is the extractor's own tail, never the
+    # `point supersedes=` prefix (a SUCCESS warning shares that prefix).
+    "no node to carry the CORRECTS record",
 )
 
 
@@ -1939,18 +1948,22 @@ def operator_drop_warnings(session_results: list[dict]) -> dict:
     int, "by_session": {sid: [warning, ...]}}``.
 
     ⛔ ``operator_drops == 0`` means the EXTRACTOR logged no drop — it does
-    NOT mean the write path dropped nothing. THREE seams are outside this
-    instrument's reach, and the run note names all three: the commit layer
+    NOT mean the write path dropped nothing. TWO seams are outside this
+    instrument's reach, and the run note names both: the commit layer
     (`commit_ops.apply_payload_operators`) logs its skips through
-    ``_logger`` only, with no warnings sink on the capture; a snapshot that
+    ``_logger`` only, with no warnings sink on the capture; and a snapshot that
     never read a session produces no warnings at all (``graph_census``'s
-    per-session ``error`` names the ones that did not); and a point-level
-    ``supersedes`` ref on a point that folds as a NOOP is dropped where the
-    ref is collected, before the resolver runs, so it logs nothing either.
-    So a zero is evidence about the operator pass and about nothing else.
+    per-session ``error`` names the ones that did not). So a zero is evidence
+    about the operator pass and about nothing else.
+    (#9906 closed the third seam this docstring used to name — a
+    ``supersedes`` ref on a point that folds as a NOOP was dropped where the
+    ref was collected, before the resolver ran, so it logged nothing. Every
+    outcome of the consolidation ladder now carries the ref onto the id its
+    fold resolved, and a ref whose point emits no node is named as a refusal.)
     (This docstring said TWO while ``operator_drop_notes`` enumerated three —
     code-review round 8; the note is the copy a receipt reader sees, so the
-    docstring was the stale half.)
+    docstring was the stale half. #9906 is the reverse drift, so the two are
+    back in step: count the seams in the NOTE, not from memory.)
     """
     by_session: dict[str, list[str]] = {}
     total = operator_drops = supersede_refusals = 0

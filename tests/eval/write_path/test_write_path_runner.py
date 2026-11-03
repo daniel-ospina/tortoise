@@ -1095,6 +1095,50 @@ def test_operator_drop_warnings_ignores_benign_extraction_warnings():
         "by_session": {}}
 
 
+def test_a_ref_with_no_carrier_counts_as_a_supersede_refusal():
+    """#9906: the LAST silent drop of this class is now MEASURED, not prose.
+
+    A point-level `supersedes` ref on a point that emitted no node was dropped
+    before the resolver ran, so it logged nothing — and the receipt's zero
+    branch still printed "the EXTRACTOR logged no operator drop and no supersede
+    refusal in any session" on a run that lost a replace record. That is the
+    exact ambiguity the #8503 attribution exists to remove; prose naming the
+    seam is not a measurement. This pin keeps the extractor's name for it
+    COUNTED — a marker set that missed it would restore the false zero.
+    """
+    dropped = (
+        "point supersedes='ship the lease fix all-at-once behind a single gl' "
+        "dropped — its point emitted no node to carry the CORRECTS record")
+    drops = runner.operator_drop_warnings(
+        [{"session_id": "s", "extraction_warnings": [dropped]}])
+    assert drops["supersede_refusals"] == 1, drops
+    assert drops["operator_drops"] == 0
+    # and the receipt speaks from the COUNT, never from the absence of drops:
+    # a run holding this refusal must not print the clean-zero sentence.
+    notes = runner.operator_drop_notes(drops, "m1")
+    assert not any("logged no operator drop" in n for n in notes), notes
+
+
+def test_the_clean_zero_note_no_longer_disclaims_the_closed_seam():
+    """#9906: the note and the instrument must name the SAME blind spots.
+
+    The run note used to name a third seam — a `supersedes` ref on a point that
+    folds as NOOP, dropped before the resolver ran. The extractor now CARRIES
+    that ref onto the surviving point and NAMES the one remainder, so leaving
+    the sentence in place would tell every receipt reader the instrument is
+    blind where it now looks. (The docstring and the note drifted apart once
+    already — code-review round 8 — so this pin counts seams in the note.)
+    """
+    note = "\n".join(runner.operator_drop_notes(
+        {"total": 0, "operator_drops": 0, "supersede_refusals": 0,
+         "by_session": {}}, "m1"))
+    assert "is dropped where the ref is collected" not in note, note
+    assert "carried onto the fold's surviving point" in note, note
+    # the two seams still outside the instrument stay named
+    assert "commit layer" in note and "snapshot failed to read" in note, note
+    assert "#9906" in note, note
+
+
 def test_entity_name_collision_is_not_a_supersede_refusal():
     """#8503 round 6: the refusal set must not swallow a notice that refuses nothing.
 
@@ -1151,10 +1195,12 @@ def test_run_note_never_claims_zero_drops_when_drops_exist():
 
     both_zero = notes_for(0, 0)
     assert "logged no operator drop and no supersede refusal" in both_zero
-    # the blind-spot enumeration is part of the claim: three seams, named
-    assert "three seams" in both_zero
+    # the blind-spot enumeration is part of the claim: the two seams still
+    # outside the instrument, named — plus the THIRD that #9906 closed, so a
+    # receipt reader can tell "measured and zero" from "never looked".
+    assert "two seams" in both_zero
     assert "commit layer" in both_zero and "snapshot failed to read" in both_zero
-    assert "NOOP" in both_zero
+    assert "#9906" in both_zero and "closed the THIRD" in both_zero
     # drops only: THE note must exist and name the drops (an empty string would
     # satisfy a bare "not in" assertion — the vacuous pin review round 6 caught)
     drops_only = notes_for(2, 0)
@@ -1195,14 +1241,14 @@ def test_the_zero_drop_note_does_not_claim_a_clean_bill_on_the_m2_lane():
     assert "product operator pass" in m2_zero
     assert "not an EXTRACTOR-side drop" not in m2_zero, (
         "the m2 lane cannot support the inference: its operator pass never runs")
-    assert "three seams" not in m2_zero, (
+    assert "two seams" not in m2_zero, (
         "the llm-lane blind spots do not bound a lane that never ran the pass")
     # two-sided: the llm lane still makes the claim it can make, and the four
     # count combinations are unchanged there.
     llm_zero = notes_for(0, 0, "llm")
     assert "not an EXTRACTOR-side drop" in llm_zero
     assert "NOT MEASURED" not in llm_zero
-    assert "three seams" in llm_zero
+    assert "two seams" in llm_zero
 
 
 def test_recall_leg_success_warning_is_not_a_refusal():

@@ -7330,12 +7330,59 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
     # survivor, the union it must carry, and the losing candidate's provenance.
     merges: list[dict] = []
     # #2552 (op_04, F2): point-level supersede refs collected from the
-    # embed points (a NEW point whose ``supersedes`` names an EARLIER-session
+    # embed points (a point whose ``supersedes`` names an EARLIER-session
     # claim surfaced by the S3 search) — resolved after the loop against the
     # search index (cross-session by construction) into pt_ supersession
     # records, deduped against the UPDATE-fold records below.
+    #
+    # #9906: EVERY outcome of the consolidation ladder collects here, not only
+    # the two that emit a payload point. The ref belongs to the CLAIM ("this
+    # replaces that earlier decision"), not to the emission — see
+    # ``_collect_point_supersede_ref`` immediately below for why, and for the
+    # survivor id each non-emitting outcome hands it.
     point_supersede_refs: list[dict] = []
     pt_record_pairs: set[tuple[str, str]] = set()
+
+    def _collect_point_supersede_ref(
+            entry: dict, *, survivor_id: str, fold: str | None) -> None:
+        """Collect ``entry['supersedes']`` for the node that will CARRY it.
+
+        ⛔ ONE definition of "collect the ref", called by every outcome — that
+        is the whole fix. #2552 collected it *after* the consolidation
+        decision, so the three outcomes that emit no payload point `continue`d
+        past the collection site and the CORRECTS record was never built —
+        with **no warning line at all** (measured on #9906: a `supersedes`-carrying
+        point whose content duplicates a prior gives `stats.noops=1`,
+        `payload.points=0`, `supersessions=[]`, **`warnings=[]`**).
+
+        Why carrying is right rather than merely visible: folding is the
+        NORMAL case for a re-statement of a decision, and a fold resolves the
+        survivor id — so "the survivor replaces that earlier claim" is still
+        true and still expressible. A CORRECTS edge is the only carrier of a
+        cross-session reversal (ONTOLOGY §3.1/§3.6), and dropping it leaves
+        every "did this decision get superseded?" consumer unable to tell "no
+        reversal was asserted" from "a reversal was asserted and lost".
+
+        ``survivor_id``:
+          * NEW / REVISES — the emitted point's own id;
+          * NOOP / MERGE — the fold's surviving prior (``decision.prior_id``);
+          * an in-payload duplicate — the id the first occurrence resolved to.
+        ``fold`` names which of those it was (``None`` = the point was dropped
+        for want of content, so there is no node to carry the record): that
+        case is NAMED as a refusal, because a dropped ref must never read as a
+        clean zero on the operator receipt (#8503).
+        """
+        ref = str(entry.get("supersedes") or "").strip()
+        if not ref or ref in ("null", "None"):
+            return
+        if fold is None or not survivor_id:
+            warnings.append(
+                f"point supersedes={ref[:60]!r} dropped — its point emitted "
+                "no node to carry the CORRECTS record")
+            return
+        point_supersede_refs.append(
+            {"point_id": survivor_id, "ref": ref, "fold": fold})
+
     for p in embed_list.get("points", []) or []:
         if not isinstance(p, dict):
             warnings.append(f"non-dict point entry {p!r} skipped")
@@ -7349,6 +7396,10 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
         _raw_content = str(p.get("content", "")).strip()
         content = _raw_content[:_MAX_CONTENT]
         if not content:
+            # #9906: a ref whose point was dropped has no node to carry it —
+            # named, never silent (the drop is a supersede refusal the receipt
+            # must be able to see).
+            _collect_point_supersede_ref(p, survivor_id="", fold=None)
             continue
         pkind = str(p.get("pointKind", "")).strip() or "statement"
         if pkind.lower() == UNCLASSIFIED:
@@ -7362,6 +7413,12 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
             pkind = _POINT_FALLBACK["kind"]
         n = _norm(content)
         if n in point_ids:
+            # #9906: an in-payload duplicate emits no payload point either, and
+            # the id it folds onto is already resolved — so it carries the ref
+            # there. Same reasoning as the NOOP/MERGE arms below; leaving it
+            # out would keep one silent drop of the class this fix closes.
+            _collect_point_supersede_ref(p, survivor_id=point_ids[n],
+                                        fold="duplicate")
             continue
         # E1 (#1533) — the point's `when` slot (used by the E5 later-date
         # guard, CG-2): validate here, once, before the match passes.
@@ -7426,6 +7483,7 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
                 "searched_for": f"point '{content[:60]}'", "found": True,
                 "note": f"duplicate of existing {pid} ({decision.reason}) — "
                         "folded (duplicates stamp, no new point)"})
+            _collect_point_supersede_ref(p, survivor_id=pid, fold="NOOP")
             continue
         if decision.decision == "MERGE":
             # #5006 (D12/O4) — the FUSION, executed at S3 after the gate.
@@ -7453,6 +7511,7 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
                 "searched_for": f"point '{content[:60]}'", "found": True,
                 "note": f"near-duplicate merge into existing {pid} "
                         "(attachments unioned, no new point)"})
+            _collect_point_supersede_ref(p, survivor_id=pid, fold="MERGE")
             continue
         if decision.decision == "UPDATE":
             reason = "REVISES"  # supersession: new content corrects the old
@@ -7476,14 +7535,14 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
                 "searched_for": f"point '{content[:60]}'", "found": False,
                 "note": "no match — created"})
         # #2552 (op_04): collect an explicit point-level ``supersedes`` ref
-        # (the DECISION-REVERSAL channel — a NEW decision/claim replaces a
-        # prior-session one). Resolution runs after the loop against the S3
-        # search, so only points actually emitted here (NEW or REVISES —
-        # NOOPs continued above) can carry a record; a self-referential or
-        # unemitted ref never reaches the record builder.
-        supersede_ref = str(p.get("supersedes") or "").strip()
-        if supersede_ref and supersede_ref not in ("null", "None"):
-            point_supersede_refs.append({"point_id": pid, "ref": supersede_ref})
+        # (the DECISION-REVERSAL channel — a decision/claim replaces a
+        # prior-session one) for the point emitted here. Resolution runs after
+        # the loop against the S3 search.
+        # ⛔ #9906: this is no longer the ONLY collection site — the NOOP,
+        # MERGE and in-payload-duplicate outcomes above collect too, carrying
+        # the ref onto the id their fold resolved. `_collect_point_supersede_ref`
+        # is the single definition all four call.
+        _collect_point_supersede_ref(p, survivor_id=pid, fold=reason)
         point_ids[n] = pid
         turn_idx = _resolve_source_turn(p, edus, warnings=warnings)
         pt_entry = {
@@ -7538,6 +7597,11 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
     for sr in point_supersede_refs:
         pid = sr["point_id"]
         ref = sr["ref"]
+        fold = str(sr.get("fold") or "")
+        # #9906: a ref carried across a fold names a SURVIVING point, not one
+        # this payload created — the record is the same record (the survivor
+        # replaces the earlier claim), so only the provenance wording differs.
+        folded = fold in ("NOOP", "MERGE", "duplicate")
         prior = _resolve_point_supersede(ref, search, warnings=warnings)
         if prior is None:
             continue
@@ -7549,14 +7613,22 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
         if (old_id, pid) in pt_record_pairs:
             continue
         pt_record_pairs.add((old_id, pid))
+        evidence = ("point-level supersede ref (claim/decision "
+                    "reversal; cross-session correction)")
+        if folded:
+            # The claim that asserted the reversal folded onto an existing node
+            # rather than minting one, so the record rides the survivor — named
+            # here so a receipt can tell the two carriers apart.
+            evidence += f"; carried across a {fold} fold onto {pid}"
         supersessions.append({
             "superseded": old_id, "supersedes_by": pid,
-            "evidence": "point-level supersede ref (claim/decision "
-                        "reversal; cross-session correction)"})
+            "evidence": evidence})
         link_before_create.append({
             "searched_for": f"point '{str(prior.get('content') or '')[:60]}'",
             "found": True,
-            "note": f"superseded by new point {pid} — CORRECTS fold"})
+            "note": (f"superseded by surviving point {pid} (the new claim "
+                     f"folded as {fold}) — CORRECTS fold" if folded else
+                     f"superseded by new point {pid} — CORRECTS fold")})
 
     # ── operators (dependency order 4) — TWO-PASS ─────────────────────────
     # Pass 1 emits IMPL/NAND and collects the emitted edges; pass 2 processes
