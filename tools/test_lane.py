@@ -2154,7 +2154,8 @@ def _container_in_use(name: str) -> bool | None:
 #:
 #: The uncovered class, stated as a MECHANISM rather than an instance: a container
 #: that (a) no process on this host names, (b) no `start()` has run against for
-#: the grace, and (c) has no client attached — is reaped by design. A `run`
+#: the grace, and (c) has no client attached within `ACTIVE_CLIENT_IDLE_S` — is
+#: reaped by design. A `run`
 #: invoked from OUTSIDE its worktree for longer than the grace is one instance of
 #: it.
 #:
@@ -2208,7 +2209,14 @@ def _ancestors(path: str):
     cur = path.rstrip("/")
     while cur and cur != "/":
         yield cur
-        cur = os.path.dirname(cur)
+        nxt = os.path.dirname(cur)
+        if nxt == cur:
+            # POSIX keeps a leading double slash: `os.path.dirname("//") == "//"`,
+            # so a path like `//a` (a cmdline token, or a `$PREFIX/$rel` with
+            # PREFIX="/") would spin forever — and `reap_orphans` runs on EVERY
+            # lane start, so that is a hang for every lane on the box.
+            break
+        cur = nxt
 
 
 def _unused_gap(name: str) -> float | None:

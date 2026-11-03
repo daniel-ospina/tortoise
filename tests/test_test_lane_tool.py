@@ -844,6 +844,60 @@ def test_arm_3_re_checks_liveness_at_the_moment_of_action(tmp_path, monkeypatch)
     assert "became LIVE" in "\n".join(out), out
 
 
+def test_arm_3_spares_a_container_by_its_CLIENT_at_the_moment_of_action(
+        tmp_path, monkeypatch):
+    """Review cycle 6, P1: the sibling test patches `_container_in_use` to a
+    constant, so it says nothing about the client clause — setting
+    `now_busy = False` left the suite green.
+
+    The clause is load-bearing, not redundant: a client exec'd from a cwd that is
+    NOT the worktree (e.g. `docker exec` from `/tmp`, whose cmdline carries the
+    container NAME and no worktree path) is invisible to `_live_lane_paths` and is
+    spared only by the client probe.
+
+    Mutation: set `now_busy = False` at the moment of action and this fails."""
+    wt = tmp_path / ".worktrees" / "client-lane"
+    wt.mkdir(parents=True)
+    slug = tl.slug_for(wt)
+    removed: list = []
+    probes = {"n": 0}
+
+    def fake(*a, **k):
+        if a[0] == "ps":
+            return _R(0, f"fdb-lane-{slug}\trunning\n", "")
+        if a[0] == "rm":
+            removed.append(a[1:])
+        return _R(0, "", "")
+
+    def in_use(_n):
+        probes["n"] += 1
+        return probes["n"] > 1      # quiet at the sweep, a client attaches after
+
+    monkeypatch.setattr(tl, "_docker", fake)
+    monkeypatch.setattr(tl, "lane_name", lambda: "fdb-lane-mine")
+    monkeypatch.setattr(tl, "_worktree_slugs", lambda: {})
+    monkeypatch.setattr(tl, "_live_lane_paths", lambda: set())
+    monkeypatch.setattr(tl, "_container_in_use", in_use)
+    monkeypatch.setattr(tl, "container_state", lambda _n: "running")
+    monkeypatch.setattr(tl, "_started_epoch", lambda _n: time.time() - 40 * 3600)
+    monkeypatch.setattr(tl, "_unused_gap", lambda _n: 40.0)
+    out = tl.reap_orphans()
+    assert removed == [], (removed, out)
+    assert "became LIVE" in "\n".join(out), out
+
+
+def test_ancestors_terminates_on_a_double_slash_path():
+    """Review cycle 6, P2: `os.path.dirname("//") == "//"` (POSIX keeps a
+    leading double slash), so a path like `//a` — reachable as a cmdline token,
+    or as a concatenated prefix plus relative path where the prefix is a single
+    slash — spun forever. `reap_orphans` runs on EVERY lane start, so that is a
+    hang for every lane on the box.
+
+    Mutation: drop the `nxt == cur` break and this test never returns."""
+    for path in ("//a", "//", "/", "", "a", "/home//x/.worktrees/y"):
+        assert isinstance(list(tl._ancestors(path)), list)
+
+
 def test_a_STOPPED_ownerless_orphan_is_reclaimed(monkeypatch):
     """The population that exhausts the port range: a STOPPED container nobody
     owns keeps its published port reserved (measured: 67 of 110 ports held by
