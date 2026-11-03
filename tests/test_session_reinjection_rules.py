@@ -1217,3 +1217,62 @@ def test_reader_window_displacement_window_zero_is_a_clean_zero():
     assert reader_window_displacement(pool, merged, window=0) == zero
     # NEGATIVE is the case the guard exists for.
     assert reader_window_displacement(pool, merged, window=-1) == zero
+
+
+def test_the_c4_arm_comment_does_not_promise_reader_additivity():
+    """#10632 review ISSUE 1: the C4 arm's own comment block said
+    *"additive, so an injected item can never evict a base item"* — true of
+    the pool LIST and false of the READER, which consumes a PREFIX. That is
+    the exact sentence the PR names as "why the crowding stayed invisible to
+    the census", and it survived verbatim ~215 lines above the census that
+    disproves it, in the file this PR modifies.
+
+    Non-vacuity: pre-fix ``"can never evict a base item"`` is present in
+    this source, so the first assertion reds; the other two pin that the
+    qualification names the reader limb and points at the census.
+
+    Reads the text rather than importing: the claim IS a comment, and
+    importing the eval lane's ``retrieve`` would drag its graph deps into
+    this hermetic rules file.
+    """
+    src = (ROOT / "tools" / "longmem_eval" / "retrieve.py").read_text(
+        encoding="utf-8")
+    assert "can never evict a base item" not in src, (
+        "the falsified pool-additivity claim must be QUALIFIED, not repeated")
+    flat = " ".join(src.split())
+    assert "NOT reader-additivity (#10540)" in flat, (
+        "the C4 arm comment must say pool-additivity is not reader-additivity")
+    assert "reader_window_displacement" in flat, (
+        "the arm comment must point at the census that measures the gap")
+
+
+def test_reader_window_displacement_docstring_scopes_the_bound_to_the_no_rerank_arm():
+    """#10632 review ISSUE 2: the residual list concluded *"inside the window
+    is an UPPER BOUND on the delivered surface"*. That holds only with R6
+    rerank OFF.
+
+    ``tools/longmem_eval/retrieve.py`` re-SELECTS the pool from the WHOLE
+    candidate list when the reranker applies (``pool = selected``, ``<=
+    top_k``) and C6 ``prefer_latest_order`` reorders the final pool after
+    that — both AFTER this census. A two-stage retrieve→rerank pipeline
+    picks ``top_n`` from the full candidate list, not a prefix of it, so
+    with rerank ON the census window bounds neither the upper nor the lower
+    side of what the reader got, and a lane reading the bound as
+    unconditional under-reads ``injected_in_window`` and ``base_displaced``.
+
+    Non-vacuity: pre-fix the docstring names NEITHER mover (neither
+    ``rerank`` nor ``prefer_latest_order`` occurs in it) and states the
+    bound unconditionally, so every assertion here reds.
+    """
+    flat = " ".join((reader_window_displacement.__doc__ or "").split())
+    assert "rerank" in flat.lower(), (
+        "the residual list must name the R6 rerank arm it is scoped away from")
+    assert "prefer_latest_order" in flat, (
+        "the residual list must name the C6 reorder it is scoped away from")
+    idx_bound = flat.find("UPPER BOUND")
+    assert idx_bound > 0, "the residual must still state the bound it qualifies"
+    assert "with rerank OFF" in flat[:idx_bound], (
+        "the UPPER BOUND sentence must be INTRODUCED by its scope, not "
+        "followed by a retraction")
+    assert "not a bound at all" in flat, (
+        "the rerank-ON case must state that the window is no bound at all")

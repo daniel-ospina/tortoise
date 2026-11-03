@@ -586,7 +586,7 @@ def reader_window_displacement(
     ``injected_merged`` reports a healthy 10. With no injection the same
     measurement is 0, so the number is attributable to the injection.
 
-    Three residuals, stated so the number is not read as more than it is:
+    Four residuals, stated so the number is not read as more than it is:
 
     * ``base_pool`` is the RAW pre-merge list while ``merged`` has been
       through ``guard_and_recap_pool``, so ``base_displaced`` also counts
@@ -607,13 +607,31 @@ def reader_window_displacement(
       AFTER this census and before ``_assemble_context``), so with
       ``TORTOISE_LME_EVIDENCE_BOOST`` on — the re-validation run's own
       default — the census window is the PRE-boost order and the reader's
-      is the post-boost one. So "inside the window" is an UPPER BOUND on
-      the delivered surface, not the surface itself. This module already
+      is the post-boost one.
+    * TWO LATER POOL MOVERS IN THE SAME LANE ARE NOT IN THIS COUNT AT ALL
+      (``tools/longmem_eval/retrieve.py``). R6 rerank re-SELECTS from the
+      whole pool (``pool = selected``, ``<= top_k``; on its degrade path
+      ``pool = pool[:top_k]``) and C6 ``prefer_latest_order`` reorders the
+      final pool. ``prefer_latest_order`` is membership-preserving, but
+      the reranker's move is a fresh SELECTION over every candidate — a
+      two-stage retrieve→rerank pipeline picks its ``top_n`` from the
+      FULL candidate list, not from a prefix of it (Cohere's Rerank API:
+      ``rerank(documents=<all candidates>, top_n=k)`` returns indices into
+      that whole list), and the lane's own ``rerank_hits`` is called on
+      the entire ``pool``. So with rerank ON the delivered surface may
+      include base hits AND injected items from BELOW this window while
+      excluding ones inside it.
+      ⇒ The bound below holds for the NO-RERANK arm ONLY. With R6 active,
+      ``injected_in_window``/``base_displaced`` describe ``merged[:40]``
+      and are not a bound — upper or lower — on what the reader got.
+    * So, with rerank OFF (the fail-safe default), "inside the window" is
+      an UPPER BOUND on the delivered surface, not the surface itself;
+      with rerank ON it is not a bound at all. This module already
       states the same residual class for ``seeded_sessions`` (*"matches the
       reader MODULO the budget caps"*); a reuse at a different window, or
-      alongside the packaging or boost arms, needs the same ``admitted=``/
-      counterfactual treatment before the number is read as delivered
-      evidence.
+      alongside the packaging, boost or rerank arms, needs the same
+      ``admitted=``/counterfactual treatment before the number is read as
+      delivered evidence.
 
     ⛔ The TOP-5 is NOT where this happens, and a probe that counts base
     hits at final rank ``>= 5`` says otherwise: it reports 35 for that shape
