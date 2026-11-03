@@ -2403,10 +2403,16 @@ def retrieve_for_question(
     # ``eff_item_cap`` there would census items the reader never received and
     # over-report crowding — injected items AND displaced base items alike —
     # on exactly the arm a pool-depth sweep reads. ``min(cap, top_k)`` is the
-    # tightest window that arm admits: nothing below the cut can reach the
-    # reader, so the count is a CEILING there, while the skip mechanism inside
-    # the prefix still over-counts it (never under-counts — the cut is below
-    # the reader's walk, not inside it). The R6 rerank arm below cannot be
+    # tightest window that arm admits. What it does NOT do is make the count
+    # incapable of under-counting: that holds only while
+    # ``top_k <= eff_item_cap``, because then the cut and the window coincide
+    # and no candidate below the window exists to be admitted. ``--top-k`` and
+    # ``--context-items`` are independent flags (``run.py``), so with
+    # ``top_k > eff_item_cap`` the cut sits ABOVE the window,
+    # ``assemble_context`` walks past ``eff_item_cap`` whenever a skip frees a
+    # slot, and a hit below the window IS delivered without being counted —
+    # the same under-count as on every other arm. The skip mechanism inside
+    # the prefix over-counts it on all arms. The R6 rerank arm below cannot be
     # narrowed this way: it re-SELECTS from the whole pool instead of cutting
     # a prefix. ``top_k`` (not ``effective_top_k``) is the value the
     # truncation site reads, and the census excludes TR questions anyway,

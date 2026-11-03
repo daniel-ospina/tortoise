@@ -624,9 +624,17 @@ def reader_window_displacement(
       ⇒ The bound below holds for the NO-RERANK arm ONLY. With R6 active,
       ``injected_in_window``/``base_displaced`` describe ``merged[:40]``
       and are not a bound — upper or lower — on what the reader got.
-    * So, with rerank OFF (the fail-safe default), "inside the window" is
-      an UPPER BOUND on the delivered surface, not the surface itself;
-      with rerank ON it is not a bound at all. This module already
+    * So the count is not a bound on the delivered surface in EITHER
+      direction, and the skip semantics above are why in both: a
+      claim-text-less (or cap-refused) hit INSIDE the window is counted and
+      never delivered, so the number can OVER-state what the reader got —
+      while a skipped hit FREES its slot, so ``assemble_context`` continues
+      PAST the raw prefix and admits later hits up to its item bound, and
+      injected items BELOW the window can therefore be delivered without
+      ever being counted. That under-count is the direction this key exists
+      for. It is a WINDOW CENSUS, not a ceiling and not a floor. With rerank
+      ON it is not a bound at all, for the R6/C6 reasons just stated. This
+      module already
       states the same residual class for ``seeded_sessions`` (*"matches the
       reader MODULO the budget caps"*); a reuse at a different window, or
       alongside the packaging, boost or rerank arms, needs the same

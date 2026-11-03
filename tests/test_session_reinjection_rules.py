@@ -1246,33 +1246,74 @@ def test_the_c4_arm_comment_does_not_promise_reader_additivity():
         "the arm comment must point at the census that measures the gap")
 
 
-def test_reader_window_displacement_docstring_scopes_the_bound_to_the_no_rerank_arm():
-    """#10632 review ISSUE 2: the residual list concluded *"inside the window
-    is an UPPER BOUND on the delivered surface"*. That holds only with R6
-    rerank OFF.
+def test_reader_window_displacement_docstring_never_claims_a_bound():
+    """#10632 review ISSUE 2 / F1: the residual list concluded *"inside the
+    window is an UPPER BOUND on the delivered surface"*.
+
+    That is false on every arm, by the mechanism the same residual list
+    states two bullets above: ``assemble_context`` admits a SKIP-FILTERED
+    subsequence — a hit that carries no claim text, or that a token/byte cap
+    refuses, is skipped WITHOUT spending an item slot
+    (``tortoise/retrieval.py``: ``for h in pool: if len(selected) >=
+    item_bound: break`` … ``continue``), so later hits are admitted past the
+    raw prefix. An injected item below the window can therefore be
+    DELIVERED while the census never counts it — the under-count, which is
+    the direction this key exists for.
 
     ``tools/longmem_eval/retrieve.py`` re-SELECTS the pool from the WHOLE
     candidate list when the reranker applies (``pool = selected``, ``<=
     top_k``) and C6 ``prefer_latest_order`` reorders the final pool after
-    that — both AFTER this census. A two-stage retrieve→rerank pipeline
-    picks ``top_n`` from the full candidate list, not a prefix of it, so
-    with rerank ON the census window bounds neither the upper nor the lower
-    side of what the reader got, and a lane reading the bound as
-    unconditional under-reads ``injected_in_window`` and ``base_displaced``.
+    that — both AFTER this census — so with rerank ON the window bounds
+    neither side. Both movers must stay named; neither may be replaced by a
+    claim that the no-rerank arm is a bound.
 
-    Non-vacuity: pre-fix the docstring names NEITHER mover (neither
-    ``rerank`` nor ``prefer_latest_order`` occurs in it) and states the
-    bound unconditionally, so every assertion here reds.
+    Non-vacuity: pre-fix the docstring says "an UPPER BOUND on the delivered
+    surface" in the no-rerank sentence, so the first assertion reds (and the
+    under-count reason it now gives is absent). The R6/C6 assertions pin
+    what must SURVIVE the correction.
     """
     flat = " ".join((reader_window_displacement.__doc__ or "").split())
+    assert "upper bound" not in flat.lower(), (
+        "the window count is not a bound on the delivered surface: a "
+        "skipped hit frees its slot, so the reader admits later hits past "
+        "the raw prefix")
+    assert "not a bound on the delivered surface in EITHER direction" in flat, (
+        "the residual must say the count is no bound in either direction")
+    assert "under-count" in flat.lower(), (
+        "the residual must name the UNDER-count the skip mechanism causes — "
+        "it is the direction this key exists for")
     assert "rerank" in flat.lower(), (
         "the residual list must name the R6 rerank arm it is scoped away from")
     assert "prefer_latest_order" in flat, (
         "the residual list must name the C6 reorder it is scoped away from")
-    idx_bound = flat.find("UPPER BOUND")
-    assert idx_bound > 0, "the residual must still state the bound it qualifies"
-    assert "with rerank OFF" in flat[:idx_bound], (
-        "the UPPER BOUND sentence must be INTRODUCED by its scope, not "
-        "followed by a retraction")
     assert "not a bound at all" in flat, (
         "the rerank-ON case must state that the window is no bound at all")
+
+
+def test_the_pool_only_window_is_not_claimed_as_a_hard_ceiling():
+    """#10632 review P3: the pool-only arm's comment said the narrowed window
+    makes the count ``never under-counts — the cut is below the reader's walk,
+    not inside it``.
+
+    That premise is only "the cut is below the WINDOW". ``--top-k`` and
+    ``--context-items`` are independent CLI flags (``run.py``), so with
+    ``top_k > eff_item_cap`` the truncation cut (``pool[:top_k]``) sits ABOVE
+    the census window, ``assemble_context`` walks past ``eff_item_cap``
+    whenever a skip frees a slot, and an injected item below the window IS
+    delivered without being counted — the under-count the P3 names.
+
+    Non-vacuity: pre-fix the source says "never under-counts" and "the cut is
+    below the reader's walk", so the first assertion reds.
+    """
+    src = (ROOT / "tools" / "longmem_eval" / "retrieve.py").read_text(
+        encoding="utf-8")
+    flat = " ".join(src.split())
+    assert "never under-counts" not in flat, (
+        "the pool-only window cannot claim to never under-count: the cut is "
+        "above the window whenever top_k > eff_item_cap")
+    assert "top_k <= eff_item_cap" in flat, (
+        "the comment must name the condition the no-under-count claim holds "
+        "under")
+    assert "walks past ``eff_item_cap``" in flat, (
+        "the comment must say WHY it under-counts above that condition: the "
+        "reader's walk extends past the window")
