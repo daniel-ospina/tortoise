@@ -169,6 +169,44 @@ def test_the_pr_list_guard_refuses_a_scalar_payload(monkeypatch, tmp_path):
         assert ac.main(["--reviews-dir", str(tmp_path), "--out", str(tmp_path / "o.md")]) == 2, scalar
 
 
+def test_a_github_url_with_no_path_is_not_an_artifact():
+    """Cycle 10: `\S*` matched the empty path, so `https://github.com/#issuecomment-9` licensed
+    RESTORE from a pointer that names no repo, no PR and no artifact."""
+    for empty in ("https://github.com/#issuecomment-9", "https://github.com/.#issuecomment-9"):
+        r = ac.Record(path=Path("/x.json"), head_sha=LIVE, mint="fresh", verdict="clean", evidence=empty)
+        assert r.real_evidence is False, empty
+        assert ac.classify(LIVE, r, *RED)[0] != ac.RESTORE, empty
+
+
+def test_a_truncated_population_is_stated_in_the_report(monkeypatch, tmp_path):
+    """Cycle 10: `--limit` silently censused the first N PRs and reported rc 0 / "one row per open
+    PR" — an absence-as-verdict at population scale."""
+
+    def gh(args):
+        if args[0] == "pr":
+            return [{"number": n, "headRefOid": LIVE, "headRefName": "b", "title": "t"} for n in range(1, 4)]
+        return {"check_runs": []}
+
+    monkeypatch.setattr(ac, "gh_json", gh)
+    out = tmp_path / "o.md"
+    assert ac.main(["--reviews-dir", str(tmp_path), "--no-gate", "--limit", "2", "--out", str(out)]) == 0
+    text = out.read_text()
+    assert "TRUNCATED" in text and "MORE than 2" in text, text
+    assert text.count("| #") == 2, text
+
+
+def test_a_population_that_fits_is_not_labelled_truncated(monkeypatch, tmp_path):
+    def gh(args):
+        if args[0] == "pr":
+            return [{"number": 1, "headRefOid": LIVE, "headRefName": "b", "title": "t"}]
+        return {"check_runs": []}
+
+    monkeypatch.setattr(ac, "gh_json", gh)
+    out = tmp_path / "o.md"
+    assert ac.main(["--reviews-dir", str(tmp_path), "--no-gate", "--limit", "5", "--out", str(out)]) == 0
+    assert "TRUNCATED" not in out.read_text()
+
+
 def test_missing_record_is_none(tmp_path):
     assert ac.load_record(tmp_path, "daniel-ospina", "tortoise", 11) is None
 

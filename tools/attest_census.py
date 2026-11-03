@@ -50,8 +50,8 @@ the rollup of a green commit can carry old `FAILURE` contexts; and the newest
 attempt per check NAME is only resolvable by check-run `id`. So the gate state is
 read the way AGENTS.md §"Reading verification state" says to read it — newest
 attempt by id, over `filter=all` — scoped with `check_name=` so the payload stays
-small enough for a rate-limited box. `--no-gate` keeps the registry half usable
-offline.
+small enough for a rate-limited box. `--no-gate` drops only the PER-PR check-run reads (the
+expensive half); `gh pr list` is still required, so a fully offline run produces no report.
 
 USAGE
 -----
@@ -103,7 +103,7 @@ _EVIDENCE_REF = re.compile(
     # ⛔ github.com ONLY: the docstring promises a GitHub artifact, and cycle 9 measured
     # `https://example.com/#issuecomment-9` (and bitbucket/localhost) licensing RESTORE — a pointer
     # whose SHAPE was checked but which resolves to no artifact on any repo.
-    r"|^https?://(?:www\.)?github\.com/\S*#(?:issuecomment|discussion_r|pullrequestreview)[-]?\d+$"
+    r"|^https?://(?:www\.)?github\.com/[^#\s]+/[^#\s]+#(?:issuecomment|discussion_r|pullrequestreview)-\d+$"
 )
 
 RESTORE = "RESTORE"
@@ -390,7 +390,7 @@ def read_gate(repo: str, head: str) -> tuple[str, str]:
 # ── render ───────────────────────────────────────────────────────────────────
 
 
-def render(rows: list[Row], repo: str, generated_at: str) -> str:
+def render(rows: list[Row], repo: str, generated_at: str, truncated: bool = False, limit: int = 100) -> str:
     counts: dict[str, int] = {}
     for r in rows:
         counts[r.outcome] = counts.get(r.outcome, 0) + 1
@@ -400,6 +400,15 @@ def render(rows: list[Row], repo: str, generated_at: str) -> str:
     lines = [
         "# Attestation census — open PRs",
         "",
+    ]
+    if truncated:
+        lines += [
+            f"> ⛔ **TRUNCATED: the first {limit} of MORE than {limit} open PRs.** This report does NOT",
+            "> cover the whole population — PRs outside this window have no row here, and their absence",
+            "> is not a statement about them. Re-run with a larger `--limit`.",
+            "",
+        ]
+    lines += [
         f"Repo `{repo}` · generated {generated_at} by `tools/attest_census.py`.",
         "",
         "> ⚠️ **SNAPSHOT, NOT A LIVE VERDICT.** This file is machine-generated from *one box's*",
@@ -490,7 +499,7 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         prs = gh_json(
-            ["pr", "list", "--repo", args.repo, "--state", "open", "--limit", str(args.limit),
+            ["pr", "list", "--repo", args.repo, "--state", "open", "--limit", str(args.limit + 1),
              "--json", "number,headRefOid,headRefName,title"]
         )
     except RuntimeError as exc:
@@ -508,6 +517,10 @@ def main(argv: list[str] | None = None) -> int:
     except RegistryUnreadable as exc:
         print(f"attest_census: {exc} — refusing to report absence from an unreadable registry", file=sys.stderr)
         return 2
+
+    truncated = len(prs) > args.limit
+    if truncated:
+        prs = prs[: args.limit]
 
     rows: list[Row] = []
     unreadable = 0
@@ -600,7 +613,7 @@ def main(argv: list[str] | None = None) -> int:
         }, indent=2))
         return 0 if unreadable == 0 else 2
 
-    text = render(rows, args.repo, generated_at)
+    text = render(rows, args.repo, generated_at, truncated=truncated, limit=args.limit)
     try:
         out = Path(args.out).expanduser()
     except RuntimeError as exc:  # symmetric with --reviews-dir: an unresolvable ~ is rc 2, not rc 1
