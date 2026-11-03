@@ -1910,6 +1910,23 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # above. Pinned by
              # tests/test_ci_selection.py::test_record_schema_pin_runs_on_migration_or_doc_change.
              "docs/00_index.md",
+             # #10704 review P2: the census doc those pins READ. Every claim in
+             # `tests/test_8447_truncation_marker.py::TestTheCensusNamesItsEvidenceHome`
+             # is bound to `docs/architecture/BOUNDED-OPERATION-CONTRACT.md` (§2's
+             # citation form and cited symbols, §2a's parked-set summary, §5's
+             # mutation-evidence home, the hosted `/v1/points` MARKS row). That path
+             # is under `docs/` (a NON_PYTHON_PREFIXES entry) and matches no
+             # SOURCE_PATTERNS row, so a census-only edit filtered to
+             # `changed == []` and took the docs-only early return: the pins that
+             # exist to catch exactly that drift never ran, and the `core`
+             # registration cannot fix it alone (a surface's test_files only run
+             # once the surface is ALREADY selected). Same #1349/#3332/#3616
+             # silent-drop class as the entries above. Measured:
+             # `_sel(["docs/architecture/BOUNDED-OPERATION-CONTRACT.md"])` pre-fix
+             # -> surfaces=[], no 8447 pin; post-fix -> ["core"] with
+             # `test_8447_truncation_marker.py`. Pinned by
+             # tests/test_ci_selection.py::test_the_8447_census_pins_run_on_a_census_doc_only_diff.
+             "docs/architecture/BOUNDED-OPERATION-CONTRACT.md",
              # RETIRED 2026-10-19: the orchestrator harness (and therefore
              # tests/test_orchestrator_harness.py) moved to
              # agent-infra/scripts/orchestrator-harness/. This repo keeps only a pointer

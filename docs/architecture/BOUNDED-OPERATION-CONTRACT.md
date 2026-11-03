@@ -120,11 +120,11 @@ failure mode this document exists to prevent is exactly "we audited the instance
 
 ### 2a. Why the remaining SILENT surfaces are parked, not fixed
 
-All six return a **bare list** *on the arm or the route the census measured*, and each sits behind a
-published surface, so there is no non-breaking place to put an incompleteness marker. The qualifier is
+All six return a **bare list** *on the arm or the route the census measured* — the qualifier is
 load-bearing for one of the six: `tortoise_query` is censused here on its **`text=` arm**, which returns
-`tortoise_fts_query`'s bare list — its *structural* arm (`text=None`) is a different surface and does
-not always return a list (see the ⚠️ above). The parked set is the arm, not the whole tool:
+`tortoise_fts_query`'s bare list, while its *structural* arm (`text=None`) is a different surface that
+does not always return a list (see the ⚠️ above), so the parked set is the arm, not the whole tool. Each
+sits behind a published surface, so there is no non-breaking place to put an incompleteness marker:
 
 - adding a key to *each row* is not a marker (a caller counting rows cannot see it);
 - returning a wrapper object (`{"items": …, "truncated": …}`) changes the declared return type, and

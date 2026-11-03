@@ -2274,6 +2274,42 @@ def test_an_already_classified_non_api_module_still_runs_the_identity_enumeratio
     )
 
 
+def test_the_8447_census_pins_run_on_a_census_doc_only_diff():
+    """#10704 review P2: a census-doc-only edit must run the pins that read it.
+
+    `tests/test_8447_truncation_marker.py::TestTheCensusNamesItsEvidenceHome`
+    binds claims to `docs/architecture/BOUNDED-OPERATION-CONTRACT.md` (§2's
+    citation form, §2a's parked-set summary, §5's mutation-evidence home, the
+    hosted `/v1/points` MARKS row) and, since the same commit, to the
+    `docs/00_index.md` row that routes a reader into that census. `docs/` is in
+    NON_PYTHON_PREFIXES and matches no SOURCE_PATTERNS row, so before the
+    `CORE_ALSO` entries a doc-only edit selected `surfaces=[]` and took the
+    docs-only early return — the pins never ran on the artifact they guard, so
+    the very regression the last commit fixes (an over-claiming summary, a
+    re-staling coordinate in the front door) could be restored green. Measured
+    pre-fix: `_sel(["docs/architecture/BOUNDED-OPERATION-CONTRACT.md"])` ->
+    `surfaces=[]`, 8447 pin ABSENT. Non-vacuity: removing either `CORE_ALSO`
+    entry fails its arm below (`surfaces == []` for the doc path).
+    """
+    root = Path(__file__).resolve().parents[1]
+    for changed in (
+        "docs/architecture/BOUNDED-OPERATION-CONTRACT.md",
+        "docs/00_index.md",
+    ):
+        assert (root / changed).exists(), f"the census artifact is gone: {changed}"
+        r = _sel([changed])
+        assert r["full"] is False, (changed, r)
+        assert r["surfaces"] == ["core"], (
+            f"{changed} selects {r['surfaces']} — the census pins are registered "
+            "on `core`, so a census-only edit runs them nowhere"
+        )
+        assert "test_8447_truncation_marker.py" in r["test_files"], (
+            f"a census-only edit to {changed} does not run "
+            "tests/test_8447_truncation_marker.py, so its pins cannot fire on "
+            "the change they bind (#10704)"
+        )
+
+
 def test_the_consent_bridge_guard_runs_on_its_docs_records_too():
     """#3524: the guard's two `docs/` subjects must select it on a docs-only diff.
 
