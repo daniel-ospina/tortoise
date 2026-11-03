@@ -193,12 +193,12 @@ private-beta users, after the storage architecture + extractor + MCP deployments
 | recorded decision | what it forbids |
 |---|---|
 | owner, 2026-08-09 — *"NO capture caps. Tiers are feature baselines; usage is metered separately"* | refusing a capture on a consumption meter |
-| owner, 2026-09-22 — tiers price features, **never refusal** | a hard ceiling that refuses on a consumption dimension |
+| owner, 2026-09-22 (`#4815`) — **paid** tiers price features, **never refusal** | a hard ceiling that refuses a **paying** customer's usage on a consumption dimension. `#4815` states its own scope verbatim: *"The free and anon tiers are **not** covered by this ruling and keep `overage: false` (refuse at the cap)"* |
 | owner, 2026-09-26 (`#4495`) — *"Exceeding the storage allowance is **PURCHASED OVERAGE, not refusal**"*, via **prepaid credits** | postpaid auto-billing and a refusal at the allowance edge |
 | `#4010` — sessions unlimited at every tier; `#3853` — no retention window | any bound that shrinks what a customer may keep, however it is denominated |
 
-⇒ **Both billable dimensions are soft: crossing the allowance never refuses the customer's data. The only
-behaviours at the boundary are the three below, and each has a different owner.**
+⇒ **On every tier with overage on, both billable dimensions are soft: crossing the allowance never refuses the
+customer's data.** The only behaviours at the boundary are the three below, and each has a different owner.
 
 | at the boundary | behaviour | who it protects | what the customer sees |
 |---|---|---|---|
@@ -213,9 +213,19 @@ classified as *safety*, not *billing*, precisely so that adding one is never mis
 never-refusal ruling. **A per-tenant rate is not a consumption cap**, and this document does not raise or lower
 either existing number.
 
+**The one carve-out is `free` and `anon`, and it is recorded, not assumed.** `#4815`'s ruling is scoped to paid
+tiers, and it keeps the two unpaid tiers at `overage: false` — which, on `main` today, is a **refusal at the cap**
+(`max_graph_nodes`, enforced at `tortoise/billing.py:1178`; §4's `STORAGE overage` / `EXTRACTION overage` cells say
+`none` for exactly this reason). This document neither reverses that carve-out nor relies on it: the three
+behaviours above describe a tier whose allowance can be **exceeded**; a `free`/`anon` tenant's allowance is instead
+**reached and refused**, which is what `product/pricing.json` (`owner_confirmed 2026-08-07`) still says and what
+`#4815` explicitly preserves. Whether the unpaid tiers keep a refusal once the two new dimensions are enforced is
+the owner's call in the measurement pass (§4), and until he rules it stays as recorded.
+
 ⛔ **There is no row in this table that refuses a capture, a commit, a point, or a read because of a consumed
-dimension.** If a future proposal needs one, it is a **reopen** of the 2026-09-22 and 2026-09-26 rulings, argued in
-front of the owner — never a lane's tuning decision.
+dimension on a tier with overage on.** The `free`/`anon` refusal-at-the-cap above is the single recorded exception,
+and it comes from `#4815`, not from this table. If a future proposal needs a *new* refusal, it is a **reopen** of the
+2026-09-22 and 2026-09-26 rulings, argued in front of the owner — never a lane's tuning decision.
 
 ---
 
@@ -274,7 +284,7 @@ This document **implements** these; it reverses none of them. Run first, before 
 | storage is billed in **MB/GB**, node unit retired | owner 2026-09-26, `STORAGE-ARCHITECTURE.md` §0 (carries `OVERRIDES:`) | **obeys** — §2 STORAGE dimension, bytes |
 | extraction usage is billed in **tokens**; overage **purchased with prepaid credits** | owner 2026-09-26, `EXTRACTOR-V4-ARCHITECTURE.md` §0 (carries `OVERRIDES:`) | **obeys** — §2 EXTRACTION dimension; §5 behaviour |
 | storage overage is **purchase, not refusal** | owner 2026-09-26, `STORAGE-ARCHITECTURE.md` §0 | **obeys** — §5 forbids a refusal at the allowance edge |
-| tiers price **features**, never refusal | owner 2026-09-22 | **obeys** — §5 |
+| tiers price **features**, never refusal | owner 2026-09-22, `#4815` (**paid** tiers; `free`/`anon` keep `overage: false`) | **obeys** — §5 carries the carve-out verbatim and adds no refusal of its own |
 | **no capture caps**; usage is metered separately | owner 2026-08-09 | **obeys** — no consumption cap on either session write lane |
 | **no** session cap; **no** retention window of any length | `#4010`, `#3853` | **obeys** — §7 |
 | prices are calibrated by the owner **after beta**, from measured consumption | owner 2026-09-26 | **obeys** — every number `TBD-BY-MEASUREMENT` |
