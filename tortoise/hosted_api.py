@@ -17,7 +17,6 @@ from __future__ import annotations
 import asyncio
 import atexit
 import contextlib
-import contextvars
 import functools
 import hmac
 import inspect
@@ -158,6 +157,8 @@ from tortoise.monitoring import (  # #2850/2953 liveness-readiness decouple
     PROBE_HARD_TIMEOUT,
     ControlPlaneOffloadError,
     HealthProbe,
+    _ContextNotReproduced,  # #10612: …and the callable provably did not run
+    confine_context,  # #10612: re-entry-proof contextvar confinement
     event_retention_interval,
     graph_offload_timeout_s,
     heartbeat_record,
@@ -191,7 +192,10 @@ from tortoise.projection import (
     is_missing_graph_error,  # #2163: absent-graph GRAPH.DELETE family == success
     journal_mint_write_ahead,  # #3390: journal the intended name BEFORE the CREATE
 )
-from tortoise.quota import with_limit_contact  # #5425 refusal seam
+from tortoise.quota import (  # #5425 refusal seam; #4051 count-scope split
+    TENANT_GRAPH_RESOURCES,
+    with_limit_contact,
+)
 
 # #9555 / R7: the ONE spelling of §9.1's narrative carrier type. Its record home
 # is `public.session_narrative` and it materialises no node (§9.1: "not in the
@@ -445,9 +449,16 @@ def _submit_off_loop(executor: ThreadPoolExecutor, fn, /, *args, **kwargs):
     Returns the CONCURRENT future. Callers needing a completion hook (the
     in-flight accounting below) attach it there: a loop-side callback would
     fire on cancellation while the worker is still parked.
+
+    #10612 P1: the copy is taken per INVOCATION by ``monitoring.confine_context``
+    rather than once as ``partial(copy_context().run, fn)``. The one-shot idiom
+    is a trap the moment the SAME wrapped callable is submitted twice — a
+    ``Context`` is single-entry, so the second run raises ``RuntimeError:
+    cannot enter context ... already entered``, and a bounded offload produces
+    exactly that overlap (a bound miss cancels the AWAIT, never the running
+    thread). See ``monitoring.confine_context`` for the mechanism.
     """
-    ctx = contextvars.copy_context()
-    return executor.submit(ctx.run, functools.partial(fn, *args, **kwargs))
+    return executor.submit(confine_context(fn), *args, **kwargs)
 
 
 async def _run_off_loop(executor: ThreadPoolExecutor, fn, /, *args, **kwargs):
@@ -7957,6 +7968,84 @@ def _key_limit_refusal(
         QuotaExceededError(message, resource="api_keys"))
 
 
+#: The resources whose count reads the TENANT GRAPH (`quota._count_resource`'s
+#: tenant-graph branch). For these the gate must count the graph the request
+#: actually opens; the registry-scoped resources (`api_keys`/`users`/`graphs`)
+#: are counted in the control plane and take no data SDK (#4051).
+#:
+#: ⛔ IMPORTED, never re-listed here. `quota.TENANT_GRAPH_RESOURCES` DERIVES the
+#: set (`_RESOURCE_LIMIT_KEYS` + the derived `documents` cap, minus
+#: `quota.REGISTRY_SCOPED_RESOURCES`), and `_count_resource` branches on that
+#: same declaration. A hand-copied literal equalled the truth only on the day it
+#: was written: add one gate-able resource to `_RESOURCE_LIMIT_KEYS` and this
+#: gate would return `None` for it — counting the org's DEFAULT graph while the
+#: write opens its own, which is exactly the #4051 defect — and nothing would
+#: red, because a literal cannot drift from a fact it does not share a source
+#: with (round-3 review, P2).
+_GRAPH_SCOPED_QUOTA_RESOURCES = TENANT_GRAPH_RESOURCES
+
+
+def _gate_sdk_for(org: dict, resource: str):
+    """The SDK whose graph the org-limit gate must COUNT — #4051.
+
+    `_data_graph_name` is *"the single value the ADMISSION GATE and the opener
+    share"*, but the gate did not use it: it called `enforce_org_limit(org,
+    resource)` with no SDK, so `quota._count_resource` fell back to its own
+    `_make_sdk(namespace=org_id)` — the org's **DEFAULT** graph, whatever graph
+    the request would actually open. `_data_sdk` writes into the graph-bound
+    key's CUSTOM `org_<tid>_<gid>` graph, so the gate counted a different graph
+    than it guarded: a custom graph already OVER its `max_points` still passed
+    the commit lane's points gate (measured: 5 points against a limit of 5, the
+    default graph empty, no refusal).
+
+    This mirrors the opener's TWO call forms rather than re-deriving one:
+    a graph-bound key gets `graph_name=_data_graph_name(org)` (the value
+    `_data_sdk` passes verbatim), and an org-wide key gets
+    `namespace=org["org_id"]` (exactly what `_data_sdk` builds). Mirroring the
+    FORMS matters as much as the graph: `_make_sdk` keys its embedded keepalive
+    anchor on `graph_name if graph_name is not None else namespace`
+    (`_FALLBACK_KEEPALIVE`), and that dict never evicts a HEALTHY anchor — it is
+    only replaced when `_anchor_usable` fails (#1502) and never to bound its
+    size — so `graph_name="org_team-001"` for an org-wide key would park a SECOND
+    anchor (`org_team-001` beside the write's `team-001`) for every org in the
+    process. Mirroring also preserves the "identical connection" property
+    `mcp_server._enforce_quota` states as the rule.
+
+    Two deliberate non-uses:
+    - registry-scoped resources get `None`: their count is a control-plane read
+      and building a data SDK for them would be pure cost on the key-mint path.
+    - an UNRESOLVED graph binding (`_data_graph_name` → `None`) also gets
+      `None`, and NOT because the gate's reading is harmless: what holds is that
+      **no write can occur either way** — `_data_sdk` refuses the request 403
+      GRAPH_NOT_FOUND — so returning `None` cannot widen access. Substituting a
+      graph here WOULD be a fail-open widening. ⚠️ At the three
+      `/v1/{points,objects,subjects}` sites the gate runs before that 403, so the
+      default-graph count is still taken first and a 402 can pre-empt the 403 —
+      the same ordering the residual below records for the RESOLVED arm; this
+      arm is not exempt from it.
+
+    ⛔ KNOWN RESIDUAL (recorded, not fixed): on the three `/v1/{points,objects,
+    subjects}` sites the gate runs BEFORE `_data_sdk`'s `_assert_graph_owned`, so
+    for a binding whose namespace RESOLVES but is not owned (a DB-inconsistency
+    window, never client input — `graph_namespace` is auth-stamped) the gate now
+    counts that graph and a 402 can pre-empt the 403. Closing it means either
+    moving the gate after the SDK open at those three sites or gating the graph
+    SDK on a completed ownership check; both are their own change. The commit
+    lane is NOT in this class: it opens `_data_sdk` before its gate.
+    """
+    if resource not in _GRAPH_SCOPED_QUOTA_RESOURCES:
+        return None
+    if org.get("graph_id"):
+        graph = _data_graph_name(org)
+        if graph is None:
+            return None
+        return _make_sdk(graph_name=graph)
+    org_id = org.get("org_id")
+    if not org_id:
+        return None
+    return _make_sdk(namespace=org_id)
+
+
 def _check_org_limit(org: dict, resource: str, *,
                      slot_credit: int = 0) -> None:
     """Enforce per-org limits. Raises 402 (payment required) when at capacity.
@@ -7998,7 +8087,9 @@ def _check_org_limit(org: dict, resource: str, *,
         quota_refusal_payload,
     )
     try:
-        enforce_org_limit(org, resource, slot_credit=slot_credit)
+        enforce_org_limit(org, resource,
+                          sdk_factory=lambda: _gate_sdk_for(org, resource),
+                          slot_credit=slot_credit)
     except QuotaExceededError as e:
         # #4614: the refusal is a STRUCTURED, distinguishable state — a `code`
         # plus the resource/used/limit the gate actually compared — not the
@@ -9024,8 +9115,10 @@ class _OffloadRefused:
     """Sentinel for a REFUSED best-effort offload (#4456).
 
     ``_cp_offload(..., best_effort=True)`` returns THIS instead of ``None``
-    when the pool refused the submission (backlog full — or, on a cancellable
-    lane, cancelled before any worker ran it): the work did NOT happen. A
+    when the offload never ran the callable — the pool refused the submission
+    (backlog full), the bound cancelled it before any worker picked it up, or
+    the context wrapper could not build the invocation's context before
+    running it (#10612, ``_ContextNotReproduced``): the work did NOT happen. A
     plain bound miss still returns ``None``, because the worker that picked
     the submission up runs it to completion (the seam abandons only the
     await). Callers that ignore the return value are unaffected; a
@@ -9089,7 +9182,9 @@ async def _cp_offload(fn, *, op: str, best_effort: bool = False,
 
     Thin hosted-side wrapper over ``monitoring.run_control_plane_call``. For
     an AUTH-CRITICAL call it owns the FAIL-CLOSED ERROR MAPPING: an offload
-    that misses its wait bound — or a saturated worker pool — becomes the
+    that misses its wait bound, a saturated worker pool, or the SUBMITTED
+    wrapper failing before it ran its callable (#10612, ``_ContextNotReproduced``
+    whose ``origin`` is that wrapper — so no work was done) becomes the
     repo-standard 503 ``control_plane_unavailable`` the client already renders,
     never a hang and never a silent pass-through. Domain errors raised by the
     helper itself propagate UNCHANGED, so each caller's existing error mapping
@@ -9156,6 +9251,39 @@ async def _cp_offload(fn, *, op: str, best_effort: bool = False,
                 "control-plane offload %r failed (best-effort, swallowed): %s",
                 op, exc)
             return OFFLOAD_REFUSED if exc.refused else None
+        if unavailable is not None:
+            raise unavailable() from None
+        raise _control_plane_unavailable() from None
+    except _ContextNotReproduced as exc:
+        # ⚠️ Ownership, not type: map it only when the wrapper that raised it IS
+        # the one this call submitted. A NESTED confine_context that fails while
+        # an OUTER confined callable is already executing raises the same
+        # subclass — after that outer callable has done work — and must
+        # propagate as a domain error, not become a retryable "nothing
+        # happened" 503 a mutating client would replay.
+        if getattr(exc, "origin", None) is not fn:
+            raise
+        # #10612 P1: the wrapper could not build THIS invocation's context, so
+        # the callable NEVER RAN — the same "no work was done" outcome a
+        # refused submission has, and the same honest, retryable 503. Without
+        # this arm the error (a RuntimeError, not a ``ControlPlaneOffloadError``)
+        # escapes to each route's blanket ``except Exception`` and becomes a
+        # bare 500 with no ``error_code``: the exact unretryable status this
+        # closes. It is never swallowed into a plausible answer — running the
+        # callable under the worker's AMBIENT context would answer another
+        # tenant.
+        #
+        # ⚠️ Deliberately the PRIVATE subclass, not ``ContextConfinementError``:
+        # only the wrapper's pre-run arm proves "nothing happened". The same
+        # type raised from INSIDE the callable (a nested ``confine_context``, or
+        # any helper that uses one) is a DOMAIN error and keeps propagating
+        # unchanged — claiming "no work was done" about a half-executed write
+        # would hand the client a retry that duplicates it.
+        logging.getLogger("tortoise.api").warning(
+            "control-plane offload %r could not build the request context: %s",
+            op, exc)
+        if best_effort:
+            return OFFLOAD_REFUSED
         if unavailable is not None:
             raise unavailable() from None
         raise _control_plane_unavailable() from None
@@ -9276,6 +9404,18 @@ async def _graph_offload(fn, *, op: str, timeout: float | None = None):
     the only place the copy is applied, callers must reach the graph pool
     THROUGH this wrapper, never ``_cp_offload(pool="graph")`` directly.
 
+    #10612 P1: the copy is ``monitoring.confine_context``'s — a FRESH context
+    per invocation, not one ``Context`` captured once. A bound miss abandons the
+    await while the worker keeps running (CPython #87185), so a caller that
+    re-submits a one-shot ``partial(copy_context().run, fn)`` re-enters a
+    context that is already entered: ``RuntimeError``, which is not a
+    ``ControlPlaneOffloadError``, so it escapes this seam's fail-closed mapping
+    and surfaces on the caller's route as a bare unlabelled 500 the client
+    cannot retry. That is a LATENT trap today — this wrapper submits ONCE, so
+    it cannot fire — and a MEASURED one on #10612's branch, whose #4055
+    cold-setup re-arm re-submits one wrapped callable (blast radius there:
+    ``/v1/search`` and ``/v1/topics/{t}/summary``).
+
     Telemetry: graph ops land in the seam's SHARED offload-record buffer under
     graph-specific op names (``data_sdk``, ``check_org_limit.points``), so they
     are identifiable by op — but they share the 512-entry buffer, so a graph
@@ -9289,9 +9429,8 @@ async def _graph_offload(fn, *, op: str, timeout: float | None = None):
     graph worker for the lane's full cold-start allowance. Callers that write
     leave it unset.
     """
-    ctx = contextvars.copy_context()
     return await _cp_offload(
-        functools.partial(ctx.run, fn), op=op, pool="graph",
+        confine_context(fn), op=op, pool="graph",
         timeout=graph_offload_timeout_s() if timeout is None else timeout,
         unavailable=_graph_unavailable)
 
@@ -10229,8 +10368,9 @@ class CreateObjectRequest(BaseModel):
     # stored ``capability`` to ``other`` on a re-create. The ``'other'`` default
     # is the fold's ON CREATE arm.
     objectKind: str | None = Field(default=None)
-    # lifecycle status rides props (create_entity splats **props over the
-    # 'live' default) — the onboarding STATE seed passes in_progress.
+    # lifecycle status rides props (``create_entity`` carries only what the
+    # caller NAMES — there is no 'live' default to splat over since #9974 R1)
+    # — the onboarding STATE seed passes in_progress.
     status: str | None = None
 
 
@@ -10535,7 +10675,18 @@ async def list_points(
     # GET /v1/points/{id}, not by list. No include param on REST v1 (surface
     # minimal).
     conditions.append("(n.status IS NULL OR n.status <> 'retracted')")
-    params: dict = {"limit": limit}
+    # #8447 (C2): this route capped at ``limit`` and answered
+    # ``{"points": …, "count": len(results)}`` — a FULL page was byte-identical
+    # to a COMPLETE one, and there is no offset and no cursor on this surface, so
+    # a row past the cap was unreachable by any follow-up call. That is the
+    # defect #8447 exists for, on the highest-traffic list route.
+    #
+    # The probe is how the marker is PROVED without a second round trip: ask the
+    # store for one row MORE than the caller asked for and drop it. ``limit+1``
+    # is an INTERNAL probe, never a caller-visible cap — the caller's bound still
+    # governs what is delivered, so the route's ``le=1000`` stays the caller's
+    # ceiling and no cap VALUE changes here (only its marking).
+    params: dict = {"limit": limit + 1}
     if kind:
         conditions.append("n.pointKind = $kind")
         params["kind"] = kind
@@ -10562,13 +10713,37 @@ async def list_points(
     rows = await _read_offload(
         lambda: sdk._get_proj().g.query(query, params=params).result_set,
         op="list_points")
+    # and /v1/search use.
+    # The candidate set AS THE PROBE CAN SEE IT — capped at ``limit+1``, so the
+    # population is BOUNDED, while the VERDICT (``candidates > returned``) is
+    # decided rather than estimated: it is true iff the store held more rows
+    # than the caller asked for.
+    # That boundedness is why ``exact=False`` below and why ``total_available``
+    # is withheld — publishing ``limit+1`` as a total is a lower bound wearing a
+    # total's clothes (``truncation.py``). Do NOT pass ``exact=True`` here.
+    candidates = len(rows)
     results = []
-    for r in rows:
+    for r in rows[:limit]:
         d = r[0]
         if "pointKind" in d:
             d["kind"] = d.pop("pointKind")
         results.append(d)
-    return {"points": results, "count": len(results)}
+    from tortoise.truncation import mark_truncation, truncation_field
+
+    # ``exact=False``: the probe proves THERE ARE MORE, not HOW MANY. An exact
+    # total would need a second COUNT over the whole graph, and publishing the
+    # probe's own ``limit+1`` as ``total_available`` would be a lower bound
+    # wearing a total's clothes (`truncation.py`). So a truncated page here takes
+    # the contract's THIRD state — incomplete, total unknown — and a complete one
+    # is positively marked complete rather than left un-marked.
+    trunc_out: dict = {}
+    mark_truncation(trunc_out, returned=len(results),
+                    candidates=candidates, exact=False)
+    body: dict = {"points": results, "count": len(results)}
+    # ⚠️ ``count`` keeps its exact prior meaning — rows DELIVERED — so a caller
+    # that ignores the new field is unaffected; ``truncated`` is the instrument.
+    body.update(truncation_field(trunc_out))
+    return body
 
 
 @app.get("/v1/points/{point_id}")
