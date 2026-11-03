@@ -3606,6 +3606,47 @@ def test_a_receipt_that_is_json_but_not_an_object_refuses_instead_of_tracebacks(
     assert "not a record" in str(exc.value), str(exc.value)
 
 
+def test_a_non_string_corpus_hash_REFUSES_instead_of_being_called_absent():
+    """A hash that is PRESENT but not a string is unknowable, not missing.
+
+    Two defects in one branch, both of the class this selector exists to close:
+
+    * the refusal LABEL was untrue — a record carrying ``"corpus_hash": 12345`` was
+      reported as ``(no corpus_hash)`` when it plainly carries one, which is the
+      "a refusal naming a false reason" failure the sibling is_dir()/absent-tree fix
+      removed one branch up;
+    * it was silently SKIPPED, so a NEWER on-pin measurement whose hash could not be
+      read lost to an OLDER scorable one with nothing anywhere saying so — exactly
+      the silent skip ``test_an_on_pin_receipt_that_cannot_be_scored_REFUSES_...``
+      refuses, and the opposite of how the sibling ``date`` field is treated.
+
+    The fixture makes the shape load-bearing: the garbled-hash record is the NEWER of
+    the two and would publish 15/15, so a regression that re-skips it returns the
+    older 5/15 and this test moves.
+    """
+    pin = "sha256:" + "d" * 64
+    root = Path(tempfile.mkdtemp())
+    receipts = root / measure.E4_RECEIPT_DIR
+    receipts.mkdir(parents=True)
+    (receipts / "w2b-operator-older.json").write_text(json.dumps({
+        "date": "2026-01-01T00:00:00Z", "run_id": "older", "corpus_hash": pin,
+        "operator_audit": {"planted": 15, "edge_correct": 5},
+    }))
+    (receipts / "w2b-operator-newer-garbled-hash.json").write_text(json.dumps({
+        "date": "2026-06-01T00:00:00Z", "run_id": "newer", "corpus_hash": 12345,
+        "operator_audit": {"planted": 15, "edge_correct": 15},
+    }))
+    with pytest.raises(SystemExit) as exc:
+        measure.select_e4_receipt(root, frozen_pin=pin)
+    message = str(exc.value)
+    assert "REFUSED" in message, message
+    assert "w2b-operator-newer-garbled-hash.json" in message, message
+    assert "not a hash" in message, message
+    assert "no corpus_hash" not in message, (
+        "the file carries a corpus_hash — calling it absent is a refusal naming a "
+        f"false reason: {message}")
+
+
 def test_e4_refuses_to_select_without_the_frozen_pin():
     """An un-pinned selection cannot check the artifact, so it is refused."""
     with pytest.raises(SystemExit) as exc:

@@ -1934,7 +1934,7 @@ def _instant(raw: object) -> tuple[int, object]:
     refuses an unreadable file: nothing can prove the newest measurement on the
     frozen corpus is not the one whose date could not be parsed.
     """
-    text = raw if isinstance(raw, str) else ""
+    text = raw if isinstance(raw, str) else ("" if raw is None else repr(raw))
     if not text:
         return (0, "")
     try:
@@ -2059,8 +2059,20 @@ def select_e4_receipt(repo: Path = ROOT, frozen_pin: str = "") -> tuple[str, dic
             unreadable.append(f"{path.name} ({type(record).__name__}, not a record)")
             continue
         corpus_hash = record.get("corpus_hash")
-        if not isinstance(corpus_hash, str) or not corpus_hash:
+        if corpus_hash in (None, ""):
             skipped.append(f"{path.name} (no corpus_hash)")
+            continue
+        if not isinstance(corpus_hash, str):
+            # PRESENT but not a string: the label above would be UNTRUE (the file
+            # plainly carries a corpus_hash) and skipping it silently is the very
+            # defect this selector exists to close — a newer on-pin measurement
+            # whose hash cannot be read would lose to an older scorable one with
+            # nothing said. Its corpus is therefore UNKNOWABLE, which is the reason
+            # the unreadable-file refusal already names: nothing can prove the newest
+            # measurement on the frozen corpus is not this one.
+            unreadable.append(
+                f"{path.name} (corpus_hash is a "
+                f"{type(corpus_hash).__name__}, not a hash)")
             continue
         if not _same_corpus(corpus_hash, frozen_pin):
             skipped.append(f"{path.name} (corpus_hash {corpus_hash[:20]}…)")
