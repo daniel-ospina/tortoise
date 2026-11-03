@@ -2874,13 +2874,15 @@ def _mask_secret_tail(value: str) -> str:
 _STORE_ABSENT = "absent"
 _STORE_OK = "ok"
 _STORE_EMPTY = "empty-key"          # present, blank → the next candidate wins
-_STORE_INVALID = "invalid-key"      # no api_key, or not a string
+_STORE_NO_KEY = "no-key"            # the field is absent/None (harness: normal)
+_STORE_INVALID = "invalid-key"      # present but not a string
 _STORE_CORRUPT = "corrupt"          # unparseable, or not a JSON object
 _STORE_UNREADABLE = "unreadable"    # PermissionError — the resolver cannot read it
 _STORE_BROKEN_SYMLINK = "broken symlink"    # the resolver SKIPS this one
 _STORE_NOT_REGULAR = "not a regular file"   # FIFO/socket/device — reading HANGS
 _STORE_DIRECTORY = "skipped (directory)"
-_STORE_REFUSING = frozenset({_STORE_INVALID, _STORE_CORRUPT, _STORE_UNREADABLE})
+_STORE_REFUSING = frozenset({_STORE_NO_KEY, _STORE_INVALID, _STORE_CORRUPT,
+                              _STORE_UNREADABLE})
 
 _MISSING = object()
 
@@ -2928,11 +2930,13 @@ def _describe_store(path: Path, key_field: str = "api_key") -> tuple[str, dict |
     if not isinstance(config, dict):
         return _STORE_CORRUPT, None
     key = config.get(key_field, _MISSING)
-    if key is _MISSING or key is None or not isinstance(key, str):
-        # ABSENT or non-string is NOT "empty": the resolver raises _ConfigError
-        # on both (`isinstance(api_key, str)` fails), so labelling them
-        # `empty-key` would tell a user "add a key here" about a file that
-        # already poisons every command.
+    if key is _MISSING or key is None:
+        # ABSENT is not "empty": for the CLI store the resolver raises
+        # `_ConfigError` (so `empty-key` would be a lie), while for the HARNESS
+        # store it is the documented env-provisioned shape. `no-key` carries that
+        # distinction to the harness block; the CLI block reads it as refusing.
+        return _STORE_NO_KEY, config
+    if not isinstance(key, str):
         return _STORE_INVALID, config
     if not key.strip():
         return _STORE_EMPTY, config
@@ -3080,16 +3084,16 @@ def _mask_display_target(value: str) -> str:
 def _same_endpoint(a: object, b: object) -> bool:
     """Do two configured api_urls name the SAME endpoint?
 
-    Compares the parsed AUTHORITY (host, case-folded; port, defaulted per scheme),
-    not the literal string, and applies the trailing-slash normalisation the Pi
-    hook itself applies (`resolveConfig` strips trailing slashes). Comparing
+    Compares the parsed endpoint (host case-folded, port defaulted per scheme, path
+    with trailing slashes stripped — the normalisation the Pi hook applies before
+    use), not the literal string. Comparing
     whole URLs made `https://h/` vs `https://h` read as "a DIFFERENT host" when
     both surfaces contact the identical endpoint — a false statement about the
     user's own configuration, and the one this comparison exists to avoid.
     """
     from urllib.parse import urlsplit
 
-    def parts(value: object) -> tuple[str, int] | None:
+    def parts(value: object) -> tuple[str, int, str] | None:
         if not isinstance(value, str) or not value.strip():
             return None
         # `urlsplit` is LAZY about the authority: `.port` re-parses the netloc and
@@ -3104,8 +3108,11 @@ def _same_endpoint(a: object, b: object) -> bool:
             port = split.port
             # `port or default` would fold an explicit 0 into the scheme default;
             # `:0` is not a usable endpoint, so treat it as unknown rather than
-            # silently equal to `:443`.
-            return (host.lower(), default if port is None else port)
+            # silently equal to `:443`. The PATH is part of the endpoint too:
+            # `https://h/v1` and `https://h/v2` are different endpoints, and the
+            # verdict is printed while the user is chasing a per-surface refusal.
+            return (host.lower(), default if port is None else port,
+                    split.path.rstrip("/"))
         except ValueError:
             return None
 
@@ -3411,7 +3418,10 @@ def _cmd_config(args) -> int:
         # alone reported "absent" for a token `recover` finds and uses.
         try:
             stored_token, token_source = _read_stored_signup_token_with_source()
-        except OSError:
+        except (OSError, RuntimeError):
+            # That reader calls `Path.home()` itself — RuntimeError for
+            # `HOME=~/x` — and the guard is bypassed on the env-key path because
+            # the resolver returns before it ever touches home.
             stored_token, token_source = None, None
         cred["recovery_token"] = "present" if stored_token else "absent"
         if stored_token and token_source is not None:
@@ -3465,85 +3475,67 @@ def _cmd_config(args) -> int:
 
     # ── the graph store this shell would use, plus the record verbs' naming ──
     # The CLI resolves its graph target through `_resolve_db_target`'s ONE
-    # precedence: TORTOISE_DB_URI (a scheme) > the FALKORDB_* legacy trio >
-    # TORTOISE_DB_PATH > the canonical default. Reporting only the first of those
-    # named a store the CLI would NOT use — the exact "reporter disagrees with
-    # the resolver" failure this verb exists to end, and the shipped selfhost
-    # image sets TORTOISE_DB_PATH with no URI at all.
+    # precedence (TORTOISE_DB_URI scheme > FALKORDB_* trio > TORTOISE_DB_PATH >
+    # canonical default). ASK IT — do not re-derive it: an earlier version of this
+    # block re-implemented the ladder, labelled the target from env-var PRESENCE,
+    # and ended up pairing the trio's label with the DB_PATH target (the exact
+    # "reporter disagrees with the resolver" failure this verb exists to end).
+    # `_resolve_db_target` also PRINTS its legacy-trio notice, which would corrupt
+    # a `--json` payload, so stdout is captured and forwarded to stderr.
+    import contextlib as _contextlib
+    import io as _io
+
     raw_uri = _os.environ.get("TORTOISE_DB_URI")
-    uri = (raw_uri or "").strip()
-    db_source = "TORTOISE_DB_URI" if uri else "none"
+    trio_set = any((_os.environ.get(k) or "").strip() for k in
+                   ("FALKORDB_HOST", "FALKORDB_PORT", "FALKORDB_PASSWORD"))
+    db_source = ("TORTOISE_DB_URI" if is_db_uri(raw_uri or "")
+                 else "FALKORDB_* trio" if trio_set
+                 else "TORTOISE_DB_PATH" if (_os.environ.get("TORTOISE_DB_PATH") or "").strip()
+                 else "default")
     graph_store: dict = {"source": db_source}
-    if not uri:
-        trio_set = any((_os.environ.get(k) or "").strip() for k in
-                       ("FALKORDB_HOST", "FALKORDB_PORT", "FALKORDB_PASSWORD"))
-        db_path = (_os.environ.get("TORTOISE_DB_PATH") or "").strip()
-        if trio_set or db_path:
-            try:
-                resolved = _resolve_db_target(db_path or None)
-            except (ValueError, OSError):
-                resolved = None
-            if resolved:
-                uri = str(resolved)
-                db_source = "FALKORDB_* trio" if trio_set else "TORTOISE_DB_PATH"
-                graph_store["source"] = db_source
-        if not uri:
-            # A script must not read "none" as "no store configured": the embedded
-            # default is in play, and only `doctor` resolves it.
+    resolved: str | None = None
+    db_error: str | None = None
+    _db_notice = _io.StringIO()
+    try:
+        with _contextlib.redirect_stdout(_db_notice):
+            resolved = _resolve_db_target()
+    except (ValueError, OSError) as exc:
+        # "configured but unusable" is a real verdict — falling through to the
+        # default note claimed the variable was unset and told the user to go
+        # look at `doctor` for a store the CLI REFUSES.
+        db_error = _scrub(f"{type(exc).__name__}: {exc}", raw_uri,
+                          _os.environ.get("TORTOISE_DB_PATH"))
+    if _db_notice.getvalue().strip():
+        print(_db_notice.getvalue().rstrip(), file=_sys.stderr)
+    if db_error is not None:
+        graph_store["status"] = "configured but unusable"
+        graph_store["error"] = _printable(db_error[:500])
+    elif resolved:
+        uri = resolved
+        if db_source == "default":
             graph_store["note_default"] = (
-                "no TORTOISE_DB_URI/DB_PATH — `tortoise doctor` reports the "
-                "resolved default")
-    if raw_uri is not None and not uri:
-        # Set-but-empty is not "absent": the user believes they configured it.
-        graph_store["note"] = "TORTOISE_DB_URI is set but empty — treated as unset"
-    if uri:
-        # Mask a URI — and ALSO a value whose `@` prefix looks like userinfo,
-        # because a copy-paste that drops the scheme (`docker:user:pw@host:6379`)
-        # is the exact shape the masker fails CLOSED on. The exemption exists only
-        # for a filesystem path, whose `@` cannot be userinfo (`me@work/` has no
-        # `:` before it) — otherwise the report redacts the target it exists to
-        # name.
+                "nothing is configured — this is the resolved default")
         userinfoish = "@" in uri and ":" in uri.rsplit("@", 1)[0]
-        redacted_kind = False
         if is_db_uri(uri) or "://" in uri or userinfoish:
             graph_store["target"] = _mask_display_target(uri)
             if graph_store["target"].startswith("<"):
-                # The masker replaced the WHOLE value (it could not parse the
-                # shape at all), so the kind cannot honestly be "embedded file
-                # path" below. An inline `:***@host` mask leaves the shape known.
-                redacted_kind = True
                 graph_store["target_kind"] = "unrecognised (redacted)"
-        elif ":" in uri:
-            # ANY colon here fails closed. The `.isdigit()` exemption this branch
-            # first carried re-admitted `user:987654321` — a numeric password is
-            # still a password, and a bare `host:port` is not a valid
-            # TORTOISE_DB_URI anyway, so the only thing the exemption bought was
-            # a leak.
-            # A copy-paste that dropped the `@host` tail leaves `user:password`
-            # (#2987). There is no userinfo marker to find, so the ONLY safe answer
-            # is to fail closed — a `C:\` or `file:` tail is lost, which is
-            # diagnosability loss, never a leak.
-            graph_store["target"] = "<redacted: userinfo-shaped, no host>"
-            graph_store["target_kind"] = "unrecognised (redacted)"
-            redacted_kind = True
+            elif is_db_uri(uri):
+                graph_store["target_kind"] = "database URI"
+            else:
+                graph_store["warning"] = (
+                    "unrecognised URI scheme — `tortoise doctor` reports supported "
+                    "schemes and the resolved target")
         else:
-            # A filesystem path keeps its `@` readable, but a query/fragment can
-            # still carry a credential (`db.fdb?password=…`) — cut it the same way.
             cuts = [i for i in (uri.find("?"), uri.find("#")) if i != -1]
             graph_store["target"] = uri[:min(cuts)] + "…" if cuts else uri
-        if redacted_kind:
-            pass                                  # the kind is already recorded
-        elif is_db_uri(uri):
-            graph_store["target_kind"] = "database URI"
-        elif "://" in uri:
-            # An unrecognised SCHEME is the misconfiguration worth flagging.
-            graph_store["warning"] = (
-                "unrecognised URI scheme — `tortoise doctor` reports supported "
-                "schemes and the resolved target"
-            )
-        else:
-            # A bare path is a SUPPORTED embedded target, not a warning.
-            graph_store["target_kind"] = "embedded file path"
+            if ":" in uri:
+                graph_store["target"] = "<redacted: userinfo-shaped, no host>"
+                graph_store["target_kind"] = "unrecognised (redacted)"
+            else:
+                graph_store["target_kind"] = "embedded file path"
+    payload["graph_store"] = graph_store
+
     org_id = cred.get("org_id")
     if isinstance(org_id, str) and org_id:
         graph_store["cache_graph_convention"] = (
@@ -3758,7 +3750,7 @@ def _cmd_config(args) -> int:
                        else "  (digest withheld — short key)")
             print(f"  stale file    {_printable(harness['file_api_key'])}"
                   f"{fdetail} — NOT in use")
-    if harness_state == _STORE_INVALID:
+    if harness_state in (_STORE_NO_KEY, _STORE_INVALID):
         # `resolveConfig` reads a keyless harness file happily (it supplies
         # apiUrl/settings; the key may come from the env), so this is NOT
         # "repair or delete" territory — it is the documented env-provisioned
