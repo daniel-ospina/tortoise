@@ -838,6 +838,7 @@ def guard_and_recap_pool(
         session_key: Callable[[dict], str] | None = None,
         window: int = DEFAULT_POOL_GUARD_WINDOW,
         per_session_cap: int = DEFAULT_POOL_SESSION_CAP,
+        floor_term: bool = False,
         max_chunks_per_session: int) -> list[dict]:
     """The shared merge discipline (C3-1 #2567 / C4 #2517): optional
     session-diverse window guard THEN the C5 per-session raw-chunk re-cap,
@@ -851,11 +852,19 @@ def guard_and_recap_pool(
     guard without a second recap entry point (the guard→re-cap ordering
     lives here exactly once). Additive: reordering never drops an item;
     the re-cap may drop raw chunks beyond the per-session cap.
+
+    ``floor_term`` (#2513) passes through to the guard's missing LOWER
+    bound: an unrepresented session may take a slot back from a session
+    holding more than one, so a session ranked past the window can still
+    be admitted. OFF by default — it is default-preserving, and arming it
+    changes the graded top-k, so it awaits the sealed A/B measurement
+    (see ``coverage_loop.session_diverse_order`` for the measured density
+    cost, which this does NOT avoid).
     """
     if guard:
         items = session_diverse_order(
             items, window=window, per_session_cap=per_session_cap,
-            session_key=session_key)
+            session_key=session_key, floor_term=floor_term)
     return dedup_pool(items, max_chunks_per_session=max_chunks_per_session,
                       session_key=session_key)
 
