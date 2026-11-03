@@ -543,7 +543,14 @@ def _handle_state(value) -> bool | None:
     for expr in _operand_calls(value):
         if not isinstance(expr, ast.Call):
             continue
-        name = getattr(expr.func, "id", None)
+        # `id or attr`: the MODULE-QUALIFIED spelling is ordinary and already in
+        # the shipped package (`_ha._make_sdk(namespace=org_id)` in
+        # `supabase_control.py`, twice). Reading the bare name only answered
+        # `None` for it — "not an SDK handle at all" — so the write went past
+        # (#10046 review round 4 P1). `_sdk_handles` already used `id or attr`
+        # for the installer half; this is the opener half catching up.
+        name = (getattr(expr.func, "id", None)
+                or getattr(expr.func, "attr", None))
         if name in _INSTALLING_OPENERS:
             state = True
         elif name in _UNBOUND_OPENERS:
@@ -625,7 +632,8 @@ def _org_scoped_sdk_sites(tree) -> dict[str, int]:
         for call in ast.walk(node):
             if not isinstance(call, ast.Call):
                 continue
-            called = getattr(call.func, "id", None)
+            called = (getattr(call.func, "id", None)
+                      or getattr(call.func, "attr", None))
             if ((called == "_make_sdk" and _namespace_is_org_scoped(call))
                     or called in unconditional):
                 sites[name] = sites.get(name, 0) + 1
@@ -772,7 +780,8 @@ _PACKAGE_ROOT = Path(ha.__file__).resolve().parent
 #: the scan's own predicates is tautological, so the inventory has to be the
 #: external reference. A legitimate new org-scoped lane may ADD a module without
 #: touching this; a module that stops matching reds.
-_ORG_SCOPED_MODULES = frozenset({"hosted_api.py", "quota.py"})
+_ORG_SCOPED_MODULES = frozenset({"hosted_api.py", "quota.py",
+                                "supabase_control.py"})
 
 
 def _joined(items: list[str]) -> str:
@@ -793,14 +802,17 @@ def test_no_lane_ANYWHERE_in_the_package_writes_records_through_an_unbound_sdk()
     nothing, which is exactly the silent-invisible class #10046 was filed for
     ("the gap is invisible until such a tenant tries to write").
 
-    Measured when this leg was added: 264 modules, 81 org-scoped construction
-    sites across TWO modules, and 0 unbound record writes, so widening the scan
+    Measured when this leg was added: 264 modules, 83 org-scoped construction
+    sites across THREE modules, and 0 unbound record writes, so widening the scan
     cannot red on the code as it stands. Its whole job is the module that does
-    not exist yet. (An earlier revision reported "149 entries / 175 sites":
-    that count was inflated by a doubled predicate — `_make_sdk` is a member of
-    `_SDK_OPENERS`, so the membership test matched EVERY `_make_sdk(...)` call
-    and 94 of the 175 were registry/base literals. Fixed in
-    `_org_scoped_sdk_sites`.)
+    not exist yet. (Two earlier revisions reported different counts, each fixed
+    at review: "149 entries / 175 sites" was inflated by a doubled predicate —
+    `_make_sdk` is a member of `_SDK_OPENERS`, so the membership test matched
+    EVERY `_make_sdk(...)` call and 94 of the 175 were registry/base literals;
+    then "81 sites / two modules" still missed `supabase_control.py`, whose two
+    lanes open through the MODULE-QUALIFIED spelling `_ha._make_sdk(...)` that a
+    bare-name reader cannot see. Both are fixed in `_org_scoped_sdk_sites` /
+    `_handle_state`.)
 
     WHAT THIS SCAN CANNOT SEE, stated rather than implied: it judges a write by
     the handle's OPENER, and only openers in the declared vocabularies are
@@ -813,7 +825,8 @@ def test_no_lane_ANYWHERE_in_the_package_writes_records_through_an_unbound_sdk()
     blind spot (`_AMBIENT_OPENERS`). Two indirections are likewise OUT of the
     scan and are named so they are not mistaken for coverage: an SDK handed to a
     writing helper as a KEYWORD argument (`_write(sdk=_org_sdk(org))`) and one
-    reached through a lambda or local factory.
+    reached through a lambda or local factory. (Module-qualified dispatch
+    `_ha._make_sdk(...)` is NOT in that list — it is scanned, since round 4.)
     """
     modules = sorted(_PACKAGE_ROOT.rglob("*.py"))
     assert len(modules) >= 200, (
@@ -861,7 +874,7 @@ def test_no_lane_ANYWHERE_in_the_package_writes_records_through_an_unbound_sdk()
         "in which case update `_ORG_SCOPED_MODULES` deliberately:" + _joined(missing))
 
     # Non-vacuity, the same rule the single-module leg states: a scan that
-    # matched nothing is not a pass. 60 against a measured 81.
+    # matched nothing is not a pass. 60 against a measured 83.
     assert sum(sites.values()) >= 60, (
         f"the package scan found only {sum(sites.values())} org-scoped SDK "
         "construction sites — the AST criteria no longer match how lanes open "
@@ -989,6 +1002,38 @@ def _run_new_feature_job(org_id: str, repos) -> None:
     assert _flagged(source), (
         f"a lane writing through `sdk.{verb}()` on an unbound org SDK must be "
         "flagged")
+
+
+def test_a_lane_opening_through_a_MODULE_QUALIFIED_opener_is_caught():
+    """#10046 review round 4 P1: `_ha._make_sdk(namespace=org_id)`.
+
+    The module-qualified spelling is ordinary, not exotic — `supabase_control.py`
+    uses it TWICE today — and a reader that only takes `node.func.id` answers
+    `None` ("not an SDK handle at all") for an `ast.Attribute`, so BOTH the site
+    count and the write detector looked past it. That made the package-wide leg
+    green on the exact recurrence it exists to catch, and it made the census
+    wrong (`supabase_control.py` was invisible).
+
+    Mutation this reddens on: dropping `or getattr(…, "attr", None)` from
+    `_handle_state` or `_org_scoped_sdk_sites` (the file's own `_sdk_handles`
+    already read `id or attr` for the installer half).
+    """
+    source = '''
+from tortoise import hosted_api as _ha
+
+def _run_qualified_lane(org_id: str) -> None:
+    sdk = _ha._make_sdk(namespace=org_id)
+    try:
+        sdk.create_point("Subject", {})
+    finally:
+        sdk.close()
+'''
+    assert _flagged(source), (
+        "a lane writing through an SDK opened as `_ha._make_sdk(...)` must be "
+        "flagged — an attribute callee is not 'not an SDK handle'")
+    assert _org_scoped_sdk_sites(ast.parse(source)), (
+        "a module-qualified org-scoped opener must also be COUNTED as a site, "
+        "or the census and the module inventory under-report")
 
 
 def test_a_lane_opening_through_open_org_graph_sdk_is_caught():
