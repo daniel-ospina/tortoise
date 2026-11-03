@@ -33,7 +33,11 @@ Read alongside `docs/ops/cost-dimensions.md` (the coverage matrix — *is dimens
 
 ---
 
-## 1 · What already exists, at `file:line`
+## 1 · What already exists, by symbol
+
+*By symbol, not by pinned `file:line` — deliberately.* A line number is a citation that rots the moment anything
+above it is edited, and this table is meant to be read months from now; each symbol resolves in one
+`rg -n '<symbol>' tortoise/`, and `python tools/cost_coverage_audit.py matrix` prints the live, checked list.
 
 The premise that "nothing is metered" is false, and acting on it would build a second substrate beside one that
 already exists. **Six** of the ten rows below write **per-org** into one durable ledger, in exactly ONE of two

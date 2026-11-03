@@ -69,31 +69,99 @@ def test_the_old_binding_could_not_have_been_a_reader():
         )
 
 
+# The two modules that DEFINE the reader, plus ``cost_dimensions.py`` — which names
+# it only as a declared ``Binding(..., READER)`` (a string, never a call).
+_ALLOWED = {"metering.py", "supabase_control.py", "cost_dimensions.py"}
+
+
+def _scan_capture_call_sites(root):
+    """Return ``(offending relative paths, every relative path actually read)``.
+
+    A helper rather than an inline loop so the scan itself can be exercised
+    against a fixture tree: a scan that is only ever run against the real tree
+    is green whether or not it can still detect anything.
+    """
+    offenders, scanned = [], []
+    for path in sorted(root.rglob("*.py")):
+        if path.name in _ALLOWED:
+            continue
+        rel = str(path.relative_to(root))
+        scanned.append(rel)
+        if "get_capture_usage" in path.read_text(encoding="utf-8", errors="replace"):
+            offenders.append(rel)
+    return offenders, scanned
+
+
 def test_no_request_path_calls_the_reader():
     """§1b scope: this is a measurement reader, not an enforcement hook.
 
-    Scans EVERY module under ``tortoise/`` except the two modules that DEFINE
-    the reader, plus ``cost_dimensions.py`` — which names it only as a declared
-    ``Binding(..., READER)`` (a string, never a call). A call site in ``hosted_api`` would put it on a request path and
+    Scans EVERY module under ``tortoise/`` except the modules that DEFINE the
+    reader. A call site in ``hosted_api`` would put it on a request path and
     make it a metered-response change; one in ``tool_registry`` / ``sdk`` /
     ``hosted_mcp`` would add surface. All three are the #4051 exclusions, so the
     pin covers the whole tree rather than the one obvious file (a review
     finding: a one-file pin stays green while the reader is wired in elsewhere).
+
+    The FLOOR below is load-bearing, not decoration. ``rglob`` over a wrong
+    root — or a moved package, or a rename — yields nothing, and then
+    ``offenders == []`` is GREEN while the pin inspected no file at all: a
+    guard that checks nothing reads exactly like a guard that found nothing.
+    ``hosted_api.py`` is asserted BY NAME for the same reason: it is the one
+    module whose call site would silently make this a request-path change, so
+    the scan must be proven to have covered it.
     """
     from pathlib import Path
 
     root = Path(metering.__file__).parent
-    allowed = {"metering.py", "supabase_control.py", "cost_dimensions.py"}
-    offenders = []
-    for path in sorted(root.rglob("*.py")):
-        if path.name in allowed:
-            continue
-        if "get_capture_usage" in path.read_text(encoding="utf-8", errors="replace"):
-            offenders.append(str(path.relative_to(root)))
+    offenders, scanned = _scan_capture_call_sites(root)
+    assert len(scanned) > 100, (
+        f"the scope scan read only {len(scanned)} module(s) under {root} — a scan "
+        "that inspected nothing cannot certify that nothing calls the reader"
+    )
+    assert "hosted_api.py" in scanned, (
+        "the scope scan did not read tortoise/hosted_api.py, the module whose call "
+        f"site would put the reader on a request path; read: {scanned[:5]}…"
+    )
     assert offenders == [], (
         "get_capture_usage is a MEASUREMENT reader with no call sites (#4051 §1b); "
         f"it is referenced in {offenders} — a call site makes it enforcement or surface"
     )
+
+
+def test_the_scope_scan_flags_a_wired_call_site(tmp_path):
+    """Non-vacuity: the scan can still DETECT — a real call site reddens it.
+
+    Run against a fixture tree rather than the repo, so the assertion is about
+    the scanner's discriminating power and not about today's tree happening to
+    be clean.
+    """
+    (tmp_path / "hosted_api.py").write_text(
+        "def f(org):\n    return metering.get_capture_usage(org)\n", encoding="utf-8")
+    (tmp_path / "clean.py").write_text("X = 1\n", encoding="utf-8")
+    offenders, scanned = _scan_capture_call_sites(tmp_path)
+    assert offenders == ["hosted_api.py"]
+    assert scanned == ["clean.py", "hosted_api.py"]
+
+
+def test_the_scope_scan_exempts_only_the_defining_modules(tmp_path):
+    """The exemption set is exact: the defining modules are skipped, and ONLY them."""
+    for name in _ALLOWED:
+        (tmp_path / name).write_text(
+            "def get_capture_usage(org):\n    return {}\n", encoding="utf-8")
+    offenders, scanned = _scan_capture_call_sites(tmp_path)
+    assert (offenders, scanned) == ([], [])
+
+
+def test_an_unreadable_root_is_caught_by_the_floor_not_read_as_a_pass(tmp_path):
+    """A wrong root produces ``[]`` offenders — which is why the floor exists.
+
+    Pinned so the floor cannot be dropped as redundant: without it, this empty
+    directory is indistinguishable from a clean tree (#3400/#4348 shape, applied
+    to a scan instead of a manifest row).
+    """
+    offenders, scanned = _scan_capture_call_sites(tmp_path)
+    assert (offenders, scanned) == ([], [])
+    assert not len(scanned) > 100, "the floor must reject a root that yielded no files"
 
 
 # ── the supabase (production) substrate ─────────────────────────────────────
