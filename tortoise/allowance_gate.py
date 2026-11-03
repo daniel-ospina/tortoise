@@ -773,7 +773,7 @@ def enforce_allowances(
             raise QuotaExceededError(
                 with_limit_contact(
                     f"Team {dim.dimension} allowance reached "
-                    f"({allowance:g} {dim.unit}, used {used:g}). Upgrade your "
+                    f"({allowance:,.0f} {dim.unit}, used {used:,.0f}). Upgrade your "
                     f"plan to increase it.{note}"),
                 resource=dim.dimension, used=int(used), limit=int(allowance),
                 # Omitted (None) when the figure is exact, so `quota.py`'s
