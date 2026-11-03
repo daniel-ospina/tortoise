@@ -13255,8 +13255,9 @@ def _seed_demo_graph(org_id: str) -> dict:
     #
     # ⚠️ NOT RETROACTIVE, the same posture as the `tags` note above: the sentinel
     # short-circuits before any write, so a demo graph seeded BEFORE this keeps
-    # its `epi_turn*` nodes AND its `s.turn_count=3` — the two are removed by
-    # DIFFERENT statements, and only the node delete is irreversible-safe.
+    # its `epi_turn*` nodes AND a counter that still declares 3 — the two are
+    # removed by DIFFERENT statements, so only the node delete is
+    # irreversible-safe.
     # ⛔ RE-SEEDING DOES NOT REPAIR THEM — a re-seed writes nothing for those
     # ids and deletes nothing (unlike the `tags` case, whose `MERGE` re-writes
     # `p.tags`). Deleting the sentinel and re-seeding, the idiom the note above
