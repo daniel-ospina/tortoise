@@ -1100,6 +1100,166 @@ def test_same_key_writes_leave_the_degraded_cache_cold_which_is_the_stated_trade
     assert fs._FLIGHTS == {}, "no flight may leak"
 
 
+def test_a_reader_racing_the_commit_invalidate_tail_gets_the_cohorts_rows():
+    """The bound is ONE FLIGHT, not "no result crosses a write boundary" (round 10, P2).
+
+    ``_mark_dirty`` runs ``invalidate()`` at the TAIL of each write surface, AFTER the
+    graph commit (``sdk.py:17589`` -> ``:17594``). So there is a window between a write
+    COMMITTING and its invalidate landing. A reader whose ``get`` misses inside that
+    window samples the PRE-write stamp and joins the pre-write flight.
+
+    This test exists because the earlier round-9 tests modelled the write AS the
+    invalidate (``fs._store.invalidate(key)`` at the exact instant of the write), which
+    pins the idealised zero-width case and cannot see this window at all — so the
+    comment's claim of "read-your-writes, structurally" went unchallenged. Here the
+    commit and the invalidate are separated, which is what the real code does.
+
+    The guarantee that DOES hold is the writer's own: a write surface invalidates before
+    it returns, so a caller cannot search before its own write's stamp has moved —
+    asserted at the end of this test.
+    """
+    import threading
+
+    fs._store.clear()
+    key = ("tail-graph", "tail-ns")
+    built = threading.Event()
+    release = threading.Event()
+    rows: list[dict] = []
+
+    def leader_builder(_proj):
+        built.set()
+        release.wait(timeout=10)
+        return _snap_stub("pre-commit")
+
+    t1 = threading.Thread(
+        target=lambda: rows.append(fs.get_or_build(None, key, builder=leader_builder) or {}))
+    t1.start()
+    assert built.wait(timeout=10), "the leader's build never started"
+
+    # The write COMMITS here (a fresh MATCH would see it) …
+    committed = True
+    # … but its ``_mark_dirty`` -> ``invalidate`` has NOT run yet. A reader arriving in
+    # this window samples the pre-write stamp and joins the pre-write flight.
+    heard: list[dict] = []
+    t2 = threading.Thread(
+        target=lambda: heard.append(
+            fs.get_or_build(None, key, builder=lambda _p: _snap_stub("post-commit")) or {}))
+    t2.start()
+    # Deterministic: wait until that reader is IN the pre-write flight.
+    g0 = fs._store.generation(key)
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        fl = fs._FLIGHTS.get((key, g0))
+        if fl is not None and fl.waiters >= 2:
+            break
+        time.sleep(0.005)
+    else:
+        raise AssertionError("the racing reader never joined the pre-write flight")
+
+    # NOW the write's tail runs.
+    fs._store.invalidate(key)
+    release.set()
+    t1.join(timeout=20)
+    t2.join(timeout=20)
+
+    assert committed
+    assert rows and rows[0].get("tag") == "pre-commit"
+    assert heard and heard[0].get("tag") == "pre-commit", (
+        "the documented behaviour: a reader racing the commit->invalidate tail is served "
+        "the cohort's pre-commit rows, bounded by one flight. If this now returns "
+        "'post-commit' the window was closed — GOOD, but update the COMMIT->INVALIDATE "
+        "WINDOW note on get_or_build, because it currently states this bound")
+    assert fs._FLIGHTS == {}, "no flight may leak"
+
+    # ⭐ THE GUARANTEE THAT DOES HOLD, and the one a writer depends on: once the write
+    # surface has RETURNED (its invalidate has run), a reader cannot join the pre-write
+    # flight — its stamp has moved and it builds for itself.
+    fs.get_or_build(None, key, builder=lambda _p: _snap_stub("after-tail"))
+    post = fs.get_or_build(None, key, builder=lambda _p: _snap_stub("rebuilt"))
+    assert post is not None and post.get("tag") == "after-tail", (
+        "a writer that has already returned must not be served the pre-write cohort's "
+        "rows — this is the read-your-writes half that DOES hold")
+
+
+def test_a_write_opens_a_concurrent_build_which_is_the_stated_concurrency_bound():
+    """At most one build per IN-FLIGHT GENERATION, not one per key (round 10, P3).
+
+    The module banner used to say "one whole-corpus fetch per key, not one per reader".
+    That is not what the code does: the slot is ``(key, generation)``, so a reader holding
+    a newer stamp opens its own build while the older one is still running. That is a
+    consequence of the correctness rule (a reader must never be served rows predating a
+    write it could have seen), not of coalescing — the pre-#10602 code ran every reader's
+    build concurrently too.
+
+    What IS guaranteed, and what this test pins, is that the bound is the number of
+    distinct generations in flight rather than the number of readers: the readers sharing
+    a stamp still coalesce, so 4 same-stamp readers cost ONE build even though a second
+    generation is building alongside.
+    """
+    import threading
+
+    fs._store.clear()
+    key = ("gen-graph", "gen-ns")
+    builds: list[str] = []
+    lock = threading.Lock()
+    g0_started = threading.Event()
+    release_g0 = threading.Event()
+
+    def builder(tag):
+        def _b(_proj):
+            with lock:
+                builds.append(tag)
+            if tag == "g0":
+                g0_started.set()
+                release_g0.wait(timeout=10)
+            return _snap_stub(tag)
+        return _b
+
+    t0 = threading.Thread(
+        target=lambda: fs.get_or_build(None, key, builder=builder("g0")))
+    t0.start()
+    assert g0_started.wait(timeout=10)
+
+    # A write lands: the stamp moves while the g0 build is still running.
+    fs._store.invalidate(key)
+
+    # Four readers arrive on the NEW stamp. They must coalesce with EACH OTHER (one
+    # build), and — the pinned bound — that build runs CONCURRENTLY with g0's.
+    late = [
+        threading.Thread(target=lambda: fs.get_or_build(None, key, builder=builder("g1")))
+        for _ in range(4)
+    ]
+    g1_started = threading.Event()
+    for t in late:
+        t.start()
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        with lock:
+            if builds.count("g1") >= 1:
+                g1_started.set()
+                break
+        time.sleep(0.005)
+    assert g1_started.is_set(), "the post-write cohort never started its own build"
+
+    with lock:
+        concurrent = "g0" in builds and "g1" in builds and not release_g0.is_set()
+    assert concurrent, (
+        "the stated bound: a newer generation builds CONCURRENTLY with an in-flight "
+        "older one. If this fails, generations were serialised — a real change, and "
+        "the BANNER note must be updated to say so")
+
+    release_g0.set()
+    for t in [t0, *late]:
+        t.join(timeout=20)
+
+    with lock:
+        assert builds.count("g0") == 1, "one build for the old generation"
+        assert builds.count("g1") == 1, (
+            f"the 4 same-stamp readers must coalesce onto ONE build, got "
+            f"{builds.count('g1')} — the bound is distinct generations, not readers")
+    assert fs._FLIGHTS == {}, "no flight may leak"
+
+
 def test_degraded_read_with_claim_class_never_uses_the_snapshot(sdk, monkeypatch):
     """#2351 must survive the #10602 reshape (review round 2, P3).
 

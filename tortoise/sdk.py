@@ -36108,7 +36108,12 @@ class TortoiseSDK:
                 # degraded read used to fetch the whole corpus per reader, so N
                 # concurrent agents cost N corpus reads and each call's latency
                 # grew with the fleet's concurrency (measured: 8 readers, 4.6 s
-                # each vs 595 ms for one). Coalescing is result-identical.
+                # each vs 595 ms for one). Coalescing does NOT change the cache
+                # policy or any answer in the common case, but it is NOT
+                # result-identical in one window: see the COMMIT→INVALIDATE WINDOW
+                # note on ``get_or_build`` (a reader racing a write's
+                # commit→invalidate tail can be served that cohort's pre-commit
+                # rows, bounded by one flight).
                 from tortoise.fallback_snapshot import (  # noqa: I001
                     _store as _fb_store, snapshot_key, get_or_build,
                     search_snapshot,

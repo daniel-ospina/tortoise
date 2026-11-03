@@ -193,8 +193,23 @@ _store = FallbackSnapshotStore()
 # and it is self-amplifying: the busier the fleet, the more whole-corpus reads the
 # store is asked for *while it is already the thing under strain*.
 #
-# What this is NOT: it changes no cache policy, no TTL, no size cap, no bound and no
-# result. Nothing is cached that was not already cached, and no answer changes.
+# Which part of that is fixed, stated exactly (review round 10, P3): AT MOST ONE BUILD PER
+# IN-FLIGHT GENERATION, not at most one per key. The slot is ``(key, generation)`` so a
+# reader holding a NEWER stamp opens its own build while the older one is still running —
+# measured: 10 concurrent readers of one key with a same-key ``invalidate`` every 50 ms and
+# a 400 ms build → 9 builds, 7 of them concurrent. That is a deliberate consequence of the
+# correctness rule below (a reader must never be served rows that predate a write it could
+# have seen), NOT of coalescing: the pre-#10602 code ran every reader's build concurrently
+# too. It is bounded by the number of distinct generations in flight, not by reader count,
+# which is the property that made latency linear in the fleet. Serialising generations
+# (a newer reader waits, re-checks the cache, then leads) would cap it at one build per key
+# at a time and is the natural follow-up if the store's slots are the binding constraint;
+# it was NOT done here because it adds cross-generation blocking to a P0 read path.
+#
+# What this is NOT: it changes no cache policy, no TTL, no size cap and no bound. Nothing
+# is cached that was not already cached. ⛔ "No answer changes" is NOT true and must not be
+# restored (review round 10, P2): see the COMMIT→INVALIDATE WINDOW note on
+# ``get_or_build`` for the one window in which a reader can be served pre-commit rows.
 #
 # ⛔ It is also not the "add a cache" remedy #10602's recorded decisions forbid
 # (STORAGE-ARCHITECTURE §14.2 / §12.1c make FalkorDB itself the cache under the
@@ -294,8 +309,10 @@ def get_or_build(proj, key: tuple, *, store: FallbackSnapshotStore | None = None
     stop — and the freshness half was accepted in review round 2. It is PINNED by
     ``test_same_key_writes_leave_the_degraded_cache_cold_which_is_the_stated_trade`` so
     the trade is a decision rather than an accident. The concurrency half — the part
-    that made latency linear in the fleet, which is #10602's actual shape — is fixed:
-    a late cohort coalesces onto ONE rebuild.
+    that made latency linear in the fleet, which is #10602's actual shape — is bounded
+    by the number of distinct generations in flight rather than by reader count (see the
+    BANNER note at the top of this section: at most one build per IN-FLIGHT GENERATION,
+    not one per key).
 
     ``builder``/``store`` are test seams.
 
@@ -343,15 +360,34 @@ def get_or_build(proj, key: tuple, *, store: FallbackSnapshotStore | None = None
     # ⛔ THE FLIGHT SLOT CARRIES THIS READER'S OWN ARRIVAL STAMP. That single choice is
     # what makes the cohort correct, and it is why no reader ever needs to rebuild:
     #
-    # * A write bumps the key's stamp, so a reader arriving AFTER a write holds a
-    #   DIFFERENT stamp and therefore cannot join the pre-write build at all — it leads
-    #   (or joins) the build for its own generation. That is read-your-writes,
-    #   structurally: no result can cross a write boundary, so none has to be
-    #   re-validated afterwards (review round 6's concern).
-    # * A reader that DOES share the leader's stamp arrived before any write that could
-    #   have overtaken it, and the leader's rows were read after that stamp was taken,
-    #   so those rows already include every write this reader could have seen. Serving
-    #   it the leader's answer is correct, not a concession.
+    # * A reader arriving AFTER a write has bumped the key's stamp holds a DIFFERENT
+    #   stamp, so it cannot join the pre-write build at all — it leads (or joins) the
+    #   build for its own generation. That is why round 6's inline per-reader rebuild is
+    #   gone: the partition is structural, so nothing has to be re-validated afterwards.
+    # * A reader that DOES share the leader's stamp sampled a stamp no older than the
+    #   leader's, and the leader's rows were read after that stamp was taken.
+    #
+    # ⛔ COMMIT→INVALIDATE WINDOW — the precondition, stated instead of glossed (review
+    # round 10, P2: this comment previously claimed "read-your-writes, structurally: no
+    # result can cross a write boundary", which is FALSE and was measured false). The
+    # stamp only moves when ``invalidate()`` runs, and ``_mark_dirty`` calls it at the
+    # TAIL of each write surface, AFTER the graph commit (``sdk.py:17589`` →
+    # ``:17594``, retract ``:20191``, promote ``:20346``). So there is a window between a
+    # write COMMITTING and its invalidate landing. A reader whose ``store.get`` misses in
+    # that window samples the PRE-write stamp and joins the pre-write flight, so it can be
+    # served that cohort's pre-commit rows — bounded by one flight's duration, never by
+    # the TTL. Two things are nevertheless true and are what this design actually
+    # guarantees:
+    #
+    #   1. A WRITER's own read-your-writes holds: every write surface invalidates before
+    #      it returns, so by the time the caller can issue a search the stamp has moved
+    #      and the pre-write flight is unjoinable.
+    #   2. An unrelated reader racing a write's commit→invalidate tail gets the cohort's
+    #      pre-commit rows, exactly as it would have got them from a cache hit; pre-#10602
+    #      it built its own rows and saw the write. That is a real, narrow difference from
+    #      the old behaviour, and it is the price of not having a per-reader build.
+    #
+    # Pinned by ``test_a_reader_racing_the_commit_invalidate_tail_gets_the_cohorts_rows``.
     #
     # ⇒ "overtaken" never means "stale for this reader"; it only means "must not be
     # CACHED" (the put guard inside ``produce``). So there is NO rebuild path here — the
