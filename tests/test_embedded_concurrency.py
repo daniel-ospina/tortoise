@@ -20,7 +20,7 @@ import pytest
 # shared system temp dir, so a socket/pid lookup can never again walk the whole
 # host temp tree (2 min at 53% CPU) nor match a concurrent suite's
 # redis.socket / redis.pid.
-from tests._tmpdir_hygiene import scan_root
+from tests._tmpdir_hygiene import SessionRedisResidue, scan_root
 
 pytest.importorskip("redislite")
 
@@ -460,59 +460,16 @@ def _clean_spawned_residue():
     processes (a race generator, and lethal when test (a)/test-slow ran
     concurrently). This fixture snapshots pids + socket dirs before the
     test and kills/removes ONLY the delta (the test_reaper pattern #493).
-    """
-    def _snapshot() -> tuple[set[int], set[str]] | None:
-        """Snapshot ambient pids + socket dirs. Returns None when the probe
-        fails — the caller must SKIP cleanup entirely (fail-safe: clean
-        nothing rather than compute a delta against an empty baseline, which
-        would kill every server on the host)."""
-        pids: set[int] = set()
-        try:
-            out = subprocess.run(
-                ["pgrep", "-f", "redislite/bin/redis-server"],
-                capture_output=True, text=True, timeout=10,
-            ).stdout
-            pids = {int(p) for p in out.split() if p.strip().isdigit()}
-        except Exception:
-            return None
-        dirs: set[str] = set()
-        tmp = scan_root()  # #3752: private root, never the shared temp dir
-        try:
-            for entry in os.scandir(tmp):
-                if entry.is_dir() and (
-                    os.path.exists(os.path.join(entry.path, "redis.socket"))
-                    or os.path.exists(os.path.join(entry.path, "redis.pid"))
-                ):
-                    dirs.add(entry.path)
-        except Exception:
-            return None
-        return pids, dirs
 
-    before = _snapshot()
-    if before is None:
-        yield  # probe failed — fail-safe: no cleanup at all
-        return
-    before_pids, before_dirs = before
+    The pid population is SESSION-scoped (`SessionRedisResidue`,
+    tests/_tmpdir_hygiene.py): a host-wide `pgrep` delta also contains every
+    server a concurrent CI job on this shared runner started while the test
+    ran, so killing it SIGTERMed *their* servers — measured 2026-11-03 as
+    `redis.socket ... No such file or directory` in a sibling shard (#7522).
+    """
+    residue = SessionRedisResidue(kill=_kill_pid, alive=_pid_alive)
     yield
-    try:
-        after = _snapshot()
-        if after is None:
-            return  # probe failed — fail-safe: skip cleanup
-        after_pids, after_dirs = after
-        delta = after_pids - before_pids
-        for pid in delta:
-            _kill_pid(pid)
-        # Poll briefly so the rmtree below does not race a dying server.
-        for _ in range(6):
-            alive = {p for p in delta if _pid_alive(p)}
-            if not alive:
-                break
-            time.sleep(0.1)
-        import shutil
-        for d in after_dirs - before_dirs:
-            shutil.rmtree(d, ignore_errors=True)
-    except Exception:
-        pass
+    residue.reap()
 
 
 @pytest.fixture(scope="module", autouse=True)

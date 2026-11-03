@@ -51,6 +51,7 @@ import json
 import logging
 import os
 import shutil
+import signal
 import stat
 import tempfile
 import time
@@ -550,6 +551,137 @@ def scan_root() -> str:
         raise SharedTmpdirScanError(
             f"session temp root {root!r} is not private (#3752)")
     return root
+
+
+# ── the KILL side of #3752: teardown may only reap THIS session's servers ──
+
+def session_redis_pids() -> set[int] | None:
+    """Live redislite redis-server pids that belong to THIS session, or None.
+
+    ``pgrep -f redislite/bin/redis-server`` is HOST-WIDE: on a shared
+    self-hosted runner (the fleet's own Mac runs several shards and several
+    branches' jobs in ONE process table) it also returns a concurrent job's and
+    a sibling ``pytest -n`` worker's servers. A teardown that snapshots that
+    population before/after a test and kills the DELTA therefore SIGTERMs
+    servers it does not own — #7522's class, measured 2026-11-03 as
+    ``Error 2 connecting to .../redis.socket. No such file or directory`` in a
+    *sibling shard's* embedded tests, and as a writer's unflushed data vanishing
+    under ``test_parallel_single_writer_multi_reader`` (its server was killed
+    mid-write; the test never checks the writer's exit code).
+
+    Attribution is by SOCKET PATH, the same key the run's own orphan gate uses
+    (``tortoise.embedded_reaper.own_live_server_count``, #1005): a redislite
+    server daemonizes, so ancestry is gone by teardown time, but its argv always
+    carries the socket path inside the session temp root it was started from —
+    and #3752 made that root PRIVATE per session. Filtering the population by
+    this session's root is therefore #3752's private-root guarantee applied to
+    the KILL side, which is the half that was still host-wide.
+
+    Returns None (never an empty set) when the probe or the argv read failed: a
+    caller must then clean NOTHING, because a delta computed against an
+    unmeasured baseline is the whole process table.
+    """
+    from tortoise import embedded_reaper  # local: conftest imports this module
+
+    prefix = os.path.realpath(scan_root()).rstrip("/") + "/"
+    pids = embedded_reaper._pgrep_redis_servers_or_none()
+    if pids is None:
+        return None
+    if not pids:
+        return set()
+    argvs = embedded_reaper._batch_cmdlines_or_none(list(pids))
+    if argvs is None:
+        return None
+    return {pid for pid, args in argvs.items() if prefix in (args or "")}
+
+
+def _redis_residue_snapshot() -> tuple[set[int], set[str]] | None:
+    """(this session's live server pids, its socket/pid dirs) or None.
+
+    None when either half is unmeasurable — the caller must not compute a
+    delta against half a baseline.
+    """
+    pids = session_redis_pids()
+    if pids is None:
+        return None
+    dirs: set[str] = set()
+    try:
+        root = scan_root()
+        entries = os.scandir(root)
+    except (OSError, SharedTmpdirScanError):
+        return None
+    with entries:
+        for entry in entries:
+            if entry.is_dir() and (
+                os.path.exists(os.path.join(entry.path, "redis.socket"))
+                or os.path.exists(os.path.join(entry.path, "redis.pid"))
+            ):
+                dirs.add(entry.path)
+    return pids, dirs
+
+
+def _terminate_pid(pid: int) -> None:
+    """SIGTERM that treats a vanished/inaccessible pid as already done."""
+    with contextlib.suppress(ProcessLookupError, PermissionError):
+        os.kill(pid, signal.SIGTERM)
+
+
+def _pid_running(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except (ProcessLookupError, PermissionError):
+        return False
+    return True
+
+
+class SessionRedisResidue:
+    """Reap the embedded servers THIS session started during one test.
+
+    The before/after delta the two embedded modules' autouse teardown fixtures
+    both need (#493/#1365), with the population scoped to the private session
+    root (#3752) instead of the host. Unmeasurable baseline or unmeasurable
+    re-read reaps NOTHING — fail-CLOSED, because the alternative is the
+    host-wide ``pkill`` those fixtures' own docstrings call lethal.
+
+    ``kill``/``alive`` default to a plain SIGTERM plus a ``kill(pid, 0)``
+    probe; ``tests/test_embedded_concurrency.py`` injects its own
+    SIGTERM-then-SIGKILL escalation to keep its exact behaviour. Both hooks
+    take ONE argument — ``kill(pid)`` / ``alive(pid)`` — because that is the
+    shape both real injections already have (``_kill_pid`` owns its own
+    escalation, so a signal parameter would be a dead knob), and because a
+    two-argument call into a one-argument teardown hook is a ``TypeError``
+    inside fixture finalisation: it is not a lost cleanup, it ERRORs every
+    test in the module.
+    """
+
+    def __init__(self, snapshot=None, kill=None, alive=None) -> None:
+        self._snapshot = snapshot or _redis_residue_snapshot
+        self._kill = kill or _terminate_pid
+        self._alive = alive or _pid_running
+        self._before = self._snapshot()
+
+    @property
+    def measurable(self) -> bool:
+        return self._before is not None
+
+    def reap(self) -> None:
+        if self._before is None:
+            return  # unmeasured baseline: never guess at a delta
+        after = self._snapshot()
+        if after is None:
+            return  # unmeasured re-read: kill nothing
+        before_pids, before_dirs = self._before
+        after_pids, after_dirs = after
+        delta = after_pids - before_pids
+        for pid in delta:
+            self._kill(pid)
+        # Poll briefly so the rmtree below does not race a dying server.
+        for _ in range(6):
+            if not any(self._alive(p) for p in delta):
+                break
+            time.sleep(0.1)
+        for d in after_dirs - before_dirs:
+            shutil.rmtree(d, ignore_errors=True)
 
 
 # ── install / teardown ───────────────────────────────────────────────────

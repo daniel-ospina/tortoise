@@ -1300,6 +1300,7 @@ surfaces:
   # `tortoise/activation_scorecard.py`'s LIMITATIONS text).
   - test_mcp_refusal_telemetry_9084.py
   - test_metering.py
+  - test_metering_capture_usage_reader.py  # #4051: the extractor's token counters had a WRITER and no READER — this pins `metering.get_capture_usage` (both substrates: the registry Cypher read and the Supabase control-plane read, the latter being the PRODUCTION ledger post-#669, where a wrong column would otherwise degrade silently to the zero view for every tenant) + the repo-wide "no call site" scope pin that keeps the reader off every request path. Registered on `api` because two of its three sources (`tortoise/metering.py`, `tortoise/supabase_control.py`) are exact `api` SOURCE_PATTERNS, AND on `core` because the THIRD (`tortoise/cost_dimensions.py`) matches no SOURCE_PATTERN and falls to `core` — measured, not assumed: `tools/ci_selection.py --changed-files tortoise/cost_dimensions.py` -> `['core']`. A named-surface match REPLACES the `core` fallback (#2938), so the `api` arm alone leaves a core-only diff running NEITHER this file nor any other of its pins — and a core-only diff is exactly the regression shape this PR fixes (the binding re-pointed back at a write-op reader). See the `core` arm.
   - test_oauth_consent_page_step4.py  # #3524 §9 step 4: the consent page STOPS signing people in. Owns the whole page surface now — the unauthenticated 302 bounce (with the complete authorize URL recoverable), the return target run through signup.html's REAL `APP_RETURN_ROUTES` under node, byte-exact `state`, the attempt-key carriage read from the page's own URL, the mint call, the token-bound `/oauth/consent` POST, and a bound token redeeming to a live code. It REPLACED test_oauth_consent_pkce.py wholesale (deleted with the inline client it pinned). DUAL-REGISTERED with `onboarding`: it reads `website/apps/dashboard/functions/**` (the mint's route files and the TS `ATTEMPT_KEY_PARAM` authority) and `public/signup.html`.
   - test_oauth_consent_bff_routes.py  # #3524 steps 1+3: the BFF mint + bounce routes and the TS<->Python token contract
   - test_oauth_consent_jti_store.py  # #3524 step 1: the control-plane jti STORE contract — first-claim vs replay mapping, the 401/503 split, the exp+leeway stamp, the prune. NOT atomicity and NOT the grants: atomicity is Postgres ON CONFLICT and the GRANT/RLS posture is executed by supabase/tests/20261030000001_oauth_consent_tickets.sql (pglite) — this file says so in its own header
@@ -4570,6 +4571,14 @@ surfaces:
   # and the production call sites it verifies live in metering.py / hosted_api.py
   # (see that surface's entry).
   - test_cost_dimensions.py
+  # #4051: the capture/extraction dimension's READER (`metering.get_capture_usage`)
+  # and the binding that re-points `capture_extraction` at it — dual-registered
+  # with `api` (see that surface's entry). THIS arm is the one that carries a
+  # core-only diff: the declaration the change touches lives in
+  # `tortoise/cost_dimensions.py`, which matches no SOURCE_PATTERN and falls to
+  # `core`, so reverting the binding to a write-op reader selects `core` and
+  # would otherwise run no leg of this file.
+  - test_metering_capture_usage_reader.py
   # #4490: the per-org compute dimension's metric family/writer/reader live in
   # tortoise/monitoring.py — a monitoring.py-only PR (which maps to `core`) must
   # run this file. Dual-registered with `api` (the middleware is in hosted_api.py).
@@ -8356,6 +8365,7 @@ durations:
   test_client_surface.py: 17.6  # #9017 CI-junit 2026-10-18 (run 39165691659); was 25.7 — ci-timing junit-census+top-15 2026-10-26 (run 40259128208): no declared testcase count for this file (UNKNOWN), so the reading cannot prove it saw the whole file; the reading (10.6s) is a LOWER bound; kept 17.6
   test_ingest_v2_consolidation.py: 23.5  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 25.9
   test_metering.py: 6.4  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 6.8
+  test_metering_capture_usage_reader.py: 2.0  # new in #4051 — a file a PR ADDS can never carry a CI junit reading yet (the refresher samples push-to-main runs only), so it takes the header's flat `DEFAULT_FAST_WEIGHT` and NOT this host's local reading, which the map forbids as a SHARD-LAYOUT input (#2818/#3419/#4348). The row must EXIST, not merely default (the #3400/#4348 trap). ⛔ The CASE COUNT is deliberately NOT quoted: `tools/ci_timing.py --refresh-durations` replaces this row from junit. What the weight covers: pure-unit, DB-free — the reader is a mapping over one ledger row, so the window and the registry are stubbed; no server, network or model, nothing written outside `tmp_path`.
   eval/harness/test_harness_benchmark.py: 38.8  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 59.1
   test_epic903_scheduler.py: 21.0  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 34.4
   test_hosted_volunteer_context.py: 16.0  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 16.1
