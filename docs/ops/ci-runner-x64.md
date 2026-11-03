@@ -755,7 +755,7 @@ belongs to). It drives the script as a subprocess in a hermetic env — a temp b
    ⛔ **WHAT THE UNION DOES AND DOES NOT BUY, stated plainly so the next stall is not read as
    closed.** The repair hardening fixed the *manual* and *provisioner-adjacent* path only: a repair
    can no longer strip `ubuntu-latest`, and nothing else in this repo calls `--repair-labels`
-   (`tools/runner_autoscale.py:1063` invokes the installer as `--count … --fallback auto`, never
+   (`tools/runner_autoscale.py:1202` invokes the installer as `--count … --fallback auto`, never
    `--repair-labels`, and its own `_preserve_labels` already kept the label). It does NOT stop the
    remover above: the gate's `fallback_off` still strips `ubuntu-latest` from this pool on its next
    tick, from `scripts/ci_runner_gate.sh` in **agent-infra**, which is not in this checkout. So the
@@ -995,3 +995,55 @@ Two further facts measured on the canary, so the next author copies the right pr
   `registry-cron.sh`; the harness stubs no `jq`), and that whole script is gated on the
   `driver_scripts` surface, so the assert carries the same gate. Ungated it would red every PR —
   including the large majority that cannot touch the driver — naming a tool nothing would have used.
+
+## A runner can be ONLINE, IDLE and serve NOTHING — the wedged work dir
+
+⛔ **`status=online` and `busy=false` are both true of a runner that fails every job in one
+second.** A job that dies at setup leaves the runner idle almost all of the time, so a pool census
+built on those two booleans calls the BROKEN runner the *idlest and healthiest* one on the box.
+
+Measured 2026-11-03 on `/opt/gh-runner-x64-{4,6,7,8}`: every job died 5–21 s in, before any step,
+with
+
+```text
+Complete job name: <job>
+##[error]Access to the path '/opt/gh-runner-x64-7/_work/_temp/_github_workflow' is denied.
+```
+
+GitHub-hosted jobs in the same run went 11/11 green; the self-hosted ones went 20/21 red. Because
+`python-ci-gate` aggregates both, the required check was red on every PR while the *code* was
+fine, `scripts/admin-merge.sh` could not attribute the failures (they are PR-unique by
+construction), and 100 consecutive `python-ci` runs produced **zero** successes. It read as
+"main is broken" for three days.
+
+**Diagnose it from job history, not from the pool census** — `tools/runner_autoscale.py` now does
+this on every pass and reports `verdict=wedged` (exit 6) instead of `at-ceiling`/`converged`:
+
+```bash
+uv run python tools/runner_autoscale.py --repo daniel-ospina/tortoise --status --json \
+  | jq '{verdict, wedged, notes}'
+```
+
+**Repair** (per wedged instance; the work dir is the runner's own scratch space, nothing else
+lives there, and a running job must not be interrupted — check `busy=false` on that registration
+first):
+
+```bash
+# Run ON the box that hosts the registration. `name` comes from `--status --json` -> `wedged[]`;
+# the directory is `/opt/gh-runner-x64-<n>` (instance 1 keeps the bare `/opt/gh-runner-x64`).
+name=pi-runner-cmux-x64-7
+dir=/opt/gh-runner-x64-7
+unit="actions.runner.daniel-ospina-tortoise.$name"
+sudo systemctl stop "$unit.service"
+sudo rm -rf "$dir/_work/_temp/_github_workflow"
+sudo systemctl start "$unit.service"
+```
+
+Stop serving from a wedged registration **while it is broken** rather than reverting the pool's
+role: detaching the fallback label (`ubuntu-latest`) from it takes it out of the scheduler's reach
+and is reversible — `--repair-labels` re-derives the set from the gate's condition.
+
+```bash
+gh api -X DELETE "repos/daniel-ospina/tortoise/actions/runners/<ID>/labels/ubuntu-latest"
+uv run python tools/install-ci-runner-x64.sh --repair-labels   # restores it once the box is repaired
+```
