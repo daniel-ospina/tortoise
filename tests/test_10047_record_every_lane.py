@@ -968,7 +968,7 @@ def _org_scoped_sdk_sites(tree) -> dict[str, int]:
     count was not org-scoped at all, which let the non-vacuity floor stand on
     registry lanes alone. Corrected, the package has 88 org-scoped sites across
     THREE modules, measured on the tree #10723 merges into (`origin/main`
-    `a6e20f05b`, 264 modules): `hosted_api.py` 85 (two of which are the
+    `e4ee966f4`, 264 modules): `hosted_api.py` 85 (two of which are the
     `namespace=None` probe constructions the predicate COUNTS deliberately),
     `quota.py` 1 and `supabase_control.py` 2 (the module-qualified spelling).
     ⚠️ The number is DATED on purpose. Two earlier revisions of this line said
@@ -1245,7 +1245,7 @@ def test_no_lane_ANYWHERE_in_the_package_writes_records_through_an_unbound_sdk()
     ("the gap is invisible until such a tenant tries to write").
 
     Measured on the tree this leg was last verified against (`origin/main`
-    `a6e20f05b`, 264 modules): 88 org-scoped construction sites across THREE
+    `e4ee966f4`, 264 modules): 88 org-scoped construction sites across THREE
     modules, and 0 unbound record writes, so widening the scan
     cannot red on the code as it stands. Its whole job is the module that does
     not exist yet. (Two earlier revisions reported different counts, each fixed
@@ -1335,7 +1335,7 @@ def test_no_lane_ANYWHERE_in_the_package_writes_records_through_an_unbound_sdk()
 
     # The MODULE axis, which a global site floor cannot see: THREE modules
     # contribute sites and `hosted_api.py` holds 85 of the 88 (measured on
-    # `origin/main` `a6e20f05b`; the ratio, not the figure, is what matters
+    # `origin/main` `e4ee966f4`; the ratio, not the figure, is what matters
     # here), so criteria drift
     # that stopped matching anywhere else would still clear the floor below with
     # the one module it already covered. A SUPERSET assertion (not equality) is
