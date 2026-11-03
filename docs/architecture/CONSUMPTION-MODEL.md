@@ -162,8 +162,8 @@ private-beta users, after the storage architecture + extractor + MCP deployments
 
 | tier | STORAGE allowance (bytes) | STORAGE overage | EXTRACTION allowance (tokens / period) | EXTRACTION overage | `write_ops` (transition) |
 |---|---|---|---|---|---|
-| `anon` (unclaimed) | `TBD-BY-MEASUREMENT(bytes retained by a zero-email team in its first period — measured on the free-tier cohort)` | **none** — no purchase path at `anon`; the door is a claim, not a card | `TBD-BY-MEASUREMENT(tokens per first-session capture — measured on new signups)` | **none** (same reason) | unchanged today (`1000`) |
-| `free` | `TBD-BY-MEASUREMENT(p50 and p95 bytes retained after 30 days on the free cohort)` | **none** — `pricing.json` `overage: false` | `TBD-BY-MEASUREMENT(tokens/capture × captures per active free user per month)` | **none** | unchanged today (`10000`) |
+| `anon` (unclaimed) | `TBD-BY-MEASUREMENT(bytes retained by a zero-email team in its first period — measured on the free-tier cohort)` | **none** — no purchase path at `anon`; the door is a claim, not a card, so the cap **refuses** (`#4815`) | `TBD-BY-MEASUREMENT(tokens per first-session capture — measured on new signups)` | **none** (same reason) | unchanged today (`1000`) |
+| `free` | `TBD-BY-MEASUREMENT(p50 and p95 bytes retained after 30 days on the free cohort)` | **none** — `pricing.json` `overage: false`, so reaching the cap **refuses** (`#4815`) | `TBD-BY-MEASUREMENT(tokens/capture × captures per active free user per month)` | **none** — the same carve-out, not a soft edge | unchanged today (`10000`) |
 | `solo` | `TBD-BY-MEASUREMENT(same population as free, one tier up)` | **prepaid credits** | `TBD-BY-MEASUREMENT(as free, on the paying cohort)` | **prepaid credits** | unchanged today (`10000`) |
 | `pro` | `TBD-BY-MEASUREMENT(power-user cohort p50/p95)` | **prepaid credits** | `TBD-BY-MEASUREMENT(power-user capture rate × measured tokens/capture)` | **prepaid credits** | unchanged today (`50000`) |
 | `team` | `TBD-BY-MEASUREMENT(team cohort p50/p95, multi-graph)` | **prepaid credits** | `TBD-BY-MEASUREMENT(team cohort)` | **prepaid credits** | unchanged today (`200000`) |
@@ -297,7 +297,7 @@ This document **implements** these; it reverses none of them. Run first, before 
 |---|---|---|
 | storage is billed in **MB/GB**, node unit retired | owner 2026-09-26, `STORAGE-ARCHITECTURE.md` §0 (carries `OVERRIDES:`) | **obeys** — §2 STORAGE dimension, bytes |
 | extraction usage is billed in **tokens**; overage **purchased with prepaid credits** | owner 2026-09-26, `EXTRACTOR-V4-ARCHITECTURE.md` §0 (carries `OVERRIDES:`) | **obeys** — §2 EXTRACTION dimension; §5 behaviour |
-| storage overage is **purchase, not refusal** | owner 2026-09-26, `STORAGE-ARCHITECTURE.md` §0 | **obeys** — §5 forbids a refusal at the allowance edge |
+| storage overage is **purchase, not refusal** | owner 2026-09-26, `STORAGE-ARCHITECTURE.md` §0 | **obeys** — §5 forbids a refusal at the allowance edge **where an overage path exists** (`solo`/`pro`/`team`) |
 | tiers price **features**, never refusal | owner 2026-09-22, `#4815` (**paid** tiers; `free`/`anon` keep `overage: false`) | **obeys** — §5 carries the carve-out verbatim and adds no refusal of its own |
 | the **node stock** stays a hard write refusal until the owner measures | `#4815` scope §1, `#4495`, `product/pricing.json` `max_graph_nodes` | **obeys** — §5 records it as the constraint the two dimensions replace, on every tier and on the capture door |
 | **no capture caps**; usage is metered separately | owner 2026-08-09 | **obeys** — no consumption cap on either session write lane |
