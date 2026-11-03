@@ -72,6 +72,10 @@ THE FOUR PROPERTIES, AND WHERE EACH LIVES
    source is ordered by `seq`, its vocabulary is imported from
    :mod:`tortoise.status_folds` (never restated here), and its bound — the
    terminal statuses the record has no carrier for — is stated at the table.
+   That exception reads THREE writers of the field (`EventRecorded` connector/
+   pack folds, an `EntityMutated` state op, and the CREATION record), so the
+   field is covered on every writer the record can carry — with the residues the
+   table names (birth-on-ON-MATCH, ordering, ambiguous names, a null clear).
 4. **A cold region reads ``not-hot``, never ``empty``.** ``declaration_for``
    writes the known-hot set **after** the writes and as a function of what was
    materialized, so a record key the projection did not write is not claimed
@@ -463,26 +467,96 @@ FOLD_ON_CREATE_DEFAULTS: dict[str, dict[str, Any]] = {
 #:   later connector fold is then refused by the terminal guard, so the replay
 #:   latches exactly where the live graph latches. See
 #:   :data:`EVENT_STREAM_FOLDS` and :class:`LifecycleEvent`'s `restatus_status`.
-#:   ⛔ **STATED BOUND — the BIRTH status is a third writer this table does not
-#:   read (#9974 review round 3).** `_upsert_object`/`_upsert_subject` seed
-#:   `status=$st` from the creation record's own payload
-#:   (`projection/entities.py`) — DERIVED-OR-ABSENT since #9974 R1, which removed
-#:   the fold's fabricated `coalesce($st, 'live')` and the door's
-#:   `out["status"] = "live"` so a status-less birth no longer CLAIMS `live`
-#:   (the value this table's §10189 no-fabrication rule already refuses to fill).
-#:   A caller-supplied birth status is unaffected by that: `sdk.create_entity`
-#:   accepts one — ⚠️ the SUBJECT door validates it against §4.2, the OBJECT door
-#:   validates nothing (a comment in `sdk._kind_layer_note` says so of the
-#:   document door — `create_entity`'s object branch has no status validation at
-#:   all, unlike the subject branch above it) — so `create_object(name, status='superseded')`
-#:   writes a terminal status at birth that `never_store` keeps out of the layer
-#:   tables and these two legs do not select (`ObjectRegistered`/`SubjectAdded` are
-#:   not `EventRecorded`). A record-sourced rebuild materializes it with NO status →
-#:   LIVE, while `rebuild_all` (which reads the JSONL payload) writes
-#:   `superseded`. This change therefore reproduces the STATE-OP writer, not every
-#:   writer of the field; the CALLER-SUPPLIED birth leg is a follow-up on #9974.
-#:   Do not read `LifecycleEvent`'s docstring as claiming the field is fully
-#:   covered.
+#:   ✅ **CLOSED (#9974's BIRTH leg) — the CREATION writer is now read.**
+#:   `_upsert_object`/`_upsert_subject` seed `status=$st` from the creation
+#:   record's own payload (`projection/entities.py`) — DERIVED-OR-ABSENT since
+#:   #9974 R1 (#10524), which removed the fold's fabricated `coalesce($st,
+#:   'live')` and the door's `out["status"] = "live"` — and `sdk.create_entity`
+#:   accepts a caller status — ⚠️ the SUBJECT door validates it against §4.2, the
+#:   OBJECT door validates nothing (`sdk._check_endpoints`'s status-refusal loop,
+#:   reached through `sdk._validate_bundle` — it says so of `:Object`/`:Event`:
+#:   "do not validate, they STORE the value"; cited by SYMBOL, not by line, per
+#:   #10524's own rule that a merge re-stales a line cite while a symbol cannot)
+#:   — so
+#:   `create_object(name, status='superseded')` writes a terminal status at
+#:   birth that `never_store` keeps out of the layer tables. `ObjectRegistered` /
+#:   `SubjectAdded` are now selected from the SAME stream (their `payload ->
+#:   'status'`) and replayed in `seq` order, ON CREATE, so a record-sourced
+#:   rebuild reproduces the value `rebuild_all` (which reads the JSONL payload)
+#:   writes instead of materializing NO status → LIVE.
+#:   ✅ **WHERE THE RECORD STATES NO STATUS, THE TWO ROUTES NOW AGREE — this was
+#:   a DIVERGENCE when this leg was written, and #9974 R1 closed it from the
+#:   other side.** At the time, `_upsert_object`/`_upsert_subject` seeded
+#:   `status=coalesce($st, 'live')`, so `rebuild_all` materialised `'live'` for a
+#:   silent creation record while this replay wrote nothing; that difference in
+#:   the PROPERTY SET was stated here as THE PRICE. R1 (#10524) removed the
+#:   fold's fabricated default — the seed is `status=$st` — so a status-less
+#:   birth now leaves the property ABSENT on BOTH routes. The price is GONE, not
+#:   merely re-described: neither route asserts a lifecycle fact the record never
+#:   stated, and an `rebuild_all`-vs-`rebuild_from_record` equality probe no
+#:   longer needs to treat `absent ≡ 'live'` for this property.
+#:   ⚠️ ONE STATED BOUND rides that leg, deliberate:
+#:   "the EARLIEST creation record speaks" is exact only where that record
+#:   is the write that CREATED the node. `_upsert_object`/`_upsert_subject` MERGE
+#:   on `id` and write `status` ON CREATE only, so for an id that already existed
+#:   (a stub/mention path, `create_object(..., id=…)`, a pre-#3590 graph, or a
+#:   delete-then-re-create under an EXPLICIT id — the SDK mints a fresh id on its
+#:   own delete+re-create path, so that one is not reachable) the
+#:   live node took the ON MATCH arm and kept its own status while this replay
+#:   would otherwise write the record's.
+#:   ⛔ THE DIVERGENCE RUNS IN BOTH DIRECTIONS, and only ONE of them is closed.
+#:   (a) THE HARM DIRECTION — a TERMINAL the graph really DID hold, discarded by
+#:   the birth arm, so the rebuild answers CURRENT. PRE-LATCH the overwrite
+#:   ordering `[restatus(seq 1,'archived'), birth(seq 2,'live')]` rebuilt `live`
+#:   while the graph holds `archived`, and `live._terminal_excluded` then admits a
+#:   superseded entity whose name still resolves — that ordering is CLOSED, see
+#:   (a-1). Reachability is not exotic: the first journaled creation record is
+#:   a RE-MENTION whenever the node pre-existed (stub, explicit `id=`, pre-#3590
+#:   graph, partial replay from `start_seq`), and a caller-supplied
+#:   `create_object(..., status='live')` states it explicitly — so the failure
+#:   does not degrade to the benign "absent reads LIVE" flavour, it actively
+#:   asserts CURRENT. ⚠️ #9974 R1 NARROWED this: `sdk._entity_door_props` used to
+#:   seed `status='live'` on every create, so any SDK birth could supply the
+#:   value; R1 deleted that fabrication, so the value now has to be stated
+#:   explicitly (or come from a pre-R1 journal). Narrower, still open.
+#:   ⛔ ONE of its two orderings is CLOSED, and the other is NOT — do not read this
+#:   as "the harm direction is fixed":
+#:   (a-1) the OVERWRITE ordering (above) is CLOSED. The birth arm now honours
+#:   the terminal latch (`_is_terminal_status`) every other in-stream fold here
+#:   honours, so it can no longer overwrite a terminal the REPLAY ALREADY HOLDS.
+#:   (a-2) the DELETE-THEN-RE-CREATE ordering is STILL OPEN, and the latch
+#:   cannot reach it: it is the `birth_seen` earliest-only rule that discards the
+#:   value, not the (now-guarded) assignment. `_upsert_object` writes `$st`
+#:   ON CREATE (derived-or-absent since #9974 R1), so a re-create under an
+#:   EXPLICIT id puts
+#:   the LATER record's terminal in the graph while this replay answers from the
+#:   FIRST incarnation — `[birth(seq 1, None), birth(seq 2, 'archived')]` and
+#:   `[birth(seq 1, 'live'), birth(seq 2, 'archived')]` both rebuilt absent/`live`
+#:   against a graph holding `archived` (MEASURED; exhaustive sweep over
+#:   `{restatus, birth, delete}` × length ≤ 4 finds 52 harm orderings, every one of
+#:   them containing a delete). The SDK mints a FRESH id on its own delete+re-create
+#:   path, so this needs an explicit `id=` — narrower, not closed. See the birth
+#:   arm's own STATED BOUND in :func:`apply_event_stream_folds`.
+#:   (b) THE FAIL-SAFE DIRECTION — still open, and the reason the latch is not
+#:   the whole bound: where the id pre-existed holding a NON-terminal status, the
+#:   ON MATCH arm keeps it live while this replay writes the record's, i.e. a
+#:   TERMINAL value the graph never held (`[restatus(seq 1,'live'),
+#:   birth(seq 2,'archived')]`). That direction is conservative — it makes the
+#:   rebuild claim LESS life, never more — so it cannot produce #9974's harm.
+#:   (c) THE THIRD ORDERING, NAMED (review P2): the latch also refuses a TERMINAL
+#:   **pre-birth fold** in the CREATED case — an id that did NOT pre-exist, where
+#:   that fold matched no node and wrote NOTHING live, and the creation record then
+#:   really is the write that made the node (`[pack-fold(seq 1,'archived'),
+#:   birth(seq 2,'live')]` → replay `archived`, graph `live`; same for
+#:   `deprecated`/`retracted`). Pre-latch this returned the birth value (round 6's
+#:   fix). ⚠️ This is pack-declaration-conditional — no pack in `packs/` declares a
+#:   terminal fold target today — and it lands in the FAIL-SAFE direction (the
+#:   rebuild claims less life, never more), which is the deliberate trade: the
+#:   replay cannot distinguish "the fold matched nothing" from "the graph held
+#:   it", and preferring the terminal never re-opens #9974's harm.
+#:   The record carries no create-vs-match signal, so the reader cannot tell (a-1),
+#:   (a-2), (b) and (c) apart; this is the same class of named residue as
+#:   the ordering bounds below.
 #:   ⚠️ Also STATED BOUND — a null-valued `state.status` (`update_entity(obj,
 #:   status=None)`) is NOT modelled: the graph applies `SET n += {status: null}`,
 #:   which REMOVES the property, while this reader skips a non-string value and
@@ -548,12 +622,15 @@ DERIVED_FROM_RECORD: dict[str, tuple[tuple[str, tuple[str, ...], Any], ...]] = {
 #:
 #: WHAT IT READS. `public.journal_event`, the record's own history, ordered by
 #: `seq` — the per-graph journal position, which is exactly the order the live
-#: fold applies events in. It reads TWO writers, not one (#9974):
-#: `event_type = 'EventRecorded'` (the connector/pack lifecycle leg), and
+#: fold applies events in. It reads THREE writers, not one (#9974):
+#: `event_type = 'EventRecorded'` (the connector/pack lifecycle leg),
 #: `event_type = 'EntityMutated'` rows whose payload carries a STRING
 #: `state.status` (a caller's explicit lifecycle write — see
 #: :data:`_LIFECYCLE_EVENTS_SQL` for why the predicate is the payload and never
-#: the `op` label). The
+#: the `op` label), and `event_type IN ('ObjectRegistered', 'SubjectAdded')` —
+#: the CREATION record, whose `payload ->> 'status'` is the BIRTH value and the
+#: only carrier it has (a snapshot row cannot hold the name: no column, and
+#: `_split_properties` drops it). The
 #: per-event payload keys (`eventKind`/`object`/`about_entities`) are the
 #: projection's contract (#7969); they are read HERE, in the projection, and
 #: nowhere else. The payload is unwrapped to the event ITSELF first, because the
@@ -639,9 +716,11 @@ EVENT_STREAM_FOLDS: dict[str, tuple[str, ...]] = {
 class LifecycleEvent:
     """One record-sourced lifecycle record, reduced to what the status fold reads.
 
-    TWO record types ride this shape, because the live fold's `status` writes come
-    from two places and a rebuild that read one of them reproduced half the
-    field:
+    THREE record types ride this shape, because the live fold's `status` writes
+    come from FOUR places — the CREATION record, a supersession's CARRIERS (read
+    by :data:`DERIVED_FROM_RECORD`, a COLUMN derivation, not a stream leg), a
+    connector/pack fold, and a state op. This shape carries the three that are
+    not columns; a rebuild that read fewer reproduced part of the field:
 
     * `EventRecorded` history — an event whose `eventKind` a
       connector or pack fold maps onto ``Object.status`` (#10198). Joined to the
@@ -661,6 +740,13 @@ class LifecycleEvent:
       (`public.journal_event.payload -> 'state' ->> 'status'`) is the whole
       signal. Before this field, a record-sourced rebuild dropped the value and
       `live._terminal_excluded` read the absent status as LIVE — #9974's window.
+    * A CREATION record — ``ObjectRegistered`` / ``SubjectAdded`` (#9974's BIRTH
+      leg). Its `payload ->> 'status'` is the caller's birth status, and it is
+      the value's ONLY carrier for the same reason (no column; the snapshot's
+      props tail refuses the name). Targeted by ID (the snapshot's record key),
+      labelled from the EVENT TYPE (`_BIRTH_EVENT_LABELS`) because a creation
+      payload has no `label` key, and applied ON CREATE only — see the replay in
+      :func:`apply_event_stream_folds`.
 
     Deliberately NOT the event payload: a fold that carried the whole dict would
     be a second `:Event` writer, and the projection already materializes the
@@ -700,11 +786,28 @@ class LifecycleEvent:
     #: here. A caller who wants a live value writes `status='live'`, which IS
     #: carried.
     restatus_status: str | None = None
-    #: Any state op — the `(label, id)` the live fold matches on. The label is
-    #: carried so a state op cannot fold onto the other family's node of the same
-    #: id (ids are per-label, not global).
+    #: A state op **or a creation record** — the `(label, id)` the live fold
+    #: matches on. `EntityMutated` sets it from `state`, and since #9974's BIRTH
+    #: leg an `ObjectRegistered`/`SubjectAdded` sets it from the snapshot's own
+    #: `id` (a creation record is not a state op, which is why this docstring
+    #: names both — review round 8, P2). The label is carried so a state op
+    #: cannot fold onto the other family's node of the same id (ids are
+    #: per-label, not global).
     target_id: str | None = None
     target_label: str | None = None
+    #: #9974 — the FOURTH `status` writer: the CREATION record's own payload.
+    #: `ObjectRegistered` / `SubjectAdded` is a `NodeSnapshot` (`record_projection`)
+    #: whose `status` reaches neither a column (there is none) nor the props tail
+    #: (`_split_properties` refuses the name), so `payload ->> 'status'` on the
+    #: creation record is the value's ONLY carrier — exactly the placement
+    #: `EntityMutated`'s `state.status` has. `is_birth` is a separate flag because
+    #: a creation record with NO status still decides the ON CREATE arm (see
+    #: :func:`apply_event_stream_folds`): the live fold's `_upsert_object` writes
+    #: `status=$st` ONLY on create (derived-or-absent since #9974 R1), so the
+    #: Earliest creation record is the one that speaks and a later re-mention
+    #: never overwrites.
+    is_birth: bool = False
+    birth_status: str | None = None
 
     def targets(self) -> tuple[tuple[str, bool], ...]:
         """``(name, is_explicit_object)``, deduplicated, declared target first.
@@ -1214,6 +1317,36 @@ def relation_from_row(row: Mapping[str, Any]) -> RecordRelation:
 _PAYLOAD_EVENT = ("COALESCE(CASE WHEN jsonb_typeof(payload -> 'event') = 'object' "
                   "THEN payload -> 'event' ELSE NULL END, payload)")
 
+#: #9974 — the label each CREATION record types: the reader's half of the
+#: creation shape, and the reason the birth leg cannot write a `:Object` status
+#: onto a `:Subject` with the same id (ids are per-label).
+#: ⛔ IT IS A COPY, NOT THE ONE HOME, and it must not be described as one.
+#: It mirrors TWO tables and owes both of them:
+#: * **the journal fold's home**, `projection._ENTITY_CREATION_EVENT_LABEL` — the
+#:   map the graph fold's creation shapes are declared in; and
+#: * **the record layer's own literal**, `record_projection.RECORD_MUTATIONS`
+#:   (`ObjectRegistered` / `SubjectAdded` are `NodeSnapshot`s of the `object` /
+#:   `subject` tables). ⚠️ That table does NOT read this one: it is written out
+#:   again at the record door, so "the map `record_projection` materialises a
+#:   snapshot from" would be FALSE — the record layer has its own copy and
+#:   nothing in it consults the fold's map.
+#: This table is both of them RESTRICTED to the labels that carry a §2.6
+#: projection-owned status (:data:`EVENT_STREAM_FOLDS`: `Object`, `Subject`).
+#: `EventRecorded` is deliberately absent: `public.event` carries an
+#: `event_status` COLUMN and its CHECK refuses only `confidence`, so `:Event`.
+#: `status` is record-held rather than a projection-owned cache (and its record
+#: key is `event_id`, not `id`).
+#: The copy is therefore only as good as the pin that binds it to BOTH homes —
+#: `tests/test_cache_projection.py::
+#: test_the_birth_event_labels_are_the_one_home_creation_map`, which asserts this
+#: table against the fold's map AND against `RECORD_MUTATIONS`' snapshot labels.
+#: Without that pin, a creation type added or renamed in either home and not here
+#: would leave this table naming the old types, the birth leg would select NOTHING
+#: for the new one, and a born-terminal node would rebuild with NO status — which
+#: `live._terminal_excluded` reads as LIVE. That is #9974's harm, silently, with
+#: every other pin green.
+_BIRTH_EVENT_LABELS = {"ObjectRegistered": "Object", "SubjectAdded": "Subject"}
+
 #: The record's own event stream, reduced to the fold's inputs. `seq` orders it.
 #: ⚠️ The payload keys are the projection's own contract (#7969) — this is the
 #: projection reading them, which is where `status_folds` says the fold lives.
@@ -1232,6 +1365,24 @@ _LIFECYCLE_EVENTS_SQL = (
     f"       {_PAYLOAD_EVENT} ->> 'label'     AS label, "
     f"       {_PAYLOAD_EVENT} ->> 'id'        AS node_id, "
     f"       {_PAYLOAD_EVENT} -> 'state' ->> 'status' AS restatus_status "
+    # #9974: the FOURTH writer — the CREATION record's own `status`. It is a
+    # `NodeSnapshot` whose value the layer table cannot hold (no column, and
+    # `_split_properties` refuses the name in `props`), so this is its only
+    # carrier. Without it, `create_object(name, status='superseded')` rebuilt
+    # from the record with NO status — which `live._terminal_excluded` reads as
+    # LIVE, i.e. a terminal Object answered as current after a rebuild.
+    # ⛔ THE `jsonb_typeof` GUARD IS NOT DECORATION (review round 2 P2, round 3
+    # NOT-FIXED — this is the line that made it real): `payload ->> 'status'` in
+    # Postgres returns TEXT for a JSON NUMBER too, so a bare `->>` folds `'5'` for
+    # `create_object(name, status=5)` — accepted by the object door (it validates
+    # nothing) and stored by the live fold as the INT 5. The state-op sister leg
+    # above guards exactly this way, so the two agree on what a legal lifecycle
+    # value is: a non-string birth status folds as "the record states none"
+    # instead of inventing its text spelling (pinned DB-free by
+    # `tests/test_cache_projection.py::
+    # test_the_birth_column_guards_a_non_string_status`).
+    f"       , CASE WHEN jsonb_typeof({_PAYLOAD_EVENT} -> 'status') = 'string' "
+    f"              THEN {_PAYLOAD_EVENT} ->> 'status' END AS birth_status "
     "FROM public.journal_event "
     "WHERE org_id = %s AND graph_id = %s "
     "  AND (event_type = 'EventRecorded' "
@@ -1255,7 +1406,25 @@ _LIFECYCLE_EVENTS_SQL = (
     # fold, so the rebuilt cache HIDES a name the graph resolves: the same
     # hide-a-live-name direction, produced by the "repair". Folding `''` as the
     # value it is reproduces the graph exactly.
-    "           AND jsonb_typeof(payload -> 'state' -> 'status') = 'string'))"
+    # ⚠️ THIS CLOSES THE `EntityMutated` GROUP ONLY — the outer
+    # `AND (…` is closed by the birth clause's tail below. It used to close
+    # BOTH (it ended `'string'))`), and appending a third `OR (…)` leg outside
+    # the tenant group left the whole statement UNPARSEABLE (`syntax error at or
+    # near ")"`) — caught by review on #9974's birth leg, not by the suite,
+    # because `tests/test_cache_projection.py::_FakeConn` matches this SQL by
+    # substring and never parses it. `tests/test_cache_projection.py`
+    # ::test_the_lifecycle_statement_is_parenthesised_as_declared pins the
+    # balance, since a DB-free fake structurally cannot.
+    "           AND jsonb_typeof(payload -> 'state' -> 'status') = 'string')"
+    # #9974: the CREATION records. Selected from the same stream, in the same
+    # `seq` order, for the same reason as the two legs above — the value they
+    # carry is real graph state (`_upsert_object`'s ON CREATE `status=$st`,
+    # derived-or-absent since #9974 R1) and no layer row can place it. ⛔ The
+    # label is decided by the EVENT TYPE, not by a payload field: these records
+    # predate the
+    # `eventKind`/`label` keys, and inventing one here would let a birth record
+    # impersonate a connector fold.
+    "       OR (event_type IN ('ObjectRegistered', 'SubjectAdded')))"
 )
 
 #: The same statement narrowed to the events that could name ONE Object. The
@@ -1274,7 +1443,29 @@ _LIFECYCLE_EVENTS_FOR_ONE_SQL = (
       # name-only predicate would filter out the very record this widening
       # exists to read, and the read door would answer a status the rebuild
       # does not (the two-door disagreement #10198's own leg pins).
-      f" OR (event_type = 'EntityMutated' AND payload ->> 'id' = %s))"
+      # ⚠️ The CREATION records join the same id coordinate (#9974's birth leg).
+      # ⛔ THE UNWRAPPED EXPRESSION — `({_PAYLOAD_EVENT} ->> 'id')`, the SAME
+      # expression the select list uses for `node_id`. Review round 2 (P2)
+      # measured the reason: `record_projection._nested_node_carrier` accepts an
+      # `event`-nested carrier for ANY `path=None` snapshot, so an
+      # `event`-nested `ObjectRegistered` IS materialised by the record and IS
+      # folded by the full statement — while a raw `payload ->> 'id'` (NULL for a
+      # nested payload) silently EXCLUDED it from the single-row narrowing, the
+      # two-door split this whole module exists to prevent. Today's producers
+      # (`_create_entity`, `_journal_entity_mutation`) are flat, which is why the
+      # raw spelling looked right; it is the ACCEPTED nested shape that decides.
+      # `tests/test_cache_projection.py::_ID_CLAUSE_RE` reads the KEY out of
+      # this statement (`'id'`, tolerant of the COALESCE), so the FAKE follows
+      # whichever key is here rather than assuming one. ⚠️ The KEY is all it
+      # follows: the COALESCE-unwrapped **expression** is pinned separately —
+      # textually — by
+      # `tests/test_cache_projection.py::test_the_narrowing_id_expression_matches_the_selects_node_id`
+      # (review round 8, P2: reverting to the raw `payload ->> 'id'` here leaves
+      # `test_a_nested_creation_record_is_read_by_the_id_narrowing` GREEN, because
+      # the fake compares its own pre-unwrapped `node_id` under whatever key the
+      # regex found). Do not delete that textual pin on the strength of the fake.
+      f" OR (event_type IN ('EntityMutated', 'ObjectRegistered', 'SubjectAdded')"
+      f" AND ({_PAYLOAD_EVENT} ->> 'id') = %s))"
 )
 
 
@@ -1299,7 +1490,8 @@ def _lifecycle_events(cur: Any, *, org_id: str, graph_id: str,
     """The record's lifecycle rows as fold inputs, ordered by `seq`.
 
     `target` narrows by NAME (the connector/pack fold's coordinate), `target_id`
-    by the stable id (the state-op coordinate). Both may be given;
+    by the stable id (the coordinate a state op **and, since #9974's birth leg, a
+    creation record** names). Both may be given;
     they are OR-ed by the SQL, and a caller that holds both must pass both or the
     single-row fold disagrees with the rebuild (#9974 — a `restatus` names its
     target by id only).
@@ -1317,7 +1509,33 @@ def _lifecycle_events(cur: Any, *, org_id: str, graph_id: str,
         except (TypeError, ValueError):
             continue
         restatus = row.get("restatus_status")
-        if row.get("event_type") == "EntityMutated":
+        event_type = row.get("event_type")
+        birth_label = _BIRTH_EVENT_LABELS.get(event_type) if isinstance(
+            event_type, str) else None
+        if birth_label is not None:
+            # #9974: the creation record. Keyed by the stable id (the record's
+            # own `NodeSnapshot` key, `id`), and labelled by the EVENT TYPE —
+            # the payload has no `label` to read, and a guessed one would let a
+            # birth record fold onto the other family's node of the same id.
+            # ⚠️ `''` IS carried, exactly as in the state-op arm below: the
+            # graph stores it and `_is_terminal_status('')` is false. Only a
+            # NON-STRING (an absent or null payload `status`) is `None`, and
+            # `None` here still MEANS something — it is the creation record that
+            # decides the ON CREATE arm, so it must be carried either way.
+            birth_id = row.get("node_id")
+            if not isinstance(birth_id, str) or not birth_id:
+                continue
+            birth = row.get("birth_status")
+            out.append(LifecycleEvent(
+                seq=seq,
+                event_kind="",
+                is_birth=True,
+                birth_status=birth if isinstance(birth, str) else None,
+                target_id=birth_id,
+                target_label=birth_label,
+            ))
+            continue
+        if event_type == "EntityMutated":
             # #9974: the caller's explicit lifecycle write. It carries NO
             # `eventKind`, so the connector/pack branch below cannot see it and
             # this arm is the only reader. Any STRING folds — `''` included,
@@ -1491,12 +1709,13 @@ def apply_event_stream_folds(
         name = node.props.get("name")
         events_for = by_target.get(name) if isinstance(name, str) else None
         # #9974: the id-keyed half — an explicit `restatus` names its target by the
-        # stable id (`MATCH (n:$label {id:$rid}) SET n += $state`), not by name —
+        # stable id (`MATCH (n:$label {id:$rid}) SET n += $state`), and so does a
+        # CREATION record (its snapshot key is the `id`) — not by name —
         # so the two coordinates are merged into ONE `seq`-ordered stream. That
         # single stream is what makes this a replay of the live sequence rather
         # than two independent rules whose relative order is a guess; nothing else
         # in the live fold is order-free.
-        restatus_for = (
+        by_id_for = (
             # ⛔ `target_label` must EQUAL the node's label; `None` is NOT a
             # wildcard. The live fold refuses a label-less state op outright
             # (`_fold_entity_mutation`: `state-op-miss`, returns 0 for a label that
@@ -1507,10 +1726,10 @@ def apply_event_stream_folds(
                   if e.target_label == node.label)
             if isinstance(node.key, str) else ()
         )
-        if not events_for and not restatus_for:
+        if not events_for and not by_id_for:
             out.append(node)
             continue
-        evs = sorted(list(events_for or ()) + list(restatus_for),
+        evs = sorted(list(events_for or ()) + list(by_id_for),
                      key=lambda e: e.seq)
         # The record can carry ONE terminal value of its own (`superseded`, from
         # DERIVED_FROM_RECORD's carriers), and a supersession beats any stream
@@ -1565,7 +1784,109 @@ def apply_event_stream_folds(
         # (o.status IN $excluded))`. So a terminal word written by one event
         # latches: the later events are refused instead of resurrecting it.
         status: str | None = current
+        birth_seen = False
         for event in evs:
+            if event.is_birth:
+                # #9974 — the CREATION record. `_upsert_object` /
+                # `_upsert_subject` write `status` **ON CREATE** and never on
+                # MATCH, so only the EARLIEST creation record for this id may
+                # speak: #3590 journals another `ObjectRegistered` on EVERY
+                # create, and a re-mention must not rewrite a stored status.
+                # ⛔ THE ASSIGNMENT IS UNCONDITIONAL *EXCEPT FOR THE TERMINAL
+                # LATCH*, and that is the round-6 (P2) fix — for the NORMAL case,
+                # where this record is the write that CREATED the node (see the
+                # stated bound below for the cases where it is not). There, any
+                # fold this replay applied BEFORE the creation record folded
+                # NOTHING in the live graph, because the node did not exist yet
+                # (`entity_identity.resolve_fold_name` never mints, and an
+                # `about_entities` miss is the exempt `unfolded-mention`, so the
+                # event is legal and journaled).
+                # MEASURED before it: `venture:disbursement` naming `T1` at
+                # seq 1 (no node), then `create_object("T1",
+                # objectKind="venture:tranche", status="archived")` at seq 2 →
+                # the live graph holds `archived` (TERMINAL) while the replay
+                # answered `released` (a pack fold from the pre-birth event), and
+                # `status is None` — the old gate — refused the birth value
+                # because the pre-birth fold had already made it non-None. So the
+                # rebuilt Object read as CURRENT and its name resolved: #9974's
+                # own harm, one ordering case over.
+                # ⚠️ Where a creation record states no status the property is left
+                # ABSENT, because absent already reads LIVE and materializing
+                # `'live'` would fabricate a lifecycle claim the record never
+                # made (pinned: `test_a_silent_birth_record_
+                # derives_no_status_rather_than_live`). This is now the SAME rule
+                # the live fold applies — `_upsert_object`/`_upsert_subject` seed
+                # `status=$st`, derived-or-absent since #9974 R1 (#10524) — so the
+                # two routes agree here rather than diverging.
+                # ⚠️ STATED BOUND (round 7, P2 — the rule above holds for the
+                # CREATED case only, and the record carries NO create-vs-match
+                # signal, so it cannot be tightened here): "the earliest creation
+                # record" is exact only where that record is the write that
+                # CREATED the node. Where the id ALREADY existed (a stub/mention
+                # path, an explicit `id=`, a pre-#3590 graph, or a
+                # delete-then-re-create) the live fold took a DIFFERENT arm than
+                # this replay assumes, and the divergence runs in BOTH directions:
+                #   (a) the node existed at that earlier event, so a pre-birth
+                #   `restatus`/pack fold the live graph DID apply can be
+                #   DISCARDED by this arm. ⚠️ ONE of its orderings is now CLOSED
+                #   by the terminal latch below, and the other is NOT — do not
+                #   read this as "closed":
+                #   (a-1) `restatus → silent birth` (`[restatus(seq 1,
+                #   'archived'), birth(seq 2, None)]`) is CLOSED. MEASURED at this
+                #   head: it rebuilds `archived`, because `if not
+                #   _is_terminal_status(status)` refuses to let the silent birth
+                #   clear a terminal the replay already holds (pre-latch it
+                #   rebuilt with NO status, which reads LIVE).
+                #   (a-2) `delete-then-re-create` is STILL OPEN —
+                #   `[birth(None), …, birth('archived')]` rebuilds absent while the
+                #   graph holds `archived`, because the value is discarded by the
+                #   earliest-only rule, which the latch cannot reach.
+                #   (b) the ON MATCH arm keeps the node's own status while this
+                #   replay writes the record's — note that a re-CREATE under an
+                #   explicit id takes ON CREATE, so there the graph holds the
+                #   LATER record's value and this arm answers from the FIRST
+                #   incarnation.
+                # ⛔ THE TERMINAL LATCH (review P1, rounds 6-7): a creation record
+                # is a RE-MENTION as soon as the id pre-existed (a name stub, an
+                # explicit `id=`, a pre-#3590 graph, a partial/segment replay from
+                # `start_seq`), and then the live fold takes ON MATCH, which writes
+                # NO status — so a TERMINAL value an earlier `restatus` put on the
+                # node SURVIVES in the graph. Writing the birth value here
+                # instead RESURRECTS the node: the replay answers `live`, which
+                # `live._terminal_excluded` admits as CURRENT, and
+                # `entity_identity.resolve_entity_id` resolves its name. That is
+                # #9974's own harm, re-opened by the leg added to close it — and
+                # measured on this very tree:
+                #     [restatus(seq 5, 'archived'), birth(seq 9, 'live')]
+                #       → rebuilt `live`; the graph holds `archived`.
+                # So the birth arm honours the SAME latch every other in-stream
+                # fold in this function honours (`_is_terminal_status`): a terminal
+                # the replay already holds is not overwritten by a later birth.
+                # ⚠️ The non-terminal case is NOT affected — the round-6 fix
+                # above still applies there, because a non-terminal pre-birth fold
+                # (`released`) genuinely folded nothing in the live graph (the node
+                # did not exist), and the creation record is the write that made
+                # it. `birth_seen` is still set by the EARLIEST creation record
+                # whether or not it was allowed to speak, so a later re-mention can
+                # never overwrite either.
+                # ⛔ BUT A **TERMINAL** PRE-BIRTH FOLD IS NOW REFUSED, and that is a
+                # deliberate trade, not an oversight (review P2): for an id that did
+                # NOT pre-exist, such a fold matched no node and wrote nothing live,
+                # so round 6's rule says the creation record must win — yet the
+                # replay cannot tell that case from "the graph already held this
+                # terminal" (the record carries no create-vs-match signal). Given
+                # the choice, it prefers the TERMINAL, because that lands in the
+                # fail-safe direction (the rebuild claims LESS life) while the
+                # alternative re-opens #9974's harm (the rebuild asserts CURRENT).
+                # MEASURED: `[pack-fold(seq 1,'archived'), birth(seq 2,'live')]`
+                # → replay `archived`, graph `live`. Pack-declaration-conditional
+                # today (no pack in `packs/` declares a terminal fold target);
+                # named as residue (c) at the top of this module.
+                if not birth_seen:
+                    birth_seen = True
+                    if not _is_terminal_status(status):
+                        status = event.birth_status
+                continue
             # #9974: a `restatus` is the caller's explicit write, applied the way
             # the live fold applies it — `SET n += $state`, unguarded, so it can
             # move a terminal node and it beats any earlier in-stream fold. It
