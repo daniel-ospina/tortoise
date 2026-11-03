@@ -272,12 +272,22 @@ loopback-bound container (`tests/test_runner_ports_6673.py` forbids a `services:
 workflow) — `TEST_RECORD_DB_URI` pointed at it, and the `postgres` extra in the test env.
 **What it blocks:** every item below **regressing silently**. This is not hypothetical — it is the
 mechanism by which a **new** #9264-class schema↔producer disagreement would hide: until #9551 armed it,
-the leg that would catch it **skipped**, twice over (§G run 1 vs run 2). ⚠️ What survives there now is *one* tolerated pin, `point.search_keys` (`_SCHEMA_DISAGREEMENTS`, A8) — #9264's own entry is deleted — so arming this leg does not turn that one red; **R4** deletes the remainder.
+the leg that would catch it **skipped**, twice over (§G run 1 vs run 2). ⚠️ While R4 was open, *one* tolerated pin survived there, `point.search_keys` (`_SCHEMA_DISAGREEMENTS`, A8) — #9264's own entry was already deleted — so arming this leg did not turn that one red; **R4** deleted it, and **#9548 deleted the remainder**: `_SCHEMA_DISAGREEMENTS` is now **EMPTY**, so a new disagreement can only arrive by someone editing BOTH the map and its detector deliberately.
 **Was the cheapest item in the list, and the one that made the rest verifiable** — armed by #9551
 (PR #9772): `test-record-postgres` provisions the database, installs the extra, and asserts zero
 skips, as a required leg of `python-ci-gate`.
 
-### R4 — Fix the two schema↔producer disagreements (#9264) · **M** · schema or code + decision · **HALF DONE**
+### R4 — Fix the two schema↔producer disagreements (#9264) · **M** · schema or code + decision · **✅ DONE (#9548)**
+
+> **BOTH are FIXED.** `session.capture_redactions` (forward migration `20261022000001`, the column
+> narrowed to `integer`, tolerance entry deleted), and `point.search_keys` — **#9548**, which fixed the
+> **encoding** rather than the column: `record_projection._jsonb_or_scalar` now serialises a scalar `str`
+> for a **`jsonb` COLUMN** (the type read from the migrations) instead of passing it through as TEXT.
+> The column's shape is unchanged; the tolerance entry is gone and `_SCHEMA_DISAGREEMENTS` in
+> `tests/test_9078_…` is now **EMPTY**, pinned by that file's own self-reddening assertion.
+> Measured cost of NOT having it: **302 Points silently dropped from the record** while the receipt still
+> said `ok: true` (`{"armed":true,"ok":true,"record_write_failures":{"write_failed":302}}`), because
+> Postgres refused every such row with `22P02` (`Token "err4032" is invalid`).
 
 > **`session.capture_redactions` is FIXED** (forward migration `20261022000001`, the column narrowed to
 > `integer`, tolerance entry deleted). What remains here is `point.search_keys`.
@@ -286,10 +296,13 @@ skips, as a required leg of `python-ci-gate`.
 `capture_redactions` was **refused** (`DatatypeMismatch`, counted on `record_write_failures`) and the
 row kept the column **NULL**; `point.search_keys` is `jsonb`, the producer emits a flattened
 **string**. #9200's sibling class. Decide per field which side is authoritative and fix it;
-the tolerance entries in `tests/test_9078…` (`_SCHEMA_DISAGREEMENTS`, now `search_keys` only) are
+the tolerance entries in `tests/test_9078…` (`_SCHEMA_DISAGREEMENTS`, now **EMPTY** since #9548) are
 held by a **self-reddening assertion**: a **schema-side** fix fails the test until the entry is deleted, while a
 **producer-side** fix leaves the entry green-but-dead — so prefer the schema side, or delete the
-entry as part of that fix.
+entry as part of that fix. ⚠️ **#9548 took the third route, and it is the one this paragraph did not
+anticipate:** the disagreement was in the **encoding**, not in either side's type — the column stayed
+`jsonb` and the producer kept emitting the graph's flattened string, with the serialisation fixed to
+bind a scalar as a JSON *string*. The entry was deleted; the detector arm went with it.
 **What it blocks:** a **complete** session record (the redaction count was lost until #9264's
 migration) and any Point that carries extracted `search_keys` (still refused ⇒ still lost). Both
 are silent losses the journal heals, so they are invisible without R3.
@@ -451,8 +464,9 @@ rebuild = record-sourced rebuild, **1 : 1 : 1** for `ownedBy`, `dependsOn`, `has
 one row each (the zero re-measured on the same harness before the change: `relation` = 3 rows total, `CONTAINS` 2 and `extractedFrom` 1). A `capture_session` on that harness leaves one residual mismatch —
 `aboutObject` and
 `extractedFrom` short by the captured turns — and it is NOT this family: the captured Point itself never reaches
-the record, because its `search_keys` string meets `point.search_keys jsonb` (**R4**'s pinned
-`_SCHEMA_DISAGREEMENTS` entry, `tests/test_9078_…`), so the edges that Point carried have no endpoint to
+the record, because its `search_keys` string met `point.search_keys jsonb` (**R4**'s then-pinned
+`_SCHEMA_DISAGREEMENTS` entry, `tests/test_9078_…` — ⚠️ **this measurement PREDATES #9548**, which fixed
+the encoding; the row is left as measured, not re-derived), so the edges that Point carried have no endpoint to
 resolve. Named here so it is not read as an edge defect.
 
 **What is still not carried, with why** — this is the "0 families without a stated reason" answer: TWO families
