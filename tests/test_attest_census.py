@@ -814,3 +814,52 @@ def test_an_old_interpreter_is_refused_with_exit_2_and_an_attributable_message(m
     assert refusal.value.code == 2, f"must not exit 1 (rc 1 is the tool's forbidden status): {message!r}"
     assert ">= 3.12" in message and "(got 3.9)" in message, f"unattributable refusal: {message!r}"
     assert "uv run python tools/attest_census.py" in message, f"must name the working form: {message!r}"
+
+
+def test_the_report_never_renders_an_emphasis_only_paragraph():
+    """#10687: the REQUIRED `docs` check was RED on this PR's own regenerated census.
+
+    The totals line used to be `f"**{totals}**"` — a paragraph consisting ENTIRELY of
+    emphasis, which is markdownlint's MD036/no-emphasis-as-heading (the `docs` job pins
+    markdownlint-cli2@0.23.3). `operations/attest-census.md` is a COMMITTED artifact, so
+    it sits in the changed-markdown set of every PR that regenerates it, is linted WHOLE,
+    and the finding is `new` against `config/docs-lint-baseline.json` — which under
+    #7435's Option 1 is a real failure, not baselined debt. Any change that re-ran the
+    census therefore reddened a required check on a finding it did not write.
+
+    Pinned as the CLASS, not the one line: `render` builds ~20 lines and a future one
+    could reintroduce MD036 without touching the totals. A rendered paragraph is
+    emphasis-only exactly when a whole line is one `*…*` / `**…**` span, which is the
+    condition the linter fires on. `**Totals:** …` is not (text follows the span), which
+    is why the label both clears the rule and says what the numbers are — they were
+    previously unlabelled totals a reader had to infer.
+    """
+    ac = _load()
+
+    def emphasis_only(line: str) -> bool:
+        s = line.strip()
+        for marker in ("**", "*"):
+            if len(s) > 2 * len(marker) and s.startswith(marker) and s.endswith(marker):
+                inner = s[len(marker) : -len(marker)]
+                # A span that closes before the line ends leaves text outside the
+                # emphasis (`**Totals:** x`), so the paragraph is not emphasis-only.
+                if marker not in inner:
+                    return True
+        return False
+
+    rows = [
+        ac.Row(pr=1, head=LIVE, branch="b", title="t", record=None, outcome=ac.IN_FLIGHT, why="w"),
+        ac.Row(pr=2, head=LIVE, branch="b", title="t", record=None, outcome=ac.OK, why="w"),
+    ]
+    text = ac.render(rows, "o/r", "2026-11-03T00:00:00Z", truncated=True, limit=1)
+    offenders = [ln for ln in text.splitlines() if emphasis_only(ln)]
+    assert not offenders, f"a rendered line is an emphasis-only paragraph (MD036) — the `docs` gate reds on it: {offenders}"
+
+    # The summary is LABELLED, and its content is the totals it always carried.
+    assert "**Totals:** IN-FLIGHT=1 · OK=1" in text, text
+
+    # An empty census has no totals, and a blank `**Totals:**` is a malformed report:
+    # the run read nothing and must say so.
+    empty = ac.render([], "o/r", "2026-11-03T00:00:00Z")
+    assert "**Totals:** no rows" in empty, empty
+    assert not [ln for ln in empty.splitlines() if emphasis_only(ln)], empty

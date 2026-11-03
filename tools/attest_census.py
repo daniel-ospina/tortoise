@@ -443,7 +443,18 @@ def render(rows: list[Row], repo: str, generated_at: str, truncated: bool = Fals
         " evidence of the live code: it is `RE-REVIEW` when the gate has no green verdict, and `OK`",
         " only because the gate itself already accepted the proof (so no re-post is owed).",
         "",
-        f"**{totals}**",
+        # ⛔ LABELLED, never a bare emphasis-only paragraph (#10687). The line used to
+        # be `f"**{totals}**"`, which renders as a paragraph consisting ENTIRELY of
+        # emphasis — markdownlint's MD036/no-emphasis-as-heading (the `docs` job's
+        # PINNED markdownlint-cli2@0.23.3 fires it), so every PR that committed a
+        # regenerated census reddened the REQUIRED `docs` check on a finding it did
+        # not write. The label earns its place twice: it removes the emphasis-only
+        # paragraph, and it says what the numbers ARE (they were previously
+        # unlabelled totals a reader had to infer).
+        # `or 'no rows'` because an empty census yields an empty `totals` string, and
+        # a `**Totals:**` with nothing after it is a malformed report — the run read
+        # no rows and must say so rather than render a blank label.
+        f"**Totals:** {totals or 'no rows'}",
         "",
         "| PR | head | record | record head | match | mint | verdict | evidence | gate | outcome |",
         "|---|---|---|---|---|---|---|---|---|---|",
