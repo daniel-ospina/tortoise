@@ -501,7 +501,8 @@ FOLD_ON_CREATE_DEFAULTS: dict[str, dict[str, Any]] = {
 #:   (ii) "the EARLIEST creation record speaks" is exact only where that record
 #:   is the write that CREATED the node. `_upsert_object`/`_upsert_subject` MERGE
 #:   on `id` and write `status` ON CREATE only, so for an id that already existed
-#:   (a stub/mention path, `create_object(..., id=…)`, a pre-#3590 graph, or a
+#:   (a stub/mention path, `EventAPI.add_object(id=…)` (`api.py:671`) or
+#:   `_server_id`, a pre-#3590 graph, or a
 #:   delete-then-re-create under an EXPLICIT id — the SDK mints a fresh id on its
 #:   own delete+re-create path, so that one is not reachable) the
 #:   live node took the ON MATCH arm and kept its own status while this replay
@@ -529,8 +530,10 @@ FOLD_ON_CREATE_DEFAULTS: dict[str, dict[str, Any]] = {
 #:   FIRST incarnation — `[birth(seq 1, None), birth(seq 2, 'archived')]` and
 #:   `[birth(seq 1, 'live'), birth(seq 2, 'archived')]` both rebuilt absent/`live`
 #:   against a graph holding `archived` (MEASURED; exhaustive sweep over
-#:   `{restatus, birth, delete}` × length ≤ 4 finds 52 harm orderings, every one of
-#:   them containing a delete). The SDK mints a FRESH id on its own delete+re-create
+#:   `{restatus, birth, delete}` × length ≤ 4 finds that EVERY harm ordering
+#:   contains a delete (the exact count is not reproduced here — two independent
+#:   re-derivations disagreed on it, so only the "every one contains a delete"
+#:   property is claimed). The SDK mints a FRESH id on its own delete+re-create
 #:   path, so this needs an explicit `id=` — narrower, not closed. See the birth
 #:   arm's own STATED BOUND in :func:`apply_event_stream_folds`.
 #:   (ii-b) THE FAIL-SAFE DIRECTION — still open, and the reason the latch is not

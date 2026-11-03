@@ -2720,9 +2720,10 @@ def test_the_birth_status_is_on_create_only_like_the_live_fold():
     obj = _node("Object", {"id": "o-1", "name": "Acme", "object_kind": "other"})
     folded = cp.apply_event_stream_folds([obj], [
         # ⚠️ THE DISCRIMINATING CASE, and it is the SILENT first birth: the
-        # `status is None` gate alone would let a later, status-carrying
-        # re-mention through, so only the "earliest creation record speaks" rule
-        # suppresses it. Measured: with `birth_seen` removed this case folds
+        # birth arm's own latch does NOT suppress a later status-carrying
+        # re-mention here (`None` is not terminal, so a second birth would write),
+        # so only the "earliest creation record speaks" rule suppresses it.
+        # Measured: with `birth_seen` removed this case folds
         # `archived`, a TERMINAL status the graph never held (create #1 stored
         # `coalesce(NULL,'live')='live'` and ON MATCH never replaced it) —
         # `live._terminal_excluded` would then hide a live name.
@@ -2738,8 +2739,11 @@ def test_the_birth_status_is_on_create_only_like_the_live_fold():
         f"({folded.props!r}) — the live fold is ON CREATE and never re-writes"
     )
     # …and a supersession the record's CARRIERS already derived is not
-    # overwritten by a birth value either (the `status is None` gate; a `status`
-    # column does not exist, so the derived row is the only legal shape).
+    # overwritten by a birth value either. ⚠️ Name the REAL mechanism: it is not
+    # a `status is None` gate (none exists here) — the pre-loop carrier gate
+    # returns before the fold for a terminal `current`, and independently the
+    # birth arm's `_is_terminal_status` latch refuses a terminal. (A `status`
+    # column does not exist, so the derived row is the only legal shape.)
     derived = cp.node_from_row("Object", {"id": "o-1", "name": "Acme",
                                           "object_kind": "other",
                                           "superseded_by": "acme-v2"})
