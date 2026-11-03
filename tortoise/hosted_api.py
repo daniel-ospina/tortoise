@@ -8534,6 +8534,15 @@ def _check_org_limit(org: dict, resource: str, *,
     round 10). Both of the fill's fail-closed faults (a resolver fault, and the
     gate's loud import-time drift) are mapped to this function's documented
     ``HTTPException(500, "Quota check failed: …")`` — never an unmapped 500.
+
+    ⚠️ A resolver LOOKUP MISS is not one of those faults (#9567 review round
+    11). ``carry_resolved_allowances`` returns this dict UNCHANGED when the
+    resolver has no record for the org: a cap cannot be armed from a record that
+    does not exist, and the absence is this gate's own declared default
+    (unconfigured = unlimited, #4051) — the same answer every door that skips
+    the fill gives. Refusing it made `Team … not found in registry` a 500 on
+    every gated door with nothing armed, for a tenant that had done nothing
+    wrong. A read FAULT still refuses, exactly as above.
     """
     org_id = org.get("org_id")
     if not org_id:
@@ -8558,7 +8567,10 @@ def _check_org_limit(org: dict, resource: str, *,
     # ABOUT WHAT IT READS"), which is the accurate statement and the one to
     # trust. A fault on that read is refused as the documented
     # `QuotaCheckError` below, which is why the carry rides inside the `try`
-    # rather than above it.
+    # rather than above it. But a resolver LOOKUP MISS is not a fault: the carry
+    # returns the dict UNCHANGED when the resolver has no record for this org
+    # (`quota.OrgNotFoundError`) — nothing to arm, and the absence is the gate's
+    # own "unconfigured = unlimited" default (#9567 review round 11).
     from tortoise.quota import (
         QuotaCheckError,
         QuotaExceededError,

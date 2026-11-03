@@ -425,6 +425,28 @@ class QuotaCheckError(Exception):
     """Quota counting/config failed — fail closed (500/503), never pass."""
 
 
+class OrgNotFoundError(QuotaCheckError):
+    """The resolver has no RECORD for this org — a STATE, not a fault (#9567).
+
+    Still a :class:`QuotaCheckError`, so every existing caller keeps its exact
+    fail-closed behaviour: where the resolved limits dict IS the answer ("what
+    may this org do?"), a missing org must be refused, and it still is.
+
+    The subclass exists for the ONE caller that only AUGMENTS a dict it was
+    already given (:func:`tortoise.allowance_gate.carry_resolved_allowances`, at
+    the REST seam). There the consumer's own auth read is authoritative and the
+    resolver can only ADD an allowance — so "this org has no row" cannot arm a
+    cap (the gate's declared default is "absent key = unconfigured"), while "the
+    read failed" is our own fault and IS refused. Collapsing the two reported a
+    tenant's well-defined absence as a 500 on every gated door, which is the
+    over-block the module's own ``#3981`` note rules out for OUR bookkeeping —
+    and the same absence was UNLIMITED on every door that skips the fill, so the
+    one state had two answers depending on the door. Canonical error-code
+    guidance (AIP-193) draws the same line: NOT_FOUND is a state the caller can
+    act on; UNAVAILABLE is the fault that must refuse.
+    """
+
+
 def quota_refusal_payload(exc: QuotaExceededError) -> dict:
     """The structured 402 ``detail`` for a quota refusal (#4614).
 
@@ -503,8 +525,11 @@ def resolve_org_limits(org_id: str) -> dict:
     empty graph (post-flip verification finding, #669). Registry mode: the
     Org node, as before.
 
-    Missing Org → QuotaCheckError (fail-closed; the auth layer should
-    guarantee key→org mapping).
+    Missing Org → :class:`OrgNotFoundError` (a ``QuotaCheckError`` subclass, so
+    fail-closed everywhere it is consumed; the auth layer should guarantee
+    key→org mapping). The subclass lets a caller that only AUGMENTS an
+    already-authoritative dict tell "no record" (a state — nothing to carry)
+    from "the read failed" (a fault it must refuse).
 
     CONTRACT (the return shape every caller must honour, #310 GAP-B / #4010):
     the returned dict carries EVERY value of ``_RESOURCE_LIMIT_KEYS``. A key
@@ -551,7 +576,8 @@ def resolve_org_limits(org_id: str) -> dict:
                             _ORG_ADDITIVE_BILLING_TIER],
         )
         if row is None:
-            raise QuotaCheckError(f"Team {org_id!r} not found in control plane")
+            raise OrgNotFoundError(
+                f"Team {org_id!r} not found in control plane")
         # #1082 PR2: the anon ceiling is tier-DERIVED at resolution — an
         # unclaimed zero-email org (owner user_id NULL) resolves to the
         # reduced ``anon`` tier until claimed, then lifts to free. The row
@@ -604,7 +630,7 @@ def resolve_org_limits(org_id: str) -> dict:
         params={"id": org_id},
     ).result_set
     if not rows:
-        raise QuotaCheckError(f"Team {org_id!r} not found in registry")
+        raise OrgNotFoundError(f"Team {org_id!r} not found in registry")
     tier, mu, mg, mp, mak, _ms = rows[0]
     tier = tier or "free"
     from tortoise.pricing import tier_limits

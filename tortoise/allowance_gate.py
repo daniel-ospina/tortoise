@@ -22,7 +22,7 @@ round 10).** Arming nothing means no dimension can be over its allowance — it 
 NOT mean the gate is free. ``hosted_api._check_org_limit`` fills the missing keys
 at the REST seam from ``quota.resolve_org_limits``, so every gated REST request
 (``points``, ``documents``, ``sessions``) performs ONE control-plane read, and a
-fault in that read is a ``QuotaCheckError`` → HTTP 500 **even with no allowance
+**fault** in that read is a ``QuotaCheckError`` → HTTP 500 **even with no allowance
 configured**. That is an over-block on our own bookkeeping fault, and the read
 side of the ``#3981`` tension this module states below: the ruling forbids
 refusing a paying org over a METERING fault, while a cap that serves past our
@@ -34,6 +34,24 @@ judgement, not an oversight; the alternative (mirroring the carry into every RES
 limits builder) is the drift ``#3874`` rules out, and the fix if the read ever
 matters operationally is a short-TTL memo on the resolver — NOT a silent
 "unlimited" on a failed read.
+
+**⚠️ BUT A LOOKUP MISS IS NOT ONE OF THOSE FAULTS (#9567 review round 11).** The
+read has THREE outcomes, not two, and only the middle one is ours to refuse:
+
+* the resolver **resolves** the org → fill the missing keys;
+* the resolver **faults** (control plane down, unreadable row, schema drift) →
+  ``QuotaCheckError`` → HTTP 500, the disclosed judgement above;
+* the resolver has **no record** for the org (``quota.OrgNotFoundError``) → the
+  caller's already-authoritative dict is returned UNCHANGED, and the dimension
+  stays at this module's declared default (an absent key is unconfigured =
+  unlimited, ``#4051``).
+
+The third case is a well-defined STATE, not a fault: a cap cannot be armed from a
+record that does not exist, and refusing it made every gated REST door answer 500
+for a tenant that had done nothing wrong — while the *same* absence read as
+UNLIMITED on every door that skips this fill, i.e. one state with two answers
+depending on the door. It also made the shipped tests that stub an org dict
+(no registry row) go red against a behaviour change nothing wanted.
 
 **⛔ ONE REGISTRY, NOT TWO (#1178).** The dimensions are NOT redeclared here.
 ``cost_dimensions.DIMENSIONS`` declares them (``graph_storage``,
@@ -128,7 +146,12 @@ from datetime import UTC, datetime
 from typing import Any
 
 from .cost_dimensions import by_name as _declared_dimension
-from .quota import QuotaCheckError, QuotaExceededError, with_limit_contact
+from .quota import (
+    OrgNotFoundError,
+    QuotaCheckError,
+    QuotaExceededError,
+    with_limit_contact,
+)
 
 _logger = logging.getLogger(__name__)
 
@@ -480,10 +503,24 @@ def carry_resolved_allowances(
 
     Only MISSING keys are filled, so a surface that already resolved them (the
     MCP lane carries from ``resolve_org_limits`` per request) pays no read and is
-    never overridden. A resolver fault is a CONFIG read we cannot complete for a
-    cap that may be armed, so it is refused as the documented ``QuotaCheckError``
-    (fail closed, #686/#4051) rather than served — a store fault on this path is
-    the same store fault the caller's own count would hit.
+    never overridden.
+
+    **A lookup MISS is not a fault** (#9567 review round 11). The three outcomes
+    of the read are DIFFERENT states and must not collapse into one:
+
+    * the resolver has **no record** for this org (:class:`~tortoise.quota.
+      OrgNotFoundError`) → the dict is returned UNCHANGED. A cap cannot be armed
+      from a record that does not exist, so the caller's own already-authoritative
+      dict stands and the dimension stays at the gate's declared default (an
+      absent key is unconfigured = unlimited, ``#4051``). Refusing here refused a
+      tenant whose absence is a well-defined state — a 500 on every gated door
+      with nothing armed, which is the over-block the module's ``#3981`` note
+      rules out for OUR bookkeeping, and it gave the SAME absence two answers
+      (unlimited on doors that skip this fill).
+    * the read **faults** → the documented ``QuotaCheckError`` (fail closed,
+      ``#686``/``#4051``), never served: a cap that serves past a config read we
+      could not complete is a cap that can be evaded during an outage.
+    * it resolves → fill only the missing keys.
     """
     if limits is None:
         return None
@@ -500,6 +537,13 @@ def carry_resolved_allowances(
         from .quota import resolve_org_limits as resolver
     try:
         resolved = resolver(org_id)
+    except OrgNotFoundError as e:
+        # A STATE, not a fault: no record ⇒ no allowance to carry. Documented
+        # and observable (WARNING), never silent, never a refusal.
+        _logger.warning(
+            "no org record for the allowance lookup (leaving the caller's "
+            "allowances as given): team=%s error=%r", org_id, e)
+        return limits
     except QuotaCheckError:
         raise
     except Exception as e:  # mapped below, never an unmapped 500

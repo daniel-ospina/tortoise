@@ -568,6 +568,99 @@ def test_a_resolver_fault_refuses_rather_than_reading_unlimited():
     assert "allowances could not be resolved" in str(exc.value), str(exc.value)
 
 
+# ── #9567 D12 (review round 11) — a LOOKUP MISS is not a FAULT ────────────
+#
+# Round 10 put the fill at the ONE REST convergence point and mapped its faults
+# to the documented refusal — correct for a read we cannot COMPLETE. But the
+# resolver also raises `OrgNotFoundError` when the org has NO RECORD, and that
+# is a well-defined STATE: a cap cannot be armed from a record that does not
+# exist, so the caller's already-authoritative dict stands and the dimension
+# keeps the gate's declared default (absent = unconfigured = unlimited, #4051).
+# Refusing it made `Team … not found in registry` a 500 on every gated REST door
+# with NOTHING armed, while the SAME absence read as unlimited on every door
+# that skips the fill — one state, two answers, depending on the door. These
+# tests pin the three-way split so neither half can regress silently.
+
+def test_a_resolver_with_no_record_for_the_org_leaves_the_dict_unarmed():
+    """A lookup MISS returns the caller's dict UNCHANGED — never a refusal.
+
+    Mutation this REDs: fold ``OrgNotFoundError`` back into the ``except
+    QuotaCheckError: raise`` arm (the round-10 shape) and this raises instead of
+    returning, which is the 500 that broke every REST suite whose fixture stubs
+    an org with no registry row.
+    """
+    from tortoise.allowance_gate import carry_resolved_allowances
+    from tortoise.quota import OrgNotFoundError
+
+    def _no_record(org_id: str):
+        raise OrgNotFoundError(f"Team {org_id!r} not found in registry")
+
+    limits = _limits()
+    out = carry_resolved_allowances(limits, resolver=_no_record)
+    assert out is limits, out           # nothing synthesized, nothing dropped
+    assert not any(k in out for k in ALLOWANCE_KEYS.values()), out
+
+
+def test_an_org_the_resolver_has_no_record_for_is_served_at_the_rest_seam(
+        monkeypatch):
+    """The REST convergence point must NOT turn a missing org record into a 500.
+
+    ``sessions`` is the door the capture route takes; ``max_sessions`` is None,
+    so nothing else can refuse and a raise here is the lookup miss alone.
+
+    Mutation this REDs: drop the ``except OrgNotFoundError: return limits`` arm
+    in ``carry_resolved_allowances`` and this raises ``HTTPException(500)``, i.e.
+    a healthy tenant refused over a record the resolver does not have.
+    """
+    from tortoise import quota
+    from tortoise.hosted_api import _check_org_limit
+
+    monkeypatch.setattr(
+        quota, "resolve_org_limits",
+        lambda org_id: (_ for _ in ()).throw(
+            quota.OrgNotFoundError(f"Team {org_id!r} not found in registry")))
+    assert _check_org_limit(_rest_org(), "sessions") is None
+
+
+def test_the_no_record_state_is_still_a_fail_closed_QuotaCheckError():
+    """The new distinction must not weaken every OTHER consumer.
+
+    ``mcp_server._enforce_quota`` and the docs job let a ``QuotaCheckError``
+    decide, where the resolved dict IS the answer — a missing org must still be
+    refused there. Pinned as a subclass relationship, because a non-subclass
+    would silently turn a missing org into a served request on those lanes.
+    """
+    from tortoise.quota import OrgNotFoundError
+
+    assert issubclass(OrgNotFoundError, QuotaCheckError)
+
+
+def test_resolve_org_limits_reports_a_missing_team_as_the_no_record_state(
+        monkeypatch):
+    """The resolver's own raise site carries the distinction (registry arm).
+
+    Mutation this REDs: revert either raise site to a bare ``QuotaCheckError``
+    and the seam can no longer tell "no record" from "read failed" — it would
+    go back to refusing a state.
+    """
+    from tortoise import quota, supabase_control
+    from tortoise.quota import OrgNotFoundError
+
+    class _EmptyRegistry:
+        def query(self, *_a, **_kw):
+            return type("_R", (), {"result_set": []})()
+
+    class _Sdk:
+        def _get_registry(self):
+            return _EmptyRegistry()
+
+    monkeypatch.setattr(supabase_control, "is_supabase_enabled", lambda: False)
+    monkeypatch.setattr(quota, "_make_sdk", lambda **_kw: _Sdk())
+    with pytest.raises(OrgNotFoundError) as exc:
+        quota.resolve_org_limits("team-with-no-row")
+    assert "not found in registry" in str(exc.value), str(exc.value)
+
+
 # ── #9567 D12 (review round 10) — the REST seam's REFUSAL SHAPE ───────────
 #
 # Round 9 put the carry at the ONE REST convergence point (`_check_org_limit`)
