@@ -118,7 +118,16 @@ _MCP_INSTRUCTIONS = (
     "Only persist information that is durable, factual, and reusable — "
     "not transient task chatter. Cite what you act on, and prefer the "
     "structured pointKinds over free text. If a search/query returns "
-    "nothing relevant, say so plainly instead of fabricating recollection."
+    "nothing relevant, say so plainly instead of fabricating recollection. "
+    # #10084: the RATIONALE for the write tools' optional `graph` parameter
+    # lives HERE, once per session, and not in `GRAPH_ARGUMENT_DESCRIPTION` —
+    # that string is copied onto every advertising tool's schema, so a
+    # paragraph there is paid N_tools times in every client payload (the
+    # schema is what a venue refuses, #10084). What stays there is what the
+    # model must know IN ORDER TO BUILD the call.
+    "Write tools take an optional `graph` argument. It is optional because a "
+    "graph is working context, not an identity, so the target is stated per "
+    "call rather than bound into the connection (#9340)."
 )
 
 mcp = FastMCP("tortoise", instructions=_MCP_INSTRUCTIONS)
@@ -1492,8 +1501,16 @@ def _take_graph_argument(name: str,
 _GRAPH_DISCLOSURE_KEY = "graph_resolution"
 
 
+#: The own-graph selector names, for the seams that must not disclose over a
+#: write that names its own target (`#9340`). Used by
+#: `tests/test_10084_graph_disclosure.py` to derive that invariant from the
+#: served tool signatures instead of trusting a hand-kept list.
+GRAPH_SELECTOR_PARAMS = frozenset({"graph_id", "graph_name", "namespace"})
+
+
 def _graph_disclosure(graph_ref: str | None,
-                      *, preview: bool = False) -> dict[str, Any] | None:
+                      *, preview: bool = False,
+                      takes_no_argument: bool = False) -> dict[str, Any] | None:
     """What graph THIS dispatch targets, for a write that named none (#10084).
 
     Read at the seam, from the scope the CREDENTIAL resolution already applied:
@@ -1536,6 +1553,12 @@ def _graph_disclosure(graph_ref: str | None,
     `preview` never changes WHAT is disclosed, only whether the reply may say the
     write happened (see `_graph_disclosure_message`).
 
+    `takes_no_argument` marks the EXCLUDED writers that write the workspace
+    DEFAULT graph (`GRAPH_ARGUMENT_EXCLUDED_DEFAULT_TARGET`) — a
+    workspace-level write for which `graph` is not a parameter at all. The
+    resolution is the same fact, but the prose must not offer `graph` as a way
+    to re-target a call that refuses it.
+
     ⛔ `graph="default"` takes the OMITTED arm, not the named one. It is the
     resolver's own no-op — `plan_graph_target` short-circuits it BEFORE any lane
     check (`mcp_auth.py:515-540`) — so it resolves to exactly what omission
@@ -1561,9 +1584,19 @@ def _graph_disclosure(graph_ref: str | None,
                     "omitted": True, "source": "server-configured"}
         else:
             bound = _mcp_auth._current_graph_id.get()
-            info = {"graph": bound or _mcp_auth._DEFAULT_GRAPH_ID,
-                    "requested": None, "omitted": True,
-                    "source": "credential-graph" if bound else "workspace-default"}
+            info = {
+                "graph": bound or _mcp_auth._DEFAULT_GRAPH_ID,
+                "requested": None, "omitted": True,
+                # Classified by WHERE IT LANDS, not by whether a binding
+                # exists: a credential bound to the default graph is told its
+                # own graph is `"default"` AND `"not the workspace default"`
+                # by the other spelling — a self-contradiction in a served
+                # sentence (#10084 review P3). `plan_graph_target` contemplates
+                # that state explicitly (`mcp_auth.py:533-536`).
+                "source": ("credential-graph"
+                           if bound and bound != _mcp_auth._DEFAULT_GRAPH_ID
+                           else "workspace-default"),
+            }
         if named:
             # Same resolution, stated as NAMED: the caller did send the argument,
             # so `omitted` stays False and `requested` echoes it.
@@ -1573,6 +1606,11 @@ def _graph_disclosure(graph_ref: str | None,
         # consumer (and the prose below) cannot read a preview as a completed
         # write.
         info["preview"] = True
+    if takes_no_argument:
+        # This tool does not ADVERTISE `graph` at all (it is in
+        # `GRAPH_ARGUMENT_EXCLUDED`), so `requested` can only ever be None and
+        # the prose must not suggest passing one.
+        info["excluded"] = True
     return info
 
 
@@ -1614,6 +1652,11 @@ def _graph_disclosure_message(info: dict[str, Any]) -> str:
             "has no workspace — so its target is the graph this server is "
             "configured with." + preview)
     if source == "workspace-default":
+        if info.get("excluded"):
+            return (
+                "Graph disclosure: this workspace-level write takes no `graph` "
+                f"argument, so its target is this workspace's default graph "
+                f"({graph!r})." + preview)
         if named_default:
             return (
                 f"Graph disclosure: this write named {named_default}, so its "
@@ -1695,23 +1738,61 @@ def _is_preview(name: str, arguments: dict[str, Any] | None, result: Any) -> boo
             or _payload_says_preview(result))
 
 
+def _excluded_writer_writes_the_default_graph(
+        name: str, arguments: dict[str, Any] | None) -> bool:
+    """Whether an EXCLUDED tool still writes the workspace DEFAULT graph (#10084).
+
+    `GRAPH_ARGUMENT_EXCLUDED` answers "does this tool take the routing
+    argument?" — NOT "does it touch a graph". The seam used to read the second
+    answer out of the first, and that is false for
+    `GRAPH_ARGUMENT_EXCLUDED_DEFAULT_TARGET`: `tortoise_pack_install`,
+    `tortoise_onboarding_demo_create`, `tortoise_onboarding_seed`,
+    `tortoise_onboarding_github_index` and `tortoise_manage_sources` each write
+    graph data into the org's DEFAULT graph, and each REJECTS a graph-bound key
+    (`_reject_graph_bound_mcp_org_surface`), so `workspace-default` is the only
+    arm they can be on. Leaving them undisclosed left the #10084 defect in place
+    on every tool except the one the issue measured (review P2).
+
+    `tortoise_manage_sources` is CONDITIONAL on its own argument, the same shape
+    as `tortoise_graph_set_recording`: `list` is a READ (its target is not a
+    change to the caller's data, and the prose says "this write"), while
+    `enable`/`disable` write org-level state in that graph.
+    """
+    if name not in _mcp_auth.GRAPH_ARGUMENT_EXCLUDED_DEFAULT_TARGET:
+        return False
+    if name == "tortoise_manage_sources":
+        action = (arguments or {}).get("action")
+        return str(action or "").strip().lower() != "list"
+    return True
+
+
 def _disclose_graph_resolution(result: Any, name: str,
                                graph_ref: str | None,
                                arguments: dict[str, Any] | None = None) -> Any:
     """Attach the #10084 disclosure to a successful WRITE's result.
 
-    Writes only: a read's target is not a change to the caller's data, and the
-    GROUP that must be excluded from it is `GRAPH_ARGUMENT_EXCLUDED` — the
-    registry's own declaration that a tool "targets the WORKSPACE or names its
-    graph explicitly". Those are writes (`tortoise_org_create` provisions a
-    workspace) and naming the credential's graph on them would assert a target
-    the call never had: the wrong-graph claim this issue exists to remove,
-    emitted by us. `WRITE_TOOL_NAMES` is the registry's DERIVED write set
+    Writes only: a read's target is not a change to the caller's data.
+    `WRITE_TOOL_NAMES` is the registry's DERIVED write set
     (`risk in write|destructive|admin`), so neither side can drift from the
     surface.
 
-    ⚠️ One member of that set is excluded on a CONDITION the registry states and
-    this seam cannot improve on: `tortoise_graph_set_recording` takes its own
+    Of the `GRAPH_ARGUMENT_EXCLUDED` tools — the registry's declaration that a
+    tool "targets the WORKSPACE or names its graph explicitly" — two groups are
+    now separated, because "takes no routing argument" does not mean "touches no
+    graph":
+
+    * **writes NO graph** (`tortoise_org_create` provisions the workspace,
+      `tortoise_onboarding_session_recording` flips a control-plane flag,
+      `tortoise_onboarding_github_connect` stores OAuth CSRF state): SKIPPED.
+      Naming the credential's graph on them would assert a target the call never
+      had — the wrong-graph claim this issue exists to remove, emitted by us.
+    * **writes the workspace DEFAULT graph**
+      (`GRAPH_ARGUMENT_EXCLUDED_DEFAULT_TARGET`): DISCLOSED, as
+      `workspace-default` with the "takes no `graph` argument" wording — see
+      `_excluded_writer_writes_the_default_graph`.
+
+    ⚠️ One member of the write set is skipped on a CONDITION the registry states
+    and this seam cannot improve on: `tortoise_graph_set_recording` takes its own
     `graph_id` **when given**, and with it omitted resolves to
     `_current_graph_id.get() or "default"` — the same silent default this issue
     is about. It is skipped here because the tool's own PAYLOAD already returns
@@ -1728,11 +1809,16 @@ def _disclose_graph_resolution(result: Any, name: str,
     `test_a_safe_answered_failure_is_not_disclosed`, because a reader (or a
     mutant) that believes this function is the guard would be wrong.
     """
-    if name not in WRITE_TOOL_NAMES or name in _mcp_auth.GRAPH_ARGUMENT_EXCLUDED:
+    if name not in WRITE_TOOL_NAMES:
+        return result
+    excluded = name in _mcp_auth.GRAPH_ARGUMENT_EXCLUDED
+    if excluded and not _excluded_writer_writes_the_default_graph(name, arguments):
         return result
     if not isinstance(result, ToolResult) or getattr(result, "is_error", False):
         return result
-    info = _graph_disclosure(graph_ref, preview=_is_preview(name, arguments, result))
+    info = _graph_disclosure(graph_ref,
+                             preview=_is_preview(name, arguments, result),
+                             takes_no_argument=excluded)
     if info is None:
         return result
     if not getattr(result, "content", None):

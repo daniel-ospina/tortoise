@@ -1589,6 +1589,48 @@ GRAPH_ARGUMENT_EXCLUDED: frozenset[str] = frozenset({
     "tortoise_onboarding_github_index",
 })
 
+#: The SUBSET of `GRAPH_ARGUMENT_EXCLUDED` that still WRITES to the workspace
+#: DEFAULT graph, and is therefore DISCLOSED by #10084's seam.
+#:
+#: `GRAPH_ARGUMENT_EXCLUDED` answers ONE question — "does this tool take the
+#: routing argument?" — and the disclosure used to read a second answer out of
+#: it ("so it touches no graph"), which is false for these five. Each says the
+#: opposite in its own body, and each rejects a graph-BOUND key outright
+#: (`_reject_graph_bound_mcp_org_surface`), so `workspace-default` is the only
+#: arm they can be on and the disclosure is true unconditionally:
+#:   * `tortoise_pack_install` — the manifest is stored graph-natively in the
+#:     tenant's (default) graph as `:PackManifest`; a per-custom-graph install
+#:     would orphan pack state that `tortoise_packs_list` never sees.
+#:   * `tortoise_onboarding_demo_create` — "the demo seeds the org's DEFAULT
+#:     graph" (its own comment, C5 #2114).
+#:   * `tortoise_onboarding_seed` — the two anchor Subjects file into the org
+#:     DEFAULT graph.
+#:   * `tortoise_onboarding_github_index` — "indexes into the DEFAULT graph".
+#:   * `tortoise_manage_sources` — a `source` enable starts the index job that
+#:     writes into that same default graph (`list` is a READ and is skipped by
+#:     the seam, not by this set).
+#:
+#: ⛔ The remaining excluded writers stay SILENT because they write NO graph at
+#: all, and a graph on them would be the wrong-graph claim this feature removes:
+#: `tortoise_org_create` provisions the WORKSPACE,
+#: `tortoise_onboarding_session_recording` flips a control-plane flag, and
+#: `tortoise_onboarding_github_connect` stores OAuth CSRF state.
+#:
+#: Membership criterion, in one line: an excluded WRITE tool whose handler body
+#: writes GRAPH DATA into the org default graph. The invariant the disclosure's
+#: truthfulness rests on — every member rejects a graph-bound key, so it cannot
+#: be on the `credential-graph` arm — is derived and pinned by
+#: `tests/test_10084_graph_disclosure.py`
+#: (`test_every_disclosed_excluded_writer_refuses_a_graph_bound_key`), not
+#: assumed here.
+GRAPH_ARGUMENT_EXCLUDED_DEFAULT_TARGET: frozenset[str] = frozenset({
+    "tortoise_pack_install",
+    "tortoise_manage_sources",
+    "tortoise_onboarding_demo_create",
+    "tortoise_onboarding_github_index",
+    "tortoise_onboarding_seed",
+})
+
 #: ⛔ The OPENING of this description is load-bearing, not prose (#10084). A model
 #: shapes the call payload FROM this text, and a host may refuse a WRITE payload
 #: that carries a routing argument: measured on the ChatGPT venue, a
@@ -1634,18 +1676,25 @@ GRAPH_ARGUMENT_EXCLUDED: frozenset[str] = frozenset({
 #: What may change here is what the model is TOLD TO SEND, never what the surface
 #: ACCEPTS: `graph` is still advertised and honoured everywhere it was
 #: (`tests/test_10084_graph_argument_omit_first.py`).
+#:
+#: ⛔ BUDGETED, because this string is served ONCE PER ADVERTISING TOOL — the
+#: parameter schema is copied onto every non-excluded tool, so every character
+#: here costs `N_tools x len` in the payload a client sends (and, on the venue
+#: #10084 is about, in the payload that was being refused). The rationale for
+#: `graph` being a per-call argument rather than a connection binding is NOT
+#: operative instruction, so it lives once in `mcp_server._MCP_INSTRUCTIONS`
+#: (the server `instructions` field, sent once per session) instead of here.
+#: `tests/test_10084_graph_argument_omit_first.py` pins the ceiling so the
+#: rationale cannot drift back in one well-meaning paragraph at a time.
 GRAPH_ARGUMENT_DESCRIPTION = (
-    "Optional graph to act on: this parameter MAY be omitted. It is optional because "
-    "a graph is working context, not an identity, so it is stated here rather than "
-    "bound into the connection (#9340). Omitting it is legal, and for a workspace "
-    "credential, omission targets the default graph (a graph-bound credential's "
-    "omission stays on its own graph, never on the default) — that is what omission "
-    "MEANS, not a form to prefer. "
+    "Optional graph to act on: this parameter MAY be omitted. Omitting it is legal, "
+    "and for a workspace credential, omission targets the default graph (a graph-bound "
+    "credential's omission stays on its own graph, never on the default) — that is what "
+    "omission MEANS, not a form to prefer. "
     "An explicit `graph=\"default\"` targets the same graph as omitting it (a "
-    "graph-bound credential is refused rather than re-pointed), so it changes nothing "
-    "about where the write lands; a host may refuse a write call that carries `graph` "
-    "whatever its value (measured on the ChatGPT venue), which is a fact about hosts, "
-    "never permission to drop the argument. "
+    "graph-bound credential is refused rather than re-pointed); a host may refuse a "
+    "write call that carries `graph` whatever its value (measured on the ChatGPT "
+    "venue), which is a fact about hosts, never permission to drop the argument. "
     "If the graph you are acting on is NOT this workspace's default, SEND it — "
     "including when a host has already refused an earlier call. Never drop `graph` to "
     "get a write through: the write would land on the default graph instead of the one "

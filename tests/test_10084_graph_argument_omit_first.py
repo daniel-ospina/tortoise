@@ -71,23 +71,52 @@ def test_the_description_states_the_parameter_is_optional_not_a_drop_tactic():
     ⛔ The HEAD is pinned by its SENTENCE SET and by a HEDGE BLOCKLIST, not by a
     phrase blocklist. A blocklist of historical wordings only catches what we
     thought of; a count of sentences only catches an ADDED sentence — and the most
-    natural way to soften a rule is to append a hedge INSIDE an existing one ("…;
-    when in doubt, leave it out"), which neither reds. So all three are pinned:
+    natural way to soften a rule is to append a hedge INSIDE an existing one (“…;
+    when in doubt, leave it out”), which neither reds. So all three are pinned:
     sentence count, the fact-bearing sentences, and any drop-the-argument hedge."""
     head = GRAPH_ARGUMENT_DESCRIPTION.split("Accepts")[0]
     sentences = [s for s in re.split(r"(?<=\.)\s+", head.strip()) if s]
-    assert len(sentences) == 7, sentences
+    assert len(sentences) == 6, sentences
     assert sentences[0] == "Optional graph to act on: this parameter MAY be omitted.", sentences[0]
-    assert sentences[1] == (
-        "It is optional because a graph is working context, not an identity, so it "
-        "is stated here rather than bound into the connection (#9340)."), sentences[1]
-    assert "that is what omission MEANS, not a form to prefer" in sentences[2], sentences[2]
-    assert "never permission to drop the argument" in sentences[3], sentences[3]
+    assert "that is what omission MEANS, not a form to prefer" in sentences[1], sentences[1]
+    assert "never permission to drop the argument" in sentences[2], sentences[2]
     for hedge in ("leave it out", "when in doubt", "drop it", "don't send",
                   "do not send", "omit it", "should omit", "must omit"):
         assert hedge not in head.lower(), (hedge, head)
     assert "OMIT IT" not in head, head
     assert "that is the form to send" not in head, head
+
+
+def test_the_rationale_lives_once_in_the_server_instructions_not_on_every_tool():
+    """WHY `graph` is optional belongs in the server `instructions` field (sent
+    once per session), not in the parameter description, which is COPIED onto
+    every advertising tool (#10084 review P2: the description had grown 631 →
+    1671 chars, ~+73 KB of tool payload per client turn on the one venue where
+    the payload is what gets refused).
+
+    The fact is not dropped, only de-duplicated — so the model still learns the
+    reason, and a future editor cannot quietly re-inline it."""
+    rationale = (
+        "It is optional because a graph is working context, not an identity, so "
+        "the target is stated per call rather than bound into the connection (#9340).")
+    assert rationale in mcp_server._MCP_INSTRUCTIONS, mcp_server._MCP_INSTRUCTIONS
+    assert "working context, not an identity" not in GRAPH_ARGUMENT_DESCRIPTION, (
+        "the rationale is back in the per-tool string — it is paid once per "
+        "advertising tool in every client payload")
+
+
+def test_the_description_stays_within_its_measured_budget():
+    """The parameter description is served ONCE PER ADVERTISING TOOL — measured
+    at >60 tools — so its length is a payload cost, not a style preference, and
+    it is paid on the venue #10084 is about (a client-side refusal of the JSON
+    tool schema / call payload).
+
+    The budget is the measured 1484-character text plus headroom for one more
+    operative rule; anything larger needs a deliberate edit here, with its
+    delta stated, rather than one more explanatory paragraph."""
+    assert len(GRAPH_ARGUMENT_DESCRIPTION) <= 1500, (
+        f"{len(GRAPH_ARGUMENT_DESCRIPTION)} chars exceeds the 1500 budget — keep "
+        "operative rules here and put rationale in `_MCP_INSTRUCTIONS`")
 
 
 def test_the_description_sends_a_graph_that_is_not_the_default():

@@ -121,9 +121,18 @@ def test_call_prints_the_payload_even_with_a_trailing_block(monkeypatch, capsys)
     MEASURED REGRESSION this pins: the dispatch seam appends content blocks LAST
     (a retired-name warning, #10084's graph disclosure), so a caller that joined
     all blocks and `json.loads`-ed them got `Extra data: line 1 column 8825` for
-    every write tool on every transport. `structured_content` is preferred, and
-    `content[0]` is the payload when there is none — a second block must never be
-    concatenated into the machine-readable output a script pipes to `jq`.
+    every write tool on every transport.
+
+    The payload slot is `content[0]`, and the CLI takes it in preference to
+    `structured_content` — NOT the other way round (`cli.py::_cmd_call`): for a
+    tool declaring `x-fastmcp-wrap-result` the structured payload is the
+    ENVELOPE (`{"result": …}`) while `content[0]` is the tool's own answer, so
+    preferring the former would silently change this command's output shape for
+    the 12 read tools that never receive a disclosure block at all. A second
+    block must never be concatenated into the machine-readable output a script
+    pipes to `jq`; it goes to stderr instead (#10084 review P3 — this docstring
+    used to state the opposite, and a reader would have "fixed" the code to
+    match it).
     """
     from types import SimpleNamespace
 

@@ -297,6 +297,23 @@ async def test_the_default_ref_on_a_no_workspace_lane_still_names_no_graph(probe
 # ── 4. the honest arm: a graph-bound credential's omission is NOT the default ──
 
 
+def test_a_credential_bound_to_the_default_graph_is_not_called_its_own_graph():
+    """A credential BOUND TO THE DEFAULT GRAPH lands on the workspace default —
+    so labelling it `credential-graph` produced the self-contradiction "its own
+    graph ('default') — not the workspace default" in a served sentence
+    (#10084 review P3). The classification is by WHERE IT LANDS.
+
+    `plan_graph_target` contemplates this state explicitly (`mcp_auth.py:533-536`:
+    a bound id equal to the default is a no-op, not a retarget)."""
+    with _workspace(graph_id=mcp_auth._DEFAULT_GRAPH_ID):
+        info = ms._graph_disclosure(None)
+    assert info["source"] == "workspace-default", info
+    assert info["graph"] == mcp_auth._DEFAULT_GRAPH_ID, info
+    message = ms._graph_disclosure_message(info)
+    assert "this workspace's default graph" in message, message
+    assert "not the workspace default" not in message, message
+
+
 @pytest.mark.asyncio
 async def test_a_bound_credentials_omission_discloses_its_own_graph(probe):
     """`mcp_auth._get_org_sdk` opens a graph-bound key's OWN graph when the
@@ -331,17 +348,95 @@ async def test_a_tool_that_does_not_target_a_graph_gets_no_disclosure(probe, mon
 
 
 def test_every_served_excluded_writer_is_skipped_by_name():
-    """The overlap measured against the registry, pinned: the excluded writers
-    are exactly the names the disclosure must not fire on."""
+    """The excluded tools that write NO graph are skipped, and the split is
+    measured against the registry rather than assumed.
+
+    `GRAPH_ARGUMENT_EXCLUDED` says "takes no routing argument", which is NOT
+    "touches no graph": five of them write the workspace DEFAULT graph and are
+    disclosed instead (review P2). So the skip list is the difference.
+    """
     writers = {n for n in ms.WRITE_TOOL_NAMES
                if n in mcp_auth.GRAPH_ARGUMENT_EXCLUDED}
     assert writers, "the overlap this guard exists for went empty — re-derive it"
+    skipped = writers - mcp_auth.GRAPH_ARGUMENT_EXCLUDED_DEFAULT_TARGET
+    assert skipped, "every excluded writer became a graph writer — re-derive it"
     from fastmcp.tools import ToolResult
 
     ok = ToolResult(content=[TextContent(type="text", text='{"id": "pt_1"}')],
                structured_content=None, is_error=False)
-    for name in sorted(writers):
+    for name in sorted(skipped):
         assert ms._disclose_graph_resolution(ok, name, None) is ok, name
+
+
+# A placeholder argument set that makes each default-target writer's own
+# CONDITION true (only `tortoise_manage_sources` has one).
+_DEFAULT_TARGET_ARGUMENTS = {"tortoise_manage_sources": {"action": "enable"}}
+
+
+def test_the_excluded_writers_that_write_the_default_graph_are_disclosed():
+    """The five excluded WRITERS that write the org DEFAULT graph must disclose
+    it. Leaving them silent left the #10084 defect — a write landing on a graph
+    the reply never names — in place on every tool except the one the issue
+    happened to measure (review P2)."""
+    from fastmcp.tools import ToolResult
+
+    ok = ToolResult(content=[TextContent(type="text", text='{"id": "pt_1"}')],
+                    structured_content=None, is_error=False)
+    for name in sorted(mcp_auth.GRAPH_ARGUMENT_EXCLUDED_DEFAULT_TARGET):
+        args = _DEFAULT_TARGET_ARGUMENTS.get(name)
+        with _workspace():
+            out = ms._disclose_graph_resolution(ok, name, None, args)
+        info = ((out.meta or {}).get("tortoise") or {})["graph_resolution"]
+        assert info["source"] == "workspace-default", (name, info)
+        assert info["excluded"] is True, (name, info)
+        # The prose must not offer `graph` as a way to re-target a tool that
+        # refuses it (`_take_graph_argument` raises on every excluded name).
+        text = _text(out)
+        assert "takes no `graph` argument" in text, (name, text)
+        assert "pass `graph`" not in text, (name, text)
+
+
+def test_the_manage_sources_read_action_still_gets_no_disclosure():
+    """`tortoise_manage_sources` is excluded-and-disclosed only for its MUTATING
+    actions: `list` is a read, and its target is not a change to the caller's
+    data (the prose says "this write")."""
+    from fastmcp.tools import ToolResult
+
+    ok = ToolResult(content=[TextContent(type="text", text='{"sources": []}')],
+                    structured_content=None, is_error=False)
+    for action in ("list", "LIST", " list "):
+        assert ms._disclose_graph_resolution(
+            ok, "tortoise_manage_sources", None, {"action": action}) is ok, action
+    # Every other action is a WRITE. An ABSENT `action` is not reachable through
+    # the seam (the parameter is required, so dispatch fails before this), so it
+    # is not a case to give a silent arm of its own.
+    with _workspace():
+        out = ms._disclose_graph_resolution(
+            ok, "tortoise_manage_sources", None, {"action": "disable"})
+    assert out is not ok, "a mutating action must be disclosed"
+
+
+def test_every_disclosed_excluded_writer_refuses_a_graph_bound_key():
+    """The invariant the `workspace-default` arm RESTS on, derived from the
+    served handlers: every excluded-and-disclosed writer rejects a graph-bound
+    key outright (`_reject_graph_bound_mcp_org_surface`), so it can never be on
+    the `credential-graph` arm — which is what makes the disclosure true rather
+    than merely plausible."""
+    import inspect
+
+    for name in sorted(mcp_auth.GRAPH_ARGUMENT_EXCLUDED_DEFAULT_TARGET):
+        assert name in ms.WRITE_TOOL_NAMES, f"{name} is not a write tool"
+        assert name in mcp_auth.GRAPH_ARGUMENT_EXCLUDED, (
+            f"{name} advertises `graph`; it would belong in neither set")
+        handler = getattr(ms, name, None)
+        assert handler is not None, name
+        src = inspect.getsource(handler)
+        assert "_reject_graph_bound_mcp_org_surface(" in src, (
+            f"{name} accepts a graph-bound key, so its target is NOT always the "
+            "workspace default and this disclosure would be a wrong-graph claim")
+        params = set(inspect.signature(handler).parameters)
+        assert not (params & ms.GRAPH_SELECTOR_PARAMS), (
+            f"{name} takes its own graph selector: {sorted(params)}")
 
 
 @pytest.mark.asyncio
@@ -641,13 +736,17 @@ def test_no_disclosed_write_tool_carries_its_own_graph_selector():
 
     The registry's own guard derives `GRAPH_ARGUMENT_EXCLUDED` from
     `_reject_graph_bound_mcp_org_surface` CALLERS, which is a different
-    criterion, so it would not catch a new selector-taking write tool.
+    criterion, so it would not catch a new selector-taking write tool. The set
+    checked here is every tool the disclosure can actually fire on, which since
+    #10084's P2 includes the excluded writers that write the default graph.
     """
     import inspect
 
-    selectors = {"graph_id", "graph_name", "namespace"}
+    disclosed = ((ms.WRITE_TOOL_NAMES - mcp_auth.GRAPH_ARGUMENT_EXCLUDED)
+                 | (ms.WRITE_TOOL_NAMES
+                    & mcp_auth.GRAPH_ARGUMENT_EXCLUDED_DEFAULT_TARGET))
     offenders = []
-    for name in sorted(ms.WRITE_TOOL_NAMES - mcp_auth.GRAPH_ARGUMENT_EXCLUDED):
+    for name in sorted(disclosed):
         handler = getattr(ms, name, None)
         if handler is None:
             continue
@@ -655,8 +754,8 @@ def test_no_disclosed_write_tool_carries_its_own_graph_selector():
             params = set(inspect.signature(handler).parameters)
         except (TypeError, ValueError):  # pragma: no cover - non-callable
             continue
-        if params & selectors:
-            offenders.append((name, sorted(params & selectors)))
+        if params & ms.GRAPH_SELECTOR_PARAMS:
+            offenders.append((name, sorted(params & ms.GRAPH_SELECTOR_PARAMS)))
     assert offenders == [], (
         "these write tools name their own graph and must be added to "
         f"GRAPH_ARGUMENT_EXCLUDED: {offenders}")
