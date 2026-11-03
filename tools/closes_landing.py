@@ -1503,11 +1503,12 @@ class Unmeasurable(RuntimeError):
 _GH_FIELDS = "number,baseRefName,body,headRefName,state,mergedAt"
 
 #: A `gh` call that never returns must not hang the run (#10634 review P2). This
-#: tool runs inside an always-on drift-guard job, and a job-level timeout kills
-#: the WHOLE job — `continue-on-error: true` covers a step's exit status, not a
-#: step that never finishes — so an unreachable API would take the rest of the
-#: drift guard down with it instead of reporting UNMEASURED. Bounded here, at the
-#: one place every live call goes through.
+#: tool runs inside a small advisory CI job (`.github/workflows/
+#: closes-coherence.yml`), and a job-level timeout kills the WHOLE job —
+#: `continue-on-error: true` covers a step's exit status, not a step that never
+#: finishes — so an unreachable API would take the rest of that job down instead
+#: of reporting UNMEASURED. Bounded here, at the one place every live call goes
+#: through.
 _GH_TIMEOUT_SECONDS = 60
 
 #: …and the bound is PER CALL, which is not enough for the run (#10634 review P2):
