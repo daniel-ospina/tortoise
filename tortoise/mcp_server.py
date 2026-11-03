@@ -6451,6 +6451,32 @@ def tortoise_session_capture(conversation: list[dict],
     # kill, and it would make MCP capture succeed where REST 500s).
     if "max_sessions" in limits:
         org["max_sessions"] = limits["max_sessions"]
+    # #9567 D11/D12: carry the RULED-dimension allowance keys through the SAME
+    # bridge. Enumerated from `ALLOWANCE_KEYS` (declared in `allowance_gate`),
+    # not hand-listed: a hand-list is how the MCP capture lane would keep
+    # spending past a configured token allowance while REST refused — the gate
+    # reads the dict it is GIVEN, so a key this bridge drops reads as UNLIMITED.
+    # Only keys the resolver actually produced are carried (absent = unlimited,
+    # which is the gate's own declared default).
+    # ⚠️ The import is GUARDED, for the reason `quota.enforce_org_limit` states
+    # in-line about the SAME import: the gate's own drift check is deliberately
+    # LOUD at import (a renamed/removed declared dimension raises there), and an
+    # unguarded import would let that loudness escape this tool as an unmapped
+    # 500/ImportError instead of the documented fail-closed refusal (#4051). A
+    # capture whose allowance gate cannot be loaded is REFUSED, never served —
+    # serving is what a dropped key would do.
+    try:
+        from tortoise.allowance_gate import (
+            carry_allowance_keys as _carry_allowance_keys,
+        )
+    except Exception as e:  # mapped to the refusal below, never an unmapped 500
+        logging.getLogger("tortoise.allowance_gate").error(
+            "capture allowance gate unavailable (fail-closed, capture "
+            "refused): team=%s error=%r", org_id, e)
+        return _SafeError({
+            "error": f"capture allowance gate unavailable: {e}",
+            "status": 500})
+    _carry_allowance_keys(org, limits)
     try:
         body = SessionRequest(conversation=conversation, harness=harness,
                               session_id=session_id,
