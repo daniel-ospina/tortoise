@@ -1387,11 +1387,11 @@ def test_the_run_budget_is_justified_by_the_cap_of_the_workflow_that_HOSTS_it():
         f"{hosts[0].name} caps its job at {cap_minutes}: that sentence IS the "
         f"argument for the budget, so it must name the workflow that hosts it")
 
-    assert cl._GH_RUN_BUDGET_SECONDS < cap_seconds, (
+    assert cap_seconds > cl._GH_RUN_BUDGET_SECONDS, (
         f"the {cl._GH_RUN_BUDGET_SECONDS}s run budget must end the run BEFORE the "
         f"{cap_seconds}s job cap does, or the job timeout wins and a stalled API "
         f"reds a job that `continue-on-error: true` cannot cover")
-    assert _DOCUMENTED_CALLS * cl._GH_TIMEOUT_SECONDS > cap_seconds, (
+    assert cap_seconds < _DOCUMENTED_CALLS * cl._GH_TIMEOUT_SECONDS, (
         f"{_DOCUMENTED_CALLS} calls at the {cl._GH_TIMEOUT_SECONDS}s per-call cap "
         f"are {_DOCUMENTED_CALLS * cl._GH_TIMEOUT_SECONDS}s and must reach the "
         f"{cap_seconds}s job cap — that arithmetic IS the justification for an "
