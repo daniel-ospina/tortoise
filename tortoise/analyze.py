@@ -552,9 +552,11 @@ def _bfs_select_operators(proj, anchors: list[str], max_hops: int | None = 1,
         (live.py): ``status IS NULL OR status <> 'draft'`` AND NOT terminal
         (retracted/superseded/outdated/archived/deprecated status — the
         canonical ``live.TERMINAL_EXCLUDED_STATUSES`` — or the
-        ``outdated=true`` flag) — legacy pre-#780 nodes without a stored
-        status are LIVE (the entity write path defaults
-        ``coalesce($st, n.status, 'live')``). The predicate is UNCONDITIONAL
+        ``outdated=true`` flag) — an ABSENT status is LIVE (the legacy rule, and
+        since #9974 R1 also the ordinary birth state of a status-less
+        Object/Subject: the entity fold seeds ``status=$st``, derived-or-absent;
+        the Point fold still writes ``coalesce($st, n.status, 'live')``). The
+        predicate is UNCONDITIONAL
         (draft AND terminal endpoints never count toward the >=2, even under
         the include_draft escape hatch — the E2E-13.1 1-live/1-draft
         boundary pins the operator INERT; #2422 extends the same exclusion
@@ -1026,8 +1028,10 @@ def mean_grounding(proj=None) -> float:
 
     Gate B snapshot metric: sample = full live Point set, mean of the
     ``confidence`` property. Live semantics follow the #780 shared
-    ``_live_only`` filter — legacy NULL-status Points are LIVE
-    (``coalesce($st, n.status, 'live')`` write default), ``status: draft``
+    ``_live_only`` filter — an ABSENT status is LIVE (the legacy rule, and
+    since #9974 R1 also the ordinary birth state of a status-less Object/
+    Subject: the entity fold seeds ``status=$st``, derived-or-absent; the Point
+    fold still writes ``coalesce($st, n.status, 'live')``), ``status: draft``
     Points are excluded. Operator Points (``is_operator: true``) are
     excluded. An empty live set returns 0.0.
 
