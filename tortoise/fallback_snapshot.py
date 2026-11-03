@@ -109,6 +109,81 @@ class FallbackSnapshotStore:
 
 _store = FallbackSnapshotStore()
 
+# ── #10602: SINGLE-FLIGHT build (one whole-corpus fetch per key, not one per reader) ──
+#
+# The degraded read used to go ``get(key)`` → miss → ``build_snapshot(proj)`` → ``put``
+# with NOTHING serialising the build. Every concurrent reader therefore ran its own
+# full-corpus fetch: measured on an idle local store holding 10,000 points, N
+# simultaneous degraded reads cost N builds (build p50 1,441 ms cold / 388 ms warm),
+# so 8 readers all took **3.7–4.6 s each** (wall 4,572 ms) while ONE reader took 595 ms.
+# Latency therefore grew linearly with the number of agents searching — the exact
+# shape #10602 records (5 concurrent agents, every call 13,204 / 13,201 / 13,307 /
+# 13,302 / 13,306 ms — tightly clustered, because they all wait on the same corpus),
+# and it is self-amplifying: the busier the fleet, the more whole-corpus reads the
+# store is asked for *while it is already the thing under strain*.
+#
+# What this is NOT: it changes no cache policy, no TTL, no size cap, no bound and no
+# result. A joiner re-checks the store under the lock, so a build that completed
+# while it waited is REUSED; a caller that builds gets exactly the snapshot it would
+# have built itself. The staleness a joiner can inherit is bounded by its own wait
+# (milliseconds), which is far inside the 60 s TTL the store already tolerates.
+#
+# ⛔ It is not a "cache" in the sense #10602's recorded decisions forbid (§14.2 /
+# §12.1c make FalkorDB itself the cache under the hybrid): the entry, its lifetime
+# and its invalidation are unchanged — this only stops N readers doing identical
+# work at once.
+_BUILD_LOCKS_GUARD = threading.Lock()
+_BUILD_LOCKS: dict[tuple, threading.Lock] = {}
+#: Bound on the lock registry. A lock is dropped only while it is NOT held, so the
+#: dict can never strand a waiter on a discarded lock; entries are re-minted on
+#: demand, and the LRU store this mirrors holds only ``MAX_SNAPSHOT_ENTRIES``.
+MAX_BUILD_LOCKS = 32
+
+
+def _build_lock(key: tuple) -> threading.Lock:
+    """The one build lock for ``key`` (minted on demand, bounded)."""
+    with _BUILD_LOCKS_GUARD:
+        lock = _BUILD_LOCKS.get(key)
+        if lock is not None:
+            return lock
+        while len(_BUILD_LOCKS) >= MAX_BUILD_LOCKS:
+            for old_key, old_lock in list(_BUILD_LOCKS.items()):
+                if old_key != key and not old_lock.locked():
+                    del _BUILD_LOCKS[old_key]
+                    break
+            else:  # every registry entry is held — mint past the cap, never block
+                break
+        lock = threading.Lock()
+        _BUILD_LOCKS[key] = lock
+        return lock
+
+
+def get_or_build(proj, key: tuple, *, store: "FallbackSnapshotStore | None" = None,
+                 builder=None) -> dict | None:
+    """Cached snapshot for ``key``, building it at most ONCE per key at a time.
+
+    Behaviourally identical to the read path's ``get``/``build_snapshot``/``put``
+    sequence (same entry, same None-on-too-big/failed contract, same write-side
+    invalidation); the only difference is that concurrent readers COALESCE instead
+    of each fetching the whole corpus. ``builder``/``store`` are test seams.
+    """
+    store = _store if store is None else store
+    build = build_snapshot if builder is None else builder
+    snap = store.get(key)
+    if snap is not None:
+        return snap
+    with _build_lock(key):
+        # Re-check UNDER the lock: a build that completed while this caller waited
+        # is exactly the snapshot it would have built, so it is reused rather than
+        # repeated (the whole point — the wait replaces a full-corpus fetch).
+        snap = store.get(key)
+        if snap is not None:
+            return snap
+        snap = build(proj)
+        if snap is not None:
+            store.put(key, snap)
+        return snap
+
 # Stable key for a ``:memory:`` projection whose client exposes no store
 # identity handle at all. All such projections share it, which buys
 # cacheability at the cost of per-store ISOLATION — not in one direction only:
@@ -205,7 +280,11 @@ def snapshot_key(proj, namespace: str | None) -> tuple:
 
 
 def build_snapshot(proj) -> dict | None:
-    """Lean corpus projection + cached document vectors. None if too big."""
+    """Lean corpus projection + cached document vectors. None if too big.
+
+    ⛔ Call this through ``get_or_build`` from anything on a request path: a bare
+    call is a whole-corpus fetch, and N concurrent callers are N fetches (#10602).
+    """
     g = proj.g
     try:
         count = g.query(

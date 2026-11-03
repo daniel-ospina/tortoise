@@ -672,3 +672,118 @@ def test_snapshot_store_is_bounded_and_lru(monkeypatch):
             "the least-recently-used entry is evicted")
     finally:
         fs._store.clear()
+
+
+# ── #10602: single-flight corpus build ─────────────────────────────────
+#
+# The degraded read path built the snapshot with a bare ``build_snapshot``
+# call, so EVERY concurrent reader ran its own whole-corpus fetch. Measured
+# (idle local store, 10,000 points): N simultaneous degraded reads cost N
+# builds — 8 readers took 4.0–4.6 s each while ONE took 0.8 s, i.e. a search
+# got slower the more agents were searching, which is #10602's own signature
+# (5 concurrent agents, every call ~13.2 s). ``get_or_build`` coalesces.
+
+def _snap_stub(tag="s"):
+    return {"built_at": time.monotonic(), "dirty": False, "points": [],
+            "vectorizer": None, "doc_vecs": None, "model_id": None,
+            "tag": tag}
+
+
+def test_get_or_build_coalesces_concurrent_readers():
+    """N concurrent misses → exactly ONE build; every reader gets that snapshot."""
+    import threading
+
+    fs._store.clear()
+    key = ("coalesce-graph", "coalesce-ns")
+    builds = []
+    lock = threading.Lock()
+    start = threading.Barrier(8)
+
+    def slow_builder(_proj):
+        with lock:
+            builds.append(1)
+        time.sleep(0.25)  # long enough that all 8 readers are inside the miss
+        return _snap_stub()
+
+    out = {}
+
+    def reader(i):
+        start.wait()
+        out[i] = fs.get_or_build(None, key, builder=slow_builder)
+
+    threads = [threading.Thread(target=reader, args=(i,)) for i in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=30)
+
+    assert len(builds) == 1, (
+        "one corpus build for %d concurrent readers — got %d (the pre-#10602 "
+        "shape: N readers, N whole-corpus fetches)"
+        % (len(out), len(builds)))
+    assert len(out) == 8 and all(v is not None for v in out.values())
+    assert len({id(v) for v in out.values()}) == 1, \
+        "every reader must be served the same built snapshot"
+
+
+def test_get_or_build_reuses_cached_snapshot_without_building():
+    fs._store.clear()
+    key = ("cached-graph", "cached-ns")
+    fs._store.put(key, _snap_stub("warm"))
+    built = []
+
+    def builder(_proj):
+        built.append(1)
+        return _snap_stub("cold")
+
+    snap = fs.get_or_build(None, key, builder=builder)
+    assert snap is not None and snap["tag"] == "warm"
+    assert built == [], "a cached snapshot must not trigger a build"
+
+
+def test_get_or_build_rebuilds_after_invalidation_and_survives_failure():
+    """A write's invalidate() is still honoured, and a None build caches nothing."""
+    fs._store.clear()
+    key = ("inval-graph", "inval-ns")
+    calls = []
+
+    def builder(_proj):
+        calls.append(1)
+        return None if len(calls) == 1 else _snap_stub("second")
+
+    assert fs.get_or_build(None, key, builder=builder) is None, \
+        "a failed build must yield None (the legacy path), not a stale snapshot"
+    assert fs._store.get(key) is None, "a failed build must not be cached"
+    snap = fs.get_or_build(None, key, builder=builder)
+    assert snap is not None and snap["tag"] == "second"
+    fs._store.invalidate(key)
+    assert fs._store.get(key) is None, "invalidate() still drops the entry"
+
+
+def test_degraded_read_path_goes_through_get_or_build(sdk, monkeypatch):
+    """The #10602 wiring: the read path must COALESCE, not build per reader.
+
+    A regression here is silent (results stay correct, latency grows with the
+    fleet), so the call itself is pinned: one degraded read → ``get_or_build``
+    once and no bare ``build_snapshot``.
+    """
+    sdk.create_point("statement", "alpha beta gamma delta")
+    calls = []
+    real = fs.get_or_build
+
+    def counting(proj, key, **kw):
+        calls.append(key)
+        return real(proj, key, **kw)
+
+    monkeypatch.setattr(fs, "get_or_build", counting)
+    trace: list[dict] = []
+    results = sdk.tortoise_fts_query(
+        query=FTS_MISS, limit=10, leg_trace=trace)
+    assert isinstance(results, list)
+    assert calls, (
+        "the degraded read never reached get_or_build — it is still calling "
+        "build_snapshot directly, i.e. one whole-corpus fetch PER READER "
+        "(#10602)")
+    assert len(calls) == 1, "one degraded read → one coalesced build (%d)" % len(calls)
+    assert any(t.get("reason") == "tfidf_snapshot" for t in trace), \
+        "the read must still be served by the snapshot arm it went through"
