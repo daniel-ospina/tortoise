@@ -686,7 +686,11 @@ class TestDistinguishingDifference:
             # leg uses the lowercase fullwidth letter.)
             assert v2.fold_allowed(f"we ship {surface} extra",
                                    "we ship extra"), surface
-        assert "latin" in v2._scripts("5 \u00b5m \u0283 \ufb01 \uff41")
+        # `_scripts`, not just `_script_of`, over the SAME surfaces — and NO
+        # ASCII letter anywhere in the string, because `"latin" in …` is
+        # satisfied by the `m` of `µm` whatever the supplement did (review
+        # round 7: emptying `_LATIN_SUPPLEMENT_BLOCKS` left the old form green).
+        assert v2._scripts("5 \u00b5 \u0283 \ufb01 \uff41") == {"latin"}
         assert v2._script_of("\uff21") == "latin"  # FULLWIDTH capital too
         # A MODIFIER letter (category Lm, e.g. `\u02b0`) IN NO BLOCK is not
         # script-bearing on its own, so it contributes nothing — as before this

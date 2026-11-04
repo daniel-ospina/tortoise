@@ -13205,6 +13205,20 @@ _LATIN_SUPPLEMENT_BLOCKS = (
 #: (Thai `๑๒๓` against `123` reads as a `number` difference, which permits a
 #: SUPERSEDE), and a MODIFIER letter (category Lm, e.g. `ʰ` U+02B0) is treated
 #: as not script-bearing, which is what it was before this reading existed.
+#:
+#: ⚠️ And a LABEL residual, which costs no decision and is stated anyway so a
+#: reader does not mistake the name for precision: `_UNLISTED_SCRIPT` is a
+#: SENTINEL carried in the same set as real script names, so
+#: `_identity_differences` reports a `language` difference for a one-sided
+#: letter whose script is ARGUABLY KNOWN and merely outside every
+#: `_SCRIPT_BLOCKS` range — `㐀` (Han Ext A) beside BMP `見`, or halfwidth `ｦ`
+#: beside fullwidth kana.  The REFUSAL there is the intended direction (base
+#: FOLDED both pairs and absorbed the letter — the #5329 loss this reading
+#: exists to stop), and the label changes no answer: `supersede_allowed` is
+#: `not _boundary(a, b)[1]`, so any identity dimension refuses a supersede
+#: alike.  Only the REPORTED reason is coarser than the truth, and extending
+#: `_SCRIPT_BLOCKS` to cover those ranges is the measurement that would sharpen
+#: it — deliberately not done here (this reading does not complete the list).
 _UNLISTED_SCRIPT = "unlisted"
 
 
