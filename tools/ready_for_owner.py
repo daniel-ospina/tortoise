@@ -86,9 +86,10 @@ than a second grouping here.
 ``record-review.sh --check-carry``, and the review RECORD is per-machine
 (``$HOME/.pi/agent/reviews``). A review minted on another box is therefore invisible to
 the default read, so such a PR reads ``NOT-READY(review)`` — the safe direction, but it can
-cost a re-review the fleet already paid for. ``--recorded-diff``/``--recorded-head`` pass a
-known pair straight through to the recorder's own ``--recorded-diff`` seam (#3315); this
-tool deliberately does NOT parse the signed marker itself.
+cost a re-review the fleet already paid for. The caller-supplied pair (``--recorded-diff``/``--recorded-head``) is NOT forwarded: the
+recorder's supplied-pair arm short-circuits its record lookup, so forwarding it made this
+arm a self-attestation (measured on #10974). The gate asks the box and FAILS when the box
+has nothing.
 
 Read-only against other PRs. It writes nothing but its own stdout: no PR comment, no
 label, no merge. (A lane that cannot write to PRs — #10930 — can still run it.)
@@ -166,7 +167,7 @@ QUEUE_BLOCKING_LABELS = frozenset({"superseded-by-fold"})
 #: ⛔ QUOTING A FINDING (`> [P1] …`) MUST STILL BLOCK — answering a finding by quoting
 #: it is normal review behaviour, and a `>` prefix read NEUTRAL (round 9). So do nested
 #: bullets and bold brackets.
-BLOCKING_RE = re.compile(r"^\s*(?:[-*>]+\s*)*\**\[?(P0|P1|P2)\]?\**\s*(?=\S|$)", re.MULTILINE)
+BLOCKING_RE = re.compile(r"(?m)^\s*(?:[-*>]+\s*|\d+[.)]\s*)*\**`?\[?(P0|P1|P2)\]?\**`?\s*(?=\S|$)")
 ISSUES_RE = re.compile(r"^\s*ISSUES\s+(\d+)\b", re.MULTILINE)
 #: A CLEAN outcome. ⛔ THE POSITIVE VOCABULARY IS THE RECORDER'S TOO: `Outcome: clean` is
 #: the declaration `scripts/record-review.sh` reads (its own suppress arm keys on it), and
@@ -221,6 +222,7 @@ EXPLICIT_CLEAN_OUTCOME_RE = re.compile(r"(?i)(?:^|[*\s])outcome:[ \t]*[*\s]*clea
 FINDINGS_DECLARED_RE = re.compile(
     r"(?i)(?:\bseverity\b\**\s*:?\s*\**\s*(P0|P1|P2)\b"
     r"|\boutcome\s*:\s*\**\s*([0-9]+)\s+(?:issues?|findings?)\b"
+    r"|\bverdict\s*:\s*\**\s*([0-9]+)\s+(?:P[0-3]\s+)?(?:issues?|findings?)\b"
     r"|\bverdict\s*:\s*\**\s*ISSUES\s+([0-9]+)\b)"
 )
 
@@ -264,6 +266,12 @@ SEVERITY_LINE_START_RE = re.compile(
 #: stands — it carries a known P1` (#10945). Each read NEUTRAL, and each as a PR's LAST
 #: artifact printed READY-FOR-OWNER.
 ISSUES_FOUND_RE = re.compile(r"(?i)(?<!no )\bissues?\s+found\b|\bISSUES\s+\d+\b")
+#: ⛔ A severity TOKEN is a finding by POSITION too, not only by decoration. Live shapes
+#: that still read NEUTRAL one round after the header fix: `P2:` followed by a
+#: `` `path:line` `` (the `${review-pr.sh}` USE cue), and a tally that counts a NON-ZERO
+#: blocking severity (`- P1: 0, P2: 2`). A finding NAMES A LOCATION.
+SEVERITY_LOCATED_RE = re.compile(r"(?i)\bP[0-2]\b[^A-Za-z0-9\n]{0,12}`?[\w./-]*\.\w+:\d+")
+TALLY_NONZERO_RE = re.compile(r"(?i)\bP([0-2])\s*:\s*([1-9]\d*)\b")
 #: A severity named in a HEADING, or a plain "do not land / known P1" verdict.
 SEVERITY_HEADING_RE = re.compile(
     r"(?im)(?:^\s*#{1,6}[^\n]*\bP[0-2]\b"
@@ -299,6 +307,10 @@ UNION_RE = re.compile(r"(?im)^\s*(?:[-*]\s*)?\**READY-GATE UNION\**\s*:[ \t]*(.*
 PR_REF_RE = re.compile(r"^#?(\d+)$")
 
 REVIEW_OK_TOKENS = frozenset({"head", "carry"})
+#: The verdicts `record-review.sh` will mint (its own guard, `:1303`). A record carrying
+#: anything else — `not-clean` above all — is an explicit statement that the PR is NOT
+#: ready, however the `--check-carry` token reads.
+CLEAN_REVIEW_VERDICTS = frozenset({"clean", "clean-micro", "clean-low"})
 
 GH_TIMEOUT = int(os.environ.get("READY_GATE_GH_TIMEOUT", "60"))
 GIT_TIMEOUT = int(os.environ.get("READY_GATE_GIT_TIMEOUT", "180"))
@@ -412,6 +424,9 @@ class Probe:
     review_token: str | None = None
     review_exit: int | None = None
     review_raw: str = ""
+    #: The RECORD's own `verdict` field (``clean`` / ``clean-micro`` / ``clean-low`` /
+    #: ``not-clean`` …). ``None`` = could not be read.
+    review_verdict: str | None = None
     #: The PR's changed files — ``None`` = unreadable.
     touched: tuple[str, ...] | None = None
     touched_raw: str = ""
@@ -587,9 +602,26 @@ def check_review(probe: Probe) -> Check:
     ============ ===== ==========================================================
     """
     raw = probe.review_raw or f"token={probe.review_token or '-'} exit={probe.review_exit}"
+    raw += f" record-verdict={probe.review_verdict or '-'}"
     if probe.review_token is None:
         return Check("review", False, raw, "unreadable", unreadable=True)
     if probe.review_token in REVIEW_OK_TOKENS and probe.review_exit == 0:
+        # ⛔ `record-review.sh --check-carry` returns `head`/`carry` at exit 0 for a
+        # `not-clean` record too — it reports that verdict on stderr and deliberately leaves
+        # the exit code alone (agent-infra#3400). Keying on the token alone therefore
+        # CERTIFIED a record whose own verdict is "not clean", the strongest available
+        # statement that the PR is not ready. The record's `verdict` field is the
+        # structured form of that statement, and it outranks the token.
+        if probe.review_verdict is None:
+            return Check(
+                "review",
+                False,
+                raw,
+                "record-verdict-unreadable",
+                unreadable=True,
+            )
+        if probe.review_verdict.strip().lower() not in CLEAN_REVIEW_VERDICTS:
+            return Check("review", False, raw, f"record-not-clean:{probe.review_verdict}")
         return Check("review", True, raw)
     if probe.review_token == "unreadable":
         return Check("review", False, raw, "diff-unreadable-retry", unreadable=True)
@@ -847,7 +879,17 @@ def _grades_as_blocking(text: str, item: Mapping[str, Any]) -> bool:
     hard = bool(
         _line_finding(text)
         or (issues and int(issues.group(1)) > 0)
-        or (ISSUES_FOUND_RE.search(text) and not p3_only_declared)
+        or (
+            ISSUES_FOUND_RE.search(text)
+            and not p3_only_declared
+            and not EXPLICIT_CLEAN_OUTCOME_RE.search(text)
+        )
+        or SEVERITY_LOCATED_RE.search(text)
+        or TALLY_NONZERO_RE.search(text)
+        # A severity token beside an ISSUE-block SIBLING is a finding even when the body
+        # never uses the word "severity" — `4 × `P2`, `check_type: bug`, `origin: diff``
+        # is the dominant shape in the fold PRs (#10902/#10909/#10920).
+        or (bool(SIBLING_FIELD_RE.search(text)) and bool(severities & {"0", "1", "2"}))
         or SEVERITY_HEADING_RE.search(text)
         # The recorder's own unconditional arms (1) and (1b).
         or NON_CLEAN_RE.search(text)
@@ -1275,6 +1317,37 @@ def _first_line(text: str | None) -> str:
     return ""
 
 
+def _record_verdict(pr: int, repo: str) -> str | None:
+    """The RECORD's own ``verdict`` field, or ``None`` when it cannot be read.
+
+    Follows the recorder's own file convention and its collision rule: the repo-qualified
+    name first, then the legacy ``<pr>.json`` only when that record names no repo or THIS
+    repo (the #426 rule the local gate and the rail both apply).
+    """
+    reviews = Path(os.environ.get("HOME") or "~").expanduser() / ".pi" / "agent" / "reviews"
+    candidates: list[Path] = []
+    if "/" in repo:
+        owner, name = repo.split("/", 1)
+        candidates.append(reviews / f"{owner}-{name}-{pr}.json")
+    candidates.append(reviews / f"{pr}.json")
+    for path in candidates:
+        if not path.is_file():
+            continue
+        try:
+            data = json.loads(path.read_text())
+        except (OSError, ValueError):
+            return None
+        if not isinstance(data, Mapping):
+            return None
+        embedded = str(data.get("repo") or "")
+        if embedded and embedded != repo:
+            continue
+        verdict = data.get("verdict")
+        if isinstance(verdict, str) and verdict.strip():
+            return verdict.strip()
+    return None
+
+
 def _review_script(workdir: Path) -> Path | None:
     """The recorder, or ``None`` when the machine-local ``scripts/`` pointer is absent.
 
@@ -1287,7 +1360,9 @@ def _review_script(workdir: Path) -> Path | None:
     return script if script.is_file() else None
 
 
-def _read_review(pr: int, repo: str, workdir: Path) -> tuple[str | None, int | None, str]:
+def _read_review(
+    pr: int, repo: str, workdir: Path
+) -> tuple[str | None, int | None, str, str | None]:
     """Ask the gate's OWN predicate: ``record-review.sh --check-carry``.
 
     The script is the single reader of "does this record cover what would merge", so it
@@ -1316,6 +1391,9 @@ def _read_review(pr: int, repo: str, workdir: Path) -> tuple[str | None, int | N
             "(the scripts/ pointer is not materialised)",
         )
     proc = _run(["bash", str(script), "--check-carry", str(pr), repo], GIT_TIMEOUT, cwd=workdir)
+    verdict = _record_verdict(pr, repo)
+    if verdict is None and "NOT CLEAN" in (proc.stderr or "").upper():
+        verdict = "not-clean"
     token = ""
     for line in (proc.stdout or "").splitlines():
         fields = line.split("\t")
@@ -1332,8 +1410,13 @@ def _read_review(pr: int, repo: str, workdir: Path) -> tuple[str | None, int | N
         # `fresh` is 1. An earlier version mapped rc==1 to `norecord`, which told a lane
         # to RE-RECORD a diff that had changed and told it to RETRY a PR with no record
         # at all — both still FAIL, so no false READY, but both sent the lane the wrong way.
-        return {1: "fresh", 4: "norecord"}.get(proc.returncode, "unreadable"), proc.returncode, raw
-    return token, proc.returncode, raw
+        return (
+            {1: "fresh", 4: "norecord"}.get(proc.returncode, "unreadable"),
+            proc.returncode,
+            raw,
+            verdict,
+        )
+    return token, proc.returncode, raw, verdict
 
 
 def _field(stdout: str, index: int) -> str:
@@ -1588,7 +1671,12 @@ def collect_probe(
         gh, lambda g: _read_check_groups(g, head, repo), surface="check-runs"
     )
     probe.tree, probe.tree_raw = _try_tree(gh, pr, head, workdir)
-    probe.review_token, probe.review_exit, probe.review_raw = _try_review(pr, repo, workdir)
+    (
+        probe.review_token,
+        probe.review_exit,
+        probe.review_raw,
+        probe.review_verdict,
+    ) = _try_review(pr, repo, workdir)
     probe.touched, probe.touched_raw = _try(gh, lambda g: _read_touched(g, pr))
     if probe.body:
         entries, _union_raw = declared_union(probe.body)
@@ -1653,11 +1741,13 @@ def _try_tree(gh: Gh, pr: int, head: str, workdir: Path) -> tuple[bool | None, s
         return None, str(exc)
 
 
-def _try_review(pr: int, repo: str, workdir: Path) -> tuple[str | None, int | None, str]:
+def _try_review(
+    pr: int, repo: str, workdir: Path
+) -> tuple[str | None, int | None, str, str | None]:
     try:
         return _read_review(pr, repo, workdir)
     except ReadError as exc:
-        return None, None, str(exc)
+        return None, None, str(exc), None
 
 
 # ── CLI ─────────────────────────────────────────────────────────────────────
@@ -1701,7 +1791,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     workdir = Path(args.workdir).resolve()
     try:
         if args.fixture:
+            # ⛔ A FIXTURE IS NOT A LIVE READ. It is marked on stderr (so a caller can always
+            # tell provenance) and it must carry a full 40-hex head, because the canonical
+            # line claims `(<PR>, <full head sha>)` and `{"head": ""}` used to print
+            # `READY-FOR-OWNER(1, )`.
+            print(f"FIXTURE-MODE({args.fixture})", file=sys.stderr)
             probe = probe_from_dict(json.loads(Path(args.fixture).read_text()))
+            if len(probe.head or "") != 40:
+                raise ReadError(
+                    f"a --fixture probe must carry a full 40-hex head; got {probe.head!r}"
+                )
         else:
             probe = collect_probe(args.pr, args.repo, workdir)
         # ⛔ INSIDE the try: `evaluate()`, `render()` and `json.dumps` were OUTSIDE it, so a
@@ -1807,6 +1906,7 @@ def probe_from_dict(data: Mapping[str, Any]) -> Probe:
         review_token=data.get("review_token"),
         review_exit=data.get("review_exit"),
         review_raw=str(data.get("review_raw", "")),
+        review_verdict=data.get("review_verdict"),
         touched=None if data.get("touched") is None else tuple(data["touched"]),
         touched_raw=str(data.get("touched_raw", "")),
         union=None if data.get("union") is None else tuple(data["union"]),

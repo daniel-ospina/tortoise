@@ -9861,7 +9861,7 @@ durations:
   test_ready_for_owner.py: 2.0  # #10930: a NEW file has no CI junit measurement (a file that
   # never ran cannot appear in an artifact), so this is `DEFAULT_FAST_WEIGHT`, NOT a local
   # reading — a local wall is forbidden as a shard-layout input (#2818/#3419/#9003). The
-  # local private-lane wall at this PR's head was ~13 s for 177 offline tests, stated only so
+  # local private-lane wall at this PR's head was ~14 s for 189 offline tests, stated only so
   # the next sweep can compare; `tools/ci_timing.py --refresh-durations` replaces this row
   # from junit once a push-to-main run includes it.
   test_ci_catch_history.py: 9.5  # #10131: a NEW file has no CI junit measurement (a file that
