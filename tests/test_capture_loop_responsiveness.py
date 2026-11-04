@@ -287,7 +287,11 @@ def test_capture_sessions_gate_allowance_read_is_off_the_event_loop(
 def test_capture_sessions_gate_carry_rides_its_own_substrate_lane(
         client, monkeypatch):
     """#9567 round 12 + main-repair (2026-11-04): the capture door's allowance
-    CARRY must ride the CONTROL-PLANE pool, not the loop's default executor.
+    CARRY must ride its OWN substrate's pool — the control-plane pool in Supabase
+    mode, the graph pool in registry mode — and never the loop's default
+    executor. (A carry pinned to ``_cp_offload`` in BOTH modes would be the
+    #3718 inversion in the other direction: in registry mode the registry IS the
+    graph connection, which is why the assertion below expects ``graph`` here.)
 
     Sibling of the off-the-loop pin above, and the LANE half of the same rule.
     #9567 round 12 split the gate's two reads by substrate — the carry is a

@@ -17547,6 +17547,26 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # and it is named here rather than left for someone to discover from a
     # dashboard line. The `error_code` (`control_plane_unavailable`) is correct
     # either way.
+    #
+    # ⚠️ SECOND DECLARED RESIDUAL (main-repair review cycle 3, P1): for
+    # `resource="sessions"` the gate has a THIRD read, and it is a control-plane
+    # read that rides the GRAPH pool. `capture_extraction` is gated on
+    # `resources={"sessions"}` and its meter is `metering.get_capture_usage`,
+    # which in Supabase mode does two PostgREST round trips
+    # (`org_metering_anchor` + `metering_get_capture_usage`) — and it runs inside
+    # the `_graph_offload` submission that carries the count. With no
+    # `max_extraction_tokens` armed (every production resolver today) the
+    # dimension is absent and nothing is read, so this is LATENT, not live; the
+    # day a token allowance ships, a control-plane stall inside that submission
+    # exceeds `graph_offload_timeout_s()`, abandons a graph-pool worker holding
+    # its slot, and refuses a legitimate capture with
+    # `503 graph_unavailable` — the wrong dependency's copy, the round-12
+    # inversion in miniature. The proper fix is NOT local to this door: it needs
+    # the configured `capture_extraction` reading resolved inside the same
+    # control-plane submission as the carry and handed down, which means
+    # threading `meters=` through `quota.enforce_org_limit` (it calls
+    # `enforce_allowances(limits, org_id=…, resource=…)` with no meter
+    # override). Filed rather than absorbed: #10949.
     await _check_org_limit_off_loop(org, "sessions",
                                     op="check_org_limit.sessions", sdk=sdk)
     # Optional frontmatter-metadata validation (#1362) — warn-only, gated by

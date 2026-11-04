@@ -146,8 +146,9 @@ by #10776 and declared here rather than left to be discovered.
 ⚠️ **BOUNDARY 4 — WHERE the carry runs (no lock, its own lane).** The fill above
 is a network read, so it must not be submitted to a pool (or a LOCK) that
 belongs to a different substrate, and it must not be held under a per-org
-mutex. Every gated REST door satisfies both: the ``points``/``documents`` doors
-run it through ``hosted_api._check_org_limit_off_loop`` (Supabase → the
+mutex. Every gated REST door satisfies both — EXCEPT one, named below: the
+``points`` doors run it through ``hosted_api._check_org_limit_off_loop``
+(Supabase → the
 control-plane pool, self-host → the graph pool, because the registry IS the
 graph connection), the capture door runs it through the SAME twin
 (``_check_org_limit_off_loop``, ``check_org_limit.sessions`` — it used to run
@@ -161,8 +162,14 @@ this read). ONE door is the declared exception: ``/v1/demo`` runs the check
 inside its own per-org seed lock, deliberately, because the idempotent
 ``existing`` short-circuit must come BEFORE the read — a re-seed of an
 already-seeded org must not pay a control-plane read, and the lock is held only
-once per org's first seed. Any NEW gated door has to make this choice
-explicitly; inheriting whichever pool or lock the rest of its work uses is how
+once per org's first seed. A SECOND door is a declared GAP: the ``documents``
+door never reached this seam at all — it calls ``enforce_org_limit(limits,
+"documents", …)`` directly on a limits dict ``_run_docs_indexing`` resolved
+INLINE on the event loop, which is the on-loop read this whole boundary exists
+to prevent. It is pre-existing, it is filed as #10946, and it is named here
+because this sentence used to claim it as satisfied (main-repair 2026-11-04,
+review cycle 3). Any NEW gated door has to make this choice explicitly;
+inheriting whichever pool or lock the rest of its work uses is how
 review round 12 (a PostgREST read on the graph pool) and round 13 (the same
 read inside the commit lock) both happened.
 
