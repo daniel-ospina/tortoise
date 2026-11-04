@@ -1,0 +1,547 @@
+diff --git a/tests/test_7405_update_point_writes.py b/tests/test_7405_update_point_writes.py
+index f0aff97e5..6ed624b83 100644
+--- a/tests/test_7405_update_point_writes.py
++++ b/tests/test_7405_update_point_writes.py
+@@ -979,51 +979,193 @@ def test_retract_does_not_claim_already_terminal_after_a_retry(
+             sdk.close()
+ 
+ 
++_WRITE_SLOT = "another write is in progress, retry the query"
++
++
++class _TargetVanishesBeforeTheWrite:
++    """The target is PRESENT at the guard read and gone by the write.
++
++    This is the ONE shape on the NON-PROMOTE arm in which a zero-row statement
++    is a legitimate, NON-RAISING outcome for ``update_point`` (#8854 review
++    round 10, I1): #10119 refuses an id absent AT the guard read before any
++    WRITE statement is issued, so the reachable benign-zero-row case here is a
++    point that existed at that read and was removed (rebuild / replay) before
++    the write ran.
++
++    Other zero-row shapes are NOT this one, and the difference is the outcome:
++    on the promote arm a zero-row statement either RAISES (an absent id gets
++    `No point`; a terminal one gets the #432 Illegal-status error) or returns
++    the POINT as the #1088 idempotent success once the node has gone live
++    between the #1088 probe and the guarded ``SET``. None of them returns the
++    empty ``{}`` this arm's vanished-target case does.
++
++    Two polarities, and the difference is the whole point:
++
++    - ``abort_message=None`` — the first matching statement simply runs and
++      matches nothing. No abort, so the retry wrapper is never consulted and
++      its witness is never called: a first attempt is never witnessed.
++    - ``abort_message=_WRITE_SLOT`` — the first matching statement aborts with
++      the write-slot arm, which is RETRYABLE but state-INDEPENDENT: it says
++      nothing about whether the target exists, so it must not ARM the witness.
++      The re-issue then reports zero rows, and a mis-armed witness would turn
++      that into a ``_WriteNotLanded`` surfacing the bare write-slot text
++      ("retry the query") on a target that is simply gone — never the
++      corruption-flavoured graph-replaced diagnosis, which belongs to the
++      LATCH family only (``_GraphAbortThenSlotAbortEmptyGraph``).
++
++    ``matched_rows`` counts what the statements ACTUALLY matched, so "nothing
++    landed" is measured rather than assumed.
++    """
++
++    def __init__(self, real, needle: str, *, abort_message: str | None = None
++                 ) -> None:
++        self._real = real
++        self._needle = needle
++        self._abort_message = abort_message
++        self.matching = 0
++        self.matched_rows = 0
++
++    def query(self, cypher, params=None, timeout=None):
++        if self._needle in cypher:
++            self.matching += 1
++            if self.matching == 1:
++                # the target is gone before the statement runs
++                self._real.query("MATCH (n:Point) DETACH DELETE n")
++                if self._abort_message is not None:
++                    raise redis_exc.ResponseError(self._abort_message)
++            res = self._real.query(cypher, params=params, timeout=timeout)
++            self.matched_rows += (res.result_set[0][0]
++                                  if res.result_set else 0)
++            return res
++        return self._real.query(cypher, params=params, timeout=timeout)
++
++    def __getattr__(self, name):
++        return getattr(self._real, name)
++
++
+ def test_a_first_attempt_that_matches_nothing_keeps_the_empty_contract(
+         tmp_path):
+     """The witness must NOT change a legitimate zero-row FIRST attempt.
+ 
+-    ``update_point`` on a missing id historically returns ``{}`` without
+-    raising. A first attempt never consults the witness, so this stays true.
+-    (The GATE itself — "only a graph-replaced abort arms it" — is pinned by
+-    ``test_a_write_slot_abort_on_a_missing_target_keeps_the_empty_contract``;
+-    this test alone cannot observe it, since ``origin/main`` passes it too.)
+-    """
+-    sdk = _sdk(tmp_path, "missing")
++    ``update_point`` returns ``{}`` when its statement matches nothing, and a
++    first attempt never consults the witness, so this stays true.
++
++    ⛔ #10119 moved WHERE that shape is reachable: an id absent at the guard
++    read now issues no WRITE statement (pinned by
++    ``test_an_absent_id_issues_no_statement_for_the_write``), so this test
++    reaches it the only way left — the target is PRESENT at that read and
++    vanishes before the write. Do NOT "restore" a write for an id that is
++    absent at entry to make this look like the old shape: that would re-open
++    #10119 (an absent id journalling a revision, advancing the EP epoch and
++    stranding a dirty root). The GATE itself — "only a graph-replaced abort
++    arms the witness" — is pinned by
++    ``test_a_write_slot_abort_on_a_vanished_target_keeps_the_empty_contract``.
++    """
++    sdk = _sdk(tmp_path, "vanished")
+     try:
+-        missing = str(uuid.uuid4())
+-        assert sdk.update_point(missing, confidence=0.5) == {}
++        pid = _pid(sdk)
++        proj = sdk._get_proj()
++        proxy = _TargetVanishesBeforeTheWrite(
++            proj.g, _POINT_PROP_SET_NEEDLE)
++        proj.g = proxy
++
++        assert sdk.update_point(pid, confidence=0.5) == {}
++        assert proxy.matching == 1, (
++            "a target present at the guard read must still take its write "
++            f"({proxy.matching} statements)")
++        assert proxy.matched_rows == 0, (
++            "the statement must have matched nothing — otherwise this test "
++            "is not the benign zero-row shape")
+     finally:
+         with contextlib.suppress(Exception):
+             sdk.close()
+ 
+ 
+-_WRITE_SLOT = "another write is in progress, retry the query"
+-
+-
+-def test_a_write_slot_abort_on_a_missing_target_keeps_the_empty_contract(
++def test_a_write_slot_abort_on_a_vanished_target_keeps_the_empty_contract(
+         tmp_path, monkeypatch):
+     """A non-rebuild abort must NOT arm the witness (#8854 review P1).
+ 
+     ``retryable_aborted_write`` also admits the write-slot arm — ordinary
+     multi-writer contention — which says nothing about whether the TARGET
+-    exists. Arming the witness on it turned ``update_point(<missing id>)`` into
+-    a stale ``ResponseError`` after four attempts, where the documented answer
+-    is ``{}``. Only the graph-deleted-or-replaced family can mean "not
+-    replayed yet", so only that family arms the witness.
++    exists. Arming the witness on it turns a re-issue that legitimately matches
++    nothing into a stale ``ResponseError`` (the bare write-slot text, "retry
++    the query") where the documented answer for a write that lands nowhere is
++    ``{}``. Only the graph-deleted-or-replaced family can mean "not replayed
++    yet", so only that family arms the witness.
++
++    ⛔ #10119 RE-BASED THIS TEST, and it is not the same test it was: it used to
++    abort on an id absent at ENTRY, which is now refused before any WRITE
++    statement is issued (so its write-slot injection could never fire and its
++    assertion silently became "no write statement reached"). The invariant it names is still
++    reachable, and this is the shape that reaches it — the target is PRESENT at
++    the guard read, the FIRST statement aborts write-slot, the target vanishes
++    so the RE-ISSUE matches zero rows. Nothing may report that as a landing,
++    and nothing may report it as a graph replacement either: the caller gets
++    the same empty contract, because a state-independent abort never armed the
++    witness.
++
++    ⚠️ A PREDECESSOR REVISION'S CLAIM HERE WAS MEASURED FALSE — read this
++    before deleting the test. `784d0c26a` concluded that "a present target
++    matches", so a PRESENT-target replacement would pass on both trees and
++    nothing should be added. That reasoning misses the window this gate exists
++    for: a target PRESENT at the guard read can VANISH before the write
++    (rebuild / replay), and the write then legitimately matches zero rows —
++    the shape below. Measured on that revision's tree, with the arming gate
++    mutated to `if keep:`: THIS test fails (the aborted statement is re-issued
++    three times and the bare write-slot ``ResponseError`` escapes). It is not a
++    test that passes with the guard deleted.
+     """
+     monkeypatch.setattr("tortoise.retry.time",
+                         types.SimpleNamespace(sleep=lambda _s: None))
+-    sdk = _sdk(tmp_path, "lockslot")
++    sdk = _sdk(tmp_path, "vanishedslot")
++    try:
++        pid = _pid(sdk)
++        proj = sdk._get_proj()
++        proxy = _TargetVanishesBeforeTheWrite(
++            proj.g, _POINT_PROP_SET_NEEDLE, abort_message=_WRITE_SLOT)
++        proj.g = proxy
++
++        # No ``pytest.raises``: a witness armed by the write-slot abort would
++        # surface ``_WRITE_SLOT`` here after the retry budget, and the
++        # graph-replaced family would append its rebuild diagnosis — neither is
++        # what a vanished target under contention may produce.
++        assert sdk.update_point(pid, confidence=0.5) == {}
++        assert proxy.matching >= 2, (
++            "the aborted statement must be RE-ISSUED — otherwise the witness "
++            "was never reachable and this test proves nothing")
++        assert proxy.matched_rows == 0, (
++            "the re-issue matched a row, so it was not the zero-row shape")
++    finally:
++        with contextlib.suppress(Exception):
++            sdk.close()
++
++
++def test_an_absent_id_issues_no_statement_for_the_write(tmp_path):
++    """#10119: an id absent at the guard read is refused BEFORE the write.
++
++    This is where the #8854 witness question used to be tested, and it can no
++    longer be: the door reads the target's existence from the lifecycle guard
++    BEFORE the journal append and BEFORE any write, so an absent id issues NO
++    WRITE statement — ``proxy.matching == 0`` — and there is no first attempt
++    to abort and retry. The witness gate itself is now pinned on the shape that
++    still issues a statement,
++    ``test_a_write_slot_abort_on_a_vanished_target_keeps_the_empty_contract``.
++
++    The proxy injects the graph-replaced abort by default precisely so a
++    regression that re-opens the write for an absent id cannot pass quietly: it
++    would be aborted and retried, and ``matching`` would leave zero.
++    """
++    sdk = _sdk(tmp_path, "absentwrite")
+     try:
+         missing = str(uuid.uuid4())
+         proj = sdk._get_proj()
+-        proxy = _AbortOnceGraph(proj.g, _POINT_PROP_SET_NEEDLE,
+-                               message=_WRITE_SLOT)
++        proxy = _AbortOnceGraph(proj.g, _POINT_PROP_SET_NEEDLE)
+         proj.g = proxy
+ 
+         assert sdk.update_point(missing, confidence=0.5) == {}
+-        assert proxy.matching >= 2, "the aborted statement was never re-issued"
++        assert proxy.matching == 0, (
++            "an ABSENT id issued a write statement (#10119: the guard read "
++            "must precede the append and every write)")
+     finally:
+         with contextlib.suppress(Exception):
+             sdk.close()
+diff --git a/tests/test_validity_windows.py b/tests/test_validity_windows.py
+index 99a9c8a59..bb971b894 100644
+--- a/tests/test_validity_windows.py
++++ b/tests/test_validity_windows.py
+@@ -2389,8 +2389,92 @@ def test_a_missing_id_takes_no_receipt_and_stays_empty(sdk):
+     ``valid_to_shaped`` turned the empty result into a truthy dict:
+     a caller's existence check (``if not sdk.update_point(id, ...)``) silently
+     passed, and the receipt reported a shaping that never reached the record.
++
++    #10119 — THE REPLY IS NOT THE WHOLE CONTRACT. This test used to pin the
++    reply SHAPE only, which is why the door could return ``{}`` while it had
++    already journalled a revision, advanced the graph-wide EP epoch and
++    stranded a dirty root that no sweep could converge (a typo'd id pinning
++    the instance into local dream mode). Each of the three is now measured
++    DIRECTLY here, so the reply cannot be honest and the effects dishonest
++    again.
+     """
++    # A real point first, so the epoch baseline is a real number rather than
++    # the cold-start ``None`` — a delta assertion against ``None`` would pass
++    # for a door that never touched the epoch at all.
++    sdk.create_point("statement", "anchor for the absent-id contract")
++
++    # ⛔ WIRE THE JOURNAL, or the row assertions below are VACUOUS. This
++    # fixture's SDK has no ``event_log_path``, so ``_emit_event`` returns
++    # ``None`` ("no journal configured") and the pre-fix tree would also read
++    # ``[] == []`` — a test that passes with the guard deleted proves nothing.
++    # The handle is lazy (``_event_log is None``), so setting the path is
++    # enough to make ``_emit_event`` journal.
++    #
++    # ⚠️ HONEST LIMIT: this is set AFTER the projection was created, so
++    # ``_proj._bind_journal(...)`` (run once, at projection creation) already
++    # bound ``None`` and the #7951 single-writer guard is NOT armed here — a
++    # different regime from an SDK built with ``event_log_path=`` (the shape
++    # `tests/test_7951_update_point_outbox.py` uses). This test measures what
++    # the DOOR commits to (its own ``_emit_event`` call), which is the surface
++    # the defect lives on; it does not claim to cover the guard.
++    _journal_dir = tempfile.mkdtemp(prefix="tortoise_validity_journal_")
++    _journal_path = os.path.join(_journal_dir, "events.jsonl")
++    sdk._event_log_path = _journal_path
++    sdk._event_log = None
++    try:
++        _assert_absent_takes_no_work(sdk, _journal_path)
++    finally:
++        shutil.rmtree(_journal_dir, ignore_errors=True)
++
++
++def _assert_absent_takes_no_work(sdk, _journal_path):
++    """The body of the #10119 side-effect assertions (own function so the
++    journal tree is reclaimed on FAILURE, not only on success — the #4096
++    hygiene class this file pins for its own fixture)."""
++    import json
++
++    def _ep_version():
++        rows = sdk._get_proj().g.query(
++            "MATCH (m:EpMeta) RETURN m.ep_version").result_set
++        return rows[0][0] if rows else None
++
++    def _journal_rows(pid):
++        if not os.path.exists(_journal_path):
++            return []
++        out = []
++        with open(_journal_path) as fh:
++            for line in fh:
++                line = line.strip()
++                if not line:
++                    continue
++                row = json.loads(line)
++                if row.get("type") == "PointRevised" and row.get("id") == pid:
++                    out.append(row)
++        return out
++
+     missing = "no-such-point-9202"
++
++    def _assert_no_side_effects(pid):
++        """The three effects #10119 measured, each on its own surface."""
++        assert _journal_rows(pid) == [], (
++            f"an absent id journalled a revision it cannot have: "
++            f"{_journal_rows(pid)!r}")
++        assert _ep_version() == _ep_before, (
++            "an absent id advanced the graph-wide EP epoch: "
++            f"{_ep_before!r} -> {_ep_version()!r}")
++        assert pid not in sdk._dirty_roots, (
++            f"an absent id entered the dirty set: {sorted(sdk._dirty_roots)!r}")
++
++    _ep_before = _ep_version()
++
++    # ── the HEADLINE path: NO temporal prop (the issue's own repro) ──────
++    # This call did NOT reach the guard before #10119 (the gate was scoped to
++    # `_TEMPORAL_RESTAMP_PROPS`), so it is the only shape whose side effects
++    # this fix newly closes. Without it, a regression that re-scopes the gate
++    # leaves this test green.
++    assert sdk.update_point(missing, confidence=0.5) == {}
++    _assert_no_side_effects(missing)
++
+     # the non-shaping case pins the pre-existing contract, so a failure below
+     # cannot be blamed on the verb having changed shape generally
+     assert sdk.update_point(missing, validTo="2026-06-10") == {}
+@@ -2399,3 +2483,28 @@ def test_a_missing_id_takes_no_receipt_and_stays_empty(sdk):
+ 
+     assert reply == {}, f"an absent id returned a truthy reply: {reply!r}"
+     assert "valid_to_shaped" not in reply
++
++    # ── the SIDE EFFECTS, each measured directly (#10119) ─────────────
++    _assert_no_side_effects(missing)
++    # and the stranded-root harm itself: a sweep over every REAL id converges.
++    real_ids = [r[0] for r in sdk._get_proj().g.query(
++        "MATCH (n:Point) RETURN n.id").result_set]
++    sdk._sweep_dirty_roots(set(real_ids))
++    assert missing not in sdk._dirty_roots, (
++        "the absent id survived a converged sweep — it pins the instance out "
++        f"of full dream mode: {sorted(sdk._dirty_roots)!r}")
++    assert sdk._auto_dream_mode() == "full"
++
++    # ── the positive control: a REAL revision still journals + advances ──
++    # Without this, every assertion above would also pass for a door that had
++    # simply stopped journalling and stopped advancing the epoch at all.
++    real = sdk.create_point("statement", "a real revision target")["id"]
++    _ep_real_before = _ep_version()
++    sdk.update_point(real, confidence=0.42)
++    assert len(_journal_rows(real)) == 1, (
++        "a real revision did not journal — the absent-id assertions above "
++        "are then not measuring the guard")
++    assert _ep_version() != _ep_real_before, (
++        "a real revision did not advance the EP epoch")
++    assert real in sdk._dirty_roots
++
+diff --git a/tortoise/sdk.py b/tortoise/sdk.py
+index e4cc2d4b5..9c20a9a27 100644
+--- a/tortoise/sdk.py
++++ b/tortoise/sdk.py
+@@ -5261,8 +5261,14 @@ class _WriteNotLanded(Exception):
+     **Scope: the graph-abort family only.** ``retryable_aborted_write`` also
+     admits the write-slot arm (ordinary multi-writer contention) and MISCONF,
+     and NEITHER says anything about whether the target existed — so arming this
+-    sentinel on those would turn a benign ``update_point(<missing id>)`` into a
+-    stale ``ResponseError`` after four attempts. The gate in
++    sentinel on those would turn a benign ``update_point`` on a target that
++    VANISHED between the guard read and the write (or on any door whose write
++    legitimately matches zero rows) into a stale ``ResponseError`` after four
++    attempts. (Pre-#10119 the same sentence named a ``<missing id>``; the
++    NON-STATUS shape is now refused at the guard read before any write, while a
++    STATUS-carrying call still takes the guarded promote write — so the absent
++    shape this latch can still meet is the status-carrying one, plus the target
++    that vanished.) The gate in
+     ``_graph_write_with_retry`` therefore LATCHES the first
+     graph-deleted-or-replaced abort of the call (a later write-slot abort must
+     neither arm it nor disarm it — a rebuild is itself a concurrent writer) and
+@@ -9234,9 +9240,16 @@ class TortoiseSDK:
+         "the caller's target never existed". The write-slot / MISCONF arms are
+         retried without arming it, so their benign zero-row outcomes are
+         unchanged, and a LATER one cannot disarm it. On exhaustion the abandoned
+-        abort is re-raised. A first attempt is never consulted, so verbs that
+-        return a benign empty result (``update_point`` on a missing id) keep
+-        that contract.
++        abort is re-raised. A first attempt is never consulted, so a benign
++        zero-row result keeps that contract. ⛔ #10119 moved the reachable
++        shape of that case for ``update_point``: an id ABSENT at its guard read
++        is refused before any WRITE statement (that read still issues its
++        own), so the observed shape is a target
++        PRESENT at that read that vanishes before the write — an absent-at-entry
++        id is no longer an example of a benign zero row here, and a write-slot
++        abort on the vanished target must stay armed-free so the empty contract
++        survives (``test_a_write_slot_abort_on_a_vanished_target_keeps_the_``
++        ``empty_contract``, #8854 review round 10).
+ 
+         A witness for a multi-statement ``fn`` whose own return value is not a
+         landing proof (the tag arm: ``_sync() -> None``), or a witness that
+@@ -9359,9 +9372,10 @@ class TortoiseSDK:
+                 #
+                 # The latch is load-bearing in BOTH directions: the
+                 # write-slot and MISCONF arms are retried too and say nothing
+-                # about node existence, so they must not ARM the witness
+-                # (`update_point(<missing id>)` keeps returning `{}`), and a
+-                # later one must not DISARM it either.
++                # about node existence, so they must not ARM the witness (a
++                # target that VANISHED between the guard read and the write
++                # keeps returning `{}`), and a later one must not DISARM it
++                # either.
+                 raise _WriteNotLanded(armed_abort)
+             return result
+ 
+@@ -16097,16 +16111,28 @@ class TortoiseSDK:
+         # shared guard for their lifecycle writes; this verb did not, and it
+         # writes the same window the temporal read surfaces answer from.
+         #
+-        # THE GATE IS SCOPED to `_TEMPORAL_RESTAMP_PROPS` (see that constant for
+-        # why a blanket refusal is wrong here: #3305's post-terminalization
+-        # revisions are a recorded capability). A call with no temporal prop in
+-        # it does not reach this guard at all, so:
+-        #   * a status-carrying call keeps the promote path unchanged —
+-        #     `update_point(terminal, status='live')` still raises the #432
+-        #     "Illegal status transition", and an already-LIVE node is still the
+-        #     #1088 idempotent no-op;
+-        #   * `missing_ok=True` keeps the absent-id contract: this verb returns
+-        #     `{}` for a missing id (measured on both trees);
++        # THE TERMINAL GATE IS SCOPED to `_TEMPORAL_RESTAMP_PROPS` (see that
++        # constant for why a blanket refusal is wrong here: #3305's
++        # post-terminalization revisions are a recorded capability). The GATE
++        # ITSELF now runs on every call that reaches the write path — the #1088
++        # status-only-on-live no-op returns above it, taking no work — and what
++        # is scoped is its terminal RAISE, passed as `refuse_terminal`, so:
++        #   * a call carrying a temporal prop is refused on a terminal node
++        #     exactly as before — including a STATUS-carrying one, which keeps
++        #     #7819 whole: `update_point(terminal, status='live', validTo=…)`
++        #     still raises `already terminal`, it does NOT reach the #432
++        #     promote message (that message is for the status-only shape);
++        #   * a call with NO temporal prop asks the terminality question but is
++        #     not refused on it, so `update_point(terminal, status='live')`
++        #     still raises the #432 "Illegal status transition", and an
++        #     already-LIVE node is still the #1088 idempotent no-op;
++        #   * `missing_ok=True` makes the ABSENT verdict a `None` rather than a
++        #     raise, and the caller turns that into the documented `{}` reply
++        #     with NO side effects (#10119). A status-carrying call is the one
++        #     absent shape that keeps its pre-existing behaviour — it falls
++        #     through to the guarded promote write and raises `No point <id>`
++        #     (no side effects either way; the asymmetry is the promote
++        #     contract's, #432);
+         #   * `allow_operator=True` keeps operator points writable: this verb is
+         #     what `annotate_operator` delegates to, and a caller may pass a
+         #     window for an operator. A TERMINAL operator is still refused, pinned
+@@ -16123,9 +16149,65 @@ class TortoiseSDK:
+         # can still be given `status='live'` (the flag keeps it terminal for
+         # readers, and the status then contradicts it). That predates this
+         # change; the promote contract and its message are #432's.
+-        if _TEMPORAL_RESTAMP_PROPS & set(props):
+-            self._assert_lifecycle_guard(id, method="update", missing_ok=True,
+-                                         allow_operator=True)
++        # ── #10119: the ABSENT arm takes no receipt, and now no WORK ──────────
++        # Measured on the pre-fix tree: `update_point("no-such-point-9202",
++        # confidence=0.5)` returned `{}` — the documented absent-id contract —
++        # and yet appended a `PointRevised` journal row, advanced
++        # `:EpMeta.ep_version` (0 -> 1 from cold), and put the ABSENT id into
++        # `_dirty_roots`, where it SURVIVED `_sweep_dirty_roots(all real ids)`
++        # and held `_auto_dream_mode()` at `'local'` for the life of the
++        # instance — a typo'd id pinning the instance out of its dream cycle
++        # (#2422 / #7505 / #9269). The reply was honest; the side effects were
++        # not.
++        #
++        # THE GATE IS THE EXISTING INSTRUMENT, NOT A SECOND ONE. #8854 round 9
++        # closed this exact shape on the PROMOTE no-op arm by returning before
++        # `_mark_dirty`; the ABSENT arm had no such exit even though this door
++        # already performed existence reads it could gate on. The predicate
++        # lives in `_assert_lifecycle_guard` (the #2498/#7819 instrument: one
++        # statement, one classifier, over the whole fan-out — #7822), so this
++        # door now consults it on every call that reaches the write path (the
++        # #1088 status-only-on-live no-op returns above it) instead of only when
++        # a temporal prop is present. It must run HERE — after the refusals above (so a
++        # refused call is reported as itself, not as absent) and BEFORE the
++        # journal append and every write (the append is the commit point,
++        # #7951 §17.1; an append for a node that is not there is a record of a
++        # revision that cannot exist).
++        #
++        # `refuse_terminal` is FALSE unless the call carries a temporal prop:
++        # #7819 scoped THIS door's terminal refusal deliberately (a generic
++        # re-assertion of a dead claim is the recorded capability pinned by
++        # `tests/test_lifecycle_guards.py::
++        # test_create_point_dedup_without_a_window_still_folds`).
++        #
++        # ⛔ THE STATUS-CARRYING CALL IS *NOT* SKIPPED. A first cut of this fix
++        # read `if 'status' not in props:` around the whole guard and thereby
++        # DELETED an existing refusal (#7819 review): measured on a flag-dead
++        # point (`status=null, outdated=true`), `update_point(p,
++        # status='live', validTo=…)` LANDED — status flipped to `live` and the
++        # window stored — where the pre-fix tree raised `already terminal
++        # (outdated)`. Only the ABSENT early return is status-gated (the
++        # promote arm owns the absent shape, raising `No point <id>`).
++        # ⚠️ THE TRADE THIS MAKES, STATED (#7405). During a rebuild the engine
++        # aborts writes while the target is legitimately absent from the LIVE
++        # graph but present in the journal. Pre-fix the non-promote arm appended
++        # `PointRevised` first (the §17.1 commit point), so such a revision was
++        # durable and a replay could pick it up, and the write rode the 7-14 s
++        # `_graph_write_with_retry` window. Post-fix, a target absent at THIS
++        # read gets no retry and no record: the typo and the mid-rebuild
++        # absence are the SAME read, and the typo harm (a stranded dirty root,
++        # #10119) is the one that persists, so this is the intended trade — but
++        # the #7405 window no longer covers that shape. Do not "restore"
++        # journal-first for absent ids to get the window back.
++        _temporal_restamp = bool(_TEMPORAL_RESTAMP_PROPS & set(props))
++        _verdict = self._assert_lifecycle_guard(
++            id, method="update", missing_ok=True, allow_operator=True,
++            refuse_terminal=_temporal_restamp)
++        if _verdict is None and 'status' not in props:
++            # ABSENT. Zero side effects, and the same `{}` the documented
++            # contract already returns — no journal row, no epoch advance,
++            # no dirty root, so a typo cannot strand the instance.
++            return {}
+ 
+         # Check if node carries :Object label (entity node with version tracking)
+         has_object = proj.g.query(
+@@ -17130,7 +17212,8 @@ class TortoiseSDK:
+     def _assert_lifecycle_guard(self, point_id: str, *, method: str,
+                                 role: str = "point",
+                                 missing_ok: bool = False,
+-                                allow_operator: bool = False) -> dict | None:
++                                allow_operator: bool = False,
++                                refuse_terminal: bool = True) -> dict | None:
+         """Single authoritative terminal/operator guard for point lifecycle
+         transitions (#2498).
+ 
+@@ -17172,6 +17255,19 @@ class TortoiseSDK:
+         the shared ``live.classify_lifecycle_fanout`` (the hosted commit
+         pre-check runs the same statement and the same classifier, so the two
+         cannot disagree).
++
++        ``refuse_terminal`` (#10119) lets a door that has its OWN narrower
++        terminal policy ASK the terminality question without pre-empting it.
++        ``update_point`` is the one such door: #7819 scoped its terminal
++        refusal to `_TEMPORAL_RESTAMP_PROPS` because a generic re-assertion of
++        a dead claim is a recorded capability (see the scope note at the call
++        site), so on that door a terminal verdict must be RETURNED, not raised
++        — while the ABSENT verdict is the same for every caller and must be
++        answered here, once, from the same read (#7822: one statement, one
++        classifier). Passing ``False`` suppresses the terminal RAISE only; the
++        caller is then responsible for its own terminal policy —
++        ``update_point`` permits a generic revision and leaves the
++        status-carrying shape to the promote arm's own guarded write.
+         """
+         rows = self._get_proj().g.query(
+             LIFECYCLE_FANOUT_QUERY, params={"id": point_id},
+@@ -17191,7 +17287,7 @@ class TortoiseSDK:
+         # once — the operator branch of the classifier outranks terminal, so
+         # its `status`/`outdated` are not the terminality answer.
+         marker = self._lifecycle_terminal_marker(point_id, rows)
+-        if marker is not None:
++        if marker is not None and refuse_terminal:
+             # Neither verb of the two families (#7819): ``update_point``
+             # re-stamps a prop/window without terminalizing, while
+             # ``retract_point`` / ``supersede_point`` / ``invalidate_point``
