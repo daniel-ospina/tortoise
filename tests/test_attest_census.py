@@ -21,6 +21,7 @@ import ast
 import importlib.util
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -1345,3 +1346,29 @@ def test_a_record_containing_the_digest_placeholder_still_verifies():
 
     assert hostile in text, "the record's own text must survive verbatim"
     assert ac.verify_census_document(text) == "", "a record containing the token must still verify"
+
+
+def test_a_repo_containing_the_digest_placeholder_still_verifies():
+    """The OTHER field that can carry the token, and the one that sits ahead of the digest.
+
+    MEASURED (#10687 review cycle 16): the header line emits `repo` FIRST and the digest slot last
+    on the same line, so `body.replace(token, digest, 1)` filled the repo field and left the
+    header's slot literal — `--repo '__CENSUS_CONTENT_SHA256__'` exited 0 and wrote a census that
+    refuses itself ("no `content sha256` in the header"). The substitution is now by INDEX, so the
+    invariant holds for every value of an argv field rather than for every value except one.
+
+    Mutation proof: restore `body.replace(_DIGEST_PLACEHOLDER, digest, 1)` in `render` and this
+    test fails on the verifier reason below.
+    """
+    ac = _load()
+    text = ac.render([], ac._DIGEST_PLACEHOLDER, "2026-11-04T00:00:00Z")
+
+    header = text.splitlines()[2]
+    assert re.search(r"content sha256 `[0-9a-f]{64}`\.$", header), (
+        f"the header must carry the real digest, not the token: {header!r}"
+    )
+    assert ac.verify_census_document(text) == "", "and it must verify, not refuse itself"
+    # The other half of the same line: a repo whose text LOOKS like a digest must not be the span
+    # the verifier reads (the pattern is end-of-line anchored for exactly this).
+    lookalike = "r`content sha256 `" + "0" * 64 + "`."
+    assert ac.verify_census_document(ac.render([], lookalike, "2026-11-04T00:00:00Z")) == ""

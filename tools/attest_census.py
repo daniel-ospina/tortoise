@@ -480,7 +480,12 @@ def _cell(value: object) -> str:
 # Infrastructure" — a guarantee that reads as a guard but cannot fail is the class the #10687
 # cycle-5/cycle-6 findings were about.
 _DIGEST_PLACEHOLDER = "__CENSUS_CONTENT_SHA256__"
-_DIGEST_RE = re.compile(r"content sha256 `([0-9a-f]{64})`")
+# The header's digest is the LAST thing on its line (`… content sha256 `<hex>`.`), and the anchor
+# is the END of that line on purpose: `repo` is emitted on the same line AHEAD of it, so a plain
+# first-match search can be satisfied by a repo whose text contains a digest-shaped span. Measured
+# (#10687 review cycle 16) with `--repo` carrying the placeholder token; the `$` anchor is what
+# makes the header's own slot the one that is read, not whichever one appears first.
+_DIGEST_RE = re.compile(r"content sha256 `([0-9a-f]{64})`\.\s*$", re.MULTILINE)
 
 
 def _content_digest(text: str) -> str:
@@ -527,9 +532,20 @@ def render(rows: list[Row], repo: str, generated_at: str, truncated: bool = Fals
             "> is not a statement about them. Re-run with a larger `--limit`.",
             "",
         ]
-    lines += [
+    # ⛔ The header is built as a SEPARATE string and spliced in by INDEX below, never found by
+    # searching for the placeholder. `repo` is emitted on this same line AHEAD of the digest, so a
+    # first-match `replace(..., 1)` puts the digest into the repo FIELD and leaves the header's
+    # slot literal — measured (#10687 review cycle 16): `--repo '__CENSUS_CONTENT_SHA256__'` exited
+    # 0 and wrote a census that `verify_census_document` refuses ("no `content sha256` in the
+    # header"), i.e. the invariant stated right below held for every repo except one.
+    header_prefix = (
         f"Repo `{repo}` · generated {generated_at} by `tools/attest_census.py` ·"
-        f" content sha256 `{_DIGEST_PLACEHOLDER}`.",
+        " content sha256 `"
+    )
+    header_suffix = "`."
+    header_index = len(lines)
+    lines.append(header_prefix + _DIGEST_PLACEHOLDER + header_suffix)
+    lines += [
         "",
         "> ⚠️ **SNAPSHOT, NOT A LIVE VERDICT.** This file is machine-generated from *one box's*",
         "> registry at the timestamp above, and every push, review and gate re-run invalidates it.",
@@ -641,10 +657,14 @@ def render(rows: list[Row], repo: str, generated_at: str, truncated: bool = Fals
         "",
     ]
     body = "\n".join(lines)
-    # ⛔ ONE substitution, and it must be the header's: a record whose own text contains the
-    # placeholder has to survive VERBATIM, or `verify_census_document` (which restores the same
-    # single span) could never re-derive this digest.
-    return body.replace(_DIGEST_PLACEHOLDER, _content_digest(body), 1)
+    # ⛔ The substitution is by INDEX, not by search. A record whose own text contains the token must
+    # survive VERBATIM, or `verify_census_document` (which restores the same single span) could never
+    # re-derive this digest — and `repo` is the second untrusted field that can contain it, one that
+    # sits ahead of the digest on the very same line. Writing to `header_index` makes both true by
+    # construction: nothing is searched, so nothing else can be hit.
+    digest = _content_digest(body)
+    lines[header_index] = header_prefix + digest + header_suffix
+    return "\n".join(lines)
 
 
 def main(argv: list[str] | None = None) -> int:
