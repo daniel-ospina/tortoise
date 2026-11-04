@@ -209,6 +209,7 @@ __all__ = [
     "CONNECT_TIMEOUT_SECONDS",
     "LIVE_WRITE_BREAKER_SECONDS",
     "LIVE_WRITE_REFUSALS",
+    "NON_DURABLE_JOURNAL_REFUSAL",
     "POSITION_ORDINAL_SOURCE",
     "POSITION_UNPROVEN_WARN_SECONDS",
     "RECORD_DSN_ENV",
@@ -1130,6 +1131,19 @@ def _close_live_breaker() -> None:
     _breaker_open_until = 0.0
 
 
+#: The ONE refusal token that means *the journal which took the write is a
+#: scratch buffer, not a journal* — so replay cannot heal the record from it.
+#: Named once (#10389 review P3) because TWO parties branch on it: the seam that
+#: returns it (:func:`_live_write_verdict`) and a REPORTER deciding whether a
+#: ``True`` from the emit actually means "a durable journal holds this". A
+#: hardcoded copy in the reporter had to drift from this vocabulary silently —
+#: and the direction it would drift is the one that matters: a renamed token
+#: would route a non-durable journal into the *durable* branch, turning the
+#: "stored NOWHERE" ERROR into a WARNING. The tuple below is built from this
+#: name, so a rename lands on every consumer at once.
+NON_DURABLE_JOURNAL_REFUSAL = "no_durable_journal"
+
+
 def _count_write_failure(reason: str) -> None:
     """Count one lost record write. **Never raises** (#5148's rule, one frame on).
 
@@ -1144,7 +1158,7 @@ def _count_write_failure(reason: str) -> None:
         monitoring.record_record_write_failure(reason)
 
 
-def _count_non_journal_skip(reason: str = "no_durable_journal") -> None:
+def _count_non_journal_skip(reason: str = NON_DURABLE_JOURNAL_REFUSAL) -> None:
     """Count one DECLINED non-journal write. **Never raises** (#5148's rule).
 
     A sibling of :func:`_count_write_failure` with the same swallow and a
@@ -1201,7 +1215,7 @@ def _note_unproven_position(record: Mapping[str, Any]) -> None:
 #: carried pair was malformed from one who carried none — both are counted on
 #: the same `no_tenant` counter, so the metric did not gain a term.
 LIVE_WRITE_REFUSALS: tuple[str, ...] = (
-    "unarmed", "malformed_dsn", "no_durable_journal", "no_tenant",
+    "unarmed", "malformed_dsn", NON_DURABLE_JOURNAL_REFUSAL, "no_tenant",
     "no_tenant_carried", "circuit_open",
 )
 
@@ -1256,7 +1270,7 @@ def _live_write_verdict(
     if not armed:
         return "unarmed", None, None
     if not durable:
-        return "no_durable_journal", None, None
+        return NON_DURABLE_JOURNAL_REFUSAL, None, None
     # ``record_tenant_effective`` IS the #10067 resolution and this is the call
     # that keeps it load-bearing: **carried > scope > env pair**, in ONE place.
     # Spelling it as `tenant if tenant is not None else record_tenant()` here (what
@@ -1375,12 +1389,12 @@ def _report_live_write_refusal(reason: str, record_type: Any,
         _count_write_failure("malformed_dsn")
         _logger.warning("the record write did not happen (malformed_dsn): %s", detail)
         return
-    if reason == "no_durable_journal":
+    if reason == NON_DURABLE_JOURNAL_REFUSAL:
         # A DECLINE, not a loss: this lane has no journal by design, so no row is
         # missing that a replay could restore (#9231 review P2). Counted on the
         # skip counter and logged at DEBUG — a warning per extracted record on
         # the healthy M2 capture path is the same noise the counter was.
-        _count_non_journal_skip("no_durable_journal")
+        _count_non_journal_skip(NON_DURABLE_JOURNAL_REFUSAL)
         _logger.debug(
             "the record write was declined (no_durable_journal) — the record "
             "is armed but this log is a scratch buffer, not a journal, so no "
