@@ -1165,6 +1165,16 @@ def test_congests_pr_is_three_valued_so_a_cancel_cannot_consume_silence():
     assert cut.congests_pr is None, (
         "a capped feed is not a measured-clear queue, even when its verdict is OK")
 
+    # ⭐ P2 #10641 review — the OTHER half, which the prose used to contradict. A
+    # truncated feed does not abstain on a CONGESTION verdict: `delays_pr` returns
+    # `True` before `truncated` is consulted, because a witnessed flood is a positive
+    # claim about runs that WERE read. The docstring said "ANY verdict carried by a
+    # truncated feed" was `None`; only a truncated `OK` is.
+    cut_flood = classify(flood_queued(12) + starving_pr_runs(9), truncated=True)
+    assert cut_flood.verdict == Q.FLOOD and cut_flood.congests_pr is True, (
+        "truncation cannot downgrade a WITNESSED congestion to 'not measured' — the "
+        "gate must still refuse it, and as a measured refusal")
+
 
 def test_an_ok_with_nothing_queued_cannot_certify_the_queue_clear():
     """⭐⭐ P1 (review): `OK(pr_queued=0)` is the clause that says it is NOT health.

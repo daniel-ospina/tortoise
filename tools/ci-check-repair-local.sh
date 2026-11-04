@@ -261,11 +261,12 @@ needing_repair_count() {
 }
 
 # ⛔ THE ZERO-JOB REFUSAL, READ WHERE THE COVERAGE SIGNAL IS DECIDED. A pass that
-# refuses the congested destruct act reports `needing_repair=0` (neither `no_verdict`
-# nor `repair_refused` is a repair this pass will attempt), and this rail used to read
-# only that key — so `needing_repair=0, repair_refused=3` produced the SAME signature
-# as a clean window, no transition fired, and nobody was notified. The count is
-# emitted by the tool for exactly this reader (tools/ci_check_repair.py summary keys).
+# refuses the congested destruct act reports `needing_repair=0` (neither
+# `zero_job_named` nor `repair_refused` is a repair this pass will attempt), and this
+# rail used to read only that key — so `needing_repair=0, repair_refused=3` produced
+# the SAME signature as a clean window, no transition fired, and nobody was notified.
+# The count is emitted by the tool for exactly this reader (tools/ci_check_repair.py
+# summary keys).
 refused_repair_count() {
     summary_count 'repair_refused'
 }

@@ -558,9 +558,17 @@ class QueueHealth:
         * ``False`` — a MEASURED, UNCUT reading found none: `OK` off an untruncated
           feed WHERE THE WAIT ITSELF WAS READ (`pr_wait_measured`). That is the only
           `False`: a positive witness that the number the budget applies to exists.
-        * ``None``  — NOT MEASURED: `UNKNOWN`, `PR-UNWITNESSED`, ANY verdict carried
-          by a truncated feed, **and an `OK` whose `pr_queued == 0`**. A gate must
-          refuse rather than consume that silence.
+        * ``None``  — NOT MEASURED: `UNKNOWN`, `PR-UNWITNESSED`, **a truncated `OK`**,
+          **and an `OK` whose `pr_queued == 0`**. A gate must refuse rather than
+          consume that silence.
+
+        ⛔ A TRUNCATED CONGESTION VERDICT IS ``True``, NOT ``None``, and this docstring
+        used to claim "ANY verdict carried by a truncated feed" abstained (#10641 review
+        P2). It cannot: the `delays_pr` return above fires FIRST, so `FLOOD` /
+        `PR-STARVED` / `PR-BACKLOGGED` off a cut feed is a WITNESSED congestion and
+        reaches the `True` arm. Only a truncated `OK` abstains, because only there is
+        the dropped OLDEST run the whole difference between "clear" and "not
+        measured".
 
         ⛔ "NOTHING IS QUEUED" IS NOT "MEASURED CLEAR" HERE. `OK` with `pr_queued=0`
         is emitted by the clause whose own reason line says that state is *not*

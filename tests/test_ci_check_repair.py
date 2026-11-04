@@ -2021,21 +2021,29 @@ def test_an_unmeasured_queue_never_authorises_the_cancel(monkeypatch, capsys, tm
         "silence is not permission: no cancel may be authorised by a queue nobody "
         "read")
     # ⭐ P2 (review): the refusal must be VISIBLE in the aggregate, not only inside a
-    # per-PR record. `needing_repair` counts neither `no_verdict` nor a suppressed
+    # per-PR record. `needing_repair` counts neither `zero_job_named` nor a suppressed
     # repair, so on this fixture it is 0 — and 0 is what the local rail quotes as a
     # clean, covered window.
     assert summary["needing_repair"] == 0, "the fixture must be the understating shape"
-    assert summary["no_verdict"] == 1, (
-        "a plan carrying a named-but-unrepairable zero-job context must be counted")
+    assert summary["zero_job_named"] == 1, (
+        "a plan carrying a NAMED zero-job context must be counted — the key counts "
+        "what was named, not what is stranded (#10641 review P2: it was called "
+        "`no_verdict` and documented as 'named-but-unrepairable', which a later "
+        "successful repair in the same pass makes false)")
     assert summary["repair_refused"] == 1, (
         "the run the congestion gate suppressed must be counted beside "
         "needing_repair, or `needing_repair=0` reads as a clean window")
     assert [d["run"] for d in summary["prs"][0]["repair_refused"]] == [41480218593], (
         "the record names the run that was identified and NOT acted on")
     assert [d["reason"] for d in summary["prs"][0]["repair_refused"]] == [
-        "queue_congested=True"], (
-        "...and the gate that refused it; whether that `True` came from a reading "
-        "or from silence is the summary pair beside it, which is asserted above")
+        "queue_congested=True (UNMEASURED — the gate refuses silence, nothing was "
+        "read)"], (
+        "...and the gate that refused it, WITH the witness for that `True`: this "
+        "fixture's queue was never read, so a bare `queue_congested=True` here would "
+        "state as a measured fact what the summary reports as unmeasured (#10641 "
+        "review P2)")
+    assert [d["measured"] for d in summary["prs"][0]["repair_refused"]] == [False], (
+        "the structured witness, not only the rendered reason")
 
 
 def test_the_local_rail_reads_the_refused_count_into_its_signature(tmp_path):
@@ -2117,6 +2125,13 @@ def test_a_MEASURED_congested_refusal_does_not_escalate(monkeypatch, capsys, tmp
     assert summary["queue_congestion_measured"] is True
     assert summary["repair_refused"] == 1
     assert summary["prs"][0]["rerun"] == [], "the cancel is still suppressed"
+    assert [d["measured"] for d in summary["prs"][0]["repair_refused"]] == [True], (
+        "the witness for the OTHER pole: this refusal came from a congestion that "
+        "was actually READ (#10641 review P2)")
+    assert [d["reason"] for d in summary["prs"][0]["repair_refused"]] == [
+        "queue_congested=True (measured)"], (
+        "...and the per-run record says so, so the granular record and the summary "
+        "cannot describe different readings")
     assert "REFUSED-REPAIR" in captured.err, "...and it is still NAMED"
 
 
@@ -2155,6 +2170,16 @@ def test_a_measured_clear_queue_still_authorises_the_cancel(monkeypatch, capsys,
     assert summary["queue_congested"] is False
     assert summary["queue_congestion_measured"] is True
     assert [r["run"] for r in summary["prs"][0]["rerun"]] == [41480218593]
+    # ⭐ P2 #10641 review: THIS is why the summary key is `zero_job_named` and not
+    # `no_verdict`-as-in-strandned. The run below was NAMED and then REPAIRED in the
+    # same pass, so it is counted by the name key while `repair_refused` is 0 — under
+    # the old name+comment pair this read as "one stranded, none refused".
+    assert summary["zero_job_named"] == 1, (
+        "it was named as 'no verdict will arrive' and then repaired — the count "
+        "describes the NAMING, not the outcome")
+    assert summary["repair_refused"] == 0, (
+        "nothing was refused: `zero_job_named=1, repair_refused=0` means 'named and "
+        "repaired', which the old key could not say")
 
 
 def test_the_gate_refuses_every_unmeasured_queue_reading():
@@ -2654,12 +2679,19 @@ def test_a_refused_cancel_does_not_spend_the_rerun(monkeypatch):
     monkeypatch.setattr(R, "_sleep",
                         lambda s: pytest.fail("a refused cancel has no settle loop to sleep in"))
     verbs: list[str] = []
+    # ⛔ A NEUTRAL stderr, deliberately: this test is named for the plain transient
+    # refusal, and `deferred` is its state. The permission case has its own test
+    # (`test_a_PERMISSION_denied_cancel_is_TERMINAL_and_never_a_deferral`) with the
+    # GitHub 403 wording, and a rate-limited 403 has a third — with a permission
+    # string here this test asserted `denied` too and pinned nothing of its own
+    # (#10641 review P2).
     monkeypatch.setattr(R, "_run", _verbs(verbs, cancel_rc=1,
-                                           cancel_stderr="Resource not accessible by integration"))
+                                           cancel_stderr="gh: Server Error (HTTP 502)"))
     assert R._rerun("o/r", run(1, "ci.yml", "pending"), 1,
-                    expected_head="a" * 40) == "denied", (
-        "a readable permission refusal is a repair this credential cannot perform — "
-        "not a skip")
+                    expected_head="a" * 40) == "deferred", (
+        "an unclassifiable refusal MAY be a blip: it stays a skip, not a terminal "
+        "credential failure — escalating every blip is the over-reporting `deferred` "
+        "was introduced to stop")
     assert verbs == ["cancel"], "no rerun may be issued after a refused cancel"
 
 
