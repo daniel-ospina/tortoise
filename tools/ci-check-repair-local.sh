@@ -271,6 +271,45 @@ refused_repair_count() {
     summary_count 'repair_refused'
 }
 
+# ── THE EXIT-1 CAUSE, ONE SENTENCE PER POLE (#10641 review P2) ────────────
+# ⛔ EXIT 1 HAS TWO INDEPENDENT CAUSES, and `repair_refused` is non-zero on BOTH
+# queue poles — so the refusal count alone cannot say which one an operator is
+# looking at. `tools/ci_check_repair.py` returns 1 for
+#   (a) a repair only a user credential can perform (`report()`: a `denied`/
+#       `failed` cancel, a spent trigger budget, `exhausted and apply`), and
+#   (b) a zero-job cancel REFUSED because the queue reading was NOT MEASURED
+#       (`main()`: `args.apply and code == 0 and congestion is None
+#       and any(p.repair_refused ...)`).
+# A refusal against a queue that WAS read and is congested is the third shape: it
+# is NOT an exit-1 cause by itself (the tool deliberately keeps exit 0 there —
+# the suppression is self-clearing), but it co-occurs with (a) on an ordinary
+# window (`exhausted and apply`, `missing_run and trigger_ok` each raise rc=1
+# independently of the refusal count). The discriminator is the machine-readable
+# `queue_congestion_measured` the tool already emits for this reader — never the
+# prose of one counter (clig.dev / structured-output practice: a caller
+# distinguishes causes with stable tokens, not by inferring them from a count).
+# Split out of the `notify` call so the test suite EXECUTES it once per pole
+# instead of grepping this file.
+exit_one_cause() { # $1 = needing_repair, $2 = repair_refused, $3 = measured
+    local needing="$1" refused="$2" measured="$3" cause
+    if [ "$refused" != "0" ] && [ "$measured" = "True" ]; then
+        cause="The ${refused} refused zero-job repair(s) met a queue that WAS read and is congested — that suppression is the correct, self-clearing outcome: the repair fires on the first pass that finds the queue drained, so no credential and no manual unjam is involved."
+    elif [ "$refused" != "0" ]; then
+        cause="A zero-job cancel was REFUSED because the queue reading did not certify it clear — read the queue (uv run python tools/ci_queue_health.py) rather than blaming the credential; an unreadable refused count or queue reading (?) is itself one of these causes."
+    else
+        cause="Some PR needs a repair even the local credential could not complete."
+    fi
+    # ⛔ THE CREDENTIAL CAUSE IS NOT DISCLAIMED when both counts are non-zero.
+    # `repair_refused` and a `denied` cancel are independent: a pass can refuse
+    # zero-job runs AND contain a permanent permission refusal, and this rail used
+    # to rule the credential out of a window that needed it fixed. A `denied` /
+    # `failed` cancel is a `rerun[]` entry, so it lands in `needing_repair`.
+    if [ "$refused" != "0" ] && [ "$needing" != "0" ]; then
+        cause="${cause} AND ${needing} PR(s) still need a repair this pass did not complete — exit 1 also covers a repair only a user credential can perform."
+    fi
+    printf '%s' "$cause"
+}
+
 # ── main ───────────────────────────────────────────────────────────────────
 if [ "$STATUS_ONLY" = 1 ]; then
     echo "state file : $STATE_FILE"
@@ -337,6 +376,10 @@ rc=$?
 mode_word="apply"; [ "$DRY" = 1 ] && mode_word="report-only"
 needing="$(needing_repair_count)"
 refused="$(refused_repair_count)"
+# The WITNESS for which queue pole a refusal came from (`True` measured /
+# `False` unmeasured / `?` unreadable). The refusal count is identical on both
+# poles, so the notification below cannot name a cause without it.
+measured="$(summary_count 'queue_congestion_measured')"
 last="$(cat "$STATE_FILE" 2>/dev/null || echo '')"
 # The signature carries the needing_repair COUNT as well as the exit code: a
 # repair that completes successfully (exit 0) but leaves the same PRs needing
@@ -352,17 +395,12 @@ if [ "$signature" != "$last" ]; then
         notify "ci-check-repair ran LOCALLY in ${mode_word} mode (${reason}). PRs needing repair: ${needing}. Refused zero-job repairs: ${refused}. The local fallback ran the same tools/ci_check_repair.py the workflow runs, exit 0."
     elif [ "$rc" = 1 ]; then
         # ⛔ EXIT 1 HAS TWO CAUSES and this message used to name only the first.
-        # `tools/ci_check_repair.py` returns 1 for a repair only a user credential can
-        # perform, AND for a zero-job cancel REFUSED because the queue reading did not
-        # certify it clear (`main()`: `args.apply and code == 0 and congestion is None
-        # and any(p.repair_refused ...)`). An operator reading "even the local
-        # credential could not complete" chases the credential while the actual cause is
-        # a queue nobody read — whose remedy is to read the queue.
-        if [ "$refused" != "0" ]; then
-            notify "ci-check-repair RAN LOCALLY and is STILL UNRESOLVED in ${mode_word} mode (${reason}). PRs needing repair: ${needing}. Refused zero-job repairs: ${refused}. A zero-job cancel was REFUSED because the queue reading did not certify it clear — read the queue (uv run python tools/ci_queue_health.py) rather than blaming the credential; an unreadable refused count (?) is itself one of these causes. See $OUT_FILE."
-        else
-            notify "ci-check-repair RAN LOCALLY and is STILL UNRESOLVED in ${mode_word} mode (${reason}). PRs needing repair: ${needing}. Refused zero-job repairs: ${refused}. Some PR needs a repair even the local credential could not complete; see $OUT_FILE."
-        fi
+        # See `exit_one_cause()` above for the full map: a credential-only repair,
+        # and a zero-job cancel refused under an UNMEASURED queue. The sentence is
+        # composed there from the record's own `queue_congestion_measured`, so the
+        # MEASURED pole no longer sends the operator to read a queue that was read
+        # and found congested, nor disclaims a credential the same pass may need.
+        notify "ci-check-repair RAN LOCALLY and is STILL UNRESOLVED in ${mode_word} mode (${reason}). PRs needing repair: ${needing}. Refused zero-job repairs: ${refused}. $(exit_one_cause "$needing" "$refused" "$measured") See $OUT_FILE."
     else
         notify "ci-check-repair COULD NOT MEASURE locally (${reason}), exit=$rc. No further action was taken; any repair already issued is not undone. See $LOG_FILE."
     fi
@@ -370,7 +408,7 @@ if [ "$signature" != "$last" ]; then
 else
     log "no transition (signature unchanged: $signature)"
 fi
-printf 'exit=%s mode=%s reason=%s needing_repair=%s refused_repair=%s\n' \
-    "$rc" "$mode_word" "$reason" "$needing" "$refused" \
+printf 'exit=%s mode=%s reason=%s needing_repair=%s refused_repair=%s queue_congestion_measured=%s\n' \
+    "$rc" "$mode_word" "$reason" "$needing" "$refused" "$measured" \
     >> "$LOG_FILE"
 exit "$rc"

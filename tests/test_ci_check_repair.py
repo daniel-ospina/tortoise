@@ -2182,6 +2182,70 @@ def test_the_local_rail_reads_the_refused_count_into_its_signature(tmp_path):
     assert ran.stdout.strip() == "?", "an unreadable report must never print as 0"
 
 
+def test_the_exit_one_notification_names_the_pole_the_reading_measured(tmp_path):
+    """P2 (review): `repair_refused` is non-zero on BOTH queue poles.
+
+    `main()` returns 1 only for the UNMEASURED pole (plus the credential-only
+    repairs), but the rail branched on `[ "$refused" != "0" ]` **alone**:
+
+    * a window whose queue WAS read and found congested was told the reading
+      "did not certify it clear" and sent to `ci_queue_health.py` for an answer it
+      had already given ("I read it: congested, and this clears itself"), and
+    * the same message said "rather than blaming the credential" — while a
+      `denied` cancel is a `rerun[]` entry, so it lands in `needing_repair` and
+      escalates independently. A window can refuse zero-job runs AND need a
+      credential, and this sentence ruled the credential out of it.
+
+    Executed, one case per pole: the sentence is composed by the rail's own
+    `exit_one_cause`, so a shell quoting bug reddens this too. Pre-fix the
+    extractor finds no such function — both poles share one message.
+    """
+    launcher = (Path(__file__).resolve().parents[1]
+                / "tools/ci-check-repair-local.sh").read_text()
+    # …and the witness is READ from the artifact, never assumed from a count.
+    assert "summary_count 'queue_congestion_measured'" in launcher, (
+        "the rail must read the tool's own measured/unmeasured witness")
+    fn = re.search(r"^exit_one_cause\(\) \{.*?^\}$", launcher, re.S | re.M)
+    assert fn, (
+        "the exit-1 cause must be a function the suite can EXECUTE, one case per pole")
+
+    def cause(needing, refused, measured):
+        ran = subprocess.run(
+            ["bash", "-c",
+             f"{fn.group(0)}\nexit_one_cause '{needing}' '{refused}' '{measured}'\n"],
+            capture_output=True, text=True)
+        assert ran.returncode == 0, ran.stderr
+        return ran.stdout
+
+    # THE MEASURED POLE — the queue was read; the suppression self-clears and no
+    # credential or manual unjam is involved.
+    measured_true = cause(0, 3, "True")
+    assert "WAS read and is congested" in measured_true
+    assert "did not certify it clear" not in measured_true, (
+        "a measured congestion must not be reported as an unread queue")
+    assert "blaming the credential" not in measured_true
+
+    # THE UNMEASURED POLE — silence, a failed read, or an unreadable artifact
+    # (`?`) keeps today's text: nothing measured, so read the queue.
+    for pole in ("False", "None", "?"):
+        unmeasured = cause(0, 3, pole)
+        assert "did not certify it clear" in unmeasured, pole
+        assert "WAS read and is congested" not in unmeasured, pole
+
+    # BOTH CAUSES IN ONE WINDOW: the refusal is measured AND a `denied`/`failed`
+    # cancel needs the credential, so the credential sentence stays reachable
+    # instead of being denied by the queue sentence.
+    both = cause(2, 3, "True")
+    assert "WAS read and is congested" in both
+    assert "2 PR(s) still need a repair this pass did not complete" in both
+    assert "user credential can perform" in both
+
+    # THE CREDENTIAL-ONLY POLE is unchanged (no refusal to explain).
+    credential_only = cause(1, 0, "False")
+    assert "even the local credential could not complete" in credential_only
+    assert "zero-job cancel was REFUSED" not in credential_only
+
+
 # ── the congestion gate's two poles, built by the module's OWN core ──────────
 #
 # ⛔ NEITHER POLE MAY BE A HAND-BUILT `QueueHealth` (#10641 review P2). Both were,
