@@ -5878,6 +5878,11 @@ surfaces:
   # `CORE_ALSO` entry beside this one in `tools/ci_selection.py` — the
   # #1349/#3332/#3616 silent-drop class.
   - test_rail_detach.py
+  # #10920: the runner-label coverage gate. `tools/ci_runner_labels.py` parses every
+  # `runs-on:` in the tree and checks it against the committed runner snapshot
+  # (`config/ci-runner-labels.json`). Pure stdlib + PyYAML: no graph, no URI, no network,
+  # so the `core` fallback is its home and any diff touching it selects it.
+  - test_ci_runner_label_coverage.py
   ep:
   # #7951 (remaining doors) / review P1: DUAL-REGISTERED with `core` (below)
   # and the other exact-match surfaces. The write-door INVENTORY scans ALL of
