@@ -254,7 +254,14 @@ jobs:
             cancel_lead="This run cancelled nothing"
           fi
           if [ "$rc" -eq 1 ]; then
-            echo "::error::${state} — PR CI is NOT slow, it is NOT RUNNING, and it still is after this run's cancellations. See the step summary."
+            # The payload-contradicting half is "…and it still is AFTER this run's
+            # cancellations": `cancelled` can be EMPTY beside an `rc=1` FLOOD — an
+            # untrimmable lead (e.g. a workflow the governor may not touch) reaches
+            # the governor block and trims nothing, and a DRY_RUN cancels nothing at
+            # all — so the arm would assert cancellations the same payload denies.
+            # Same class, and the same fix, as the two no-action arms below
+            # (#10264 review P3): say what the payload says via `${cancel_lead}`.
+            echo "::error::${state} — PR CI is NOT slow, it is NOT RUNNING. ${cancel_lead}. See the step summary."
           elif [ "$rc" -eq 2 ]; then
             echo "::warning::CI: UNKNOWN — the queue could not be measured, so nothing was changed and nothing is certified healthy."
           elif [ "$verdict" = "PR-STARVED" ]; then

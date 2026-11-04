@@ -117,17 +117,40 @@ def _extractor_range(code: str) -> str:
 
 
 def _extractor_items_gate(gate_code: str) -> str:
-    """``:LINE`` of the first `if items:` after the classify gate `gate_code`.
+    """``:LINE`` of the `if items:` INSIDE the block opened by the gate `gate_code`.
 
     `if items:` is not uniquely searchable (the S2 pass and the union pass each
     carry one), so the pin derives the SECOND gate from its enclosing gate rather
     than from a bare string that would match either.
+
+    The search is BOUNDED to that gate's own block — it stops at the first line
+    indented no deeper than the gate itself. Without that bound the search runs
+    to end-of-file, so a line-count-neutral edit to the S2 gate's `if items:`
+    (e.g. adding a conjunct) made this helper return the UNION pass's gate
+    instead: both cites collapsed onto `:8831`, `:8831` is a legitimate
+    `_IDLE_CITES` entry, and every assertion in the caller stayed GREEN while the
+    S2.3 cause sent its reader to code the S2 pass never runs — the exact
+    failure this pin exists to prevent (#10264 review P2, measured). With the
+    bound the S2 helper reds instead, because no `if items:` survives inside the
+    S2 gate's block.
     """
     lines = (_REPO / _EXTRACTOR).read_text().splitlines()
-    for n in range(_extractor_lineno(gate_code) + 1, len(lines) + 1):
-        if lines[n - 1].strip() == "if items:":
+    start = _extractor_lineno(gate_code)
+    gate_line = lines[start - 1]
+    gate_indent = len(gate_line) - len(gate_line.lstrip())
+    for n in range(start + 1, len(lines) + 1):
+        line = lines[n - 1]
+        if not line.strip():
+            continue
+        if len(line) - len(line.lstrip()) <= gate_indent:
+            break                      # left the gate's block: no `if items:` in it
+        if line.strip() == "if items:":
             return f":{n}"
-    raise AssertionError(f"no `if items:` after extractor_v2.py:{gate_code!r}")
+    raise AssertionError(
+        f"no `if items:` INSIDE the block opened by extractor_v2.py:{start} "
+        f"({gate_code!r}) — the gate moved or was removed. Refusing to fall "
+        f"through to the union pass's `if items:`, which would pass every "
+        f"`_IDLE_CITES` assertion while citing the wrong pass")
 
 
 #: Every ``extractor_v2.py`` cite the flag-on/zero-activity causes print, DERIVED

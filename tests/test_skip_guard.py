@@ -166,6 +166,15 @@ def _write(tmp_path, name, text):
 #: A further migration that changes the split reds this guard.
 _STATED_JUNIT_LEG_COUNT = 3
 
+#: The docstring above also states how many duration-prefixed `python -m pytest`
+#: legs exist AT ALL ("EIGHT"), and that number was the one still restated by hand
+#: after the leg count was pinned (#10264 review P3): a NINTH such leg left every
+#: assertion GREEN while the prose went stale — the same "a restated measurement
+#: goes stale in the commit that changes the code" class this guard retires. Both
+#: counts are now derived from the workflow, so a leg added anywhere in the file
+#: reds here and the next editor is told to update the sentence.
+_STATED_DURATION_LEG_COUNT = 8
+
 
 class TestGuardAcceptsCleanLog:
     def test_no_skips_at_all(self):
@@ -227,9 +236,10 @@ class TestGuardAcceptsCleanLog:
         NOT read (the `$PYTEST_JUNIT_LF` pre-phase), plus ONE term that now
         excludes the other two legs at once (the xdist expansion). A term that
         stops discriminating does not error — it silently compares another leg's
-        command line — which is why the count floor below is load-bearing. Both
-        halves of that sentence are MEASURED below, not restated: the stated
-        leg count is `_STATED_JUNIT_LEG_COUNT`, and every junit-carrying leg this
+        command line — which is why the count floor below is load-bearing. Every
+        number in that sentence is MEASURED below, not restated: the total is
+        `_STATED_DURATION_LEG_COUNT`, the junit-carrying count is
+        `_STATED_JUNIT_LEG_COUNT`, and every junit-carrying leg this
         chain does not select must be dropped by the xdist term."""
         workflow = Path(__file__).resolve().parents[1] / ".github" / "workflows" \
             / "python-ci.yml"
@@ -322,6 +332,8 @@ class TestGuardAcceptsCleanLog:
         #       → `_STATED_JUNIT_LEG_COUNT`;
         #   (b) of those, every leg this chain does NOT select is dropped by the
         #       xdist term — that is what "ONE term for TWO legs" means.
+        #   (c) EIGHT duration-prefixed `python -m pytest` legs exist at all
+        #       → `_STATED_DURATION_LEG_COUNT`.
         #
         # They are asserted against the workflow, not read out of the prose, so the
         # next migration that changes the split reds here instead of silently
@@ -329,6 +341,18 @@ class TestGuardAcceptsCleanLog:
         # tree (a) fails (carve-out wrote `--junitxml=/tmp/junit.xml`, so the count
         # was 2) — the prose then said TWO and was true; this pin is what keeps it
         # true.
+        duration_legs = [
+            ln for ln in text.splitlines()
+            if re.search(
+                r"timeout -s INT -k 10 (?:\d+|\$\{\{\s*matrix\.watchdog_minutes\s*\}\})m", ln)
+            and "-m pytest" in ln
+        ]
+        assert len(duration_legs) == _STATED_DURATION_LEG_COUNT, (
+            f"the docstring says {_STATED_DURATION_LEG_COUNT} watchdog-wrapped "
+            f"`python -m pytest` legs match the duration prefix, the workflow has "
+            f"{len(duration_legs)} — update the stated count and the docstring's "
+            f"selector map: {duration_legs}"
+        )
         junit_legs = [
             ln for ln in text.splitlines()
             if re.search(
