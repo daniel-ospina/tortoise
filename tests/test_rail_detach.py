@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -348,6 +349,41 @@ def test_refuses_when_the_rail_script_is_absent(tmp_path):
     bare.mkdir()
     with pytest.raises(rd.Refused, match="link_agent_infra_scripts"):
         rd.launch(3, cwd=bare, state_dir=tmp_path / "state", repo="o/r")
+
+
+# ── a missing `gh` binary is an UNREADABLE answer, never a traceback ──────────
+# Measured 2026-11-03 (CI shard `test (d)`): 21 of this file's tests died with
+# `FileNotFoundError: 'gh'` on a runner with no GitHub CLI. The tool's own
+# contract already names the degraded answer (`_head_sha` → "unreadable",
+# `_resolve_repo` → `Refused`); only the spawn was unguarded, so the missing
+# binary escaped as an exception the callers never see in production.
+def _path_without_gh(tmp_path: Path, *needed: str) -> str:
+    """A `PATH` holding just the binaries the detached child needs, never `gh`."""
+    bin_dir = tmp_path / "nogh-bin"
+    bin_dir.mkdir()
+    for name in ("bash", "sleep", "date", *needed):
+        src = shutil.which(name)
+        assert src, f"the fixture needs {name} on the host PATH"
+        (bin_dir / name).symlink_to(src)
+    assert not (bin_dir / "gh").exists()
+    return str(bin_dir)
+
+
+def test_a_missing_gh_binary_yields_an_unreadable_head_not_a_crash(tmp_path, monkeypatch):
+    """`launch()` degrades to `head=unreadable`; pre-fix it raised FileNotFoundError."""
+    co = make_checkout(tmp_path)
+    monkeypatch.setenv("PATH", _path_without_gh(tmp_path))
+    ln = launch(tmp_path / "state", co, pr=17)
+    assert ln.pid > 0
+    assert ln.head == "unreadable"
+    assert "HEAD=unreadable" in Path(ln.artifact).read_text(encoding="utf-8")
+
+
+def test_resolving_a_repo_without_gh_names_the_missing_binary(tmp_path, monkeypatch):
+    """The refusal says what is missing; pre-fix this was a bare FileNotFoundError."""
+    monkeypatch.setenv("PATH", _path_without_gh(tmp_path))
+    with pytest.raises(rd.Refused, match="`gh` is not on PATH"):
+        rd._resolve_repo(tmp_path)
 
 
 def test_child_invokes_only_the_one_lander(tmp_path):
