@@ -2019,6 +2019,14 @@ surfaces:
   # NON_PYTHON_PREFIXES before the `core` fallback runs). Pinned by
   # tests/test_dod_5090_probe.py::test_the_instrument_is_selected_by_its_own_subjects.
   - test_dod_5090_probe.py
+  # #10687: `tools/attest_census.py` owns its own suite — the hermetic arms pin the
+  # RESTORE/RE-REVIEW partition (repair separated from fabrication), the 0/2-never-1
+  # exit contract, and the report shape the REQUIRED `docs` check lints whole. `core`
+  # like every entry here, because `tests/` is not a SOURCE_PATTERN: a diff touching
+  # only `tests/test_attest_census.py` falls through to `core` anyway, and a
+  # `tools/attest_census.py` diff is caught by its own `TOOL_CARVEOUTS` entry (which
+  # fails closed to the FULL matrix), so this line makes the ownership explicit for
+  # the file-level selection rather than relying on that fallback.
   - test_attest_census.py
   # #9964: the kind↔layer partition — `tortoise/kind_layers.py` is the ONE
   # authority (a new module: no SOURCE_PATTERNS entry, so a diff touching only it
@@ -3537,6 +3545,11 @@ surfaces:
   # measurement that only ran on one lane would stop being checkable.
   - test_journal_growth.py
   - test_test_lane_tool.py
+  # #10806: the test-lane container REAPER's actuator. DB-free and docker-free
+  # (every docker call in it is monkeypatched), so it belongs on the same lane as
+  # the tool it drives — and a destructive tool whose safety suite never runs in
+  # CI has no safety suite.
+  - test_container_reaper.py
   - test_transport_wait_bound.py  # #3834: transport wait bound + cold-half gate wiring (dual: api)
   # #2877: DB-free guards that a dead backup watcher degrades /health (the file
   # it guards, tortoise/hosted_api.py, selects the `api` surface, so it is
@@ -3593,7 +3606,7 @@ surfaces:
   # #5064: the declared-mechanism gate. `core` is its classification home and
   # the lane for a code diff; `tier1` is REQUIRED because half the gate's subject
   # is now DOCUMENT — `membership_errors()` reads the
-  # `<!-- v4-mechanism: <id> -->` markers in `docs/architecture/**/*.md` — and this
+  # `<!-- v4-mechanism: <id> state: <state> -->` markers in `docs/architecture/**/*.md` — and this
   # file is in NEITHER named surface a docs-only diff can select. `docs/` is in
   # NON_PYTHON_PREFIXES, so the mechanism differs by document: an
   # EXTRACTOR-V4-ARCHITECTURE.md-only diff takes `select()`'s early return
@@ -7078,6 +7091,22 @@ surfaces:
   # Not embedded-only: a URI lane redirects the by-path SDK construction to the
   # server and the assertions hold either way.
   - longmem_eval/test_ep_census_10137.py
+  # #10137: the OPERATOR-PROMOTION half of the belief-layer wiring — an operator
+  # minted over claims that are ALREADY live (a resumed/partial ingest: the v2
+  # ingest mints EVERY operator with `promote_source=False`, and
+  # `sdk.promote_point` cannot promote an operator node — it refuses one with
+  # `reason: 'is_operator'`) was promoted by NOTHING, so `ep._live_only` kept it
+  # out of the factor graph for ever and the belief layer contributed nothing on
+  # a question holding both evidence and an operator. Registered against
+  # `tools/longmem_eval/` so a change to the promotion sweep SELECTS the file
+  # that can tell a wired factor from an unpromoted one — as surface OWNERSHIP,
+  # NOT shard membership: `longmem_eval/**` is a non-gating `on_demand` member
+  # (#10194/#10206, verified: `--non-gating-report` lists all 19 under "excluded
+  # from every gating leg"), so this row does NOT put the pin on the merge gate.
+  # Nothing does — the sweep's only pre-merge cover is review. Embedded (a
+  # throwaway `TortoiseSDK` per case, no server/network); a URI lane redirects
+  # the by-path SDK construction and the assertions hold either way.
+  - longmem_eval/test_ep_activation_operator_promotion_10137.py
   - longmem_eval/test_gold_evidence_claims.py  # #3011 §9.5: gold-evidence claim artifact builder — frozen tokenizer, MIN_GOLD_TOKENS, non-emptiness (hermetic)
   - longmem_eval/test_ingest_stall_guard.py  # #2969: bounded graph socket read (socket_timeout env knobs) + ingest heartbeat/no-progress budget → retryable `ingest:retries_exhausted` (hermetic: fake hung/pong TCP servers + injected clock)
   - longmem_eval/test_server_posture_2969.py  # #2969 suggested fix 3: the eval refuses a defragging graph server (`CONFIG GET activedefrag`); opt-in `disable` applies the incident mitigation + read-back and FAILS CLOSED when it cannot read the value or open the probe (the one exception to UNKNOWN-and-proceed, which stays soft for `require-off`/`allow`); a readable value that is neither `yes` nor `no` is UNKNOWN, never `off`; wiring aborts before BOTH model loads (R6 cross-encoder pre-warm + `--model` injection), the embedder pre-flight and the dataset download (hermetic: a fake connection records commands AND a loopback RESP2 server drives the REAL `_connection_from_uri` builder — the anti-inert leg)
@@ -8688,7 +8717,7 @@ durations:
   test_orient_direct_consolidation.py: 11.2  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 5.9
   test_oauth_mcp.py: 14.9  # #9017 CI-junit 2026-10-18 (run 39165691659); was 12.4 — ci-timing junit-census+top-15 2026-10-26 (run 40259128208): no declared testcase count for this file (UNKNOWN), so the reading cannot prove it saw the whole file; the reading (9.4s) is a LOWER bound; kept 14.9
   test_oauth_consent_client_identity_8218.py: 2.0  # new in #8218 — a file a PR ADDS can never carry a CI junit reading yet (the refresher samples push-to-main runs only), so it takes the flat `DEFAULT_FAST_WEIGHT` and NOT a dev-box reading, which this map forbids as a SHARD-LAYOUT input (#2818/#3419/#4348) — the same shape as the `test_oauth_consent_page_step4.py` row below, whose node-spawning harness this suite reuses. ONE row only: `durations` is a single global map keyed by file, so a second row would be a duplicate key a YAML loader silently collapses — per-surface reasoning belongs in `surfaces`, and this file is registered on `api` and `core` (see both entries; the `core` arm is the AST-enumeration half). What it covers: 20 cases — the reproduction and the count-based invariant both render the REAL page through `GET /oauth/authorize` and execute its inline script under node (~1-4 s per render, which is why the real reading will land above the default; measured 13.84 s for the whole file on this host 2026-11-01, recorded for the refresher, deliberately NOT used as the weight), plus two AST enumerations over the whole `tortoise/` package (every `oauth_clients` toucher, every `client_name` consumer) that red the suite when a new identity source is written. `tools/ci_timing.py --refresh-durations` replaces this from junit once a push-to-main sweep includes it.
-  test_oauth_consent_page_step4.py: 2.0  # new in #3524 §9 step 4 (it REPLACES test_oauth_consent_pkce.py, deleted with the inline client it pinned) — a file a PR ADDS can never carry a CI junit reading yet (the refresher samples push-to-main runs only), so it takes the flat `DEFAULT_FAST_WEIGHT` and NOT a dev-box reading, which this map forbids as a SHARD-LAYOUT input (#2818/#3419/#4348). ONE row only: this suite is DUAL-REGISTERED (`api` + `onboarding`), but `durations` is a single global map keyed by file, so a second row would be a duplicate key a YAML loader silently collapses — ordering and per-surface comments belong in `surfaces`. What it covers: 58 cases — the bounce, the scope the page DISPLAYS being the one the token CARRIES (measured end to end) + return-target recovery, the real allowlist executed under node, the page's inline script executed under node (a dozen-plus cases spawn node, ~1-4 s each, which is why the real reading will land well above the default), the #6001 placeholder set ×8, #3443's four navigation arms plus its guard-removed control, the org preview's two identity arms and the #1701 R1 chooser, and the token-bound AS round trips. `tools/ci_timing.py --refresh-durations` replaces this from junit once a push-to-main sweep includes it.
+  test_oauth_consent_page_step4.py: 2.0  # new in #3524 §9 step 4 (it REPLACES test_oauth_consent_pkce.py, deleted with the inline client it pinned) — a file a PR ADDS can never carry a CI junit reading yet (the refresher samples push-to-main runs only), so it takes the flat `DEFAULT_FAST_WEIGHT` and NOT a dev-box reading, which this map forbids as a SHARD-LAYOUT input (#2818/#3419/#4348). ONE row only: this suite is DUAL-REGISTERED (`api` + `onboarding`), but `durations` is a single global map keyed by file, so a second row would be a duplicate key a YAML loader silently collapses — ordering and per-surface comments belong in `surfaces`. What it covers: 60 cases — the bounce, the scope the page DISPLAYS being the one the token CARRIES (measured end to end) + return-target recovery, the real allowlist executed under node, the page's inline script executed under node (a dozen-plus cases spawn node, ~1-4 s each, which is why the real reading will land well above the default), the #6001 placeholder set ×8, #3443's four navigation arms plus its guard-removed control, the org preview's two identity arms and the #1701 R1 chooser, and the token-bound AS round trips. `tools/ci_timing.py --refresh-durations` replaces this from junit once a push-to-main sweep includes it.
   test_mcp_server.py: 4.3  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 0.9
   test_dashboard_client_paths_resolve.py: 9.5  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 3.6
   test_dashboard_login.py: 22.2  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 6.8
@@ -9203,6 +9232,17 @@ durations:
   # `tools/ci_timing.py --refresh-durations` re-bases it after the next
   # push-to-main sweep.
   longmem_eval/test_ep_census_10137.py: 2.0
+  # #10137: a file ADDED BY A PR can never carry a CI junit measurement (the
+  # refresher samples push-to-main runs only), so it takes the header's flat
+  # `DEFAULT_FAST_WEIGHT` = 2.0 — the SAME value the sibling PR-added row
+  # (`longmem_eval/test_ep_census_10137.py`) takes. Deliberately NO local timing
+  # reading and NO case count here: a dev-box reading is a forbidden
+  # SHARD-LAYOUT input (#2818/#3419), and this file's count moved three times
+  # during its own review — the map's neighbouring rows keep recording that such
+  # counts re-stale. Re-derive both from the file if you need them.
+  # `tools/ci_timing.py --refresh-durations` re-bases it after the next
+  # push-to-main sweep.
+  longmem_eval/test_ep_activation_operator_promotion_10137.py: 2.0
   longmem_eval/test_probe_v2.py: 0.1
   test_alert_store.py: 0.3  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 0.1
   test_analytics.py: 0.1
