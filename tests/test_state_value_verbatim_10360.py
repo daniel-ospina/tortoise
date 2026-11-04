@@ -988,7 +988,7 @@ def test_the_carve_outs_own_ADJACENT_time_units_are_judged():
 #: ⛔ WHAT THIS CANNOT CATCH, stated rather than implied: it is a pattern list, so
 #: a reopening phrased with none of these words ("`minute` is back in the open
 #: set") passes. The pin's job is to catch the shapes a lane actually writes —
-#: the six below covered every one produced by three review cycles — not to be a
+#: the seven below covered every one produced by four review cycles — not to be a
 #: semantic reader of English. Closing that gap needs a human or a different
 #: instrument, not a longer regex.
 _ADJACENCY_REOPENING = (
@@ -1000,8 +1000,38 @@ _ADJACENCY_REOPENING = (
     r"\bno\s+longer\s+(closed|fuses|judged|caught|compared|enforced|retained)\b",
     r"\bunclosed\b",
     r"\bre-?open",
-    r"\b(is|are|remains|remain|stays?|was|were)\s+(still\s+|now\s+)?open\b",
+    # The verb arm covers the INFLECTIONS, not just the present tense (review
+    # cycle 7, MEASURED: `stayed open`, `remained open`, `has stayed open`,
+    # `keeps open` and `is left open` all PASSED against the previous
+    # `stays?|remains?` arm — one inflection defeated it).
+    r"\b(is|are|was|were|remain(s|ed)?|stay(s|ed)?|keep(s)?)\b[^.;]{0,25}\bopen\b",
     r"\bopen\s+again\b",
+)
+
+#: The closure ASSERTION the adjacency sentence must carry. Not the bare word
+#: `closed`: a sentence reading "the ADJACENCY half is now UNJUDGED, unlike the
+#: closed spellings" contains `closed` while asserting the gap is open (review
+#: cycle 7, MEASURED: it PASSED the `"closed" in sentence` check, at both the
+#: previous revision and this one).
+_ADJACENCY_CLOSED_CLAIM = (
+    r"\b(is|are|was|were)\b[^.;]{0,20}\bclosed\b",
+    r"\b(has|have|had)\s+been\s+closed\b",
+    r"\bwe\s+have\s+closed\b",
+    r"\bclosed\s+by\s+this\s+table\b",
+)
+
+
+#: The reopenings that may NOT appear even in the sentence that discloses the
+#: STILL-OPEN spelling class: they say a unit stopped being fused/judged, which
+#: reopens the adjacency gap whatever else the sentence is about (review cycle 7,
+#: MEASURED: exempting that sentence wholesale let "the SPELLING gap is not closed
+#: and `minute` no longer fuses" PASS — an over-block traded for a fail-open).
+#: `not closed` / `is open` are deliberately absent: the SPELLING gap IS open, and
+#: saying so is the row's own honest disclosure.
+_SPELLING_SENTENCE_REOPENING = (
+    r"\bno\s+longer\s+(closed|fuses|judged|caught|compared|enforced|retained)\b",
+    r"\bunclosed\b",
+    r"\bre-?open",
 )
 
 
@@ -1049,30 +1079,60 @@ def test_the_registry_row_names_the_residual_that_still_stands():
     # ("`minute` no longer fuses", "the time-unit half is no longer closed",
     # "except `minute`, which is open again") is the likeliest edit of all
     # (review cycle 6, MEASURED: with the scan gated on `adjacency`, all five of
-    # those PASSED). Verified against 6 reopening mutations (all FAIL) and 4
-    # truthful paraphrases ("is now CLOSED", "has been CLOSED", "We have closed
-    # the ADJACENCY half", "the ADJACENCY gap is closed" — all PASS).
+    # those PASSED). Verified against 15 reopening mutations (all FAIL) and 8
+    # truthful statements (all PASS: "is now CLOSED", "has been CLOSED", "We have
+    # closed the ADJACENCY half", "the ADJACENCY gap is closed", "closed by this
+    # table", and the two TRUE spelling disclosures and "no longer fails open")
+    # — plus the structural rule that the still-open SPELLING disclosure must be
+    # its OWN sentence, because one sentence carrying both claims must satisfy
+    # both and cannot.
     block = row.split("(d) a RATE unit", 1)[1].split("(e) the", 1)[0]
     flat = " ".join(block.split()).lower()
     sentences = re.split(r"(?<=[.!?;])\s+", flat)
-    assert [s for s in sentences if "adjacency" in s], (
+    # ⛔ REGION A = every sentence up to AND INCLUDING the LAST one that names
+    # the adjacency claim. The strict scan lives here. Region B is the trailing
+    # DISCLOSURE that the SPELLING class is still open — it is TRUE that it is
+    # open, so applying the adjacency rules to it refused a true statement
+    # (review cycle 7, MEASURED: "the SPELLING case is still open on purpose",
+    # "the SPELLING gap, which is not closed" and "remains open by design" all
+    # FAILED), and exempting it wholesale re-opened "the SPELLING gap is not
+    # closed and `minute` no longer fuses" — so region B keeps a narrower ban.
+    adjacency_at = [i for i, s in enumerate(sentences) if "adjacency" in s]
+    assert adjacency_at, (
         "the row no longer makes any ADJACENCY claim in residual (d) — this "
         "table closed that gap; if it was reopened, say so AND delete this pin")
-    assert "closed" in flat, (
-        "the row does not state the ADJACENCY gap as CLOSED — this table "
-        "closed it; if it was reopened, say so AND delete that claim")
-    # ⛔ MATCH THE ASSERTION OF OPENNESS, NOT BARE WORDS (review cycle 6,
-    # MEASURED): banning `not`/`never`/`still` outright over-blocked truthful
-    # paraphrases, because the sentence window can merge an adjacent clause
-    # (`… is CLOSED: … per day` is `not judged` → tripped on `not`). These
-    # patterns name reopening and nothing else, and `fails open` (a truthful
-    # thing to write about the SPELLING case) is deliberately not matched.
-    for sentence in sentences:
+    last = adjacency_at[-1]
+    # ⛔ THE CLAIM ITSELF must still say CLOSED, per SENTENCE (review cycle 7 P1,
+    # MEASURED: collapsing this to a block-wide `"closed" in flat` let a row that
+    # says "the ADJACENCY half is not currently judged; the closed set grows"
+    # pass — any unrelated `closed` in the 1339-char block satisfied it).
+    for i in adjacency_at:
+        assert any(re.search(p, sentences[i])
+                   for p in _ADJACENCY_CLOSED_CLAIM), (
+            "the row does not ASSERT the ADJACENCY gap as CLOSED (a `closed` "
+            f"elsewhere in the sentence is not enough): {sentences[i]!r}")
+    for sentence in sentences[:last + 1]:
         for pattern in _ADJACENCY_REOPENING:
             m = re.search(pattern, sentence)
             assert m is None, (
                 f"the row says {m.group(0)!r}, which reopens the adjacency gap "
                 f"this table closed: {sentence!r}")
+    # region B may describe the SPELLING gap as open (it IS open), but must not
+    # claim a unit stopped being fused/judged, and must still DISCLOSE that gap.
+    tail = sentences[last + 1:]
+    for sentence in tail:
+        for pattern in _SPELLING_SENTENCE_REOPENING:
+            m = re.search(pattern, sentence)
+            assert m is None, (
+                f"the row says {m.group(0)!r}, which reopens the adjacency gap "
+                f"this table closed: {sentence!r}")
+    assert not tail or any("spelling" in s for s in tail), (
+        "a sentence after the adjacency claim says something other than the "
+        f"disclosed SPELLING residual — inspect it: {tail!r}")
+    if tail:
+        assert any("open" in s for s in tail), (
+            "the row no longer discloses that the SPELLING class is open: "
+            f"{tail!r}")
     # positive control: the RATE class IS still open, and it must stay NAMED, or
     # the assertions above could be satisfied by a row that says nothing at all.
     assert "not judged" in flat, block
