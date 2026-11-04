@@ -3197,11 +3197,14 @@ _DREAM_QUEUE_TTL_S = 600
 # other `to_thread` sites on that pool are enough on their own to park every
 # worker during a burst (prod is 2 vCPU →
 # `min(32, cpu+4)` = 6) and stall unrelated tenants BEFORE their handlers —
-# #10618 removed the last PER-REQUEST tenant of that pool (`first_api_call` and
-# `_abuse_post_auth`, both awaited on every authenticated request; they ride the
-# bounded telemetry lane now), which shortens no fuse: the shared pool is still
-# unbounded-wait and still `min(32, cpu+4)`. While `/health` stays green by
-# design (#2850), nothing would notice. That
+# #10618 removed the last PER-REQUEST tenant of that pool on THIS (REST/hosted)
+# auth path (`first_api_call` and `_abuse_post_auth`, both awaited on every
+# authenticated request; they ride the bounded ``abuse`` lane now), which
+# shortens no fuse: the shared pool is still unbounded-wait and still
+# `min(32, cpu+4)`. It is not empty of per-request hops — the `/mcp` side still
+# awaits `abuse.check_new_country` there (pre-existing, tracked as #10720) — so
+# read this as "one tenant moved", never "the hazard is gone". While `/health`
+# stays green by design (#2850), nothing would notice. That
 # is the #3060 starvation path relocated, not removed. Dream therefore gets its
 # OWN pool: it can only ever starve itself.
 #
@@ -3228,8 +3231,10 @@ _DREAM_EXECUTOR = ThreadPoolExecutor(
 # is an unbounded all-time scan of an org's Sessions + CONTAINS (the windowed
 # funnel rides the same hand-off), so this is the "long / stallable" class the
 # comment at the top of this file says must NOT share the loop's default
-# executor with ~80 other `to_thread` sites and the auth middleware's abuse
-# hooks. Its own small pool means a slow graph can only starve the scorecard.
+# executor with ~80 other `to_thread` sites (the auth path's per-request abuse
+# hooks were among them until #10618 moved them to the bounded ``abuse`` lane —
+# the pool itself is unchanged: `min(32, cpu+4)` with an unbounded wait). Its
+# own small pool means a slow graph can only starve the scorecard.
 _SCORECARD_EXECUTOR = ThreadPoolExecutor(
     max_workers=max(1, min(_int_env("TORTOISE_SCORECARD_WORKERS", 2), 8)),
     thread_name_prefix="activation-scorecard")
@@ -7159,9 +7164,10 @@ async def get_current_org(request: Request) -> dict:
         # tortoise/analytics.py); distinct_id is the key creator's user UUID
         # (joins web + server funnels), with org_id fallback for legacy/
         # bootstrap keys that predate created_by.
-        # #10618: activation telemetry, so it rides the bounded telemetry lane
-        # — NOT the loop's shared default executor, which is what made this
-        # per-request hop able to park a request BEFORE its handler.
+        # #10618: activation telemetry, so it rides the bounded ``abuse`` lane
+        # (`_telemetry_hook_off_loop`) — NOT the loop's shared default executor,
+        # which is what made this per-request hop able to park a request BEFORE
+        # its handler.
         if first_api_call_pending(org_id):
             try:  # noqa: SIM105
                 await _telemetry_hook_off_loop(
@@ -7351,9 +7357,10 @@ async def _get_current_org_supabase(request: Request, token: str) -> dict:
         # #528: activation telemetry — first successful API auth per org.
         # created_by (key creator's user UUID) joins web + server funnels,
         # with org_id fallback for keys that predate created_by.
-        # #10618: activation telemetry, so it rides the bounded telemetry lane
-        # — NOT the loop's shared default executor, which is what made this
-        # per-request hop able to park a request BEFORE its handler.
+        # #10618: activation telemetry, so it rides the bounded ``abuse`` lane
+        # (`_telemetry_hook_off_loop`) — NOT the loop's shared default executor,
+        # which is what made this per-request hop able to park a request BEFORE
+        # its handler.
         if first_api_call_pending(org_id):
             try:  # noqa: SIM105
                 await _telemetry_hook_off_loop(
@@ -7368,7 +7375,7 @@ async def _get_current_org_supabase(request: Request, token: str) -> dict:
         request.state.tier = org["tier"]
         _publish_default_namespace(org)
         # #308: R3 read velocity + R4 geo (best-effort). #10618: it rides the
-        # bounded telemetry lane, never the loop's shared default executor —
+        # bounded ``abuse`` lane, never the loop's shared default executor —
         # this hook is awaited on EVERY authenticated request.
         await _abuse_post_auth(request, org)
         # #2600: canonical actor_user_id alias (UUID-gated, reads created_by
@@ -9219,7 +9226,7 @@ async def _abuse_post_auth(request: Request, org: dict) -> None:
     """Async wrapper — never raises into the auth path.
 
     #10618: awaited on EVERY authenticated request, so it rides the bounded
-    ``telemetry`` lane (``_telemetry_hook_off_loop``) and never the loop's
+    ``abuse`` lane (``_telemetry_hook_off_loop``) and never the loop's
     shared default executor. ``request.headers``/``request.method`` are read
     HERE, on the loop: ``Request`` is not thread-safe and a worker must not
     touch it.
@@ -9243,7 +9250,7 @@ def _abuse_record_points_sync(org: dict, n: int) -> None:
 
 async def _abuse_record_points(request: Request, org: dict, n: int) -> None:
     try:  # noqa: SIM105
-        # #10618: the bounded telemetry lane, never the shared default pool.
+        # #10618: the bounded ``abuse`` lane, never the shared default pool.
         await _telemetry_hook_off_loop(
             functools.partial(_abuse_record_points_sync, org, n),
             op="abuse.record_points")
@@ -9259,7 +9266,7 @@ def _abuse_evaluate_keys_sync(org_id: str) -> None:
 
 async def _abuse_evaluate_keys(org_id: str) -> None:
     try:  # noqa: SIM105
-        # #10618: the bounded telemetry lane, never the shared default pool.
+        # #10618: the bounded ``abuse`` lane, never the shared default pool.
         await _telemetry_hook_off_loop(
             functools.partial(_abuse_evaluate_keys_sync, org_id),
             op="abuse.evaluate_keys")
@@ -22227,8 +22234,9 @@ _RETENTION_MAX_ORGS = 1000
 #: self-inflicted `org_read_timeout`. The read is a control-plane HTTP walk of
 #: up to `max_pages` round trips per org, which is the "long / stallable"
 #: class the #3060 doctrine above says must NOT share the loop's default
-#: executor with ~80 other `to_thread` sites and the auth middleware's abuse
-#: hooks.
+#: executor with ~80 other `to_thread` sites (the auth path's per-request abuse
+#: hooks left that pool in #10618; its width and its unbounded wait did not
+#: change, so the doctrine stands).
 _RETENTION_MAX_CONCURRENCY = 4
 
 
