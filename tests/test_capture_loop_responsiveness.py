@@ -454,7 +454,7 @@ def test_health_answers_while_the_default_executor_is_saturated(
 
     The first revision moved the extraction to `asyncio.to_thread`, which uses
     the loop's SHARED default executor — at the time, also the pool /health's DB
-    probe (and the auth middleware's abuse hooks) rode. Six-plus concurrent
+    probe rode. Six-plus concurrent
     stalls (prod runs 2 vCPU → `min(32, cpu+4)` workers) would therefore leave
     that probe queued for minutes, miss Fly's 15s check timeout, and drop the
     machine exactly as in the original outage — one level down, with nothing
