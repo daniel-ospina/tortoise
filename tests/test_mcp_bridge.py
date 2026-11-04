@@ -637,6 +637,37 @@ class TestRefusal:
 
 
 class TestFailureModes:
+    def test_a_non_UTF8_stdout_still_gets_the_frame_it_asked_for(self):
+        """The protocol writer must not depend on the child's stdout encoding.
+
+        `ensure_ascii=False` raises `UnicodeEncodeError` when stdout is ASCII (a
+        container locale with no `C.UTF-8`, `PYTHONIOENCODING`, Windows ANSI) and
+        the reply carries any non-ASCII character — ordinary Tortoise content.
+        `main()`'s emit loop is outside every `try`, so the raise escapes and the
+        bridge writes NOTHING for that frame: the harness waits forever.
+        """
+        import io
+
+        from tortoise import mcp_bridge
+
+        raw = io.BytesIO()
+        ascii_out = io.TextIOWrapper(raw, encoding="ascii", write_through=True)
+        original = mcp_bridge.sys.stdout
+        mcp_bridge.sys.stdout = ascii_out
+        try:
+            mcp_bridge._emit({
+                "jsonrpc": "2.0", "id": 1,
+                "result": {"serverInfo": {"name": "Peña Blanca"}},
+            })
+            ascii_out.flush()
+        finally:
+            mcp_bridge.sys.stdout = original
+
+        line = raw.getvalue().decode("ascii")
+        assert json.loads(line)["result"]["serverInfo"]["name"] == "Peña Blanca"
+        assert "\\u00f1" in line, (
+            "the frame must be ASCII-escaped on the wire, not written as raw UTF-8")
+
     def test_a_faulted_stderr_cannot_kill_the_frame_it_is_logging_about(self, monkeypatch):
         """`_log` is called FROM `main()`'s fault handler, so it must not fault.
 

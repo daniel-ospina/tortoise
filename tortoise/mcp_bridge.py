@@ -170,8 +170,21 @@ def _log(message: str) -> None:
 
 
 def _emit(message: Any) -> None:
-    """Write one JSON-RPC message to stdout (one message per line)."""
-    sys.stdout.write(json.dumps(message, ensure_ascii=False) + "\n")
+    """Write one JSON-RPC message to stdout (one message per line).
+
+    `json.dumps` default `ensure_ascii=True` is deliberate, not a formatting
+    choice. The protocol stream's ENCODING is not ours to assume: a harness may
+    run the child with an ASCII stdout (`PYTHONIOENCODING`, a container locale
+    with no `C.UTF-8`, Windows ANSI), and `ensure_ascii=False` then raises
+    `UnicodeEncodeError` on any non-ASCII reply — Tortoise content is
+    multilingual, so that is ordinary content, not exotic input. This write is
+    the one call in `main()`'s emit loop that is NOT inside a `try`, so the raise
+    escapes, the bridge writes NOTHING for that frame, and the harness waits
+    forever — the silence this module promises never to emit. Escaping to
+    `\\uXXXX` keeps the wire bytes ASCII by construction and is decoded
+    identically by the peer, so nothing about the protocol changes.
+    """
+    sys.stdout.write(json.dumps(message) + "\n")
     sys.stdout.flush()
 
 

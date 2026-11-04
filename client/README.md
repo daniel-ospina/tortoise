@@ -142,10 +142,13 @@ the full note.
 
 Only the `status` probe emits `3`/`4`; `list-tools` and `call` are operations
 against a declared endpoint, so any failure there keeps the generic code `1`.
-On the probe, `TORTOISE_MCP_URL` **unset** *is* the definition of unconfigured —
-a self-hoster running the default daemon without declaring the variable reads
-as `unconfigured` (exit `4`) when that daemon is down. Declare the endpoint
-(set the variable, even to the default) to get the `degraded` state.
+On the probe, **no endpoint DECLARED** *is* the definition of unconfigured — and
+an endpoint is declared by `TORTOISE_MCP_URL` **or** by a store's `api_url`
+(#10605), so a self-hoster running the default daemon with neither reads as
+`unconfigured` (exit `4`) when that daemon is down, while a host that onboarded
+through `tortoise init --api-key` has declared one and reads `degraded` (exit
+`3`). Declare an endpoint either way — set the variable (even to the default), or
+record `api_url` in the store — to move a down daemon into the `degraded` state.
 
 ## What's inside
 
