@@ -51,6 +51,9 @@ score    = PARTIAL(24 of 500) — a complete sample of a sample, never presented
 | `points_off_neutral` = `points_moved_off_neutral` | 185 |
 | `points_off_neutral_unread` / `points_moved_off_neutral_unread` | **0 / 0** (same disclosure for the two contribution sums — a partial 185 is not read as a complete one) |
 | `point_coverage` | `2,696 / 27,608 = 0.0977` — a **floor** on claim coverage (see the two limits below), never quoted as claim coverage |
+| `points_substrate` / `belief_eligible_total` | **UNKNOWN** (`null`, `_unread: 24`) — this run predates #10493, so no question measured the eligibility population. Not zero: the run never read it |
+| `belief_eligible_with_ep` / `belief_eligible_unmeasured` | **UNKNOWN** (`null`, `_unread: 24`) — same reason |
+| `belief_eligible_ratio` | **UNKNOWN** (`null`) — withheld, because a ratio over a population nobody read is the fabricated figure the `_unread` companions exist to prevent |
 
 ### Per question type
 
@@ -83,10 +86,27 @@ Two honest limits on that 10%:
 
 1. It is a **floor**, not a claim-coverage figure. `_COUNT_POINTS_TOTAL` counts every non-operator
    `Point`, and the v2 ingest also writes *episodic turn points* and *session-transcript chunks*,
-   which are not claims and can never carry EP state. A claim-only denominator does not exist as a
-   cell today — which is why the probe publishes the ratio as **`point_coverage`**, never
-   `claim_coverage`: a key named for a denominator nobody measured is how 9.77% gets quoted as
-   "claim coverage" one lane later (#10137 review, P2).
+   which are not claims and can never carry EP state. The probe therefore publishes the ratio as
+   **`point_coverage`**, never `claim_coverage`: a key named for a denominator nobody measured is how
+   9.77% gets quoted as "claim coverage" one lane later (#10137 review, P2).
+
+   ⚠️ **ERRATUM (2026-11-03).** This item used to end *"a claim-only denominator does not exist as a
+   cell today"*. That is **no longer true**. It was true when written (2026-10-31, `7adf5cea9` —
+   neither `points_substrate` nor `belief_eligible_*` existed in the tree) and stopped being true
+   ~6 h later, when #10493 (`d2c3b08b1`, merged 2026-11-01) added `points_substrate` /
+   `belief_eligible_total` / `_with_ep` / `_unmeasured` to every per-question manifest
+   (`tools/longmem_eval/ep_activation.py`) and `belief_eligible_ratio` to the posture summary
+   (`tools/longmem_eval/measurement_posture.py`).
+   The belief-eligible denominator exists. What did **not** carry it was this bundle's probe — its
+   `cells` block is an allow-list, and the new cells were never added to it (#10493's own *residual
+   1*, closed 2026-11-03). `census.json` now carries the nine keys as **UNKNOWN** — the eight summed
+   ones with `_unread: 24`, the ratio as `null` — because the 24-question run predates #10493 and its
+   manifests never measured them — **not zero**,
+   and not obtainable by re-probing this run: the cells are read off the manifests, and these
+   manifests never carried them. The next **post-#10493** run through `probes/census.py` emits the
+   real values per question. The floor beside it is unchanged and still published: the two ratios
+   answer different questions (whole-graph coverage vs coverage of the population that can actually
+   carry a belief).
 2. `factor_edges = 0` while `operators = 1,710`: operators are minted, but none is a **direct
    claim↔claim IMPL/NAND**. Which point pairs the operators do connect is not measured here.
 
@@ -106,6 +126,13 @@ Two honest limits on that 10%:
   already exist and are published beside the ratio (`points_with_ep`, `points_unmeasured`,
   `points_off_neutral`, `points_moved_off_neutral`). Indicator (a) is satisfied by publishing the
   ratio **with** those cells — which is what this artifact does.
+
+**Errata discipline.** `census.json` is a run's artifact, so its measured cells are never edited. The
+nine `points_substrate` / `belief_eligible_*` keys were APPENDED on 2026-11-03 with values **derived
+by the repo's own aggregator** (`measurement_posture.summarize_belief_activation`) over this
+artifact's committed `per_question` rows — which is why they read `null` with `_unread: 24` rather
+than a number: that run never measured the eligibility population. No pre-existing cell was touched,
+and `test_committed_census_rederives_its_own_aggregate` re-derives all 28 from the committed rows.
 
 **Disclosure of what this artifact can and cannot re-derive:** `census.json` carries the run totals
 and the per-question cells but not the per-question graphs, and the corpus cache lives outside the
