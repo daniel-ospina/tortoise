@@ -10405,8 +10405,14 @@ class TortoiseSDK:
         #   #10515 indicator 1, and is exactly what `main` reported loudly.
         # * REPLACEMENT: a new `st_dev`/`st_ino` (a rotate, an `mv`, a restore),
         #   so `resume`/`seam` describe the NEW file while `known` came from the
-        #   OLD one. The map is NOT evidence about anything at this path, and the
-        #   re-fold is deliberately MAP-FREE.
+        #   OLD one. The map is NOT evidence about presence at this path NOW —
+        #   the re-read below is, and it is map-free in the sense that it never
+        #   ANSWERS out of the map. It is still the only surviving record that
+        #   the file this call FOLDED named this point, so it is handed on as the
+        #   WITNESS here too (review round 20, finding 1: this was the third and
+        #   last arm still answering map-free, and for a replacement landing
+        #   under the fold it returned ``False`` — a silent "typo" — for an id
+        #   the old file really carried, where `main` reported the loss).
         # * TRUNCATION of the SAME inode (``stat_after[2] < resume``): no new file
         #   exists — the bytes the fold read were merely cut away — and this arm
         #   is reachable ONLY when the fold consumed them, so `known` is the one
@@ -10437,8 +10443,22 @@ class TortoiseSDK:
             # discarded map is re-derived from the file that is there NOW,
             # needle-filtered: bounded memory, one pass, and an answer that
             # describes THIS path rather than the one that was moved away.
+            #
+            # ⛔ AND THE DISCARDED MAP GOES ON AS THE **WITNESS** (review round
+            # 20, finding 1). Being no evidence about the NEW file is not the
+            # same as being no evidence at all: it was folded from records that
+            # really named this journal at this path, and rename(2) guarantees
+            # the fd the fold read still names the OLD file, so an id it holds
+            # as PRESENT must answer UNJUDGED (``None`` ⇒ `journal_unreadable`)
+            # when the re-read finds no line for it. Answering ``False`` there
+            # says "a typo" about a revision the old file provably held — the
+            # silent loss #10515 indicator 1 forbids, and a step BELOW `main`,
+            # which answered it loudly. The needle keeps a folded DELETE at
+            # ``False`` (``point_id in state``), so the witness can only make
+            # this call LOUDER — never assert a `journal_known` it cannot
+            # support.
             self._journal_presence_memo = None
-            return self._journal_presence_needle(log, point_id)
+            return self._journal_presence_needle(log, point_id, known)
         if stat_after[2] < resume:
             # ⛔ THE SAME INODE, WITH THE FOLDED BYTES TRUNCATED AWAY (review
             # round 18, finding 1). This is NOT the replacement case above: no
@@ -10531,22 +10551,36 @@ class TortoiseSDK:
         """Re-fold the journal AS IT IS NOW, filtered to *point_id* (#10543 r16).
 
         The honest answer once the retained map has been declared
-        untrustworthy for THIS path: the map is dropped from the memo, and — on
-        the replacement/truncation arm — from this call's answer too, because it
-        was folded from a file the path no longer names. Filtered to the one id,
-        so the pass is bounded in memory (at most one entry) and single-purpose.
+        untrustworthy for THIS path: the map is always dropped from the memo,
+        and it never ANSWERS this call — the re-read below does. Filtered to the
+        one id, so the pass is bounded in memory (at most one entry) and
+        single-purpose.
 
-        *known* is the RETAINED MAP as a WITNESS, and it is passed only where it
-        IS evidence: the ``stat_after is None`` arm, where the fold read a file
-        this very call watched disappear (``open()`` binds the inode; unlink(2)
-        keeps it readable), and the truncation arm, where the same inode still
-        exists but the bytes the fold read were cut away. A map that says
-        ``True`` was folded from records that named this point, so a path that
-        no longer answers for it cannot be judged (``None`` ⇒
+        *known* is the RETAINED MAP as a WITNESS, and it is passed on EVERY arm
+        that reaches here, because on all three the fold really did read the
+        journal at this path:
+
+        * ``stat_after is None`` — the path no longer names a file, and the fold
+          read one this very call watched disappear (``open()`` binds the inode;
+          unlink(2) keeps it readable);
+        * TRUNCATION — the same inode still exists, but the bytes the fold read
+          were cut away (logrotate(8)'s ``copytruncate`` shape);
+        * REPLACEMENT — a rotate/``mv``/restore put a DIFFERENT file at the path
+          (logrotate(8)'s ``create``/``renamecopy`` shape), and rename(2) leaves
+          the fold's descriptor naming the OLD one: "Open file descriptors for
+          oldpath are also unaffected".
+
+        A map that says ``True`` was folded from records that named this point,
+        so a path that no longer answers for it cannot be judged (``None`` ⇒
         ``journal_unreadable``) — the same reading the fold's own
         ``FileNotFoundError`` arm applies to its retained map. The replacement
-        arm passes nothing, because there the map describes a DIFFERENT file and
-        a ``True`` in it says nothing about this one.
+        arm used to pass nothing, on the reading that a map of a DIFFERENT file
+        says nothing about this one; that is true of presence-at-the-path-now,
+        but the question here is whether a revision was LOST, and for that the
+        old file's records are the surviving evidence (review round 20, finding
+        1). The round-19 ``point_id not in state`` term keeps a folded DELETE at
+        ``False``, so the witness can only make this call louder, never claim a
+        ``journal_known`` it cannot support.
 
         ⛔ THE WITNESS IS APPLIED TO EVERY NON-ANSWER, NOT JUST THE RAISED ONE
         (review round 18, finding 1). A re-read that SUCCEEDS and carries no LINE

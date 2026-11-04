@@ -2361,19 +2361,32 @@ def test_a_delete_in_the_recreated_path_is_answered_not_escalated(
             sdk.close()
 
 
-def test_a_replacement_is_not_answered_from_the_old_maps_witness(
+def test_a_replacement_answers_unjudged_through_the_old_maps_witness(
         tmp_path, monkeypatch, caplog):
-    """The witness is evidence about ONE file: a REPLACEMENT stays map-free.
+    """A REPLACEMENT under the fold must NOT answer "a typo" for a witnessed id.
 
-    The companion of the round-18 split — it pins the ORDER of the two arms. An
-    id the OLD map held as PRESENT, absent from the REPLACEMENT journal, must
-    still answer a silent "typo": the map describes a file that is no longer at
-    this path, so applying it to the new file would alarm a healthy lane
-    (#10515 indicator 2, and the calibration the ABSENT arm exists to keep).
+    A rotate/``mv``/restore landing under the fold is the third arm, and it was
+    the last one still answering MAP-FREE. ``stat_after[:2]`` differs from the
+    key, so ``known`` was dropped entirely — and for an id the OLD map held as
+    PRESENT, absent from the replacement journal, the map-free needle read the
+    NEW file, found no line, and answered ``False``. `_report_absent_revision`
+    then took its ``else: return`` branch: NO warning, NO counter, for a revision
+    the file this call folded provably carried. `origin/main` answered that same
+    interleaving loudly (``known.get(pid, False)`` ⇒ ``True`` ⇒
+    `journal_known`), so the map-free answer was a step BELOW `main` on exactly
+    the loss #10515 indicator 1 requires to be visible.
 
-    This is a guard against the over-correction of the two tests above, not a
-    pre-fix pin: it passes on both trees, and a fix that passed ``known`` on the
-    replacement arm would fail it.
+    The answer here must be UNJUDGED, not "known": the old file's records are
+    the surviving evidence that the id EXISTED, while nothing at this path can
+    confirm the graph should now hold it — ``None`` ⇒ `journal_unreadable`, the
+    vocabulary's own word for "nothing can be judged here". A folded DELETE is
+    the different case that stays ``False`` and silent
+    (`test_a_delete_in_the_recreated_path_is_answered_not_escalated`).
+
+    Non-vacuity: on the pre-fix tree (map-free replacement arm) the counter does
+    not move and no warning is emitted, so both assertions below redden — the
+    old docstring claimed this test "passes on both trees", which was false for
+    exactly this reason.
     """
     from tortoise import monitoring
     from tortoise.log import EventLog
@@ -2428,12 +2441,24 @@ def test_a_replacement_is_not_answered_from_the_old_maps_witness(
         caplog.clear()
         with caplog.at_level("WARNING"):
             assert sdk.update_point(pid, confidence=0.9) == {}
-        assert monitoring.silent_revision_loss_counts() == before, (
-            "the REPLACED file holds no record for the id, and the old map is "
-            "not evidence about it — a healthy typo must stay silent")
-        assert not any("will not be replayed" in r.getMessage()
-                       for r in caplog.records), (
-            "the old map must not raise an alarm about a different file")
+        after = monitoring.silent_revision_loss_counts()
+        assert after.get("journal_unreadable", 0) == \
+            before.get("journal_unreadable", 0) + 1, (
+                "the REPLACED file holds no record for the id and cannot answer "
+                "for it, but the OLD map — folded from records that really "
+                "named this journal at this path — proves the id existed, so "
+                "the loss is UNJUDGED and must be reported (#10515 indicator "
+                f"1): {after}")
+        assert after.get("journal_known", 0) == before.get("journal_known", 0), (
+            "nothing at this path can confirm the id is journal-known NOW — the "
+            "witness may only escalate the answer to UNJUDGED, never assert "
+            "`journal_known` it cannot support")
+        assert any("could not be READ to rule a typo out" in r.getMessage()
+                   for r in caplog.records), (
+            "the loss must be reported LOUDLY, as journal_unreadable")
+        assert sdk._journal_presence_memo is None, (
+            "the map still came from a file the path no longer names, so it "
+            "must not be kept, whatever this call answered")
         new_stat = os.stat(journal)
         assert (new_stat.st_dev, new_stat.st_ino) != (
             old_stat.st_dev, old_stat.st_ino), (
