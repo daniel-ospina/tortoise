@@ -682,8 +682,10 @@ def _wait_bound_refused() -> bool:
 #: lands while the ABANDONED first write is still running is not a repeat — both
 #: can read absent, and both create. The other two members do not share that
 #: mechanism and are not covered by this caveat: ``create_source`` converges in ONE
-#: conditional statement (`projection/entities.py`: `MERGE (s:Source {url:$id})`,
-#: "CONDITIONAL (single statement, pin b)"), and ``onboarding_demo_create`` is
+#: conditional statement (`projection/entities.py`: `MERGE (s:Source {url:$id})`
+#: — the file's own note there is "pin d"; the "CONDITIONAL (single statement,
+#: pin b)" wording is `sdk.py`'s, at the door that calls it), and
+#: ``onboarding_demo_create`` is
 #: sentinel-gated. Measured on the embedded lane: two in-process
 #: concurrent `create_point(..., dedup=True)` calls minted two nodes with the
 #: identical `content_hash` in 14 of 20 rounds, while the sequential control
@@ -891,6 +893,44 @@ def _declared_dry_run_default(name: str):
     return None if param is None else param.default
 
 
+#: The spellings a JSON client sends for a boolean, and what FastMCP's pydantic
+#: coercion makes of them. ONLY the TRUE half is used below — see
+#: ``_coerces_to_true``'s docstring for why the FALSE half must stay unread.
+_COERCES_TO_TRUE = frozenset({"true", "1", "yes", "on", "t", "y"})
+
+
+def _coerces_to_true(value) -> bool:
+    """Whether FastMCP will coerce this raw argument to ``True``.
+
+    ⛔ The refusal runs on the PRE-VALIDATION dict, but the handler it stands in
+    for runs AFTER pydantic coerces it. So `{"dry_run": "true"}` — a spelling an
+    LLM client emits naturally, and one the served schema accepts — is a real
+    preview (the handler sees ``True`` and every write sits behind ``if not
+    dry_run``), while ``value is True`` is False for it. Measured: that shipped
+    ``committed: "unknown"`` + "this call is NOT safe to repeat" for six of the
+    seven ``dry_run`` tools, i.e. told a caller an unexecuted preview may have
+    committed and forbade re-sending it — the exact outcome the docstring above
+    says is impossible.
+
+    ⛔ ONLY the true-direction is admitted, and that asymmetry is load-bearing.
+    Reading ``"false"``/``"0"`` as ``False`` would let a caller's spelling switch
+    the verdict toward "nothing was written"; leaving them unread can only
+    produce the conservative answer, because an unrecognised spelling still falls
+    through to the write arm. (If the spelling is one pydantic REJECTS, no write
+    happens at all, so ``"none"`` is right for that case too — which is why the
+    true-direction is safe to accept even for a spelling this table guesses at.)
+    """
+    if value is True:
+        return True
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, int):  # `dry_run: 1` also coerces to True
+        return value == 1
+    if isinstance(value, str):
+        return value.strip().lower() in _COERCES_TO_TRUE
+    return False
+
+
 def _arguments_say_preview(name: str, arguments) -> bool:
     """Whether this call declares itself a preview, so it writes nothing.
 
@@ -901,9 +941,14 @@ def _arguments_say_preview(name: str, arguments) -> bool:
     which is the place a preview of a destructive operation matters most.
 
     Gated on the tool's own declared ``dry_run`` parameter, never on the raw
-    argument dict: ``dry_run`` is not a server-managed prop, so a caller could
-    otherwise smuggle ``props={"dry_run": True}`` onto a tool that ignores it
-    and forge "nothing was written" over an executed write (#3926 / #8135).
+    argument dict. ⛔ The ``props={"dry_run": True}`` echo-forgery is real, but it
+    lives on the PAYLOAD reader (``_payload_says_preview`` / ``_is_preview``,
+    pinned by ``tests/test_10084_graph_disclosure.py``), NOT here: ``props`` stays
+    nested inside ``arguments``, so this reader never sees it. Verified rather
+    than assumed — deleting this gate leaves
+    ``_wait_bound_refusal_result("tortoise_create_point", {"props": {"dry_run":
+    True}})`` at ``committed: "unknown"``, i.e. this reader's answer does not
+    depend on the props channel either way.
     """
     if not isinstance(arguments, dict):
         return False
@@ -913,7 +958,7 @@ def _arguments_say_preview(name: str, arguments) -> bool:
         # call (its most common invocation, a read-only schema inspection) writes
         # nothing — while `arguments.get("dry_run") is True` never fires for it.
         # Read the DECLARED default instead of assuming "explicit True".
-        if arguments.get("dry_run") is True:
+        if _coerces_to_true(arguments.get("dry_run")):
             return True
         if "dry_run" not in arguments and _declared_dry_run_default(name) is True:
             return True
@@ -1009,9 +1054,13 @@ def _wait_bound_refusal_result(name: str | None = None,
       ``_arguments_say_preview``'s neighbourhood and #10849's review, where
       ``tortoise_manage_sources(action="list")`` turned out to materialise
       onboarding state through a CAS write.
-    * ``data.retry_safe`` — the registry's own retry-safety verdict for this
-      call, so the caller does not have to re-derive it from prose (a new writer
-      defaults to UNSAFE). ⛔ Derived from the NAME **and the ARGUMENTS**: a
+    * ``data.retry_safe`` — for a DISPATCHED write, the registry's own
+      retry-safety verdict for this call, so the caller does not have to
+      re-derive it from prose (a new writer defaults to UNSAFE). ⛔ On the
+      NOT_SENT and PREVIEW arms it is forced ``true`` WITHOUT consulting the
+      registry — nothing was written, so re-sending is safe whatever the
+      operation is; ``tortoise_delete`` (``idempotentHint: false``) is the
+      counter-example, and it returns ``true`` on both. ⛔ Derived from the NAME **and the ARGUMENTS**: a
       converging declaration can be switched off by the call itself
       (``tortoise_create_point(dedup=False)`` mints a second Point), and a
       name-only verdict would ship "repeating it converges" to exactly the

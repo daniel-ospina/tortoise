@@ -391,13 +391,54 @@ def test_a_preview_writes_nothing_and_says_so():
 def test_a_forged_dry_run_prop_cannot_claim_a_preview():
     """The preview arm is gated on the tool's DECLARED `dry_run` parameter.
 
-    `dry_run` is not a server-managed prop, so a caller could otherwise pass
-    `props={"dry_run": True}` to a tool that ignores it and forge "nothing was
-    written" over an executed write — the #3926 / #8135 class.
+    A tool that does not declare `dry_run` must never be reported as a preview,
+    however the caller spells the request — otherwise a forged "nothing was
+    written" sits over an executed write (the #3926 / #8135 class).
+
+    ⛔ This asserts a POSITIVE, not just "not a preview": `tortoise_get_point` is
+    a genuine READ, so it must be the WRITE-AMBIGUOUS answer (`unknown`), and an
+    implementation that dropped the declared-parameter gate would answer that by
+    accident. So the discriminating case is the one below it — a tool that does
+    NOT declare `dry_run` and is NOT a read, where the gate is what decides.
     """
     forged = _error(ms._wait_bound_refusal_result(
         "tortoise_create_point", {"props": {"dry_run": True}}))["data"]
     assert forged["committed"] == "unknown"
+    # ...and the reader does not see `props` at all, so the payload-echo vector
+    # belongs to the payload reader, not here. Pinned by asserting the gate's
+    # actual rule: a non-dry_run tool stays write-ambiguous even when the spelling
+    # is a real boolean at the TOP level (which no pydantic coercion can rescue).
+    top_level = _error(ms._wait_bound_refusal_result(
+        "tortoise_create_point", {"dry_run": True}))["data"]
+    assert top_level["committed"] == "unknown", (
+        "`tortoise_create_point` does not declare `dry_run`, so a top-level "
+        "`dry_run=True` must not be read as a preview")
+
+
+def test_a_COERCED_true_is_a_preview_and_a_coerced_false_is_not():
+    """The refusal reads the RAW dict; the handler runs AFTER pydantic coerces it.
+
+    `{"dry_run": "true"}` is a spelling an LLM client emits naturally and the
+    served schema accepts; FastMCP coerces it to `True`, so the handler takes its
+    preview branch and every write sits behind `if not dry_run` — nothing is
+    written. Reading only `value is True` reported `committed: "unknown"` +
+    "this call is NOT safe to repeat" for it, i.e. told a caller an unexecuted
+    preview may have committed and forbade re-sending it.
+
+    ⛔ The asymmetry is the point: only the TRUE direction is admitted. Reading
+    `"false"`/`"0"` as `False` would let a caller's SPELLING move the verdict
+    toward "nothing was written"; leaving them unread can only fall through to
+    the conservative write arm.
+    """
+    def committed(v):
+        return _error(ms._wait_bound_refusal_result(
+            "tortoise_backfill_v25", {"dry_run": v}))["data"]["committed"]
+
+    for truthy in (True, "true", "TRUE", " true ", "1", 1, "yes", "on"):
+        assert committed(truthy) == "none", f"{truthy!r} coerces to True -> preview"
+    for not_true in ("false", "0", False, 0, None, "", "nonsense"):
+        assert committed(not_true) == "unknown", (
+            f"{not_true!r} must NOT be read as a preview — the fail-closed direction")
 
 
 def test_a_no_dispatch_arm_claims_nothing_was_sent():
