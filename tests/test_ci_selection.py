@@ -4749,6 +4749,35 @@ def test_work_claim_tool_change_fails_closed_to_full():
         assert "core" in r["surfaces"], (sibling, r)
 
 
+def test_attest_census_tool_change_fails_closed_to_full():
+    # #10687: tools/attest_census.py owns tests/test_attest_census.py — the hermetic
+    # arms that pin the fabricate-vs-repair boundary (a proof may be RE-POSTED only from
+    # a record that exists, declares this repo, binds THIS head byte-for-byte, carries a
+    # clean verdict with artifact-shaped evidence and is not `mint: carried`). Same
+    # #3261/#4256/#5052 silent-drop class as the carve-outs above: `tools/` is a flat
+    # NON_PYTHON_PREFIXES entry, so without this TOOL_CARVEOUTS entry a tool-only change
+    # came back `changed=[]`, select() took the docs-only early return (surfaces=[],
+    # tier-1 smoke only) — which BYPASSES the `if not matched: matched.add("core")`
+    # fallback — so not one arm ran on the single file that decides whether a review
+    # claim is laundered. Registering tests/test_attest_census.py under `core` in
+    # ci-surfaces.yml does NOT cover this: it applies to edits of the TEST file, not of
+    # the tool (measured: the tool-only diff came back surfaces=[], full=False).
+    # Mutation check: removing the TOOL_CARVEOUTS entry filters the path out (docs-only
+    # early return), failing every assert below.
+    r = _sel(["tools/attest_census.py"])
+    assert r["full"] is True, r
+    assert r["test_files"] == "ALL", r
+    assert "core" in r["surfaces"], r
+    # ... and the carve-out is a PREFIX, not one exact filename, so a rename or a split
+    # cannot re-open the same drop with nothing failing (the shape the work_claim prefix
+    # arm was added for).
+    for sibling in ("tools/attest_census_extra.py", "tools/attest_census_store.py"):
+        r = _sel([sibling])
+        assert r["full"] is True, (sibling, r)
+        assert r["test_files"] == "ALL", (sibling, r)
+        assert "core" in r["surfaces"], (sibling, r)
+
+
 def test_session_schema_guard_runs_on_every_declared_writer_surface():
     # #3554: the declared :Session writer inventory SPANS surfaces —
     # tools/longmem_eval/ingest.py and ingest_v2.py select `eval`,
@@ -10567,6 +10596,48 @@ def test_surface_audit_maps_tortoise_api_source_as_api_pin(tmp_path):
     report = _audit(_audit_manifest(api=["test_imports_api.py"]), repo)
     assert "tortoise/api.py" not in [g["path"] for g in report["coverage_gaps"]]
     assert "tortoise/api.py" not in [r["path"] for r in report["uncovered"]]
+
+
+def test_window_arm_receipt_edit_selects_eval():
+    """#10538 (fresh-context review, cycle 1, P1): the receipts a ruling rests on
+    must be under the gate.
+
+    `docs/scoping/receipts/2026-11-03-10538-window-arm-retention.json` is a
+    COMMITTED build artifact: the owner ruling on #10538 (`window-exit` vs
+    `ab-head-ab`) and the #9097 exit measurement are argued from its numbers. A
+    docs-only diff selects NO surface (tier 1), so before the exact-path
+    SOURCE_PATTERNS entry a hand-edited receipt — or an instrument change that
+    re-emits different numbers — ran nothing that gates. The instrument
+    (`tools/longmem_eval/window_arm_baseline.py`) was already an `eval` match;
+    the receipt was not, and registering the TEST file in
+    config/ci-surfaces.yml does not fix that half: selection is driven by
+    SOURCE_PATTERNS. Same #1349/#2938/#3616 silent-drop class as the
+    write-path entry above.
+
+    RED before the change, for TWO different reasons: the receipt edit selected
+    NO surface at all (``surfaces == []`` — a docs-only diff is tier 1), and the
+    instrument edit selected ``eval`` (``tools/longmem_eval/`` was already a
+    pattern there) but not this pin, because the surface carried no registration
+    for it. GREEN after both repairs — and both halves stay mutation-real:
+    removing the SOURCE_PATTERNS entry reds the receipt case, removing the
+    ``eval`` registration reds the instrument case.
+    """
+    cases = (
+        # the instrument that emits the numbers
+        "tools/longmem_eval/window_arm_baseline.py",
+        # ...and the committed artifact those numbers are published in
+        "docs/scoping/receipts/2026-11-03-10538-window-arm-retention.json",
+    )
+    for changed in cases:
+        r = _sel([changed])
+        assert r["full"] is False, changed
+        assert "eval" in r["surfaces"], (
+            f"{changed} must select the `eval` surface that owns its pins; "
+            f"got {r['surfaces']}")
+        selected = set(r["test_files"]) | set(r["slow_selected"])
+        assert "test_window_arm_baseline_10538.py" in selected, (
+            f"nothing pins the retention baseline on {changed}; "
+            f"selected {sorted(selected)[:5]}")
 
 
 def test_write_path_measurement_source_edit_selects_eval():
