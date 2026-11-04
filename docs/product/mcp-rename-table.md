@@ -77,11 +77,11 @@ not something to reconcile silently.
 | 57 | `tortoise_list_sources` | `tool_registry.py:367` | `tortoise_overview(section="sources")` | `graph_overview` | warning shim |
 | 58 | `tortoise_list_tags` | `tool_registry.py:438` | `tortoise_overview(section="tags")` | `graph_overview` | warning shim |
 | 59 | `tortoise_list_topics` | `tool_registry.py:1031` | **no replacement** | `list_knowledge` | absent |
-| 60 | `tortoise_manage_sources` | `tool_registry.py:1405` | **no replacement** | `manage_sources` | absent |
+| 60 | `tortoise_manage_sources` | `tool_registry.py:1411` | **no replacement** | `manage_sources` | absent |
 | 61 | `tortoise_mine_conversations` | `tool_registry.py:524` | **no replacement** | `mine_knowledge_from_directory` | absent |
 | 62 | `tortoise_mitigate_operator` | `tool_registry.py:704` | **no replacement** | `adjust_relationship` | absent |
-| 63 | `tortoise_onboarding_github_index` | `tool_registry.py:1446` | `tortoise_manage_sources(action="enable", source="github_issues") (no per-repo scope: it indexes every connected repo)` | `manage_sources` | warning shim |
-| 64 | `tortoise_onboarding_session_recording` | `tool_registry.py:1437` | `tortoise_manage_sources(action="enable" or "disable", source="agent_sessions")` | `manage_sources` | warning shim |
+| 63 | `tortoise_onboarding_github_index` | `tool_registry.py:1452` | `tortoise_manage_sources(action="enable", source="github_issues") (no per-repo scope: it indexes every connected repo)` | `manage_sources` | warning shim |
+| 64 | `tortoise_onboarding_session_recording` | `tool_registry.py:1443` | `tortoise_manage_sources(action="enable" or "disable", source="agent_sessions")` | `manage_sources` | warning shim |
 | 65 | `tortoise_operator_action` | `tool_registry.py:1326` | **no replacement** | `adjust_relationship` | absent |
 | 66 | `tortoise_org_create` | `tool_registry.py:1106` | **no replacement** | `tenancy:create_memory_graph` | absent |
 | 67 | `tortoise_overview` | `tool_registry.py:1358` | **no replacement** | `graph_overview` | absent |

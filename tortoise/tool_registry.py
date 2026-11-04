@@ -1395,11 +1395,17 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
     # `tortoise_onboarding_state`, `tortoise_onboarding_seed`,
     # `tortoise_onboarding_github_connect`, `tortoise_onboarding_github_status`.
     #
-    # NO capability is lost — every one of these routes is HAND-WRITTEN in
-    # `tortoise/hosted_api.py` (`POST /v1/demo`, `GET|PATCH /v1/onboarding/state`,
-    # `POST /v1/onboarding/seed`, `POST /v1/onboarding/github/connect`,
-    # `GET /v1/onboarding/github/status`) and `tortoise/selfhost_api.py` mirrors
-    # them for the self-hosted fork. `tortoise_manage_sources` is the surviving
+    # NO capability is lost on the HOSTED surface — every one of these routes is
+    # HAND-WRITTEN in `tortoise/hosted_api.py` (`POST /v1/demo`,
+    # `GET|PATCH /v1/onboarding/state`, `POST /v1/onboarding/seed`,
+    # `POST /v1/onboarding/github/connect`, `GET /v1/onboarding/github/status`).
+    # ⚠️ SELF-HOST is narrower, and stated so the claim is not read as universal:
+    # `tortoise/selfhost_api.py` serves only TWO of the five (`GET
+    # /v1/onboarding/state`, `POST /v1/onboarding/seed`), so `demo_create` and the
+    # two `github_*` tools are HOSTED-ONLY. A self-hosting operator loses the
+    # demo-graph step; its fallback is the ordinary write path (file the demo
+    # points with `tortoise_create_point`).
+    # `tortoise_manage_sources` is the surviving
     # agent-callable source-management tool, and the two per-source switches it
     # replaced stay RETIRED (see `RETIRED_USE_INSTEAD`).
     ToolDefinition(

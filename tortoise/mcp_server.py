@@ -5695,11 +5695,11 @@ def _sources_view() -> dict:
 
         The two GitHub sources share a key set on purpose: a caller iterating
         `sources` must not need to know which of them happens to carry the
-        index state. Both onboarding tools are off the TARGET list yet STILL
-        SERVED today: `tortoise_onboarding_state` returns the raw projection and
-        is therefore a second reader of this state, while
-        `tortoise_onboarding_github_status` is served but reads no index state.
-        "Removed" here is a target-list status, never the served surface. The
+        index state. Both onboarding tools that used to read this state are gone
+        from the surface (#4282 Phase 3.2: `tortoise_onboarding_state`,
+        `tortoise_onboarding_github_status`), so `tortoise_manage_sources` is the
+        ONLY reader of the projection — `onboarding` below carries the raw state
+        `tortoise_onboarding_state` used to return. The
         issues walk stamps `github_indexed`, the docs walk `github_docs_indexed`.
         """
         raw = _state_get(state, f"{prefix}_at")
@@ -7040,9 +7040,11 @@ def create_http_app(*, allowed_origins: list[str] | None = None,
             _by_name = get_tool_by_name()
             # Skip the control-plane read when it can't change the outcome: in
             # a curation-group-scoped app (other than "onboarding") the group
-            # filter below already excludes the onboarding tools.
+            # filter below already excludes the onboarding tools — and since
+            # #4282 Phase 3.2 the hide-list is EMPTY, so there is no population
+            # left for this read to gate.
             onboarding_done = False
-            if not (group and group != "onboarding"):
+            if _ONBOARDING_TOOL_NAMES and not (group and group != "onboarding"):
                 # #2924: awaited — the gate read is off the event loop (the
                 # read is synchronous end to end; see _org_onboarding_complete).
                 onboarding_done = await _org_onboarding_complete()
@@ -7058,7 +7060,13 @@ def create_http_app(*, allowed_origins: list[str] | None = None,
                 # Epic #888: onboarding tools retire from the steady-state
                 # surface once this org's onboarding is complete (fail-open
                 # — state read errors keep them visible).
-                if onboarding_done and t.name in _ONBOARDING_TOOL_NAMES:  # noqa: SIM103
+                #
+                # #4282 Phase 3.2: the set is EMPTY (all five members left the
+                # surface), so it is tested FIRST — without the short-circuit
+                # every `tools/list` would still pay an `_org_onboarding_complete()`
+                # control-plane read to gate a population that cannot exist.
+                if (_ONBOARDING_TOOL_NAMES and onboarding_done
+                        and t.name in _ONBOARDING_TOOL_NAMES):  # noqa: SIM103
                     return False
                 return True
 

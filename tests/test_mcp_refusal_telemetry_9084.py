@@ -618,16 +618,23 @@ async def test_overview_topics_without_entity_id_is_recorded_as_a_failure(
 @pytest.mark.asyncio
 async def test_onboarding_state_without_team_context_is_recorded_as_a_failure(
         events, hosted):
-    """`_onboarding_state` builds the refusal; the tool returns it verbatim.
+    """`_onboarding_state` builds the refusal; a served tool returns it verbatim.
 
     The IDENTICAL "No team context" message was converted in six sibling tool
     bodies by the first sweep and left plain in the helper that produces it —
     so the same refusal from the same family was a failure in five tools and a
-    success in the sixth (`tortoise_onboarding_state`).
+    success in the sixth.
+
+    #4282 Phase 3.2: the original witness (`tortoise_onboarding_state`) left the
+    MCP surface, but the HELPER did not — `tortoise_manage_sources(action="list")`
+    still calls `_onboarding_state()` and returns its refusal verbatim, so the
+    property is re-pinned on the surviving caller instead of lapsing with the
+    removed name.
     """
     token = ms._current_org_id.set(None)
     try:
-        result = await ms.mcp.call_tool("tortoise_onboarding_state", {})
+        result = await ms.mcp.call_tool("tortoise_manage_sources",
+                                        {"action": "list"})
     finally:
         ms._current_org_id.reset(token)
 

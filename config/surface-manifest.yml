@@ -74,6 +74,10 @@ response_fields:
     came from a neutral default), and is ABSENT when the ranker''s read is unobservable or answered other rows but
     not this one. #10137.'
   unchanged_when_off: yes — additive; ordering and every other field unchanged
+- response: tortoise_analyze
+  field: why
+  emitted_when: TORTOISE_W4_ENRICHMENT is truthy (1/true/yes/on; unset or 0 means off)
+  unchanged_when_off: yes — the response is byte-identical when the flag is off
 - response: tortoise_search
   field: status
   emitted_when: the hosted GET /v1/search response, when TORTOISE_READ_STATUS is truthy (1/true/yes/on; unset or
@@ -511,6 +515,12 @@ response_fields:
     transport wait-bound refusal; a `_safe` failure is dropped from `structured_content` and survives as the JSON
     text in `content`'
   unchanged_when_off: yes — a successful call's `structured_content` and `_meta` are byte-identical
+- response: tortoise_packs_list
+  field: _meta.tortoise_error
+  emitted_when: 'the same #8482 repair on this tool''s wrap envelope. `_meta.tortoise_error` is set ONLY by the
+    transport wait-bound refusal; a `_safe` failure is dropped from `structured_content` and survives as the JSON
+    text in `content`'
+  unchanged_when_off: yes — a successful call's `structured_content` and `_meta` are byte-identical
 - response: tortoise_suggest_entry_points
   field: _meta.tortoise_error
   emitted_when: 'the same #8482 repair on this tool''s wrap envelope. `_meta.tortoise_error` is set ONLY by the
@@ -689,7 +699,11 @@ counts:
     link: 4
     operate: 5
 high_water_counts:
-  tools: 82
+  # Lowered 82 -> 76 in #4282 Phase 3.2 (five `run_onboarding` tools retired). This is the
+  # deliberate, reviewable act the pin requires: leaving it at 82 would give a re-cut over the
+  # reduced surface six slots of slack, so re-adding any of the five (the regression
+  # `tests/test_tool_registry.py` pins) would pass `tools/surface-guard.py` green.
+  tools: 76
   sdk_public_methods: 150
 retired:
 - name: tortoise_get
