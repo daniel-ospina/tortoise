@@ -1026,9 +1026,11 @@ def _condition_holds(expr, *, run_cancelled: bool, legs_failed: bool) -> bool:
 def test_both_jobs_stay_literal_always():
     """The exact-string pin for BOTH jobs — the behavioural check is not a substitute.
 
-    No behavioural check covers this job's CANCELLED-run half — the job the wedge
-    re-arms first — so that half's pin must be exact. Its red-run half IS covered
-    behaviourally by `test_the_deferrable_arms_are_exactly_the_verdict_jobs_needs`,
+    No behavioural check covers `ci-introduced-failure`'s CANCELLED-run half, so its pin
+    must be exact (the aggregate's cancelled-run half is covered by
+    `::test_the_required_aggregate_must_not_be_skippable_on_a_cancelled_run`). Its
+    red-run half IS covered behaviourally by
+    `test_the_deferrable_arms_are_exactly_the_verdict_jobs_needs`,
     whose final assertion runs `_condition_holds` over this job's `if:` with
     `run_cancelled=False, legs_failed=True`. The aggregate's `-`-selectored row for this
     job then REDs the required check on a skipped verdict.
@@ -1052,8 +1054,8 @@ def test_the_required_aggregate_must_not_be_skippable_on_a_cancelled_run():
 
     MEASURED 2026-11-04T12:03-12:22Z: 112 runs listed `queued` (286 jobs actually
     queued), 3 running jobs repo-wide, 15 of 18 self-hosted runners IDLE, 0 merges in
-    ~2 h. Six
-    runs were every-job-`cancelled` EXCEPT `ci-introduced-failure` sitting `queued`
+    ~2 h. Six runs were every-job-`cancelled` EXCEPT `ci-introduced-failure` sitting
+    `queued`
     (oldest ~2.2 h); twelve more had it as their only remaining queued job.
 
     Mechanism: `concurrency:` cancels a superseded PR run, GitHub RE-EVALUATES job `if`
@@ -1062,15 +1064,15 @@ def test_the_required_aggregate_must_not_be_skippable_on_a_cancelled_run():
     troubleshooting docs) a stuck run keeps blocking later runs in the same concurrency
     group. In the runs THIS LANE sampled, the re-armed job sits `queued` while its
     siblings are `cancelled`; the required context then never posts a conclusion. WHICH
-    job lands in `queued` varies by run, so this is stated as "never posts a conclusion"
-    rather than by job. Either way
-    the rail REFUSES BY NAME (`check-unresolved:<name>:<status>/<conclusion>`) at
+    job lands in `queued` varies by run, so the required-context consequence is stated
+    by effect while the sampled detail names the job it observed.
+    The rail REFUSES BY NAME (`check-unresolved:<name>:<status>/<conclusion>`) at
     the bound `ADMIN_MERGE_CHECK_UNRESOLVED_BOUND` (default 3600 s; `admin-merge.sh`
     assigns `CHECK_UNRESOLVED_BOUND` from it — cite the CONSTANT, never a rail line:
-    `tests/fixtures/rail_surface_tokens.json`'s `_read_at_rail_lines` records how far
-    those drift between checkouts) — the bound written for exactly this shape, whose
-    doc block notes a run "queued because the whole pool is saturated never stops
-    moving, so no progress-based clock can ever reach it".
+    `tests/fixtures/rail_surface_tokens.json`'s `_read_at_rail_lines` records WHERE
+    those sets were read; the live rail has since moved) — the bound written for exactly
+    this shape, whose doc block notes a run "that is queued because the whole pool is
+    saturated never stops moving, so no progress-based clock can ever reach it".
 
     ⛔ The obvious fix — `${{ !cancelled() }}` — is a FALSE PASS and is refused here.
     A job skipped by a conditional concludes `skipped`, which branch protection reports
