@@ -6601,8 +6601,13 @@ def test_a_fold_never_moves_the_canary_producer_row(monkeypatch):
     TESTS across runs; routing it onto a different class would make it a
     comparison of runner classes — the failure measured 2026-10-27..30, when run
     `40986603502` (head `5a2ae6aa1`) had `test (i)`, the canary, taken by
-    `pi-runner-vm-5` (ARM64) and killed at 32m12s of a 30m budget
-    (`docs/ops/ci-runner-x64.md:847`, `:888`).
+    `pi-runner-vm-5` (ARM64) and killed at 32m12s at its own watchdog. The
+    runbook's residual table records that row (`docs/ops/ci-runner-x64.md`, the
+    `pool-split` residuals) — cited WITHOUT a line number on purpose: this branch
+    edits that runbook, and a `path:line` into a file under edit decays silently
+    the moment anything is inserted above it. The sentinel that verifies the row
+    still says this lives in `tests/test_ci_runner_x64_install.py`'s
+    `symbol_citations`, so the relay is checked while the address cannot go stale.
     A fold therefore gets priority on the legs that carry the wall, and the
     producer stays where the streak expects it.
     """
