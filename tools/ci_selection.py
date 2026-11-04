@@ -1479,6 +1479,24 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # this file's suite (the same #1349/#3332/#3616 silent-drop class as
              # queue_resweep/batch_open above).
              "tools/next_work.py",
+            # #10968 (fold #10974 review P1): `tools/ready_for_owner.py` owns
+            # `tests/test_ready_for_owner.py` (registered `core`), and `tools/` is
+            # in NON_PYTHON_PREFIXES, so a ready_for_owner-only change was filtered
+            # out BEFORE the "not matched -> core" fallback and took the docs-only
+            # early return — measured: `select(["tools/ready_for_owner.py"])`
+            # yielded `surfaces=[]` and 72 unrelated tests, with neither this
+            # tool's own suite nor `tests/test_entry_point_python_guard.py`
+            # selected. That is the fail-OPEN direction for this tool in
+            # particular: its docstring states its whole purpose is that "a human
+            # who does not review relies on this thing saying no", so an edit that
+            # widens its gates predicate (e.g. counting `skipped`/`neutral` as
+            # pass, or letting an unreadable read fall through) would have gone
+            # green and merged with none of its 97 arms executed, and the tool
+            # would then print READY-FOR-OWNER over PRs it cannot certify. The
+            # entry makes `_selection_relevant()` keep the path so `core` — and
+            # this tool's own guard — is selected. Pinned by
+            # tests/test_ready_for_owner.py::test_a_ready_for_owner_only_change_selects_core_so_this_guard_actually_runs.
+            "tools/ready_for_owner.py",
              # #6388: `tools/seal_session_events.py` is the session-events seal
              # policy, guarded by tests/test_session_events_seal.py, which is
              # `core`-registered — but `tools/` is swallowed by

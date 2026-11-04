@@ -1753,3 +1753,43 @@ def test_each_mutation_is_killed(mutant_name: str, label: str, fixture_fn) -> No
         f"SURVIVED MUTANT: {label} — the mutant did not flip {condition} to PASS, so the "
         f"per-mode test does not discriminate. Mutant raw: {mutant_check.raw}"
     )
+
+
+# ── the CI-selection carveout is LOAD-BEARING, so it is pinned here ──────
+def test_a_ready_for_owner_only_change_selects_core_so_this_guard_actually_runs() -> None:
+    """Without the `CORE_ALSO` entry a ready_for_owner-only diff runs NO guard.
+
+    `tools/` is in `NON_PYTHON_PREFIXES` and no `SOURCE_PATTERNS` row matches
+    `tools/ready_for_owner.py`, so WITHOUT the entry the path is filtered out
+    BEFORE the "not matched -> core" fallback, `select()` takes the docs-only
+    early return, and neither this file's suite nor
+    `tests/test_entry_point_python_guard.py` is selected. Measured before the
+    entry existed: `surfaces == []` and **72 unrelated** test files.
+
+    For THIS tool that is the fail-open direction specifically. Its own docstring
+    states the whole point is that "a human who does not review relies on this
+    thing saying no", so the diff most worth guarding is one that widens the
+    gates predicate — e.g. counting `skipped`/`neutral` as pass, or letting an
+    unreadable read fall through instead of `FAIL(unreadable)`. Such an edit
+    would have gone green and merged with none of this file's arms executed, and
+    the tool would then print READY-FOR-OWNER over PRs it cannot certify.
+
+    `config/ci-surfaces.yml`'s registration of `tests/test_ready_for_owner.py` is
+    the OTHER half and is pinned by `ci_selection.py --integrity`. That half is
+    NOT sufficient, and is exactly what was mistaken for coverage: it applies to
+    edits of the TEST file, never of the tool. This test pins the selection half,
+    which `integrity()` does not read.
+    """
+    from tools import ci_selection as cs
+
+    selection = cs.select(
+        ["tools/ready_for_owner.py"], "pull_request", cs.load_manifest()
+    )
+    assert selection["surfaces"] == ["core"], selection
+    assert "test_ready_for_owner.py" in selection["test_files"], (
+        "the CORE_ALSO entry is missing: a ready_for_owner-only diff would run no "
+        f"guard at all — got {len(selection['test_files'])} files"
+    )
+    assert "test_entry_point_python_guard.py" in selection["test_files"], (
+        "the #5128 entry-point guard must be selected by an edit to this entry point"
+    )
