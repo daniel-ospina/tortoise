@@ -5,10 +5,13 @@ The capture writes the transcript's first substantive utterance as the session
 `_source_search_text(summary=…)` — the capture path has no title). #10000's
 ruling (§9.1/D1) is that captured turn text does not live on a graph node.
 
-⛔ THE DOOR THIS FILE PINS IS NOT THE CAPTURE. `tortoise record-restore` and
-`record_serve`'s `fetch-record` repair re-materialise a node from the RECORD ROW
-through `cache_projection.node_from_row` — so a row written by a build that
-still placed the key re-creates the prose on the graph, and nothing reds.
+⛔ THE DOOR THIS FILE PINS IS NOT THE CAPTURE. Every record-sourced read and
+rebuild goes through `cache_projection.node_from_row`: `tortoise record-restore`
+and `rebuild_from_record` MATERIALISE a node with it, and
+`record_serve.fetch_record_node` answers with the same map because its contract
+is that a served node and a rebuilt node cannot drift. So a row written by a
+build that still placed the key either re-creates the prose on the graph or makes
+the served answer disagree with the rebuild — and nothing reds either way.
 
 The property pinned is a PAIR, because they are one datum: the capture derives
 `_searchText` from the summary (`_source_search_text`), so dropping only
@@ -239,3 +242,91 @@ def test_the_record_row_is_not_mutated_by_the_projection():
         "the value, and only the cache may decline to project it"
     )
     assert row["summary"] == UTTERANCE
+
+
+# ── THE THIRD COST'S REPAIR: the reconciler must not call this a divergence ──
+
+
+class _FakeResult:
+    def __init__(self, rows):
+        self.result_set = rows
+
+
+class _FakeGraph:
+    """The minimum `scan_cache_view` needs: one `MATCH` returning properties."""
+
+    def __init__(self, rows):
+        self._rows = rows
+
+    def query(self, cypher, timeout=None):  # signature parity with the driver
+        return _FakeResult(self._rows)
+
+
+def test_the_reconciler_counts_the_declined_pair_as_cache_owned_not_divergence():
+    """Review cycle 3, P1: the third cost, repaired instead of merely declared.
+
+    At this head the capture STILL writes and journals the prose, so the
+    reconciler's record side (built through `node_from_row`) omits it while the
+    cache holds it — for EVERY session this build captures, not only legacy
+    rows. Left as a `field_mismatch` that is permanent non-clean on healthy
+    data: the class the reconciler's own docstring grades P1 ("a signal
+    indistinguishable from noise is not observability"). So `scan_cache_view`
+    marks the pair CACHE-OWNED for an episodic Source, and the run reports it
+    under `graph_only` — visible, and not a divergence against a correct record.
+    """
+    from tortoise import record_reconcile as rr
+
+    key = "Source:session:s-10853"
+    cache_props = {
+        "url": "session:s-10853", "sourceKind": "agentSession", "sessionId": "s-10853",
+        "summary": UTTERANCE, "_searchText": UTTERANCE,
+    }
+    scan = rr.scan_cache_view(_FakeGraph([(cache_props,)]), labels=["Source"])
+
+    assert scan.placed[key] >= frozenset({"url", "sourceKind"})
+    assert not (scan.placed[key] & frozenset({"summary", "_searchText"})), (
+        "the reconciler still thinks the record PLACES the prose for an episodic "
+        "Source, so it will count it as a field mismatch forever"
+    )
+
+    result = rr.reconcile_record_and_cache(
+        # the RECORD side: what `node_from_row` yields — no prose.
+        {key: {"url": "session:s-10853", "sourceKind": "agentSession",
+               "sessionId": "s-10853"}},
+        scan.view, placed=scan.placed)
+
+    assert result.report.field_mismatches == 0, (
+        f"the reconciler counted the projection's own narrowing as divergence: "
+        f"{result.report.as_dict() if hasattr(result.report, 'as_dict') else result.report}")
+    assert result.divergent == 0
+    assert result.verdict() == rr.VERDICT_CLEAN
+    assert result.graph_only_total == 2, (
+        "the pair must still be VISIBLE, as its own named count — a comparison "
+        f"that declines to judge a field has to say so: {result.graph_only!r}"
+    )
+
+
+def test_a_document_source_with_the_pair_is_still_compared_field_by_field():
+    """The exclusion is scoped to an EPISODIC Source — not to the column pair.
+
+    A document that the cache holds with a DIFFERENT summary than the record is a
+    real divergence and must still be counted: an exclusion keyed on the property
+    name alone would hide it.
+    """
+    from tortoise import record_reconcile as rr
+
+    key = "Source:https://example.com/q3-pricing"
+    cache_props = {
+        "url": "https://example.com/q3-pricing", "sourceKind": "document",
+        "summary": "a DIFFERENT summary from the record's",
+    }
+    scan = rr.scan_cache_view(_FakeGraph([(cache_props,)]), labels=["Source"])
+    assert {"summary"} <= set(scan.placed[key])
+
+    result = rr.reconcile_record_and_cache(
+        {key: {"url": "https://example.com/q3-pricing", "sourceKind": "document",
+               "summary": "A memo about the Q3 pricing change."}},
+        scan.view, placed=scan.placed)
+
+    assert result.report.field_mismatches == 1
+    assert result.divergent == 1
