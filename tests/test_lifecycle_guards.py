@@ -870,17 +870,255 @@ def test_create_point_dedup_folds_a_window_onto_a_live_claim(sdk):
     assert _stored(pid, "confidence", sdk) == pytest.approx(0.97)
 
 
-def test_create_point_dedup_without_a_window_still_folds(sdk):
-    """The boundary: a fold with NO temporal prop keeps applying, dead target or
-    not — the same rule as any other revision of a dead claim (#3305)."""
-    content = f"dedup metadata {uuid.uuid4().hex[:8]}"
-    pid = sdk.create_point("statement", content)["id"]
-    sdk.retract_point(pid)
-    again = sdk.create_point("statement", content, confidence=0.99,
+def test_create_point_dedup_metadata_folds_a_live_target_only(sdk):
+    """The boundary, re-drawn by #10368: a metadata fold applies to a LIVE
+    target and is DROPPED on a TERMINAL one.
+
+    This test used to read "a fold with NO temporal prop keeps applying, dead
+    target or not — the same rule as any other revision of a dead claim
+    (#3305)", and it pinned `confidence=0.99` landing on a retracted point.
+    #10368 (P1-severe) overturns exactly that half: the *implicit*
+    content-identity fold must not rewrite a settled belief, while the
+    *explicit* doors (`update_point`, `supersede_point`) keep the #3305
+    revision capability. The dead-target half now lives in
+    `test_create_point_dedup_does_not_mutate_a_terminal_point`."""
+    live_content = f"dedup metadata live {uuid.uuid4().hex[:8]}"
+    live = sdk.create_point("statement", live_content)["id"]
+    live_before = sdk.get_point(live)["updatedAt"]
+    sdk.create_point("statement", live_content, confidence=0.99, dedup=True)
+    assert sdk.get_point(live)["confidence"] == pytest.approx(0.99)
+    assert sdk.get_point(live)["updatedAt"] != live_before, (
+        "a LIVE target must still take the metadata revision AND its stamp")
+
+    # ...and the same fold on a TERMINAL target lands nothing.
+    dead_content = f"dedup metadata dead {uuid.uuid4().hex[:8]}"
+    dead = sdk.create_point("statement", dead_content)["id"]
+    sdk.retract_point(dead)
+    before = sdk.get_point(dead)
+    again = sdk.create_point("statement", dead_content, confidence=0.99,
                              dedup=True)
+    assert again["id"] == dead
+    after = sdk.get_point(dead)
+    assert after["confidence"] == before["confidence"]
+    assert after["updatedAt"] == before["updatedAt"], (
+        "the fold must not move the stamp on a TERMINAL target either")
+    assert after["status"] == "retracted"
+
+
+def test_create_point_dedup_does_not_mutate_a_terminal_point(sdk):
+    """#10368 — the SDK door of the #9819 class: a content-dedup fold must not
+    REWRITE a TERMINAL point.
+
+    `create_point(dedup=True)` resolves a content match unconditionally
+    (`_resolve_dedup_hit` -> `_find_point_by_content`, which applies no
+    status/outdated filter), and the only terminal guard on the fold is #7819,
+    scoped to `_TEMPORAL_RESTAMP_PROPS`. A fold carrying a GENERIC prop is
+    therefore invisible to it and reaches
+
+        props["updatedAt"] = now
+        self.update_point(pid, **props)
+
+    so a re-assertion of a settled claim rewrote the dead node: `updatedAt`
+    moved, the prop was stored, `status` stayed `retracted`. The ingest door
+    refuses the same shape at Phase 1 (#9819 / #10377); this is the residual on
+    the direct-SDK surface.
+
+    The caller is TOLD (the advisory), because a silently dropped write is the
+    #5365 defect that #7819's landing also refused to leave behind.
+    """
+    content = f"direct ctx {uuid.uuid4().hex[:8]}"
+    pid = sdk.create_point("statement", content, dedup=True)["id"]
+    sdk.retract_point(pid)
+    before = sdk.get_point(pid)
+
+    again = sdk.create_point("statement", content, dedup=True,
+                             custom_probe="x")
+
+    assert again["id"] == pid, "a dedup HIT is still reported"
+    after = sdk.get_point(pid)
+    assert after["updatedAt"] == before["updatedAt"], (
+        "the fold re-stamped updatedAt on a TERMINAL point")
+    assert "custom_probe" not in after, (
+        "the fold stored a caller prop on a TERMINAL point")
+    assert after["status"] == "retracted", after["status"]
+    codes = [a.get("code") for a in (again.get("advisories") or [])]
+    assert "metadata_not_applied" in codes, again
+    # The advisory NAMES what did not land — the surface-manifest row and the
+    # rendered `docs/product/mcp-sdk-surface.md` promise that `props` list, so
+    # an empty or unsorted one is a documented lie, not cosmetics.
+    dropped = next(a for a in again["advisories"]
+                   if a.get("code") == "metadata_not_applied")
+    assert dropped["props"] == ["custom_probe"], dropped
+    assert dropped["node_id"] == pid, dropped
+    # TRANSIENT, like the #8171 advisories it sits beside: never on the node.
+    assert "advisories" not in after
+
+    # The guarantee is "no revision", so the STAMP is only half of it: a
+    # `PointRevised` journaled against the dead id would be replayed into one
+    # (#7951), and the suite would never see it. Drive EVERY terminal shape and
+    # read the journal, not just `updatedAt` — the family convention is
+    # `test_a_refused_temporal_write_journals_no_revision`.
+    for status in _TERMINAL_STATUSES:
+        armed = _point(sdk, status=status)
+        content = sdk.get_point(armed)["content"]
+        before_row = sdk.get_point(armed)
+        # `sdk` here has no event log of its own; the fixture's sibling test
+        # covers the journal on a logged SDK, so assert the stamp + the props
+        # here and the journal in the dedicated test below.
+        again = sdk.create_point("statement", content, dedup=True,
+                                 custom_probe=status)
+        assert again["id"] == armed, status
+        after_row = sdk.get_point(armed)
+        assert after_row["updatedAt"] == before_row["updatedAt"], (
+            f"status={status}: the fold re-stamped a TERMINAL point")
+        assert "custom_probe" not in after_row, (status, after_row.keys())
+        dropped = next(a for a in again["advisories"]
+                       if a.get("code") == "metadata_not_applied")
+        assert dropped["props"] == ["custom_probe"], (status, dropped)
+    # ...and the legacy `outdated=true` FLAG with no terminal status is terminal
+    # too (_TERMINAL_STATUSES covers the vocabulary; this is the other shape).
+    flagged = _point(sdk, outdated=True)
+    flagged_content = sdk.get_point(flagged)["content"]
+    before_row = sdk.get_point(flagged)
+    sdk.create_point("statement", flagged_content, dedup=True,
+                     custom_probe="flag")
+    after_row = sdk.get_point(flagged)
+    assert after_row["updatedAt"] == before_row["updatedAt"], (
+        "the legacy outdated=true flag must be terminal for this fold too")
+    assert "custom_probe" not in after_row
+
+    # ...and the stamp must not sneak back in through the OTHER legs. The ruled
+    # evidence/word legs write props of their own and none of them may carry a
+    # revision. Each shape gets its OWN fresh point: a shared target would make
+    # the later shapes vacuous, because `credibility` is first-writer-wins
+    # (#7980) — the word would never apply and the assertion would pass for the
+    # wrong reason. Measured pre-fix on the #10368 review: a `credibility`-only
+    # fold moved `updatedAt` 21:08:00.559425 -> .910422 with NO advisory,
+    # because nothing had been dropped.
+    from tortoise.source_credibility import canonical_tier
+    for label, kwargs in (
+        ("prop+word", {"custom_probe": "y", "credibility": "gold"}),
+        ("word only", {"credibility": "gold"}),
+        ("evidence+word", {"extractedFrom":
+                           "https://example.com/10368-ctx-word",
+                           "credibility": "gold"}),
+    ):
+        fresh = sdk.create_point(
+            "statement", f"direct ctx {label} {uuid.uuid4().hex[:8]}",
+            dedup=True)["id"]
+        sdk.retract_point(fresh)
+        before = sdk.get_point(fresh)
+        # Dedup must HIT that point, so the content is the point's own.
+        sdk.create_point("statement", before["content"], dedup=True, **kwargs)
+        after = sdk.get_point(fresh)
+        assert after["updatedAt"] == before["updatedAt"], (
+            f"{label}: the fold re-stamped updatedAt on a TERMINAL point")
+        assert after["status"] == "retracted", (label, after["status"])
+        assert after.get("credibility") == canonical_tier("gold"), (
+            f"{label}: #398's word leg must still land", after.get("credibility"))
+
+
+def test_a_KEY_named_fold_onto_a_terminal_point_is_unchanged(sdk):
+    """The key leg is deliberately NOT widened (#10368 scope statement).
+
+    A caller-supplied `key` is an IDENTITY (#6110), so a fold it resolves DID
+    address the point — the deliberation side of the line this issue draws. The
+    drop is therefore gated on `not _key_hits`, and this pins that boundary: a
+    key-named fold keeps writing onto a terminal target exactly as it did
+    before, and reports NO `metadata_not_applied`. Without this mirror the gate
+    could be "simplified" into dropping every fold, silently reversing the
+    scope recorded on the issue.
+    """
+    content = f"key named fold {uuid.uuid4().hex[:8]}"
+    pid = sdk.create_point("statement", content, dedup=True, key="K-10368")["id"]
+    sdk.retract_point(pid)
+    again = sdk.create_point("statement", content, dedup=True,
+                             key="K-10368", custom_probe="z")
     assert again["id"] == pid
-    assert sdk.get_point(pid)["confidence"] == pytest.approx(0.99)
-    assert sdk.get_point(pid)["status"] == "retracted"
+    assert sdk.get_point(pid).get("custom_probe") == "z", (
+        "a KEY-named fold must keep the behaviour it had before #10368")
+    codes = [a.get("code") for a in (again.get("advisories") or [])]
+    assert "metadata_not_applied" not in codes, again
+
+
+@pytest.mark.parametrize("kwargs", [
+    {"custom_probe": "x"},
+    {"credibility": "gold"},
+    {"extractedFrom": "https://example.com/10368-journal"},
+    {"extractedFrom": "https://example.com/10368-journal",
+     "credibility": "gold"},
+], ids=["prop", "word", "evidence", "evidence+word"])
+def test_a_terminal_fold_journals_no_pointrevised(tmp_path, kwargs):
+    """#10368 — the guarantee is "no revision", and a revision is a RECORD.
+
+    `updatedAt` not moving is only half of it: a `PointRevised` appended for the
+    dead id is replayed into one by `rebuild_all`, so a journal entry is the
+    same mutation one rebuild later (#7951's outbox ordering). Pinned on a
+    LOGGED SDK for every ruled-leg shape. The `word` and `evidence+word` arms
+    are the two cycle 2 of the #10368 review measured still stamping the dead
+    claim; the `evidence`-only arm already wrote no stamp before the fix (the
+    fold pops `extractedFrom` before the write leg), so it stands here as the
+    anti-over-reach mirror rather than as a reproduction.
+    """
+    from tortoise.log import EventLog
+    from tortoise.sdk import TortoiseSDK
+
+    events = tmp_path / "events"
+    events.mkdir()
+    path = events / "events.jsonl"
+    sdk = TortoiseSDK(str(tmp_path / "g10368.db"),
+                      event_log_path=str(path))
+    try:
+        content = f"journal no revision {uuid.uuid4().hex[:8]}"
+        pid = sdk.create_point("statement", content, dedup=True)["id"]
+        sdk.retract_point(pid)
+        before = [e for e in EventLog(str(path)).read_all()
+                  if e.get("type") == "PointRevised" and e.get("id") == pid]
+        sdk.create_point("statement", content, dedup=True, **kwargs)
+        after = [e for e in EventLog(str(path)).read_all()
+                 if e.get("type") == "PointRevised" and e.get("id") == pid]
+        assert after == before, (
+            f"{sorted(kwargs)}: the fold journaled a PointRevised against a "
+            f"TERMINAL point ({len(after) - len(before)} new record(s))")
+        assert sdk.get_point(pid)["status"] == "retracted"
+    finally:
+        sdk.close()
+
+
+def test_create_point_dedup_still_folds_EVIDENCE_onto_a_terminal_point(sdk):
+    """#10368 must not over-reject: EVIDENCE still folds onto a dead claim.
+
+    The owner ruling on #7704 is that a dedup hit KEEPS the new evidence —
+    "one claim, N sources" — and #398 rules an authored `credibility` word is a
+    SOURCE. So the refusal is scoped to the generic-metadata leg: the evidence
+    fold (`_fold_source_evidence`, its own journaled path) and the attribution
+    word both keep applying to a terminal target, exactly as #10010's
+    `test_a_fold_onto_a_dead_claim_keeps_its_terminalizer_stamp` pins — while
+    writing NO revision (`updatedAt` does not move).
+    """
+    content = f"direct ctx evidence {uuid.uuid4().hex[:8]}"
+    url = "https://example.com/10368-second-source"
+    pid = sdk.create_point("statement", content, dedup=True)["id"]
+    sdk.retract_point(pid)
+    before = sdk.get_point(pid)
+
+    sdk.create_point("statement", content, dedup=True, extractedFrom=url,
+                     credibility="gold")
+
+    sources = {
+        row[0] for row in sdk._get_proj().g.query(
+            "MATCH (p:Point {id:$id})-[:extractedFrom]->(s:Source) "
+            "RETURN DISTINCT s.url", params={"id": pid}).result_set
+    }
+    assert sources == {url}, (
+        f"the evidence fold must still land on a terminal claim: {sources!r}")
+    after = sdk.get_point(pid)
+    assert after["status"] == "retracted"
+    assert after["updatedAt"] == before["updatedAt"], (
+        "the evidence/word fold must not write a REVISION onto a dead claim")
+    from tortoise.source_credibility import canonical_tier
+    assert after.get("credibility") == canonical_tier("gold"), (
+        "#398's word leg must still land on a dead claim")
 
 
 # ── #7819 after-care: the two surfaces the guard's consequence reaches ─────

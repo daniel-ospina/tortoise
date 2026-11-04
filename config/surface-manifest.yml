@@ -496,10 +496,22 @@ response_fields:
     pointKind is declared only on another layer (an Event kind — e.g. pointKind=''core:deployment'') written as
     a point — the point LANDS with that kind (#1934 warn-not-block) and the message names `create_event`. This door
     never re-labels (a Point is a different record, not a relabel of an entity), so `kind_layer_routed` cannot fire
-    here. Both codes ride the SAME key on the dedup-hit return, so a re-run reports them together rather than dropping
-    one'
-  unchanged_when_off: n/a — not flag-gated; the key is ABSENT on a sourced or word-bearing write, and on every write
-    whose fold actually applied, so that response stays byte-identical
+    here. A FOURTH code rides it too (#10368): `metadata_not_applied`, when the write DEDUP-hits a point that is
+    already a terminal claim and the payload carried GENERIC metadata props — a CONTENT-only match does not name a
+    target, so it does not revise a settled belief: those props are dropped, the fold''s `updatedAt` stamp is not
+    written (no `PointRevised` against the dead id), the advisory''s `props` list names them, and the response
+    reports the HIT rather than a silent rewrite. A fold whose hit was resolved by the caller''s `key` is NOT
+    affected — a key is a caller-declared identity (#6110), i.e. the addressing side of this door, so it keeps
+    the behaviour it has today. EVIDENCE still folds onto a dead claim (the
+    `extractedFrom` source fold and the authored `credibility` word, #7704/#398), so this leg alone is dropped
+    prop-by-prop. All of these ride the SAME key on the dedup-hit return, so a re-run reports them together rather
+    than dropping one'
+  unchanged_when_off: n/a — not flag-gated; the key is ABSENT on a purely word-only write and on every write whose
+    fold applied in full, so those responses stay byte-identical. It is PRESENT when either of the two legs that
+    ADVISES a drop was refused — the temporal leg (#7819) or the terminal content-fold metadata leg (#10368) —
+    including on a word-bearing fold, because the word legs and the metadata leg are decided separately. ⚠️ NOT a
+    guarantee that every refusal is advised — the (#7980) first-writer-wins credibility drop and the (#6110)
+    "key not applied" drop are LOG-ONLY and leave this key absent
 - response: tortoise_check_structure
   field: _meta.tortoise_error
   emitted_when: 'only for the transport wait-bound refusal — the ONE producer whose failure payload is a `{code,
