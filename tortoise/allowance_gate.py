@@ -149,7 +149,10 @@ belongs to a different substrate, and it must not be held under a per-org
 mutex. Every gated REST door satisfies both: the ``points``/``documents`` doors
 run it through ``hosted_api._check_org_limit_off_loop`` (Supabase → the
 control-plane pool, self-host → the graph pool, because the registry IS the
-graph connection), the capture door runs the whole check on a worker thread,
+graph connection), the capture door runs it through the SAME twin
+(``_check_org_limit_off_loop``, ``check_org_limit.sessions`` — it used to run
+the whole check on a bare worker thread, which put a control-plane read on the
+loop's default executor; main-repair 2026-11-04),
 and ``POST /v1/sessions/commit`` runs the carry in the HANDLER, before its
 per-graph commit lock is taken, handing the stamped dict down (review round 13
 — held inside that lock, a control-plane stall was a network wait every other
