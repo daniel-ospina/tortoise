@@ -249,12 +249,23 @@ def test_a_PROPS_PAYLOAD_defeats_the_dedup_fold_so_it_is_never_called_safe():
         assert safe("tortoise_create_point",
                     {"content": "X", "props": props}) is False, (
             f"props={props} makes convergence unprovable")
-    # The nested spelling is the same channel one fold deeper. Calls 1 and 2
-    # return the SAME id (the mint writes `is_operator=False`, then the dedup-hit
-    # relay folds again), so it diverges only from the third call — the verdict is
-    # false because convergence is not PROVABLE, which is the claim.
+    # The nested spelling is the same channel one fold deeper — the outer dict is
+    # non-empty, so it is a payload either way. (Measured under `dedup=True`, this
+    # spelling also returns two DIFFERENT ids on calls 1 and 2; the verdict below
+    # is false because convergence is not PROVABLE, which is the claim, and it
+    # does not rest on that measurement.)
     assert safe("tortoise_create_point",
                 {"content": "X", "props": {"props": {"is_operator": True}}}) is False
+    # ⛔ And `props` is not the only argument the handler folds into the props
+    # dict: `authoredBy` / `credibility` are merged into it before the write, so a
+    # call carrying neither `props` was still a props-CARRYING call. Measured:
+    # `create_point(content=x, authoredBy="me", dedup=True)` twice returns the
+    # same id but the second lands on the dedup-hit UPDATE leg, emits
+    # `PointRevised` and bumps `updatedAt` — so the repeat is visible to a reader
+    # even though it converged, and "repeating it converges" is the wrong promise.
+    for sibling in ({"authoredBy": "me"}, {"credibility": 0.8}):
+        assert safe("tortoise_create_point", {"content": "X", **sibling}) is False, (
+            f"{list(sibling)[0]} is folded into props by the handler")
 
 
 def test_a_STATE_conditional_writer_is_never_called_safe():

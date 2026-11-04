@@ -763,7 +763,7 @@ def _arguments_disable_convergence(name: str, arguments) -> bool:
     # registry `idempotent` flag is False for the same reason.
     if name != "tortoise_create_point":
         return False
-    if _call_carries_props(arguments):
+    if _call_carries_props(arguments) or _call_folds_siblings_into_props(arguments):
         # ⛔ `props` DEFEATS the dedup fold, so no allow-list of prop keys can
         # prove convergence. Measured: `create_point(content=X, props={"is_operator":
         # True})` twice mints TWO nodes with DIFFERENT ids, because the fold's own
@@ -799,11 +799,36 @@ def _call_carries_props(scope) -> bool:
     """
     if not isinstance(scope, dict):
         return False
-    props = scope.get("props")
-    if isinstance(props, dict):
-        # a nested `props` is the same channel one fold deeper.
-        return bool(props) or _call_carries_props(props)
-    return bool(props)
+    # Truthiness alone answers it: a non-empty dict (a nested `props={"props":
+    # {...}}` spelling included — the outer dict is non-empty) is a payload, and
+    # an empty one carries nothing. No recursion: it could only be reached with
+    # `{}`, where it answers False anyway.
+    return bool(scope.get("props"))
+
+
+#: The `tortoise_create_point` arguments its handler folds INTO the props dict —
+#: `merged = dict(props or {}); if authoredBy: merged["authoredBy"] = authoredBy;
+#: if credibility is not None: merged["credibility"] = credibility`. They are
+#: therefore the SAME channel as `props`, and the seam cannot see the fold, so a
+#: call carrying one carries props.
+_PROPS_FOLDING_ARGUMENTS = ("authoredBy", "credibility")
+
+
+def _call_folds_siblings_into_props(arguments) -> bool:
+    """Whether a named argument will be folded into props before the write.
+
+    ⛔ Measured: `create_point(content=x, authoredBy="me", dedup=True)` twice
+    returns the SAME id, but the second call lands on the dedup-hit UPDATE leg
+    (`sdk.py` `if props or _word_applied: self.update_point(pid, **props)`) and
+    emits `PointRevised`, bumping `updatedAt` — the one effect the props-free
+    dedup path is explicitly protected from ("must not bump updatedAt or
+    re-trigger EP dirty-marking"). So a repeat is NOT a no-op, and calling it
+    `retry_safe: true` / "repeating it converges" is the same over-claim that
+    got `tortoise_approve_merge` demoted in this PR.
+    """
+    if not isinstance(arguments, dict):
+        return False
+    return any(arguments.get(k) not in (None, "", False) for k in _PROPS_FOLDING_ARGUMENTS)
 
 
 def _declared_dry_run_default(name: str):
@@ -902,8 +927,13 @@ def _wait_bound_refusal_result(name: str | None = None,
     apart.
 
     ``name`` is the client-supplied tool name, and it decides whether this
-    refusal may present itself as a plain FAILURE (#10849). For a READ it may:
-    nothing was mutated, and the shipped shape is returned byte-for-byte. For a
+    refusal may present itself as a plain FAILURE (#10849). For a call OUTSIDE
+    the write set it may: nothing on this path schedules a mutation, and the
+    shipped shape is returned byte-for-byte. That is a statement about the write
+    set, NOT about the tool being pure — ``tortoise_compute_confidence`` and
+    ``tortoise_get_confidence`` are ``maintenance``-tier and DO re-store on a
+    repeat (which is why the tier refuses ``writes=True`` for them), so they take
+    this arm and get no mutation claim either way. For a
     WRITE it may not — the seam ABANDONS the dispatch rather than cancelling it
     (see ``_await_under_mcp_wait_bound``), so the write can still commit after
     the caller has been told the request failed. Measured on #10849: a
@@ -5636,6 +5666,7 @@ def tortoise_approve_merge(candidate_id: str,
     promotion. action='reject' → the candidate stays separate and is no
     longer surfaced. Idempotent for repeated identical reviews.
     """
+
     return _safe(_get_org_sdk().approve_merge, candidate_id, action=action)
 
 
