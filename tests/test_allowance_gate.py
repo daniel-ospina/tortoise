@@ -722,12 +722,11 @@ def test_a_missing_allowance_gate_module_is_the_documented_500(monkeypatch,
     from tortoise.hosted_api import _check_org_limit
 
     monkeypatch.setitem(sys.modules, "tortoise.allowance_gate", None)
-    with caplog.at_level(logging.ERROR):
-        with pytest.raises(HTTPException) as exc:
-            # A NON-gated door: the import runs on every door, so the mapping
-            # must hold there too (`users` is outside
-            # ALLOWANCE_GATED_RESOURCES).
-            _check_org_limit(_rest_org(), "users")
+    with caplog.at_level(logging.ERROR), pytest.raises(HTTPException) as exc:
+        # A NON-gated door: the import runs on every door, so the mapping
+        # must hold there too (`users` is outside
+        # ALLOWANCE_GATED_RESOURCES).
+        _check_org_limit(_rest_org(), "users")
     assert exc.value.status_code == 500, exc.value
     detail = str(exc.value.detail)
     assert detail.startswith("Quota check failed:"), detail
