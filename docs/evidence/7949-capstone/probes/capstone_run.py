@@ -1128,13 +1128,21 @@ def main(argv: list[str] | None = None) -> int:
                 "INSTRUMENT gap (#9116) and NOT a claim that the pass was idle — "
                 "an absent surface cannot distinguish 'nothing to do' from "
                 "'never ran'", prereg_ok=True, code=5, corpus=corpus)
+        # Name the CAUSE, not the union of the possibilities: #9823's whole point
+        # is that "flag off", "failed" and "nothing to do" send a reader to three
+        # different places, and one message for all of them is how #9116 was
+        # mis-blamed the first time. By elimination here the block either says the
+        # flag was off, or a failure marker is present.
+        cause = ("its own `enabled` reads False — the pass was not enabled, so it "
+                 "was never idled"
+                 if block.get("enabled") is not True else
+                 "a failure marker for it IS present on the receipt, so the "
+                 "fail-open path fired rather than the pass finding nothing to do")
         return refuse(
             f"the conditional step {step} is neither observed nor idle: its "
-            f"surface IS present and reads {_summary_block(block)}, and the "
-            "receipt's error/warning surfaces carry a failure marker for it or "
-            "its flag was off — a pass that was not enabled, or that FAILED "
-            "fail-open, leaves the same empty counters as an idle one and is "
-            "not a step with nothing to do", prereg_ok=True, code=5, corpus=corpus)
+            f"surface IS present and reads {_summary_block(block)}, and {cause}. "
+            "Neither state is a step with nothing to do", prereg_ok=True, code=5,
+            corpus=corpus)
 
     # G6 — per-criterion evidence
     receipt = e4_receipt(result.get("stats") or {})

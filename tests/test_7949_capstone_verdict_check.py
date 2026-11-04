@@ -2717,8 +2717,12 @@ def test_a_conditional_step_g5_can_witness_idle_passes_the_gate(tmp_path, monkey
                           numerator=31, denominator=50, blocked_by=None,
                           corpus_sha256="a" * 64)
     rec["corpus"] = {"path": "corpus.json", "sha256": "a" * 64, "turns": 50}
-    findings = cvc.check(rec, repo=_REPO, require_green=False)
-    assert not findings, findings.render()
+    # ONLY the step half is under test here: the emitted rows cite a tmp_path
+    # artifact and carry the run's own corpus digest, so V4/V7/V8 rightly red on
+    # this fixture — a V5 finding is what must NOT appear.
+    codes = [code for code, _w, _m in
+             cvc.check(rec, repo=_REPO, require_green=False).items]
+    assert "V5" not in codes, codes
 
 
 def test_g5_refuses_when_the_conditional_pass_FAILED_instead_of_idling(
@@ -2749,7 +2753,9 @@ def test_g5_refuses_when_the_conditional_pass_FAILED_instead_of_idling(
                        "--out", str(out)])
     assert code == 5, code
     reason = cvc.extract_block(out.read_text())["run"]["reason"]
-    assert "S2.3" in reason and "fail-open" in reason, reason
+    assert "S2.3" in reason, reason
+    # the CAUSE is named, not the union of possibilities (#9823's distinction)
+    assert "failure marker for it IS present" in reason, reason
 
 
 def test_g5_refuses_a_conditional_step_whose_surface_is_absent(tmp_path, monkeypatch):
@@ -2787,6 +2793,8 @@ def test_g5_refuses_a_malformed_step_declaration(tmp_path, monkeypatch):
     _read_prereg_ok(monkeypatch, _frozen_prereg(
         corpus={"sha256": probe.corpus_sha256(corpus), "items": 1},
         steps={"conditional": "S2.3"}))
+    monkeypatch.setattr(probe, "backend_is_searchable", lambda: (True, ""))
+    monkeypatch.setattr(probe, "model_key_present", lambda: (True, ""))
     out = tmp_path / "malformed-steps.log"
     code = probe.main(["--prereg", HEAD, "--corpus", str(corpus),
                        "--out", str(out)])
