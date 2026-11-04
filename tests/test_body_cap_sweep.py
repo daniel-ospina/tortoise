@@ -45,6 +45,7 @@ for _v in ("SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY", "SUPABASE_SERVICE_KEY",
 from tortoise.hosted_api import app  # noqa: E402, I001
 
 from tests._http_fixtures import patched_tortoise_sdk  # noqa: E402
+from tests._verdict import verdict_client  # noqa: E402
 from tests.fake_control_plane import FakeControlPlane  # noqa: E402
 
 
@@ -74,8 +75,20 @@ def embedded_client(monkeypatch, tmp_path):
     # close → clear overrides at exit. Its internal CM already closed the
     # anchors at teardown (most helper-like local shape) — the helper adds
     # the env pin + close-at-enter.
+    #
+    # #5049 rule 1 / #10410: `verdict_client`, not a bare `TestClient`. Every
+    # route in this file sits behind `WaitBoundMiddleware`, whose 10 s budget is
+    # a WALL-CLOCK supervisor (#3834, owner ruling 2026-09-20). CI run
+    # 41214803329 (`test (h)`) measured the consequence: under a loaded shard the
+    # bound fired on `POST /v1/agent/signup` and
+    # `test_agent_signup_empty_no_ct_mints_200` read the refusal as `504 != 200`
+    # — a FAIL about machine load, produced by an assertion the property under
+    # test (empty body + no content-type → mint) never reached. The verdict seam
+    # converts exactly that envelope into the contract's INCONCLUSIVE skip while
+    # every answered response still reaches its own assertion. The bound's VALUE
+    # is untouched: it is a recorded ruling, and it is still 10 s here.
     with patched_tortoise_sdk(db_path), \
-            TestClient(app, raise_server_exceptions=False) as tc:
+            verdict_client(app, raise_server_exceptions=False) as tc:
         yield tc
 
 
@@ -91,9 +104,10 @@ def supabase_client(monkeypatch, tmp_path):
                            "org_memberships": [], "invitations": []})
     monkeypatch.setattr(sc, "get_control_plane", lambda: cp)
     db_path = os.path.join(tmp_path, "oauth_sweep.db")
-    # #2127: shared helper (see embedded_client).
+    # #2127: shared helper (see embedded_client) — and the same #5049 verdict
+    # seam, because these OAuth routes are behind the transport bound too.
     with patched_tortoise_sdk(db_path), \
-            TestClient(app, raise_server_exceptions=False) as tc:
+            verdict_client(app, raise_server_exceptions=False) as tc:
         yield tc
 
 
@@ -114,10 +128,12 @@ def root_path_client(monkeypatch, tmp_path):
         monkeypatch.delenv(_v, raising=False)
     monkeypatch.setenv("RATE_LIMIT_DISABLED", "1")
     db_path = os.path.join(tmp_path, "root_path.db")
-    # #2127: shared helper (see embedded_client).
+    # #2127: shared helper (see embedded_client) — and the same #5049 verdict
+    # seam, so a mount-prefixed route refused by the transport bound is a
+    # non-answer here too rather than a load-dependent contract FAIL.
     with patched_tortoise_sdk(db_path), \
-            TestClient(app, root_path="/x",
-                       raise_server_exceptions=False) as tc:
+            verdict_client(app, root_path="/x",
+                           raise_server_exceptions=False) as tc:
         yield tc
 
 
@@ -282,6 +298,42 @@ class TestAgentSignupCap:
         r = embedded_client.post("/v1/agent/signup", content=b"")
         assert r.status_code == 200, r.text
         assert r.json()["key"]
+
+    def test_a_wait_bound_refusal_is_inconclusive_not_a_product_fail(
+            self, embedded_client, monkeypatch):
+        """#5049 rule 1 / #10410: this file's clients ARE the verdict seam.
+
+        CI run 41214803329 (`test (h)`) measured the shape this pins:
+        `test_agent_signup_empty_no_ct_mints_200` read the transport's 10 s
+        wait-bound refusal as `504 != 200` and reported a product FAIL. The
+        property was never observed — the verdict came from machine load.
+
+        Both legs red on a revert, so neither is decorative:
+
+        * CONTROL — a plain `TestClient` must still get the raw 504. If the
+          route were ever exempted from the bound, the middleware stops
+          refusing and this assertion fails.
+        * SEAM — the SAME refusal, through `embedded_client`, must arrive as
+          `_verdict`'s INCONCLUSIVE skip naming the request and the deadline.
+          Reverting the fixture to a bare `TestClient` returns a plain 504 and
+          `pytest.raises` sees no skip, so this leg fails.
+        """
+        from tortoise import mcp_auth
+        from tortoise.hosted_api import _TRANSPORT_WAIT_BOUND_EXEMPT
+
+        route = ("POST", "/v1/agent/signup")
+        assert route not in _TRANSPORT_WAIT_BOUND_EXEMPT
+        # ``timeout <= 0`` never takes the cold-setup exemption
+        # (`mcp_auth.await_under_wait_bound`), so the refusal is deterministic
+        # and does not depend on the mint's own timing.
+        monkeypatch.setattr(mcp_auth, "_TRANSPORT_WAIT_BOUND_S", 0.0)
+        with TestClient(app, raise_server_exceptions=False) as raw:
+            assert raw.post(route[1], content=b"").status_code == 504
+        with pytest.raises(pytest.skip.Exception) as excinfo:
+            embedded_client.post(route[1], content=b"")
+        message = str(excinfo.value)
+        assert "INCONCLUSIVE [#5049]" in message
+        assert "POST /v1/agent/signup answered" in message
 
 
 class TestAgentRecoverCap:

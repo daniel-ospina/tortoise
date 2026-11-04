@@ -45,7 +45,16 @@ diagnostic, not the ruler.
 Read-only with respect to the product; it seeds through the SAME seeder
 (``_seed_memory``) and spins the SAME per-call docker scratch graphs
 (``ask_shape_rate._fresh_db``) the instrument uses — so the arms differ ONLY
-in the A4 knob.
+in the A4 knob. A ``docker://`` base URI is required by that SCRATCH-GRAPH
+mechanism, NOT by FTS availability: this diagnostic used to refuse with "the
+embedded lane has no FTS index, so A4 has no leg to expand", and that premise
+is FALSE — FalkorDBLite (the embedded lane's backend) HAS the Point FTS index,
+measured ``leg_trace`` ``reason='ok'``, ``count=4`` (recorded in
+``tests/test_a4_instrument_input.py``'s module docstring, whose arm tests RUN
+on the embedded lane). Independent proof it is stale: on the base tree the
+failing #5534 arm test REACHED ``assert off == on`` past ``_skip_if_no_fts``.
+The stale paragraph is what once made that red dismissible as an environment
+artefact, so it is corrected here rather than repeated.
 
 Usage:
   TORTOISE_ASK_SHAPE_DB_URI='docker://:falkordb@localhost:6379/askshape5534' \\
@@ -208,8 +217,12 @@ def main() -> int:
 
     if not os.environ.get("TORTOISE_ASK_SHAPE_DB_URI", "").strip():
         print("5534: TORTOISE_ASK_SHAPE_DB_URI must name a docker:// base "
-              "graph (per-call scratch graphs; the embedded lane has no FTS "
-              "index, so A4 has no leg to expand).", file=sys.stderr)
+              "graph — this diagnostic mints per-call scratch graphs on it "
+              "via ask_shape_rate._fresh_db. This is a SCRATCH-GRAPH "
+              "requirement, not an FTS one: the embedded lane (FalkorDBLite) "
+              "DOES carry the Point FTS index (measured leg_trace "
+              "reason='ok', count=4), which is exactly why the #5534 arm "
+              "test runs and fails there rather than skipping.", file=sys.stderr)
         return 2
 
     with open(FIXTURE) as f:

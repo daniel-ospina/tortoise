@@ -291,12 +291,28 @@ extraction:
 #                      round-trips rather than being refused as unknown.)
 #   relationTemplates: pack-typical edge shapes, so the extractor recognizes
 #                      the domain's IMPL/NAND phrasings.
-#                      ⛔ Deliberately NO consumer (#4894), for the same
-#                      reason: a predicate + mechanism pair is ALREADY declared
-#                      and READ in `ontology.relations` (whose write-path
-#                      verdict is enforced — #2766), so a second declared
-#                      spelling of the same pair would be a second source of
-#                      truth. It validates and round-trips; it does not render.
+#                      ⛔ NO write-path consumer (#4894), for the same reason: a
+#                      predicate + mechanism pair is ALREADY declared and READ
+#                      in `ontology.relations` (whose write-path verdict is
+#                      enforced — #2766), so a second declared spelling of the
+#                      same pair would be a second source of truth.
+#                      ⚠️ Its `fromKind`/`toKind` endpoints ARE read, for
+#                      vocabulary only: `value_extractor._relation_endpoint_refs`
+#                      carries them on the `pack_refs` brief section so compact
+#                      mode co-selects the kinds a declared relation is spelled
+#                      with (#9733). So declaring this slot DOES reach the
+#                      rendered compact prompt vocabulary — `predicate` and
+#                      `mechanism` remain unconsumed.
+#                      ⚠️ `namespace:kind` is the spelling that always works. A
+#                      BARE endpoint IS resolved here — the validator's own
+#                      first rule (`_resolve_kind_ref`: this pack's kind), then
+#                      `CORE_KINDS` — so `fromKind: valuationMark` means
+#                      `<this namespace>:valuationMark` and is co-selected with
+#                      its partner. Two shapes still close nothing: a bare CORE
+#                      kind (rendered on every path), and a bare name that only
+#                      resolves to a SINGLE OTHER pack (`bare_index`), which this
+#                      engine-side read cannot resolve without the whole catalog.
+#                      Spell those `namespace:kind`.
 #                        predicate:        the domain verb
 #                        mechanism:        IMPL | NAND — the same pair
 #                                          `ontology.relations` accepts.
@@ -304,7 +320,8 @@ extraction:
 #                                          the operator menu by the F1 ruling
 #                                          (#4937 / #2552) and
 #                                          `sdk.create_operator` refuses it.
-#                        fromKind/toKind:  kind references, resolved as above
+#                        fromKind/toKind:  kind references, resolved as above —
+#                                          bare means THIS pack's kind (or core)
 #                        description:      one line of what the shape captures
 #   valueGate:         {keep: [...], drop: [...]} — what a VALUABLE utterance
 #                      looks like in this domain. It judges utterances and never

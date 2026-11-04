@@ -1685,6 +1685,28 @@ class _EntityHandlers:
         # only in-tree SDK/indexer writers reach it. The pack-declared fold
         # generalization is Object-scoped and does NOT extend to Events
         # (#2729); #2725 answered the Event-carries-state question "no".
+        #
+        # #10000 / D1 (§9.1): `story_arc` is NOT Event content either, and this
+        # skip set is the `EventRecorded` fold's ONLY write filter
+        # (`_persist_extra_props` skips `_META_KEYS | _EVENT_HANDLED`, and the
+        # same fold is the live writer AND the replay writer — `rebuild_all`
+        # calls it), so the entry is what denies the route on BOTH sides at
+        # once. MEASURED at #10389's review head, before this entry: one SDK
+        # call `create_event("probe-event-door5", "AgentSession",
+        # story_arc=<prose>, project="kept-228")` (the door behind the MCP tool
+        # `tortoise_create_event`) left `e.story_arc` = the PROSE on the node,
+        # `e.project` = `kept-228`. MEASURED after it: `e.story_arc` reads back
+        # `None` and `e.project` still lands, so the entry is ONE key and not a
+        # blanket refusal of the passthrough (#228). ⚠️ That narrows `#228` on
+        # this fold deliberately; the departure is marked ON `#228` with an
+        # `OVERRIDES:` line (`#issuecomment-6544613785`).
+        # ⛔ ONTOLOGY §4.4 declares `story_arc` on `:Source` only, so on
+        # `:Event` it was an UNDECLARED property riding the open passthrough —
+        # the same #3998/D30 shape this change closes for the document fold.
+        # Do NOT cite this entry as evidence a legacy `:Event` cannot be READ:
+        # `:Event` has no read filter, so a node that already carries the key
+        # still reads it back.
+        "story_arc",
     })
     # #3998 (D30): the DECLARED extra-property surface of a :Source. The graph
     # is the INDEX of the raw, not its store — so this is a CLOSED set, not an
@@ -1785,9 +1807,18 @@ class _EntityHandlers:
         # are the document's own provenance metadata. Both spellings are listed
         # for the session/source pair because the document writer emits the
         # snake_case forms while the session-capture writer mints the camelCase.
-        "needs_extraction", "story_arc", "document_knowledge_domain",
+        # ⛔ `story_arc` is NOT one of them and is declared for the OPPOSITE
+        # reason (#10000 / §9.1/D1, #10389 review P3): it is here so a legacy
+        # node's prose still READS BACK, and it is in `_DOC_PASSTHROUGH_HANDLED`
+        # precisely so no payload can write it (declared ⇒ readable, listed in
+        # the passthrough reserve ⇒ never written) — `_upsert_source`'s closed
+        # set already denied it, so this is the two folds agreeing rather than
+        # the document route landing it. Do not cite this line as evidence the
+        # key reaches a node.
+        "needs_extraction", "document_knowledge_domain",
         "authored_by", "owned_by", "managed_by", "governing_agreement",
         "createdAt", "session_id", "event_id", "source_path",
+        "story_arc",
     })
     _SOURCE_EXTRA_PROPS: frozenset = frozenset({
         "credibilityTier",   # create_source(tier=)
@@ -1967,6 +1998,45 @@ class _EntityHandlers:
         # `s.content_hash` property beside the camelCase the readers use
         # (the same snake-door class as `needs_extraction` below).
         "content_hash",
+        # #10000 / D1 (§9.1): §9.1's S1 NARRATIVE is text in Postgres — "not in
+        # the graph, not a `Document` node, not a `Point`" — and this passthrough
+        # is the one route that could still put it on a node. MEASURED at
+        # #10389's review head, before this entry: `create_document(url, kind,
+        # story_arc=<narrative>)` (the SDK door behind the MCP tool
+        # `tortoise_create_document`) left `s.story_arc` = the PROSE on the
+        # `:Source` node verbatim, because this call deliberately passes NO
+        # `allow_keys` and `story_arc` is in none of `_SOURCE_HANDLED`, this set
+        # or `_DOC_RETIRED_KEYS`. MEASURED after it: the same call reads back
+        # `s.story_arc` = None while `project="kept-228"` still lands.
+        #
+        # ⛔ IT STAYS DECLARED in `_SOURCE_NODE_PROPS` (legacy nodes must still
+        # read back) — declared ⇒ readable, listed HERE ⇒ never written from a
+        # payload. That is the #3998/D30 posture exactly, and it ALSO ends a
+        # disagreement: `_upsert_source`'s closed set already DENIED this key,
+        # so the two folds answered the same question differently, which is the
+        # drift class a shared key must not have.
+        #
+        # ⚠️ This NARROWS #228 on this route, deliberately, and the departure is
+        # marked on the issue (an `OVERRIDES:` line, `#issuecomment-6540959107`)
+        # so a later reader cannot mistake it for legacy and tidy it away.
+        # Scope: ONE key. #228's passthrough is intact — `_upsert_document`
+        # still passes NO `allow_keys` and every OTHER arbitrary prop lands
+        # (`tests/test_projection.py -k "arbitrary_props or document"`, and this
+        # key's own pin also asserts `project="kept-228"` survives).
+        #
+        # ⚠️ Deliberate trade, stated: a legacy JOURNAL whose `DocumentCreated`
+        # carried `story_arc` now replays without it, so a rebuild of a graph
+        # holding that property no longer reproduces it. Accepted because the
+        # owner rule says the property must not exist, the destructive purge of
+        # what does exist is #10017, and no in-tree producer ever emitted the key
+        # on this event (`api.add_document` takes no such parameter).
+        #
+        # ⛔ Scope, so this is not read as more than it is: it denies the KEY.
+        # Another spelling (`storyArc`) still lands, exactly as any unknown key
+        # does — that is #228's passthrough contract, not a narrative route, and
+        # no reader or restore lane reads it (door 2 restores the `story_arc`
+        # column only).
+        "story_arc",
     })
     # #2795 (D2): every key owned by the fixed SET clauses of
     # `_upsert_point_props` (plus the MERGE key and the structural/edge-carried
@@ -5913,6 +5983,28 @@ class _EntityHandlers:
 
         # #228: persist arbitrary caller-supplied props (iterate inner dict
         # so nested {event:{...}} and flat formats both work)
+        # #10389 review P3-1(a): a DENIED key is DROPPED here, and that drop was
+        # SILENT — `_persist_extra_props` filters `_META_KEYS | _EVENT_HANDLED`
+        # and returns nothing about the filtered keys, so
+        # `create_event(..., story_arc=<prose>)` answered SUCCESS and discarded
+        # the key. Named instead, because silence is the failure shape this
+        # change closes elsewhere: `_upsert_source` WARNS on its allowlist
+        # refusal and the commit path reports `narrative_not_recorded` rather
+        # than a quiet 200. A LEGACY journal line reaching this same fold replays
+        # to the same warning, which states the declared trade (the key stays
+        # READABLE on a node that already carries it, and is never WRITTEN)
+        # rather than absorbing it.
+        _managed_dropped = sorted(
+            k for k in inner
+            if k in _EVENT_SERVER_MANAGED_PROPS and inner[k] is not None)
+        if _managed_dropped:
+            logger.warning(
+                "Event %r supplied %s — DROPPED, not written to the node "
+                "(#10000/D1, §9.1: the S1 narrative lives in "
+                "`public.session_narrative`, never on a node). No error is "
+                "raised and nothing is stored for the key, so a caller that "
+                "reads it back of this Event gets None.",
+                eid, _managed_dropped)
         self._persist_extra_props(
             "MATCH (n:Event {eventId: $eid})", {"eid": eid},
             inner, self._EVENT_HANDLED,
@@ -6791,7 +6883,64 @@ _SOURCE_SERVER_MANAGED_PROPS: frozenset = frozenset({
     # node AND into the `EntityMutated` record, where a rebuild restores it — the
     # same `__runId` hole (#5196 round 3, P2) one line up.
     "sessionId", "capturedAt", "eventId",
+    # #10000: the S1 narrative is NOT a node property at all. §9.1/D1 places it
+    # in Postgres (`public.session_narrative`, #9555), and the commit writer's
+    # raw `SET s.story_arc` is deleted — but the property stays DECLARED (legacy
+    # nodes read back; ONTOLOGY §4.4 lists it), so without this entry the
+    # generic tenant route can put the prose back: measured,
+    # `update_entity(<source url>, story_arc=<narrative>)` is accepted, journalled
+    # into an `EntityMutated` record, and SURVIVES `rebuild_all` — the `__runId`
+    # hole one property over (#5196 round 3). Declared ⇒ readable; listed HERE ⇒
+    # caller-unsettable.
+    "story_arc",
 })
+# The SERVER-MANAGED subset for `:Event` — the write filter's counterpart of
+# `_SOURCE_SERVER_MANAGED_PROPS`, consumed by the generic tenant route
+# (`sdk._update_entity`, the surface behind the MCP tool `tortoise_update_entity`)
+# where it reaches an `:Event` target. `:Event` has no read DECLARATION (no
+# `filter_*_props` over it), so this set is the whole contract: it names the keys
+# a caller may NOT set through that route. It is a SET rather than a single key
+# for the same reason as the Source one — the next such key must not need a
+# second guard, and two copies of one contract is how the copy that drifts stops
+# being true.
+_EVENT_SERVER_MANAGED_PROPS: frozenset = frozenset({
+    # #10000 / D1 (§9.1): the S1 narrative is text in Postgres
+    # (`public.session_narrative`, #9555), never a node property. The commit
+    # writer stops writing it, `_EVENT_HANDLED` stops the `EventRecorded` fold
+    # from restoring it, and without this entry the generic tenant route still
+    # puts it back: MEASURED at #10389's review head, before this entry,
+    # `update_entity(<agentSession eventId>, story_arc=<prose>)` was ACCEPTED,
+    # persisted live, journalled into an `EntityMutated` record, and SURVIVED a
+    # `rebuild_all` — the `__runId` hole (#5196 round 3) one property over, on
+    # the label whose prose-free state this change's own pin asserts.
+    # `_EVENT_HANDLED` alone does NOT close it: that skip set is consulted by the
+    # FOLD, and this route writes caller props straight through `SET n += $props`.
+    "story_arc",
+})
+
+# The label → server-managed-set TABLE (#10389 review P2, the #3860 one-table
+# rule this change already invokes elsewhere). TWO consumers, ONE contract:
+#   * the LIVE tenant route (`sdk._update_entity`, behind the MCP tool
+#     `tortoise_update_entity`), which writes caller props with a live
+#     `SET n += $props` and consults no label skip-set; and
+#   * the REPLAY fold (`projection._FalkorProjection__fold_entity_mutation`,
+#     reached by `apply`, `rebuild_all`, `recover_from_log` and
+#     `backup.restore`), which applies a JOURNALLED state map verbatim.
+# ⛔ Both halves are load-bearing and neither implies the other. A live-writer
+# fix cannot retire bytes already in a journal — the same argument the `:Source`
+# arm has carried since #3998 ("the bytes are already in the journal on any
+# deployment that ran one"). Measured at #10389's review head: the `:Source`
+# side was defended on BOTH arms while `:Event` was defended on ONE, so
+# `update_entity(<agentSession eventId>, story_arc=…)` on ANY pre-fix head left
+# an `EntityMutated {label: "Event", state: {story_arc: …}}` line that the next
+# `rebuild_all` re-materialised on the anchor §9.1(b) calls prose-free.
+# Keyed by label, so the next label that grows a managed set (or the next key on
+# one of these) cannot leave one arm behind: an arm reading the table is
+# automatically covered, and an arm NOT reading it is the visible defect.
+_SERVER_MANAGED_PROPS_BY_LABEL: dict[str, frozenset] = {
+    "Source": _SOURCE_SERVER_MANAGED_PROPS,
+    "Event": _EVENT_SERVER_MANAGED_PROPS,
+}
 
 # The IDENTITY keys of a `:Source` — NOT refused to a caller-supplied map.
 # `create_source` treats these as server-managed (it MERGEs on `url` and mints

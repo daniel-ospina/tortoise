@@ -7504,3 +7504,516 @@ class TestEvidence8503Claims:
             "the tokenizer docstring still argues for a contiguous-span design")
         assert "SEQUENCE EQUALITY" in tok_doc, (
             "the tokenizer docstring must name the comparison that replaced it")
+
+
+# ── #9733: compact selection closes over a selected pack's own references ──
+#
+# `_select_pack_kinds` narrows PACK KINDS by story trigger words, but the list is
+# rendered under "EVERY kind you emit MUST come from this list" — so a pack whose
+# RELATIONS name another namespace's kind offered a closed vocabulary its own
+# declarations could not be spelled in (`packs/investment-portfolio-manager`:
+# `marks`/`constrainedBy` endpoints are `venture:investment`, and three of the
+# four `portfolio:` trigger words are not also `venture:` triggers — only the
+# bare `portfolio` one is, and it is also a `pm:` trigger — so that one mention
+# never demonstrated the defect). The closure is taken
+# over the DECLARED REFERENCES (the brief's reserved `pack_refs` section), not
+# over the manifests' `depends_on` list — see `_select_pack_kinds`' docstring
+# and `test_the_namespace_closure_is_deliberately_not_taken`.
+
+PORTFOLIO_STORY = "the board reviewed the investment mandate last week"
+
+
+def _declared_pack_relations() -> list[tuple[str, str, str]]:
+    """Every kind-to-kind relation the SHIPPED manifests declare, as
+    ``(predicate, fromKind, toKind)`` — namespaced endpoints only.
+
+    Read off the MANIFESTS, not off the brief's `pack_refs`: this is the
+    declared-INTENT side, and the residual set below is a gap between what the
+    packs declare and what the catalog brief can offer. `pack_refs` has already
+    dropped the `core:`/bare values (both are always spelled), so it cannot
+    answer "which declarations can no closure reach".
+
+    `default_packs_dir()`, not a cwd-relative `Path("packs")`: the manifests
+    must be the ones `build_master_list()` actually compiled, and that
+    resolution honours `TORTOISE_PACKS_DIR` first and falls back to the repo
+    root. A cwd-relative glob agrees with it only when pytest is run from the
+    repo root.
+    """
+    import yaml
+
+    from tortoise.pack_registry import default_packs_dir
+
+    rels: list[tuple[str, str, str]] = []
+    for path in sorted(default_packs_dir().glob("*/manifest.yaml")):
+        raw = yaml.safe_load(path.read_text()) or {}
+        for rel in ((raw.get("ontology") or {}).get("relations") or []):
+            if not isinstance(rel, dict):
+                continue
+            a, b = rel.get("fromKind"), rel.get("toKind")
+            # shape, not key: `fromKind`/`toKind` also carry entity types
+            # (`packs/venture` declares `toKind: Subject`)
+            if not (isinstance(a, str) and isinstance(b, str)):
+                continue
+            if ":" not in a or ":" not in b:
+                continue
+            if a.split(":")[0] == "core" or b.split(":")[0] == "core":
+                continue
+            rels.append((str(rel.get("predicate")), a, b))
+    return rels
+
+
+class TestCompactReferenceClosure:
+    def test_a_referenced_kind_survives_selection(self):
+        """The defect, asserted at the level it lives: the trigger words select
+        `portfolio:*`, and the position kind its relations point at must come
+        with them. Without the refs map the kind is dropped — which is the
+        pre-#9733 head, so this assertion FAILS on the unfixed code."""
+        m = v2.build_master_list()
+        assert "venture:investment" in m["pack_kinds"]
+        assert "venture:investment" in v2._select_pack_kinds(
+            PORTFOLIO_STORY, m["pack_kinds"], m["pack_refs"])
+        # The discrimination pin: the trigger words alone do not select it.
+        assert "venture:investment" not in v2._select_pack_kinds(
+            PORTFOLIO_STORY, m["pack_kinds"])
+        assert "venture:investment" not in v2._select_pack_kinds(
+            PORTFOLIO_STORY, m["pack_kinds"], {})
+
+    def test_the_compact_render_carries_the_referenced_kind(self):
+        """End-to-end: the kind reaches the rendered closed list, and the
+        narrowing the mode exists for still holds (this is not the all-packs
+        fallback)."""
+        m = v2.build_master_list()
+        rendered = v2._render_master_compact(m, PORTFOLIO_STORY)
+        assert "- venture:investment" in rendered, rendered
+        hit = v2._select_pack_kinds(
+            PORTFOLIO_STORY, m["pack_kinds"], m["pack_refs"])
+        assert set(hit) != set(m["pack_kinds"]), "all-packs fallback"
+        assert "dev:issue" not in hit, list(hit)
+
+    def test_every_declared_endpoint_of_a_selected_pack_is_closed(self):
+        """The general guard over the REAL catalog: for every KIND that declares
+        a namespaced relation partner, a story that selects it gets every one of
+        its partners in the list. A new pack (or a new relation) needs no engine
+        edit — only the partner must be a kind the brief carries.
+
+        Keyed by kind (#9733) and NOT by declaring namespace: `pack_refs` has no
+        namespace rows to iterate, and the old namespace-shaped loop also read
+        `_PACK_TRIGGERS[f"{ns}:"][0]` directly was a `KeyError` for any
+        ref-declaring namespace with no trigger row, a catalog state the engine
+        explicitly supports and injects whole (extractor_v2.py `_PACK_TRIGGERS`
+        read, ``triggers is None``). That guard would then have gone red for a
+        non-defect on the next such pack, and the cheapest way to green it is to
+        add an engine trigger row — exactly the per-pack engine edit this branch
+        documents as a deliberate decision. A kind in a trigger-less namespace is
+        selected whole, so it is exercised by asserting the partner arrives, not
+        by synthesising a story for it.
+        """
+        m = v2.build_master_list()
+        assert m["pack_refs"], "fixture: the catalog must declare endpoints"
+        empty = v2._select_pack_kinds(
+            "zzz no trigger word at all zzz", m["pack_kinds"])
+        assert set(empty) == set(m["pack_kinds"]), "fixture: expected fallback"
+        for kind, partners in m["pack_refs"].items():
+            triggers = v2._PACK_TRIGGERS.get(f"{kind.split(':')[0]}:")
+            if triggers is None:
+                # trigger-less namespace: injected whole, closure is moot
+                continue
+            story = f"the {triggers[0]} was reviewed last week"
+            hit = v2._select_pack_kinds(story, m["pack_kinds"], m["pack_refs"])
+            if kind not in hit:
+                # not every kind of a selected namespace carries its namespace's
+                # trigger word; the closure is about selected kinds, so a kind
+                # the story did not reach makes no claim here.
+                continue
+            for partner in partners:
+                if partner in m["pack_kinds"]:
+                    assert partner in hit, (kind, partner, story)
+
+    def test_a_reference_from_an_unselected_pack_is_not_added(self):
+        """Closure follows the SELECTION, not the catalog: a pack the story did
+        not select contributes no endpoint, or every prompt would drift toward
+        the all-packs set one reference at a time."""
+        m = v2.build_master_list()
+        hit = v2._select_pack_kinds(
+            "deploy the hotfix and fix the CI test failure",
+            m["pack_kinds"], m["pack_refs"])
+        assert "dev:issue" in hit
+        assert "venture:investment" not in hit, list(hit)
+
+    def test_a_reference_to_an_uninstalled_kind_is_inert(self):
+        """Fail-open: a graph-gated brief that does not install the dependency
+        has no such kind to add, and must not raise (the same direction as
+        every other branch in the selector)."""
+        pack_kinds = {"portfolio:mandate": "m", "dev:issue": "i"}
+        refs = {"portfolio:mandate": ["venture:investment"],
+                "dev:issue": ["gone:kind", 7, None]}
+        hit = v2._select_pack_kinds(
+            "the investment mandate", pack_kinds, refs)
+        assert hit == {"portfolio:mandate": "m"}, hit
+
+    def test_a_malformed_row_cannot_make_the_render_raise(self):
+        """The RENDER path never raises on a malformed master.
+
+        `pack_refs` reaches `_select_pack_kinds` through `_build_master_from_brief`,
+        which filters each ROW to a list/tuple but not its ELEMENTS — so a hand-built
+        or JSON-round-tripped master can carry a nested list, which is unhashable
+        and made `partner in pack_kinds` raise `TypeError: unhashable type: 'list'`
+        from inside the render. Same contract as `_values_suffixes` ("the RENDER
+        path must never raise on it") and as this module's own shape guards.
+        """
+        m = v2._build_master_from_brief(
+            {"a:one": "d", "pack_refs": {"a:one": [["x"], 7, None, "b:two"]}})
+        assert m["pack_refs"] == {"a:one": [["x"], 7, None, "b:two"]}, (
+            "fixture: `_build_master_from_brief` keeps the row's elements as-is")
+        rendered = v2._render_master_compact(m, "a story about a")
+        assert "a:one" in rendered
+        hit = v2._select_pack_kinds("a story about a", m["pack_kinds"],
+                                    m["pack_refs"])
+        assert hit == {"a:one": "d"}, hit
+
+    def test_a_non_iterable_row_cannot_make_the_render_raise(self):
+        """The same contract, for the ROW rather than its elements.
+
+        `_build_master_from_brief` filters each row to a list/tuple, so this
+        reaches only a HAND-BUILT or caller-supplied master — which is exactly
+        the master the contract names (“a master built by hand (or from JSON) can
+        carry a non-dict here, and the RENDER path must never raise on it”).
+        `refs.get(k) or ()` guards only a FALSY row, so a truthy non-iterable
+        raised `TypeError: 'int' object is not iterable` from the `for` itself,
+        before the per-element `isinstance(partner, str)` test could run.
+        """
+        m = v2._build_master_from_brief({"a:one": "d"})
+        m["pack_refs"] = {"a:one": 7}  # hand-built: a truthy non-iterable row
+        rendered = v2._render_master_compact(m, "a story about a")
+        assert "a:one" in rendered, (
+            "the malformed row must not cost the selected kind its render")
+        assert v2._select_pack_kinds("a story about a", m["pack_kinds"],
+                                     m["pack_refs"]) == {"a:one": "d"}
+
+    def test_the_refs_are_undirected_and_drop_core_and_bare(self):
+        """The DIRECT contract of `_relation_endpoint_refs` — the only pin on it.
+
+        Every catalog-level assertion above reaches this function only through
+        `ontology.relations` of the SHIPPED manifests. Two consequences, both
+        measured: (a) no shipped manifest uses
+        `extraction.relationTemplates[].fromKind/toKind`, so deleting that
+        collection site left the whole suite green; (b) the `core:` and bare-name
+        exclusions were un-pinned entirely. This row is hermetic — its own
+        manifest, no catalog — so each clause fails on its own mutation.
+        """
+        from tortoise.value_extractor import _relation_endpoint_refs
+
+        raw = {
+            "ontology": {"relations": [
+                # a foreign pairing, named in ONE direction only
+                {"fromKind": "a:one", "toKind": "b:two"},
+                # …and BOTH are partners of each other once collected
+                {"fromKind": "b:two", "toKind": "a:three"},
+                # core is always rendered — never a ref
+                {"fromKind": "a:one", "toKind": "core:plan"},
+                # a bare value is a CORE PascalCase kind — the validator rejects
+                # an unprefixed camelCase endpoint (`pack_registry`: "must be a
+                # core PascalCase kind or 'namespace:kind'"), and core is
+                # rendered on every path, so this is dropped as one
+                {"fromKind": "a:one", "toKind": "Bare"},
+            ]},
+            "extraction": {"relationTemplates": [
+                {"fromKind": "a:one", "toKind": "c:three"},
+            ]},
+        }
+        assert _relation_endpoint_refs(raw) == {
+            "a:one": ["b:two", "c:three"],
+            "b:two": ["a:one", "a:three"],
+            "a:three": ["b:two"],
+            "c:three": ["a:one"],
+        }, _relation_endpoint_refs(raw)
+        # shape-intolerant, not shape-crashing
+        for junk in (None, [], "x", 7, {"ontology": "nope"},
+                     {"ontology": {"relations": [None, 7, {"fromKind": 3}]}}):
+            assert _relation_endpoint_refs(junk) == {}, junk
+
+    def test_a_bare_template_endpoint_resolves_against_the_declaring_pack(self):
+        """The SECOND declaration site resolves bare endpoints; the first does not.
+
+        `pack_registry` treats the two sites differently and this function has to
+        follow it. `ontology.relations` accepts only a known core PascalCase kind
+        or `namespace:kind` — a bare camelCase there is REJECTED, so a bare value
+        is core. `extraction.relationTemplates` is resolved by
+        `_resolve_kind_ref`, whose first rule is `ref in pack_kinds`, i.e. a bare
+        value is THIS pack's own kind spelled short.
+
+        Two defects this row exists for, both of them #9733's own class surviving
+        on that second site: (a) a bare endpoint is a real partner, not core, so
+        dropping it leaves the pairing half-offered; (b) `_pair` used to return
+        early on the bare side and discard the NAMESPACED partner too, so
+        `{fromKind: valuationMark, toKind: venture:investment}` contributed
+        nothing at all — the very defect the fix removes, unclosed.
+
+        Non-vacuous by construction: the pre-fix signature takes no `namespace`
+        (``TypeError``), and neither the bare resolution nor the surviving
+        namespaced partner exists without it.
+        """
+        from tortoise.value_extractor import _relation_endpoint_refs
+
+        raw = {"extraction": {"relationTemplates": [
+            # a SAME-namespace endpoint spelled short, with a foreign partner:
+            # both sides must survive, in both directions
+            {"fromKind": "valuationMark", "toKind": "venture:investment"},
+            # a bare core kind is rendered on every path — no partner to close
+            {"fromKind": "Project", "toKind": "venture:investment"},
+        ]}}
+        assert _relation_endpoint_refs(raw, "portfolio") == {
+            "portfolio:valuationMark": ["venture:investment"],
+            "venture:investment": ["portfolio:valuationMark"],
+        }, _relation_endpoint_refs(raw, "portfolio")
+        # …and the SAME rows under `ontology.relations` still drop the bare side
+        # (the validator rejects that spelling there), while keeping nothing of
+        # its partner: a core-kind pairing needs no closure.
+        onto = {"ontology": {"relations": [
+            {"fromKind": "valuationMark", "toKind": "venture:investment"},
+        ]}}
+        assert _relation_endpoint_refs(onto, "portfolio") == {}, \
+            _relation_endpoint_refs(onto, "portfolio")
+        # With no namespace known the bare side is dropped, never guessed.
+        assert _relation_endpoint_refs(raw) == {}, _relation_endpoint_refs(raw)
+
+    def test_a_bare_relation_pair_adds_nothing_to_the_shipped_catalog(self):
+        """`pack_refs` for the REAL catalog is unchanged by the bare resolution.
+
+        No shipped manifest declares `extraction.relationTemplates` (only
+        `packs/_template` shows it, commented out), so the new namespace-aware
+        branch must be inert on every shipped pack: the derived map over `packs/`
+        is byte-identical whether each pack passes its namespace or not. That is
+        what makes the `zero half-offered relations` measurement independent of
+        this change.
+        """
+        import yaml as _yaml
+
+        from tortoise.pack_registry import default_packs_dir
+        from tortoise.value_extractor import _relation_endpoint_refs
+
+        packs = default_packs_dir()
+        for manifest in sorted(packs.glob("*/manifest.yaml")):
+            raw = _yaml.safe_load(manifest.read_text()) or {}
+            ns = raw.get("namespace") or manifest.parent.name
+            assert _relation_endpoint_refs(raw, str(ns)) == \
+                _relation_endpoint_refs(raw), manifest
+
+    def test_the_closure_iterates_to_a_fixpoint(self):
+        """A kind the closure ADDS brings the partners of its own declarations.
+
+        This is the P1 a fresh-context reviewer left open on the first cut of
+        this fix, which keyed `pack_refs` by declaring NAMESPACE and kept only
+        foreign refs ("a same-namespace partner is already selected with it").
+        That premise is false the moment a namespace is selected PARTIALLY —
+        which is exactly what co-selecting one foreign kind produces. Measured
+        on the real catalog at that head: a `dev` story gained
+        `product-strategy:feature` and nothing else of `product-strategy`, so
+        five of that namespace's own declared edges became half-offered and the
+        metric the fix exists for went 2 → 6 (WORSE for `dev`).
+        """
+        m = v2.build_master_list()
+        hit = v2._select_pack_kinds(
+            "deploy the hotfix and fix the CI test failure",
+            m["pack_kinds"], m["pack_refs"])
+        # the foreign kind the first hop adds…
+        assert "product-strategy:feature" in hit
+        # …and, transitively, every partner of ITS declared edges.
+        for partner in m["pack_refs"]["product-strategy:feature"]:
+            assert partner in hit, (partner, sorted(hit))
+        # narrowing is still not the all-packs fallback
+        assert set(hit) != set(m["pack_kinds"])
+
+    def test_no_relation_is_left_half_offered(self):
+        """The METRIC the whole fix exists for, over the real catalog.
+
+        A relation is half-offered when exactly one of its two namespaced
+        endpoints is in the narrowed list — the "closed vocabulary its own
+        declarations cannot be spelled in" state, which is the defect #9733
+        names. Two-sided: the trigger words ALONE leave relations half-offered
+        (so the assertion is not vacuous), and the closure leaves NONE — for
+        every shipped namespace that is story-selected.
+
+        ⛔ The count is over pairs where BOTH endpoints are in `pack_kinds`, and
+        that is not a convenience, it is the reachable universe: a kind declared
+        in `objectKinds`/`documentKinds` with no `kindDef` never reaches the
+        catalog brief (the narrow-prompt asymmetry recorded in
+        `docs/EXPANSION_PACKS.md`), so no selector — this closure or any other —
+        can offer it. "ZERO" here therefore means zero AMONG THE ENDPOINTS THE
+        BRIEF CARRIES; the declared-but-brief-less residuals are enumerated in
+        `test_declared_endpoints_absent_from_the_brief_are_known` so the
+        qualification cannot silently grow. Without that pairing, "zero" reads
+        as a claim about all declared relations, which would be false (measured:
+        `marketing:content → marketing:keyword` and
+        `agent-ops:rule → agent-ops:rationale` are half-offered on any story that
+        selects their namespace, and always were — pre-existing, not this fix's).
+
+        Reads the pairings off the BRIEF (`pack_refs`), not off a second YAML
+        parse, so it cannot drift from what the selector actually consumes.
+        """
+        m = v2.build_master_list()
+        pack_kinds, refs = m["pack_kinds"], m["pack_refs"]
+        # every declared pairing, both directions, restricted to kinds offered
+        # by the brief (a brief-gated graph simply has fewer)
+        pairs = set()
+        for kind, partners in refs.items():
+            if kind not in pack_kinds:
+                continue
+            for partner in partners:
+                if partner in pack_kinds:
+                    pairs.add((kind, partner))
+        assert pairs, "fixture: the catalog must declare namespaced pairings"
+
+        def half_offered(sel):
+            return sum(1 for a, b in pairs if (a in sel) != (b in sel))
+
+        # `must_discriminate` is False where the namespace's pairings are ALL
+        # intra-namespace (`marketing`: campaign→content→channel, all
+        # `marketing:*`): a namespace that selects on its own trigger words
+        # selects its every kind, so no relation can be half-offered and the
+        # pre-fix side is trivially zero. That is a property of the catalog, not
+        # a hole — the discriminating namespaces are the ones with a FOREIGN
+        # pairing, and there the pre-fix list must be visibly broken.
+        stories = {
+            "deploy the hotfix and fix the CI test failure": ("dev", True),
+            "the board reviewed the investment mandate last week":
+                ("portfolio", True),
+            "our product feature addresses a customer segment":
+                ("product-strategy", True),
+            "the campaign ran on a new channel for the audience":
+                ("marketing", False),
+        }
+        regressed = {}
+        for story, (ns, must_discriminate) in stories.items():
+            pre = v2._select_pack_kinds(story, pack_kinds)
+            if must_discriminate:
+                assert half_offered(pre) > 0, (
+                    f"{ns}: the trigger words alone leave NO half-offered "
+                    f"relation — this story stopped discriminating, so the "
+                    f"assertion below is vacuous for it")
+            else:
+                assert half_offered(pre) == 0, (
+                    f"{ns} was recorded as intra-namespace-only; it now has a "
+                    f"foreign pairing and must discriminate: "
+                    f"{sorted((a, b) for a, b in pairs if (a in pre) != (b in pre))}")
+            post = v2._select_pack_kinds(story, pack_kinds, refs)
+            if half_offered(post):
+                regressed[ns] = sorted(
+                    (a, b) for a, b in pairs if (a in post) != (b in post))
+            # …and it is still the NARROWING, not the all-packs fallback.
+            assert set(post) != set(pack_kinds), (ns, "all-packs fallback")
+        assert not regressed, (
+            "the closure left a declared relation unspellable: "
+            f"{regressed}")
+
+    def test_declared_endpoints_absent_from_the_brief_are_known(self):
+        """The RESIDUAL SET behind "zero half-offered relations", enumerated.
+
+        `_relation_endpoint_refs` collects every namespaced endpoint a manifest
+        declares, but `compile_value_brief`'s CATALOG loop iterates only
+        `kindDefs` — so a kind declared in `objectKinds`/`documentKinds` with no
+        `kindDef` is absent from `pack_kinds`, and a relation pointing at one is
+        half-offered in the rendered prompt no matter what the selector does.
+        (The TENANT loop synthesizes those kinds; the catalog loop does not — the
+        narrow-prompt asymmetry `docs/EXPANSION_PACKS.md` already records.)
+
+        That is pre-existing and out of #9733's scope, but it means the "zero"
+        in `_select_pack_kinds`' docstring and in the docs holds only for
+        endpoints the brief carries. This row is what keeps that qualifier
+        honest: the residual set is pinned, so a new one reds HERE instead of
+        quietly widening the gap under a claim of zero. If a future change
+        closes the asymmetry (synthesize kindDefs-less declared kinds in the
+        catalog loop, as the tenant loop does), this row is the place to update.
+        """
+        m = v2.build_master_list()
+        pack_kinds = m["pack_kinds"]
+        residual = {e for _, a, b in _declared_pack_relations()
+                    for e in (a, b) if e not in pack_kinds}
+        assert residual == {
+            "agent-ops:rationale", "dev:api", "dev:database",
+            "marketing:keyword",
+        }, (
+            "the declared-but-brief-less endpoint set moved. If it GREW, the "
+            "\"zero half-offered relations\" claim (extractor_v2 docstring, "
+            "docs/EXPANSION_PACKS.md) is now wrong by more than it says and the "
+            "docs must be updated with it; if it SHRANK, that is an improvement "
+            "worth saying out loud. Either way, do not just re-pin this set \u2014 "
+            f"update the claim. got: {sorted(residual)}")
+
+    def test_every_residual_relation_is_named_in_the_docs(self):
+        """The prose enumeration and this pin must be the SAME set.
+
+        Review cycle 5: `docs/EXPANSION_PACKS.md` qualified the "zero" and then
+        enumerated TWO residual relations, while the pin above measures FOUR
+        brief-absent endpoints — THREE relations. The third,
+        `dev:api → dev:database`, is strictly WORSE than the two the prose named:
+        BOTH of its endpoints are declared `objectKinds` with no `kindDef`, so it
+        is not half-offered but wholly unspellable in every render mode. The
+        prose is what a reader meets first, so an under-enumerating sentence
+        ships a claim smaller than the measurement — the exact class this PR
+        polices. (It failed at `92ba0d497`, which named two of the three.)
+
+        Two-sided like the metric row: the DOC must name every residual the
+        catalog really has, and a NEW residual reds here as well, so "the pin
+        reds, the claim does not" cannot happen again.
+        """
+        m = v2.build_master_list()
+        pack_kinds = m["pack_kinds"]
+        rels = sorted(
+            (a, b) for _, a, b in _declared_pack_relations()
+            if a not in pack_kinds or b not in pack_kinds)
+        assert rels == [
+            ("agent-ops:rule", "agent-ops:rationale"),   # half-offered
+            ("dev:api", "dev:database"),                 # BOTH endpoints absent
+            ("marketing:content", "marketing:keyword"),  # half-offered
+        ], rels
+        # the class the docs distinguish: half-offered vs wholly unspellable
+        half = [(a, b) for a, b in rels
+                if (a in pack_kinds) != (b in pack_kinds)]
+        wholly = [(a, b) for a, b in rels
+                  if a not in pack_kinds and b not in pack_kinds]
+        assert len(half) == 2 and wholly == [("dev:api", "dev:database")], (
+            half, wholly)
+        doc = (Path(__file__).resolve().parents[1]
+               / "docs/EXPANSION_PACKS.md").read_text()
+        for a, b in rels:
+            assert f"`{a} → {b}`" in doc, (
+                f"{a} → {b} is a residual relation, but "
+                "`docs/EXPANSION_PACKS.md` does not name it — the \"zero "
+                "half-offered relations\" qualifier is enumerating less than "
+                "the measurement")
+
+    def test_nothing_matched_still_returns_everything(self):
+        """The all-packs fallback returns before the closure runs — it is
+        already the whole vocabulary, and a refs map must not narrow it."""
+        m = v2.build_master_list()
+        hit = v2._select_pack_kinds(
+            "zzz no trigger word at all zzz", m["pack_kinds"], m["pack_refs"])
+        assert hit == m["pack_kinds"]
+
+    def test_the_namespace_closure_is_deliberately_not_taken(self):
+        """RECORDED DECISION (#9733): the closure is over REFERENCES, not over
+        `depends_on` NAMESPACES.
+
+        The filing asked for the dependency route and assumed "only `portfolio`
+        declares `depends_on` today". Measured at this head that premise is
+        stale — `dev: [product-strategy, pm]`, `marketing: [product-strategy]`,
+        `product-strategy: [dev]` and `portfolio: [venture]` all declare one,
+        and `dev` ↔ `product-strategy` is a CYCLE. Transitive namespace
+        closure would therefore collapse the narrowing compact mode exists for:
+        every `dev:` story would pull dev+product-strategy+pm (29), and a
+        `marketing:` story would pull 33 of the 47 shipped kinds.
+
+        Pinned so a later "generalise it" change is visible rather than silent:
+        these kinds are referenced by NO selected pack's endpoint, so their
+        absence is a stated cost of the narrowing, not a dangling reference. If
+        this starts failing, the decision moved — update it here and in
+        `_select_pack_kinds`' docstring rather than deleting the test.
+        """
+        m = v2.build_master_list()
+        hit = v2._select_pack_kinds(
+            "deploy the hotfix and fix the CI test failure",
+            m["pack_kinds"], m["pack_refs"])
+        assert "dev:issue" in hit
+        assert not [k for k in hit if k.startswith("pm:")], list(hit)
+        assert not [k for k in hit if k.startswith("marketing:")], list(hit)

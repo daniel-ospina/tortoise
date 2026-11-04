@@ -279,8 +279,8 @@ def validate_manifest(
     # canonical collision surface (a tenant pack named `dev` would collide
     # with the starter `dev` PackInstall); ``core`` and the brief's RESERVED
     # non-kind sections (``value_extractor.RESERVED_BRIEF_KEYS`` —
-    # ``memory_granularity``, ``pack_hints``) are reserved because the #2031
-    # tenant-view compile overlays tenant kinds onto
+    # ``memory_granularity``, ``pack_hints``, ``pack_refs``) are reserved because
+    # the #2031 tenant-view compile overlays tenant kinds onto
     # ``compile_value_brief``'s dicts, where a tenant ``core`` namespace would
     # shadow the canonical core vocabulary and a namespace named after a
     # reserved brief section would shadow that section's key. The tuple is
@@ -291,7 +291,7 @@ def validate_manifest(
         return ManifestValidation(
             False, namespace=ns,
             errors=[f"namespace '{ns}' is a reserved starter pack — pick a different name"])
-    if ns in ("core", "memory_granularity", "pack_hints"):
+    if ns in ("core", "memory_granularity", "pack_hints", "pack_refs"):
         return ManifestValidation(
             False, namespace=ns,
             errors=[f"namespace '{ns}' is a reserved namespace — pick a different name"])

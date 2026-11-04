@@ -545,10 +545,25 @@ def test_field_order_tracks_the_evidence_not_the_raw_retrieval_order(
     (the pool ``assemble_context`` was handed), so the test cannot pass
     vacuously on an empty pool.
 
+    The stub reverses the **SESSION** order the evidence presents, not the
+    incidental hit sequence (#10240, measured). A plain ``reversed(hits)`` is
+    a no-op on the observable quantity whenever the pool's session sequence is
+    palindromic — measured at this head under the BM25 lexical arm ON (the
+    default since #10240): a 3-hit pool in the order ``A, B, A`` reverses to
+    ``A, B, A``, so ``expected`` (``reversed(pool_order)``) stopped matching an
+    assembly that had in fact preserved the reversal, and this test reddened on
+    its own device instead of on a wiring defect (``test (g)`` of run
+    `41217291700`; ``TORTOISE_BM25_LEXICAL=0`` → green). Grouping the pool by
+    DESCENDING session order makes the assembled order the exact reverse of
+    ``pool_order`` whenever the pool carries >= 2 sessions — which the
+    precondition below asserts — so the device cannot be defeated by pool
+    composition and no arm pin is needed.
+
     ❌ MUTATION KILLED: ``_distinct_session_ids(hits)`` in ``run_ask_lane()``
     instead of
     ``_distinct_session_ids(assembled)`` → the field reports the RAW pool
-    order, which the stub reversed, RED.
+    order, which the stub reversed, RED (verified at this head: red under the
+    mutation, green restored).
     """
     sdk = _new_sdk()
     _seed_captured_session(sdk, SID_A, TURNS_A)
@@ -561,11 +576,22 @@ def test_field_order_tracks_the_evidence_not_the_raw_retrieval_order(
     captured: dict = {}
 
     def _reversed_assemble(pool, **kw):
-        # Same hits in the REVERSE of the order the pool arrived in — a
-        # different order from the raw retrieval order, so a field derived
-        # from the raw hits must differ from one derived from this list.
-        captured["pool"] = list(pool)
-        return real_assemble(list(reversed(list(pool))), **kw)
+        # The same hits, grouped in the REVERSE of the session order the pool
+        # arrived in — a different order from the raw retrieval order, so a
+        # field derived from the raw hits must differ from one derived from
+        # this list. Grouped rather than merely `reversed(pool)`: see the
+        # docstring (a palindromic session sequence made a bare reversal a
+        # no-op on the distinct-session order).
+        hits = list(pool)
+        captured["pool"] = hits
+        rank = {sid: i for i, sid in enumerate(
+            retrieval._distinct_session_ids(hits))}
+        grouped = sorted(
+            hits,
+            key=lambda h: rank.get(retrieval.hit_session_id(h), -1),
+            reverse=True,
+        )
+        return real_assemble(grouped, **kw)
 
     monkeypatch.setattr(retrieval, "assemble_context", _reversed_assemble)
     _install_fake_reader(monkeypatch)

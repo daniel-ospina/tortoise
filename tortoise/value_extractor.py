@@ -18,6 +18,7 @@ from pathlib import Path
 
 from tortoise._gate_memo import GateMemo
 from tortoise.commit_schema import EVENT_KINDS as _GATE_EVENT_KINDS
+from tortoise.pack_registry import CORE_KINDS as _CORE_KINDS
 
 # ── The value brief: compiled vocab + semantics (the #954 contract) ─────────
 
@@ -33,7 +34,158 @@ from tortoise.commit_schema import EVENT_KINDS as _GATE_EVENT_KINDS
 #: ``_object_kind_vocab`` reads THIS set, so the reservation and the emit cannot
 #: drift, and ``tests/test_pack_brief_hints_4894.py`` fails if a new non-kind
 #: section is added without landing here.
-RESERVED_BRIEF_KEYS = frozenset({"memory_granularity", "pack_hints"})
+#: ``pack_refs`` (#9733) is the kind references the packs' own relation
+#: declarations name — foreign AND same-namespace partners, since a namespace
+#: can be selected partially — pack-authored data, so it rides the brief too,
+#: and it must never read as a pack namespace either.
+RESERVED_BRIEF_KEYS = frozenset({"memory_granularity", "pack_hints", "pack_refs"})
+
+
+def _relation_endpoint_refs(raw: object, namespace: str | None = None) \
+        -> dict[str, list[str]]:
+    """``{kind: [every kind its own declared relations pair it with]}`` (#9733).
+
+    Compact-mode story selection (``extractor_v2._select_pack_kinds``) narrows
+    the PACK KINDS list to the namespaces whose trigger words matched the story,
+    and that list is rendered under "EVERY kind you emit MUST come from this
+    list". A selecting pack whose relations name ANOTHER namespace's kind thus
+    offers a vocabulary its own declarations cannot be spelled in: the portfolio
+    overlay's ``marks``/``constrainedBy`` endpoints are ``venture:investment``,
+    and three of the four ``portfolio:`` trigger words are not also ``venture:``
+    triggers (only the bare ``portfolio`` one is, and it is also a ``pm:``
+    trigger) — so a
+    portfolio story lost the very position kind the mark values.
+
+    ⛔ **Keyed by KIND and UNDIRECTED, including same-namespace partners.** The
+    first cut of this fix keyed by declaring NAMESPACE and kept only foreign
+    refs, on the premise "a same-namespace partner is already selected with it".
+    That premise is false the moment a namespace can be selected PARTIALLY —
+    which is exactly what co-selecting one foreign kind produces: a `dev` story
+    gained `product-strategy:feature` but no other `product-strategy` kind, so
+    five of that namespace's own declared edges became half-offered (measured:
+    2 → 6, i.e. the fix made the metric it exists for WORSE for `dev`). A
+    relation is emittable only when BOTH endpoints are offered, so the closure
+    is over the pairing itself: whichever endpoint is selected pulls the other.
+
+    Collected from the two declaration sites that name an ENDPOINT on both sides
+    of a typed edge: ``ontology.relations[].fromKind/toKind`` and
+    ``extraction.relationTemplates[].fromKind/toKind``. Kind-to-kind prose
+    (``nearMisses``, descriptions) is deliberately NOT collected: prose mentions
+    a kind, an endpoint IS one — only the latter needs vocabulary to be
+    emittable. The legacy ``from``/``to`` relation spelling is likewise not
+    read: it carries ENTITY TYPES (``Object``/``Subject``), never a namespaced
+    kind (``pack_registry`` dataclass comment). Note that ``fromKind``/``toKind``
+    CAN also carry an entity type — ``packs/venture`` declares
+    ``assignedTo … toKind: Subject`` and ``holds … toKind: Subject`` — so the
+    value is classified by shape, not by which key it arrived under.
+
+    ⚠️ ``extraction.relationTemplates[].fromKind/toKind`` is read for the same
+    reason as ``ontology.relations[]``: it is the second declaration site that
+    names a KIND on both sides of a typed edge. No SHIPPED manifest uses it
+    today (only ``packs/_template`` shows it, commented out), so it is pinned by
+    its own hermetic unit test rather than by the catalog sweep — otherwise
+    deleting the site would leave every test green.
+
+    ``core:`` refs are dropped: core is rendered on every path, so a pairing
+    with it needs no closure. A BARE value means something different on the two
+    sites, because the validator treats the two sites differently (primary
+    source: ``pack_registry``):
+
+    * ``ontology.relations`` — ``_validate`` accepts only a known core
+      PascalCase kind or a ``namespace:kind`` here and REJECTS an unprefixed
+      camelCase value ("must be a core PascalCase kind or 'namespace:kind'"),
+      so a bare value is a CORE kind: dropped, like ``core:``.
+    * ``extraction.relationTemplates`` — ``_validate_cross_pack_refs`` resolves
+      a bare value FIRST against the declaring pack's OWN kinds
+      (``_resolve_kind_ref``: ``ref in pack_kinds`` → ok), so here a bare value
+      is a same-namespace kind spelled short, and ``namespace`` (the declaring
+      pack's) resolves it to ``namespace:kind``. The selector's own membership
+      test confirms it: a bare core kind or a bare cross-pack name stays inert,
+      because it is never a kindDef of this namespace. With no ``namespace``
+      known the bare value is dropped, not guessed.
+
+    Each side of a pair is normalized INDEPENDENTLY, and a side that RESOLVES
+    (a ``namespace:kind``, or a BARE ``relationTemplates`` value, which ``_norm``
+    resolves to the declaring namespace's own kind) no longer discards its
+    partner: before the template-site fix, ``{fromKind: "valuationMark",
+    toKind: "venture:investment"}`` contributed nothing there either, which is
+    the very defect #9733 removes surviving on the second declaration site.
+    ⚠️ A side that closes NOTHING — core, an entity type, a malformed value, or a
+    bare value at the ``ontology.relations`` site — still drops the PAIR, and the
+    partner with it: such an edge is never emittable from this pack, so offering
+    the partner alone would be half an edge.
+    First-seen order, de-duplicated; shape is NOT trusted — this reads raw YAML,
+    so a malformed section degrades to nothing rather than raising (the manifest
+    validator reports it). ``tests/test_extractor_v2.py
+    ::TestCompactReferenceClosure`` (`test_the_refs_are_undirected_and_drop_core
+    _and_bare`, `test_a_bare_template_endpoint_resolves_against_the_declaring
+    _pack`) is the direct pin on this function's contract.
+    """
+    if not isinstance(raw, dict):
+        return {}
+    out: dict[str, list[str]] = {}
+
+    def _norm(ref: object, site: str) -> str | None:
+        """A usable ``namespace:kind``, or None when this side closes nothing.
+
+        ``_CORE_KINDS`` is READ from ``pack_registry``, not re-spelled: it is the
+        same set ``_resolve_kind_ref`` tests (``ref in pack_kinds or ref in
+        CORE_KINDS``), and the #1026 residual forbids a second engine-side
+        enumeration of the vocabulary.
+        """
+        if not isinstance(ref, str):
+            return None
+        ref = ref.strip()
+        if not ref:
+            return None
+        if ":" in ref:
+            ns_part = ref.split(":", 1)[0]
+            if not ns_part or ns_part == "core":
+                return None  # core is rendered on every path, always spellable
+            return ref
+        if ref in _CORE_KINDS or site != "template" or not namespace:
+            # `ontology.relations`: a bare value is a CORE PascalCase kind (the
+            # validator REJECTS an unprefixed camelCase here), and core needs no
+            # closure. A template bare value that IS a core kind is core on that
+            # site too (`_resolve_kind_ref`: own kinds, then `CORE_KINDS`). A
+            # template bare value with no namespace to resolve it against is
+            # dropped rather than guessed.
+            return None
+        # `extraction.relationTemplates`: the validator resolves a bare value
+        # against the declaring pack's OWN kinds first (`_resolve_kind_ref`), so
+        # this is a same-namespace kind spelled short.
+        return f"{namespace}:{ref}"
+
+    def _pair(a: object, b: object, site: str) -> None:
+        # Both sides, so the map is undirected. A side that closes nothing drops
+        # the PAIR (see the docstring): an edge is emittable only when BOTH
+        # endpoints are, so keeping the half that DID resolve would offer a
+        # relation whose other end this pack never names.
+        a_ref, b_ref = _norm(a, site), _norm(b, site)
+        if a_ref is None or b_ref is None or a_ref == b_ref:
+            return
+        row = out.setdefault(a_ref, [])
+        if b_ref not in row:
+            row.append(b_ref)
+        row = out.setdefault(b_ref, [])
+        if a_ref not in row:
+            row.append(a_ref)
+
+    onto = raw.get("ontology")
+    onto = onto if isinstance(onto, dict) else {}
+    relations = onto.get("relations")
+    for rel in (relations if isinstance(relations, list) else []):
+        if not isinstance(rel, dict):
+            continue
+        _pair(rel.get("fromKind"), rel.get("toKind"), "relation")
+    ext = raw.get("extraction")
+    templates = (ext.get("relationTemplates")
+                 if isinstance(ext, dict) else None)
+    for tpl in (templates if isinstance(templates, list) else []):
+        if not isinstance(tpl, dict):
+            continue
+        _pair(tpl.get("fromKind"), tpl.get("toKind"), "template")
+    return out
 
 
 def _extraction_hints(extraction: object) -> dict:
@@ -145,7 +297,9 @@ def compile_value_brief(packs_dir: Path | str | None = None,
     byte-identical to before. The overlay contributes the tenant manifest's
     kindDefs (with nearMisses, same extraction discipline), its
     memory_granularity, its ``extraction`` value-brief hints (``valueGate`` /
-    ``promptFragments`` → the reserved ``pack_hints`` section) and
+    ``promptFragments`` → the reserved ``pack_hints`` section), its relation
+    endpoints (→ the reserved ``pack_refs`` section, #9733, like the filesystem
+    loop) and
     declared-but-kindDefs-less object/document/
     event kinds (empty semantics — the parity surface for the default
     path's FIX M declared-kind acceptance, which is served by the
@@ -222,6 +376,12 @@ def compile_value_brief(packs_dir: Path | str | None = None,
     #: the granularity — a hint is pack-authored domain data, so an uninstalled
     #: pack's hints must not reach the prompt any more than its kinds may.
     pack_hints: dict = {}
+    #: #9733: the SAME gate and the SAME loop — a relation endpoint is
+    #: pack-authored domain data like the kinds it belongs with, so an
+    #: uninstalled pack's references must not reach the prompt either. Keyed by
+    #: KIND (not by declaring namespace) and merged across packs, because the
+    #: closure that consumes it walks kinds: see ``_relation_endpoint_refs``.
+    pack_refs: dict = {}
     for ns, path in ns_files.items():
         if _gate is not None and ns not in _gate:
             continue
@@ -232,6 +392,9 @@ def compile_value_brief(packs_dir: Path | str | None = None,
         hints = _extraction_hints(raw.get("extraction"))
         if hints:
             pack_hints[ns] = hints
+        for kind, partners in _relation_endpoint_refs(raw, ns).items():
+            row = pack_refs.setdefault(kind, [])
+            row.extend(p for p in partners if p not in row)
 
     # #2031: per-tenant custom packs (hosted) — the SAME compile loop over
     # the tenant's :PackManifest YAMLs (graph-native, not filesystem).
@@ -292,6 +455,9 @@ def compile_value_brief(packs_dir: Path | str | None = None,
                 hints = _extraction_hints(raw.get("extraction"))
                 if hints:
                     pack_hints[ns] = hints
+                for kind, partners in _relation_endpoint_refs(raw, ns).items():
+                    row = pack_refs.setdefault(kind, [])
+                    row.extend(p for p in partners if p not in row)
             except Exception:  # noqa: BLE001, RUF100 — never let one node
                 continue  # take down the whole tenant's vocabulary
 
@@ -326,7 +492,15 @@ def compile_value_brief(packs_dir: Path | str | None = None,
             # #1026/#4894: the pack's value-brief slots, carried by the brief so
             # the SINGLE documented pack→extractor seam stays single. RESERVED —
             # ``_object_kind_vocab`` skips it, so it never reads as an objectKind.
-            "pack_hints": pack_hints}
+            "pack_hints": pack_hints,
+            # #9733: ``{kind: [every kind its own declared relations pair it
+            # with]}`` — the SAME shape the closure walks, so compact-mode
+            # story selection can co-select exactly the kinds a SELECTED
+            # pack's declarations reference, to a fixpoint.
+            # RESERVED for the same reason ``pack_hints`` is — it names the
+            # vocabulary, it is not in it. Absent-equivalent (``{}``) for a
+            # catalog where no pack declares a relation endpoint.
+            "pack_refs": pack_refs}
 
 
 def compile_kind_index_spec(packs_dir: Path | str | None = None,
