@@ -1,0 +1,147 @@
+....................................F................................... [ 67%]
+.FF............................F...                                      [100%]
+=================================== FAILURES ===================================
+___ TestFoldBehaviour.test_declared_fold_never_resurrects_a_terminal_object ____
+
+self = <test_status_folds_2729.TestFoldBehaviour object at 0x7f95a16a9610>
+
+    def test_declared_fold_never_resurrects_a_terminal_object(self):
+        """#2164/#3309 guard carried through the declared path too."""
+        sdk = _fresh_sdk()
+        try:
+            sdk.create_entity("object", "T3", objectKind="venture:tranche")
+            sdk._get_proj()._fold_object_superseded(
+                {"name": "T3", "supersedes_by": "T3-v2"})
+            sdk.create_event("released", "venture:disbursement", object="T3")
+>           assert _object_status(sdk, "T3") == "superseded"
+E           AssertionError: assert 'released' == 'superseded'
+E             
+E             - superseded
+E             + released
+
+tests/test_status_folds_2729.py:471: AssertionError
+------------------------------ Captured log call -------------------------------
+WARNING  tortoise.pack_registry:pack_registry.py:45 relation 'competesWith': semantics 'opposes' is retired in favour of 'mutuallyExclusive' (ONTOLOGY §8, #7852) — packs align to the core vocabulary (#7848)
+WARNING  tortoise.pack_registry:pack_registry.py:45 relation 'blocks' declares no semantics — the Layer-2 meaning (ONTOLOGY §8, #7852); valid values: addresses, causes, dependsOn, hasPart, managedBy, mutuallyExclusive, mutuallySupportive, ownedBy, refutes, related, supports, transacts
+WARNING  tortoise.pack_registry:pack_registry.py:45 relation 'blocks': the declaration binds no write path — 'blocks' is neither a structural edge predicate (create_edge refuses it) nor carried by a declared mechanism, so create_operator has no declared op_type for it. This is a declaration gap, not a runtime refusal: create_operator(op_type=..., label='blocks') still accepts the bare label (warn-not-block, #1934). Declare `mechanism: IMPL|NAND`, use a structural predicate, or mark it `declarationOnly: true` (#2766)
+WARNING  tortoise.pack_registry:pack_registry.py:45 relation 'partOfSprint' declares no semantics — the Layer-2 meaning (ONTOLOGY §8, #7852); valid values: addresses, causes, dependsOn, hasPart, managedBy, mutuallyExclusive, mutuallySupportive, ownedBy, refutes, related, supports, transacts
+WARNING  tortoise.pack_registry:pack_registry.py:45 relation 'partOfSprint': the declaration binds no write path — 'partOfSprint' is neither a structural edge predicate (create_edge refuses it) nor carried by a declared mechanism, so create_operator has no declared op_type for it. This is a declaration gap, not a runtime refusal: create_operator(op_type=..., label='partOfSprint') still accepts the bare label (warn-not-block, #1934). Declare `mechanism: IMPL|NAND`, use a structural predicate, or mark it `declarationOnly: true` (#2766)
+WARNING  tortoise.pack_registry:pack_registry.py:45 relation 'assignedTo' declares no semantics — the Layer-2 meaning (ONTOLOGY §8, #7852); valid values: addresses, causes, dependsOn, hasPart, managedBy, mutuallyExclusive, mutuallySupportive, ownedBy, refutes, related, supports, transacts
+WARNING  tortoise.pack_registry:pack_registry.py:45 relation 'assignedTo': the declaration binds no write path — 'assignedTo' is neither a structural edge predicate (create_edge refuses it) nor carried by a declared mechanism, so create_operator has no declared op_type for it. This is a declaration gap, not a runtime refusal: create_operator(op_type=..., label='assignedTo') still accepts the bare label (warn-not-block, #1934). Declare `mechanism: IMPL|NAND`, use a structural predicate, or mark it `declarationOnly: true` (#2766)
+WARNING  tortoise.pack_registry:pack_registry.py:45 relation 'onBoard' declares no semantics — the Layer-2 meaning (ONTOLOGY §8, #7852); valid values: addresses, causes, dependsOn, hasPart, managedBy, mutuallyExclusive, mutuallySupportive, ownedBy, refutes, related, supports, transacts
+WARNING  tortoise.pack_registry:pack_registry.py:45 relation 'onBoard': the declaration binds no write path — 'onBoard' is neither a structural edge predicate (create_edge refuses it) nor carried by a declared mechanism, so create_operator has no declared op_type for it. This is a declaration gap, not a runtime refusal: create_operator(op_type=..., label='onBoard') still accepts the bare label (warn-not-block, #1934). Declare `mechanism: IMPL|NAND`, use a structural predicate, or mark it `declarationOnly: true` (#2766)
+WARNING  tortoise.pack_registry:pack_registry.py:45 relation 'funds': semantics 'funds' is retired in favour of 'transacts' (ONTOLOGY §8, #7852) — packs align to the core vocabulary (#7848)
+WARNING  tortoise.pack_registry:pack_registry.py:45 relation 'producedBy': semantics 'produces' is retired in favour of 'causes' (ONTOLOGY §8, #7852) — packs align to the core vocabulary (#7848)
+WARNING  tortoise.pack_registry:pack_registry.py:45 relation 'holds': semantics 'holds' is retired in favour of 'ownedBy' (ONTOLOGY §8, #7852) — packs align to the core vocabulary (#7848)
+WARNING  tortoise.pack_registry:pack_registry.py:45 pack registry /tmp/cell-t3/.worktrees/fix-9876/packs: 1 pack(s) carry a non-blocking lifecycle declaration note — a `statuses` word shared with the connector vocabulary, or a bare object kind claimed by more than one pack (see registry.lifecycle_warnings): venture: kindDefs 'investment': 'statuses' reuses the shared connector vocabulary word(s) active — this kind owns its own state (the built-in connector fold does not apply to it), but the spelling is ambiguous to a reader; rename or record the intent
+_ TestPropertyMutationRoundTrip.test_a_name_change_is_not_journaled_and_says_so _
+
+self = <test_unjournaled_mutation_class.TestPropertyMutationRoundTrip object at 0x7f95a1359520>
+env = (<tortoise.sdk.TortoiseSDK object at 0x7f948f796fc0>, PosixPath('/tmp/tt_u6qcb547/pytest-of-cmux/pytest-0/test_a_name_change_is_not_jour0/events'))
+caplog = <_pytest.logging.LogCaptureFixture object at 0x7f948fa93170>
+
+    def test_a_name_change_is_not_journaled_and_says_so(self, env, caplog):
+        """#3377 is DEFERRED (#4769) — and the deferral must be LOUD.
+    
+        Journalling a `name` change renames the node in pass 1b, before the
+        deferred `ObjectSuperseded` sweep matches on that name, so a legacy
+        id-less supersede is dropped (`rebuild_all` returns the object
+        status='live' while live and `apply()` keep 'superseded'). Rather than
+        ship that regression, the producer withholds the record — and warns on
+        every matching occurrence, so the withhold is a declared deferral and not
+        the silent loss this lane exists to fix.
+    
+        This row is the pin for that contract: it asserts the write still
+        applies to the graph, that NO `EntityMutated` record is written for it,
+        and that a warning naming #4769 is emitted.
+        """
+        sdk, events = env
+        oid = sdk.create_entity("object", name="A",
+                                objectKind="k")["node"]["id"]
+        before = len(_mutations(events))
+        caplog.clear()
+        with caplog.at_level("WARNING"):
+            # NAME-ONLY: a write carrying other keys journals THOSE (see
+            # `test_a_name_bearing_write_still_journals_its_other_keys`).
+            sdk.update_entity(oid, name="B")
+    
+        assert _props(sdk, "Object", oid, "name")["name"] == "B", \
+            "the live write must still apply — only the JOURNAL is withheld"
+>       assert len(_mutations(events)) == before, \
+            "a `name` change must not be journalled while #3377 is deferred"
+E       AssertionError: a `name` change must not be journalled while #3377 is deferred
+E       assert 1 == 0
+E        +  where 1 = len([{'event_id': '1a16f8d844d-0c646faeae0a', 'ts': '2026-10-24T20:15:07.853455+00:00', 'type': 'EntityMutated', 'initiated_by': 'sdk', ...}])
+E        +    where [{'event_id': '1a16f8d844d-0c646faeae0a', 'ts': '2026-10-24T20:15:07.853455+00:00', 'type': 'EntityMutated', 'initiated_by': 'sdk', ...}] = _mutations(PosixPath('/tmp/tt_u6qcb547/pytest-of-cmux/pytest-0/test_a_name_change_is_not_jour0/events'))
+
+tests/test_unjournaled_mutation_class.py:554: AssertionError
+_ TestPropertyMutationRoundTrip.test_a_name_bearing_write_still_journals_its_other_keys _
+
+self = <test_unjournaled_mutation_class.TestPropertyMutationRoundTrip object at 0x7f95a1358650>
+env = (<tortoise.sdk.TortoiseSDK object at 0x7f948fa91010>, PosixPath('/tmp/tt_u6qcb547/pytest-of-cmux/pytest-0/test_a_name_bearing_write_stil0/events'))
+caplog = <_pytest.logging.LogCaptureFixture object at 0x7f948fa937a0>
+
+    def test_a_name_bearing_write_still_journals_its_other_keys(self, env,
+                                                                caplog):
+        """The withhold must be exactly `name` wide — #3312 for the rest.
+    
+        Withholding the WHOLE map (the first cut of this fix) reopened #3312 for
+        the ordinary call `update_entity(id, name=..., status=...)`: the status
+        rode along with the withheld record and was silently reverted by
+        `rebuild_all`. Only `name` moves the node in front of the deferred
+        name-keyed supersede sweep, so only `name` needs withholding.
+        """
+        sdk, events = env
+        oid = sdk.create_entity("object", name="A",
+                                objectKind="k")["node"]["id"]
+        caplog.clear()
+        with caplog.at_level("WARNING"):
+            sdk.update_entity(oid, name="B", status="archived",
+                              confidence=0.9)
+        assert _props(sdk, "Object", oid,
+                      "name")["name"] == "B", "live write still applies"
+    
+        recs = [r for r in _mutations(events) if r.get("id") == oid]
+        assert recs, "the non-`name` keys must still journal"
+        state = recs[-1]["state"]
+>       assert "name" not in state, (
+            "`name` must NOT be journalled while #3377 is deferred: " f"{state}")
+E       AssertionError: `name` must NOT be journalled while #3377 is deferred: {'name': 'B', 'status': 'archived', 'confidence': 0.9}
+E       assert 'name' not in {'name': 'B', 'status': 'archived', 'confidence': 0.9}
+
+tests/test_unjournaled_mutation_class.py:592: AssertionError
+_ TestLegacyJournalShapes.test_legacy_name_keyed_supersede_beats_an_earlier_state_op _
+
+self = <test_unjournaled_mutation_class.TestLegacyJournalShapes object at 0x7f95a11d06e0>
+env = (<tortoise.sdk.TortoiseSDK object at 0x7f94915e8980>, PosixPath('/tmp/tt_u6qcb547/pytest-of-cmux/pytest-0/test_legacy_name_keyed_superse0/events'))
+
+    def test_legacy_name_keyed_supersede_beats_an_earlier_state_op(
+            self, env):
+        """Supersede journalled LAST must win — the guard must NOT re-fold."""
+        sdk, events = env
+        oid = sdk.create_entity("object", name="Legacy",
+                                objectKind="k")["node"]["id"]
+        sdk.update_entity(oid, status="archived")
+        _append_raw(events, type="ObjectSuperseded", name="Legacy",
+                    supersedes_by="other", session_id="s", evidence="e")
+    
+        sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
+>       assert _props(sdk, "Object", oid, "status")["status"] == "superseded", (
+            "the state fold overwrote a LATER name-keyed supersede")
+E       AssertionError: the state fold overwrote a LATER name-keyed supersede
+E       assert 'archived' == 'superseded'
+E         
+E         - superseded
+E         + archived
+
+tests/test_unjournaled_mutation_class.py:997: AssertionError
+------------------------------ Captured log call -------------------------------
+WARNING  tortoise.projection:__init__.py:13155 rebuild: the event-log dir /tmp/tt_u6qcb547/pytest-of-cmux/pytest-0/test_legacy_name_keyed_superse0/events differs from the embedded DB dir /tmp/tt_u6qcb547/pytest-of-cmux/pytest-0/test_legacy_name_keyed_superse0 — the durable pre-wipe snapshot is written next to the log, so automatic recovery on DB open will not see it; re-run `tortoise rebuild --dir /tmp/tt_u6qcb547/pytest-of-cmux/pytest-0/test_legacy_name_keyed_superse0/events` to recover (#2943)
+WARNING  tortoise.projection:__init__.py:14891 rebuild: ObjectSuperseded carries no id (event_id=raw-ObjectSuperseded name='Legacy' supersedes_by='other') — no incarnation to address, so the supersede is LOST (named exemption: supersede-without-id)
+WARNING  tortoise.projection.nonfolded:nonfolded.py:882 rebuild_all: 1 non-folded journal event(s) recorded but EXEMPT (run passes): [supersede-without-id] event_id=None target=('Object',None) name='Legacy' context=ObjectSuperseded without an id (target unaddressable: the supersede is LOST, live and replay alike) (exempt: a legacy ``ObjectSuperseded`` carries no ``id`` at all, so it addresses NO incarnation and neither the live fold nor replay can apply it — the same class as ``point-superseded-no-new-id``, on the Object side (recorded decision: this module's #3590 entry and `identity-decision.md` §"Stage 0 findings"). DEGRADED GUARANTEE: live and replay BOTH fold nothing (one fetch-and-refuse in ``commit_ops``, one in ``_fold_object_superseded``), so this is not a live/replay divergence — but the SUPERSEDE IS LOST: the Object keeps its live status where pre-#3590 main fell back to the name and buried it. The name fallback is retired on purpose (under same-name coexistence it supersedes a DIFFERENT incarnation — #3573's burial class), so the loss is the correct disposition, not a bug to recover. The record is still emitted and named by the run boundary. ⛔ BOUND: only a record with NO id at all takes this exemption — an id-bearing supersede whose node is missing stays NON-exempt (`object-superseded-miss` / `unregistered-reference`))
+=========================== short test summary info ============================
+FAILED tests/test_status_folds_2729.py::TestFoldBehaviour::test_declared_fold_never_resurrects_a_terminal_object
+FAILED tests/test_unjournaled_mutation_class.py::TestPropertyMutationRoundTrip::test_a_name_change_is_not_journaled_and_says_so
+FAILED tests/test_unjournaled_mutation_class.py::TestPropertyMutationRoundTrip::test_a_name_bearing_write_still_journals_its_other_keys
+FAILED tests/test_unjournaled_mutation_class.py::TestLegacyJournalShapes::test_legacy_name_keyed_supersede_beats_an_earlier_state_op
+4 failed, 103 passed in 231.56s (0:03:51)

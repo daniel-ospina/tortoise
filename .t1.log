@@ -1,0 +1,43 @@
+....................................F................................... [ 32%]
+........................................................................ [ 64%]
+........................................................................ [ 96%]
+.......                                                                  [100%]
+=================================== FAILURES ===================================
+_______ test_entity_mutated_dispatches_on_op_and_refuses_undeclared_ops ________
+
+    def test_entity_mutated_dispatches_on_op_and_refuses_undeclared_ops():
+        base = {"type": "EntityMutated", "ts": "T", "id": "p1", "label": "Point"}
+        delete = rp.mutations_for({**base, "op": "delete"}, org_id="o", graph_id="g")
+        # The hard delete is the identity parent's removal (cascades the node and
+        # its incident relations, matching the fold's `DETACH DELETE`) then the
+        # node row itself.
+        assert len(delete) == 2, delete
+        assert delete[0].sql.startswith("DELETE FROM public.node_identity"), delete
+        assert delete[1].sql.startswith("DELETE FROM public.point"), delete
+    
+        patch = rp.mutations_for(
+            {**base, "op": "restatus", "state": {"status": "retracted"}},
+            org_id="o", graph_id="g",
+        )
+        assert len(patch) == 1 and patch[0].sql.startswith("UPDATE public.point")
+        assert "status" in patch[0].sql and "retracted" in patch[0].params
+    
+        with pytest.raises(rp.RefusedJournalOperation) as excinfo:
+            rp.mutations_for({**base, "op": "rename", "name": "n2"},
+                             org_id="o", graph_id="g")
+        # #3590 review P1 — the cited reason used to be "#3377/#4769: no writer
+        # produces it", which became the OPPOSITE of the truth once `_update_entity`
+        # started journaling renames. The refusal is real and still fail-closed; the
+        # tracking issue for the key move is what the message must name.
+        assert "#9912" in str(excinfo.value)
+>       assert "no writer produces it" not in str(excinfo.value)
+E       AssertionError: assert 'no writer produces it' not in 'EntityMutat...ror lags it.'
+E         
+E         'no writer produces it' is contained here:
+E           , '#3377: no writer produces it', is RETIRED and was the opposite of the truth once the producer landed). Until #9912 lands, feeding this record to a RECORD-ARMED deployment refuses the write BEFORE the first statement (fail-closed, never a half-applied record). The JSONL journal is still the authority and replays the rename; only the record mirror lags it.
+E         ?           +++++++++++++++++++++
+
+tests/test_record_projection.py:316: AssertionError
+=========================== short test summary info ============================
+FAILED tests/test_record_projection.py::test_entity_mutated_dispatches_on_op_and_refuses_undeclared_ops
+1 failed, 222 passed in 198.40s (0:03:18)
