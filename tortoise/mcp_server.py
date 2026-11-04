@@ -2471,7 +2471,10 @@ def _carry_allowances(limits: dict | None, resource: str) -> dict | None:
       shape is the six resolved limit keys; it has no allowance key and no
       column to read one from.
     * **registry/self-host mode** → ``resolve_org_limits(...)``, i.e. the lane
-      an arming edit lands on first.
+      an arming edit lands on first. That dict IS the resolver's answer, so
+      ``mcp_auth._registry_limits_for`` stamps it ``CARRIED_MARKER_KEY`` and this
+      carry returns it untouched — the read is paid by the auth resolution
+      only, never a second time per write.
 
     So without this carry, arming a dimension in the resolver REFUSES on the
     REST doors (``hosted_api._check_org_limit`` fills at its seam) and SERVES

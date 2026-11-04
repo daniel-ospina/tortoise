@@ -556,8 +556,9 @@ def carry_resolved_allowances(
     drift"*.
 
     Only MISSING keys are filled, so a surface that already resolved them (the
-    MCP lane carries from ``resolve_org_limits`` per request) pays no read and is
-    never overridden.
+    MCP lane's registry-mode ContextVar dict IS ``resolve_org_limits``'s answer
+    and arrives with ``CARRIED_MARKER_KEY`` set, ``mcp_auth._registry_limits_for``)
+    pays no read and is never overridden.
 
     **A lookup MISS is not a fault** (#9567 review round 11). The three outcomes
     of the read are DIFFERENT states and must not collapse into one:

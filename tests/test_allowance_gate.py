@@ -1008,6 +1008,86 @@ def test_the_resolver_fallback_does_not_read_the_resolver_a_SECOND_time(
     assert calls == [ORG], calls
 
 
+def test_the_registry_lane_mints_limits_the_write_gate_does_not_re_resolve(
+        monkeypatch):
+    """The registry ContextVar dict IS the resolver's answer — MARKED, read once.
+
+    ``mcp_auth``'s registry branch resolves the limits through
+    ``quota.resolve_org_limits`` and caches the result. That dict is the answer
+    of the ONE authority an arming edit lands on (#3874), so the #9567 carry has
+    nothing to fill — but without the ``CARRIED_MARKER_KEY`` stamp it cannot tell
+    this apart from the Supabase six-key ``resolve_api_key`` dict, and re-runs the
+    resolver on EVERY gated MCP write (a fresh ``_make_sdk`` plus a registry read
+    per write) to fill keys that can only be absent because the resolver emits
+    none — i.e. the cost is paid exactly in the state where it can never change
+    an outcome.
+
+    Mutations this REDs, in two halves so neither can pass alone:
+      * drop the ``CARRIED_MARKER_KEY`` stamp in
+        ``mcp_auth._registry_limits_for`` → ``minted[CARRIED_MARKER_KEY]`` is
+        False AND ``calls`` reads ``[ORG, ORG]`` (the write gate re-resolves);
+      * drop the marker check in ``carry_resolved_allowances`` → the same
+        ``[ORG, ORG]``.
+    """
+    from tortoise import mcp_auth, quota
+    from tortoise.allowance_gate import CARRIED_MARKER_KEY
+
+    calls: list[str] = []
+    handed_back: list[dict] = []
+
+    def _resolver(org_id: str):
+        calls.append(org_id)
+        # The resolver's own shape: no allowance key configured anywhere.
+        answer = {"org_id": org_id, "tier": "free", "max_users": None,
+                  "max_graphs": None, "max_points": None, "max_api_keys": None,
+                  "max_sessions": None}
+        handed_back.append(answer)
+        return answer
+
+    monkeypatch.setattr(quota, "resolve_org_limits", _resolver)
+    minted = mcp_auth._registry_limits_for(ORG)
+    assert calls == [ORG], calls
+    assert minted[CARRIED_MARKER_KEY] is True, minted
+    # The stamp rides a COPY: the resolver's own dict is what the auth cache and
+    # every other caller of the ONE resolver (#3874) may share.
+    assert CARRIED_MARKER_KEY not in handed_back[0], handed_back[0]
+
+    # …and the write gate pays NO second read for that dict.
+    mcp_server = _mcp_lane(monkeypatch, limits=minted)
+
+    def _boom(org_id: str):
+        calls.append(org_id)
+        raise AssertionError(
+            "the write gate re-read the resolver for a dict that IS its answer")
+
+    monkeypatch.setattr(quota, "resolve_org_limits", _boom)
+    assert mcp_server._enforce_quota("points") is None
+    assert calls == [ORG], calls
+
+
+def test_a_FAILED_registry_resolution_is_not_minted_as_carried(monkeypatch):
+    """A degraded resolution is NOT the resolver's answer, so it stays unmarked.
+
+    ``_registry_limits_for`` returns the keyless ``{"org_id": ...}`` when the
+    registry read faults — fail-closed, because ``enforce_org_limit`` raises
+    ``QuotaCheckError`` on a MISSING limit key (#310 GAP-B). Marking that dict
+    as "already resolved" would let the one state that must fail closed skip the
+    carry's mapping and hand a keyless dict to the gate as if it were an answer.
+
+    Mutation this REDs: stamp the marker on the ``except`` arm too.
+    """
+    from tortoise import mcp_auth, quota
+    from tortoise.allowance_gate import CARRIED_MARKER_KEY
+
+    def _fault(org_id: str):
+        raise RuntimeError("registry down")
+
+    monkeypatch.setattr(quota, "resolve_org_limits", _fault)
+    degraded = mcp_auth._registry_limits_for(ORG)
+    assert degraded == {"org_id": ORG}, degraded
+    assert CARRIED_MARKER_KEY not in degraded, degraded
+
+
 # ── #5425: the CUSTOMER ceiling must carry the human-contact seam ──────────
 #
 # ⛔ WHY THE GUARD IS *HERE* AND NOT ONLY IN ``tests/test_hosted_api.py``.

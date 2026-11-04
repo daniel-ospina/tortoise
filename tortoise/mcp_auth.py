@@ -1183,6 +1183,51 @@ def _unauthorized_challenge(request: Request,
     return {"WWW-Authenticate": f'Bearer resource_metadata="{url}"'}
 
 
+def _registry_limits_for(org_id: str) -> dict:
+    """The registry lane's limits dict — the RESOLVER'S OWN answer, MARKED (#9567).
+
+    **Why the marker rides here and not on every write.** ``resolve_org_limits``
+    is the ONE authority an arming edit lands on (#3874), so this dict already
+    carries whatever the resolver emits — including an allowance value. Without
+    the mark, ``mcp_server._carry_allowances`` cannot tell that apart from the
+    Supabase lane's six-key ``resolve_api_key`` dict, so it re-runs the resolver
+    on **every** gated MCP write (a ``_make_sdk`` construction plus a registry
+    read per write) to fill keys that can only ever be absent because the
+    resolver itself emits none. ``CARRIED_MARKER_KEY`` is exactly the "already
+    resolved" signal the carry reads, so stamping it here makes the gate's
+    documented claim — *"a surface that already resolved them pays no read"* —
+    true on the lane that resolves them (pinned by
+    ``test_the_registry_lane_mints_limits_the_write_gate_does_not_re_resolve``).
+
+    ⚠️ The stamp is applied on a COPY: the caller caches this dict, and a
+    resolver that ever returned a shared constant must not be mutated.
+
+    ⚠️ A resolution FAILURE still leaves the keyless ``{"org_id": ...}`` —
+    fail-closed, not "defaults": ``enforce_org_limit`` raises
+    ``QuotaCheckError`` on a MISSING limit key for every resource (#310 GAP-B,
+    #4010), so a degraded resolution refuses writes rather than granting them.
+    That dict is deliberately left UNMARKED: it is not the resolver's answer, so
+    the carry's own fill (and its fail-closed mapping) still owns it.
+
+    ⚠️ Both imports are FUNCTION-LOCAL on purpose: this module imports no hosted
+    app and must not acquire an import cycle, and ``allowance_gate`` refuses at
+    import when its declared dimensions drift from ``cost_dimensions`` — an
+    unguarded import here would turn that loud diagnosis into an auth 500. A
+    failed gate import degrades to the unmarked dict, i.e. to the pre-fix
+    behaviour (one redundant read), never to a fail-open write.
+    """
+    from tortoise.quota import resolve_org_limits
+    try:
+        limits = resolve_org_limits(org_id)
+    except Exception:
+        return {"org_id": org_id}
+    try:
+        from tortoise.allowance_gate import CARRIED_MARKER_KEY
+    except Exception:  # pragma: no cover — the gate is present wherever it matters
+        return limits
+    return {**limits, CARRIED_MARKER_KEY: True}
+
+
 class OrgResolutionMiddleware(BaseHTTPMiddleware):
     """Bearer token → org_id ContextVar. 401 pre-tool-leak (D3, D17).
 
@@ -1426,24 +1471,17 @@ class OrgResolutionMiddleware(BaseHTTPMiddleware):
                 )
             if is_suspended_signal(org.get("org_id") or ""):
                 clear_suspended(org.get("org_id") or "")
-            if is_supabase_enabled():
-                # The Supabase resolution already carries tier/quota from the
-                # orgs row (one round-trip) — use it directly as the limits
-                # dict so REST and MCP enforce identical limits (#329).
-                limits = org
-            else:
-                # #329: resolve quota limits (registry Org node). A resolution
-                # FAILURE leaves a keyless {"org_id": ...} — fail-closed, not
-                # "defaults": `enforce_org_limit` raises QuotaCheckError on a
-                # MISSING limit key for every resource (#310 GAP-B, #4010), so
-                # a degraded resolution refuses writes rather than granting
-                # them. (The old comment claimed "defaults" applied; there are
-                # none, and sessions' 1000 fallback was deleted in #4010.)
-                from tortoise.quota import resolve_org_limits
-                try:
-                    limits = resolve_org_limits(org["org_id"])
-                except Exception:
-                    limits = {"org_id": org["org_id"]}
+            # Supabase: the resolution already carries tier/quota from the orgs
+            # row (one round-trip) — use it directly as the limits dict so REST
+            # and MCP enforce identical limits (#329).
+            #
+            # registry/self-host: resolve quota limits (registry Org node),
+            # MARKED as the resolver's own answer so the #9567 allowance carry
+            # does not pay the same control-plane read again (see
+            # `_registry_limits_for`, which also carries the fail-closed note for
+            # a resolution failure: keyless, never "defaults").
+            limits = org if is_supabase_enabled() else _registry_limits_for(
+                org["org_id"])
             # #2600 (#2664, review #8): alias actor_user_id before caching
             # so the cache always holds an already-aliased dict — never
             # mutates a cached object on a warm hit.
