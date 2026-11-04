@@ -5275,6 +5275,20 @@ def test_pgrep_redis_servers_or_none_distinguishes_failure_from_zero(
     monkeypatch.setattr(_R.subprocess, "run", lambda *a, **k: _Bad())
     assert _R._pgrep_redis_servers_or_none() is None
 
+    # A seam handing back NON-TEXT stdout is "undeterminable", not a crash
+    # (#10757 review P3). The delegation moved `_pgrep_redis_servers`'s callers
+    # through THIS reader, so if it parses `out.stdout` directly it drops
+    # `_stdout_text`'s type guard — the class #4496 measured (a bare
+    # `.splitlines()` escaping as `AttributeError` from a probe documented as
+    # "or None"). Both readings must be `None`/`[]`, never an exception.
+    class _NoText:
+        returncode = 0
+        stdout = None
+
+    monkeypatch.setattr(_R.subprocess, "run", lambda *a, **k: _NoText())
+    assert _R._pgrep_redis_servers_or_none() is None
+    assert _R._pgrep_redis_servers() == []
+
 
 def test_discover_reports_a_FAILED_pass1_probe_as_a_TRUNCATED_census(
         tmp_path, monkeypatch):
@@ -6361,8 +6375,8 @@ def test_build_end_sweep_report_threads_observed_natural_exits():
 # in none of `reaped`/`exited`/`left`, so the gate read the shortfall as "the
 # sweep's own measurement is broken" on a run whose pytest passed. Measured
 # nine times on diffs that cannot move a server's lifetime (before=4/5/10/11/
-# 20/28/32/44, every one `pytest rc 0`), and again on THIS PR at
-# before=15, reaped=0, exited=0, left=14.
+# 15/20/28/32/44, every one `pytest rc 0`; the 15 re-recorded on THIS PR at
+# reaped=0, exited=0, left=14).
 
 
 def test_vanished_before_discovery_accounts_for_a_self_exit_it_never_saw():

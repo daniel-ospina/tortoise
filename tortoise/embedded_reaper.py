@@ -1783,8 +1783,20 @@ def _pgrep_redis_servers_or_none() -> list[int] | None:
         return None
     if out.returncode not in (0, 1):
         return None
+    # ⛔ READ THE STDOUT THROUGH `_stdout_text`, not `out.stdout` directly
+    # (#10757 review P3). `_run_text` applied that guard and this reader did
+    # not; while `_pgrep_redis_servers` was its own implementation the gap was
+    # confined, but now that it DELEGATES here the guard is the only thing
+    # keeping ITS callers' `[]`-on-failure contract (#4496: a seam handing back
+    # non-text stdout raised `TypeError` out of a probe documented as "or
+    # None", and that escaped into a fail-closed co-tenant check and leaked a
+    # daemon). Production passes `text=True`, so this is the monkeypatched-seam
+    # class — which is exactly the class #4496 measured.
+    text = _stdout_text(out)
+    if text is None:
+        return None
     pids: list[int] = []
-    for line in out.stdout.splitlines():
+    for line in text.splitlines():
         line = line.strip()
         if line.isdigit():
             pids.append(int(line))
@@ -3921,7 +3933,7 @@ def live_embedded_server_pids() -> list[int] | None:
     gate reports "the sweep's own measurement is broken" (its accounting
     identity `reaped + exited + left >= before`) on a run whose pytest passed.
     Measured nine times, on diffs that cannot move a server's lifetime (#8599:
-    before=4/5/10/11/20/28/32/44; every one with `pytest rc 0`).
+    before=4/5/10/11/15/20/28/32/44; every one with `pytest rc 0`).
 
     `len()` of this reading IS :func:`live_embedded_server_count`, so the
     builder derives both counts from ONE observation per seam and they can
@@ -4034,7 +4046,7 @@ def _vanished_before_discovery(before_pids, discovered_pids,
     (`reaped + exited + left >= before`) then reports "the sweep's own
     measurement is broken" on a run whose pytest passed. That is a false red of
     the guard's own instrument, measured nine times on diffs that cannot move a
-    server's lifetime (#8599 and its eight recordings).
+    server's lifetime (#8599's body and its comments record every one).
 
     THIS IS A MEASUREMENT, NOT THE COMPLEMENT `before - reaped - left`, which
     #6984 explicitly refused: it needs THREE separate observations — the
