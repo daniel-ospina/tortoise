@@ -5775,8 +5775,9 @@ def _sources_view() -> dict:
         index state. Both onboarding tools that used to read this state are gone
         from the surface (#4282 Phase 3.2: `tortoise_onboarding_state`,
         `tortoise_onboarding_github_status`), so `tortoise_manage_sources` is the
-        ONLY reader of the projection — `onboarding` below carries the raw state
-        `tortoise_onboarding_state` used to return. The
+        only SERVED reader of the projection — `onboarding` below carries the raw
+        state `tortoise_onboarding_state` used to return. (That handler's BODY is
+        retained and still reads it; nothing dispatches to it any more.) The
         issues walk stamps `github_indexed`, the docs walk `github_docs_indexed`.
         """
         raw = _state_get(state, f"{prefix}_at")

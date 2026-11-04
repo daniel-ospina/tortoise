@@ -101,8 +101,9 @@ def test_list_covers_all_three_sources_with_their_defaults(ctx):
     # still SERVED — `tortoise_onboarding_state` returned the raw projection as
     # a second reader of this state, `tortoise_onboarding_github_status` was
     # served but read no index state. Phase 3.2 removed both from the surface,
-    # so `tortoise_manage_sources(action="list")` is now the ONLY reader of
-    # this projection.
+    # so `tortoise_manage_sources(action="list")` is now the only SERVED reader
+    # of this projection. (`tortoise_onboarding_state`'s handler body is retained
+    # and still reads it; nothing dispatches to it.)
     issues = set(out["sources"]["github_issues"])
     documents = set(out["sources"]["github_documents"])
     assert issues == documents, (issues ^ documents)

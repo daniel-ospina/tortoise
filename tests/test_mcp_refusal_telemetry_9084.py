@@ -631,9 +631,11 @@ async def test_onboarding_state_without_team_context_is_recorded_as_a_failure(
     `tortoise_manage_sources` answers at its first guard and never reaches
     `_sources_view`. The one surviving **served** reader that DOES reach the
     branch is `_sources_view()`, below. `tortoise_onboarding_state()` reaches it
-    too — it is unregistered, but its body is retained and
-    `tests/test_onboarding_selfhost_w12.py` still drives it — so "no
-    dispatch-level caller left" means no SERVED one, not that the branch is dead.
+    too — it is unregistered, but its body is retained, and
+    `tests/test_onboarding_selfhost_w12.py` still drives the **handler** (that
+    test wraps it in `_selfhost_transport_context`, so it takes the SELFHOST
+    branch, not this one) — so "no dispatch-level caller left" means no SERVED
+    one, not that the branch is dead.
     Pinning the refusal through a `tortoise_manage_sources` dispatch would assert
     a payload that dispatch produced itself (measured: reverting `_SafeError`
     here leaves that dispatch arm green). It is pinned where a SERVED path
@@ -660,8 +662,11 @@ async def test_onboarding_state_without_team_context_is_recorded_as_a_failure(
     assert row["status"] == "exec_error", row
     assert row["error_kind"] == "safe_error", row
 
-    # (2) helper-level: `_onboarding_state`'s conversion, reached the only way
-    # it CAN be reached after the removal — directly, through `_sources_view`.
+    # (2) helper-level: `_onboarding_state`'s conversion. No SERVED dispatch
+    # reaches it — `tortoise_manage_sources` answers its own guard — so the served
+    # path to it is `_sources_view`, which is what this arm drives. It is NOT the
+    # only way it can be reached: the retained `tortoise_onboarding_state` body
+    # reaches it too (see the docstring above).
     token = ms._current_org_id.set(None)
     try:
         state = ms._onboarding_state()
