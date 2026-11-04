@@ -962,64 +962,176 @@ def test_no_module_level_constant_is_DEAD_because_a_dead_one_reads_as_live():
         f"name whose comment can claim it is the live mechanism (#10634 review P3)")
 
 
-def _module_scope_bound_names(tree: ast.Module) -> list[tuple[str, int]]:
-    r"""Every `(name, lineno)` the REBIND guard treats as a module-scope BINDING.
+# The module-scope statement forms that own a CLAUSE BODY (`if`/`try`/`for`/…), i.e. the
+# ones whose nested statements still bind at module scope. `ast.TryStar` is 3.11+ and
+# this repo requires 3.12, so it is named directly rather than through a getattr seam.
+_COMPOUND_STATEMENTS = (
+    ast.If, ast.Try, ast.TryStar, ast.While,
+    ast.For, ast.AsyncFor, ast.With, ast.AsyncWith, ast.Match,
+)
 
-    The enumeration IS the guard's scope claim: each branch below names a form this
-    function collects, so the docstring that advertises the scope cannot drift from
-    the walk (#10703 review, ISSUE 1). Only `tree.body` is visited — a `for` or
-    `with` inside a function binds in THAT scope and is not a module rebind.
+# A new SCOPE, not a new module binding: a `for` inside a function, or a `x = 1` inside
+# a class body, binds somewhere else entirely and is not a module-scope rebind.
+_OTHER_SCOPES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)
+
+
+def _from_target(target: ast.expr) -> list[str]:
+    """Every name a binding TARGET expression binds.
+
+    `A, B = …` / `A, *rest = …` bind every Name inside the target, not a `Tuple`
+    node — the iterable side of a `for` is a different node entirely.
+    """
+    if isinstance(target, ast.Name):
+        return [target.id]
+    if isinstance(target, ast.Starred):
+        return _from_target(target.value)
+    if isinstance(target, (ast.Tuple, ast.List)):
+        return [name for elt in target.elts for name in _from_target(elt)]
+    return []
+
+
+def _bindings_of_statement(node: ast.stmt) -> list[tuple[str, int]]:
+    r"""Every `(name, lineno)` ONE statement binds through a form the guard COLLECTS.
+
+    This function IS the guard's scope claim, and it is the ONLY place that claim is
+    written: both walks below (`_module_scope_bound_names` for `tree.body`, and
+    `_compound_body_bound_names` for binders nested inside a module-level `if` /
+    `try` / `for` / `while` / `with` / `match`) call it, so the two can never
+    enumerate different form sets — a drift that would silently reopen the gap
+    (#10703 review, second round). Its docstring names exactly the branches it has:
+    `Assign` / `AnnAssign` targets (bare names, tuple/list unpack elements, a `*rest`
+    element), `for` / `async for` targets, `with` / `async with` `as` targets,
+    `import` / `from … import` bindings, and `def` / `class` names.
+
+    ⚠️ What this does NOT model, by design, is enumerated as a MEASURED residual in
+    `_UNMODELLED_module_scope_binders`: `except … as` names, `match` captures, a
+    module-scope `:=`, and a PEP 695 `type` alias.
+    """
+    if isinstance(node, ast.Assign):
+        return [(name, node.lineno) for t in node.targets for name in _from_target(t)]
+    if isinstance(node, (ast.AnnAssign, ast.For, ast.AsyncFor)):
+        # An annotated target, a `for` target and an `async for` target are each a
+        # single target expression, so they share this branch. (A top-level `for`
+        # target binds at module scope, which is why this is not a compound-only form.)
+        return [(name, node.lineno) for name in _from_target(node.target)]
+    if isinstance(node, (ast.With, ast.AsyncWith)):
+        return [
+            (name, node.lineno)
+            for item in node.items
+            if item.optional_vars is not None
+            for name in _from_target(item.optional_vars)
+        ]
+    if isinstance(node, (ast.Import, ast.ImportFrom)):
+        bound: list[tuple[str, int]] = []
+        for alias in node.names:
+            if alias.name == "*":  # a star import binds no name this walk can name
+                continue
+            # `import a.b` binds `a`; `as c` binds `c` instead.
+            bound.append((alias.asname or alias.name.split(".")[0], node.lineno))
+        return bound
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        return [(node.name, node.lineno)]
+    return []
+
+
+def _module_scope_bound_names(tree: ast.Module) -> list[tuple[str, int]]:
+    r"""Every `(name, lineno)` the REBIND guard treats as a TOP-LEVEL module binding.
+
+    Scope, stated exactly: `tree.body` only. A `for` or `with` inside a function
+    binds in THAT scope and is not a module rebind — and a binder nested inside a
+    module-level `if` / `try` / `for` / `with` / `match` is not counted HERE either;
+    it is `_compound_body_bound_names` below that sees those, and the guard reds on a
+    name bound in BOTH walks (the live defect: `import os` at the top of this file
+    plus `import os` inside its `if __name__ == "__main__":` block would rebind `os`
+    at import while this walk counted ONE binding).
+    """
+    return [binding for node in tree.body for binding in _bindings_of_statement(node)]
+
+
+def _compound_clause_bodies(node: ast.stmt) -> list[list[ast.stmt]]:
+    """The statement lists a compound statement OWNS, i.e. every clause body.
+
+    `node.body` alone is not enough: a name bound in `else:`, `except …:`, `finally:`
+    or a `match` `case` body binds at the same scope as one in `if X:` above it.
+    """
+    bodies = [node.body]
+    for attr in ("orelse", "finalbody"):
+        value = getattr(node, attr, None)
+        if value:
+            bodies.append(value)
+    for handler in getattr(node, "handlers", ()):
+        bodies.append(handler.body)
+    for case in getattr(node, "cases", ()):
+        bodies.append(case.body)
+    return bodies
+
+
+def _compound_body_bound_names(tree: ast.Module) -> list[tuple[str, int]]:
+    r"""Every `(name, lineno)` bound INSIDE a module-level compound statement's body.
+
+    The other half of the module scope, and the half the first round of this guard
+    was blind to: `_module_scope_bound_names` reads `tree.body`, so
+    `if __name__ == "__main__": import os` (`tests/test_closes_landing.py:3489`) was
+    invisible to it AND unreported by `_UNMODELLED_module_scope_binders`, while the
+    docstring claimed every module-scope binder form was collected. Measured before
+    this walk existed: `import os` added at the top of that file rebinds `os` at
+    import, the guard counted ONE binding, and the rebind went unreported.
+
+    Recursion descends through nested compound statements (`if X: for y in z:` binds
+    `y` at module scope) and STOPS at `_OTHER_SCOPES` — a duplicate inside a function
+    body is a local rebind, and a guard that reds on it is a guard that gets deleted.
+
+    Bindings in DIFFERENT clause bodies of the SAME compound are deliberately not a
+    rebind by themselves: `try: import a as x / except ImportError: import b as x` is
+    the legal exclusive-branch shape (exactly one runs), and reporting it would be
+    the false red the first review round asked this guard to avoid. Only a name the
+    TOP-LEVEL walk also binds is reported — see the guard.
     """
     bound: list[tuple[str, int]] = []
 
-    def _from_target(target: ast.expr) -> list[str]:
-        # `A, B = …` / `A, *rest = …` bind every Name inside the target, not a
-        # `Tuple` node — the iterable side of a `for` is a different node entirely.
-        if isinstance(target, ast.Name):
-            return [target.id]
-        if isinstance(target, ast.Starred):
-            return _from_target(target.value)
-        if isinstance(target, (ast.Tuple, ast.List)):
-            return [name for elt in target.elts for name in _from_target(elt)]
-        return []
+    def _walk(statements: list[ast.stmt]) -> None:
+        for statement in statements:
+            if isinstance(statement, _COMPOUND_STATEMENTS):
+                # An INNER compound's own header target (`for y in …`) binds at module
+                # scope; a TOP-level one was already counted by the sibling walk.
+                bound.extend(_bindings_of_statement(statement))
+                for body in _compound_clause_bodies(statement):
+                    _walk(body)
+            else:
+                # A `def` / `class` here binds its NAME at module scope, and only its
+                # BODY is another scope — so it is COLLECTED and then not descended
+                # into. `_bindings_of_statement` reads the statement header only, so
+                # nothing inside a function or class body is ever reached through it.
+                bound.extend(_bindings_of_statement(statement))
 
-    for node in tree.body:
-        if isinstance(node, ast.Assign):
-            bound.extend((name, node.lineno) for t in node.targets for name in _from_target(t))
-        elif isinstance(node, (ast.AnnAssign, ast.For, ast.AsyncFor)):
-            # An annotated target, a `for` target and an `async for` target are each a
-            # single target expression, so they share this branch.
-            bound.extend((name, node.lineno) for name in _from_target(node.target))
-        elif isinstance(node, (ast.With, ast.AsyncWith)):
-            for item in node.items:
-                if item.optional_vars is not None:
-                    bound.extend((name, node.lineno) for name in _from_target(item.optional_vars))
-        elif isinstance(node, (ast.Import, ast.ImportFrom)):
-            for alias in node.names:
-                if alias.name == "*":  # a star import binds no name this walk can name
-                    continue
-                # `import a.b` binds `a`; `as c` binds `c` instead.
-                bound.append((alias.asname or alias.name.split(".")[0], node.lineno))
-        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            bound.append((node.name, node.lineno))
+    for statement in tree.body:
+        if isinstance(statement, _COMPOUND_STATEMENTS):
+            for body in _compound_clause_bodies(statement):
+                _walk(body)
     return bound
 
 
 def _UNMODELLED_module_scope_binders(tree: ast.Module) -> list[tuple[str, int]]:
-    r"""Module-scope names bound through a form `_module_scope_bound_names` does NOT collect.
+    r"""Module-scope names bound through a FORM neither binder walk collects.
 
     A residual that is only written down is invisible: this RETURNS the gap so the
     guard can red on it, which is the difference between "we chose not to model
     `match` captures" and "nothing here binds through one, and the day something
     does we are told". Class/function/lambda bodies are skipped — they are other
-    scopes; only the module body's own statements are inspected.
+    scopes; only the module body's own statements are inspected, including the
+    statements nested inside a module-level compound one.
+
+    This is the residual of the FORMS, complementing `_module_scope_bound_names`
+    (top-level statements) and `_compound_body_bound_names` (statements nested in a
+    module-level compound). Between the three there is no module-scope binder shape
+    that is silently unwatched: a form is either COLLECTED by one of the walks, or
+    REPORTED by this one.
     """
     found: list[tuple[str, int]] = []
-    other_scope = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)
 
     def _visit(node: ast.AST) -> None:
         for child in ast.iter_child_nodes(node):
-            if isinstance(child, other_scope):
+            if isinstance(child, _OTHER_SCOPES):
                 continue
             if isinstance(child, (ast.ExceptHandler, ast.MatchAs, ast.MatchStar)) and child.name:
                 # `except … as name` and a `match` capture both bind `name`; the walk
@@ -1034,7 +1146,7 @@ def _UNMODELLED_module_scope_binders(tree: ast.Module) -> list[tuple[str, int]]:
             _visit(child)
 
     for statement in tree.body:
-        if not isinstance(statement, other_scope):
+        if not isinstance(statement, _OTHER_SCOPES):
             _visit(statement)
     return found
 
@@ -1059,20 +1171,30 @@ def test_no_module_level_name_is_REBOUND_because_the_second_copy_wins():
     an unused DEFINITION, and "plain reassignments … remain unflagged"
     (<https://docs.astral.sh/ruff/rules/redefined-while-unused/>).
 
-    So `_module_scope_bound_names` below collects EVERY module-scope binder form this
-    pair of files can hold, instead of assigning the uncovered half to lint:
-    `Assign` / `AnnAssign` targets — bare names, the names inside a tuple/list
-    unpack, and a `*rest` element — top-level `for` / `async for` targets, top-level
-    `with` / `async with` `as` targets, `import` / `from … import` bindings, and
-    `def` / `class` names. The claimed scope and the walk are the same enumeration in
-    one place, and `test_the_REBIND_guard_DETECTS_a_duplicate_in_EVERY_form_it_collects`
-    proves each form is DETECTED rather than listed.
+    So the guard walks the module scope in TWO passes, and the split is the scope
+    claim rather than a detail of it. `_module_scope_bound_names` collects the
+    TOP-LEVEL statements' binders — `Assign` / `AnnAssign` targets (bare names, the
+    names inside a tuple/list unpack, and a `*rest` element), `for` / `async for`
+    targets, `with` / `async with` `as` targets, `import` / `from … import` bindings,
+    and `def` / `class` names. `_compound_body_bound_names` collects the same forms
+    where they are nested inside a module-level `if` / `try` / `for` / `while` /
+    `with` / `match` body, because a binder there still binds at module scope — and
+    the guard reds on a name bound in BOTH passes. That cross-pass check is the
+    live defect from the second review round: this file carries `import os` inside
+    its `if __name__ == "__main__":` block (`tests/test_closes_landing.py:3489`), so
+    a top-level `import os` would have rebound `os` at import while the top-level
+    walk counted ONE binding and reported nothing.
+    `test_the_REBIND_guard_DETECTS_a_duplicate_in_EVERY_form_it_collects` proves each
+    TOP-LEVEL form is DETECTED rather than merely listed, and
+    `test_the_REBIND_guard_DETECTS_a_duplicate_through_a_module_level_COMPOUND_body`
+    does the same for the compound pass, plus its legal-shape negative controls.
 
-    ⚠️ The forms the walk does NOT collect — `except … as` names, `match` captures, a
+    ⚠️ The forms NEITHER pass collects — `except … as` names, `match` captures, a
     module-scope `:=`, and a PEP 695 `type` alias — are not merely written down here:
-    `_UNMODELLED_module_scope_binders` measures them on both scanned files and the
-    assertion below reds the moment one appears, so a gap cannot open silently while
-    the docstring keeps saying the class is watched.
+    `_UNMODELLED_module_scope_binders` measures them on both scanned files (top-level
+    and compound-nested alike) and the assertion below reds the moment one appears,
+    so a gap cannot open silently while the docstring keeps saying the class is
+    watched.
 
     ⚠️ BOTH SCOPES ARE SCANNED, and the second one is not a nicety: while resolving
     the #10703 forward merge of `origin/main`, the conflicted WORKING TREE carried
@@ -1089,21 +1211,34 @@ def test_no_module_level_name_is_REBOUND_because_the_second_copy_wins():
     this branch.
     """
     seen: dict[Path, dict[str, list[int]]] = {}
+    cross_pass: dict[str, list[int]] = {}
+    compound_bindings = 0
     for source in (MODULE_PATH, Path(__file__)):
         tree = ast.parse(source.read_text())
         unmodelled = _UNMODELLED_module_scope_binders(tree)
         assert not unmodelled, (
             f"{source.name} binds module-scope name(s) through a form the rebind scan "
-            f"does not collect {sorted(unmodelled)}: extend `_module_scope_bound_names` "
+            f"does not collect {sorted(unmodelled)}: extend `_bindings_of_statement` "
             f"rather than leaving that form unwatched (#10703 review)")
         per_file: dict[str, list[int]] = {}
         for name, lineno in _module_scope_bound_names(tree):
             per_file.setdefault(name, []).append(lineno)
         seen[source] = per_file
+        # The OTHER half of the module scope: a binder nested inside a module-level
+        # `if` / `try` / `for` / `with` / `match` body still binds at import, and a
+        # name bound in BOTH passes is the rebind this guard would otherwise miss.
+        for name, lineno in _compound_body_bound_names(tree):
+            compound_bindings += 1
+            if name in per_file:
+                cross_pass.setdefault(f"{source.name}:{name}", []).append(lineno)
     # A scan that finds nothing proves nothing — this asserts the guard MEASURES.
     total_bindings = sum(len(per_file) for per_file in seen.values())
     assert total_bindings > 20, (
         f"only {total_bindings} module-level bindings found: not measuring")
+    assert compound_bindings, (
+        "the compound-body pass found NO binder at all, so the cross-pass check below "
+        "cannot fire: this file's own `if __name__ == \"__main__\": import os` "
+        "(`tests/test_closes_landing.py:3489`) is the live instance it measures")
     rebound = {
         f"{source.name}:{name}": lines
         for source, per_file in seen.items()
@@ -1115,6 +1250,14 @@ def test_no_module_level_name_is_REBOUND_because_the_second_copy_wins():
         f"wins at import, so the first is dead code that reads as live (#10703 review). "
         f"Each entry is `<file>:<name>` — the two files are SEPARATE namespaces, so the "
         f"same name in each is not a rebind and is never reported as one.")
+    assert not cross_pass, (
+        f"name(s) bound at TOP LEVEL **and** inside a module-level compound body "
+        f"{sorted(cross_pass.items())}: the compound binding wins at import, so the "
+        f"top-level copy is dead code that reads as live. Each entry is "
+        f"`<file>:<name>` → line(s) of the compound binder; the top-level line is not "
+        f"repeated because it is the one a maintainer reads first. Bindings in "
+        f"different clause bodies of ONE compound (`try: import a as x` / "
+        f"`except ImportError: import b as x`) are NOT reported — exactly one runs.")
 
 
 def test_the_REBIND_guard_DETECTS_a_duplicate_in_EVERY_form_it_collects():
@@ -1188,7 +1331,121 @@ def test_the_REBIND_guard_DETECTS_a_duplicate_in_EVERY_form_it_collects():
     assert "_PROBE" not in local_counts, (
         f"a module-scope host script is used to prove detection, so a FUNCTION-local "
         f"`_PROBE` rebind must not be collected at all (got {local_counts.get('_PROBE')}): "
-        f"the walk reads `tree.body`, not `ast.walk`")
+        f"the top-level walk reads `tree.body`, not `ast.walk`")
+
+
+def test_the_REBIND_guard_DETECTS_a_duplicate_through_a_module_level_COMPOUND_body():
+    r"""#10703 review, second round at `cb4cf7c8a4a4`, ISSUE 1 — the cross-pass half.
+
+    The guard's previous revision claimed it collected "EVERY module-scope binder
+    form this pair of files can hold", but `_module_scope_bound_names` iterates
+    `tree.body` only, so a binder nested inside a module-level `if` / `try` / `for` /
+    `while` / `with` / `match` body was invisible to it — and
+    `_UNMODELLED_module_scope_binders` enumerates the residual FORMS (`except … as`,
+    `match` captures, `:=`, `type` aliases), not that position, so it did not report
+    it either. The claim was false, and the file it scans contains the counterexample:
+    `tests/test_closes_landing.py:3489` binds `os` inside its
+    `if __name__ == "__main__":` block. A top-level `import os` there would rebind
+    `os` at import, the top-level walk would count ONE binding, and the guard would
+    stay green — the "second copy wins, the copy you read is dead" class this PR
+    exists to close, re-introduced inside the fix for it.
+
+    ⚠️ Non-vacuity is EXECUTED, not asserted. Every case is appended to the REAL
+    module text, and for each one the PRE-FIX shape (the top-level walk alone) is
+    run on the same text and must MISS it. A test that only exercised the fixed walk
+    could pass over a walk that could never see the case at all.
+
+    ⚠️ Both negative controls are legal shapes this tree legitimately holds, and a
+    guard that reds on either gets deleted within a week:
+      - `try: import a as x` / `except ImportError: import b as x` — one compound,
+        two clause bodies, exactly one executes;
+      - `if COND: X = 1` / `else: X = 2` — the conditional-constant shape. Neither
+        is a TOP-LEVEL binding, so the cross-pass check never compares them.
+    """
+    module_text = MODULE_PATH.read_text()
+
+    def _top_level_counts(text: str) -> dict[str, int]:
+        counts: dict[str, int] = {}
+        for name, _ in _module_scope_bound_names(ast.parse(text)):
+            counts[name] = counts.get(name, 0) + 1
+        return counts
+
+    def _cross_pass(text: str) -> set[str]:
+        tree = ast.parse(text)
+        top_level = {name for name, _ in _module_scope_bound_names(tree)}
+        return top_level & {name for name, _ in _compound_body_bound_names(tree)}
+
+    # label -> (snippet appended to the real module, the name that must be reported)
+    cases: dict[str, tuple[str, str]] = {
+        "import inside if __main__-style block": (
+            "import contextvars as _PROBE_MAIN\n"
+            "if _PROBE_MAIN:\n    import json as _PROBE_MAIN\n",
+            "_PROBE_MAIN"),
+        "reassignment inside if": (
+            "_PROBE_IF = 1\nif _PROBE_IF:\n    _PROBE_IF = 2\n", "_PROBE_IF"),
+        "def inside if": (
+            "def _probe_if():\n    pass\nif True:\n    def _probe_if():\n        pass\n",
+            "_probe_if"),
+        "reassignment inside try": (
+            "_PROBE_TRY = 1\ntry:\n    _PROBE_TRY = 2\nexcept Exception:\n    pass\n",
+            "_PROBE_TRY"),
+        "for target inside if": (
+            "for _PROBE_F in (1,):\n    pass\n"
+            "if True:\n    for _PROBE_F in (2,):\n        pass\n",
+            "_PROBE_F"),
+        "with-as target inside if": (
+            "with _probe_cm() as _PROBE_W:\n    pass\n"
+            "if True:\n    with _probe_cm() as _PROBE_W:\n        pass\n",
+            "_PROBE_W"),
+        "tuple unpack inside else": (
+            "_PROBE_T, _PROBE_U = (1, 2)\nif False:\n    pass\nelse:\n"
+            "    _PROBE_T, _PROBE_U = (3, 4)\n",
+            "_PROBE_T"),
+    }
+    missed_by_fixed_walk = {
+        label: expected
+        for label, (snippet, expected) in cases.items()
+        if expected not in _cross_pass(module_text + snippet)
+    }
+    assert not missed_by_fixed_walk, (
+        f"the cross-pass check does not report {missed_by_fixed_walk}: a name bound "
+        f"both at top level and inside a module-level compound body is a rebind, and "
+        f"the docstring says this walk closes it — the class of #10703 review ISSUE 1")
+
+    # NON-VACUITY, PRE-FIX SHAPE: the top-level walk ALONE must miss every one of
+    # them. If it ever starts seeing them, this test stops discriminating and says so
+    # instead of quietly passing over a guard whose second pass is doing no work.
+    detected_without_the_second_pass = {
+        label: expected
+        for label, (snippet, expected) in cases.items()
+        if _top_level_counts(module_text + snippet).get(expected, 0) >= 2
+    }
+    assert not detected_without_the_second_pass, (
+        f"the top-level walk alone already reports {detected_without_the_second_pass}, "
+        f"so these cases no longer prove the compound pass is what detects them — "
+        f"pick snippets whose duplicate really does go through a compound body")
+
+    # NEGATIVE CONTROL — the legal exclusive-branch shape, one compound, one executor.
+    legal_alias = "try:\n    import a as _PROBE_LEGAL\nexcept ImportError:\n    import b as _PROBE_LEGAL\n"
+    assert "_PROBE_LEGAL" not in _cross_pass(module_text + legal_alias), (
+        "`try: import a as x` / `except ImportError: import b as x` is the legal "
+        "exclusive-branch shape — exactly one binding runs — and reporting it is the "
+        "false red the first review round asked this guard to avoid")
+
+    # NEGATIVE CONTROL — the conditional-constant shape: both bindings are nested, so
+    # neither is a TOP-LEVEL binding and there is nothing for the cross-pass to pair.
+    legal_conditional = "if False:\n    _PROBE_COND = 1\nelse:\n    _PROBE_COND = 2\n"
+    assert "_PROBE_COND" not in _cross_pass(module_text + legal_conditional), (
+        "`if COND: X = 1` / `else: X = 2` binds X once per exclusive branch and is not "
+        "a top-level rebind — reporting it would fire on a shape this tree holds")
+
+    # NEGATIVE CONTROL — scope, not position: a duplicate inside a FUNCTION nested in a
+    # compound body is a local rebind in another scope, not a module binding.
+    legal_local = "if True:\n    def _probe_scope():\n        _PROBE_LOCAL = 1\n        _PROBE_LOCAL = 2\n"
+    assert "_PROBE_LOCAL" not in _cross_pass(module_text + legal_local), (
+        "a duplicate inside a function body is a LOCAL rebind, even when the function "
+        "is defined inside a module-level compound — the descent must stop at "
+        "`_OTHER_SCOPES`, or the guard fires on code this tree contains legitimately")
 
 
 def test_no_property_is_DEAD_because_its_docstring_can_claim_the_live_rule():
