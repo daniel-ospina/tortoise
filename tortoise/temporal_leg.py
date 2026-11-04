@@ -918,11 +918,15 @@ def window_arm_retention(
                                    position and ``pick_ranks_before_dedup`` to
                                    see the splice itself.
     ``graded_by_recall_all_at_5``  how many picks land at a READER index
-                                   ``< 5`` AND ``< window`` — the metric grades
-                                   ``hits[:5]`` of the DEDUPED pool, so this
-                                   counts ``pick_ranks`` (post-cap) and a pick
-                                   outside the window is not graded however high
-                                   it ranks in the caller's order
+                                   ``< 5`` of the DEDUPED pool — ``recall_all@5``
+                                   grades ``hits[:5]`` and ``hits`` is that pool
+                                   UNTRUNCATED (``retrieve.py``: ``"hits":
+                                   pool``, ``top = hits[:k]``), so the metric
+                                   carries NO reader-window term. This field
+                                   therefore counts ``pick_ranks`` (post-cap)
+                                   ``< 5`` and nothing else; whether the reader
+                                   can SEE the pick is a different question,
+                                   reported by ``picks_outside_window``.
     ``picks_outside_window``       picks whose index is ``>= window`` (invisible
                                    to the reader at all)
     ``base_graded_evicted``        evicted ids that were themselves inside
@@ -989,7 +993,7 @@ def window_arm_retention(
         "ceiling": max(
             width - effective_promotion_budget(width, int(limit)), 0),
         "graded_by_recall_all_at_5": sum(
-            1 for p in pick_list if rank_of[p] < min(5, width)),
+            1 for p in pick_list if rank_of[p] < 5),
         "base_graded_evicted": [i for i in evicted_ids
                                 if base_ids.index(i) < 5],
     }

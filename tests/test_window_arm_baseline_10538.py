@@ -454,28 +454,37 @@ def test_a_pick_that_never_reaches_the_fused_order_is_reported_not_dropped():
     assert got["picks_absent_from_fused"] == ["ghost99"]
 
 
-def test_a_pick_outside_the_reader_window_is_not_counted_as_graded():
-    """The metric grades the READER's top 5 (``hits[:5]``), so a pick beyond the
-    window is not graded however high it ranks in the caller's order.
+def test_the_graded_count_follows_the_metrics_own_cutoff_not_the_window():
+    """``graded_by_recall_all_at_5`` counts ``pick_ranks < 5`` of the DEDUPED
+    pool and carries NO reader-window term: ``recall_all@5`` grades
+    ``hits[:5]``, and ``hits`` is that pool UNTRUNCATED (``retrieve.py``:
+    ``"hits": pool``, ``top = hits[:k]``). A pick the reader's WINDOW hides
+    can still be inside the graded top 5, so the two questions are reported
+    separately — this field grades, ``picks_outside_window`` says whether the
+    reader can see the pick.
 
     Reachable only by a direct caller at these geometries (the shipped caller
     splices at ``ceiling = window - budget < window``), which the module
-    supports — so the field is gated on visibility rather than assumed.
+    supports — so both fields are gated on their own reading rather than
+    assumed.
     """
     pool = _pool([("sA", 3), ("sB", 1)])
     order = ["sa0", "sa1", "sa2", "sb3"]
     got = window_arm_retention(pool, order, picks=["sb3"], window=3)
     assert got["pick_ranks"] == [3]
-    assert got["picks_outside_window"] == ["sb3"]
-    assert got["graded_by_recall_all_at_5"] == 0, (
-        "a pick outside a 3-slot window was reported as graded")
-    # window=0: the reader sees nothing, so nothing can be graded — even a pick
-    # that sits at fused index 0.
+    assert got["picks_outside_window"] == ["sb3"], (
+        "a pick past a 3-slot window is invisible to the reader")
+    assert got["graded_by_recall_all_at_5"] == 1, (
+        "rank 3 is inside the metric's hits[:5], so it IS graded — the count "
+        "must follow the metric's own cutoff, not the measured window")
+    # window=0: the reader sees nothing in the WINDOW, but the pool is still
+    # the whole 4-slot deduped list, so a pick at pool rank 0 IS graded. The
+    # visibility question is answered by ``picks_outside_window``, not here.
     zero = window_arm_retention(pool, order, picks=["sa0"], window=0)
     assert zero["fused_ids"] == []
     assert zero["pick_ranks"] == [0]
     assert zero["picks_outside_window"] == ["sa0"]
-    assert zero["graded_by_recall_all_at_5"] == 0
+    assert zero["graded_by_recall_all_at_5"] == 1
 
 
 def test_the_sole_representative_count_is_per_session_not_per_bucket():
