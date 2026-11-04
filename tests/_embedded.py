@@ -520,10 +520,13 @@ TEST_NO_REDIRECT_STEMS: tuple[str, ...] = (
     "test_4521_revise_point_embedding",
     # CLI-extraction lane (#9915): `TestWriterContract` executes the real
     # writer script against the real in-repo SDK on per-test `TORTOISE_DB_PATH`
-    # embedded stores in namespace `cliex-contract` — a non-guard-passing
-    # namespace, so a URI-set run would redirect those constructions onto the
-    # shared `tortoise_test_matrix` instance (the #5084 cross-lane pollution
-    # class) and certify a lane the suite does not target. Registered with the
+    # embedded stores in namespace `cliex-contract`. The lane is held by the
+    # suite's OWN module-level `pytest.mark.embedded_only` (a URI-set run skips
+    # it visibly), not by this exempt-the-redirect registry: the writer passes no
+    # explicit `db_path` and the SDK gives `TORTOISE_DB_URI` precedence when
+    # `db_path is None`, so a docker-lane run would otherwise write into the
+    # shared `tortoise_test_matrix` instance (#5084 cross-lane pollution) and
+    # certify a backend the suite does not target. Registered with the
     # ``carve_out`` list in config/ci-surfaces.yml (the two are one set in two
     # homes; tests/test_ci_selection.py pins the equality) and DECLARED in
     # tests/test_markers.py::test_no_redirect_stems_registry_exact.

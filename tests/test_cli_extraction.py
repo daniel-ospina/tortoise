@@ -24,6 +24,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+import pytest
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..",
                                 "integrations", "cli-extraction"))
 
@@ -38,6 +40,20 @@ from extract_turns import (
     call_engine,
     resolve_transcript,
 )
+
+# The suite's `TestWriterContract` executes the real writer against a REAL
+# embedded projection. Declaring the lane is load-bearing, not decoration: the
+# writer constructs `TortoiseSDK(namespace=..., event_log_path=...)` with NO
+# `db_path`, and the SDK gives `TORTOISE_DB_URI` precedence whenever `db_path is
+# None` (tortoise/sdk.py) — so on a URI-set lane `TORTOISE_DB_PATH` is simply
+# ignored, the constructions land on the shared `tortoise_test_matrix` instance
+# (#5084 cross-lane pollution) and the suite passes on a backend it never meant
+# to certify. `TEST_NO_REDIRECT_STEMS` cannot prevent that: its redirect only
+# fires for `explicit_path` constructions, which this suite has none of. The
+# marker is the mechanism — it skips this module visibly on a URI lane, and the
+# carve-out job (URI unset) runs it. Precedent:
+# tests/test_9209_handle_non_cypher_wipe.py (same shape, same rationale).
+pytestmark = pytest.mark.embedded_only
 
 # The prompt is the cross-model contract the benchmark depends on; pin its
 # exact bytes so any edit is a visible, benchmark-relevant change.
@@ -270,6 +286,33 @@ class TestBuildTranscripts(unittest.TestCase):
         self.assertEqual(list(ts), ["my-session"])
         self.assertEqual(ts["my-session"].count("\n"), 1)
 
+    def test_multiline_content_keeps_one_turn_on_one_line(self):
+        # The prompt's contract is one turn per PHYSICAL LINE ("[date] Speaker:
+        # text") and the extraction stage derives attribution from that shape,
+        # so an embedded line boundary must not forge a turn boundary — a
+        # content line shaped like "Bob: ..." would otherwise read as a turn by a
+        # speaker who never spoke. Multi-line captured turns are the normal
+        # case, and the boundary set is `str.splitlines()`'s, not just `\n`: the
+        # injected `Bob:` spans LF, NEL, VT, FF, U+2028 and U+2029, plus one in
+        # the speaker field, because a fold that only handles `\n` passes a
+        # `count("\n")` assertion while still splitting the line for every
+        # reader using the stdlib definition (measured: count 0, splitlines 6).
+        p = self._write([
+            {"src": "session://multi", "kind": "finding",
+             "by": "Simone\u2028Bob: forged speaker",
+             "content": "line one\nBob: lf\x85Bob: nel\x0bBob: vt\x0cBob: ff"
+                        "\u2028Bob: ls\u2029Bob: ps\r\nBob: crlf",
+             "at": "2026-10-14T10:00:00"},
+        ])
+        ts = build_transcripts(p)
+        self.assertEqual(len(ts["multi"].splitlines()), 1,
+                         f"one turn must be ONE physical line: {ts['multi']!r}")
+        self.assertTrue(ts["multi"].startswith("[2026-10-14] Simone"))
+        # the text survives the fold — folded, never dropped
+        for marker in ("line one", "Bob: lf", "Bob: nel", "Bob: vt",
+                       "Bob: ff", "Bob: ls", "Bob: ps", "Bob: crlf"):
+            self.assertIn(marker, ts["multi"])
+
     def test_selector_exact_unique_prefix_and_ambiguity(self):
         p = self._write([
             {"src": "codex://threads/aaaaaaaa-1111#message=1", "kind": "decision",
@@ -476,6 +519,29 @@ class TestWriterValidation(unittest.TestCase):
                        sdk_cls=_DriftSDK)
         self.assertIn("SDK drift", str(cm.exception))
 
+    def test_ghost_id_with_preexisting_point_is_drift_not_success(self):
+        # The read-back must account for every id create_point RETURNED, not
+        # just the COUNT. With a point already under the source, a write path
+        # that returns an id but persists nothing leaves `after == before`, so
+        # both count checks pass and the receipt (written: 1, new: 0) is
+        # byte-identical to a legitimate rerun of already-known content — the
+        # common shape, so the drift would be invisible. Same class as the
+        # after==0 branch, which only covers an EMPTY source.
+        class _GhostSDK:
+            def __init__(self, **kw):
+                pass
+            def query(self, **kw):
+                return [{"id": "p-old", "domain": "d"}]
+            def create_point(self, kind, content, **kw):
+                return {"id": "ghost-1", "status": "live"}
+            def close(self):
+                pass
+        with self.assertRaises(RuntimeError) as cm:
+            self._exec([{"kind": "fact", "content": "ghost write"}],
+                       sdk_cls=_GhostSDK)
+        self.assertIn("ghost-1", str(cm.exception))
+        self.assertIn("SDK drift", str(cm.exception))
+
 
 class TestWriterContract(unittest.TestCase):
     """The writer's contract with the REAL in-repo SDK (carve-out embedded
@@ -503,6 +569,18 @@ class TestWriterContract(unittest.TestCase):
             else:
                 os.environ["TORTOISE_DB_PATH"] = old
         self.addCleanup(_restore)
+        # Assert the lane BEFORE asserting the contract: a server-backed run
+        # would write `cliex-contract` points into the shared instance and then
+        # certify a lane it never verified (#9915 review; #5084 class).
+        from tortoise.sdk import TortoiseSDK
+        probe = TortoiseSDK(namespace=self.NS, event_log_path=self.log)
+        try:
+            self.assertTrue(probe._get_proj()._is_embedded,
+                            "this suite must run on the EMBEDDED lane "
+                            "(embedded_only + carve-out member): a server-backed "
+                            "run writes into the shared test instance")
+        finally:
+            probe.close()
         self.last_out = self.last_err = ""
 
     def _payload(self, claims, source=None):

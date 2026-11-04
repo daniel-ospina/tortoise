@@ -4796,15 +4796,19 @@ surfaces:
 
   # CLI-extraction lane (#9915): the lane's guard suite. `TestWriterContract`
   # executes the real static writer script against the real in-repo SDK on
-  # per-test `TORTOISE_DB_PATH` embedded stores in namespace `cliex-contract`
-  # — a non-guard-passing namespace, so on a docker lane the redirect would
-  # flip those constructions onto the shared `tortoise_test_matrix` instance
-  # (#5084 cross-lane pollution class). Registered here so the file is
-  # CLASSIFIED (integrity rglobs `tests/test_*.py` with no wildcard) and ALSO
-  # in `carve_out:` — the URI-unset carve-out job is its natural home. No
-  # `durations` row: `fast_pool()` drops every carve-out member. The extractor
-  # itself is kept in change-selection via `CORE_ALSO` (tools/ci_selection.py)
-  # so an extractor-only diff keeps the `core` fallback alive.
+  # per-test `TORTOISE_DB_PATH` embedded stores in namespace `cliex-contract`.
+  # The lane is held by the module's OWN `pytestmark = pytest.mark.embedded_only`
+  # (a URI-set run skips it visibly), NOT by the redirect exemption below: the
+  # writer passes no explicit `db_path`, and the SDK gives `TORTOISE_DB_URI`
+  # precedence when `db_path is None` (tortoise/sdk.py), so without the marker a
+  # docker-lane run would write into the shared `tortoise_test_matrix` instance
+  # (#5084 cross-lane pollution class) and certify a backend it never targeted.
+  # Registered here so the file is CLASSIFIED (integrity rglobs `tests/test_*.py`
+  # with no wildcard) and ALSO in `carve_out:` — the URI-unset carve-out job is
+  # its natural home. No `durations` row: `fast_pool()` drops every carve-out
+  # member. The extractor itself is kept in change-selection via `CORE_ALSO`
+  # (tools/ci_selection.py) so an extractor-only diff keeps the `core` fallback
+  # alive.
   - test_cli_extraction.py
   ep:
   # #7951 (remaining doors) / review P1: DUAL-REGISTERED with `core` (below)
@@ -6680,10 +6684,13 @@ carve_out:
 # tests/test_ci_selection.py::test_carve_out_mirrors_test_no_redirect_stems).
 - test_ci_runner_x64_install.py
 # CLI-extraction lane (#9915): `TestWriterContract` builds a per-test embedded
-# SDK from `TORTOISE_DB_PATH` in namespace `cliex-contract` — not guard-passing
-# (`test*`/`tortoise_test*`/`test-*`, tests/test_markers.py) — so under a URI
-# lane the redirect would land those constructions on the shared
-# `tortoise_test_matrix` instance, the #5084 cross-lane pollution class.
+# SDK from `TORTOISE_DB_PATH` in namespace `cliex-contract`. The lane is held by
+# the suite's module-level `pytest.mark.embedded_only` (a URI-set run skips it
+# visibly) — NOT by the redirect exemption above, which only covers explicit-path
+# constructions and this suite passes none: the writer builds
+# `TortoiseSDK(namespace=..., event_log_path=...)` and the SDK gives
+# `TORTOISE_DB_URI` precedence when `db_path is None`, so a docker-lane run would
+# otherwise write into the shared `tortoise_test_matrix` instance (#5084 class).
 # Routed here so the URI-unset carve-out job runs it as designed; the stem is
 # mirrored in `tests/_embedded.TEST_NO_REDIRECT_STEMS` (the pin is
 # `test_ci_selection.py::test_carve_out_mirrors_test_no_redirect_stems`) and

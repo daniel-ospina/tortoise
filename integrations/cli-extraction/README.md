@@ -16,7 +16,7 @@ read-only, and it is documented here rather than glossed.
 
 ## How it works
 
-```
+```text
 capture (per-turn hook, #3963)      codex://threads/<id>#message=<id>
         │                                   │
         ▼                                   ▼
@@ -153,8 +153,13 @@ The transcript is captured user text and is treated as **data**, end to end:
   mid-loop prints a partial receipt (`{"partial": true, "made_ids": [...]}`)
   on stdout before raising, so already-created ids are never lost.
 
-Tests: `tests/test_cli_extraction.py` — run with
-`uv run pytest tests/test_cli_extraction.py`. It pins the
+Tests: `tests/test_cli_extraction.py` — a URI-unset carve-out member (it
+builds embedded stores per test), so run it with
+`TORTOISE_TEST_CARVE_OUT=1 uv run pytest tests/test_cli_extraction.py`.
+A bare `uv run pytest` without that opt-in trips the epic-#1647 P4 session
+gate and errors every item; on a `TORTOISE_DB_URI`-set lane the suite is
+`embedded_only` and skips visibly rather than writing `cliex-contract`
+points into the shared instance (#5084 class). It pins the
 accounting/parser/selector/prompt-contract invariants, the engine-call
 hardening flags for **both** the claude and codex lanes (via fake
 executables: flags, stdin prompt, fresh scratch cwd), and the writer's
@@ -163,8 +168,12 @@ script against the real in-repo SDK (embedded backend, fresh DB per test).
 CI registration: the suite is registered under `surfaces: core:` AND
 `carve_out:` in `config/ci-surfaces.yml` (`TestWriterContract` builds
 per-test embedded SDKs in namespace `cliex-contract` — not guard-passing —
-so the URI-unset carve-out job is its natural home; #5084 class), with the
-stem mirrored in `tests/_embedded.TEST_NO_REDIRECT_STEMS` and declared in
+so the URI-unset carve-out job is its natural home; #5084 class), and it
+carries the module-level `pytest.mark.embedded_only` that makes a URI-set
+lane skip it instead of silently testing the server backend (`test_markers.py::
+test_module_level_embedded_only_modules_are_carve_out` requires such a module
+to be a carve-out member). The stem is mirrored in
+`tests/_embedded.TEST_NO_REDIRECT_STEMS` and declared in
 `tests/test_markers.py`. The extractor itself is kept in change-selection
 via `CORE_ALSO` (tools/ci_selection.py): `integrations/` is a flat
 non-Python prefix, and without the CORE_ALSO entry an extractor-only diff

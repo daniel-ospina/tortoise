@@ -157,6 +157,19 @@ def dump(out: Path, allow_empty: bool = False):
     print(f"transcripts: {keys}")
 
 
+# Every line boundary `str.splitlines()` honours (Python float/universal
+# newlines: CR, LF, CRLF, VT, FF, NEL, LS, PS). One definition, used for every
+# field that is interpolated into a transcript line — a boundary that survives
+# the fold is a forged turn boundary, and the extraction stage attributes claims
+# by line.
+_LINE_BOUNDARY_RE = re.compile("[\r\n\x0b\x0c\x85\u2028\u2029]")
+
+
+def _fold_line_boundaries(value: str) -> str:
+    """Replace every line boundary with the visible fold marker."""
+    return _LINE_BOUNDARY_RE.sub(" \u23ce ", value)
+
+
 def build_transcripts(turns_path: Path):
     """Group turns by codex thread -> {full_thread_id: transcript}.
 
@@ -184,7 +197,22 @@ def build_transcripts(turns_path: Path):
                 # merge risk the codex lane raises loudly on)
                 key = t["src"].split("/")[-1].split("#", 1)[0]
             date = (t.get("at") or "")[:10]
-            groups.setdefault(key, []).append(f"[{date}] {t.get('by') or 'Speaker'}: {t['content']}")
+            # The prompt's contract is ONE TURN PER PHYSICAL LINE ("[date]
+            # Speaker: text") and the extraction stage derives attribution from
+            # that line format. Captured turns are multi-line far more often
+            # than not, so an embedded line boundary inside `content` forges a
+            # turn boundary: the continuation reads as an unprefixed turn, and
+            # any content line shaped like `Bob: ...` is credited to a speaker
+            # who never spoke. Fold EVERY boundary `str.splitlines()` honours —
+            # not just CR/LF: U+2028/2029/0085 and VT/FF split a line for every
+            # reader that uses the Python/stdlib definition, so folding only
+            # `\n` would leave the same forgery open one codepoint over
+            # (measured: `count("\n") == 0` but `splitlines() == 6`).
+            # The speaker is part of the same physical line, so it folds too: a
+            # newline in `by` forges a boundary exactly like content does.
+            text = _fold_line_boundaries(str(t["content"]))
+            speaker = _fold_line_boundaries(str(t.get("by") or "Speaker"))
+            groups.setdefault(key, []).append(f"[{date}] {speaker}: {text}")
     return {k: "\n".join(v) for k, v in sorted(groups.items())}
 
 
@@ -523,6 +551,22 @@ try:
     after = len(pts)
     if after < before:
         raise RuntimeError(f'inconsistent write: before={before} after={after}')
+    # Every id create_point RETURNED must be accounted for by the read-back:
+    # either present under this source (a fresh write, or a same-source rerun
+    # that returns the existing point's id — measured, not assumed), or named
+    # by the dedup-hit warning as folded onto another source (collected in
+    # `folded`). An id that is neither is a SILENTLY DROPPED write, and the
+    # count checks above cannot see it whenever the source already had points:
+    # `written: N, new: 0` is then byte-identical to a legitimate idempotent
+    # rerun, so a drifted write path would exit 0 with a success receipt.
+    _under_source = {p.get('id') for p in pts}
+    _missing = [i for i in made if i not in _under_source and i not in folded]
+    if _missing:
+        raise RuntimeError(
+            f'inconsistent write: {len(made)} create_point call(s) returned '
+            f'{len(_missing)} id(s) that are neither present under the source '
+            f'nor reported as dedup folds ({_missing[:5]}) — SDK drift, not a '
+            'rerun of already-known content')
     _noise = [f'{name}: {msg}' for name, msg in _new_warnings
               if not name.startswith(_WRITE_PATH_LOGGERS)]
     receipt = {'written': len(made), 'new': after - before, 'total_for_source': after,
