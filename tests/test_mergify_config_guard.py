@@ -2111,3 +2111,58 @@ def test_gitattributes_escaped_literal_name(tmp_path: Path) -> None:
     (root / "docs" / "README.md").write_text("a\n", encoding="utf-8")
     (root / ".gitattributes").write_text("docs/README\\.md merge=union\n", encoding="utf-8")
     assert mcg._unioned_files(root) == {"docs/README.md"}
+
+
+# ---------------------------------------------------------------------------
+# #10897 — the FOLD's CI priority (the third mechanism of the batch-gate answer)
+# ---------------------------------------------------------------------------
+#
+# The owner's question (2026-11-04): *"will we have a way to prioritise for CI
+# queues the combined ones? so their components don't land before and disrupt the
+# process?"* The two STRUCTURAL mechanisms live on PR #10902 (a superseded
+# constituent cannot ENTER the queue, and `tools/batch_open.py` closes it at
+# fold-open). This file pins the PRIORITY mechanism, which orders the queue.
+
+
+def test_the_fold_priority_rule_outranks_the_accelerator() -> None:
+    """A fold must beat the accelerator: Mergify uses the FIRST matching rule.
+
+    Two labels on one PR is the case that decides it — read in file order, so
+    `fold (batch gate)` above `queue accelerator` is what makes 9000 win over
+    `high` (3000; unmatched is `medium`, 2000). A future editor who renumbers the
+    fold rule to `high` while leaving it in place, or who appends it below the
+    accelerator, breaks the same property from either side — hence both arms.
+
+    The interruption flag is asserted because it is the ONLY part of this rule
+    that costs anything (it cancels checks already running): it must be a
+    deliberate true, not an inherited default.
+    """
+    doc = mcg._load_mergify(ROOT)
+    rules = doc["priority_rules"]
+    names = [r["name"] for r in rules]
+    fold = next(i for i, r in enumerate(rules) if "batch-fold" in " ".join(r["conditions"]))
+    accel = next(i for i, r in enumerate(rules) if r["name"] == "queue accelerator")
+    assert fold < accel, f"the fold rule must be evaluated first; order is {names}"
+    priority = rules[fold]["priority"]
+    assert isinstance(priority, int) and 3000 < priority <= 10_000, priority
+    assert rules[fold]["allow_checks_interruption"] is True
+
+
+def test_the_queue_config_still_satisfies_every_protection_clause() -> None:
+    """The invariant this change must not disturb, asserted where the guard lives.
+
+    `queue_conditions ∪ merge_conditions` == the live required set, each name in
+    exactly ONE list. Breaking it deadlocks every PR in the repository, so it is
+    pinned here as well as in `test_required_set_sync.py`. The priority rule is
+    not part of the gate digest and names no check, so the union is unchanged by
+    this change — which is the fact the assertion records.
+    """
+    doc = mcg._load_mergify(ROOT)
+    per_list: dict[str, set[str]] = {"queue": set(), "merge": set()}
+    for rule in doc["queue_rules"]:
+        for key, bucket in (("queue_conditions", "queue"), ("merge_conditions", "merge")):
+            per_list[bucket].update(mcg._success_names(rule.get(key) or []))
+    union = per_list["queue"] | per_list["merge"]
+    assert union == set(LIVE_SEVEN), sorted(union)
+    assert not (per_list["queue"] & per_list["merge"]), (
+        "a required check named in BOTH lists violates the file's own contract")
