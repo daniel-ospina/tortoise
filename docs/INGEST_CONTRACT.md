@@ -466,10 +466,12 @@ committed. The recovery signal is a single rule:
 > items that committed dedup, items that didn't commit are created, and
 > the whole logical bundle carries **one `batch_id`** across kill + retry
 > (`batch_id` is content-derived, not per-call — a retry mints the same id).
-> ⛔ **Not exactly-once for anything the fold does not cover** — append-only
-> `document`/`event` entities, and any point the fold excludes (operator nodes):
-> a resubmission appends a second one, silently. A bundle carrying such an item
-> is the case where "how many did I create?" cannot be answered by the retry
+> ⛔ **Not exactly-once for anything the fold does not cover** — a `document`/
+> `event` entity, or a point whose node identity differs from what the fold
+> queries (operator nodes by predicate; a `pointKind` arriving through the props
+> passthrough): a resubmission appends a second one, silently. A bundle carrying
+> such an item is the case where "how many did I create?" cannot be answered by
+> the retry
 > alone — [§15](#15-timeout--failure).
 
 - The killed call returns no structured error; there is nothing to parse.
@@ -484,9 +486,9 @@ committed. The recovery signal is a single rule:
   mode has no AOF window, so the JSONL journal is the durability contract).
 - **Timeout ≠ failure — resubmission is duplicate-averse, not idempotent.**
   A timeout is the same class as transport death: re-send the identical bundle;
-  if it committed, the duplicate-averse legs come back `deduped`, confirming
-  presence. The append-only `document`/`event` legs are the exception — a
-  resubmission appends them again, silently (no warning key: `append_only_items`
+  if it committed, the legs the fold covers come back `deduped`, confirming
+  presence — while a `document`/`event` entity, or a point whose identity escapes
+  the fold, appends again, silently (no warning key: `append_only_items`
   in [§3.2](#32-warnings--the-thirteen-keys) is reserved vocabulary, not observable
   today), so an ambiguous timeout on a bundle containing them can leave a second
   occurrence record.
@@ -506,7 +508,7 @@ with the exact retry action:
 | 4 | `ERR_QUOTA_SERVER` `{error, code}` | Transient quota-counting failure (fail-closed). | **Backoff-retry** (transient). |
 | 5 | `ERR_UNAUTHORIZED` `{error, code}` | 401 — missing/invalid `Bearer tt_<key>`. | **Fix credentials; never retry.** |
 | 6 | `ERR_REGISTRY` `{error, code}` | 503 — team registry (key→team resolution) unavailable. The `-32099` **static-auth-misconfigured** variant ("Static auth misconfigured: no API key set") is a server configuration problem. | Transient → **backoff-retry**. The `-32099` static-misconfig variant → **operator fix (config), don't retry**. |
-| 7 | Phase-2 failure `{error}` — **no code** | A write failed mid-commit; partial state is committed. The error names the section/index/item; it carries the already-computed `batch_id`. | **Re-send converges** where the fold applies — the retry dedups what committed and writes the rest. ⛔ Not for the items [§15](#15-timeout--failure) excludes (append-only `document`/`event` entities, operator points): those append, so a re-send can leave two. Audit via `batch_id` first if you like. |
+| 7 | Phase-2 failure `{error}` — **no code** | A write failed mid-commit; partial state is committed. The error names the section/index/item; it carries the already-computed `batch_id`. | **Re-send converges** where the fold applies — the retry dedups what committed and writes the rest. ⛔ Not for the items [§15](#15-timeout--failure) does not cover (`document`/`event` entities; a point whose identity escapes the fold, e.g. operator nodes or a `pointKind` via the props passthrough): those append, so a re-send can leave two. Audit via `batch_id` first if you like. |
 | 8 | Transport death — **no response** | The call may have committed anything. | **Re-send the identical bundle**; duplicate-averse where the fold applies, and the exclusions [§15](#15-timeout--failure) names ([§7](#7-kill-recovery)). |
 | 9 | `EmbeddedStoreBusyError` — named class prefix in `{error}` (**planned**) | Cross-process contention on an embedded store (another process holds the db). **planned:** fail-fast with a named error replaces today's blocking flock-with-timeout handling. | **planned:** do **NOT** retry until the holder exits. Unlike phase-2 partial-state errors, re-sending while the store is busy does **not** converge — it re-errors. (Fail-fast replaces the old silent second-daemon behavior.) |
 
@@ -796,7 +798,7 @@ strand run-1 residue.
 
 **What is not covered — and why this is NOT a list.** The fold covers points (by
 kind + content hash), sources (by url) and connections (by endpoint set + arity).
-Everywhere else an identical resubmission writes again, and a POINT can do that by
+Everywhere else, the answer depends on the item, and a POINT can write again by
 at least two independent mechanisms:
 
 * `document` and `event` entities — occurrence records, append-only by contract
@@ -843,12 +845,12 @@ the verdict is not evidence that nothing was written.
 without qualification: **do NOT re-send it — reconcile by other means.** ⛔ Note
 what that verdict does and does not say. It says convergence is **not provable**
 for this tool — its bundle's key space is open-ended, so no finite predicate can
-cover it — and it does NOT say a repeat will duplicate. The append-only legs
-(above) are the concrete reason provability fails, not a prediction about any
-particular bundle: a points-only bundle with no operator item converges
-completely and STILL reports `retry_safe: false`, because the tool-level answer
-must hold for every bundle. Read the response's counts to learn what THIS bundle
-did; read `retry_safe` to learn what the tool can promise. So the over-MCP answer
+cover it — and it does NOT say a repeat will duplicate. The mechanisms below are
+WHY provability fails, not a prediction about any particular bundle: a bundle
+whose items all fold converges completely and STILL reports `retry_safe: false`,
+because the tool-level answer must hold for every bundle. Read the response's
+counts to learn what THIS bundle did; read `retry_safe` to learn what the tool can
+promise. So the over-MCP answer
 and this section's "re-send the identical bundle" are answering different
 questions — the section answers *"the call is dead and I want the data in"*; the
 refusal answers *"I do not know whether it is dead"*, and for ingest the safe

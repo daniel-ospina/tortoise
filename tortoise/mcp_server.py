@@ -4358,8 +4358,11 @@ def tortoise_mitigate_operator(id: str, reason: str, strength: float = 0.5,
       numeric 0-4) — stamped 'set-by-author'. Omit for the #2199 system
       starting belief ('medium', provenance 'system-default') so the
       mitigation is a calibrated live evidence point (no CalibrationError).
-    Idempotent for a CURRENT mitigation — a second call updates it in place.
-    Once it has been withdrawn (retracted/superseded/outdated/archived) the
+    Does NOT duplicate a CURRENT mitigation — a second call updates it in place,
+    so the node count stays 1 — but it is NOT a no-op: every call re-stores the
+    node and re-triggers EP dirty-marking (`sdk.py`'s CURRENT branch calls
+    `update_point` unconditionally), which is why the tool is not declared
+    idempotent. Once it has been withdrawn (retracted/superseded/outdated/archived) the
     call mints a NEW mitigation Point and returns its id, because a retraction
     is terminal (#432/#2422) and is never revived by a re-assertion.
     """
@@ -5131,9 +5134,10 @@ def tortoise_operator_action(action: str, id: str, reason: str | None = None,
     """Consolidated operator write action — action=mitigate|annotate.
 
     mitigate: reason (required) + strength (0-1, default 0.5) — creates/updates
-    the mitigation Point. Idempotent for a CURRENT mitigation — a second call
-    updates it in place; NOT idempotent after a withdrawal, where a re-assertion
-    mints a NEW Point. annotate: bias/precision/consistency/directness (all
+    the mitigation Point. Does NOT duplicate a CURRENT mitigation (a second call
+    updates it in place) but is NOT a no-op — every call re-stores the node and
+    re-triggers EP dirty-marking; after a withdrawal a re-assertion mints a NEW
+    Point. annotate: bias/precision/consistency/directness (all
     required, 0-1).
 
     ⛔ `mitigate` and `tortoise_mitigate_operator` reach the SAME
@@ -5406,8 +5410,10 @@ def tortoise_ingest(bundle: Any = None, granularity: str = "bulk",
     that set is OPEN rather than a list. Two measured point-side mechanisms
     alone: operator nodes are skipped by the fold's predicate, and a `pointKind`
     arriving through the props passthrough WINS over the kind the fold queries.
-    Either makes an identical resubmission write a second Point; the entity legs
-    are append-only on top. Read created/deduped rather than inferring it here.
+    Either makes an identical resubmission write a second Point. On the entity
+    side `document`/`event` are APPEND-ONLY, while `subject`/`object`
+    resolve-or-mint on the name and DO converge — even the entity legs are not
+    one rule. Read created/deduped rather than inferring it here.
     """
     bundle = _parse(bundle)
     if bundle is None:

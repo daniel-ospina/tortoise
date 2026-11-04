@@ -734,9 +734,12 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         name="tortoise_mitigate_operator",
         id="surface.mitigate_operator",
         description="Create a mitigation Point that modulates an operator's edge strength. "
-                    "Idempotent for a CURRENT mitigation — a second call updates it in place; "
-                    "once it has been withdrawn (retracted/superseded/outdated/archived) a "
-                    "re-assertion mints a NEW mitigation Point and returns its id.",
+                    "It does NOT duplicate a CURRENT mitigation — a second call updates it "
+                    "in place, so the node count stays 1 — but it is NOT a no-op: every call "
+                    "re-stores the node and re-triggers EP dirty-marking, which is why this "
+                    "tool is not declared idempotent. Once withdrawn "
+                    "(retracted/superseded/outdated/archived) a re-assertion mints a NEW "
+                    "mitigation Point and returns its id.",
         risk="destructive",
         # ⛔ NOT idempotent — its own description above says a re-assertion after
         # withdrawal MINTS A NEW Point. So convergence is conditional on the
@@ -1052,8 +1055,10 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
                     "side mechanisms alone: operator nodes are skipped by the fold's "
                     "predicate, and a `pointKind` arriving through the props "
                     "passthrough WINS over the kind the fold queries. Either one "
-                    "makes an identical resubmission write a second Point, and the "
-                    "entity legs are append-only on top of that. Read "
+                    "makes an identical resubmission write a second Point. On the "
+                    "entity side `document`/`event` are append-only, while "
+                    "`subject`/`object` resolve-or-mint on the name and DO converge — "
+                    "so even the entity legs are not one rule. Read "
                     "created/deduped to tell what happened — do not infer it from "
                     "this description.",
         risk="write",
@@ -1401,9 +1406,10 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         id="surface.operator_action",
         description="Consolidated operator write action — action=mitigate|annotate. "
                     "mitigate: reason + strength (0-1) — creates/updates the mitigation "
-                    "Point. Idempotent for a CURRENT mitigation (a second call updates "
-                    "it in place); not idempotent after a withdrawal (a re-assertion "
-                    "mints a NEW Point) — the same state-conditional SDK call as "
+                    "Point. It does NOT duplicate a CURRENT mitigation (a second call updates "
+                    "it in place, node count stays 1) but it is NOT a no-op — every call "
+                    "re-stores the node and re-triggers EP dirty-marking; after a withdrawal a "
+                    "re-assertion mints a NEW Point — the same state-conditional SDK call as "
                     "tortoise_mitigate_operator. annotate: bias/precision/consistency/"
                     "directness (0-1).",
         risk="destructive",

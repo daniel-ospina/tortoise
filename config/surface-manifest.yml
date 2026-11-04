@@ -49,7 +49,7 @@
 # a constant here.
 manifest_version: 1
 issue: 3863
-cut_at_commit: 3417a0e20dbe09c41ec1e6f3c798e2edd7982385
+cut_at_commit: 8274613f82f6ed8c358aa4523c302d08a61583ee
 allowed_transforms:
 - _HTTPToolFilter
 - _RetiredToolTransform
@@ -1740,7 +1740,7 @@ rows:
   class: agent-reachable
   cluster_canonical: null
 - name: tortoise_ingest
-  served_from: tortoise/mcp_server.py:83826395a24c54d8
+  served_from: tortoise/mcp_server.py:222f028c3016f9c9
   served_attributes: c0ea3c28d0df1685
   family: graph
   family_rank: 2
@@ -1767,8 +1767,9 @@ rows:
     by url and operators by input set — but the fold does NOT cover everything, and the set is OPEN, not a list.
     Two measured point-side mechanisms alone: operator nodes are skipped by the fold''s predicate, and a `pointKind`
     arriving through the props passthrough WINS over the kind the fold queries. Either one makes an identical resubmission
-    write a second Point, and the entity legs are append-only on top of that. Read created/deduped to tell what
-    happened — do not infer it from this description.'
+    write a second Point. On the entity side `document`/`event` are append-only, while `subject`/`object` resolve-or-mint
+    on the name and DO converge — so even the entity legs are not one rule. Read created/deduped to tell what happened
+    — do not infer it from this description.'
   dependency: declares TortoiseSDK.ingest (resolves)
   lifecycle: active
   used_by: never called, tooling, docs
@@ -1837,7 +1838,7 @@ rows:
   cluster_canonical: tortoise_delete
   cluster_note: group `delete` is split across ['graph', 'memory']; proposed family `memory` — waits for your approval
 - name: tortoise_operator_action
-  served_from: tortoise/mcp_server.py:d4a400bdc7a89ba7
+  served_from: tortoise/mcp_server.py:eadf9f2a7246923d
   served_attributes: 07f3aa2bf8138e28
   family: graph
   family_rank: 2
@@ -1849,9 +1850,10 @@ rows:
   cluster: operator-action
   canonical: true
   job: 'Consolidated operator write action — action=mitigate|annotate. mitigate: reason + strength (0-1) — creates/updates
-    the mitigation Point. Idempotent for a CURRENT mitigation (a second call updates it in place); not idempotent
-    after a withdrawal (a re-assertion mints a NEW Point) — the same state-conditional SDK call as tortoise_mitigate_operator.
-    annotate: bias/precision/consistency/directness (0-1).'
+    the mitigation Point. It does NOT duplicate a CURRENT mitigation (a second call updates it in place, node count
+    stays 1) but it is NOT a no-op — every call re-stores the node and re-triggers EP dirty-marking; after a withdrawal
+    a re-assertion mints a NEW Point — the same state-conditional SDK call as tortoise_mitigate_operator. annotate:
+    bias/precision/consistency/directness (0-1).'
   dependency: 'handler-served: no declared SDK link'
   lifecycle: active
   used_by: never called, tooling, docs
@@ -1891,7 +1893,7 @@ rows:
   class: agent-reachable
   cluster_canonical: tortoise_operator_action
 - name: tortoise_mitigate_operator
-  served_from: tortoise/mcp_server.py:bcfee30a32c3e633
+  served_from: tortoise/mcp_server.py:b9109a02d6ef02e7
   served_attributes: 3d86b6571fc4c911
   family: graph
   family_rank: 2
@@ -1902,9 +1904,10 @@ rows:
   keyword_rank: 9
   cluster: operator-action
   canonical: false
-  job: Create a mitigation Point that modulates an operator's edge strength. Idempotent for a CURRENT mitigation
-    — a second call updates it in place; once it has been withdrawn (retracted/superseded/outdated/archived) a re-assertion
-    mints a NEW mitigation Point and returns its id.
+  job: 'Create a mitigation Point that modulates an operator''s edge strength. It does NOT duplicate a CURRENT mitigation
+    — a second call updates it in place, so the node count stays 1 — but it is NOT a no-op: every call re-stores
+    the node and re-triggers EP dirty-marking, which is why this tool is not declared idempotent. Once withdrawn
+    (retracted/superseded/outdated/archived) a re-assertion mints a NEW mitigation Point and returns its id.'
   dependency: declares TortoiseSDK.mitigate_operator (resolves)
   lifecycle: active
   used_by: never called, tooling, docs
