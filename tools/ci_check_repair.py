@@ -716,6 +716,50 @@ def _zero_job_stalled(run: Run, min_age_s: float, now: float | None = None) -> b
     return age is not None and age >= min_age_s
 
 
+def repairable_zero_job_ids(runs: list[Run], min_age_s: float,
+                            max_attempts: int) -> frozenset[int]:
+    """The zero-job runs THIS PASS's repair machinery owns — the exemption's set.
+    PURE.
+
+    ⛔ THE SET IS PASS-WIDE BY CONSTRUCTION, SO IT MUST BE BUILT OVER EVERY OPEN PR
+    HEAD THE PASS READS (`build_plans`), NOT OVER ONE HEAD (#10641 review P1). The
+    congestion exemption asks "is anything OTHER than this run congested?", and the
+    witness list it is asked against (`ci_queue_health.wait_witness_ids`) is
+    REPO-WIDE — so a set derived from one PR's runs answers a strictly narrower
+    question than the one being asked, and the gap is reachable: with one aged
+    zero-job run on EACH of two open PRs, each run is "independent work" for the
+    other, every plan refuses, and the pass sits at `rerun=[]` / `exit 0` forever
+    (`docs/ci/ci-check-repair-red-surface.md` §Fact 2).
+
+    ⛔ WHY EXCLUDING A ZERO-JOB RUN IS SOUND — and it is NOT "this pass will
+    re-run it". The refusal the exemption narrows exists for one harm: cancel-then-
+    rerun discards the QUEUE POSITION the run had reached and re-queues it behind
+    the same wait. A zero-job run holds no jobs and never starts (see
+    `ZERO_JOB_MIN_AGE_S`), so it is not a wait that drains and there is nothing
+    behind it to be re-queued past — it is dead weight IN the wait population that
+    makes `PR-STARVED`/`PR-BACKLOGGED` true. An independent witness is still an
+    independent witness: an ordinary aged queued run, a `FLOOD`, a cut feed, or a
+    leg that was not fully read all refuse, unchanged.
+
+    ⛔ BOTH BOUNDS ARE LOAD-BEARING, and they are the repair loop's own: a run at a
+    LATER attempt is the fresh attempt a previous window's cancel-then-rerun created
+    and IS progressing (so it can drain — it refuses like any other witness), and a
+    SPENT budget is a human's problem, not a self-clearing wait. Exempting either
+    would be a fail-open: it would authorise a destructive cancel behind work that
+    genuinely is waiting.
+
+    ⛔ ONE PREDICATE, TWO CALLERS. `classify()` uses it for the head it is given and
+    `build_plans()` unions it over every head it reads; deriving either half
+    independently is how the two could disagree about the class.
+    """
+    return frozenset(
+        r.id for r in runs
+        if _zero_job_stalled(r, min_age_s)
+        and r.run_attempt <= ZERO_JOB_MAX_REPAIRABLE_ATTEMPT
+        and r.run_attempt < max_attempts
+    )
+
+
 def runs_at_head(repo: str, sha: str) -> list[Run]:
     def build() -> list[Run]:
         raw = _paginate(f"repos/{repo}/actions/runs?head_sha={sha}", "workflow_runs")
@@ -890,7 +934,8 @@ def classify(pr: dict, checks: list[dict], all_runs: list[Run], required: list[s
              zero_job_min_age_s: float | None = None,
              queue_congested: bool | None = None,
              queue_congestion_measured: bool | None = None,
-             queue_congestion_apart_from=None) -> PrPlan:
+             queue_congestion_apart_from=None,
+             also_repairable: frozenset[int] | None = None) -> PrPlan:
     """The whole decision, PURE — no API calls — so it is unit-testable.
 
     For each required context absent from the head's check runs, the producing
@@ -953,6 +998,18 @@ def classify(pr: dict, checks: list[dict], all_runs: list[Run], required: list[s
     was unreachable whenever a repairable run existed and the gate refused the only act
     that could clear its own witness. `None` (the default) keeps every unit caller and
     every inability to answer on the refusing side.
+
+    `also_repairable` is the PASS-wide half of that exclusion (#10641 review P1), and
+    it is what makes the exemption's own sentence true. The set is built by
+    `repairable_zero_job_ids()` from `all_runs` — ONE PR's head — while `build_plans()`
+    walks EVERY open PR and `wait_witness_ids` is REPO-WIDE, so a head-wide set answers
+    a narrower question than the reading: one aged zero-job run on each of two open PRs
+    is "independent work" for the other, both plans refuse, and the pass sits at
+    `rerun=[]` / `exit 0` for ever — the same §Fact 2 harm, one PR apart. `build_plans()`
+    unions the same predicate over every head it reads and passes it here. It is
+    UNIONED, never substituted, so a unit caller that omits it is not widened past its
+    own head and a caller that supplies it cannot name a run the predicate would not
+    have selected at that run's own head.
     """
     plan = PrPlan(number=int(pr["number"]), head=pr["headRefOid"],
                   in_flight=sorted({r.name or r.path for r in all_runs
@@ -964,30 +1021,35 @@ def classify(pr: dict, checks: list[dict], all_runs: list[Run], required: list[s
     plan.absent = [c for c in required if c not in seen]
     if not plan.absent:
         return plan
-    # ⛔ THE HEAD-WIDE REPAIRABLE SET (#10641 review P1). The congestion exemption
-    # asks "is anything OTHER than this run congested?", and the honest answer must
-    # exclude EVERY zero-job run this pass can repair — not just the one being
-    # considered. `wait_witness_ids` is REPO-WIDE, so with N aged zero-job runs each
-    # one is "another witness" for every other and a per-run exclusion refuses all N
-    # forever. MEASURED on the head's pure core with the module's own motivating
-    # shape (`CI` + `Python CI` + `drift-guard` held at ZERO jobs):
+    # ⛔ THE REPAIRABLE SET IS PASS-WIDE (#10641 review P1, twice). The congestion
+    # exemption asks "is anything OTHER than this run congested?", and the honest
+    # answer must exclude EVERY zero-job run THIS PASS's machinery owns — not just
+    # the one being considered, and not just the ones at THIS PR's head.
+    # `wait_witness_ids` is REPO-WIDE, so with N aged zero-job runs each one is
+    # "another witness" for every other and a per-run exclusion refuses all N
+    # forever. MEASURED on the pure core with the module's own motivating shape
+    # (`CI` + `Python CI` + `drift-guard` held at ZERO jobs):
     #
     #   wait_witness_ids = (101, 102, 103)
     #   congests_pr_apart_from(101|102|103) = True   -> rerun=[] and exit 0
     #
     # — a permanent deadlock at exit 0, which `docs/ci/ci-check-repair-red-surface.md`
-    # §Fact 2 declares unsound. Derived ONCE from `all_runs` (the same list every
-    # context below is scanned from), and bounded by BOTH the structural attempt
-    # bound and the spent budget, so a witness this pass could not repair — a later
-    # attempt, or a spent budget — still refuses the cancel.
+    # §Fact 2 declares unsound. The first fix derived the set from `all_runs`, which
+    # is ONE PR's head, while `build_plans()` walks EVERY open PR — so the same
+    # deadlock survived one PR apart (PR#1's run witnessing PR#2's and back), and the
+    # commit message's "the WHOLE repairable set" was false in that shape. Hence
+    # `also_repairable`: `build_plans()` unions the set over every head it reads and
+    # hands it in, so "whole" means the pass.
+    #
+    # The union is deliberate rather than a replacement: `classify()` stays usable on
+    # its own (its 36 unit callers never build a pass), and `also_repairable` can only
+    # ADD runs that the same predicate already selected at another head, so a caller
+    # can never widen the exemption past the class — the structural attempt bound and
+    # the spent budget bound every member, from either half.
     floor = (ZERO_JOB_MIN_AGE_S if zero_job_min_age_s is None
              else zero_job_min_age_s)
-    zero_job_targets = frozenset(
-        r.id for r in all_runs
-        if _zero_job_stalled(r, floor)
-        and r.run_attempt <= ZERO_JOB_MAX_REPAIRABLE_ATTEMPT
-        and r.run_attempt < max_attempts
-    )
+    zero_job_targets = (repairable_zero_job_ids(all_runs, floor, max_attempts)
+                        | frozenset(also_repairable or ()))
     for ctx in plan.absent:
         runs = producing_runs(ctx, all_runs, emitters)
         if not runs:
@@ -1006,8 +1068,9 @@ def classify(pr: dict, checks: list[dict], all_runs: list[Run], required: list[s
             # get jobs (measured on the #8254 shape) — and it spends the same attempt
             # budget every other repair path spends.
             # `floor` is resolved ONCE above, before the context loop, so the
-            # head-wide `zero_job_targets` set and this loop can never disagree about
-            # which runs are in the repairable class.
+            # `zero_job_targets` set (head-derived ∪ the pass-wide set `build_plans()`
+            # hands in) and this loop can never disagree about which runs are in the
+            # repairable class.
             crowded = queue_starved if queue_congested is None else queue_congested
             for r in runs:
                 if not _zero_job_stalled(r, floor):
@@ -1628,17 +1691,34 @@ def build_plans(repo: str, required: list[str], emitters: dict[str, list[str]],
     # call (which this did) discarded the pre-scan half and could hand the scan a
     # second full budget, which is how the total could exceed the workflow timeout.
     _PASS_DEADLINE = deadline if deadline is not None else _arm_pass_deadline()
+    # ⛔ TWO SWEEPS, BECAUSE THE EXEMPTION SET IS PASS-WIDE (#10641 review P1).
+    # `wait_witness_ids` is REPO-WIDE, so the congestion exemption must exclude every
+    # zero-job run THIS PASS's machinery owns — not the ones at one head only. Read
+    # every open PR's head first, then build ONE set from all of them, then classify.
+    # This costs no extra API call: `check_runs_at` and `runs_at_head` are cached per
+    # `(repo, sha)` and the second sweep is pure, so the reads happen exactly once
+    # each and only the ORDER changes. (Gathering the heads also means a PR with no
+    # `headRefOid` is still refused BEFORE any repair is decided, as before.)
+    heads: list[tuple[dict, list[dict], list[Run]]] = []
     for pr in open_prs(repo, include_drafts):
         head = pr.get("headRefOid") or ""
         if not head:
             raise MeasureError(f"PR #{pr.get('number')} has no headRefOid — cannot measure")
-        checks = check_runs_at(repo, head)
-        runs = runs_at_head(repo, head)
+        heads.append((pr, check_runs_at(repo, head), runs_at_head(repo, head)))
+    # The SAME predicate, the SAME floor and the SAME attempt bounds `classify()`
+    # applies at one head — `zero_job_min_age_s` is threaded in below for the same
+    # reason: two independently resolved floors is how the set and the per-run
+    # decision could disagree about the class.
+    pass_repairable = repairable_zero_job_ids(
+        [r for _, _, runs in heads for r in runs], ZERO_JOB_MIN_AGE_S, max_attempts)
+    for pr, checks, runs in heads:
         plans.append(classify(pr, checks, runs, required, emitters, max_attempts,
                               queue_starved=queue_starved,
+                              zero_job_min_age_s=ZERO_JOB_MIN_AGE_S,
                               queue_congested=queue_congested,
                               queue_congestion_measured=queue_congestion_measured,
-                              queue_congestion_apart_from=queue_congestion_apart_from))
+                              queue_congestion_apart_from=queue_congestion_apart_from,
+                              also_repairable=pass_repairable))
     return plans
 
 

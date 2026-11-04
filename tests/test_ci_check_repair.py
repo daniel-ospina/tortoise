@@ -2384,11 +2384,15 @@ def test_the_exemption_is_asked_with_the_WHOLE_head_wide_repairable_set(monkeypa
     head's pure core, `rerun=[]`, `repair_refused=[101,102,103]`, `exit 0` — permanent,
     not the "converges over windows" the docstring claimed.
 
-    The fix is that `classify()` asks the reading with the WHOLE head-wide repairable
-    set, so the exclusion covers every run this pass can repair. Pinned here by
-    RECORDING the argument the seam is called with: dropping the set (a per-run
+    The fix is that `classify()` asks the reading with the WHOLE repairable set, so the
+    exclusion covers every run this pass can repair. Pinned here by RECORDING the
+    argument the seam is called with: dropping the set (a per-run
     `congests_pr_apart_from(r.id)`) reddens the second assertion, and it is the
     multi-run fixture — not the single-run one — that makes that discriminating.
+
+    ⛔ THIS IS THE ONE-HEAD HALF ONLY. The sibling test below is the PASS-wide half:
+    a set built at ONE head is still narrower than the repo-wide witness list, so the
+    same deadlock survives one PR apart.
     """
     seen: list[tuple[int, frozenset[int]]] = []
 
@@ -2414,6 +2418,97 @@ def test_the_exemption_is_asked_with_the_WHOLE_head_wide_repairable_set(monkeypa
         assert {101, 102, 103} <= repairable, (
             f"the exemption was asked about {run_id} with {sorted(repairable)} — the "
             "caller must pass the whole head-wide repairable set")
+
+
+def test_the_repairable_set_is_PASS_wide_so_one_run_per_PR_cannot_deadlock(monkeypatch):
+    """⛔ P1 (review): the set was built at ONE head while the pass repairs EVERY PR.
+
+    `build_plans()` walks every open PR and `wait_witness_ids` is REPO-WIDE, but the
+    exemption set was derived from `all_runs` — one PR's head. So with ONE aged
+    zero-job run on each of two open PRs, each run is "another witness" for the other,
+    symmetrically: every plan answers `congests_pr_apart_from(...) is True`, refuses,
+    and the pass sits at `rerun=[]` / `exit 0` for ever — the same §Fact 2 harm the
+    single-PR fix closed, one PR apart, while the commit message claimed "the WHOLE
+    repairable set".
+
+    The fixture is `build_plans()` itself (the defect was in what the PASS hands down,
+    not in `classify()`), fed the module's own pure `classify_queue` reading. The
+    pre-fix shape is reproduced at the end, so a green run here cannot be green for
+    some unrelated reason: the same reading asked per head, with only that head's
+    derived set, refuses both plans.
+    """
+    from tools import ci_queue_health as Q
+
+    head1, head2 = "1" * 40, "2" * 40
+    # ⚠️ A zero-job run can only be aged INTO the witness class at
+    # ZERO_JOB_MIN_AGE_S (5400 s), so 5700 s is both "old enough to be repairable"
+    # and "old enough to witness" — the shape that deadlocked.
+    reading = _queue_reading(pending=[_queue_run(101, age_s=5700.0),
+                                      _queue_run(102, age_s=5700.0)])
+    assert reading.verdict == Q.PR_STARVED, reading.reasons
+    assert reading.wait_witness_ids == (101, 102)
+
+    monkeypatch.setattr(R, "open_prs", lambda repo, include_drafts: [
+        pr(1, head=head1), pr(2, head=head2)])
+    monkeypatch.setattr(R, "check_runs_at", lambda repo, head: [])
+    monkeypatch.setattr(R, "runs_at_head", lambda repo, head: [
+        aged_run(101 if head == head1 else 102, jobs=0, age_s=5700.0,
+                 path="ci.yml", name="CI")])
+
+    plans = R.build_plans("o/r", ["docs"], EMITTERS, False, 3,
+                          queue_congested=True, queue_congestion_measured=True,
+                          queue_congestion_apart_from=reading.congests_pr_apart_from)
+    by_pr = {p.number: p for p in plans}
+    assert [r.id for r in by_pr[1].rerun] == [101], (
+        "PR#1's own run must be repaired — PR#2's is not independent work")
+    assert [r.id for r in by_pr[2].rerun] == [102]
+    assert by_pr[1].repair_refused == [] and by_pr[2].repair_refused == [], (
+        "nothing is stranded: each run is the other's witness only under a set built "
+        "at one head")
+    assert [r.id for r in by_pr[1].self_witness] == [101]
+    assert [r.id for r in by_pr[2].self_witness] == [102]
+
+    # THE PRE-FIX SHAPE, reproduced: `classify()` with only its OWN head's derived set
+    # (what the pass used to hand down) refuses both — so the assertions above pin the
+    # PASS-wide set and not something else in `build_plans`.
+    for number, head, rid in ((1, head1, 101), (2, head2, 102)):
+        alone = R.classify(pr(number, head=head), [],
+                          [aged_run(rid, jobs=0, age_s=5700.0, path="ci.yml", name="CI")],
+                          ["docs"], EMITTERS, max_attempts=3,
+                          queue_congested=True, queue_congestion_measured=True,
+                          queue_congestion_apart_from=reading.congests_pr_apart_from)
+        assert alone.rerun == [], "the deadlock this test exists for"
+        assert [d["run"] for d in alone.repair_refused] == [rid]
+
+
+def test_the_PASS_wide_set_still_stops_at_the_structural_bound():
+    """The wider set must not swallow the two bounds that keep it fail-closed.
+
+    Widening the exemption from one head to the whole pass is exactly the change that
+    could turn "a zero-job run" into "any queued run": a later attempt IS the fresh
+    attempt a previous window's cancel-then-rerun created and is progressing, and a
+    spent budget is a human's problem — neither is a wait that cannot drain, so
+    neither may be excluded. Discriminating: adding the attempt bound back into the
+    predicate moves 202 into `repairable_zero_job_ids` here and clears the refusal
+    below.
+    """
+    from tools import ci_queue_health as Q
+
+    runs = [aged_run(101, jobs=0, age_s=5700.0, path="ci.yml", name="CI"),
+            aged_run(202, jobs=0, age_s=9000.0, attempt=2, path="ci.yml", name="CI")]
+    assert R.repairable_zero_job_ids(runs, R.ZERO_JOB_MIN_AGE_S, 3) == frozenset({101}), (
+        "an attempt-2 run at another PR is NOT in the repairable class")
+
+    reading = _queue_reading(pending=[_queue_run(101, age_s=5700.0),
+                                      _queue_run(202, age_s=9000.0)])
+    assert reading.verdict == Q.PR_STARVED, reading.reasons
+    plan = R.classify(pr(), [], [runs[0]], ["docs"], EMITTERS, max_attempts=3,
+                      queue_congested=True, queue_congestion_measured=True,
+                      queue_congestion_apart_from=reading.congests_pr_apart_from,
+                      also_repairable=R.repairable_zero_job_ids(
+                          runs, R.ZERO_JOB_MIN_AGE_S, 3))
+    assert plan.rerun == [], "run 202 witnesses independently and still suppresses"
+    assert [d["run"] for d in plan.repair_refused] == [101]
 
 
 def test_a_NON_target_old_wait_still_refuses_the_cancel(monkeypatch):

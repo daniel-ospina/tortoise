@@ -745,18 +745,31 @@ class QueueHealth:
         0` coexisted with a required check that could never be produced, which is
         exactly what `docs/ci/ci-check-repair-red-surface.md` §Fact 2 declares unsound.
 
-        ``also_repairable`` is the CALLER's set of run ids this same pass can repair
-        (the head-wide zero-job candidates). It exists because the witness set is
-        REPO-WIDE while the exemption is asked per run: with N aged zero-job runs,
-        each one is "another witness" for every other, so a per-run exclusion refuses
-        all N forever. Measured on this head's pure core: 3 aged runs (the #8254
+        ``also_repairable`` is the CALLER's PASS-WIDE set of run ids its repair
+        machinery owns (``ci_check_repair.repairable_zero_job_ids`` over every open PR
+        head the pass reads — ⛔ not the head-wide candidates: this witness set is
+        REPO-WIDE, so a head-wide exemption answers a narrower question than the one
+        being asked, and one aged zero-job run on each of two open PRs is "independent
+        work" for the other). It exists because the witness set is REPO-WIDE while the
+        exemption is asked per run: with N aged zero-job runs, each one is "another
+        witness" for every other, so a per-run exclusion refuses all N forever.
+        Measured on this head's pure core: 3 aged runs (the #8254
         `CI`/`Python CI`/`drift-guard` shape) → `wait_witness_ids = (101, 102, 103)`
         and `congests_pr_apart_from` answered ``True`` for all three, so
         `rerun=[]`, `repair_refused=[101, 102, 103]`, `exit 0` — a permanent
         deadlock, not the "converges over windows" the earlier revision claimed.
-        Excluding the whole repairable set is what makes the claim true: each target
-        is repaired, and a witness that is NOT a repairable zero-job run still
-        refuses.
+        Excluding the whole repairable set is what breaks the deadlock, and a witness
+        that is NOT a repairable zero-job run still refuses.
+
+        ⛔ WHY EXCLUDING A ZERO-JOB RUN IS SOUND — and it is NOT "the caller will
+        re-run it". The harm the refusal prevents is a discarded QUEUE POSITION,
+        re-queued behind the same wait. A zero-job run holds no jobs and never starts
+        (`ci_check_repair.ZERO_JOB_MIN_AGE_S`), so it is not a wait that drains: there
+        is nothing behind it to be re-queued past. A run at a LATER attempt IS the
+        fresh attempt a previous repair created and is progressing (it can drain), so
+        it stays a witness — which is why the caller's set is bounded by
+        `ZERO_JOB_MAX_REPAIRABLE_ATTEMPT` and by the spent budget, and why this method
+        must not compute the set itself.
 
         * ``False`` — the ONLY runs witnessing this congestion are `run_id` and the
           caller's other repairable targets. The refusal is self-referential, and
