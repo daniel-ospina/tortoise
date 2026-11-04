@@ -164,11 +164,9 @@ a *pin that stops one step short*, which is exactly what this file exists to nam
 ## Why no row can be GREEN — the structural cap, re-verified here
 
 `tools/capstone_verdict_check.py:118` declares `STEPS = ("S0", "S1", "S2.1", "S2.2",
-"S2.3", "S3", "S5", "S6")`, and `_step_accounting` (`:379`) refuses a GREEN row whose
+"S2.3", "S3", "S5", "S6")`, and `_step_accounting` (`:393`) refuses a GREEN row whose
 run left a REQUIRED step out: the rule is `missing = [s for s in required if s not in
-observed]`, reported as `GREEN with steps not observed in the run: …`. (Those two inner
-cites are deliberately NOT line numbers — #10215's own review rounds moved them twice
-inside this one PR, once in the commit that had just re-pointed them.)
+observed]`, reported as `GREEN with steps not observed in the run: …`.
 
 ⚠️ **The two numbers above are not read by the bundle sweep — a separate pin reads
 them.** `tests/test_7949_capstone_measure.py`'s `_BUNDLE_CITE` matches only the three

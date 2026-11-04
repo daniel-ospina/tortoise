@@ -1935,8 +1935,8 @@ def test_the_bare_continuation_cites_name_what_they_say():
             ("118", 'STEPS = ("S0", "S1", "S2.1", "S2.2", "S2.3", "S3", '
                     '"S5", "S6")'),
         ), "capstone_verdict_check"),
-        ("E1-E5-PROOFS.md", "_step_accounting` (`:379`) refuses a GREEN row whose", (
-            ("379", "def _step_accounting("),
+        ("E1-E5-PROOFS.md", "_step_accounting` (`:393`) refuses a GREEN row whose", (
+            ("393", "def _step_accounting("),
         ), "capstone_verdict_check"),
     )
     # The SAME document states two of its claims as the RULE's own text rather than a
