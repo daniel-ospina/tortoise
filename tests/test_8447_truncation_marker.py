@@ -1186,6 +1186,78 @@ class TestTheCensusNamesItsEvidenceHome:
             "§5 sends C2's mutation evidence to a PR body, which is not the "
             "artifact a lane reads (and was the P3 finding)")
 
+    def test_the_mutation_claim_names_the_kill_set_it_actually_kills(self):
+        """§5's M1/M2 arithmetic must match what the four tests assert.
+
+        M2 is "probe removed, the marker KEPT": with the probe gone
+        `candidates == returned`, so `mark_truncation` publishes
+        `truncated: False` over a page that IS cut. That reds exactly the tests
+        asserting `truncated: True` — 2 of the 4 M1 reds — so the kill sets are
+        NESTED (M2 ⊂ M1; the mutation-testing literature calls M2 *subsumed* by
+        M1) and the union is 4, not 6.
+
+        §5 said "6 named tests red, disjoint sets". That is the direction that
+        costs a lane real coverage: told the mutants are disjoint, a lane
+        trimming the boundary set believes each mutant owns its own tests, drops
+        one of M2's two reds, and loses the only discrimination against a marker
+        that is present but lying. So the sets are DERIVED from the tests here
+        instead of trusted — flip one test's `truncated` verdict and the doc's
+        claim has to move with it.
+        """
+        import ast
+        import re
+        from pathlib import Path
+
+        root = Path(__file__).resolve().parent.parent
+        src = (root / "tests" / "test_hosted_api.py").read_text(encoding="utf-8")
+        cls = next((n for n in ast.parse(src).body
+                    if isinstance(n, ast.ClassDef)
+                    and n.name == "TestBoundedPointsListBoundaries"), None)
+        assert cls is not None, (
+            "the /v1/points boundary class is gone, so §5's mutation matrix has "
+            "nothing left to be true about")
+
+        #: M2 (probe removed) turns every page into the `truncated: False`
+        #: answer, so it reds exactly the tests asserting `True`.
+        asserting: dict[bool, set[str]] = {True: set(), False: set()}
+        for fn in cls.body:
+            if not isinstance(fn, ast.FunctionDef) or not fn.name.startswith("test_"):
+                continue
+            for verdict in re.findall(r'\["truncated"\] is (True|False)',
+                                      ast.get_source_segment(src, fn) or ""):
+                asserting[verdict == "True"].add(fn.name)
+        assert asserting[True] and asserting[False], (
+            "the boundary class no longer asserts BOTH marker directions, so it "
+            f"cannot pin a lying marker: {asserting}")
+
+        text = self._doc_text()
+        assert "## 5. Related" in text, "§5 (the evidence pointer) is gone"
+        bullets = [b for b in re.split(r"\n(?=- )",
+                                      text.split("## 5. Related", 1)[1])
+                   if "MUTATION-MATRIX" in b]
+        assert len(bullets) == 1, (
+            "expected exactly ONE §5 bullet carrying the mutation matrix, found "
+            f"{len(bullets)}")
+        claim = " ".join(bullets[0].split())
+
+        assert "disjoint" not in claim.lower(), (
+            "§5 calls the two mutants' kill sets disjoint. They are NESTED — M2 "
+            "reds 2 of M1's 4 — so a lane reading 'disjoint' believes each "
+            f"mutant owns its own tests and may drop one of M2's two: {claim}")
+
+        named = set(re.findall(r"TestBoundedPointsListBoundaries::([A-Za-z_]\w*)",
+                               claim))
+        assert named == asserting[True], (
+            "§5 names the wrong set as M2's kills. M2 (probe removed, marker "
+            "kept) publishes `truncated: False` on a cut page, so it reds "
+            f"exactly the `truncated: True` assertions {sorted(asserting[True])}; "
+            f"the doc names {sorted(named)}")
+
+        assert re.search(r"strict\s+subset|subsumed", claim, re.I), (
+            "§5 no longer says M2's kill set is a strict subset of M1's (M2 is "
+            "subsumed by M1) — the fact that stops 4 reds being counted as 6 "
+            f"distinct: {claim}")
+
 
 # ── the marker-site REGISTER: the docstring list a new site must join ────
 #
