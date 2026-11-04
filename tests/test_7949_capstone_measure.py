@@ -1022,31 +1022,36 @@ def test_the_e2_note_never_claims_a_shortfall_that_did_not_happen():
     assert "falls short of 13 of 14" in red_note, red_note
 
 
-def test_the_record_does_not_narrate_an_under_floor_after_arm_as_a_disagreement(
-        tmp_path):
+def test_the_record_does_not_narrate_an_under_floor_after_arm_as_a_disagreement():
     """#10610 review issue 2, third consequence: `why` contradicted `outcome`.
 
     `e1_pairings` folds the floor into `decidable`, so a below-floor after arm had
-    `outcome: REFUSED` beside a `why` reading "every before realization agrees on
-    the pairing" — a pass condition printed against a refusal. The floor is now
-    narrated as the floor, on the record itself. Non-vacuity: the pre-fix `why`
-    for this input is asserted absent.
+    `outcome: REFUSED` beside a `why` reading "every before realization agrees on the
+    pairing" — a pass condition printed against a refusal. The floor is now narrated as
+    the floor, on the record itself.
 
-    The mutation moves the population CONSISTENTLY — 25 Objects with 13 of them
-    bare-definite gives a share of 0.52 — because a log whose share no longer
-    matches the counts printed beside it is refused earlier, by the share
-    reconciliation (`_consistent_share`, #10610 review P2). A real producer writes
-    the division; only an edited line can disagree with itself.
+    Driven through `e1_pairings` DIRECTLY rather than by editing `on-arm.log`: since
+    the review at `f12471075` the ON census is reconciled against `e1-gate-drops.json`
+    and the log's own `e3 label=Object` line, so a log edit that moves the population
+    has to move three artifacts at once — a heavier fixture for a narration rule that is
+    a pure function of `(before_arms, after, floors)`. The pure call is also the honest
+    subject: this is the branch, not the file.
     """
-    repo = _copied_bundle(tmp_path)
-    log = repo / "docs/evidence/9889/on-arm.log"
-    edited = re.sub(
-        r"^e1-aux objects_in_graph=61 bare_definite=13 share=0\.21311475409836064",
-        f"e1-aux objects_in_graph=25 bare_definite=13 share={13 / 25!r}",
-        log.read_text(), count=1, flags=re.MULTILINE)
-    assert "objects_in_graph=25" in edited
-    log.write_text(edited)
-    e1 = scores_probe.score(repo)["e1"]
+    bars = measure.parse_bars(
+        json.loads((_REPO / "docs/evidence/7949-capstone/preregistration.json")
+                   .read_text(encoding="utf-8")))
+    floors = {"bars": bars, "e1_objects": 30, "e1_min_before_share": 0.2}
+    before = [{"artifact": "docs/evidence/9889/e1-paired-off-arm-1.json",
+               "graph": "capstone_off_54922a800_1793378986",
+               "share": 0.358974358974359, "objects": 78, "bare_definite": 28,
+               "arm": {}},
+              {"artifact": "docs/evidence/9889/e1-paired-off-arm-2.json",
+               "graph": "capstone_off_54922a800_1793379347",
+               "share": 0.5652173913043478, "objects": 69, "bare_definite": 39,
+               "arm": {}}]
+    after = {"artifact": "docs/evidence/9889/on-arm.log", "share": 13 / 25,
+             "objects": 25, "bare_definite": 13}
+    e1 = scores_probe.e1_pairings(before, after, floors)
     assert e1["below_floor"] is True, e1
     assert e1["outcome"] == "REFUSED", e1
     assert "under the frozen" in e1["why"], e1["why"]
@@ -1321,8 +1326,12 @@ def test_the_e2a_counter_is_a_count_not_a_token(mutation, tmp_path, capsys):
     module docstring promises. This is the same pair of checks `_consistent_share` got in
     the two previous rounds, on the counter nobody looked at.
 
-    Non-vacuity: at the pre-fix head the first two write `PASS` (exit 0) and the string arm
-    escapes with exit 1.
+    Non-vacuity, MEASURED against the pre-fix probe (`75bfd9c6e`): the `"8"` arm escapes
+    as `TypeError` (exit 1, no `REFUSED` line), and the numeric arms reach the
+    `as_written` cross-check, whose message names the record's own contradiction. The
+    assertion below therefore keys on the REFUSAL ARRIVING AT ALL plus `value_survived`
+    in the reason rather than on `_count`'s exact wording — the guard's own arms are what
+    the four numeric cases cover once the record is otherwise consistent.
     """
     repo = _bundle(tmp_path)
     path = repo / "docs/evidence/9889/e2a-value-units.json"
@@ -1335,6 +1344,14 @@ def test_the_e2a_counter_is_a_count_not_a_token(mutation, tmp_path, capsys):
     assert refused.value.code == 2, refused.value
     err = capsys.readouterr().err
     assert "value_survived" in err, err
+    if isinstance(mutation["value_survived"], (int, float)) \
+            and not isinstance(mutation["value_survived"], bool):
+        # The numeric arms must be refused by `_count` ITSELF, not by the as-written
+        # cross-check that happens to name the same field: without this the pin would
+        # stay green with `_count` deleted whenever the falsifier disagrees first.
+        assert ("not a finite number" in err or "not a whole number" in err
+                or "not a subset" in err or "of a population of" in err
+                or "is negative" in err), err
 
 
 def test_the_e2a_totals_are_the_census_they_re_summed_from(tmp_path, capsys):
@@ -1415,7 +1432,10 @@ def test_the_value_gate_liveness_refusal_is_not_a_truthiness_test(tmp_path, caps
         # (an edit to the total ALONE is refused there, so a fixture that only
         # bumped the total would be testing the wrong guard).
         for row in e2a["per_session"].values():
+            # Survivors AND the complement, because the census is a PARTITION of
+            # `value_ids` (a unit listed as both survived and lost is refused).
             row["value_survived"] = list(row["value_ids"])
+            row["value_lost"] = []
         e2a["value_survived"] = e2a["value_units"]
         e2a_path.write_text(json.dumps(e2a))
         # ...and the FALSIFIER's own blocks must agree, or its cross-check refuses first and
@@ -1426,6 +1446,7 @@ def test_the_value_gate_liveness_refusal_is_not_a_truthiness_test(tmp_path, caps
             block = falsifier[key]
             for row in block["per_session"].values():
                 row["value_survived"] = list(row["value_ids"])
+                row["value_lost"] = []
             block["value_survived"] = block["value_units"]
         falsifier_path.write_text(json.dumps(falsifier))
         path = repo / "docs/evidence/9889" / scores_probe.GATE_DROPS
@@ -5180,6 +5201,50 @@ def test_the_three_routes_to_the_e1_e2_verdict_state_the_records_verdict():
             f"arm) — the reason the row is refused rather than undecided: "
             f"{e1_audit_rows[0][:600]}")
 
+    # ⛔ THE E1 BAR AND THE TWO BOUNDS, DERIVED (#10610 review at `f12471075`, P2).
+    # Leg 3b exists because "a bar typed into a document is a bar nobody froze", and it
+    # pinned only E2's two bars. So the README's E1 row could print
+    # `after_share <= 0.25 × before_share` (measured: green) and BOTH surfaces could
+    # print the self-contradicting `0.2131 <= 0.9000 FAILS` / `0.2131 <= 0.1000
+    # PASSES` (also green), because leg 3 pinned only the `.4f` token and never the
+    # inequality around it.
+    e1_multiplier = bars["E1"]["multiplier"]
+    e1_bar = f"after_share <= {e1_multiplier:.2f} × before_share"
+    assert e1_bar in e1_readme_row, (
+        f"the README's E1 verdict cell does not print the frozen E1 bar {e1_bar!r} — a "
+        f"bar typed into a document is a bar nobody froze: {e1_readme_row[:400]}")
+    for pairing in pairings:
+        bound = pairing["after_share"] and pairing["before_share"] * e1_multiplier
+        word = "PASSES" if pairing["passed"] else "FAILS"
+        # The surfaces print `after <= bound` and the word the RECORD's `passed` gives,
+        # so a re-derived multiplier moves the document instead of silently disagreeing
+        # with the record's own outcome.
+        for surface, text_row in (("the README's E1 verdict cell", e1_readme_row),
+                                  ("the `#9080` index row", route)):
+            assert f"{pairing['after_share']:.4f} <= {bound:.4f}" in text_row, (
+                f"{surface} does not print the record's own bound "
+                f"`{pairing['after_share']:.4f} <= {bound:.4f}` for the before arm at "
+                f"{pairing['before_share']:.4f}: {text_row[:500]}")
+            assert word in text_row, (
+                f"{surface} does not state {word} for the before arm at "
+                f"{pairing['before_share']:.4f}, which the record scores "
+                f"passed={pairing['passed']}: {text_row[:500]}")
+    # The E2a count, in both routing surfaces: `RED 8/14` is the re-run reading, and
+    # `RED 13/14` (or `8 of 12`) was measured green before this leg existed.
+    e2a_count = f"{e2a['value_survived']}/{e2a['frozen_units']}"
+    for surface, text_row in (("the README's E2 verdict cell", e2_table_row),
+                              ("the `#9080` index row", route)):
+        assert e2a_count in text_row, (
+            f"{surface} does not carry the record's E2a count {e2a_count!r}: "
+            f"{text_row[:500]}")
+    # …and the AFTER arm's own Objects count on the first route a reader takes (it was
+    # `61` in the record and `62` in a mutation that stayed green).
+    assert f"**{pairings[0]['after_objects']} Objects / " \
+           f"{pairings[0]['after_share']:.4f}**" in route, (
+        "the `#9080` row does not carry the record's after arm as "
+        f"`**{pairings[0]['after_objects']} Objects / {pairings[0]['after_share']:.4f}**`: "
+        f"{route[:500]}")
+
     # 5. The refuted absence claim, in every routing surface.
     #
     # ⛔ NO BAN ON `"with no before arm"` (#10610 review at `9ed67a02`): that phrase is TRUE
@@ -5748,6 +5813,240 @@ def test_a_before_arm_missing_one_arm_key_is_refused(key, tmp_path, capsys):
     assert scores_probe.score(repo)["e1"]["outcome"] in ("REFUSED", "PASS", "FAIL")
 
 
+def test_the_after_arm_is_witnessed_by_the_gate_drops_record(tmp_path, capsys):
+    """#10610 review at `f12471075` (P0): a self-consistent ON-log edit scored GREEN.
+
+    Two independent censuses of the SAME ON run are in the tree — `on-arm.log`'s
+    `e1-aux` line and `e1-gate-drops.json` (whose graph identity the driver already
+    requires) — plus the log's own `e3 label=Object` line, and nothing compared them.
+    Measured: editing ONE line of the log to `objects_in_graph=78 bare_definite=10
+    share=0.1282…` (self-consistent, so `_consistent_share` passes) exited 0 with
+    `e1.outcome = PASS`, `decidable: True`, and the consumer's row came back GREEN,
+    while the gate-drops record still said 61 Objects / 13 bare / 0.2131.
+
+    Three arms, so no single witness can carry the check: the gate-drops counts, the
+    gate-drops `object_names` census, and the log's own `e3` line.
+    """
+    # The log-side edit moves BOTH of the log's own lines, because the log's internal
+    # check is the earlier guard: a self-consistent log edit that only `e1-gate-drops.json`
+    # can refute is the hole this arm closes.
+    counts_repo = _bundle(tmp_path / "counts")
+    log = counts_repo / "docs/evidence/9889/on-arm.log"
+    text = log.read_text()
+    for old, new in (
+            ("e1-aux objects_in_graph=61 bare_definite=13 share=0.21311475409836064",
+             "e1-aux objects_in_graph=78 bare_definite=10 share=0.1282051282051282"),
+            ("e3 label=Object nodes=61", "e3 label=Object nodes=78")):
+        assert old in text, old
+        text = text.replace(old, new, 1)
+    log.write_text(text)
+    with pytest.raises(SystemExit) as refused:
+        scores_probe.score(counts_repo)
+    assert refused.value.code == 2, refused.value
+    err = capsys.readouterr().err
+    assert "two censuses of one ON run cannot disagree" in err, err
+    assert "61" in err and "78" in err, err
+
+    # …and the log's own `e3` line alone, which nothing else in the record witnesses.
+    e3_repo = _bundle(tmp_path / "e3")
+    log = e3_repo / "docs/evidence/9889/on-arm.log"
+    log.write_text(log.read_text().replace("e3 label=Object nodes=61",
+                                           "e3 label=Object nodes=78", 1))
+    with pytest.raises(SystemExit) as refused:
+        scores_probe.score(e3_repo)
+    assert refused.value.code == 2, refused.value
+    assert "one run, one Object census" in capsys.readouterr().err
+
+
+def test_the_after_arm_readback_is_read_with_the_repos_truthiness(tmp_path, capsys):
+    """#10610 review at `f12471075` (P1): the ON test was a DENY-list of spellings.
+
+    The pipeline decides with `is_truthy` (an allow-list: unset/blank/falsy/garbage ->
+    False). The arm guard compared against a hand-typed OFF-spelling list, so
+    `TORTOISE_VET=off` in the ON readback was ACCEPTED as the ON half of E1's pair —
+    `is_truthy("off") is False`, i.e. the treatment was off and the "pair" was two
+    control arms, greened by changing one line of the log. `no` behaves the same way.
+
+    The other direction is asserted too: a BEFORE arm spelling its switches `off` is
+    genuinely OFF and must score, not be refused by the same list.
+    """
+    for spelling in ("off", "no", "0", "false", "disabled"):
+        repo = _bundle(tmp_path / f"on-{spelling}")
+        log = repo / "docs/evidence/9889/on-arm.log"
+        text = log.read_text()
+        arm_line = next(ln for ln in text.splitlines() if ln.startswith("# arm:"))
+        edited = arm_line.replace("TORTOISE_VET=1",
+                                  f"TORTOISE_VET={spelling}", 1)
+        assert edited != arm_line, arm_line
+        log.write_text(text.replace(arm_line, edited, 1))
+        with pytest.raises(SystemExit) as refused:
+            scores_probe.score(repo)
+        assert refused.value.code == 2, (spelling, refused.value)
+        assert "were not ON" in capsys.readouterr().err, spelling
+
+    # …and a genuine OFF spelling on a BEFORE arm still scores, which the deny-list
+    # refused (`off` was not in it, so the arm read as "not a before arm").
+    repo = _bundle(tmp_path / "before-off")
+    path = repo / "docs/evidence/9889/e1-paired-off-arm-1.json"
+    record = json.loads(path.read_text())
+    for var in record["arm"]:
+        record["arm"][var] = "off"
+    path.write_text(json.dumps(record))
+    assert scores_probe.score(repo)["e1"]["outcome"] == "REFUSED"
+
+
+def test_the_arm_vocabulary_is_the_repos_truthiness_contract():
+    """The driver's mirrored vocabulary must BE `tortoise.env_truthy`'s.
+
+    `tortoise/env_truthy.py` is the tree's ONE truthiness contract and it is stdlib-only
+    so a module may mirror it (`embedded_reaper.py`, `hermes-plugin/__init__.py` already
+    do, and `tests/test_env_truthy.py` pins every mirror). The scoring driver runs before
+    any DB is up, so it mirrors too — and this is the pin that stops the copy drifting
+    into a different rule than the pipeline's.
+    """
+    from tortoise.env_truthy import FALSY, TRUTHY, is_truthy
+    assert set(scores_probe._TRUTHY) == set(TRUTHY), (
+        scores_probe._TRUTHY, sorted(TRUTHY))
+    assert set(scores_probe._FALSY) == set(FALSY), (
+        scores_probe._FALSY, sorted(FALSY))
+    for sample in [*sorted(TRUTHY), *sorted(FALSY), "off", "OFF", " off ", "", "  ",
+                   None, "disabled", "true", "TRUE", "1", "0", 1, 0]:
+        assert scores_probe._is_truthy(sample) == is_truthy(sample), (
+            f"the driver reads {sample!r} as truthy={scores_probe._is_truthy(sample)} "
+            f"but the repo's contract says {is_truthy(sample)}")
+
+
+def test_the_e2b_line_is_reconciled_with_the_share_it_prints(tmp_path, capsys):
+    """#10610 review at `f12471075` (P1): E2b's counts were unbounded, its share ignored.
+
+    `fused`/`atomic_points` were read as integers and the `= 0.087719` printed on the
+    same line was never compared, so editing ONLY the denominator (`fused=10/114` ->
+    `10/100000`) wrote `share: 0.0001` and turned E2 from FAIL into PASS while the line
+    still printed its own contradiction. A numerator above its denominator is refused
+    too, and a non-numeric token is a refusal rather than a traceback.
+    """
+    cases = (
+        ("denominator", "fused=1/114 = 0.008772", "fused=1/100000 = 0.008772",
+         "cannot disagree"),
+        ("numerator", "fused=1/114 = 0.008772", "fused=200/114 = 0.008772",
+         "not a share"),
+        ("token", "fused=1/114 = 0.008772", "fused=1/114 = abc",
+         "is not a number"),
+        ("share-nan", "fused=1/114 = 0.008772", "fused=1/114 = nan",
+         "not finite"),
+    )
+    for marker, old, new, expected in cases:
+        repo = _bundle(tmp_path / marker)
+        log = repo / "docs/evidence/9889/on-arm.log"
+        text = log.read_text()
+        assert old in text, marker
+        log.write_text(text.replace(old, new, 1))
+        with pytest.raises(SystemExit) as refused:
+            scores_probe.score(repo)
+        assert refused.value.code == 2, (marker, refused.value)
+        assert expected in capsys.readouterr().err, marker
+
+
+def test_the_e2a_record_may_not_be_the_injected_reading(tmp_path, capsys):
+    """#10610 review at `f12471075` (P1): only the falsifier's injection was read.
+
+    `e2a_value_units.py --inject-anchor` writes 14/14 WITH `injected_anchor: true` into
+    the E2a record's own shape, so a record copied from that run states — in its own
+    field — that it graded the injected pass, and 14/14 then meets E2a's bar. Nothing
+    read it: the round-5 fix closed the GUARD on `with_anchor` alone. `is not False`
+    refuses `true`, `null` and an absent key alike, and the falsifier's `as_written`
+    block is held to the same rule because it claims to BE the E2a reading.
+    """
+    for declared, marker in ((True, "true"), (None, "null"), ("absent", "absent")):
+        repo = _bundle(tmp_path / marker)
+        e2a_path = repo / "docs/evidence/9889/e2a-value-units.json"
+        record = json.loads(e2a_path.read_text())
+        assert record["injected_anchor"] is False
+        if declared == "absent":
+            record.pop("injected_anchor")
+        else:
+            record["injected_anchor"] = declared
+        e2a_path.write_text(json.dumps(record))
+        with pytest.raises(SystemExit) as refused:
+            scores_probe.score(repo)
+        assert refused.value.code == 2, (marker, refused.value)
+        assert "UNINJECTED reading" in capsys.readouterr().err, marker
+
+    # …and the as-written block: an INJECTED block claiming to be the E2a reading.
+    repo = _bundle(tmp_path / "as-written")
+    path = repo / "docs/evidence/9889/e2a-value-units-falsifier.json"
+    falsifier = json.loads(path.read_text())
+    assert falsifier["as_written"]["injected_anchor"] is False
+    falsifier["as_written"]["injected_anchor"] = True
+    path.write_text(json.dumps(falsifier))
+    with pytest.raises(SystemExit) as refused:
+        scores_probe.score(repo)
+    assert refused.value.code == 2, refused.value
+    assert "as-written block does not declare" in capsys.readouterr().err
+
+
+def test_the_census_is_a_partition_not_four_lengths(tmp_path, capsys):
+    """#10610 review at `f12471075` (P2): `value_lost` and duplicates were unread.
+
+    `e2a_value_units.py` writes `value_lost` beside the two lists, so a row listing the
+    same unit as both surviving and lost contradicts itself — measured: `kept = ids`
+    with `value_lost` untouched wrote `E2 PASS` while six units appeared in BOTH. `len()`
+    also counted duplicates, which inflates the totals the bar is scored on.
+    """
+    for marker, mutate, expected in (
+            ("both",
+             lambda row: (row.__setitem__("value_survived", list(row["value_ids"])),
+                          row.__setitem__("value_lost", list(row["value_ids"]))),
+             "as BOTH survived and lost"),
+            ("dup", lambda row: (row.__setitem__(
+                "value_survived", [row["value_ids"][0], row["value_ids"][0]]),
+                row.__setitem__("value_lost", [])),
+             "twice"),
+            ("stranger",
+             lambda row: (row.__setitem__("value_survived", ["not-a-listed-unit"]),
+                          row.__setitem__("value_lost", [])),
+             "not among its own value_ids"),
+    ):
+        repo = _bundle(tmp_path / marker)
+        path = repo / "docs/evidence/9889/e2a-value-units.json"
+        record = json.loads(path.read_text())
+        row = record["per_session"]["wp04_aurora_perf"]
+        assert row["value_ids"] and not row["value_survived"], row
+        mutate(row)
+        total = sum(len(r["value_survived"]) for r in record["per_session"].values())
+        record["value_survived"] = total
+        path.write_text(json.dumps(record))
+        with pytest.raises(SystemExit) as refused:
+            scores_probe.score(repo)
+        assert refused.value.code == 2, (marker, refused.value)
+        assert expected in capsys.readouterr().err, (marker,)
+
+
+def test_the_e1b_numerator_is_bounded_by_its_own_printed_bar(tmp_path, capsys):
+    """#10610 review at `f12471075` (P3): E1b had no ceiling, and its bar was unread.
+
+    `real_facts=100000` was accepted beside `bar=90 of 90` — a numerator 1,111x its
+    denominator, the shape `_count(ceiling=…)` exists for. The bar token is on the same
+    line, so it is read: the numerator is inside its population, and the bar the log
+    prints must be the pre-registration's.
+    """
+    for marker, old, new, expected in (
+            ("ceiling", "e1b outcome=PASS real_facts=90 bar=90 of 90",
+             "e1b outcome=PASS real_facts=100000 bar=90 of 90", "e1b real_facts"),
+            ("bar", "e1b outcome=PASS real_facts=90 bar=90 of 90",
+             "e1b outcome=PASS real_facts=90 bar=90 of 100", "froze 90 of 90"),
+    ):
+        repo = _bundle(tmp_path / marker)
+        log = repo / "docs/evidence/9889/on-arm.log"
+        text = log.read_text()
+        assert old in text, marker
+        log.write_text(text.replace(old, new, 1))
+        with pytest.raises(SystemExit) as refused:
+            scores_probe.score(repo)
+        assert refused.value.code == 2, (marker, refused.value)
+        assert expected in capsys.readouterr().err, (marker,)
+
+
 def test_a_re_stamped_copy_of_one_before_arm_is_still_one_realization(tmp_path, capsys):
     """#10610 review at `75bfd9c6` (P1): the graph NAME is not the record's identity.
 
@@ -5759,7 +6058,12 @@ def test_a_re_stamped_copy_of_one_before_arm_is_still_one_realization(tmp_path, 
     to fake #9889's own next requirement (n >= 2 per arm). `e1_paired_arm.py` writes
     `object_names` from the run, so identity is the POPULATION, not the stamp.
 
-    Non-vacuity: at the pre-fix head this bundle scores `PASS`, exit 0.
+    Non-vacuity, MEASURED against the pre-fix probe (`75bfd9c6e`): copying arm 1 over
+    arm 2 with arm 2's graph scores `FAIL, decidable: True` — a decided verdict from one
+    realization, which the pin catches. ⚠️ It does NOT score `PASS` in this direction;
+    the PASS-forging direction is the mirror (arm 2, share 0.5652, copied over arm 1 with
+    the epoch bumped). The guard is direction-agnostic, so both are refused, but the
+    claim has to be the measured one.
     """
     repo = _bundle(tmp_path)
     first = repo / "docs/evidence/9889/e1-paired-off-arm-1.json"
@@ -5949,8 +6253,11 @@ def test_an_e2b_population_under_its_floor_is_REFUSED_not_FAILED(tmp_path):
     repo = _bundle(tmp_path)
     log = repo / "docs/evidence/9889/on-arm.log"
     text = log.read_text()
-    assert "fused=1/114" in text
-    log.write_text(text.replace("fused=1/114", "fused=1/10"))
+    assert "fused=1/114 = 0.008772" in text
+    # Keep the printed share consistent with the counts: the reconciliation that
+    # refuses a counts/share disagreement is a different guard, and this case is about
+    # the FLOOR (a self-consistent small population still refuses).
+    log.write_text(text.replace("fused=1/114 = 0.008772", "fused=1/10 = 0.100000"))
     record = scores_probe.score(repo)
     e2 = record["e2"]
     assert e2["e2b"]["below_floor"] is True, e2["e2b"]
@@ -6284,7 +6591,7 @@ def test_a_non_finite_share_is_refused_rather_than_scored(token, tmp_path, capsy
         scores_probe.score(repo)
     assert refused.value.code == 2, refused.value
     err = capsys.readouterr().err
-    assert "is not a finite number" in err, err
+    assert "not finite" in err, err
 
     log.write_text(text)
     assert scores_probe.score(repo)["e1"]["outcome"] == "REFUSED"
