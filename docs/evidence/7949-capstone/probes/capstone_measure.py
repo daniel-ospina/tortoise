@@ -2247,11 +2247,18 @@ def select_e4_receipt(repo: Path = ROOT, frozen_pin: str = "") -> tuple[str, dic
     row. A hard-coded path broke that silently: the roll-up cited
     ``w2b-operator-2026-10-19.json``, whose own ``corpus_hash`` is ``943a99ec…``
     — not the frozen ``dd7e8520…`` — and scored E4 at **2/15** from it, while three
-    later receipts written AFTER ``#8503``'s fix, all on the frozen corpus, read
+    of ``#8503``'s OWN measurement receipts, all on the frozen corpus, read
     **5/15**. So the published row was measured on a different corpus than the one
-    the record froze, and on code that predates the fix. Nothing observed it: the
-    row carried the mismatching ``corpus_hash`` as a disclosure and the gate
-    passes a disclosed mismatch (V7).
+    the record froze. Nothing observed it: the row carried the mismatching
+    ``corpus_hash`` as a disclosure and the gate passes a disclosed mismatch (V7).
+
+    ⛔ NOT "written AFTER ``#8503``'s fix, on code that predates the fix" — there is
+    no fix. ``#8503`` CLOSED 2026-10-24 as a **DISPROOF** (*"This issue is that
+    residual, now measured post-close. No open issue owns it."*), and these three
+    receipts (`w2b-operator-2026-10-24-8503-{preleg,a,b}.json`) are dated
+    ``2026-10-24T05:46:51Z`` / ``06:03:47Z`` / ``06:10:47Z`` — ~14 h BEFORE that
+    issue's ``closedAt`` of ``2026-10-24T20:50:13Z``. They are its measurement
+    artifacts, not the output of a repair it never made.
 
     A filename constant is also an evidence hole: point it at any other receipt and
     the row reports that receipt's number with no signal that the artifact moved.

@@ -1699,17 +1699,36 @@ def test_the_shipped_logs_blocker_cells_are_the_emitters_own():
         "a hand-typed E4 note would still pass")
     assert e4_sentence in record["rows"][3]["note"], record["rows"][3]["note"]
 
-    # ⛔ THE CORRECTED RESIDUAL CLAUSE IS PINNED TOO (`#10679` review round 2, F6).
-    # The token above survived a hand-edit that restored the FALSE attribution — it
-    # sits earlier in the same sentence — so with only that token bound, a log hand-
-    # edited back to "the residual is owned by #9596" stayed `162 passed`: exactly the
-    # artifact/emitter divergence this pin exists to refuse, on the one sentence this
-    # change corrects. Both halves are now bound, in the emitter AND in the artifact.
+    # ⛔ THE CORRECTED RESIDUAL CLAUSE IS PINNED TOO, AND AGAINST THE EMITTED NOTE
+    # (`#10679` review rounds 2 and 3). Round 2 established that the token above is
+    # not enough: it sits EARLIER in the same sentence, so a log hand-edited back to
+    # "the residual is owned by #9596" kept it intact and the suite stayed green.
+    #
+    # ⛔ Round 2's first fix for that was ITSELF VACUOUS, and round 3 measured it: an
+    # `assert unowned in source_joined` searches the WHOLE FILE, so it was satisfied by
+    # `build_e4_row`'s THIRD arm (the planted-count-shortfall clause) — an arm no
+    # committed receipt can reach, because every receipt reads `edge_correct 5 <
+    # planted 15` and takes the `elif`. Reverting the `elif`'s clause to the refuted
+    # attribution therefore left the suite green while the emitter would print it into
+    # every future scored log.
+    #
+    # So this binds BEHAVIOUR, not text: drive `build_e4_row` with the receipt the
+    # committed tree actually selects and assert on the NOTE IT EMITS. That is the
+    # sentence a scored log will carry, and no unreachable arm can satisfy it.
+    pin = _prereg()["corpus"]["fixtures_hash"]
+    real = measure.load_e4(_REPO, frozen_pin=pin)
+    built = measure.build_e4_row(real, bars=measure.parse_bars(_prereg()),
+                                 corpus_sha=pin)
+    assert built["verdict"] == "RED" and built["numerator"] < built["denominator"], (
+        f"this arm binds the SHORTFALL branch, and the committed receipt no longer "
+        f"takes it: {built['verdict']} {built['numerator']}/{built['denominator']}")
     unowned = "no open issue owns the residual"
-    assert unowned in source_joined, (
-        "the E4 note's UNOWNED-residual clause is not in the committed probe — "
-        "#9596 owns the receipt's retrievability gap, not the planted-edge residual, "
-        "and #8503's own body says 'No open issue owns it.'")
+    assert unowned in built["note"], (
+        "the note `build_e4_row` EMITS for the committed receipt does not say the "
+        "residual is unowned — #9596 owns the receipt's retrievability gap, not the "
+        f"planted-edge residual, and #8503's own body says so: {built['note']}")
+    assert "residual is owned by" not in built["note"], (
+        f"the emitted note carries the refuted ownership attribution: {built['note']}")
     assert unowned in record["rows"][3]["note"].lower(), (
         "the shipped log's E4 note still attributes the residual to an owner: "
         f"{record['rows'][3]['note']}")
@@ -4478,9 +4497,12 @@ def test_no_document_cites_the_run_probe_by_a_number_nothing_can_resolve():
 
     # 2. The claim survives as a symbol — the ban above must not be satisfied
     #    by deleting the sentence (that would trade a rotting cite for a
-    #    dropped measurement, and `README.md:809-815`'s paragraph is where the
-    #    README tells a consumer the frozen log predates the conditional split —
-    #    `E1-E5-PROOFS.md:219` says it too, so "only place" was never true).
+    #    dropped measurement, and the README's paragraph at `README.md:918-923` is
+    #    where it tells a consumer the committed log predates the conditional split
+    #    — `E1-E5-PROOFS.md:219` says it too, so "only place" was never true). That
+    #    range was `809-815` until this branch's own README insertions moved the
+    #    paragraph; the assertion below resolves the SYMBOL, not the number, which is
+    #    why the stale comment never redded anything.
     readme_lines = (_REPO / "docs/evidence/7949-capstone/README.md").read_text(
         encoding="utf-8").splitlines()
     carrying = [i + 1 for i, ln in enumerate(readme_lines)
@@ -4758,8 +4780,9 @@ def test_e4_is_selected_by_the_receipts_own_corpus_hash_not_by_its_filename():
     Non-vacuity, and the defect this pins. The probe used to read one hard-coded
     filename — ``w2b-operator-2026-10-19.json`` — whose own ``corpus_hash`` is
     ``943a99ec…``, not the frozen ``dd7e8520…``, and scored E4 at **2/15** from it
-    while three later receipts written AFTER ``#8503``'s fix, all five-on-fifteen and
-    all on the frozen corpus, sat unread in the same directory. Before the fix this
+    while three of ``#8503``'s OWN measurement receipts — all five-on-fifteen and all
+    on the frozen corpus, dated ~14 h BEFORE that issue closed as a DISPROOF, not
+    "after its fix", which never existed — sat unread in the same directory. Before this
     test's NEWER, other-corpus receipt is what the row would have carried had anyone
     edited the constant; a filename constant cannot tell the two apart.
 
