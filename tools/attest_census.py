@@ -937,7 +937,14 @@ def main(argv: list[str] | None = None) -> int:
     # `UnicodeEncodeError` and the tool exits 1 — breaking its published `0`/`2`-never-`1` contract
     # (measured: review cycle 14). Pinned the same way `validation/check-license-surface.py` pins a
     # C-locale stream, and suppressed because `sys.stdout` may be a replaced stream without it.
-    with contextlib.suppress(AttributeError, ValueError):
+    # ⛔ `OSError` belongs in this tuple for the same reason it is in the three sibling helpers
+    # (`_neutralise_stdout`, `_neutralise_stderr`, `_say`): `reconfigure` FLUSHES whatever is already
+    # buffered, so an in-process caller that wrote to stdout before calling `main` can get `ENOSPC`
+    # out of it (measured, review cycle 24: "ESCAPED: OSError [Errno 28] No space left on device").
+    # Unreachable from the CLI — the buffer is empty at interpreter start — which is why this is a
+    # library-boundary fix, but a guard on one of four sibling paths is the coin flip this file's
+    # own rule forbids.
+    with contextlib.suppress(OSError, ValueError, AttributeError):
         # ⛔ `errors="backslashreplace"` is the last piece of the `0`/`2`-never-`1` contract. When
         # fd 2 is closed `sys.stderr` is None, and a `print(..., file=None)` then falls back to
         # STDOUT — so with a C-locale argv (non-ASCII `--out` decoded as lone surrogates) the
@@ -965,6 +972,13 @@ def main(argv: list[str] | None = None) -> int:
     # raised its perfectly clean `SystemExit(2)`. So the stream must be neutralised on the
     # `SystemExit` path, before that deferred flush can decide the status. `SystemExit(0)`
     # (`--help`) is left alone: it is not a failure and must still exit 0.
+    # ⛔ `SystemExit(0)` (`--help`) is NOT a failure, but it still needs the stdout surface handled:
+    # argparse writes the help text to `sys.stdout`, which is BLOCK-buffered, so the write succeeds
+    # and a broken stdout only fails in CPython's shutdown flush — measured (review cycle 24):
+    # `--help >/dev/full` and `--help | true` under `pipefail` both exited **120**, the code this
+    # file publishes as impossible, from the one path the comment above used to claim was safe.
+    # The help text is already unrecoverable at that point, so discarding it is the only honest
+    # outcome; `_neutralise_stdout` makes the shutdown flush a no-op and the code stays 0.
     try:
         args = ap.parse_args(argv)
     except (OSError, ValueError):
@@ -973,6 +987,10 @@ def main(argv: list[str] | None = None) -> int:
     except SystemExit as exc:
         if exc.code not in (0, None):
             _neutralise_stderr()
+        else:
+            with contextlib.suppress(OSError, ValueError, AttributeError):
+                sys.stdout.flush()
+            _neutralise_stdout()
         raise
 
     owner, _, name = args.repo.partition("/")

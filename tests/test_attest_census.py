@@ -18,6 +18,7 @@ snapshot warning marks as per-box and short-lived.)
 from __future__ import annotations
 
 import ast
+import contextlib
 import importlib.util
 import json
 import os
@@ -2032,6 +2033,19 @@ def test_a_usage_error_with_an_unwritable_stderr_is_rc_2_not_120(tmp_path):
         [sys.executable, str(TOOL), "--help"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=120
     )
     assert ok.returncode == 0, f"--help must still exit 0 (got {ok.returncode})"
+    # ... AND it must stay 0 when its own output cannot be written. `argparse` writes help to a
+    # BLOCK-buffered stdout, so the failure lands in CPython's shutdown flush and used to exit 120
+    # (review cycle 24, measured both ways: `--help >/dev/full` and `--help | true` under `pipefail`).
+    full = open("/dev/full", "wb")  # noqa: SIM115
+    try:
+        blocking = subprocess.run(
+            [sys.executable, str(TOOL), "--help"], stdout=full, stderr=subprocess.DEVNULL, timeout=120
+        )
+    finally:
+        full.close()
+    assert blocking.returncode == 0, (
+        f"--help with an unwritable stdout must be 0, not 120 (got {blocking.returncode})"
+    )
 
 
 def test_evidence_attribution_cannot_be_redirected_by_a_path_traversal_or_a_query(tmp_path):
@@ -2044,8 +2058,17 @@ def test_evidence_attribution_cannot_be_redirected_by_a_path_traversal_or_a_quer
       across the query string, so "no PR number found" was silently read as "no PR to disagree with".
 
     Both classify identically to a genuine proof, which is what makes them the laundering this
-    guard exists to refuse. Mutation check: drop the traversal segment rejection / parse the path
-    without `urlsplit` and these go back to `RESTORE`.
+    guard exists to refuse.
+
+    ⛔ Cycle 24 (P2) FALSIFIED the mutation claim this docstring used to make, and the correction is
+    the reason two of the vectors below exist. "Drop the traversal rejection and these go back to
+    `RESTORE`" was **false**: every vector above is also caught by the slug / PR-page checks that
+    follow, so the whole suite stayed green with the traversal block deleted — an unpinned guard
+    behind a docstring that invited exactly the refactor that would remove it. Measured, the shape
+    only the traversal check refuses is a traversal placed AFTER a MATCHING `pull/<pr>`:
+    `…/tortoise/pull/7/../../evil-org/evil-repo#issuecomment-1` — the page check sees `pull/7` and is
+    satisfied, and only normalising the path reveals a different repository. With the guard deleted
+    that shape measures `real_evidence=True, classify=RESTORE`; with it, `NOTHING-TO-RESTORE`.
     """
     tpl = (
         '{"repo":"daniel-ospina/tortoise","pr":7,"head_sha":"' + LIVE + '","mint":"fresh",'
@@ -2054,6 +2077,12 @@ def test_evidence_attribution_cannot_be_redirected_by_a_path_traversal_or_a_quer
     for crafted in (
         "https://github.com/daniel-ospina/tortoise/../evil-org/evil-repo#issuecomment-1",
         "https://github.com/daniel-ospina/tortoise/%2e%2e/evil-org/evil-repo#issuecomment-1",
+        # ⛔ These two are the ONLY shapes the traversal check refuses: the page segment is a
+        # matching `/pull/7`, so every other check is satisfied and only path normalisation
+        # exposes the different repository. Delete the traversal block and these become RESTORE
+        # (measured) — which is what makes them the pin rather than the five above.
+        "https://github.com/daniel-ospina/tortoise/pull/7/../../evil-org/evil-repo#issuecomment-1",
+        "https://github.com/daniel-ospina/tortoise/pull/7/%2e%2e/%2e%2e/evil-org/evil-repo#issuecomment-1",
         "https://github.com/daniel-ospina/tortoise/pull/999?x=1#issuecomment-1",
         "https://github.com/daniel-ospina/tortoise/issues/999#issuecomment-1",
         "https://github.com/daniel-ospina/tortoise/settings#issuecomment-1",
@@ -2075,3 +2104,35 @@ def test_evidence_attribution_cannot_be_redirected_by_a_path_traversal_or_a_quer
         got = ac.load_record(tmp_path, "daniel-ospina", "tortoise", 7)
         assert got is not None and got.real_evidence is True, own
         assert ac.classify(LIVE, got, *RED)[0] == ac.RESTORE, own
+
+
+@pytest.mark.skipif(not Path("/dev/full").exists(), reason="/dev/full is Linux-only")
+def test_an_in_process_caller_with_buffered_stdout_gets_no_oserror(monkeypatch, tmp_path):
+    """⛔ Cycle 24, P3: `sys.stdout.reconfigure` FLUSHES, and its `suppress` tuple was the one place
+    in this file missing `OSError`.
+
+    `_neutralise_stdout`, `_neutralise_stderr`, `_say` and `_emit_report` all handle the triple
+    `(OSError, ValueError, AttributeError)`; `reconfigure` suppressed only the last two. A caller
+    that wrote to stdout before calling `main` — and this suite calls `main` in-process in dozens of
+    places — leaves that data BUFFERED, so `reconfigure`'s flush hits the broken stream and
+    `OSError(ENOSPC)` escaped `main` as an exception. Measured pre-fix: "ESCAPED: OSError [Errno 28]
+    No space left on device".
+
+    Unreachable from the CLI (the buffer is empty at interpreter start, so every fd-closed /
+    `/dev/full` arm correctly measures 0 or 2), which is why this is a library-boundary pin rather
+    than an end-to-end one. Mutation check: remove `OSError` from that `suppress` tuple and this
+    raises instead of asserting a code.
+    """
+    sink = open("/dev/full", "w", encoding="utf-8")  # noqa: SIM115
+    try:
+        sink.write("x" * 100)  # stays in the buffer: nothing raises yet, that is the point
+        monkeypatch.setattr(ac.sys, "stdout", sink)
+        monkeypatch.setattr(ac, "gh_json", lambda args: [])
+        rc = ac.main(["--reviews-dir", str(tmp_path), "--no-gate", "--out", str(tmp_path / "o.md")])
+    finally:
+        monkeypatch.undo()
+        with contextlib.suppress(OSError):
+            sink.close()
+    # A failed stdout write is the CODE 2 (the report could not be emitted), never a raise.
+    assert rc == 2, f"a failed stdout write must be rc 2, not an exception (got {rc!r})"
+    assert (tmp_path / "o.md").exists(), "the artifact is written before the stdout emit"
