@@ -4715,12 +4715,21 @@ def test_the_three_routes_to_the_e1_e2_verdict_state_the_records_verdict():
     README's five verdict rows, so a re-run that flips an outcome moves the documents or
     reds this pin.
 
-    Non-vacuity, measured at `e989c6449` (the head this pin was written against): the index
-    row carried `**E2 BLOCKED**` against a record that says FAIL, the proofs E2a row carried
-    `**BLOCKED**` as well, and all three `_UNCARRIED_DENOMINATOR`-class phrases were present
-    in those two files — so legs 3, 4 and 5 each red on the pre-fix tree. Leg 1 makes the
-    phrase ban honest rather than rhetorical: the record carries two before arms and the
-    E2a artifact carries the frozen 14.
+    Non-vacuity, measured at `e989c6449` (the head this pin was written against) and
+    re-measured at every review round since: the index row stated neither the record's E1
+    word nor E2's row verdict while carrying the 1/14 reading, the proofs E2a row carried
+    `**BLOCKED**` alone against a record that says FAIL, and the `_UNCARRIED_DENOMINATOR`
+    phrases were present in both files — so legs 3, 4 and 5 each red there. Every leg since
+    has been mutation-verified at `9ed67a02`: an audit row stating `**GREEN**` reds leg 4,
+    and so does a table that has CAUGHT UP to the record while the row still names the old
+    frozen word (the mirror that stops that sentence rotting once the re-run lands). Leg 1
+    makes the phrase ban honest rather than rhetorical: the record carries two before arms
+    and the E2a artifact carries the frozen 14.
+
+    ⛔ No leg bans `"with no before arm"`. That phrase is TRUE about the measurement run
+    (`capstone-measured-9152448d.log` says "this run has no before arm"), and the index
+    states it in the same sentence that reports the two before arms `#9889` produced; leg 3
+    is what holds the row to those two shares, without needing to ban a true sentence.
     """
     record = json.loads((_REPO / "docs/evidence/9889/e1-e2-scores.json")
                         .read_text(encoding="utf-8"))
@@ -4823,24 +4832,22 @@ def test_the_three_routes_to_the_e1_e2_verdict_state_the_records_verdict():
         "auditing one half of E2, so this leg has no subject")
     survived = f"{e2a['value_survived']} of {e2a['frozen_units']}"
     recorded = _ROW_VERDICT[record["e2"]["outcome"]]
-    # ⛔ TOKEN-anchored, never a substring (#10610 review at `5f636d2f`). The row
-    # legitimately contains "MEASURED", which CONTAINS "RED", so a bare `recorded in
-    # e2_rows[0]` is unconditionally true and this leg pinned NOTHING — measured: an audit
-    # row rewritten to state `**GREEN**` over a measured 8 of 14 still passed the leg.
-    assert f"**{recorded}" in e2_rows[0], (
-        f"the audit's E2a row states no `**{recorded}` verdict — the record's outcome is "
-        f"{record['e2']['outcome']!r}: {e2_rows[0][:400]}")
-    assert "**GREEN" not in e2_rows[0], (
-        f"the audit's E2a row states GREEN for a criterion the record scores {recorded}: "
-        f"{e2_rows[0][:400]}")
-    if table["E2"] != recorded:
-        # The committed table is allowed to lag (it describes the frozen log); the audit is
-        # not. When the two disagree the audit row must state BOTH words, each in its own
-        # role, or a reader cannot tell the committed state from the measured one.
-        assert f"**{table['E2']}" in e2_rows[0], (
-            f"the committed table says {table['E2']} while the record scores {recorded}; "
-            "the audit row states only one of the two, so a reader cannot tell the frozen "
-            f"table's word from the measured one: {e2_rows[0][:400]}")
+    # ⛔ THE VERDICT WORDS AS A SET, not substrings (#10610 review at `5f636d2f`, then at
+    # `9ed67a02`). Two separate defects lived here: a bare `recorded in row` is
+    # unconditionally true because the row says "MEASURED" (which CONTAINS "RED"), and an
+    # `or` whose first branch was satisfied by the row's own legitimate mention of the
+    # committed table's word. Reading the set fixes both AND closes the rot in the other
+    # direction: while the table lags, the audit row must name BOTH words (one as the
+    # frozen state, one as the measured reading); once a re-recorded log makes the table
+    # agree with the record, the second word becomes a FALSE claim and the set must
+    # collapse to one — so the sentence cannot survive the re-run it describes.
+    words = set(re.findall(r"\*\*(BLOCKED|RED|GREEN)\b", e2_rows[0]))
+    expected = {recorded} | ({table["E2"]} if table["E2"] != recorded else set())
+    assert words == expected, (
+        f"the audit's E2a row states {sorted(words)}, but the record scores {recorded}"
+        + (f" while the frozen table says {table['E2']}" if table["E2"] != recorded
+           else " and the frozen table now agrees with it")
+        + f" — so the row must state exactly {sorted(expected)}: {e2_rows[0][:400]}")
     assert survived in e2_rows[0] and e2a["artifact"] in e2_rows[0], (
         f"the audit's E2a row does not carry the record's own count ({survived!r}) and "
         f"artifact ({e2a['artifact']!r}): {e2_rows[0][:400]}")
@@ -4850,10 +4857,16 @@ def test_the_three_routes_to_the_e1_e2_verdict_state_the_records_verdict():
         f"measurements of one criterion: {e2_rows[0][:400]}")
 
     # 5. The refuted absence claim, in every routing surface.
+    #
+    # ⛔ NO BAN ON `"with no before arm"` (#10610 review at `9ed67a02`): that phrase is TRUE
+    # about the measurement run — `capstone-measured-9152448d.log` says "this run has no
+    # before arm", and `docs/00_index.md` says so in the same sentence that reports the two
+    # before arms `#9889` later produced. The refuted claim is that the row has no before
+    # arm NOW, and that is already held by leg 3, which requires the index row to carry both
+    # measured before shares. A substring ban here would red a true sentence about a
+    # different population, which is the "banning truth" failure this pin's own premise
+    # check exists to avoid — so the phrase is deliberately NOT banned.
     for name, text in (("docs/00_index.md", index), ("E1-E5-PROOFS.md", proofs)):
-        assert "with no before arm" not in text, (
-            f"{name} still says E1 measured `with no before arm` — the record carries two "
-            "before arms (78 and 69 Objects) on the frozen corpus")
         for phrase in _UNCARRIED_DENOMINATOR:
             assert phrase not in text, (
                 f"{name} still asserts the frozen 14-unit denominator is {phrase!r}, which "
