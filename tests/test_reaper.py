@@ -6774,8 +6774,14 @@ def test_conftest_sweep_returns_build_end_sweep_report():
     * a builder call that is statically unreachable (`if False:`);
     * a builder call whose arguments are not exactly the three positional
       ones — a `lambda: _run_sweep(...)`, the `deadline` name, and
-      `embedded_reaper.live_embedded_server_count` (a fabricated probe,
-      e.g. `lambda: 999`, is a different shape and is rejected).
+      `embedded_reaper.live_embedded_server_pids` (a fabricated probe,
+      e.g. `lambda: 999`, is a different shape and is rejected). The PID-SET
+      probe is required, not the older `live_embedded_server_count`: the
+      COUNT form cannot say WHICH process left the population, which is the
+      whole of the #8599 disappeared-before-discovery term, and a scalar
+      hands `build_end_sweep_report` an `int` where it takes `len()` of the
+      PID SET it observed — so a count probe silently loses the term rather
+      than failing.
 
     This test does not prove the call site correct in general; it rejects the
     shapes listed above (#4740).
