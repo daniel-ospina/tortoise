@@ -1292,6 +1292,12 @@ surfaces:
   # would run on no change that can break it.
   - test_own_key_selfservice_2446.py
   - test_mcp_client.py
+  # #10605: the stdio↔HTTP bridge's guards (per-request credential resolution,
+  # the named MCP-KEY-EMPTY refusal, session propagation). Registered here
+  # because `tortoise/mcp_bridge.py` is an exact `api` SOURCE_PATTERNS entry —
+  # a bridge-only diff replaces the `core` fallback, so the guard has to run
+  # from this surface or it runs nowhere (the #7076 self-guard class).
+  - test_mcp_bridge.py
   - test_mcp_http.py
   - test_mcp_rename_table.py  # #4282: Phase 0.3 rename table — old name → new name, per tool
   - test_mcp_route_challenge.py  # #2864: RFC 9728 challenge on /mcp 401s + /mcp route canonicalization (docker lane)
@@ -8954,6 +8960,7 @@ durations:
   test_file_human_approval.py: 4.3  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 2.4
   test_kind_eval_set.py: 2.6  # ci-timing top-15 2026-10-20 (run 39467226356); was 1.5
   test_mcp_client.py: 1.6  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 1.8
+  test_mcp_bridge.py: 2.0  # new in #10605 — the #3400/#4348 trap: a file a PR ADDS cannot carry a CI junit reading yet, so it takes the header's flat `DEFAULT_FAST_WEIGHT` and NOT a local reading. The `api` registration above puts it in `fast_pool()`, and a fast file added by a PR must carry a weight at all ("a default is not a reading"). It spawns a real bridge subprocess per case, so 2.0 UNDERSTATES it until `tools/ci_timing.py --refresh-durations` replaces this row from junit. `tools/ci_selection.py --integrity` is the authority.
   test_sdk_props_coercion.py: 4.6  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 1.9
   test_volunteer_pipeline.py: 4.0  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 2.6
   eval/retrieval/test_1348.py: 6.5  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 6.1
