@@ -1351,6 +1351,37 @@ def test_the_pool_only_window_is_not_claimed_as_a_hard_ceiling():
         "source states, not only stop over-claiming")
 
 
+def test_the_degrade_arms_are_not_declared_outside_the_census_window():
+    """#10632 review ISSUE 1 (P2), prose half: ``session_reinjection.py``'s
+    residual list kept naming R6's DEGRADE path ``pool = pool[:top_k]`` among
+    the movers *"not in this count at all"*.
+
+    That was true before ``8ca8528ad``. After it, each truncating site
+    declares its cut (``_sr_prefix_cut = len(pool)``) and the census is taken
+    with ``window = min(item_cap, cut)`` — so on the degrade arms the window
+    IS the prefix the reader receives, and the residual list was denying the
+    fix in the same document that states it. A reader of the residual would
+    discount ``sessions_lost`` on exactly the arm the fix was written for.
+
+    Non-vacuity: pre-fix the module says "on its degrade path ``pool =
+    pool[:top_k]``", so the first assertion reds; it also says "describe
+    ``merged[:40]``", which is the widened window the fix replaced, so the
+    second reds with it.
+    """
+    src = (ROOT / "tortoise" / "session_reinjection.py").read_text(
+        encoding="utf-8")
+    flat = " ".join(src.split())
+    assert "on its degrade path ``pool = pool[:top_k]``" not in flat, (
+        "the degrade arm's cut is the census window after 8ca8528ad — the "
+        "residual list cannot keep naming it as an uncovered pool mover")
+    assert "``merged[:40]``" not in flat, (
+        "with the window following the cut, the applied arm's window is "
+        "`merged[:window]`, never the eff_item_cap 40 the sentence pinned")
+    assert "The three TRUNCATING arms are NOT in that class" in flat, (
+        "the residual list must say which arms the cut DOES cover, not only "
+        "which mover it misses")
+
+
 def test_the_pool_only_under_count_is_MEASURED_not_merely_asserted_in_prose():
     """The BEHAVIOURAL half of ``test_the_pool_only_window_is_not_claimed_as_a_hard_ceiling``.
 

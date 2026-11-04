@@ -608,23 +608,32 @@ def reader_window_displacement(
       ``TORTOISE_LME_EVIDENCE_BOOST`` on — the re-validation run's own
       default — the census window is the PRE-boost order and the reader's
       is the post-boost one.
-    * TWO LATER POOL MOVERS IN THE SAME LANE ARE NOT IN THIS COUNT AT ALL
-      (``tools/longmem_eval/retrieve.py``). R6 rerank re-SELECTS from the
-      whole pool (``pool = selected``, ``<= top_k``; on its degrade path
-      ``pool = pool[:top_k]``) and C6 ``prefer_latest_order`` reorders the
-      final pool. ``prefer_latest_order`` is membership-preserving, but
-      the reranker's move is a fresh SELECTION over every candidate — a
-      two-stage retrieve→rerank pipeline picks its ``top_n`` from the
-      FULL candidate list, not from a prefix of it (Cohere's Rerank API:
+    * ONE LATER POOL MOVER IN THE SAME LANE IS NOT IN THIS COUNT, and it is
+      the re-SELECTION only (``tools/longmem_eval/retrieve.py``). When R6
+      rerank APPLIES it re-SELECTS from the whole pool (``pool = selected``,
+      ``<= top_k``), and C6 ``prefer_latest_order`` reorders the final pool.
+      ``prefer_latest_order`` is membership-preserving, but the reranker's
+      move is a fresh SELECTION over every candidate — a two-stage
+      retrieve→rerank pipeline picks its ``top_n`` from the FULL candidate
+      list, not from a prefix of it (Cohere's Rerank API:
       ``rerank(documents=<all candidates>, top_n=k)`` returns indices into
       that whole list), and the lane's own ``rerank_hits`` is called on
-      the entire ``pool``. So with rerank ON the delivered surface may
+      the entire ``pool``. So on the APPLIED arm the delivered surface may
       include base hits AND injected items from BELOW this window while
       excluding ones inside it.
-      ⇒ With R6 active, ``injected_in_window``/``base_displaced`` describe
-      ``merged[:40]`` and are not a bound at all — upper or lower — on what
-      the reader got. (Nor are they one with R6 OFF, for the reason the
-      bullet below gives.)
+      ⇒ On the APPLIED arm ``injected_in_window``/``base_displaced``
+      describe ``merged[:window]`` and are not a bound at all — upper or
+      lower — on what the reader got. (Nor are they one with R6 OFF, for
+      the reason the bullet below gives.)
+      ⛔ The three TRUNCATING arms are NOT in that class, and an earlier
+      revision of this list wrongly put one of them there: the pool-only
+      arm and the two R6 DEGRADES (load-failure ``scorer is None``,
+      score-failure ``applied: False``) each cut a prefix of the pool, and
+      the caller declares that cut so ``window`` becomes the cut
+      (``min(item_cap, len(pool))`` after it — #10632 review ISSUE 1). No
+      candidate outside the window can reach the reader on those arms, so
+      there the window IS a ceiling. It is still not the DELIVERED set:
+      the skip filter below can only remove items from inside it.
     * So the count is not a bound on the delivered surface in EITHER
       direction, and the skip semantics above are why in both: a
       claim-text-less (or cap-refused) hit INSIDE the window is counted and
