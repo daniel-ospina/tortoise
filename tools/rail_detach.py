@@ -389,9 +389,12 @@ class _GhRun:
     the provenance of the same root and neither alone was believed:
 
     * `test (d)` on the #9018 fallback pool (`pi-runner-vm-2`, 2026-11-03):
-      `FileNotFoundError: 'gh'`, 21 red arms, on a PR whose diff touches
-      neither this tool nor its test — a bare `ubuntu-latest` runner with a
-      minimal non-login PATH has no `gh`.
+      `FileNotFoundError: 'gh'` on a PR whose diff touches neither this tool nor
+      its test — a bare `ubuntu-latest` runner with a minimal non-login PATH has
+      no `gh`. ⚠️ The two sides recorded this one differently (this branch:
+      shard `test (d)`, 21 arms; main/#10622: shard `test (a)`, 20 arms) and
+      neither job log is retrievable here, so the ROOT is what is asserted — a
+      bare runner with no `gh` — and not the integer.
     * `test (h)` on `pi-runner-vm-6`/Linux-ARM64, run `41732583553` (kept from
       the other side of the #10622 merge): all 20 cases in
       `tests/test_rail_detach.py` killed at this call.
