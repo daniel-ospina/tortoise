@@ -3638,9 +3638,17 @@ def duplicate_mapping_key_issues(manifest_path: Path | None = None) -> list[str]
     (``.gitattributes``), so a replay in which BOTH sides changed the SAME
     ``durations:`` row to DIFFERENT values keeps both copies — a merge, a
     rebase, or a re-applied commit. An identical change on both sides, or a
-    replay only one side touched, emits the row once. This one batch PR
-    (#10726) has produced it repeatedly — 62 keys, then 13, then 1, then 2 (each
-    recorded in its fold ledger), and 6 measured on ``13a53ef7e``'s own tree.
+    replay only one side touched, emits the row once. This batch PR (#10726)
+    re-created the class on most of its forward-merges; the per-event counts are
+    in that PR body's own fold ledger, where they are a record of what happened
+    rather than a claim about the next merge.
+
+    ⛔ DO NOT RESTATE THOSE COUNTS HERE. A series of event counts describes a
+    mechanism that fires on every merge, so it is guaranteed to go stale — and
+    it did, twice within an hour, before this paragraph replaced it. What
+    belongs here is the CONDITION (above) and the instruction (below); the
+    numbers belong where they are dated, one entry per event.
+
     ``--integrity`` — the check that PR body cited as proof of "0 duplicates" —
     did not compose this walk until ``dd4f66e6a`` (``02133e21b`` has no
     ``duplicate_mapping_key_issues`` in ``tools/ci_selection.py``, though
@@ -3651,13 +3659,13 @@ def duplicate_mapping_key_issues(manifest_path: Path | None = None) -> list[str]
     ``check() == []``). That is why the walk is now COMPOSED INTO
     ``--integrity`` (``dd4f66e6a``).
 
-    ⛔ A GREEN RUN FROM BEFORE A REPLAY DOES NOT COVER THE REPLAY.
-    ``13a53ef7e`` is AFTER ``dd4f66e6a`` and still carried 6, because the replay
-    itself created them and that merge was pushed BEFORE the check ran
-    (``c660ffcee`` records it). Re-run ``--integrity`` after every merge, rebase
-    or re-applied commit into this branch, and judge the COMMITTED TREE rather
-    than a commit subject: a fold merge's subject announces the duplicates its
-    own resolution then removes.
+    ⛔ A GREEN RUN FROM BEFORE A REPLAY DOES NOT COVER THE REPLAY. Measured at
+    ``13a53ef7e``: that head is AFTER ``dd4f66e6a``, and it still carried
+    duplicates of this class, because the replay itself created them and that
+    merge was pushed BEFORE the check ran (``c660ffcee`` records it). Re-run
+    ``--integrity`` after every merge, rebase or re-applied commit into this
+    branch, and judge the COMMITTED TREE rather than a commit subject: a fold
+    merge's subject announces the duplicates its own resolution then removes.
 
     The walk lives in ``tools/registry_integrity.py`` and is imported rather
     than re-spelled, so the two entry points cannot disagree about what a
