@@ -36580,9 +36580,12 @@ async def public_demo(org: dict = Depends(get_current_org_gated)):  # noqa: B008
         # `_org_sdk` calls would split them, and the second call is a second
         # control-plane read when the auth hint is absent).
         _check_org_limit(org, "points", sdk=sdk)
-        # The shared demo seeder (extracted from /internal/demo) writes ~13
-        # Points through the handle passed in (it opens its own when called
-        # without one, e.g. from `/internal/demo`).
+        # The shared demo seeder (extracted from /internal/demo) writes ~10
+        # Points — the 9 seeded `:Point` nodes + `_demo_sentinel`, the same
+        # census the `point_count` below records — through the handle passed in
+        # (it opens its own when called without one, e.g. from
+        # `/internal/demo`). ⚠️ It said ~13 until #10675: that was true while
+        # the three `epi_turn*` nodes existed, and #10000 removed them (§9.1/D1).
         return {"existing": False,
                 "created": _seed_demo_graph(org["org_id"], sdk=sdk)}
 
