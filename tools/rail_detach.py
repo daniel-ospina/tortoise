@@ -568,13 +568,28 @@ def _resolve_repo(cwd: Path) -> str:
             + (f": {detail[-1]}" if detail else "")
             + ") — the `gh` on PATH ran and refused; pass --repo, or repair that `gh`"
         )
-    if out.returncode == 126:
+    if out.returncode == 126 and out.cause:
         # Found but not runnable — a DIFFERENT remedy from "install the CLI", and
         # the remedy travels on the run because a missing CWD is a third one.
+        # ⛔ GATED ON `cause`, for the same reason as the 127 pair above: only a
+        # FABRICATED run carries one, so a REAL process that exited 126 must not
+        # be told it "could not be executed" — it demonstrably ran (review, #10777).
         raise Refused(
             "could not resolve the repo from this checkout — "
-            f"{out.cause or '`gh` could not be executed'} "
+            f"{out.cause} "
             f"({out.remedy or 'pass --repo, or fix the `gh` install'})"
+        )
+    if out.returncode == 126:
+        # ⛔ A REAL `gh` THAT RAN AND EXITED 126 IS NOT "UNEXECUTABLE" (review,
+        # #10777). Same shape as the real-127 arm above: a fabricated run always
+        # carries a `cause`, a real one never does. The binary ran — that is what
+        # proves it is executable — so the only useful thing to print is what IT
+        # said, which is the same stderr the generic arm below would surface.
+        detail = (out.stderr or "").strip().splitlines()
+        raise Refused(
+            "could not resolve the repo from this checkout (`gh repo view` exited 126"
+            + (f": {detail[-1]}" if detail else "")
+            + ") — the `gh` on PATH ran and failed; pass --repo, or repair that `gh`"
         )
     # Every other non-zero exit keeps main's stderr detail: the last line is the
     # only thing that says WHY `gh repo view` failed (auth, network, no remote).

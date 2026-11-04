@@ -657,6 +657,42 @@ def test_a_real_gh_that_exits_127_is_not_reported_as_missing(tmp_path, monkeypat
     assert "unresolvable gh" in msg, msg
 
 
+def test_a_real_gh_that_exits_126_is_not_reported_as_unexecutable(tmp_path, monkeypatch):
+    """`gh` exiting 126 is a FAILURE of a process that ran, never "cannot execute".
+
+    Review, `#10777`: the sibling 127 pair already separates a fabricated PATH
+    miss (which carries a `cause`) from a real process's own exit code, but the
+    126 arm was NOT gated on `cause` — so a real `gh` that exited 126 was told it
+    "could not be executed", which its own exit proves false, and `out.stderr`
+    (the only thing that says why) was dropped on the floor. Same defect class as
+    the 127 collapse this PR exists to fix.
+    """
+    bin_dir = tmp_path / "gh-126-bin"
+    bin_dir.mkdir()
+    stub = bin_dir / "gh"
+    stub.write_text(
+        "#!/bin/sh\n"
+        'echo "gh: 126 from a binary that ran" >&2\n'
+        "exit 126\n",
+        encoding="utf-8")
+    stub.chmod(0o755)
+    monkeypatch.setenv("PATH", str(bin_dir))
+
+    out = rd._gh(["repo", "view"], tmp_path)
+    assert out.returncode == 126, (out.returncode, getattr(out, "cause", ""))
+    assert getattr(out, "cause", "") == "", (
+        "a real process's exit code must not be given a fabricated cause: "
+        f"{getattr(out, 'cause', '')!r}")
+
+    with pytest.raises(rd.Refused) as exc:
+        rd._resolve_repo(tmp_path)
+    msg = str(exc.value)
+    assert "could not be executed" not in msg, msg
+    assert "exited 126" in msg, msg
+    # The stderr detail must survive: it is the only thing that says WHY.
+    assert "126 from a binary that ran" in msg, msg
+
+
 def test_a_cwd_that_is_not_a_directory_is_not_a_broken_gh_install(tmp_path):
     """An `ENOTDIR` cwd is ALSO an `OSError`, and "repair the install" is wrong for it.
 
