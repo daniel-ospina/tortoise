@@ -1056,7 +1056,30 @@ def cmd_pin(args: argparse.Namespace) -> int:
     # is REFUSED as soon as the caller's HEAD moves (the stale guard compares the caller's
     # HEAD to the pin's parent), with advice that is wrong for this shape.
     handle = "" if branch == "HEAD" else f" --branch {branch}"
-    print(f"recover with: tools/lane_wip.py recover {ref} --into <path>{handle}")
+    # ⛔ THE REMEDY MUST NAME THE REPOSITORY THE PIN LIVES IN. `pin --path <a worktree in
+    # another repo>` is a supported, TESTED shape (`test_pin_writes_the_ref_into_the_path_repo_not_the_caller`)
+    # and it writes the ref into THAT repo — but the printed line named neither that repo nor
+    # `--path`, so the command it printed assumed the CALLER's repo. Measured (caller in
+    # repoA, pin taken into repoB's lane): `pin` rc 0, then the printed command run verbatim
+    # -> rc 2 "'<ref>' does not name a commit in this repository", and the `list --all` it
+    # advises answered "no lane has any wip pin" at rc 0 from repoA while the pin sat one ref
+    # away — the false "the work is gone" verdict this module documents it must never give,
+    # produced by its own primary verb.
+    try:
+        caller_root: Path | None = _repo_root()
+    except (LaneWipError, GitFailed):
+        caller_root = None  # outside a repo: certainly not the pin's repo
+    if caller_root is not None and caller_root == root:
+        print(f"recover with: tools/lane_wip.py recover {ref} --into <path>{handle}")
+    else:
+        # `--path <root>` makes `recover` read the ref from the repository that holds it,
+        # and the note says where to run it when `root` itself is the destroyed lane.
+        print(f"recover with: tools/lane_wip.py recover {ref} --path {root} --into <path>{handle}")
+        print(
+            f"  (this pin lives in {root} — the ref is readable from any worktree of THAT "
+            "repository, so run it there (`list --all` too); a bare `recover` from another "
+            "repository cannot see it)"
+        )
     return 0
 
 
@@ -2274,8 +2297,8 @@ def build_parser() -> argparse.ArgumentParser:
 def _make_output_byte_safe() -> None:
     """Never let a MESSAGE kill the verb, and never let it outrun the work.
 
-    ⛔ The INPUT side was fixed long ago (`surrogateescape` on every git read, `os.fsencode`
-    in the lane key), but the OUTPUT side was not: `print()` of a path holding a lone
+    ⛔ The INPUT side was fixed long ago (`surrogateescape` on every git read, and a
+    `surrogateescape`-capable lane key), but the OUTPUT side was not: `print()` of a path holding a lone
     surrogate raises `UnicodeEncodeError` under a `strict` stdout. That is the default under
     an ordinary `en_US.utf8` locale — this box's `C.UTF-8` hides it — so measured:
     `pin` printed nothing and exited 1 AFTER writing the ref, and `recover` exited 1 AFTER

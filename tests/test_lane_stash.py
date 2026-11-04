@@ -997,13 +997,19 @@ def test_lane_key_is_a_valid_git_ref_for_hostile_directory_names(tmp_path):
 
 
 def test_lane_key_digest_does_not_follow_the_filesystem_encoding(tmp_path, monkeypatch):
-    """The digest INPUT is pinned to UTF-8, so a lane key cannot ROTATE with the locale.
+    """The digest INPUT is pinned to UTF-8, so the key cannot rotate with how the path is RE-ENCODED.
 
     `os.fsencode` encodes with `sys.getfilesystemencoding()`, and the lane key names refs in a
-    SHARED namespace (`refs/lane/<key>/…`, `refs/pi-lane-wip/<key>/…`), so a key that varied
-    with the box's locale would make a lane's own pins unreachable from another box — the
+    SHARED namespace (`refs/lane/<key>/…`, `refs/pi-lane-wip/<key>/…`), so a digest that
+    followed the box's encoding would rewrite the key of a path that already had one — the
     "pins look lost while they sat under the old key" verdict `lane_key`'s docstring forbids.
     Measured: `'/tmp/café'` digests `19f0d7cb` as UTF-8 and `89b4df2f` as latin-1.
+
+    Scope, stated precisely: this pins the RE-ENCODE only. The DECODE that produced the path
+    string still uses the filesystem encoding, so the same on-disk bytes can yield a different
+    string (and so a different key) on a box that decodes them differently — measured
+    `b'/tmp/caf\xc3\xa9'` -> `19f0d7cb` decoded UTF-8 vs `6c7aacb7` decoded latin-1. The key is
+    stable across boxes that decode the path the same way, and this test claims no more.
 
     The assertion is a SPY, not a locale switch, because the filesystem encoding cannot be
     varied portably in-process: `os.fsencode` reads CPython's startup-time encoding (so
