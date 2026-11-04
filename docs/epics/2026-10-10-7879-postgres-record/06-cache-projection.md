@@ -204,8 +204,8 @@ and `rebuild_from_record` materialise a node with it, and
 `record_serve.read_node` answers with the same map because its contract is
 that a served node and a rebuilt node cannot drift. So a row written by a build
 that still placed the key either re-creates the prose **whatever build is reading
-it** or makes the served answer disagree with the rebuild — the one-way divergence
-#10853 measured. Sweeping the existing rows instead would decay: at
+it** or makes the served answer disagree with the rebuild — the one-way
+divergence #10853 measured. Sweeping the existing rows instead would decay: at
 this head the capture still writes the value, so the next capture of the same
 session writes it straight back.
 
