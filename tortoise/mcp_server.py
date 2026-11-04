@@ -684,7 +684,7 @@ def _wait_bound_refused() -> bool:
 #: can read absent, and both create. The remaining member does not share that
 #: mechanism and is not covered by this caveat: ``create_source`` converges in ONE
 #: conditional statement, `_upsert_source`'s `MERGE (s:Source {url: $url})`
-#: (`projection/entities.py:6503`; that function's own note there is "pin d").
+#: (that function's own note there is "pin d").
 #: ⛔ ``onboarding_demo_create`` is NOT one of them, though its seed is
 #: sentinel-gated: the handler then writes its RECEIPT unconditionally
 #: (`_update_onboarding_state(org_id, demo_created=True)`), `demo_created` is an

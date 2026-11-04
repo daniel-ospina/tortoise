@@ -812,12 +812,17 @@ def test_the_refusal_envelope_is_unchanged_so_the_verdict_contract_still_reads_i
         assert err["data"]["retry_after"] == ma._TRANSPORT_WAIT_RETRY_AFTER_S
 
 
-def test_a_read_refusal_is_byte_identical_to_the_shipped_refusal():
-    """No widening for reads.
+def test_a_read_refusal_carries_ONLY_retry_after_and_no_verdict_keys():
+    """No widening for reads, and no verdict keys to read.
 
     A read mutated nothing, so a read refusal may present as a failure and must
     stay exactly as shipped — the retry protocol of every existing reader is
-    written against it.
+    written against it. So the DATA is the shipped pair and nothing else: the
+    three `committed`/`retry_safe`/`retry_rule` keys are ABSENT, not defaulted.
+
+    ⛔ `err["message"]` is asserted by identity elsewhere in this file (see the
+    module's `_TRANSPORT_WAIT_BOUND_MESSAGE` pins); this test is the one that pins
+    the SHAPE of a read refusal, which is why it does not restate it.
     """
     err = _error(ms._wait_bound_refusal_result("tortoise_search"))
     assert err["data"] == {"retry_after": ma._TRANSPORT_WAIT_RETRY_AFTER_S}
@@ -919,20 +924,27 @@ async def test_the_seam_returns_the_write_contract_and_still_abandons(slow_dispa
 
 
 def test_the_citations_in_this_contract_are_SYMBOLS_not_sdk_line_numbers():
-    """A `sdk.py:<line>` citation is a claim that rots on the next upstream edit.
+    """An `sdk.py:<line>` citation is a claim that rots on the next upstream edit.
 
-    This branch carried five of them, and they moved TWICE while it was open (the
-    `origin/main` merge shifted every one by +4, and a docstring edit in this same
-    PR shifted them again by +6). A line number is only meaningful against one
-    revision, so in a file that outlives the revision it is wrong more often than
-    right — and it stays WRONG silently, because prose cannot red a check.
+    This branch carried five of them and re-derived the numbers SEVEN times before
+    giving up on the device: the `origin/main` merge alone shifted every one by
+    +104, and edits inside this PR moved them again (+21, +8, +6, +3, +3, +6). A
+    line number is only meaningful against one revision, so across the life of a
+    PR it is wrong most of the time — and it stays WRONG silently, because prose
+    cannot red a check.
 
     The repo's own convention is the symbol (see
     `docs/architecture/STORAGE-ARCHITECTURE-CHANGELOG.md`: "the emitters are named
     by SYMBOL now … reds on a bare `sdk.py:<N>`"). This pins it for the files this
-    contract's claims live in, so the next lane cannot reintroduce the rot. The
-    symbol is also the stronger claim: it survives any edit that does not remove
-    the function, and a test that flips a registry entry still finds it.
+    contract's claims live in, so neither this lane nor the next can reintroduce a
+    line citation to `tortoise/sdk.py` — the file that moves under them.
+
+    ⛔ SCOPE, so this does not claim more than it does: the pattern is
+    `sdk.py:<digits>`. Line citations to OTHER modules already exist in these files
+    from before this PR (`mcp_auth.py:515-538`, `mcp_server.py:1304`,
+    `fastmcp/tools/base.py:363-369`, `record_read.py:1029`) and are not this
+    lane's debt to convert — `sdk.py` is the one cited five times here and the one
+    that moved seven times in a week.
     """
     import pathlib
     import re
@@ -948,10 +960,17 @@ def test_the_citations_in_this_contract_are_SYMBOLS_not_sdk_line_numbers():
         "MEMORY.md",
     ]
     offenders = []
+    missing = [rel for rel in touched if not (root / rel).exists()]
+    # ⛔ Fail CLOSED on a missing file: every entry above is tracked, so absence
+    # means this population went stale — and silently skipping it would leave the
+    # gate green over a smaller population, which is the no-op-gate shape this
+    # replaced a lane checker for.
+    assert missing == [], (
+        "this gate's population names files that do not exist here: "
+        f"{missing} — a tracked file cannot vanish, so the list is stale and the "
+        "check below would verify a SMALLER population than it claims")
     for rel in touched:
         path = root / rel
-        if not path.exists():
-            continue
         for n, line in enumerate(path.read_text().splitlines(), 1):
             for m in re.finditer(r"sdk\.py:(\d+)", line):
                 offenders.append(f"{rel}:{n} -> sdk.py:{m.group(1)}")
