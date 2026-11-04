@@ -43,12 +43,13 @@ head still has a live run of the same workflow elsewhere (a concurrency supersed
 leaves one, and cancelling then is still correct — the replacement is the verdict).
 `scripts/ci-queue-hygiene.sh` (agent-infra) owns the multi-run queue sweep; this
 guard owns the single SUPERSEDE act. ⛔ It is the only GATED path, not yet the only
-path: four other call sites POST the same endpoint on their own decisions and none
-routes through here — `tools/ci_queue_health.py::cancel_run` (a FLOOD trim limited
-to `finding-provenance` `issue_comment` runs), `tools/ci_check_repair.py::_cancel`
-(a re-read zero-job stall that then reruns the same head), `tools/run_reaper.py`
-(a verified-in-progress wedge), and agent-infra's sweep. Wiring them in is the
-follow-up.
+path: THREE other call sites in this repo POST the same endpoint on their own
+decisions and none routes through here — `tools/ci_queue_health.py::cancel_run` (a
+FLOOD trim limited to `finding-provenance` `issue_comment` runs),
+`tools/ci_check_repair.py::_cancel` (a re-read zero-job stall that then reruns the
+same head), and `tools/run_reaper.py` (a verified-in-progress wedge) — plus
+agent-infra's sweep, which is not in this index (four in total). Wiring them in is
+the follow-up.
 
 Usage:
   uv run python tools/ci_cancel_guard.py <run-id> [--repo owner/name] [--apply] [--json]
@@ -99,9 +100,10 @@ _OID_RE = re.compile(r"^[0-9a-f]{40}$|^[0-9a-f]{64}$", re.IGNORECASE)
 #: deny-list silently).
 UNSTARTED_JOB_STATUSES = frozenset({"queued", "waiting", "requested", "pending"})
 PR_LIMIT = 500
-#: Set by a test seam only. An operator never sets this: acting on a stale
-#: comparison is the defect this tool exists to prevent.
-_FAKE_ELAPSED_ENV = "CI_CANCEL_GUARD_FAKE_ELAPSED_S"
+#: The test seam, as a COMMAND-LINE argument only. ⛔ There is deliberately no
+#: environment variable: acting on a stale comparison is the defect this tool exists
+#: to prevent, and an ambient knob is indistinguishable from configuration.
+_FAKE_ELAPSED_SEAM = "--fake-elapsed"
 
 
 class Unreadable(Exception):
@@ -321,31 +323,44 @@ def decide(repo: str, run_id: int) -> tuple[str, dict[str, Any]]:
     return "PERMIT", {**detail, "why": "run.head_sha is not the open PR's current head"}
 
 
-def _elapsed_override() -> float | None:
+def _elapsed_override(raw: str | None) -> float | None:
     """The declared test seam. Refuses a value it cannot honestly represent.
 
+    ⛔ THE VALUE ARRIVES AS A PARAMETER, NEVER FROM THE ENVIRONMENT (round-4 review).
+    With it read from `os.environ`, ANY caller could run
+    `CI_CANCEL_GUARD_FAKE_ELAPSED_S=5 ci_cancel_guard.py <run> --apply` and issue a real
+    POST on a reading of ANY age — clause 6, the anti-TOCTOU property this tool exists
+    for, bypassed by a variable the comment below only *asked* operators not to set.
+    This module's own thesis is that prose cannot prevent that (see the header): so the
+    seam is a parameter, reachable only by an explicit `--fake-elapsed` on the command
+    line, and no ambient environment can reach the check at all.
+
     ⛔ `nan >= 60` is False, so an un-validated seam made the ONLY staleness check
-    vacuous (`CI_CANCEL_GUARD_FAKE_ELAPSED_S=nan` -> PERMIT + POST) while the audit
-    line printed `comparison age: nans`. A negative value did the same and printed a
-    negative age. Both are refused here, and `render` says UNMEASURED instead of
-    printing a number the tool did not measure (review cycle 1, R1).
+    vacuous (`--fake-elapsed nan` -> PERMIT + POST) while the audit line printed
+    `comparison age: nans`. A negative value did the same and printed a negative age.
+    Both are refused here, and `render` says UNMEASURED instead of printing a number the
+    tool did not measure (review cycle 1, R1).
+
+    The value is taken as the RAW STRING argparse handed over (not `type=float`), so a
+    typo'd seam reaches THIS refusal instead of being rejected by argparse with the
+    same exit code the exit table reserves for `a surface could not be read` — which is
+    what made the round-3 pin vacuous (round-4 review, F2).
     """
-    raw = os.environ.get(_FAKE_ELAPSED_ENV, "")
-    if not raw:
+    if raw is None or not raw:
         return None
     try:
         value = float(raw)
     except ValueError:
         # A typo'd seam must not be silently ignored: it would take the real path and
         # still be rendered as if the seam had been used.
-        raise Unreadable(f"{_FAKE_ELAPSED_ENV}={raw!r} is not a number")
+        raise Unreadable(f"{_FAKE_ELAPSED_SEAM} {raw!r} is not a number") from None
     if not math.isfinite(value) or value < 0:
-        raise Unreadable(f"{_FAKE_ELAPSED_ENV}={raw!r} is not a representable age")
+        raise Unreadable(f"{_FAKE_ELAPSED_SEAM} {raw!r} is not a representable age")
     return value
 
 
-def evaluate(repo: str, run_id: int,
-             max_age: int) -> tuple[str, dict[str, Any], float, bool]:
+def evaluate(repo: str, run_id: int, max_age: int,
+             fake_elapsed: str | None = None) -> tuple[str, dict[str, Any], float, bool]:
     """Decide, and refuse if the comparison is older than `max_age` when it is used.
 
     The age is MEASURED around each read pair inside this function: a pair that takes
@@ -356,7 +371,7 @@ def evaluate(repo: str, run_id: int,
     measurement of the same kind). Only `act` issues the POST, so no caller can
     skip the check by calling `decide` directly.
     """
-    fake = _elapsed_override()
+    fake = _elapsed_override(fake_elapsed)
     if fake is not None:
         verdict, detail = decide(repo, run_id)
         return verdict, detail, fake, False
@@ -370,11 +385,10 @@ def evaluate(repo: str, run_id: int,
 
 
 def act(repo: str, run_id: int) -> tuple[int, str]:
-    ok, detail = True, ""
     proc = _gh(["api", "-X", "POST", f"repos/{repo}/actions/runs/{run_id}/cancel"])
     if proc.returncode != 0:
         return 1, (proc.stderr or proc.stdout or "").strip()[:300] or "cancel POST failed"
-    return 0, detail
+    return 0, ""
 
 
 # --------------------------------------------------------------------------- render
@@ -424,8 +438,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--json", action="store_true")
     parser.add_argument("--max-age", type=int, default=MAX_COMPARISON_AGE_S)
     parser.add_argument("--self-test", action="store_true")
-    parser.add_argument("--fake-elapsed", type=float, default=None,
-                        help=argparse.SUPPRESS)  # test seam; see _FAKE_ELAPSED_ENV
+    # ⛔ The seam is a STRING, parsed and validated by `_elapsed_override` — not
+    # `type=float`, which would let argparse exit `2` ("a surface could not be read")
+    # on a typo and make the guard's own refusal unreachable (round-4 review).
+    parser.add_argument("--fake-elapsed", default=None,
+                        help=argparse.SUPPRESS)  # test seam; see _elapsed_override
     args = parser.parse_args(argv)
 
     if args.self_test:
@@ -445,12 +462,10 @@ def main(argv: list[str] | None = None) -> int:
     if args.max_age <= 0:
         print("--max-age must be positive", file=sys.stderr)
         return 64
-    if args.fake_elapsed is not None:
-        os.environ[_FAKE_ELAPSED_ENV] = str(args.fake_elapsed)
-
     run_id = int(args.run_id)
     try:
-        verdict, detail, elapsed, measured = evaluate(args.repo, run_id, args.max_age)
+        verdict, detail, elapsed, measured = evaluate(args.repo, run_id, args.max_age,
+                                                      args.fake_elapsed)
     except Unreadable as exc:
         print(f"ci_cancel_guard: FAIL-CLOSED for run {run_id}: {exc} — cancelling NOTHING",
               file=sys.stderr)

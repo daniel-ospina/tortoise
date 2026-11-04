@@ -1,4 +1,4 @@
-"""Tests for tools/ci_cancel_guard.py — the cancel-actuation gate (#10920 window).
+"""Tests for tools/ci_cancel_guard.py — the cancel-actuation gate (#10936).
 
 RED-FIRST: every one of these cases fails against a "cancel if it looks queued"
 implementation. The fixture is a stub `gh` on PATH-shaped argv (GH_BIN), so no
@@ -243,7 +243,7 @@ def test_an_unkeyable_pr_row_refuses_the_branch_even_beside_a_readable_one(fixtu
     The cycle-1 code dropped that sentinel whenever a readable row existed on the
     same branch and reached a POST (measured rc=0)."""
     fixture.apply("run.json", _run_meta(sha=HEAD_OLD))
-    fixture.apply("prs.json", pr(PR_HEAD_MOVED) + [{
+    fixture.apply("prs.json", [*pr(PR_HEAD_MOVED), {
         "number": 10999, "headRefName": "surface-containers",
         "headRefOid": HEAD_OLD, "headRepository": None}])
     r = guard(fixture, "41840910128", "--apply")
@@ -253,7 +253,7 @@ def test_an_unkeyable_pr_row_refuses_the_branch_even_beside_a_readable_one(fixtu
 
 def test_a_head_repository_name_with_two_slashes_is_unkeyable(fixture):
     fixture.apply("run.json", _run_meta(sha=HEAD_OLD))
-    fixture.apply("prs.json", pr(PR_HEAD_MOVED) + [{
+    fixture.apply("prs.json", [*pr(PR_HEAD_MOVED), {
         "number": 10999, "headRefName": "surface-containers",
         "headRefOid": HEAD_OLD,
         "headRepository": {"nameWithOwner": "a/b/c"}}])
@@ -498,7 +498,7 @@ def test_json_does_not_attest_an_unmeasured_age_or_a_false_applied(fixture):
     fixture.apply("prs.json", pr(PR_HEAD_MOVED))
     fixture.apply("jobs.json", {"total_count": 0, "jobs": []})
     r = guard(fixture, "41840910128", "--json", "--fake-elapsed", "5")
-    payload = [l for l in r.stdout.splitlines() if l.startswith("{")][-1]
+    payload = [line for line in r.stdout.splitlines() if line.startswith("{")][-1]
     rec = json.loads(payload)
     assert rec["elapsed_s"] is None
     assert rec["applied"] is False
@@ -526,20 +526,41 @@ def test_a_placeholder_pr_head_is_not_a_comparison(fixture):
 
 
 def test_a_non_numeric_seam_value_is_refused_not_ignored(fixture):
-    """Round-3 finding 3a, round-4 correction: the refusal lives on the ENV seam.
+    """Round-3 finding 3a, round-4 correction, round-4 F2: the refusal is reached for REAL.
 
-    `--fake-elapsed` is `type=float`, so argparse rejects `abc` with SystemExit(2)
-    before `_elapsed_override()` is reached — a CLI-based test is vacuous and lets the
-    round-3 mutant (`except ValueError: return None`) pass the whole file. Only the
-    env var reaches the refusal, and under that mutant it PERMITs and POSTs.
+    `--fake-elapsed` used to be `type=float`, so argparse rejected `abc` with SystemExit(2)
+    before any tool code ran and this case still passed with the guard's own refusal
+    deleted. The seam is now parsed and validated by `_elapsed_override` from the raw
+    string, so the refusal is the tool's — delete `except ValueError:` and this fails.
+    """
+    fixture.apply("run.json", _run_meta(sha=HEAD_OLD))
+    fixture.apply("prs.json", pr(PR_HEAD_MOVED))
+    fixture.apply("jobs.json", {"total_count": 0, "jobs": []})
+    r = guard(fixture, "41840910128", "--apply", "--fake-elapsed", "abc")
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert "not a number" in r.stderr, r.stderr
+    assert "FAIL-CLOSED" in r.stderr, r.stderr
+    assert fixture.cancelled() == []
+
+
+def test_an_ambient_environment_value_cannot_reach_the_seam(fixture):
+    """Round-4 finding F3: the seam was read from `os.environ`, so ANY caller could run
+    `CI_CANCEL_GUARD_FAKE_ELAPSED_S=5 ci_cancel_guard.py <run> --apply` and POST a real
+    cancel from a reading of ANY age — clause 6, the anti-TOCTOU property this tool
+    exists for, bypassed by an ambient variable.
+
+    The seam is a parameter now. Pre-fix this case exits 2 (the env value `abc` reached
+    `_elapsed_override` and was refused); at head the variable is inert, so the run is
+    judged on its real measurement and PERMITs + POSTs exactly once.
     """
     fixture.apply("run.json", _run_meta(sha=HEAD_OLD))
     fixture.apply("prs.json", pr(PR_HEAD_MOVED))
     fixture.apply("jobs.json", {"total_count": 0, "jobs": []})
     r = guard(fixture, "41840910128", "--apply",
               env={"CI_CANCEL_GUARD_FAKE_ELAPSED_S": "abc"})
-    assert r.returncode == 2, r.stdout + r.stderr
-    assert fixture.cancelled() == []
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "UNMEASURED" not in r.stdout, r.stdout
+    assert fixture.cancelled() == ["41840910128"]
 
 
 def test_a_landed_cancel_is_attested_as_applied(fixture):
@@ -550,7 +571,7 @@ def test_a_landed_cancel_is_attested_as_applied(fixture):
     fixture.apply("jobs.json", {"total_count": 0, "jobs": []})
     r = guard(fixture, "41840910128", "--json", "--apply", "--fake-elapsed", "5")
     assert r.returncode == 0, r.stdout + r.stderr
-    rec = json.loads([l for l in r.stdout.splitlines() if l.startswith("{")][-1])
+    rec = json.loads([line for line in r.stdout.splitlines() if line.startswith("{")][-1])
     assert rec["applied"] is True
     assert rec["post_rc"] == 0
     assert fixture.cancelled() == ["41840910128"]

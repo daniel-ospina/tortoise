@@ -2792,7 +2792,7 @@ def test_inbound_relay_sweep_tool_change_selects_core_not_tier1():
 
 
 def test_ci_cancel_guard_tool_change_selects_core_not_tier1():
-    """A change to the cancel guard must run the rules it pins (#10920 round-3 review).
+    """A change to the cancel guard must run the rules it pins (#10936 round-3 review).
 
     `tests/test_ci_cancel_guard.py` is registered on the `core` surface and owns the
     guard's fail-closed guarantees — a CURRENT-HEAD cancel is refused, a started job

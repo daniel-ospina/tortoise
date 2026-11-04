@@ -1586,7 +1586,7 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # Pinned by
              # tests/test_ci_selection.py::test_worktree_report_tool_change_selects_core_not_tier1.
              "tools/worktree_report.py",
-             # #10920 review round 3, BLOCKING: tools/ci_cancel_guard.py owns
+             # #10936 review round 3, BLOCKING: tools/ci_cancel_guard.py owns
              # tests/test_ci_cancel_guard.py (registered `core`), and the same silent
              # drop bit it: `tools/` is swallowed by NON_PYTHON_PREFIXES and no
              # SOURCE_PATTERNS row matches the tool, so a TOOL-ONLY change selected NO
@@ -1594,9 +1594,9 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # where that file is not registered. That is the worst possible diff to
              # drop: the file being edited is the gate in front of POST /cancel, so the
              # PR that deletes the CURRENT-HEAD arm, the job allow-list or the sentinel
-             # refusal would merge green with its 35 pins never selected, and the guard
-             # would then cancel the open PR's current head. MEASURED before this entry:
-             # `--changed-files tools/ci_cancel_guard.py --event pull_request` ->
+             # refusal would merge green with every case in it never selected, and the
+             # guard would then cancel the open PR's current head. MEASURED before this
+             # entry: `--changed-files tools/ci_cancel_guard.py --event pull_request` ->
              # surfaces=[], full=False, test_ci_cancel_guard.py ABSENT; after ->
              # surfaces=['core'], present. ⚠️ n is a SNAPSHOT taken at the head that
              # measured it — re-measure, do not trust the count. Same
