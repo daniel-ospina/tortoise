@@ -847,6 +847,16 @@ move there is to look before re-sending — `tortoise_list_batches` names a rece
 `batch_id` and `tortoise_list_batch` shows what it committed, so re-sending becomes
 a decision about the items that are missing rather than a guess about all of them.
 
+⛔ **Know what that look cannot see.** The batch surface stamps points, operator
+points and direct edges — **not** entities or sources ([§16](#16-batch_id--audit),
+and the reason is the same one §15 opened with). So on a bundle carrying a
+`document`/`event` entity, `list_batch` answers for the points and says nothing
+about the occurrence records: a clean-looking batch does NOT license re-sending
+those, and they are exactly the items that append a second copy. For the entity
+legs the response's own `created`/`deduped` counts are the only signal, and after
+a refusal there is no response — so treat a refused bundle with entity items as
+`UNSAFE` for the entities regardless of what the batch shows.
+
 ---
 
 ## 16. `batch_id` & audit

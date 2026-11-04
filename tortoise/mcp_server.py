@@ -803,8 +803,14 @@ def _arguments_disable_convergence(name: str, arguments) -> bool:
     if name != "tortoise_create_point":
         return False
     if _call_carries_props(arguments) or _call_folds_siblings_into_props(arguments):
-        # ⛔ `props` DEFEATS the dedup fold, so no allow-list of prop keys can
-        # prove convergence. Measured: `create_point(content=X, props={"is_operator":
+        # ⛔ `props` is CALLER-CONTROLLED and open-ended, so no allow-list of prop
+        # keys can prove convergence — and a payload naming `is_operator` really
+        # does defeat the fold. Do not state that as "props defeats the fold" for
+        # ALL props: measured, `props={"confidence": 0.9}` and
+        # `props={"label": "supports"}` both fold onto the same id, and only
+        # `is_operator` mints a second node. The rule below is "proven only for a
+        # props-free call", which is about provability, not about what one
+        # particular payload does. Measured: `create_point(content=X, props={"is_operator":
         # True})` twice mints TWO nodes with DIFFERENT ids, because the fold's own
         # predicate EXCLUDES operator nodes (`sdk.py`: `WHERE (n.is_operator IS
         # NULL OR n.is_operator = false) AND (n.op_type IS NULL OR n.is_operator =
@@ -3516,10 +3522,22 @@ def tortoise_create_point(kind: str, content: str,
     separate ceremony needed, and no step the write did not observe (#3784).
 
     dedup=True (default) folds onto an existing Point when the content matches.
-    ⛔ That is NOT a blanket idempotency claim: a call carrying props, authoredBy
-    or credibility is not advertised as repeatable, because convergence is not
-    provable across the props channel (a props payload can take the node out of
-    the fold's own predicate).
+    ⛔ That is NOT a blanket idempotency claim: a call carrying ``props``,
+    ``authoredBy`` or ``credibility`` is not advertised as repeatable — and the
+    three are NOT disqualified for the same reason, so do not collapse them:
+
+    * ``props`` naming ``is_operator`` takes the node OUT of the fold's own
+      predicate (measured: two ids). Because ``props`` is caller-controlled and
+      open-ended, no prop allow-list can prove convergence.
+    * ``authoredBy`` (like any other prop) folds onto the SAME id, but the
+      dedup-hit path then runs ``update_point`` and emits ``PointRevised``,
+      bumping ``updatedAt`` — a repeat that is not a no-op.
+    * ``credibility`` alone is byte-identical on a repeat (measured, on both
+      doors) and is withheld anyway because this check is conservative BY
+      DESIGN: ``0 == False`` in Python, so a value-truthiness test would fail
+      OPEN. Over-blocking costs a legitimate retry; under-blocking duplicates.
+
+    The rule is what is PROVEN, not what is known to duplicate.
     dedup=False: force-create even if content is identical.
 
     Decision parts (#2199) — pointKind option/criterion/evidence/decision

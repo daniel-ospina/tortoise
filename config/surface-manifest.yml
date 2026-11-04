@@ -49,7 +49,7 @@
 # a constant here.
 manifest_version: 1
 issue: 3863
-cut_at_commit: 9f04159f0f68c67be9dc07e2d4bc306762e7013d
+cut_at_commit: fed5ece67c755f94c841f90989f8aa4c8c8b151e
 allowed_transforms:
 - _HTTPToolFilter
 - _RetiredToolTransform
@@ -1043,7 +1043,7 @@ rows:
   class: agent-reachable
   cluster_canonical: tortoise_index_files
 - name: tortoise_create_point
-  served_from: tortoise/mcp_server.py:9860ad2503ad1b45
+  served_from: tortoise/mcp_server.py:a28c98b7bda822f7
   served_attributes: edb6c4d045fc0522
   family: memory
   family_rank: 1
