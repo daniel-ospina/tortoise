@@ -48,11 +48,23 @@ class _R:
         self.returncode, self.stdout, self.stderr = returncode, stdout, stderr
 
 
+LANE_FIXTURE_ROOT = Path("/tmp/fdb-lane-fixture-worktree")
+#: The root that fixture name is DERIVED FROM, not a literal pinned beside it: a
+#: `start()`-created container carries `container_name(slug_for(root))` as its
+#: NAME and the same pair as its ownership LABEL, and the removal guard compares
+#: the two (see `_assert_removal_allowed`). A hand-written name would therefore
+#: be a state the tool cannot produce — it refused to clean up after itself, and
+#: the suite said nothing because the guard used to re-derive the name instead of
+#: taking the caller's.
+LANE_FIXTURE_NAME = tl.container_name(tl.slug_for(LANE_FIXTURE_ROOT))
+
+
 @pytest.fixture
 def lane(monkeypatch):
     """Pin the lane's container name so tests do not depend on the CWD."""
-    monkeypatch.setattr(tl, "lane_name", lambda: "fdb-lane-0123456789")
-    return "fdb-lane-0123456789"
+    monkeypatch.setattr(tl, "_lane_identity",
+                        lambda: (LANE_FIXTURE_NAME, LANE_FIXTURE_ROOT))
+    return LANE_FIXTURE_NAME
 
 
 @pytest.fixture(autouse=True)
@@ -229,6 +241,15 @@ def test_the_reaper_never_removes_a_container_no_worktree_here_claims(monkeypatc
 
     monkeypatch.setattr(tl, "_docker", fake)
     monkeypatch.setattr(tl, "_worktree_slugs", lambda: {})
+    # Both arms below are decided by the sweep's /proc scan BEFORE the client
+    # probe, so leaving it real hands this test's verdict to the host: on a box
+    # without /proc `_live_lane_paths()` returns None, the sweep reports
+    # "ownership is NOT determined" and `continue`s, and the "active client"
+    # arm this test exists to pin is never reached (measured: red on macOS,
+    # green on the Linux runner — the #5049 "verdicts from conditions, not
+    # ambient machine state" defect). Pin the scan to a readable-and-empty
+    # answer so each arm asserts the rule it names on every host.
+    monkeypatch.setattr(tl, "_live_lane_paths", lambda: set())
     # YOUNG: the backstop is a bound, not a hair trigger. An unowned container
     # inside ORPHAN_MAX_AGE_H is REPORTED and removed by nothing.
     monkeypatch.setattr(tl, "_started_epoch", lambda _n: time.time())
@@ -954,7 +975,7 @@ def test_arm_3_defaults_to_REPORT_ONLY_and_names_the_opt_in(monkeypatch):
 
     def fake(*a, **k):
         if a[0] == "ps":
-            return _R(0, "fdb-lane-0123456789\trunning\n", "")
+            return _R(0, f"{LANE_FIXTURE_NAME}\trunning\n", "")
         if a[0] == "rm":
             removed.append(a[1:])
         return _R(0, "", "")
@@ -1282,7 +1303,7 @@ def test_ORPHAN_MAX_AGE_H_gates_the_unowned_arm(tmp_path, monkeypatch):
 
     def fake(*a, **k):
         if a[0] == "ps":
-            return _R(0, "fdb-lane-0123456789\trunning\n", "")
+            return _R(0, f"{LANE_FIXTURE_NAME}\trunning\n", "")
         if a[0] == "rm":
             removed.append(a[1:])
         return _R(0, "", "")
@@ -1308,7 +1329,7 @@ def test_ORPHAN_MAX_AGE_H_gates_the_unowned_arm(tmp_path, monkeypatch):
 
     monkeypatch.setattr(tl, "_unused_gap", lambda _n, **k: 25.0)
     out = tl.reap_orphans()
-    assert removed == [("-f", "fdb-lane-0123456789")], (removed, out)
+    assert removed == [("-f", LANE_FIXTURE_NAME)], (removed, out)
 
 
 def test_a_live_cross_clone_lane_spares_its_container_by_SLUG(tmp_path, monkeypatch):
@@ -1415,7 +1436,7 @@ def test_start_sweeps_orphans_and_reports_them_on_stderr(
 # ── the ownership guard (the part that must never be wrong) ────────────────
 
 @pytest.mark.parametrize("name", [
-    "fdb-lane-0123456789",
+    LANE_FIXTURE_NAME,
     "fdb-lane-abcdef",
 ])
 def test_is_managed_accepts_this_tool_s_containers(name):
@@ -1891,7 +1912,7 @@ def test_start_refuses_when_a_stale_container_cannot_be_removed(monkeypatch):
     rather than the removal problem it is."""
     monkeypatch.setattr(tl, "container_state", lambda _n: "exited")
     monkeypatch.setattr(tl, "_remove_and_describe",
-                        lambda _n: "FAILED to remove it — check `docker ps -a`")
+                        lambda _n, **_k: "FAILED to remove it — check `docker ps -a`")
     with pytest.raises(SystemExit) as exc:
         tl.start()
     assert "could not be removed" in str(exc.value)
@@ -2064,7 +2085,7 @@ def test_start_reuses_a_running_container_without_removing_it(lane, monkeypatch)
     monkeypatch.setattr(tl, "_container_live_maxmemory", lambda _n: 1536 << 20)
     monkeypatch.setattr(tl, "_container_redis_args", lambda _n: "")
     monkeypatch.setattr(tl, "_remove_and_describe",
-                        lambda n: removed.append(n) or "removed it")
+                        lambda n, **_k: removed.append(n) or "removed it")
 
     # The reuse path now also records a LEASE (one `inspect` for the instance
     # id) so the reaper can tell a live lane from a leaked one. That read is
@@ -2075,7 +2096,7 @@ def test_start_reuses_a_running_container_without_removing_it(lane, monkeypatch)
     def _boom(*_a, **_k):
         raise AssertionError("`docker run` must not be reached on the reuse path")
     monkeypatch.setattr(tl, "_docker", _boom)
-    assert tl.start() == ("fdb-lane-0123456789", 16390)
+    assert tl.start() == (LANE_FIXTURE_NAME, 16390)
     assert removed == [], "a running lane container must never be removed"
 
 
@@ -2215,9 +2236,9 @@ def test_start_accepts_an_explicit_port_that_matches(lane, monkeypatch):
     monkeypatch.setattr(tl, "_published_port", lambda _n: (True, 16390))
     monkeypatch.setattr(tl, "_wait_ready", lambda _n, _host_port=None: True)
     monkeypatch.setattr(tl, "_remove_and_describe",
-                        lambda n: (_ for _ in ()).throw(
+                        lambda n, **_k: (_ for _ in ()).throw(
                             AssertionError("must not remove a live lane")))
-    assert tl.start(port=16390) == ("fdb-lane-0123456789", 16390)
+    assert tl.start(port=16390) == (LANE_FIXTURE_NAME, 16390)
 
 
 def test_the_documented_shell_contract_aborts_on_failure():
@@ -2311,7 +2332,7 @@ def test_start_returns_the_published_port_not_the_requested_one(lane, monkeypatc
         seen.append((args, kwargs))
         return _R(0, "PONG")
     monkeypatch.setattr(tl, "_docker", _fake)
-    assert tl.start() == ("fdb-lane-0123456789", 16400)
+    assert tl.start() == (LANE_FIXTURE_NAME, 16400)
 
     runs = [(argv, kw) for argv, kw in seen if argv[:2] == ("run", "-d")]
     assert runs, "`docker run` must have been invoked"
@@ -2479,7 +2500,8 @@ def test_a_failed_port_query_on_a_fresh_container_says_so_and_cleans_up(lane, mo
     monkeypatch.setattr(tl, "container_state", lambda _n: "absent")
     monkeypatch.setattr(tl, "pick_port", lambda *a, **k: 16399)
     monkeypatch.setattr(tl, "_published_port", lambda _n: (False, None))
-    monkeypatch.setattr(tl, "_remove_and_describe", lambda _n: "removed it")
+    monkeypatch.setattr(tl, "_remove_and_describe",
+                        lambda _n, **_k: "removed it")
     monkeypatch.setattr(tl, "_docker", lambda *a, **k: _R(0, "PONG"))
     with pytest.raises(SystemExit) as exc:
         tl.start()
@@ -2509,9 +2531,9 @@ def test_cleanup_reports_a_failed_removal_instead_of_claiming_success(lane, monk
     — reverting it to an unverified "removed it" must not leave the suite green."""
     monkeypatch.setattr(tl, "is_managed", lambda _n, _host_port=None: True)
     monkeypatch.setattr(tl, "_docker", lambda *a, **k: _R(1, "", "container busy"))
-    assert "FAILED to remove it" in tl._remove_and_describe("fdb-lane-0123456789")
+    assert "FAILED to remove it" in tl._remove_and_describe(LANE_FIXTURE_NAME)
     monkeypatch.setattr(tl, "_docker", lambda *a, **k: _R(0, "", ""))
-    assert tl._remove_and_describe("fdb-lane-0123456789") == "removed it"
+    assert tl._remove_and_describe(LANE_FIXTURE_NAME) == "removed it"
 
 
 def test_cleanup_refuses_an_unmanaged_name(lane, monkeypatch):
@@ -2555,7 +2577,79 @@ def test_start_cleans_up_when_the_container_answers_but_publishes_nothing(lane, 
     with pytest.raises(SystemExit) as exc:
         tl.start()
     assert "it publishes no port" in str(exc.value)
-    assert ("rm", "-f", "fdb-lane-0123456789") in calls
+    assert ("rm", "-f", LANE_FIXTURE_NAME) in calls
+
+
+def test_a_DEGRADED_later_root_read_cannot_strand_a_half_started_container(
+        monkeypatch, tmp_path):
+    """`start()` reads `repo_root()` ONCE and THREADS it into its removal guards.
+
+    The guard re-derived this worktree's container name from a FRESH
+    `repo_root()`, and that read has a documented PER-CALL degraded mode
+    (`Path.cwd()` on a git timeout — the overloaded hosts this tool exists for).
+    A degraded read therefore REFUSED to clean up the container `start()` had
+    just created, on exactly the two paths that exist to stop it holding a
+    reserved port: the message names a peer lane that does not exist, and the
+    container survives (#8180's leak, produced by the guard meant to prevent it).
+
+    Mutation: drop `root=root` from the `_remove_and_describe(...)` calls in
+    `start()` — the flipping root below then refuses the removal.
+    """
+    real, degraded = tmp_path / "real-root", tmp_path / "degraded-root"
+    real.mkdir()
+    degraded.mkdir()
+    reads: list[Path] = []
+
+    def flipping_root():
+        reads.append(real if not reads else degraded)
+        return reads[-1]
+
+    calls: list = []
+
+    def fake(*a, **k):
+        calls.append(a)
+        if a[0] == "exec":
+            return _R(0, "PONG", "")
+        return _R(0, "", "")
+
+    monkeypatch.setattr(tl, "repo_root", flipping_root)
+    monkeypatch.setattr(tl, "container_state", lambda _n: "absent")
+    monkeypatch.setattr(tl, "pick_port", lambda *a, **k: 16399)
+    monkeypatch.setattr(tl, "_published_port", lambda _n: (True, None))
+    monkeypatch.setattr(tl, "_wait_ready", lambda _n, _host_port=None: True)
+    monkeypatch.setattr(tl, "_docker", fake)
+    with pytest.raises(SystemExit) as exc:
+        tl.start()
+    assert "it publishes no port" in str(exc.value)
+    # The container THIS call created is removed by name, from the same read.
+    assert ("rm", "-f", tl.container_name(tl.slug_for(real))) in calls, calls
+    assert len(reads) == 1, reads
+
+
+def test_the_orphan_sweep_uses_the_NAME_the_caller_already_derived(monkeypatch):
+    """`start()` passes the name it derived (`own_name=`) into the sweep.
+
+    The sweep's "this is THIS worktree's container" test is what stops a lane
+    deleting its own database. Deciding it from a SECOND `repo_root()` read meant
+    a read that degraded inside one `start()` could make `mine` disagree with the
+    container `start()` was about to create — the same divergence the label pair
+    exists to prevent, one record over.
+
+    Mutation: drop `own_name=` at the call site (or use `lane_name()` regardless)
+    and the sweep re-derives the name, reaching the boom below.
+    """
+    name = "fdb-lane-0123456789"
+
+    def _boom(*_a, **_k):  # pragma: no cover - asserted not to run
+        raise AssertionError("the sweep re-derived this lane's identity")
+
+    monkeypatch.setattr(tl, "lane_name", _boom)
+    monkeypatch.setattr(tl, "repo_root", _boom)
+    monkeypatch.setattr(tl, "_worktree_slugs", lambda: {})
+    monkeypatch.setattr(tl, "_docker",
+                        lambda *a, **k: _R(0, f"{name}\trunning\t\t\n", ""))
+    out = tl.reap_orphans(own_name=name)
+    assert f"kept {name} — this is THIS worktree's container" in "\n".join(out), out
 
 
 def test_stop_surfaces_a_failed_removal(lane, monkeypatch):
@@ -2997,7 +3091,8 @@ def test_the_start_reuse_path_reports_a_container_with_no_dataset_ceiling(
     monkeypatch.setattr(tl, "container_state", lambda _n: "running")
     monkeypatch.setattr(tl, "_published_port", lambda _n: (True, 16390))
     monkeypatch.setattr(tl, "_wait_ready", lambda _n, _host_port=None: True)
-    monkeypatch.setattr(tl, "_remove_and_describe", lambda n: "removed it")
+    monkeypatch.setattr(tl, "_remove_and_describe",
+                        lambda n, **_k: "removed it")
     # The container is 2g-born and UNBOUNDED — the measured shape of the
     # container this note exists for (`fdb-lane-1555b57be7`).
     monkeypatch.setattr(tl, "_container_memory_limit", lambda _n: 2 << 30)
@@ -3010,11 +3105,11 @@ def test_the_start_reuse_path_reports_a_container_with_no_dataset_ceiling(
     monkeypatch.setattr(tl, "_container_live_maxmemory", unbounded)
     monkeypatch.setattr(tl, "_container_redis_args", lambda _n: "")
 
-    assert tl.start() == ("fdb-lane-0123456789", 16390)
+    assert tl.start() == (LANE_FIXTURE_NAME, 16390)
     err = capsys.readouterr().err
     assert "NO dataset ceiling in effect" in err, err
     assert "down" in err, err
-    assert read == ["fdb-lane-0123456789"], (
+    assert read == [LANE_FIXTURE_NAME], (
         "start() must ASK the reused container for its live ceiling: without that "
         f"call the note is dead code on the only path that needs it, got {read}"
     )
@@ -3679,7 +3774,7 @@ def test_the_env_fallback_does_not_call_a_readable_ceiling_unreadable(
 
 def _stub_start(monkeypatch, *, port: int = 16406):
     """Pin the resolved lane, so the seam under test is the child env, not Docker."""
-    monkeypatch.setattr(tl, "start", lambda _p=None: ("fdb-lane-0123456789", port))
+    monkeypatch.setattr(tl, "start", lambda _p=None: (LANE_FIXTURE_NAME, port))
 
 
 def _capture_run(monkeypatch, *, returncode: int = 0) -> dict:
@@ -3782,7 +3877,7 @@ def test_run_re_stamps_the_lease_AFTER_the_child(lane, monkeypatch):
     monkeypatch.setattr(tl.subprocess, "run", fake_run)
     monkeypatch.setattr(tl, "_touch_lease", lambda n: events.append(("lease", n)))
     assert tl.main(["run", "--", "-q", "tests/"]) == 0
-    assert events == [("child", None), ("lease", "fdb-lane-0123456789")], events
+    assert events == [("child", None), ("lease", LANE_FIXTURE_NAME)], events
 
 
 def test_a_run_LONGER_than_the_grace_ends_with_a_FRESH_lease(lane, monkeypatch):
@@ -3794,7 +3889,7 @@ def test_a_run_LONGER_than_the_grace_ends_with_a_FRESH_lease(lane, monkeypatch):
     2 h grace at the exact moment the lane is between steps."""
     monkeypatch.setattr(tl, "_touch_lease", _REAL_TOUCH_LEASE)
     monkeypatch.setattr(tl, "_container_id", lambda _n: "ffffffffffff")
-    name = "fdb-lane-0123456789"
+    name = LANE_FIXTURE_NAME
     f = tl._reap_state_path(name)
     f.parent.mkdir(parents=True, exist_ok=True)
     f.write_text(f"ffffffffffff {time.time() - 3 * 3600:.0f}\n")
@@ -3846,7 +3941,7 @@ def test_run_names_the_target_BEFORE_the_child_starts(
     monkeypatch.setattr(tl.subprocess, "run", fake_run)
     tl.main(["run", "--", "-q"])
     assert len(at_child_start) == 1
-    assert "fdb-lane-0123456789" in at_child_start[0]
+    assert LANE_FIXTURE_NAME in at_child_start[0]
     assert "TORTOISE_DB_URI=docker://:@127.0.0.1:16406/" in at_child_start[0]
 
 
@@ -3956,7 +4051,7 @@ def test_run_and_up_emit_the_SAME_three_seam_vars(lane, monkeypatch, capsys):
     tl.main(["run", "--", "-q"])
     child_env = seen["env"]
 
-    monkeypatch.setattr(tl, "start", lambda _p=None: ("fdb-lane-0123456789", 16406))
+    monkeypatch.setattr(tl, "start", lambda _p=None: (LANE_FIXTURE_NAME, 16406))
     monkeypatch.setattr(tl, "_graph_count", lambda _n: 0)
     tl.main(["up"])
     printed = capsys.readouterr().out.splitlines()
@@ -3990,3 +4085,206 @@ def test_the_default_target_cannot_itself_be_eaten_by_an_option(
     assert seen["argv"] == [sys.executable, "-m", "pytest", "tests/", "-q", "-k"]
     assert seen["argv"][3] == "tests/"        # the target is the first pytest arg
     assert "adding `tests/`" in capsys.readouterr().err
+
+
+# ── OWNERSHIP IS STAMPED INTO THE CONTAINER, not only into its name ────────
+#
+# The name is `fdb-lane-<sha1(worktree path)[:10]>` — a one-way digest of the
+# very path teardown DELETES, so `_worktree_slugs()` cannot resolve it once
+# `git worktree remove`/prune drops the entry. The container then leaves the
+# "owner determined" population and joins the INDETERMINATE one, whose default
+# #8180's owner has not ruled on. The label pair stamped at creation survives
+# that teardown, so the container stays DETERMINED — and it can only SPARE a
+# container or move it onto the one proof the ruling already authorises armed.
+
+def _labelled_row(name, state, owner):
+    """A `docker ps` row shaped exactly like `reap_orphans()`'s projection:
+    name, state, ``LABEL_OWNER``, ``LABEL_SLUG``.
+
+    The slug is DERIVED from ``owner`` the way `_label_args()` writes it, and
+    callers derive ``name`` from the same path — because that is the ONLY pair
+    this tool produces. A hand-written slug would exercise a shape that never
+    occurs and would hide a broken corroboration.
+    """
+    return f"{name}\t{state}\t{owner}\t{tl.slug_for(owner)}"
+
+
+def test_the_label_writer_cannot_read_the_root_itself():
+    """The single-read invariant is only true if `_label_args` cannot read the
+    root itself: a required `root` parameter is what makes "ONE `repo_root()`
+    read" a property of the code instead of a comment."""
+    assert list(inspect.signature(tl._label_args).parameters) == ["root"]
+
+
+def test_the_NAME_and_the_ownership_LABEL_come_from_ONE_root_read(monkeypatch,
+                                                                 tmp_path):
+    """ONE degraded `repo_root()` read must not weld a container shut forever.
+
+    `repo_root()` has a documented PER-CALL degraded mode (`Path.cwd()` on a git
+    timeout — the overloaded hosts this tool exists for). The container NAME is
+    `slug_for(root)` and the label pair is `<root>` + `slug_for(root)`; while
+    those came from TWO reads one of them could degrade, and the label then names
+    a different worktree than the container. `_trusted_label_owner()` vetoes that
+    pair as non-evidence, and after the worktree is gone the name does not
+    resolve either — the #8180 leak, re-entered through the door built to close
+    it. So this flips the root BETWEEN calls, which is what a degraded read looks
+    like from inside `start()`.
+    """
+    first, second = tmp_path / "read-one", tmp_path / "read-two"
+    first.mkdir()
+    second.mkdir()
+    reads: list[Path] = []
+
+    def flipping_root():
+        reads.append(first if not reads else second)
+        return reads[-1]
+
+    monkeypatch.setattr(tl, "repo_root", flipping_root)
+    calls: list = []
+
+    def fake(*a, **k):
+        calls.append(a)
+        if a[0] == "inspect":
+            return _R(0, "absent\n", "")
+        if a[0] == "run":
+            return _R(0, "deadbeef\n", "")
+        if a[0] == "port":
+            return _R(0, "0.0.0.0:16390\n", "")
+        return _R(0, "PONG\n", "")
+
+    monkeypatch.setattr(tl, "_docker", fake)
+    name, _port = tl.start(port=16390)
+
+    assert len(reads) == 1, (
+        f"`start()` must derive the container identity from ONE `repo_root()` "
+        f"read, not {len(reads)}: {reads}")
+    argv = list(next(c for c in calls if c[0] == "run"))
+    labels = {argv[i + 1].split("=", 1)[0]: argv[i + 1].split("=", 1)[1]
+              for i, a in enumerate(argv) if a == "--label"}
+    assert labels.get(tl.LABEL_OWNER) == str(first.resolve()), labels
+    assert labels.get(tl.LABEL_SLUG) == tl.slug_for(first), labels
+    assert labels.get(tl.LABEL_CREATED), labels
+    # The pair must describe the SAME worktree the NAME came from, and the slug
+    # is what corroborates the owner label to the container it is stamped on.
+    assert name == tl.container_name(labels[tl.LABEL_SLUG]), (name, labels)
+
+
+def test_an_ownership_LABEL_makes_a_DEREGISTERED_worktree_still_reapable(
+        monkeypatch, tmp_path):
+    """THE LEAK, closed at the root.
+
+    `git worktree remove` destroys the only record `_worktree_slugs()` has, so
+    the container used to be INDETERMINATE — reported and kept, for days. The
+    label says which worktree created it, so the owner is DETERMINED and GONE,
+    which is exactly the proof #8180 authorises armed.
+    """
+    gone = tmp_path / "deleted-worktree"
+    removed: list = []
+    name = tl.container_name(tl.slug_for(gone))
+    assert not gone.exists()
+
+    def fake(*a, **k):
+        if a[0] == "ps":
+            return _R(0, _labelled_row(name, "running", gone), "")
+        if a[0] == "rm":
+            removed.append(a)
+        return _R(0, "", "")
+
+    monkeypatch.setattr(tl, "_docker", fake)
+    # git answered: nothing claims this container any more (the teardown).
+    monkeypatch.setattr(tl, "_worktree_slugs", lambda: {})
+    monkeypatch.setattr(tl, "lane_name", lambda: "fdb-lane-mine")
+    out = tl.reap_orphans()
+    joined = "\n".join(out)
+    assert [c[1:3] for c in removed] == [("-f", name)], (removed, out)
+    assert "owning worktree" in joined and "is gone" in joined, out
+
+
+def test_a_LABEL_whose_SLUG_disagrees_with_the_container_is_not_evidence(
+        monkeypatch, tmp_path):
+    """A label is a fact written by SOMEONE — a predecessor version, a copied
+    `docker run`, a hand-written `--label` — so it is an ownership record only
+    when it corroborates the container it sits on. Here it names a LIVE path that
+    is not this container's origin: believing it would assert "its owning
+    worktree exists" about a container that path never owned, and keep it
+    forever. It is reported and IGNORED instead.
+    """
+    live = tmp_path / "someone-elses-clone"
+    live.mkdir()
+    gone = tmp_path / "this-containers-real-owner"
+    name = tl.container_name(tl.slug_for(gone))       # the container's real id
+    removed: list = []
+
+    def fake(*a, **k):
+        if a[0] == "ps":
+            # Self-consistent pair — but for a DIFFERENT worktree.
+            return _R(0, _labelled_row(name, "running", live), "")
+        if a[0] == "rm":
+            removed.append(a)
+        return _R(0, "", "")
+
+    monkeypatch.setattr(tl, "_docker", fake)
+    monkeypatch.setattr(tl, "_worktree_slugs", lambda: {})
+    monkeypatch.setattr(tl, "lane_name", lambda: "fdb-lane-mine")
+    out = tl.reap_orphans()
+    joined = "\n".join(out)
+    assert "not evidence" in joined, out
+    assert "owning worktree exists" not in joined, (
+        f"the label must not be reported as this container's owner: {out}")
+    # Ignored is not believed, and it is not a deletion either: with no name
+    # record and no trusted label, the owner is INDETERMINATE, which is the
+    # DEFAULT-report population — untouched, exactly as on main.
+    assert removed == [], out
+    assert "report only" in joined, out
+
+
+def test_a_corroborated_label_whose_owner_EXISTS_beats_the_age_backstop(
+        monkeypatch, tmp_path):
+    """The other direction: a labelled container whose worktree is STILL THERE is
+    DETERMINED and PRESENT, so the INDETERMINATE age arm can never reach it —
+    however ancient the container is. Without the label it is only a candidate
+    for that arm; with it, the container is spared by OWNERSHIP, not by age.
+
+    The age arm's deletion is ARMED here (`OWNER_INDETERMINATE_REAP_ENV=1`), so
+    "not removed" cannot be explained by the report-only default: the same
+    fixture without the label reaches `rm -f`. And the probe seams are stubbed
+    rather than left to the host — a running container must still be ASKED
+    whether a client is attached (an unreadable probe keeps it for the wrong
+    reason, which is how this assertion could pass on nothing), and `/proc` is a
+    platform surface a unit test must not depend on.
+
+    Mutation: stop consulting the label (drop the `_trusted_label_owner` branch
+    in `reap_orphans`) and the container is REMOVED by the armed age arm."""
+    live = tmp_path / "live-lane"
+    live.mkdir()
+    removed: list = []
+    name = tl.container_name(tl.slug_for(live))
+
+    def fake(*a, **k):
+        if a[0] == "ps":
+            return _R(0, _labelled_row(name, "running", live), "")
+        if a[0] == "rm":
+            removed.append(a)
+        return _R(0, "", "")
+
+    monkeypatch.setattr(tl, "_docker", fake)
+    monkeypatch.setattr(tl, "_worktree_slugs", lambda: {})
+    monkeypatch.setattr(tl, "lane_name", lambda: "fdb-lane-mine")
+    monkeypatch.setattr(tl, "_started_epoch", lambda _n: 0.0)      # ancient
+    # A live lane's container on the `start()`-shape evidence: no process holds
+    # it, no client is attached, and it has been unused for longer than either
+    # bound. Every one of those is stubbed, so the ONLY thing keeping it is the
+    # label resolving to a worktree that exists.
+    monkeypatch.setattr(tl, "_live_lane_paths", lambda: set())
+    monkeypatch.setattr(tl, "_container_in_use", lambda _n: False)
+    monkeypatch.setattr(tl, "_unused_gap", lambda _n: 40.0)
+    monkeypatch.setenv(tl.OWNER_INDETERMINATE_REAP_ENV, "1")   # age arm ARMED
+    out = tl.reap_orphans()
+    joined = "\n".join(out)
+    assert removed == [], out
+    # The DETERMINED-and-PRESENT arm reports the OWNER worktree, not the clock.
+    assert "its owning worktree still EXISTS" in joined, out
+    assert str(live) in joined, out
+    # …and the INDETERMINATE arm — the only bucket this PR's label can move a
+    # container OUT of — never sees it.
+    assert "no worktree in this clone names it" not in joined, out
