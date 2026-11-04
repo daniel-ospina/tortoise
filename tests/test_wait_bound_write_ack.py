@@ -328,7 +328,12 @@ def test_the_unsafe_rule_speaks_about_the_CALL_never_the_operation():
     assert "converges when repeated" in safe_rule
     assert "may still be in flight" in safe_rule, (
         "the promise must be bounded by the condition it holds under")
-    assert "uniqueness guard" in safe_rule
+    # ...and it must NOT name a mechanism only SOME members have: the rule ships
+    # for four tools, and `create_source` converges in a single conditional MERGE
+    # while `onboarding_demo_create` is sentinel-gated. The check-then-write
+    # census belongs in the rationale, not in a shipped promise.
+    assert "check-then-write" not in safe_rule
+    assert "uniqueness guard" not in safe_rule
 
 
 def test_the_verdict_is_per_CALL_not_per_name():

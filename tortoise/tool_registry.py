@@ -266,8 +266,10 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         id="surface.create_point",
         description="Create a Point node (statement, decision, vision, hypothesis, etc.). "
                     "dedup=True (default) folds onto an existing Point when the content "
-                    "matches — UNLESS the call carries props or authoredBy/credibility, "
-                    "which take the node out of the fold's own predicate. "
+                    "matches. Calls carrying props, authoredBy or credibility are NOT "
+                    "advertised as repeatable: convergence is not provable across the "
+                    "props channel (a props payload can take the node out of the fold's "
+                    "own predicate). "
                     "Declaring extractedFrom materializes that :Source and links it (#8171); "
                     "a fresh write with no source and no provenance is advised (advisories: "
                     "[{code: no_source, node_id, message}] — advisory only, never a block). "
@@ -1040,9 +1042,10 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
                     "update_point(status='live'). promotion_policy='auto' preserves the #131 "
                     "promote-on-wire lifecycle (null-status sources only — an explicit draft "
                     "is never retro-promoted, #1088; terminal sources are never resurrected; "
-                    "deduped connections never retro-promote). Idempotent-ish: "
-                    "points dedup by content hash + kind, sources by url, operators by "
-                    "input set.",
+                    "deduped connections never retro-promote). NOT declared "
+                    "idempotent: points dedup by content hash + kind, sources by url "
+                    "and operators by input set, but the entities leg is append-only "
+                    "for document/event — a repeat can write a second Source.",
         risk="write",
         # ⛔ NOT idempotent — and this is a corrected declaration, not a tier
         # default (#10849 review). `ingest` looked convergent on three separate

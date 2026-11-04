@@ -698,8 +698,7 @@ def _wait_bound_refused() -> bool:
 _WAIT_BOUND_RETRY_RULE_SAFE = (
     "this operation converges when repeated, so a retry is safe once the first "
     "attempt can no longer be running. Do NOT re-send while it may still be in "
-    "flight: this convergence is a check-then-write with no uniqueness guard "
-    "behind it, so two overlapping attempts can both find nothing and both write."
+    "flight: an overlapping attempt is not a repeat."
 )
 #: No dispatch was ever STARTED (the transport refused before this seam scheduled
 #: one, or the argument check bailed out having already been answered), so there
@@ -5721,7 +5720,12 @@ def tortoise_approve_merge(candidate_id: str,
     action='merge' → content: wire the alreadyDecided IMPL (draft prior) or
     defer to promotion (live prior); temporal: defer the NAND/supersede to
     promotion. action='reject' → the candidate stays separate and is no
-    longer surfaced. Idempotent for repeated identical reviews.
+    longer surfaced.
+
+    ⛔ NOT idempotent for every branch: the temporal branch guards a repeat of the
+    same action, but the dedup branch emits its DedupeRecorded/DedupeRejected
+    event unconditionally after the already-linked check — so a retry is visible
+    twice to poll_events.
     """
 
     return _safe(_get_org_sdk().approve_merge, candidate_id, action=action)

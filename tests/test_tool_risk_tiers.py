@@ -346,7 +346,7 @@ class TestHintsCannotDrift:
             # clients read as `idempotentHint`.
             ("tortoise_create_point", True),
             ("tortoise_create_source", True),
-            # ⛔ `tortoise_get_source_reliability` is NOT here. It is a getter in
+            # ⛔ `tortoise_get_source_reliability` is pinned FALSE below, not omitted — it is a getter in
             # the write tier, and an earlier revision of this PR declared it
             # repeatable on "a repeat converges on the same value" — but the value
             # is CLOCK-dependent (recency-decayed prior, `now` defaults to the wall
@@ -354,7 +354,7 @@ class TestHintsCannotDrift:
             # float: 0.65087406 -> 0.65087345 at +1 h -> 0.65043060 at +30 d. Same
             # property that keeps `compute_confidence` non-idempotent.
             ("tortoise_get_source_reliability", False),
-            # ⛔ `tortoise_ingest` is NOT here. Three readings each looked
+            # ⛔ `tortoise_ingest` is pinned FALSE below, not omitted — three readings each looked
             # convergent and each was falsified: its entities leg is append-only
             # for document/event, a bundle may arrive as a JSON string parsed
             # after the MCP seam, and a bundle's points splat `props` FLAT beside
@@ -363,7 +363,7 @@ class TestHintsCannotDrift:
             # it (#10849 reviews).
             ("tortoise_ingest", False),
             ("tortoise_onboarding_demo_create", True),
-            # ⛔ `tortoise_mitigate_operator` is NOT here. Its own description
+            # ⛔ `tortoise_mitigate_operator` is pinned FALSE below, not omitted — its own description
             # says a re-assertion after withdrawal MINTS A NEW mitigation Point,
             # so convergence is conditional on the mitigation's current STATE —
             # which no argument predicate can see (#10849 review).
