@@ -4575,3 +4575,32 @@ def test_the_allowance_carry_does_not_run_inside_the_per_graph_commit_lock(
         f"{resolved}) — [True] means it rides the lock, two entries means the "
         "CARRIED_MARKER_KEY stamp is missing and the read was added, not moved"
     )
+
+
+def test_the_hoisted_carry_keeps_the_gate_faults_MAPPED_on_this_lane(
+        client, monkeypatch):
+    """The commit lane's hoisted fill must still answer the documented 500.
+
+    Hoisting the carry OUT of ``_commit_region`` moved the gate's import — the
+    one that is DELIBERATELY LOUD at import time — to a place the region's
+    ``except QuotaCheckError`` no longer covers. ``_carry_allowances`` is what
+    keeps it mapped (a broken/renamed module becomes the documented
+    ``500 "Quota check failed: …"``); a call that reached past it, or a marker
+    import placed ABOVE the fill, would report OUR drift as an ``ImportError``
+    escaping the route — the wrong-shape refusal class this PR removed from the
+    REST seam twice (rounds 10 and 13).
+
+    Mutation this REDs: call ``carry_resolved_allowances`` directly from
+    ``commit_session`` (or move the ``CARRIED_MARKER_KEY`` import above
+    ``_carry_allowances`` in the helper) → the response is an unhandled 500 from
+    ``ImportError``, not this body.
+    """
+    import sys
+
+    monkeypatch.setitem(sys.modules, "tortoise.allowance_gate", None)
+    r = _commit(client, _raw_payload(0, session_id="sBrokenGateLane", points=[],
+                                     entities=[], provenance_refs=[]))
+    assert r.status_code == 500, r.text
+    detail = str(r.json()["detail"])
+    assert detail.startswith("Quota check failed:"), detail
+    assert "allowance gate could not be loaded" in detail, detail
