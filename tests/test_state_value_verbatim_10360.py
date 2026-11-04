@@ -1060,6 +1060,20 @@ def test_a_magnitude_prefix_beside_a_unit_word_is_COMPOSED_not_refused():
     assert v2._value_slot_divergence("the ride was 20kms", "the ride was 20000 ms") == ()
     # …while the colloquially-correct reading stays REFUSED at both heads.
     assert v2._value_slot_divergence("the ride was 20kms", "the ride was 20000 m")
+    # ⛔ THE SECOND new tolerance, and it comes from the WIDEN, not from the arm
+    # above (review P3, measured): a fused suffix outside `_UNIT_EQUIV`
+    # (`kseconds`) leaves the core UNSCALED at `5`, so it coincides with
+    # `5 minutes` and the unknown-unit tolerance fires. `the batch took 5k
+    # seconds`/`… 5 minutes` REFUSED at `origin/main` `525fde4a9` and TOLERATES
+    # here. That is a MISSED REWRITE — the fail-open direction this rule prefers
+    # to a false accusation — and the same mechanism already tolerated
+    # `3k minutes`/`3 hours` at the base. Pinned so it cannot widen unnoticed.
+    assert v2._value_slot_divergence(
+        "the batch took 5k seconds", "the batch took 5 minutes") == ()
+    # …and the false accusation the SAME mechanism REPAIRS, which is why the
+    # trade was taken: `3k minutes`/`3000 minutes` REFUSED at base.
+    assert v2._value_slot_divergence(
+        "the job ran 3k minutes", "the job ran 3000 minutes") == ()
 
 
 #: The patterns that assert the ADJACENCY gap is OPEN again — the thing

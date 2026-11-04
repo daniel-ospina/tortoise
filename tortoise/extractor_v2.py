@@ -13308,15 +13308,23 @@ def _script_of(ch: str) -> str | None:
 # the hash-pinned `PRE-REGISTRATION.md`, so an insertion above them re-stales
 # every cite (that class produced a P0 on this very PR last cycle). Appending
 # after the last line shifts nothing. The two edits that touch the cited region
-# are both NET-ZERO swaps (the magnitude arm, 2 lines for 2; the `_UNIT_WORDS`
-# spelling line, 1 for 1), so **the file's line numbering above this append is
-# unchanged by this fix** — the insert above the cites is still the same 21+12
-# = 33 lines the cite re-derivation was computed against. Verified with
-# `git diff origin/main -- tortoise/extractor_v2.py | grep '^@@'`: every hunk
-# over a cited line has equal old/new counts (8→8, 7→7) and the only hunk that
-# grows starts at the END OF FILE. The total `--numstat` is therefore NOT 33/0
-# (it is 150/2) and quoting that pair as the invariant would be wrong — the
-# invariant is "equal counts on every hunk over a cited line".
+# are both NET-ZERO line swaps (the magnitude arm, 2 lines for 2; one
+# `_UNIT_WORDS` spelling line, 1 for 1), so **the file's line numbering above
+# this append is unchanged by this fix** and no cite needs re-deriving.
+#
+# ⛔ HOW TO CHECK IT, and why this note quotes NO running total. An earlier cut
+# of this paragraph pinned `git diff --numstat` at `33 0`; the very next commit
+# made that false, and a stale measurement quoted as an invariant is how the
+# cite P0 on this PR happened. So the invariant is stated STRUCTURALLY instead,
+# and it does not rot: between `_UNIT_EQUIV` and `_UNIT_WORDS` the only GROWING
+# hunk is the widen itself — the 21 + 12 = 33 lines every cite was re-derived
+# against — from `_UNIT_WORDS` up to the last cited line there must be NO
+# growing hunk at all, and everything this fix appends starts AFTER that line.
+# `git diff origin/main -- tortoise/extractor_v2.py | grep '^@@'` therefore has
+# to show four hunks: the two widen hunks (+21 at `_UNIT_EQUIV`, +12 at
+# `_UNIT_WORDS`), ONE net-zero hunk for the arm swap, and a final hunk at EOF.
+# Anything else — a growing hunk between `_UNIT_WORDS` and the last cited line,
+# or a fifth hunk — means a cite moved.
 #
 # THE DEFECT.  `_value_bindings` glues a value to the unit word written beside
 # it with NO prefix arithmetic (``value + seq[i + 1]``), so a magnitude-prefixed
