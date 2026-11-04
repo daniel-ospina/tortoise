@@ -263,33 +263,72 @@ def _group_alive(pgid: int) -> bool:
 
 
 def test_a_recycled_pid_without_procfs_does_not_read_waiting(tmp_path, monkeypatch):
-    """⛔ ON A BOX WITHOUT PROCFS the argv marker was silently dropped.
+    """⛔ ON A BOX WITHOUT PROCFS the identity test is the SESSION, not the argv.
 
-    `_pid_alive` consulted only the `ps` STAT letter there, so ANY live pid
+    `_pid_alive` used to consult only the `ps` STAT letter there, so ANY live pid
     inherited from a dead rail read `waiting` — reported alive forever AND
     refusing every later `start` on the PR (the unrailable wedge this module
     exists to remove; `SPAWNING_TTL_S` cannot age a pid-based `waiting` out).
-    The wrapper NEVER execs, so its argv carries the artifact path for its whole
-    life and IS a usable identity test for it (unlike for the rail, which execs
-    — that is what `pgid` is for).
+
+    The fix reads the session the launcher recorded: `sid == pid` means the
+    wrapper WAS made a session leader, so `getsid(pid) == pid` proves the pid is
+    still that leader. A recycled pid is some other process and answers False.
     """
     monkeypatch.setattr(rd, "_proc_stat_letter", lambda pid: None)
     monkeypatch.setattr(rd, "_proc_cmdline", lambda pid: None)
     monkeypatch.setattr(rd, "_PS_USABLE", True)
-    me = os.getpid()
     marker = str(tmp_path / "rail-o-r-91.md")
+    # The REAL shape: a detached wrapper is a session leader (sid == its own pid).
+    ours = subprocess.Popen(["/bin/sleep", "30"], start_new_session=True,
+                            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL)
+    # A RECYCLED pid belongs to an ordinary process — NOT a session leader.
+    other = subprocess.Popen(["/bin/sleep", "30"],
+                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL)
+    try:
+        assert rd._pid_alive(ours.pid, marker, sid=ours.pid) is True
+        assert rd._pid_alive(other.pid, marker, sid=other.pid) is False   # pre-fix: True
+        # No recorded SID (a non-detached launch, as the suite's mutant arm runs):
+        # there is no positive identity test, so the claim is KEPT — fail ALIVE.
+        assert rd._pid_alive(other.pid, marker, sid=0) is True
+    finally:
+        for p in (ours, other):
+            p.kill()
+            p.wait()
 
-    def unrelated(*args):
-        return "some-unrelated-process --flag\n" if "command=" in args else f"{me} S\n"
 
-    monkeypatch.setattr(rd, "_ps", unrelated)
-    assert rd._pid_alive(me, marker) is False        # pre-fix: True, forever
+def test_a_live_wrapper_is_not_read_dead_by_a_narrow_ps(tmp_path, monkeypatch):
+    """⛔ A TRUNCATED `ps` FIELD IS NOT EVIDENCE, AND A MISS MUST NOT VETO.
 
-    def ours(*args):
-        return f"bash -c ... {marker}\n" if "command=" in args else f"{me} S\n"
+    An earlier fix matched the artifact path against `ps -o command=`. That field
+    is WIDTH-LIMITED — the marker sits ~100 columns in — so on a narrow terminal
+    the marker is simply ABSENT from a LIVE wrapper's output and the wrapper was
+    judged DEAD. Measured on the box this ran on: the same call answered True at
+    COLUMNS=150 and False at COLUMNS=132/100/80; on macOS (no procfs, the reason
+    this arm exists) the DEFAULT is the window width and even `-w` is only 132.
 
-    monkeypatch.setattr(rd, "_ps", ours)
-    assert rd._pid_alive(me, marker) is True         # the real wrapper still reads alive
+    Reading a live rail as dead is the direction the file FORBIDS: it admits a
+    SECOND rail (#3061) and publishes a durable `lost` for a PR that merged. The
+    session test involves no text field, so no width can change the answer —
+    which is what this arm pins, at the widths that broke the argv version.
+    """
+    monkeypatch.setattr(rd, "_proc_stat_letter", lambda pid: None)
+    monkeypatch.setattr(rd, "_proc_cmdline", lambda pid: None)
+    monkeypatch.setattr(rd, "_PS_USABLE", True)
+    marker = str(tmp_path / "rail-o-r-92.md")
+    wrapper = subprocess.Popen(["/bin/sleep", "30"], start_new_session=True,
+                               stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                               stderr=subprocess.DEVNULL)
+    try:
+        for cols in ("80", "100", "132", "150"):
+            monkeypatch.setenv("COLUMNS", cols)
+            assert rd._pid_alive(wrapper.pid, marker, sid=wrapper.pid) is True, (
+                f"a live wrapper read DEAD at COLUMNS={cols}"
+            )
+    finally:
+        wrapper.kill()
+        wrapper.wait()
 
 
 def test_an_unspawnable_launch_is_an_environment_error_not_a_gate_verdict(
@@ -375,6 +414,45 @@ def test_a_rail_that_exits_during_the_liveness_probe_keeps_its_exit_code(tmp_pat
     assert st.exit_code == 0, st.as_dict()        # pre-fix: None (the stale read)
     assert st.merge_sha == "deadbeefcafe1234"
     assert st.reason == "", st.reason            # not the "never written" lie
+
+
+def test_a_merge_announced_during_the_liveness_probe_is_not_lost(tmp_path, monkeypatch):
+    """⛔ THE LOG HAS THE SAME STALE READ AS THE ARTIFACT — and a worse verdict.
+
+    `collect` computed `log` once, BEFORE `_rail_alive`, and drew the `lost`
+    conclusion from it. A rail that prints `✅ merged PR #N at <sha>` and dies
+    DURING the probe was therefore reported `lost`: the log-side twin of the
+    `EXIT=` race above, except this one is not about an exit code — it reports a
+    PR that MERGED as undecided, which also permits a second rail.
+
+    Reproduced with one fixture and only the write timing changed: merge line
+    present before the log read -> `merged`; appended during the probe -> `lost`.
+    """
+    co = make_checkout(tmp_path)
+    sd = tmp_path / "state"
+    launch(sd, co, pr=78)
+    st = wait_state(sd, 78, rd.MERGED)
+    art = rd.artifact_path(sd, "o/r", 78)
+    logp = Path(st.log)
+    # Rewind to the instant BEFORE the announcement: this attempt's mark, no merge.
+    logp.write_text(f"{rd.ATTEMPT_MARK} run 1\nadmin-merge: … FIRST-CHECKS wait\n",
+                    encoding="utf-8")
+    text = art.read_text()
+    art.write_text(
+        "\n".join(ln for ln in text.splitlines() if not ln.startswith("EXIT=")) + "\n"
+    )
+    assert "merged PR" not in logp.read_text()          # the stale log read
+
+    def announce_during_the_probe(pid, marker="", **kw):
+        with logp.open("a", encoding="utf-8") as fh:
+            fh.write("admin-merge: ✅ merged PR #78 at deadbeefcafe1234 "
+                     "(state=MERGED confirmed via the API)\n")
+        return False                                    # …and it is GONE
+
+    monkeypatch.setattr(rd, "_pid_alive", announce_during_the_probe)
+    got = rd.collect(sd, "o/r", 78)
+    assert got.state == rd.MERGED, got.as_dict()        # pre-fix: `lost`
+    assert got.merge_sha == "deadbeefcafe1234"
 
 
 def test_previous_attempts_merge_line_is_not_inherited(tmp_path):
@@ -553,14 +631,20 @@ def test_refuses_a_second_live_rail_on_one_pr(tmp_path):
     co = make_checkout(tmp_path)
     sd = tmp_path / "state"
     os.environ["FAKE_RAIL_SLEEP"] = "20"
+    ln = None
     try:
-        launch(sd, co, pr=15)
+        ln = launch(sd, co, pr=15)
         st = wait_state(sd, 15, rd.WAITING)
         assert st.state == rd.WAITING, st.as_dict()   # the first rail is live…
         with pytest.raises(rd.Refused, match="ALREADY LIVE"):
             launch(sd, co, pr=15)
     finally:
         os.environ.pop("FAKE_RAIL_SLEEP", None)
+        # ⛔ KILL WHAT WAS STARTED: the rail sleeps 20 s, so dropping it here left
+        # a real wrapper + `sleep 20` running for the rest of the suite (measured:
+        # still in `ps` after the test reported `1 passed in 2.28s`).
+        if ln is not None:
+            kill_group(ln.pid)
 
 
 def test_refuses_to_detach_a_rail_carrying_the_override_hatch(tmp_path, monkeypatch):

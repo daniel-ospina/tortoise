@@ -317,13 +317,19 @@ def _in_group(pid: int, pgid: int) -> bool:
         return False
 
 
-def _pid_alive(pid: int, marker: str = "", *, pgid: int | None = None) -> bool:
+def _pid_alive(pid: int, marker: str = "", *, pgid: int | None = None,
+               sid: int | None = None) -> bool:
     """Alive AND still ours — `os.kill(pid, 0)` alone reports a RECYCLED pid as
     a live rail, which would report `waiting` forever on a dead rail.
 
     `pgid` swaps the "is it ours" test from an argv marker to GROUP MEMBERSHIP —
     required for the rail itself (see the module docstring): its argv is whatever
     `admin-merge.sh` last exec'd, while its group is fixed at fork time.
+
+    `sid` is the SESSION the launcher recorded in the artifact. When `sid == pid`
+    the wrapper was made a session leader (`start_new_session=True`) and that is
+    a positive, exec-surviving, WIDTH-INDEPENDENT identity test — see the
+    no-procfs arm for why the argv is not.
     """
     if pid <= 0:
         return False
@@ -370,23 +376,41 @@ def _pid_alive(pid: int, marker: str = "", *, pgid: int | None = None) -> bool:
         # Identity is already settled by group membership; the argv is the
         # rail's own business and may be anything it exec'd.
         return True
-    if not marker:
-        return True   # nothing to test identity against; keep the claim
-    # ⛔ A RECYCLED PID ON A BOX WITHOUT PROCFS. The `pid` here is the `bash -c`
-    # WRAPPER, which NEVER execs — its argv carries the artifact path for its
-    # whole life — so the marker IS a usable identity test for it. (It is not
-    # for the RAIL, which execs; that is what `pgid` is for, and the arms above
-    # say so.) Without this check a recycled pid reads `waiting` forever: it is
-    # reported alive AND blocks every later `start` on the PR — the unrailable
-    # wedge this module exists to remove, and the one thing `SPAWNING_TTL_S`
-    # cannot age out.
-    cmd = _ps("-o", "command=", "-p", str(pid))
-    if cmd is None:
-        return True   # the probe could not answer ⇒ keep the claim
-    return Path(marker).name in cmd or marker in cmd
+    # ⛔ A RECYCLED PID ON A BOX WITHOUT PROCFS. Without this the pid alone reads
+    # `waiting` forever: it is reported alive AND blocks every later `start` on
+    # the PR — the unrailable wedge this module exists to remove, and the one
+    # thing `SPAWNING_TTL_S` cannot age out.
+    #
+    # ⛔ BUT THE IDENTITY TEST MUST NOT BE THE ARGV. Matching the artifact path
+    # against `ps -o command=` LOOKS right (the `bash -c` WRAPPER never execs, so
+    # it carries the path for its whole life) and is WRONG: that field is
+    # WIDTH-LIMITED, so the marker — which sits ~100 columns in — is absent from
+    # a truncated read and a LIVE wrapper is judged DEAD. Measured on this box:
+    # the same call answers True at COLUMNS=150 and False at COLUMNS=132/100/80,
+    # and on the box this arm exists for (macOS) the default IS the window width
+    # and `-w` is only 132. That is the fail direction this file forbids —
+    # reading a live rail as dead admits a SECOND rail (#3061) and publishes a
+    # durable `lost` for a PR that merged (`_ps_stat`'s docstring says so).
+    # A truncated field is not evidence of anything, so a substring hit is the
+    # only usable signal and a MISS MUST NOT VETO.
+    #
+    # So the test is POSITIVE EVIDENCE ONLY: `sid == pid` means the launcher made
+    # this pid a SESSION LEADER, and `getsid(pid) == pid` proves the pid is still
+    # that leader. `sid` survives exec, is not width-limited, and a recycled pid
+    # is some other process — it answers False unless it is itself a detached
+    # session leader, and that direction fails ALIVE, which is the safe one.
+    if sid != pid:
+        # Not detached (the suite's mutant arm runs this way), or no `SID=` was
+        # recorded: there is no positive identity test available here, so keep
+        # the claim. Fail alive.
+        return True
+    try:
+        return os.getsid(pid) == pid
+    except OSError:
+        return False   # the pid is gone
 
 
-def _rail_alive(leader: int, child: int, marker: str) -> bool:
+def _rail_alive(leader: int, child: int, marker: str, sid: int = 0) -> bool:
     """Is the rail's WORK still running? Two processes carry it, and they do not
     die together: the wrapper (`leader`, which writes `EXIT=`) and the rail
     itself (`child`, which runs `admin-merge.sh`). Probing only the wrapper read
@@ -396,7 +420,7 @@ def _rail_alive(leader: int, child: int, marker: str) -> bool:
     An artifact from before `CHILD_PID=` has no rail pid; it falls back to the
     wrapper-only probe, which is what it was written under.
     """
-    if _pid_alive(leader, marker):
+    if _pid_alive(leader, marker, sid=sid):
         return True
     if leader > 0 and child > 0 and _pid_alive(child, pgid=leader):
         return True
@@ -483,6 +507,27 @@ class RailState:
         }
 
 
+def _attempt_log(logp: Path) -> str:
+    """The CURRENT attempt's slice of the rail's log ('' when there is no mark).
+
+    ⛔ THE LOG IS APPEND-ONLY ACROSS ATTEMPTS. Parsing the whole file lets a DEAD
+    attempt inherit a PREVIOUS attempt's `✅ merged` line and be reported merged —
+    evidence forged by concatenation. Every verdict read is scoped to the LAST
+    attempt.
+
+    ⛔ NO MARK ⇒ NO SCOPED EVIDENCE. Our launcher always writes the mark before
+    it spawns, so a log without one is not this attempt's: reading it whole would
+    let a dead attempt inherit ANY earlier `✅ merged` line — the forged-evidence
+    shape the scoping exists to prevent. Fail CLOSED (empty evidence ⇒
+    refused/lost), never "read everything".
+    """
+    if not logp.exists():
+        return ""
+    full = logp.read_text(encoding="utf-8", errors="replace")
+    cut = full.rfind(ATTEMPT_MARK)
+    return full[cut:] if cut >= 0 else ""
+
+
 def collect(state_dir: Path, repo: str, pr: int) -> RailState | None:
     """Read the artifact and the rail's log. NO side effects: no writes, no
     network, no process signals. The only external call is a local `ps` state
@@ -508,24 +553,12 @@ def collect(state_dir: Path, repo: str, pr: int) -> RailState | None:
     for _ in range(2):
         text = art.read_text(encoding="utf-8", errors="replace")
         logp = Path(read_field(text, "LOG", str(logp_default)))
-        log = ""
-        if logp.exists():
-            full = logp.read_text(encoding="utf-8", errors="replace")
-            # ⛔ THE LOG IS APPEND-ONLY ACROSS ATTEMPTS. Parsing the whole file lets a
-            # DEAD attempt inherit a PREVIOUS attempt's `✅ merged` line and be
-            # reported merged — evidence forged by concatenation. Every verdict read
-            # is scoped to the LAST attempt.
-            cut = full.rfind(ATTEMPT_MARK)
-            # ⛔ NO MARK ⇒ NO SCOPED EVIDENCE. Our launcher always writes the mark
-            # before it spawns, so a log without one is not this attempt's: reading it
-            # whole would let a dead attempt inherit ANY earlier `✅ merged` line — the
-            # forged-evidence shape the scoping exists to prevent. Fail CLOSED (empty
-            # evidence ⇒ refused/lost), never "read everything".
-            log = full[cut:] if cut >= 0 else ""
+        log = _attempt_log(logp)
 
         exits = read_all(text, "EXIT")
         pid = _int_or_none(read_field(text, "PID", "0")) or 0
         child = _int_or_none(read_field(text, "CHILD_PID", "0")) or 0
+        sid = _int_or_none(read_field(text, "SID", "0")) or 0
         st = RailState(
             pr=pr,
             state=WAITING,
@@ -562,7 +595,7 @@ def collect(state_dir: Path, repo: str, pr: int) -> RailState | None:
         # No EXIT line yet. Alive ⇒ waiting; gone ⇒ lost (NEVER merged). ⛔ ALIVE
         # IS "THE WRAPPER **OR** THE RAIL": a killed wrapper leaves the rail
         # running, and reading that as `lost` was the P1 (module docstring).
-        if _rail_alive(pid, child, str(art)):
+        if _rail_alive(pid, child, str(art), sid):
             st.state = WAITING
             return st
 
@@ -605,7 +638,13 @@ def collect(state_dir: Path, repo: str, pr: int) -> RailState | None:
     # `state=MERGED`. Reading it is not a gate being relaxed: the rail's gates ran
     # to completion, only the bookkeeping line was lost. Anything short of that
     # announcement stays `lost` (a vanished rail has NO verdict — #2235).
-    merged, sha = _merge_evidence(log)
+    #
+    # ⛔ RE-READ THE LOG HERE, for the same reason `text` is re-read above. `log`
+    # was read BEFORE the liveness probe; a rail that prints `✅ merged PR #N at
+    # <sha>` and dies DURING that probe would otherwise conclude `lost` from a
+    # pre-announcement read — the log-side twin of the `EXIT=` race this block
+    # exists to close, and it reports `lost` for a PR that merged.
+    merged, sha = _merge_evidence(_attempt_log(logp))
     if merged == MERGED:
         st.state, st.merge_sha = MERGED, sha
         st.reason = ("the rail's log records the merge"
