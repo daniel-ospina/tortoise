@@ -4614,6 +4614,27 @@ def test_container_reaper_change_selects_core_not_tier1():
         assert set(r["test_files"]) != _tier1(), changed
 
 
+def test_gh_write_preflight_tool_change_selects_core():
+    # #10945 review P1: tools/gh_write_preflight.py owns
+    # tests/test_gh_write_preflight.py, registered `core`. Registering the test file
+    # alone does NOT fix the drop — `tools/` is a flat NON_PYTHON_PREFIXES entry and
+    # no SOURCE_PATTERNS row matches the tool, so `select(["tools/gh_write_preflight.py"])
+    # answered surfaces=[], full=False, 72 tier-1 smoke files with the suite ABSENT:
+    # the arms that pin "a read passing is never a pass" would not run on the PR that
+    # edits the preflight. Mutation check: delete the CORE_ALSO entry and every
+    # assert below fails (measured: surfaces=[], 72 files, file absent).
+    r = _sel(["tools/gh_write_preflight.py"])
+    assert r["full"] is False, r
+    assert "core" in r["surfaces"], r
+    assert "test_gh_write_preflight.py" in r["test_files"], r
+    assert set(r["test_files"]) != _tier1()
+    # …and the registration is a real classification, not a name that only keeps
+    # `--integrity` quiet: `classify_test_file` must name `core` for the file.
+    manifest = load_manifest()
+    assert classify_test_file("test_gh_write_preflight.py", manifest) == "core"
+    assert integrity(manifest) == []
+
+
 def test_queue_conflict_census_tool_change_selects_core_not_tier1():
     # #6138 review P1: tools/queue_conflict_census.py owns
     # tests/test_queue_conflict_census.py (`core`). Without the CORE_ALSO entry

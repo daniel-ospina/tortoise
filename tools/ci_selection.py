@@ -1572,6 +1572,20 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # tests/test_ci_selection.py::test_container_reaper_change_selects_core_not_tier1.
              "tools/container_reaper.py",
              "tools/install-container-reaper-timer.sh",
+             # #10945 review P1: tools/gh_write_preflight.py owns
+             # tests/test_gh_write_preflight.py (registered `core`), but `tools/` is
+             # swallowed by NON_PYTHON_PREFIXES and no SOURCE_PATTERNS entry matches
+             # it — so a tool-only edit selected NO surface and fell back to tier-1
+             # smoke, where the 30-odd arms that pin the tool's fail-closed contract
+             # (a read passing is never a pass; the identity that resolves is the one
+             # that is MEASURED; a wrong classification sends a human to re-mint the
+             # wrong token) are not registered. MEASURED before this entry:
+             # `select(["tools/gh_write_preflight.py"], …)` -> surfaces=[],
+             # full=False, 72 files, test_gh_write_preflight.py ABSENT.
+             # Same #1349/#3332/#3616 silent-drop class as the entries above.
+             # Pinned by
+             # tests/test_ci_selection.py::test_gh_write_preflight_tool_change_selects_core.
+             "tools/gh_write_preflight.py",
              # #7435: the docs-lint baseline differ owns
              # tests/test_docs_lint_baseline.py, which is `core`-registered, but
              # `tools/` is swallowed by NON_PYTHON_PREFIXES and no
