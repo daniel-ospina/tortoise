@@ -12804,8 +12804,12 @@ class TortoiseSDK:
                 # no prop, carries no temporal prop and sets no word — so the
                 # verdict is never consulted. The exclusion thus avoids the read
                 # only for a DIRECT-SDK fold whose whole payload is
-                # `content_hash` + `extractedFrom` (the arm pinned at
-                # tests/test_lifecycle_guards.py:949). Measured on this head
+                # `content_hash` + `extractedFrom` (arm (ii), the EVIDENCE-only
+                # fold, of
+                # `tests/test_lifecycle_guards.py::test_a_dedup_hit_pays_no_lifecycle_read_unless_the_fold_can_write`
+                # — cited by SYMBOL, never by `file:line`: the pointer form drifts,
+                # and the number that used to sit here had already re-staled onto
+                # arm (i)'s prose by the #10889 review). Measured on this head
                 # before the exclusion (the #10792 review's P2): an
                 # evidence-only replay went 0 -> 1 marker reads.
                 #

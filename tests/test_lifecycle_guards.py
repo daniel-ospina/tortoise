@@ -931,7 +931,10 @@ def test_a_dedup_hit_pays_no_lifecycle_read_unless_the_fold_can_write(
 
     Two-sided on purpose: a "fix" that simply REMOVED the read reds the third
     arm, because a fold carrying a caller prop must still get the terminal
-    verdict that decides the refusal.
+    verdict that decides the refusal — and that arm therefore asserts the DROP
+    FIRED as well as the count, since a count alone does not discriminate (the
+    `update_point` guard reads the same marker, so 0 fold reads + 1 guard read
+    lands on the same `len(calls) == 1` as the correct 1 + 0).
     """
     calls: list[int] = []
     real = type(sdk)._lifecycle_terminal_marker
@@ -967,11 +970,22 @@ def test_a_dedup_hit_pays_no_lifecycle_read_unless_the_fold_can_write(
 
     # (iii) a GENERIC caller prop: the verdict decides whether the write is
     # refused, so it MUST be read — exactly once for the whole fold.
-    sdk.create_point("statement", content, dedup=True, custom_probe="x")
+    # ⛔ The COUNT ALONE DOES NOT DISCRIMINATE: with the hoist removed the fold
+    # reads 0, but `update_point` -> `_assert_lifecycle_guard` ->
+    # `_lifecycle_terminal_marker` then reads 1 (the prop got stored, so the
+    # write leg ran), which lands on the same `== 1`. So assert the drop FIRED
+    # too — that is the property the read exists to produce (#10889 review).
+    refused = sdk.create_point("statement", content, dedup=True,
+                               custom_probe="x")
     assert len(calls) == 1, (
         "a fold carrying a caller prop must READ the terminal verdict — that "
         "read is what refuses the write onto the settled claim, and the hoist "
         "exists so both refusals share it (#10368)")
+    assert "custom_probe" not in sdk.get_point(pid), (
+        "the terminal verdict was consulted but the fold was NOT refused — the "
+        "prop landed on the settled claim, which is the #10368 defect")
+    assert [a.get("code") for a in (refused.get("advisories") or [])] == [
+        "metadata_not_applied"], refused.get("advisories")
 
 
 def test_create_point_dedup_does_not_mutate_a_terminal_point(sdk):
