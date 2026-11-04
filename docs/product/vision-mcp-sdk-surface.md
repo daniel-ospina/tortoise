@@ -16,7 +16,8 @@ aboutObjects: [tortoise-mcp, tortoise-sdk]
 ## The vision, in one paragraph
 
 **A developer should be able to read our entire surface in a sitting and know what to call.**
-Today they cannot: the MCP server exposes **99 tools** and the SDK **149 methods**, with five
+Today they cannot: the MCP server exposes **94 tools** (76 of them advertised — the five
+`run_onboarding` tools were deleted in #4282 Phase 3.2, 81 → 76) and the SDK **149 methods**, with five
 overlapping ways to search, four ways to revise, seven ways to create a node, and a
 lifecycle nobody owns. The target is a surface small enough to hold in your head, where every
 name says what it does, every operation says what it will do to your data, and
@@ -60,7 +61,11 @@ The freeze is on **tools and endpoints** — nothing is added, removed, renamed 
 either surface without explicit human approval. A **response field** that is off by default and
 leaves the response unchanged is **not** a gate failure, but must be recorded.
 
-## The reconciliation — MCP 99 → 27
+## The reconciliation — MCP 99 → 94 → 27
+
+> The starting figure is historical: **99** declared tools at the vision's measurement, **94**
+> after the five `run_onboarding` deletions (#4282 Phase 3.2, 81 → 76 advertised), and the target
+> remains **27**.
 
 **GENERATED — see `docs/product/bridge-table.md`**, produced by
 `uv run python tools/bridge_table.py`.

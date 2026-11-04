@@ -982,6 +982,8 @@ def test_every_workspace_level_tool_is_excluded_by_derivation():
         t.name for t in RETIRED_TOOL_REGISTRY
     }
     missing = sorted((callers & resolvable) - mcp_auth.GRAPH_ARGUMENT_EXCLUDED)
+    assert callers & resolvable, (
+        "the derivation has no resolvable subject — it would prove nothing")
     assert not missing, (
         "these tools refuse a selected graph but advertise the `graph` "
         f"argument: {missing}")
