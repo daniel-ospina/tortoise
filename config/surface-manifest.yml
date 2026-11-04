@@ -505,11 +505,21 @@ response_fields:
     point (a content coincidence picked the target), and a `key`-resolved hit is an identity match, not a licence
     to rewrite a settled record (#6110 decides identity; ingest already refuses the same fold, #10377). The whole fold is dropped, the HIT is still reported, and the
     message names `update_point` as the addressed route that does revise a dead claim deliberately. The journaled
-    provenance retrofit (#7704) still folds, so an evidence-bearing re-run keeps its source. All of these codes ride
+    provenance retrofit (#7704) still folds, so an evidence-bearing re-run keeps its source. One shape emits the SAME
+    code with a NARROWER message: a fold that RACES a terminalization (a retract/supersede landing after the fold''s
+    snapshot but at or before its write point) reports only the leg that was actually stopped — the caller''s props
+    were not applied, while an authored word the fold had ALREADY written through the server-owned baseline leg DID
+    land, so that text says the stored record is NOT unchanged and names the properties carrying the word. Denying a
+    write that happened is the #8400 class this refusal exists to close, so the receipt may not overclaim the drop.
+    All of these codes ride
     the SAME key on the dedup-hit return, so a re-run reports them together rather than dropping
     one'
-  unchanged_when_off: n/a — not flag-gated; the key is ABSENT on a sourced or word-bearing write, and on every write
-    whose fold actually applied, so that response stays byte-identical
+  unchanged_when_off: 'n/a — not flag-gated; the key is ABSENT when there is no advisory, so the response stays
+    byte-identical. The sourced/word-bearing clause is `no_source`-SCOPED, never key-wide — that one code is absent on
+    a sourced write (a materialized `extractedFrom`, or an authored `credibility=`, which #398 rules IS a source) and
+    on every write whose fold actually applied. It does NOT silence the other codes — a WORD-BEARING write that
+    dedup-hits a TERMINAL point reports `terminal_fold_refused` on this same key, so the old "the key is ABSENT on a
+    word-bearing write" reading was false as soon as #10368 landed'
 - response: tortoise_check_structure
   field: _meta.tortoise_error
   emitted_when: 'only for the transport wait-bound refusal — the ONE producer whose failure payload is a `{code,

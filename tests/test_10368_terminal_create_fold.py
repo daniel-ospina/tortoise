@@ -31,7 +31,9 @@ And the read the guard is built on is a SNAPSHOT, so the WRITE point
 re-verifies: a point that goes terminal between that read and the fold's
 `update_point` call is refused there, not written (`test_a_fold_that_races_a_
 terminalization_at_the_write_point_writes_nothing`). The authored-word leg's
-`set_point_baseline` write is the disclosed residual that window does not cover.
+`set_point_baseline` write is the disclosed residual that window does not cover,
+so on THAT shape the receipt reports the word leg's own outcome instead of
+denying it (`test_a_raced_fold_that_already_wrote_the_authored_word_says_so`).
 """
 from __future__ import annotations
 
@@ -113,6 +115,15 @@ def test_an_authored_word_fold_does_not_touch_a_terminal_points_baseline(sdk):
     assert after.get("ep_alpha") == before.get("ep_alpha")
     assert after.get("ep_beta") == before.get("ep_beta")
     assert "terminal_fold_refused" in _advisory_codes(again), again
+    # Two-sided against the RACED pin below (#10368 review P2): here neither leg
+    # ran, so the receipt keeps the FULL-drop text. A "fix" that made the
+    # message vague everywhere would satisfy the raced pin while under-reporting
+    # this one, and reds here.
+    _refusal = [a for a in again["advisories"]
+                if a.get("code") == "terminal_fold_refused"][0]
+    assert "PROPS AND WORD were not applied" in _refusal["message"], (
+        "the non-raced path really did drop BOTH legs — its receipt keeps the "
+        f"full-drop text: {_refusal['message']}")
 
 
 def test_the_same_fold_still_applies_to_a_live_target(sdk):
@@ -402,3 +413,147 @@ def test_a_fold_that_races_a_terminalization_at_the_write_point_writes_nothing(s
         "updatedAt")
     assert after["status"] == "retracted", "the point must stay terminal"
     assert "terminal_fold_refused" in _advisory_codes(again), again
+
+
+def _race_snapshot_against_write_point(sdk, monkeypatch, *, calls):
+    """Answer the fold's SNAPSHOT read "live", every later read truthfully.
+
+    Shared by the two race pins below so the window they exercise is the SAME
+    one: `create_point`'s hoisted read is call #1, and the write point's own
+    read (`update_point`'s guard, then the refusal's marker re-read) is every
+    call after it. Deterministic on purpose — nothing here sleeps.
+    """
+    real = type(sdk)._lifecycle_terminal_marker
+
+    def snapshot_then_truth(self, point_id, rows=None):
+        calls.append(point_id)
+        if len(calls) == 1:
+            return None          # the snapshot: taken before the retraction
+        return real(self, point_id, rows)
+
+    monkeypatch.setattr(type(sdk), "_lifecycle_terminal_marker",
+                        snapshot_then_truth)
+
+
+def test_a_raced_fold_that_already_wrote_the_authored_word_says_so(sdk, monkeypatch):
+    """#10368 review P2 — the receipt may not deny a write that LANDED.
+
+    Both write legs are gated on ONE snapshot, but the authored-word leg writes
+    through its OWN baseline writer and runs BEFORE the props leg's
+    `update_point`. So when a terminalization lands inside that window, the
+    props leg is refused while the word leg has already written `ep_alpha` /
+    `ep_beta` / `baseline_*` / the `credibility` label. The refusal used to
+    report the NON-raced message ("PROPS AND WORD were not applied … the stored
+    record is returned unchanged") on BOTH paths — a receipt that told the
+    caller a settled claim was untouched while it had just acquired an evidence
+    body. That is the #8400 "terminal point mutated" class this PR exists to
+    close, reported as not having happened.
+
+    Two-sided and non-vacuous: the stored assertions below MEASURE the disclosed
+    residual (the word really does land — this test does not claim the window is
+    closed), and the message assertions red on the pre-fix text, which is the
+    "PROPS AND WORD" sentence. The non-raced pin above keeps the other
+    direction honest: narrowing the message must not make the TRUE case vague.
+    """
+    from tortoise.source_credibility import canonical_tier
+
+    content = _fresh_content("raced-word")
+    pid = sdk.create_point("statement", content, dedup=True)["id"]
+    sdk.retract_point(pid)
+    before = sdk.get_point(pid)
+    assert before["status"] == "retracted"
+    assert before.get("credibility") is None
+
+    calls: list[str] = []
+    _race_snapshot_against_write_point(sdk, monkeypatch, calls=calls)
+
+    again = sdk.create_point("statement", content, dedup=True,
+                             credibility="gold", custom_probe="raced-word")
+    after = sdk.get_point(pid)
+
+    assert again["id"] == pid, "a dedup HIT is still reported"
+    assert len(calls) >= 2, (
+        "the write point must take its OWN lifecycle read — the snapshot is not "
+        "a verification")
+    # The PROPS leg really was stopped …
+    assert after.get("custom_probe") is None, (
+        "the refused props leg stored the caller's prop")
+    assert after["updatedAt"] == before["updatedAt"], (
+        "the refused props leg moved a settled claim's updatedAt")
+    assert after["status"] == "retracted"
+    # … and the WORD leg really did land. MEASURED, not argued: this is the
+    # disclosed residual the arming does not cover, and the test says so rather
+    # than pretending the window is closed.
+    assert after.get("credibility") == canonical_tier("gold"), (
+        "expected the authored-word leg's label on the raced path — if this "
+        "reds, the residual is CLOSED and the raced message must be retired")
+    assert (after.get("ep_alpha") or 0.0) > (before.get("ep_alpha") or 0.0), (
+        "expected the authored-word leg's weak body on the raced path")
+
+    adv = [a for a in (again.get("advisories") or [])
+           if a.get("code") == "terminal_fold_refused"]
+    assert adv, again
+    message = adv[0]["message"]
+    assert "PROPS AND WORD were not applied" not in message, (
+        "the receipt reused the NON-raced text on a fold whose word leg had "
+        f"already written, so it denies a write that happened: {message}")
+    assert "DID LAND" in message, (
+        f"the receipt must name the leg that did write: {message}")
+    assert "updatedAt" in message and "credibility" in message, (
+        "the receipt must name what is and is not unchanged: " + message)
+
+
+def test_a_non_terminal_refusal_from_the_write_point_propagates(sdk, monkeypatch):
+    """#10368 review P3 — the fold converts ONE named refusal, not `ValueError`.
+
+    The refusal's catch used to be a bare `except ValueError` narrowed only by a
+    marker re-read afterwards, so ANY `ValueError` raised inside `update_point`
+    on this path — a validation refusal, a malformed window — was re-labelled as
+    "the point was settled" and returned as a dedup HIT. On the one path whose
+    contract is "the error you got is the error I meant", that is a mask. The
+    guard now raises `_TerminalWriteRefused` (a `ValueError` SUBCLASS, so every
+    published `except ValueError` is unchanged) and the fold catches that type.
+
+    Non-vacuous: with the broad catch this test reds because `create_point`
+    returns a receipt instead of raising.
+    """
+
+    def refusing_update(self, point_id, **props):
+        raise ValueError("a validation refusal that is NOT a terminal verdict")
+
+    content = _fresh_content("foreign-refusal")
+    pid = sdk.create_point("statement", content, dedup=True)["id"]
+    sdk.retract_point(pid)
+
+    calls: list[str] = []
+    _race_snapshot_against_write_point(sdk, monkeypatch, calls=calls)
+    monkeypatch.setattr(type(sdk), "update_point", refusing_update)
+
+    with pytest.raises(ValueError, match="NOT a terminal verdict"):
+        sdk.create_point("statement", content, dedup=True, custom_probe="x")
+
+
+def test_the_terminal_refusal_is_a_named_valueerror_subclass(sdk):
+    """The type the fold narrows to exists, and it keeps the published contract.
+
+    #10368 review P3: `_assert_lifecycle_guard`'s terminal refusal is a
+    `ValueError` subclass so every existing caller and `pytest.raises(ValueError,
+    match="already terminal")` pin (`test_sdk.py`, `test_7405_update_point_
+    writes.py`, `test_pointinvalidated_rebuild.py`) behaves identically, while a
+    `type`-based catch can tell it from any other refusal without parsing prose.
+    """
+    from tortoise.sdk import _TerminalWriteRefused
+
+    content = _fresh_content("named-refusal")
+    pid = sdk.create_point("statement", content)["id"]
+    sdk.retract_point(pid)
+
+    with pytest.raises(_TerminalWriteRefused) as refused:
+        sdk.update_point(pid, validTo="2030-01-01")
+
+    assert isinstance(refused.value, ValueError), (
+        "the refusal's published contract is ValueError — a subclass, not a "
+        "replacement")
+    assert refused.value.point_id == pid
+    assert refused.value.marker, "the refusal must carry the terminal marker"
+    assert "already terminal" in str(refused.value)

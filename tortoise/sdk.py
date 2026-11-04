@@ -5811,6 +5811,37 @@ _FOLD_REFUSES_TERMINAL_WRITE: contextvars.ContextVar[bool] = contextvars.Context
     "_FOLD_REFUSES_TERMINAL_WRITE", default=False
 )
 
+
+class _TerminalWriteRefused(ValueError):
+    """Internal: a write REFUSED because the point it names is already terminal.
+
+    #10368 review P3. ``_assert_lifecycle_guard`` has always raised plain
+    ``ValueError`` for BOTH of its refusals (absent/operator, and terminal), and
+    the dedup fold converted ANY ``ValueError`` out of ``update_point`` into its
+    own ``terminal_fold_refused`` reply — narrowed only by re-reading the
+    marker afterwards. On a path whose whole contract is "the error you got is
+    the error I meant", that turned a validation refusal from anywhere else
+    inside ``update_point`` into a silent "the point was settled" receipt.
+
+    Subclasses ``ValueError`` on purpose: every published contract, every
+    caller and every ``pytest.raises(ValueError, match="already terminal")``
+    behaves identically (``test_sdk.py``, ``test_7405_update_point_writes.py``,
+    ``test_pointinvalidated_rebuild.py`` all pin exactly that). The dedup fold
+    catches THIS type, so any other refusal propagates instead of being
+    re-labelled.
+
+    The facts ride as attributes (the marker, the point, the door) so a
+    boundary that renders the refusal does not have to parse prose — the
+    ``InvertedSupersedeWindow`` / ``UnapprovedKindNamespace`` pattern.
+    """
+
+    def __init__(self, message: str, *, marker: str, point_id: str,
+                 method: str) -> None:
+        super().__init__(message)
+        self.marker = marker
+        self.point_id = point_id
+        self.method = method
+
 # ── #2600 server-resolved human actor ───────────────────────────────────────
 # `_current_actor_user_id` carries the server-resolved human actor for
 # session + write-event stamps. SET ONLY at auth seams (mcp_auth
@@ -13081,6 +13112,12 @@ class TortoiseSDK:
                 _terminal_fold_refused = bool(
                     _terminal is not None
                     and (props or cred_prior is not None))
+                # #10368 review P2: on the RACED path the authored-word leg has
+                # ALREADY written (it is gated on the same stale snapshot and
+                # writes through its own baseline writer), so the props leg is
+                # the only leg that refusal stopped. Tracked here so the return
+                # can report the word leg's own outcome instead of denying it.
+                _raced_word_landed = False
                 if _terminal_fold_refused:
                     _logger.warning(
                         "create_point: dedup resolved to point %s, which is "
@@ -13114,16 +13151,26 @@ class TortoiseSDK:
                     _ftok = _FOLD_REFUSES_TERMINAL_WRITE.set(True)
                     try:
                         self.update_point(pid, **props)
-                    except ValueError:
+                    except _TerminalWriteRefused:
                         # The write-point guard refused: the point went terminal
                         # between the snapshot above and here. Nothing was
-                        # written — that guard raises BEFORE the journal append
-                        # and before every write — so report the same refusal
-                        # the non-raced path reports rather than letting a dedup
-                        # hit raise out of `create_point`.
+                        # written by THIS leg — that guard raises BEFORE the
+                        # journal append and before every write — so report the
+                        # same refusal the non-raced path reports rather than
+                        # letting a dedup hit raise out of `create_point`.
+                        #
+                        # ⛔ A NARROW catch, never `except ValueError` (#10368
+                        # review P3). The terminal refusal is its own
+                        # `ValueError` SUBCLASS, so every historical
+                        # `except ValueError` behaves identically while a
+                        # refusal from anywhere else inside `update_point`
+                        # PROPAGATES instead of being re-labelled as "the point
+                        # was settled". The marker re-read below is defence in
+                        # depth, no longer the discriminator.
                         if self._lifecycle_terminal_marker(pid) is None:
                             raise
                         _terminal_fold_refused = True
+                        _raced_word_landed = _word_applied
                         # No end receipt for a write that did not happen
                         # (#9202/#10079): a raced fold must not report
                         # `valid_to_shaped` either.
@@ -13131,8 +13178,13 @@ class TortoiseSDK:
                         _logger.warning(
                             "create_point: dedup resolved to point %s, which "
                             "became terminal while this fold was in flight — "
-                            "the caller's props were NOT applied (#10368).",
-                            pid)
+                            "the caller's props were NOT applied; %s "
+                            "(#10368).",
+                            pid,
+                            "the authored word HAD already been written by "
+                            "the baseline leg, so the stored record is NOT "
+                            "unchanged"
+                            if _word_applied else "nothing else was written")
                     finally:
                         _FOLD_REFUSES_TERMINAL_WRITE.reset(_ftok)
                         _WARN_SUPPRESS.reset(_tok)
@@ -13144,7 +13196,11 @@ class TortoiseSDK:
                      # drop one (#9964).
                      **_merge_advisories(
                          _kind_layer_advisory(_layer_note, pid),
-                         (self._terminal_fold_refused_advisory(pid)
+                         (self._terminal_fold_refused_advisory(
+                              pid,
+                              message=(
+                                  self._TERMINAL_FOLD_REFUSED_RACED_WORD_MESSAGE
+                                  if _raced_word_landed else None))
                           if _terminal_fold_refused else {}))},
                     _end_receipt)
 
@@ -19118,10 +19174,11 @@ class TortoiseSDK:
             # ``retract_point`` / ``supersede_point`` / ``invalidate_point``
             # terminalize, so the refusal names what the dead claim FORBIDS
             # instead of assuming the caller's shape.
-            raise ValueError(
+            raise _TerminalWriteRefused(
                 f"Point {point_id!r} is already terminal ({marker}) — "
                 f"{method} cannot re-stamp or terminalize a dead {role} "
-                f"(#2498: terminalization is one-way)")
+                f"(#2498: terminalization is one-way)",
+                marker=marker, point_id=point_id, method=method)
         return {"id": point_id, "status": status, "outdated": outdated}
 
     def _lifecycle_terminal_marker(self, point_id: str, rows=None) -> str | None:
@@ -43784,6 +43841,33 @@ class TortoiseSDK:
         "update_point(<id>, ...), the addressed door."
     )
 
+    #: #10368 review P2 — the RACED variant. The message above is TRUE on the
+    #: non-raced path: both write legs are gated on ONE snapshot, so neither ran.
+    #: It is FALSE when a terminalization lands inside the authored-word leg's
+    #: window, because that leg is gated on the SAME stale snapshot and writes
+    #: through its OWN baseline writer before the props leg's refused
+    #: `update_point`. Only the PROPS leg is stopped there, and a caller told
+    #: "the stored record is returned unchanged" would read a settled claim that
+    #: now carries an evidence body and a `credibility` label as untouched — the
+    #: #8400 "terminal point mutated" class this fold exists to close, reported
+    #: as not having happened. Nothing covered the RECEIPT denying it; a caller
+    #: cannot detect that. Same code, because the vocabulary is not widened for
+    #: a message difference, but the text may not claim a write did not happen.
+    _TERMINAL_FOLD_REFUSED_RACED_WORD_MESSAGE: ClassVar[str] = (
+        "The dedup fold carried a caller prop and an authored word, and the "
+        "point it resolved to became terminal while the fold was in flight; a "
+        "dedup hit never writes onto a settled belief (#10368) — the CALLER'S "
+        "PROPS were NOT applied (no caller prop was stored and `updatedAt` did "
+        "not move). ⛔ THE AUTHORED WORD DID LAND: it is written through the "
+        "server-owned baseline writer BEFORE the write point that refused, so "
+        "the stored record's `ep_alpha`/`ep_beta`, its `baseline_*` provenance "
+        "and its `credibility` label now carry it. THE STORED RECORD IS NOT "
+        "UNCHANGED — read the point back before treating this as a drop. (A "
+        "declared `extractedFrom` still folds: a dedup hit keeps the new "
+        "evidence, #7704.) Revise the claim deliberately with "
+        "update_point(<id>, ...), the addressed door."
+    )
+
     def _temporal_not_applied_advisory(self, node_id: str | None) -> dict:
         """The `temporal_not_applied` advisory payload (#7819).
 
@@ -43799,18 +43883,27 @@ class TortoiseSDK:
             "advisory": True,
         }]}
 
-    def _terminal_fold_refused_advisory(self, node_id: str | None) -> dict:
+    def _terminal_fold_refused_advisory(
+            self, node_id: str | None, *,
+            message: str | None = None) -> dict:
         """The `terminal_fold_refused` advisory payload (#10368).
 
         ADVISORY ONLY — a dropped fold has already written nothing; this only
         makes the drop OBSERVABLE to the caller (`create_point` returns it on a
         COPY of the dedup snapshot, and the hosted commit receipt folds it into
         `warnings`). Never raises, never blocks.
+
+        ``message`` overrides the default text for the ONE shape the default
+        mis-describes (#10368 review P2): a fold that raced a terminalization
+        after its authored-word leg had already written. The CODE is
+        deliberately unchanged — the vocabulary is not widened for a message
+        difference — and the override is applied by the caller that knows the
+        facts, never derived here, so this factory stays a pure formatter.
         """
         return {"advisories": [{
             "code": "terminal_fold_refused",
             "node_id": node_id,
-            "message": self._TERMINAL_FOLD_REFUSED_MESSAGE,
+            "message": message or self._TERMINAL_FOLD_REFUSED_MESSAGE,
             "advisory": True,
         }]}
 
