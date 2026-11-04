@@ -538,6 +538,15 @@ def render(rows: list[Row], repo: str, generated_at: str, truncated: bool = Fals
     # slot literal — measured (#10687 review cycle 16): `--repo '__CENSUS_CONTENT_SHA256__'` exited
     # 0 and wrote a census that `verify_census_document` refuses ("no `content sha256` in the
     # header"), i.e. the invariant stated right below held for every repo except one.
+    # ⛔ `_cell` on `repo`, because the header must be ONE LINE by construction. The digest is read
+    # back by an end-of-line-anchored pattern, so a value that can inject a newline can put an
+    # earlier digest-shaped span in front of the real one and make a genuine document refuse itself
+    # (measured, review cycle 17: a repo of `a\ncontent sha256 `<64 zeroes>`.\nrest` gave "header says
+    # 000…, body hashes to 0d78aa…"). Unreachable through `main` — `gh pr list --repo` refuses a
+    # slash-less/multi-line slug first — so this closes the LIBRARY boundary, which is where the
+    # suite and any future caller reach `render` directly. `_cell` is IDENTITY for a real slug
+    # (`daniel-ospina/tortoise`), so the committed artifact stays byte-identical.
+    repo = _cell(repo)
     header_prefix = (
         f"Repo `{repo}` · generated {generated_at} by `tools/attest_census.py` ·"
         " content sha256 `"
@@ -843,7 +852,12 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     try:
         print(text)
-    except UnicodeEncodeError as exc:  # same contract on the stdout surface as on the file
+    # ⛔ BOTH classes, because the contract is `0`/`2`-never-`1` on this surface too: an
+    # unencodable character is a `ValueError`, and a CLOSED PIPE is a `BrokenPipeError` — an
+    # `OSError`. Catching only the first left `tools/attest_census.py | head -1` reporting rc 1 for a
+    # run that had already written its report (measured, review cycle 17), which is the one exit code
+    # this file publishes as impossible. Same pair the `--out` write above guards, for the same reason.
+    except (OSError, ValueError) as exc:
         print(f"attest_census: could not write the report to stdout: {exc}", file=sys.stderr)
         return 2
     print(f"attest_census: wrote {out}", file=sys.stderr)

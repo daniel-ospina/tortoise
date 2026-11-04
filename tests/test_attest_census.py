@@ -1372,3 +1372,50 @@ def test_a_repo_containing_the_digest_placeholder_still_verifies():
     # the verifier reads (the pattern is end-of-line anchored for exactly this).
     lookalike = "r`content sha256 `" + "0" * 64 + "`."
     assert ac.verify_census_document(ac.render([], lookalike, "2026-11-04T00:00:00Z")) == ""
+
+
+def test_a_repo_that_injects_a_line_cannot_displace_the_header_digest():
+    """`repo` is the one field interpolated into the header, and the header must be ONE LINE.
+
+    MEASURED (#10687 review cycle 17): the digest is read back by an END-OF-LINE anchored pattern,
+    so a repo carrying a newline put an earlier digest-shaped span in front of the real one and a
+    genuinely rendered document refused itself (`header says 000…, body hashes to 0d78aa…`).
+    Unreachable through `main` — `gh pr list --repo` refuses the slug first — so this pins the
+    LIBRARY boundary the suite and any future caller reach directly.
+
+    Mutation proof: delete `repo = _cell(repo)` in `render` and this fails on the verifier reason.
+    """
+    ac = _load()
+    hostile = "a\ncontent sha256 `" + "0" * 64 + "`.\nrest"
+    text = ac.render([], hostile, "2026-11-04T00:00:00Z")
+
+    assert len([ln for ln in text.splitlines() if ln.startswith("Repo `")]) == 1, (
+        "the header must be exactly one line whatever the repo value contains"
+    )
+    assert ac.verify_census_document(text) == "", "and the document must not refuse itself"
+
+
+def test_a_closed_stdout_pipe_is_rc_2_not_1(monkeypatch, tmp_path):
+    """`BrokenPipeError` is an `OSError`, so the old `except UnicodeEncodeError` let it escape as rc 1.
+
+    MEASURED (#10687 review cycle 17): `tools/attest_census.py | head -1` reported rc 1 for a run
+    that had ALREADY written its report — the one exit code the module docstring publishes as
+    impossible. The stdout guard now catches the same pair (`OSError`, `ValueError`) the `--out`
+    write does.
+    """
+    ac = _load()
+    monkeypatch.setattr(ac, "gh_json", lambda args: [])
+
+    class _ClosedPipe:
+        def reconfigure(self, **_kwargs):  # `main` suppresses a stream without it — be honest
+            return None
+
+        def write(self, _data):
+            raise BrokenPipeError(32, "Broken pipe")
+
+        def flush(self):
+            return None
+
+    monkeypatch.setattr(ac.sys, "stdout", _ClosedPipe())
+    assert ac.main(["--reviews-dir", str(tmp_path), "--no-gate", "--out", str(tmp_path / "o.md")]) == 2
+    assert (tmp_path / "o.md").exists(), "the report was written before the pipe broke"
