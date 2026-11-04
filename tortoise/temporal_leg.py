@@ -918,15 +918,26 @@ def window_arm_retention(
                                    position and ``pick_ranks_before_dedup`` to
                                    see the splice itself.
     ``graded_by_recall_all_at_5``  how many picks land at a READER index
-                                   ``< 5`` of the DEDUPED pool — ``recall_all@5``
-                                   grades ``hits[:5]`` and ``hits`` is that pool
-                                   UNTRUNCATED (``retrieve.py``: ``"hits":
-                                   pool``, ``top = hits[:k]``), so the metric
-                                   carries NO reader-window term. This field
-                                   therefore counts ``pick_ranks`` (post-cap)
-                                   ``< 5`` and nothing else; whether the reader
-                                   can SEE the pick is a different question,
-                                   reported by ``picks_outside_window``.
+                                   ``< 5`` of the DEDUPED pool —
+                                   ``recall_all@5`` grades ``hits[:5]``
+                                   (``retrieve.py``: ``top = hits[:k]``), and
+                                   this field counts ``pick_ranks`` (post-cap)
+                                   ``< 5``. It carries NO ``window`` term: the
+                                   graded surface has no reader-window
+                                   truncation, so a pick the window hides can
+                                   still be graded — visibility is its own
+                                   question, reported by
+                                   ``picks_outside_window``. ⚠️ The surface
+                                   DOES carry a ``top_k`` cut that this field
+                                   does not model: with rerank on, ``hits`` is
+                                   ``pool[:top_k]`` or the selected-only list,
+                                   and on the pool-only arm ``pool =
+                                   pool[:top_k]`` (``retrieve.py`` R6 block),
+                                   so at ``top_k < 5`` a rank-3 pick is not
+                                   gradable. Every number in the receipt is
+                                   measured on the plain path (no rerank, no
+                                   pool override), where ``hits`` IS the
+                                   deduped pool untruncated.
     ``picks_outside_window``       picks whose index is ``>= window`` (invisible
                                    to the reader at all)
     ``base_graded_evicted``        evicted ids that were themselves inside
