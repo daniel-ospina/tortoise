@@ -195,3 +195,68 @@ def test_the_generated_rename_table_is_not_tracked() -> None:
         ["git", "-C", str(ROOT), "check-ignore", "-q", "--", GENERATED],
     )
     assert ignored.returncode == 0, f"{GENERATED} is untracked but not ignored"
+
+
+# ─────────────────────────────────────────────────────────────────────
+# The other entry point: `ci_selection.py --integrity` must SEE the class
+# ─────────────────────────────────────────────────────────────────────
+# `--integrity` is the check fixers actually run, and the one a PR body cites
+# as proof that the durations map carries no duplicate. It reads the manifest
+# through `yaml.safe_load`, so before this wiring it was structurally blind to
+# a duplicate MAPPING key: #10726 reddened the REQUIRED `manifest-integrity`
+# leg four times (62 durations keys, then 13, then 1, then 2) while
+# `--integrity` printed its green OK line over every one of them.
+
+
+def test_the_integrity_entry_point_names_a_duplicate_durations_key(tmp_path, monkeypatch) -> None:
+    """Wiring: `--integrity`'s composed problems include the registry walk.
+
+    Non-vacuous both ways — `safe_load` (what `load_manifest()` uses) keeps the
+    LAST row and reports nothing, while the same file makes `--integrity` exit 1
+    naming the duplicate. Remove the `duplicate_mapping_key_issues()` term from
+    the composition and the message disappears from the output.
+    """
+    from tools import ci_selection
+
+    text = ci_selection.MANIFEST.read_text(encoding="utf-8")
+    dup = "  test_7818_plan_record_5362.py: 0.1  # duplicate planted by this test\n"
+    anchor = "  test_7818_plan_record_5362.py: "
+    at = text.index(anchor)
+    planted = text[:at] + dup + text[at:]
+    victim = tmp_path / "ci-surfaces.yml"
+    victim.write_text(planted, encoding="utf-8")
+
+    # the loader the gate uses cannot see it …
+    assert sum(1 for line in planted.splitlines()
+               if line.startswith(anchor)) == 2
+    assert yaml.safe_load(planted)["durations"]["test_7818_plan_record_5362.py"] == 0.1
+
+    # … but the composed `--integrity` does, by name.
+    assert any("duplicate mapping key 'test_7818_plan_record_5362.py'"
+               in problem for problem in ci_selection.duplicate_mapping_key_issues(victim))
+
+    import contextlib
+    import io
+
+    def _run_integrity() -> tuple[int, str]:
+        out, err = io.StringIO(), io.StringIO()
+        monkeypatch.setattr(sys, "argv", ["ci_selection.py", "--integrity"])
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = ci_selection.main()
+        return rc, out.getvalue() + err.getvalue()
+
+    rc, seen = _run_integrity()          # the REAL manifest is clean …
+    assert rc == 0, seen
+    assert "duplicate mapping key" not in seen
+
+    monkeypatch.setattr(ci_selection, "MANIFEST", victim)
+    rc, seen = _run_integrity()          # … and the planted one is not
+    assert rc == 1, seen
+    assert "duplicate mapping key 'test_7818_plan_record_5362.py'" in seen
+
+
+def test_the_integrity_entry_point_is_clean_on_the_real_manifests() -> None:
+    """Positive control: the shipped manifest carries no duplicate mapping key."""
+    from tools import ci_selection
+
+    assert ci_selection.duplicate_mapping_key_issues() == []

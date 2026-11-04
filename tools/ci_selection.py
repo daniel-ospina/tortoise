@@ -3479,6 +3479,40 @@ def duplicate_entries(manifest: dict) -> list[str]:
     return dupes
 
 
+def duplicate_mapping_key_issues(manifest_path: Path | None = None) -> list[str]:
+    """#5373: a duplicate MAPPING key — invisible to every reader in this module.
+
+    :func:`load_manifest` goes through ``yaml.safe_load``, which keeps only the
+    LAST of two duplicate keys, so ``integrity()``/``duplicate_entries()`` and
+    every selection path are structurally blind to the class. Meanwhile
+    ``tools/ci_timing.py --refresh-durations`` updates the FIRST occurrence in
+    the TEXT (its own contract,
+    ``tests/test_ci_timing.py::test_durations_bridge_updates_a_quoted_key_instead_of_appending_a_duplicate``),
+    so the post-landing sweep rewrites a weight the shard packer never reads.
+
+    It is not hypothetical: ``config/ci-surfaces.yml`` is ``merge=union``
+    (``.gitattributes``), so any merge that touches a ``durations:`` hunk emits
+    the row twice — FOUR occurrences on one batch PR (#10726: 62 keys, then 13,
+    then 1, then 2), each caught only by the required ``manifest-integrity``
+    leg after a push, while ``--integrity`` — the check that PR body cited as
+    proof of "0 duplicates" — stayed green.
+
+    The walk lives in ``tools/registry_integrity.py`` and is imported rather
+    than re-spelled, so the two entry points cannot disagree about what a
+    duplicate is. A check that cannot run returns a problem and never an empty
+    list: an unrunnable gate must not read as a passing one.
+    """
+    path = Path(manifest_path or MANIFEST)
+    tools_dir = str(Path(__file__).resolve().parent)
+    if tools_dir not in sys.path:
+        sys.path.insert(0, tools_dir)
+    try:
+        import registry_integrity  # noqa: PLC0415 — sibling TOOL, not a package
+    except Exception as exc:  # pragma: no cover - it ships beside this file
+        return [f"{path}: duplicate-key check UNAVAILABLE ({exc}) — not clean"]
+    return registry_integrity.check([path])
+
+
 def unlisted_tests(tests_dir: Path, manifest: dict) -> list[str]:
     """Top-level tests/test_*.py absent from every surface in the manifest.
 
@@ -6315,7 +6349,7 @@ def main() -> int:
         # above). It is re-added at this call site so the union of the two
         # pipelines drops neither — the same rule the two folded-in checks
         # followed. Both entry points compose it, so it stays single-sourced.
-        problems = missing + slow_file_issues(manifest) \
+        problems = duplicate_mapping_key_issues() + missing + slow_file_issues(manifest) \
             + _manifest_contract_issues(manifest) \
             + carve_shard_issues(manifest) \
             + slow_shard_issues(manifest) \
