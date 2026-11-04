@@ -1661,8 +1661,14 @@ _POINT_KIND = re.compile(
 #: `pointKind='event'` node RATHER THAN Postgres rows" is still a violation —
 #: pinned as an arm rather than left to inspection.
 _TURN_SHAPE_TAIL = r"(?:pointKind|\bturn\s+node\b)"
+#: The clause connectors, stated ONCE (#10675 review cycle 7, P2: `_CONTINUE`
+#: listed `but|rather than|instead of` while the walk excluded eight, so a
+#: re-assertion behind `while`/`though`/`yet`/`and`/`although`/`however` stayed
+#: GREEN — the two lists drifting apart is the whole `#:`-documents-its-subject
+#: hazard this file guards against elsewhere).
+_CLAUSE_CONNECTORS = r"but|yet|and|although|while|whereas|however|instead|though"
 _NEGATED_CLAUSE_GAP = (
-    r"(?:(?!(?:but|yet|and|although|while|whereas|however|instead)\b)"
+    r"(?:(?!(?:" + _CLAUSE_CONNECTORS + r")\b)"
     # ⛔ A SPACED hyphen is a clause separator; a COMPOUND hyphen is not. `-`
     # therefore stays in the class (so `pre-#10000` — this tree's own spelling
     # for exactly this population — is walkable) and only the ` - ` form is
@@ -1684,9 +1690,17 @@ _NEGATED_CLAIM = re.compile(
 #: span, which ends at the FIRST shape, so the asserted clause behind it was never
 #: examined — widening the contrast class turned four spellings of that construction
 #: into a false PASS, the guard's core job (#10675 review cycle 6, P2).
+#: ⛔ The continuation is judged the way the parent judges its OWN tail: the
+#: shape it finds is read for its KIND, and a negator before the continued verb
+#: means the clause DENIES the shape rather than asserting it. Without that, a
+#: true sentence ("… no longer writes a `pointKind='event'` node but writes a
+#: `pointKind='observation'` node") was a false RED — the class this guard has
+#: spent several cycles removing (#10675 review cycle 7, P3).
 _CONTINUE = re.compile(
-    r"\s*(?:,|;|:)?\s*\b(?:but|rather\s+than|instead\s+of)\b[^.\n]{0,40}?"
-    + _TURN_SHAPE_TAIL, re.IGNORECASE)
+    r"\s*(?:,|;|:)?\s*(?:although\s+|however\s*,\s*)?"
+    r"(?:(?:" + _CLAUSE_CONNECTORS + r")\b|rather\s+than\b|instead\s+of\b)"
+    r"[^.\n]{0,40}?" + _TURN_SHAPE_TAIL, re.IGNORECASE)
+_NEGATOR_IN_CLAUSE = re.compile(r"\b(?:not|never|no\s+longer|no\s+more)\b", re.IGNORECASE)
 
 
 def _present_tense_writer_claim(flat: str) -> str | None:
@@ -1712,8 +1726,22 @@ def _present_tense_writer_claim(flat: str) -> str | None:
         # a sentence that is already right.
         if _NEGATED_CLAIM.search(hit.group()):
             # ⛔ …unless the clause AFTER the span re-asserts a shape, in which
-            # case the sentence is the half-correction, not the correction.
-            if _CONTINUE.search(flat[hit.end():hit.end() + 80]):
+            # case the sentence is the half-correction, not the correction. The
+            # continued clause is read the way the parent reads its own tail: a
+            # NON-`event` kind is a TRUE statement, and a negator in that clause
+            # means it DENIES the shape rather than asserting it.
+            window = flat[hit.end():hit.end() + 80]
+            cont = _CONTINUE.search(window)
+            if cont:
+                # Read the KIND a short way PAST the shape token, exactly as the
+                # parent does for its own tail — the match stops at `pointKind`,
+                # so the `='observation'` value would otherwise be invisible.
+                tail = window[cont.start():cont.end() + 40]
+                kind = _POINT_KIND.search(tail)
+                if kind is not None and kind.group(1).lower() != "event":
+                    continue
+                if _NEGATOR_IN_CLAUSE.search(tail):
+                    continue
                 return hit.group()
             continue
         # The kind may be named just PAST the verb's match ("… with a
@@ -1965,6 +1993,13 @@ def test_the_present_tense_guard_reads_a_NEGATED_writer_claim_as_the_CORRECTION(
         # spelling for exactly this population (#10675 review cycle 6, P3).
         "the demo seed no longer writes its pre-#10000 turn node",
         "the demo seed does not write the pre-#10000 `pointKind='event'` node",
+        # ⛔ The continued clause is judged the way the parent judges its own
+        # tail: another KIND is a true statement, and a negator DENIES the shape
+        # (#10675 review cycle 7, P3: both were false REDs).
+        "since #10000 the demo seed no longer writes a `pointKind='event'` node "
+        "but writes a `pointKind='observation'` node",
+        "the demo seed no longer writes a `pointKind='event'` node, but it "
+        "never writes a `turn node` either",
     )
     for sentence in corrections:
         found = _present_tense_writer_claim(sentence)
@@ -2039,6 +2074,16 @@ def test_the_present_tense_guard_reads_a_NEGATED_writer_claim_as_the_CORRECTION(
         "the demo seed writes its turn not in a `turn node` but in a "
         "`pointKind='event'` node",
         "the demo seed writes its turn not into a `turn node` but into a "
+        "`pointKind='event'` node",
+        # ⛔ The continuation set was `but|rather than|instead of` while the walk
+        # excluded NINE connectors, so a re-assertion behind `while`/`though`/
+        # `yet` stayed GREEN — the two lists drifting apart, which is why they
+        # now share `_CLAUSE_CONNECTORS` (#10675 review cycle 7, P2).
+        "since #10000 the demo seed no longer writes a turn node while still "
+        "writing a `pointKind='event'` node",
+        "since #10000 the demo seed no longer writes turn text, though it "
+        "still writes a `pointKind='event'` node",
+        "the demo seed writes its turn not a `turn node`, yet a "
         "`pointKind='event'` node",
     )
     for sentence in compound:
