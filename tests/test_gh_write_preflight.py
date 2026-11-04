@@ -31,6 +31,7 @@ Run standalone:      python3 tests/test_gh_write_preflight.py
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
 import os
@@ -69,7 +70,21 @@ if LOG:
     with open(LOG, "a") as fh:
         fh.write(json.dumps(argv) + "\n")
 
+if os.environ.get("FAKE_GH_NOISE"):
+    # The harness shim prints its own pacing banner and gh prints warnings; both go
+    # to stderr. A tool that merges the streams parses them as data — the arm this
+    # switch exists to falsify.
+    sys.stderr.write("[gh-limit] pacing 1.2s (core 41/5000)\n")
+
+INCLUDE = "-i" in argv or "--include" in argv
+
 def emit(code, reason, headers=None, body=""):
+    if not INCLUDE:
+        # Real `gh api` without `-i` prints ONLY the body — no status line. The
+        # fake must do the same, or a tool that forgot `-i` would still pass
+        # because every parse would find a status line the real CLI never sends.
+        sys.stdout.write(body + "\n")
+        sys.exit(0 if code < 400 else 1)
     out = [f"HTTP/2.0 {code} {reason}"]
     for k, v in (headers or {}).items():
         out.append(f"{k}: {v}")
@@ -99,6 +114,9 @@ if argv[:1] == ["auth"]:
         print(os.environ.get("FAKE_GH_SECRET", "tok"))
         sys.exit(0)
     print("github.com")
+    print("  \u2713 Logged in to github.com account probe-user (keyring)")
+    print("  - Active account: false")
+    print("  - Token scopes: 'gist', 'read:org', 'repo', 'workflow'")
     print("  \u2713 Logged in to github.com account probe-user (GH_TOKEN)")
     print("  - Active account: true")
     print("  - Token scopes: 'gist', 'read:org', 'repo', 'workflow'")
@@ -109,7 +127,14 @@ if argv[:2] == ["repo", "view"]:
     sys.exit(0)
 
 if argv[:2] == ["pr", "list"]:
-    print("[]" if MODE == "nopr" else json.dumps([{"number": 4242}]))
+    # The tool asks for the NUMBER via `--jq`, so there is no JSON to locate in a
+    # stream that may carry a shim banner.
+    if MODE in ("nopr", "readonly-nopr"):
+        sys.exit(0)            # `.[0].number` over an empty list prints nothing
+    if "--jq" in argv and argv[argv.index("--jq") + 1] == ".[0].number":
+        print("4242")
+    else:
+        print(json.dumps([{"number": 4242}]))
     sys.exit(0)
 
 # gh api …
@@ -163,7 +188,7 @@ if MODE in ("ok", "nopr"):
         emit(204, "No Content", h)
     emit(201 if method == "POST" else 200, "Created",
          h, json.dumps({"id": 999, "ref": "refs/heads/probe"}))
-elif MODE == "readonly-pat":
+elif MODE in ("readonly-pat", "readonly-nopr"):
     emit(403, "Forbidden", h,
          json.dumps({"message": "Resource not accessible by personal access token",
                      "status": "403"}))
@@ -202,12 +227,18 @@ def fake_gh(tmp_path):
     exe.chmod(0o755)
     log = tmp_path / "gh.log"
 
-    def run(mode: str, *args: str) -> subprocess.CompletedProcess:
+    def run(
+        mode: str, *args: str, noise: bool = False, secret: str | None = None
+    ) -> subprocess.CompletedProcess:
         env = dict(os.environ)
         env["PATH"] = f"{bindir}{os.pathsep}{env.get('PATH', '')}"
         env["FAKE_GH_MODE"] = mode
         env["FAKE_GH_LOG"] = str(log)
-        env["FAKE_GH_SECRET"] = SECRET
+        env["FAKE_GH_SECRET"] = SECRET if secret is None else secret
+        if noise:
+            env["FAKE_GH_NOISE"] = "1"
+        else:
+            env.pop("FAKE_GH_NOISE", None)
         env.pop("GH_TOKEN", None)
         env.pop("GITHUB_TOKEN", None)
         env["NO_COLOR"] = "1"
@@ -445,6 +476,143 @@ def test_classify_reads_only_success_codes_as_success():
         assert ghwp.classify(ghwp.HttpResult(status=status), ghwp.PERM_CONTENTS, "p") is None
     for status in (301, 400, 422, 500):
         assert ghwp.classify(ghwp.HttpResult(status=status), ghwp.PERM_CONTENTS, "p") is not None
+
+
+# ── #10945 review round 1: each finding gets an arm that fails without its fix ──
+
+
+def test_a_shim_banner_on_stderr_does_not_corrupt_the_repo_or_the_identity(fake_gh):
+    """#10945 review P2 (1). Merging stdout+stderr made the shim's own banner data.
+
+    `gh()` used to return `stdout + stderr`, and three parsers read the last line
+    of that: the repo became the banner text, `--jq .login`'s value became the
+    banner text, and the IDENTITY DIGEST hashed the banner instead of the token —
+    which would report the same credential for two different ones. With the
+    streams separated, a noisy stderr changes nothing.
+    """
+    res = fake_gh("ok", noise=True)
+    assert res.returncode == ghwp.EXIT_WRITABLE, res.stdout + res.stderr
+    assert "repo=owner/repo" in res.stdout
+    assert "identity=probe-user" in res.stdout
+    assert "gh-limit" not in res.stdout
+
+
+def test_the_identity_digest_is_the_tokens_hash_and_a_swap_changes_it(fake_gh):
+    """#10945 review P2 (2). `"token=sha256:" in stdout` passes for a CONSTANT.
+
+    The hash's whole job is to make a credential SWAP visible, so the assertion
+    has to be the real digest of the real secret — and a second run with a
+    different secret has to produce a different one.
+    """
+    expected = f"token=sha256:{hashlib.sha256(SECRET.encode()).hexdigest()[:12]}"
+    res = fake_gh("ok")
+    assert expected in res.stdout, res.stdout
+    other = fake_gh("ok", secret="a-completely-different-token")
+    assert expected not in other.stdout
+    assert "token=sha256:" in other.stdout
+    assert SECRET not in other.stdout
+
+
+def test_the_reported_credential_source_is_the_ACTIVE_account_not_the_first(fake_gh):
+    """#10945 review P2 (3). `gh auth status` lists the active account SECOND here.
+
+    Returning the first account line names a credential that is not in use, which
+    sends the human to re-mint the wrong one — the exact misdiagnosis this tool
+    exists to prevent.
+    """
+    res = fake_gh("ok")
+    assert "source=GH_TOKEN" in res.stdout, res.stdout
+    assert "source=keyring" not in res.stdout
+
+
+def test_a_measured_refusal_outranks_an_unmeasurable_probe(fake_gh):
+    """#10945 review P2 (4). Exit 3 used to mask a real, measured permission defect.
+
+    `contents` is refused with a definite 403 and `pull_requests` cannot be probed
+    (no PR): the caller's `|| exit` recipe must see the REPAIRABLE finding, not
+    "cannot measure, file a bug".
+    """
+    res = fake_gh("readonly-nopr")
+    assert res.returncode == ghwp.EXIT_UNAVAILABLE, res.stdout + res.stderr
+    assert "GH-WRITE-UNAVAILABLE(permission:contents-write)" in res.stderr
+    # The unmeasurable probe is still disclosed — it is just not the verdict.
+    assert "GH-WRITE-UNVERIFIABLE(no-pr-to-probe)" in res.stderr
+
+
+def test_a_404_on_the_pull_request_probe_never_claims_the_repo_is_invisible():
+    """#10945 review P2 (5). The role read already succeeded, so the repo IS visible.
+
+    A `--pr` given an ISSUE number is the plausible lane mistake; telling the
+    operator to chase `--hostname` or their account sends them the wrong way.
+    """
+    pr = ghwp.classify(ghwp.HttpResult(status=404), ghwp.PERM_PULL_REQUESTS, "pull_requests")
+    repo = ghwp.classify(ghwp.HttpResult(status=404), ghwp.PERM_CONTENTS, "contents")
+    assert pr is not None and pr.reason == "pr-not-visible"
+    assert "not a pull request" in pr.detail
+    assert repo is not None and repo.reason == "repo-not-visible"
+
+
+def test_the_cleanup_deletes_exactly_the_ref_the_probe_created(fake_gh):
+    """#10945 review P2 (6). `"git/refs" in path` cannot tell the probe ref from main.
+
+    A wrong-ref delete would destroy the default branch and the old assertion would
+    stay green, so the deleted path is pinned to the ref the POST actually named.
+    """
+    fake_gh("ok")
+    created, deleted = None, None
+    for argv in write_calls(fake_gh):
+        method = ""
+        path = ""
+        ref = ""
+        for i, a in enumerate(argv):
+            if a in ("-X", "--method") and i + 1 < len(argv):
+                method = argv[i + 1]
+            elif a.startswith("ref="):
+                ref = a.removeprefix("ref=")
+            elif a.startswith("repos/"):
+                path = a
+        if method == "POST":
+            created = ref
+        elif method == "DELETE":
+            deleted = path
+    assert created and created.startswith("refs/heads/gh-write-preflight-"), created
+    name = created.removeprefix("refs/heads/")
+    assert deleted == f"repos/owner/repo/git/refs/heads/{name}", deleted
+    assert not (deleted or "").endswith("/main"), deleted
+
+
+def test_the_tool_passes_include_so_a_bare_body_is_never_mistaken_for_an_exchange(fake_gh):
+    """#10945 review P2 (8). The fake now prints ONLY the body without `-i`.
+
+    Real `gh api` without `-i` emits no status line, so a tool that forgot it would
+    report `no-response` forever. This arm keeps the suite honest about that: every
+    `api` invocation carries `-i`, which is why the healthy arm parses a status.
+    """
+    fake_gh("ok")
+    # Only the calls that are PARSED as HTTP exchanges need `-i`; `gh api user
+    # --jq .login` legitimately returns a bare value.
+    api_calls = [argv for argv in calls(fake_gh) if argv[:1] == ["api"] and "-X" in argv]
+    assert api_calls, "no parsed `gh api` exchange was logged"
+    for argv in api_calls:
+        assert "-i" in argv or "--include" in argv, argv
+
+
+def test_the_noop_patch_is_re_read_and_its_title_claim_is_checked(fake_gh):
+    """#10945 review P2 (9). "No residue" was asserted, never verified.
+
+    The tool sends back the title it read, then re-reads the PR: the detail must say
+    the title was unchanged on the re-read, so the property that licenses running
+    this before every landing is measured rather than promised.
+    """
+    res = fake_gh("ok")
+    assert "title unchanged on re-read" in res.stdout, res.stdout
+    api = [argv for argv in calls(fake_gh) if argv[:1] == ["api"]]
+    patched = [i for i, argv in enumerate(api) if "PATCH" in argv]
+    assert patched, "no PATCH was issued"
+    after = api[patched[0] + 1 :]
+    assert any("GET" in argv and any("/pulls/" in a for a in argv) for argv in after), (
+        "the PR was never re-read after the PATCH"
+    )
 
 
 if __name__ == "__main__":

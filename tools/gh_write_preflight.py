@@ -87,6 +87,10 @@ Named refusals — one code per cause, because each has a different repair
                                  granted that resource kind.
     forbidden-unclassified       a 403 none of the above explains.
     repo-not-visible             404 on the repo read.
+    pr-not-visible               404 on the PR probe: that number is not a PR this
+                                 identity can see (often `--pr` given an issue
+                                 number) — never "the repo is not visible", because
+                                 the role read already succeeded.
     unexpected:<status>
 
 `GH-WRITE-UNVERIFIABLE(<what>)`, exit 3 — never 0: `gh` missing, the probe timed
@@ -282,6 +286,20 @@ def classify(res: HttpResult, perm: str, probe: str) -> Refusal | None:
         )
 
     if res.status == 404:
+        # ⛔ SPLIT BY PROBE (#10945 review P2). The repo read has already succeeded
+        # by the time the `pull_requests` probe runs, so the repo is provably
+        # visible — telling the operator to chase a wrong `--hostname` or a
+        # different account sends them the wrong way when the real cause is a
+        # `--pr` that is an issue number, a deleted PR, or another repo's number.
+        if probe == "pull_requests":
+            return Refusal(
+                "pr-not-visible",
+                f"404 on the {probe} probe: that number is not a pull request this "
+                f"identity can see — most often `--pr` was given an ISSUE number, or "
+                f"the PR is in another repo. The repository itself IS visible (the "
+                f"role read succeeded). {_detail(res, '')}".strip(),
+                probe,
+            )
         return Refusal(
             "repo-not-visible",
             f"404 on the {probe} probe: the repo is not visible to this identity "
@@ -346,18 +364,31 @@ def gh(args: list[str], timeout: float) -> tuple[int, str]:
             env=env,
         )
     except FileNotFoundError:
-        return 127, ""
+        return 127, "", ""
     except subprocess.TimeoutExpired:
-        return 124, ""
-    return out.returncode, (out.stdout or "") + (out.stderr or "")
+        return 124, "", ""
+    # ⛔ THE STREAMS STAY SEPARATE (#10945 review P2). They were merged here, and
+    # three parsers read "the last line" or located JSON in the merged text — so a
+    # single stderr line (the harness shim's own pacing banner, or gh's
+    # "warning: using token from GH_TOKEN") became the repo name, or `--jq .login`'s
+    # value, or — worst — the bytes that get hashed into the identity digest, which
+    # would make two DIFFERENT credentials hash identically and silently defeat the
+    # token-swap property this tool reports on. Only `api()` sees both, and it
+    # prefers stdout.
+    return out.returncode, out.stdout or "", out.stderr or ""
 
 
 def api(method: str, path: str, fields: dict[str, str] | None, timeout: float) -> HttpResult:
     args = ["api", "-i", "-X", method, path]
     for k, v in (fields or {}).items():
         args += ["-f", f"{k}={v}"]
-    _, out = gh(args, timeout)
-    return parse_http_output(out)
+    _, out, err = gh(args, timeout)
+    res = parse_http_output(out)
+    if res.status is None and err.strip():
+        # A shim that merges the exchange onto stderr is still answerable; what is
+        # NOT allowed is mixing stderr into a parse that already found a status.
+        res = parse_http_output(err)
+    return res
 
 
 def token_identity(timeout: float) -> tuple[str, str]:
@@ -367,12 +398,9 @@ def token_identity(timeout: float) -> tuple[str, str]:
     with different hashes used different credentials, which is the first thing to
     know when one of them passed. It is deliberately not reversible.
     """
-    rc, out = gh(["api", "user", "--jq", ".login"], timeout)
+    rc, out, _ = gh(["api", "user", "--jq", ".login"], timeout)
     login = out.strip() if rc == 0 else "unknown"
-    rc_t, tok = gh(["auth", "token"], timeout)
-    # `--jq` output above is merged with stderr; a login is a single token, so a
-    # shim banner would corrupt it — take the last line and drop anything
-    # non-identifier.
+    rc_t, tok, _ = gh(["auth", "token"], timeout)
     login = re.sub(r"[^A-Za-z0-9_.-]", "", login.splitlines()[-1]) if login else "unknown"
     digest = "unavailable"
     if rc_t == 0 and tok.strip():
@@ -381,31 +409,40 @@ def token_identity(timeout: float) -> tuple[str, str]:
 
 
 def credential_source(timeout: float) -> str:
-    """Which credential `gh` activated: `GH_TOKEN`, `GITHUB_TOKEN`, or the store.
+    """Which credential `gh` **activated**: `GH_TOKEN`, `GITHUB_TOKEN`, or the store.
 
     Reported because it is the single most useful fact when a lane is refused: a
     box with a working OAuth token in `GH_TOKEN` and an under-scoped fine-grained
     PAT in `hosts.yml` flips between them purely on whether the variable survived
     into the lane's environment (gh's documented precedence is `GH_TOKEN` >
     `GITHUB_TOKEN` > stored credentials, and it activates the first it finds).
-    Best effort — an unparseable `gh auth status` is reported, never guessed.
+
+    ⛔ The ADDRESSED account, not merely the first one (#10945 review P2).
+    `gh auth status` prints an account line and then its own
+    `Active account: true|false`, so the source has to be carried forward from the
+    last account line and only returned once the active marker is seen. Returning
+    the first account line instead names a credential that is not in use — which
+    sends the human to re-mint the wrong one, the exact misdiagnosis this tool
+    exists to prevent. Unparseable is reported, never guessed.
     """
-    rc, out = gh(["auth", "status"], timeout)
-    if rc != 0 and not out.strip():
+    rc, out, err = gh(["auth", "status"], timeout)
+    text = out or err
+    if rc != 0 and not text.strip():
         return "unknown"
-    for line in out.splitlines():
-        if "Active account: true" in line or "account" not in line:
-            continue
+    pending: str | None = None
+    for line in text.splitlines():
         m = re.search(r"account\s+(\S+)\s+\(([^)]*)\)", line)
         if m:
-            return m.group(2)
-    m = re.search(r"account\s+(\S+)\s+\(([^)]*)\)", out)
-    return m.group(2) if m else "unreported"
+            pending = m.group(2)
+            continue
+        if "Active account:" in line and "true" in line.lower() and pending is not None:
+            return pending
+    return pending or "unreported"
 
 
 def detect_repo(timeout: float) -> str | None:
     """`owner/name` from the checkout's origin, else gh's own answer."""
-    rc, out = gh(["repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"], timeout)
+    rc, out, _ = gh(["repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"], timeout)
     if rc == 0 and "/" in out:
         return out.strip().splitlines()[-1]
     return None
@@ -439,28 +476,33 @@ def pick_pr(repo: str, explicit: int | None, timeout: float) -> int | None:
     """
     if explicit:
         return explicit
-    rc, out = gh(
-        ["pr", "list", "--repo", repo, "--state", "merged", "--limit", "1", "--json", "number"],
-        timeout,
-    )
-    if rc == 0:
-        try:
-            rows = json.loads(out[out.index("[") :]) if "[" in out else []
-            if rows:
-                return int(rows[0]["number"])
-        except (ValueError, KeyError, TypeError, IndexError):
-            pass
-    rc, out = gh(
-        ["pr", "list", "--repo", repo, "--state", "all", "--limit", "1", "--json", "number"],
-        timeout,
-    )
-    if rc == 0 and "[" in out:
-        try:
-            rows = json.loads(out[out.index("[") :])
-            if rows:
-                return int(rows[0]["number"])
-        except (ValueError, KeyError, TypeError, IndexError):
-            pass
+    # ⛔ ASK `gh` FOR THE NUMBER, do not locate JSON in its output (#10945 review
+    # P2). `out.index("[")` on the merged stream matched the harness shim's own
+    # pacing banner (`[gh-limit] pacing 1.2s …`) before the real array, so both
+    # queries failed, `pick_pr` returned None, and a box whose writes were
+    # perfectly fine got `no-pr-to-probe` -> exit 3 on EVERY landing — a total
+    # false block of exactly the lanes this tool exists to unblock. `--jq` leaves
+    # nothing to locate.
+    for state in ("merged", "all"):
+        rc, out, _ = gh(
+            [
+                "pr",
+                "list",
+                "--repo",
+                repo,
+                "--state",
+                state,
+                "--limit",
+                "1",
+                "--json",
+                "number",
+                "--jq",
+                ".[0].number",
+            ],
+            timeout,
+        )
+        if rc == 0 and out.strip().isdigit():
+            return int(out.strip())
     return None
 
 
@@ -561,7 +603,24 @@ def probe_pull_requests(
     verdict = classify(res, PERM_PULL_REQUESTS, "pull_requests")
     if verdict is not None:
         return verdict, f"no-op PATCH on PR #{pr} refused"
-    return None, f"no-op PATCH on PR #{pr} accepted"
+    # ⛔ VERIFY THE NO-OP CLAIM INSTEAD OF ASSERTING IT (#10945 review P2). "No
+    # residue" is this probe's whole licence to run before every landing, and
+    # nothing above checks it — the tool sent the title it read and then trusted
+    # that GitHub stored it verbatim. If a future normalisation (or a `-f`
+    # encoding surprise) did change the PR, the probe would silently edit a real
+    # PR on every landing while reporting OK. One re-read pins it, and a mismatch
+    # is reported as residue with both values so an operator can restore it.
+    after = api("GET", f"repos/{repo}/pulls/{pr}", None, timeout)
+    if after.status and 200 <= after.status < 300:
+        got = None
+        with contextlib.suppress(ValueError, AttributeError):
+            got = json.loads(after.body).get("title")
+        if got is not None and got != title:
+            return None, (
+                f"no-op PATCH on PR #{pr} accepted, BUT the title changed — "
+                f"residue: was {title!r}, is now {got!r}; restore it"
+            )
+    return None, f"no-op PATCH on PR #{pr} accepted (title unchanged on re-read)"
 
 
 # ── CLI ──────────────────────────────────────────────────────────────────────
@@ -649,33 +708,44 @@ def main(argv: list[str] | None = None) -> int:
         # A probe we could not RUN is `unverifiable`, not `unavailable`: the
         # difference decides whether a human sees a repair or a bug report.
         unrun = [r for r in refusals if r.reason in UNVERIFIABLE_REASONS]
+        definite = [r for r in refusals if r.reason not in UNVERIFIABLE_REASONS]
         report["refusals"] = [
             {"reason": r.reason, "probe": r.probe, "detail": r.detail} for r in refusals
         ]
         if args.json:
             print(json.dumps(report, indent=2))
-        if unrun:
-            print(f"GH-WRITE-UNVERIFIABLE({unrun[0].reason}) — {unrun[0].detail}", file=sys.stderr)
-            return EXIT_UNVERIFIABLE
-        # The refusal line goes to STDERR (it is a failure, and that is the stream
-        # a gate greps) and a summary to STDOUT (a caller that captures stdout
-        # only still sees the marker). One line each, so neither stream repeats
-        # the detail.
-        for r in refusals:
-            print(
-                f"{r.line()} probe={r.probe} identity={login} token={ident} source={source}",
-                file=sys.stderr,
-            )
-            print(f"  {r.detail}", file=sys.stderr)
-        reasons = ",".join(r.reason for r in refusals)
-        if not args.json:
-            # `--json` keeps stdout parseable: the machine form is the whole body
-            # there, and a trailing summary line would make it invalid JSON (which
-            # is how a caller's `json.loads` becomes an unexplained crash).
-            print(
-                f"GH-WRITE-PREFLIGHT REFUSED repo={repo} reasons={reasons} identity={login} token={ident} source={source}"
-            )
-        return EXIT_UNAVAILABLE
+        # ⛔ A MEASURED REFUSAL OUTRANKS AN UNMEASURED ONE (#10945 review P2).
+        # `unrun` used to be tested first, so `contents=permission:contents-write`
+        # alongside `pull_requests=no-pr-to-probe` printed ONLY
+        # `GH-WRITE-UNVERIFIABLE` and exited 3 — the caller's documented
+        # `|| exit` recipe then reports "cannot measure, file a bug" while a real,
+        # measured `contents=write` defect sits unrepaired and is named nowhere on
+        # stderr. Exit 3 is reserved for "nothing definite was measured".
+        if definite:
+            for r in definite:
+                print(
+                    f"{r.line()} probe={r.probe} identity={login} token={ident} source={source}",
+                    file=sys.stderr,
+                )
+                print(f"  {r.detail}", file=sys.stderr)
+            for r in unrun:
+                print(
+                    f"GH-WRITE-UNVERIFIABLE({r.reason}) probe={r.probe} — {r.detail}",
+                    file=sys.stderr,
+                )
+            reasons = ",".join(r.reason for r in refusals)
+            if not args.json:
+                # `--json` keeps stdout parseable: the machine form is the whole
+                # body there, and a trailing summary line would make it invalid
+                # JSON (which is how a caller's `json.loads` becomes an
+                # unexplained crash).
+                print(
+                    f"GH-WRITE-PREFLIGHT REFUSED repo={repo} reasons={reasons} "
+                    f"identity={login} token={ident} source={source}"
+                )
+            return EXIT_UNAVAILABLE
+        print(f"GH-WRITE-UNVERIFIABLE({unrun[0].reason}) — {unrun[0].detail}", file=sys.stderr)
+        return EXIT_UNVERIFIABLE
 
     report["writable"] = True
     if args.json:
