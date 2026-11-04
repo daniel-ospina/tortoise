@@ -1622,7 +1622,13 @@ _POINT_KIND = re.compile(
 #: that let them through kept the half-correction GREEN — measured (#10675 review
 #: cycle 5, P2): "… no longer writes turn text to the graph: it still writes a
 #: `pointKind='event'` node" and its " - " and "(…)" twins. Every one of them is
-#: a clause separator, so every one of them terminates the walk.
+#: a clause separator in its CLAUSE use, so every one of them terminates the walk.
+#: ⚠️ Residual, stated because the previous line overstated its cost: the same
+#: characters also introduce an APPOSITIVE that merely GLOSSES the shape
+#: ("no longer writes the turn shape (a `pointKind='event'` node)", "… the turn
+#: shape: a `turn node`"), and those are TRUE corrections that still red. The
+#: separators cannot be dropped — the half-correction arms depend on them — so
+#: this is named rather than hidden (#10675 review cycle 6, P3).
 #: ⛔ AND A DASH IS A CLAUSE SEPARATOR TOO, not an odd character: `—`/`–` is
 #: this tree's dominant one (it appears throughout the comment block that states
 #: this rule), so `[^,;]` alone still crossed it — "… no longer writes turn text
@@ -1657,14 +1663,30 @@ _POINT_KIND = re.compile(
 _TURN_SHAPE_TAIL = r"(?:pointKind|\bturn\s+node\b)"
 _NEGATED_CLAUSE_GAP = (
     r"(?:(?!(?:but|yet|and|although|while|whereas|however|instead)\b)"
-    r"[^,;:()!?\u2014\u2013-]){0,60}?")
+    # ⛔ A SPACED hyphen is a clause separator; a COMPOUND hyphen is not. `-`
+    # therefore stays in the class (so `pre-#10000` — this tree's own spelling
+    # for exactly this population — is walkable) and only the ` - ` form is
+    # refused (#10675 review cycle 6, P3: excluding bare `-` falsely red
+    # "no longer writes the pre-#10000 turn node").
+    r"(?!(?<=\s)-(?=\s))[^,;:()!?\u2014\u2013]){0,60}?")
 _NEGATED_CLAIM = re.compile(
     r"\b(?:not|never|no\s+longer|no\s+more)\s+(?:also\s+|still\s+|ever\s+)?"
     r"(?:writes?|mints?|creates?)\b" + _NEGATED_CLAUSE_GAP + _TURN_SHAPE_TAIL
     # A contrast marker INTRODUCING the shape ("rather than a turn node").
-    + r"|\b(?:rather\s+than|instead\s+of|not\s+(?:to|a|as|into|in|on))\s+"
+    # ⛔ `never` is the negative-polarity twin of `not`, and an earlier wideneing
+    # dropped it silently: "… never a `turn node`" went GREEN→RED (#10675 review
+    # cycle 6, P3).
+    + r"|\b(?:rather\s+than|instead\s+of|(?:not|never)\s+(?:to|a|as|into|in|on))\s+"
     + _NEGATED_CLAUSE_GAP + _TURN_SHAPE_TAIL,
     re.IGNORECASE)
+#: A clause that RE-ASSERTS the shape after the escape's own span ("not a `turn
+#: node` BUT a `pointKind='event'` node"). The escape matches INSIDE the parent's
+#: span, which ends at the FIRST shape, so the asserted clause behind it was never
+#: examined — widening the contrast class turned four spellings of that construction
+#: into a false PASS, the guard's core job (#10675 review cycle 6, P2).
+_CONTINUE = re.compile(
+    r"\s*(?:,|;|:)?\s*\b(?:but|rather\s+than|instead\s+of)\b[^.\n]{0,40}?"
+    + _TURN_SHAPE_TAIL, re.IGNORECASE)
 
 
 def _present_tense_writer_claim(flat: str) -> str | None:
@@ -1689,6 +1711,10 @@ def _present_tense_writer_claim(flat: str) -> str | None:
         # what this guard wants stated, and reding it tells the lane to restate
         # a sentence that is already right.
         if _NEGATED_CLAIM.search(hit.group()):
+            # ⛔ …unless the clause AFTER the span re-asserts a shape, in which
+            # case the sentence is the half-correction, not the correction.
+            if _CONTINUE.search(flat[hit.end():hit.end() + 80]):
+                return hit.group()
             continue
         # The kind may be named just PAST the verb's match ("… with a
         # ``pointKind`` of ``observation``"), so read a short context, not the
@@ -1929,6 +1955,16 @@ def test_the_present_tense_guard_reads_a_NEGATED_writer_claim_as_the_CORRECTION(
         "the demo seed writes turn text to Postgres, not into a "
         "`pointKind='event'` node",
         "the demo seed writes turn text to Postgres, not as a `turn node`",
+        # ⛔ `never a` is `not a`'s negative-polarity twin, dropped silently by
+        # an earlier widening (#10675 review cycle 6, P3).
+        "the demo seed writes its turns to Postgres, never a `turn node`",
+        "the demo seed writes its turns to Postgres, never a "
+        "`pointKind='event'` node",
+        # ⛔ A COMPOUND hyphen is not a clause separator: removing bare `-` from
+        # the walk falsely red these, and `pre-#10000` is this tree's own
+        # spelling for exactly this population (#10675 review cycle 6, P3).
+        "the demo seed no longer writes its pre-#10000 turn node",
+        "the demo seed does not write the pre-#10000 `pointKind='event'` node",
     )
     for sentence in corrections:
         found = _present_tense_writer_claim(sentence)
@@ -1992,6 +2028,18 @@ def test_the_present_tense_guard_reads_a_NEGATED_writer_claim_as_the_CORRECTION(
         "it still writes a `pointKind='event'` node per turn",
         "since #10000 the demo seed no longer writes turn text to the graph (it "
         "still writes a `pointKind='event'` node)",
+        # ⛔ `not X BUT Y` — the escape matches inside the parent's span, so the
+        # clause ASSERTED after `but` was never examined; widening the contrast
+        # class made these false PASSes (#10675 review cycle 6, P2). `_CONTINUE`
+        # now re-reads the clause behind the span.
+        "the demo seed writes its turn not as a `turn node` but as a "
+        "`pointKind='event'` node",
+        "the demo seed writes its turn not a `turn node`, but a "
+        "`pointKind='event'` node",
+        "the demo seed writes its turn not in a `turn node` but in a "
+        "`pointKind='event'` node",
+        "the demo seed writes its turn not into a `turn node` but into a "
+        "`pointKind='event'` node",
     )
     for sentence in compound:
         assert _present_tense_writer_claim(sentence) is not None, (
