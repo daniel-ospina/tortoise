@@ -421,8 +421,8 @@ def test_the_gate_refuses_an_operator_with_no_endpoints(sdk):
     dropping the guard journals an ``OperatorPromoted`` for an operator with no
     endpoints and counts it in ``operators_promoted``.
 
-    The guard is the ENGINE's too (``sdk.py:21341`` — ``if not eps: continue  #
-    no endpoints — nothing to gate on``), so this is parity, not a harness
+    The guard is the ENGINE's too (``sdk.py:21344-21345`` — ``if not eps:
+    continue  # no endpoints — nothing to gate on``), so this is parity, not a harness
     invention: a harness that promoted here would publish a promotion
     production cannot produce.
 
@@ -473,7 +473,7 @@ def test_the_gate_refuses_an_operator_with_no_endpoints(sdk):
     )
     assert _operator_status(sdk, oid) == "draft", (
         "an endpoint-less operator went live; the engine keeps it draft "
-        "(sdk.py:21341) and a promotion the engine cannot produce must not be "
+        "(sdk.py:21344-21345) and a promotion the engine cannot produce must not be "
         "published in operators_promoted (#10137)"
     )
     assert events.count("OperatorPromoted") == 0, (

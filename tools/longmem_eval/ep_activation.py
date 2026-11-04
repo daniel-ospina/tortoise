@@ -238,6 +238,24 @@ _FACTOR_EDGE_TYPES = frozenset({"IMPL", "NAND"})
 #: ``:Subject`` / ``:Object`` / ``:Event`` id handed to it is never stamped and
 #: is instead filed in ``_dirty_roots`` as an unmatched root — MEASURED: an
 #: ``:Event`` endpoint id lands in ``_dirty_roots`` with no ``ep_dirty`` stamp.
+#:
+#: ⚠️ A FOURTH DIVERGENCE, NAMED SO IT IS NOT ABSORBED — an operator that is
+#: ITSELF another operator's OPERAND can never be promoted, and no number of
+#: passes resolves it (#10874). ``create_operator`` mints the typed operand edge
+#: AND its mirror ``(s)-[:INPUT]->(o)`` in one statement (``sdk.py:22405-22407``),
+#: so such an operator acquires an outgoing ``:INPUT`` edge to a ``:Point`` — and
+#: THIS read, like the engine's, counts it as a gating endpoint
+#: (``epistemic_disjunction`` admits ``:Point``, ``live.py:509``). With ``A``'s
+#: operand ``B`` and ``B``'s ``:INPUT`` target ``A``, each keeps the other draft
+#: FOR EVER: a mutual deadlock whose fixed point is "both draft", so re-running
+#: cannot break it. MEASURED at this head — two such operators over two live
+#: claims report ``promoted=0, factors=0, no_op_reason='no_ep_factors'`` on pass
+#: 1 AND pass 2, i.e. the exact #10137 symptom, published as a silent zero.
+#: ⛔ Do NOT "fix" it HERE by excluding ``:INPUT`` from THIS read: that makes the
+#: harness gate more LOOSELY than the engine and publishes promotions production
+#: cannot produce — the invariant the block above exists to protect. The gap is
+#: the R16 gate's endpoint predicate, which has no notion of edge ROLE; it is
+#: filed as #10874 beside #10828 (the same gate ignoring ``outdated``).
 _SELECT_OPERATOR_ENDPOINTS = (
     "MATCH (o:Point {id:$oid})-[r]->(x) "
     "WHERE " + epistemic_disjunction("x") + " "
@@ -270,8 +288,9 @@ _COUNT_POINTS_WITH_EP = (
 # ⛔ ``is_episodic`` is NOT the discriminator, and using it is how this fix was
 # wrong on its first pass (review P0): the ingest stamps ``is_episodic=True`` on
 # the EXTRACTED CLAIMS TOO (``ingest_v2.py:275-290``, kind ``statement``). The
-# flag is the QUOTA discriminator (``tortoise/quota.py:1087-1089`` counts only
-# non-episodic points, which is why the eval ingest marks everything), not a
+# flag is the QUOTA discriminator (``tortoise/quota.py:1046-1050`` — the
+# Point-level ``is_episodic`` flag is the Point discriminator, which is why the
+# eval ingest marks everything), not a
 # belief/evidence one — filtering on it excluded every claim EP stamps: 3 claims
 # + 2 IMPL read ``belief_eligible_total = 0`` against ``points_with_ep = 3``.
 # The substrate is identified by the SHAPE its writer stamps, the one property
@@ -713,7 +732,7 @@ def _promote_operator_row(sdk, g, oid, promoted_ops, on_input) -> bool:
     if not endpoints:
         # ``all([])`` is True, so WITHOUT this the CAS below flips an operator
         # that has no epistemic edge at all. The engine carries the same guard
-        # (``sdk.py:21341``, "no endpoints — nothing to gate on"); pinned by
+        # (``sdk.py:21344-21345``, "no endpoints — nothing to gate on"); pinned by
         # ``test_the_gate_refuses_an_operator_with_no_endpoints``.
         return False  # no endpoints — nothing to gate on (the SDK skips too)
     if not all((st or "live") == "live" for _, st, _rel, _labs in endpoints):
