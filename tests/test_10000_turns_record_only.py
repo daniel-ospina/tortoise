@@ -3383,8 +3383,10 @@ def test_the_shared_read_predicate_accepts_0_and_rejects_a_short_claim():
 # The six-name scan above CANNOT SEE THIS ONE, and its own docstring says so:
 # `sdk._session_source_metadata` derives the transcript's first substantive
 # utterance into `summary`, and `_materialize_session_source` USED TO carry it
-# on its `SourceCreated` record, from which the `:Source` MERGE wrote it (and,
-# for a record restore, `cache_projection.node_from_row` re-wrote it). The
+# on its `SourceCreated` record, from which the fold's own `:Source` passthrough
+# wrote it onto the node (`_upsert_source` → `_persist_extra_props`, with
+# `summary` in `_SOURCE_EXTRA_PROPS`) — NOT via `cache_projection.node_from_row`,
+# which DROPS the pair for an episodic Source (#10853's pin). The
 # carrier no longer carries it — see the test below. The scan's population is
 # still a property-name allow-list, so a `:Source.summary` hit WOULD be a route
 # it cannot reach; that class is covered by its own pin rather than by widening
@@ -3426,10 +3428,13 @@ def test_a_captured_session_source_keeps_the_transcript_out_of_summary(sdk):
         D10 declaration is that *"a `:Source` stores no raw bytes — the text
         lives on `_searchText`"* (`tortoise/search_engine.py:1895`);
       * the `SourceCreated` CARRIER must not carry it either — that is the ONE
-        door this fix closes, and it is what the record→cache door would
-        otherwise re-materialise on `tortoise record-restore` (a placed
-        `public.source.summary` column is written back onto the node by
-        `cache_projection.node_from_row`);
+        door this fix closes, because the fold's own `:Source` passthrough
+        writes a carried `summary` onto the node on apply AND on replay
+        (`projection/entities.py::_upsert_source`, `summary` ∈
+        `_SOURCE_EXTRA_PROPS`; pinned at `test_projection.py:3468`). The
+        record→cache door is NOT that route — it DROPS the pair for an episodic
+        Source (`cache_projection._EPISODIC_SOURCE_PROSE_COLUMNS`), so a
+        `record-restore` RECLAIMS a pre-fix node;
       * the FTS field `_searchText` MUST still carry it. That field is #3518's
         decision and D10's declared home for a Source's searchable text;
         removing it is a #3518/D10 **reopen**, not a cleanup, and this pin would
@@ -3493,7 +3498,8 @@ def test_a_captured_session_source_keeps_the_transcript_out_of_summary(sdk):
         "half below would pass vacuously")
     leaked = [r for r in source_carriers if r.get("summary") is not None]
     assert leaked == [], (
-        "the `SourceCreated` carrier still carries the transcript slice, so a "
-        "record restore (`cache_projection.node_from_row` writes a placed "
-        f"`public.source.summary` back onto the node) re-creates the prose "
+        "the `SourceCreated` carrier still carries the transcript slice, so the "
+        "fold's `:Source` passthrough (`_upsert_source` → `_persist_extra_props`, "
+        "`summary` in `_SOURCE_EXTRA_PROPS`) writes it onto the node on apply "
+        "and on replay — the prose "
         f"§9.1/D1 keeps out of the graph: {[r.get('summary') for r in leaked]!r}")

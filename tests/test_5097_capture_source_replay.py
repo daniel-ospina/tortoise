@@ -10,9 +10,12 @@ writer: a RAW Cypher MERGE on the capture path that stores the session
 that list any more: §9.1/D1 (#10000) keeps the raw transcript out of the graph,
 so this writer sets neither the node property nor the ``SourceCreated`` payload —
 the carrier is where the key used to travel, and dropping it there is what stops
-the record→cache door placing it back on the node. ⛔ There is NO fold-side deny
+THE FOLD writing it straight onto the node. ⛔ There is NO fold-side deny
 to lean on: ``_upsert_source`` allows ``summary`` (it is caller-settable), so a
-carrier that carried it would write it straight onto the node. See
+carrier that carried it would write it straight onto the node — that is the door
+this change closes, and it is NOT the record→cache door
+(`cache_projection._EPISODIC_SOURCE_PROSE_COLUMNS` DROPS the pair for an episodic
+Source; ``tests/test_10853_session_source_prose.py``). See
 `test_the_capture_summary_is_never_on_the_node_and_never_on_the_carrier`.
 
 Before the fix it had NO journal carrier, so a rebuild silently reverted the
@@ -115,8 +118,9 @@ DERIVED_KEYS = (
     # The capture derives it from the transcript's first substantive utterance —
     # a VERBATIM SLICE OF THE RAW TURN TEXT, which the raw-transcript rule keeps
     # out of the graph — so the writer sets neither the node property nor the
-    # `SourceCreated` carrier key (a placed `public.source.summary` would be
-    # written straight back onto the node by the record→cache door). Pinning it
+    # `SourceCreated` carrier key (the fold's own passthrough would write a
+    # carried `summary` straight onto the node — `_upsert_source` admits it,
+    # `summary` ∈ `_SOURCE_EXTRA_PROPS`). Pinning it
     # here would assert a property the node must never hold again —
     # `test_the_capture_summary_is_never_on_the_node_and_never_on_the_carrier`
     # is where that half is asserted.
@@ -246,7 +250,7 @@ def test_the_capture_summary_is_never_on_the_node_and_never_on_the_carrier(captu
     | where | holds `summary`? | why |
     |---|---|---|
     | the derivation (`sdk._session_source_metadata`) | yes | it is the transcript's first substantive utterance |
-    | the `SourceCreated` CARRIER | **no** | it is a placed `public.source.summary` column, and the record→cache door writes a placed column back onto the node — so carrying it here re-creates the prose on `tortoise record-restore` |
+    | the `SourceCreated` CARRIER | **no** | the fold's own `:Source` passthrough writes a carried `summary` onto the node on apply and on replay (`_upsert_source`, `summary` ∈ `_SOURCE_EXTRA_PROPS`) — so carrying it here re-creates the prose |
     | the `:Source` NODE | **no** | that utterance is a verbatim slice of the RAW turn text, and §9.1/D1 keeps the raw transcript out of the graph |
 
     The node's searchable text is `_searchText` — D10/#3518's declared home for a

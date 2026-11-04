@@ -1941,8 +1941,17 @@ other could not see it, and where a merge order could have decided it.
 SUBSTANTIVE UTTERANCE — a verbatim slice of the RAW turn text, not authored metadata — and
 `_materialize_session_source` writes it twice: onto the node (`s.summary=$sum`, between
 `s.contentHash=$ch` and `s.topics=$topics`) and onto the `SourceCreated` carrier (`summary=…`), which
-the record→cache door places back onto a node, so replay re-created what the live write had done. Both
-writes are present on `main` as this entry is written.
+`_upsert_source`'s own passthrough writes back onto the node — the fold admits `summary` because it
+is in `_SOURCE_EXTRA_PROPS` (`tortoise/projection/entities.py:1840`) — so replay re-created what the
+live write had done. Both writes are present on `main` as this entry is written.
+
+⛔ **CORRECTED by `#10858`'s fix round after the round-10 review.** This paragraph said the
+*record→cache door* placed the carrier's `summary` back onto a node. It does not, and has not since
+`#10880`'s batch fold landed `_EPISODIC_SOURCE_PROSE_COLUMNS` (`cache_projection.py:1244-1246`;
+skipped in `_props_from_row` at `:1420-1424`): that door DROPS the `summary`/`_search_text` pair for
+an episodic Source, and `tests/test_10853_session_source_prose.py` pins it. The engine the carrier
+change closes is the FOLD's `:Source` passthrough, on apply and on replay alike — a correction made
+because the wrong name is what a future lane would sweep against.
 
 **Two proposals, exclusive, neither adopted** — each verified against its own head's source, not
 against its description:
@@ -1983,7 +1992,11 @@ by merge order.** It must not be decided that way.
   today should read that as §9.1 working as decided — not as a bug, and not as a settled departure.
 
 **The residue this does not touch, whatever the ruling.** A row a PRE-FIX build already placed in
-`public.source` keeps its `summary` and is restored onto the node by the same record→cache door. That is
+`public.source` keeps its `summary`, and the node that build wrote keeps the prose. The record→cache
+door does NOT restore it — `_props_from_row` drops the `summary`/`_search_text` pair for an episodic
+Source (`_EPISODIC_SOURCE_PROSE_COLUMNS`, `cache_projection.py:1244-1246`; skip at `:1420-1424`), and
+`tests/test_10853_session_source_prose.py` pins exactly that — so what `#10853` sizes is a
+GRAPH-ONLY residue, and a record-sourced re-materialisation already reclaims both columns. That is
 a **data migration**, not a code path, and it is `#10853`'s — which is why
 `tests/test_8501_capture_path_anchor.py` states `_PRE_FIX_SOURCE_KEYS` (`_SESSION_SOURCE_KEYS` plus
 `summary`) as a separate ground truth rather than reusing the shipped set.

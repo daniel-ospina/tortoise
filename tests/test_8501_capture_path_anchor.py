@@ -51,7 +51,9 @@ CONV = [
 #: FIRST SUBSTANTIVE UTTERANCE, a verbatim slice of the RAW turn text, and
 #: `_materialize_session_source` used to write it to BOTH sides: the node
 #: (`s.summary=$sum`) and the `SourceCreated` carrier (`summary=…`, which the
-#: record→cache door would place back onto the node). Neither write remains. The
+#: FOLD's `:Source` passthrough would write back onto the node — `_upsert_source`
+#: admits `summary` via `_SOURCE_EXTRA_PROPS`; the record→cache door already
+#: drops the pair for an episodic Source). Neither write remains. The
 #: node's searchable text still carries that same derivation, on `_searchText`
 #: (D10/`#3518`'s declared home), so the session stays findable; nothing reads
 #: `summary` for a session Source. Dropping it here was the pin being UPDATED on

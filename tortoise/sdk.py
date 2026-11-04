@@ -16497,10 +16497,10 @@ class TortoiseSDK:
         transcript lives outside the graph. The derivation still runs and its
         text still reaches the node's searchable field (``_searchText``,
         #3518/D10), so the session stays findable and nothing is lost: what this
-        write stops doing is shipping the same prose as NODE METADATA (a placed
-        ``public.source.summary`` column is written straight back onto the node by
-        the record→cache door, i.e. the one recovery engine a journal fold cannot
-        constrain). Applying and replaying therefore AGREE without any further
+        write stops doing is shipping the same prose as NODE METADATA. The door a
+        ``summary`` VALUE would take is the FOLD's own ``:Source`` passthrough,
+        NOT the record→cache door (see the carrier note below). Applying and
+        replaying therefore AGREE without any further
         clause — there is no `summary` write on either side — and no ``REMOVE`` is
         issued here: an unconditional one would destroy a caller-authored
         ``summary`` on a ``session:``-keyed ``:Source`` (`summary` is
@@ -16598,9 +16598,9 @@ class TortoiseSDK:
             # escape). The value is still DERIVED, and its text still reaches the
             # node through `_searchText` — D10/#3518's declared home for a
             # Source's searchable text — but it is neither written here as a
-            # property nor carried on the `SourceCreated` record below: a placed
-            # `public.source.summary` would be written back onto the node by the
-            # record→cache door.
+            # property nor carried on the `SourceCreated` record below: that
+            # carrier is the door a `summary` key would re-enter through (the
+            # fold's passthrough admits it — see the carrier note below).
             "topics": topics,
             "st": search_text,
             "now": now,
@@ -16788,14 +16788,14 @@ class TortoiseSDK:
             # carried here and written by the `:Source` MERGE, so the node held
             # it on every capture.
             #
-            # ⛔ WHY THE *CARRIER* AND NOT THREE DOWNSTREAM EXCEPTIONS. The
-            # record row's `summary` is a placed PRIMARY column fed from THIS
-            # record, and the record→cache door (`cache_projection.node_from_row`)
-            # writes a placed column back onto the node — so a carrier that still
-            # carried it would re-create the prose on `tortoise record-restore`,
-            # in the one recovery engine the journal fold cannot constrain. Doing
-            # it here leaves ONE door (the value is simply never journaled as
-            # node metadata) and needs no shape-keyed special case in the fold,
+            # ⛔ WHY THE *CARRIER*. A `SourceCreated` record carrying `summary`
+            # is written onto the node by THIS writer's own passthrough —
+            # `_persist_extra_props(..., allow_keys=_SOURCE_EXTRA_PROPS)`, with
+            # `summary` in it (`projection/entities.py:1840`, call `:6816`) — on
+            # apply AND on replay (`test_projection.py:3468`); NOT the record→
+            # cache door, which DROPS the pair for an episodic Source
+            # (`cache_projection.py:1244`/`:1420`; `test_10853_session_source_`
+            # `prose.py`). One door here: no shape-keyed special case in the fold,
             # in `_props_from_row`, or a conditional `REMOVE` in the live SET —
             # each of which keyed the rule differently (`_stub_completion` vs
             # `source_kind` vs unconditional), and an unconditional `REMOVE`
@@ -16803,9 +16803,9 @@ class TortoiseSDK:
             # `session:`-keyed Source while replay kept it (measured in review).
             #
             # ⚠️ SCOPE: this closes the door for rows written FROM HERE ON. A row a
-            # PRE-FIX build already placed still holds the column and is restored
-            # onto the node by that same door — a data migration, not a code path
-            # (#10853).
+            # PRE-FIX build already placed keeps the column and the node it wrote
+            # keeps the prose — GRAPH-ONLY, since the record→cache door drops the
+            # pair (#10853: a data migration, not a code path).
             #
             # ⛔ WHAT DOES NOT CHANGE, deliberately: the derivation still runs,
             # and its text still reaches the node's searchable field
