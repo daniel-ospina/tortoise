@@ -626,7 +626,86 @@ def _wait_bound_refused() -> bool:
     return bool(state.get(_WAIT_BOUND_REFUSED_KEY)) if state is not None else False
 
 
-def _wait_bound_refusal_result() -> ToolResult:
+#: The two retry rules shipped WITH a breached write's refusal. ONE of them is
+#: always returned, so a caller is never left to infer a retry protocol from
+#: prose — and neither of them ever says "retry" without the registry having
+#: declared the operation idempotent.
+#:
+#: ⚠️ There is deliberately NO generic read-back recipe here, and that is a
+#: correctness decision rather than an omission. A single recipe CANNOT be sound
+#: across the write surface, and two ways it is unsound are both measured:
+#:
+#:   * ``tortoise_search`` (``entity_type="point"``) indexes ``content`` +
+#:     ``search_keys`` only, while ``sdk.create_operator`` writes a ``:Point``
+#:     with ``{id, is_operator, op_type, direction, label, status}`` and NO
+#:     ``content`` (``sdk.py:22382``) — so for EVERY created operator the recipe
+#:     returns nothing, "nothing" reads as "it did not commit", and the retry
+#:     duplicates the edge and double-counts its EP factor. That is the exact
+#:     tool #10849 measured, so a recipe here would have instructed the
+#:     duplicate it exists to prevent.
+#:   * the inversion is not even uniform across the destructive tier, so no one
+#:     sentence can describe it: for a hard delete (``DETACH DELETE``) and the
+#:     terminal-marking doors (``supersede`` / ``invalidate`` / ``retract``,
+#:     whose old node leaves the default ``include_terminal=False`` result set) a
+#:     search HIT means the write did NOT commit — inverted.
+#:   * and for ``update_point`` presence carries NO information at all: the node
+#:     exists BEFORE the write, so a HIT is what a not-committed update produces
+#:     exactly as much as a committed one (hit ⇒ committed is unsound); worse, a
+#:     generic revision of an already-terminal point is ACCEPTED
+#:     (``refuse_terminal=_temporal_restamp``) and the node stays terminal, so a
+#:     COMMITTED update can also be a MISS. The default result set excludes it
+#:     either way.
+#:
+#: So the machine-actionable answer is the one the registry can actually support:
+#: ``retry_safe``. An idempotent operation converges on a repeat and needs no
+#: read-back; a non-idempotent one must not be repeated at all, because no
+#: read-back can be offered for it here. A per-tool verify recipe is left to
+#: #10849's remaining half (making ``create_operator`` adopt on endpoint-set +
+#: label + direction the way ``ingest`` already does), which makes the question
+#: moot for the family that needs it most.
+_WAIT_BOUND_RETRY_RULE_SAFE = (
+    "this operation is idempotent, so repeating it converges — a retry is safe "
+    "once the advertised delay has elapsed"
+)
+#: ⛔ Deliberately does NOT say what a repeat would do (a duplicate is true for a
+#: creator; a re-issued hard delete returns ``False`` and is the door's own
+#: "no-op") and deliberately
+#: does NOT send the caller to a read-back (there is none on this surface for
+#: the family that needs it most). It states the one rule that holds for every
+#: non-idempotent writer: do not re-send.
+_WAIT_BOUND_RETRY_RULE_UNSAFE = (
+    "this operation is NOT idempotent — do NOT repeat it. The write may already "
+    "have committed, and nothing on this response tells you whether it did. "
+    "Reconcile by other means rather than re-sending."
+)
+
+
+def _write_retry_safety(name: str) -> bool:
+    """Whether REPEATING a breached write is safe — derived, fail-closed.
+
+    The source of truth is the registry entry's own retry-safety declaration:
+    ``ToolDefinition.idempotent`` (#4122), read through the derived
+    ``entry.annotations.idempotentHint`` (``annotations_for_risk`` returns the
+    declared value when the entry sets one, else the tier's default — ``write``
+    defaults to ``False``). It already exists and is already maintained per
+    tool: ``tortoise_create_point`` declares ``idempotent=True`` (content-hash
+    dedup), ``tortoise_ingest`` declares it (content-derived ``batch_id``), and
+    ``tortoise_create_operator`` does not — which is exactly the asymmetry
+    #10849 measured, and the reason a blind retry duplicates an edge and
+    double-counts its EP weight.
+
+    Deriving it from the entry rather than listing names here is the #4170 rule:
+    a hand-maintained parallel list is what lets a new writer be silently
+    missing from it. The default is FAIL-CLOSED — a name the registry cannot
+    resolve is never advertised as safe to repeat.
+    """
+    entry = get_tool_by_name().get(name)
+    if entry is None:
+        return False
+    return bool(entry.annotations.idempotentHint)
+
+
+def _wait_bound_refusal_result(name: str | None = None) -> ToolResult:
     """The ONE refusal result both wait-bound paths return.
 
     The message and the advertised delay come from the single module both
@@ -635,15 +714,72 @@ def _wait_bound_refusal_result() -> ToolResult:
     paths now deliver it (the seam's own breach, and the already-refused
     short-circuit #9762 added) and a second construction is how the two drift
     apart.
+
+    ``name`` is the client-supplied tool name, and it decides whether this
+    refusal may present itself as a plain FAILURE (#10849). For a READ it may:
+    nothing was mutated, and the shipped shape is returned byte-for-byte. For a
+    WRITE it may not — the seam ABANDONS the dispatch rather than cancelling it
+    (see ``_await_under_mcp_wait_bound``), so the write can still commit after
+    the caller has been told the request failed. Measured on #10849: a
+    ``tortoise_create_point`` answered ``-32009`` at 12.45 s and the Point
+    existed on the next read.
+
+    So a WRITE refusal carries a three-valued outcome and a retry RULE,
+    additively — the ENVELOPE is unchanged (same ``code``, same ``message``,
+    ``retry_after`` still where it was), because ``tests/_verdict.py``
+    classifies the refusal by that envelope and a restructured one would read as
+    a genuine product failure on a busy host:
+
+    * ``data.committed: "unknown"`` — never a bare failure. The seam cannot
+      know, and saying so is the whole fix.
+    * ``data.retry_safe`` — the registry's own retry-safety verdict for this
+      tool, so the caller does not have to re-derive it from prose (and a new
+      writer defaults to UNSAFE).
+    * ``data.retry_rule`` — the prose of that verdict, because ``retry_safe``
+      alone does not tell a caller what to do INSTEAD when it is false.
+
+    ⛔ ``error.message`` STAYS the neutral ``_TRANSPORT_WAIT_BOUND_MESSAGE`` on
+    BOTH arms; the write prose goes on ``content``, the human channel. That
+    split is load-bearing, not tidiness: the fleet's verdict contract
+    (``tests/_verdict.py::is_transport_wait_bound_refusal``) identifies a
+    wait-bound refusal by ``code == ERR_TIMEOUT`` **AND an exact equality on
+    ``error.message``**, and it is what converts a refusal on a busy host into
+    INCONCLUSIVE instead of a false red charged to the product (#5049 / #8579).
+    Putting the write message in ``error.message`` made that detector miss every
+    refused WRITE — the reachable class, since #10849's own measured incident
+    was a ``tortoise_create_point`` refused on the wire. The message field is
+    the refusal's IDENTITY; the write consequence is its PAYLOAD.
+
+    ⚠️ On the ``transport_refused`` short-circuit below no dispatch is started,
+    so nothing can commit — and both ``committed: "unknown"`` AND the write
+    prose are conservative there (the prose says the write "may still complete",
+    which on that arm it cannot). Both are kept uniform rather than branched:
+    this function does not know which arm it is serving, and one field with one
+    meaning is what a caller can act on. "unknown" is never wrong about a write
+    whose dispatch this function did not itself observe.
     """
+    data: dict = {"retry_after": _mcp_auth._TRANSPORT_WAIT_RETRY_AFTER_S}
+    # The human channel. A read mutated nothing, so it reads as it always has.
+    prose = _mcp_auth._TRANSPORT_WAIT_BOUND_MESSAGE
+    if name and name in WRITE_TOOL_NAMES:
+        prose = _mcp_auth._TRANSPORT_WAIT_BOUND_WRITE_MESSAGE
+        retry_safe = _write_retry_safety(name)
+        data.update({
+            "committed": "unknown",
+            "retry_safe": retry_safe,
+            "retry_rule": (_WAIT_BOUND_RETRY_RULE_SAFE if retry_safe
+                           else _WAIT_BOUND_RETRY_RULE_UNSAFE),
+        })
     return ToolResult(
-        content=_mcp_auth._TRANSPORT_WAIT_BOUND_MESSAGE,
+        content=prose,
         # The REST JSON-RPC error payload, carried on the channel this surface
-        # has: same code, same message, same `data.retry_after`.
+        # has: same code, same message, same `data.retry_after`. ⛔ `message` is
+        # the NEUTRAL one on both arms — see the docstring: it is the refusal's
+        # identity for ``tests/_verdict.py``, not the place for the write prose.
         structured_content={"error": {
             "code": ERR_TIMEOUT,
             "message": _mcp_auth._TRANSPORT_WAIT_BOUND_MESSAGE,
-            "data": {"retry_after": _mcp_auth._TRANSPORT_WAIT_RETRY_AFTER_S},
+            "data": data,
         }},
         meta={_WAIT_BOUND_META_KEY: True},
         is_error=True,
@@ -779,7 +915,7 @@ async def _await_under_mcp_wait_bound(name: str, arguments, *, version,
             "MCP tools/call %s already refused at the transport; this seam's "
             "refusal is redundant and no dispatch is started",
             _mcp_auth._sanitize_for_log(name))
-        return _wait_bound_refusal_result()
+        return _wait_bound_refusal_result(name)
     # #4055 (P2): bind an opaque owner token for this dispatch, then create the
     # dispatch task INSIDE the binding so it copies the token. A one-time
     # embedder load this dispatch triggers stamps that token as the load's
@@ -879,7 +1015,7 @@ async def _await_under_mcp_wait_bound(name: str, arguments, *, version,
         _log.warning(
             "transport wait bound (%.0fs) exceeded: MCP tools/call %s — "
             "refusing legibly", _mcp_auth._TRANSPORT_WAIT_BOUND_S, safe_name)
-    return _wait_bound_refusal_result()
+    return _wait_bound_refusal_result(name)
 
 
 def _enforce_mcp_tool_scope(name: str) -> None:
@@ -2126,7 +2262,7 @@ async def _wrapped_call_tool(name: str, arguments: dict[str, Any] | None = None,
             # and FALL THROUGH, so the classification below still labels the row
             # (`refused`/`transport_wait_bound`) and the refusal is repaired by
             # the same envelope path as every other one.
-            result = _wait_bound_refusal_result()
+            result = _wait_bound_refusal_result(name)
         else:
             result = await _await_under_mcp_wait_bound(
                 name, arguments, version=version, task_meta=task_meta,

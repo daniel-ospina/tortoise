@@ -334,7 +334,11 @@ class TestHintsCannotDrift:
             ("tortoise_approve_merge", True),
             ("tortoise_checkpoint", True),
             ("tortoise_create_document", True),
-            ("tortoise_create_operator", True),
+            # ⛔ `tortoise_create_operator` is NOT here: it has no adoption path
+            # (`_find_operator` is `ingest`-only), so a repeat writes a second
+            # edge and double-counts the claim's EP weight. It carried
+            # `idempotent=True` until #10849 — a false retry-safety claim that
+            # clients read as `idempotentHint`.
             ("tortoise_create_point", True),
             ("tortoise_create_source", True),
             ("tortoise_ingest", True),

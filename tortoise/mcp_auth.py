@@ -799,6 +799,33 @@ _TRANSPORT_WAIT_BOUND_MESSAGE = (
     "operation is safe."
 )
 
+#: The refusal as a caller of a MUTATING tool must read it (#10849).
+#:
+#: The message above is transport-neutral, so on the write surface it says
+#: something true but not actionable: "the work may still complete" is a fact a
+#: caller cannot branch on, and the two natural readings of a refusal are BOTH
+#: wrong for a write. Read as "nothing happened" it makes the caller skip a
+#: write that landed (the fleet's ``GRAPH-WRITE-DEFERRED`` false negative); read
+#: as "failed, so retry" it duplicates every non-idempotent write
+#: (``tortoise_create_operator`` has no dedup, and a duplicated IMPL/NAND
+#: double-counts the claim's EP weight — measured on #10849).
+#:
+#: This is a SECOND constant rather than an edit to the first on purpose: the
+#: REST arm (``hosted_api.WaitBoundMiddleware``) never learns which tool was
+#: called, so it cannot claim anything about a mutation, and its body is pinned
+#: byte-for-byte by callers and tests. The write-ambiguity belongs to the seam
+#: that DOES know the tool name — ``mcp_server._wait_bound_refusal_result``.
+#: Static and digit-free for the same reason as the message above: the
+#: advertised delay has exactly one source (``_TRANSPORT_WAIT_RETRY_AFTER_S``).
+_TRANSPORT_WAIT_BOUND_WRITE_MESSAGE = (
+    "The server's wait budget for this request was exceeded before a response "
+    "was ready. This call WRITES, and the write may still complete on the "
+    "server — so this refusal is NOT a statement that nothing was written. "
+    "Read error.data.committed (it is \"unknown\"), then follow "
+    "error.data.retry_rule: a repeat is only ever safe for an idempotent "
+    "operation. Wait for the advertised delay before retrying."
+)
+
 
 def _sanitize_for_log(value: str) -> str:
     """Escape the control characters that can forge a log line or an ANSI
