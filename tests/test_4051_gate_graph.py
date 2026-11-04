@@ -143,13 +143,13 @@ def test_a_FULL_default_graph_cannot_refuse_a_write_into_an_EMPTY_bound_graph():
     `tests/test_8906_points_gate_counts_write_graph.py`'s
     `test_default_graph_full_write_graph_empty_is_ADMITTED` (#10724, landed on
     `main` after this branch point): that file pins the doors, this arm pins the
-    omitted-`sdk=` fallback inside `_check_org_limit` that all five of them
-    inherit. Every case above seeds the DEFAULT graph with 0, so none of them
-    can say what a FULL counted graph does to a write into an EMPTY bound graph
-    — and that is the direction that froze the fleet (the counted graph sat at
-    `max_points`, so every REST write behind it was refused, while the bound
-    graph kept absorbing ~200 counted Points in 48 minutes; the refusal's
-    `message` began `Team points limit reached`).
+    omitted-`sdk=` fallback inside `_check_org_limit`. Every case above that
+    seeds a graph sets the DEFAULT graph to 0, so none of them can say what a
+    FULL counted graph does to a write into an EMPTY bound graph — and that is
+    the direction that froze the fleet (the counted graph sat at `max_points`,
+    so every REST write behind it was refused, while the bound graph kept
+    absorbing ~200 counted Points in 48 minutes; the refusal's `message` began
+    `Team points limit reached`).
 
     DISCRIMINATION: SAME credential, SAME limit, and only the two graphs'
     populations swapped — so only a gate that counts the graph the request
