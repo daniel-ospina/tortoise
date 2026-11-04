@@ -165,9 +165,14 @@ from **its own** worktree:
 cd <the owning worktree> && uv run python tools/test_lane.py down
 ```
 
-The sweep itself is gated on `TORTOISE_TEST_LANE_REAP` being `"1"` (the default) — set it to
-anything else and the sweep does not run at all, so the stranded containers are neither reported nor
-reclaimed.
+The sweep itself is gated on `TORTOISE_TEST_LANE_REAP` — on by default, and off for any of
+`0` / `false` / `no` / `off` / empty / unset-to-nothing (`export X=${SOMETHING_UNSET}`), which is
+the same predicate the `run` exit hook reads. Set it to one of those and the LANE's sweep does not
+run, nor does `run` reap on exit, so the stranded containers are neither reported nor reclaimed by
+either. Any other value — including `1`, `true`, `yes` — leaves both ON, so do not spell "off" with
+a value this list does not name. ⛔ It gates the LANE's two paths only: the installed
+`tortoise-container-reaper.timer` clears this variable (`UnsetEnvironment=`) and is armed by
+INSTALLATION, so disarming it is an installer act — `docs/ops/container-lifetime.md` §2.
 
 The two **liveness** proofs — the arms behind `TORTOISE_TEST_LANE_REAP_LANE_GONE` and
 `TORTOISE_TEST_LANE_REAP_OWNER_INDETERMINATE` — never treat a container a **live** lane is using as a
@@ -177,10 +182,15 @@ evidence there (`/proc` unreadable, `docker` refusing, a non-listing reply) is *
 removal. The age figures are a backstop over that evidence, never a substitute for it.
 
 ⛔ **That guarantee does not extend to the worktree-gone proof above** — the one arm that removes by
-**default**. It consults ownership only (`Path(owner).is_dir()`): no `/proc` scan, no client probe. A
-worktree that was removed, moved, or is briefly on an unmounted mount therefore reads as "owner gone"
-while the lane's process — and its connected client — are still alive, and the removal takes a live
-lane's database mid-run. That gap is **#10697**; close it before widening this default.
+**default**. Its ownership test is a directory (`Path(owner).is_dir()`), with no `/proc` scan: a
+worktree that was removed, moved, or is briefly on an unmounted mount therefore reads as "owner gone".
+(#10712's ownership LABEL narrows this — such a container is attributed rather than left
+indeterminate — but it does not turn a directory read into a liveness proof.) The container IS asked
+for an attached client before every proof-1 removal **of a container docker reports as RUNNING**, and
+is spared on `True` or on an unreadable answer (a TERMINAL container cannot have a client, so the probe
+is skipped there rather than failing on a dead server). So a live client is not the gap; the gap is
+that the client probe can only see a client that answers it. That residual is **#10697**; close it
+before widening this default.
 
 The **same lane** must serve Phase 1 and Phase 3. A batch measured on a different lane from its
 baseline is not comparable to it.

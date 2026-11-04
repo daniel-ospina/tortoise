@@ -138,7 +138,8 @@ the token regardless of which subdomain presented it.
     REMOVED**: the page has no provider buttons, no password form, no inline client, no bearer and
     no cookie write (`grep -c sb-tortoise tortoise/oauth.py` = 0), and it authenticates nobody. Its
     replacement is `docs/engineering/auth/consent-identity-bridge.md`: an authorize request without
-    the app-written `attempt_key` is a `302` to `{app}/auth?next=/api/consent/start?{raw query}`, the
+    an `attempt_key` is a `302` to `{app}/auth?next=/api/consent/start?{raw query}`, the AS mints the
+    key on that bounce leg (#10487) so a COLD START carries one before the app ever sees the flow, the
     app signs the visitor in on the one session-bearing origin, and the page then redeems a **bound,
     single-use consent token** instead of a session.
   - **Formerly accepted by — that same page, and by nothing else.** Its inline client read the

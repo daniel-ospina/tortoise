@@ -68,7 +68,7 @@ first attributed: ``extract_session_v2`` built the surfaces
 (``result["classify_later"]`` at ``tortoise/extractor_v2.py:10576-10582`` and
 ``result["vet"]`` at ``:10586-10590``) while the meta fold dropped them with
 ``"stats": out.get("stats") or {}``. The fold now calls
-``_capture_stats_with_step_witness`` (``tortoise/sdk.py:16250``), which copies each
+``_capture_stats_with_step_witness`` (``tortoise/sdk.py:16354``), which copies each
 stage's own counts onto ``stats["step_witness"]`` and drops no candidate text — so
 this module READS that seam (:func:`_witness_block`) instead of citing the gap. A
 run measured at a stamp BEFORE the seam still reports S2.2/S2.3 unobserved, and
@@ -130,6 +130,7 @@ import re
 import subprocess
 import time
 from contextlib import contextmanager
+from datetime import UTC, datetime
 from pathlib import Path
 
 #: ``docs/evidence/7949-capstone/probes/capstone_measure.py`` → repo root.
@@ -223,6 +224,13 @@ E1_E2_SCORES = "docs/evidence/9889/e1-e2-scores.json"
 E1_E2_SCORES_CMD = (
     "uv run python docs/evidence/7949-capstone/probes/e1_e2_scores.py "
     f"--out {E1_E2_SCORES}")
+
+#: E4's evidence is selected by the receipt's OWN ``corpus_hash``, never by a filename
+#: (see ``select_e4_receipt``). ``E4_RECEIPT`` names the receipt the row USED to cite and
+#: is kept as that record — it is NOT a fallback for any row, and ``build_rows`` refuses an
+#: ``e4`` mapping that does not carry its own ``evidence``.
+E4_RECEIPT_DIR = "tests/eval/write_path/receipts"
+E4_RECEIPT_GLOB = "*.json"
 E4_RECEIPT = "tests/eval/write_path/receipts/w2b-operator-2026-10-19.json"
 E5_RESCORE = "docs/evidence/7949-capstone/e5-rescore.json"
 ARMS_DIR = "tests/eval/write_path/receipts/7947-arms-2026-10-18"
@@ -268,7 +276,7 @@ ANCHOR_OUT = ("extractedFrom",)
 #: ->(Event|Document)``, written by ``_EdgeHandlers.link_source_to_event``
 #: (``tortoise/projection/edges.py:2832-2857``, ``MERGE (s)-[r:references]->(e)
 #: ON CREATE SET r.sourceVersion = s.contentHash``) and reached from the capture
-#: path at ``tortoise/sdk.py:16531`` (``proj.link_source_to_event(source_key,
+#: path at ``tortoise/sdk.py:16635`` (``proj.link_source_to_event(source_key,
 #: event_id)`` — ``(Source)-[:references]->(sessionCaptured Event)``). The anchor
 #: is on the same link, but the DERIVED node is its TARGET.
 #: ⚠️ Counting this one in the ``extractedFrom`` direction counts SOURCES.
@@ -970,6 +978,14 @@ def build_rows(*, head: str, out_path: str, log_corpus_sha: str,
     the corpus THIS run froze, the row also carries ``artifact_corpus_sha256`` and
     ``tools/capstone_verdict_check.py``'s V7 requires that digest to appear in the
     artifact's own text — a declaration nothing supports is a finding.
+
+    ⛔ E4 is the row where the two are the SAME, so it declares nothing: since the
+    selector landed, ``build_e4_row`` REFUSES a receipt whose ``corpus_hash`` is not
+    the frozen pin, so ``e4["corpus_sha256"]`` is this run's corpus by construction.
+    It carried ``artifact_corpus_sha256`` unconditionally anyway — a declaration that
+    told a machine consumer "a different revision" about the one row whose own note
+    says the opposite, and that V7 could never verify, because its same-corpus arm
+    short-circuits before it reads the field.
     """
     def row(criterion: str, *, verdict: str, evidence: str, sha: str | None,
             numerator: int | None, denominator: int | None,
@@ -1000,6 +1016,33 @@ def build_rows(*, head: str, out_path: str, log_corpus_sha: str,
             built["artifact_corpus_sha256"] = artifact_corpus_sha256
         return built
 
+    # The docstring's rule, applied to E4's operands rather than hard-coded to
+    # "no declaration": on the real path this is False (`build_e4_row` refused an
+    # off-pin receipt before we got here), and an `e4` handed in from another
+    # revision still declares itself.
+    #
+    # ⛔ A NAMED REFUSAL FOR BOTH KEYS, AND BEFORE EITHER IS SUBSCRIPTED. The guard
+    # below was added for `evidence` alone and sat AFTER this line, so a caller
+    # omitting `corpus_sha256` still got the bare ``KeyError`` the guard exists to
+    # eliminate — from the line above it. Both are checked here, in one place, ahead
+    # of every subscript.
+    missing = [key for key in ("evidence", "corpus_sha256") if key not in e4]
+    if missing:
+        raise SystemExit(
+            "capstone-measure: REFUSED — build_rows was handed an e4 mapping with no "
+            + " and no ".join(f"`{key}`" for key in missing)
+            + ". Defaulting `evidence` to E4_RECEIPT would cite the pre-#8503 "
+            "artifact beside this run's numbers, and a missing `corpus_sha256` would "
+            "raise a bare KeyError from the comparison below — so the mapping is "
+            "refused by name rather than left to either")
+
+    # ⛔ `_same_corpus` coerces both operands itself, so this line passes them RAW on
+    # purpose: a non-string `corpus_sha256` must yield a ROW the gate can report (V7
+    # reds a non-string declaration), never an `AttributeError` from inside the
+    # comparison. `build_e4_row` cannot produce one — this is the synthetic-caller
+    # path — but the predicate's job is a verdict, not a traceback.
+    e4_off_this_corpus = not _same_corpus(e4["corpus_sha256"], log_corpus_sha)
+
     return [
         # E1 and E2 carry the counts their OWN criteria are written over — E2 the
         # E2a count over the FROZEN 14 value-bearing units (8/14, bar >= 13 of 14),
@@ -1026,10 +1069,29 @@ def build_rows(*, head: str, out_path: str, log_corpus_sha: str,
         row("E3", verdict=e3["verdict"], evidence=out_path, sha=head,
             numerator=e3["numerator"], denominator=e3["denominator"],
             corpus_sha256=log_corpus_sha, blocked_by="#9736", note=e3["note"]),
-        row("E4", verdict=e4["verdict"], evidence=E4_RECEIPT, sha=e4["sha"],
+        row("E4", verdict=e4["verdict"], evidence=e4["evidence"], sha=e4["sha"],
             numerator=e4["numerator"], denominator=e4["denominator"],
             corpus_sha256=e4["corpus_sha256"],
-            artifact_corpus_sha256=e4["corpus_sha256"], blocked_by="#9596",
+            artifact_corpus_sha256=(e4["corpus_sha256"] if e4_off_this_corpus
+                                    else None),
+            # `#9596` is the row's LIVE BLOCKER POINTER on a red row — NOT the owner
+            # of the unformed edges. It is the only OPEN issue on E4 and it owns a
+            # DIFFERENT gap (the receipt's unmeasured retrievability rate); the
+            # planted-edge residual is UNOWNED, which `build_e4_row`'s note states and
+            # `#8503`'s own body says in its own words. `#8503` is not the pointer
+            # because it CLOSED 2026-10-24 — that closure records the DISPROOF, so it
+            # is this row's measurement record — and `#10601`'s V12 REFUSES a row for
+            # naming a blocker recorded CLOSED in `blocker-states.json`.
+            #
+            # ⛔ The literal is unconditional HERE because the GREEN invariant is
+            # enforced one layer down, in `row()`: "GREEN carries a blocker … green and
+            # blocked are mutually exclusive" (V5) is resolved once for all five rows,
+            # before the dict is built. Emitting the conditional here as well was a
+            # narrower duplicate of that rule, and it made the cell unreadable to
+            # `test_the_shipped_logs_blocker_cells_are_the_emitters_own`, which reads
+            # the five `blocked_by="#NNNN"` literals in ROW ORDER to hold the shipped
+            # log's cells to what this probe emits.
+            blocked_by="#9596",
             note=e4["note"]),
         row("E5", verdict=e5["verdict"], evidence=E5_RESCORE, sha=head,
             numerator=e5["numerator"], denominator=e5["denominator"],
@@ -2206,25 +2268,286 @@ def census(uri: str) -> dict:
 
 # ── E4 / E5 / E1+E2 ───────────────────────────────────────────────────────
 
-def load_e4(repo: Path = ROOT) -> dict:
-    """E4's number, read VERBATIM out of the committed operator receipt."""
-    path = repo / E4_RECEIPT
-    if not path.is_file():
-        raise SystemExit(f"capstone-measure: REFUSED — E4's receipt {E4_RECEIPT} "
-                         "does not exist; a row with no artifact is an inference, "
-                         "not evidence")
-    record = json.loads(path.read_text())
-    audit = record.get("operator_audit")
-    if not isinstance(audit, dict):
-        raise SystemExit(f"capstone-measure: REFUSED — {E4_RECEIPT} carries no "
-                         "operator_audit block")
+def _same_corpus(a: object, b: object) -> bool:
+    """Two corpus hashes name the same corpus, with or without the ``sha256:`` prefix.
+
+    The record writes ``sha256:<hex>``; a receipt written by a different code path may
+    drop the prefix. Comparing the RAW strings made those two spellings unequal, so a
+    receipt on the pinned corpus was reported as "not measured on the frozen corpus" —
+    a refusal that names a false reason is the one failure mode a refusal must not have.
+
+    ⛔ Both operands are COERCED HERE, not at the call sites. This predicate's contract
+    is to RETURN A VERDICT — and a caller handing it a non-string (a synthetic `e4`, a
+    caller-supplied pin) must get that verdict, not `AttributeError: 'int' object has
+    no attribute 'removeprefix'` raised from inside the check. Doing it in one place is
+    also why the sites cannot drift apart again: three of them coerced one operand or
+    none, and each shape was a separate review round.
+    """
+    return (str(a or "").removeprefix("sha256:")
+            == str(b or "").removeprefix("sha256:"))
+
+
+def _instant(raw: object) -> tuple[int, object]:
+    """A comparable instant from a receipt's ``date``, or a sentinel that sorts FIRST.
+
+    A STRING compare is not an ordering here: ``…T01:00:00+02:00`` sorts ABOVE
+    ``…T00:30:00Z`` lexically while being genuinely EARLIER. The key decides both which
+    receipt wins and whether an unscorable one refuses the selection, so a wrong
+    compare makes the two disagree — a false refusal one way, a reopened silent skip
+    the other. Returns ``(0, "")`` for an ABSENT date, ``(0, <the date as text>)``
+    for one that is PRESENT but unreadable, and ``(1, datetime)`` otherwise (so an
+    undated record never displaces a dated one); the tag is compared first, so a
+    datetime is never ordered against a str.
+
+    ⛔ The two tag-0 shapes are NOT the same fact, and the CALLER must separate them:
+    ``(0, "")`` is "no date recorded", which the ordering can state honestly;
+    ``(0, <text>)`` is "a date is recorded and it cannot be read", which makes the
+    record's position in the order unknowable. Ranking the second as if it were the
+    first let an OLDER on-pin receipt publish E4's number while a newer measurement
+    sat unread (and silenced the would-have-won refusal when that newer one was also
+    unscorable) — so ``select_e4_receipt`` REFUSES it, on the same reasoning it
+    refuses an unreadable file: nothing can prove the newest measurement on the
+    frozen corpus is not the one whose date could not be parsed.
+
+    The second element of a tag-0 key is therefore ALWAYS a ``str``: an absent date
+    contributes ``""`` and a present-but-unreadable one contributes ``repr(raw)`` (a
+    non-string such as ``"date": 20261024`` lands here rather than being flattened
+    into the absent shape). Both are only ever compared against other strings, so
+    ordering is unaffected.
+    """
+    if raw is None:
+        return (0, "")
+    if not isinstance(raw, str):
+        # ⛔ NEVER PARSE `repr(raw)`. A recorded date that is not a string is
+        # UNREADABLE, and the repr of an int is the ISO BASIC form — `repr(20261024)`
+        # is `'20261024'`, which `datetime.fromisoformat` ACCEPTS, so parsing here
+        # silently ranked a malformed date at midnight UTC instead of refusing it
+        # (measured: it did exactly that, while `0` — whose repr fails to parse — was
+        # refused; two non-string dates, opposite outcomes, for no stated reason).
+        # Tag 0 puts every non-string on the refusal path `select_e4_receipt` already
+        # implements for a present-but-unreadable date.
+        return (0, repr(raw))
+    text = raw
+    if not text:
+        return (0, "")
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return (0, text)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return (1, parsed)
+
+
+def _sort_key(record: dict, name: str) -> tuple:
+    """The ONE ordering key, shared by the winner choice and the refusal predicate."""
+    return (_instant(record.get("date")), str(record.get("run_id") or ""), name)
+
+
+def select_e4_receipt(repo: Path = ROOT, frozen_pin: str = "") -> tuple[str, dict]:
+    """E4's artifact: the operator receipt measured on the FROZEN corpus.
+
+    Why this is not a filename constant. E4's bar is *"the planted-operator corpus
+    goes from 0/4 to 4/4"* — on the **pre-registered corpus**, like every other
+    row. A hard-coded path broke that silently: the roll-up cited
+    ``w2b-operator-2026-10-19.json``, whose own ``corpus_hash`` is ``943a99ec…``
+    — not the frozen ``dd7e8520…`` — and scored E4 at **2/15** from it, while three
+    of ``#8503``'s OWN measurement receipts, all on the frozen corpus, read
+    **5/15**. So the published row was measured on a different corpus than the one
+    the record froze. Nothing observed it: the row carried the mismatching
+    ``corpus_hash`` as a disclosure and the gate passes a disclosed mismatch (V7).
+
+    ⛔ NOT "written AFTER ``#8503``'s fix, on code that predates the fix" — there is
+    no fix. ``#8503`` CLOSED 2026-10-24 as a **DISPROOF** (*"This issue is that
+    residual, now measured post-close. No open issue owns it."*), and these three
+    receipts (`w2b-operator-2026-10-24-8503-{preleg,a,b}.json`) are dated
+    ``2026-10-24T05:46:51Z`` / ``06:03:47Z`` / ``06:10:47Z`` — 14.66–15.06 h BEFORE
+    that issue's ``closedAt`` of ``2026-10-24T20:50:13Z``. They are its measurement
+    artifacts, not the output of a repair it never made.
+
+    A filename constant is also an evidence hole: point it at any other receipt and
+    the row reports that receipt's number with no signal that the artifact moved.
+
+    Selection is therefore by the receipt's OWN ``corpus_hash``:
+
+    * ``frozen_pin`` must be a real pin — an un-pinned selection is refused;
+    * every ``*.json`` in the receipts directory is read (the name is not trusted to
+      say which files are receipts), and the one whose hash **matches** the pin wins;
+      no match REFUSES rather than falling back to "the newest file";
+    * among matches the ordering is by the record's own ``date`` and then ``run_id``,
+      and the winner is the last. The date is PARSED where it can be (the writer emits
+      a fixed ``…Z`` stamp, but a hand-authored receipt may carry an offset —
+      ``…T01:00:00+02:00`` sorts ABOVE ``…T00:30:00Z`` as a STRING while being
+      genuinely EARLIER); a receipt whose ``date`` is ABSENT sorts first, so an
+      undated record never displaces a dated one. One helper (``_sort_key``) produces
+      the key for BOTH the winner choice and the would-have-won refusal below, because
+      those two disagreeing is exactly how a silent revert gets in;
+    * a receipt ON the pin whose ``date`` is PRESENT but unparseable REFUSES the
+      selection. Its position in the order is unknowable, so it can neither be ranked
+      (an older receipt would publish while a newer measurement sat unread) nor be
+      shown not to be the newest unread one (which resurrects the silent skip this
+      selector exists to close). An ABSENT date is different and stays permitted: that
+      is a recorded fact, not an unreadable one. The reason is the same one the next
+      bullet gives for an unreadable file;
+    * a file in the receipts directory that cannot be read as a JSON object REFUSES
+      the selection: its corpus and date are unknowable, so nothing can prove the
+      newest measurement on the frozen corpus is not it;
+    * a candidate that IS on the frozen pin but carries no ``operator_audit`` REFUSES
+      **when it would have won** — i.e. when it sorts after the newest scorable
+      receipt. Skipping that one would let an OLDER on-pin receipt publish the row's
+      number while the newest measurement on the same corpus sat unread, which is the
+      same "the row's number is not the artifact you think it is" defect this selector
+      exists to close, one level down. One that sorts BEFORE the winner provably cannot
+      change the result and is ignored, because a refusal that names a consequence that
+      is not true is the one failure mode a refusal must not have;
+    * a candidate carrying no ``corpus_hash``, or one measured on another corpus, is
+      ignored and NAMED in the no-match refusal, so a missing artifact cannot read as
+      "no candidate".
+    """
+    if not frozen_pin:
+        raise SystemExit("capstone-measure: REFUSED — E4 was asked to select its "
+                         "receipt without the frozen corpus pin; a receipt whose "
+                         "corpus cannot be checked is not evidence for a bar "
+                         "written over the pre-registered corpus")
+    directory = repo / E4_RECEIPT_DIR
+    if not directory.exists():
+        raise SystemExit(
+            f"capstone-measure: REFUSED — the receipts directory {directory} does "
+            "not exist, so E4's artifact cannot be looked for. Check the root this "
+            "probe was pointed at; an ABSENT directory is a different failure from "
+            "an empty one, and reporting both as 'none present' points the reader "
+            "at a missing receipt when the real cause is a missing tree")
+    if not directory.is_dir():
+        # ⛔ `is_dir()` IS False FOR A PATH THAT EXISTS AS A FILE. Falling into the
+        # absent-tree refusal above would then assert "does not exist" about a path
+        # that IS there — and a refusal that names a false reason is the one failure
+        # mode a refusal must not have (the same rule `_same_corpus` states). The
+        # sibling commit that split absent-vs-empty made this exact distinction; this
+        # is its third arm, so the reader is never sent to check a root that is fine.
+        raise SystemExit(
+            f"capstone-measure: REFUSED — {directory} exists but is NOT a "
+            "directory, so E4's artifact cannot be looked for. An ABSENT directory "
+            "is a different failure from one that is present but unusable; this one "
+            "is present, so check what occupies that path rather than the root")
+    paths = sorted(directory.glob(E4_RECEIPT_GLOB))
+    matched: list[tuple[tuple, Path, dict]] = []
+    skipped: list[str] = []
+    #: Candidates that ARE on the frozen pin but carry no ``operator_audit``, so they
+    #: cannot be scored. Kept with their ORDERING key: one that sorts after the winner
+    #: is a REFUSAL (it would have won), one that sorts before it provably cannot affect
+    #: the result and is ignored — refusing on those would name a false reason.
+    unscorable: list[tuple[tuple, str]] = []
+    #: Files in the receipts directory that could not be read as a JSON object. Their
+    #: corpus and date are unknowable, so nothing can prove the newest measurement on
+    #: the frozen corpus is not one of them — a REFUSAL, never a silent skip.
+    unreadable: list[str] = []
+    #: Files ON the frozen pin whose ``date`` is present but cannot be parsed. Their
+    #: position in the order is unknowable, so they neither rank nor can be shown not
+    #: to be the newest unread measurement — a REFUSAL, for the same reason an
+    #: unreadable file refuses.
+    unorderable: list[str] = []
+    for path in paths:
+        try:
+            record = json.loads(path.read_text())
+        except (OSError, ValueError) as exc:
+            # JSONDecodeError and UnicodeDecodeError are both ValueError subclasses, so
+            # this catches a non-UTF-8 file too — otherwise it escapes as a traceback
+            # instead of the refusal naming the file.
+            unreadable.append(f"{path.name} (unreadable: {exc})")
+            continue
+        if not isinstance(record, dict):
+            unreadable.append(f"{path.name} ({type(record).__name__}, not a record)")
+            continue
+        corpus_hash = record.get("corpus_hash")
+        if corpus_hash in (None, ""):
+            skipped.append(f"{path.name} (no corpus_hash)")
+            continue
+        if not isinstance(corpus_hash, str):
+            # PRESENT but not a string: the label above would be UNTRUE (the file
+            # plainly carries a corpus_hash) and skipping it silently is the very
+            # defect this selector exists to close — a newer on-pin measurement
+            # whose hash cannot be read would lose to an older scorable one with
+            # nothing said. Its corpus is therefore UNKNOWABLE, which is the reason
+            # the unreadable-file refusal already names: nothing can prove the newest
+            # measurement on the frozen corpus is not this one.
+            unreadable.append(
+                f"{path.name} (corpus_hash is a "
+                f"{type(corpus_hash).__name__}, not a hash)")
+            continue
+        if not _same_corpus(corpus_hash, frozen_pin):
+            skipped.append(f"{path.name} (corpus_hash {corpus_hash[:20]}…)")
+            continue
+        raw_date = record.get("date")
+        if raw_date not in (None, "") and _instant(raw_date)[0] != 1:
+            # PRESENT and unreadable. Ranking it first would let an older receipt
+            # publish; ignoring it would let an unscorable newest measurement be
+            # skipped without the would-have-won refusal firing. Both are the defect
+            # this selector exists to close, so the position is unknowable ⇒ refuse.
+            unorderable.append(f"{path.name} (date {raw_date!r} is not an instant)")
+            continue
+        key = _sort_key(record, path.name)
+        if not isinstance(record.get("operator_audit"), dict):
+            unscorable.append((key, path.name))
+            continue
+        matched.append((key, path, record))
+    if unreadable:
+        raise SystemExit(
+            f"capstone-measure: REFUSED — {len(unreadable)} file(s) in "
+            f"{directory} could not be read as a receipt: {sorted(unreadable)}. "
+            f"Every {E4_RECEIPT_GLOB} there is a candidate receipt, so nothing can "
+            "prove the newest measurement on the frozen corpus is not one of them — "
+            "repair or remove the file, or re-run the operator probe")
+    if unorderable:
+        raise SystemExit(
+            f"capstone-measure: REFUSED — {len(unorderable)} receipt(s) in "
+            f"{directory} ARE on the frozen corpus ({frozen_pin}) but carry a date "
+            f"that is not an instant: {sorted(unorderable)}. The newest measurement "
+            "on the frozen corpus cannot be ORDERED against them, so no scorable "
+            "receipt can be shown to be the newest one — repair the date, or re-run "
+            "the operator probe")
+    if not matched:
+        if unscorable:
+            raise SystemExit(
+                f"capstone-measure: REFUSED — {len(unscorable)} receipt(s) in "
+                f"{directory} ARE on the frozen corpus ({frozen_pin}) but carry no "
+                "operator_audit, and nothing else matched, so none of them can be "
+                f"scored: {sorted(name for _key, name in unscorable)}. Repair or "
+                "remove them, or re-run the operator probe")
+        raise SystemExit(
+            f"capstone-measure: REFUSED — no operator receipt in "
+            f"{directory} was measured on the frozen corpus "
+            f"({frozen_pin}). {len(paths)} candidate(s) were scanned and none "
+            f"matched: {skipped or 'none present'}. E4 is a bar over the "
+            "pre-registered corpus; scoring it from another revision would report "
+            "a number this run's corpus cannot support")
+    matched.sort(key=lambda entry: entry[0])
+    winner = matched[-1][0]
+    would_have_won = sorted(name for key, name in unscorable if key > winner)
+    if would_have_won:
+        raise SystemExit(
+            f"capstone-measure: REFUSED — {len(would_have_won)} receipt(s) in "
+            f"{directory} ARE on the frozen corpus ({frozen_pin}) and sort AFTER the "
+            f"newest scorable one, but carry no operator_audit so they cannot be "
+            f"scored: {would_have_won}. Skipping them would let an OLDER on-pin "
+            "receipt publish the row's number while the newest measurement on the "
+            "same corpus sat unread — repair or remove the receipt, or re-run the "
+            "operator probe")
+    _key, path, record = matched[-1]
+    return path.relative_to(repo).as_posix(), record
+
+
+def load_e4(repo: Path = ROOT, *, frozen_pin: str = "") -> dict:
+    """E4's number, read VERBATIM out of the receipt measured on the frozen corpus."""
+    rel, record = select_e4_receipt(repo, frozen_pin=frozen_pin)
+    audit = record["operator_audit"]
     for key in ("planted", "edge_correct", "content_ok", "operators_total"):
         value = audit.get(key)
         if not isinstance(value, int) or isinstance(value, bool):
-            raise SystemExit(f"capstone-measure: REFUSED — {E4_RECEIPT} "
+            raise SystemExit(f"capstone-measure: REFUSED — {rel} "
                              f"operator_audit[{key!r}] is not an integer count: "
                              f"{value!r}")
     return {
+        "evidence": rel,
         "planted": audit["planted"],
         "edge_correct": audit["edge_correct"],
         "content_ok": audit["content_ok"],
@@ -2237,6 +2560,108 @@ def load_e4(repo: Path = ROOT) -> dict:
         "judge_pin": record.get("judge_pin"),
         "verdict": record.get("verdict"),
         "failure_origin": record.get("failure_origin"),
+    }
+
+
+def e4_outcome_for(receipt: dict, bars: dict) -> dict:
+    """The E4 outcome for a receipt — ONE derivation, two call sites.
+
+    ``build_e4_row`` and ``main``'s ``render_log`` call both need it. Deriving it
+    twice is how the log comes to print an outcome the row was not built from — the
+    exact "the number is not the one you think it is" class this probe exists to
+    refuse — so there is one definition here and no second transcription.
+    """
+    return e4_outcome(edge_correct=receipt["edge_correct"],
+                      planted=receipt["planted"], bars=bars)
+
+
+def build_e4_row(receipt: dict, *, bars: dict, corpus_sha: str) -> dict:
+    """E4's row, from a receipt ``load_e4`` selected on the frozen corpus.
+
+    Factored out of ``main`` so the union of *selection* and *row* is one pinned
+    unit: the row's ``evidence`` is the receipt it was measured from, and while this
+    was inline a reversion to a constant cited a path the row was not measured on
+    with every test still green.
+
+    ⛔ Three things are separate and the note keeps them separate: the corpus hash is
+    the FROZEN one (that is why the receipt was selected), the receipt's own ``date``
+    and ``commit`` are the RECEIPT's (it was written on an earlier head than this
+    run — saying they "equal the frozen corpus" was a sentence the fields refute),
+    and ``verdict``/``failure_origin`` are the receipt's gate verdict over its own
+    metrics, not this row's verdict.
+    """
+    if not corpus_sha or not _same_corpus(receipt.get("corpus_hash"), corpus_sha):
+        raise SystemExit(
+            f"capstone-measure: REFUSED — build_e4_row was handed "
+            f"{receipt.get('evidence')!r}, whose corpus_hash="
+            f"{receipt.get('corpus_hash')!r} is not the frozen corpus "
+            f"({corpus_sha}). The note below states that equality, so building the "
+            "row from a receipt that does not carry the pin would print a sentence "
+            "the row's own fields refute")
+    result = e4_outcome_for(receipt, bars)
+    # ⛔ THIS CLAUSE IS A CLAIM ABOUT THE NUMBER BESIDE IT, so it follows that
+    # number's operands. It used to be unconditional, which was harmless only while
+    # every receipt read below the bar: the bar is 15 of 15, so the moment an on-pin
+    # receipt reads 15/15 the row is GREEN and it announced that "the planted edges
+    # are still not all formed" — a sentence the row's OWN fields refute, fired at
+    # exactly the epic's success state. Nor is `FAIL` a single cause: `e4_outcome`
+    # fails on `edge_correct < required` OR on `planted != of`, so a receipt that
+    # plants its own count (14/14, 16/16) is RED with numerator == denominator and
+    # the wiring clause would be refuted there too. The `#9596` half is a fact about
+    # the RECEIPT (its retrievability is unreported whatever the edge count) and
+    # stays unconditional; only the `#8503` half is a claim about this number.
+    # ⛔ `#8503` is named as the MEASUREMENT RECORD, never as a live blocker: it
+    # CLOSED 2026-10-24 and that closure records E4's DISPROOF. `#10601`'s V12 refuses
+    # a row whose `blocked_by` has closed — so a row that still said "#8503 is what
+    # blocks this" would be refused by the gate for naming work that is finished.
+    #
+    # ⛔ THE RESIDUAL IS UNOWNED, AND SAYING OTHERWISE WAS A FALSE ATTRIBUTION.
+    # `#8503`'s own body closes by stating it plainly — *"This issue is that residual,
+    # now measured post-close. No open issue owns it."* — and `#9596` is scoped to a
+    # DIFFERENT gap: the receipt's retrievability rate is unmeasured (a v2 receipt must
+    # re-cut it on a real run). This clause used to say `#9596` owns the ten unformed
+    # planted edges; it does not, and the sentence would have been emitted into every
+    # future scored log. The row's `blocked_by` cell is still `#9596`, because the gate
+    # requires a non-green row to name a LIVE issue and that is the only open one on
+    # E4 — but the CELL is a pointer, and this NOTE is where its scope is stated.
+    # ⛔ NOT "#8503's fix holds here": there IS no fix. `#8503` closed 2026-10-24 as a
+    # DISPROOF, so a receipt that reaches the bar is evidence the edges were formed on
+    # that artifact — not that a fix landed. The PASS arm is printed into a future
+    # scored log, so it must not name work no issue ever did.
+    if result["outcome"] == "PASS":
+        edge_clause = ("the planted-edge bar IS met by this receipt, so nothing is "
+                       "missing on this row")
+    elif receipt["edge_correct"] < receipt["planted"]:
+        edge_clause = ("the planted edges are still not all formed (#8503 — CLOSED "
+                       "2026-10-24: that closure records the DISPROOF, so it is this "
+                       "row's measurement record and not a live blocker, and no open "
+                       "issue owns the residual — #8503 says so in its own words)")
+    else:
+        edge_clause = (f"the planted-edge COUNT, not the wiring, is the shortfall — "
+                       f"this receipt plants {receipt['planted']} where the record "
+                       f"freezes {bars['E4']['of']} (#8503 — CLOSED 2026-10-24: that "
+                       f"closure records the DISPROOF, so it is this row's measurement "
+                       f"record and not a live blocker, and no open issue owns the "
+                       f"residual — #8503 says so in its own words)")
+    return {
+        "verdict": verdict_word(result),
+        "numerator": receipt["edge_correct"],
+        "denominator": receipt["planted"],
+        "sha": receipt["commit"],
+        "evidence": receipt["evidence"],
+        "corpus_sha256": receipt["corpus_hash"],
+        "note": (f"{result['value']}; bar {result['bar']}; content_ok="
+                 f"{receipt['content_ok']} operators_total="
+                 f"{receipt['operators_total']} on the SAME receipt, from "
+                 f"{receipt['evidence']}. Its corpus_hash={receipt['corpus_hash']} "
+                 f"IS the frozen corpus ({corpus_sha}) — the receipt is selected by "
+                 f"that hash, so this row cannot be scored on another revision. The "
+                 f"receipt's own date={receipt['date']} and commit={receipt['commit']} "
+                 f"are the RECEIPT's, not this run's head. verdict="
+                 f"{receipt['verdict']} failure_origin={receipt['failure_origin']} "
+                 f"is the receipt's own gate verdict over its metrics, not this "
+                 f"row's: {edge_clause}, and "
+                 f"the receipt's retrievability rate is UNMEASURED (#9596)"),
     }
 
 
@@ -2520,7 +2945,7 @@ def render_log(*, head: str, prereg_sha: str, bars: dict, corpus_sha: str,
         "atomic POINTS rather than surviving planted units")
     add("")
     add("## E4 — the committed operator receipt, read verbatim")
-    add(f"e4 receipt={E4_RECEIPT} run_id={e4['run_id']} date={e4['date']} "
+    add(f"e4 receipt={e4['evidence']} run_id={e4['run_id']} date={e4['date']} "
         f"commit={e4['commit']} corpus_hash={e4['corpus_hash']} "
         f"judge_pin={e4['judge_pin']} verdict={e4['verdict']} "
         f"failure_origin={e4['failure_origin']}")
@@ -2529,12 +2954,19 @@ def render_log(*, head: str, prereg_sha: str, bars: dict, corpus_sha: str,
         f"operators_total={e4['operators_total']} "
         f"operators_provenanced={e4['operators_provenanced']}")
     add(f"e4 outcome={e4_out['outcome']} {e4_out['value']} bar={e4_out['bar']}")
-    add("e4 provenance: the FILE postdates the pre-registration but the "
-        f"MEASUREMENT does not — its own date={e4['date']} and its "
-        f"corpus_hash={e4['corpus_hash']} are not the frozen corpus "
-        f"({corpus_sha}). This row is therefore scored as a NON-GREEN measurement "
-        "on ITS OWN corpus revision, and the gate requires that digest to appear "
-        "in the artifact itself (V7)")
+    on_pin = _same_corpus(e4["corpus_hash"], corpus_sha)
+    add("e4 provenance: the receipt's own "
+        f"date={e4['date']} and commit={e4['commit']} are the RECEIPT's, not this "
+        f"run's head. " + (
+            f"Its corpus_hash={e4['corpus_hash']} IS the frozen corpus "
+            f"({corpus_sha}) — this row was selected BY that hash, so it is scored "
+            "on the pre-registered corpus and V7's declared-mismatch arm is not "
+            "taken for it"
+            if on_pin else
+            f"Its corpus_hash={e4['corpus_hash']} is NOT the frozen corpus "
+            f"({corpus_sha}). This row is therefore scored as a NON-GREEN "
+            "measurement on ITS OWN corpus revision, and the gate requires that "
+            "digest to appear in the artifact itself (V7)"))
     add("")
     add("## E5 — a fresh re-score of the #7947 arms against this corpus's gold")
     add(f"e5 arms_dir={e5['arms_dir']} artifact={e5['artifact']}")
@@ -2624,7 +3056,8 @@ def render_log(*, head: str, prereg_sha: str, bars: dict, corpus_sha: str,
                 "content_ok": e4["content_ok"],
                 "operators_total": e4["operators_total"],
                 "measured_commit": e4["commit"],
-                "source": E4_RECEIPT,
+                "corpus_hash": e4["corpus_hash"],
+                "source": e4["evidence"],
             },
             "e5_rescore": {
                 "raw_loss_rate": e5["raw_loss"],
@@ -2712,6 +3145,16 @@ def main(argv: list[str] | None = None) -> int:
     except ValueError as exc:
         raise SystemExit(f"capstone-measure: REFUSED — {exc}") from exc
     corpus_sha = check_corpus(prereg)
+    # ⛔ THE E4 ARTIFACT IS RESOLVED HERE, WITH THE OTHER PRE-FLIGHT READS, AND FOR
+    # THE SAME REASON: `select_e4_receipt` has ~8 refusal arms (absent pin, no match
+    # on the pin, unreadable / non-object / non-UTF-8 file, non-string `corpus_hash`,
+    # unorderable date, would-have-won unscorable) and every one of them is a property
+    # of the ARTIFACTS, not of the run. Resolved where it used to be — after
+    # `run_corpus` — a bad receipts tree burned the full 7-session extraction cost and
+    # wrote NOTHING, which is the exact class `#9889`'s own pin exists for ("a real run
+    # burned its 7-session LLM cost and wrote NOTHING"). The receipt is CARRIED to the
+    # E4 section rather than re-read, so this is one read, not two.
+    receipt = load_e4(frozen_pin=corpus_sha)
 
     ready, why = backend_ready()
     if not ready:
@@ -2833,27 +3276,10 @@ def main(argv: list[str] | None = None) -> int:
     }
 
     # ── E4 ────────────────────────────────────────────────────────────────
-    receipt = load_e4()
-    e4_result = e4_outcome(edge_correct=receipt["edge_correct"],
-                           planted=receipt["planted"], bars=bars)
-    e4 = {
-        "verdict": verdict_word(e4_result),
-        "numerator": receipt["edge_correct"],
-        "denominator": receipt["planted"],
-        "sha": receipt["commit"],
-        "corpus_sha256": receipt["corpus_hash"],
-        "note": (f"{e4_result['value']}; bar {e4_result['bar']}; content_ok="
-                 f"{receipt['content_ok']} operators_total="
-                 f"{receipt['operators_total']} on the SAME receipt. Its own "
-                 f"date={receipt['date']}, commit={receipt['commit']} and "
-                 f"corpus_hash={receipt['corpus_hash']} differ from the frozen "
-                 f"corpus ({corpus_sha}), and its verdict={receipt['verdict']} "
-                 f"failure_origin={receipt['failure_origin']}: the planted edges "
-                 f"are not formed at all (#8503 \u2014 CLOSED 2026-10-24: that closure "
-                 f"records the DISPROOF, so it is this row's measurement record and "
-                 f"not a live blocker; the residual is owned by #9596), and the "
-                 f"receipt's retrievability rate is UNMEASURED (#9596)"),
-    }
+    # `receipt` was resolved by the PRE-FLIGHT, before the model pass, so a refusal
+    # cannot land after the spend. It is the same object, not a second read.
+    e4_result = e4_outcome_for(receipt, bars)
+    e4 = build_e4_row(receipt, bars=bars, corpus_sha=corpus_sha)
 
     # ── E5 ────────────────────────────────────────────────────────────────
     e5 = score_e5(sessions, Path(args.e5_out))
