@@ -48,6 +48,7 @@ class _Stub:
 
     def __init__(self, read=OK_READ, issues=OK_ISSUES, pulls=OK_PULLS):
         self.read, self.issues, self.pulls = read, issues, pulls
+        self.redirect_writes = False
         self.seen: list[tuple[str, str, str]] = []
         stub = self
 
@@ -59,6 +60,12 @@ class _Stub:
                 length = int(self.headers.get("Content-Length") or 0)
                 req_body = self.rfile.read(length).decode("utf-8", "replace") if length else ""
                 stub.seen.append((method, self.path, req_body))
+                if stub.redirect_writes and method == "POST":
+                    self.send_response(301)
+                    self.send_header("Location", self.path)
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
                 parts = [p for p in self.path.split("?")[0].split("/") if p]
                 if method == "GET" and len(parts) == 3 and parts[0] == "repos":
                     status, headers, body = stub.read
@@ -266,6 +273,73 @@ def test_unexpected_4xx_is_not_a_permission_verdict():
             rc, out, _ = _run(s.base)
         assert rc != 0
         assert "pull-requests-write-missing" not in out, (code, out)
+
+
+def test_redirect_is_not_a_pass():
+    """A 3xx must never become a FALSE PASS (review round-3 defect, category A).
+
+    urllib's default opener FOLLOWS redirects and stdlib `HTTPRedirectHandler.redirect_request`
+    DOWNGRADES `POST` to `GET` on 301/302/303. A stub that 301s the write probes and 200s the
+    resulting collection GETs made this tool print `GH-WRITE-OK` and exit 0 while NO write was ever
+    answered — a broken token would then have lead the lane into a merge whose closures it cannot post.
+    """
+    stub = _Stub()
+    stub.redirect_writes = True
+    with stub as s:
+        rc, out, _ = _run(s.base)
+    assert rc != 0, f"a redirecting endpoint produced a PASS: {out}"
+    assert "GH-WRITE-OK" not in out, out
+    # …and the write must NOT have been re-issued as a downgraded GET that returned 200.
+    assert not any(m == "GET" and p.endswith("/issues") for m, p, _ in s.seen), s.seen
+
+
+def test_2xx_on_a_write_probe_is_not_a_pass():
+    """200 on an empty-body issue POST means something accepted it — not that permission was proven."""
+    with _Stub(issues=(200, {}, '{"number":1}'), pulls=(201, {}, '{"number":2}')) as s:
+        rc, out, _ = _run(s.base)
+    assert rc != 0, f"a 2xx on a must-be-invalid payload was read as a PASS: {out}"
+    assert "GH-WRITE-OK" not in out, out
+
+
+def test_read_403_is_a_read_problem_not_a_write_verdict():
+    """A refused READ must not emit an undocumented reason carrying write-shaped advice."""
+    with _Stub(read=(403, {}, '{"message":"Resource not accessible by personal access token"}')) as s:
+        rc, out, _ = _run(s.base)
+    assert rc != 0
+    assert "repo-not-visible" in out, out
+    assert "lacks write" not in out, out
+
+
+def test_gh_config_dir_is_honoured_over_xdg():
+    """gh's OWN order is GH_CONFIG_DIR, then XDG_CONFIG_HOME, then ~/.config.
+
+    Omitting the GH_CONFIG_DIR leg made the tool read a different store from the one `gh` uses
+    (review round-3 defect), so its verdict could be about a credential the lane never uses.
+
+    ⛔ THE TOKEN LIVES ONLY IN GH_CONFIG_DIR, DELIBERATELY. A first version seeded BOTH stores, which
+    made the test VACUOUS for the defect it names: a mutant with the GH_CONFIG_DIR leg deleted fell
+    through to the XDG store, found its token, and still printed GH-WRITE-OK (measured — the reviewer
+    ran exactly that mutant). With the token only in GH_CONFIG_DIR, deleting the leg yields
+    `no-credential`, so the test goes red on the regression it exists for.
+    """
+    with tempfile.TemporaryDirectory() as cfg, tempfile.TemporaryDirectory() as xdg:
+        os.makedirs(os.path.join(xdg, "gh"))
+        # The XDG store exists but holds NO token: it is the decoy, not a fallback.
+        with open(os.path.join(xdg, "gh", "hosts.yml"), "w", encoding="utf-8") as fh:
+            fh.write("github.com:\n    user: someone\n")
+        with open(os.path.join(cfg, "hosts.yml"), "w", encoding="utf-8") as fh:
+            fh.write("github.com:\n    oauth_token: ghp_from_gh_config_dir\n")
+        with _Stub() as s:
+            env = _env(s.base, None)
+            env["XDG_CONFIG_HOME"] = xdg
+            env["GH_CONFIG_DIR"] = cfg
+            p = subprocess.run([sys.executable, str(TOOL), "--repo", "daniel-ospina/tortoise"],
+                               capture_output=True, text=True, env=env, timeout=120)
+    # The ONLY store with a token is GH_CONFIG_DIR, so a pass PROVES that leg was read; ignoring it
+    # would find no credential at all and answer `no-credential`.
+    assert p.returncode == 0, p.stdout + p.stderr
+    assert "GH-WRITE-OK" in p.stdout, p.stdout
+    assert "gh_config_dir" in p.stdout or "GH_CONFIG_DIR" in p.stderr or p.stderr == "", p.stderr
 
 
 def test_exhausted_quota_is_caught_before_any_write_probe():

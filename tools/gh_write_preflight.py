@@ -68,11 +68,15 @@ WHAT IT PROBES, AND WHY EACH CHOICE IS THE ONE IT IS
    nothing for a missing permission. The discriminator is the body plus the headers
    (`x-ratelimit-remaining: 0`, `retry-after`), never the bare status code.
 
+5. **REDIRECTS ARE NEVER FOLLOWED.** Only `422` counts as "authorised"; a 2xx on a must-be-invalid
+   payload is evidence the response did not come from GitHub's validation path. See `_WRITE_OK`.
+
 REASONS (`GH-WRITE-UNAVAILABLE(<reason>)`), each with its own fix
 ─────────────────────────────────────────────────────────────────
   no-credential                no GH_TOKEN, no GITHUB_TOKEN, no github.com entry in hosts.yml
   bad-credentials              401 — expired, revoked, or mistyped
-  repo-not-visible             404 on the READ probe
+  repo-not-visible             404 on the READ probe, or the READ itself refused — an access
+                               question, never a missing write permission
   wrong-host                   GH_HOST names a host other than github.com
   rate-limited                 403/429 with rate-limit wording / remaining==0 / retry-after
                                NOT a permission problem — do not re-mint the token for it
@@ -112,10 +116,32 @@ import urllib.request
 DEFAULT_API = "https://api.github.com"
 TIMEOUT_S = 25
 
-# Probe outcomes that mean "the authorisation gate was PASSED and the request was merely invalid".
-# 422 is the measured answer for both probes; 200/201/204 would mean the request actually SUCCEEDED
-# (which for these payloads is impossible, so it is treated as a surprising-but-writable signal).
-_WRITE_OK = (200, 201, 204, 422)
+# Probe outcomes that prove "the authorisation gate was PASSED and the request was merely invalid".
+# ⛔ 422 IS THE ONLY SUCH ANSWER, and 2xx must NOT be read as success.
+# MEASURED (review round 3): urlopen's default opener FOLLOWS redirects, and stdlib
+# `HTTPRedirectHandler.redirect_request` DOWNGRADES POST to GET on 301/302/303. A stub that 301s the
+# write probes and 200s the resulting collection GETs made this tool print
+# `GH-WRITE-OK(issues+pull-requests writable)` and exit 0 while the server log showed NO write was
+# ever answered — a FALSE PASS of the very gate the tool exists to be. 200 is the one status that
+# cannot distinguish "authorised" from "GitHub was never asked": a proxy, WAF, captive portal, or a
+# renamed-repo redirect all answer 200. So a 2xx on a must-be-invalid payload is itself evidence the
+# response did not come from GitHub's validation path, and it fails closed below.
+_WRITE_OK = (422,)
+_SURPRISING_SUCCESS = (200, 201, 204)
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Surface a 3xx instead of silently re-issuing it — and never as a downgraded GET.
+
+    Returning None leaves the request unhandled, so urllib raises the HTTPError carrying the real
+    status (301/302/303/307/308), which then fails closed like any other unexpected status.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+_OPENER = urllib.request.build_opener(_NoRedirect)
 
 
 # ── credential resolution ────────────────────────────────────────────────────────────────────────
@@ -124,9 +150,26 @@ _WRITE_OK = (200, 201, 204, 422)
 # same shim/host hazards this tool exists to report. Mirrors `objective.py::_gh_token` and
 # `pr-doctor.py::_gh_token` deliberately, so the three cannot disagree about who the lane is.
 def _hosts_path() -> str:
+    """gh's OWN directory resolution: `GH_CONFIG_DIR`, then `XDG_CONFIG_HOME`, then `~/.config`.
+
+    ⛔ THE `GH_CONFIG_DIR` LEG IS NOT COSMETIC. This tool's docstring says it mirrors
+    `objective.py::_gh_token` and `pr-doctor.py::_gh_token` so the three cannot disagree about who
+    the lane is — and BOTH siblings consult `GH_CONFIG_DIR` FIRST (`objective.py:2285`,
+    `pr-doctor.py:1761`). Omitting it made this tool read a DIFFERENT store from the one `gh` uses
+    on any box that sets it: a false `no-credential` for a lane whose `gh` can write, or a verdict
+    about a credential the landing lane will never use (#2138 r4's wrong-identity hazard).
+    MEASURED in review round 3: with `GH_CONFIG_DIR` holding a token, this returned `no-credential`.
+
+    Residual, stated rather than implied: the OS KEYRING is not read (no `gh auth token`
+    subprocess), exactly as `objective.py` documents for itself — a keyring-only box answers
+    `no-credential` here, which fails closed rather than guessing.
+    """
+    cfg = os.environ.get("GH_CONFIG_DIR")
+    if cfg:
+        return os.path.join(os.path.expanduser(cfg), "hosts.yml")
     xdg = os.environ.get("XDG_CONFIG_HOME")
     if xdg:
-        return os.path.join(xdg, "gh", "hosts.yml")
+        return os.path.join(os.path.expanduser(xdg), "gh", "hosts.yml")
     return os.path.expanduser("~/.config/gh/hosts.yml")
 
 
@@ -200,7 +243,7 @@ def _request(url: str, token: str, method: str = "GET", body: bytes | None = Non
     if body is not None:
         req.add_header("Content-Type", "application/json")
     try:
-        with urllib.request.urlopen(req, timeout=TIMEOUT_S) as resp:
+        with _OPENER.open(req, timeout=TIMEOUT_S) as resp:
             return resp.status, {k.lower(): v for k, v in resp.headers.items()}, \
                 resp.read().decode("utf-8", "replace")
     except urllib.error.HTTPError as e:
@@ -238,6 +281,15 @@ def _write_probe(url: str, token: str, body: bytes) -> dict:
     if status in _WRITE_OK:
         return {"ok": True, "reason": "permitted",
                 "detail": f"authorised (HTTP {status} — the payload was rejected, the permission was not)",
+                "status": status}
+    if status in _SURPRISING_SUCCESS:
+        # ⛔ A 2xx ON A MUST-BE-INVALID PAYLOAD IS NOT A PASS. Either the payload was accepted (it
+        # cannot be — an issue needs a title, the head ref cannot exist) or the response came from
+        # something that is not GitHub's validation path (a redirect downgraded to a GET, a proxy, a
+        # captive portal). Fail closed and say so.
+        return {"ok": False, "reason": "forbidden",
+                "detail": f"HTTP {status} on a must-be-invalid payload — the request was accepted or "
+                          f"rewritten, so this did NOT prove the permission gate",
                 "status": status}
     if status == 401:
         return {"ok": False, "reason": "bad-credentials", "detail": "401 from the write probe", "status": status}
@@ -300,6 +352,13 @@ def preflight(repo: str, api_base: str, token: str, source: str) -> dict:
         return result
     if status == 403:
         reason, detail = _classify_403(headers, body)
+        # ⛔ A REFUSED **READ** IS A READ PROBLEM, NOT A MISSING WRITE PERMISSION. `_classify_403`'
+        # wording/name is written for a write probe ("the token lacks write …"), and `not-permitted`
+        # is deliberately absent from the REASONS contract — so feeding it straight through emitted an
+        # UNDOCUMENTED reason carrying write-shaped advice about a read (review round 3).
+        if reason == "not-permitted":
+            reason = "repo-not-visible"
+            detail = "the token cannot READ this repo — an access question, not a write question"
         result.update(reason=reason, detail=f"on the READ probe: {detail}")
         return result
     if status == 429:
