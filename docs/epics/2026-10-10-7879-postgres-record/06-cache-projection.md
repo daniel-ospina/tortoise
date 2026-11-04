@@ -254,7 +254,11 @@ title-derived `_searchText`, silently un-indexing it in the cache.
   under its own `graph_only` bucket: visible, and not a divergence against a
   record that is correct. The graph side is repaired by a record-sourced
   re-projection (`record-restore` / `rebuild_from_record`, which re-materialise
-  through this projector), then by #10000's capture change.
+  through this projector) — **for a node the projection CREATES**. The write is
+  additive (`MERGE … SET n += $props`), so a node that ALREADY carries the pair
+  keeps it across a re-projection: this arm stops the pair being re-written, it
+  does not clear one. Clearing a populated cache's stale pair needs an explicit
+  property clear, and the sweep is #10000's capture change.
 
 ### The pin
 
