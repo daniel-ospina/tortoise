@@ -2951,9 +2951,14 @@ def test_a_non_green_row_on_another_corpus_must_declare_that_revision():
     operator receipt on another revision until `#7949`'s selector made it choose the
     receipt BY the frozen pin, so the CURRENT E4 row's corpus is the log's. The arm
     still matters for every log written BEFORE those two changes — the shipped
-    `capstone-measured-e0fc940b.log` carries exactly those shapes — so a rule deleted
-    once the current probes stop taking it would leave those recorded rows
-    unverifiable. Refusing such rows outright would hide the only numbers they have;
+    `capstone-measured-9152448d.log` carries exactly those shapes, because `#10601`
+    re-measured the table at a head that still read the pre-selector constant, so its
+    E4 row declares `943a99ec…` while the log's own corpus was `dd7e8520…` — so a rule
+    deleted once the current probes stop taking it would leave those recorded rows
+    unverifiable. (`#10601` DELETED `capstone-measured-e0fc940b.log`, which this
+    docstring used to name as "the shipped" log: a docstring that points a reader at
+    a file the tree no longer holds is the same claim-vs-tree defect the arm exists
+    to catch.) Refusing such rows outright would hide the only numbers they have;
     accepting them on the row's word would let any red row name any corpus. So the
     row DECLARES the revision, and the declaration is checked against the artifact.
     """

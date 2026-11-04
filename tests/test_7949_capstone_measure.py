@@ -5711,17 +5711,36 @@ def test_the_v7_paragraph_states_the_merge_once_and_not_a_leftover_half_sentence
                         .split("=== CAPSTONE-VERDICT-END ===", 1)[0])
     declared = sorted(row["criterion"] for row in record["rows"]
                       if "artifact_corpus_sha256" in row)
-    assert declared == ["E1", "E2", "E4"], (
-        "the shipped log's rows taking the `artifact_corpus_sha256` declaration are "
-        f"{declared}, not ['E1', 'E2', 'E4'] — the V7 paragraph states a fact about "
-        "that artifact, so re-derive BOTH sides before changing either")
+
+    # ⛔ THE PARAGRAPH'S SCOPE CLAIM IS HELD TO THE ARTIFACT, BOTH WAYS — never to a
+    # literal membership list (delta review, F3). Asserting
+    # `declared == ["E1", "E2", "E4"]` pinned the SHAPE of one artifact rather than the
+    # CLAIM the paragraph makes about it, so it redded on the bundle's own documented
+    # supersede path: re-run the probe at a post-selector head and every row stops
+    # declaring (`build_e4_row` refuses an off-pin receipt, so E4's corpus IS the run's;
+    # E1/E2 are passed no declaration either), giving `declared == []` — a red on DATA
+    # DRIFT in a pin whose job is the CLAIM. What the paragraph says is:
+    #   * never, ever, that the SHIPPED table declares nothing (F1's refuted sentence);
+    #   * "the SHIPPED log still carries it" exactly when the log on disk does.
+    # Both arms are asserted, so neither the forbidden over-reach nor a paragraph left
+    # describing a log that a re-run replaced can stay green.
     assert "no row in THIS table takes the declaration" not in flat, (
-        "the paragraph claims the SHIPPED table declares nothing, and its own log "
-        f"declares it on {declared} — state which run the sentence is about (PR #10679 "
-        "review, F1: the claim this pin used to require verbatim)")
-    assert "SHIPPED log" in flat, (
-        "the paragraph must say outright that the shipped log still carries the "
-        "declaration, or the reader of the artifact cannot tell why the arm is kept")
+        "the paragraph claims the SHIPPED table declares nothing — state which run "
+        "the sentence is about (PR #10679 review, F1: the claim this pin used to "
+        "require verbatim)")
+    if declared:
+        assert "SHIPPED log" in flat, (
+            f"the scored log on disk declares `artifact_corpus_sha256` on {declared}, "
+            "so the paragraph must say outright that the SHIPPED log still carries the "
+            "declaration — otherwise the reader of the artifact cannot tell why the "
+            "arm is kept")
+    else:
+        assert "SHIPPED log" not in flat, (
+            "the scored log on disk declares `artifact_corpus_sha256` on NO row (a "
+            "re-run at a post-selector head), so the paragraph's 'the SHIPPED log "
+            "still carries it' is false about the artifact in the tree — update the "
+            "paragraph WITH the log, which is the documented supersede path, rather "
+            "than deleting this pin")
 
     # The merge left the SAME clause twice; the fragment half is the one a count of the
     # sentence above cannot see (delta review, P3): re-applying only the lead-in keeps
@@ -5780,6 +5799,45 @@ def test_a_row_with_no_evidence_path_is_refused_not_defaulted_to_the_constant():
                 "note": "E5 note"})
     assert "REFUSED" in str(exc.value), str(exc.value)
     assert "evidence" in str(exc.value), str(exc.value)
+
+
+def test_a_mapping_missing_corpus_sha256_is_refused_by_name_too():
+    """The sibling key takes the SAME named refusal — and before it is subscripted.
+
+    The guard above was written for `evidence` alone and PLACED AFTER
+    `e4_off_this_corpus = not _same_corpus(e4["corpus_sha256"], …)`, so a caller
+    omitting `corpus_sha256` still got a bare ``KeyError`` — from the line three above
+    the guard whose own comment promised the mapping was "refused by name rather than
+    left to a KeyError" (PR #10679 review, F4: the guarantee was partial in exactly the
+    direction the comment denied). Both keys are now checked in one place, ahead of
+    every subscript.
+
+    Non-vacuity: at the pre-fix head this mapping raises ``KeyError`` out of
+    ``build_rows`` and the ``pytest.raises(SystemExit)`` below never fires.
+    """
+    with pytest.raises(SystemExit) as exc:
+        measure.build_rows(
+            head="a" * 40, out_path="docs/evidence/7949-capstone/e1-e2.log",
+            log_corpus_sha="sha256:" + "d" * 64,
+            e1={"verdict": "BLOCKED", "sha": "c" * 40, "corpus_sha256": "e" * 64,
+                "note": "E1 note"},
+            e2={"verdict": "BLOCKED", "sha": "c" * 40, "corpus_sha256": "e" * 64,
+                "note": "E2 note"},
+            e3={"verdict": "RED", "numerator": 23, "denominator": 70,
+                "note": "E3 note"},
+            e4={"verdict": "RED", "numerator": 5, "denominator": 15,
+                "sha": "a" * 9, "evidence": _E4_ON_PIN, "note": "E4 note"},
+            e5={"verdict": "RED", "numerator": 12, "denominator": 25,
+                "note": "E5 note"})
+    message = str(exc.value)
+    assert "REFUSED" in message, message
+    # The NAMED part is the leading clause; the explanatory tail legitimately mentions
+    # `evidence` (the key whose defaulting is refused), so the assertion is on the
+    # clause that names what is MISSING, not on the word's absence from the message.
+    assert "with no `corpus_sha256`" in message, (
+        f"the refusal must name the key the caller did not supply: {message}")
+    assert "with no `evidence`" not in message, (
+        f"the refusal named a key the caller DID supply: {message}")
 
 
 def test_a_non_string_date_is_UNREADABLE_and_refuses_instead_of_parsing():

@@ -938,27 +938,27 @@ def build_rows(*, head: str, out_path: str, log_corpus_sha: str,
     # off-pin receipt before we got here), and an `e4` handed in from another
     # revision still declares itself.
     #
+    # ⛔ A NAMED REFUSAL FOR BOTH KEYS, AND BEFORE EITHER IS SUBSCRIPTED. The guard
+    # below was added for `evidence` alone and sat AFTER this line, so a caller
+    # omitting `corpus_sha256` still got the bare ``KeyError`` the guard exists to
+    # eliminate — from the line above it. Both are checked here, in one place, ahead
+    # of every subscript.
+    missing = [key for key in ("evidence", "corpus_sha256") if key not in e4]
+    if missing:
+        raise SystemExit(
+            "capstone-measure: REFUSED — build_rows was handed an e4 mapping with no "
+            + " and no ".join(f"`{key}`" for key in missing)
+            + ". Defaulting `evidence` to E4_RECEIPT would cite the pre-#8503 "
+            "artifact beside this run's numbers, and a missing `corpus_sha256` would "
+            "raise a bare KeyError from the comparison below — so the mapping is "
+            "refused by name rather than left to either")
+
     # ⛔ `_same_corpus` coerces both operands itself, so this line passes them RAW on
     # purpose: a non-string `corpus_sha256` must yield a ROW the gate can report (V7
     # reds a non-string declaration), never an `AttributeError` from inside the
     # comparison. `build_e4_row` cannot produce one — this is the synthetic-caller
     # path — but the predicate's job is a verdict, not a traceback.
     e4_off_this_corpus = not _same_corpus(e4["corpus_sha256"], log_corpus_sha)
-
-    # ⛔ A NAMED REFUSAL, NOT A `KeyError`. Every sibling guard in this module refuses
-    # by name (``capstone-measure: REFUSED — …``) because a traceback is not a refusal:
-    # it carries no cause and lands at the END of a full corpus run. `evidence` used to
-    # be read with ``e4["evidence"]``, so a caller omitting it got an unlabelled
-    # ``KeyError`` — while this module's own header said ``build_rows`` REFUSES that
-    # mapping. The prose was right and the code was not; defaulting it instead would
-    # cite the pre-#8503 artifact beside this run's numbers, which is the defect this
-    # bundle closes.
-    if "evidence" not in e4:
-        raise SystemExit(
-            "capstone-measure: REFUSED — build_rows was handed an e4 mapping with no "
-            "`evidence` path. Defaulting it to E4_RECEIPT would cite the pre-#8503 "
-            "artifact beside this run's numbers, so the row is refused by name rather "
-            "than left to a KeyError")
 
     return [
         # E1 and E2 carry the counts their OWN criteria are written over — E2 the
@@ -2496,23 +2496,34 @@ def build_e4_row(receipt: dict, *, bars: dict, corpus_sha: str) -> dict:
     # the RECEIPT (its retrievability is unreported whatever the edge count) and
     # stays unconditional; only the `#8503` half is a claim about this number.
     # ⛔ `#8503` is named as the MEASUREMENT RECORD, never as a live blocker: it
-    # CLOSED 2026-10-24 and that closure records E4's DISPROOF. The residual is
-    # `#9596`, and `#10601`'s V12 refuses a row whose `blocked_by` has closed — so a
-    # row that still said "#8503 is what blocks this" would be refused by the gate
-    # for naming work that is finished.
+    # CLOSED 2026-10-24 and that closure records E4's DISPROOF. `#10601`'s V12 refuses
+    # a row whose `blocked_by` has closed — so a row that still said "#8503 is what
+    # blocks this" would be refused by the gate for naming work that is finished.
+    #
+    # ⛔ THE RESIDUAL IS UNOWNED, AND SAYING OTHERWISE WAS A FALSE ATTRIBUTION.
+    # `#8503`'s own body closes by stating it plainly — *"This issue is that residual,
+    # now measured post-close. No open issue owns it."* — and `#9596` is scoped to a
+    # DIFFERENT gap: the receipt's retrievability rate is unmeasured (a v2 receipt must
+    # re-cut it on a real run). This clause used to say `#9596` owns the ten unformed
+    # planted edges; it does not, and the sentence would have been emitted into every
+    # future scored log. The row's `blocked_by` cell is still `#9596`, because the gate
+    # requires a non-green row to name a LIVE issue and that is the only open one on
+    # E4 — but the CELL is a pointer, and this NOTE is where its scope is stated.
     if result["outcome"] == "PASS":
         edge_clause = ("the planted-edge bar IS met by this receipt, so #8503's fix "
                        "holds here")
     elif receipt["edge_correct"] < receipt["planted"]:
         edge_clause = ("the planted edges are still not all formed (#8503 — CLOSED "
-                       "2026-10-24; that closure records the DISPROOF, so it is this "
-                       "row's measurement record and not a live blocker, and the "
-                       "residual is owned by #9596)")
+                       "2026-10-24: that closure records the DISPROOF, so it is this "
+                       "row's measurement record and not a live blocker, and no open "
+                       "issue owns the residual — #8503 says so in its own words)")
     else:
         edge_clause = (f"the planted-edge COUNT, not the wiring, is the shortfall — "
                        f"this receipt plants {receipt['planted']} where the record "
-                       f"freezes {bars['E4']['of']} (#8503 — CLOSED 2026-10-24, its "
-                       f"disproof; the residual is owned by #9596)")
+                       f"freezes {bars['E4']['of']} (#8503 — CLOSED 2026-10-24: that "
+                       f"closure records the DISPROOF, so it is this row's measurement "
+                       f"record and not a live blocker, and no open issue owns the "
+                       f"residual — #8503 says so in its own words)")
     return {
         "verdict": verdict_word(result),
         "numerator": receipt["edge_correct"],
