@@ -52,8 +52,16 @@ state's own bar is deliberately NOT re-cut here (that is #8486's recorded
 disclosure rule and an open owner decision) — see
 ``measurement_posture.belief_layer_state``.
 
-Hermetic by construction: the module imports only the standard library
-(``logging``, ``time``, ``math``, ``sys``);
+Hermetic by construction: the module imports the standard library
+(``logging``, ``time``, ``math``, ``sys``) plus ONE leaf symbol from the
+package — ``epistemic_disjunction`` from ``tortoise.live`` (#10137), the
+canonical label predicate the engine's own R16 gate uses, imported rather than
+hand-rolled so the gate cannot drift from it. That import is not free: it pulls
+the ``tortoise`` package (``config``, ``embedded_lifecycle``, ``embedded_reaper``,
+``env_truthy``, ``fork_safety``, ``live``) even for a caller that only wants
+``read_confidence`` — which is why ``tortoise/subgraph_render.py``, a package
+module that imports this one, keeps working (the package is already loaded) but
+a bare pre-install probe of ``read_confidence`` no longer is.
 ``activate_beliefs`` takes an already-constructed SDK (or a stub) so it can
 be unit-tested without a database.
 """
@@ -86,7 +94,7 @@ EP_ENGINE = "dream:full"
 
 # ── Cypher ────────────────────────────────────────────────────────────────
 # Shaped after the capture auto-promotion block (``sdk._apply_capture_ingest_ep``,
-# ``sdk.py:8278+``), NOT byte-mirrored from it. Two divergences are DELIBERATE
+# ``sdk.py:8278+``), NOT byte-mirrored from it. THREE divergences are DELIBERATE
 # and must not be "restored to parity":
 #   * ``_PROMOTE_OPERATOR`` adds ``WHERE o.status = 'draft'`` and ``RETURN o.id``
 #     — capture's ``SET`` is unconditional, which double-counts and journals a
@@ -94,6 +102,15 @@ EP_ENGINE = "dream:full"
 #   * ``_SELECT_DRAFT_OPERATOR_IDS`` is explicit-``draft``-only and graph-wide,
 #     not incident-scoped — see its own block for why (an operator over
 #     already-live claims has no other promotion route, #10137).
+#   * ``_SELECT_DRAFT_OPERATOR_IDS`` also treats a node carrying ``op_type`` as
+#     an operator (``is_operator = true OR op_type IS NOT NULL``), wider than the
+#     engine's ``{is_operator:true}``. That is #10137's own bug class being fixed
+#     rather than a divergence in spirit: a hybrid node (``op_type`` set,
+#     ``is_operator`` false) is promotable by NO engine path either
+#     (``promote_point`` blocks on ``op_type`` too), so leaving it draft would
+#     re-create "an operator nothing promotes". It matches ``ep.py``'s own
+#     operator predicate (``ep.py:1456/:1804/:1870/:2579``), which is what the
+#     factor graph will actually use.
 # Pinned by ``test_the_gate_promotes_an_operator_once`` (CAS, embedded),
 # ``test_the_gate_refuses_a_status_less_operator`` (explicit-draft-only arm,
 # embedded), and this one for graph-wide REACH (stub):
