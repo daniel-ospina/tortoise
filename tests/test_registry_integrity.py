@@ -102,6 +102,32 @@ def test_duplicate_sequence_entry_is_refused(tmp_path: Path) -> None:
     assert len(problems) == 1 and "duplicate entry 'test_a.py'" in problems[0]
 
 
+def test_a_duplicate_key_inside_a_nested_mapping_is_refused(tmp_path: Path) -> None:
+    """Depth is the point: `_walk` must RECURSE into `.durations` (#10894).
+
+    The arms above duplicate the ROOT mapping and a `surfaces:` sequence, so they
+    pass on a `_walk` that never descends. `config/ci-surfaces.yml` meanwhile
+    carried 22 duplicate keys inside `durations:` (5 on the branch head, 22 on
+    the merged tree — the `merge=union` shape at a depth this suite did not
+    reach), and the required `manifest-integrity` job went RED on the PR with
+    nothing here naming the class: `safe_load` kept the last weight and the
+    shard packer used it. A duplicated WEIGHT is the silent half — the file still
+    parses, so no other check can see it.
+    """
+    victim = tmp_path / "ci-surfaces.yml"
+    victim.write_text(
+        "version: 1\n"
+        "durations:\n"
+        "  test_same.py: 2.0\n"
+        "  test_other.py: 1.0\n"
+        "  test_same.py: 9.0\n",
+        encoding="utf-8",
+    )
+    problems = check_registry(victim)
+    assert len(problems) == 1, problems
+    assert "duplicate mapping key 'test_same.py' at .durations" in problems[0], problems
+
+
 def test_duplicate_name_in_the_frozen_baseline_is_refused(tmp_path: Path) -> None:
     """A name-keyed comparison drops all but the last row — unverified content."""
     victim = tmp_path / "surface-manifest.yml"

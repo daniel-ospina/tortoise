@@ -30,6 +30,7 @@ the three sources those cites name (`sdk.py`, `projection/edges.py`,
 from __future__ import annotations
 
 import ast
+import collections
 import importlib.util as _ilu
 import json
 import os
@@ -42,6 +43,7 @@ import types
 from pathlib import Path
 
 import pytest
+import yaml
 
 _REPO = Path(__file__).resolve().parents[1]
 if str(_REPO) not in sys.path:
@@ -1333,6 +1335,31 @@ def test_the_record_does_not_narrate_an_under_floor_after_arm_as_a_disagreement(
     assert "agrees on the pairing" not in e1["why"], e1["why"]
 
 
+def _duplicate_duration_keys(manifest_text: str) -> dict[str, int]:
+    """`{key: occurrences}` for every DUPLICATED key in the `durations:` map.
+
+    Parsed with `yaml.compose`, which returns the raw node graph BEFORE the
+    constructor collapses duplicate keys — that is the whole point: a loader
+    that CONSTRUCTS the mapping cannot see the duplicate at all (`safe_load`
+    keeps the last row and raises nothing).
+
+    MAP-WIDE on purpose. This predicate used to be a filter for one hard-coded
+    key (`test_7949_capstone_measure.py`), so the pin below — named and
+    documented for "one row per file" — was green against a map carrying
+    TWENTY-TWO duplicate keys (#10894 review, findings 1-2: 5 on the branch head,
+    22 once merged with `origin/main`). It read one row of a 1,258-row map and
+    reported the map clean; the required `manifest-integrity` check was red the
+    whole time. A pin whose name is broader than its filter is a FALSE PASS.
+    """
+    node = yaml.compose(manifest_text)
+    durations = next((v for k, v in node.value if k.value == "durations"), None)
+    assert durations is not None, (
+        "the manifest has no top-level `durations:` key — the `durations_captured_at` "
+        "stamp sits above it, so this is a parse problem, not an absent map")
+    counts = collections.Counter(k.value for k, _ in durations.value)
+    return {key: n for key, n in counts.items() if n > 1}
+
+
 def test_the_durations_map_carries_one_row_per_file():
     """A DUPLICATE key is a stale claim that YAML silently keeps only half of.
 
@@ -1341,14 +1368,30 @@ def test_the_durations_map_carries_one_row_per_file():
     (YAML keeps the LAST; the count pin takes the FIRST) saw a different one. A
     pin that reads one line of a file that carries two cannot claim the file is
     clean (the manifest's own 51st pin names this class).
+
+    `#10894`: the same defect came back at MAP scale — 5 duplicates on the
+    branch head, 22 once merged with `main` — and this pin was green through all
+    of it because it only ever looked at its own key. It is now map-wide, and
+    NON-VACUOUS: the detector is required to reject a synthetic duplicated row,
+    so the assertion cannot pass because the detector stopped looking.
     """
     manifest = (_REPO / "config" / "ci-surfaces.yml").read_text()
-    rows = [line for line in manifest.splitlines()
-            if line.strip().startswith("test_7949_capstone_measure.py:")]
-    assert len(rows) == 1, (
-        f"the durations map carries {len(rows)} rows for this file — a duplicate "
-        "key is a claim YAML keeps only the last of:" + "".join(
-            f"\n  {row[:90]}" for row in rows))
+    dupes = _duplicate_duration_keys(manifest)
+    assert dupes == {}, (
+        f"the durations map carries {len(dupes)} duplicate key(s) — a duplicate "
+        "key is a claim YAML keeps only the LAST of, so the weight `tools/"
+        "ci_selection.py` packs the shards with is whichever row landed last:"
+        + "".join(f"\n  {key} ×{n}" for key, n in sorted(dupes.items())))
+
+    # Non-vacuity: the SAME predicate must see a duplicate in a synthetic map.
+    assert _duplicate_duration_keys(
+        "version: 1\n"
+        "durations:\n"
+        "  test_same.py: 2.0  # the claim that loses\n"
+        "  test_other.py: 1.0\n"
+        "  test_same.py: 9.0  # the claim YAML keeps\n") == {"test_same.py": 2}, (
+            "the duplicate detector did not see a duplicated `durations:` key — "
+            "this pin would then be green for a map it never checked")
 
 
 def _build_gate_repo() -> Path:
