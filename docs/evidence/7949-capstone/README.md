@@ -28,11 +28,15 @@ committed in this tree and is read as a file. The SCORED run below is stamped se
 COUNT is deliberately not restated here — it changed twice while this was open, and a stale
 integer in the one paragraph a reviewer bounds the PR by is worse than no integer):
 the bundle itself — `docs/evidence/7949-capstone/**` (this `README.md`, `E1-E5-PROOFS.md`, the
-committed `blocker-states.json`, the scored log `capstone-measured-9152448d.log` that replaces
-`capstone-measured-e0fc940b.log`, and `probes/capstone_measure.py`) and
+scored log `capstone-measured-9152448d.log` that replaces `capstone-measured-e0fc940b.log`, and
+`probes/capstone_measure.py`) and
 `tools/capstone_verdict_check.py` with `tests/test_7949_capstone_verdict_check.py` (the V12 arm and
 its pins) plus `tests/test_7949_capstone_measure.py` (the bundle's own claim pins); its registration
 (`config/ci-surfaces.yml` `core`/`tier1`/`durations` arms, `docs/00_index.md`).
+⛔ `blocker-states.json` is deliberately NOT listed: it landed on `origin/main` in `#10601` and this
+branch only READS it (`git log origin/main..HEAD -- docs/evidence/7949-capstone/blocker-states.json`
+is empty). It was listed until review round 4 checked this enumeration against the command it cites,
+which is twice now for this one paragraph.
 ⛔ A previous revision of this paragraph named eight files this branch does **not** touch —
 `tools/capstone_preregistration_check.py`, `tests/test_capstone_preregistration_9075.py`,
 `tools/ci_selection.py`, `tests/test_ci_selection.py`, `config/surface-manifest.yml`,
@@ -1066,7 +1070,7 @@ gated the pass off, or the stage produced nothing.
 | `#9738` E5's disclosure and population reconciliation | **CLOSED** `2026-11-02T08:53:06Z` — it closed on its own §10 *record* correction (PR `#10525`), which is not a measurement of E5's number. The residual is S3 selection recovery, owned by **`#5087`** (OPEN): raw absolute `0.4800` against the `0.80` floor |
 | `#5333` may any pass remove/relocate an Object (owner ruling) | **OPEN** — E1's blocker (the mechanism that must move the share) |
 | `#10360` nothing enforces the state-value guarantee on the write path | **OPEN** — E2's blocker (the render half is closed: PR `#10382` on `#9775`) |
-| `#8503` the planted operator edges are not formed | **CLOSED** `2026-10-24T20:50:13Z` — it was E4's `blocked_by` and closed nine days before this bundle noticed. The residual is the receipt's retrievability, owned by **`#9596`** (OPEN) |
+| `#8503` the planted operator edges are not formed | **CLOSED** `2026-10-24T20:50:13Z` — it was E4's `blocked_by` and closed nine days before this bundle noticed. Its residual is the UNFORMED PLANTED EDGES, and **no open issue owns it** (`#8503` says so itself) — the receipt's unmeasured retrievability is a DIFFERENT gap, `#9596`, and is E4's blocker POINTER rather than this residual's owner |
 | `#9596` the operator receipt's retrievability is unmeasured | **OPEN — E4's blocker** (re-attributed from the closed `#8503`, `2026-11-02`): the receipt's retrievability rate is UNMEASURED, which E4's own note already named |
 
 A **scored** row moves to a different verdict only by RE-RUNNING the probe, never by reading an

@@ -2957,6 +2957,44 @@ def test_the_shipped_log_states_the_e3_note_the_same_way_in_both_copies():
         assert not re.search(r"\d+/\d+ = 1\.000000", copy), (where, copy)
 
 
+def test_the_shipped_log_states_EVERY_row_note_the_same_way_in_both_copies():
+    """One note, two copies — and EVERY row, not just E3.
+
+    `render_log` writes a note twice: the human `row <C> note: …` line and the machine
+    record's `rows[i].note`. In a fresh run they cannot disagree (one `row()` dict feeds
+    both, `probes/capstone_measure.py:2899`), so a disagreement in the SHIPPED log is
+    proof of a one-sided HAND EDIT — an edit that reads as emitter output, which is the
+    class `#10537` exists to refuse and rounds 2-3 of this review claimed to have
+    closed.
+
+    ⛔ WHY THIS IS GENERALISED (`#10679` review round 4). E3 had this pin and E4/E5 did
+    not, so the standard existed and the two copies this very PR edits were left
+    one-sided. Measured in a throwaway copy: restoring
+    "… and the residual is owned by #9596)" in the human `row E4 note:` line ALONE —
+    leaving the machine copy corrected — kept both note pins GREEN while the two copies
+    then contradicted each other; stripping "The row's blocker moved on 2026-11-02 from
+    #9738 to #5087" from the human `row E5 note:` line alone also stayed green. Binding
+    every criterion closes both, and closes the next one nobody has thought of.
+
+    Non-vacuity: either of those one-sided edits reds here.
+    """
+    log = _newest_log(_scored_logs())
+    text = log.read_text()
+    record = cvc.extract_block(text)
+    machine = {row["criterion"]: row["note"] for row in record["rows"]}
+    human = dict(re.findall(r"^row (E[1-5][ab]?) note: (.*)$", text, re.MULTILINE))
+    assert human, "the shipped log carries no `row <C> note:` line"
+    assert set(human) == set(machine), (
+        f"the log's human copies cover {sorted(human)} but its machine record covers "
+        f"{sorted(machine)} — a row with one copy is a copy nothing can compare")
+    for criterion in sorted(machine):
+        assert human[criterion] == machine[criterion], (
+            f"the log's human and machine copies of the {criterion} note disagree — one "
+            f"of them was hand-edited alone, which reads as emitter output:\n"
+            f"  human:   {human[criterion]}\n"
+            f"  machine: {machine[criterion]}")
+
+
 def test_the_not_established_section_quotes_the_s5_operator_counts_the_log_measured():
     """The README's own S5 row and the log's `step S5` line must agree with it.
 
