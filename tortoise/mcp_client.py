@@ -48,7 +48,7 @@ import os
 import re
 import subprocess
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -231,10 +231,17 @@ class Connection:
     a repo- or environment-supplied URL can never redirect a stored credential to
     a host of its choosing. `sources` names every source that was read, in order,
     so a refusal can be specific instead of saying "missing".
+
+    `key` is excluded from `repr()`: a dataclass's generated repr renders every
+    field, so one `logger.info(connection)`, one `print(conn)` or one traceback
+    frame that includes the object would put a live Bearer credential in a log
+    line, a transcript, or a CI artifact. The value stays a readable ATTRIBUTE
+    (`connection.key` is what `_redact_known` and the bridge's `_headers` use),
+    it is only the IMPLICIT rendering that must not carry it.
     """
 
     url: str
-    key: str | None
+    key: str | None = field(repr=False)
     source: str | None
     sources: tuple[str, ...]
     #: whether an ENDPOINT was DECLARED — by `TORTOISE_MCP_URL`, or by a store's

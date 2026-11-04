@@ -944,6 +944,34 @@ class TestCredentialResolution:
         assert "tt_sent_key_0123456789abcdef" not in text, text
         assert "<redacted>" in text, text
 
+    def test_a_connection_never_RENDERS_its_credential(self, monkeypatch):
+        """`Connection` renders its coordinates, never its `key`.
+
+        The dataclass's generated `__repr__` included every field, so a single
+        `logger.info(connection)`, a `print(conn)` or a traceback frame carrying
+        the object put a live Bearer credential into a log line, a transcript or
+        a CI artifact — on the per-request path this module exists for.
+
+        The assertion is BOTH ways on purpose: the value must still be an
+        attribute (the redactor and the bridge's `_headers` read `connection.key`),
+        and must not be rendered — so deleting the field would fail here rather
+        than pass vacuously.
+        """
+        from tortoise import mcp_client
+
+        monkeypatch.setenv("TORTOISE_API_KEY", "tt_repr_canary_0123456789abcdef")
+        connection = mcp_client.resolve_connection()
+
+        assert connection.key == "tt_repr_canary_0123456789abcdef", (
+            "the credential must stay a readable attribute"
+        )
+        for rendered in (repr(connection), str(connection), f"{connection}", f"{connection!r}"):
+            assert "tt_repr_canary_0123456789abcdef" not in rendered, rendered
+        # …while the non-secret coordinates stay rendered, so the repr is still
+        # the diagnostic it is used as.
+        assert connection.url in repr(connection), repr(connection)
+        assert connection.sources[0] in repr(connection), repr(connection)
+
     def test_the_project_local_store_is_read(
         self, recorded_daemon, isolated_home, monkeypatch, tmp_path,
     ):
