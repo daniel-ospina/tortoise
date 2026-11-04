@@ -295,9 +295,14 @@ def _in_a_git_work_tree(directory: Path) -> bool:
     """Whether a `.git` entry sits at or above `directory`.
 
     `.git` is a DIRECTORY in an ordinary checkout and a FILE in a linked
-    worktree or a submodule, so both count. Used when git itself cannot answer
-    (`_git_tracks`): it answers "could anything here have committed the file?"
-    without needing git.
+    worktree or a submodule, so both count. Used at TWO sites, and both matter:
+
+    * `_git_tracks` calls it when git cannot answer at all (no binary, a timeout);
+    * `resolve_connection` calls it DIRECTLY, as the spawn-free pre-check that
+      decides whether git is asked at all — which is what keeps the global
+      candidate covered without paying a `git` spawn per request. Deleting that
+      disjunct as "redundant" would stop a `~/.tortoise/credentials.json` under a
+      dotfiles repo from being vetted at all (fail-open).
 
     `exists()` re-raises OSError for an UNSEARCHABLE directory (`chmod 000`, an
     EACCES on a container's `HOME`); it only swallows ENOENT/ENOTDIR/ELOOP/EINVAL.
@@ -498,13 +503,16 @@ def resolve_connection() -> Connection:
         sources.append(label)
         try:
             present = path.is_file()
-        except OSError:
+        except OSError as exc:
             # A candidate that cannot be STATTED (an unsearchable directory —
             # EACCES on a container's HOME, a `chmod 000` store dir) is not a
             # store that is readable here. `is_file()` only swallows
             # ENOENT/ENOTDIR/ELOOP/EINVAL, and a raise here would break the
-            # never-raise contract on every request.
-            sources[-1] = f"{label} (unreadable: PermissionError)"
+            # never-raise contract on every request. The class is NAMED from the
+            # exception rather than assumed: EACCES gives PermissionError, but a
+            # network-mounted `$HOME` gives a plain OSError (EIO/ESTALE/ETIMEDOUT),
+            # and naming the wrong errno misdirects the operator.
+            sources[-1] = f"{label} (unreadable: {type(exc).__name__})"
             continue
         if not present:
             # Absent, or a DIRECTORY at the project-local path (a repo's own

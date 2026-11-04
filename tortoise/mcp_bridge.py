@@ -107,6 +107,7 @@ All diagnostics go to STDERR: stdout carries JSON-RPC and nothing else.
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import sys
@@ -146,18 +147,26 @@ _MAX_REDIRECT_HOPS = 3
 
 
 def _log(message: str) -> None:
-    """Diagnostics — stderr only, never a credential value, never the wire.
+    """Diagnostics — stderr only, never a credential value, never the wire, never a raise.
 
-    `if sys.stderr is None: return` is not defensive noise: when fd 2 is closed
-    Python sets `sys.stderr` to None, and `print(..., file=None)` falls back to
-    **`sys.stdout`** — which in this process IS the JSON-RPC protocol pipe. A
-    harness reading stdout as MCP would then see `[mcp-bridge] credential: …` as
-    a parse error and kill the session, the one failure this module exists to
-    avoid. A dropped diagnostic is always cheaper than a corrupted frame.
+    Two guards, both load-bearing:
+
+    * `sys.stderr is None` when fd 2 is closed, and `print(..., file=None)` then
+      falls back to **`sys.stdout`** — which in this process IS the JSON-RPC
+      protocol pipe. A harness reading stdout as MCP would see
+      `[mcp-bridge] credential: …` as a parse error and kill the session.
+    * the write itself can fail — ENOSPC under `2>/dev/full`, BrokenPipe when the
+      collector goes away mid-session — and this writer is reached from
+      `main()`'s `except Exception` handler. A `_log` that raises there re-enters
+      the handler, escapes `main()`, and leaves the next request in the batch
+      unanswered: the exact hang the handler exists to prevent.
+
+    A dropped diagnostic is always cheaper than a corrupted or unanswered frame.
     """
     if sys.stderr is None:
         return
-    print(f"[mcp-bridge] {message}", file=sys.stderr, flush=True)
+    with contextlib.suppress(OSError, ValueError):
+        print(f"[mcp-bridge] {message}", file=sys.stderr, flush=True)
 
 
 def _emit(message: Any) -> None:

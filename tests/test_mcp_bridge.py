@@ -637,6 +637,26 @@ class TestRefusal:
 
 
 class TestFailureModes:
+    def test_a_faulted_stderr_cannot_kill_the_frame_it_is_logging_about(self, monkeypatch):
+        """`_log` is called FROM `main()`'s fault handler, so it must not fault.
+
+        ENOSPC under `2>/dev/full`, or a collector pipe that goes away
+        mid-session, makes the write raise. If `_log` propagates, `main()`'s
+        `except Exception` re-enters it, the second raise escapes `main()`, and
+        the next request id in the batch gets NO reply — the hang the handler
+        exists to prevent.
+        """
+        import io
+
+        from tortoise import mcp_bridge
+
+        class _Raising(io.StringIO):
+            def write(self, _data):
+                raise OSError(28, "No space left on device")
+
+        monkeypatch.setattr(mcp_bridge.sys, "stderr", _Raising())
+        mcp_bridge._log("internal failure forwarding a frame")  # must NOT raise
+
     def test_a_reply_with_no_matching_id_is_answered_not_silent(self, upstream, home, bridge_factory):
         """A 200 whose stream carries no reply for the id must not become silence.
 
