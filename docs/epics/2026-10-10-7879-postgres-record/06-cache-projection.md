@@ -309,10 +309,38 @@ record→cache door only (the live journal fold keeps them), and the reconciler
 subtraction would keep that out of the mismatch count. So this rule is correct
 for a pre-fix row and **wrong** for a post-`#10852` one, and it must not outlive
 it — `#10852` deletes `_EPISODIC_SOURCE_PROSE_COLUMNS`, both guard doors in
-`_props_from_row`, `episodic_source_prose_properties`, `is_episodic_source_node`
-and the `scan_cache_view` subtraction, and adds a leg that a lexicon `summary` +
-a topics-derived `_searchText` SURVIVE the door with the rebuilt session Source
-still Source-FTS-indexed. Recorded on #10853 as a follow-up obligation.
+`_props_from_row`, `episodic_source_prose_properties`,
+**`episodic_source_declined_properties`**, `is_episodic_source_node`, the
+`scan_cache_view` subtraction, and **`record_serve.parity_difference`'s decline**,
+and adds a leg that a lexicon `summary` + a topics-derived `_searchText` SURVIVE
+the door with the rebuilt session Source still Source-FTS-indexed. Recorded on
+#10853 as a follow-up obligation.
+
+**SIX touch points, not five — and two of them are callers rather than
+enumerations** (#10867 review, ISSUE 2). An obligation that named only the
+projection's own names was a trap in both directions:
+
+- `episodic_source_declined_properties` (`cache_projection.py:1554`) is a
+  **caller** of `episodic_source_prose_properties`, so deleting the latter alone
+  leaves `NameError` on the `props` tail for every episodic row;
+- `record_serve.parity_difference` (`record_serve.py:1137-1151`) imports **both**
+  `episodic_source_declined_properties` and `is_episodic_source_node` — the
+  tree's SECOND record↔cache comparison instrument. A partial deletion is an
+  `ImportError` on every `Source` comparison, loud today only because three legs
+  the obligation did not list exist; and the other direction is worse — if
+  `is_episodic_source_node` survives, `parity_difference` keeps explaining the
+  pair away for every session `Source` after `#10852`, so a REAL projection gap
+  on a lexicon `summary`/`_searchText` reddens as "explained". That is the
+  "declared asymmetry and a real gap as the same signal" class this PR grades
+  P1, and it is precisely how a rule outlives its own correctness.
+
+So the check is not "were the names in this list deleted" but **"does any
+reference survive"**: after the deletion, re-run
+`grep -rn 'episodic_source_prose_properties\|episodic_source_declined_properties\|_EPISODIC_SOURCE_PROSE_COLUMNS\|is_episodic_source_node' tortoise/ tests/`
+and expect **no** hits outside the new lexicon-SURVIVES legs (#10867 review
+ISSUE 2, from the external pass: removal guides converge on *enumerate every
+reference — including test, documentation and CI callers — then re-run the
+search to prove zero*, because a hand-kept list is what goes stale).
 
 ### The pin
 
@@ -325,6 +353,18 @@ the whole 443-test neighbourhood green while the door stripped a record-held
 property);
 the reconciler counting the declined pair as `graph_only` (not divergence) while a
 DOCUMENT with a differing summary is still counted field by field;
+**`tests/test_record_serve.py` — the SECOND instrument** (the served-read parity
+check, `record_serve.parity_difference`; it is in the `#10852` obligation above,
+so it is pinned here rather than only in the epic prose):
+`test_parity_explains_the_episodic_source_decline_instead_of_reddening` (the
+declined pair is EXPLAINED, and the explained set is drawn from the projection's
+own declaration rather than a list the test curates — so a name added to the
+decline needs no test edit), `test_parity_reddens_on_the_same_names_for_a_document_source`
+(the negative direction: a `corpus://` document of kind `agentSession` that
+carries a differing `summary`/`_searchText` still REDDENS, i.e. the decline is
+scoped to the identity arms and cannot explain away a real gap), and
+`test_parity_explains_only_the_declined_names_on_a_session_source` (scoped by
+NAME too: the identity opens the decline, it does not blanket the comparison);
 ONE LEG PER ARM; the FOUR negative legs (a plain-document baseline, then one per
 term that must not be a signal: a transcript document carrying a `session_id`, a
 `corpus://` permalink stamped `agentSession`, a document stamped `is_episodic`);
@@ -347,3 +387,12 @@ the label gate,
 the call-time resolution of the placement spellings, and each of the three flags
 re-added — every one reds at least the leg that names it, plus the row/node
 agreement shape that exists to catch exactly that drift.
+
+The parity half is mutation-checked the same way, in `record_serve.py`'s
+decline — measured at `a7f5b6a58`, one mutation at a time, `-k parity`:
+DROPPING the explanation (`declined = frozenset()`) reds **2**
+(`test_parity_explains_the_episodic_source_decline_instead_of_reddening`,
+`test_parity_explains_only_the_declined_names_on_a_session_source`), and
+DROPPING THE IDENTITY GATE (explain for every `Source`) reds **1**
+(`test_parity_reddens_on_the_same_names_for_a_document_source`) — the direction
+that matters, because it is the one that would silence a real document gap.
