@@ -4518,3 +4518,60 @@ def test_the_tenant_route_cannot_put_the_narrative_back_on_a_source(client):
         )
     finally:
         sdk.close()
+
+
+# ── #9567 review round 13 — the allowance carry must NOT ride under the lock ──
+
+def test_the_allowance_carry_does_not_run_inside_the_per_graph_commit_lock(
+        client, monkeypatch):
+    """The gate's ONE control-plane read must not be held inside the commit mutex.
+
+    ``_commit_region`` runs under ``with lock:`` (the per-graph commit lock that
+    serializes a graph's commits), and the org-points gate lives inside it.
+    Since #9567 that gate FILLS the missing ALLOWANCE keys from
+    ``quota.resolve_org_limits`` — a SYNCHRONOUS control-plane read
+    (``_orgs_row_fail_soft``'s ``httpx`` ladder, up to 6 dependent attempts; an
+    SDK construction plus a ``Team`` query in registry mode). Held inside the
+    lock, a control-plane STALL becomes a network wait every other commit for
+    that org queues behind: an *inert* gate that refuses nothing, consuming the
+    org's write serialization. Same class as review round 12, which hoisted this
+    read off the graph pool for the points doors.
+
+    Mutation this REDs (both directions of the claim, measured not asserted):
+
+    * DELETE the ``_carry_allowances_off_loop(org, "points", …)`` hoist in
+      ``commit_session`` → the resolver is consulted from inside
+      ``_commit_region`` → ``resolved == [True]``;
+    * keep the hoist but drop ``CARRIED_MARKER_KEY`` from the helper → the
+      in-lock half resolves a SECOND time → ``resolved == [False, True]``.
+
+    So ``[False]`` pins both halves: the read ran once, and it ran outside the
+    lock.
+    """
+    import tortoise.hosted_api as ha_mod
+    from tortoise import quota
+
+    resolved: list[bool] = []
+
+    def _resolver(org_id: str) -> dict:
+        # Record whether ANY per-graph commit lock is held at the instant the
+        # resolver is consulted (``_COMMIT_LOCKS`` is process-wide and an entry
+        # is dropped the moment its last holder releases).
+        resolved.append(any(lk.locked() for lk in ha_mod._COMMIT_LOCKS.values()))
+        # The resolver's CURRENT shape, which is also its production shape: the
+        # six limit keys and NO allowance key (#4051 — no resolver may emit one).
+        return {"org_id": org_id, "tier": "free", "max_users": 1,
+                "max_graphs": 1, "max_points": 10000, "max_api_keys": 2,
+                "max_sessions": None}
+
+    monkeypatch.setattr(quota, "resolve_org_limits", _resolver)
+
+    r = _commit(client, _raw_payload(1))
+    assert r.status_code == 200, r.text
+
+    assert resolved == [False], (
+        "the allowance carry must run EXACTLY ONCE, on its own lane and OUTSIDE "
+        "the per-graph commit lock (observed under-lock flags: "
+        f"{resolved}) — [True] means it rides the lock, two entries means the "
+        "CARRIED_MARKER_KEY stamp is missing and the read was added, not moved"
+    )

@@ -132,6 +132,26 @@ org-CUMULATIVE with no window, so gating on it would refuse forever after one pa
 drop); closing it needs a WINDOW-scoped drop counter, which is a follow-up tracked
 by #10776 and declared here rather than left to be discovered.
 
+⚠️ **BOUNDARY 4 — WHERE the carry runs (no lock, its own lane).** The fill above
+is a network read, so it must not be submitted to a pool (or a LOCK) that
+belongs to a different substrate, and it must not be held under a per-org
+mutex. Every gated REST door satisfies both: the ``points``/``documents`` doors
+run it through ``hosted_api._check_org_limit_off_loop`` (Supabase → the
+control-plane pool, self-host → the graph pool, because the registry IS the
+graph connection), the capture door runs the whole check on a worker thread,
+and ``POST /v1/sessions/commit`` runs the carry in the HANDLER, before its
+per-graph commit lock is taken, handing the stamped dict down (review round 13
+— held inside that lock, a control-plane stall was a network wait every other
+commit for the org queued behind, since #9567 made that in-lock gate perform
+this read). ONE door is the declared exception: ``/v1/demo`` runs the check
+inside its own per-org seed lock, deliberately, because the idempotent
+``existing`` short-circuit must come BEFORE the read — a re-seed of an
+already-seeded org must not pay a control-plane read, and the lock is held only
+once per org's first seed. Any NEW gated door has to make this choice
+explicitly; inheriting whichever pool or lock the rest of its work uses is how
+review round 12 (a PostgREST read on the graph pool) and round 13 (the same
+read inside the commit lock) both happened.
+
 ⚠️ **RESIDUAL, named rather than hidden:** the ``sessions`` door is
 ``_check_org_limit(org, "sessions")`` in ``hosted_api._capture_session_impl``,
 and it runs unconditionally — including the store-only lanes (keyless #3892 and

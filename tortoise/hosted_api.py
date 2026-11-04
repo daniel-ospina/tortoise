@@ -9027,6 +9027,52 @@ def _check_org_limit(org: dict, resource: str, *,
         _raise_quota_check_failed(org_id, resource, e)
 
 
+async def _carry_allowances_off_loop(org: dict, resource: str, *,
+                                     op: str = "check_org_limit.points") -> dict:
+    """Run ``_carry_allowances`` on the lane its OWN substrate lives in, off-loop.
+
+    Returns the carried dict with ``CARRIED_MARKER_KEY`` stamped, so a caller can
+    hand it to ``_check_org_limit`` (which runs on the graph lane, or inside a
+    LOCKED region) without a second resolver read.
+
+    A helper rather than two copies because TWO doors need it for the same
+    reason: ``_check_org_limit_off_loop`` (the points doors, which submit the
+    count to the graph pool) and ``/v1/sessions/commit`` (which submits its
+    whole read→plan→write region to a worker UNDER A PER-GRAPH LOCK — the carry
+    must NOT ride inside that lock, see the route's note). Both must pick the
+    pool by SUBSTRATE, not by whichever pool the rest of their work uses, and
+    both must stamp the marker so the second half does not re-read. A second
+    copy of that decision is how the two drift back apart (#9567 review round
+    13).
+    """
+    from tortoise.quota import QuotaCheckError
+    from tortoise.supabase_control import is_supabase_enabled
+
+    try:
+        if is_supabase_enabled():
+            # Supabase mode → the PostgREST lane (_orgs_row_fail_soft's httpx
+            # ladder is a control-plane read, not a graph one).
+            org = await _cp_offload(
+                lambda: _carry_allowances(org, resource),
+                op=f"{op}.allowance_carry")
+        else:
+            # Registry/self-host mode → the graph pool, because the registry IS
+            # the graph connection (#3718).
+            org = await _graph_offload(
+                lambda: _carry_allowances(org, resource),
+                op=f"{op}.allowance_carry")
+    except QuotaCheckError as e:
+        _raise_quota_check_failed(org.get("org_id"), resource, e)
+    # The marker is stamped on a COPY of the caller's dict: the fill is done, so
+    # the second half must not consult the resolver again (a no-record org would
+    # otherwise re-read on the lane this helper just moved it off).
+    from tortoise.allowance_gate import CARRIED_MARKER_KEY
+
+    carried = dict(org)
+    carried[CARRIED_MARKER_KEY] = True
+    return carried
+
+
 async def _check_org_limit_off_loop(org: dict, resource: str, *,
                                     op: str = "check_org_limit.points") -> None:
     """``_check_org_limit`` for an ``async def`` door — each read on ITS lane.
@@ -9065,28 +9111,12 @@ async def _check_org_limit_off_loop(org: dict, resource: str, *,
     sibling (``_raise_quota_check_failed``), so a PostgREST fault on a points
     door is ``500 "Quota check failed: …"`` — never a bare ``QuotaCheckError``
     and never ``graph_unavailable``.
+
+    The carry itself is ``_carry_allowances_off_loop``, shared with the commit
+    lane (#9567 review round 13) — this function is the points-doors half: hoist
+    the carry onto its own lane, then submit ONLY the count to the graph pool.
     """
-    from tortoise.quota import QuotaCheckError
-    from tortoise.supabase_control import is_supabase_enabled
-
-    try:
-        if is_supabase_enabled():
-            org = await _cp_offload(
-                lambda: _carry_allowances(org, resource),
-                op=f"{op}.allowance_carry")
-        else:
-            org = await _graph_offload(
-                lambda: _carry_allowances(org, resource),
-                op=f"{op}.allowance_carry")
-    except QuotaCheckError as e:
-        _raise_quota_check_failed(org.get("org_id"), resource, e)
-    # The marker is stamped on a COPY of the caller's dict: the fill is done, so
-    # the graph-lane half must not consult the resolver again (a no-record org
-    # would otherwise re-read on the pool this function just moved it off).
-    from tortoise.allowance_gate import CARRIED_MARKER_KEY
-
-    carried = dict(org)
-    carried[CARRIED_MARKER_KEY] = True
+    carried = await _carry_allowances_off_loop(org, resource, op=op)
     await _graph_offload(lambda: _check_org_limit(carried, resource), op=op)
 
 
@@ -20743,7 +20773,16 @@ async def commit_session(request: Request, org: dict = Depends(get_current_org_g
         # `_load_commit_graph_state` / `_execute_commit_writes` in the same
         # per-graph-locked region. The site (after every replay return, before the
         # budget adjudication) is unchanged, so an idempotent re-POST is still
-        # never gated.
+        # never GATED (never 402/429).
+        #
+        # ⚠️ #9567 review round 13: the ALLOWANCE fill this call performs is the
+        # one read on this path that is NOT graph I/O, and it must not run under
+        # this lock. It does not: `commit_session` already ran
+        # `_carry_allowances_off_loop` BEFORE the hand-off, on the lane the read's
+        # substrate names, and stamped `CARRIED_MARKER_KEY` — so the fill here is
+        # a dict hit and the in-lock cost is the COUNT alone. Do not "simplify"
+        # the hoist away: reverting it makes a control-plane stall a network wait
+        # held inside this org's write serialization.
         _check_org_limit(org, "points")
 
         # [4c] #4051 §3.1 — the per-ORG ingest budget. The gates above bound the
@@ -21007,6 +21046,32 @@ async def commit_session(request: Request, org: dict = Depends(get_current_org_g
         finally:
             _release_commit_lock(key)
 
+    # ── #9567 D12 (review round 13): the allowance carry rides ITS OWN lane, and
+    # it rides it OUTSIDE the per-graph commit lock ────────────────────────────
+    # `_check_org_limit(org, "points")` is reached from INSIDE `_commit_region`,
+    # i.e. under `with lock:`, and since #9567 that call fills the missing
+    # ALLOWANCE keys from `quota.resolve_org_limits` — a SYNC control-plane read
+    # (`_orgs_row_fail_soft`'s httpx ladder, up to 6 dependent attempts; or an
+    # SDK construction + a `Team` query in registry mode). Held inside the lock,
+    # a control-plane STALL is a network wait every other commit for that org
+    # queues behind: an *inert* gate that refuses nothing, consuming the org's
+    # write serialization. That is the mirror of review round 12's finding on the
+    # graph POOL, and the fix is the same shape — run the carry on the lane its
+    # own substrate lives in, BEFORE the lock is taken, and hand the carried dict
+    # down. `CARRIED_MARKER_KEY` turns the in-lock half into a dict miss instead
+    # of a second read, so this adds no read: it MOVES one.
+    #
+    # ⚠️ Consequence, stated here rather than discovered at arming time: the read
+    # now covers REPLAY requests too (the L1 `fully_written` return happens
+    # inside the lock, i.e. after this point), so a resolver FAULT refuses a
+    # replay that would otherwise have answered `duplicate: true`. That is the
+    # same DISCLOSED posture every other gated door takes (a read we cannot
+    # complete is refused, never read as unlimited — see
+    # `tortoise/allowance_gate.py`), and the alternative — knowing "this is a
+    # replay" before reading — needs exactly the locked graph read this ordering
+    # exists to avoid.
+    org = await _carry_allowances_off_loop(
+        org, "points", op="commit_session.points")
     # One worker hand-off of the whole synchronous region (see the note above).
     # The lock lives inside `_commit_sync`, not around this await.
     return await asyncio.to_thread(_commit_sync)
