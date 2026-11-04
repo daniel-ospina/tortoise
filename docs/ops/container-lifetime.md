@@ -15,9 +15,11 @@ updated: 2026-11-03
 **Status:** armed on cells · **Owner surface:** `tools/test_lane.py`,
 `tools/container_reaper.py`, `tools/install-container-reaper-timer.sh`
 **Issue lineage:** #5084 (private lane) → #8180 (ownership proofs) → #10693 / #10712
-(the lane-gone proof, the ownership labels — **both open, neither merged at the time of
-writing**, so this tool reads the labels defensively and works without them) → #10806
-(this doc: the actuator + the clock)
+(the lane-gone proof, and the ownership labels stamped into the container) — **#10712 is
+on `main` as of the rebase onto `0e02acae9`, and this tool writes those labels**, so the
+backstop reads a stamped owner where the name record has stopped resolving. The rest of
+the documentation below still describes the tool as it behaves on a box whose checkout
+predates the labels: it works without them → #10806 (this doc: the actuator + the clock)
 
 ---
 

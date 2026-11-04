@@ -165,9 +165,11 @@ from **its own** worktree:
 cd <the owning worktree> && uv run python tools/test_lane.py down
 ```
 
-The sweep itself is gated on `TORTOISE_TEST_LANE_REAP` being `"1"` (the default) — set it to
-anything else and the sweep does not run at all, so the stranded containers are neither reported nor
-reclaimed.
+The sweep itself is gated on `TORTOISE_TEST_LANE_REAP` — on by default, and off for any of
+`0` / `false` / `no` / `off` / empty / unset-to-nothing (`export X=${SOMETHING_UNSET}`), which is
+the same predicate the `run` exit hook reads. Set it to one of those and the sweep does not run at
+all, so the stranded containers are neither reported nor reclaimed. Any other value — including
+`1`, `true`, `yes` — leaves it ON, so do not spell "off" with a value this list does not name.
 
 The two **liveness** proofs — the arms behind `TORTOISE_TEST_LANE_REAP_LANE_GONE` and
 `TORTOISE_TEST_LANE_REAP_OWNER_INDETERMINATE` — never treat a container a **live** lane is using as a

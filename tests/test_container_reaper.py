@@ -58,6 +58,24 @@ class _R:
 #: The orphan: its owning worktree no longer exists on disk (proof 1 — the one
 #: proof #8180 authorises unconditionally).
 ORPHAN = "fdb-lane-aaaaaaaaaa"
+
+
+@pytest.fixture(autouse=True)
+def _reap_state_dir_is_isolated(tmp_path, monkeypatch):
+    """The lease/marker registry is REAL box state, so no test here may touch it.
+
+    `REAP_STATE_DIR` defaults to `~/.pi/agent/state/lane-reap/`. The sweeping
+    tests drive the real `reap_orphans()`, and its proofs 2/3 consult and REWRITE
+    that registry (`_touch_lease` / `_drop_lease`) — so without this fixture a
+    test both reads whatever a LIVE peer lane left behind and writes into the
+    developer's own state. That is a test whose verdict depends on the box, on a
+    file registered to a docker-free CI surface (#10813 review P3-7).
+
+    The sibling file (`tests/test_test_lane_tool.py`) has carried the identical
+    fixture since the same review; this file drives the REAL sweep, so it needs
+    it at least as much.
+    """
+    monkeypatch.setattr(tl, "REAP_STATE_DIR", tmp_path / "lane-reap")
 #: A container whose owning lane is LIVE, and one whose owner worktree exists but
 #: whose lane holds nothing — the two populations a timer must never remove.
 LIVE = "fdb-lane-bbbbbbbbbb"
@@ -726,6 +744,17 @@ def test_the_rendered_unit_pins_the_sha256_of_the_reaper_it_installs():
     bounds = [int(ln.split("=", 1)[1]) for ln in r.stdout.splitlines()
               if ln.startswith("TimeoutStartSec=")]
     assert bounds and bounds[0] >= 600, bounds
+    # ⛔ THE SCHEDULING DIRECTIVES THEMSELVES (#10813 review P2-4). Nothing above
+    # pins them, so a replace of `OnCalendar=` with `OnUnitActiveSec=` — the exact
+    # mistake the unit's own comment warns about, and one that silently loses "a
+    # rebooted cell catches up" — kept every test in this file green.
+    assert "OnCalendar=*:0/15" in r.stdout, r.stdout
+    assert "Persistent=true" in r.stdout, r.stdout
+    # …and the arming guard: a manager-level `DefaultEnvironment=` must not be
+    # able to arm a deletion proof behind the installer's back.
+    assert ("UnsetEnvironment=TORTOISE_TEST_LANE_REAP_LANE_GONE "
+            "TORTOISE_TEST_LANE_REAP_OWNER_INDETERMINATE "
+            "TORTOISE_TEST_LANE_REAP_STOPPED") in r.stdout, r.stdout
 
 
 def test_the_rendered_units_COMMENTARY_keeps_the_directive_names_it_names():

@@ -4430,6 +4430,12 @@ def _stub_start(monkeypatch, *, port: int = 16406):
     # stub that only accepts the name would raise TypeError and the hook's own
     # `except Exception` would swallow it as "could not reap".
     monkeypatch.setattr(tl, "_container_in_use", lambda _n, **_k: False)
+    # The hook reads the container's STATE before it decides whether the client
+    # probe is meaningful at all (a TERMINAL container cannot have a client, and
+    # `docker exec` into it fails — #10813 review P2-3). Left real, that is a
+    # `docker inspect` in every one of these tests. Pinned to `running`, the state
+    # in which the question is askable; the terminal case has its own test.
+    monkeypatch.setattr(tl, "container_state", lambda _n: "running")
     # The module-wide fixture disables automatic reaping (`TORTOISE_TEST_LANE_REAP=0`)
     # so no test touches the real box's containers; `run` now HONOURS that opt-out
     # (#10813 review P2-4), so the run tests have to re-enable it for themselves.
@@ -5343,3 +5349,64 @@ def test_a_corroborated_label_whose_owner_EXISTS_beats_the_age_backstop(
     # …and the INDETERMINATE arm — the only bucket this PR's label can move a
     # container OUT of — never sees it.
     assert "no worktree in this clone names it" not in joined, out
+
+
+def test_the_PEER_marker_exists_BEFORE_start_runs(lane, monkeypatch):
+    """The marker has to cover `start()`, not only the child.
+
+    `start()` sweeps orphans, reads state, resolves image/port and may wait
+    `READY_TIMEOUT` for the first PING. A peer `run` inside that window holds no
+    marker and no socket, so a concurrently EXITING run sees "no peer, nothing
+    attached" and `docker rm -f`s the container `start()` just handed to it; the
+    peer then reports connection errors as test verdicts (#10813 review P2-2).
+
+    The assertion is the ORDER, observed from inside `start()` itself: if the
+    marker is opened after `start()` returns, this fails with nothing found.
+
+    Mutation: hoist `name, port = start(...)` back above `with _run_marker(name)`
+    and `during_start` is empty.
+    """
+    _stub_start(monkeypatch)
+    found: list = []
+    real_start = tl.start
+
+    def start_that_looks(_p=None):
+        found.extend(p.name for p in tl.REAP_STATE_DIR.glob("*.run.*"))
+        return real_start(_p)
+
+    monkeypatch.setattr(tl, "start", start_that_looks)
+    _capture_run(monkeypatch)
+    assert tl.main(["run", "--", "-q", "tests/"]) == 0
+    mine = f"{LANE_FIXTURE_NAME}.run.{__import__('os').getpid()}"
+    assert mine in found, (
+        f"no run marker existed while start() ran (saw {found}); a peer that "
+        f"is inside start() cannot be seen, so an exiting run may remove the "
+        f"container it was just handed")
+
+
+def test_a_run_whose_container_DIED_is_still_reaped(lane, monkeypatch, capsys):
+    """A container docker reports as TERMINAL cannot have a client, so the hook
+    must not ask — and must not treat the unanswerable question as "in use".
+
+    `_container_in_use` answers `None` for anything `docker exec` cannot reach,
+    and the hook keeps on `None` (correctly: unreadable is not "unused"). But a
+    container that died during the run — the OOM-kill population #7357 documents
+    — is exactly what the hook should clean up, and asking it would answer
+    `None` and leave it behind for a timer that withholds proof 2 while this
+    worktree still exists (#10813 review P2-3).
+
+    The sweep already states this rule ("a TERMINAL one cannot have one, so the
+    probe is skipped"); this pins that the hook mirrors it."""
+    _stub_start(monkeypatch)
+    reaped: list = []
+    monkeypatch.setattr(tl.subprocess, "run", lambda *a, **k: _R(0, "", ""))
+    monkeypatch.setattr(tl, "stop", lambda: (reaped.append(1), "removed")[1])
+    monkeypatch.setattr(tl, "container_state", lambda _n: "exited")
+
+    def _never(*_a, **_k):     # pragma: no cover - asserted not to run
+        raise AssertionError("a TERMINAL container was probed for clients")
+
+    monkeypatch.setattr(tl, "_container_in_use", _never)
+    assert tl.main(["run", "--", "-q", "tests/"]) == 0
+    assert reaped == [1], "a container that DIED during the run was left behind"
+    assert "reaping" in capsys.readouterr().err
