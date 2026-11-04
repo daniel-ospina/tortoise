@@ -3183,7 +3183,8 @@ def test_the_shipped_log_states_EVERY_row_note_the_same_way_in_both_copies():
 
     `render_log` writes a note twice: the human `row <C> note: …` line and the machine
     record's `rows[i].note`. In a fresh run they cannot disagree (one `row()` dict feeds
-    both, `probes/capstone_measure.py:2899`), so a disagreement in the SHIPPED log is
+    both — `render_log` emits `add(f"row {row['criterion']} note: {row['note']}")` from
+    that one dict and the same `rows` list becomes the record's `rows`), so a disagreement in the SHIPPED log is
     proof of a one-sided HAND EDIT — an edit that reads as emitter output, which is the
     class `#10537` exists to refuse and rounds 2-3 of this review claimed to have
     closed.
