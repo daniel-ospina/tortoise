@@ -368,8 +368,9 @@ def test_refuses_when_the_rail_script_is_absent(tmp_path):
 # the missing binary escaped as an exception the callers never see in
 # production.
 #
-# ⚠️ `origin/main` landed the SAME fix independently (carried into main by
-# `815a9495b`, #10622) and arrived here as a content conflict. The merge keeps
+# ⚠️ `origin/main` landed the SAME fix independently (`_gh` introduced by
+# `f422799c4`, #10724; its lines edited later by `815a9495b`, #10622) and arrived
+# here as a content conflict. The merge keeps
 # ONE helper and ONE arm per layer rather than both sides' copies: the duplicate
 # owner is the shape #10777 exists to remove (the merge left two copies of this
 # very helper once, and the second binding silently shadowed the first —
