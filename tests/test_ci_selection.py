@@ -6625,19 +6625,28 @@ def test_duration_coverage_guard_boundary_and_realistic():
 # #2148 (the batch fold's PR #10726) review P3: the map's own ENTRY RULE is that a
 # fast file added by a PR must carry a `durations:` row at all — "a default is not a
 # reading" — and the coverage FLOOR cannot police it, because the floor is a RATIO
-# (`duration_coverage_issues()` against 0.90, ~70 files of headroom here). Two of the
-# nine test files that fold ADDED (`test_attest_census.py`, `test_rail_detach.py`) were
-# registered in a fast surface with no row, so they packed at the flat default while
-# every other added file carried one. Nothing reds on that today, which is exactly why
-# it needs a pin: the rule was enforced by hand once (`test_substrate_map.py`) and
-# silently missed twice.
+# (`duration_coverage_issues()` against 0.90, ~70 files of headroom here). Nothing reds
+# on a missing row today, which is exactly why it needs a pin: the rule was enforced by
+# hand once (`test_substrate_map.py`) and silently missed twice.
 #
-# The list is EXPLICIT rather than derived from git: `ADDED_BY_THIS_FOLD` is a fact
+# ⛔ WHAT THIS SET ACTUALLY IS — stated because an earlier revision of this comment
+# called all nine files "files that fold ADDED", and only ONE is (measured against the
+# fold's base `60b0e07a0`):
+#   * ADDED by this delta, so it cannot have a row from anywhere else —
+#     `test_9548_record_search_keys_shape.py` (`git diff --diff-filter=A` finds no
+#     other file in this set);
+#   * ROWLESS on the base and repaired by this fold's manifest — the review's actual
+#     finding, `test_attest_census.py` and `test_rail_detach.py`;
+#   * already carrying a row on the base — the other six. They are kept in the set
+#     rather than trimmed, so the guard covers the whole row-set this fold owns and a
+#     later edge cannot drop one silently.
+#
+# The list is EXPLICIT rather than derived from git: `ROWED_BY_THIS_FOLD` is a fact
 # about one PR's diff, and a test that shelled out to `git diff <base>...HEAD` would
 # change meaning with the base it happened to run against (and would go silently empty
 # on a shallow CI checkout, which is the #10356 shallow-channel trap this same file
 # already carries a control for).
-ADDED_BY_THIS_FOLD = (
+ROWED_BY_THIS_FOLD = (
     "test_10084_graph_argument_omit_first.py",
     "test_10084_graph_disclosure.py",
     "test_4051_gate_graph.py",
@@ -6654,7 +6663,7 @@ def test_every_test_file_the_fold_added_carries_a_durations_row():
     """#2148 P3: the ENTRY RULE, pinned — an added fast file has a row of its own."""
     from tools.ci_selection import load_manifest
     durations = load_manifest()["durations"]
-    missing = [f for f in ADDED_BY_THIS_FOLD if f not in durations]
+    missing = [f for f in ROWED_BY_THIS_FOLD if f not in durations]
     assert missing == [], (
         "a test file this PR ADDS is registered in a fast surface but carries no "
         f"`durations:` row, so it packs at the flat default: {missing}. The map's "
@@ -6675,18 +6684,18 @@ def test_the_added_file_row_guard_bites_at_the_pre_fix_head():
     # the guard's own predicate, applied to a map that lacks the two rows this fix adds
     pre_fix = {k: v for k, v in real.items()
                if k not in {"test_attest_census.py", "test_rail_detach.py"}}
-    assert [f for f in ADDED_BY_THIS_FOLD if f not in pre_fix] == [
+    assert [f for f in ROWED_BY_THIS_FOLD if f not in pre_fix] == [
         "test_attest_census.py", "test_rail_detach.py"], (
         "the pre-fix reconstruction must find exactly the two files the review "
         "reported rowless — otherwise this pin is not testing that defect")
     # and dropping any ONE row is still named, so the guard is not keyed to those two
-    dropped = next(f for f in ADDED_BY_THIS_FOLD if f in real)
+    dropped = next(f for f in ROWED_BY_THIS_FOLD if f in real)
     holed = {k: v for k, v in real.items() if k != dropped}
-    assert [f for f in ADDED_BY_THIS_FOLD if f not in holed] == [dropped]
+    assert [f for f in ROWED_BY_THIS_FOLD if f not in holed] == [dropped]
 
 
 def _added_files_off_the_flat_default(durations: dict, tails: dict):
-    """Files a PR ADDED whose row is neither the flat default nor a CI reading.
+    """Files in this fold's row set whose row is neither the flat default nor a CI reading.
 
     The ENTRY RULE's SECOND half, which the existence pin above cannot see: the
     VALUE of a PR-added row must be `DEFAULT_FAST_WEIGHT`, because no push-to-main
@@ -6698,7 +6707,7 @@ def _added_files_off_the_flat_default(durations: dict, tails: dict):
     """
     from tools.ci_selection import DEFAULT_FAST_WEIGHT
     off = []
-    for f in ADDED_BY_THIS_FOLD:
+    for f in ROWED_BY_THIS_FOLD:
         if f not in durations:
             continue
         value = durations[f]
@@ -6724,7 +6733,7 @@ def test_a_file_the_fold_added_carries_the_flat_default_not_a_local_reading():
     """
     from tools.ci_selection import load_manifest
     durations = load_manifest()["durations"]
-    tails = {f: _durations_row_tail(f) for f in ADDED_BY_THIS_FOLD}
+    tails = {f: _durations_row_tail(f) for f in ROWED_BY_THIS_FOLD}
     off = _added_files_off_the_flat_default(durations, tails)
     assert off == [], (
         "a test file this PR ADDS carries a weight that is neither the flat "
@@ -6744,7 +6753,7 @@ def test_the_flat_default_value_pin_bites_on_the_pre_fix_row_and_spares_a_ci_rea
     """
     from tools.ci_selection import load_manifest
     real = load_manifest()["durations"]
-    tails = {f: _durations_row_tail(f) for f in ADDED_BY_THIS_FOLD}
+    tails = {f: _durations_row_tail(f) for f in ROWED_BY_THIS_FOLD}
     victim = "test_9548_record_search_keys_shape.py"
     pre_fix = dict(real, **{victim: 4.0})
     assert _added_files_off_the_flat_default(pre_fix, tails) == [(victim, 4.0)], (
