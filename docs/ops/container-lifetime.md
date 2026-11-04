@@ -202,12 +202,20 @@ tools/install-container-reaper-timer.sh              # install / re-pin (idempot
 tools/install-container-reaper-timer.sh --status     # scheduler's verb + drift verdict
 tools/install-container-reaper-timer.sh --uninstall
 tools/install-container-reaper-timer.sh --dry-run    # render the units only
+#                                                      (works on any platform: it
+#                                                      installs nothing, and the
+#                                                      digest tool is resolved
+#                                                      portably)
 tools/install-container-reaper-timer.sh --help       # works on any platform
 ```
 
-The installer targets **systemd**, so it is Linux-only (cells are Linux, and every
-measured leak is on one). On macOS it refuses and names the reason; `--help` still
-answers.
+The installer's **mutating** verbs target **systemd**, so `--install`,
+`--uninstall` and `--status` (which queries systemd) are Linux-only — cells are
+Linux, and every measured leak is on one. Off Linux they refuse and name the
+reason. `--help` and `--dry-run` render/answer anywhere: the gate is on the verbs
+that touch the box, not on the file, because `--dry-run` writes nothing. That is
+also what keeps the rendered-unit tests runnable on a macOS dev box instead of
+skipped on every platform.
 
 ## ⛔ The agent-infra seam — not edited here
 

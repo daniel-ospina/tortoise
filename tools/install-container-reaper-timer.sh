@@ -44,6 +44,11 @@
 #   tools/install-container-reaper-timer.sh --status        is it scheduled? what did it last do?
 #   tools/install-container-reaper-timer.sh --uninstall     remove unit + timer
 #   tools/install-container-reaper-timer.sh --dry-run       render the units, install nothing
+#                                                          (the only verb that also works
+#                                                          off Linux — it touches no
+#                                                          systemd, and the digest tool is
+#                                                          resolved portably, so a macOS
+#                                                          dev box can inspect the unit)
 #
 # Env overrides:
 #   REAPER_INTERVAL_SEC   cadence, default 900 (15 min — the same rhythm as the
@@ -87,19 +92,37 @@ die()  { echo "ERROR: $*" >&2; exit 1; }
 refuse() { echo "REFUSED: $*" >&2; exit 3; }
 usage() { help_text; exit "${1:-0}"; }
 
-# ── platform gate ───────────────────────────────────────────────────────────
-# Cells are Linux and every measured leak is on one. macOS has no systemd, and
+# ── platform gate ───────────────────────────────────────────────────────────# Cells are Linux and every measured leak is on one. macOS has no systemd, and
 # the repo already carries a launchd precedent for the OTHER (embedded) reaper —
 # inventing a second macOS scheduler here without a measured leak to justify it
 # would be machinery, not a fix. Refused, with the reason, rather than silently
 # doing nothing.
-if [ "$(uname -s)" != "Linux" ]; then
-    die "$(uname -s) has no systemd. This installer arms the sweep on Linux cells,
+#
+# ⛔ THE GATE BELONGS ON THE VERBS THAT TOUCH THE BOX, NOT ON THE FILE. `--help`
+# was already moved ahead of it for exactly this reason (asking what a script
+# does is not a request to install); `--dry-run` is the same class — it renders
+# text to stdout and installs nothing. At module scope the gate also forced
+# `sys.platform != "linux"` skips on the three rendered-unit tests, i.e. a
+# platform gate that hides tests from every CI job (the shape
+# tests/test_markers.py::PLATFORM_GATED_TESTS exists to red — #4162), and made
+# the renderer untestable on the dev boxes that would want to inspect a unit
+# before installing it. So: `--install`, `--uninstall` and `--status` (which
+# queries systemd) refuse off Linux; `--dry-run` and `--help` do not.
+#
+# The probe is a SEAM, not a literal `uname`, because both sides of the gate now
+# have to be exercised on ONE Linux runner — a test cannot be macOS on CI. The
+# repo's precedent for this is the same shape: `OS_NAME_SEAM` in
+# tools/install-ci-runner-x64.sh and `AUTOSCALE_PLATFORM` in
+# tools/install-runner-autoscale-schedule.sh.
+PLATFORM="${PLATFORM_SEAM:-$(uname -s)}"
+require_linux() {
+    [ "$PLATFORM" = "Linux" ] && return 0
+    die "$PLATFORM has no systemd. This installer arms the sweep on Linux cells,
         where the leak is measured (cell-1 76 containers / load 285.53). On macOS
         run the reaper by hand or from whatever scheduler that box already has:
-          python3 $SELF_DIR/container_reaper.py --apply"
-fi
-command -v systemctl >/dev/null 2>&1 || die "systemctl not found — is this a systemd box?"
+          python3 $SELF_DIR/container_reaper.py --apply
+        (--dry-run renders the units anywhere and installs nothing.)"
+}
 
 # ── the checkout to pin: the MAIN worktree, never a lane worktree ───────────
 repo_root_main() {
@@ -149,18 +172,39 @@ fi
 "$PY" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 12) else 1)' \
     || die "$PY is older than 3.12, which the reaper refuses at import time"
 
+# ⛔ THE DIGEST TOOL IS NOT PORTABLE. macOS ships `shasum` and `openssl` but NOT
+# coreutils' `sha256sum`, so `--dry-run` there died on a missing tool rather than
+# on anything about the unit — the other half of why the render used to be
+# Linux-only. Both spellings print `<hex>  <name>` (shasum's is byte-identical
+# with `-a 256`), so the same `cut -d' ' -f1` reads either, and the pin is the
+# same digest the reaper computes in Python. No tool at all stays FATAL for the
+# verbs that pin (an EMPTY pin silently disables the staleness check).
+SHA256_OF() {
+    local out
+    if command -v sha256sum >/dev/null 2>&1; then
+        out="$(sha256sum "$1" 2>/dev/null)"
+        [ -n "${out:-}" ] && { printf '%s\n' "$out"; return 0; }
+    fi
+    if command -v shasum >/dev/null 2>&1; then
+        out="$(shasum -a 256 "$1" 2>/dev/null)"
+        [ -n "${out:-}" ] && { printf '%s\n' "$out"; return 0; }
+    fi
+    return 1
+}
+
 # The pins are only needed to INSTALL. `--status` reports what is deployed, so it
 # must run from anywhere (a lane worktree, a fresh clone with no main checkout).
 if [ "${1:-}" != "--status" ]; then
-command -v sha256sum >/dev/null 2>&1 \
-    || die "sha256sum not found — the deployed-vs-source pin cannot be computed,
-        and an EMPTY pin silently disables the reaper's staleness check"
+SHA256_OF "$SOURCE" >/dev/null \
+    || die "neither sha256sum nor shasum could digest $SOURCE — the deployed-vs-source pin
+        cannot be computed, and an EMPTY pin silently disables the reaper's
+        staleness check"
 # ⛔ TWO pins. `container_reaper.py` only enumerates and reports; every verdict
 # comes from `tools/test_lane.py::reap_orphans()`, which is the file that decides
 # what gets DELETED. Pinning only the safe half would invert the risk.
 [ -f "$POLICY" ] || die "no decision half at $POLICY"
-SHA="$(sha256sum "$SOURCE" | cut -d' ' -f1)"
-POLICY_SHA="$(sha256sum "$POLICY" | cut -d' ' -f1)"
+SHA="$(SHA256_OF "$SOURCE" | cut -d' ' -f1)"
+POLICY_SHA="$(SHA256_OF "$POLICY" | cut -d' ' -f1)"
 [ -n "$SHA" ] && [ -n "$POLICY_SHA" ] \
     || die "could not hash the reaper or its policy file — refusing to install a
         unit whose pin would be empty (an empty pin disables the check)"
@@ -264,6 +308,8 @@ EOF
 }
 
 install_all() {
+    require_linux
+    command -v systemctl >/dev/null 2>&1 || die "systemctl not found — is this a systemd box?"
     render_service | sudo tee "$SERVICE" >/dev/null || die "could not write $SERVICE"
     render_timer   | sudo tee "$TIMER"   >/dev/null || die "could not write $TIMER"
     sudo systemctl daemon-reload || die "daemon-reload failed"
@@ -280,6 +326,7 @@ install_all() {
 }
 
 status_all() {
+    require_linux
     echo "── unit files ──"
     for f in "$SERVICE" "$TIMER"; do
         if [ -f "$f" ]; then echo "present  $f"; else echo "MISSING  $f"; fi
@@ -308,8 +355,8 @@ status_all() {
     # this the report said "deployed at: <none>" for a healthy unit.
     deployed="$(echo "$exec_line" | tr ' ' '\n' | tr -d '"' \
                 | grep -E '\.py$' | head -1)"
-    live="$([ -n "${deployed:-}" ] && sha256sum "$deployed" 2>/dev/null | cut -d' ' -f1)"
-    src_live="$([ -f "$SOURCE" ] && sha256sum "$SOURCE" 2>/dev/null | cut -d' ' -f1)"
+    live="$([ -n "${deployed:-}" ] && SHA256_OF "$deployed" | cut -d' ' -f1)"
+    src_live="$([ -f "$SOURCE" ] && SHA256_OF "$SOURCE" | cut -d' ' -f1)"
     # The POLICY the DEPLOYED reaper will import: the deployed checkout's own
     # tools/test_lane.py, not this caller's checkout.
     policy_live=""
@@ -317,8 +364,8 @@ status_all() {
     # `.` and this hashes the CALLER's checkout, printing a verdict about a file
     # the unit does not run.
     if [ -n "${deployed:-}" ]; then
-        policy_live="$(sha256sum "$(dirname "$deployed")/test_lane.py" \
-            2>/dev/null | cut -d' ' -f1)"
+        policy_live="$(SHA256_OF "$(dirname "$deployed")/test_lane.py" \
+            | cut -d' ' -f1)"
     fi
     echo "deployed at  : ${deployed:-<none>}"
     echo "deployed pin : ${pinned:-<none>}  (actuator)"
@@ -358,6 +405,7 @@ status_all() {
 }
 
 uninstall_all() {
+    require_linux
     # ⛔ Never report a removal that did not happen. The old form swallowed both
     # failures with `|| true` and then printed "removed" — the exact class this
     # tool refuses everywhere else (#10813 review P3).

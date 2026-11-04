@@ -595,7 +595,6 @@ def _render(env_extra: dict | None = None) -> subprocess.CompletedProcess:
                           capture_output=True, text=True, timeout=120)
 
 
-@pytest.mark.skipif(sys.platform != "linux", reason="cells are Linux; macOS has no systemd")
 def test_the_rendered_unit_pins_the_sha256_of_the_reaper_it_installs():
     """Deployed-vs-source, wired — not merely documented.
 
@@ -626,7 +625,6 @@ def test_the_rendered_unit_pins_the_sha256_of_the_reaper_it_installs():
     assert bounds and bounds[0] >= 600, bounds
 
 
-@pytest.mark.skipif(sys.platform != "linux", reason="cells are Linux; macOS has no systemd")
 def test_the_rendered_units_COMMENTARY_keeps_the_directive_names_it_names():
     """The unit heredoc is UNQUOTED and must stay so — it interpolates `$SHA`,
     `$POLICY_SHA`, `$REPO`, `$PY` and `$SOURCE`. The cost is that a bare backtick
@@ -646,7 +644,6 @@ def test_the_rendered_units_COMMENTARY_keeps_the_directive_names_it_names():
     assert "``" not in r.stdout, r.stdout
 
 
-@pytest.mark.skipif(sys.platform != "linux", reason="cells are Linux; macOS has no systemd")
 def test_the_installer_REFUSES_to_pin_a_lane_worktree_without_the_override(tmp_path):
     """A worktree is deleted when its lane lands; a unit pinned to one fails forever.
 
@@ -662,3 +659,69 @@ def test_the_installer_REFUSES_to_pin_a_lane_worktree_without_the_override(tmp_p
                        capture_output=True, text=True, timeout=120)
     assert r.returncode == 3, (r.returncode, r.stdout, r.stderr)
     assert "refusing to pin" in r.stderr.lower()
+
+
+def test_the_PLATFORM_gate_is_on_the_VERBS_that_touch_the_box_not_on_the_file(tmp_path):
+    """macOS has no systemd: `--install`/`--uninstall`/`--status` must refuse there.
+
+    RED-FIRST, and the reason this test exists: at module scope the same gate also
+    refused `--dry-run`, which renders text and installs NOTHING. That is what put
+    a `sys.platform != "linux"` skip on the three rendered-unit tests above — a
+    platform gate that hides tests from every CI job, the exact shape
+    `tests/test_markers.py::PLATFORM_GATED_TESTS` exists to red (#4162). The gate
+    belongs to the verbs that touch the box, the same way `--help` was already
+    answered before it.
+
+    `--status` is the verb driven here instead of `--install` on purpose: it only
+    READS systemd, so a regression that drops `require_linux()` from it queries the
+    box rather than mutating it. Both sides are exercised on one Linux runner
+    through the installer's own `PLATFORM_SEAM` (the shape
+    `tools/install-ci-runner-x64.sh` already uses as `OS_NAME_SEAM`).
+    """
+    # A path that is NOT a lane worktree, so the pin refusal (exit 3, module scope)
+    # does not answer first and mask the platform verdict.
+    repo = tmp_path / "repo"
+    (repo / "tools").mkdir(parents=True)
+    env = {**os.environ, "PLATFORM_SEAM": "Darwin", "REAPER_REPO": str(repo),
+           "PYTHON_BIN": sys.executable}
+    env.pop("REAPER_ALLOW_WORKTREE_PIN", None)
+    r = subprocess.run(["bash", str(INSTALLER), "--status"], env=env,
+                       capture_output=True, text=True, timeout=120)
+    assert r.returncode == 1, (r.returncode, r.stdout, r.stderr)
+    assert "Darwin has no systemd" in r.stderr, r.stderr
+    # …and the OTHER side: the render still works off Linux, so a dev box can
+    # inspect the unit before installing it on a cell.
+    rendered = _render({"PLATFORM_SEAM": "Darwin"})
+    assert rendered.returncode == 0, (rendered.returncode, rendered.stderr)
+    assert "ExecStart=" in rendered.stdout, rendered.stdout
+
+
+def test_the_pin_survives_a_SHA256SUM_that_cannot_digest(tmp_path):
+    """macOS ships `shasum` (perl), never coreutils' `sha256sum`.
+
+    Both spellings print `<hex>  <path>`, so `cut -d' ' -f1` reads either; what
+    must not happen is an EMPTY pin, which silently disables the reaper's
+    staleness check (`TORTOISE_CONTAINER_REAPER_SHA256` unset ⇒ no check). The
+    fallback is proved here by shadowing the first spelling with a `sha256sum`
+    that is present but answers nothing — the shape a busybox/PATH hazard
+    produces — and a `shasum` stub that computes the real digest, so what is
+    under test is the SCRIPT'S resolution, not the stub's format.
+    """
+    shim = tmp_path / "bin"
+    shim.mkdir()
+    (shim / "sha256sum").write_text("#!/bin/sh\nexit 1\n")
+    (shim / "sha256sum").chmod(0o755)
+    impl = tmp_path / "shasum_impl.py"
+    impl.write_text(
+        "import hashlib, sys\n"
+        "p = sys.argv[-1]\n"
+        'print(hashlib.sha256(open(p, "rb").read()).hexdigest() + "  " + p)\n'
+    )
+    (shim / "shasum").write_text(
+        f"#!/bin/sh\nexec {sys.executable!r} {str(impl)!r} \"$@\"\n")
+    (shim / "shasum").chmod(0o755)
+    r = _render({"PATH": f"{shim}{os.pathsep}{os.environ['PATH']}"})
+    assert r.returncode == 0, (r.returncode, r.stdout, r.stderr)
+    pin = hashlib.sha256(
+        (ROOT / "tools" / "container_reaper.py").read_bytes()).hexdigest()
+    assert f"Environment=TORTOISE_CONTAINER_REAPER_SHA256={pin}" in r.stdout, r.stdout
