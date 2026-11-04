@@ -531,8 +531,24 @@ def test_the_spawn_remedy_is_keyed_by_errno(tmp_path):
     notice. This arm calls the helper directly, which is the only way to reach a
     fork failure without inducing one.
     """
-    assert "chmod" in rd._oserror_remedy(PermissionError(errno.EACCES, "denied"))
+    denied = rd._oserror_remedy(PermissionError(errno.EACCES, "denied"))
+    assert "chmod" in denied, denied
+    # ⛔ BOTH OBJECTS, because this errno cannot say which one (review, `#10777`):
+    # an untraversable `PATH` directory and a non-executable file both arrive as
+    # `PermissionError(13, filename='gh')`, so a `chmod +x`-only remedy is wrong
+    # advice for one of them. Pinned, or the directory half can be deleted unseen.
+    assert "traversable" in denied, denied
     assert "chmod" in rd._oserror_remedy(PermissionError(errno.EPERM, "denied"))
+
+    # ⛔ AND THE CWD IS BLAMED ONLY FOR AN ERRNO A `chdir` CAN RAISE (review,
+    # `#10777`): otherwise the gate is unpinned, because every cwd-side arm uses
+    # EACCES and gated/ungated code answer it identically. EIO cannot come from a
+    # chdir, so it must not be reported as a working-directory fault.
+    not_a_chdir_errno = rd._oserror_remedy(OSError(errno.EIO, "i/o error", "/some/cwd"))
+    # The generic fallback legitimately mentions the cwd as ONE thing to check; what
+    # is forbidden is CLAIMING it is the fault.
+    assert "could not be used" not in not_a_chdir_errno, not_a_chdir_errno
+    assert "is not a directory" not in not_a_chdir_errno, not_a_chdir_errno
     eagain = rd._oserror_remedy(OSError(errno.EAGAIN, "try again"))
     assert "loaded" in eagain, eagain
     assert "chmod" not in eagain, eagain
@@ -705,7 +721,7 @@ def test_a_gh_on_path_with_a_dead_shebang_is_not_reported_as_missing(tmp_path, m
 
     ⚠️ With a WORKING `gh` later on `PATH`, CPython's own walk silently skips this
     candidate and runs the later one (`executable_list` is built from
-    `os.get_exec_path` at `subprocess.py:1877`; no `execvp` is called on this path) — so this arm must own `PATH` completely or it
+    `os.get_exec_path` at `subprocess.py:1880-1882`; no `execvp` is called on this path) — so this arm must own `PATH` completely or it
     pins nothing.
     """
     bin_dir = tmp_path / "dead-shebang-bin"
