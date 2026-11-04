@@ -520,6 +520,42 @@ def test_the_alarm_is_never_malformed_even_for_an_empty_reading():
     assert "absorbed ;" not in warning, warning
 
 
+def test_a_truncated_sample_is_named_in_the_alarm():
+    """Review P2: past the SAMPLE cap the receipt must say its list is incomplete.
+
+    `_VOCABULARY_GAP_CAP` bounds the retained SAMPLE, not the token SIZE (that
+    is `_VOCABULARY_GAP_MAX_TOKEN`, a separate clause), and `_truncated` only
+    increments once the sample is full — so a truncated reading always still
+    carries a non-empty sample and the clause is purely ADDITIVE. Silent, a run
+    that absorbed 5,000 distinct tokens shipped "512 unlisted token(s)" with no
+    sign the rest were dropped, on a customer-visible receipt field.
+
+    Driven END TO END through the real accumulator rather than a hand-built
+    dict, so it also pins that `_truncated` reaches the alarm at all: without
+    the clause the assertion below has nothing to match (the pre-fix warning
+    names the sample and stops).
+    """
+    overflow = 3
+    acc = v2._VocabularyGapRunAccumulator()
+    # Distinct, short, bucket-free tokens: no pair-read bucket and no oversize
+    # cap, so the ONLY loss this reading records is the sample cap itself.
+    acc.absorb(f"tok{i}" for i in range(v2._VOCABULARY_GAP_CAP + overflow))
+
+    reading = acc.reading()
+    assert reading["distinct_tokens"] == v2._VOCABULARY_GAP_CAP, reading["cap"]
+    assert reading["truncated_observations"] == overflow, reading["truncated_observations"]
+    assert reading["pair_read_residual"] == 0, reading["pair_read_residual"]
+    assert reading["oversize_observations"] == 0, reading["oversize_observations"]
+
+    warning = v2._vocabulary_gap_run_warning(reading)
+    assert f"{overflow} further observation(s)" in warning, warning
+    assert f"the {v2._VOCABULARY_GAP_CAP}-distinct-token sample cap" in warning, warning
+    assert "not complete" in warning, warning
+    # Additive, not displacing: the unlisted-sample clause the predicate fires
+    # on is still there, so the reader gets BOTH facts from one alarm.
+    assert "unlisted one-sided token(s)" in warning, warning
+
+
 # ── round 7, P2 (1): the accumulator is SHARED across context-carrying threads ─
 #
 # `_VocabularyGapRunAccumulator`'s docstring used to justify having no lock with

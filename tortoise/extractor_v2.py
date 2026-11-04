@@ -12941,6 +12941,13 @@ def _vocabulary_gap_run_warning(reading: dict[str, Any]) -> str:
       (`_pair_read_bucket`), so its appearance means the guard did not fire on
       THIS pair, not that a marker was lost;
     * OVERSIZE tokens — counted, never retained, so no vocabulary can name them.
+    * the SAMPLE cap — an ADDITIVE fourth clause, not a fourth predicate shape:
+      once `_VOCABULARY_GAP_CAP` is reached `distinct_tokens` stops being the
+      count of distinct tokens, so the alarm says the list is incomplete rather
+      than shipping "512 unlisted token(s)" with no sign the rest were dropped.
+      It cannot appear alone — `_truncated` only increments once the sample is
+      FULL — which is why the predicate (`_vocabulary_gap_recorded_a_loss`)
+      still fires on the three shapes above.
 
     A single trailing sentence describing all three as "reached NO identity
     dimension" is FALSE for the residual, and an enumeration that covered only
