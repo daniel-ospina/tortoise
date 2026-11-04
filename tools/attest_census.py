@@ -127,6 +127,51 @@ _EVIDENCE_REF = re.compile(
     r"|^https?://(?:www\.)?github\.com/[^#\s]+/[^#\s]+#(?:issuecomment-|pullrequestreview-|discussion_r)\d+$"
 )
 
+# ⛔ The slug of a GitHub-URL pointer, so the URL arm can be checked against the PR it claims to be
+# evidence FOR (review cycle 22). `_EVIDENCE_REF` validates the SHAPE — host, a two-segment path, an
+# artifact anchor — and a shape cannot say WHOSE artifact it is: measured, a record declaring this
+# repo and this PR, carrying `evidence` = `https://github.com/evil-org/evil-repo#issuecomment-1` or
+# `…/daniel-ospina/tortoise/pull/999#discussion_r5`, both reached `RESTORE`. `RESTORE` tells a lane to
+# re-post that pointer as THIS PR's proof, so a URL naming another repo or PR is the laundering this
+# tool exists to refuse — `load_record` already refuses a record whose own `repo`/`pr` FIELDS
+# disagree (cycles 4/5); this is the same rule on the field that is actually re-posted.
+_GITHUB_URL_SLUG = re.compile(r"^https?://(?:www\.)?github\.com/(?P<owner>[^/#\s]+)/(?P<repo>[^/#\s]+)(?P<path>/[^#\s]*)?#")
+
+
+def _evidence_defect(evidence: object, repo: str, pr: int) -> str:
+    """`""` when `evidence` can be THIS PR's proof, else the reason it cannot.
+
+    ONE function for both call sites — `Record.real_evidence` (which decides `RESTORE`) and
+    `classify`'s reason text — because a rule that exists on one of two sibling paths is a coin
+    flip, not a contract (the lesson `_emit_report` records at its own definition).
+
+    The slug test is skipped for a pointer that carries none (`comment:<id>`) and for a `Record`
+    with no attribution (`repo` empty): the census cannot invent an attribution the artifact does
+    not state. Only a record the READER produced carries one, and that is the one that reaches a
+    lane.
+    """
+    if not isinstance(evidence, str):
+        return f"evidence ({evidence!r}) is not a string"
+    ref = evidence.strip()
+    if _EVIDENCE_REF.match(ref) is None:
+        return f"evidence ({evidence!r}) is not an artifact pointer — it cannot be quoted as proof"
+    m = _GITHUB_URL_SLUG.match(ref)
+    if m is None or not repo:
+        return ""
+    slug = f"{m.group('owner')}/{m.group('repo')}"
+    if slug.lower() != repo.lower():
+        return (
+            f"evidence ({evidence!r}) points at {slug}, not {repo} — re-posting it would quote "
+            "another repository's artifact as this PR's proof"
+        )
+    pm = re.search(r"/pull/(\d+)(?:/|$)", m.group("path") or "")
+    if pr and pm is not None and int(pm.group(1)) != pr:
+        return (
+            f"evidence ({evidence!r}) points at {slug} PR #{pm.group(1)}, not #{pr} — re-posting "
+            "it would quote another PR's artifact as this PR's proof"
+        )
+    return ""
+
 RESTORE = "RESTORE"
 RE_REVIEW = "RE-REVIEW"
 NOTHING = "NOTHING-TO-RESTORE"
@@ -154,6 +199,12 @@ class Record:
     evidence: object = None
     diff_sha256: str = ""
     reviewed_at: str = ""
+    # The attribution `load_record` resolved this record to (`owner/repo`, PR number), carried so
+    # `real_evidence` can hold a GitHub-URL `evidence` to the same artifact its record claims to be
+    # (review cycle 22). Empty for a hand-built `Record` — which is exactly the case where there is
+    # nothing to check against, and the shape test alone decides.
+    repo: str = ""
+    pr: int = 0
     error: str = ""
 
     @property
@@ -174,8 +225,7 @@ class Record:
         return (
             bool(self.verdict)
             and self.verdict in CLEAN_VERDICTS
-            and isinstance(self.evidence, str)
-            and _EVIDENCE_REF.match(self.evidence.strip()) is not None
+            and _evidence_defect(self.evidence, self.repo, self.pr) == ""
             and not _is_carried(self.mint)
         )
 
@@ -255,14 +305,15 @@ def classify(
     # ⛔ Name the ACTUAL defect: a clean verdict with an unusable pointer is not "a non-clean
     # verdict" (cycle 6: the row asserted the opposite of its own `verdict` column, so a lane
     # concluded the review had found issues and re-reviewed for the wrong reason).
-    if not isinstance(record.evidence, str) or _EVIDENCE_REF.match(record.evidence.strip()) is None:
+    defect = _evidence_defect(record.evidence, record.repo, record.pr)
+    if defect:
         # ⛔ Do NOT assert a verdict here: this branch fires on the EVIDENCE test, and cycle 7
         # measured the claim "is clean" printed beside `verdict=ISSUES` — which sends a lane to
         # repair a pointer on a review that actually found issues, without reading the findings.
-        return NOTHING, (
-            f"record verdict {record.verdict!r} at the live head, but its evidence "
-            f"({record.evidence!r}) is not an artifact pointer — it cannot be quoted as proof"
-        )
+        # The message is `_evidence_defect`'s, so the row names the ACTUAL defect: a shape failure
+        # and a "resolves to a different artifact" failure read identically today only because
+        # both are described by the one function that decides both.
+        return NOTHING, f"record verdict {record.verdict!r} at the live head, but its {defect}"
     return NOTHING, f"record verdict {record.verdict!r} is not a clean verdict — nothing to restore"
 
 
@@ -345,6 +396,12 @@ def load_record(
             f"legacy record {chosen.name} declares no repo — it cannot be attributed to "
             f"{owner}/{repo}, so it is not evidence"
         )
+    # Attribution for the EVIDENCE pointer, which is the field a lane actually re-posts: a record
+    # that passed every check above IS this PR's, so its `evidence` URL must name this PR too.
+    # Unconditional, including on an `error` record — `classify` returns before reading evidence
+    # for those, so it can only ever under-report, never licence a cross-artifact RESTORE.
+    rec.repo = f"{owner}/{repo}"
+    rec.pr = pr
     rec_pr = data.get("pr")
     if rec_pr is not None and str(rec_pr).strip() != str(pr):
         # NOT `isinstance(rec_pr, int)`: cycle 5 measured a record declaring `"pr":"8"` escaping
@@ -359,7 +416,13 @@ def gh_json(args: list[str]) -> object:
     becomes a RuntimeError, never an uncaught OSError/ValueError: the exit-code contract
     (0/2, never 1) depends on it (cycle 3 measured `FileNotFoundError` escaping as rc 1)."""
     try:
-        out = subprocess.run(["gh", *args], capture_output=True, text=True)
+        # ⛔ Pinned to UTF-8, not the ambient locale (review cycle 22). `gh --json` emits raw UTF-8
+        # (`—` in a PR title, an accented branch), and `text=True` alone decodes with
+        # `locale.getpreferredencoding(False)`: under `LC_ALL=C PYTHONUTF8=0` that is `ascii`, so the
+        # WHOLE census died on `'ascii' codec can't decode byte 0xe2` (rc 2, "could not list PRs")
+        # for a surface that had answered perfectly. The record read is pinned for exactly this
+        # reason a few functions above — a guard on one of two sibling readers is a coin flip.
+        out = subprocess.run(["gh", *args], capture_output=True, text=True, encoding="utf-8")
     except OSError as exc:  # gh not installed / not executable
         raise RuntimeError(f"could not run gh ({' '.join(args[:2])}…): {exc}") from exc
     except ValueError as exc:  # a non-UTF-8 stdout body — UnicodeDecodeError is a ValueError
@@ -403,11 +466,15 @@ def read_gate(repo: str, head: str) -> tuple[str, str]:
     # ⛔ NEWEST BY `id`, never by list position: the endpoint answers newest-first, so
     # `runs[-1]` would read the OLDEST attempt — the rollup error requirement (c) forbids
     # (a re-run ADDS an attempt; the oldest may be a stale `cancelled`/`failure`).
-    # An id that is not an integer is a payload we cannot order, so it is a TRANSPORT verdict.
-    ordered = [r for r in runs if isinstance(r.get("id"), int)]
-    if runs and not ordered:
-        raise RuntimeError(f"check-runs payload for {head[:12]}… carries no integer id — cannot order attempts")
-    newest = max(ordered, key=lambda r: r["id"])
+    # ⛔ ANY unorderable attempt is a TRANSPORT verdict, not just an all-unorderable payload
+    # (review cycle 22). Dropping a non-integer id and taking `max` of the remainder silently reads
+    # an OLDER attempt — measured: a payload whose NEWEST attempt had `id: null` and whose older one
+    # was green reported `('completed', 'success')`, so the row read "gate green; no re-post owed"
+    # on a head whose newest gate attempt was `failure`. That is the rollup error §622 forbids,
+    # reached from the other side, and the previous test only covered a single-element payload.
+    if any(not isinstance(r.get("id"), int) for r in runs):
+        raise RuntimeError(f"check-runs payload for {head[:12]}… carries a non-integer id — cannot order attempts")
+    newest = max(runs, key=lambda r: r["id"])
     return str(newest.get("status") or ""), str(newest.get("conclusion") or "")
 
 

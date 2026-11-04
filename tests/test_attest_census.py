@@ -151,6 +151,47 @@ def test_evidence_urls_must_be_github_artifacts():
         assert ac.classify(LIVE, r, *RED)[0] != ac.RESTORE, foreign
 
 
+def test_evidence_url_naming_another_repo_or_pr_is_not_evidence(tmp_path):
+    """⛔ Cycle 22: the URL arm checked the HOST and the ANCHOR but never the SLUG, so a record
+    declaring THIS repo and THIS PR could carry `evidence` pointing at another repository's
+    artifact and still reach `RESTORE` — and `RESTORE` is the outcome that tells a lane to
+    re-post that pointer as this PR's proof. That is the laundering this tool exists to refuse.
+
+    `load_record` already refuses a record whose own `repo`/`pr` FIELDS disagree (cycles 4/5);
+    this is the same rule applied to the field a lane actually re-posts. Measured on the pre-fix
+    tree: both records below classified `RESTORE`. Mutation check: pass `self.repo`/`self.pr` as
+    `""`/`0` in `real_evidence` (i.e. drop the attribution) and both go green again.
+    """
+    record = (
+        '{"repo":"daniel-ospina/tortoise","pr":7,"head_sha":"' + LIVE + '","mint":"fresh",'
+        '"verdict":"clean","evidence":"%s"}'
+    )
+    for foreign in (
+        "https://github.com/evil-org/evil-repo#issuecomment-1",
+        "https://github.com/daniel-ospina/tortoise/pull/999#discussion_r5",
+    ):
+        (tmp_path / "daniel-ospina-tortoise-7.json").write_text(record % foreign, encoding="utf-8")
+        got = ac.load_record(tmp_path, "daniel-ospina", "tortoise", 7)
+        assert got is not None and got.error == "", (foreign, got and got.error)
+        assert got.real_evidence is False, foreign
+        outcome, why = ac.classify(LIVE, got, *RED)
+        assert outcome != ac.RESTORE, (foreign, outcome)
+        # The row must name WHICH artifact the pointer belongs to, not a generic "bad pointer".
+        assert ("not daniel-ospina/tortoise" in why) or ("not #7" in why), (foreign, why)
+
+    # ... and this PR's OWN artifact still restores: the guard is an attribution test, not a ban.
+    own = "https://github.com/daniel-ospina/tortoise/pull/7#issuecomment-1"
+    (tmp_path / "daniel-ospina-tortoise-7.json").write_text(record % own, encoding="utf-8")
+    got = ac.load_record(tmp_path, "daniel-ospina", "tortoise", 7)
+    assert got is not None and got.real_evidence is True
+    assert ac.classify(LIVE, got, *RED)[0] == ac.RESTORE
+    # A `<kind>:<id>` pointer states no slug, so there is nothing for it to disagree with — the
+    # census must not invent an attribution the artifact does not carry.
+    (tmp_path / "daniel-ospina-tortoise-7.json").write_text(record % "comment:1", encoding="utf-8")
+    got = ac.load_record(tmp_path, "daniel-ospina", "tortoise", 7)
+    assert got is not None and got.real_evidence is True
+
+
 def test_the_record_cell_does_not_call_an_intact_foreign_record_corrupt(tmp_path):
     """Cycle 9: `CORRUPT` keyed on `rec.error == ""`, so an intact foreign/unattributable record —
     JSON that merely names another PR/repo — was labelled corrupt, whose remedy is destructive."""
@@ -460,6 +501,76 @@ def test_read_gate_refuses_a_non_integer_id(monkeypatch):
             assert "integer id" in str(exc)
         else:
             raise AssertionError(f"id={bad!r} must be a transport failure")
+
+
+def test_read_gate_refuses_a_mixed_payload_rather_than_reading_a_older_attempt(monkeypatch):
+    """⛔ Cycle 22: `ordered = [r for r in runs if isinstance(r['id'], int)]` DROPPED the
+    unorderable attempt and took `max` of what was left, so a payload whose NEWEST attempt had
+    `id: null` returned the OLDER attempt's verdict.
+
+    Measured on the pre-fix tree: an older green attempt + a newer `failure` with `id: null` read
+    as `('completed', 'success')`, so the row said "gate green; no re-post owed" on a head whose
+    newest gate attempt was red — §622's rollup error reached from the other side. The existing
+    single-element test above cannot see it (with ONE attempt there is nothing older to fall back
+    to, so it stays red either way). Mutation check: restore the `ordered = [...]` filter and this
+    test reads `('completed', 'success')` instead of raising.
+    """
+    payload = {
+        "check_runs": [
+            # newest first, exactly as the endpoint answers
+            {"id": None, "name": ac.GATE_CHECK, "status": "completed", "conclusion": "failure"},
+            {"id": 7, "name": ac.GATE_CHECK, "status": "completed", "conclusion": "success"},
+        ]
+    }
+    monkeypatch.setattr(ac, "gh_json", lambda args: payload)
+    try:
+        ac.read_gate("o/r", "a" * 40)
+    except RuntimeError as exc:
+        assert "integer id" in str(exc)
+    else:
+        raise AssertionError("a mixed payload must not fall back to an older attempt's verdict")
+
+    # ... and the all-integer payload still orders by id, not by list position.
+    monkeypatch.setattr(
+        ac,
+        "gh_json",
+        lambda args: {
+            "check_runs": [
+                {"id": 9, "name": ac.GATE_CHECK, "status": "completed", "conclusion": "failure"},
+                {"id": 7, "name": ac.GATE_CHECK, "status": "completed", "conclusion": "success"},
+            ]
+        },
+    )
+    assert ac.read_gate("o/r", "a" * 40) == ("completed", "failure")
+
+
+def test_gh_json_pins_utf8_so_a_c_locale_cannot_blank_a_real_gh_answer(monkeypatch):
+    """⛔ Cycle 22: `subprocess.run(..., text=True)` decoded `gh`'s stdout with the AMBIENT locale.
+
+    `gh --json` emits raw UTF-8 (`—` in a PR title), so under `LC_ALL=C PYTHONUTF8=0` the decode
+    was `ascii` and the whole census died on `'ascii' codec can't decode byte 0xe2` — rc 2,
+    "could not list PRs", for a surface that had answered perfectly. `load_record` pins the same
+    argument on the record read; a guard on one of two sibling readers is a coin flip.
+
+    The assertion is on the KWARG, deliberately: the failure needs a real child process with a
+    real locale, so `tests/test_attest_census.py::test_a_c_locale_box_can_still_read_a_utf8_gh_payload`
+    is the end-to-end pin and this one keeps the seam from being removed on the way to it.
+    """
+    seen: dict[str, object] = {}
+
+    class Proc:
+        returncode = 0
+        stdout = "[]"
+        stderr = ""
+
+    def fake_run(*a, **k):
+        seen.update(k)
+        return Proc()
+
+    monkeypatch.setattr(ac.subprocess, "run", fake_run)
+    assert ac.gh_json(["pr", "list"]) == []
+    assert seen.get("encoding") == "utf-8", seen
+    assert seen.get("text") is True, seen
 
 
 def test_gh_json_wraps_an_undecodable_answer_as_runtime_error(monkeypatch):
@@ -1459,18 +1570,24 @@ def test_a_flush_that_fails_only_at_exit_is_rc_2_not_120(monkeypatch, tmp_path):
 
 
 def _run_with_shim(tmp_path, extra_args, stdout, preexec_fn=None, stderr=subprocess.PIPE, env_extra=None,
-                   out_name="o.md"):
+                   out_name="o.md", gh_stdout="[]"):
     """Run the REAL entry point against a `gh` shim, with `stdout` as the child's fd 1.
 
     A subprocess is not optional for these cases: one needs fd 1 CLOSED at interpreter start
     (CPython then sets `sys.stdout = None`), one needs fd 2 closed (so `sys.stderr` is None, and
     `print(file=None)` falls back to stdout), and one needs the failure to happen at SHUTDOWN,
     after `main` has returned. None of the three can be modelled by patching `sys.stdout` in-process.
+
+    `gh_stdout` is written RAW (UTF-8 bytes on disk, emitted by `printf`), not `json.dumps`'d — the
+    locale test below needs a payload that is UTF-8 on the wire exactly as real `gh` emits it, and
+    `json.dumps`' `ensure_ascii=True` default would escape every non-ASCII character away and let
+    the test go vacuous.
     """
     shim = tmp_path / "bin"
     shim.mkdir(exist_ok=True)
     gh = shim / "gh"
-    gh.write_text("#!/bin/sh\nprintf '%s' '[]'\n", encoding="utf-8")
+    assert "'" not in gh_stdout, "the shim body is single-quoted shell — keep the JSON quote-free"
+    gh.write_text(f"#!/bin/sh\nprintf '%s' '{gh_stdout}'\n", encoding="utf-8")
     gh.chmod(0o755)
     reviews = tmp_path / "reviews"
     reviews.mkdir(exist_ok=True)
@@ -1488,6 +1605,41 @@ def _run_with_shim(tmp_path, extra_args, stdout, preexec_fn=None, stderr=subproc
     ]
     return subprocess.run(cmd, cwd=str(tmp_path), env=env, stdout=stdout, stderr=stderr,
                           timeout=120, preexec_fn=preexec_fn)
+
+
+def test_a_c_locale_box_can_still_read_a_utf8_gh_payload(tmp_path):
+    """⛔ Cycle 22, end to end: `gh_json`'s `text=True` without `encoding=` decodes `gh`'s stdout
+    with the AMBIENT locale. `gh --json` emits RAW UTF-8 (`—` in a PR title), so under
+    `LC_ALL=C PYTHONUTF8=0` the decode is `ascii` and the census dies rc 2 — "could not list PRs",
+    blaming GitHub for a locale — on a box where the answer was perfect.
+
+    The shim emits the payload as literal UTF-8 bytes precisely so this cannot go vacuous: the
+    suite's other `gh` stubs build their JSON with `json.dumps`, whose `ensure_ascii=True` default
+    escapes every non-ASCII character back to `\\uXXXX`, and an escaped body decodes fine in any
+    locale. Mutation check: delete `encoding="utf-8"` from `gh_json` and this reds with
+    `'ascii' codec can't decode byte 0xe2` (measured on the pre-fix tree).
+    """
+    payload = (
+        '[{"number": 1, "headRefOid": "' + LIVE + '", "headRefName": "b", '
+        '"title": "a title with an em dash \u2014 in it"}]'
+    )
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("PYTHONIOENCODING", "PYTHONUTF8", "PYTHONCOERCECLOCALE", "LC_ALL", "LANG")}
+    env.update({"LC_ALL": "C", "LANG": "C", "PYTHONCOERCECLOCALE": "0", "PYTHONUTF8": "0"})
+    proc = _run_with_shim(tmp_path, [], subprocess.DEVNULL, env_extra=env, gh_stdout=payload)
+    # ⛔ The payload must be UTF-8 ON THE WIRE or this test is vacuous: `json.dumps`' default
+    # `ensure_ascii=True` writes `\u2014` as six ASCII bytes, which any locale decodes. Assert the
+    # bytes the shim will actually emit.
+    assert b"\xe2\x80\x94" in (tmp_path / "bin" / "gh").read_bytes(), "the em dash was escaped away"
+    assert proc.returncode == 0, (
+        f"a C-locale box must still read a UTF-8 `gh` payload (got {proc.returncode})\n"
+        f"stderr={proc.stderr[-1500:]!r}"
+    )
+    # ⛔ Non-vacuity: the row has to have been RENDERED from that payload. An EMPTY `gh pr list`
+    # answers rc 0 without ever decoding a non-ASCII byte, so rc alone would not prove the read.
+    text = (tmp_path / "o.md").read_text(encoding="utf-8")
+    assert "| #1 |" in text, f"no row rendered from the UTF-8 payload: {text[-800:]}"
+    assert "NOTHING-TO-RESTORE" in text, f"the row did not classify: {text[-800:]}"
 
 
 def test_a_closed_fd1_is_rc_2_not_1(tmp_path):
