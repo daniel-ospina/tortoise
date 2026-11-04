@@ -536,8 +536,9 @@ def test_an_ingest_bundle_with_append_only_entities_is_not_repeatable():
     a `created.entities` count. So a retry mints a
     NEW `:Source` for a document — and a new `:Event` occurrence for an event,
     which can also gain a NEW operator where the bundle wires one to it (a
-    document cannot: a `:Source` is refused as a connection endpoint — the ERRORS
-    table's row 6, `Endpoint typing`).
+    document cannot: a `:Source` is refused as a connection endpoint — §5's top-
+    violations table, row 6 `Endpoint typing`; NOT §8's error-code table, whose
+    row 6 is `ERR_REGISTRY`).
     `batch_id` is a STAMP, not a dedup key, so it does not save it.
 
     The verdict that follows from those facts is NOT "read the bundle and decide"

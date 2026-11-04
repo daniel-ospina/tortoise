@@ -820,7 +820,7 @@ explicitly, in `error.data.committed`, `error.data.retry_safe` and
 (HTTP 504 on the JSON-RPC surface) the payload carries `retry_after` and nothing
 else — no `committed`, no `retry_safe`, no `retry_rule`. Treat that answer as the
 worst case, `committed: "unknown"` and `retry_safe: false`: the request may have
-reached the server, and for `ingest` a repeat is not convergent. The absence of
+reached the server, and for `ingest` a repeat's convergence is not provable. The absence of
 the verdict is not evidence that nothing was written.
 
 | `retry_rule` | `committed` | What it means (seam refusals only — see above) |
@@ -831,10 +831,15 @@ the verdict is not evidence that nothing was written.
 | `UNSAFE` | `"unknown"` | Dispatched and may still be running, and a repeat is NOT provably convergent — `retry_safe: false`. |
 
 `tortoise_ingest` reports `retry_safe: false`, and its rule says what that means
-without qualification: **do NOT re-send it — reconcile by other means.** That is
-this exception stated mechanically, and it is stronger than a concurrency caution:
-ingest is `UNSAFE` because its append-only legs duplicate a repeat whenever it
-lands, not only while the first attempt is still running. So the over-MCP answer
+without qualification: **do NOT re-send it — reconcile by other means.** ⛔ Note
+what that verdict does and does not say. It says convergence is **not provable**
+for this tool — its bundle's key space is open-ended, so no finite predicate can
+cover it — and it does NOT say a repeat will duplicate. The append-only legs
+(above) are the concrete reason provability fails, not a prediction about any
+particular bundle: a points-only bundle with no operator item converges
+completely and STILL reports `retry_safe: false`, because the tool-level answer
+must hold for every bundle. Read the response's counts to learn what THIS bundle
+did; read `retry_safe` to learn what the tool can promise. So the over-MCP answer
 and this section's "re-send the identical bundle" are answering different
 questions — the section answers *"the call is dead and I want the data in"*; the
 refusal answers *"I do not know whether it is dead"*, and for ingest the safe
