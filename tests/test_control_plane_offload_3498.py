@@ -207,20 +207,44 @@ def test_drain_cannot_be_left_waiting_by_a_fast_completing_submission():
 def test_drain_is_not_held_open_by_a_refused_submission():
     """A REFUSED submission never reaches a worker, so it can never run late —
     it must not hold a drainer open (that would turn fail-fast refusal into a
-    teardown hang)."""
+    teardown hang).
+
+    ⛔ The refusal must be ESTABLISHED, not hoped for (#10618 cycle-5 review
+    P2). `max_backlog` bounds the QUEUE, and `queue.Queue.get()` REMOVES the
+    item before the callable runs (`_SingleSlotWorker._loop`), so a
+    submit-immediately-after-submit test lets the worker free the slot first and
+    the second submission is ACCEPTED — a 5 s stall in the worker's `wait` and a
+    false RED on the premise assertion, decided by the GIL rather than by the
+    test. `started` makes it deterministic: once the worker has set it, it is
+    blocked inside the callable and cannot dequeue anything, so the backlog
+    filled below stays full.
+    """
     tiny = monitoring._SingleSlotWorker("test-drain-refused", workers=1,
                                         max_backlog=1)
     release = threading.Event()
+    started = threading.Event()
     assert tiny.drain(timeout=5.0)
-    accepted = tiny.submit(lambda: release.wait(5))
+    accepted = tiny.submit(lambda: (started.set(), release.wait(5)))
+    assert started.wait(5), (
+        "the single worker never picked up the blocking submission, so the "
+        "backlog below was never proven full and the refusal was not "
+        "established")
+    # The worker is provably past its `_queue.get()` and parked, so the queue is
+    # empty: fill it to `max_backlog` while no worker can drain it.
+    queued = tiny.submit(lambda: release.wait(5))
+    assert tiny._queue.full(), (
+        "premise: the backlog must be FULL before the refusal below is "
+        "asserted, or this test measures the scheduling race it is meant to "
+        "remove")
     refused = tiny.submit(lambda: None)
     assert isinstance(refused.exception(), TimeoutError), (
-        "premise: the second submission must be REFUSED by the bounded backlog")
+        "premise: the third submission must be REFUSED by the bounded backlog")
     release.set()
     assert tiny.drain(timeout=10.0), (
         "a refused submission has no worker to run on, so it must not hold "
         "drain() open")
     assert accepted.done()
+    assert queued.done()
 
 
 def test_offload_records_op_and_duration():
