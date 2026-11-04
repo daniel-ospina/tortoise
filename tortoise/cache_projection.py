@@ -106,7 +106,12 @@ THE FOUR PROPERTIES, AND WHERE EACH LIVES
      bucket — visible, and not a divergence against a record that is correct.
      The graph side is repaired by a record-sourced re-projection
      (`record-restore` / `rebuild_from_record`, which re-materialise through this
-     projector), then by #10000's capture change.
+     projector) — **for a node the projection CREATES**. The write is additive
+     (`MERGE … SET n += $props`, :func:`node_statement`), so a node that ALREADY
+     carries the pair keeps it across a re-projection; this arm stops the pair
+     being re-written, it does not clear an existing one. Clearing a populated
+     cache's stale pair needs an explicit property clear, and the sweep is
+     #10000's capture change.
 4. **A cold region reads ``not-hot``, never ``empty``.** ``declaration_for``
    writes the known-hot set **after** the writes and as a function of what was
    materialized, so a record key the projection did not write is not claimed
