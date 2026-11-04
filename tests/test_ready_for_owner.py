@@ -659,6 +659,155 @@ def test_a_later_approval_closes_an_earlier_change_request() -> None:
     assert check.passed is True, check.raw
 
 
+#: REAL review bodies, captured from this repo's PRs (ids in the docstrings). Round 6
+#: measured that 25 of 203 real bodies graded NEUTRAL because the gate only knew the
+#: line-leading `[P1] file:line` shape — these fixtures ARE that measurement.
+REAL_FINDING_BODY_10916 = """## Review — PR #10916 (fresh context, `ci-route` @ 76953c1eef4de419b149cdac39ff282761278256)
+
+**Outcome: 2 findings (1 × P1, 1 × P2).** The design refusal itself is sound and I verified it
+externally; both findings are about what the PR *claims* is guaranteed.
+"""
+
+REAL_ISSUE_BLOCK = """ISSUE:
+  check_type: test-coverage-gap
+  severity: P1
+  origin: diff
+  file: tortoise/sdk.py
+  outcome: a deleted method is still called
+"""
+
+REAL_VERDICT_MIDLINE = (
+    "Verdict: ISSUES 1 — one P2 claim-integrity defect. The capture-side change is sound."
+)
+
+REAL_SUMMARY_10641 = (
+    "**Outcome: 3 issues — 2 blocking (both P1), 1 P2. NOT CLEAN.** See the ISSUE blocks below."
+)
+
+
+@pytest.mark.parametrize(
+    "body",
+    [REAL_FINDING_BODY_10916, REAL_ISSUE_BLOCK, REAL_VERDICT_MIDLINE, REAL_SUMMARY_10641],
+    ids=[
+        "outcome-n-findings",
+        "issue-block-severity",
+        "verdict-issues-midline",
+        "outcome-n-issues",
+    ],
+)
+def test_a_finding_in_the_fleets_real_declared_shape_is_blocking(body: str) -> None:
+    """ROUND-6 P1: the gate only saw a line-leading `[P1] file:line`. These are the shapes
+    actually posted — the reviewer's own `Outcome: N findings` header and the `ISSUE:`
+    block's `severity:` field (defined by `skills/code-review/SKILL.md`) — and 25 of 203
+    real review bodies graded NEUTRAL."""
+    comments = [{"id": 100, "created_at": "2026-11-04T11:40:00Z", "kind": "comment", "body": body}]
+    _assert_fails("blocking-finding", "open-blocking-finding", comments=comments)
+
+
+def test_the_measured_false_pass_on_10726_is_now_a_failure() -> None:
+    """The exact measured sequence: a clear at 18:54:57Z (6639280674), then two records
+    declaring an OPEN P2 at 21:05 and 21:58. Before this fix the check returned PASS and
+    printed READY-FOR-OWNER for the PR this whole tool was built because of."""
+    comments = [
+        {
+            "id": 6639280674,
+            "created_at": "2026-11-04T18:54:57Z",
+            "kind": "comment",
+            "body": "NO ISSUES FOUND",
+        },
+        {
+            "id": 6642099634,
+            "created_at": "2026-11-04T21:05:44Z",
+            "kind": "comment",
+            "body": "Verdict: one real issue (P2, claim integrity)",
+        },
+        {
+            "id": 6643177214,
+            "created_at": "2026-11-04T21:58:54Z",
+            "kind": "comment",
+            "body": REAL_VERDICT_MIDLINE,
+        },
+    ]
+    check = _assert_fails("blocking-finding", "open-blocking-finding", comments=comments)
+    assert "open=comment:6643177214" in check.raw
+
+
+def test_a_history_summary_that_mentions_a_clean_verdict_is_not_a_clear() -> None:
+    """The mirror image: a body titled "Review history and dispositions (4 rounds)" mentions
+    `NO ISSUES FOUND` while listing severities. A clear phrase must not outrank a finding."""
+    comments = [
+        {
+            "id": 110,
+            "created_at": "2026-11-04T11:40:00Z",
+            "kind": "comment",
+            "body": (
+                "## Review history and dispositions (4 rounds)\n\n"
+                "Round 1: NO ISSUES FOUND\nRound 4: ISSUE:\n  severity: P2\n"
+            ),
+        }
+    ]
+    _assert_fails("blocking-finding", "open-blocking-finding", comments=comments)
+
+
+def test_the_recorders_loose_arm2_still_honours_its_outcome_clean_suppression() -> None:
+    """The #1964 / tortoise#8866 false refusal: a genuine CLEAN review whose prose contains
+    "not clean" later, but which declares `Outcome: clean`. Importing arm (2) WITHOUT the
+    recorder's suppression would reproduce that false block."""
+    comments = [
+        {
+            "id": 120,
+            "created_at": "2026-11-04T11:40:00Z",
+            "kind": "comment",
+            "body": ("**Outcome: CLEAN.** The tree is not clean of debt, but nothing blocks here."),
+        }
+    ]
+    assert _check("blocking-finding", comments=comments).passed is True
+
+
+def test_the_loose_arm2_still_fires_without_an_explicit_clean_outcome() -> None:
+    comments = [
+        {
+            "id": 121,
+            "created_at": "2026-11-04T11:40:00Z",
+            "kind": "comment",
+            "body": "Round 2 came back not clean.",
+        }
+    ]
+    _assert_fails("blocking-finding", "open-blocking-finding", comments=comments)
+
+
+@pytest.mark.parametrize("field", ["is_draft", "merged"])
+def test_an_omitted_draft_or_merged_flag_is_unreadable(field: str) -> None:
+    """ROUND-6 P3: an ABSENT boolean defaulted to the passing side."""
+    check = _check("exclusions", **{field: None})
+    assert check.passed is False
+    assert check.unreadable is True
+
+
+def test_a_truncated_file_listing_is_unreadable() -> None:
+    """ROUND-6 P3: `pulls/N/files` completeness was never witnessed."""
+    fake = _FakeGh(
+        {
+            "/files?per_page": [{"filename": "a.py"}],
+            "pulls/": {"changed_files": 3},
+        }
+    )
+    with pytest.raises(rfo.ReadError):
+        rfo._read_touched(fake, 1)
+
+
+def test_main_prints_a_verdict_line_even_when_a_reader_crashes(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """ROUND-6 P3-a: the backstop that makes the output contract hold for an unforeseen
+    payload shape (a `head` that is a string, a vendor schema change)."""
+    bad = tmp_path / "bad.json"
+    bad.write_text(json.dumps({"pr": "not-an-int"}))
+    assert rfo.main(["--fixture", str(bad)]) == 1
+    out = capsys.readouterr().out
+    assert out.strip().startswith("NOT-READY("), out
+
+
 def test_p3_only_note_is_not_blocking() -> None:
     comments = [
         {

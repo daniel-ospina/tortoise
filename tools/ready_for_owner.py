@@ -168,21 +168,9 @@ CLEAR_RE = re.compile(
 #: A CAPPED / ABORTED / DECLARED-NEGATIVE review exit. ⛔ THE VOCABULARY IS COPIED FROM
 #: `scripts/record-review.sh`, NOT INVENTED HERE: it is that script's arms (1) and (1b) —
 #: the two it applies UNCONDITIONALLY when deciding whether a review artifact is evidence
-#: of a clean outcome (`grep -qiE 'auto-fix +(stalled|failed|reached|aborted|converged|stuck)|…'`
-#: and the `Outcome: not clean` / `Review — NOT CLEAN` declarations). Adopting its own list
-#: keeps ONE definition of "not clean" instead of growing a second, weaker one.
-#:
-#: ⛔ ARM (2) OF THAT SCRIPT IS DELIBERATELY *NOT* IMPORTED — the loose `not[ _-]*clean`
-#: substring search. It is prose-tolerant there for a measured reason (#1964 / tortoise#8866:
-#: a genuine CLEAN review was refused because a later sentence contained the phrase), and
-#: importing it would reproduce that false block on good PRs. Arms (1) and (1b) veto only
-#: DECLARATIONS and STRUCTURAL EXIT PREFIXES, which is the fail-closed half with no such
-#: history.
-#:
-#: Residual, stated rather than hidden: a reviewer who writes a brand-new negative phrasing
-#: outside this vocabulary reads as NEUTRAL here. The bound on that is condition 3 — the
-#: recorder refuses to mint a clean record over a `[P0]/[P1]/[P2]` finding, so the documented
-#: finding shape cannot slip through this arm, only an undocumented one.
+#: of a clean outcome — and arm (2), its loose `not[ _-]*clean` search WITH that script's
+#: own `Outcome: clean` suppression. All three are applied here in the same order, so there
+#: is ONE definition of "not clean" on this box, not a second weaker one.
 NON_CLEAN_RE = re.compile(
     r"(?i)(?:auto-fix[ \t]+(?:stalled|failed|reached|aborted|converged|stuck)"
     r"|require[s]?[ \t]+human[ \t]+(?:attention|input|review)"
@@ -193,6 +181,31 @@ NON_CLEAN_RE = re.compile(
     r"|\[NO-LOOP-BUDGET\]"
     r"|(?:^|[*\s])outcome:[ \t]*[*\s]*(?:not|non|no)[ \t_-]*clean"
     r"|(?:^|[\s>*-])review[ \t]*[\u2014\u2013-][ \t]*not[ \t_-]*clean)"
+)
+
+#: The recorder's ARM (2) — the loose `not…clean` substring — and the SUPPRESSION that makes
+#: it safe there: it does not fire when the artifact states an explicit `Outcome: clean`
+#: (measured false refusal, #1964 / tortoise#8866: a genuine CLEAN review whose body used the
+#: phrase later in a sentence was refused). Applied as a PAIR, exactly as the recorder does.
+LOOSE_NEGATIVE_RE = re.compile(r"(?i)not[ \t_-]*clean")
+EXPLICIT_CLEAN_OUTCOME_RE = re.compile(r"(?i)(?:^|[*\s])outcome:[ \t]*[*\s]*clean\b")
+
+#: ⛔ A REVIEWER'S FINDING IN THE FLEET'S REAL SHAPE. The `[P1] file:line —` form above is
+#: only one of three shapes actually posted, and the OTHER TWO WERE INVISIBLE, which made
+#: this condition report PASS on PRs with an open P1/P2 (measured on #10726: two records
+#: declaring an open P2 after the last clear; 25 of 203 real review bodies across five PRs
+#: graded NEUTRAL). The shapes, each anchored to a source rather than guessed:
+#:
+#: * `severity: P1` — the `ISSUE:` block field, defined by
+#:   `skills/code-review/SKILL.md` §"ISSUE: block" (its `severity:` line IS the finding's
+#:   declared severity, indented two spaces under `ISSUE:`).
+#: * `Outcome: 2 findings (1 × P1, 1 × P2)` / `Outcome: 3 issues — 2 blocking …` — the
+#:   reviewer's own verdict HEADER, which is how a merged review states its count.
+#: * `Verdict: ISSUES 1` — the same verdict stated mid-line rather than at column 0.
+FINDINGS_DECLARED_RE = re.compile(
+    r"(?im)(?:^\s*severity\s*:\s*\**(P0|P1|P2)\b"
+    r"|\boutcome\s*:\s*\**\s*([0-9]+)\s+(?:issues?|findings?)\b"
+    r"|\bverdict\s*:\s*\**\s*ISSUES\s+([0-9]+)\b)"
 )
 
 #: A FORMAL change request is a blocking record even when the review body is empty — the
@@ -318,7 +331,7 @@ class Probe:
     repo: str = DEFAULT_REPO
     head: str = ""
     base: str = "main"
-    is_draft: bool = False
+    is_draft: bool | None = False
     mergeable: str = "UNKNOWN"
     merge_state: str = ""
     head_committed_at: str = ""
@@ -356,7 +369,7 @@ class Probe:
     labels_raw: str = ""
     #: ``open``/``closed`` as GitHub states it, and whether it already merged.
     pr_state: str = "open"
-    merged: bool = False
+    merged: bool | None = None
     #: Set by tests/callers that need a fixed clock; default = now (UTC).
     now: datetime = field(default_factory=lambda: datetime.now(UTC))
 
@@ -613,6 +626,14 @@ def check_exclusions(probe: Probe) -> Check:
             "unreadable",
             unreadable=True,
         )
+    if probe.merged is None:
+        return Check(
+            "exclusions",
+            False,
+            "the PR payload carried no `merged` field",
+            "unreadable",
+            unreadable=True,
+        )
     if probe.merged or probe.pr_state.lower() != "open":
         reasons.append(f"not-open:{probe.pr_state}{'-merged' if probe.merged else ''}")
         parts.append(f"state={probe.pr_state} merged={str(probe.merged).lower()}")
@@ -651,6 +672,14 @@ def check_exclusions(probe: Probe) -> Check:
     elif flag == "CONFLICTING":
         parts.append(f"mergeable={probe.mergeable} (flag IGNORED: merge-tree is clean)")
 
+    if probe.is_draft is None:
+        return Check(
+            "exclusions",
+            False,
+            "the PR payload carried no `draft`/`isDraft` field",
+            "unreadable",
+            unreadable=True,
+        )
     if probe.is_draft:
         reasons.append("draft")
         parts.append("isDraft=true")
@@ -719,12 +748,27 @@ def check_blocking_finding(probe: Probe) -> Check:
     ):
         text = str(item.get("body") or "")
         issues = ISSUES_RE.search(text)
-        blocking = (
-            BLOCKING_RE.search(text)
-            or (issues and int(issues.group(1)) > 0)
-            or NON_CLEAN_RE.search(text)
-            or str(item.get("state") or "").upper() == CHANGES_REQUESTED
-        )
+        declared = FINDINGS_DECLARED_RE.search(text)
+        # ⛔ A FINDING DECLARATION OUTRANKS ANY CLEAN PHRASE IN THE SAME BODY. A "review
+        # history and dispositions" summary mentions `NO ISSUES FOUND` while listing
+        # severities, and reading that as a CLEAR would close a real finding.
+        if declared:
+            severity = (declared.group(1) or "").upper()
+            n = _int_or_none(declared.group(2) or declared.group(3)) or 0
+            blocking = bool(severity in {"P0", "P1", "P2"} or n > 0)
+        elif NON_CLEAN_RE.search(text) or (
+            # The recorder's arm (2): loose `not…clean`, suppressed by an explicit
+            # `Outcome: clean` — the SAME pairing `record-review.sh` applies, so this is
+            # its rule and not a second one.
+            LOOSE_NEGATIVE_RE.search(text) and not EXPLICIT_CLEAN_OUTCOME_RE.search(text)
+        ):
+            blocking = True
+        else:
+            blocking = bool(
+                BLOCKING_RE.search(text)
+                or (issues and int(issues.group(1)) > 0)
+                or str(item.get("state") or "").upper() == CHANGES_REQUESTED
+            )
         if blocking:
             blocking_seen += 1
             open_finding = item
@@ -913,6 +957,25 @@ def _run(cmd: Sequence[str], timeout: int, cwd: Path | None = None) -> subproces
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise ReadError(f"{' '.join(cmd)}: {exc}") from exc
+
+
+def _int_or_none(value: Any) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _tri_state(payload: Mapping[str, Any], *keys: str) -> bool | None:
+    """``True``/``False`` from the first PRESENT key, ``None`` when none of them is there.
+
+    The point is the third value: an ABSENT boolean is not ``False``, and defaulting it to
+    ``False`` puts the passing side on a field the gate exists to check.
+    """
+    for key in keys:
+        if key in payload:
+            return payload[key] is True
+    return None
 
 
 def _mergeable_flag(value: Any) -> str:
@@ -1133,7 +1196,18 @@ def _read_touched(gh: Gh, pr: int) -> tuple[tuple[str, ...], str]:
             names.append(str(entry["filename"]))
     if not names:
         raise ReadError(f"pulls/{pr}/files returned no filenames")
-    return tuple(names), f"files={len(names)}"
+    # ⛔ COMPLETENESS IS WITNESSED, not assumed: the PR payload states `changed_files`, so a
+    # truncated listing is caught instead of silently shrinking the coverage read while the
+    # raw line still says `files=N`. (The same rule `ci_verdict.collect_items` applies to
+    # the check-run surface.)
+    _pull = gh.api(f"pulls/{pr}")
+    expected = _int_or_none(_pull.get("changed_files")) if isinstance(_pull, Mapping) else None
+    if expected is not None and len(names) < expected:
+        raise ReadError(
+            f"pulls/{pr}/files: read {len(names)} of {expected} changed files — "
+            "the listing is TRUNCATED"
+        )
+    return tuple(names), f"files={len(names)}/{expected if expected is not None else '?'}"
 
 
 def declared_union(body: str) -> tuple[tuple[str, ...] | None, str]:
@@ -1239,6 +1313,13 @@ def _read_comments(gh: Gh, pr: int) -> tuple[tuple[Mapping[str, Any], ...], str]
     comments = _flatten(gh.api(f"issues/{pr}/comments?per_page=100"))
     reviews = _flatten(gh.api(f"pulls/{pr}/reviews?per_page=100"))
     inline = _flatten(gh.api(f"pulls/{pr}/comments?per_page=100"))
+    # A dismissed review's INLINE comments are as dismissed as its body. Keeping them made
+    # a dismissed review's `[P1]` block forever — asymmetric with dropping the body.
+    dismissed_review_ids = {
+        item.get("id")
+        for item in reviews
+        if isinstance(item, Mapping) and str(item.get("state") or "").upper() == DISMISSED
+    }
     out: list[Mapping[str, Any]] = []
     for kind, items in (("comment", comments), ("review", reviews), ("inline", inline)):
         for item in items:
@@ -1250,6 +1331,8 @@ def _read_comments(gh: Gh, pr: int) -> tuple[tuple[Mapping[str, Any], ...], str]
             # its findings no longer stand. Keeping a non-empty dismissed body graded its
             # `[P0]/[P1]/[P2]` lines as open forever.
             if state == DISMISSED:
+                continue
+            if kind == "inline" and item.get("pull_request_review_id") in dismissed_review_ids:
                 continue
             # A BARE GitHub-UI review (empty body) still carries a STATE, and that state
             # is the verdict: an empty-bodied APPROVED is the commonest approval shape, and
@@ -1302,15 +1385,21 @@ def collect_probe(
     head = str((pull.get("head") or {}).get("sha") or "")
     probe.head = head
     probe.base = str((pull.get("base") or {}).get("ref") or "")
-    # An OMITTED `draft` is not "not a draft": read the key, do not assume it.
-    probe.is_draft = pull.get("draft") is True
+    # An OMITTED `draft` is not "not a draft": read the key, do not assume it. Both
+    # spellings are read — REST and the GitHub UI payload say `draft`, GraphQL says
+    # `isDraft` — and `None` means "not read", which `check_exclusions` turns into
+    # FAIL(unreadable). A GraphQL-shaped payload read only for `draft` would silently
+    # UN-draft a draft PR.
+    probe.is_draft = _tri_state(pull, "draft", "isDraft")
     probe.mergeable = _mergeable_flag(pull.get("mergeable"))
     # REST spells it `mergeable_state`; GraphQL (`gh pr view --json`) spells it
     # `mergeStateStatus`. Read both, so the reported value is the same either way.
     probe.merge_state = str(pull.get("mergeable_state") or pull.get("mergeStateStatus") or "")
     probe.body = str(pull.get("body") or "")
     probe.pr_state = str(pull.get("state") or "")
-    probe.merged = bool(pull.get("merged") is True or pull.get("merged_at"))
+    probe.merged = _tri_state(pull, "merged")
+    if probe.merged is None and pull.get("merged_at"):
+        probe.merged = True
     labels = pull.get("labels")
     if isinstance(labels, list):
         probe.labels = tuple(
@@ -1470,6 +1559,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         pr = args.pr if args.pr is not None else 0
         print(f"NOT-READY({pr}, failed={','.join(CONDITIONS)})")
         return 1
+    except Exception as exc:  # the OUTPUT CONTRACT outranks the exception
+        # ⛔ A read that is not a verdict must never become a traceback with NO line. Every
+        # reader is meant to convert its own failure, but this is the backstop that makes
+        # "exactly one of READY-FOR-OWNER / NOT-READY" true even for a case nobody foresaw
+        # (a payload whose `head` is a string rather than an object, a vendor schema change).
+        print(f"READY-GATE-ERROR({type(exc).__name__}: {exc})", file=sys.stderr)
+        pr = args.pr if args.pr is not None else 0
+        print(f"NOT-READY({pr}, failed={','.join(CONDITIONS)})")
+        return 1
     verdict = evaluate(probe)
     if args.json:
         print(json.dumps(verdict.to_dict(), indent=2, sort_keys=True))
@@ -1505,7 +1603,9 @@ def probe_from_dict(data: Mapping[str, Any]) -> Probe:
         repo=str(data.get("repo", DEFAULT_REPO)),
         head=str(data.get("head", "")),
         base=str(data.get("base", "main")),
-        is_draft=bool(data.get("is_draft", False)),
+        # None (absent or explicit null) is "not read" — the fail-closed default — so a
+        # fixture that omits `is_draft`/`merged` cannot accidentally read as not-a-draft.
+        is_draft=None if data.get("is_draft") is None else bool(data["is_draft"]),
         mergeable=str(data.get("mergeable", "UNKNOWN")),
         merge_state=str(data.get("merge_state", "")),
         head_committed_at=str(data.get("head_committed_at", "")),
@@ -1517,7 +1617,7 @@ def probe_from_dict(data: Mapping[str, Any]) -> Probe:
         ),
         labels_raw=str(data.get("labels_raw", "")),
         pr_state=str(data.get("pr_state", "open")),
-        merged=bool(data.get("merged", False)),
+        merged=None if data.get("merged") is None else bool(data["merged"]),
         tree=data.get("tree"),
         tree_raw=str(data.get("tree_raw", "")),
         groups=parsed_groups,
