@@ -1513,6 +1513,17 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # Pinned by
              # tests/test_ci_selection.py::test_test_lane_tool_change_selects_core_not_tier1.
              "tools/test_lane.py",
+             # #10806: the ACTUATOR for that tool (`container_reaper.py`) and the
+             # systemd installer that arms it own tests/test_container_reaper.py
+             # (`core`). `tools/` is swallowed by NON_PYTHON_PREFIXES, so without
+             # these entries a change to the dry-run allow-list, the `--apply`
+             # path or the pins selects NO surface — 72 tier-1 smoke files and
+             # ZERO of the safety cases for a tool that DELETES containers. Same
+             # #1349/#3332/#3616 silent-drop class as tools/test_lane.py above.
+             # Pinned by
+             # tests/test_ci_selection.py::test_container_reaper_change_selects_core_not_tier1.
+             "tools/container_reaper.py",
+             "tools/install-container-reaper-timer.sh",
              # #7435: the docs-lint baseline differ owns
              # tests/test_docs_lint_baseline.py, which is `core`-registered, but
              # `tools/` is swallowed by NON_PYTHON_PREFIXES and no
