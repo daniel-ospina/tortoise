@@ -244,7 +244,29 @@ MARKER_TOKEN = "v4-mechanism:"
 #: document published a contradiction: the fail-open this file exists to close,
 #: one typo deep (review cycle 2, P2). A near-miss now falls through to the
 #: malformed verdict instead of disappearing.
-MARKER_TOKEN_LOOSE = re.compile(r"v4[\s_-]*mechanism\s*:", re.IGNORECASE)
+#:
+#: ⚠️ The separator class is `[\W_]{0,3}` rather than an enumerated `[\s_-]*`: the
+#: enumerated set covered case/space/underscore/hyphen and STILL missed a dot
+#: (`v4.mechanism:`), a slash (`v4/mechanism:`) and an en dash — each of which
+#: left a mis-spelled marker invisible to this scan (review P3). A widened class
+#: cannot be shown complete either, but it is the difference between "the
+#: spellings we thought of" and "any non-word character a keyboard produces"
+#: (`_` is a WORD character, so it must be named in the class explicitly —
+#: `\W` alone silently dropped `v4_mechanism:`, which the first widening did).
+#: The match is case-insensitive for the same reason, and the
+#: direction of a false match is fail-CLOSED (a prose mention inside a comment
+#: is a malformed-declaration verdict, which a reader can fix, not a silent
+#: pass). `_prose_only` still keeps ordinary prose out of this scan.
+MARKER_TOKEN_LOOSE = re.compile(r"v4[\W_]{0,3}mechanism\s*:", re.IGNORECASE)
+#: The state recorded for a marker that NAMED its mechanism but whose wording did
+#: not parse. It exists so `membership_errors` does not re-judge the same defect
+#: with a WRONG repair: before it, `<!-- v4-mechanism: x state: -->` produced the
+#: parse verdict AND "a registry row with NO `v4-mechanism: x` marker" AND "the
+#: row names NO declaring document", telling the reader to add a marker that is
+#: already on the page (review P3). A presence the state gate refuses is a
+#: presence here; `declaration_state_errors` skips this sentinel because the
+#: parse error already owns that verdict.
+UNPARSEABLE_STATE = "<unparseable>"
 #: The marker's TWO accepted shapes. The plain one is still read so
 #: `membership_errors` keeps its own verdict on an id-only marker (a synthetic
 #: fixture, and the shape every pre-state marker had); `declaration_state_errors`
@@ -260,6 +282,16 @@ MARKER_COMMENT_STATE = re.compile(
 #: the reader to fix a `state:` value that was already correct (review cycle 2,
 #: P3 — the cycle-1 P3 defect mirrored).
 MARKER_ID = re.compile(r"^\s*v4-mechanism:\s*(?!(?:state)\s*:)([A-Za-z0-9_-]+)")
+#: The same id read through a NEAR-MISS token. When the token itself is
+#: misspelled (`v4.mechanism: x state: implemented`) the strict `MARKER_ID`
+#: cannot see the id either, so the malformed verdict also told membership the
+#: row was unmarked — a repair ("add the marker") for a marker already on the
+#: page (review P3). Reading the id through the loose token lets the defect be
+#: named once, as the misspelling it is.
+MARKER_ID_LOOSE = re.compile(
+    r"^\s*v4[\W_]{0,3}mechanism\s*:\s*(?!(?:state)\s*:)([A-Za-z0-9_-]+)",
+    re.IGNORECASE,
+)
 MARKER_ID_STRICT = re.compile(r"[a-z][a-z0-9_]*")
 
 
@@ -528,6 +560,11 @@ def declaration_markers(
                 # fix an id that is already correct is not actionable.
                 named = MARKER_ID.match(body)
                 if named is not None and MARKER_ID_STRICT.fullmatch(named.group(1)):
+                    # The id IS on the page: record it as present-but-unparseable
+                    # so membership does not also report the row as unmarked.
+                    markers.setdefault(named.group(1), []).append(
+                        Declaration(named.group(1), rel, UNPARSEABLE_STATE)
+                    )
                     errors.append(
                         f"{rel}: the `{MARKER_TOKEN} {named.group(1)}` marker's "
                         f"`state:` tail is not a bare state token "
@@ -538,6 +575,24 @@ def declaration_markers(
                         f"violation and not an absence"
                     )
                 else:
+                    loose = MARKER_ID_LOOSE.match(body)
+                    if loose is not None and MARKER_ID_STRICT.fullmatch(loose.group(1)):
+                        # A near-miss TOKEN, with a readable id: the repair is the
+                        # token, not the id, and membership must not also report
+                        # the row as unmarked.
+                        markers.setdefault(loose.group(1), []).append(
+                            Declaration(loose.group(1), rel, UNPARSEABLE_STATE)
+                        )
+                        errors.append(
+                            f"{rel}: a `{MARKER_TOKEN}` comment is spelled with a "
+                            f"near-miss token (`{body.strip()[:60]}`) — the only "
+                            f"token this gate reads is `{MARKER_TOKEN}` "
+                            f"(`<!-- v4-mechanism: {loose.group(1)} state: "
+                            f"<state> -->`); a misspelled declaration is a "
+                            f"violation, and it publishes no state at the "
+                            f"declaration site until the spelling is fixed"
+                        )
+                        continue
                     errors.append(
                         f"{rel}: a `{MARKER_TOKEN}` comment does not name a "
                         f"mechanism id (expected `<!-- v4-mechanism: "
@@ -817,6 +872,8 @@ def declaration_state_errors(
         if recorded not in accepted:
             continue  # a bad row state is `gate_errors`' verdict
         for decl in markers[mid]:
+            if decl.state == UNPARSEABLE_STATE:
+                continue  # the marker's own parse error owns this verdict
             if decl.state is None:
                 errors.append(
                     f"{decl.document}: the `{MARKER_TOKEN} {mid}` marker states "
@@ -6228,18 +6285,75 @@ def test_a_malformed_marker_breaks_the_state_verdict_too(tmp_path) -> None:
 
 
 @pytest.mark.parametrize(
-    "token", ["V4-MECHANISM:", "v4-mechanism :", "v4_mechanism:", "v4mechanism:"]
+    "token",
+    [
+        "V4-MECHANISM:",
+        "v4-mechanism :",
+        "v4_mechanism:",
+        "v4mechanism:",
+        # Review P3: the enumerated separator class `[\s_-]*` missed these, so a
+        # marker spelled this way was invisible to BOTH gates unless a sibling
+        # document happened to mark the same id honestly — and all five
+        # dual-declared mechanisms have such a sibling.
+        "v4.mechanism:",
+        "v4/mechanism:",
+        "v4\u2013mechanism:",
+    ],
 )
 def test_a_misspelled_marker_token_is_a_verdict_not_silence(tmp_path, token) -> None:
     """A near-miss token used to vanish — no marker, no error, no state.
 
     `MARKER_TOKEN` is an exact substring, so every spelling here was SKIPPED
     rather than reported (review cycle 2, P2). A typo must be a verdict: silence
-    is how a contradictory claim survives both gates.
+    is how a contradictory claim survives both gates. Since review P3 the verdict
+    names the SPELLING when the id is still readable, because the repair is the
+    token, not the id.
     """
     docs = _docs(tmp_path, a__md=f"a <!-- {token} x state: not-implemented -->\n")
     errors = declaration_state_errors([_row("x")], docs)
-    assert any("does not name a mechanism id" in e for e in errors), errors
+    assert any("near-miss token" in e for e in errors), errors
+    assert not any("does not name a mechanism id" in e for e in errors), errors
+
+
+def test_a_malformed_marker_is_ONE_defect_and_names_the_right_repair(tmp_path) -> None:
+    """Review P3: a marker that IS on the page was reported as missing.
+
+    `<!-- v4-mechanism: x state: -->` produced the parse verdict AND, because the
+    id was never registered, membership's "a registry row with NO `v4-mechanism:
+    x` marker" and "the row names NO declaring document" — two repairs that tell
+    a reader to add a marker already on the page. The id is now recorded
+    present-but-unparseable, so membership stays silent while the parse verdict
+    (the only actionable one) is emitted.
+    """
+    docs = _docs(tmp_path, a__md="a <!-- v4-mechanism: x state: -->\n")
+    row = _row("x")
+    assert declaration_state_errors([row], docs), "the parse defect must still red"
+    membership = membership_errors([row], docs)
+    assert not any("NO `v4-mechanism: x` marker" in e for e in membership), membership
+    assert not any("names NO declaring document" in e for e in membership), membership
+    # The near-miss TOKEN gets the same treatment: the repair is the spelling.
+    docs = _docs(tmp_path, a__md="a <!-- v4.mechanism: x state: implemented -->\n")
+    membership = membership_errors([row], docs)
+    assert not any("NO `v4-mechanism: x` marker" in e for e in membership), membership
+
+
+def test_a_near_miss_token_cannot_hide_a_contradiction(tmp_path) -> None:
+    """Review P3, the fail-open that remained after the cycle-2 fix.
+
+    The cycle-2 test used a mis-CASED token, which the loose scan already
+    covered. A punctuation variant (`v4.mechanism:`) was still invisible, so a
+    second document could publish the OPPOSITE state while both gates passed —
+    the same shape, one typo deeper. The separated class closes it.
+    """
+    for token in ("v4.mechanism:", "v4/mechanism:", "v4\u2013mechanism:"):
+        docs = _docs(
+            tmp_path,
+            a__md="honest <!-- v4-mechanism: x state: implemented -->\n",
+            b__md=f"loud <!-- {token} x state: not-implemented -->\n",
+        )
+        assert declaration_state_errors([_row("x")], docs), (
+            f"the `{token}` marker must not be silent"
+        )
 
 
 def test_a_misspelled_token_cannot_hide_a_contradiction(tmp_path) -> None:

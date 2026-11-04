@@ -231,10 +231,23 @@ The mechanism is **parent-document retrieval** / **small-to-big**: *embed the sm
 > unconditionally (its value is `None` when no turn resolves), and the S5 mint
 > path writes it only when a turn resolves — so "the link is stamped everywhere"
 > is exactly the false-present reading this marker exists to prevent.
-> Every other committed point is written with **no span** — a point resolved by
-> the token-overlap band carries a `source_turn_id` and still no offsets, which
-> is why the two are stated separately above and not as one "address"; measured
-> on `execute_embed`, **1 of 3** committed points carries a span. So *"every
+> Every other point **the extraction write path commits** is written with **no
+> span** — a point resolved by the token-overlap band carries a `source_turn_id`
+> and still no offsets, which is why the two are stated separately above and not
+> as one "address". The coverage is a **pinned census**, not an impression:
+> `tests/eval/write_path/test_value_span_census_2684.py` measures **101 of the
+> 217** committed points carrying a span (`CENSUS["spanned"]`, sealed 2026-10-25)
+> and **105 of the 217** value-free (runbook §6,
+> `2684-slice-b-t-gate.md`), i.e. the every-point requirement holds for under
+> half the committed population. The number is quoted from that artifact because
+> a reader can re-run it; a rate with no artifact behind it is the same
+> false-present class this marker exists to prevent. ⚠️ "No span" is a property
+> of the **extraction** path, not of every writer in the process: `create_point`
+> and `update_point` accept caller-supplied offsets through their generic props
+> and validate them with `validate_span`
+> (`tortoise/sdk.py:12383`, `:17271`, the rule in
+> `tortoise/commit_schema.py:445`), so an SDK caller can commit a span the four
+> gates never saw. So *"every
 > committed `Point`/`Object` must carry a reachable link"* is unbuilt for the
 > general point, and `config/v4-mechanisms.yml` records `span_link` as
 > `not-implemented` with the widening owned by **#2684** (§2.4's own
