@@ -367,6 +367,37 @@ def test_an_acknowledgement_only_session_still_derives_and_is_findable(sdk):
         "user", entity_type="source")]
     assert "session:sess-ack-only" not in framing_hits, (topics, framing_hits)
 
+    # ⛔ THE SHORT-WORD ARM (#10852 review, P2) — the cliff this test used to
+    # step over by one character. The presence test used to run the 3-character
+    # CONTENT floor (`[A-Za-z][A-Za-z0-9_-]{2,}`) inside "does this transcript
+    # have any word tokens at all", so a non-empty transcript whose words are
+    # ALL short fell through to `("", [])`: `summary` blank AND no `_searchText`
+    # at all (this writer never passes `summary` to `_source_search_text`, so
+    # the empty topics list resolves to `None`) — the #3518 unfindability the
+    # lexicon exists to prevent. The fixture above (`"ok"` / `"yes"`) sat one
+    # character above the cliff, so it could not see it.
+    # MEASURED PRE-FIX (`7ca6221b4`): topics=[] , summary='' , `_searchText` None.
+    short_summary, short_topics = _session_source_metadata("user: ok go")
+    assert short_topics, (
+        "a non-empty transcript made of SHORT words derived nothing — the "
+        "3-char content floor is being applied to the presence test instead of "
+        "only to the ranking")
+    assert short_summary, short_summary
+
+    sdk._materialize_session_source(
+        "sess-short-words", None, "2026-09-01T11:00:00+00:00",
+        [{"role": "user", "content": "ok go"}])
+    short_written = _source_rows(sdk)["session:sess-short-words"]
+    assert short_written[1], (
+        "the short-word session's :Source got no _searchText, so it is "
+        f"unfindable through the Source FTS index: {short_written!r}")
+    assert short_written[1] == ", ".join(short_topics), short_written
+
+    # …and it is findable by a word it actually used. `go`/`ok` are not
+    # RediSearch stopwords, so the OR-union leg matches them.
+    assert "session:sess-short-words" in [
+        r["id"] for r in sdk.tortoise_fts_query("go", entity_type="source")]
+
 
 def test_the_lexicon_does_not_depend_on_the_transcript_word_order():
     """The descriptor is a function of the word MULTISET, not of turn order.

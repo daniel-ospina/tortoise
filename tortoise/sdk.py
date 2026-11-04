@@ -4171,6 +4171,18 @@ def _session_source_metadata(transcript: str) -> tuple[str, list[str]]:
     prefix, not words the session used, and indexing them put a constant
     ``user, assistant`` pair on every acknowledgement-only session.
 
+    ⛔ That fallback is reached by TWO transcript shapes, and the presence test
+    must not exclude either. The 3-character CONTENT floor is a RANKING
+    preference (a two-letter token discriminates poorly), so it is applied only
+    where the content counts are built — never to decide whether the transcript
+    has word tokens at all. Running it inside the presence test made a
+    non-empty transcript whose words are ALL short (``"User: ok go"``) take the
+    ``("", [])`` arm, which wrote ``summary=''`` and NO ``_searchText`` at all
+    (``_source_search_text(topics=[])`` is ``None``, and this writer never
+    passes ``summary``) — the #3518 unfindability this docstring forbids,
+    reintroduced one arm over (#10852 review, P2). The presence test is
+    therefore WIDTH-FREE and the floor lives in the content filter.
+
     ⛔ The descriptor is a function of the word MULTISET — frequency order, ties
     broken by the token itself (``_session_source_lexicon``), so it does NOT
     depend on the transcript's word order — and it never quotes: a summary that
@@ -4195,14 +4207,22 @@ def _session_source_metadata(transcript: str) -> tuple[str, list[str]]:
     if not transcript.strip():
         return "", []
     from collections import Counter
-    words = [w for w in re.findall(r"[A-Za-z][A-Za-z0-9_-]{2,}",
+    # ⛔ WIDTH-FREE presence test, 3-char floor only when RANKING: see the
+    # docstring. A pattern with ``{2,}`` here conflates "no lexicon" with "no
+    # word tokens of 3+ characters", and that conflated case is a real, reachable
+    # transcript (``"User: ok go"`` — a kept turn with no long word).
+    words = [w for w in re.findall(r"[A-Za-z][A-Za-z0-9_-]*",
                                    transcript.lower())
              if w not in _SESSION_SOURCE_FRAMING_TOKENS]
     if not words:  # no word tokens at all (empty/blank/punctuation-only,
         return "", []  # or nothing but the transcript's own Speaker: labels)
-    counts = Counter(w for w in words if w not in _SESSION_SOURCE_STOPWORDS)
+    counts = Counter(w for w in words
+                     if w not in _SESSION_SOURCE_STOPWORDS and len(w) >= 3)
     topics = _session_source_lexicon(counts)
-    if not topics:  # stopword-only: fall back to the transcript's own vocabulary
+    if not topics:  # stopword-only OR short-word-only: fall back to the
+        # transcript's own vocabulary. Both shapes are non-empty transcripts
+        # with nothing to derive a CONTENT lexicon from, and both must still
+        # yield a descriptor or the session is unfindable (#3518).
         topics = _session_source_lexicon(Counter(words))
     return _SESSION_SOURCE_SUMMARY_PREFIX + ", ".join(topics), topics
 
