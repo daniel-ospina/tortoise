@@ -576,6 +576,25 @@ Exit 0 only when **all** of these hold:
    `evidence_issue` that measured it — an entry without them is a waiver with no content. This is the
    rule that stops a step being quietly dropped from the capstone's gate (`#10215`).
 
+8. **A registered class the run measured ZERO nodes of cannot satisfy `= 1.000` (#9736).** E3's row
+   is scored by SUMMING its classes, so a class with no nodes contributes `0/0` to BOTH halves and
+   vanishes: the row then reports `share = 1.000` over a population NARROWER than the one registered.
+   That is reachable on every post-D10 graph, because `:Document` is a retired label (the writer
+   remaps it onto `:Source`) and §10.1 records that the scored run wrote none at all — a leg that
+   `0/0` makes permanently unable to fail. So the probe derives the empty legs from the census
+   (`e3_unmeasured_legs`, over `DERIVED_LABELS` and never `:Object`) and a row naming one **cannot
+   PASS** — it is `FAIL`, or `REFUSED` where the node floor applies (a too-small population is not a
+   verdict either way) — with the leg disclosed in its bar, note and log line. **This decides no
+   spelling and moves no threshold**: a row that already failed stays failed (the shipped `148/383`
+   is RED before and after), a row whose every registered class carried nodes is scored exactly as
+   before, and whether the honest document class is `Document` or `Source`-as-document — and whether
+   that anchor belongs in the denominator at all — remains `#9736`'s owner-gated ruling.
+   ⛔ **This item is NOT one the gate can exit 0 on.** `tools/capstone_preregistration_check.py`
+   never reads `probes/capstone_measure.py` (it lints registrations, not runs), so a gate exit 0
+   says nothing about it. The rule lives in the probe and is pinned where it runs:
+   `tests/test_7949_capstone_measure.py`'s empty-leg arms (the pure rule, the census-derived log
+   line and row note, and an AST pin that `main` feeds the legs in).
+
 The pins block below is the machine-readable copy; the prose in §1–§3 is the argument. Both are
 checked, so neither can rot alone.
 
