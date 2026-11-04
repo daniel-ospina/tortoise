@@ -829,7 +829,11 @@ _TRANSPORT_WAIT_BOUND_NOT_SENT_MESSAGE = (
 #: This is a SEPARATE constant rather than an edit to ``_TRANSPORT_WAIT_BOUND_
 #: MESSAGE`` on purpose: the REST arm (``hosted_api.WaitBoundMiddleware``) never
 #: learns which tool was called, so it cannot claim anything about a mutation,
-#: and that body is pinned byte-for-byte by callers and tests. The write
+#: and that body is read by identity from every caller (`tests/_verdict.py`
+#: compares against this same constant, and
+#: ``tests/test_transport_wait_bound.py`` asserts its shape: three substrings and
+#: digit-freeness). A rewrite that keeps that shape would pass every test — so it
+#: is the IDENTITY and the shape that are pinned, not the bytes. The write
 #: ambiguity belongs to the seam that DOES know the tool name —
 #: ``mcp_server._wait_bound_refusal_result``.
 #:

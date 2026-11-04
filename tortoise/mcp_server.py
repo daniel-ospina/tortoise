@@ -722,14 +722,16 @@ _WAIT_BOUND_RETRY_RULE_PREVIEW = (
 #: for a write that ACTUALLY WROTE — a preview of one takes the PREVIEW arm
 #: instead, because it wrote nothing: do not re-send.
 #:
-#: ⛔ It is worded about THIS CALL, never about the operation. This arm is reached
-#: by a DECLARED-idempotent tool whose ARGUMENTS switched convergence off
-#: (``create_point(dedup=False)``, or one carrying ``props``/``authoredBy``/
-#: ``credibility``) — the registry says the operation converges and only the call
-#: does not. Saying "this operation is NOT idempotent" there would contradict the
-#: same tool's served ``idempotentHint: true`` in one response, and the file's own
-#: vocabulary ("the declaration says the OPERATION converges; the ARGUMENTS decide
-#: whether this CALL does"). So: no claim either way about the operation.
+#: ⛔ It is worded about THIS CALL, never about the operation, because the arm's
+#: population is MIXED. Most of it is write-set tools that declare no idempotency
+#: at all (``create_operator``, ``ingest``, …), for which "this operation is NOT
+#: idempotent" would be true. But the arm also takes declared-idempotent tools
+#: whose ARGUMENTS switched convergence off — ``create_point(dedup=False)``, or one
+#: carrying ``props``/``authoredBy``/``credibility`` — and there the registry DOES
+#: say the operation converges, served as ``idempotentHint: true``. A single rule
+#: true of every arm is therefore the one the file already uses elsewhere: "the
+#: declaration says the OPERATION converges; the ARGUMENTS decide whether this
+#: CALL does". So: no claim either way about the operation.
 _WAIT_BOUND_RETRY_RULE_UNSAFE = (
     "this call is NOT safe to repeat — do NOT re-send it. The write may already "
     "have committed, and nothing on this response tells you whether it did. "
@@ -967,12 +969,17 @@ def _wait_bound_refusal_result(name: str | None = None,
 
     ``name`` is the client-supplied tool name, and it decides whether this
     refusal may present itself as a plain FAILURE (#10849). For a call OUTSIDE
-    the write set it may: nothing on this path schedules a mutation, and the
-    shipped shape is returned byte-for-byte. That is a statement about the write
-    set, NOT about the tool being pure — ``tortoise_compute_confidence`` and
-    ``tortoise_get_confidence`` are ``maintenance``-tier and DO re-store on a
-    repeat (which is why the tier refuses ``writes=True`` for them), so they take
-    this arm and get no mutation claim either way. For a
+    the write set it may, and the shipped shape is returned unchanged. ⛔ That is
+    membership in the WRITE SET, not a statement that the tool is pure — several
+    non-write-set tools DO mutate: ``tortoise_compute_confidence`` /
+    ``tortoise_get_confidence`` are ``maintenance``-tier and re-store a
+    re-derived score on a repeat (why the tier refuses ``writes=True`` for them),
+    and ``tortoise_onboarding_state`` is ``read``-tier but its registry leg
+    ``_get_onboarding_state`` runs ``_cas_write_onboarding_state(org_id, state,
+    0)`` when the state is missing — the same CAS that got the
+    ``tortoise_manage_sources(action="list")`` read-only arm removed below. So the
+    non-write-set arm makes NO mutation claim either way; it only declines to add
+    the write-ambiguity payload. For a
     WRITE it may not — the seam ABANDONS the dispatch rather than cancelling it
     (see ``_await_under_mcp_wait_bound``), so the write can still commit after
     the caller has been told the request failed. Measured on #10849: a
@@ -1032,7 +1039,9 @@ def _wait_bound_refusal_result(name: str | None = None,
     default, because there the dispatch really was started and abandoned.
     """
     data: dict = {"retry_after": _mcp_auth._TRANSPORT_WAIT_RETRY_AFTER_S}
-    # The human channel. A read mutated nothing, so it reads as it always has.
+    # The human channel. Not in the write set, so the shape it always had stands.
+    # NOT a claim that nothing was mutated: non-write-set tools can write (see the
+    # docstring's `_cas_write_onboarding_state` case).
     prose = _mcp_auth._TRANSPORT_WAIT_BOUND_MESSAGE
     if name and name in WRITE_TOOL_NAMES and not dispatched:
         # The transport refused BEFORE any dispatch was scheduled, so nothing

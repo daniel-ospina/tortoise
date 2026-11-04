@@ -192,7 +192,7 @@ def test_a_breached_write_ships_a_retry_rule_not_a_fabricated_recipe():
     assert "converges" in safe["retry_rule"]
 
 
-def test_retry_safe_is_derived_from_the_registry_and_fails_closed():
+def test_retry_safe_is_derived_from_the_registry_not_a_second_list():
     """The retry-safety verdict is the registry's, not a second hand-kept list.
 
     #10849's measured asymmetry, now machine-readable at the call site:
@@ -203,15 +203,17 @@ def test_retry_safe_is_derived_from_the_registry_and_fails_closed():
     (``_stamp_batch_id``), never a dedup key, which is exactly why ingest's
     ``entities`` leg had to be handled separately.)
 
-    An unresolvable name must never be advertised as safe: this flag is what a
-    caller acts on to skip the manual reconciliation, so a wrong ``true`` is a duplicate.
+    (The FAIL-CLOSED half — an unresolvable name is never advertised as safe —
+    is pinned separately in ``test_an_unresolvable_write_name_still_fails_closed``;
+    this test covers the three resolvable declarations.)
     """
     def safe(name):
         return _error(ms._wait_bound_refusal_result(name))["data"]["retry_safe"]
 
     assert safe("tortoise_create_point") is True, (
-        "create_point is idempotent (dedup=True, content-hash identity) — "
-        "refusing to retry it costs a caller a write that would have converged")
+        "create_point is idempotent (dedup=True, content-hash identity), so a "
+        "SEQUENTIAL repeat converges — refusing to retry it costs a caller a write "
+        "that would have converged")
     assert safe("tortoise_ingest") is False, (
         "ingest is NOT advertised safe: its bundle is open-ended (append-only "
         "entities, a JSON-string spelling, and flat `props` beside `kind`), so "
@@ -263,7 +265,8 @@ def test_a_PROPS_PAYLOAD_defeats_the_dedup_fold_so_it_is_never_called_safe():
                 {"content": "X", "props": {"props": {"is_operator": True}}}) is False
     # ⛔ And `props` is not the only argument the handler folds into the props
     # dict: `authoredBy` / `credibility` are merged into it before the write, so a
-    # call carrying neither `props` was still a props-CARRYING call. Measured:
+    # call carrying neither `props` NOR a folded sibling is the only props-free
+    # shape. Measured:
     # `create_point(content=x, authoredBy="me", dedup=True)` twice returns the
     # same id but the second lands on the dedup-hit UPDATE leg, emits
     # `PointRevised` and bumps `updatedAt` — so the repeat is visible to a reader
@@ -296,15 +299,18 @@ def test_a_STATE_conditional_writer_is_never_called_safe():
 
 
 def test_the_unsafe_rule_speaks_about_the_CALL_never_the_operation():
-    """It is emitted for a DECLARED-idempotent tool whose arguments defeated it.
+    """The arm's population is MIXED, so the rule cannot speak about the operation.
 
-    `create_point(dedup=False)` — and `create_point` carrying `props`/`authoredBy`/
-    `credibility` — reaches the UNSAFE arm while the registry still says the
-    OPERATION converges and the tool is served with `idempotentHint: true`. A rule
-    worded "this operation is NOT idempotent" would therefore contradict that same
-    tool's served annotation in the same response, and contradict this file's own
-    vocabulary: the declaration says the OPERATION converges, the ARGUMENTS decide
-    whether this CALL does.
+    Most of the arm is write-set tools that declare no idempotency at all
+    (`create_operator`, `ingest`, …), where "this operation is NOT idempotent"
+    would be TRUE. But the arm also takes declared-idempotent tools whose
+    arguments defeated convergence — `create_point(dedup=False)`, and
+    `create_point` carrying `props`/`authoredBy`/`credibility` — where the
+    registry DOES say the operation converges and the tool is served with
+    `idempotentHint: true`. One wording has to be true of both, so it says what
+    holds on every arm (this call is not safe to repeat) and makes no claim about
+    the operation — matching this file's own vocabulary: the declaration says the
+    OPERATION converges, the ARGUMENTS decide whether this CALL does.
     """
     assert ms._WAIT_BOUND_RETRY_RULE_UNSAFE.startswith("this call is NOT safe to repeat"), (
         "the UNSAFE rule must be about this call, not about the operation")
