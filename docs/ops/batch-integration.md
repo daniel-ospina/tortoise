@@ -1135,8 +1135,18 @@ the gate-following `ubuntu-latest` fallback (`tools/install-ci-runner-x64.sh`,
 So the decision lives in Python, where it is unit-tested, and the operator declares the class:
 
 ```text
-CI_FOLD_RUNNER_LABELS = '["self-hosted", "fold"]'   # a repo variable; unset = seam inert
+CI_FOLD_RUNNER_LABELS = '["self-hosted", "self-hosted-x64"]'   # a repo variable; unset = seam inert
 ```
+
+⛔ **Declare a class the pool really carries.** `["self-hosted", "fold"]` is the tempting value and it
+is precisely the failure this section opens with: `fold` is carried by **no runner on this fleet**, so
+it does not deprioritise the job — it makes the eight non-`canary_producer` legs of every fold
+**unstartable**, and those legs feed the required `python-ci-gate`, so the result is a red-less,
+progress-less pending check. `parse_fold_runner` cannot catch this: it validates the **shape** of the
+declaration, never the live pool — whether a runner carries a label is a fact about the fleet, not
+about the string (`tools/ci_selection.py:4485-4494`). So the fail-safe covers typos in the JSON, not
+typo'd or invented labels. At this writing the pool offers `["self-hosted"]`,
+`["self-hosted", "self-hosted-x64"]`, or `["ubuntu-latest"]`.
 
 `tools/ci_selection.py::resolve_fold_runner` then, per matrix row:
 
