@@ -10080,6 +10080,28 @@ durations:
   # `TEST_RECORD_DB_URI` (the 2 row legs + the 12-shape conversion leg, which the
   # armed `test-record-postgres` job runs). Unarmed it is ~3 s; the 4.5 s budget
   # keeps headroom for the armed legs on a cold container.
+  # connect + replay. MEASURED at `8e3ccbb1d` (the head this line lands AFTER, so
+  # the reading is bound to a sha and never to "this head"): the file collected
+  # **44** legs (two parametrized ones: 6 reasons, 12 conversion shapes) —
+  # **30** run everywhere, **14** skip without `TEST_RECORD_DB_URI` (the 2 row
+  # legs + the 12-shape conversion leg, which the armed `test-record-postgres`
+  # job runs). The leg that lands WITH this line
+  # (`test_an_unreadable_verdict_is_never_published_as_not_refusing`) adds one, so
+  # the file at its own face collected **45 / 31 run / 14 skip**. #10648's
+  # driver-withhold fix added three DB-free legs (a driver-shaped `22P02`
+  # DETAIL/CONTEXT leg, a `23514` CHECK whose DETAIL is the failing row, and the
+  # same withhold driven through the real `RecordWriter.write` wrap), so it now
+  # collects **48 / 34 run / 14 skip**. #10648's review then added four more:
+  # the source-upsert leg that proves ONE line withholds a document title on
+  # BOTH halves, the subset pin between `_IDENTITY_CONTENT_KEYS` and
+  # `_CONTENT_COLUMNS`, the DB-armed non-`str` array-element divergence leg, and
+  # its DB-free header pin — so the file collects **52 / 37 run / 15 skip**
+  # (measured at `a40653185`).
+  # Re-derive with `--collect-only -q`
+  # rather than carrying any of these figures. Unarmed it is ~5 s;
+  # the 4.5 s budget keeps headroom for the armed legs on a cold container. An
+  # earlier revision of this note said 42 / 28 / 14 — stale, and quietly short of
+  # the file it describes.
   test_record_searchkeys_10620.py: 4.5
   test_9555_narrative_carrier.py: 3.4
   test_backfill_references_5141.py: 0.1
