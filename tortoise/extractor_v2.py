@@ -4269,9 +4269,9 @@ _KNOWN_UNITS = frozenset(_UNIT_EQUIV.values())
 #: rather than widened here on a guess.
 _MAGNITUDE_PREFIXES = frozenset({"k"})
 
-#: The factor each magnitude prefix denotes. Read ONLY by `_magnitude_agrees`,
-#: which is the whole of what the ambiguity arm is allowed to tolerate: the two
-#: sides must name the SAME number once the prefix is read as x1000.
+#: The factor each magnitude prefix denotes. Read by `_magnitude_agrees` and by
+#: `_composed_identity` — together the whole of what the ambiguity arm may
+#: tolerate: both sides must name the SAME number once the prefix reads x1000.
 #: ⛔ EVERY name in `_MAGNITUDE_PREFIXES` needs a factor here, and the test file
 #: asserts the containment: a prefix with no factor makes `_magnitude_agrees`
 #: return False for everything, so the arm becomes a silent no-op and the false
@@ -13308,24 +13308,37 @@ def _script_of(ch: str) -> str | None:
 # the hash-pinned `PRE-REGISTRATION.md`, so an insertion above them re-stales
 # every cite (that class produced a P0 on this very PR last cycle). Appending
 # after the last line shifts nothing, and the only lines that move anything
-# above it are the widen's own +21 and +12 — accounted for below, never
-# summarised as "nothing moved", which is what an earlier cut said and was
-# false (`_UNIT_WORDS` is a GROWING hunk, not a 1-for-1 swap; 17 cites were
-# re-derived by exactly +33).
+# above it are the widen's own two hunks — +21 at `_UNIT_EQUIV` and +12 at
+# `_UNIT_WORDS` — accounted for below, never summarised as "nothing moved"
+# (what an earlier cut said, and false: `_UNIT_WORDS` is a GROWING hunk, not a
+# 1-for-1 swap).
+#
+# ⛔ AND THE OFFSET IS NOT ONE NUMBER, which is the trap in "+33" read as a
+# blanket: a cite BELOW `_UNIT_EQUIV` but ABOVE `_UNIT_WORDS` moved by +21.
+# Exactly two sites sit in that window — `_value_verbatim_span`'s definition
+# (`:4887` → `:4908`) and the `_carries_value` gate (`:4927` → `:4948`) — and
+# both are pinned at their +21 values rather than the +33 a hunk total suggests
+# (`_VALUE_FREE_GATE` in `tests/eval/write_path/test_value_span_census_2684.py`,
+# and the runbook's published `:4948-4949`). Every cite BELOW `_UNIT_WORDS`
+# moved by +33.
 #
 # ⛔ HOW TO CHECK IT, and why this note quotes NO running total. An earlier cut
 # of this paragraph pinned `git diff --numstat` at `33 0`; the very next commit
 # made that false, and a stale measurement quoted as an invariant is how the
 # cite P0 on this PR happened. So the invariant is stated STRUCTURALLY instead,
 # and it does not rot: between `_UNIT_EQUIV` and `_UNIT_WORDS` the only GROWING
-# hunk is the widen itself — the 21 + 12 = 33 lines every cite was re-derived
-# against — from `_UNIT_WORDS` up to the last cited line there must be NO
+# hunks are the widen's own (+21, then +12 — see the split of offsets above) —
+# from `_UNIT_WORDS` up to the last cited line there must be NO
 # growing hunk at all, and everything this fix appends starts AFTER that line.
 # `git diff origin/main -- tortoise/extractor_v2.py | grep '^@@'` therefore has
-# to show four hunks: the two widen hunks (+21 at `_UNIT_EQUIV`, +12 at
-# `_UNIT_WORDS`), ONE net-zero hunk for the arm swap, and a final hunk at EOF.
-# Anything else — a growing hunk between `_UNIT_WORDS` and the last cited line,
-# or a fifth hunk — means a cite moved.
+# to show: the two widen hunks (+21 at `_UNIT_EQUIV`, +12 at `_UNIT_WORDS`), any
+# number of NET-ZERO hunks (N lines for N lines — the magnitude arm's 2-for-2
+# swap, and comment corrections such as the one below, which is one), and a
+# final growing hunk at EOF. What must NOT appear is a GROWING hunk between
+# `_UNIT_WORDS` and the last cited line: THAT is what moves a cite. A net-zero
+# hunk cannot, which is why it is allowed and this note does not pin a count of
+# hunks — pinning one would make the next comment fix look like a moved cite,
+# and this paragraph has already been wrong once in exactly that direction.
 #
 # THE DEFECT.  `_value_bindings` glues a value to the unit word written beside
 # it with NO prefix arithmetic (``value + seq[i + 1]``), so a magnitude-prefixed
