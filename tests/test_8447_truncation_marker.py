@@ -43,6 +43,7 @@ warm the model once before collecting evidence.
 from __future__ import annotations
 
 import asyncio
+import re
 
 import pytest
 
@@ -983,6 +984,41 @@ class TestTheCensusNamesItsEvidenceHome:
         return text.split("## 2. The census", 1)[1].split(
             "## 3. `OVERRIDES:`", 1)[0]
 
+    #: A line coordinate in a census cell, in EITHER spelling the doc has used:
+    #: contiguous (``hosted_api.py:10209``) and split across two code spans
+    #: (```config/surface-manifest.yml` (`:121-143`)```). The filename must be
+    #: followed by the coordinate, allowing only the punctuation that separates
+    #: them — a closing backtick, whitespace, and the opening paren/bracket.
+    _LINE_CITATION = re.compile(
+        r"[\w./-]+\.(?:py|ya?ml)"
+        r"[\s`'\"]*"          # a closing code span and/or whitespace
+        r"[(\[]?"             # the split form's opening paren/bracket
+        r"[\s`'\"]*"
+        r":\d[\w-]*")        # the coordinate itself
+
+    def test_the_pin_sees_the_split_form_too(self):
+        """Positive control: the split spelling is a line coordinate TOO.
+
+        The pin above is only worth its green if it can red. Its first version
+        matched the filename and the digits as one contiguous run, so the form
+        §2a actually carried —
+        ``config/surface-manifest.yml` (`:121-143`)`` — slipped past it: the
+        digits were still in the census, and the pin still said the census
+        cited none. This asserts the pattern against that exact string (and
+        against the symbol form that replaced it, which must NOT match), so
+        narrowing the pattern reds here instead of silently reopening the hole.
+        """
+        assert self._LINE_CITATION.findall(
+            "a row in\n`config/surface-manifest.yml` (`:121-143`), **not** as an"), (
+            "the census pin no longer sees the split spelling of a line "
+            "coordinate, so it can pass over exactly the drift it exists to "
+            "catch")
+        assert not self._LINE_CITATION.findall(
+            "a row in `config/surface-manifest.yml` → "
+            "`response_fields[tortoise_search].truncated`, **not** as an"), (
+            "the census pin reds on the SYMBOL form it recommends — a pin its "
+            "own suggested fix cannot satisfy is a trap")
+
     def test_the_census_cites_symbols_not_line_numbers(self):
         """A line number in the census goes stale on the next unrelated merge.
 
@@ -996,11 +1032,16 @@ class TestTheCensusNamesItsEvidenceHome:
         The fix is the form the register in `tortoise/truncation.py` already
         uses and this PR's own scan pin already chose: cite `<module>::<name>`,
         which does not move when somebody inserts a blank line above it.
-        """
-        import re
 
-        stale = sorted(re.findall(r"[\w./-]+\.(?:py|ya?ml):\d[\w-]*",
-                                  self._census_section()))
+        ⚠️ BOTH spellings of the coordinate are caught, because the first
+        version of this pin only saw the contiguous one. A file named inside a
+        code span, with the line in its own parenthesised span —
+        ``config/surface-manifest.yml` (`:121-143`)`` — is the same stale
+        coordinate one keystroke apart, and it survived that pin while §2a
+        carried it. :meth:`test_the_pin_sees_the_split_form_too` is the
+        positive control: it reds if this pattern narrows back to contiguous.
+        """
+        stale = sorted(self._LINE_CITATION.findall(self._census_section()))
         assert not stale, (
             "the census cites absolute line numbers, which go stale on every "
             "unrelated edit to the file they point into — cite "
@@ -1145,6 +1186,78 @@ class TestTheCensusNamesItsEvidenceHome:
             "§5 sends C2's mutation evidence to a PR body, which is not the "
             "artifact a lane reads (and was the P3 finding)")
 
+    def test_the_mutation_claim_names_the_kill_set_it_actually_kills(self):
+        """§5's M1/M2 arithmetic must match what the four tests assert.
+
+        M2 is "probe removed, the marker KEPT": with the probe gone
+        `candidates == returned`, so `mark_truncation` publishes
+        `truncated: False` over a page that IS cut. That reds exactly the tests
+        asserting `truncated: True` — 2 of the 4 M1 reds — so the kill sets are
+        NESTED (M2 ⊂ M1; the mutation-testing literature calls M2 *subsumed* by
+        M1) and the union is 4, not 6.
+
+        §5 said "6 named tests red, disjoint sets". That is the direction that
+        costs a lane real coverage: told the mutants are disjoint, a lane
+        trimming the boundary set believes each mutant owns its own tests, drops
+        one of M2's two reds, and loses the only discrimination against a marker
+        that is present but lying. So the sets are DERIVED from the tests here
+        instead of trusted — flip one test's `truncated` verdict and the doc's
+        claim has to move with it.
+        """
+        import ast
+        import re
+        from pathlib import Path
+
+        root = Path(__file__).resolve().parent.parent
+        src = (root / "tests" / "test_hosted_api.py").read_text(encoding="utf-8")
+        cls = next((n for n in ast.parse(src).body
+                    if isinstance(n, ast.ClassDef)
+                    and n.name == "TestBoundedPointsListBoundaries"), None)
+        assert cls is not None, (
+            "the /v1/points boundary class is gone, so §5's mutation matrix has "
+            "nothing left to be true about")
+
+        #: M2 (probe removed) turns every page into the `truncated: False`
+        #: answer, so it reds exactly the tests asserting `True`.
+        asserting: dict[bool, set[str]] = {True: set(), False: set()}
+        for fn in cls.body:
+            if not isinstance(fn, ast.FunctionDef) or not fn.name.startswith("test_"):
+                continue
+            for verdict in re.findall(r'\["truncated"\] is (True|False)',
+                                      ast.get_source_segment(src, fn) or ""):
+                asserting[verdict == "True"].add(fn.name)
+        assert asserting[True] and asserting[False], (
+            "the boundary class no longer asserts BOTH marker directions, so it "
+            f"cannot pin a lying marker: {asserting}")
+
+        text = self._doc_text()
+        assert "## 5. Related" in text, "§5 (the evidence pointer) is gone"
+        bullets = [b for b in re.split(r"\n(?=- )",
+                                      text.split("## 5. Related", 1)[1])
+                   if "MUTATION-MATRIX" in b]
+        assert len(bullets) == 1, (
+            "expected exactly ONE §5 bullet carrying the mutation matrix, found "
+            f"{len(bullets)}")
+        claim = " ".join(bullets[0].split())
+
+        assert "disjoint" not in claim.lower(), (
+            "§5 calls the two mutants' kill sets disjoint. They are NESTED — M2 "
+            "reds 2 of M1's 4 — so a lane reading 'disjoint' believes each "
+            f"mutant owns its own tests and may drop one of M2's two: {claim}")
+
+        named = set(re.findall(r"TestBoundedPointsListBoundaries::([A-Za-z_]\w*)",
+                               claim))
+        assert named == asserting[True], (
+            "§5 names the wrong set as M2's kills. M2 (probe removed, marker "
+            "kept) publishes `truncated: False` on a cut page, so it reds "
+            f"exactly the `truncated: True` assertions {sorted(asserting[True])}; "
+            f"the doc names {sorted(named)}")
+
+        assert re.search(r"strict\s+subset|subsumed", claim, re.I), (
+            "§5 no longer says M2's kill set is a strict subset of M1's (M2 is "
+            "subsumed by M1) — the fact that stops 4 reds being counted as 6 "
+            f"distinct: {claim}")
+
 
 # ── the marker-site REGISTER: the docstring list a new site must join ────
 #
@@ -1165,12 +1278,16 @@ class TestTheMarkerSiteRegisterIsComplete:
     The list is derived from the tree (an AST scan), never restated here, so
     this test cannot itself go stale: adding a marker site without adding it to
     the register reds, which is exactly what the docstring's ⛔ rule promises.
+    That promise was exercised by the merge that landed `hosted_api.py::search`'s
+    outage arm on `main` — a NEW site the register did not name, caught here and
+    not by review.
 
     ⚠️ "Derived from the tree" includes the NAME the marker is called under.
-    The tree already imports `truncation.mark_truncation` under three local
+    The tree already imports `truncation.mark_truncation` under four local
     aliases besides `_mark_truncation` (`_seed_mark`, `_lost_mark`,
-    `_lost_mark2`, all bound by `tortoise_fts_query`), so a filter that
-    hard-codes the two names it happens to recognise sees 3 of the 6 call sites
+    `_lost_mark2` bound by `tortoise_fts_query`; `_lost_mark` again in
+    `hosted_api.py::search`), so a filter that
+    hard-codes the two names it happens to recognise sees 3 of the 7 call sites
     and would leave the pin green while a NEW site was written in the aliasing
     pattern the tree already uses three times. The name set is therefore read
     off each module's own `ImportFrom` nodes (:meth:`_marker_aliases`), which is
@@ -1262,20 +1379,17 @@ class TestTheMarkerSiteRegisterIsComplete:
         """All SEVEN call sites, not the three a two-name filter can match.
 
         The tree calls the marker under `mark_truncation`, `_mark_truncation`,
-        and four further aliases introduced by
-        `from .truncation import mark_truncation as …`. Pre-fix the scan matched
-        two hard-coded names, so the aliased calls were invisible to it —
-        the mount point for a new site that would have gone unpinned while the
-        class docstring promised it could not. Asserted by the alias NAME, not
-        by line number, because a line pin breaks on every unrelated edit to
-        `sdk.py` while an alias pin only breaks when a site is added or moved.
-
-        ⚠️ The 7th is `tortoise/hosted_api.py`'s `_lost_mark`, added by #10602's
-        read lane: the hosted `/v1/search` arm marks the empty it returns when
-        the store will not OPEN (an outage is not a complete empty). It is a
-        FOURTH surface, not a fourth spelling of an existing one, which is why
-        the register and the site-set below each grew a row rather than one
-        function moving.
+        and four further alias bindings introduced by
+        `from .truncation import mark_truncation as …` — three inside `sdk.py`
+        and one in `hosted_api.py` (`search`'s out-of-`ImportFrom` alias
+        `_lost_mark`, which `main` added after this register was written).
+        Pre-fix the scan matched two hard-coded names, so the aliased calls were
+        invisible to it — the mount point for a new site that would have gone
+        unpinned while the class docstring promised it could not. Asserted by
+        the alias NAME, not by line number, because a line pin breaks on every
+        unrelated edit to `sdk.py` while an alias pin only breaks when a site is
+        added or moved. The same alias NAME can legitimately appear in two
+        modules, so the key is `(module, name)`.
         """
         from collections import Counter
 
@@ -1283,7 +1397,7 @@ class TestTheMarkerSiteRegisterIsComplete:
                        for module, _lineno, name, _owner in self._scan())
         assert seen == Counter({
             ("tortoise/hosted_api.py", "mark_truncation"): 1,
-            ("tortoise/hosted_api.py", "_lost_mark"): 1,  # #10602 search outage arm
+            ("tortoise/hosted_api.py", "_lost_mark"): 1,   # search, outage arm
             ("tortoise/sdk.py", "_mark_truncation"): 2,
             ("tortoise/sdk.py", "_seed_mark"): 1,     # as _seed_mark
             ("tortoise/sdk.py", "_lost_mark"): 1,     # as _lost_mark
@@ -1313,13 +1427,8 @@ class TestTheMarkerSiteRegisterIsComplete:
             "tortoise/new_marker_site.py::a_new_bounded_read"
         }
 
-    def test_the_scan_finds_the_sites_the_register_names(self):
-        """Guard against a vacuous scan: the AST really does see every site.
-
-        FOUR since #10602 added the hosted `/v1/search` outage arm; the test
-        (like the register it mirrors) grows a row per real surface rather than
-        treating the count as the property.
-        """
+    def test_the_scan_finds_the_four_sites_the_register_names(self):
+        """Guard against a vacuous scan: the AST really does see all four."""
         sites = self._call_sites()
         assert sites == {
             "tortoise/hosted_api.py::list_points",
