@@ -171,11 +171,30 @@ def _evidence_defect(evidence: object, repo: str, pr: int) -> str:
     ref = evidence.strip()
     if _EVIDENCE_REF.match(ref) is None:
         return f"evidence ({evidence!r}) is not an artifact pointer — it cannot be quoted as proof"
-    if _GITHUB_URL_SLUG.match(ref) is None or not repo:
+    if not repo:
+        return ""  # a hand-built `Record`: nothing to attribute it to, so the shape test decides
+    if not ref.lower().startswith(("http://", "https://")):
+        # `_EVIDENCE_REF` admits exactly two forms, so a non-URL here IS a `<kind>:<id>` pointer. It
+        # states no slug, so there is nothing for it to disagree with — the census must not invent an
+        # attribution the artifact does not carry.
         return ""
-    # ⛔ `unquote` BEFORE splitting: `%2e%2e` is a `..` segment a server decodes and a naive split
-    # does not, which is the same bypass one encoding layer down.
-    segs = [s for s in unquote(urlsplit(ref).path).split("/") if s]
+    if _GITHUB_URL_SLUG.match(ref) is None:
+        # ⛔ FAIL CLOSED on a URL this guard cannot parse (review cycle 25, P1). The previous arm read
+        # "the slug regex did not match" as "attributed, nothing to check" — and `_EVIDENCE_REF`
+        # accepts shapes this regex rejects, because its two path segments may contain a `/`. GitHub
+        # COLLAPSES an empty segment, so `github.com/daniel-ospina//agent-infra#issuecomment-1`
+        # resolves, 200 OK, to a DIFFERENT repository:
+        #     curl "https://github.com/daniel-ospina//agent-infra" → <title>… daniel-ospina/agent-infra
+        # but the canonical spelling of that same repo is refused two lines below. Measured: both `//`
+        # shapes and `github.com//evil-org/evil-repo/pull/1#…` reached `RESTORE`. A guard that fails
+        # open on the input it cannot read is not a guard.
+        return (
+            f"evidence ({evidence!r}) carries no attributable repository — this census cannot tell "
+            "which repo it points at, so re-posting it could quote another repository's artifact"
+        )
+    # ⛔ Repeated slashes are COLLAPSED before splitting, because GitHub collapses them when it
+    # resolves the URL — the same normalisation, applied one layer earlier.
+    segs = [s for s in re.sub(r"/{2,}", "/", unquote(urlsplit(ref).path)).split("/") if s]
     if any(s in (".", "..") for s in segs):
         return (
             f"evidence ({evidence!r}) carries a path-traversal segment — it normalises to a "
@@ -197,7 +216,20 @@ def _evidence_defect(evidence: object, repo: str, pr: int) -> str:
             f"evidence ({evidence!r}) points at a {slug} page that is not a pull request — "
             "re-posting it would quote an artifact that is not this PR's review proof"
         )
-    if pr and int(rest[1]) != pr:
+    # ⛔ `isdigit()` is NOT sufficient to make `int()` safe (review cycle 25, P2): `'²'`, `'³'` and
+    # `'⑧'` are all `isdigit()` true and `int()` INVALID, and an ASCII run past CPython's 4300-digit
+    # conversion limit is too. So the conversion is guarded, because it is reached from
+    # `real_evidence` (a property) and from `classify` — both called OUTSIDE every handler in this
+    # file — and the `ValueError` therefore escaped as a traceback and **rc 1** for the whole census,
+    # on one record, from the very contract that says a record can never do that.
+    try:
+        page_pr = int(rest[1])
+    except ValueError:
+        return (
+            f"evidence ({evidence!r}) carries a PR segment that is not a number — this census cannot "
+            "tell which PR it points at, so it cannot be quoted as this PR's proof"
+        )
+    if pr and page_pr != pr:
         return (
             f"evidence ({evidence!r}) points at {slug} PR #{rest[1]}, not #{pr} — re-posting "
             "it would quote another PR's artifact as this PR's proof"
@@ -1031,9 +1063,17 @@ def main(argv: list[str] | None = None) -> int:
         if exc.code not in (0, None):
             _neutralise_stderr()
         else:
-            with contextlib.suppress(OSError, ValueError, AttributeError):
+            # ⛔ Neutralise ONLY when the flush actually FAILED (review cycle 25, P3).
+            # `_neutralise_stdout` dup2s /dev/null onto fd 1 for the life of the PROCESS, and this
+            # branch is also reached by an IN-PROCESS caller — which this suite does in dozens of
+            # places — so an unconditional call silently discarded every later write in the HOST: a
+            # `print()` after `main(["--help"])` produced nothing, and so would pytest's own summary.
+            # The `--help >/dev/full` case still exits 0 because the failing flush is what triggers
+            # the neutralise, and a clean flush leaves the stream alone.
+            try:
                 sys.stdout.flush()
-            _neutralise_stdout()
+            except (OSError, ValueError, AttributeError):
+                _neutralise_stdout()
         raise
 
     owner, _, name = args.repo.partition("/")
