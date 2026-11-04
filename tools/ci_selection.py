@@ -1039,6 +1039,40 @@ SOURCE_PATTERNS = {
             "tortoise/temporal_leg.py"),
     "api": ("tortoise/hosted_api.py", "tortoise/hosted_backup.py",
             "tortoise/acl_graph_users.py", "tortoise/__main__.py", "tortoise/mcp_auth.py",
+            # #10605: the MCP CLIENT side — the driver every long-lived consumer
+            # holds (`mcp_client.py`, staged into the client-only wheel) and the
+            # stdio↔HTTP bridge that exists so a harness config never needs a
+            # static `Authorization` header (`mcp_bridge.py`). Both of their
+            # guards (`tests/test_mcp_client.py`, `tests/test_mcp_bridge.py`)
+            # are registered in this surface, and a named-surface match REPLACES
+            # the `core` fallback — so without these entries a client-only diff
+            # selected `core`, where neither guard runs. That was the measured
+            # #7076 self-guard pair for `test_mcp_client.py` (it sat in
+            # `_SELF_GUARD_DEBT` because of exactly this); adding the source
+            # entries is the named fix, and the debt row is deleted with it.
+            "tortoise/mcp_client.py", "tortoise/mcp_bridge.py",
+            # #10605 review (P2): §8a of `docs/client-server-split.md` is part of
+            # that SAME guard pair's subject, and the diff that can break it is a
+            # DOC edit. `docs/` is in NON_PYTHON_PREFIXES and is not itself a
+            # pattern, so without this CONCRETE entry (the
+            # `docs/auth-architecture.md` shape above) a
+            # `docs/client-server-split.md`-only edit filtered to `changed == []`,
+            # took the docs-only early return and selected NO surface — exactly
+            # the scenario
+            # `test_mcp_bridge.py::test_no_artifact_restates_the_refuted_capture_mechanism`
+            # and
+            # `test_client_status_vocabulary.py::test_the_artifacts_no_longer_call_the_driver_a_one_word_failure_reporter`
+            # name in their own docstrings ("so the plausible-but-wrong sentence
+            # cannot come back in a later tidy-up"). Re-adding "expanded once at
+            # process start" / "replayed for the life of the process", deleting
+            # "re-runs at every connect", or restoring "Client + BearerAuth"
+            # there merged green with both guards asleep — the
+            # #1349/#3332/#3616 silent-drop class, one level up. Paired with
+            # `CORE_ALSO` because a named-surface match REPLACES the `core`
+            # fallback and the `BearerAuth` prohibition lives in a
+            # CORE-registered guard. Named as a CONCRETE file, not a glob:
+            # `select()` matches with `startswith` and has no glob support.
+            "docs/client-server-split.md",
             # #3154: hosted_api.py imports hosted_backup.py at module level (the
             # backup/restore/import endpoints), and the boolean-index audit lives
             # there — without this entry a hosted_backup.py-only change matched
@@ -1415,6 +1449,20 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # tool's own guard) is selected. Pinned by
              # tests/test_ci_selection.py::test_queue_resweep_tool_change_selects_core_not_tier1.
              "tools/queue_resweep.py",
+             # #2148: `tools/batch_open.py` owns `tests/test_batch_gate.py`
+             # (registered `core`), and `tools/` is in NON_PYTHON_PREFIXES, so a
+             # batch_open-only change would be filtered out BEFORE the "not
+             # matched -> core" fallback and take the docs-only early return —
+             # `select(["tools/batch_open.py"])` would yield NO surface, and the
+             # guard that pins the fold gate would never run on the file it guards
+             # (the same #1349/#3332/#3616 silent-drop class as queue_resweep
+             # directly above). The entry makes `_selection_relevant()` keep the
+             # path so `core` — and this tool's own guard — is selected. Pinned by
+             # tests/test_batch_gate.py::test_a_batch_open_only_change_selects_core_so_this_guard_actually_runs,
+             # which asserts `select(["tools/batch_open.py"])` returns `core` AND this
+             # file's suite. (`integrity()` does NOT read CORE_ALSO — measured: it
+             # returns `[]` with and without this entry — so it is not a pin.)
+             "tools/batch_open.py",
              # #6388: `tools/seal_session_events.py` is the session-events seal
              # policy, guarded by tests/test_session_events_seal.py, which is
              # `core`-registered — but `tools/` is swallowed by
@@ -1955,6 +2003,21 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # above. Pinned by
              # tests/test_ci_selection.py::test_record_schema_pin_runs_on_migration_or_doc_change.
              "docs/00_index.md",
+             # #10605 review (P2): the OTHER half of the split-doc guard pair.
+             # `docs/client-server-split.md` §8a is read by TWO guards, and one
+             # does not imply the other: the `api` entry above reaches
+             # `test_mcp_bridge.py` (the four refuted phrases and the required
+             # "re-runs at every connect" mechanism sentence), while
+             # `test_client_status_vocabulary.py` — which pins the `BearerAuth`
+             # PROHIBITION — is registered only on `core`, and a named-surface
+             # match REPLACES the `core` fallback. Without this entry a
+             # split-doc-only edit selects `api` alone and half the guard pair
+             # stays asleep, which is the residue the reviewer measured. `docs/`
+             # is a flat NON_PYTHON_PREFIXES entry and this path is no
+             # SOURCE_PATTERNS row of its own, so it reached the docs-only early
+             # return. Same #1349/#3332/#3616 class; pinned by
+             # tests/test_ci_selection.py::test_the_split_doc_guards_run_on_the_doc_itself.
+             "docs/client-server-split.md",
              # RETIRED 2026-10-19: the orchestrator harness (and therefore
              # tests/test_orchestrator_harness.py) moved to
              # agent-infra/scripts/orchestrator-harness/. This repo keeps only a pointer
@@ -2204,6 +2267,17 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # `test_test_lane_tool.py`). Pinned by
              # tests/test_ci_selection.py::test_lane_stash_guard_runs_on_a_tools_only_change.
              "tools/lane_stash.py",
+             # #10812: `tools/lane_wip.py` pins a lane's UNCOMMITTED work into
+             # `refs/pi-lane-wip/<lane-key>/<n>` so `git worktree remove --force`
+             # cannot destroy content that was never in the object DB. It owns
+             # `tests/test_lane_wip.py`, registered `core`. Same shape as
+             # `tools/lane_stash.py` directly above: `tools/` is a flat
+             # NON_PYTHON_PREFIXES entry, so without this entry a tools-only diff
+             # comes back with `changed == []`, takes the docs-only early return,
+             # and the pin never runs on the file it guards — the
+             # #1349/#3332/#3616 silent-drop class. Pinned by
+             # tests/test_ci_selection.py::test_lane_wip_guard_runs_on_a_tools_only_change.
+             "tools/lane_wip.py",
              # #5612: the journal-growth measurement (`tools/journal_growth.py`)
              # and its probe
              # (`docs/evidence/5612-journal-growth/probes/corpus_growth_probe.py`)
@@ -2597,6 +2671,38 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # tests/test_ci_selection.py::
              # test_ci_catch_history_tool_change_selects_core_not_tier1.
              "tools/ci_catch_history.py",
+             # #10605 review (PR #10727): `tortoise/mcp_client.py` is now an
+             # exact SOURCE_PATTERNS["api"] entry (so its own guard,
+             # `tests/test_mcp_client.py`, runs on a client-only diff instead of
+             # sitting in `_SELF_GUARD_DEBT`). The other half was missing: a
+             # named-surface match REPLACES the `core` fallback (#2938), so the
+             # same edit made a client-only diff STOP running the core pool it
+             # selected before. MEASURED with the repo's own selector —
+             # `select(["tortoise/mcp_client.py"])` on origin/main =
+             # `['core']` / 735 test files; at the PR head, without this entry =
+             # `['api']` / 337. The dropped 398 include the two `core`-registered
+             # suites that execute the `tortoise-client` CLI against this very
+             # module's driver words — `tests/test_client_status_vocabulary.py`
+             # (the `available | empty | degraded | unconfigured` boundary, which
+             # this PR CHANGES: `status()` gained `unconfigured`) and
+             # `tests/test_client_cli_probe.py` (it imports
+             # `tortoise_client.cli`, which imports `describe_failure` from
+             # here) — plus `tests/test_uri_env_mutations_declared.py`, the
+             # registry this PR edits. So a follow-up that touches only
+             # `tortoise/mcp_client.py` and moves the driver's word set again
+             # would run its own guard and NEITHER of the two guards that assert
+             # the CLI mapping of those words. That is the #2938/#1349 silent-drop
+             # class, re-created in the other direction — the fix for one silent
+             # drop would have created another. This entry is COVERAGE
+             # PRESERVATION (the pool is large; those two are the pinners worth
+             # naming); it is not a claim that every dropped file pins this
+             # module. Pool sizes are DATED ANCHORS — the suite grows. Pinned by
+             # tests/test_ci_selection.py::
+             # test_mcp_client_change_keeps_the_core_pool_that_guards_its_words.
+             # `tortoise/mcp_bridge.py` deliberately has NO entry: it is a new
+             # file in this PR and no `core`-registered test guards it, so its
+             # `api` registration downgrades nothing (#10727 review).
+             "tortoise/mcp_client.py",
              # #2148: `tools/` is a flat NON_PYTHON_PREFIXES entry and no
              # SOURCE_PATTERNS row matches `tools/rail_detach.py`, so a
              # TOOL-ONLY change filtered to `changed == []` and took the

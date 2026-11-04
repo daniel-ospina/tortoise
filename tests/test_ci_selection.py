@@ -1393,7 +1393,6 @@ _SELF_GUARD_DEBT: dict[str, str] = {
     "tests/test_github_map.py": "tortoise/github_map.py",
     "tests/test_kind_classifier.py": "tortoise/kind_classifier.py",
     "tests/test_kind_index.py": "tortoise/kind_index.py",
-    "tests/test_mcp_client.py": "tortoise/mcp_client.py",
     "tests/test_sentry.py": "tortoise/sentry.py",
     "tests/test_source_credibility.py": "tortoise/source_credibility.py",
     "tests/test_subgraph_render.py": "tortoise/subgraph_render.py",
@@ -2520,6 +2519,75 @@ def test_kind_vocabulary_guard_runs_on_a_docs_only_ontology_edit():
         ["docs/ONTOLOGY.md"], "pull_request", stripped)["test_files"]
 
 
+def test_the_split_doc_guards_run_on_the_doc_itself(monkeypatch):
+    """#10605 review (P2): both §8a guards must be selected by a §8a-only edit.
+
+    `docs/client-server-split.md` §8a is the subject of TWO guards, and one does
+    not imply the other:
+
+      * `tests/test_mcp_bridge.py::test_no_artifact_restates_the_refuted_capture_mechanism`
+        (registered `api`) pins the four refuted phrases and REQUIRES
+        "re-runs at every connect" + "process.env";
+      * `tests/test_client_status_vocabulary.py::test_the_artifacts_no_longer_call_the_driver_a_one_word_failure_reporter`
+        (registered `core`) pins the `BearerAuth` PROHIBITION.
+
+    `docs/` is a flat NON_PYTHON_PREFIXES entry and this path was no
+    SOURCE_PATTERNS row and no CORE_ALSO member, so a split-doc-only edit
+    filtered to `changed == []` and took the docs-only early return
+    (`surfaces=[]`, tier-1 smoke): re-adding "expanded once at process start",
+    deleting "re-runs at every connect", or restoring "Client + BearerAuth"
+    merged GREEN with both guards asleep — on the exact scenario the first
+    guard's own docstring names ("so the plausible-but-wrong sentence cannot
+    come back in a later tidy-up"). Same #1349/#3332/#3616 silent-drop class.
+
+    Both halves are needed because a named-surface match REPLACES the `core`
+    fallback: the `api` entry alone drops `test_client_status_vocabulary.py`.
+    """
+    doc = REPO / "docs" / "client-server-split.md"
+    assert doc.exists(), "the guarded doc is gone: docs/client-server-split.md"
+
+    r = _sel(["docs/client-server-split.md"])
+    assert r["full"] is False
+    assert sorted(r["surfaces"]) == ["api", "core"], (
+        f"a docs/client-server-split.md-only edit selects {r['surfaces']} — the "
+        "doc reached the docs-only tier-1 early return, so neither §8a guard runs "
+        "on the only change that can break it (SOURCE_PATTERNS['api'] / CORE_ALSO "
+        "entry removed?)"
+    )
+    assert "test_mcp_bridge.py" in r["test_files"], (
+        "a docs/client-server-split.md-only edit does not run "
+        "tests/test_mcp_bridge.py, so the refuted capture phrases can come back "
+        "into §8a in a later tidy-up"
+    )
+    assert "test_client_status_vocabulary.py" in r["test_files"], (
+        "a docs/client-server-split.md-only edit does not run "
+        "tests/test_client_status_vocabulary.py, so `Client + BearerAuth` can be "
+        "restored into §8a unnoticed"
+    )
+
+    # Non-vacuity, one arm per half: each entry is load-bearing on its own, so
+    # neither assertion above can be satisfied by the other entry.
+    api_paths = tuple(p for p in cs.SOURCE_PATTERNS["api"]
+                      if p != "docs/client-server-split.md")
+    monkeypatch.setattr(cs, "SOURCE_PATTERNS",
+                        {**cs.SOURCE_PATTERNS, "api": api_paths})
+    without_api = _sel(["docs/client-server-split.md"])
+    assert "test_mcp_bridge.py" not in without_api["test_files"], (
+        "with the api entry removed the bridge guard is STILL selected — the "
+        "`api` half of the pair is dead config"
+    )
+    monkeypatch.undo()
+
+    core_also = tuple(p for p in cs.CORE_ALSO if p != "docs/client-server-split.md")
+    monkeypatch.setattr(cs, "CORE_ALSO", core_also)
+    without_core = _sel(["docs/client-server-split.md"])
+    assert "core" not in without_core["surfaces"], (
+        "with the CORE_ALSO entry removed `core` is STILL selected — the "
+        "`core` half of the pair is dead config"
+    )
+    assert "test_client_status_vocabulary.py" not in without_core["test_files"]
+
+
 def test_session_import_change_selects_the_window_guard():
     """#3575 P1-A: `tortoise/session_import/` maps to no named surface, so a
     parsers.py change selects `core` via the fallback. The window guard must be
@@ -3152,6 +3220,59 @@ def test_temporal_leg_change_runs_its_pins_and_keeps_the_core_pool():
     assert "core" in r["surfaces"], (
         "a temporal_leg-only diff dropped the core pool (CORE_ALSO entry removed?)",
         r["surfaces"])
+
+
+def test_mcp_client_change_keeps_the_core_pool_that_guards_its_words():
+    # #10605 / PR #10727 review (P2). `tortoise/mcp_client.py` was registered as
+    # an exact SOURCE_PATTERNS["api"] entry so that `tests/test_mcp_client.py`
+    # (its named self-guard, formerly a `_SELF_GUARD_DEBT` row) runs on a
+    # client-only diff. A named-surface match REPLACES the `core` fallback
+    # (#2938), and nothing added the other half — so the same edit DOWNGRADED the
+    # selection. MEASURED with the repo's own selector: on origin/main a
+    # `tortoise/mcp_client.py`-only diff selected `['core']` / 735 test files;
+    # at the PR head it selected `['api']` / 337. Among the dropped files are the
+    # only two `core`-registered suites that execute the shipped
+    # `tortoise-client` CLI against THIS module's driver words —
+    # `tests/test_client_status_vocabulary.py` (`available | empty | degraded |
+    # unconfigured`, and this PR adds the third word to `status()`) and
+    # `tests/test_client_cli_probe.py` (`client/tortoise_client/cli.py` imports
+    # `describe_failure` from here) — plus
+    # `tests/test_uri_env_mutations_declared.py`, whose registry this PR edits.
+    # The #2938/#1349 silent-drop class, in the other direction: the fix for one
+    # silent drop created another.
+    #
+    # Mutation check: deleting the `tortoise/mcp_client.py` row from `CORE_ALSO`
+    # puts surfaces back to `['api']` and drops both CLI guards -> the third and
+    # fourth asserts red. Deleting the SOURCE_PATTERNS row instead fails the
+    # first two (the self-guard half this PR legitimately adds).
+    #
+    # `test_files` is the STRING "ALL" under the FULL matrix, so coverage goes
+    # through `runs()` — promoting the module to `SHARED_MODULES` is a strictly
+    # WIDER selection and must not red this pin. Pool sizes are DATED ANCHORS;
+    # the suite grows, so no count is asserted.
+    r = _sel(["tortoise/mcp_client.py"])
+
+    def runs(name: str) -> bool:
+        return r["full"] is True or name in r["test_files"]
+
+    assert "api" in r["surfaces"], (
+        "a mcp_client-only diff must select `api`, where its own guard "
+        "(`tests/test_mcp_client.py`) is registered "
+        "(SOURCE_PATTERNS['api'] entry removed?)", r["surfaces"])
+    assert runs("test_mcp_client.py"), (
+        "a mcp_client-only diff does not run the module's own guard "
+        "(SOURCE_PATTERNS['api'] entry removed?)", r)
+    assert "core" in r["surfaces"], (
+        "a mcp_client-only diff dropped the core pool it selects on main "
+        "(CORE_ALSO entry removed?) — the `api` match REPLACES the `core` "
+        "fallback (#2938)", r["surfaces"])
+    for guard in ("test_client_status_vocabulary.py",
+                  "test_client_cli_probe.py"):
+        assert runs(guard), (
+            f"a mcp_client-only diff does not run {guard}, the core-registered "
+            "suite that executes the `tortoise-client` CLI against this "
+            "module's driver words (CORE_ALSO entry for "
+            "`tortoise/mcp_client.py` removed?)", r)
 
 
 def test_supabase_control_change_selects_the_org_purge_rpc_guard():
@@ -4312,6 +4433,34 @@ def test_9664_capstone_runs_on_the_middleware_diff_that_can_break_it():
             "the capstone would not run on the diff class that can break its "
             "tenant install or its refusal text",
             api_sel)
+
+
+def test_10668_allowance_gate_evidence_runs_on_both_diff_classes():
+    # #10668 review P1: `tests/test_allowance_gate.py` is the evidence for the
+    # #9567 D11/D12 allowance gate, and it was registered in NO surface —
+    # `--integrity` printed `❌ manifest drift: ['test_allowance_gate.py']`
+    # (redding the REQUIRED `manifest-integrity` leg) and no leg ever selected
+    # it, so the suite would have stayed green if the gate were deleted (#10513
+    # / #1349 silent-drop class).
+    #
+    # Two modules carry the subject and they classify DIFFERENTLY: a
+    # `tortoise/quota.py` diff (the gate's primary door, `enforce_org_limit`)
+    # selects `api`, while `tortoise/allowance_gate.py` matches no SOURCE_PATTERN
+    # and falls through to the `core` fallback — and a match REPLACES the
+    # fallback, so neither arm alone covers both diff classes (#9192/#9664
+    # idiom).
+    #
+    # Mutation check: deleting the `api` arm fails the quota pair, deleting the
+    # `core` arm fails the allowance_gate pair.
+    api_sel = _sel(["tortoise/quota.py"])
+    assert api_sel["full"] is False, api_sel
+    assert api_sel["surfaces"] == ["api"], api_sel
+    assert "test_allowance_gate.py" in api_sel["test_files"], api_sel
+
+    core_sel = _sel(["tortoise/allowance_gate.py"])
+    assert core_sel["full"] is False, core_sel
+    assert core_sel["surfaces"] == ["core"], core_sel
+    assert "test_allowance_gate.py" in core_sel["test_files"], core_sel
 
 
 def test_source_currency_tool_change_selects_core_not_tier1():
@@ -13520,6 +13669,23 @@ def test_lane_stash_guard_runs_on_a_tools_only_change():
     assert r["full"] is False, r
     assert r["surfaces"] == ["core"], r
     assert "test_lane_stash.py" in r["test_files"], r
+
+
+def test_lane_wip_guard_runs_on_a_tools_only_change():
+    # #10812: `tests/test_lane_wip.py` (registered `core`) guards
+    # `tools/lane_wip.py` — the pin that snapshots a lane's UNCOMMITTED working
+    # state into `refs/pi-lane-wip/<lane-key>/<n>` so `git worktree remove
+    # --force` cannot destroy content that was never in the object DB (the
+    # measured 4,500-line loss). `tools/` is a flat NON_PYTHON_PREFIXES entry and
+    # the tool matches no SOURCE_PATTERNS row, so before the CORE_ALSO entry a
+    # tools-only diff was filtered out BEFORE the "not matched -> core" fallback:
+    # the pin never ran on the file it exists to hold (the #1349/#3332/#3616
+    # silent-drop class). Mutation check: removing the CORE_ALSO entry fails the
+    # arm below (surfaces == [] and the guard absent from test_files).
+    r = _sel(["tools/lane_wip.py"])
+    assert r["full"] is False, r
+    assert r["surfaces"] == ["core"], r
+    assert "test_lane_wip.py" in r["test_files"], r
 
 
 def test_rail_pin_runs_on_a_tools_only_change():

@@ -2457,12 +2457,76 @@ def _analyze_llm_budget_available() -> bool:
     return True
 
 
+def _carry_allowances(limits: dict | None, resource: str) -> dict | None:
+    """#9567 D12: fill the ruled-dimension allowances this MCP lane is missing.
+
+    **Why this exists.** ``enforce_org_limit`` enforces the owner-ruled
+    dimensions from the dict it is GIVEN, so a key the surface never carried is
+    not a warning — it reads as UNLIMITED (``allowance_gate.enforce_allowances``
+    skips a missing ``limit_key``). ``_enforce_quota`` is the pre-write gate for
+    every ``_quota_gated`` MCP tool (~19 ``points`` writers), and the dict it
+    passes comes from ``mcp_auth``'s ContextVar, which is:
+
+    * **Supabase mode** → ``limits = org``, the ``resolve_api_key`` dict. Its
+      shape is the six resolved limit keys; it has no allowance key and no
+      column to read one from.
+    * **registry/self-host mode** → ``resolve_org_limits(...)``, i.e. the lane
+      an arming edit lands on first.
+
+    So without this carry, arming a dimension in the resolver REFUSES on the
+    REST doors (``hosted_api._check_org_limit`` fills at its seam) and SERVES
+    WITHOUT LIMIT on every points/documents MCP write tool — the fail-open the
+    capture bridge was added for, one surface short.
+
+    Only MISSING keys are filled (a lane that already resolved them pays no
+    read and is never overridden), and the state-vs-fault split is
+    ``carry_resolved_allowances``'s own: a resolver LOOKUP MISS leaves the dict
+    unchanged, a read FAULT is the documented ``QuotaCheckError``.
+    ⚠️ The ``limits is None`` fallback in ``_enforce_quota`` is ALREADY the
+    resolver's own answer, so it skips this fill — otherwise the same read runs
+    twice for one gate (pinned by
+    ``test_the_resolver_fallback_does_not_read_the_resolver_a_SECOND_time``).
+
+    ⚠️ The import is GUARDED, for the reason ``quota.enforce_org_limit`` states
+    in-line about the SAME import: the gate's drift check is deliberately LOUD at
+    import (a renamed/removed declared dimension is a hard failure), and an
+    unguarded import would let that loudness escape as an unmapped
+    ``ImportError``/``KeyError`` instead of the documented fail-closed refusal
+    (#4051).
+    """
+    if limits is None:
+        return None
+    from tortoise.quota import QuotaCheckError
+    try:
+        from tortoise.allowance_gate import (
+            ALLOWANCE_GATED_RESOURCES,
+            carry_resolved_allowances,
+        )
+    except Exception as e:  # mapped below, never an unmapped 500
+        logging.getLogger("tortoise.allowance_gate").error(
+            "allowance gate unavailable on the MCP write lane (fail-closed): "
+            "resource=%s error=%r", resource, e)
+        raise QuotaCheckError(
+            f"the allowance gate is unavailable on the MCP {resource!r} lane "
+            f"({type(e).__name__}: {e})") from e
+    if resource not in ALLOWANCE_GATED_RESOURCES:
+        # No declared dimension gates this resource (api_keys/users/graphs), so
+        # there is nothing to fill and no control-plane read to pay.
+        return limits
+    return carry_resolved_allowances(limits)
+
+
 def _enforce_quota(resource: str = "points") -> None:
     """#329: fail-closed org quota pre-write for MCP write tools.
 
     HTTP mode: limits come from the middleware-resolved ContextVar (same
     limits REST sees); fallback resolves from the registry. Stdio mode
     (no org context) → skip — operator/trusted (batch caps still apply).
+
+    #9567 D12: the dict is AUGMENTED here with the ruled-dimension allowances
+    resolved by ``quota.resolve_org_limits`` — this lane's ContextVar carries
+    none in Supabase mode, and an uncarried allowance is UNLIMITED to the gate
+    (see ``_carry_allowances`` and ``tortoise/allowance_gate.py``).
     """
     from tortoise.mcp_auth import SELFHOST_ORG_ID, _current_org_id, _current_org_limits
     from tortoise.quota import enforce_org_limit, resolve_org_limits
@@ -2474,8 +2538,11 @@ def _enforce_quota(resource: str = "points") -> None:
         # quota is N/A (selfhost has no billing). Batch caps still apply.
         return
     limits = _current_org_limits.get()
-    if limits is None:
-        limits = resolve_org_limits(org_id)
+    # ⛔ `limits is None` means the fallback IS the resolver read, so its answer
+    # is already authoritative — carrying it afterwards would repeat the very
+    # same control-plane read for one gate (#9567 review round 15).
+    limits = (resolve_org_limits(org_id) if limits is None
+              else _carry_allowances(limits, resource))
     # Count on the SAME org SDK the tool writes to (identical connection),
     # so the count and the write can never target different databases.
     enforce_org_limit(limits, resource, sdk=_get_org_sdk())
@@ -6451,6 +6518,32 @@ def tortoise_session_capture(conversation: list[dict],
     # kill, and it would make MCP capture succeed where REST 500s).
     if "max_sessions" in limits:
         org["max_sessions"] = limits["max_sessions"]
+    # #9567 D11/D12: carry the RULED-dimension allowance keys through the SAME
+    # bridge. Enumerated from `ALLOWANCE_KEYS` (declared in `allowance_gate`),
+    # not hand-listed: a hand-list is how the MCP capture lane would keep
+    # spending past a configured token allowance while REST refused — the gate
+    # reads the dict it is GIVEN, so a key this bridge drops reads as UNLIMITED.
+    # Only keys the resolver actually produced are carried (absent = unlimited,
+    # which is the gate's own declared default).
+    # ⚠️ The import is GUARDED, for the reason `quota.enforce_org_limit` states
+    # in-line about the SAME import: the gate's own drift check is deliberately
+    # LOUD at import (a renamed/removed declared dimension raises there), and an
+    # unguarded import would let that loudness escape this tool as an unmapped
+    # 500/ImportError instead of the documented fail-closed refusal (#4051). A
+    # capture whose allowance gate cannot be loaded is REFUSED, never served —
+    # serving is what a dropped key would do.
+    try:
+        from tortoise.allowance_gate import (
+            carry_allowance_keys as _carry_allowance_keys,
+        )
+    except Exception as e:  # mapped to the refusal below, never an unmapped 500
+        logging.getLogger("tortoise.allowance_gate").error(
+            "capture allowance gate unavailable (fail-closed, capture "
+            "refused): team=%s error=%r", org_id, e)
+        return _SafeError({
+            "error": f"capture allowance gate unavailable: {e}",
+            "status": 500})
+    _carry_allowance_keys(org, limits)
     try:
         body = SessionRequest(conversation=conversation, harness=harness,
                               session_id=session_id,
