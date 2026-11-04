@@ -1201,6 +1201,67 @@ class TestPromotePoint:
         res = sdk.promote_point(b["id"])
         assert res["operator_nodes_promoted"] == []
 
+    def test_r16_refuses_an_operator_over_a_flag_dead_endpoint(self, sdk):
+        """#10828: `outdated=true` with `status` still `live` is a DEAD endpoint.
+
+        `invalidate_point` sets the flag and deliberately leaves the status
+        alone, so the R16 gate's status-only read admitted an operator over an
+        endpoint EP has already stripped: the operator flipped `live`, the
+        factor degenerated, and it stayed live over a dead endpoint for good.
+        The measured `(status='live', outdated=true)` shape is staged below and
+        asserted before the gate is asked, so this test cannot pass on a graph
+        that never held it.
+        """
+        live_endpoint = _make_point(sdk, status="draft", content="fresh claim")
+        dead = _make_point(sdk, status="live", content="claim to be invalidated")
+        replacement = _make_point(sdk, status="live", content="the correction")
+        sdk.invalidate_point(dead["id"], replacement["id"])
+        # The staged shape IS the defect: status untouched, flag set.
+        dead_point = sdk.get_point(dead["id"])
+        assert dead_point["status"] == "live", (
+            "#10828's premise: invalidate_point leaves the status alone")
+        assert dead_point["outdated"] is True
+
+        op = _make_draft_operator(sdk, "NAND", [live_endpoint["id"], dead["id"]])
+        res = sdk.promote_point(live_endpoint["id"])
+
+        assert res["operator_nodes_promoted"] == [], (
+            "an operator over a flag-dead endpoint must NOT be promoted — "
+            "EP strips that input, so the promotion buys a degenerate factor "
+            "and a permanently-live operator over a dead endpoint")
+        assert sdk.get_point(op["id"])["status"] == "draft"
+
+    def test_r16_still_promotes_over_live_endpoints_that_are_not_flag_dead(
+            self, tmp_path):
+        """The flag arm must not be bought with the live arm: the same shape
+        with `outdated` FALSE still promotes, and the `OperatorPromoted` event
+        is still journalled for it, so the fix cannot re-create #10137's "an
+        operator nothing promotes" and cannot leave the graph and the JSONL
+        disagreeing about a promotion (#548, review #944).
+
+        An event log of its own, because the promotion's event is the half a
+        status read alone cannot show."""
+        import json
+
+        sdk = TortoiseSDK(db_path=str(tmp_path / "t.db"),
+                          event_log_path=str(tmp_path / "events.jsonl"))
+        try:
+            a = _make_point(sdk, status="draft", content="a")
+            b = _make_point(sdk, status="live", content="b")
+            op = _make_draft_operator(sdk, "NAND", [a["id"], b["id"]])
+            assert sdk.get_point(b["id"]).get("outdated") is not True
+            res = sdk.promote_point(a["id"])
+            assert res["operator_nodes_promoted"] == [op["id"]]
+            assert sdk.get_point(op["id"])["status"] == "live"
+            types = [json.loads(line).get("type")
+                     for line in (tmp_path / "events.jsonl").read_text().splitlines()
+                     if line.strip()]
+            assert "OperatorPromoted" in types, (
+                "the flag arm must not cost the journalled promotion: a graph "
+                "write with no event is a rebuild divergence")
+        finally:
+            sdk.close()
+
     def test_promote_emits_point_promoted_event(self, tmp_path):
         sdk = TortoiseSDK(db_path=str(tmp_path / "t.db"),
                           event_log_path=str(tmp_path / "events.jsonl"))
