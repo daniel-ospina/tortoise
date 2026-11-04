@@ -1744,7 +1744,10 @@ def node_from_row(label: str, row: Mapping[str, Any]) -> RecordNode:
     # The fold's `ON CREATE` constants, applied where the record is SILENT
     # (#9634). `None` counts as silence, not as a value: it is a FALLBACK, so a
     # value the record states — a named kind, from the column or from the
-    # `props` tail, which `_props_from_row` keeps verbatim — is never replaced.
+    # `props` tail, which `_props_from_row` seeds FIRST and then lets a column
+    # value overwrite (and, for an EPISODIC Source, pops the declined names out
+    # of — :func:`_props_from_row`'s own docstring states the rule in full) — is
+    # never replaced.
     #
     # On the OBJECT side null-as-silence IS the fold's own rule: both clauses
     # COALESCE (`coalesce($ok, 'other')`, `coalesce($title, '')`), so an
