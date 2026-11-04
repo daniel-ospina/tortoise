@@ -1026,11 +1026,12 @@ def _condition_holds(expr, *, run_cancelled: bool, legs_failed: bool) -> bool:
 def test_both_jobs_stay_literal_always():
     """The exact-string pin for BOTH jobs — the behavioural check is not a substitute.
 
-    No behavioural check covers `ci-introduced-failure` — the job the wedge re-arms
-    first — so its pin must be exact. The behavioural test DOES catch `!cancelled()` on
-    the AGGREGATE (at its `run_cancelled=True` assertion), but it never inspects this
-    job. The aggregate's `-`-selectored row for this job then REDs the required check on
-    a skipped verdict.
+    No behavioural check covers this job's CANCELLED-run half — the job the wedge
+    re-arms first — so that half's pin must be exact. Its red-run half IS covered
+    behaviourally by `test_the_deferrable_arms_are_exactly_the_verdict_jobs_needs`,
+    whose final assertion runs `_condition_holds` over this job's `if:` with
+    `run_cancelled=False, legs_failed=True`. The aggregate's `-`-selectored row for this
+    job then REDs the required check on a skipped verdict.
     """
     import yaml
 
@@ -1058,7 +1059,11 @@ def test_the_required_aggregate_must_not_be_skippable_on_a_cancelled_run():
     conditions during cancellation, and `always()` is true there — so the cancelled run
     re-arms these jobs onto a run never scheduled again, and (per GitHub's own
     troubleshooting docs) a stuck run keeps blocking later runs in the same concurrency
-    group. That is a real wedge and it fails SAFE: the required context never posts, so
+    group. MEASURED on this PR's own earlier head: `python-ci-gate` is never CREATED on
+    such a run (runs 41832355132, 41833765464, 41834751952, 41831607343 — the gate job is
+    absent from every one), because its `needs:` never resolve; only
+    `ci-introduced-failure` reaches `queued`. Either way the required context never
+    posts, so
     the rail REFUSES BY NAME (`check-unresolved:<name>:<status>/<conclusion>`) at
     the bound `ADMIN_MERGE_CHECK_UNRESOLVED_BOUND` (default 3600 s, read from
     `CHECK_UNRESOLVED_BOUND` in `admin-merge.sh` — cite the CONSTANT, never a rail line:

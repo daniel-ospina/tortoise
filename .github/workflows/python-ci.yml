@@ -4447,7 +4447,8 @@ jobs:
     #
     # ⛔ `always()` MUST stay non-skippable. This IS the required context
     # (`merge_conditions`), and the measured wedge (#10911) — a cancelled run re-arming
-    # this job into a permanent `queued` state so it never posts at all — fails SAFE:
+    # `ci-introduced-failure` into a permanent `queued` state, so THIS job's `needs:`
+    # never resolve and it is never created, i.e. it never posts at all — fails SAFE:
     # the rail REFUSES BY NAME (`check-unresolved:<name>:<status>/<conclusion>`) at
     # `ADMIN_MERGE_CHECK_UNRESOLVED_BOUND` (default 3600 s, read from
     # `CHECK_UNRESOLVED_BOUND` in `admin-merge.sh`),
