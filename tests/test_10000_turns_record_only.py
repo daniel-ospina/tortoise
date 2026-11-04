@@ -3260,11 +3260,13 @@ def test_the_repair_note_names_BOTH_halves_of_a_legacy_demo_graph():
     # is refused although the purge lane is told exactly the right thing
     # (#10675 review round 11, P3). The VALUE is what the note must pin.
     # Accept the VALUE however the sentence spells the operator: `= 0`,
-    # `to 0`, or a bare "reset `s.turn_count` to 0" — the note must name
-    # the counter and the value, not one punctuation choice (#10675
-    # review round 12, P2: `\s*=\s*0` never accepted the `to 0` form the
-    # first version of this comment itself offered as the example).
-    assert re.search(r"s\.turn_count[`\s]*(?:=|to)\s*0\b", instruction), (
+    # `to 0`, or `back to 0` — the note must name the counter and the value,
+    # not one punctuation choice (#10675 review round 12, P2: `\s*=\s*0` never
+    # accepted the `to 0` form the first version of this comment itself offered
+    # as the example; review cycle 2, P3: `back to 0` — the same meaning, and
+    # the pin's own contract above promises it — red with a message that said
+    # the sentence did not name the counter at all, which it did).
+    assert re.search(r"s\.turn_count[`\s]*(?:=|to|back\s+to)\s*0\b", instruction), (
         "the repair SENTENCE names the node delete but not the counter — an "
         "instruction that leaves the reset to the explanation beside it is how "
         "a destructive lane reads 'delete the nodes' and stops: "

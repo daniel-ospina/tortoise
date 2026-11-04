@@ -1567,9 +1567,23 @@ _POINT_KIND = re.compile(
 #: end-to-end, and the failure message quoted the NEGATION as the violation
 #: while telling the lane to "restate it as history", which it already was.
 #: Read on the MATCHED SPAN, so the negator may sit on either side of the verb.
+#: ⛔ THE NEGATOR MUST GOVERN THE MENTION, not merely share a sentence: the
+#: parent pattern's verb→`pointKind` gap is `[^.\n]{0,160}?`, which crosses `,`,
+#: `;`, `but` and `yet`, so a negated verb ANYWHERE in the span excused a match
+#: — and because the span already consumed that `pointKind`, the violating clause
+#: behind it was never examined. Measured (#10675 review cycle 2, P2): "the demo
+#: seed no longer writes turn text, but still writes a `pointKind='event'` node"
+#: was GREEN — the HALF-CORRECTION this pin exists for, in the vocabulary its own
+#: comment enumerates. The first alternative therefore walks from the negated
+#: verb to the `pointKind` it negates and stops at a clause boundary (`[^,;]`);
+#: the second covers the negator AFTER the verb, which is adjacent by
+#: construction. ⚠️ Residual: a sentence that negates its FIRST clause and
+#: asserts the shape in a later one (`writes no X but writes a `pointKind=…``)
+#: still passes, because the lookahead inside the parent pattern kills the only
+#: anchored match; catching it needs the subject re-anchored across clauses.
 _NEGATED_CLAIM = re.compile(
     r"\b(?:not|never|no\s+longer|no\s+more)\s+(?:also\s+|still\s+|ever\s+)?"
-    r"(?:writes?|mints?|creates?)\b"
+    r"(?:writes?|mints?|creates?)\b[^,;]{0,60}?pointKind"
     r"|\b(?:writes?|mints?|creates?)\s+(?:no|nothing|none|never)\b",
     re.IGNORECASE)
 
@@ -1817,6 +1831,25 @@ def test_the_present_tense_guard_reads_a_NEGATED_writer_claim_as_the_CORRECTION(
     assert _present_tense_writer_claim(positive) is not None, (
         "the guard stopped matching the present-tense claim altogether, so "
         f"its negation arms prove nothing: {positive!r}")
+    # ⛔ AND THE ESCAPE MUST NOT SWALLOW A LATER CLAUSE (#10675 review cycle 2,
+    # P2): the verb→`pointKind` gap crosses `,` `;` `but` `yet`, so a negator
+    # anywhere in the span used to excuse a violating clause behind it — which
+    # is the HALF-CORRECTION (text fixed, node still asserted as current) that
+    # this pin exists for. Each sentence below negates one clause and states
+    # the shape in the next; all three must be the violation.
+    compound = (
+        "since #10000 the demo seed no longer writes turn text to the graph, "
+        "but still writes a `pointKind='event'` node per turn",
+        "the demo seed does not write turn text into the graph, but it writes "
+        "a `pointKind='event'` node per turn (#10000)",
+        "since #10000 the demo seed no longer writes `[role]`-tagged text into "
+        "the graph; it STILL writes a `pointKind='event'` node per turn",
+    )
+    for sentence in compound:
+        assert _present_tense_writer_claim(sentence) is not None, (
+            "a clause that NEGATES one shape and ASSERTS the turn node in the "
+            "next is the half-correction this guard exists for, and the "
+            f"negation escape passed it: {sentence!r}")
 
 
 # ── END of the guard's machinery — below this line the population resumes
