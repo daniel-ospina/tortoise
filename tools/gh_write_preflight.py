@@ -355,7 +355,7 @@ def _detail(res: HttpResult, prefix: str) -> str:
 
 
 def gh(args: list[str], timeout: float) -> tuple[int, str, str]:
-    """Run `gh` and return (rc, merged output).
+    """Run `gh` and return (rc, stdout, stderr).
 
     ⛔ Invoked as `gh`, NOT by path: the harness `gh` in PATH is the shim that
     serialises the shared bucket and whose `auth` layer resolves the SAME identity
@@ -436,6 +436,15 @@ def credential_source(timeout: float) -> str:
     the first account line instead names a credential that is not in use — which
     sends the human to re-mint the wrong one, the exact misdiagnosis this tool
     exists to prevent. Unparseable is reported, never guessed.
+
+    ⛔ AND THAT HOLDS ON THE FALLBACK TOO (#10945 review F2). The loop's `return`
+    enforces "only once the active marker is seen", but the fall-through used to be
+    `pending or "unreported"` — so account lines with NO active marker (an older
+    `gh`, a localisation, one line this parse misses) returned the LAST account
+    seen, i.e. the one field whose whole purpose is preventing a wrong-credential
+    chase took the loosest path in the function. What was seen is named as CONTEXT
+    after the verdict, in parentheses, so `source=` never reads as a credential
+    name it cannot substantiate.
     """
     rc, out, err = gh(["auth", "status"], timeout)
     text = out or err
@@ -449,7 +458,9 @@ def credential_source(timeout: float) -> str:
             continue
         if "Active account:" in line and "true" in line.lower() and pending is not None:
             return pending
-    return pending or "unreported"
+    if pending is None:
+        return "unreported"
+    return f"unreported (saw {pending})"
 
 
 def detect_repo(timeout: float) -> str | None:
@@ -633,8 +644,20 @@ def probe_pull_requests(
             f"read of PR #{pr} refused",
         )
     title = None
+    pre_updated = None
     with contextlib.suppress(ValueError, AttributeError):
-        title = json.loads(current.body).get("title")
+        before = json.loads(current.body)
+        title = before.get("title")
+        # ⛔ THE PRE-WRITE STAMP, taken from the SAME read as the title (#10945
+        # review F3). `updated_at` is the only token available here — GitHub
+        # documents conditional requests as a GET-caching mechanism
+        # (`If-None-Match`/304) and documents no `If-Match` on
+        # `PATCH /repos/{owner}/{repo}/pulls/{n}`, so there is no compare-and-swap
+        # to use instead. It works because a no-op PATCH leaves it byte-identical:
+        # measured on PR #10902 (200 after re-sending the same title, `title` and
+        # `updated_at` unchanged), which is why an unchanged stamp is evidence and
+        # not a coincidence.
+        pre_updated = before.get("updated_at")
     if not title:
         return (
             Refusal(
@@ -655,12 +678,31 @@ def probe_pull_requests(
     # conflated: what OUR write stored (read off the PATCH's own response, which is
     # race-free), what the PR says afterwards, and failing to read either.
     stored = None
+    post_updated = None
     with contextlib.suppress(ValueError, AttributeError):
-        stored = json.loads(res.body).get("title")
+        patched = json.loads(res.body)
+        stored = patched.get("title")
+        post_updated = patched.get("updated_at")
     if stored is not None and stored != title:
         return None, (
             f"no-op PATCH on PR #{pr} accepted, BUT our own write stored {stored!r} "
             f"instead of {title!r} — residue: restore the title"
+        )
+    # ⛔ THE MIRROR CASE OF THE ONE BELOW (#10945 review F3). The re-read catches a
+    # change AFTER our write; nothing caught a change BEFORE it. If a human renamed
+    # the PR between our read and our PATCH, then the PATCH RESTORED THE TITLE WE
+    # READ — discarding a real edit — and the re-read then compares against the
+    # value we just wrote, so it takes the clean branch and the tool certifies
+    # "title unchanged on re-read" over an edit it destroyed. A moved `updated_at`
+    # is the one signal that survives, because it moves for the other actor's write
+    # and not for ours. No test can drive this through the interleaving itself; it
+    # is driven here as the stamp disagreement the interleaving produces.
+    if pre_updated and post_updated and pre_updated != post_updated:
+        return None, (
+            f"no-op PATCH on PR #{pr} accepted, BUT the PR moved between our read "
+            f"({pre_updated}) and our write ({post_updated}) — another actor changed "
+            f"it, so this probe may have reverted that edit. Check PR #{pr}'s title by "
+            f"hand (ours was {title!r}); this probe does NOT claim a no-op here."
         )
     after = api("GET", f"repos/{repo}/pulls/{pr}", None, timeout)
     got = None

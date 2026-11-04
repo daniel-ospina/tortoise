@@ -114,6 +114,15 @@ if argv[:1] == ["auth"]:
         print(os.environ.get("FAKE_GH_SECRET", "tok"))
         sys.exit(0)
     print("github.com")
+    if os.environ.get("FAKE_GH_NO_ACTIVE_MARKER"):
+        # An older `gh`, a localisation, or a parse miss on the active line: the
+        # account lines are all there is. The tool must say so rather than return
+        # whatever account it happened to see last (review F2).
+        print("  \u2713 Logged in to github.com account probe-user (keyring)")
+        print("  - Token scopes: 'gist', 'read:org', 'repo', 'workflow'")
+        print("  \u2713 Logged in to github.com account probe-user (GH_TOKEN)")
+        print("  - Token scopes: 'gist', 'read:org', 'repo', 'workflow'")
+        sys.exit(0)
     if os.environ.get("FAKE_GH_ACCOUNT_ORDER") == "activefirst":
         # The normal layout on a box whose env token wins: the ACTIVE account is
         # printed FIRST. Pins the active-marker parse against "return the last
@@ -227,15 +236,22 @@ if method == "GET" and "/pulls/" in path:
 
 # ── writes ────────────────────────────────────────────────────────────────────
 h = write_headers(path)
-if MODE in ("ok", "nopr", "pr404", "retitle", "reread403", "mangle", "repo404"):
+if MODE in ("ok", "nopr", "pr404", "retitle", "reread403", "mangle", "repo404",
+            "race-before"):
     if method == "DELETE":
         emit(204, "No Content", h)
     if method == "PATCH":
         # The PATCH's own response is what OUR write stored — the race-free half of
         # the no-op check. `mangle` models a write that stored something ELSE than
-        # was sent, which is the case that must be called OUR residue.
+        # was sent, which is the case that must be called OUR residue. `race-before`
+        # models a rename that landed BETWEEN our read and our write: the stored
+        # title still matches what we sent, and the re-read agrees with it, so the
+        # only evidence of the lost edit is `updated_at` moving.
         stored = title_field + " (mangled)" if MODE == "mangle" else title_field
-        emit(200, "OK", h, json.dumps({"number": 4242, "title": stored}))
+        stamp = ("2026-11-04T19:31:00Z" if MODE == "race-before"
+                 else "2026-11-04T18:19:01Z")
+        emit(200, "OK", h, json.dumps({"number": 4242, "title": stored,
+                                       "updated_at": stamp}))
     emit(201 if method == "POST" else 200, "Created",
          h, json.dumps({"id": 999, "ref": "refs/heads/probe"}))
 elif MODE in ("readonly-pat", "readonly-nopr"):
@@ -283,6 +299,7 @@ def fake_gh(tmp_path):
         noise: bool = False,
         secret: str | None = None,
         account_order: str | None = None,
+        no_active_marker: bool = False,
     ) -> subprocess.CompletedProcess:
         env = dict(os.environ)
         env["PATH"] = f"{bindir}{os.pathsep}{env.get('PATH', '')}"
@@ -293,6 +310,10 @@ def fake_gh(tmp_path):
             env["FAKE_GH_ACCOUNT_ORDER"] = account_order
         else:
             env.pop("FAKE_GH_ACCOUNT_ORDER", None)
+        if no_active_marker:
+            env["FAKE_GH_NO_ACTIVE_MARKER"] = "1"
+        else:
+            env.pop("FAKE_GH_NO_ACTIVE_MARKER", None)
         if noise:
             env["FAKE_GH_NOISE"] = "1"
         else:
@@ -795,6 +816,47 @@ def test_an_unreadable_repo_is_not_a_pr_not_visible_refusal(fake_gh):
     assert res.stderr.count("GH-WRITE-UNAVAILABLE(repo-not-visible)") == 2, res.stderr
     assert "pr-not-visible" not in res.stderr
     assert "resource-not-found" not in res.stderr
+
+
+def test_an_unmarked_active_account_is_unreported_never_guessed(fake_gh):
+    """#10945 review F2. The fallback returned the LAST account line, unverified.
+
+    Account lines with NO `Active account:` marker (an older `gh`, a localisation,
+    a parse miss on that one line) fell through to `pending or "unreported"` —
+    printing an account that may not be in use as `source=<credential>`. That is
+    the one field whose stated purpose is preventing a wrong-credential chase, so
+    its fallback must not be the loosest path in the function: the verdict is
+    `unreported`, with what was seen named only as parenthetical CONTEXT.
+    """
+    res = fake_gh("ok", no_active_marker=True)
+    assert res.returncode == ghwp.EXIT_WRITABLE, res.stdout + res.stderr
+    assert "source=unreported" in res.stdout, res.stdout
+    # Neither account may be presented AS the source — the pre-fix code printed the
+    # last one (`GH_TOKEN` here) and the first-account implementation prints
+    # `keyring`; both are guesses in this state.
+    assert "source=GH_TOKEN" not in res.stdout, res.stdout
+    assert "source=keyring" not in res.stdout, res.stdout
+    assert "unreported (saw GH_TOKEN)" in res.stdout, res.stdout
+
+
+def test_a_rename_between_our_read_and_our_write_is_not_certified_as_a_no_op(fake_gh):
+    """#10945 review F3. The mirror of the post-write race, which had no guard.
+
+    A human renames the PR after our read and before our PATCH: the PATCH restores
+    the title WE read, quietly discarding their edit, and the re-read then agrees
+    with what we just wrote — so the pre-fix tool printed the clean "title
+    unchanged on re-read" wording over an edit it destroyed. `updated_at` moving
+    between the read and the write's response is the only surviving signal.
+    """
+    res = fake_gh("race-before")
+    assert res.returncode == ghwp.EXIT_WRITABLE, res.stdout + res.stderr
+    assert "moved between our read" in res.stdout, res.stdout
+    assert "another actor changed" in res.stdout, res.stdout
+    # It must NOT certify the no-op, and it must NOT tell anyone to "restore" —
+    # restoring here would discard the other actor's edit a second time.
+    assert "title unchanged on re-read" not in res.stdout, res.stdout
+    assert "restore the title" not in res.stdout, res.stdout
+    assert "does NOT claim a no-op" in res.stdout, res.stdout
 
 
 if __name__ == "__main__":
