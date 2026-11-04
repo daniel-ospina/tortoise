@@ -17,7 +17,7 @@ This module closes that gap with two steps for a given eval graph:
    candidate read is ``sdk.py:8357-8363``; the ``PointPromoted`` /
    ``OperatorPromoted`` events are emitted so a JSONL replay rebuilds the same
    live state). Its operator sweep (``sdk.py:8394-8401``) is NOT copied: see
-   ``_SELECT_DRAFT_OPERATOR_IDS`` and the Cypher header below for the two
+   ``_SELECT_DRAFT_OPERATOR_IDS`` and the Cypher header below for the three
    divergences and why they are deliberate.
 2. **Run EP** so real posteriors (``posterior_alpha``/``posterior_beta``,
    falling back to ``ep_alpha``/``ep_beta``) are persisted.
@@ -104,13 +104,20 @@ EP_ENGINE = "dream:full"
 #     already-live claims has no other promotion route, #10137).
 #   * ``_SELECT_DRAFT_OPERATOR_IDS`` also treats a node carrying ``op_type`` as
 #     an operator (``is_operator = true OR op_type IS NOT NULL``), wider than the
-#     engine's ``{is_operator:true}``. That is #10137's own bug class being fixed
-#     rather than a divergence in spirit: a hybrid node (``op_type`` set,
-#     ``is_operator`` false) is promotable by NO engine path either
-#     (``promote_point`` blocks on ``op_type`` too), so leaving it draft would
-#     re-create "an operator nothing promotes". It matches ``ep.py``'s own
-#     operator predicate (``ep.py:1456/:1804/:1870/:2579``), which is what the
-#     factor graph will actually use.
+#     engine's ``{is_operator:true}``, to match ``ep.py``'s own operator
+#     predicate (``ep.py:1456/:1804/:1870/:2579``) — the one the factor graph
+#     actually uses. ⚠️ On THIS path that wider arm is INERT, and the record
+#     should say so rather than claim it closes a hole: phase 1a promotes a
+#     hybrid node (``op_type`` set, ``is_operator`` false) as a POINT first
+#     (``_SELECT_DRAFT_POINT_IDS`` admits ``is_operator IS NULL OR = false``),
+#     so by the time this sweep runs the node is already ``live`` and is no
+#     longer a candidate. Measured: ``points_promoted: 1, operators_promoted: 0``
+#     for a hybrid over live claims. It is kept because the predicate is
+#     ``ep.py``'s and the sweep should never be narrower than the factor graph —
+#     not because the activation path needs it. What 1a does to such a node is
+#     itself unchecked: it promotes a hybrid operator ``live`` over even a
+#     RETRACTED endpoint, with no R16 gate at all (#10842). That is a different
+#     phase's defect, named here so this entry does not read as its fix.
 # Pinned by ``test_the_gate_promotes_an_operator_once`` (CAS, embedded),
 # ``test_the_gate_refuses_a_status_less_operator`` (explicit-draft-only arm,
 # embedded), and this one for graph-wide REACH (stub):
