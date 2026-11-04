@@ -780,6 +780,20 @@ def _binds_locally(scope, key: str) -> bool:
     see "no local event" and resolve the enclosing name. A name that is not
     bound here at all (the genuine closure capture) still resolves outward.
 
+    ⚠️ A target that is NOT an identifier is a USE of the name, never a binding
+    of it (#10723 review at `bb2dde007`, P2 fail-open). CPython's execution
+    model lists what binds a name as *"targets that are **identifiers** if
+    occurring in an assignment … after `as` in a `with` statement"*, so
+    `sdk.timeout = 5`, `seen[sdk] = 1` and `sdk.calls += 1` all only *read*
+    `sdk` — they cannot make it local. Walking the target and accepting any
+    `ast.Name` it contains read those as bindings, so a nested writer that
+    merely set an attribute on the enclosing UNBOUND handle was answered
+    `shadowed` → `inherited` (`None` = silent), while deleting the attribute
+    line flagged it. Measured at `bb2dde007`: `_flagged` returned `[]` for the
+    attribute and subscript spellings and `['_lane:5 writes through the unbound
+    SDK `sdk`']` for the control. The `Store` requirement below is the fix; the
+    genuine shadows (`sdk = …`, `with … as sdk:`) are `Store` and stay silent.
+
     ⚠️ The stop reads the bindings of THIS BLOCK only — `_nodes_of_one_scope`
     stops at a nested `def` AND at a nested `class`, because a class body is a
     block of its own (a `class C: sdk = …` binds `C.sdk`, never the writing
@@ -805,7 +819,12 @@ def _binds_locally(scope, key: str) -> bool:
                        if item.optional_vars is not None]
         for target in targets:
             for node in ast.walk(target):
-                if isinstance(node, ast.Name) and node.id == key:
+                # `Store` only: `ast.walk` also reaches the `Load` names inside
+                # an attribute or subscript target, which are uses (see the
+                # docstring). A tuple/list target carries `Store` on each of its
+                # `Name`s, so unpacking still binds.
+                if (isinstance(node, ast.Name) and node.id == key
+                        and isinstance(node.ctx, ast.Store)):
                     return True
     return False
 
@@ -1293,9 +1312,15 @@ def test_no_hosted_lane_writes_records_through_an_unbound_sdk():
     """
     tree = ast.parse(Path(ha.__file__).read_text())
     sites = _org_scoped_sdk_sites(tree)
-    assert len(sites) >= 30, (
+    # `sites` maps LANE → its count, so the floor is asserted on the SITES, the
+    # same quantity the package-wide leg uses. `len(sites)` is the number of
+    # lanes holding at least one site (65 at `bb2dde007` against 85 sites), so
+    # the old message reported a lane count as a site count and the floor would
+    # not move while lanes kept one site each (#10723 review P3).
+    assert sum(sites.values()) >= 30, (
         "the scan found only "
-        f"{len(sites)} org-scoped SDK construction sites — the AST criteria no "
+        f"{sum(sites.values())} org-scoped SDK construction sites across "
+        f"{len(sites)} lanes — the AST criteria no "
         "longer match how lanes open their SDK")
     unbound = _unbound_record_writes(tree)
     assert unbound == [], (
@@ -2134,6 +2159,93 @@ def _lane(org_id):
         "the shadowing stop reads THIS scope's bindings only — a nested `def`'s "
         "local must not silence the write one scope out, which is the "
         "fail-open a plain `ast.walk(scope)` would introduce")
+
+
+def test_a_USE_of_the_handle_inside_the_writer_is_not_a_shadow():
+    """Setting an ATTRIBUTE on the handle reads it — it does not bind the name.
+
+    #10723 review at `bb2dde007`, P2 (fail-open, the direction this file must
+    never fail in). `_binds_locally` walked the assignment TARGET and accepted
+    any `ast.Name` it met, so the `Load` names inside an attribute or subscript
+    target counted as bindings. CPython's execution model (§4.2.1, the primary
+    source for this) says only *"targets that are identifiers"* bind a name, so
+    `sdk.timeout = 5` is a USE of `sdk`. Reading it as a binding made
+    `state_at` take the `shadowed` branch and answer `inherited` (`None` =
+    silent) for a write through the enclosing lane's UNBOUND handle.
+
+    Measured at `bb2dde007` with this file's own `_flagged`: the attribute case
+    and the subscript case returned `[]`, the augmented form returned `[]`, and
+    deleting the attribute line from the same snippet returned
+    `['_lane:5 writes through the unbound SDK `sdk` …']` — the flag existed and
+    the use-only line erased it. Post-fix all three red, so the pin fails on the
+    pre-fix code.
+
+    Mutation this reddens on: dropping `isinstance(node.ctx, ast.Store)` from
+    `_binds_locally` (back to a plain `ast.walk` over the target).
+    """
+    control = '''
+def _lane(org_id):
+    sdk = _make_sdk(namespace=org_id)
+    def _write():
+        sdk.create_point("Subject", {})
+    _write()
+'''
+    attribute_use = '''
+def _lane(org_id):
+    sdk = _make_sdk(namespace=org_id)
+    def _write():
+        sdk.timeout = 5
+        sdk.create_point("Subject", {})
+    _write()
+'''
+    subscript_use = '''
+def _lane(org_id):
+    sdk = _make_sdk(namespace=org_id)
+    def _write():
+        seen[sdk] = 1
+        sdk.create_point("Subject", {})
+    _write()
+'''
+    augmented_attribute = '''
+def _lane(org_id):
+    sdk = _make_sdk(namespace=org_id)
+    def _write():
+        sdk.calls += 1
+        sdk.create_point("Subject", {})
+    _write()
+'''
+    control_flag = _flagged(control)
+    assert control_flag, (
+        "the write goes through the enclosing lane's UNBOUND handle — the "
+        "control case, which must stay RED")
+
+    def _shape(flags: list[str]) -> list[str]:
+        """The flag with its line number dropped — the variants shift lines."""
+        return [re.sub(r":\d+ ", ":<line> ", f) for f in flags]
+
+    for label, source in (("attribute", attribute_use),
+                          ("subscript", subscript_use),
+                          ("augmented attribute", augmented_attribute)):
+        assert _shape(_flagged(source)) == _shape(control_flag), (
+            f"a {label} assignment on the handle is a USE — it does not bind "
+            "the name, so it must not hide the enclosing unbound definition "
+            "(#10723 review: a false PASS where the same snippet without that "
+            "line is RED)")
+
+    # The `Store` requirement must not cost a genuine binding: an unpacking
+    # target carries `Store` on each of its names, so this one still shadows.
+    unpacked_shadow = '''
+def _lane(org_id):
+    sdk = _make_sdk(namespace=org_id)
+    def _write():
+        sdk, other = _safe_handle(), 1
+        sdk.create_point("Subject", {})
+    _write()
+'''
+    assert _flagged(unpacked_shadow) == [], (
+        "an unpacking target BINDS each name it names, so the nested scope "
+        "holds a different variable and the outer definition does not reach "
+        "its write")
 
 
 def test_a_nested_CLASS_BODY_binding_is_not_a_binding_of_the_writing_function():
