@@ -43,9 +43,14 @@ from tools import ci_queue_health as Q
 NOW = datetime(2026, 10, 19, 3, 30, 0, tzinfo=UTC)
 
 
-def run(rid, name, event="issue_comment", age_seconds=600, created_at=None):
+def run(rid, name, event="issue_comment", age_seconds=600, created_at=None,
+        *, attempt=1, started_age_seconds=None):
     stamp = created_at or (NOW - timedelta(seconds=age_seconds)).strftime("%Y-%m-%dT%H:%M:%SZ")
-    return Q.QueuedRun(id=rid, name=name, event=event, created_at=stamp)
+    started = ("" if started_age_seconds is None
+               else (NOW - timedelta(seconds=started_age_seconds)).strftime(
+                   "%Y-%m-%dT%H:%M:%SZ"))
+    return Q.QueuedRun(id=rid, name=name, event=event, created_at=stamp,
+                       run_attempt=attempt, run_started_at=started)
 
 
 def flood_queued(count=12, name="finding-provenance", age_seconds=600, start=1000,
@@ -1485,6 +1490,169 @@ def test_a_CUT_pending_leg_cannot_certify_the_queue_clear():
     assert health.to_dict()["pending_truncated"] is True
     assert any("pending" in r and "page cap" in r for r in health.reasons), (
         "and the reading says WHICH leg was cut")
+    # ⛔ AND THE ONE LINE THE FLEET READS MUST NOT SAY `feed=read` (#10641 review).
+    # `feed=` was derived from `truncated` alone, which `read_health` feeds from the
+    # QUEUED/RUNNING legs — so a reading made `PR-UNWITNESSED` by a cut
+    # `pending`/`requested` leg printed `oldest=unmeasured, feed=read` beside its own
+    # verdict. Measured pre-fix on this exact fixture: the line below ended
+    # `feed=read`. Discriminating: `self.truncated or self.pending_truncated` is the
+    # whole fix, and dropping either half reddens this assertion.
+    assert health.state_line == (
+        "CI: PR-UNWITNESSED(queued=5, pr_running=1, pr_queued=1, pr_pending=0, "
+        "oldest=60s, feed=truncated)"
+    ), f"an unwitnessed line may not call its cut feed 'read': {health.state_line!r}"
+
+
+# ── a QUEUED RE-RUN is aged from its current attempt, never from `created_at` ──
+#
+# `created_at` does not move on a rerun (measured live by the sibling module:
+# `ci_check_repair.attempt_age_seconds`), and this change is what puts the legs a
+# re-run lands in (`pending`/`requested`) into the aged wait population — while the
+# repair path in `ci_check_repair` is what CREATES those re-runs. Aging a 2-minute-old
+# attempt from a 90-minute-old `created_at` invents a 90-minute wait, and a witnessed
+# wait is what flips `OK` to `FLOOD`/`PR-STARVED` — the FLOOD arm of which cancels
+# REAL runs of another workflow through `trimmable`.
+
+def test_a_QUEUED_RERUN_is_aged_from_its_current_attempt_NOT_created_at():
+    """The measured harm: a re-run that is seconds old read as a 90-minute wait.
+
+    Reviewer probe at the pre-fix head: 8 young `finding-provenance` runs beside one
+    `pending` PR run with `created_at` 5400 s old but `run_attempt=2` and
+    `run_started_at` 120 s old → `verdict=FLOOD, oldest=5400.0, trimmable=[100,101,102]`,
+    i.e. the inflated PR age both summons the flood and authorises three cancellations
+    of genuinely young runs. With the attempt-aware age the same reading is `OK` with
+    nothing trimmable.
+
+    Discriminating: reverting `wait_age_seconds` to `age_seconds(created_at)` restores
+    `FLOOD` and the three cancellations.
+    """
+    young = [run(100 + i, "finding-provenance", event="issue_comment",
+                 age_seconds=10) for i in range(8)]
+    rerun = run(4247, "Python CI", event="pull_request", age_seconds=5400,
+                attempt=2, started_age_seconds=120)
+    health = classify(young, pending=[rerun])
+    assert health.oldest_pr_queued_age_seconds == 120.0, (
+        "the wait is the CURRENT attempt's, not attempt 1's creation")
+    assert health.verdict == Q.OK, (
+        f"a 2-minute-old attempt is not a flood; got {health.verdict!r}")
+    assert health.trimmable == (), "and it must not authorise three real cancellations"
+    assert health.pr_wait_measured is True, "the wait WAS read — it is just young"
+
+
+def test_a_queued_rerun_with_NO_stamped_start_ABSTAINS_rather_than_inheriting_attempt_1():
+    """`None` is the honest age when the attempt's start was never stamped.
+
+    `created_at` is attempt 1's age, so using it here would report a fresh attempt as
+    an old wait. The abstention is the fail-closed direction and it ALREADY means
+    "not witnessed" downstream: the reading degrades to `PR-UNWITNESSED`, the gate
+    answers `None` (refuse), and nothing is trimmed.
+
+    Discriminating: the `if self.run_attempt >= 2: return None` arm is the whole
+    behaviour — restoring the `created_at` fallback yields `FLOOD`/`PR-STARVED` with a
+    5400 s wait nobody waited.
+    """
+    young = [run(100 + i, "finding-provenance", event="issue_comment",
+                 age_seconds=10) for i in range(8)]
+    unstamped = run(4247, "Python CI", event="pull_request", age_seconds=5400,
+                    attempt=2)
+    health = classify(young, pending=[unstamped])
+    assert health.oldest_pr_queued_age_seconds is None, (
+        "an unstamped re-run has no measurable wait — not attempt 1's age")
+    assert health.verdict == Q.PR_UNWITNESSED, (
+        f"an unmeasurable wait is not a measured-clear one; got {health.verdict!r}")
+    assert health.congests_pr is None and health.trimmable == ()
+
+
+# ── `congests_pr_apart_from`: is the queue busy with OTHER work? ──────────────
+#
+# A zero-job run is stuck ABOVE the queue but is still IN the wait population, and it
+# can only reach the repair class at ≥ 5400 s — at or above every threshold the age
+# clause compares against. So `congests_pr is False` was UNREACHABLE whenever a
+# repairable run existed, and the repair could never fire on the class it was written
+# for: an exit-0 window beside a required check that can never be produced (#10641
+# review P1, `docs/ci/ci-check-repair-red-surface.md` §Fact 2).
+
+def test_a_SOLE_witness_is_congested_by_ITSELF_and_the_repair_can_fire():
+    """The target is the only run witnessing the congestion → the refusal is
+    self-referential.
+
+    Reviewer probe (pure core): a lone `pending` target at 5700 s reads
+    `PR-STARVED oldest=5700.0 congests_pr=True`. That is the whole false PASS: the
+    gate refuses, `main()` keeps exit 0 on a measured congestion, and the required
+    check can never be produced while the only act that would clear the witness is
+    the one being refused.
+    """
+    target = run(4247, "Python CI", event="pull_request", age_seconds=5700)
+    health = classify([], pending=[target])
+    assert health.verdict == Q.PR_STARVED and health.congests_pr is True
+    assert health.wait_witness_ids == (4247,), (
+        "the reading must name the run the verdict is witnessed by")
+    assert health.congests_pr_apart_from(4247) is False, (
+        "nothing OTHER than the target witnesses this congestion")
+    # 40 young PR siblings: still nothing old enough to be a witness itself.
+    siblings = [run(5000 + i, "Python CI", event="pull_request", age_seconds=10)
+                for i in range(40)]
+    crowded = classify(siblings, pending=[target])
+    assert crowded.verdict == Q.PR_STARVED
+    assert crowded.congests_pr_apart_from(4247) is False, (
+        "a young backlog is not a congestion witness — the target still is the only one")
+
+
+def test_ANOTHER_old_wait_keeps_the_refusal_and_stops_the_repair():
+    """The other pole, so this is not "always exempt": a second old PR wait means the
+    queue IS busy with work that is not the target, and cancel-then-rerun would
+    discard a queue position behind a wait that only drains.
+
+    Discriminating: dropping the `any(rid != run_id ...)` scan (returning `False`
+    whenever the target is a witness) reddens this, while the sole-witness test above
+    keeps passing.
+    """
+    target = run(4247, "Python CI", event="pull_request", age_seconds=5700)
+    other = run(4248, "Python CI", event="pull_request", age_seconds=9000)
+    health = classify([other], pending=[target])
+    assert health.wait_witness_ids == (4248, 4247)
+    assert health.congests_pr_apart_from(4247) is True, (
+        "the other old wait congests the queue independently of the target")
+    assert health.congests_pr_apart_from(4248) is True, "...and symmetrically"
+
+
+def test_an_UNCUT_reading_is_required_before_any_witness_can_be_excluded():
+    """A cut leg or an unread leg means the unseen oldest run may be the witness.
+
+    Fail-closed BOTH ways, and they are different arms: a cut leg on a reading whose
+    verdict is otherwise clean is `PR-UNWITNESSED` (`congests_pr is None` → the gate
+    refuses and nothing may be excluded), while a POSITIVE congestion survives the cut
+    (`congests_pr is True`, the `delays_pr` arm) and the exemption is still refused
+    because the unseen oldest run could be a second witness.
+
+    Discriminating: dropping `pending_truncated` (or `pr_wait_measured`) from the guard
+    would let a feed that never finished exempt the very run it might have been hiding.
+    """
+    young = run(4247, "Python CI", event="pull_request", age_seconds=60)
+    abstained = classify([], in_progress=[run(1, "Python CI", event="pull_request",
+                                             age_seconds=60)],
+                         pending=[young], pending_truncated=True)
+    assert abstained.verdict == Q.PR_UNWITNESSED
+    assert abstained.congests_pr is None, "a cut leg is not a measured congestion"
+    assert abstained.congests_pr_apart_from(4247) is None, (
+        "...and it cannot exclude anything")
+
+    old = run(4249, "Python CI", event="pull_request", age_seconds=9000)
+    witnessed = classify([], in_progress=[run(1, "Python CI", event="pull_request",
+                                             age_seconds=60)],
+                         pending=[old], pending_truncated=True)
+    assert witnessed.verdict == Q.PR_BACKLOGGED
+    assert witnessed.congests_pr is True, (
+        "a POSITIVE congestion is a claim about what was read — the cut does not erase it")
+    assert witnessed.congests_pr_apart_from(4249) is True, (
+        "but the exemption is unavailable: the cut may have hidden a second witness")
+
+
+def test_the_witness_ids_are_emitted_so_the_caller_does_not_re_derive_them():
+    """One derivation, at the single constructor — the JSON carries it."""
+    health = classify([], pending=[run(4247, "Python CI", event="pull_request",
+                                       age_seconds=5700)])
+    assert health.to_dict()["wait_witness_ids"] == [4247]
 
 
 def test_read_health_READS_the_pending_leg(monkeypatch):
