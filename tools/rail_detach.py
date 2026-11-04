@@ -1052,7 +1052,25 @@ def collect(state_dir: Path, repo: str, pr: int) -> RailState | None:
     """Read the artifact and the rail's log. NO side effects: no writes, no
     network, no process signals. The only external call is a local `ps` state
     read, and only on a box without procfs. Returns None when no artifact
-    exists."""
+    exists.
+
+    ⛔ AND IT ANSWERS `absent`, IT DOES NOT TRACEBACK, WHEN THE RECORD IS UNLINKED
+    UNDER IT. `rm <artifact>` is the recovery BOTH verbs print, `launch` replaces
+    the record wholesale, and this function reads it several times (once before the
+    probe, once after). A `FileNotFoundError` escaping here exits 1 — the code this
+    tool publishes as `--assert-merged` "the state is NOT merged" — so a crash wore
+    the gate's exit code, which is the one signal a fleet beat must be able to
+    trust. The honest answer for a record that no longer exists is `absent` (3).
+    """
+    try:
+        return _collect_read(state_dir, repo, pr)
+    except FileNotFoundError:
+        return None
+
+
+def _collect_read(state_dir: Path, repo: str, pr: int) -> RailState | None:
+    """The read itself (see `collect` for the contract, the two passes and the
+    attempt-scoping rationale)."""
     art = artifact_path(state_dir, repo, pr)
     if not art.exists():
         return None
@@ -1235,32 +1253,47 @@ def collect(state_dir: Path, repo: str, pr: int) -> RailState | None:
         # `start`'s duplicate guard (it refuses only `waiting`). The merge is not
         # lost by waiting — the log keeps the line, and the verdict becomes `merged`
         # when the carrier exits.
-        if child > 0 and _pid_alive(child, ""):
+        #
+        # ⛔ BUT ANNOUNCED STILL OUTRANKS **`lost`**, AND A RECYCLED PID IS `lost`.
+        # Ordering the carrier first must not run the stranger branch past the merge
+        # evidence: a stranger carries nothing, while the announcement was printed
+        # only after the API confirmed `state=MERGED` — so the merge IS the verdict
+        # there. Skipping that check reported `lost` for a merged PR, which `start`
+        # accepts and the truncation then makes permanent (#2235, #3061). So: a live
+        # carrier that is OURS ⇒ waiting; an announcement ⇒ merged; a live STRANGER
+        # ⇒ lost (nothing of ours is left).
+        alive_carrier = child > 0 and _pid_alive(child, "")
+        crowd = False
+        if alive_carrier:
             child_started = read_field(text, "CHILD_STARTED")
             child_ticks = read_field(text, "CHILD_START_TICKS")
-            if _pid_is_a_stranger(child, child_started, child_ticks):
-                st.state = LOST
-                st.reason = (f"the pid the rail named (CHILD_PID={child}) started "
-                             "AFTER this rail was forked, so it is a DIFFERENT "
-                             "process — the rail is gone and its pid was RECYCLED, "
-                             "not decided")
+            crowd = _pid_is_a_stranger(child, child_started, child_ticks)
+            if not crowd:
+                st.state = WAITING
+                st.reason = ("a rail named itself (CHILD_PID) but its wrapper never "
+                             "recorded a pid — waiting for the rail's own record")
+                if _age_seconds(child_started) is None:
+                    # No identity material, so the recycled-pid residual DOES apply
+                    # here: name it and name the way out, rather than pretending a
+                    # bound exists.
+                    st.reason += ("; this artifact records no CHILD_STARTED, so that "
+                                  "pid cannot be identity-checked and a RECYCLED one "
+                                  "would lift only when it exits — clear with "
+                                  f"`rm {st.artifact}`")
                 return st
-            st.state = WAITING
-            st.reason = ("a rail named itself (CHILD_PID) but its wrapper never "
-                         "recorded a pid — waiting for the rail's own record")
-            if _age_seconds(child_started) is None:
-                # No identity material, so the recycled-pid residual DOES apply here:
-                # name it and name the way out, rather than pretending a bound exists.
-                st.reason += ("; this artifact records no CHILD_STARTED, so that pid "
-                              "cannot be identity-checked and a RECYCLED one would "
-                              f"lift only when it exits — clear with `rm {st.artifact}`")
-            return st
         merged, sha = _merge_evidence(log, pr, st.repo)
         if merged == MERGED:
             st.state, st.merge_sha = MERGED, sha
             st.reason = ("the rail's log records the merge"
                          + (" (no merge sha printed)" if not sha else "")
                          + "; the EXIT line was never written")
+            return st
+        if crowd:
+            st.state = LOST
+            st.reason = (f"the pid the rail named (CHILD_PID={child}) started "
+                         "AFTER this rail was forked, so it is a DIFFERENT "
+                         "process — the rail is gone and its pid was RECYCLED, "
+                         "not decided")
             return st
         age = _age_seconds(st.since)
         if child <= 0 and age is not None and age <= SPAWNING_TTL_S:
@@ -1527,16 +1560,23 @@ def launch(pr: int, *, cwd: Path, state_dir: Path, repo: str | None = None,
             # holding that number answers forever. Saying nothing there is a refusal
             # that names no way out. The `ps -p` gate is what keeps the `rm` from
             # being advice to unlink a live rail's own record.
-            if prior.pid:
-                hint = (f" — verify with `ps -p {prior.pid}`: a genuine wrapper lifts "
-                        "this when it exits, and a RECYCLED pid never does; if that "
-                        f"process is not this PR's rail, clear it with: rm {prior.artifact}")
-            elif prior.child > 0:
+            # ⛔ A NAMED CHILD IS CHECKED FIRST, BECAUSE IT IS THE ONE THAT CARRIES
+            # THE RAIL. `prior.pid` is the WRAPPER, and the state this module
+            # documents as its P1 is exactly "wrapper killed, rail alive": there the
+            # pid arm's `ps -p <wrapper>` returns an empty table, its own gate reads
+            # "not this PR's rail", and the `rm` it offers would unlink a LIVE rail's
+            # record — the harm the paragraph above cites as the reason to withhold a
+            # hint at all. Ordered the other way, the pid arm shadowed this one.
+            if prior.child > 0:
                 hint = (f" — the rail named CHILD_PID={prior.child} and that process "
                         "answers, so no CLOCK lifts this claim: it lifts only when "
                         "whatever process holds that pid exits (a RECYCLED one is not "
                         f"your rail). Verify with `ps -p {prior.child}`; if it is not "
                         f"this PR's rail, clear it with: rm {prior.artifact}")
+            elif prior.pid:
+                hint = (f" — verify with `ps -p {prior.pid}`: a genuine wrapper lifts "
+                        "this when it exits, and a RECYCLED pid never does; if that "
+                        f"process is not this PR's rail, clear it with: rm {prior.artifact}")
             else:
                 hint = (f" — this launch has recorded no pid and named no child, so it "
                         f"expires on its own within {SPAWNING_TTL_S}s; nothing to "

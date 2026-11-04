@@ -874,6 +874,111 @@ def test_a_pid_d_claim_refusal_names_the_check_and_the_remedy(tmp_path):
         wrapper.wait()
 
 
+def test_an_announced_merge_outranks_a_recycled_child_pid(tmp_path):
+    """⛔ ANNOUNCED BEATS `lost` — INCLUDING THE `lost` A RECYCLED PID DRAWS.
+
+    Putting the live-carrier check first (alive outranks announced) must not run the
+    stranger branch past the merge evidence: a stranger carries NOTHING, while the
+    announcement was printed only after the API confirmed `state=MERGED`, so there
+    the merge IS the verdict. Skipping it reported `lost` for a merged PR — the
+    state `start` accepts, and the truncation that follows makes the loss permanent
+    (#2235, #3061). The recycled-pid arm that already existed writes no log, so it
+    cannot see this.
+    """
+    sd = tmp_path / "state"
+    sd.mkdir()
+    art = rd.artifact_path(sd, "o/r", 92)
+    logp = rd.log_path(sd, "o/r", 92)
+    started_long_ago = time.strftime("%Y-%m-%dT%H:%M:%SZ",
+                                     time.gmtime(time.time() - 3600))
+    stranger = subprocess.Popen(["/bin/sleep", "20"], start_new_session=True,
+                                stdin=subprocess.DEVNULL,
+                                stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL)
+    try:
+        art.write_text(f"PR=92\nREPO=o/r\nSTARTED_AT={started_long_ago}\nLOG={logp}\n"
+                       f"SPAWNING=1\nCHILD_PID={stranger.pid}\n"
+                       f"CHILD_STARTED={started_long_ago}\n", encoding="utf-8")
+        logp.write_text("\n===== rail attempt started x (detached) =====\n"
+                        "admin-merge: ✅ merged PR #92 at deadbeefcafe1234 (state=MERGED)\n",
+                        encoding="utf-8")
+        st = rd.collect(sd, "o/r", 92)
+        assert st.state == rd.MERGED, st.as_dict()   # pre-fix: LOST
+        assert st.merge_sha == "deadbeefcafe1234"
+
+        # CONTROL — with nothing announced, the same recycled pid IS `lost`.
+        logp.write_text("\n===== rail attempt started x (detached) =====\n"
+                        "admin-merge: … FIRST-CHECKS wait: run 41557371710 is pending\n",
+                        encoding="utf-8")
+        st = rd.collect(sd, "o/r", 92)
+        assert st.state == rd.LOST, st.as_dict()
+        assert "RECYCLED" in st.reason
+    finally:
+        stranger.kill()
+        stranger.wait()
+
+
+def test_the_live_child_is_what_the_refusal_points_at(tmp_path):
+    """⛔ THE WRAPPER PID IS THE WRONG THING TO `ps` WHEN THE WRAPPER IS THE DEAD ONE.
+
+    "wrapper killed, rail alive" is this module's documented P1, and there `collect`
+    reports `waiting` because of `CHILD_PID` while `prior.pid` is gone. A hint that
+    names the wrapper sends the operator to an empty `ps` table, whose own gate then
+    reads "not this PR's rail" — and the `rm` it offers would unlink a LIVE rail's
+    record. The child arm must win whenever a child is named.
+    """
+    co = make_checkout(tmp_path)
+    sd = tmp_path / "state"
+    os.environ["FAKE_RAIL_SLEEP"] = "30"
+    try:
+        ln = rd.launch(91, cwd=co, state_dir=sd, repo="o/r")
+    finally:
+        os.environ.pop("FAKE_RAIL_SLEEP", None)
+    art = rd.artifact_path(sd, "o/r", 91)
+    assert wait_field(art, "CHILD_PID"), art.read_text(encoding="utf-8")
+    child = int(rd.read_field(art.read_text(encoding="utf-8"), "CHILD_PID"))
+    try:
+        os.kill(ln.pid, signal.SIGKILL)     # ONLY the wrapper: the P1 shape
+        st = wait_state(sd, 91, rd.WAITING)
+        assert st.state == rd.WAITING, st.as_dict()
+        assert st.pid == ln.pid and st.child == child, st.as_dict()
+        with pytest.raises(rd.Refused) as exc:
+            rd.launch(91, cwd=co, state_dir=sd, repo="o/r")
+        msg = str(exc.value)
+        assert "ALREADY LIVE" in msg
+        assert f"ps -p {child}" in msg, msg          # the pid that CARRIES the rail
+        assert f"ps -p {ln.pid}" not in msg, msg     # never the dead wrapper
+    finally:
+        kill_group(ln.pid)
+
+
+def test_an_artifact_unlinked_mid_collect_is_absent_not_a_traceback(tmp_path, monkeypatch):
+    """A crash must not wear the machine gate's exit code.
+
+    `collect` reads the artifact more than once, and `rm <artifact>` is the recovery
+    both verbs print. A `FileNotFoundError` escaping it exits 1 — which this tool
+    publishes as `--assert-merged` "the state is NOT merged" — so a missing record
+    would read as a completed rail that declined. `absent` (3) is the honest answer.
+    """
+    sd = tmp_path / "state"
+    sd.mkdir()
+    art = rd.artifact_path(sd, "o/r", 90)
+    logp = rd.log_path(sd, "o/r", 90)
+    art.write_text(f"PR=90\nREPO=o/r\nSTARTED_AT={rd._iso_now()}\nLOG={logp}\n"
+                   f"SPAWNING=1\nATTEMPT_ID=a90\nPID={_reaped_pid()}\n",
+                   encoding="utf-8")
+    logp.write_text(f"\n{rd.ATTEMPT_MARK} x attempt=a90 (detached) =====\n",
+                    encoding="utf-8")
+
+    def probe(leader, child, marker, **_kw):
+        art.unlink()          # an operator's `rm`, mid-read
+        return False
+
+    monkeypatch.setattr(rd, "_rail_alive", probe)
+    assert rd.collect(sd, "o/r", 90) is None            # pre-fix: FileNotFoundError
+    assert rd.main(["collect", "90", "--repo", "o/r", "--state-dir", str(sd)]) == 3
+
+
 def test_a_merge_line_naming_another_pr_is_not_this_prs_merge(tmp_path):
     """⛔ EVERY SUCCESS LINE CARRIES ITS PR NUMBER, AND THE NUMBER WAS IGNORED.
 
