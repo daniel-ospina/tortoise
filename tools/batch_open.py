@@ -23,8 +23,10 @@ THE THREE MECHANISMS, AND WHICH ONE THIS IS
 -------------------------------------------
 1. **HARD GATE** — `.mergify.yml`'s `queue_conditions` carries
    `-label=superseded-by-fold`, so a labelled constituent is refused at queue
-   ENTRY (and evicted if already queued, since Mergify drops a PR that stops
-   satisfying `queue_conditions`). This file APPLIES that label.
+   ENTRY. (Mergify's documented lifecycle also drops an already-queued PR that
+   stops satisfying `queue_conditions`, so the label should drain the queue too;
+   that part is DOCUMENTED rather than measured, and the entry gate does not rely
+   on it.) This file APPLIES that label.
 2. **CLOSE AT FOLD-OPEN** — this file, `--apply`.
 3. **CI PRIORITY** — this file applies `queue-accelerator` to the FOLD, which
    the existing `priority_rules` resolves to `priority: high` with
@@ -419,6 +421,21 @@ def is_ancestor(head: str, fold_head: str, cwd: Path) -> bool:
     return code == 0
 
 
+#: What a three-way apply prints when it FAILS to apply cleanly but still exits 0.
+#: Matched case-insensitively on the apply's own output, because the exit status
+#: cannot be trusted for this (see `content_contained`).
+_CONFLICT_MARKERS = ("with conflicts", "conflict", "does not apply", "patch failed")
+
+
+def _reports_conflict(output: str) -> bool:
+    """True iff the apply's output says the patch did not apply cleanly.
+
+    A nested function would be tidier; it is module-level so a test can call it.
+    """
+    lowered = output.lower()
+    return any(marker in lowered for marker in _CONFLICT_MARKERS)
+
+
 def content_contained(head: str, base: str, fold_head: str, cwd: Path) -> tuple[bool, str]:
     """Reverse-apply the constituent's own diff inside the fold's tree.
 
@@ -428,10 +445,30 @@ def content_contained(head: str, base: str, fold_head: str, cwd: Path) -> tuple[
     already carries the change.
 
     A scratch worktree is used so the operator's checkout is never touched, and
-    it is removed in a `finally` so a failure cannot leave one behind. `--3way`
-    lets a change that merely moved within a file still be recognised as present;
-    without it, a legitimate fold would report `NOT-CONTAINED` and the tool would
-    refuse a safe close.
+    it is removed in a `finally` so a failure cannot leave one behind.
+
+    ⛔ NO `--3way`, AND THE EXIT STATUS IS NOT THE EVIDENCE. Measured on git 2.43.0
+    against a fold tree that conflicts with the constituent at the same lines —
+    i.e. a constituent that was DROPPED from the fold:
+
+        git apply --reverse --check          -> rc=1  "patch does not apply"   (correct)
+        git apply --reverse --check --3way   -> rc=0  "Applied patch to 'f.txt' with conflicts."
+
+    `--3way` exits ZERO while reporting a CONFLICT, so a status-only reading of it
+    returns "contained" for a diff the fold tree does not carry — and `--apply`
+    then closes that PR with a comment asserting a containment that is false.
+    That is the one unrecoverable outcome this tool can produce, so:
+
+      * `--3way` is not used at all. A plain reverse-apply is the actual test:
+        it succeeds only when the change is already in the tree it is reversed
+        against. Acknowledged cost — a fold that *moved* a change within a file
+        now reports NOT-CONTAINED and the operator closes the PR by hand. A false
+        refusal costs one manual step; a false proof destroys work
+        irreversibly, so the trade is taken in that direction deliberately.
+      * the conflict phrase is ALSO refused, as a belt for any future edit that
+        reintroduces a three-way apply. Exit status alone is not containment
+        evidence — the same reason `_git` treats an unreadable result as a
+        failure rather than as empty.
     """
     tmp = Path(tempfile.mkdtemp(prefix="batch-open-"))
     worktree = tmp / "fold"
@@ -457,7 +494,7 @@ def content_contained(head: str, base: str, fold_head: str, cwd: Path) -> tuple[
             # would close a PR on no evidence at all.
             return False, "the constituent's diff is empty — nothing to prove"
         applied = subprocess.run(
-            ["git", "-c", "core.hooksPath=/dev/null", "apply", "--reverse", "--check", "--3way"],
+            ["git", "-c", "core.hooksPath=/dev/null", "apply", "--reverse", "--check"],
             cwd=worktree,
             input=diff.stdout,
             capture_output=True,
@@ -465,8 +502,16 @@ def content_contained(head: str, base: str, fold_head: str, cwd: Path) -> tuple[
             check=False,
             timeout=GIT_TIMEOUT_S,
         )
-        if applied.returncode == 0:
+        conflicting = _reports_conflict(applied.stdout + applied.stderr)
+        if applied.returncode == 0 and not conflicting:
             return True, "reverse-apply of the constituent diff is clean"
+        if conflicting:
+            # Reached only if a three-way apply is reintroduced: a conflict means
+            # the fold tree does NOT carry this change, whatever the status says.
+            return False, (
+                "reverse-apply reported a CONFLICT in the fold tree — the change is "
+                f"not contained: {(applied.stderr or applied.stdout).strip()[:300]}"
+            )
         return False, f"reverse-apply failed: {applied.stderr.strip()[:300]}"
     finally:
         if added:
@@ -496,21 +541,57 @@ def _gh(argv: list[str]) -> tuple[int, str]:
     return proc.returncode, (proc.stdout if proc.returncode == 0 else proc.stderr)
 
 
-def parse_constituents(body: str) -> list[int]:
+#: A `fold-constituents:` line is accepted only as `#<n>`/`<n>` tokens separated by
+#: commas and/or whitespace. Anything else on the line REFUSES the line rather than
+#: being harvested — see `parse_constituents`.
+_CONSTITUENTS_LINE = re.compile(r"\s*fold-constituents\s*:\s*(.*)$")
+_CONSTITUENT_TOKEN = re.compile(r"#?(\d+)")
+_CONSTITUENT_SEPARATOR = re.compile(r"^[\s,]*(?:#?\d+[\s,]*)*$")
+
+
+def parse_constituents(body: str, fold: int | None = None) -> list[int]:
     """The fold's declared constituents, from an explicit machine-readable line.
 
     NOT from prose. A fold title routinely names a PR that was deliberately NOT
     folded (`(#10641 dropped: ...)`), and closing that one would destroy work the
-    fold does not carry. The explicit line is the fold PR body's own record of
-    what it folded, which is also the evidence artifact
-    `docs/ops/batch-integration.md` already requires.
+    fold does not carry.
+
+    ⛔ THE GRAMMAR IS STRICT, and the fold's own number is never a constituent.
+    Harvesting every digit group on the line was a real defect: a natural line
+    like
+
+        fold-constituents: 10543, 10610, 10575 (was 10641, dropped; see #10820)
+
+    yielded `10641` (the PR the fold deliberately dropped) and `10820` (an issue),
+    and a line naming the fold itself yielded the FOLD — for which
+    `is_ancestor(fold_head, fold_head)` is vacuously true, so `--apply` would have
+    closed the fold along with its constituents, leaving nothing that carries the
+    validated tree. So:
+      * a parenthetical tail is STRIPPED and never parsed;
+      * the remaining line must be ONLY `#<n>`/`<n>` tokens separated by commas
+        and/or whitespace — otherwise the line is refused (returns `[]`), because
+        a line this tool cannot read unambiguously is not evidence;
+      * `fold` is excluded explicitly, and `main` excludes it again for the
+        `--constituent` path.
     """
     for line in body.splitlines():
-        match = re.match(r"\s*fold-constituents\s*:\s*(.+)$", line)
+        match = _CONSTITUENTS_LINE.match(line)
         if not match:
             continue
-        numbers = [int(n) for n in re.findall(r"\d+", match.group(1))]
-        return numbers
+        value = match.group(1)
+        # Drop a trailing parenthetical entirely: it is prose, and prose here is
+        # how a dropped PR gets closed.
+        value = re.sub(r"\([^)]*\)", " ", value)
+        value = re.sub(r"\(.*$", " ", value)  # an unterminated parenthetical
+        if not value.strip():
+            return []
+        if not _CONSTITUENT_SEPARATOR.match(value):
+            # Something other than the token grammar is on the line (a word, a
+            # bare issue reference in prose, a link). Refuse the LINE, do not
+            # harvest from it — a partial parse is how the wrong PR gets closed.
+            return []
+        numbers = [int(n) for n in _CONSTITUENT_TOKEN.findall(value)]
+        return [n for n in numbers if n != fold]
     return []
 
 
@@ -596,7 +677,17 @@ def main(argv: list[str] | None = None) -> int:
         print(f"cannot read fold #{args.fold} — nothing measured is never a pass", file=sys.stderr)
         return 2
 
-    constituents = args.constituent or parse_constituents(body)
+    # ⛔ The fold is never one of its own constituents. `--constituent <fold>` would
+    # otherwise yield `is_ancestor(fold_head, fold_head) == True` and close the fold
+    # itself, leaving nothing that carries the validated tree.
+    requested = args.constituent or parse_constituents(body, fold=args.fold)
+    constituents = [n for n in dict.fromkeys(requested) if n != args.fold]
+    if args.constituent and args.fold in args.constituent:
+        print(
+            f"ignoring --constituent {args.fold}: that is the fold itself, and a fold "
+            "is never one of its own constituents",
+            file=sys.stderr,
+        )
     if not constituents:
         hint = hint_constituents(body, args.fold)
         print(

@@ -164,8 +164,12 @@ queue_rules:
       # below: `_split_check` classifies by the `check-` prefix, so `queue ∪ merge`
       # is unchanged and `tests/test_batch_gate.py` proves it name-for-name. Removing
       # the line silently restores the disruption, which is why that test asserts it.
-      # Mergify also EVICTS an already-queued PR that stops satisfying these
-      # conditions, so applying the label drains the queue as well as gating it.
+      # Mergify's documented lifecycle drops an already-queued PR that stops
+      # satisfying these conditions, so applying the label should also drain the
+      # queue. ⚠️ That is Mergify's DOCUMENTED behaviour and is deliberately NOT
+      # claimed as measured here — the ENTRY gate above does not depend on it, so
+      # treat the drain as a bonus and verify it in the Mergify UI before relying
+      # on it for a live fold.
       - -label=superseded-by-fold
       - check-success=pricing-artifact
       - check-success=docs

@@ -961,8 +961,10 @@ Two mechanisms close that, and they are complementary — neither is sufficient 
 1. **The queue refuses a labelled constituent at ENTRY.** `queue_conditions` carries
    `-label=superseded-by-fold`. Entry, not merge, because `merge_conditions` is evaluated against
 the queue *branch*, which carries no author labels — a label condition there could never become
-true and would **deadlock the queue for every PR**. Mergify also evicts an already-queued PR that
-stops satisfying `queue_conditions`, so the same line drains the queue.
+true and would **deadlock the queue for every PR**. Mergify's documented lifecycle also drops an
+already-queued PR that stops satisfying `queue_conditions`, so the label should drain the queue too —
+⚠️ that part is **documented, not measured** here; the entry gate does not rely on it, so confirm the
+drain in the Mergify UI before counting on it for a live batch.
    ⚠️ **Measured limit: this gate refuses nothing until the label is applied.** With no label, all
    7 were still admitted. So mechanism 2 is load-bearing; mechanism 1 is the belt.
 2. **`tools/batch_open.py` labels and closes the constituents when the batch opens.** A closed PR

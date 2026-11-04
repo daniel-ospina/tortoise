@@ -372,6 +372,194 @@ def test_label_only_reports_a_failed_label_instead_of_claiming_success() -> None
 
 
 # ---------------------------------------------------------------------------
+# (b2) CONTAINMENT AT THE REAL-GIT LEVEL — the defect these exist for
+#
+# Every test above injects a hand-made `Verdict`, so they pin the POLICY
+# (closable or not) and nothing about how a verdict is DERIVED. Two real defects
+# were green under exactly that gap, both of which closed a PR on a false proof:
+#
+#  1. `content_contained` read only the exit status of
+#     `git apply --reverse --check --3way`, and git 2.43.0 exits **0** while
+#     printing "Applied patch to 'f.txt' with conflicts." — so a constituent that
+#     CONFLICTS with the fold (i.e. one that was dropped from it) was reported
+#     CONTAINED-CONTENT.
+#  2. `parse_constituents` harvested every digit group on the
+#     `fold-constituents:` line, so a parenthetical naming a dropped PR, or the
+#     fold's own number, became a constituent — and `is_ancestor(fold_head,
+#     fold_head)` is vacuously true, so `--apply` closed the fold itself.
+#
+# These run against a scratch repository built with git plumbing, so they measure
+# the real functions rather than a model of them.
+# ---------------------------------------------------------------------------
+
+
+def _git(repo: Path, *args: str, stdin: str | None = None) -> str:
+    proc = subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "-c",
+            "core.hooksPath=/dev/null",
+            "-c",
+            "commit.gpgsign=false",
+            *args,
+        ],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=False,
+        input=stdin,
+        timeout=120,
+    )
+    assert proc.returncode == 0, f"git {' '.join(args)} failed: {proc.stderr}"
+    return proc.stdout.strip()
+
+
+def _commit(repo: Path, files: dict[str, str], parents: list[str], message: str) -> str:
+    entries = []
+    for name, content in files.items():
+        blob = _git(repo, "hash-object", "-w", "--stdin", stdin=content)
+        entries.append(f"100644 blob {blob}\t{name}")
+    tree = _git(repo, "mktree", stdin="\n".join(entries) + "\n")
+    args = ["commit-tree", tree, "-m", message]
+    for parent in parents:
+        args += ["-p", parent]
+    return _git(repo, *args)
+
+
+@pytest.fixture()
+def scratch_repo(tmp_path: Path) -> Path:
+    repo = tmp_path / "r"
+    repo.mkdir()
+    _git(repo, "init", "-q", ".")
+    return repo
+
+
+def _three_way_fixture(repo: Path) -> tuple[str, str, str]:
+    """base / constituent / fold where the FOLD CONFLICTS with the constituent.
+
+    Models the case that matters: a squash-built fold that changed the same lines,
+    which is exactly a constituent the fold did NOT carry.
+    """
+    base = _commit(repo, {"f.txt": "one\ntwo\nthree\n"}, [], "base")
+    const = _commit(repo, {"f.txt": "one\nTWO-changed\nthree\n"}, [base], "const")
+    fold = _commit(repo, {"f.txt": "one\nZZZ-unrelated\nthree\n"}, [base], "fold")
+    return base, const, fold
+
+
+def test_a_CONFLICTING_fold_tree_is_NOT_reported_as_contained(
+    scratch_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """(b2) THE DEFECT: a conflicting reverse-apply must not prove containment.
+
+    `git apply --reverse --check --3way` exits 0 with "… with conflicts." here, so
+    a status-only reading said CONTAINED-CONTENT and `--apply` closed a PR whose
+    work no fold carries — irreversible, with a comment asserting a falsehood.
+
+    The fix drops `--3way` and additionally refuses any conflict marker, so this
+    test fails on either regression: a reintroduced three-way apply, or a return
+    to trusting the exit status alone.
+    """
+    base, const, fold = _three_way_fixture(scratch_repo)
+    monkeypatch.chdir(scratch_repo)
+    verdict = bo.verdict_for(101, const, base, fold, scratch_repo)
+    assert verdict.state != "CONTAINED-CONTENT", (
+        "a constituent that CONFLICTS with the fold tree was reported contained — "
+        f"the tool would close it: {verdict}"
+    )
+    assert verdict.closable is False, f"a conflicting constituent must not be closable: {verdict}"
+
+
+def test_a_genuinely_contained_change_still_proves_out(scratch_repo: Path) -> None:
+    """(b2) The fix must not be a blanket refusal — the positive case must still work.
+
+    Without this, deleting `content_contained` would pass the test above.
+    """
+    base = _commit(scratch_repo, {"f.txt": "one\ntwo\nthree\n"}, [], "base")
+    const = _commit(scratch_repo, {"f.txt": "one\nTWO\nthree\n"}, [base], "const")
+    # A squash-built fold: different history, the SAME resulting blob content is
+    # not required — the fold carries the change plus an unrelated one.
+    fold = _commit(
+        scratch_repo,
+        {"f.txt": "one\nTWO\nthree\n", "g.txt": "extra\n"},
+        [base],
+        "fold",
+    )
+    verdict = bo.verdict_for(101, const, base, fold, scratch_repo)
+    assert verdict.state == "CONTAINED-CONTENT", verdict
+    assert verdict.closable is True
+
+
+def test_the_conflict_marker_is_refused_whatever_the_exit_status(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """(b2) Belt for a future `--3way` reintroduction: output beats exit status.
+
+    Simulates the measured git behaviour directly — rc 0 WITH the conflict phrase —
+    so this cannot pass by accident on a git version that happens to behave
+    differently.
+    """
+    assert bo._reports_conflict("Applied patch to 'f.txt' with conflicts.") is True
+    assert bo._reports_conflict("error: patch failed: f.txt:1") is True
+    assert bo._reports_conflict("") is False
+
+
+def test_parse_constituents_ignores_a_parenthetical_and_the_fold_itself() -> None:
+    """(b2) THE DEFECT: prose on the machine-readable line must not become a close target.
+
+    Measured with the old parser:
+        'fold-constituents: 10543, 10610, 10575 (was 10641, dropped; see #10820)'
+            -> [10543, 10610, 10575, 10641, 10820]
+    `10641` is the PR the fold deliberately DROPPED and `10820` is an issue — both
+    would have been labelled un-queueable and closed.
+    """
+    body = (
+        "Some prose naming #99999.\n"
+        "fold-constituents: 10543, 10610, 10575 (was 10641, dropped; see #10820)\n"
+    )
+    assert bo.parse_constituents(body, fold=10894) == [10543, 10610, 10575]
+
+
+def test_parse_constituents_excludes_the_fold_itself() -> None:
+    """(b2) THE DEFECT: the fold's own number is never a constituent.
+
+    `is_ancestor(fold_head, fold_head)` is vacuously true, so a fold listed among
+    its own constituents would be closed in the same run as its constituents —
+    nothing carrying the validated tree would remain.
+    """
+    body = "fold-constituents: 10894 = 10543, 10610\n"
+    assert 10894 not in bo.parse_constituents(body, fold=10894)
+    assert bo.parse_constituents("fold-constituents: #10894, #10543\n", fold=10894) == [10543]
+
+
+def test_parse_constituents_refuses_a_line_it_cannot_read_unambiguously() -> None:
+    """(b2) Fail closed: a partially-readable line is NOT evidence.
+
+    Harvesting the readable tokens out of a line carrying prose is how the wrong PR
+    gets closed; refusing the line sends the operator to `--constituent`, which is
+    explicit.
+    """
+    for line in (
+        "fold-constituents: see the batch description\n",
+        "fold-constituents: 10543 and also 10610\n",
+        "fold-constituents: https://github.com/o/r/pull/10543\n",
+    ):
+        assert bo.parse_constituents(line, fold=900) == [], line
+
+
+def test_hint_constituents_still_sees_prose_but_is_never_acted_on() -> None:
+    """(b2) The prose hint is retained for the refusal message only."""
+    body = "batch(x): land #10543 #10610 (#10641 dropped)"
+    assert bo.hint_constituents(body, 900) == [10543, 10610, 10641]
+    assert bo.parse_constituents(body, fold=900) == [], (
+        "a title carrying no `fold-constituents:` line must yield NO constituents"
+    )
+
+
+# ---------------------------------------------------------------------------
 # (c) THE CONFIGURATION CONTRACT SURVIVES
 # ---------------------------------------------------------------------------
 
@@ -547,22 +735,54 @@ def test_runs_on_carries_no_job_level_fold_expression() -> None:
     runner — so exactly one `runs-on` may read `matrix.runner`, it must be the
     selector's array verbatim, and no `runs-on` anywhere may introduce a `fold`
     pool the fleet does not have.
+
+    ⛔ PARSED AS YAML, not scanned line-by-line. A line scan seeing only entries
+    whose text STARTS with `runs-on:` is blind to the legal block-style spelling —
+
+        runs-on:
+          - self-hosted
+          - fold
+
+    — which parses to the same thing and would have slipped a `fold` pool past
+    this pin while it stayed green. The pin has to read the document, because the
+    thing it forbids is a YAML value and not a line shape.
     """
-    text = (ROOT / ".github" / "workflows" / "python-ci.yml").read_text(encoding="utf-8")
-    runs_on = [line.strip() for line in text.splitlines() if line.strip().startswith("runs-on:")]
-    assert runs_on, "no runs-on found in python-ci.yml"
-
-    matrix_rows = [line for line in runs_on if "matrix.runner" in line]
-    assert len(matrix_rows) == 1, f"expected exactly one matrix-driven `runs-on`, got {matrix_rows}"
-    assert matrix_rows[0] == "runs-on: ${{ fromJSON(matrix.runner) }}", (
-        "the shard `runs-on` gained logic — it must parse the selector's array "
-        f"verbatim, not derive one: {matrix_rows[0]!r}"
+    doc = yaml.safe_load(
+        (ROOT / ".github" / "workflows" / "python-ci.yml").read_text(encoding="utf-8")
     )
+    jobs = doc.get("jobs")
+    assert isinstance(jobs, dict) and jobs, "python-ci.yml has no jobs"
 
-    fold_rows = [line for line in runs_on if "fold" in line]
-    assert not fold_rows, (
-        f"a `runs-on` names a `fold` pool — no runner on this fleet carries that "
-        f"label, so the job would never start: {fold_rows}"
+    def labels(value) -> list[str]:
+        if isinstance(value, str):
+            return [value]
+        if isinstance(value, list):
+            return [str(v) for v in value]
+        raise AssertionError(f"unrecognised runs-on shape: {value!r}")
+
+    matrix_jobs = []
+    fold_jobs = []
+    for job_id, job in jobs.items():
+        if not isinstance(job, dict) or "runs-on" not in job:
+            continue
+        entries = labels(job["runs-on"])
+        if any("matrix.runner" in entry for entry in entries):
+            matrix_jobs.append((job_id, entries))
+        if any("fold" in entry for entry in entries):
+            fold_jobs.append((job_id, entries))
+
+    assert len(matrix_jobs) == 1, (
+        "expected exactly one matrix-driven `runs-on`, got "
+        f"{[j for j, _ in matrix_jobs]} — two would be two places to decide routing"
+    )
+    job_id, entries = matrix_jobs[0]
+    assert entries == ["${{ fromJSON(matrix.runner) }}"], (
+        "the shard `runs-on` gained logic — it must parse the selector's array "
+        f"verbatim, not derive one: job {job_id!r} has {entries}"
+    )
+    assert not fold_jobs, (
+        "a `runs-on` names a `fold` pool — no runner on this fleet carries that "
+        f"label, so the job would never start: {fold_jobs}"
     )
 
 
@@ -570,9 +790,16 @@ def _registered_runner_labels() -> set[str]:
     """The label set the x86 runner installer would register, computed locally.
 
     `--print-labels` is the installer's own resolution (no network, no `gh`), so
-    this reads the fleet's INTENT rather than a rate-limited API. A non-zero exit
-    is a could-not-measure, never an empty set — an empty set would make the
-    assertion above vacuously true.
+    this measures the installer's INTENT, not the fleet's live registration — say
+    so rather than overclaim. It is the right measure for the question asked:
+    whether a job naming `fold` could be matched on this box is decided by the
+    labels the installer writes, and an installer that never emits `fold` is
+    sufficient to show the route is inert. A live `gh api …/actions/runners` read
+    would be the stronger measurement and is deliberately not used here — it is
+    rate-limited and would make this guard flaky for no extra discrimination.
+
+    A non-zero exit is a could-not-measure, never an empty set: an empty set would
+    make the assertions above vacuously true.
     """
     proc = subprocess.run(
         ["bash", str(ROOT / "tools" / "install-ci-runner-x64.sh"), "--print-labels"],
