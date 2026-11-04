@@ -784,13 +784,13 @@ holding one `event` and one `document` entity item returns
 duplicate by comparing `created.entities` and `ids.entities` across the retry —
 the count says a second occurrence was minted and the ids name it. (Whether any
 other row in §3.2's table reaches your deployment is likewise not something this
-paragraph asserts; §3.2's emission note is not a census.) ⚠️ **The rest of this
-document is stale on the same point**: §2.2, §13 rows 6–7 and §14 still promise
-unqualified convergence, and §16 still calls `list_batch` `planned` though it
-ships. Those are pre-existing — older than the change that prompted this
-paragraph — and are filed as **#10907** rather than scoped here one sentence at a
-time. Treat THIS paragraph and §7's rule as the authoritative statement of what
-dedups; where another section disagrees, it is wrong.
+paragraph asserts; §3.2's emission note is not a census.) ⚠️ **Other sections of
+this document are stale on the same point** — this paragraph does not enumerate
+them, because a list here would itself be a census this change cannot keep
+true. They are pre-existing (older than the change that prompted this paragraph)
+and are filed as **#10907**. Treat THIS paragraph, §7's recovery rule and §15's
+carve-out as the authoritative statement of what dedups and what appends; where
+another section disagrees, it is wrong.
 
 ⚠️ **This is also why `tortoise_ingest` is NOT declared idempotent on the MCP
 surface** (`annotations.idempotentHint: false`). A `-32009` wait-bound refusal on
