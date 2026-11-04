@@ -801,11 +801,11 @@ kind + content hash), sources (by url) and connections (by endpoint set + arity)
 Everything else depends on the item, and there are at least THREE independent
 mechanisms by which an identical resubmission writes again:
 
-* `document` and `event` entities — occurrence records, append-only by contract
+- `document` and `event` entities — occurrence records, append-only by contract
   (`sdk.ingest` sets `existed = []` on both legs: "never deduped");
-* an OPERATOR point — the fold's predicate skips operator nodes, so a points item
+- an OPERATOR point — the fold's predicate skips operator nodes, so a points item
   declaring itself one mints a second node;
-* a point whose identity differs from what the fold QUERIES — the props
+- a point whose identity differs from what the fold QUERIES — the props
   passthrough can carry `pointKind` itself, which WINS over the positional kind
   on the node while the query still scopes by the positional kind, so
   `{"content": "x", "pointKind": "decision"}` resubmitted mints a second node
