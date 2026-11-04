@@ -4449,7 +4449,8 @@ jobs:
     # (`merge_conditions`), and the measured wedge (#10911) — a cancelled run re-arming
     # this job into a permanent `queued` state so it never posts at all — fails SAFE:
     # the rail REFUSES BY NAME (`check-unresolved:<name>:<status>/<conclusion>`) at
-    # `ADMIN_MERGE_CHECK_UNRESOLVED_BOUND` (default 3600 s, `ADMIN_MERGE_CHECK_UNRESOLVED_BOUND` in `admin-merge.sh`),
+    # `ADMIN_MERGE_CHECK_UNRESOLVED_BOUND` (default 3600 s, read from
+    # `CHECK_UNRESOLVED_BOUND` in `admin-merge.sh`),
     # which exists for precisely this shape — its own doc block says a run "queued
     # because the whole pool is saturated never stops moving, so no progress-based
     # clock can ever reach it". Making the gate skippable would replace that refusal

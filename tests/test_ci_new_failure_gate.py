@@ -1026,10 +1026,11 @@ def _condition_holds(expr, *, run_cancelled: bool, legs_failed: bool) -> bool:
 def test_both_jobs_stay_literal_always():
     """The exact-string pin for BOTH jobs — the behavioural check is not a substitute.
 
-    A behavioural check over `(run_cancelled, legs_failed)` cannot distinguish `always()`
-    from `!cancelled()` in the one state it does not sample, and the aggregate's
-    `ci-introduced-failure` row carries the `-` selector, so a skipped verdict REDs the
-    required check. Distinct defect, distinct pin: this one is exact.
+    No behavioural check covers `ci-introduced-failure` — the job the wedge re-arms
+    first — so its pin must be exact. The behavioural test DOES catch `!cancelled()` on
+    the AGGREGATE (at its `run_cancelled=True` assertion), but it never inspects this
+    job. The aggregate's `-`-selectored row for this job then REDs the required check on
+    a skipped verdict.
     """
     import yaml
 
@@ -1059,9 +1060,10 @@ def test_the_required_aggregate_must_not_be_skippable_on_a_cancelled_run():
     troubleshooting docs) a stuck run keeps blocking later runs in the same concurrency
     group. That is a real wedge and it fails SAFE: the required context never posts, so
     the rail REFUSES BY NAME (`check-unresolved:<name>:<status>/<conclusion>`) at
-    `ADMIN_MERGE_CHECK_UNRESOLVED_BOUND` (default 3600 s,
-    `agent-infra/scripts/admin-merge.sh:1006`) — the bound written for exactly this
-    shape, whose doc block notes a run "queued because the whole pool is saturated never
+    the bound `ADMIN_MERGE_CHECK_UNRESOLVED_BOUND` (default 3600 s, read from
+    `CHECK_UNRESOLVED_BOUND` in `admin-merge.sh` — cite the CONSTANT, never a rail line:
+    `tests/fixtures/rail_surface_tokens.json`'s `_read_at_rail_lines` records how far
+    those drift between checkouts) — the bound written for exactly this shape, whose doc block notes a run "queued because the whole pool is saturated never
     stops moving, so no progress-based clock can ever reach it".
 
     ⛔ The obvious fix — `${{ !cancelled() }}` — is a FALSE PASS and is refused here.
