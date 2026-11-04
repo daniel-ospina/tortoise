@@ -178,14 +178,16 @@ Measured 2026-10-31 on `main@eac49c0dd9aababd01016325a34a327481dd006c`.
 All 24 questions completed (`failed = 0`), then the runner's watchdog aborted the *finalisation*
 (`RUN ABORTED — degraded_aborted: leg_dead`) on a box at load 10–55, so no `*.report.json` was
 written. The census is therefore derived from the run's own checkpoint via the runner's own
-aggregation function — the same code path the report uses (`run.py:5693`) — not a second
-implementation. `probes/census.py` is that call, and it reads either shape.
+aggregation function — the same code path the report uses (`run.py`'s call to
+`measurement_posture.summarize_belief_activation`) — not a second implementation.
+`probes/census.py` is that call, and it reads either shape.
 
 ### The per-question block, on the REPORT path (the shape a finalised run writes)
 
-The checkpoint write has always carried each question's belief manifest
-(`run.py:5115-5116`), which is why the cells above could be audited row by row. The **report's**
-outcome projection is an explicit whitelist and did **not** carry it, so reading a report gave a
+The checkpoint write has always carried each question's belief manifest (`run.py`, where the
+checkpoint row spreads `belief_activation` in when it is not `None`), which is why the cells above
+could be audited row by row. The **report's** outcome projection is an explicit whitelist and did
+**not** carry it, so reading a report gave a
 correct aggregate (`methodology.measurement_posture.activation`) above **192 of 192 null**
 per-question cells — the ordinary path a future run takes was the one that lost the column, and a
 null `ep_ran` / `points_with_ep` in such a block is indistinguishable from a measured one
@@ -217,12 +219,12 @@ null `ep_ran` / `points_with_ep` in such a block is indistinguishable from a mea
   `summarize_belief_activation` only ever sees `outcomes`, so a checkpoint from a *crashed* run —
   the normal case, and the case this very bundle came from — would publish
   `questions_with_ep / questions = N/N = 1.00` over its survivors with the ablation invisible. The
-  probe therefore reads the input's own failure list (`run.py:2797` writes `failures`; a report
-  carries both the list and `n_failed`, `report.py:2792-2798`) and publishes `questions_failed`
-  beside `questions_in_run` — **the ratio's own denominator plus the questions it excludes**, which
-  is what makes `questions_in_run − questions == questions_failed` hold by construction rather
-  than by luck. The failure ids are counted as **distinct ids over both lists**, never
-  `len(outcomes) + len(failures)`: a qid completed by one worker and failed by another lands in
+  probe therefore reads the input's own failure list (`run.py` writes the `failures` key into the
+  checkpoint; a report carries both the list and `n_failed`, `report.py:2792-2798`) and publishes
+  `questions_failed` beside `questions_in_run` — **the ratio's own denominator plus the questions it
+  excludes**, which is what makes `questions_in_run − questions == questions_failed` hold by
+  construction rather than by luck. The failure ids are counted as **distinct ids over both lists**,
+  never `len(outcomes) + len(failures)`: a qid completed by one worker and failed by another lands in
   both (`report.py:1407-1410`), and summing the lengths published a 2-question population as a
   3-question run. And the total is never a *second* count of the population: the runner's own
   denominator counts rows while the ids are distinct, so a duplicate-`question_id` input published a
@@ -236,8 +238,17 @@ null `ep_ran` / `points_with_ep` in such a block is indistinguishable from a mea
   `tests/longmem_eval/test_ep_census_10137.py::test_census_probe_*`.
 
 `census.json` below was written by the *checkpoint* path, so it carries `per_question_source:
-"outcome.belief_activation"` and `per_question_unread: 0` — measured on every one of the 24
-questions, which is verifiable from the rows themselves (no `null` in any of the seven COUNT cells
-across the 24 questions; the eighth cell, `no_op_reason`, is `null` in all 24 because no question
-no-op'd — that null is the measured value, not a missing one; the ninth, `error`, is `null` for the
-same reason).
+"outcome.belief_activation"` and `per_question_unread: 0` — every one of the 24 questions produced an
+outcome, which is verifiable from the rows themselves. The rows carry **thirteen** value cells, and
+"measured" is a per-cell question, not a per-row one:
+
+- the **seven COUNT cells** (`operators`, `factor_edges`, `points_with_ep`, `points_unmeasured`,
+  `points_off_neutral`, `points_moved_off_neutral`, `ep_ran`) are non-`null` in all 24 rows;
+- `no_op_reason` is `null` in all 24 because no question no-op'd — that null is the measured value,
+  not a missing one, and `error` is `null` for the same reason;
+- the **four `points_substrate` / `belief_eligible_*` cells are `null` in all 24 rows, and those
+  nulls are NOT measured** — this run predates #10493, so no question ever read the eligibility
+  population. Each carries its `_unread: 24` companion, and that companion is the only thing
+  separating "we looked and the answer was nothing" from "nobody looked"; `belief_eligible_ratio`
+  is therefore withheld rather than published over an unread denominator. See the cell table
+  above, `cells.belief_eligible_total` and `census.json`'s own rows.
