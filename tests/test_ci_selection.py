@@ -7038,6 +7038,66 @@ def test_the_stale_case_count_guard_is_not_vacuous(tmp_path):
         ("test_gone.py", 4, None)]
 
 
+# ── a row may not state ZERO cases for a file that defines tests ──────────────
+# The instruments disagree on a CLASS-BASED file: `grep -c '^def test_'` reads **0**
+# for every test that lives as a method of a `Test*` class, while the session that
+# ran it reports the real count. So a row that re-derived its count with that
+# instrument and wrote the result into a note that QUOTES a passing run produces a
+# sentence that contradicts itself in one line — "pytest session total, 0 tests,
+# '16 passed in 138.63s'" (measured on the #10726 fold at `65b3d332b`: two such
+# rows). Zero is never a legitimate case count here — every key in this map is a
+# file that contributes tests — so it is judged WITHOUT needing the citation form
+# the pins above require. `0 tests skipped` is a different claim and is not judged.
+_ZERO_CASE_COUNT_RE = re.compile(r"(?<![\w.])0 tests\b(?!\s+skipped)")
+
+
+def _durations_rows_claiming_zero_cases(text: str, tests_dir: Path):
+    """`(key, indented-definition-count)` for rows asserting ZERO cases for a real file.
+
+    The second element proves the claim false: the number of `def test_` at ANY
+    indent (methods of a `Test*` class included), which no collection can undercut.
+    """
+    out = []
+    for key, note in _durations_row_comments(text):
+        if _ZERO_CASE_COUNT_RE.search(note) is None:
+            continue
+        path = tests_dir / key
+        defined = (len(re.findall(r"^\s*def test_", path.read_text(encoding="utf-8"),
+                                  re.M)) if path.is_file() else 0)
+        if defined:
+            out.append((key, defined))
+    return out
+
+
+def test_no_durations_row_states_zero_cases_for_a_file_that_defines_tests():
+    """A row that quotes a passing run cannot also claim the file has 0 cases."""
+    offenders = _durations_rows_claiming_zero_cases(
+        cs.MANIFEST.read_text(encoding="utf-8"), cs.TESTS_DIR)
+    assert offenders == [], (
+        "a durations row states its file has 0 cases while the file defines tests "
+        "— `grep -c '^def test_'` reads 0 for a class-based file, so a count "
+        "re-derived with it is a FLOOR of zero, not a measurement. Restore the "
+        "measured count (or re-derive with `tools/ci_timing.declared_test_counts`, "
+        f"which reads the AST): (key, defined): {offenders}")
+
+
+def test_the_zero_case_count_guard_is_not_vacuous(tmp_path):
+    """Bites on a zero claim, stays quiet on `0 tests skipped` and on a real file."""
+    (tmp_path / "test_cls.py").write_text(
+        "class TestThing:\n    def test_a(self):\n        pass\n", encoding="utf-8")
+    zeroed = (
+        "durations:\n"
+        "  test_cls.py: 2.0  # #5509: pytest session total, 0 tests, \"16 passed in "
+        "138.63s\".\n"
+        "surfaces: []\n")
+    skipped = (
+        "durations:\n"
+        "  test_cls.py: 2.0  # #5509: 16 tests, and 0 tests skipped on this lane.\n"
+        "surfaces: []\n")
+    assert _durations_rows_claiming_zero_cases(zeroed, tmp_path) == [("test_cls.py", 1)]
+    assert _durations_rows_claiming_zero_cases(skipped, tmp_path) == []
+
+
 #: A row's own STALENESS CHAIN — "This count has gone stale THIRTEEN times
 #: (17 -> 19 -> … -> 38)". The chain is the row's history of control-adding cycles,
 #: and its own ⛔ ENTRY RULE fixes what the LAST element means: "every entry in that

@@ -784,3 +784,47 @@ def test_gh_json_wraps_a_non_json_answer_as_runtime_error(monkeypatch):
         assert "non-JSON" in str(exc)
     else:
         raise AssertionError("a non-JSON answer must raise RuntimeError (contract: never exit 1)")
+
+
+# ── the committed artifact must be REPRODUCIBLE from the committed generator ──
+# `operations/attest-census.md` advertises itself as "machine-generated … by
+# `tools/attest_census.py`", so the totals block in it is that tool's OUTPUT, not
+# prose a lane may retype. Measured on the #10726 fold at `65b3d332b`: the fold's
+# `render()` had been reduced to `f"**{totals}**"` (dropping `main`'s `## Census
+# totals` header), while the committed artifact still carried a HAND-WRITTEN
+# `Outcomes across the rows below: **…**` line that no generator in the tree
+# emitted — so the "machine-generated" snapshot could not have been produced by
+# the tool that claims to produce it. Neither side was checked by anything.
+def _artifact_rows(text: str):
+    """`Row`s carrying the outcome each table row in the artifact states."""
+    rows = []
+    for line in text.splitlines():
+        cells = [c.strip() for c in line.strip().strip("|").split("|")]
+        if len(cells) != 10 or not cells[0].startswith("#"):
+            continue
+        rows.append(ac.Row(pr=int(cells[0].lstrip("#")), head="", branch="", title="",
+                           record=None, outcome=cells[-1].strip("*")))
+    return rows
+
+
+def test_the_committed_census_totals_are_what_the_generator_emits_for_its_rows():
+    """The snapshot's totals block must be reproducible from the tool, verbatim."""
+    artifact = (Path(__file__).resolve().parent.parent
+                / "operations" / "attest-census.md").read_text(encoding="utf-8")
+    rows = _artifact_rows(artifact)
+    assert rows, "the committed artifact carries no census rows to check its totals against"
+
+    rendered = ac.render(rows, "daniel-ospina/tortoise", "2026-11-03T05:22:14Z")
+    block = artifact.split("## Census totals", 1)
+    assert len(block) == 2, (
+        "the committed artifact has no `## Census totals` section — the header the "
+        "generator emits is missing, so the artifact and its generator disagree")
+    stated = [line for line in block[1].splitlines() if line.strip()]
+    assert stated, "the `## Census totals` section carries no totals line"
+    totals_line = stated[0]
+
+    assert f"## Census totals\n\n{totals_line}\n" in rendered, (
+        "the committed artifact's totals line is not what `render()` emits for the "
+        f"same rows — artifact says {totals_line!r};\nrender() says "
+        f"{rendered.split('## Census totals', 1)[1].splitlines()[:3]!r}. The artifact "
+        "is a machine-generated snapshot: regenerate it, do not retype it.")
