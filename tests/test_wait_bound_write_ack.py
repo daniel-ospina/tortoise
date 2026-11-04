@@ -211,6 +211,82 @@ def test_retry_safe_is_derived_from_the_registry_and_fails_closed():
         "double-counts the claim's EP weight (#10849)")
 
 
+def test_the_verdict_is_per_CALL_not_per_name():
+    """`create_point(dedup=False)` must NOT ship "repeating it converges".
+
+    `tortoise_create_point` is idempotent BECAUSE of its `dedup` argument, which
+    the caller controls: `dedup=False` mints a second Point with identical
+    content instead of folding onto the existing one (its own docs say so, and
+    `sdk.py` gates the whole dedup branch on `if dedup:`). A name-only verdict
+    would therefore hand `retry_safe: true` to the exact duplicate this contract
+    exists to prevent — on the exact tool #10849 measured.
+    """
+    def data(**args):
+        return _error(ms._wait_bound_refusal_result("tortoise_create_point",
+                                                    args))["data"]
+
+    assert data()["retry_safe"] is True, "an absent dedup keeps the tool default"
+    assert data(dedup=True)["retry_safe"] is True
+    assert data(dedup=False)["retry_safe"] is False, (
+        "dedup=False diverges — a retry writes a second Point")
+    assert data(dedup=False)["retry_rule"] == ms._WAIT_BOUND_RETRY_RULE_UNSAFE
+    # ⛔ The STRING spellings reach the handler as `False`: `dedup` is declared
+    # `{"type": "boolean"}` in the served schema and FastMCP coerces before the
+    # handler runs — `"false"`/`"False"`/`"0"`/`"no"` all arrive as `False`
+    # (measured; the same coercion `tests/test_10084_graph_disclosure.py` pins
+    # for `dry_run`). The refusal reads the RAW pre-validation dict, so it must
+    # fail closed on a non-bool rather than trust Python truthiness — a
+    # truthiness test would call `"false"` converging and license a duplicate.
+    for spelling in ("false", "False", "0", "no"):
+        assert data(dedup=spelling)["retry_safe"] is False, (
+            f"dedup={spelling!r} reaches the handler as False and mints a "
+            f"second Point — it must not be advertised as safe to retry")
+
+
+def test_a_preview_writes_nothing_and_says_so():
+    """`dry_run=True` on a destructive writer: committed "none", and re-sendable.
+
+    A preview mutates nothing by construction (#10084's recorded contract), so
+    "the write may have committed" is false for it — and "do NOT repeat it"
+    forbids the one safe action, which is the action that matters most for a
+    preview of a destructive operation.
+    """
+    data = _error(ms._wait_bound_refusal_result(
+        "tortoise_delete_point", {"dry_run": True}))["data"]
+    assert data["committed"] == "none"
+    assert data["retry_safe"] is True
+    assert data["retry_rule"] == ms._WAIT_BOUND_RETRY_RULE_PREVIEW
+    # ...and the same tool WITHOUT dry_run is a real mutation.
+    real = _error(ms._wait_bound_refusal_result(
+        "tortoise_delete_point", {}))["data"]
+    assert real["committed"] == "unknown"
+    assert real["retry_safe"] is False
+
+
+def test_a_forged_dry_run_prop_cannot_claim_a_preview():
+    """The preview arm is gated on the tool's DECLARED `dry_run` parameter.
+
+    `dry_run` is not a server-managed prop, so a caller could otherwise pass
+    `props={"dry_run": True}` to a tool that ignores it and forge "nothing was
+    written" over an executed write — the #3926 / #8135 class.
+    """
+    forged = _error(ms._wait_bound_refusal_result(
+        "tortoise_create_point", {"props": {"dry_run": True}}))["data"]
+    assert forged["committed"] == "unknown"
+
+
+def test_a_getter_in_the_write_tier_is_repeatable():
+    """`tortoise_get_source_reliability` is a getter that writes a CACHE.
+
+    The `write` tier's default retry-safety is `False`, which told a caller that
+    breached the bound on a reliability lookup to "reconcile by other means" —
+    when repeating is the documented way to obtain the value at all. Its
+    recompute-then-write-through is convergent, and its entry now declares it.
+    """
+    assert _error(ms._wait_bound_refusal_result(
+        "tortoise_get_source_reliability"))["data"]["retry_safe"] is True
+
+
 def test_an_unresolvable_write_name_still_fails_closed():
     """The derivation's defensive default, pinned at the function.
 

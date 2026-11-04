@@ -626,10 +626,18 @@ def _wait_bound_refused() -> bool:
     return bool(state.get(_WAIT_BOUND_REFUSED_KEY)) if state is not None else False
 
 
-#: The two retry rules shipped WITH a breached write's refusal. ONE of them is
-#: always returned, so a caller is never left to infer a retry protocol from
-#: prose — and neither of them ever says "retry" without the registry having
-#: declared the operation idempotent.
+#: The three retry rules shipped WITH a breached write's refusal. Exactly ONE is
+#: returned for any breached write, so a caller is never left to infer a retry
+#: protocol from prose. Which one, and why:
+#:
+#:   * PREVIEW  — the call declared itself a preview (``dry_run=True``) and wrote
+#:                nothing, so a repeat is safe REGARDLESS of idempotency. This is
+#:                the one arm that says "retry" for a tool the registry has not
+#:                declared idempotent, and it is sound because nothing was
+#:                written in the first place.
+#:   * SAFE     — the registry declared the operation idempotent AND this call's
+#:                arguments did not switch that off.
+#:   * UNSAFE   — everything else: do not re-send.
 #:
 #: ⚠️ There is deliberately NO generic read-back recipe here, and that is a
 #: correctness decision rather than an omission. A single recipe CANNOT be sound
@@ -667,12 +675,21 @@ _WAIT_BOUND_RETRY_RULE_SAFE = (
     "this operation is idempotent, so repeating it converges — a retry is safe "
     "once the advertised delay has elapsed"
 )
+#: A call whose arguments declare it a PREVIEW (``dry_run=True``) wrote nothing,
+#: so neither of the other two rules describes it: "may have committed" is false
+#: for it, and "do NOT repeat it" forbids the one safe action — which is the
+#: action that matters most for a preview of a destructive operation.
+_WAIT_BOUND_RETRY_RULE_PREVIEW = (
+    "this call was a PREVIEW (dry_run) and wrote nothing, so repeating it is "
+    "safe — no reconciliation is needed"
+)
+
 #: ⛔ Deliberately does NOT say what a repeat would do (a duplicate is true for a
 #: creator; a re-issued hard delete returns ``False`` and is the door's own
-#: "no-op") and deliberately
-#: does NOT send the caller to a read-back (there is none on this surface for
-#: the family that needs it most). It states the one rule that holds for every
-#: non-idempotent writer: do not re-send.
+#: "no-op") and deliberately does NOT send the caller to a read-back (there is
+#: none on this surface for the family that needs it most). It states the rule
+#: for a non-idempotent writer that ACTUALLY WROTE — a preview of one takes the
+#: PREVIEW arm instead, because it wrote nothing: do not re-send.
 _WAIT_BOUND_RETRY_RULE_UNSAFE = (
     "this operation is NOT idempotent — do NOT repeat it. The write may already "
     "have committed, and nothing on this response tells you whether it did. "
@@ -680,7 +697,71 @@ _WAIT_BOUND_RETRY_RULE_UNSAFE = (
 )
 
 
-def _write_retry_safety(name: str) -> bool:
+#: The one ARGUMENT that turns a converging write into a diverging one: with
+#: ``dedup=False`` the SAME `tortoise_create_point` call mints a second Point
+#: instead of folding onto the existing one — its own docs say so ("pass a fresh
+#: key with ``dedup=False`` to mint a second point", #6110), and ``sdk.py`` gates
+#: the whole dedup branch on ``if dedup:``. A name-only verdict is therefore
+#: WRONG for the call in front of it: it would ship ``retry_safe: true`` — and a
+#: ``retry_rule`` reading "repeating it converges" — for the exact duplicate this
+#: whole contract exists to prevent.
+_CONVERGENCE_OFF_ARGUMENT = "dedup"
+
+
+def _arguments_disable_convergence(name: str, arguments) -> bool:
+    """Whether THIS call's arguments switch its convergence off (fail-closed).
+
+    ⛔ The arguments read here are the RAW PRE-VALIDATION dict, and FastMCP
+    COERCES them before the handler sees them (`dedup` is declared
+    ``{"type": "boolean"}`` in the served schema, so ``"false"``, ``"False"``,
+    ``"0"`` and ``"no"`` all arrive at the handler as ``False`` — measured, and
+    the same coercion ``tests/test_10084_graph_disclosure.py`` pins for
+    ``dry_run``). So a truthiness test on the raw value is WRONG in the dangerous
+    direction: ``"false"`` is truthy, would read as "still converges", and would
+    ship "a retry is safe" for a call that mints a second Point.
+
+    Therefore the read is fail-closed on TYPE, not on truthiness:
+      * key absent   → the tool's own default applies (``True``: converging);
+      * a real bool  → use it (FastMCP only ever hands the handler a bool);
+      * anything else → we cannot know what the handler will receive, so assume
+        the divergence case.
+    """
+    if not isinstance(arguments, dict):
+        return False
+    if name != "tortoise_create_point":
+        return False
+    if _CONVERGENCE_OFF_ARGUMENT not in arguments:
+        return False
+    value = arguments[_CONVERGENCE_OFF_ARGUMENT]
+    if isinstance(value, bool):
+        return not value
+    # A spelling the schema will coerce and we cannot evaluate: fail closed.
+    _log.warning(
+        "wait-bound refusal: non-boolean %s=%r on %s — treating the call as "
+        "non-converging", _CONVERGENCE_OFF_ARGUMENT, value, name)
+    return True
+
+
+def _arguments_say_preview(name: str, arguments) -> bool:
+    """Whether this call declares itself a preview, so it writes nothing.
+
+    A ``dry_run`` tool with ``dry_run=True`` returns a preview by construction —
+    "Nothing was written: this call was a preview" is the recorded contract
+    (#10084). Saying "the write may have committed" to such a caller is simply
+    false, and worse, it FORBIDS the one safe action (re-sending the preview),
+    which is the place a preview of a destructive operation matters most.
+
+    Gated on the tool's own declared ``dry_run`` parameter, never on the raw
+    argument dict: ``dry_run`` is not a server-managed prop, so a caller could
+    otherwise smuggle ``props={"dry_run": True}`` onto a tool that ignores it
+    and forge "nothing was written" over an executed write (#3926 / #8135).
+    """
+    if not isinstance(arguments, dict):
+        return False
+    return name in _dry_run_tool_names() and arguments.get("dry_run") is True
+
+
+def _write_retry_safety(name: str, arguments=None) -> bool:
     """Whether REPEATING a breached write is safe — derived, fail-closed.
 
     The source of truth is the registry entry's own retry-safety declaration:
@@ -702,10 +783,15 @@ def _write_retry_safety(name: str) -> bool:
     entry = get_tool_by_name().get(name)
     if entry is None:
         return False
-    return bool(entry.annotations.idempotentHint)
+    if not entry.annotations.idempotentHint:
+        return False
+    # The declaration says the OPERATION converges; the ARGUMENTS decide whether
+    # this CALL does. Both must hold.
+    return not _arguments_disable_convergence(name, arguments)
 
 
-def _wait_bound_refusal_result(name: str | None = None) -> ToolResult:
+def _wait_bound_refusal_result(name: str | None = None,
+                               arguments=None) -> ToolResult:
     """The ONE refusal result both wait-bound paths return.
 
     The message and the advertised delay come from the single module both
@@ -730,11 +816,17 @@ def _wait_bound_refusal_result(name: str | None = None) -> ToolResult:
     classifies the refusal by that envelope and a restructured one would read as
     a genuine product failure on a busy host:
 
-    * ``data.committed: "unknown"`` — never a bare failure. The seam cannot
-      know, and saying so is the whole fix.
+    * ``data.committed`` — ``"unknown"`` for a write (the seam cannot know, and
+      saying so is the whole fix), or ``"none"`` for a call whose ARGUMENTS
+      declare it a preview (``dry_run=True``), which writes nothing by
+      construction.
     * ``data.retry_safe`` — the registry's own retry-safety verdict for this
-      tool, so the caller does not have to re-derive it from prose (and a new
-      writer defaults to UNSAFE).
+      call, so the caller does not have to re-derive it from prose (a new writer
+      defaults to UNSAFE). ⛔ Derived from the NAME **and the ARGUMENTS**: a
+      converging declaration can be switched off by the call itself
+      (``tortoise_create_point(dedup=False)`` mints a second Point), and a
+      name-only verdict would ship "repeating it converges" to exactly the
+      duplicate this contract exists to prevent.
     * ``data.retry_rule`` — the prose of that verdict, because ``retry_safe``
       alone does not tell a caller what to do INSTEAD when it is false.
 
@@ -763,13 +855,23 @@ def _wait_bound_refusal_result(name: str | None = None) -> ToolResult:
     prose = _mcp_auth._TRANSPORT_WAIT_BOUND_MESSAGE
     if name and name in WRITE_TOOL_NAMES:
         prose = _mcp_auth._TRANSPORT_WAIT_BOUND_WRITE_MESSAGE
-        retry_safe = _write_retry_safety(name)
-        data.update({
-            "committed": "unknown",
-            "retry_safe": retry_safe,
-            "retry_rule": (_WAIT_BOUND_RETRY_RULE_SAFE if retry_safe
-                           else _WAIT_BOUND_RETRY_RULE_UNSAFE),
-        })
+        if _arguments_say_preview(name, arguments):
+            # A preview writes nothing BY CONSTRUCTION, so the honest outcome is
+            # "none" rather than "unknown", and repeating it is safe — which is
+            # the one action a caller most needs back for a destructive preview.
+            data.update({
+                "committed": "none",
+                "retry_safe": True,
+                "retry_rule": _WAIT_BOUND_RETRY_RULE_PREVIEW,
+            })
+        else:
+            retry_safe = _write_retry_safety(name, arguments)
+            data.update({
+                "committed": "unknown",
+                "retry_safe": retry_safe,
+                "retry_rule": (_WAIT_BOUND_RETRY_RULE_SAFE if retry_safe
+                               else _WAIT_BOUND_RETRY_RULE_UNSAFE),
+            })
     return ToolResult(
         content=prose,
         # The REST JSON-RPC error payload, carried on the channel this surface
@@ -915,7 +1017,7 @@ async def _await_under_mcp_wait_bound(name: str, arguments, *, version,
             "MCP tools/call %s already refused at the transport; this seam's "
             "refusal is redundant and no dispatch is started",
             _mcp_auth._sanitize_for_log(name))
-        return _wait_bound_refusal_result(name)
+        return _wait_bound_refusal_result(name, arguments)
     # #4055 (P2): bind an opaque owner token for this dispatch, then create the
     # dispatch task INSIDE the binding so it copies the token. A one-time
     # embedder load this dispatch triggers stamps that token as the load's
@@ -1015,7 +1117,7 @@ async def _await_under_mcp_wait_bound(name: str, arguments, *, version,
         _log.warning(
             "transport wait bound (%.0fs) exceeded: MCP tools/call %s — "
             "refusing legibly", _mcp_auth._TRANSPORT_WAIT_BOUND_S, safe_name)
-    return _wait_bound_refusal_result(name)
+    return _wait_bound_refusal_result(name, arguments)
 
 
 def _enforce_mcp_tool_scope(name: str) -> None:
@@ -2262,7 +2364,7 @@ async def _wrapped_call_tool(name: str, arguments: dict[str, Any] | None = None,
             # and FALL THROUGH, so the classification below still labels the row
             # (`refused`/`transport_wait_bound`) and the refusal is repaired by
             # the same envelope path as every other one.
-            result = _wait_bound_refusal_result(name)
+            result = _wait_bound_refusal_result(name, arguments)
         else:
             result = await _await_under_mcp_wait_bound(
                 name, arguments, version=version, task_meta=task_meta,

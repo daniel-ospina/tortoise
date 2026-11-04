@@ -1238,6 +1238,16 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
                     "cache-consistency-checked. NOTE: refreshes the reliability "
                     "cache on the Source node (write-through projection), so not read-only.",
         risk="write",
+        # ⛔ IDEMPOTENT, and it must say so (#10849 review). This is the only
+        # GETTER in the write tier, and until this line the `write` tier default
+        # advertised `idempotentHint: false` for it — so a caller that breached
+        # the transport bound on a reliability lookup was told "do NOT repeat it
+        # … reconcile by other means", when repeating is the documented way to
+        # obtain the value at all. The operation is a recompute-then-write-through
+        # of a cache the SDK describes as "a documented projection — recomputed
+        # when stale": a repeat converges on the same value, which is exactly the
+        # retry-safety the flag means.
+        idempotent=True,
         http_policy=True,
         sdk_method="get_source_reliability",
     ),

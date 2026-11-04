@@ -819,11 +819,12 @@ _TRANSPORT_WAIT_BOUND_MESSAGE = (
 #: advertised delay has exactly one source (``_TRANSPORT_WAIT_RETRY_AFTER_S``).
 _TRANSPORT_WAIT_BOUND_WRITE_MESSAGE = (
     "The server's wait budget for this request was exceeded before a response "
-    "was ready. This call WRITES, and the write may still complete on the "
-    "server — so this refusal is NOT a statement that nothing was written. "
-    "Read error.data.committed (it is \"unknown\"), then follow "
-    "error.data.retry_rule: a repeat is only ever safe for an idempotent "
-    "operation. Wait for the advertised delay before retrying."
+    "was ready. This call targets a WRITE surface: unless it was a preview, the "
+    "write may still complete on the server, so this refusal is NOT a statement "
+    "that nothing was written. Read error.data.committed, then follow "
+    "error.data.retry_rule — a repeat is only ever safe for an operation that "
+    "converges, or for one that was a preview and wrote nothing. Wait for the "
+    "advertised delay before retrying."
 )
 
 

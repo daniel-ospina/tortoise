@@ -341,6 +341,9 @@ class TestHintsCannotDrift:
             # clients read as `idempotentHint`.
             ("tortoise_create_point", True),
             ("tortoise_create_source", True),
+            # the only GETTER in the write tier: a recompute-then-write-through
+            # of a stale cache converges on the same value (#10849 review).
+            ("tortoise_get_source_reliability", True),
             ("tortoise_ingest", True),
             ("tortoise_onboarding_demo_create", True),
             # destructive tier, idempotent by operation (same id → same row)
