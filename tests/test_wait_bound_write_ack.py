@@ -6,7 +6,7 @@ the next read. The refusal was not a statement about the graph's state, and the
 two natural readings of a refusal are both wrong for a write:
 
 * read as "nothing happened" it makes a lane skip a write that LANDED (the
-  fleet's ``GRAPH-WRITE-DEFERRED`` false negative);
+  false negative #10849 reports the fleet's lanes recording on this signal);
 * read as "failed, so retry" it duplicates every NON-idempotent write —
   ``tortoise_create_operator`` has no dedup, and a duplicated IMPL/NAND
   double-counts the claim's EP weight in ``ep.py``.
@@ -347,6 +347,121 @@ def test_the_write_message_names_both_homes_of_the_payload():
     msg = ma._TRANSPORT_WAIT_BOUND_WRITE_MESSAGE
     assert "error.data.committed" in msg
     assert "_meta.tortoise_error.data.committed" in msg
+
+
+def test_an_ingest_bundle_with_append_only_entities_is_not_repeatable():
+    """POINTS converge in `ingest`; `entities` of type document/event do NOT.
+
+    The SDK shape-validates the entity leg but DEDUPS nothing on it: "Document
+    records are append-only — never deduped", same for `event`
+    (`docs/INGEST_CONTRACT.md` row 1 `append_only_items`). So a retry mints a
+    NEW `:Source` for a document — and a new `:Event` occurrence for an event,
+    which can also gain a NEW operator where the bundle wires one to it (a
+    document cannot: a `:Source` is refused as a connection endpoint — the ERRORS
+    table's row 6, `Endpoint typing`).
+    `batch_id` is a STAMP, not a dedup key, so it does not save it. The caller
+    controls this through the bundle, so the verdict has to read the bundle.
+    """
+    def data(bundle):
+        return _error(ms._wait_bound_refusal_result(
+            "tortoise_ingest", {"bundle": bundle}))["data"]
+
+    assert data({"points": [{"ref": "p1", "kind": "statement", "content": "x"}]})[
+        "retry_safe"] is True, "a points-only bundle converges (create_point dedup)"
+    # ⛔ The bundle's SPELLING is caller-controlled and parsed AFTER the seam:
+    # `_parse(bundle)` in the handler accepts a JSON string, and the served schema
+    # puts no `type` on `bundle`. Reading only the dict spelling was measured to
+    # return retry_safe=true for a JSON-string bundle carrying a Document — the
+    # exact duplicate this contract exists to prevent, forged from one argument.
+    import json as _json
+    for bad in ({"type": "document", "name": "d"}, {"type": "event", "name": "e"}):
+        assert data(_json.dumps({"entities": [bad]}))["retry_safe"] is False, (
+            f"a JSON-string bundle is parsed by the handler, so {bad['type']} "
+            "still reaches the append-only writer")
+    # an unreadable bundle is not evidence that it writes nothing.
+    assert data("{not json")["retry_safe"] is False
+    assert data('["a list"]')["retry_safe"] is False
+
+    # ⛔ The SDK strips and lowercases the type on both legs, so a case-variant
+    # reaches the append-only writer — a case-sensitive gate here fails OPEN.
+    for bad in ({"type": "document", "name": "d"}, {"type": "event", "name": "e"},
+                {"type": "Document", "name": "d"}, {"type": " DOCUMENT ", "name": "d"},
+                {"type": "EVENT", "name": "e"}):
+        assert data({"entities": [bad]})["retry_safe"] is False, (
+            f"an append-only {bad['type']} entity mints a new node on retry")
+    # a subject/object entity resolves-or-mints on its name: convergent.
+    assert data({"entities": [{"type": "subject", "name": "s"}]})["retry_safe"] is True
+
+
+def test_a_write_tier_tool_on_its_read_only_arm_is_repeatable():
+    """The same defect as the getter, reached by an ARGUMENT instead of a tier.
+
+    `manage_sources(action="list")` returns `_sources_view()` and nothing else;
+    `onboarding_seed()` with no names is its documented FIRST call ("call
+    WITHOUT names to discover gaps") and writes nothing. Both live in a writing
+    tier, so a name-only verdict told the caller a mutation may have landed and
+    forbade the re-send — the caller could not obtain the listing at all.
+    """
+    listing = ms._wait_bound_refusal_result(
+        "tortoise_manage_sources", {"action": "list"})
+    assert _error(listing)["data"]["committed"] == "none"
+    assert _error(listing)["data"]["retry_safe"] is True
+    # Its OWN prose: this arm is reached after the dispatch started, so the
+    # NOT_SENT wording ("refused BEFORE any work started — nothing was sent")
+    # would be a false statement about the request.
+    assert _text(listing) == ma._TRANSPORT_WAIT_BOUND_READ_ONLY_MESSAGE
+    assert _error(listing)["data"]["retry_rule"] == ms._WAIT_BOUND_RETRY_RULE_READ_ONLY
+    # ...and `enable` really does write.
+    enabling = _error(ms._wait_bound_refusal_result(
+        "tortoise_manage_sources", {"action": "enable", "source": "github_issues"}))["data"]
+    assert enabling["committed"] == "unknown"
+    assert enabling["retry_safe"] is False
+
+
+    # ⛔ `tortoise_onboarding_seed` is NOT a read-only arm, despite its docstring
+    # inviting "call WITHOUT names to discover gaps". For a COMPACT org
+    # (`hosted_api.py`: `include_person = not compact`) there is no person gap,
+    # so `gaps` is empty and the SAME no-name call falls through to
+    # `seed_onboarding_anchors` — the write is conditional on SERVER state, which
+    # no argument predicate can see (`tests/test_onboarding_seed_endpoint.py`
+    # proves it: "compact + no names" returns `status == "seeded"`). It must stay
+    # UNSAFE, or the refusal tells a caller nothing was written about a call that
+    # filed the org anchor.
+    for args in ({}, {"org_name": "Acme"}):
+        seed = _error(ms._wait_bound_refusal_result("tortoise_onboarding_seed", args))["data"]
+        assert seed["committed"] == "unknown", (
+            "a no-name seed still seeds a compact org — it is never a known-no-write")
+        assert seed["retry_safe"] is False
+
+
+def test_a_tool_whose_DECLARED_default_is_the_preview_is_recognised():
+    """`tortoise_backfill_v25(dry_run: bool = True)` — the no-arg call is a preview.
+
+    Its most common invocation is a read-only schema inspection, and it writes
+    nothing: every write in the SDK door sits behind `if not dry_run`. A check
+    for an EXPLICIT `dry_run=True` misses it entirely and reports "a schema
+    migration may be half-applied; do not re-run".
+    """
+    no_args = ms._wait_bound_refusal_result("tortoise_backfill_v25", {})
+    assert _error(no_args)["data"]["committed"] == "none"
+    assert _error(no_args)["data"]["retry_rule"] == ms._WAIT_BOUND_RETRY_RULE_PREVIEW
+    # an explicit opt-in to the real run is a real write.
+    real = _error(ms._wait_bound_refusal_result(
+        "tortoise_backfill_v25", {"dry_run": False}))["data"]
+    assert real["committed"] == "unknown"
+
+
+def test_approve_merge_is_not_advertised_as_repeatable():
+    """Its dedup branch appends an event with no already-reviewed guard.
+
+    The TEMPORAL branch is guarded ("re-approving with the SAME action is a
+    no-op — no duplicate event"); the DEDUP branch falls through to
+    `_emit_event("DedupeRecorded"|"DedupeRejected", …)`, which writes a journal
+    line AND a graph event record — so a retry is visible twice to `poll_events`.
+    """
+    data = _error(ms._wait_bound_refusal_result("tortoise_approve_merge"))["data"]
+    assert data["retry_safe"] is False
+    assert data["retry_rule"] == ms._WAIT_BOUND_RETRY_RULE_UNSAFE
 
 
 def test_a_getter_in_the_write_tier_is_repeatable():

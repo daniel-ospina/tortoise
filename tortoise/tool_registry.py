@@ -550,7 +550,14 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
                     "Wiring deferred to promotion for live priors. WRITES "
                     "review flags + wires edges (idempotent for repeats).",
         risk="write",
-        idempotent=True,
+        # ⛔ NOT idempotent for every branch (#10849 review). The TEMPORAL branch
+        # guards a re-approval ("re-approving with the SAME action is a no-op —
+        # no duplicate event"), but the DEDUP branch does not: after its
+        # already-linked check it falls through unconditionally to
+        # `_emit_event("DedupeRecorded"|"DedupeRejected", …)`, which writes a
+        # journal line AND a graph event record — so a retry is visible twice to
+        # `poll_events`. The two branches disagree; the flag is the half that is
+        # wrong, and a repeat is not safe until the guard matches.
         http_policy=True,
         sdk_method="approve_merge",
     ),

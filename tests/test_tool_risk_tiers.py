@@ -331,7 +331,9 @@ class TestHintsCannotDrift:
                      if e.idempotent is not None}
         assert overrides == {
             # write tier, idempotent by operation (dedup on content/identity)
-            ("tortoise_approve_merge", True),
+            # ⛔ `tortoise_approve_merge` is NOT here: its dedup branch falls
+            # through to `_emit_event` with no already-reviewed guard, so a retry
+            # appends a second DedupeRecorded/DedupeRejected (#10849 review).
             ("tortoise_checkpoint", True),
             # ⛔ `tortoise_create_document` is NOT here: the door mints a fresh
             # ulid per call and `_upsert_document` MERGEs on that id, so a retry

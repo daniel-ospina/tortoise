@@ -799,29 +799,14 @@ _TRANSPORT_WAIT_BOUND_MESSAGE = (
     "operation is safe."
 )
 
-#: The refusal as a caller of a MUTATING tool must read it (#10849).
-#:
-#: The message above is transport-neutral, so on the write surface it says
-#: something true but not actionable: "the work may still complete" is a fact a
-#: caller cannot branch on, and the two natural readings of a refusal are BOTH
-#: wrong for a write. Read as "nothing happened" it makes the caller skip a
-#: write that landed (the fleet's ``GRAPH-WRITE-DEFERRED`` false negative); read
-#: as "failed, so retry" it duplicates every non-idempotent write
-#: (``tortoise_create_operator`` has no dedup, and a duplicated IMPL/NAND
-#: double-counts the claim's EP weight — measured on #10849).
-#:
-#: This is a SECOND constant rather than an edit to the first on purpose: the
-#: REST arm (``hosted_api.WaitBoundMiddleware``) never learns which tool was
-#: called, so it cannot claim anything about a mutation, and its body is pinned
-#: byte-for-byte by callers and tests. The write-ambiguity belongs to the seam
-#: that DOES know the tool name — ``mcp_server._wait_bound_refusal_result``.
 #: The refusal for a WRITE that was never DISPATCHED — the transport refused
 #: before the seam scheduled any work (or the argument check had already been
-#: answered). Its own message, not the one below, because the two say opposite
-#: things about whether a write can be in flight: here nothing was sent, so
-#: nothing can complete, and re-sending is the safe action rather than a risk.
-#: Serving the dispatched-write prose on this arm told a caller to reconcile a
-#: write it never issued AND to withhold the safe re-send (#10849 review).
+#: answered). Its own message, because it says the OPPOSITE of the
+#: dispatched-write one below about whether a write can be in flight: here
+#: nothing was sent, so nothing can complete, and re-sending is the safe action
+#: rather than a risk. Serving the dispatched-write prose on this arm told a
+#: caller to reconcile a write it never issued AND to withhold the safe re-send
+#: (#10849 review).
 _TRANSPORT_WAIT_BOUND_NOT_SENT_MESSAGE = (
     "The server's wait budget for this request was exceeded before a response "
     "was ready, and this request was refused BEFORE any work started — nothing "
@@ -829,7 +814,44 @@ _TRANSPORT_WAIT_BOUND_NOT_SENT_MESSAGE = (
     "Re-sending it is safe once the advertised delay has elapsed."
 )
 
-#: Static and digit-free for the same reason as the message above: the
+#: The refusal for a READ that the seam dispatched and then abandoned (#10849).
+#:
+#: Distinct from BOTH neighbours, because the two facts a caller needs are
+#: independent and each of the other two arms gets one of them wrong here.
+#: ``_TRANSPORT_WAIT_BOUND_NOT_SENT_MESSAGE`` above says "nothing was sent" —
+#: false, since this arm is reached only after the seam scheduled the work. The
+#: dispatched-write message below says the mutation may still land — also false,
+#: because this call writes nothing on ANY arm (that is what puts it here). So
+#: this says exactly what the caller can act on: the read did not fail, repeating
+#: it is safe, and the only thing lost is the response.
+_TRANSPORT_WAIT_BOUND_READ_ONLY_MESSAGE = (
+    "The server's wait budget for this request was exceeded before the response "
+    "was ready. This call is a READ: it writes nothing, so there is no write to "
+    "reconcile and the outcome of your data is not in question — only this "
+    "reply was lost. Re-sending it once the advertised delay has elapsed is safe, "
+    "and is the only way to obtain the answer."
+)
+
+#: The refusal as a caller of a MUTATING tool must read it (#10849).
+#:
+#: ``_TRANSPORT_WAIT_BOUND_MESSAGE`` above is transport-neutral, so on the write
+#: surface it says something true but not actionable: "the work may still
+#: complete" is a fact a caller cannot branch on, and the two natural readings of
+#: a refusal are BOTH wrong for a write. Read as "nothing happened" it makes the
+#: caller skip a write that landed — the false negative #10849 reports the
+#: fleet's lanes recording on this signal. Read as "failed, so retry" it
+#: duplicates every non-idempotent write (``tortoise_create_operator`` has no
+#: dedup, and a duplicated IMPL/NAND double-counts the claim's EP weight —
+#: measured on #10849).
+#:
+#: This is a SEPARATE constant rather than an edit to ``_TRANSPORT_WAIT_BOUND_
+#: MESSAGE`` on purpose: the REST arm (``hosted_api.WaitBoundMiddleware``) never
+#: learns which tool was called, so it cannot claim anything about a mutation,
+#: and that body is pinned byte-for-byte by callers and tests. The write
+#: ambiguity belongs to the seam that DOES know the tool name —
+#: ``mcp_server._wait_bound_refusal_result``.
+#:
+#: Static and digit-free for the same reason as the messages above: the
 #: advertised delay has exactly one source (``_TRANSPORT_WAIT_RETRY_AFTER_S``).
 _TRANSPORT_WAIT_BOUND_WRITE_MESSAGE = (
     "The server's wait budget for this request was exceeded before a response "
