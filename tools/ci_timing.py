@@ -1900,6 +1900,13 @@ def _prior_basis_spans(tail: str) -> list[tuple[int, int, str]]:
     return spans
 
 
+# Punctuation that ATTACHES to the word before it. `_without_span` joins on this
+# set with NO space, because the text it re-joins was adjacent before a basis was
+# injected between the two halves. `…` is in the set because the map's notes use it
+# as a sentence-final mark.
+_ATTACHING_PUNCTUATION = frozenset(",.;:!?)]}\"'…")
+
+
 def _without_span(tail: str, start: int, end: int) -> str:
     """`tail` with `[start:end)` removed, without leaving a double space behind.
 
@@ -1907,11 +1914,24 @@ def _without_span(tail: str, start: int, end: int) -> str:
     `tail[:start].rstrip()`, byte-identical to what this module wrote before the
     mid-note case existed. A MID-NOTE span keeps the text on both sides, joined by
     the single space the ` — ` separator it consumed used to occupy.
+
+    ⛔ THAT SPACE IS NOT UNCONDITIONAL. The dash a mid-note span consumes is the
+    RENDERER's separator, not the note's: the writer appends its basis to the
+    row-line FRAGMENT, which can end mid-sentence, so the note's own remainder
+    starts wherever the fragment stopped. `#5256`'s row is that shape — the
+    fragment ends `… not carve_out-registered` and the continuation opens
+    `. The count is re-derived …` — so joining with a space emits
+    `… carve_out-registered . The count …`, a space before a sentence period that
+    nothing catches (the guard on the wrapped row asserts surviving WORDS, which a
+    spurious space does not change). An attaching mark therefore joins WITHOUT a
+    space; every other continuation keeps the single space the dash occupied.
     """
     before, after = tail[:start].rstrip(), tail[end:]
     if not after.strip():
         return before
-    return f"{before} {after.lstrip()}".rstrip()
+    rest = after.lstrip()
+    glue = "" if rest[:1] in _ATTACHING_PUNCTUATION else " "
+    return f"{before}{glue}{rest}".rstrip()
 
 
 def _strip_prior_held_basis(tail: str) -> str:
@@ -2509,7 +2529,9 @@ def _declared_floors(manifest_text: str) -> dict[str, DeclaredFloor]:
     Absent → no declarations, so every caller and fixture that carries no such key
     keeps its output. UNREADABLE → `DurationsBridgeError`, NEVER "no declarations":
     that fail-open reading is the #10575 P1 this mechanism exists to prevent, and
-    the four refused shapes are enumerated in the body below.
+    the refused shapes are enumerated in the body below (a `null` block, a
+    non-mapping container, a per-row non-numeric value, an unknown declaration key,
+    a non-boolean `pinned`).
     """
     import yaml
     try:
@@ -2518,6 +2540,19 @@ def _declared_floors(manifest_text: str) -> dict[str, DeclaredFloor]:
         return {}
     floors = data.get("durations_floors") if isinstance(data, dict) else None
     if floors is None:
+        if isinstance(data, dict) and "durations_floors" in data:
+            # PRESENT but NULL. Absent is legal (every fixture that carries no such
+            # key keeps its output); a key that is THERE and declares nothing is a
+            # block the writer cannot read, and reading it as "absent" reverted every
+            # cap on the next sweep with no signal on either side. Same fail-closed
+            # rule the non-mapping container got (#10575 review, F2), applied to the
+            # other face of the same container (#10575 review, P3).
+            raise DurationsBridgeError(
+                "`durations_floors` is present but declares nothing (null) — a "
+                "declaration block the writer cannot read must be REFUSED rather "
+                "than silently treated as absent, or every declared cap reverts on "
+                "the next sweep (state the declaration or drop the key, #9172)"
+            )
         return {}
     if not isinstance(floors, dict):
         # Fail CLOSED on the CONTAINER too: `durations_floors:` written as a LIST

@@ -5977,12 +5977,14 @@ def _manifest_contract_issues(manifest: dict) -> list[str]:
     a non-empty map whose every weight is the `0.0` sentinel, and a stale
     capture date).
 
-    `ci_manifest.map_issues` also carries main's TWO newer manifest checks —
+    `ci_manifest.map_issues` also carries main's two newer manifest checks —
     `fast_shard_issues` (#6135, the top-level `fast_shards` declaration) and
-    `duplicate_entries` (#2913/#5373, the same-surface `merge=union` gate) —
-    because they landed beside this change and the union of the two pipelines
-    must not drop either. Composing them here keeps the branch's invariant
-    (every check reachable from ONE place) while keeping main's coverage.
+    `duplicate_entries` (#2913/#5373, the same-surface `merge=union` gate) — and
+    `ci_manifest.floor_issues` (a weight declared as a floor/cap rather than a
+    reading, cut on this branch rather than inherited) beside them, because the
+    union of the two pipelines must not drop any of the three. Composing them here
+    keeps the branch's invariant (every check reachable from ONE place) while
+    keeping main's coverage.
 
     An ImportError is reported as an issue, never swallowed: returning ``[]``
     would leave ``--integrity`` GREEN with none of these checks having run —

@@ -6500,6 +6500,38 @@ def test_a_wrapped_rows_prior_basis_is_pruned_wherever_it_sits() -> None:
         (REPO_ROOT / "config" / "ci-surfaces.yml").read_text())
 
 
+def test_a_mid_note_span_does_not_leave_a_space_before_a_sentence_period() -> None:
+    """A re-join glues an ATTACHING mark, and keeps the space everywhere else.
+
+    `_without_span` removes a prior basis from the MIDDLE of a joined note, where
+    the ` — ` it consumes is the RENDERER's separator and not the note's: the writer
+    appended its basis to the row-line FRAGMENT, which can end mid-sentence, so the
+    note's own remainder starts wherever the fragment stopped. `#5256`'s row is that
+    shape — the fragment ends `… not carve_out-registered` and the continuation
+    opens `. The count is re-derived …` — and joining with a space emitted
+    `… carve_out-registered . The count …`. No guard catches that: the map carries
+    zero such occurrences today (so a map scan cannot prove it), and the wrapped-row
+    guard asserts surviving WORDS, which a spurious space does not change. So the
+    predicate is pinned directly, in both directions (#10575 review, P3).
+    """
+    tail = ("… rows in the run — but it is not carve_out-registered"
+            " — ci-timing junit-census+top-15 2026-11-02 (run 1); was 3.2"
+            " . The count is re-derived at your head")
+    start = tail.index(" — ci-timing")
+    end = tail.index(". The count") - 1  # leave the ` . ` separator's own space out
+    assert ci_timing._without_span(tail, start, end).endswith(
+        "carve_out-registered. The count is re-derived at your head"), \
+        ci_timing._without_span(tail, start, end)
+    # CONTROL: an ordinary (non-attaching) continuation keeps the single space the
+    # dash occupied, so the fix is not "glue everything".
+    control = tail.replace(". The count", "x The count")
+    start = control.index(" — ci-timing")
+    end = control.index("x The count") - 1
+    assert ci_timing._without_span(control, start, end).endswith(
+        "carve_out-registered x The count is re-derived at your head"), \
+        ci_timing._without_span(control, start, end)
+
+
 def test_the_wrapped_row_prune_guard_survives_the_next_sweep() -> None:
     """The prune guard must not red a map the writer's own sweep has re-valued.
 
@@ -6876,6 +6908,14 @@ def test_a_floor_that_names_no_row_or_sits_above_one_is_red() -> None:
         {"durations": {"test_a.py": 355.0},
          "durations_floors": ["test_a.py"]})
     assert len(block_as_list) == 1 and "mapping" in block_as_list[0], block_as_list
+    # …and the container's OTHER face: PRESENT but NULL. Deleting a block's entries
+    # while leaving the key line is a plausible "tidy" (and the shape this repo's
+    # duplicate-row repairs take), and reading it as "no declarations" un-enforced
+    # every declared cap on both sides at once with nothing red anywhere
+    # (#10575 review, P3).
+    null_block = ci_manifest.floor_issues(
+        {"durations": {"test_a.py": 355.0}, "durations_floors": None})
+    assert len(null_block) == 1 and "null" in null_block[0], null_block
     # An ABSENT map is `check`'s UNKNOWN, not this check's red: there is no map for
     # a floor to be inconsistent with, and one red per declared floor would turn
     # that UNKNOWN into a wall of reds.
@@ -7102,6 +7142,12 @@ def test_an_unreadable_or_pinned_odd_declaration_refuses_the_write() -> None:
     """
     header = "durations:\n  test_capped.py: 355.0\n"
     for bad in ("durations_floors: [test_capped.py]\n",
+                # PRESENT but NULL — the container's OTHER face. Its entries deleted
+                # is exactly how a merge-resolution "tidy" drops duplicate twins in
+                # this repo, and reading it as "absent" reverted every cap with
+                # nothing red on either side (#10575 review, P3).
+                "durations_floors:\n",
+                "durations_floors: null\n",
                 "durations_floors:\n  test_capped.py: [355.0]\n",
                 'durations_floors:\n  test_capped.py: "a lot"\n',
                 "durations_floors:\n  test_capped.py: {value: 355.0, pinned: maybe}\n",

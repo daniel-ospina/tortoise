@@ -41,7 +41,7 @@ is the ONE composition, and it carries every manifest-level check the two
 entry points used to call loose — the three duration checks plus
 ``fast_shard_issues`` (#6135) and ``duplicate_entries`` (#2913/#5373), which
 landed on main beside this change and must therefore run here rather than at a
-call site.
+call site, plus this module's own ``floor_issues``.
 
 CLI::
 
@@ -423,6 +423,21 @@ def floor_issues(manifest: dict) -> list[str]:
     """
     floors = manifest.get("durations_floors")
     if floors is None:
+        # ABSENT is legal (a fixture manifest declares no floors); PRESENT but NULL is
+        # not. `durations_floors:` written with its entries deleted — a plausible
+        # merge-resolution "tidy", and exactly how duplicate twins get dropped in this
+        # repo — used to read as "no declarations" on BOTH sides at once (this check
+        # and the writer's `_declared_floors`), so every declared cap reverted on the
+        # next sweep with nothing red anywhere. That is the same silent revert the
+        # non-mapping container was fixed for (#10575 review, F2); the container shape
+        # must fail closed on EITHER face (#10575 review, P3).
+        if "durations_floors" in manifest:
+            return [
+                "``durations_floors`` is present but declares nothing (`null`) — a "
+                "declaration block that parses to no declarations means no row in "
+                "this map is declared at all, so every cap it states silently "
+                "reverts; state the declaration or drop the key (#9172)"
+            ]
         return []
     if not isinstance(floors, dict):
         return [
@@ -490,13 +505,32 @@ def floor_issues(manifest: dict) -> list[str]:
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             continue  # the wrong TYPE is `duration_issues`' diagnostic, not this one
         if float(value) < float(floor):
-            issues.append(
-                f"{name} is declared with a ``durations_floors`` FLOOR of "
-                f"{float(floor):.1f} but its row carries {value!r} — the writer "
-                f"keeps a row at or above its floor, so this map states both that "
-                f"the value is a declared minimum and that it is below it; raise "
-                f"the row, or lower the declared floor"
-            )
+            # The DECLARATION decides the sentence, not the direction of the
+            # disagreement (the reader-side mirror of the writer's
+            # `kept_at_declared_cap` vs `kept_as_lower_bound`). A `pinned` row is a
+            # CAP: the writer holds it AT the declared value in BOTH directions, and
+            # the key's own header forbids "lower the declared floor" as a repair —
+            # raising or lowering a cap is a CI-budget decision recorded on #9172,
+            # never a sweep's side effect. Naming the wrong mechanism sent a reader
+            # to the one action the declaration forbids (#10575 review, P3).
+            if pinned:
+                issues.append(
+                    f"{name} is declared with a ``durations_floors`` CAP of "
+                    f"{float(floor):.1f} but its row carries {value!r} — the writer "
+                    f"holds a capped row AT its declared value in both directions, "
+                    f"so this map states both that the weight is a declared weighing "
+                    f"choice and that it is a measurement below it; correcting the "
+                    f"row (or the declaration itself) is a CI-budget decision "
+                    f"(#9172), never a side effect of a sweep"
+                )
+            else:
+                issues.append(
+                    f"{name} is declared with a ``durations_floors`` FLOOR of "
+                    f"{float(floor):.1f} but its row carries {value!r} — the writer "
+                    f"keeps a row at or above its floor, so this map states both that "
+                    f"the value is a declared minimum and that it is below it; raise "
+                    f"the row, or lower the declared floor"
+                )
         elif pinned and float(value) > float(floor):
             issues.append(
                 f"{name} is declared with a ``durations_floors`` CAP of "
