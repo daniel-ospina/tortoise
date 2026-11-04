@@ -303,8 +303,17 @@ def test_the_verdict_FOLLOWS_a_flipped_registry_entry(monkeypatch):
         assert real[name].annotations.idempotentHint is expected
 
 
-def test_any_PROPS_PAYLOAD_makes_convergence_unprovable_so_it_is_never_called_safe():
-    """`props` is an OPEN caller channel onto the node, so it is never called safe.
+def test_a_PROPS_PAYLOAD_on_create_point_is_never_called_safe_10849_measured():
+    """On `tortoise_create_point`, `props` is an OPEN caller channel onto the
+    node, so such a call is never called safe.
+
+    ⛔ SCOPE, because the rule is not universal: the props gate lives inside the
+    `name != "tortoise_create_point"` early return, and it must — for
+    `tortoise_create_source` the fold MERGEs on the caller's own `url`, so no
+    props payload can escape it (measured: `props={"is_operator": True}` there
+    still answers `retry_safe: True`). `create_point` is the tool whose fold
+    queries by KIND + content hash rather than by a caller-supplied key, which is
+    why only there is the channel open.
 
     ⛔ The claim is UNPROVABILITY, not "props defeats the fold" — that would be
     false for most payloads (see the counter-examples below, which fold onto one
@@ -648,7 +657,7 @@ def test_an_ingest_bundle_with_append_only_entities_is_not_repeatable():
     # the RESOLUTION rather than an oversight: three review rounds each closed ONE
     # spelling of this hole (the append-only entities leg, the JSON-string bundle,
     # and the FLAT `props` splat), which is the signal that the enumeration is the
-    # defect. `sdk.py:26775` documents the points form as `{kind, content, ref?,
+    # defect. `sdk.py:26781` documents the points form as `{kind, content, ref?,
     # status?, **props}` — so `is_operator` sits BESIDE `kind`, not in `props`, and
     # no key allow-list sees it. The bundle's key space is open-ended, so the seam
     # reports what it knows ("not provable") instead of a claim it cannot ground.

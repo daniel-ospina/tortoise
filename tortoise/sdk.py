@@ -22622,7 +22622,8 @@ class TortoiseSDK:
 
         action='mitigate' → mitigate_operator(id=..., reason=..., strength=)
             Creates/updates the mitigation Point modulating an operator's edge
-            strength (idempotent).
+            strength. Does NOT duplicate a CURRENT mitigation, but is NOT a
+            no-op (see `mitigate_operator`).
         action='annotate' → annotate_operator(id=..., bias=..., precision=...,
             consistency=..., directness=...) — structured epistemic dims.
 
@@ -22773,8 +22774,13 @@ class TortoiseSDK:
 
         Raises ValueError if id not found, not an operator, strength out of
         [0, 1], or credibility outside the ladder.
-        Idempotent: a second call updates the existing CURRENT mitigation
-        (reason + strength), does not create a duplicate. A mitigation the graph
+        Does NOT duplicate a CURRENT mitigation: a second call updates it in
+        place, so the node count stays 1. ⛔ It is NOT a no-op, and this door must
+        not be read as one: the CURRENT branch calls `update_point`
+        UNCONDITIONALLY, so every repeat re-stores the node and
+        re-triggers EP dirty-marking — which is why `tortoise_mitigate_operator`
+        is declared `idempotent=False` in the registry and why its refusal's
+        `retry_safe` is False. A mitigation the graph
         records as terminal (retracted/superseded/outdated/archived) is never
         revived in place — a re-assertion creates a NEW mitigation Point, since
         retraction is terminal (#432/#2422). A REDELIVERY through ``ingest()``

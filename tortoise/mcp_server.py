@@ -787,12 +787,12 @@ def _arguments_disable_convergence(name: str, arguments) -> bool:
     #   * `entities` of type document/event are APPEND-ONLY (`sdk.py` "Document
     #     records are append-only — never deduped"; `docs/INGEST_CONTRACT.md` row
     #     1 `append_only_items`), and the SDK lowercases the type on BOTH legs
-    #     (`sdk.py:23845` admission, `sdk.py:27236` dispatch), so a case variant
+    #     (`sdk.py:23851` admission, `sdk.py:27242` dispatch), so a case variant
     #     reaches the writer too;
     #   * `bundle` may arrive as a JSON STRING — the handler calls
     #     `_parse(bundle)` after this seam runs and the served schema puts no
     #     `type` on it — so `json.dumps(...)` bypassed the whole check;
-    #   * and a bundle's points SPLAT `props` FLAT (`sdk.py:26775`: `[{kind,
+    #   * and a bundle's points SPLAT `props` FLAT (`sdk.py:26781`: `[{kind,
     #     content, ref?, status?, **props}]`), so a caller puts `is_operator`
     #     BESIDE `kind` rather than inside `props` — measured, that mints a
     #     second node while every key-allow-list reads it as props-free.
@@ -2927,8 +2927,11 @@ WRITE_TOOL_NAMES: frozenset[str] = get_write_tool_names()
 # `dry_run` must not, and the metering behaviour is verified through the real
 # dispatch seam. "Six" is the destructive subset, not the size of the set —
 # the derivation yields seven registry tools today (those six plus
-# `tortoise_backfill_v25`, whose handler default is `dry_run=True`), which is
-# the count `docs/INGEST_CONTRACT.md` and `_arguments_say_preview` both use.
+# `tortoise_backfill_v25`, whose handler default is `dry_run=True`). That count is
+# the one `docs/INGEST_CONTRACT.md`'s PREVIEW row uses, and the one
+# `_coerces_to_true`'s docstring quotes when it records the measured regression
+# (`six of the seven dry_run tools`); `_arguments_say_preview` itself names no
+# number — it branches on the SET this function derives.
 _DRY_RUN_TOOLS: frozenset[str] | None = None
 
 

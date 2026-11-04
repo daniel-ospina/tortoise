@@ -384,9 +384,10 @@ sdk.query(kind=None, status="draft")         # everything still gated
 MCP: `tortoise_query(kind="statement")`, `tortoise_search(q="…")`.
 
 **Audit what a bundle added:** `batch_id` round-trips through the whole
-bundle's artifacts — see [§16](#16-batch_id--audit). **planned:** a batch
-discovery/audit primitive (`list_batch`) lands with this release; until then
-`query(status="draft")` + the `ids` from the response are the retrieval path.
+bundle's artifacts — see [§16](#16-batch_id--audit). A batch discovery/audit
+primitive SHIPPED: `sdk.list_batch(batch_id)` / `sdk.list_batches(limit)`, served
+as `tortoise_list_batch` / `tortoise_list_batches` — that is the retrieval path,
+and it is what answers "what committed?" when transport death ate the response.
 
 **Check team usage:** `tortoise team info` → `GET /v1/team` (see [§9](#9-quota)).
 
