@@ -314,7 +314,10 @@ def test_a_LIVE_pid_in_ANOTHER_group_is_not_our_rail():
     No procfs, no `ps`: a child started in its OWN session is a live pid this
     process does not own, which is the whole predicate.
     """
-    child = subprocess.Popen(                      # noqa: S603 - a sleeping stub
+    # A sleeping stub on this interpreter's own argv, so no suppression is
+    # needed: `S` is not in this repo's ruff select (pyproject `[tool.ruff.lint]`),
+    # and naming a rule that is not enabled reds `RUF100` here in CI.
+    child = subprocess.Popen(
         [sys.executable, "-c", "import time; time.sleep(60)"],
         start_new_session=True)
     try:

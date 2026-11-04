@@ -9567,22 +9567,30 @@ durations:
   # `DEFAULT_FAST_WEIGHT` (2.0) and NOT a dev-box reading, which this map forbids
   # as a SHARD-LAYOUT input (#2818/#3419/#4348) — exactly as the eight other
   # files in `ADDED_BY_THIS_FOLD` do (`tests/test_ci_selection.py`). Its own
-  # count citation and the measurement follow the row, because a continuation
+  # measurement note follows the row, because a continuation
   # block belongs to the row ABOVE it (#10055's reader) — a citation parked
   # above would be read as the PREVIOUS row's claim.
   test_9548_record_search_keys_shape.py: 2.0
-  # THIS file: 12 cases (`grep -c '^def test_'` -> 12; pytest collects 12 — the
-  # file has no parametrize, no pytestmark and no collect_ignore, so the count
-  # is static). 12 cases now because the #10692 review P2 added
+  # ⛔ The CASE COUNT is deliberately NOT quoted, and neither is a pass count: a
+  # hand-written count re-stales on every case a later round adds. This row
+  # carried one and it was wrong on arrival — the #10726 review at `ae9209738`
+  # re-derived the file's `^def test_` population with the instrument this map's
+  # ENTRY RULE names and found the note short by one, in the same commit
+  # (`c660ffcee`) that added the missing case, and the note's own local reading was
+  # short by the same arithmetic. The file is the only authority for what it
+  # collects; nothing is restated here. What the cases cover: the #10692 review P2 added
   # `test_the_pre_fix_binding_shape_is_still_readable_when_built_by_hand`, the
   # pin for `Statement.value_types()`'s otherwise-unreachable
-  # `→jsonb(NOT a JSON document)` arm. The DB-free legs are the ones that run on
+  # `→jsonb(NOT a JSON document)` arm, and a later round added
+  # `test_a_message_string_with_a_cause_degrades_instead_of_raising`. The file has
+  # no parametrize, no pytestmark and no collect_ignore, so pytest's collection
+  # follows `^def test_`. The DB-free legs are the ones that run on
   # the fast lane; the ONE Postgres leg SKIPS without `TEST_RECORD_DB_URI` (the
-  # #9551 job arms it, not this leg). MEASURED LOCALLY on this host 2026-11-03 at
+  # #9551 job arms it, not this leg). MEASURED LOCALLY on this host 2026-11-04 at
   # this head as a sanity bound, not as a weight:
   # `TORTOISE_TEST_CARVE_OUT=1 .venv/bin/python -m pytest
   # tests/test_9548_record_search_keys_shape.py -q -p no:cacheprovider` ->
-  # "11 passed, 1 skipped in 3.45s" — ABOVE the 2.0 flat weight, so the flat
+  # 7.31 s wall, the ONE Postgres leg skipping — ABOVE the 2.0 flat weight, so the flat
   # reading UNDERSTATES it until a sweep replaces this row (the
   # `test_state_value_verbatim_10360.py` precedent: the point of the row is
   # existence + coverage, not an accurate shard weight).
