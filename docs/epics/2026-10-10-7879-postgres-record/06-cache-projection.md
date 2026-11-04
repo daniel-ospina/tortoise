@@ -237,17 +237,17 @@ title-derived `_searchText`, silently un-indexing it in the cache.
 
 ### Three costs, named rather than implied
 
-* the **journal fold** still projects the value until #10000's capture-side change
-  lands, so the two rebuild paths disagree on that one column until then — in the
-  ruling's direction, and converging with it;
+* the **journal fold** still projects BOTH, so the two rebuild paths disagree on
+  `_searchText` for a new capture and on `summary` only for a LEGACY carrier line
+  — #10853's residue, in the ruling's direction;
 * graph-side FTS over a session Source's own utterances goes with the prose. The
   value survives in the record (retrievable by a column read; there is no
   record-side text index), and #10000 replaces the capture's summary with a topic
   lexicon;
 * `python -m tortoise record-reconcile` builds its RECORD side through the same
   projector, so its truth side omits what the cache holds. **The population is not
-  "legacy"**: at this head the capture still writes and journals the pair, so
-  every session this build captures would report `field_mismatches` forever — the
+  ONE shape**: `_searchText` is written and journaled by every capture, so
+  every session this build captures reports `field_mismatches=1` — the
   "signal indistinguishable from noise" the reconciler's own docstring grades P1.
   So `scan_cache_view` marks the pair CACHE-OWNED for an episodic Source
   (`cache_projection.episodic_source_prose_properties()`) and the run counts it
@@ -258,7 +258,8 @@ title-derived `_searchText`, silently un-indexing it in the cache.
   additive (`MERGE … SET n += $props`), so a node that ALREADY carries the pair
   keeps it across a re-projection: this arm stops the pair being re-written, it
   does not clear one. Clearing a populated cache's stale pair needs an explicit
-  property clear, and the sweep is #10000's capture change.
+  property clear, which #10858's capture change does NOT perform — that sweep is
+  #10853's migration.
 
 ### The pin
 

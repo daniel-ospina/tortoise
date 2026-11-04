@@ -89,17 +89,17 @@ THE FOUR PROPERTIES, AND WHERE EACH LIVES
    and the cache declines them. Three costs, named here and at that table rather
    than implied:
 
-   * the **journal fold** still projects the value until #10000's capture-side
-     change lands, so the two rebuild paths disagree on that one column until
-     then — in the ruling's direction, and converging with it;
+   * the **journal fold** still projects BOTH, so the two rebuild paths disagree
+     on `_searchText` for a new capture and on `summary` only for a LEGACY
+     carrier line — #10853's residue, in the ruling's direction;
    * **graph-side FTS** over a session Source's own utterances goes with the
      prose. The value survives in the record and is retrievable by a column read
      (`record_serve.read_node`, `record-text`); there is no record-side text
      INDEX;
    * **`record-reconcile`** builds its RECORD side through this same projector,
-     so its truth side omits what the cache holds. The population is NOT
-     "legacy": at this head the capture still writes and journals the pair, so
-     every session this build captures is in it. That is why the pair is marked
+     so its truth side omits what the cache holds. The population is not ONE
+     shape: `_searchText` is written and journaled by every capture, so every
+     session this build captures is in it. That is why the pair is marked
      CACHE-OWNED for an episodic Source
      (:func:`episodic_source_prose_properties`, consumed by
      `record_reconcile.scan_cache_view`) and counted under its own `graph_only`
@@ -110,8 +110,8 @@ THE FOUR PROPERTIES, AND WHERE EACH LIVES
      (`MERGE … SET n += $props`, :func:`node_statement`), so a node that ALREADY
      carries the pair keeps it across a re-projection; this arm stops the pair
      being re-written, it does not clear an existing one. Clearing a populated
-     cache's stale pair needs an explicit property clear, and the sweep is
-     #10000's capture change.
+     cache's stale pair needs an explicit property clear, which `#10858`'s
+     capture change does NOT perform — that sweep is #10853's migration.
 4. **A cold region reads ``not-hot``, never ``empty``.** ``declaration_for``
    writes the known-hot set **after** the writes and as a function of what was
    materialized, so a record key the projection did not write is not claimed
@@ -1196,9 +1196,9 @@ def _scalar(value: Any) -> Any:
 #:
 #: WHY THIS IS HERE AND NOT ONLY IN THE CAPTURE. `sdk._session_source_metadata`
 #: derives a *summary* from the transcript's first substantive utterance, and the
-#: capture writes it on the session `:Source` (`s.summary=$sum`). #10000's ruling
-#: (§9.1/D1) is that captured turn text lives in the RECORD, not on a graph node.
-#: The capture side of that is #10000's own change. This table is the OTHER door:
+#: capture USED to write it on the session `:Source` (`s.summary=$sum`) — that
+#: write and its record carrier are both gone (`#10858`, on §9.1/D1: captured turn
+#: text lives in the RECORD, not on a graph node). This table is the OTHER door:
 #: every record-sourced READ and rebuild goes through :func:`node_from_row` —
 #: `tortoise record-restore` and `rebuild_from_record` MATERIALISE a node with it,
 #: and `record_serve.read_node` answers the graph-engine-down read with
@@ -1206,9 +1206,9 @@ def _scalar(value: Any) -> Any:
 #: written by a build that still placed the key would either re-materialise the
 #: prose **whatever build is reading it**, or make the served answer disagree
 #: with what a rebuild can carry — and nothing reds either way: a one-way
-#: divergence (`#10853`). Clearing the legacy rows would be a sweep that decays:
-#: at this head the capture still places the key, so the next capture of the same
-#: session writes the value straight back. A rule cannot decay.
+#: divergence (`#10853`). The DECAY argument here is history: it held while the
+#: capture still placed the key, and `#10858` removed that write — so the residue
+#: is now a MIGRATION debt this rule declines to re-create (#10853), nothing more.
 #:
 #: ⛔ THE PAIR IS ONE DATUM, which is why both COLUMNS are here (`summary`,
 #: `_search_text` — the graph property its mapping produces is `_searchText`). On
@@ -1230,17 +1230,17 @@ def _scalar(value: Any) -> Any:
 #: non-clean reads as noise: `python -m tortoise record-reconcile` builds its
 #: RECORD side through :func:`read_record_view` → `node_from_row`, so the truth
 #: side omits these two properties while the CACHE side holds them. That
-#: population is not "legacy" — at this head the capture still writes and
-#: journals them, so EVERY session this build captures would report
-#: `field_mismatches=2` forever. Left alone that is the class the reconciler
-#: itself grades P1 (*"a signal indistinguishable from noise is not
-#: observability"*), so the comparison is not left to carry it:
+#: population is not ONE shape: `_searchText` is written and journaled by
+#: EVERY capture (`#3518`/D10's home for the text), so every session this
+#: build captures reports `field_mismatches=1`; a SECOND field means a
+#: pre-fix row (#10853) — the class the reconciler itself grades P1
+#: (*"a signal indistinguishable from noise"*), so it is not left to carry:
 #: :func:`episodic_source_prose_properties` and
 #: `record_reconcile.scan_cache_view` mark the pair CACHE-OWNED for an episodic
 #: Source, and the reconciler counts them under `graph_only` — visible, and not
 #: a divergence against a record that is correct. The repair for the graph side
 #: is a record-sourced re-projection (`record-restore` / `rebuild_from_record`,
-#: which re-materialise through this projector), then #10000's capture change.
+#: which re-materialise through this projector), and clearing one is #10853.
 _EPISODIC_SOURCE_PROSE_COLUMNS: frozenset[str] = frozenset({
     "summary", "_search_text",
 })
