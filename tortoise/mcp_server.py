@@ -875,11 +875,17 @@ def _call_folds_siblings_into_props(arguments) -> bool:
     # write has already satisfied. The rule still blocks it, for the reason the
     # `props` rule exists: the channel is caller-controlled, so convergence is not
     # PROVABLE — not because this particular value diverges.
-    if arguments.get("authoredBy"):                 # handler: `if authoredBy:`
-        return True
-    if arguments.get("credibility") is not None:     # handler: `is not None`
-        return True
-    return False
+    # ⛔ These are two DIFFERENT predicates and neither may absorb the other:
+    # `authoredBy` folds on TRUTHINESS (handler: `if authoredBy:`), `credibility`
+    # folds on PRESENCE (handler: `if credibility is not None:`) — `credibility=0`
+    # is the real T0 tier, and `0 == False` in Python.
+    #
+    # ⛔ `bool(...)` is load-bearing, not decoration: `arguments.get("authoredBy")`
+    # yields the RAW value (`"me"`), and SIM103's own "Fix safety" note says the
+    # unwrapped form changes behaviour whenever the condition is not already a
+    # Boolean — it would leak a string out of this `-> bool` function and out of
+    # `_write_retry_safety`, whose `retry_safe` cell is compared with `is True/False`.
+    return bool(arguments.get("authoredBy")) or (arguments.get("credibility") is not None)
 
 
 def _declared_dry_run_default(name: str):

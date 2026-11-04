@@ -279,6 +279,41 @@ def test_a_PROPS_PAYLOAD_defeats_the_dedup_fold_so_it_is_never_called_safe():
             " reads it as absent while the handler folds it (`0 is not None`)")
 
 
+def test_the_sibling_fold_probe_answers_a_real_bool_not_the_raw_value():
+    """The `-> bool` return of `_call_folds_siblings_into_props` is load-bearing.
+
+    Ruff's SIM103 asked for this two-predicate body to be inlined, and its own
+    "Fix safety" note is why the `bool(...)` wrap has to survive that rewrite:
+    `arguments.get("authoredBy")` yields the RAW value (`"me"`), so the unwrapped
+    form leaks a string out of a `-> bool` function. Downstream that stays
+    invisible until it is not: the value feeds `_write_retry_safety`, whose
+    `retry_safe` cell callers and this suite compare with `is True` / `is False`.
+
+    So this pins the two things the simplification must not lose: the return is a
+    real `bool` (the unwrapped form returns `"me"`), and the two predicates stay
+    DIFFERENT — `authoredBy` on truthiness (`if authoredBy:`), `credibility` on
+    presence (`if credibility is not None:`), because `credibility=0` is the real
+    T0 tier and `0 == False` in Python. Collapsing either one is how this rule
+    failed OPEN before.
+    """
+    folds = ms._call_folds_siblings_into_props
+
+    assert folds({"authoredBy": "me"}) is True
+    assert isinstance(folds({"authoredBy": "me"}), bool), (
+        "the raw `authoredBy` value must not escape — SIM103's fix-safety note is "
+        "exactly this hazard, and the `bool(...)` wrap is what prevents it")
+    assert folds({"credibility": 0}) is True, "`credibility=0` is T0, not absent"
+    assert folds({"credibility": 0.0}) is True, "same value, float spelling"
+    assert folds({"authoredBy": ""}) is False, (
+        "the handler folds `authoredBy` on TRUTHINESS, so an empty string is not "
+        "folded — presence is the OTHER predicate's rule")
+    assert folds({"credibility": None}) is False, "an explicit None is not folded"
+    assert folds({}) is False
+    assert folds({"content": "X"}) is False, (
+        "the props-free shape is the only one convergence is provable for")
+    assert folds(None) is False, "a non-dict bundle carries no named argument"
+
+
 def test_a_STATE_conditional_writer_is_never_called_safe():
     """`tortoise_mitigate_operator` converges only for a CURRENT mitigation.
 
