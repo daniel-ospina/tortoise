@@ -1883,9 +1883,19 @@ def test_the_shipped_logs_blocker_cells_are_the_emitters_own():
     # "edit that reads as emitter output" class #10537 exists to refuse.
     e4_sentence = ("that closure records the DISPROOF, so it is this row's "
                    "measurement record")
+    # ⛔ THE FILE-WIDE SEARCH BELOW IS NOT THE BINDING — it is a fast pre-check, and on
+    # its own it is VACUOUS (`#10679` review round 6, measured). The phrase occurs
+    # TWICE in the joined source: in the reachable `elif` arm AND in `build_e4_row`'s
+    # `else` arm, which no committed receipt can reach (`edge_correct >= planted` with
+    # an outcome that is not PASS). Rewriting the REACHABLE arm's clause to
+    # "… and IS a live blocker again …" left the whole file green at 163 passed, while
+    # `build_e4_row` emitted exactly that sentence into every future scored log. The
+    # BEHAVIOURAL binding is asserted on `built["note"]` further down, beside the
+    # sibling `unowned` clause round 3 fixed the same way; this line only catches a
+    # probe that has lost the sentence entirely.
     assert e4_sentence in source_joined, (
-        "the E4 note's closed-blocker sentence is NOT in the committed probe, so "
-        "a hand-typed E4 note would still pass")
+        "the E4 note's closed-blocker sentence is NOT in the committed probe at all, "
+        "so a hand-typed E4 note would still pass")
     assert e4_sentence in record["rows"][3]["note"], record["rows"][3]["note"]
 
     # ⛔ THE CORRECTED RESIDUAL CLAUSE IS PINNED TOO, AND AGAINST THE EMITTED NOTE
@@ -1924,6 +1934,25 @@ def test_the_shipped_logs_blocker_cells_are_the_emitters_own():
     assert "residual is owned by" not in record["rows"][3]["note"], (
         "the shipped log's E4 note carries the refuted '#9596 owns the residual' "
         f"attribution: {record['rows'][3]['note']}")
+    # ⛔ AND THE CLOSED-BLOCKER SENTENCE ITSELF, BOUND BEHAVIOURALLY (`#10679` review
+    # round 6). The file-wide pre-check above cannot see a rewrite of the REACHABLE
+    # arm, because the same phrase survives in the unreachable one — measured: the
+    # refuted "… and IS a live blocker again …" stayed green at 163 passed while the
+    # emitter printed it. Binding `built["note"]` closes that, and the negative arm
+    # below (`"not a live blocker"`) is what makes the binding mean something rather
+    # than just "the phrase is still somewhere in the sentence".
+    assert e4_sentence in built["note"], (
+        "the note `build_e4_row` EMITS for the committed receipt does not carry the "
+        f"closed-blocker sentence, so the shipped log's copy is hand-typed: {built['note']}")
+    assert "not a live blocker" in built["note"], (
+        "the emitted note lost the `#8503` closure reading — that issue CLOSED and its "
+        f"closure records E4's DISPROOF, so it is not a live blocker: {built['note']}")
+    assert e4_sentence in record["rows"][3]["note"], (
+        "the shipped log's E4 note lost the closed-blocker sentence: "
+        f"{record['rows'][3]['note']}")
+    assert "not a live blocker" in record["rows"][3]["note"], (
+        "the shipped log's E4 note no longer says `#8503` is not a live blocker: "
+        f"{record['rows'][3]['note']}")
 
 
 def test_the_shipped_log_discloses_what_the_run_did_not_emit():
@@ -4675,9 +4704,11 @@ def test_the_bare_entry_point_call_cite_resolves_to_the_call_it_names():
 # sweep in this file: not resolved, and — unlike a bare `:NNNN` continuation —
 # not even reported `unmatched`, because it carries a file name the sweep never
 # looks for. The bundle's own convention for a number in that position is
-# `README.md:188-200` (*"written here WITHOUT the `file:line` form on purpose …
-# do NOT follow them as pointers at this head"*): the SYMBOL is authoritative,
-# the line is a convenience nothing re-derives.
+# the README's *"written here WITHOUT the `file:line` form on purpose … do NOT
+# follow them as pointers at this head"* paragraph: the SYMBOL is authoritative, the
+# line is a convenience nothing re-derives. Cited by SENTENCE — that range was
+# `188-200` at `origin/main` and is `196-205` at this head, moved by THIS branch's own
+# README insertions, which is the third time a number here has walked.
 #
 # Measured provenance, stated exactly (the previous revision of this comment
 # misstated both halves, and this file's own docstring below contradicted it):
@@ -4739,7 +4770,8 @@ def test_no_document_cites_the_run_probe_by_a_number_nothing_can_resolve():
         "`_BUNDLE_CITE` resolves `sdk|edges|extractor_v2` only and "
         "`_BUNDLE_TOOL_SOURCES` names only the gate, so the number rots "
         f"silently: {offenders}. Cite the SYMBOL instead (the bundle's own "
-        "convention, `README.md:188-200`), or add a resolver row for the probe "
+        "convention, its `file:line`-is-not-a-live-cite paragraph), or add a "
+        "resolver row for the probe "
         "before writing a number into it")
 
     # 2. The claim survives as a symbol — the ban above must not be satisfied
@@ -5030,7 +5062,7 @@ def test_e4_is_selected_by_the_receipts_own_corpus_hash_not_by_its_filename():
     filename — ``w2b-operator-2026-10-19.json`` — whose own ``corpus_hash`` is
     ``943a99ec…``, not the frozen ``dd7e8520…``, and scored E4 at **2/15** from it
     while three of ``#8503``'s OWN measurement receipts — all five-on-fifteen and all
-    on the frozen corpus, dated ~14 h BEFORE that issue closed as a DISPROOF, not
+    on the frozen corpus, dated 14.66–15.06 h BEFORE that issue closed as a DISPROOF, not
     "after its fix", which never existed — sat unread in the same directory. Before this
     test's NEWER, other-corpus receipt is what the row would have carried had anyone
     edited the constant; a filename constant cannot tell the two apart.

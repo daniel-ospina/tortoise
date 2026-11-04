@@ -35,9 +35,12 @@ touched one — and `probes/capstone_measure.py`) and
 its pins) plus `tests/test_7949_capstone_measure.py` (the bundle's own claim pins); its registration
 (`config/ci-surfaces.yml` `core`/`tier1`/`durations` arms, `docs/00_index.md`).
 ⛔ `blocker-states.json` is deliberately NOT listed: it landed on `origin/main` in `#10601` and this
-branch only READS it (`git log origin/main..HEAD -- docs/evidence/7949-capstone/blocker-states.json`
-is empty). It was listed until review round 4 checked this enumeration against the command it cites,
-which is twice now for this one paragraph.
+branch only READS it. Two commands say so and one does not — `git diff --name-only origin/main...HEAD
+-- docs/evidence/7949-capstone/blocker-states.json` and `git log --no-merges origin/main..HEAD -- …`
+are both empty, while a plain `git log origin/main..HEAD -- …` is NOT: it lists the forward merge
+commit, whose second parent carries the file, so a reader who runs the obvious form sees a hit and
+concludes the claim is false. Named with that distinction because this paragraph has now been
+re-derived twice for this class.
 ⛔ A previous revision of this paragraph named eight files this branch does **not** touch —
 `tools/capstone_preregistration_check.py`, `tests/test_capstone_preregistration_9075.py`,
 `tools/ci_selection.py`, `tests/test_ci_selection.py`, `config/surface-manifest.yml`,
@@ -526,8 +529,9 @@ fix: `#8503` CLOSED 2026-10-24 as a **DISPROOF**, and its own body closes with *
 it."* `probes/capstone_measure.py` now selects E4's receipt **by its
 own `corpus_hash`** (`select_e4_receipt`): the newest receipt on the frozen pin wins, and no match
 REFUSES instead of falling back. Three receipts on the frozen pin (`w2b-operator-2026-10-24-8503-{preleg,a,b}.json`
-— `#8503`'s OWN measurement receipts, dated `2026-10-24T05:46:51Z`/`06:03:47Z`/`06:10:47Z`, i.e. ~14 h
-BEFORE that issue's `closedAt` of `2026-10-24T20:50:13Z`, so they are not "after its fix" either) read
+— `#8503`'s OWN measurement receipts, dated `2026-10-24T05:46:51Z`/`06:03:47Z`/`06:10:47Z`, i.e.
+**14.66–15.06 h** BEFORE that issue's `closedAt` of `2026-10-24T20:50:13Z` (re-derived from the
+receipts' own `date` fields against the tracker), so they are not "after its fix" either) read
 **5/15**, with `content_ok` 11–13 and `operators_total` 29–33 across the
 three (the row reads `b`: `content_ok=11`, `operators_total=33`, commit `a999be41e`).
 So **E4 is 5/15, still RED** against the 15/15 bar. The verdict did not move; the number did, and

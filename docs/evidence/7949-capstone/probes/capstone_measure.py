@@ -2361,8 +2361,8 @@ def select_e4_receipt(repo: Path = ROOT, frozen_pin: str = "") -> tuple[str, dic
     no fix. ``#8503`` CLOSED 2026-10-24 as a **DISPROOF** (*"This issue is that
     residual, now measured post-close. No open issue owns it."*), and these three
     receipts (`w2b-operator-2026-10-24-8503-{preleg,a,b}.json`) are dated
-    ``2026-10-24T05:46:51Z`` / ``06:03:47Z`` / ``06:10:47Z`` — ~14 h BEFORE that
-    issue's ``closedAt`` of ``2026-10-24T20:50:13Z``. They are its measurement
+    ``2026-10-24T05:46:51Z`` / ``06:03:47Z`` / ``06:10:47Z`` — 14.66–15.06 h BEFORE
+    that issue's ``closedAt`` of ``2026-10-24T20:50:13Z``. They are its measurement
     artifacts, not the output of a repair it never made.
 
     A filename constant is also an evidence hole: point it at any other receipt and
