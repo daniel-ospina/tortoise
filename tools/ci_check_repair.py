@@ -187,11 +187,25 @@ QUEUED_STATUSES = frozenset({"queued", "waiting", "requested", "pending"})
 #: is therefore the NORMAL pre-start state for the whole of the first half hour (the
 #: same 2026-11-02 read that motivated this class had 11 of 16 `pending` runs at zero
 #: jobs at 11-22 min), and a 1200 s floor selects the measured-MEDIAN wait rather than
-#: an anomaly. The same document's §6 derives the repo's queue-wait budget from that
-#: max (81.9 min → 90 min) *"so it fires past the measured-normal population rather
-#: than on it"*, and this floor defers to the SAME derivation: 5400 s is past the
-#: measured maximum, so a run named here has outlasted every first-job wait this repo
-#: has recorded.
+#: an anomaly.
+#:
+#: THE BUDGET THIS FLOOR DEFERS TO, cited at each place for what it actually says:
+#: `docs/ops/ci-wall-clock.md` §1 line 50 is the MEASUREMENT (the table, 54 `python-ci`
+#: runs: p50 29.9 min, p95 77.0 min, max 81.9 min wait for a run's FIRST job);
+#: `tools/ci_queue_health.py:300` is the DERIVED VALUE,
+#: `DEFAULT_MAX_PR_WAIT_SECONDS = 90 * 60.0`; and `docs/ops/ci-wall-clock.md` §6
+#: (lines 326-332) records that derivation in its own words — *"The budget's default is
+#: derived from this document's own §1 measurement (max first-job wait 81.9 min →
+#: 90 min), so it fires past the measured-normal population rather than on it."* 5400 s
+#: sits on the same side of the same measurement: past the measured maximum, so a run
+#: named here has outlasted every first-job wait this repo has recorded.
+#:
+#: ⛔ CITE EACH PLACE FOR WHAT IT SAYS. §6 OPENS with *"**It does not bound queue
+#: wait.** §1. No `timeout-minutes` can."* — that sentence is about `timeout-minutes`,
+#: and the SAME BULLET, three lines later, supplies the 81.9 → 90 min derivation. Read
+#: as a denial of a queue-wait budget it is a misreading that then discards the one
+#: section that supports this floor. A lane re-deriving 5400 s follows §1
+#: (measurement) → §6 / `ci_queue_health.py:300` (budget).
 #:
 #: WHY THE ORDERING IS LOAD-BEARING: the repair for this class evaluates to
 #: cancel-then-rerun, and cancelling a run that is merely waiting for a slot discards
@@ -334,10 +348,10 @@ _CANCEL_NOT_QUEUED_RE = re.compile(r"has not been queued yet", re.I)
 #: ⛔ A 403 ON THE CANCEL IS *NOT* A DEFERRAL — it is a CREDENTIAL refusal (#10763).
 #:
 #: `_cancel`'s other skips are all TRANSIENT and deferring them can succeed: a spent
-#: settle budget ('no_budget') refills, an observation that missed ('unsettled') or
-#: could not be read ('unreadable') is re-attempted, and a detail-less POST failure
-#: ('refused') may be a blip. A permission failure cannot be deferred into success —
-#: the token lacks `actions:write`, and no window grants it.
+#: settle budget ('no_budget') refills, an observation that missed
+#: ('cancel_unobserved') or could not be read ('unreadable') is re-attempted, and a
+#: detail-less POST failure ('refused') may be a blip. A permission failure cannot be
+#: deferred into success — the token lacks `actions:write`, and no window grants it.
 #:
 #: Folding it into 'refused' (and so into `_rerun`'s 'deferred') made the caller stamp
 #: `deferred: True`, which the escalation predicate EXCLUDES — so the tool exited 0
@@ -390,9 +404,13 @@ class Run:
     run_attempt: int
     event: str
     created_at: str = ""
-    #: When the run's CURRENT ATTEMPT started (GitHub's `run_started_at`), null while
-    #: the attempt is still queued. `created_at` is the RUN's creation and does NOT
-    #: move on a rerun — MEASURED 2026-11-02 on run 41523739094, whose attempt 2 began
+    #: When the run's CURRENT ATTEMPT started (GitHub's `run_started_at`). NOT reliably
+    #: null while an attempt is queued — MEASURED 2026-11-03 that a QUEUED re-run
+    #: attempt already carries the stamp (run 41585740714: `run_attempt` 2, created
+    #: 05:45:16Z, `run_started_at` 05:54:22Z, still `queued`) — so a missing stamp is an
+    #: ABSTENTION in `attempt_age_seconds`, never evidence that an attempt has not
+    #: started. `created_at` is the RUN's creation and does NOT move on a rerun —
+    #: MEASURED 2026-11-02 on run 41523739094, whose attempt 2 began
     #: at 21:41:43Z while `created_at` still read 20:56:13Z (the attempt-1 time). The
     #: job count describes the LATEST attempt, so the AGE must too, or every rerun
     #: inherits the first attempt's age and its floor becomes 0 (see `_zero_job_stalled`).
@@ -438,6 +456,17 @@ class PrPlan:
     # ``{run, workflow, status, jobs, age_seconds}`` and is reported by name as
     # ``NO-VERDICT-WILL-ARRIVE(...)``.
     no_verdict: list[dict] = field(default_factory=list)
+    # Runs whose zero-job repair was SUPPRESSED by the congestion gate (`crowded`
+    # below), i.e. a repair this pass identified and deliberately did not perform.
+    # Each entry is ``{run, workflow, reason}``. It exists because such a run lands
+    # in `no_verdict` FIRST and then takes the `continue`, so it contributes nothing
+    # to `needing_repair` — and a pass that exits 0 reporting `needing_repair=0` is
+    # read by the local rail's notification and transition signature as a CLEAN,
+    # COVERED window. A refused repair is not a clean window: it is work waiting for
+    # a queue that is readable (or for the credential that can unjam it), so it is
+    # counted and printed beside `needing_repair` (module-level summary keys
+    # `no_verdict` / `repair_refused`).
+    repair_refused: list[dict] = field(default_factory=list)
 
     @property
     def actionable(self) -> bool:
@@ -456,7 +485,7 @@ class PrPlan:
         and escalated — dropping it is how an unrepairable check goes silent.
         """
         return bool(self.actionable or self.rerun or self.exhausted or self.starved
-                    or self.no_verdict)
+                    or self.no_verdict or self.repair_refused)
 
 
 def _run(argv: list[str], timeout: int = 120) -> subprocess.CompletedProcess:
@@ -877,6 +906,12 @@ def classify(pr: dict, checks: list[dict], all_runs: list[Run], required: list[s
     behind the queue rather than behind this run?". A cancel answers yes under either
     reading by discarding a queue position and adding load to the wait it is stuck
     in, so neither may authorise one.
+
+    ⛔ THE DEFAULT IS FOR CALLERS THAT DID NOT ASK THE QUESTION, NOT A LICENCE TO ACT.
+    `None` falls back to `queue_starved` for unit callers; the real entry point never
+    leaves it unanswered — `main()` maps an UNMEASURED queue (`None`, `UNKNOWN`,
+    `PR-UNWITNESSED`, a truncated feed, `--no-queue-health`) to `True` through
+    `queue_congestion_gate`, because on a destructive act silence is not permission.
     """
     plan = PrPlan(number=int(pr["number"]), head=pr["headRefOid"],
                   in_flight=sorted({r.name or r.path for r in all_runs
@@ -926,7 +961,39 @@ def classify(pr: dict, checks: list[dict], all_runs: list[Run], required: list[s
                 # NOTHING, and `queue_congested` extends the same refusal to a queue
                 # that is moving but backlogged: cancelling there discards the queue
                 # position the run had reached and re-queues it at the back.
-                if crowded and all(x.status in QUEUED_STATUSES for x in runs):
+                #
+                # ⛔ THE REFUSAL IS PER-RUN, NOT PER-CONTEXT, and it used to be the
+                # latter (`crowded and all(x.status in QUEUED_STATUSES for x in runs)`).
+                # The conjunct made every documented claim about this gate FALSE for a
+                # context carrying more than one producing run: with a `completed`
+                # sibling, `all(...)` is false and the cancel was ISSUED while the queue
+                # reading was congested — including the state where congestion was never
+                # measured at all (`--no-queue-health`, a failed read, `UNKNOWN`,
+                # `PR-UNWITNESSED`, a truncated feed), which is precisely the "silence is
+                # not permission" case `queue_congestion_gate` exists to close. Two runs
+                # of one workflow at one head are ordinary (`pull_request` plus
+                # `workflow_dispatch` on the same sha), so the hole was reachable.
+                # The HARM the refusal exists for — discarding the queue position a
+                # queued run had reached, and adding load to the wait it is stuck in —
+                # does not depend on what its SIBLINGS did, so neither may the refusal.
+                if crowded:
+                    # THE REFUSAL IS RECORDED, NOT SILENT. This run was named a
+                    # zero-job repair candidate above and is now not repaired;
+                    # without this entry the plan counts for nothing in
+                    # `needing_repair` and the pass reads as a clean window.
+                    # The reason names the refuser it can SEE here: measured
+                    # starvation, or the congestion gate. Whether that gate value
+                    # came from a real reading or from silence is NOT knowable at
+                    # this layer (`main()` collapses an unmeasured queue to `True`
+                    # through `queue_congestion_gate`) — the summary pair
+                    # `queue_congested` + `queue_congestion_measured` says it, and
+                    # the REFUSED-REPAIR notice prints both.
+                    reason = "queue_starved=True" if queue_starved else (
+                        "queue_congested=True")
+                    if not any(d["run"] == r.id for d in plan.repair_refused):
+                        plan.repair_refused.append(
+                            {"run": r.id, "workflow": r.name or r.path,
+                             "reason": reason})
                     continue
                 # ⛔ THE LOOP BOUND IS STRUCTURAL, NOT AN ABSTENTION (see
                 # `ZERO_JOB_MAX_REPAIRABLE_ATTEMPT`). Cancel-then-rerun turns attempt 1
@@ -1038,9 +1105,11 @@ def _live_zero_job(repo: str, run_id: int) -> tuple[str | None, int | None, int 
     cancels is KNOWN to contain runs that would have created jobs on their own.
 
     ⛔ THE ATTEMPT IS PART OF THE MEASUREMENT, NOT DECORATION. A status of `queued`
-    with `0` jobs is ALSO the shape of a FRESH RE-RUN ATTEMPT (its `run_started_at` is
-    null until it starts), so a peer re-run of the same run id inside the pass window
-    presents a payload identical to the one the classification was made from. Asking
+    with `0` jobs is ALSO the shape of a FRESH RE-RUN ATTEMPT, so a peer re-run of the
+    same run id inside the pass window presents a payload identical to the one the
+    classification was made from — the attempt integer is the field that separates
+    them (do not lean on `run_started_at` here: a queued re-run DOES carry a stamp —
+    see the measurement recorded on `ZERO_JOB_MAX_REPAIRABLE_ATTEMPT`). Asking
     only "is it still a queued zero-job run" would then cancel an attempt that was
     progressing normally, spend a second attempt of the budget, and (with
     `max_attempts = 3`) escalate the context EXHAUSTED — the loop the classification
@@ -1081,8 +1150,27 @@ def _cancel(repo: str, run: Run) -> str:
                     lacks `actions:write`) — TERMINAL, never a skip: no window
                     repairs a token, so `_rerun` propagates it and the pass escalates
                     instead of reporting a window it never discharged (#10763)
-      'unsettled'   the cancel landed but the run never reported `completed` in bound
-      'no_budget'   this pass's cancel-settle budget is spent → SKIP
+      'cancel_unknown'
+                    the POST was SENT and the ANSWER WAS LOST (`TimeoutExpired`; `_run`
+                    kills the child on expiry, and a killed `gh` may already have had
+                    its request applied) → the effect is UNKNOWN: the cancel may have
+                    landed. Neither 'refused' ("nothing was changed") nor
+                    'cancel_unobserved' ("the POST was accepted") is true, so it has its own
+                    state; the next window re-reads the run and acts on what is then
+                    true. ⛔ THE THIRD TRUTH VALUE IS THE POINT — the same discipline
+                    `Run.job_count` applies by keeping `None` ≠ `0`
+      'cancel_unobserved'
+                    the cancel POST was ACCEPTED and the run was never OBSERVED
+                    `completed` inside the settle bound. ⛔ AN ACCEPTED POST IS NOT AN
+                    APPLIED CANCEL — GitHub documents that a cancel can simply not take
+                    effect, which is why a force-cancel endpoint exists for a run "not
+                    responding to POST …/cancel" — so this state claims only what was
+                    measured: ACCEPTED, no replacement attempt from this pass, effect
+                    UNOBSERVED. It is distinct from 'deferred' because reporting it as
+                    "nothing was changed" is the other understatement: a destructive act
+                    WAS requested and may have taken effect.
+      'no_budget'   this pass's cancel-settle budget is spent BEFORE the POST → SKIP,
+                    nothing is cancelled
 
     ⛔ THE SAFETY PROPERTY IS MEASURED HERE, AT THE MOMENT OF ACTION — NOT BY THE
     CALLER, AND NOT AT THE START OF THE PASS. This is reached only from the zero-job
@@ -1098,10 +1186,10 @@ def _cancel(repo: str, run: Run) -> str:
     UNCACHED (`_live_zero_job`) and the POST is issued only while the run is still in
     a QUEUED status with a MEASURED zero AND the attempt it classified — the same
     discipline `_rerun` already applies to the head immediately before its own action.
-    The ATTEMPT is compared for the reason the classification side abstains on it: a
-    fresh re-run attempt is `queued` with `0` jobs and a null `run_started_at`, so a
+    The ATTEMPT is compared because a fresh re-run attempt is `queued` with `0` jobs: a
     peer re-run of the same run id inside the pass window is INDISTINGUISHABLE from
-    the stalled run by status and job count alone.
+    the stalled run by status and job count alone, and `run_attempt` is the only field
+    in that payload that tells them apart.
 
     Only 'cancelled' means the run is OBSERVED `completed`: a rerun issued against a
     run the API still considers live is refused (`403 This workflow is already
@@ -1130,12 +1218,23 @@ def _cancel(repo: str, run: Run) -> str:
         # TESTED BEFORE THE POST, deliberately: with no budget left to OBSERVE the
         # settle, the rerun that follows would be refused (`already running`) — so
         # cancelling here would destroy the attempt's verdict without being able to
-        # re-establish it. Skip; the next window has a fresh budget.
+        # re-establish it. Skip; the next window has a fresh budget. NOTHING was
+        # cancelled in this branch — every outcome INSIDE THE SETTLE LOOP below answers
+        # 'cancel_unobserved' instead.
         return "no_budget"
     try:
         r = _run([GH_BIN, "api", "-X", "POST",
                   f"repos/{repo}/actions/runs/{run.id}/cancel"])
-    except (OSError, subprocess.TimeoutExpired):
+    except subprocess.TimeoutExpired:
+        # ⛔ THE REQUEST WAS SENT AND THE ANSWER WAS LOST — the POST's effect is UNKNOWN.
+        # `_run` kills the child on expiry, and a killed `gh` may already have had its
+        # request applied: the server's answer is what was lost, not the act. This used
+        # to answer 'refused', which the caller maps to `deferred` ("nothing was
+        # changed") — the precise understatement `cancel_unobserved` exists to prevent,
+        # on the one path where the act's outcome is LEAST known (#10641 review).
+        return "cancel_unknown"
+    except OSError:
+        # `gh` could not be STARTED: no request left this process, so nothing changed.
         return "refused"
     if r.returncode != 0:
         detail = f"{r.stderr or ''} {r.stdout or ''}"
@@ -1148,20 +1247,28 @@ def _cancel(repo: str, run: Run) -> str:
             # it is a window that never can. Kept out of 'refused' precisely because
             # 'refused' is a SKIP (see the predicate at the other end of this chain).
             return "denied"
+        # ⛔ THE API ANSWERED, and the answer was not the permanent class above — nor a
+        # rate limit (excluded by the guard that just failed, so it stays a deferral).
+        # A refusal we cannot classify as permanent MAY be a blip, so it keeps the
+        # transient 'refused' state rather than escalating a human on every window.
         return "refused"
     started = time.time()
     try:
         for poll in range(_CANCEL_SETTLE_POLLS):
             elapsed = time.time() - started
             if elapsed >= _CANCEL_SETTLE_TOTAL_S:
-                return "unsettled"
+                return "cancel_unobserved"
             if _CANCEL_SETTLE_SPENT_S + elapsed >= CANCEL_SETTLE_PASS_BUDGET_S:
-                return "no_budget"
+                # ⛔ AFTER THE POST: the cancel was accepted and cannot be recalled, so
+                # this is NOT the pre-POST 'no_budget' skip. The run is cancelled and
+                # will get no replacement attempt from this pass.
+                return "cancel_unobserved"
             try:
                 data = gh_json(["api", f"repos/{repo}/actions/runs/{run.id}"],
                                retries=0, timeout=_CANCEL_SETTLE_POLL_TIMEOUT_S)
             except (MeasureError, subprocess.TimeoutExpired):
-                return "unsettled"
+                # The observation failed, not the cancel: the POST was accepted.
+                return "cancel_unobserved"
             if isinstance(data, dict) and data.get("status") == "completed":
                 return "cancelled"
             if poll + 1 < _CANCEL_SETTLE_POLLS:
@@ -1173,14 +1280,15 @@ def _cancel(repo: str, run: Run) -> str:
         # Real wall clock, not the nominal sleeps: the budget must bound what the
         # pass ACTUALLY spends, and a patched-out `_sleep` must not spend it.
         _CANCEL_SETTLE_SPENT_S += time.time() - started
-    return "unsettled"
+    return "cancel_unobserved"
 
 
 def _rerun(repo: str, run: Run, number: int, expected_head: str = "") -> str:
     """Re-run an EXISTING workflow run at the head it was measured at.
 
     Returns 'rerun'|'cancelled_rerun'|'rerun_not_queued'|'head_moved'|'target_moved'
-    |'deferred'|'denied'|'failed'. The head is re-read immediately before acting, the SAME
+    |'cancel_unobserved'|'cancel_unknown'|'deferred'|'denied'|'failed'. The head is
+    re-read immediately before acting, the SAME
     load-bearing precondition `_reopen` documents: a repair pass over many PRs takes
     minutes, so a run whose head has already been replaced would be re-run on a
     superseded sha and burn a CI cycle. If the head cannot be re-read the action is
@@ -1197,8 +1305,8 @@ def _rerun(repo: str, run: Run, number: int, expected_head: str = "") -> str:
     escalates (exit 1) so `ci-check-repair-local.sh` takes over.
 
     'deferred' IS A SKIP TOO, and it exists because the alternative mis-reported one.
-    `_cancel`'s own contract already distinguishes the states in which NOTHING was
-    done — 'no_budget' is documented there as *"Skip; the next window has a fresh
+    `_cancel`'s own contract already distinguishes the states in which nothing was
+    DONE — 'no_budget' is documented there as *"Skip; the next window has a fresh
     budget"*, 'moved' as a skip, 'unreadable'/'refused' as refusals that never act —
     yet every one of them except 'moved' used to fall through to 'failed', and
     `report` escalates a failure to exit 1, whose documented meaning is *"some PR needs
@@ -1222,7 +1330,22 @@ def _rerun(repo: str, run: Run, number: int, expected_head: str = "") -> str:
     — re-running it would be churn on a run that is working, or a second attempt on one
     that already finished), 'not_queued' falls through to the direct rerun, because
     the API's 409 means the run was never queued and there is nothing to cancel first,
-    and the remaining states are 'deferred' — nothing was done, so nothing escalated.
+    'cancel_unobserved' is a skip in which the cancel POST was ACCEPTED and its effect
+    never observed (named distinctly, see below), 'cancel_unknown' is a skip in which the
+    POST was sent and its ANSWER was lost
+    (the cancel MAY have landed — recorded as unknown, never as "nothing changed"),
+    'denied' is a READABLE PERMANENT refusal from the API (the class the workflow's
+    non-zero exit exists to signal: a repair this credential cannot perform), and the
+    remaining states are 'deferred' — nothing was done, so nothing escalated.
+
+    ⛔ 'cancel_unobserved' IS NOT 'deferred', AND THE DIFFERENCE IS THE RECORD. Both
+    are skips (neither escalates), but 'deferred' means nothing was even ATTEMPTED,
+    while 'cancel_unobserved' means a cancel POST was ACCEPTED and the settle was never
+    observed: an act was requested and may have taken effect, and this pass issued no
+    replacement attempt. Folding the two together made the record understate a
+    destructive act — the same reason 'cancel_refused_409' exists. ⛔ IT DOES NOT CLAIM
+    THE CANCEL LANDED: `completed` is the only evidence of that and this state exists
+    precisely because it was never read, so the entry records `cancel_accepted`.
     """
     if expected_head:
         try:
@@ -1243,16 +1366,30 @@ def _rerun(repo: str, run: Run, number: int, expected_head: str = "") -> str:
             state = "rerun_not_queued"
         elif cancelled == "moved":
             return "target_moved"
+        elif cancelled == "cancel_unobserved":
+            # THE POST WAS ACCEPTED; THE EFFECT WAS NOT OBSERVED. A SKIP, but one the
+            # record must not describe as "nothing was changed". If the cancel did take
+            # effect the next window sees the cancelled run, takes the DEAD path and
+            # re-runs it as the next attempt; if it did not, the run is still there and
+            # the next window re-measures it. Either way nothing is stranded — and
+            # nothing here claims which of the two happened.
+            return "cancel_unobserved"
+        elif cancelled == "cancel_unknown":
+            # THE POST WAS SENT; THE ANSWER WAS LOST. The run MAY be cancelled, so a
+            # rerun here is the "already running" refusal this whole path exists to
+            # avoid, and "nothing was changed" may be false. A SKIP (the next window
+            # re-reads the run and acts on what is then true), recorded as unknown —
+            # never as 'cancel_unobserved', which would claim the cancel LANDED.
+            return "cancel_unknown"
         elif cancelled == "denied":
             # NOT a deferral — see this function's docstring. Propagated so the caller
             # escalates instead of promising a window that cannot ever succeed.
             return "denied"
         else:
-            # 'no_budget' / 'unsettled' / 'refused' / 'unreadable' — the cancel did not
-            # happen (or could not be observed), and each of those is TRANSIENT, so
-            # the rerun must not be attempted and NOTHING was changed. That is a
-            # deferral to the next window, which can succeed. 'denied' is deliberately
-            # NOT in this set: a permission refusal cannot succeed in any window.
+            # 'no_budget' (checked BEFORE the POST) / 'refused' (`gh` never started, so
+            # the POST was never sent) / 'unreadable' — the cancel did NOT happen, so no
+            # rerun may be attempted and NOTHING was changed. That is a deferral to the
+            # next window, not a repair this credential cannot perform.
             return "deferred"
     try:
         ok = _run([GH_BIN, "api", "-X", "POST",
@@ -1368,11 +1505,16 @@ def build_plans(repo: str, required: list[str], emitters: dict[str, list[str]],
 def read_queue_health(repo: str):
     """The repo-level queue reading (#9115), or ``None`` when it cannot be read.
 
-    A failed queue read is NOT a verdict and NOT an outage of this tool: it
-    degrades the classification to exactly what it was before #9115 (a queued run
-    reads PENDING) and says so in the report. Inventing `flood=False` silently
-    would be the same fail-open in the opposite direction — a starved head
+    A failed queue read is NOT a verdict and NOT an outage of this tool: a queued run
+    reads PENDING and the report says the queue was not read. Inventing `flood=False`
+    silently would be the same fail-open in the opposite direction — a starved head
     reported as healthy — so `None` is threaded through and printed.
+
+    ⛔ ``None`` USED TO DEGRADE THE PASS TO EXACTLY ITS PRE-#9115 SELF, AND IT NO
+    LONGER DOES. Since the zero-job repair gained a DESTRUCTIVE step (cancel-then-
+    rerun), ``None`` also has to answer "is the queue congested?" — and it answers NO
+    MEASUREMENT, so the act is refused (`queue_congestion_gate`). A queue this tool
+    could not read never authorises a cancel.
     """
     try:
         root = str(Path(__file__).resolve().parent.parent)
@@ -1385,6 +1527,59 @@ def read_queue_health(repo: str):
         return ci_queue_health.read_health(repo)
     except Exception:  # a queue read must never fail the repair pass
         return None
+
+
+def queue_congestion_reading(queue) -> bool | None:
+    """Read the DESTRUCTIVE-act gate input ONCE: `True` congested, `False` clear,
+    `None` NOT MEASURED.
+
+    ⛔ THE SINGLE READ IS THE POINT. `main()` needs the three-valued reading twice —
+    once as the DECISION (`queue_congestion_gate`) and once as the REPORT
+    (`queue_congestion_measured`) — and two independent `getattr(queue,
+    "congests_pr", None)` calls are a drift hazard: any future change that makes one
+    of them smarter makes the report line disagree with the decision it describes.
+    So the attribute is read here, once, and threaded into both.
+
+    `None` covers BOTH ways the question goes unanswered — no reading at all
+    (`--no-queue-health`, a failed `read_queue_health`) and a reading that abstained
+    (`UNKNOWN`, `PR-UNWITNESSED`, a truncated newest-first feed, or any object that
+    cannot answer). The gate refuses on either, which is why the distinction is not
+    needed until the REPORT, where `queue_congestion_measured` states it.
+    """
+    if queue is None:
+        return None
+    return getattr(queue, "congests_pr", None)
+
+
+def queue_congestion_gate(congestion: bool | None) -> bool:
+    """May the DESTRUCTIVE repair act? An UNMEASURED queue answers NO.
+
+    The zero-job class is repaired by cancel-then-rerun, which discards the queue
+    position the run had reached and re-queues the replacement behind the same wait,
+    plus one attempt of the budget. That act is therefore gated on congestion, and a
+    gate is NOT a report: `QueueHealth.delays_pr` answers the reporting question and
+    reads ``False`` for an unmeasured queue on purpose, which is the fail-open
+    direction the moment it is consumed as permission.
+
+    Takes the value `queue_congestion_reading` returned — the one place the
+    three-valued `QueueHealth.congests_pr` is read — so the decision and the report
+    can never disagree about which reading they saw. The mapping is the module's own
+    polarity — *"an unmeasured wait is not a measured-healthy one"* — applied to an
+    ACT:
+
+      * ``None`` from the reading — NOT MEASURED, whether because the read never ran
+        (`--no-queue-health`; `read_queue_health` returns ``None`` on any exception)
+        or because it abstained (`UNKNOWN`, `PR-UNWITNESSED`, any verdict off a
+        truncated newest-first feed, an object that cannot answer at all) → ``True``,
+        the act is refused;
+      * anything not provably ``False`` → ``True``. Only a MEASURED, uncut clear
+        reading lets the cancel run.
+
+    A report may say "starvation not witnessed" about an unread queue; a cancel may
+    not act on it. The two questions stay separate, exactly as `starves_pr` and
+    `delays_pr` are.
+    """
+    return congestion is not False
 
 
 def report(plans: list[PrPlan], apply: bool, trigger_ok: bool, repo: str,
@@ -1448,6 +1643,7 @@ def report(plans: list[PrPlan], apply: bool, trigger_ok: bool, repo: str,
                      "missing_run": p.missing_run, "exhausted": list(p.exhausted),
                      "starved": list(p.starved),
                      "no_verdict": list(p.no_verdict),
+                     "repair_refused": list(p.repair_refused),
                      "reopen_attempts": 0, "needs_user_actor": False}
         for nv in p.no_verdict:
             # THE NAMED REFUSAL. A zero-job run older than the floor cannot produce a
@@ -1549,14 +1745,41 @@ def report(plans: list[PrPlan], apply: bool, trigger_ok: bool, repo: str,
                                          # and nothing escalates.
                                          **({"target_moved": True}
                                             if state == "target_moved" else {}),
-                                         # Nothing was done because the pass could not
-                                         # afford or could not observe the act
-                                         # ('no_budget'/'unsettled'/'refused'/
-                                         # 'unreadable') — the next window has a fresh
+                                         # Nothing was changed because the pass could
+                                         # not afford the act ('no_budget' checked
+                                         # before the POST) or never sent it ('refused'
+                                         # = `gh` could not be started, or the API
+                                         # answered with a refusal we cannot classify
+                                         # as permanent, 'unreadable' = the pre-act
+                                         # read failed) — the next window has a fresh
                                          # budget. Also a SKIP: a deferral is not "a
                                          # repair this credential cannot perform".
+                                         # ⛔ 'denied' (a PERMANENT refusal) is
+                                         # deliberately NOT here — it escalates below.
                                          **({"deferred": True}
                                             if state == "deferred" else {}),
+                                         # AN ACCEPTED CANCEL, UNOBSERVED: the POST was
+                                         # accepted and the settle was never observed, so
+                                         # a destructive act was REQUESTED and may have
+                                         # taken effect, and no replacement attempt was
+                                         # issued. Still a SKIP (the next window acts on
+                                         # what is then true), but ⛔ NOT `deferred`: that
+                                         # key means the pass changed NOTHING, which is
+                                         # an understatement here — and `cancel_landed`
+                                         # would be the opposite overstatement, since
+                                         # `completed` is the only evidence of a landed
+                                         # cancel and it was never read.
+                                         **({"skipped": True, "cancel_accepted": True}
+                                            if state == "cancel_unobserved" else {}),
+                                         # THE EFFECT IS UNKNOWN: the POST was SENT and
+                                         # its ANSWER was lost, so the run MAY be
+                                         # cancelled. A SKIP (the next window re-reads
+                                         # the run and acts on what is then true), but
+                                         # neither of the two claims above is true, so
+                                         # it carries its own key and claims neither.
+                                         **({"skipped": True,
+                                             "cancel_effect_unknown": True}
+                                            if state == "cancel_unknown" else {}),
                                          # ⛔ THE OPPOSITE CASE, AND NAMED SO IT CANNOT
                                          # BE READ AS A DEFERRAL: the cancel was refused
                                          # for PERMISSION, which no window repairs. It is
@@ -1576,7 +1799,7 @@ def report(plans: list[PrPlan], apply: bool, trigger_ok: bool, repo: str,
                 if apply:
                     escalations += 1
             if any(r["ok"] is False and not (r.get("head_moved") or r.get("target_moved")
-                                              or r.get("deferred"))
+                                              or r.get("deferred") or r.get("skipped"))
                    for r in rec["rerun"]):
                 escalations += 1
         records.append(rec)
@@ -1681,7 +1904,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--no-live", action="store_true", help="skip the live protection read")
     ap.add_argument("--no-queue-health", action="store_true",
                     help="skip the repo-level queue read (#9115); a queued run then "
-                         "reads PENDING exactly as it did before, and the report says so")
+                         "reads PENDING, and because congestion is left UNMEASURED the "
+                         "destructive zero-job repair (cancel-then-rerun) is REFUSED "
+                         "for the pass — a cancel may not be authorised by a queue "
+                         "nobody read. The report says so (queue_congestion_measured)")
     ap.add_argument("--json", action="store_true")
     args = ap.parse_args(argv)
 
@@ -1735,7 +1961,17 @@ def main(argv: list[str] | None = None) -> int:
     # wait (the state this tool's own body cites: `CI: OK(queued=60, pr_running=2,
     # pr_queued=56)`). `delays_pr` is the truthful superset, so the destructive act is
     # suppressed by it while the report keeps naming `starved` from `starves_pr`.
-    queue_congested = bool(getattr(queue, "delays_pr", queue_starved))
+    # ⛔ AND SILENCE IS NOT PERMISSION. This used to be
+    # `bool(getattr(queue, "delays_pr", queue_starved))`, which reads an UNMEASURED
+    # queue (`None`, or `PR-UNWITNESSED`/`UNKNOWN`, or a truncated feed) as "clear" and
+    # switches the cancel ON in exactly the state that makes a cancel most harmful:
+    # a queue read is refused under the load a cancel would add to, and `delays_pr`
+    # is false-by-design for the unmeasured verdicts. `queue_congestion_reading` /
+    # `queue_congestion_gate` are the three-valued read (measured clear vs. NOT
+    # MEASURED) the act needs, and the reading is taken ONCE so the decision below and
+    # the `queue_congestion_measured` report line cannot describe different readings.
+    congestion = queue_congestion_reading(queue)
+    queue_congested = queue_congestion_gate(congestion)
     try:
         required = resolve_required(args.repo, record_path, live=not args.no_live)
         emitters = emitters_from_record(record_path)
@@ -1778,6 +2014,14 @@ def main(argv: list[str] | None = None) -> int:
         # `queue_starved: false` next to a plan that was not repaired, and the reason
         # would be invisible.
         "queue_congested": bool(queue_congested),
+        # ...and WHY it was suppressed. ⛔ TWO KEYS BECAUSE THERE ARE TWO QUESTIONS, and
+        # the polarity is the one a reader expects: `true` here means a congestion
+        # READING WAS TAKEN (clear or congested — which of the two is `queue_congested`
+        # above), `false` means none was: `--no-queue-health`, a failed read, `UNKNOWN`,
+        # `PR-UNWITNESSED`, or a truncated feed. On `false` the act was REFUSED rather
+        # than authorised by silence, so a suppressed repair can be told from an
+        # abstention.
+        "queue_congestion_measured": congestion is not None,
         # Starved contexts are NOT "needing repair" — no per-PR repair can create a
         # runner slot — so they are counted separately rather than inflating a
         # number whose whole meaning is "a repair will be attempted".
@@ -1786,6 +2030,17 @@ def main(argv: list[str] | None = None) -> int:
         # repair, so it is deliberately excluded from this count — otherwise the
         # number would report the normal in-flight state of every pushed PR.
         "needing_repair": sum(1 for p in plans if p.missing_run or p.rerun or p.exhausted),
+        # ⛔ `needing_repair=0` IS NOT "NOTHING WAS FOUND" ON ITS OWN. A zero-job run
+        # whose cancel the congestion gate suppressed is appended to `no_verdict` and
+        # then skipped, so neither count above sees it — the pass exits 0 and the
+        # local rail's notification/transition signature quotes `needing_repair` as a
+        # clean, covered window while a PR whose required check can never be produced
+        # is silently skipped every 30 minutes. Both are reported so the zero can be
+        # read next to the work it excludes: `no_verdict` counts PLANS carrying a
+        # named-but-unrepairable zero-job context, `repair_refused` counts the RUNS
+        # this pass identified and deliberately did not cancel.
+        "no_verdict": sum(1 for p in plans if p.no_verdict),
+        "repair_refused": sum(len(p.repair_refused) for p in plans),
         # Re-measures the "queued and never starts" residual every window (see
         # `PrPlan.oldest_pending_age_seconds`).
         "oldest_pending_age_seconds": (
@@ -1802,6 +2057,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"{summary['queue']}")
         print(f"ci-check-repair [{mode}] repo={args.repo} open_prs={summary['open_prs']} "
               f"needing_repair={summary['needing_repair']} starved={summary['starved']} "
+              f"no_verdict={summary['no_verdict']} "
+              f"repair_refused={summary['repair_refused']} "
               f"trigger={summary['trigger_ok']}")
         for r in records:
             print(f"  #{r['pr']} absent={r['absent']} pending={r['pending']} "
@@ -1809,6 +2066,16 @@ def main(argv: list[str] | None = None) -> int:
                   f"rerun={[x['run'] for x in r['rerun']]} missing_run={r['missing_run']} "
                   f"reopened={r['reopened']} reopen_attempts={r['reopen_attempts']} "
                   f"needs_user_actor={r['needs_user_actor']}")
+        if summary["repair_refused"]:
+            # NAMED, because it is the one number above that can make a real problem
+            # look like a clean window. Stderr: `--json` owns stdout.
+            print(f"ci-check-repair: REFUSED-REPAIR — {summary['repair_refused']} "
+                  f"zero-job run(s) were identified and NOT cancelled/rerun because the "
+                  f"queue reading did not certify it clear "
+                  f"(queue_congestion_measured={summary['queue_congestion_measured']}, "
+                  f"queue_congested={summary['queue_congested']}). This window is NOT "
+                  f"discharged: read the queue, or run the repair with a credential "
+                  f"that can unjam it.", file=sys.stderr)
         if summary["starved"]:
             # Named state, named remedy. A starved head is not repaired by anything
             # this tool can do: the missing resource is a runner slot.
