@@ -434,9 +434,13 @@ def test_a_COERCED_true_is_a_preview_and_a_coerced_false_is_not():
         return _error(ms._wait_bound_refusal_result(
             "tortoise_backfill_v25", {"dry_run": v}))["data"]["committed"]
 
-    for truthy in (True, "true", "TRUE", " true ", "1", 1, "yes", "on"):
+    for truthy in (True, "true", "TRUE", "1", 1, 1.0, "yes", "on"):
         assert committed(truthy) == "none", f"{truthy!r} coerces to True -> preview"
-    for not_true in ("false", "0", False, 0, None, "", "nonsense"):
+    # ⛔ and the FALSE half, plus everything the coercion REJECTS, stays
+    # conservative. `" true "` is here on purpose: the coercion does not STRIP, so
+    # pydantic refuses that spelling outright — the call never reaches the handler,
+    # so nothing is written either way and the conservative answer costs nothing.
+    for not_true in ("false", "0", False, 0, 0.0, None, "", "nonsense", " true "):
         assert committed(not_true) == "unknown", (
             f"{not_true!r} must NOT be read as a preview — the fail-closed direction")
 

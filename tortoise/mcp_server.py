@@ -893,14 +893,15 @@ def _declared_dry_run_default(name: str):
     return None if param is None else param.default
 
 
-#: The spellings a JSON client sends for a boolean, and what FastMCP's pydantic
-#: coercion makes of them. ONLY the TRUE half is used below — see
-#: ``_coerces_to_true``'s docstring for why the FALSE half must stay unread.
+#: The STRING spellings pydantic's bool coercion maps to ``True``. Taken from the
+#: coercion itself (`str_to_bool`: `s.lower()` looked up in a fixed table — note
+#: there is NO `.strip()`, so a padded string is REJECTED rather than coerced).
+#: ONLY the TRUE half is used below — see ``_coerces_to_true`` for why.
 _COERCES_TO_TRUE = frozenset({"true", "1", "yes", "on", "t", "y"})
 
 
 def _coerces_to_true(value) -> bool:
-    """Whether FastMCP will coerce this raw argument to ``True``.
+    """Whether FastMCP will coerce this raw argument to ``True`` — and only that.
 
     ⛔ The refusal runs on the PRE-VALIDATION dict, but the handler it stands in
     for runs AFTER pydantic coerces it. So `{"dry_run": "true"}` — a spelling an
@@ -909,25 +910,30 @@ def _coerces_to_true(value) -> bool:
     dry_run``), while ``value is True`` is False for it. Measured: that shipped
     ``committed: "unknown"`` + "this call is NOT safe to repeat" for six of the
     seven ``dry_run`` tools, i.e. told a caller an unexecuted preview may have
-    committed and forbade re-sending it — the exact outcome the docstring above
-    says is impossible.
+    committed and forbade re-sending it.
 
     ⛔ ONLY the true-direction is admitted, and that asymmetry is load-bearing.
-    Reading ``"false"``/``"0"`` as ``False`` would let a caller's spelling switch
-    the verdict toward "nothing was written"; leaving them unread can only
-    produce the conservative answer, because an unrecognised spelling still falls
-    through to the write arm. (If the spelling is one pydantic REJECTS, no write
-    happens at all, so ``"none"`` is right for that case too — which is why the
-    true-direction is safe to accept even for a spelling this table guesses at.)
+    Reading ``"false"``/``"0"`` as ``False`` would let a caller's spelling move
+    the verdict toward "nothing was written"; leaving them unread can only fall
+    through to the conservative write arm.
+
+    The table is the coercion's OWN, checked against the pinned pydantic rather
+    than guessed. Two corrections a first attempt got wrong, both measured:
+    ``1.0`` IS coerced to ``True`` (a float is admitted, not only an int), and a
+    PADDED string (``" true "``) is REJECTED by the coercion rather than
+    accepted — so a ``.strip()`` here would claim a preview for a call that never
+    reaches the handler. A rejected spelling cannot fail open anyway: validation
+    refuses the call, so nothing is written.
     """
-    if value is True:
-        return True
+    # `bool` is a subclass of `int`, so these arms must come FIRST or `True` would
+    # be re-read as the number 1 (harmless) and `False` as 0 (also harmless) — but
+    # being explicit keeps the reading obvious.
     if isinstance(value, bool):
-        return False
-    if isinstance(value, int):  # `dry_run: 1` also coerces to True
+        return value is True
+    if isinstance(value, (int, float)):
         return value == 1
     if isinstance(value, str):
-        return value.strip().lower() in _COERCES_TO_TRUE
+        return value.lower() in _COERCES_TO_TRUE
     return False
 
 
@@ -1036,7 +1042,7 @@ def _wait_bound_refusal_result(name: str | None = None,
     ``tortoise_create_point`` answered ``-32009`` at 12.45 s and the Point
     existed on the next read.
 
-    So a WRITE refusal carries a three-valued outcome and a retry RULE,
+    So a WRITE refusal carries a two-valued outcome and a retry RULE,
     additively — the ENVELOPE is unchanged (same ``code``, same ``message``,
     ``retry_after`` still where it was), because ``tests/_verdict.py``
     classifies the refusal by that envelope and a restructured one would read as
@@ -3501,7 +3507,11 @@ def tortoise_create_point(kind: str, content: str,
     write) and hands completion to the canonical fork-aware gate — no
     separate ceremony needed, and no step the write did not observe (#3784).
 
-    dedup=True (default): idempotent — returns existing Point if content matches.
+    dedup=True (default) folds onto an existing Point when the content matches.
+    ⛔ That is NOT a blanket idempotency claim: a call carrying props, authoredBy
+    or credibility is not advertised as repeatable, because convergence is not
+    provable across the props channel (a props payload can take the node out of
+    the fold's own predicate).
     dedup=False: force-create even if content is identical.
 
     Decision parts (#2199) — pointKind option/criterion/evidence/decision
@@ -5342,8 +5352,9 @@ def tortoise_ingest(bundle: Any = None, granularity: str = "bulk",
     the strict grounding selector while a rebuild produced 'live'). Deduped
     connections never retro-promote (promotion fires on FIRST edge creation
     only).
-    Idempotent-ish: points dedup by content hash + kind, sources by url,
-    operators by input set.
+    ⛔ NOT declared idempotent: points dedup by content hash + kind, sources by
+    url and operators by input set — but the entities leg is APPEND-ONLY for
+    document/event, so a repeat can write a second Source.
     """
     bundle = _parse(bundle)
     if bundle is None:
