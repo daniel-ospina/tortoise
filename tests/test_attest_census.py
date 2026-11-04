@@ -1502,6 +1502,11 @@ def test_a_closed_fd1_is_rc_2_not_1(tmp_path):
             f"(got {proc.returncode})\nstderr={proc.stderr[-1500:]!r}"
         )
         assert b"Traceback" not in proc.stderr, proc.stderr[-1500:]
+        # ⛔ The report must EXIST, or this test passes vacuously: any early rc 2 (a failing `gh`
+        # exec, an unreadable registry) would satisfy the assertions above without the child ever
+        # reaching the print. Measured #10687 cycle 20 — an injected `return 2` before the report
+        # left this test GREEN while its dead-reader sibling reddened.
+        assert (tmp_path / "o.md").exists(), "the child never reached the report — this pin is vacuous"
 
 
 def test_a_small_report_against_a_dead_reader_is_rc_2_not_120(tmp_path):

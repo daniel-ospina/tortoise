@@ -735,7 +735,15 @@ def main(argv: list[str] | None = None) -> int:
     # (measured: review cycle 14). Pinned the same way `validation/check-license-surface.py` pins a
     # C-locale stream, and suppressed because `sys.stdout` may be a replaced stream without it.
     with contextlib.suppress(AttributeError, ValueError):
-        sys.stdout.reconfigure(encoding="utf-8")
+        # ⛔ `errors="backslashreplace"` is the last piece of the `0`/`2`-never-`1` contract. When
+        # fd 2 is closed `sys.stderr` is None, and a `print(..., file=None)` then falls back to
+        # STDOUT — so with a C-locale argv (non-ASCII `--out` decoded as lone surrogates) the
+        # courtesy message raised `UnicodeEncodeError` AFTER a complete census. Measured #10687
+        # cycle 20: `LC_ALL=C PYTHONUTF8=0 PYTHONCOERCECLOCALE=0 --out café/…` with fd 2 closed was
+        # rc 1 while each ingredient alone was rc 0. `backslashreplace` is also exactly what
+        # CPython's own `create_stdio` gives a real stderr, which is why the same message is harmless
+        # when fd 2 is open.
+        sys.stdout.reconfigure(encoding="utf-8", errors="backslashreplace")
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--repo", default="daniel-ospina/tortoise")
     ap.add_argument("--reviews-dir", default=str(Path.home() / ".pi/agent/reviews"))
