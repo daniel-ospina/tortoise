@@ -12,7 +12,9 @@ aboutObjects: tortoise-ingest, tortoise-mcp
 # Ingest Contract (`tortoise_ingest` / `sdk.ingest`)
 
 The ingest surface writes a whole **bundle** — points, entities, sources, and
-the connections between them — in one coherent, idempotent call. This document
+the connections between them — in one coherent call. Resubmission is idempotent
+for points, sources and connections; it is **not** idempotent for append-only
+`document`/`event` entity items (§15). This document
 is the granular customer contract for that surface: bundle shape, worked
 examples with the exact response shape, the full error surface with the retry
 action per error class, quota semantics, and what to do when you ingest the
@@ -450,9 +452,12 @@ committed. The recovery signal is a single rule:
   mitigation stamps survive with no manual rebuild (see
   [quickstart-selfhosted.md](quickstart-selfhosted.md) — the default embedded
   mode has no AOF window, so the JSONL journal is the durability contract).
-- **Timeout ≠ failure — resubmission is idempotent.** A timeout is the
-  same class as transport death: re-send the identical bundle; if it
-  committed, you get an all-`deduped` response confirming presence.
+- **Timeout ≠ failure — resubmission is idempotent for points, sources and
+  connections, NOT for `document`/`event` entity items.** A timeout is the same
+  class as transport death: re-send the identical bundle; if it committed, you
+  get an all-`deduped` response confirming presence — but an `entities` item of
+  `type:"event"`/`"document"` is append-only, so that re-send mints a NEW
+  occurrence and a NEW `:Source` (§15).
 
 ---
 
@@ -657,8 +662,8 @@ construction**: it participates in EP **iff ≥2 of its connected points are
 live AND the operator itself has been promoted out of draft** — endpoint
 promotion alone does NOT activate a draft operator (see the §11 interim-
 route caveat; zombie-operator auto-resolution ships with the #785 promote
-tools). "Promote a second endpoint and the operator activates" is the
-#785-era post-resolution statement; pre-#785 the operator's OWN promotion
+tools). "Promote a second endpoint and the operator activates" is the #785-era
+post-resolution statement — pre-#785 the operator's OWN promotion
 is the second required conjunct. Promote a second endpoint and the operator activates; until then it
 cannot propagate belief. This is the derived-liveness rule (A9's selector
 predicate for operator nodes).
@@ -746,7 +751,7 @@ Point-bearing pair.
 
 ## 15. Timeout ≠ failure
 
-> **Timeout ≠ failure — resubmission is idempotent.**
+> **Timeout ≠ failure — but resubmission is only PARTLY idempotent.**
 
 If an ingest call times out, you do not know whether it committed. Re-send
 the identical bundle: committed items dedup (all-`deduped` counts confirm
@@ -754,6 +759,22 @@ presence), missed items are created, and one `batch_id` spans the whole
 logical bundle. Never "fix" a timeout by editing the bundle before retrying
 — a modified retry is a different logical bundle and can strand run-1
 residue.
+
+⛔ **What dedups and what APPENDS.** Resubmission is idempotent for `points`
+(content hash + kind), `sources` (url) and the connections between them. It is
+**not** idempotent for `document`/`event` ENTITY items: those are append-only
+occurrence records, so re-sending a full bundle mints a NEW `:Event` occurrence
+(new id), a NEW `:Source`, and therefore a NEW operator over them — reported as
+the `append_only_items` warning (§3.2 row 1; the note under §5 row 6, "Endpoint
+typing"). Re-send the identical bundle only when minting a second occurrence is
+what you want; otherwise re-send the point-only or connection-only half.
+
+⚠️ **This is also why `tortoise_ingest` is NOT declared idempotent on the MCP
+surface** (`annotations.idempotentHint: false`). A `-32009` wait-bound refusal on
+an ingest therefore answers `error.data.retry_safe: false` with the UNSAFE
+`retry_rule`: the abandoned call may still be running, and a blind retry races
+it into the append-only leg above. `error.data.committed` is `"unknown"` for a
+dispatched ingest — it is never a statement that nothing was written.
 
 ---
 

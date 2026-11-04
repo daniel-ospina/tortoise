@@ -1609,6 +1609,19 @@ def test_an_excluded_tool_is_not_a_graph_error_when_the_transport_refused(
         f"the argument refusal was recorded as {rows} — a false row in the "
         "series #3834 F-2 keeps truthful")
 
+    # ⛔ #10849: THIS call site passes `dispatched=False`, and that argument is what
+    # makes the write contract truthful here — no dispatch was ever scheduled, so
+    # nothing can have been written. Without this pin, deleting `, dispatched=False`
+    # at the call site leaves `test_wait_bound_write_ack.py`'s direct-call arm GREEN
+    # while a caller is told `committed: "unknown"` / "do NOT repeat it" about a
+    # write it never sent — i.e. it silently drops the retry, which is the exact
+    # defect `dispatched=False` was added to fix.
+    _refusal_text = "\n".join(getattr(c, "text", "") for c in (result.content or []))
+    assert _refusal_text == mcp_auth._TRANSPORT_WAIT_BOUND_NOT_SENT_MESSAGE, (
+        "the no-dispatch arm served the DISPATCHED-write prose "
+        f"({_refusal_text!r}) — a caller would reconcile a write that was never "
+        "sent, and withhold the safe re-send")
+
     # ...and NOT refused: the argument refusal still surfaces, classified.
     monkeypatch.setattr(mcp_server, "_wait_bound_state", lambda: None)
     refused_rows = _record_telemetry(monkeypatch)
