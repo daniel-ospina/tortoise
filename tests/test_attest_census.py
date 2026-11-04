@@ -2176,7 +2176,11 @@ def test_read_gate_reports_in_flight_over_a_non_red_completed_group(monkeypatch)
     """
     payload = {
         "check_runs": [
-            {"id": 30, "name": ac.GATE_CHECK, "status": "completed", "conclusion": "cancelled",
+            # ⛔ The SETTLED group must be the NEWER one, or this test is vacuous: with the in-flight
+            # attempt also newest, plain newest-by-`id` returns the same answer and the polarity arm
+            # could be deleted with the suite green (measured, review cycle 25 — the first version of
+            # this fixture had exactly that defect, and its own docstring claimed otherwise).
+            {"id": 50, "name": ac.GATE_CHECK, "status": "completed", "conclusion": "cancelled",
              "app": {"slug": "github-actions"},
              "details_url": "https://github.com/o/r/actions/runs/2001/job/9101"},
             {"id": 40, "name": ac.GATE_CHECK, "status": "in_progress", "conclusion": None,
