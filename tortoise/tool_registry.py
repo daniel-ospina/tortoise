@@ -728,7 +728,14 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
                     "once it has been withdrawn (retracted/superseded/outdated/archived) a "
                     "re-assertion mints a NEW mitigation Point and returns its id.",
         risk="destructive",
-        idempotent=True,
+        # ⛔ NOT idempotent — its own description above says a re-assertion after
+        # withdrawal MINTS A NEW Point. So convergence is conditional on the
+        # mitigation's current STATE, which no argument predicate can see, in
+        # exactly the way this PR already ruled for `tortoise_onboarding_seed`.
+        # Advertising it as repeatable told a caller "repeating it converges"
+        # about a retry that mints a second mitigation (and, on an operator's
+        # edge strength, applies it twice) — #10849 review.
+        idempotent=False,
         http_policy=True,
         sdk_method="mitigate_operator",
     ),
@@ -1032,7 +1039,15 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
                     "points dedup by content hash + kind, sources by url, operators by "
                     "input set.",
         risk="write",
-        idempotent=True,
+        # ⛔ NOT idempotent — and this is a corrected declaration, not a tier
+        # default (#10849 review). `ingest` looked convergent on three separate
+        # readings and each was falsified: its `entities` leg is append-only for
+        # document/event, a bundle may arrive as a JSON string parsed AFTER the
+        # MCP seam, and a bundle's points splat `props` FLAT beside `kind`, so a
+        # caller can pass `is_operator` outside `props` and defeat the fold. The
+        # bundle's key space is open-ended, so no finite predicate can prove it
+        # — a repeat is not safe to advertise.
+        idempotent=False,
         http_policy=True,
         sdk_method="ingest",
     ),
@@ -1253,9 +1268,9 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         risk="write",
         # ⛔ IDEMPOTENT, and it must say so (#10849 review). This is the only
         # GETTER in the write tier, and until this line the `write` tier default
-        # advertised `idempotentHint: false` for it — so a caller that breached
-        # the transport bound on a reliability lookup was told "do NOT repeat it
-        # … reconcile by other means", when repeating is the documented way to
+        # advertised `idempotentHint: false` for it, so the refusal THIS PR adds
+        # would have handed a caller the non-idempotent verdict for a reliability
+        # lookup — "do NOT repeat it" — when repeating is the documented way to
         # obtain the value at all. The operation is a recompute-then-write-through
         # of a cache the SDK describes as "a documented projection — recomputed
         # when stale": a repeat converges on the same value, which is exactly the

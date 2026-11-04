@@ -814,24 +814,6 @@ _TRANSPORT_WAIT_BOUND_NOT_SENT_MESSAGE = (
     "Re-sending it is safe once the advertised delay has elapsed."
 )
 
-#: The refusal for a READ that the seam dispatched and then abandoned (#10849).
-#:
-#: Distinct from BOTH neighbours, because the two facts a caller needs are
-#: independent and each of the other two arms gets one of them wrong here.
-#: ``_TRANSPORT_WAIT_BOUND_NOT_SENT_MESSAGE`` above says "nothing was sent" —
-#: false, since this arm is reached only after the seam scheduled the work. The
-#: dispatched-write message below says the mutation may still land — also false,
-#: because this call writes nothing on ANY arm (that is what puts it here). So
-#: this says exactly what the caller can act on: the read did not fail, repeating
-#: it is safe, and the only thing lost is the response.
-_TRANSPORT_WAIT_BOUND_READ_ONLY_MESSAGE = (
-    "The server's wait budget for this request was exceeded before the response "
-    "was ready. This call is a READ: it writes nothing, so there is no write to "
-    "reconcile and the outcome of your data is not in question — only this "
-    "reply was lost. Re-sending it once the advertised delay has elapsed is safe, "
-    "and is the only way to obtain the answer."
-)
-
 #: The refusal as a caller of a MUTATING tool must read it (#10849).
 #:
 #: ``_TRANSPORT_WAIT_BOUND_MESSAGE`` above is transport-neutral, so on the write

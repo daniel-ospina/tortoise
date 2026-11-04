@@ -349,10 +349,20 @@ class TestHintsCannotDrift:
             # the only GETTER in the write tier: a recompute-then-write-through
             # of a stale cache converges on the same value (#10849 review).
             ("tortoise_get_source_reliability", True),
-            ("tortoise_ingest", True),
+            # ⛔ `tortoise_ingest` is NOT here. Three readings each looked
+            # convergent and each was falsified: its entities leg is append-only
+            # for document/event, a bundle may arrive as a JSON string parsed
+            # after the MCP seam, and a bundle's points splat `props` FLAT beside
+            # `kind` (so `is_operator` defeats the fold from outside `props`).
+            # The bundle's key space is open-ended → no finite predicate proves
+            # it (#10849 reviews).
+            ("tortoise_ingest", False),
             ("tortoise_onboarding_demo_create", True),
-            # destructive tier, idempotent by operation (same id → same row)
-            ("tortoise_mitigate_operator", True),
+            # ⛔ `tortoise_mitigate_operator` is NOT here. Its own description
+            # says a re-assertion after withdrawal MINTS A NEW mitigation Point,
+            # so convergence is conditional on the mitigation's current STATE —
+            # which no argument predicate can see (#10849 review).
+            ("tortoise_mitigate_operator", False),
             # maintenance tier, NOT idempotent: a repeat call re-stores a
             # re-derived score (#4122 measurement: 0.693315 -> 0.693320)
             ("tortoise_compute_confidence", False),

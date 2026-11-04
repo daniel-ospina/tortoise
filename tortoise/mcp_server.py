@@ -626,16 +626,11 @@ def _wait_bound_refused() -> bool:
     return bool(state.get(_WAIT_BOUND_REFUSED_KEY)) if state is not None else False
 
 
-#: The five retry rules shipped WITH a breached write's refusal. Exactly ONE is
+#: The four retry rules shipped WITH a breached write's refusal. Exactly ONE is
 #: returned for any breached write, so a caller is never left to infer a retry
 #: protocol from prose. Which one, and why:
 #:
 #:   * NOT_SENT — no dispatch was started, so nothing was sent at all.
-#:   * READ_ONLY — the call was dispatched, but its ARGUMENTS select a branch
-#:                that only reads (``tortoise_manage_sources(action="list")``),
-#:                so nothing was written and the reply is the only thing lost.
-#:                Its own rule rather than NOT_SENT's, because the dispatch DID
-#:                start and "nothing was sent" would be false.
 #:   * PREVIEW  — the call declared itself a preview (``dry_run=True`` — explicit
 #:                or the handler's documented default — or ``tortoise_delete``
 #:                with no ``confirmation``) and wrote nothing, so a repeat is
@@ -643,9 +638,9 @@ def _wait_bound_refused() -> bool:
 #:   * SAFE     — the registry declared the operation idempotent AND this call's
 #:                arguments did not switch that off.
 #:
-#: NOT_SENT, READ_ONLY and PREVIEW are the THREE arms that say "retry" for a tool
-#: the registry has not declared idempotent, and all three are sound for the same
-#: reason: nothing was written in the first place.
+#: NOT_SENT and PREVIEW are the TWO arms that say "retry" for a tool the
+#: registry has not declared idempotent, and both are sound for the same reason:
+#: nothing was written in the first place.
 #:   * UNSAFE   — everything else: do not re-send.
 #:
 #: ⚠️ There is deliberately NO generic read-back recipe here, and that is a
@@ -690,11 +685,6 @@ _WAIT_BOUND_RETRY_RULE_SAFE = (
 _WAIT_BOUND_RETRY_RULE_NOT_SENT = (
     "this request was refused before any work started, so nothing was written "
     "and re-sending it is safe once the advertised delay has elapsed"
-)
-
-_WAIT_BOUND_RETRY_RULE_READ_ONLY = (
-    "This call only reads — it writes nothing, so no mutation is in flight. "
-    "Repeating it is safe and is the only way to obtain the answer."
 )
 
 #: A call that is a PREVIEW wrote nothing, so none of the other rules describes
@@ -752,50 +742,39 @@ def _arguments_disable_convergence(name: str, arguments) -> bool:
     """
     if not isinstance(arguments, dict):
         return False
-    if name == "tortoise_ingest":
-        # ⛔ NOT everything `ingest` writes converges. POINTS do (create_point
-        # dedup), but its `entities` step is APPEND-ONLY for the two types that
-        # mint a fresh id per item — `sdk.py:27108` "Document records are
-        # append-only — never deduped", same for `event` — and the product
-        # contract records it (`docs/INGEST_CONTRACT.md` row 1,
-        # `append_only_items`: "Event/Document entities are append-only
-        # occurrence records"). So a bundle
-        # carrying one of those mints a NEW node on every retry. `batch_id` is a
-        # STAMP (`_stamp_batch_id`), not a dedup key, so it does not save this.
-        # ⛔ The bundle's SPELLING is caller-controlled too, and the handlers
-        # parse it AFTER this seam runs (`tortoise_ingest` calls `_parse(bundle)`
-        # — "LLM agents naturally emit JSON strings"), while the served schema
-        # declares `bundle` with no `type`, so a JSON string is admissible. Read
-        # only the dict spelling and the append-only check is bypassed by
-        # `json.dumps(...)`: measured, that returned `retry_safe: true` for a
-        # bundle carrying a Document. Fail CLOSED on anything we cannot parse —
-        # an unreadable bundle is not evidence that it carries nothing.
-        bundle = arguments.get("bundle")
-        if isinstance(bundle, str):
-            try:
-                bundle = json.loads(bundle)
-            except (ValueError, TypeError):
-                return True  # unparseable: cannot prove it writes nothing
-        if not isinstance(bundle, dict):
-            return True if bundle not in (None, "", {}) else False
-        items = bundle.get("entities")
-        for item in (items or []):
-            if not isinstance(item, dict):
-                continue
-            # ⛔ NORMALISE as the SDK does, not by raw spelling. The SDK strips
-            # and lowercases the type in BOTH legs (`sdk.py:23696` admission,
-            # `sdk.py:27079` dispatch: `(item.pop("type", None) or "").strip()
-            # .lower()`), so `"Document"` / `" DOCUMENT "` reach the append-only
-            # writer — while a raw `in ("document", "event")` test calls them
-            # convergant and hands back `retry_safe: true` for a call that
-            # duplicates. A case-sensitive gate here is a fail-OPEN gate.
-            etype = item.get("type")
-            etype = etype.strip().lower() if isinstance(etype, str) else ""
-            if etype in ("document", "event"):
-                return True
-        return False
+    # ⛔ `tortoise_ingest` has NO safe arm, and that is the finding rather than a
+    # gap. Three separate review rounds each closed one spelling of the same
+    # hole, which is the signal that the enumeration itself is the defect:
+    #   * `entities` of type document/event are APPEND-ONLY (`sdk.py` "Document
+    #     records are append-only — never deduped"; `docs/INGEST_CONTRACT.md` row
+    #     1 `append_only_items`), and the SDK lowercases the type on BOTH legs
+    #     (`sdk.py:23696` admission, `sdk.py:27079` dispatch), so a case variant
+    #     reaches the writer too;
+    #   * `bundle` may arrive as a JSON STRING — the handler calls
+    #     `_parse(bundle)` after this seam runs and the served schema puts no
+    #     `type` on it — so `json.dumps(...)` bypassed the whole check;
+    #   * and a bundle's points SPLAT `props` FLAT (`sdk.py:26626`: `[{kind,
+    #     content, ref?, status?, **props}]`), so a caller puts `is_operator`
+    #     BESIDE `kind` rather than inside `props` — measured, that mints a
+    #     second node while every key-allow-list reads it as props-free.
+    # `batch_id` does not save any of this: it is a STAMP (`_stamp_batch_id`),
+    # never a dedup key. Since the bundle's key space is open-ended, no finite
+    # predicate can prove convergence — so ingest reports UNSAFE, and its
+    # registry `idempotent` flag is False for the same reason.
     if name != "tortoise_create_point":
         return False
+    if _call_carries_props(arguments):
+        # ⛔ `props` DEFEATS the dedup fold, so no allow-list of prop keys can
+        # prove convergence. Measured: `create_point(content=X, props={"is_operator":
+        # True})` twice mints TWO nodes with DIFFERENT ids, because the fold's own
+        # predicate EXCLUDES operator nodes (`sdk.py`: `WHERE (n.is_operator IS
+        # NULL OR n.is_operator = false) AND (n.op_type IS NULL OR n.is_operator =
+        # false)`), and `is_operator` is neither server-managed nor stripped — it
+        # lands on the node via the plain props passthrough. Since `props` is
+        # caller-controlled and open-ended, the only sound rule is: convergence
+        # is PROVEN only for a props-free call.
+        # Over-blocking here costs a legitimate retry; under-blocking duplicates.
+        return True
     if _CONVERGENCE_OFF_ARGUMENT not in arguments:
         return False
     value = arguments[_CONVERGENCE_OFF_ARGUMENT]
@@ -806,6 +785,25 @@ def _arguments_disable_convergence(name: str, arguments) -> bool:
         "wait-bound refusal: non-boolean %s=%r on %s — treating the call as "
         "non-converging", _CONVERGENCE_OFF_ARGUMENT, value, name)
     return True
+
+
+def _call_carries_props(scope) -> bool:
+    """Whether this call/item carries a non-empty caller `props` payload.
+
+    `props` is an open channel onto the node, so a key inside it can change what
+    the writer DEDUPS on (measured: `is_operator` takes the node out of the dedup
+    fold's own predicate; `op_type` alone does NOT, because the second conjunct
+    is `n.is_operator = false`, which passes whatever `op_type` holds). A finite
+    allow-list of "safe" prop keys would have to be re-derived every time a prop
+    is added — so the sound question is only "is there any?".
+    """
+    if not isinstance(scope, dict):
+        return False
+    props = scope.get("props")
+    if isinstance(props, dict):
+        # a nested `props` is the same channel one fold deeper.
+        return bool(props) or _call_carries_props(props)
+    return bool(props)
 
 
 def _declared_dry_run_default(name: str):
@@ -821,38 +819,6 @@ def _declared_dry_run_default(name: str):
     except (TypeError, ValueError):  # pragma: no cover - non-callable
         return None
     return None if param is None else param.default
-
-
-def _arguments_are_read_only(name: str, arguments) -> bool:
-    """Whether THIS call is a pure READ despite living in a writing tier (#10849).
-
-    Same defect class as the getter this branch already fixed by tier: a tool can
-    carry a `write`/`admin` tier while an ARGUMENT selects a branch that writes
-    nothing. Forcing such a call to `committed: "unknown"` + "do NOT repeat it"
-    tells the caller a mutation may have landed and forbids the re-send — so it
-    cannot obtain the very listing the call exists to return, and is sent to
-    reconcile a write that could not have happened.
-
-    Deliberately tiny and explicit rather than inferred: these are the
-    argument-selected read arms the registry tier cannot see, and each is gated
-    on its handler's own documented contract. Anything not named here keeps the
-    conservative UNSAFE verdict.
-    """
-    if not isinstance(arguments, dict):
-        return False
-    if name == "tortoise_manage_sources":
-        # `list` → `_sources_view()` and nothing else; enable/disable write.
-        return arguments.get("action") == "list"
-    # ⛔ `tortoise_onboarding_seed` is NOT here, though its docstring invites it.
-    # With no names it *usually* returns gaps instead of seeding — but for a
-    # COMPACT org (`hosted_api.py`: `include_person = not compact`) there is no
-    # person gap, so `gaps` is empty and the same no-name call falls through to
-    # `seed_onboarding_anchors`, filing the org anchor + `onboards` edge +
-    # `first-points-filed` step. The write is conditional on SERVER state, not on
-    # the arguments, so no argument predicate can see it — and
-    # `tests/test_onboarding_seed_endpoint.py` proves it ("compact + no names" →
-    # `status == "seeded"`). A verdict this seam cannot know stays UNSAFE.
-    return False
 
 
 def _arguments_say_preview(name: str, arguments) -> bool:
@@ -903,10 +869,11 @@ def _write_retry_safety(name: str, arguments=None) -> bool:
     declared value when the entry sets one, else the tier's default — ``write``
     defaults to ``False``). It already exists and is already maintained per
     tool: ``tortoise_create_point`` declares ``idempotent=True`` (content-hash
-    dedup), ``tortoise_ingest`` declares it (content-derived ``batch_id``), and
-    ``tortoise_create_operator`` does not — which is exactly the asymmetry
-    #10849 measured, and the reason a blind retry duplicates an edge and
-    double-counts its EP weight.
+    dedup), while ``tortoise_create_operator`` and ``tortoise_ingest`` do not —
+    for an operator because it has no dedup at all, and for ingest because no
+    finite predicate can prove its bundle converges (see
+    ``_write_retry_safety``). That is exactly the asymmetry #10849 measured, and
+    the reason a blind retry duplicates an edge and double-counts its EP weight.
 
     Deriving it from the entry rather than listing names here is the #4170 rule:
     a hand-maintained parallel list is what lets a new writer be silently
@@ -951,14 +918,16 @@ def _wait_bound_refusal_result(name: str | None = None,
 
     * ``data.committed`` — ``"unknown"`` for a write that may have been
       dispatched (the seam cannot know, and saying so is the whole fix), or
-      ``"none"`` when nothing can have been committed. ``"none"`` has FOUR
+      ``"none"`` when nothing can have been committed. ``"none"`` has THREE
       producers, all knowable at this call site: ``dispatched=False`` (no
-      dispatch was ever started), ``dry_run=True`` on a tool that declares it,
-      ``tortoise_delete`` with no ``confirmation`` (its two-call design: the
-      first call only mints the token), and a WRITE-tier tool on an arm where the
-      ARGUMENTS select a read (``_arguments_are_read_only``). Each is a fact
-      about THIS call, which is why the branch order is dispatch state, then
-      ARGUMENTS, then the name-derived verdict — never the name alone.
+      dispatch was ever started), ``dry_run`` on a tool that declares it (the
+      explicit true or the handler's own default), and ``tortoise_delete`` with
+      no ``confirmation`` (its two-call design: the first call only mints the
+      token). There is deliberately NO "this call only reads" producer: an
+      argument that looks read-only cannot be trusted to be one — see
+      ``_arguments_say_preview``'s neighbourhood and #10849's review, where
+      ``tortoise_manage_sources(action="list")`` turned out to materialise
+      onboarding state through a CAS write.
     * ``data.retry_safe`` — the registry's own retry-safety verdict for this
       call, so the caller does not have to re-derive it from prose (a new writer
       defaults to UNSAFE). ⛔ Derived from the NAME **and the ARGUMENTS**: a
@@ -1009,19 +978,7 @@ def _wait_bound_refusal_result(name: str | None = None,
         })
     elif name and name in WRITE_TOOL_NAMES:
         prose = _mcp_auth._TRANSPORT_WAIT_BOUND_WRITE_MESSAGE
-        if _arguments_are_read_only(name, arguments):
-            # A read in a writing tier. Its OWN prose and rule, not the NOT_SENT
-            # ones: this arm is reached only on the `dispatched=True` branch, so
-            # "nothing was sent" would be a false statement about a request the
-            # seam did schedule and abandon — the caller would be told the
-            # opposite of what happened to its request.
-            prose = _mcp_auth._TRANSPORT_WAIT_BOUND_READ_ONLY_MESSAGE
-            data.update({
-                "committed": "none",
-                "retry_safe": True,
-                "retry_rule": _WAIT_BOUND_RETRY_RULE_READ_ONLY,
-            })
-        elif _arguments_say_preview(name, arguments):
+        if _arguments_say_preview(name, arguments):
             # A preview writes nothing BY CONSTRUCTION, so the honest outcome is
             # "none" rather than "unknown", and repeating it is safe — which is
             # the one action a caller most needs back for a destructive preview.

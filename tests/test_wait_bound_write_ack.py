@@ -191,9 +191,12 @@ def test_retry_safe_is_derived_from_the_registry_and_fails_closed():
     """The retry-safety verdict is the registry's, not a second hand-kept list.
 
     #10849's measured asymmetry, now machine-readable at the call site:
-    ``create_point`` dedups on ``(pointKind, content_hash)`` and ``ingest`` on a
-    content-derived ``batch_id``, so a repeat CONVERGES; ``create_operator`` has
-    no dedup at all, so a repeat DUPLICATES the edge.
+    ``create_point`` dedups on ``(pointKind, content_hash)`` and ``ingest``
+    reaches that same fold for its points, so a props-free repeat CONVERGES;
+    ``create_operator`` has no dedup at all, so a repeat DUPLICATES the edge.
+    (NOT because of ``batch_id`` — that is a STAMP written after the fact
+    (``_stamp_batch_id``), never a dedup key, which is exactly why ingest's
+    ``entities`` leg had to be handled separately.)
 
     An unresolvable name must never be advertised as safe: this flag is what a
     caller acts on to skip the manual reconciliation, so a wrong ``true`` is a duplicate.
@@ -204,11 +207,73 @@ def test_retry_safe_is_derived_from_the_registry_and_fails_closed():
     assert safe("tortoise_create_point") is True, (
         "create_point is idempotent (dedup=True, content-hash identity) — "
         "refusing to retry it costs a caller a write that would have converged")
-    assert safe("tortoise_ingest") is True, (
-        "ingest is exactly-once via a content-derived batch_id")
+    assert safe("tortoise_ingest") is False, (
+        "ingest is NOT advertised safe: its bundle is open-ended (append-only "
+        "entities, a JSON-string spelling, and flat `props` beside `kind`), so "
+        "no finite predicate proves it — see the ingest test below")
     assert safe("tortoise_create_operator") is False, (
         "create_operator has NO dedup — a retry writes a second IMPL/NAND and "
         "double-counts the claim's EP weight (#10849)")
+
+
+def test_a_PROPS_PAYLOAD_defeats_the_dedup_fold_so_it_is_never_called_safe():
+    """`props` is an OPEN caller channel onto the node, and it can defeat dedup.
+
+    Measured through the real MCP door, `create_point(content=X,
+    props={"is_operator": True})` twice mints TWO nodes with DIFFERENT ids (and
+    the nested `props={"props": {...}}` spelling does the same), while the
+    props-free control converges on one. The reason is the fold's own predicate:
+    it EXCLUDES operator nodes, and `is_operator` is neither server-managed nor
+    stripped, so it lands on the node through the plain props passthrough.
+    (`op_type` alone does NOT: the fold's second conjunct is `n.is_operator =
+    false`, which passes whatever `op_type` holds — measured, SAME id. It is
+    still over-blocked here because convergence is not PROVABLE, not because this
+    particular key diverges.)
+
+    So a finite allow-list of "safe" prop keys would be re-derived every time a
+    prop is added — the hand-maintained parallel list this whole design avoids.
+    The sound rule is the cheap one: convergence is PROVEN only for a props-free
+    call, and everything else gets UNSAFE. Over-blocking costs a legitimate
+    retry; under-blocking duplicates a write, which is the entire defect.
+    """
+    def safe(tool, args):
+        return _error(ms._wait_bound_refusal_result(tool, args))["data"]["retry_safe"]
+
+    assert safe("tortoise_create_point", {"content": "X"}) is True, (
+        "the props-free control really does converge")
+    # `op_type` and `confidence` do NOT diverge on their own — they are here to
+    # pin the rule "any props payload ⇒ not provable", which is the sound one.
+    for props in ({"is_operator": True}, {"op_type": "NAND"},
+                  {"props": {"is_operator": True}},
+                  {"confidence": 0.9}):
+        assert safe("tortoise_create_point",
+                    {"content": "X", "props": props}) is False, (
+            f"props={props} makes convergence unprovable")
+    # The nested spelling is the same channel one fold deeper. Calls 1 and 2
+    # return the SAME id (the mint writes `is_operator=False`, then the dedup-hit
+    # relay folds again), so it diverges only from the third call — the verdict is
+    # false because convergence is not PROVABLE, which is the claim.
+    assert safe("tortoise_create_point",
+                {"content": "X", "props": {"props": {"is_operator": True}}}) is False
+
+
+def test_a_STATE_conditional_writer_is_never_called_safe():
+    """`tortoise_mitigate_operator` converges only for a CURRENT mitigation.
+
+    Its own registry description says so: "Idempotent for a CURRENT mitigation …
+    once it has been withdrawn (retracted/superseded/outdated/archived) a
+    re-assertion mints a NEW mitigation Point and returns its id." So convergence
+    depends on the mitigation's stored STATE, which no argument predicate can
+    see — the same ruling this PR already applied to `tortoise_onboarding_seed`.
+    Advertising it repeatable told a caller "repeating it converges" about a
+    retry that mints a second mitigation (and applies it to the operator's edge
+    strength twice).
+    """
+    data = _error(ms._wait_bound_refusal_result(
+        "tortoise_mitigate_operator", {"target": "x", "reason": "r", "strength": 0.8}))["data"]
+    assert data["committed"] == "unknown"
+    assert data["retry_safe"] is False
+    assert data["retry_rule"] == ms._WAIT_BOUND_RETRY_RULE_UNSAFE
 
 
 def test_the_verdict_is_per_CALL_not_per_name():
@@ -359,15 +424,34 @@ def test_an_ingest_bundle_with_append_only_entities_is_not_repeatable():
     which can also gain a NEW operator where the bundle wires one to it (a
     document cannot: a `:Source` is refused as a connection endpoint — the ERRORS
     table's row 6, `Endpoint typing`).
-    `batch_id` is a STAMP, not a dedup key, so it does not save it. The caller
-    controls this through the bundle, so the verdict has to read the bundle.
+    `batch_id` is a STAMP, not a dedup key, so it does not save it.
+
+    The verdict that follows from those facts is NOT "read the bundle and decide"
+    — that was the first attempt, and it lost three rounds running, each time to a
+    spelling it did not enumerate. The bundle's key space is open-ended, so the
+    seam reports "not provable" (UNSAFE) for every ingest call. The cases below
+    are kept as the record of WHY: each is a concrete input that a bundle-reading
+    predicate had to grow a branch for.
     """
     def data(bundle):
         return _error(ms._wait_bound_refusal_result(
             "tortoise_ingest", {"bundle": bundle}))["data"]
 
-    assert data({"points": [{"ref": "p1", "kind": "statement", "content": "x"}]})[
-        "retry_safe"] is True, "a points-only bundle converges (create_point dedup)"
+    # ⛔ Even the innocent-looking points-only bundle reports UNSAFE, and that is
+    # the RESOLUTION rather than an oversight: three review rounds each closed ONE
+    # spelling of this hole (the append-only entities leg, the JSON-string bundle,
+    # and the FLAT `props` splat), which is the signal that the enumeration is the
+    # defect. `sdk.py:26626` documents the points form as `{kind, content, ref?,
+    # status?, **props}` — so `is_operator` sits BESIDE `kind`, not in `props`, and
+    # no key allow-list sees it. The bundle's key space is open-ended, so the seam
+    # reports what it knows ("not provable") instead of a claim it cannot ground.
+    for bundle in (
+        {"points": [{"ref": "p1", "kind": "statement", "content": "x"}]},
+        {"points": [{"kind": "statement", "content": "y", "is_operator": True}]},
+        {"entities": [{"type": "subject", "name": "s"}]},
+    ):
+        assert data(bundle)["retry_safe"] is False, (
+            f"ingest must never claim convergence for an open-ended bundle: {bundle}")
     # ⛔ The bundle's SPELLING is caller-controlled and parsed AFTER the seam:
     # `_parse(bundle)` in the handler accepts a JSON string, and the served schema
     # puts no `type` on `bundle`. Reading only the dict spelling was measured to
@@ -389,44 +473,36 @@ def test_an_ingest_bundle_with_append_only_entities_is_not_repeatable():
                 {"type": "EVENT", "name": "e"}):
         assert data({"entities": [bad]})["retry_safe"] is False, (
             f"an append-only {bad['type']} entity mints a new node on retry")
-    # a subject/object entity resolves-or-mints on its name: convergent.
-    assert data({"entities": [{"type": "subject", "name": "s"}]})["retry_safe"] is True
+    # (a subject/object entity resolves-or-mints on its name and would converge on
+    # its own — but `ingest` ships a BUNDLE, so the open-ended sibling items above
+    # are what decides the verdict. There is no per-item safe arm.)
 
 
-def test_a_write_tier_tool_on_its_read_only_arm_is_repeatable():
-    """The same defect as the getter, reached by an ARGUMENT instead of a tier.
+def test_an_argument_that_LOOKS_read_only_is_not_taken_at_face_value():
+    """There is no "this call only reads" arm, and here is why.
 
-    `manage_sources(action="list")` returns `_sources_view()` and nothing else;
-    `onboarding_seed()` with no names is its documented FIRST call ("call
-    WITHOUT names to discover gaps") and writes nothing. Both live in a writing
-    tier, so a name-only verdict told the caller a mutation may have landed and
-    forbade the re-send — the caller could not obtain the listing at all.
+    `tortoise_manage_sources(action="list")` looks like a pure read, and an
+    earlier revision of this fix had an arm that said so — `committed: "none"`,
+    `retry_safe: true`, "This call is a READ: it writes nothing". A reviewer
+    falsified it: `_sources_view()` → `_onboarding_state()` → on a hosted org
+    `_get_onboarding_state`, whose registry leg runs
+    `_cas_write_onboarding_state(org_id, state, 0)` — a real
+    `SET t.onboarding_state = $state, t.state_version = $expected + 1` that
+    MATERIALISES the state when it is missing ("Auto-initializes to defaults if
+    missing"). So the arm could have committed a write while telling the caller
+    nothing could have been.
+
+    The same reasoning removed `tortoise_onboarding_seed`'s no-name arm (a
+    COMPACT org has no person gap, so the same no-name call falls through to
+    `seed_onboarding_anchors`). Both are STATE-conditional, which no argument
+    predicate can see — so both stay UNSAFE, and the rule count stays four.
     """
-    listing = ms._wait_bound_refusal_result(
-        "tortoise_manage_sources", {"action": "list"})
-    assert _error(listing)["data"]["committed"] == "none"
-    assert _error(listing)["data"]["retry_safe"] is True
-    # Its OWN prose: this arm is reached after the dispatch started, so the
-    # NOT_SENT wording ("refused BEFORE any work started — nothing was sent")
-    # would be a false statement about the request.
-    assert _text(listing) == ma._TRANSPORT_WAIT_BOUND_READ_ONLY_MESSAGE
-    assert _error(listing)["data"]["retry_rule"] == ms._WAIT_BOUND_RETRY_RULE_READ_ONLY
-    # ...and `enable` really does write.
-    enabling = _error(ms._wait_bound_refusal_result(
-        "tortoise_manage_sources", {"action": "enable", "source": "github_issues"}))["data"]
-    assert enabling["committed"] == "unknown"
-    assert enabling["retry_safe"] is False
+    listing = _error(ms._wait_bound_refusal_result(
+        "tortoise_manage_sources", {"action": "list"}))["data"]
+    assert listing["committed"] == "unknown"
+    assert listing["retry_safe"] is False
+    assert listing["retry_rule"] == ms._WAIT_BOUND_RETRY_RULE_UNSAFE
 
-
-    # ⛔ `tortoise_onboarding_seed` is NOT a read-only arm, despite its docstring
-    # inviting "call WITHOUT names to discover gaps". For a COMPACT org
-    # (`hosted_api.py`: `include_person = not compact`) there is no person gap,
-    # so `gaps` is empty and the SAME no-name call falls through to
-    # `seed_onboarding_anchors` — the write is conditional on SERVER state, which
-    # no argument predicate can see (`tests/test_onboarding_seed_endpoint.py`
-    # proves it: "compact + no names" returns `status == "seeded"`). It must stay
-    # UNSAFE, or the refusal tells a caller nothing was written about a call that
-    # filed the org anchor.
     for args in ({}, {"org_name": "Acme"}):
         seed = _error(ms._wait_bound_refusal_result("tortoise_onboarding_seed", args))["data"]
         assert seed["committed"] == "unknown", (
@@ -467,10 +543,11 @@ def test_approve_merge_is_not_advertised_as_repeatable():
 def test_a_getter_in_the_write_tier_is_repeatable():
     """`tortoise_get_source_reliability` is a getter that writes a CACHE.
 
-    The `write` tier's default retry-safety is `False`, which told a caller that
-    breached the bound on a reliability lookup to "reconcile by other means" —
-    when repeating is the documented way to obtain the value at all. Its
-    recompute-then-write-through is convergent, and its entry now declares it.
+    The `write` tier's default retry-safety is `False`, so the refusal THIS PR
+    adds would hand a caller the non-idempotent verdict for a reliability lookup
+    — "do NOT repeat it" — when repeating is the documented way to obtain the
+    value at all. Its recompute-then-write-through is convergent, and its entry
+    now declares it.
     """
     assert _error(ms._wait_bound_refusal_result(
         "tortoise_get_source_reliability"))["data"]["retry_safe"] is True
