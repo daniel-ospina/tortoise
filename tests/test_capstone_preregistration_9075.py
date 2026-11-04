@@ -470,6 +470,68 @@ def test_a_malformed_disclosure_on_an_unscored_log_is_reported_not_a_crash(tmp_p
         assert added == [] and detail == {}, (added, detail)
 
 
+def _unprovable_and_descending(repo: Path, salt: int, epoch_base: int = 1_699_999_000):
+    """A log with TWO add-commits: one git cannot order against the registration, one descendant.
+
+    The side-branch add is neither an ancestor nor a descendant of the registration's add-commit —
+    the case the module calls "an unprovable ordering is not an ordering". The second add (a
+    delete-and-re-add on the mainline) IS a descendant. `salt` varies only the re-added CONTENT, so
+    it varies the two shas and therefore their ALPHABETICAL order — which is the whole point.
+    """
+    _git(repo, "commit", "-q", "--allow-empty", "-m", "base", epoch=epoch_base)
+    trunk = subprocess.run(
+        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+        cwd=str(repo), capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    base = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=str(repo), capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    prereg = _write_and_commit(repo, check.PREREG_NAME, epoch=1_700_000_100)
+    # The log is added on a branch cut from BEFORE the registration, then merged in — so its
+    # add-commit sits in history beside the registration's, not before and not after it.
+    _git(repo, "checkout", "-q", "-b", f"side{salt}", base)
+    log = _write_log(repo, f"e1-e2-{salt}.log", epoch=1_700_000_000)
+    _git(repo, "checkout", "-q", trunk)
+    _git(repo, "merge", "-q", "--no-ff", "-m", "merge side", f"side{salt}", epoch=1_700_000_200)
+    # Delete and re-add on the mainline: a SECOND add-commit, this one a true descendant.
+    log.unlink()
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "remove", epoch=1_700_000_300)
+    log.write_text(f"y{salt}\n")
+    _git(repo, "add", str(log.relative_to(repo)))
+    _git(repo, "commit", "-q", "-m", f"re-add {salt}", epoch=1_700_000_400)
+    return prereg, log
+
+
+@pytest.mark.parametrize("salt", range(12))
+def test_an_unprovable_add_commit_cannot_borrow_the_proven_order_pass(
+        tmp_path, monkeypatch, salt):
+    """REGRESSION (#10546 review P1): the proven-order arm took ONE sha-sorted representative.
+
+    With two add-commits, `log_sha` was `sorted(add_shas)[0]` — so the verdict was decided by
+    ALPHABETICAL sha order. Whenever the descendant happened to sort first, a pair git cannot
+    order passed as a PROVEN ORDER: no disclosure, and the `late` in-place-edit bound below was
+    skipped because `continue` came first. Retrying a commit message until it sorts favourably is
+    a free bypass of "an unprovable ordering is not an ordering". The arm now reads the SET.
+
+    Asserted over salts on purpose: the defect was order-DEPENDENT, so any single fixture either
+    proves nothing (a salt where the pre-fix code already failed) or proves it by luck. Every salt
+    here has the SAME topology, so every salt must fail — the conservative epoch fallback, because
+    the unprovable add-commit predates the registration.
+    """
+    root = tmp_path / f"s{salt}"
+    root.mkdir()
+    repo = _repo(root, monkeypatch)
+    prereg, log = _unprovable_and_descending(repo, salt)
+    monkeypatch.setattr(check, "_log_declares_no_measurement", lambda _p: (False, "no ratio"))
+    failures = check.check_ordering(prereg, [log])
+    assert failures, (
+        f"salt {salt}: an add-commit that is neither ancestor nor descendant of the "
+        "registration was treated as a PROVEN ORDER — retry the commit message until it sorts"
+    )
+
+
 def test_a_proven_order_is_not_reported_as_a_content_waiver(tmp_path, monkeypatch):
     """REGRESSION (#10531 cycle-6 P2): a waiver reported where none was granted teaches that they
     are routine. Git PROVED the order, so no arm may record an exemption."""

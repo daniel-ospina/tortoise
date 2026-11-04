@@ -625,11 +625,20 @@ def _resolves_to_commit(sha: str) -> bool:
     ⛔ THE ASYMMETRY IS THE POINT (#10531 review cycle 14, P2). ``branch_commits`` may NOT be
     required to resolve — a squash merge leaves them unreachable from ``main``, so demanding the
     object would make the disclosure permanently red in exactly the case it exists for. The same
-    argument does NOT reach ``squash_merge``: that commit is ON ``main`` by construction, so in any
-    tree where this check runs it either exists or the claim is about a repository that does not.
-    Format alone accepted ``deadbeef1`` — and the CLI then printed it as "squashed by deadbeef1",
-    presenting the ONE line this change added to make the disclosure checkable as an unresolvable
-    pointer. ``rev-parse --verify --quiet`` is the same primitive ``_blob_at`` already uses.
+    argument does NOT reach ``squash_merge``: an honest disclosure's value is the merge commit, which
+    a repository holding this history necessarily has, so in any tree where this check runs it either
+    exists or the claim is about a repository that does not. Format alone accepted ``deadbeef1`` —
+    and the CLI then printed it as "squashed by deadbeef1", presenting the ONE line this change added
+    to make the disclosure checkable as an unresolvable pointer. ``rev-parse --verify --quiet`` is the
+    same primitive ``_blob_at`` already uses.
+
+    ⛔ WHAT THIS DOES **NOT** CHECK (#10546 review P2): reachability from ``main``. A commit on an
+    unmerged branch resolves here. That is deliberate, and the reason is the one above — ancestry
+    cannot be asked of the shallow checkouts these gates also run in (``history_unavailable()``
+    already owns that distinction), and demanding it would red a CORRECT disclosure forever on such
+    a tree, which is the stuck light this change exists to remove. So the guarantee is exactly
+    "the object this repository holds", and the reader verifies that it is the merge commit. Do not
+    restate this as "it is on ``main``": that is a claim no line of this function tests.
     """
     try:
         out = subprocess.run(
@@ -1078,8 +1087,10 @@ ATOMIC_ADD_KEY = "atomic_add_ordering"
 #: merge leaves the branch commits unreachable from ``main``, so requiring the object to be present
 #: would make the disclosure permanently red in exactly the case it exists for — the stuck light
 #: this change removes. It is still a checkable claim: a reader resolves the sha from the PR that
-#: carried it. ⛔ That reasoning stops at ``branch_commits``: ``squash_merge`` is on ``main`` by
-#: construction and MUST resolve (#10531 review cycle 14, P2 — see ``_resolves_to_commit``).
+#: carried it. ⛔ That reasoning stops at ``branch_commits``: ``squash_merge`` MUST RESOLVE (#10531
+#: review cycle 14, P2 — see ``_resolves_to_commit``). Resolve is what is checked, NOT reachability
+#: from ``main``: a shallow checkout cannot answer ancestry, and demanding it would red a correct
+#: disclosure forever (#10546 review P2).
 COMMIT_SHA_TOKEN = re.compile(r"^[0-9a-f]{7,40}$")
 
 
@@ -1290,7 +1301,8 @@ def check_ordering(prereg: Path, logs: list[Path], pins: dict | None = None,
             (sha for sha in sorted(add_shas) if sha != prereg_sha and _is_ancestor(sha, prereg_sha)),
             "",
         )
-        # For MESSAGES only. The verdict never keys on this choice.
+        # For MESSAGES only. The verdict never keys on this choice: the proven-order pass below
+        # reads `add_shas` as a SET, never this representative (#10546 review P1).
         log_sha = predating_sha or (prereg_sha if atomic_pair else sorted(add_shas)[0])
         sha_known.add(log.name)
         if atomic_pair:
@@ -1352,8 +1364,10 @@ def check_ordering(prereg: Path, logs: list[Path], pins: dict | None = None,
         # numbers out of a predating log flipped the guard's central hard fail into green ("exempt by
         # CONTENT, measured nothing") — the content read was no longer the content that entered with
         # the tree. Computed once here; the arms that claim content entered at/before the
-        # registration consult it. The proven-order pass (a descendant add-commit) does NOT: there
-        # the registration predates the whole log, so later touches are beside the point.
+        # registration consult it. The proven-order pass (EVERY add-commit a descendant) does NOT:
+        # there the registration predates the whole log, so later touches are beside the point. That
+        # premise is now ENFORCED rather than assumed (#10546 review P1) — `all()`, not one
+        # sha-sorted representative, so an unprovable second add-commit cannot borrow it.
         late = _late_touches(log, prereg_sha)
         if predating_sha:
             if late:
@@ -1382,12 +1396,23 @@ def check_ordering(prereg: Path, logs: list[Path], pins: dict | None = None,
                 # A waived ordering is REPORTED on every path that can waive it (#9089).
                 exempted.append(log.name)
             continue
+        # ⛔ PROVEN ORDER IS TAKEN OVER EVERY ADD-COMMIT (#10546 review P1). This arm used
+        # `log_sha`, which in this branch (not atomic, no predating add) is
+        # `sorted(add_shas)[0]` — an ALPHABETICALLY-chosen representative. With TWO add-commits
+        # (a delete-and-re-add, or a side-branch add later merged) the verdict was decided by sha
+        # SORT: retry the commit message until the smallest sha is the descendant, and a pair git
+        # cannot order passed as a PROVEN ORDER — no disclosure required, and skipping the `late`
+        # bound below, whose soundness rests on the registration actually predating the WHOLE log.
+        # One unprovable add-commit means it does not, so one representative was never enough. The
+        # same fail-closed-over-the-set rule the atomic and predating arms already apply (#10531
+        # cycle 10), applied to the arm that was left out.
+        #
         # ⛔ PROVEN ORDER IS NOT A WAIVER (#10531 review cycle 6, P2). The content arm used to run
         # first, so a pair git proves ordered was still appended to `exempted` and the claim read
         # "(exempt by CONTENT, measured nothing: X)" — a waiver reported where none was granted, the
         # mirror of the misdescription cycle 3 fixed in the verdict line, and it teaches readers that
         # waivers are routine. A proven order returns here, before any arm that records a waiver.
-        if not atomic_pair and _is_ancestor(prereg_sha, log_sha):
+        if not atomic_pair and all(_is_ancestor(prereg_sha, sha) for sha in add_shas):
             continue
         # A log that provably produced NO number cannot have been scored against thresholds
         # chosen after it was read. Re-asked of the content on every run, so the moment it gains a
