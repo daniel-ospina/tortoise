@@ -702,10 +702,19 @@ _WAIT_BOUND_RETRY_RULE_PREVIEW = (
 #: creator; a re-issued hard delete returns ``False`` and is the door's own
 #: "no-op") and deliberately does NOT send the caller to a read-back (there is
 #: none on this surface for the family that needs it most). It states the rule
-#: for a non-idempotent writer that ACTUALLY WROTE — a preview of one takes the
-#: PREVIEW arm instead, because it wrote nothing: do not re-send.
+#: for a write that ACTUALLY WROTE — a preview of one takes the PREVIEW arm
+#: instead, because it wrote nothing: do not re-send.
+#:
+#: ⛔ It is worded about THIS CALL, never about the operation. This arm is reached
+#: by a DECLARED-idempotent tool whose ARGUMENTS switched convergence off
+#: (``create_point(dedup=False)``, or one carrying ``props``/``authoredBy``/
+#: ``credibility``) — the registry says the operation converges and only the call
+#: does not. Saying "this operation is NOT idempotent" there would contradict the
+#: same tool's served ``idempotentHint: true`` in one response, and the file's own
+#: vocabulary ("the declaration says the OPERATION converges; the ARGUMENTS decide
+#: whether this CALL does"). So: no claim either way about the operation.
 _WAIT_BOUND_RETRY_RULE_UNSAFE = (
-    "this operation is NOT idempotent — do NOT repeat it. The write may already "
+    "this call is NOT safe to repeat — do NOT re-send it. The write may already "
     "have committed, and nothing on this response tells you whether it did. "
     "Reconcile by other means rather than re-sending."
 )

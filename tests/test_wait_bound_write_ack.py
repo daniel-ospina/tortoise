@@ -174,9 +174,11 @@ def test_a_breached_write_ships_a_retry_rule_not_a_fabricated_recipe():
     err = _error(ms._wait_bound_refusal_result("tortoise_create_operator"))
     assert "verify" not in err["data"], (
         "a generic read-back recipe is unsound across the write surface — see "
-        "the two measured failure modes in this test's docstring")
+        "the measured failure modes in this test's docstring")
     assert err["data"]["retry_rule"] == ms._WAIT_BOUND_RETRY_RULE_UNSAFE
-    assert "do NOT repeat it" in err["data"]["retry_rule"]
+    assert "do NOT re-send it" in err["data"]["retry_rule"]
+    assert "operation" not in err["data"]["retry_rule"], (
+        "this tool's operation IS declared idempotent — the rule is about the CALL")
     # ...and the unsafe rule must not send the caller to the recipe that is
     # unsound for this very tool, nor claim what a repeat would DO.
     assert "search" not in err["data"]["retry_rule"]
@@ -288,6 +290,27 @@ def test_a_STATE_conditional_writer_is_never_called_safe():
     assert data["committed"] == "unknown"
     assert data["retry_safe"] is False
     assert data["retry_rule"] == ms._WAIT_BOUND_RETRY_RULE_UNSAFE
+
+
+def test_the_unsafe_rule_speaks_about_the_CALL_never_the_operation():
+    """It is emitted for a DECLARED-idempotent tool whose arguments defeated it.
+
+    `create_point(dedup=False)` — and `create_point` carrying `props`/`authoredBy`/
+    `credibility` — reaches the UNSAFE arm while the registry still says the
+    OPERATION converges and the tool is served with `idempotentHint: true`. A rule
+    worded "this operation is NOT idempotent" would therefore contradict that same
+    tool's served annotation in the same response, and contradict this file's own
+    vocabulary: the declaration says the OPERATION converges, the ARGUMENTS decide
+    whether this CALL does.
+    """
+    assert ms._WAIT_BOUND_RETRY_RULE_UNSAFE.startswith("this call is NOT safe to repeat"), (
+        "the UNSAFE rule must be about this call, not about the operation")
+    assert "operation" not in ms._WAIT_BOUND_RETRY_RULE_UNSAFE, (
+        "a claim about the OPERATION is false on the create_point(dedup=False) arm,"
+        " where the registry declares the operation idempotent")
+    # the SAFE rule may name the operation: it is reachable only when the
+    # declaration AND the arguments both hold.
+    assert "operation is idempotent" in ms._WAIT_BOUND_RETRY_RULE_SAFE
 
 
 def test_the_verdict_is_per_CALL_not_per_name():
