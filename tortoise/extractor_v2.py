@@ -12901,6 +12901,177 @@ def reset_vocabulary_gap_census() -> None:
     _VOCABULARY_GAPS.reset()
 
 
+# ── The RUN-level reader (#10626) ──────────────────────────────────────────
+#
+# `_VOCABULARY_GAPS` above is PROCESS-GLOBAL, and until #10626 the only egress a
+# run could see was `record()`'s first-sighting WARNING — capped at
+# `_VOCABULARY_GAP_LOG_CAP` distinct tokens per PROCESS, so after the first 32
+# the alarm is spent for the life of the process, while the token set that
+# answers WHICH markers we are losing stays in memory behind a function nobody
+# calls.  Invariant I2 (`docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md:927`) is
+# explicit about what reporting means — *"HOLD, or degrade loudly into the run's
+# census"* — so the count has to reach the RUN, not just the log.
+#
+# WHAT THIS IS.  A run-scoped accumulator the boundary feeds on the same call it
+# already makes, plus the one line that appends the run's reading to the run's
+# own receipt (`result["stats"]` + `result["warnings"]` — the surfaces the
+# sibling `error_census` already rides, which is what makes the reading reach the
+# SDK capture receipt with no second seam).  See
+# `_run_scoped_vocabulary_gap` at the end of this module for the entry point.
+#
+# ⛔ WHAT IT IS NOT: it changes NO fold decision.  Failing closed on a
+# shape-candidate marker is #5329's OWNER-GATED question — §16.4's two
+# deliberately FAIL-OPEN classes make that a REOPEN, not a guard tweak — and a
+# reader that quietly implemented it would be deciding it.  The reader's whole
+# job is that the loss a fold ALREADY measures stops being invisible.
+#
+# ⚠️ WHY A RUN-SCOPED ACCUMULATOR AND NOT A SNAPSHOT DELTA.  The process-global
+# census cannot answer "what did THIS run absorb": a before/after delta is a
+# SUPERSET of the run's own folds (another capture may have folded inside the
+# window), which is the safe direction for a COUNT but not for the token NAMES —
+# a hosted process serves many tenants, and a receipt that echoes a concurrent
+# tenant's token is a cross-tenant leak.  So the accumulator is scoped to the
+# RUN'S EXECUTION CONTEXT (a ``contextvars.ContextVar``, NOT a bare
+# ``threading.local``): the receipt names only tokens this run's own boundary
+# calls absorbed, and a fold that executes on a WORKER THREAD carrying the run's
+# context still lands on THIS run's reading instead of vanishing.
+#
+# ⛔ WHY THE CONTEXT MATTERS AND A THREAD-LOCAL WOULD NOT DO.  This block's
+# neighbour says it plainly — the census is *"Thread-safe (**the boundary runs on
+# extractor worker threads**)"* — and this repo already PROPAGATES contextvars
+# into its capture pool (`hosted_api._run_off_loop` copies the caller's
+# contextvars into the worker, which is what `_call_once`'s own
+# `copy_context()` snapshot depends on, #2185).  A thread-local would fail OPEN
+# on exactly that path: the fold happens, no counter sees it, and the receipt
+# reports an EMPTY reading — the "silent absence" invariant I2 forbids.  A
+# context that was never COPIED (a bare ``threading.Thread``) still sees nothing,
+# so the guarantee is only as good as the caller's copy; the pin in
+# `tests/test_vocabulary_gap_run_reader_10626.py` states that boundary rather
+# than implying a guarantee the scope cannot make.
+
+
+class _VocabularyGapRunAccumulator:
+    """The #5329 census as ONE run saw it — the run-level counterpart.
+
+    Mirrors the process census's bucketing rules exactly (it reuses
+    ``_pair_read_bucket`` and ``_VOCABULARY_GAP_MAX_TOKEN``), so the run reading
+    can never disagree with ``vocabulary_gap_snapshot()`` about which bucket a
+    token belongs to.  Bounded like the census: the token sample stops growing at
+    ``_VOCABULARY_GAP_CAP`` and says so (``truncated_observations``); oversize
+    tokens are counted and never retained.
+
+    Run-confined by construction (installed in the run's own execution context)
+    — and STILL LOCKED, because "run-confined" is not "thread-confined".
+    ``contextvars.copy_context()`` copies the *mapping*, not the values, so every
+    context-carrying thread holds **the same accumulator object**: that sharing is
+    precisely the propagation this scope exists for (a fold on a worker carrying
+    the run's context must land on THIS run's reading), and it is equally
+    precisely why ``absorb`` can run on several threads at once.  The process
+    census this mirrors carries a lock for the same reason
+    (``_VocabularyGapCensus._lock``, same three-way bucket logic); without one
+    here the unlocked ``+=`` would lose increments and could over-admit past
+    ``_VOCABULARY_GAP_CAP``, so the receipt would UNDER-report the loss it exists
+    to disclose — the silent absence invariant I2 forbids.
+    """
+
+    __slots__ = ("_counts", "_lock", "_oversize", "_paired", "_truncated",
+                 "fold_decisions")
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._counts: Counter[str] = Counter()
+        self._paired: dict[str, Counter[str]] = {
+            name: Counter() for name in _PAIR_READ_BUCKETS}
+        self._truncated = 0
+        self._oversize = 0
+        self.fold_decisions = 0
+
+    def absorb(self, tokens) -> None:
+        """Count one fold decision's absorbed tokens (mirrors ``_record``).
+
+        Serialized by ``self._lock``: several threads can carry the same run's
+        context, so this is a read-modify-write on SHARED state.
+        """
+        with self._lock:
+            self.fold_decisions += 1
+            for t in tokens:
+                bucket = _pair_read_bucket(t)
+                if bucket is not None:
+                    self._paired[bucket][t] += 1
+                    continue
+                if len(t) > _VOCABULARY_GAP_MAX_TOKEN:
+                    self._oversize += 1
+                    continue
+                if t in self._counts or len(self._counts) < _VOCABULARY_GAP_CAP:
+                    self._counts[t] += 1
+                else:
+                    self._truncated += 1
+
+    def reading(self) -> dict[str, Any]:
+        """The run's census — the SAME shape ``snapshot()`` reports, per run.
+
+        Taken under the lock (as ``snapshot()`` does): a worker thread carrying
+        the run's context may be mid-``absorb``, and a torn reading would report
+        its own sums inconsistently.
+        """
+        def _sorted(counter: Counter[str]) -> dict[str, int]:
+            return dict(sorted(counter.items(), key=lambda kv: (-kv[1], kv[0])))
+
+        with self._lock:
+            connective = self._paired["one_sided_connective"]
+            state = self._paired["one_sided_state"]
+            return {
+                "tokens": _sorted(self._counts),
+                "distinct_tokens": len(self._counts),
+                # NOT "claims folded": this counts the run's BOUNDARY calls that
+                # returned a fold decision (the census's own definition).
+                "fold_decisions": self.fold_decisions,
+                "one_sided_connective": _sorted(connective),
+                "one_sided_state": _sorted(state),
+                "pair_read_residual": (sum(connective.values())
+                                       + sum(state.values())),
+                "truncated_observations": self._truncated,
+                "oversize_observations": self._oversize,
+                "cap": _VOCABULARY_GAP_CAP,
+                "max_token_chars": _VOCABULARY_GAP_MAX_TOKEN,
+                # Named for what it is: the reading is THIS run's own boundary
+                # calls, not a window over the process's lifetime totals.
+                "scope": "run",
+            }
+
+
+#: The ContextVar carrying the run accumulator, created on FIRST USE so this
+#: block adds NO import line above `def extract_session_v2(` — the #7949 bundle's
+#: cites are typed against this file's line numbers and every line added there
+#: re-stales them (measured: a hook inside that function shifts eight; the same
+#: constraint the tail of this module already works under).  The `contextvars`
+#: import is therefore FUNCTION-local — the idiom `_VocabularyGapCensus._record`
+#: already uses for `logging` — and `_vocabulary_gap_run_scope` creates the
+#: ContextVar exactly once, under a lock.
+_VOCABULARY_GAP_RUN_ACCUMULATOR: Any = None
+_VOCABULARY_GAP_RUN_SCOPE_LOCK = threading.Lock()
+
+
+def _vocabulary_gap_run_scope():
+    """The ``ContextVar`` carrying the run accumulator (created once)."""
+    global _VOCABULARY_GAP_RUN_ACCUMULATOR
+    var = _VOCABULARY_GAP_RUN_ACCUMULATOR
+    if var is None:
+        with _VOCABULARY_GAP_RUN_SCOPE_LOCK:
+            var = _VOCABULARY_GAP_RUN_ACCUMULATOR
+            if var is None:
+                import contextvars
+
+                var = _VOCABULARY_GAP_RUN_ACCUMULATOR = contextvars.ContextVar(
+                    "tortoise_vocabulary_gap_run_accumulator", default=None)
+    return var
+
+
+def _vocabulary_gap_run_accumulator() -> _VocabularyGapRunAccumulator | None:
+    """The run accumulator for the calling context, else ``None``."""
+    return _vocabulary_gap_run_scope().get()
+
+
 def _record_vocabulary_gap(absorbed: list[str]) -> None:
     """Count one FOLD's absorbed tokens, and NEVER raise out of the boundary.
 
@@ -12915,6 +13086,13 @@ def _record_vocabulary_gap(absorbed: list[str]) -> None:
     """
     with contextlib.suppress(Exception):  # observability never decides
         _VOCABULARY_GAPS.record(absorbed)
+        # #10626: and the RUN-level ledger, when a run is executing in this
+        # context.  Inside the same suppress for the same reason — a reader that
+        # raised would abort the capture from `_boundary`'s ``finally:``, which
+        # is the escape this wrapper exists to prevent.
+        run = _vocabulary_gap_run_accumulator()
+        if run is not None:
+            run.absorb(absorbed)
 
 
 # ── The script reading (#5329) — appended AFTER the #7949 marker on purpose ───
@@ -12998,3 +13176,221 @@ def _script_of(ch: str) -> str | None:
         # and the recursion is idempotent if it does.
         return _script_of(base)
     return _UNLISTED_SCRIPT
+
+
+#: How many distinct tokens a run-level WARNING names.  Bounded on purpose: the
+#: census is a SAMPLE of the tail and says so, and a run that absorbed a thousand
+#: distinct tokens must not put a thousand token strings into one receipt entry
+#: (the reason `_VOCABULARY_GAP_LOG_CAP` bounds the log line).
+_VOCABULARY_GAP_WARN_NAMES = 8
+
+
+def _vocabulary_gap_run_warning(reading: dict[str, Any]) -> str:
+    """The run-level alarm for a reading that recorded a loss (#10626).
+
+    Carries the token NAMES because that is what makes the alarm actionable — a
+    count alone names nothing a reader can curate (the same trade `record()`'s
+    WARNING documents).  Unlike that WARNING it is bounded per RUN rather than
+    per process, so the 32-token cap cannot spend it.
+
+    ⛔ ONE CLAUSE PER SHAPE, because the predicate that attaches this alarm
+    (`_vocabulary_gap_recorded_a_loss`) fires on THREE — and only the FIRST is an
+    UNNAMED token:
+
+    * the token SAMPLE — unlisted, so each reached NO identity dimension;
+    * the PAIR-READ residual — a token a CLOSED connective/state list DOES name
+      (`_pair_read_bucket`), so its appearance means the guard did not fire on
+      THIS pair, not that a marker was lost;
+    * OVERSIZE tokens — counted, never retained, so no vocabulary can name them.
+
+    A single trailing sentence describing all three as "reached NO identity
+    dimension" is FALSE for the residual, and an enumeration that covered only
+    the first two rendered an oversize-only loss as the literal sentence "this
+    run's folds absorbed .".  This is a CUSTOMER-VISIBLE receipt field on both
+    capture lanes, so it names the shape it actually recorded.
+    """
+    named = list(reading["tokens"].items())[:_VOCABULARY_GAP_WARN_NAMES]
+    distinct = reading["distinct_tokens"]
+    parts: list[str] = []
+    if distinct:
+        shown = ", ".join(f"{token!r} x{count}" for token, count in named)
+        hidden = distinct - len(named)
+        if hidden > 0:
+            shown = f"{shown}, +{hidden} more" if shown else f"+{hidden} more"
+        sample = f" ({shown})" if shown else ""
+        parts.append(
+            f"{distinct} unlisted one-sided token(s) no boundary vocabulary "
+            f"names{sample} — each reached NO identity dimension, so a marker "
+            "among them lost its difference")
+    if reading["pair_read_residual"]:
+        parts.append(
+            f"{reading['pair_read_residual']} named-but-unread pair-read "
+            "token(s) (one-sided connective/state) — NAMED by a closed list, so "
+            "the guard did not fire on THIS pair; not an unnamed marker")
+    if reading["oversize_observations"]:
+        parts.append(
+            f"{reading['oversize_observations']} oversize token(s) counted but "
+            f"never retained (over the {_VOCABULARY_GAP_MAX_TOKEN}-char cap, so "
+            "never sampled)")
+    if not parts:  # unreachable through `_attach`, kept so no caller ships a hole
+        parts.append("no readable loss (the reading recorded none of the three "
+                     "shapes)")
+    return (
+        "boundary vocabulary gap (#5329): this run's folds absorbed "
+        + "; ".join(parts)
+        + ". The fold decision is UNCHANGED — this is the record, not a gate; "
+        "the reading is at stats.vocabulary_gap and the cure is curating the "
+        "vocabulary from it (#5329)."
+    )
+
+
+def _vocabulary_gap_recorded_a_loss(reading: dict[str, Any]) -> bool:
+    """Did this run RECORD anything a reader could act on? (#10626)
+
+    The predicate behind BOTH receipt keys, and the reason ``stats`` stays
+    ``{}`` on a run that recorded nothing.
+
+    ``fold_decisions`` alone is NOT evidence of a loss: every ``_boundary`` call
+    that returned a fold decision counts one — including the folds that absorbed
+    NO token — so attaching on that would have made ``stats`` non-empty on every
+    capture that folded at all, including a zero-call M2 capture whose documented
+    contract is a clean ``{}``.  What a reader can act on is the token sample (the
+    unnamed gap), the PAIR-READ residual (named-but-dropped connectives/states),
+    or oversize tokens counted but never retained — the three ways a fold can
+    lose something here.
+    """
+    return bool(reading["tokens"] or reading["pair_read_residual"]
+                or reading["oversize_observations"])
+
+
+def _run_scoped_vocabulary_gap(run):
+    """Wrap a run entry so its own census reading rides its own receipt (#10626).
+
+    The #5329 census is counted on the fold path and, before this, reachable only
+    through a process-global accessor nobody called.  This is the run-level
+    READER: it installs a per-run accumulator for the duration of the call (so
+    ``_record_vocabulary_gap`` feeds it on the same boundary call the fold
+    already makes), then appends the reading to the result the run returns:
+
+    * ``result["stats"]["vocabulary_gap"]`` — the reading, present WHEN THE RUN
+      RECORDED A LOSS (see `_vocabulary_gap_recorded_a_loss`) and ABSENT
+      otherwise, the same shape ``vocabulary_gap_snapshot()`` reports plus
+      ``"scope": "run"``.  Placed on ``stats`` because that is the receipt
+      surface the SDK's capture fold (``sdk._capture_stats_with_step_witness``)
+      already copies wholesale — so the reading reaches the product lane with no
+      second seam, which is the #2335 WI-1a lesson `error_census` taught.
+    * ``result["warnings"]`` — ONE entry naming the tokens, under the SAME
+      predicate that attaches the reading, so a receipt never alarms about a gap
+      it does not also report.  This is the run's own alarm; it is what a caller
+      sees instead of a process log line that is spent after 32 distinct tokens.
+
+    TWO RECEIPT SHAPES, because there are two capture lanes and both fold: the v2
+    entry returns a result dict (``stats``/``warnings``), and `sdk._extract_session_llm`
+    — the opt-in M2 lane — returns ``(extracted, meta)``, whose ``meta`` carries
+    the same two keys.  Covering only one would leave the MORE destructive fold
+    silent (the M2 seam DETACH-DELETEs the folded node).
+
+    A run that absorbed nothing reports NOTHING — no ``vocabulary_gap`` key and
+    no warning.  That is a CONTRACT, not a nicety: ``stats`` is passed through
+    verbatim by the hosted receipt (``hosted_api`` →
+    ``"stats": meta.get("stats") or {}``) and read by the cost seam
+    (``_capture_cost_props``), and the M2 lane documents a genuine zero-call path
+    as a clean ``{}`` (``sdk._extract_session_llm``'s meta build, and
+    ``_capture_stats_with_step_witness``'s replayed/M2 note).  An "always
+    present" reading made that ``{}`` impossible on the M2 lane, which is the
+    regression `tests/test_capture_cost_measurement.py::
+    test_emit_call_site_writes_no_cost_row_when_props_is_none` pins.  So: a run
+    WITH a gap is distinguishable from a run without — by the key's presence —
+    and neither fabricates a measured zero.
+
+    A run that RAISES leaves its reading unattached (there is no receipt to
+    carry it) and the process-level census + WARNING still hold it — the reader
+    never converts a failure into a silent one, and never changes a decision:
+    the fold outcome is whatever ``_boundary`` computed, bit-identical.
+
+    And the converse, which is the module's own invariant rather than a nicety
+    (#10626 review round 7, P2): a RAISING READER never converts a successful,
+    already-committed capture into an exception.  The post-run attach runs inside
+    ``contextlib.suppress(Exception)`` for exactly the reason the two census
+    writers do — the points have landed by then, so an escape would leave this
+    function and `sdk` would report ``ok: False`` on a capture that SUCCEEDED.
+    """
+    from functools import wraps
+
+    def _attach(receipt: dict, reading: dict[str, Any]) -> None:
+        """Land the reading on ONE receipt dict — ONLY if it recorded a loss.
+
+        ⛔ ABSENT-WHEN-NO-DATA, never a fabricated empty reading (#10626 review
+        round 4, ISSUE 1).  ``stats`` is the surface the hosted receipt passes
+        through verbatim and the surface the cost seam reads; writing a reading
+        unconditionally made the M2 lane's ``stats`` non-empty on EVERY capture,
+        including the zero-call path whose documented contract is a clean
+        ``{}``.
+
+        ⛔ THE RECEIPT FIELDS BELONG TO THE LANE, NOT TO THIS READER (#10626
+        review round 7, P2).  The alarm is built BEFORE anything is written, so a
+        raising builder leaves the receipt EXACTLY as the lane built it instead
+        of half-attached (the caller suppresses the escape — observability never
+        turns a committed capture into a raised one).  And a container of the
+        wrong type is never REPLACED: this reader adds its own key/entry to a
+        ``dict``/``list`` the lane provided, and where the lane shipped something
+        else (a foreign ``stats`` shape, a tuple ``warnings``) it leaves that
+        value alone and lands the half that fits — the alarm still names every
+        shape the reading recorded, and the process census + WARNING hold it.
+        Clobbering the lane's field to fit the reading is receipt-field loss, the
+        same class of damage the attach exists to prevent.
+        """
+        if not _vocabulary_gap_recorded_a_loss(reading):
+            return
+        # Build first, write second: nothing below can leave a torn receipt.
+        warning = _vocabulary_gap_run_warning(reading)
+        stats = receipt.get("stats")
+        if stats is None:
+            stats = receipt["stats"] = {}
+        if isinstance(stats, dict):
+            stats["vocabulary_gap"] = reading
+        warnings = receipt.get("warnings")
+        if warnings is None:
+            warnings = receipt["warnings"] = []
+        if isinstance(warnings, list):
+            warnings.append(warning)
+
+    @wraps(run)
+    def _run_with_census(*args, **kwargs):
+        accumulator = _VocabularyGapRunAccumulator()
+        scope = _vocabulary_gap_run_scope()
+        token = scope.set(accumulator)
+        try:
+            result = run(*args, **kwargs)
+        finally:
+            # ``reset`` restores the PREVIOUS value EXACTLY, so a nested run
+            # (none today) cannot silently detach its caller's ledger, and the
+            # accumulator cannot leak into the NEXT run in this context — that
+            # would report one run's folds on another run's receipt.
+            scope.reset(token)
+        # ⛔ INSIDE the module's own suppress, for the reason `_record_vocabulary_gap`
+        # and `_VocabularyGapCensus.record` are: this runs AFTER the run has
+        # already committed its points, so an escaping exception here would turn a
+        # SUCCESSFUL capture into a reported failure (`sdk.py` returns
+        # ``{**result, "ok": False, …}`` on an escape).  Observability may degrade
+        # to unattached — the process census + WARNING still hold the reading —
+        # but it may never decide the capture's outcome.
+        with contextlib.suppress(Exception):  # observability never decides
+            reading = accumulator.reading()
+            if isinstance(result, dict):
+                _attach(result, reading)
+            elif (isinstance(result, tuple) and len(result) == 2
+                  and isinstance(result[1], dict)):
+                # the M2 lane's ``(extracted, meta)`` contract (#1530 D8)
+                _attach(result[1], reading)
+        return result
+
+    return _run_with_census
+
+
+# The run-level reader, wired at the ONE entry every capture lane routes through
+# (`sdk`, `hosted_api`, `ingest_v2`, `run_v2_pipeline`).  Rebinding at module
+# scope — rather than inserting lines inside `extract_session_v2` — keeps every
+# #7949 bundle cite typed against this file's line numbers resolving (measured:
+# a hook at the top of that function shifts eight of them).
+extract_session_v2 = _run_scoped_vocabulary_gap(extract_session_v2)

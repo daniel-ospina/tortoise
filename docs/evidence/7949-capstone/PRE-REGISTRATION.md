@@ -580,13 +580,16 @@ Exit 0 only when **all** of these hold:
    is scored by SUMMING its classes, so a class with no nodes contributes `0/0` to BOTH halves and
    vanishes: the row then reports `share = 1.000` over a population NARROWER than the one registered.
    That is reachable on every post-D10 graph, because `:Document` is a retired label (the writer
-   remaps it onto `:Source`) and §10.1 records that the scored run wrote none at all — a leg that
-   `0/0` makes permanently unable to fail. So the probe derives the empty legs from the census
+   remaps it onto `:Source`) and §10.1 records that the run IT re-derives wrote none at all (the
+   scored log agrees: `capstone-measured-9152448d.log` carries `e3 label=Document nodes=0`) — a leg
+   that `0/0` makes permanently unable to fail. So the probe derives the empty legs from the census
    (`e3_unmeasured_legs`, over `DERIVED_LABELS` and never `:Object`) and a row naming one **cannot
    PASS** — it is `FAIL`, or `REFUSED` where the node floor applies (a too-small population is not a
    verdict either way) — with the leg disclosed in its bar, note and log line. **This decides no
-   spelling and moves no threshold**: a row that already failed stays failed (the shipped `148/383`
-   is RED before and after), a row whose every registered class carried nodes is scored exactly as
+   spelling and moves no threshold**: a row that already failed stays failed (the scored run shipped
+   in this bundle, `capstone-measured-9152448d.log`, reads E3 `157/397` and is RED before and after —
+   and it is itself the empty-leg shape, carrying `e3 label=Document nodes=0`), a row whose every
+   registered class carried nodes is scored exactly as
    before, and whether the honest document class is `Document` or `Source`-as-document — and whether
    that anchor belongs in the denominator at all — remains `#9736`'s owner-gated ruling.
    ⛔ **This item is NOT one the gate can exit 0 on.** `tools/capstone_preregistration_check.py`
@@ -1018,6 +1021,34 @@ place a machine reads it.
   appearance) and refuses when that commit postdates a scored log while this section is absent or
   empty. Where the checkout is too shallow to establish the order it returns no verdict at all
   rather than falling back to asking the record to assert it.
+
+### 10.6 E3 — a registered class the run measured ZERO nodes of can no longer satisfy `= 1.000` (2026-11-03, `#9736`)
+
+- **Original rule** (§3.1's E3 row as §10.1 left it): the row is scored by **summing** its registered
+  classes against `= 1.000`, and the document said nothing about a registered class the run wrote
+  **no** nodes of. Such a class contributed `0/0` to both halves, so it vanished from the ratio and
+  the row reported `1.000` over a population NARROWER than the one registered.
+- **New rule** (§7 item 8): a registered class the run measured **zero** nodes of makes the row
+  unable to PASS — `FAIL`, or `REFUSED` where the node floor applies — with the leg named in the
+  row's bar, in its note and in the log's `e3 unmeasured_legs=` line. The probe derives the legs from
+  its own census (`e3_unmeasured_legs`, over `DERIVED_LABELS` and never `:Object`).
+- **Why it is not a re-cut of a bar**: no threshold, no denominator and no class set moves. The
+  scored run reads E3 `157/397` and is RED before and after; a row whose every registered class
+  carried nodes is scored bit-identically; the change can only add refusals, never remove one. §7's
+  hazard is a denominator moved to fit a number, and nothing here moves toward a pass.
+- **Why it is honest to record it now**: the false green was MEASURED on the pre-fix probe — a census
+  with `Document` and `Event` at zero nodes and `Point` 30/30 anchored reported `PASS` (GREEN,
+  `1.000000`) — and the leg it protects is structurally empty on every post-D10 graph, `:Document`
+  being a retired label the writer remaps onto `:Source`. `#9736`'s own decision card names this as
+  `NOT-A-DECISION(9736-gate-empty-leg, …)`: *"the mechanical fix that would have caught the `Document`
+  spelling on its own, and it should land regardless of what you answer."*
+- **What it deliberately does NOT decide**: which spelling is the honest document class (`Document`
+  vs `Source`-as-document), and whether the document anchor belongs in E3's denominator at all. Both
+  stay `#9736`'s **owner-gated** ruling, exactly as §10.1 left them.
+- **Where it is enforced, and why not where the card named it**: in the probe, not in
+  `tools/capstone_preregistration_check.py`. That tool lints registrations and never runs the probe,
+  so it has no path to a measured leg at all; §7 item 8 states this rather than implying a gate
+  covers it, and the rule is pinned by the probe's own cases.
 
 ## 11. The step set V5 gates over — seven unconditional, one conditional (`#10215`)
 

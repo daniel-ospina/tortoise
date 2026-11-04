@@ -504,8 +504,21 @@ def _probe():
 
 
 def _manifest(**over) -> dict:
-    """The manifest ``ep_activation.activate_beliefs`` returns per question —
-    and the exact shape ``census.py`` reads its eight cells off."""
+    """The manifest ``ep_activation.activate_beliefs`` returns per question.
+
+    This default supplies EIGHT of the THIRTEEN census cells the probe's
+    per-question projection now reads: ``operators``, ``factor_edges``,
+    ``points_with_ep``, ``points_unmeasured``, ``points_off_neutral``,
+    ``points_moved_off_neutral``, ``ep_ran``, ``no_op_reason``. The five it omits
+    are ``error`` and the four ``points_substrate`` / ``belief_eligible_*`` cells,
+    and each omission is load-bearing rather than an oversight: `error: null` is
+    what a fail-open manifest looks like, and the four absent belief cells are
+    exactly what makes a pre-#10493 manifest project four UNREAD cells rather
+    than four measured ones. Callers that need either pass them through
+    ``**over``.
+
+    (Before #10493 the projection read NINE — these eight plus ``error``.)
+    """
     m = {"ep_ran": True, "ep_engine": "ep", "operators": 171,
          "factor_edges": 0, "points_with_ep": 121, "points_unmeasured": 1038,
          "points_off_neutral": 8, "points_moved_off_neutral": 8,
@@ -786,8 +799,8 @@ def test_census_probe_discloses_failed_questions_behind_the_ratio(tmp_path):
     """A crashed run's checkpoint must not read as ``N/N`` over its survivors
     (#10137 review, P2). ``summarize_belief_activation`` only ever sees
     ``outcomes``, so the failure population is read from the input itself
-    (``run.py:2797`` writes ``failures``; a report carries ``n_failed``) and
-    published beside it.
+    (``run.py`` writes each checkpoint's ``failures`` key; a report carries
+    ``n_failed``) and published beside it.
 
     Non-vacuous: the pre-fix probe reported ``questions_in_run: 2`` for this
     input and no ``questions_failed`` at all — the ablation was invisible."""
@@ -827,7 +840,8 @@ def test_census_probe_counts_an_overlapped_qid_once(tmp_path):
     by one worker and failed by another lands in both lists (``report.py:1407-
     1410``), and ``_merge_checkpoint`` unions the two independently, the
     ``remove_failures`` tombstone being present only when the writer knew it was
-    a ``--retry-failed`` re-attempt (``run.py:2699-2729``). Counting
+    a ``--retry-failed`` re-attempt (``_merge_checkpoint``'s ``remove_failures``
+    parameter, honored in its tombstone loop). Counting
     ``len(outcomes) + len(failures)`` would publish this 2-question population
     as a 3-question run, and the gap the README calls "the disclosure" could
     not see it, because the gap was ``questions_failed`` BY CONSTRUCTION.
@@ -1761,8 +1775,9 @@ def test_committed_census_rederives_its_own_aggregate():
         f"checks is how the headline ratio shipped editable (#10678 review)")
 
     # The disclosure fields describe THESE rows: nothing was unread. UNREAD is
-    # ``_optional_int(cell) is None`` — the one predicate the probe's
-    # ``_census_unread`` and the summarizer use — not ``value is None``, which
+    # ``_optional_int(cell) is None`` — the predicate the probe's
+    # ``_census_unread`` and the summarizer's own ``*_unread`` sums both use over
+    # ``_UNKNOWN_PER_MANIFEST_KEYS`` — not ``value is None``, which
     # would call a non-numeric cell (``operators: true``) READ here while its
     # ``cells.operators_unread`` companion calls it UNREAD.
     assert doc["per_question_source"] == "outcome.belief_activation"

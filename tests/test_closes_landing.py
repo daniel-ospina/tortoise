@@ -38,9 +38,20 @@ import re
 import subprocess
 import sys
 import time
+import tomllib
 from pathlib import Path
 
 import pytest
+
+# A MODULE-SCOPE hard import, deliberately — never `pytest.importorskip` (#10634
+# review P2). The renderer cross-check below is the ONLY mitigation for this
+# file's hand-rolled copy of GitHub's grammar (`tools/closes_landing.py:76-84`:
+# "That test is the mitigation, and it is the only thing that is"), so a missing
+# dependency must be a collection ERROR, not a `1 skipped` that leaves the leg
+# green — which is exactly the re-staleable "checked by hand" claim #8379 removed
+# by declaring markdown-it-py on both install paths. Same import, same reason, as
+# the repo precedent `tests/test_blog_authoring_doc.py:21`.
+from markdown_it import MarkdownIt
 
 ROOT = Path(__file__).resolve().parents[1]
 MODULE_PATH = ROOT / "tools" / "closes_landing.py"
@@ -2075,9 +2086,7 @@ _COMMONMARK_SHAPES = [
 
 @pytest.mark.parametrize("body,why", _COMMONMARK_SHAPES)
 def test_the_parser_agrees_with_a_real_commonmark_renderer(body, why):
-    markdown_it = pytest.importorskip(
-        "markdown_it", reason="markdown-it-py is a declared test dependency (#8379)")
-    html = markdown_it.MarkdownIt("commonmark").render(body)
+    html = MarkdownIt("commonmark").render(body)
     prose = _CODE_BLOCK_RE.sub("", html)
     match = _FIRST_REF_RE.search(body)
     assert match, (why, body)
@@ -2094,6 +2103,36 @@ def test_the_parser_agrees_with_a_real_commonmark_renderer(body, why):
             f"{why}: the renderer puts #{n} in <pre><code> ({html!r}) and the "
             f"strict parse — the PASS arm — reported it. A keyword GitHub ignores "
             f"cannot buy a `lands`.")
+
+
+def test_the_commonmark_oracle_cannot_be_skipped_out_of_the_install():
+    """The oracle above is only as real as the dependency being installed.
+
+    It used to reach `markdown_it` through `pytest.importorskip`, so an install
+    that lost the package reported `1 skipped` and left the file GREEN — while the
+    mitigation `tools/closes_landing.py:76-84` leans on ("a divergence … reds a
+    test rather than a reader") silently stopped existing. The import is now
+    module-scope, so that state is a collection error; this pin closes the other
+    half, the declarations a well-meaning tidy-up could drop.
+
+    Both paths are pinned because both are installed in practice (#2985): CI's
+    `pip install -e '.[test]'` and the canonical dev install `uv sync --extra
+    embeddings --extra parity`, which does NOT include the `test` extra. That is
+    the #8379 finding-3 rule this dependency was declared by in the first place.
+    """
+    pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text())
+    test_extra = pyproject["project"]["optional-dependencies"]["test"]
+    dev_group = pyproject["dependency-groups"]["dev"]
+    for where, declarations in (
+        ("`project.optional-dependencies.test` (CI: pip install -e '.[test]')", test_extra),
+        ("`dependency-groups.dev` (uv sync --extra embeddings --extra parity)", dev_group),
+    ):
+        assert any(d.startswith("markdown-it-py") for d in declarations), (
+            f"markdown-it-py is missing from {where} — the renderer oracle in this "
+            f"file is the ONLY check on the hand-rolled CommonMark copy in "
+            f"tools/closes_landing.py, and with a module-scope import a dropped "
+            f"declaration makes that install path lose the oracle. Declarations: "
+            f"{declarations}")
 
 
 def test_the_ITEM_EDGE_is_measured_in_the_space_the_item_lives_in():

@@ -304,6 +304,34 @@ rows in 5 h** before #10620 narrowed `point.search_keys` to `text` (the producer
 halves are now carried. Both were silent losses the journal heals, which is why they were
 invisible without R3.
 
+#### Where the array arm is deliberately BROADER than the write path (the non-`str` element divergence)
+
+`20261102000002_record_point_search_keys_text.sql`'s `USING` arm is bootstrap arithmetic on rows that
+already exist, and for an ARRAY it applies the write path's rule (per-element `strip`, blank elements
+dropped, joined by one space, order preserved) **for every element a producer can emit**. One shape
+diverges on purpose: a **NON-`str` ELEMENT** inside an array (#10648 review P3).
+
+`jsonb_array_elements_text` renders a nested object/array as its own JSON text (`{"k": "v"}`) and
+yields SQL `NULL` for a JSON `null`, so `["a", null]` lands as `a` (an element with no text is
+dropped) and `["a", {"k": "v"}]` as `a {"k": "v"}`. The write path's restatement
+(`record_projection._record_column_value`) is `str(item)` — i.e. `a None` and `a {'k': 'v'}` — which
+are **PYTHON REPRS**. Reproducing a repr in a persisted column would store one language's artifact as
+the record's canonical form (a `replay(journal)`-divergent value, and `rebuild_from_record` copies
+this column back into the graph), so the migration keeps the element's own JSON text and drops only
+an element that HAS no text. It is unreachable from any producer (`search_keys` is `list[str]`), so
+only a pre-existing `jsonb` row — the old `_jsonb_or_scalar` path, or a hand-written row — can hold
+one. The two ends are pinned together by
+`tests/test_record_searchkeys_10620.py::test_the_array_arms_non_str_elements_are_the_stated_divergence`,
+so a change to EITHER side goes red.
+
+⛔ **Why this lives here and not in the migration header.** The header used to state it, and it is the
+paragraph a future lane reads before deciding the arm is "the SAME rule" and tidying it — but
+migrations are **append-only history** (`.github/scripts/check-migration-append-only`), and the file
+had already landed on `main` before the statement was written. Editing it would redden the gate on a
+file that has already been applied. So the divergence is stated here, and
+`tests/test_record_searchkeys_10620.py::test_the_divergence_is_STATED_in_the_doc_the_next_lane_reads`
+reds if this paragraph is deleted while the arm still diverges.
+
 ### R5 — Materialise the point-property edge family into `relation` · **L** · code · **BLOCKER**
 
 **What:** `relation` exists with real composite FKs into `node_identity`, and the registry already

@@ -269,6 +269,52 @@ def test_every_record_migration_the_wheel_ships_is_named():
     )
 
 
+#: A migration's own header line: `-- Migration <14-digit stamp>: …`.
+_MIGRATION_HEADER_RE = re.compile(r"^--\s*Migration\s+(?P<stamp>\d{14})", re.M)
+
+
+def _text_of(name: str) -> str:
+    """A shipped migration's bytes, by its registered NAME."""
+    return (_SHIPPED / name).read_text(encoding="utf-8")
+
+
+def test_every_record_migration_header_names_its_own_stamp():
+    """The FILENAME is the version; the header must not claim a different one.
+
+    Two record migrations landed on the same day, so this branch's migration was
+    RENUMBERED off the collision (#9698's root) — and the sweep that renamed the
+    file, `RECORD_MIGRATIONS`, the CI-selection entry and six call sites missed
+    the header, which kept saying `20261102000002`'s neighbour `20261102000001`.
+    That stamp is now a DIFFERENT, real migration (#10180's
+    `20261102000001_graphs_promote_default.sql`), so the header did not merely
+    go stale — it named another lane's schema change as this file's, in the file
+    an operator reads before applying it. Measured on that pre-fix tree: the
+    header and the filename disagreed.
+
+    Deliberately narrow to `RECORD_MIGRATIONS`: this is the registry whose
+    names are the gate above, a missing or misnamed header in it is read as
+    ordering truth by the next renumber, and widening the pin to every
+    migration would red on a pre-existing, unrelated mismatch.
+
+    Non-vacuity: the expectation is not a re-typed stamp — it is read from each
+    filename, so a future renumber that misses the header reds HERE on the file
+    that was renumbered, in the same direction as the filename it forgot.
+    """
+    mismatched = {}
+    for name in RECORD_MIGRATIONS:
+        match = _MIGRATION_HEADER_RE.search(_text_of(name))
+        if match is None:
+            continue
+        if match.group("stamp") != name.split("_")[0]:
+            mismatched[name] = match.group("stamp")
+    assert not mismatched, (
+        f"record migration header(s) name a stamp that is not their own: "
+        f"{mismatched} — the filename is the version Postgres applies and "
+        "`RECORD_MIGRATIONS` ships; a header naming another stamp sends the "
+        "next reader (or the next renumber, #9698) to the wrong migration"
+    )
+
+
 def test_a_missing_name_degrades_silently_for_a_forward_migration(tmp_path: Path):
     """Why the name pin above is not pedantry: the forward half fails SILENTLY.
 

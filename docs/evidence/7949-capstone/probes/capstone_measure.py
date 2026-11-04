@@ -686,7 +686,8 @@ def e3_unmeasured_legs(per_label: dict[str, dict[str, int]] | None, *,
     it onto ``:Source`` under D10 — the ``entity_label = "Source"`` remap in
     ``tortoise/projection/edges.py``, cited by SYMBOL because a line number here would re-stale on
     the next insertion above it), and §10.1 of the
-    pre-registration records that the scored run wrote none at all. So the leg E3 names is
+    pre-registration records that the run IT re-derives wrote none at all (the scored log agrees:
+    ``e3 label=Document nodes=0``). So the leg E3 names is
     structurally empty on every post-D10 graph, and only #9736's owner-gated ruling can change
     WHICH spelling the row names.
 
@@ -1028,11 +1029,11 @@ def build_rows(*, head: str, out_path: str, log_corpus_sha: str,
         row("E4", verdict=e4["verdict"], evidence=E4_RECEIPT, sha=e4["sha"],
             numerator=e4["numerator"], denominator=e4["denominator"],
             corpus_sha256=e4["corpus_sha256"],
-            artifact_corpus_sha256=e4["corpus_sha256"], blocked_by="#8503",
+            artifact_corpus_sha256=e4["corpus_sha256"], blocked_by="#9596",
             note=e4["note"]),
         row("E5", verdict=e5["verdict"], evidence=E5_RESCORE, sha=head,
             numerator=e5["numerator"], denominator=e5["denominator"],
-            corpus_sha256=log_corpus_sha, blocked_by="#9738", note=e5["note"]),
+            corpus_sha256=log_corpus_sha, blocked_by="#5087", note=e5["note"]),
     ]
 
 
@@ -2848,8 +2849,10 @@ def main(argv: list[str] | None = None) -> int:
                  f"corpus_hash={receipt['corpus_hash']} differ from the frozen "
                  f"corpus ({corpus_sha}), and its verdict={receipt['verdict']} "
                  f"failure_origin={receipt['failure_origin']}: the planted edges "
-                 f"are not formed at all (#8503), and the receipt's "
-                 f"retrievability rate is UNMEASURED (#9596)"),
+                 f"are not formed at all (#8503 \u2014 CLOSED 2026-10-24: that closure "
+                 f"records the DISPROOF, so it is this row's measurement record and "
+                 f"not a live blocker; the residual is owned by #9596), and the "
+                 f"receipt's retrievability rate is UNMEASURED (#9596)"),
     }
 
     # ── E5 ────────────────────────────────────────────────────────────────
@@ -2873,7 +2876,13 @@ def main(argv: list[str] | None = None) -> int:
                  f"delta cannot be certified. #9738 also records that §10's prior "
                  f"measurement was visible when the record claimed it was not, and "
                  f"that the 25-bound vs 29-marker populations must be reconciled "
-                 f"before either number is called final"),
+                 f"before either number is called final. The row's blocker moved "
+                 f"on 2026-11-02 from #9738 to #5087: #9738 CLOSED that morning "
+                 f"because its own record correction landed (PR #10525), which is "
+                 f"not a measurement of this number — raw recovery "
+                 f"{e5_result['raw_recovery']:.4f} against the 0.80 floor is S3 "
+                 f"selection recovery, owned by the S0→S6 selective write path "
+                 f"(#5087)"),
     }
 
     rows = build_rows(head=head, out_path=out_path, log_corpus_sha=corpus_sha,
