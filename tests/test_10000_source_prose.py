@@ -405,7 +405,7 @@ def test_the_lexicon_still_prefers_the_most_frequent_words():
     _, topics = _session_source_metadata(
         "zebra zebra zebra apple mango turnip walnut radish")
     assert topics[0] == "zebra", topics
-    assert topics == ["zebra"] + sorted(topics[1:]), topics
+    assert topics == ["zebra", *sorted(topics[1:])], topics
     assert len(topics) == 6, topics
 
 
