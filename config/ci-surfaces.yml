@@ -2046,11 +2046,18 @@ surfaces:
   # `tortoise/record_writer.py` (the error that no longer discards the driver's
   # cause) — NEITHER matches a `SOURCE_PATTERN`, so both fall through to `core`
   # and this arm is the load-bearing one for exactly the diff class it guards.
-  # ELEVEN of its twelve legs are DB-free (the bound value, the read-side decode,
-  # the param/column alignment, the per-parameter memo, the synthetic-tree
-  # forward + fail-closed arms, the replay attribution wrapper, the migrations
-  # parse, the no-shared-name check, the column-naming error, the cause the
-  # writer keeps). ⚠️ The TWELFTH —
+  # The DB-free legs are the ones that run on the fast lane (the bound value, the
+  # read-side decode, the param/column alignment, the per-parameter memo, the
+  # synthetic-tree forward + fail-closed arms, the replay attribution wrapper, the
+  # migrations parse, the no-shared-name check, the column-naming error, the cause
+  # the writer keeps, plus the later pins
+  # `test_the_pre_fix_binding_shape_is_still_readable_when_built_by_hand` (#10692
+  # review P2) and `test_a_message_string_with_a_cause_degrades_instead_of_raising`
+  # (`c660ffcee`)). ⛔ NO LEG TOTAL is quoted here: this paragraph read "ELEVEN of
+  # its twelve legs" and both numbers were stale by the next round — the same
+  # half-life-of-one-round the `durations` note below refuses to claim. Re-derive
+  # the counts from the file (a `^def test_` count, or `--collect-only`). ⚠️ The
+  # ONE Postgres leg —
   # `test_the_record_applies_the_live_search_keys_shape_and_reads_it_back`, the
   # only leg that proves the JSON scalar APPLIES and round-trips — needs
   # `TEST_RECORD_DB_URI` and therefore SKIPS in the fast matrix. It is NOT yet
@@ -2059,8 +2066,8 @@ surfaces:
   # stays a reviewed change. Until then this entry is what keeps the file in the
   # selected pool at all — without it `--integrity` reds the required
   # `manifest-integrity` job (measured: `manifest drift:
-  # ['test_9548_record_search_keys_shape.py']`) and no leg runs the eleven DB-free
-  # pins, not even a push (its fast pool is built from this manifest).
+  # ['test_9548_record_search_keys_shape.py']`) and no leg runs the DB-free pins,
+  # not even a push (its fast pool is built from this manifest).
   - test_9548_record_search_keys_shape.py
   # #9325/#9326: the record's schema ships as a MAPPED package
   # (`pyproject.toml` `package-dir` -> `supabase/migrations`), so BOTH Dockerfiles

@@ -7568,6 +7568,42 @@ def test_the_stale_case_count_guard_is_not_vacuous(tmp_path):
         ("test_gone.py", 4, None)]
 
 
+def test_the_added_files_durations_note_is_attached_so_the_guard_can_judge_it():
+    """#10726 review P2: a note the reader DETACHES is a claim no guard can read.
+
+    The `durations` row for the test file this PR ADDS stated "12 cases" while the
+    file has 13, and NOTHING red — not because the stale-count guard above is
+    broken, but because the block below the row OPENED a note of its own
+    (`# THIS file: 12 cases …` matches `tools.ci_timing._starts_a_new_note`), so
+    `_row_continuation_lines` returned `[]` and `_durations_row_comments` never
+    joined it. The citation was never read, which is how a count that was false on
+    arrival (`c660ffcee` added the case and the note in the same commit) survived
+    eleven review rounds.
+
+    So the property worth pinning is the one whose ABSENCE hid the defect: the
+    note below this row must CONTINUE the row's sentence rather than open a new
+    one, so every claim it carries is judged by the guards above. Verified at
+    `ae9209738`: with an attached note carrying the old claim,
+    `_durations_rows_with_a_stale_case_count` returns
+    `[('test_9548_record_search_keys_shape.py', 12, 13)]` — the detachment, not the
+    guard, is what let it through.
+
+    Non-vacuous: put `# THIS file: …` back as the block's first line and the
+    assertion below reds (the row's continuation span is empty).
+    """
+    from tools.ci_timing import _row_continuation_lines
+
+    lines = cs.MANIFEST.read_text(encoding="utf-8").splitlines()
+    block_start = lines.index("durations:")
+    row = next(i for i, ln in enumerate(lines)
+               if i > block_start
+               and ln.startswith("  test_9548_record_search_keys_shape.py:"))
+    assert _row_continuation_lines(lines, row), (
+        "the note below this row is DETACHED from it (its first line opens a note "
+        "of its own), so no duration guard reads what it claims. Start the block "
+        "with a line that CONTINUES the row's sentence.")
+
+
 # ── a row may not state ZERO cases for a file that defines tests ──────────────
 # The instruments disagree on a CLASS-BASED file: `grep -c '^def test_'` reads **0**
 # for every test that lives as a method of a `Test*` class, while the session that
