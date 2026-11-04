@@ -1859,8 +1859,15 @@ def test_snapshot_contents_are_pinned_so_an_entry_cannot_be_swapped():
     # 19-minute watchdog, so the failure set was never observed (#5049). The
     # lesson is not a new guard, it is that the guard has to RUN — which is why
     # the count and the digest move in ONE change, with the reason written here.
+    # 2026-11-04 (#10849, fold #10895): burned down by ONE. The fold reflowed
+    # `docs/INGEST_CONTRACT.md`'s `#785-era` line — a line STARTING with `#` that
+    # MD018 reads as an ATX heading — so the entry above is now unreproducible and
+    # the ceiling had to follow the code, exactly as `ecc7bc8ca` and #9071 learned.
+    # The removal was measured, not assumed: `markdownlint-cli2@0.23.3` on that
+    # file reports `0 issues` and the baseline differ reports `0 new, 0 known`.
+    # Both numbers moved WITH the list in this commit, per the #9193 lesson above.
     assert _canonical_digest(baseline["markdownlint"]) == (
-        "7a563e5fd489cfc5d6acb26e35d43ce2bc4e9e66932dff6c4647122625cc08fb"
+        "ba19cd42b57bbf10f44bf1e27e0de92ea47cea364ef04cb40f630e77ac176a12"
     ), "the markdownlint snapshot contents changed — a swap is not a re-baseline"
     assert _canonical_digest(baseline["lychee"]) == (
         "42efc6c28d6efc385ad49dc59c443f2954220ca9b5eb34e9e66b9f71de38c2db"

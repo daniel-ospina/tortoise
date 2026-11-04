@@ -103,6 +103,8 @@ from __future__ import annotations
 
 import sys
 
+# #5128: refuse a <3.12 interpreter before the imports below — a module-level
+# 3.11+-only import (`from datetime import UTC`) would fail first (D9 shape).
 if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
     raise SystemExit(
         f"tools/batch_open.py requires Python >= 3.12 (got "
@@ -119,7 +121,6 @@ import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-
 
 REPO = Path(__file__).resolve().parent.parent
 MERGIFY_REL = ".mergify.yml"
