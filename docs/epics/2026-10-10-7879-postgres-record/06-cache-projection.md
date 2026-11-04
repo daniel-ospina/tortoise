@@ -261,7 +261,17 @@ bounds, both deliberate:
 
 * **a COLUMN value wins** the same coordinate, preserving the asymmetry above:
   an ambiguous row is read as a DOCUMENT and keeps its prose (the pre-existing
-  defect) rather than stripping a document's metadata;
+  defect) rather than stripping a document's metadata. ⛔ **That rule is the NODE
+  MAP's rule too**, and it has to be the *same* rule: `_props_from_row` seeds
+  the map from the tail and lets the column loop overwrite it. Resolving the
+  collision only in the identity read left the node map's winner to the row's
+  MAPPING ORDER, and the DDL declares `props` **last**, so on a real `SELECT *`
+  row the TAIL won `sourceKind` while the predicate read the COLUMN — the two
+  functions disagreed and R1 failed open exactly on the conflicting shape
+  (#10867 review ISSUE 1). `_source_row`'s `sorted()` keys put `props` first, so
+  every agreement leg ran on the one ordering real rows do not have; the pin now
+  has a legs pair that builds the row in `SELECT *` order and one that builds the
+  same record both ways and requires the SAME node map;
 * **only the KIND can travel**, because `url` is the label's CONTRACT KEY —
   `node_from_row` refuses a NULL one (`UnprojectableRecord`, the schema's own
   CHECK), so the tail never decides the `session:` arm.
@@ -318,14 +328,20 @@ DOCUMENT with a differing summary is still counted field by field;
 ONE LEG PER ARM; the FOUR negative legs (a plain-document baseline, then one per
 term that must not be a signal: a transcript document carrying a `session_id`, a
 `corpus://` permalink stamped `agentSession`, a document stamped `is_episodic`);
-the row/node predicate-agreement legs, including the tail-carried identity; the
+the row/node predicate-agreement legs, including the tail-carried identity, and
+TWO legs for the ORDER the row arrives in (`_row_in_select_star_order`: the tail
+is the last column in the DDL, so a real row iterates it last — the ordering in
+which the tail used to win the node map while the predicate read the column;
+#10867 review ISSUE 1); the
 `props`-tail legs (prose AND the `sourceKind` identity, plus the negative that a
 tail-carried kind alone does not strip a `corpus://` document); and the record row
 that must not be mutated. Mutation-checked, one at a time: each identity arm, EACH
 OF THE TWO DOORS (the column loop and the `props` tail — the tail filter undoes
 only the keys the tail added, so neither door subsumes the other), the tail read in
 the predicate (column-only reds 2 legs), WIDENING THE DROP SET (`+"title"` reds the
-drop-set leg and only it), the label gate,
+drop-set leg and only it), the column-wins seeding (writing the tail last again
+reds the `SELECT *`-order leg and the order-independence leg, and nothing else),
+the label gate,
 the call-time resolution of the placement spellings, and each of the three flags
 re-added — every one reds at least the leg that names it, plus the row/node
 agreement shape that exists to catch exactly that drift.

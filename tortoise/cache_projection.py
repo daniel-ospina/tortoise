@@ -1386,6 +1386,18 @@ def _row_identity_view(row: Mapping[str, Any],
     AMBIGUOUS row is read as a DOCUMENT, so it keeps its prose (the pre-existing
     defect) rather than stripping a document's own metadata.
 
+    ⛔ AND THAT RULE IS THE *NODE MAP's* RULE TOO — `_props_from_row` seeds `out`
+    from the tail and lets the column loop overwrite it, for this reason (#10867
+    review ISSUE 1). The rule is stated here once and applied in both places on
+    purpose: it is the same collision, and resolving it twice is how the two
+    functions came to disagree.
+
+    `None` is SILENCE, and nothing else is: a column that carries a value (an
+    empty string included) wins the coordinate, because `_props_from_row` writes
+    it. An empty key is refused downstream anyway (`node_from_row`'s
+    `UnprojectableRecord`, and the schema's own CHECK), so the two agree on every
+    shape that can become a node.
+
     The row itself is NEVER mutated — a fresh mapping is returned.
     """
     if not tail:
@@ -1394,7 +1406,7 @@ def _row_identity_view(row: Mapping[str, Any],
     kind_property = _episodic_source_kind_property()
     if merged.get("source_kind") is None and kind_property in tail:
         merged["source_kind"] = tail[kind_property]
-    if not merged.get("url") and "url" in tail:
+    if merged.get("url") is None and "url" in tail:
         merged["url"] = tail["url"]
     return merged
 
@@ -1492,27 +1504,49 @@ def _props_from_row(table: str, row: Mapping[str, Any], *,
     refused = _refused(table)
     projected = projected_columns(table)
     # The tail is decoded ONCE: it feeds the identity read below AND the verbatim
-    # `out.update`, and decoding is what decides whether the identity participates.
+    # seed of `out`, and decoding is what decides whether the identity participates.
     tail = _decoded_tail(row.get("props"))
     # §9.1/D1 (#10853): resolved ONCE per row, from the row's identity AS THE
     # NODE WILL CARRY IT — the columns AND the `props` tail.
     episodic_source = (table == "source"
                        and _is_episodic_source_row(row, tail))
+    # ⛔ THE TAIL IS SEEDED FIRST, AND A COLUMN VALUE WINS (#10867 review ISSUE
+    # 1). Ordering here is not cosmetic: `props` is declared LAST in every
+    # record table (`CREATE TABLE public.source` … `props jsonb NOT NULL DEFAULT
+    # '{}' :189), and Postgres yields `SELECT *` columns in DDL order
+    # (`pg_attribute.attnum` — "ordinary columns are numbered from 1 up"), so on
+    # a REAL row the tail used to be iterated last and `out.update(dict(tail))`
+    # made it the WINNER — of every coordinate it carried, not just the identity.
+    # The winner was therefore the row's MAPPING ORDER (`sorted()` in a test
+    # fixture puts `props` early, `SELECT *` puts it last), while
+    # `_row_identity_view` declares the opposite rule — *"a COLUMN VALUE WINS
+    # over the tail's spelling of the same coordinate"*. On a row whose
+    # `source_kind` COLUMN and `sourceKind` tail disagreed, the row predicate
+    # read the column (document) and the node carried the tail (agentSession):
+    # R1 failed OPEN on a node `is_episodic_source_node` itself calls a session,
+    # with the turn prose on it, and `scan_cache_view` then subtracted the pair
+    # from `placed` — hiding a real divergence as `graph_only` instead of
+    # reporting it. Seeding `out` from the tail and letting the column loop
+    # overwrite it resolves the collision ONCE, in the direction both functions
+    # already declare: the record's COLUMN is the authority for a column-backed
+    # property (the writer routes it there — `record_projection._split_properties`
+    # — so the tail never legitimately carries one), and the tail stays the
+    # open-set surface for the names no column spells.
     out: dict[str, Any] = {}
     tail_keys: set[str] = set()
+    if tail:
+        tail_keys = set(tail)
+        refused_tail = sorted(set(tail) & refused)
+        if refused_tail:
+            raise CacheProjectionError(
+                f"{table}.props carries DERIVED/VOLATILE name(s) "
+                f"{refused_tail} — the record must not hold them as "
+                f"authority, so the cache must not either (the "
+                f"schema's own CHECK refuses this row)"
+            )
+        out.update(dict(tail))
     for column, value in row.items():
         if column == "props":
-            if tail:
-                tail_keys = set(tail)
-                refused_tail = sorted(set(tail) & refused)
-                if refused_tail:
-                    raise CacheProjectionError(
-                        f"{table}.props carries DERIVED/VOLATILE name(s) "
-                        f"{refused_tail} — the record must not hold them as "
-                        f"authority, so the cache must not either (the "
-                        f"schema's own CHECK refuses this row)"
-                    )
-                out.update(dict(tail))
             continue
         if column in bookkeeping_columns(table) or column in skip:
             continue

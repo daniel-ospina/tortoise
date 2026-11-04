@@ -51,8 +51,37 @@ UTTERANCE = "We decided the weekly rebuild happens on Fridays."
 
 
 def _source_row(**overrides: object) -> dict[str, object]:
-    """A `public.source` row of the SHAPE Postgres returns (every column)."""
+    """A `public.source` row of the SHAPE Postgres returns (every column).
+
+    ⚠️ But NOT in the ORDER it returns them: `sorted()` puts `'props'` BEFORE
+    `'source_kind'`/`'title'`/`'url'`, while the DDL puts the tail LAST — see
+    :func:`_row_in_select_star_order`, the ordering a real row has.
+    """
     row: dict[str, object] = {c: None for c in sorted(rp.table_columns()["source"])}
+    row.update(overrides)
+    return row
+
+
+def _row_in_select_star_order(**overrides: object) -> dict[str, object]:
+    """A `public.source` row in the order `SELECT *` ACTUALLY yields: tail last.
+
+    `props` is declared last in `CREATE TABLE public.source` (the `props jsonb
+    NOT NULL DEFAULT '{}'` line, immediately above the PRIMARY KEY), and Postgres
+    numbers ordinary columns in creation order (`pg_attribute.attnum`, *"ordinary
+    columns are numbered from 1 up"*), so `SELECT *` iterates the tail LAST —
+    the coordinate `_props_from_row` used to write last, i.e. the one that won
+    every collision it carried.
+
+    ⛔ This ordering is the whole point of the legs that use it: `_source_row`'s
+    `sorted()` keys put `props` first, so a column overwrote the tail and the row
+    predicate and the node map AGREED on the one ordering real rows do not have
+    (#10867 review ISSUE 1).
+    """
+    row: dict[str, object] = {
+        c: None for c in sorted(rp.table_columns()["source"]) if c != "props"}
+    # Inserted LAST — and `update` never moves an existing key, so `props` stays
+    # the final coordinate however many overrides follow.
+    row["props"] = ""
     row.update(overrides)
     return row
 
@@ -532,6 +561,98 @@ def test_the_row_and_node_predicates_agree_when_the_tail_carries_the_identity():
             f"the row predicate disagreed with the node predicate on "
             f"{column_url!r} + {props_tail}"
         )
+
+
+def test_a_column_value_wins_the_tail_on_a_real_SELECT_star_row():
+    """ISSUE 1 (#10867 review): on the real row ordering the TAIL won the identity.
+
+    A row whose `source_kind` COLUMN says `document` and whose `props` tail says
+    `agentSession` is the one shape where the two readings of the same
+    coordinate disagree. `_row_identity_view` declares the rule — *"a COLUMN
+    VALUE WINS over the tail's spelling of the same coordinate"* — but
+    `_props_from_row` never applied it: it wrote the tail with `out.update(...)`
+    wherever the `props` column happened to sit, so the winner was the row's
+    MAPPING ORDER. `props` is declared LAST in the record DDL, so on a real row
+    the TAIL won while the row predicate read the COLUMN: the node carried
+    `sourceKind='agentSession'` — `is_episodic_source_node` calls that a session
+    — WITH the turn prose on it, so R1 (*"from any row shape"*) failed open and
+    `scan_cache_view` then subtracted the pair from `placed`, reporting a real
+    divergence as `graph_only`.
+
+    The three existing agreement legs could not see it: they build `_source_row`,
+    whose `sorted()` keys put `props` first, i.e. the one ordering in which the
+    column wins the node map too.
+    """
+    from tortoise import cache_projection as cp
+
+    row = _row_in_select_star_order(
+        url="session.md",
+        id="session.md",
+        name="session.md",
+        source_kind="document",
+        summary=UTTERANCE,
+        _search_text=UTTERANCE,
+        props='{"sourceKind": "agentSession"}',
+    )
+    node = node_from_row("Source", row)
+
+    assert node.props["sourceKind"] == "document", (
+        "the `props` tail overwrote the record's own `source_kind` COLUMN — a "
+        "column-backed property's authority is the COLUMN (the writer routes it "
+        "there, `record_projection._split_properties`), and `_row_identity_view` "
+        "already declares that it wins this coordinate"
+    )
+    assert cp.is_episodic_source_node(node.props) is False, (
+        "the node is classified a DOCUMENT by the column, so nothing may strip "
+        "its own metadata"
+    )
+    assert cp._is_episodic_source_row(row) is False
+    assert (cp.is_episodic_source_node(node.props)
+            == cp._is_episodic_source_row(row)), (
+        "the row predicate and the node predicate answered differently about "
+        "the SAME row — that disagreement is what let the prose through while "
+        "the reconciler suppressed the divergence"
+    )
+    # The AMBIGUOUS row is read as a DOCUMENT (the declared asymmetry), so it
+    # keeps its prose. Pinned so a future change cannot "fix" the collision the
+    # other way and start stripping a document's own metadata.
+    assert node.props.get("summary") == UTTERANCE
+    assert node.props.get("_searchText") == UTTERANCE
+
+
+def test_the_projection_does_not_depend_on_the_row_mapping_order():
+    """The same record must project the SAME map whichever way the row arrives.
+
+    Pre-fix a column/tail collision was decided by the row's mapping order, so
+    `SELECT *` (tail last) and a `sorted()` fixture (tail early) built different
+    nodes out of identical data. Pinned on a NON-identity column too (`title`),
+    so a fix narrowed to `sourceKind` cannot pass: the rule is about the whole
+    map, not about the one coordinate a review happened to name.
+    """
+    from tortoise import cache_projection as cp
+
+    overrides: dict[str, object] = {
+        "url": "session.md",
+        "id": "session.md",
+        "name": "session.md",
+        "source_kind": "document",
+        "title": "the COLUMN's title",
+        "summary": UTTERANCE,
+        "_search_text": UTTERANCE,
+        "props": '{"sourceKind": "agentSession", "title": "the TAIL title"}',
+    }
+    fixture_order = node_from_row("Source", _source_row(**overrides))
+    select_star = node_from_row("Source", _row_in_select_star_order(**overrides))
+
+    assert select_star.props == fixture_order.props, (
+        "the projection's result depends on the row's MAPPING ORDER: the same "
+        "record yields two different node maps"
+    )
+    assert select_star.props["title"] == "the COLUMN's title"
+    assert select_star.props["sourceKind"] == "document"
+    assert (cp.is_episodic_source_node(select_star.props)
+            == cp._is_episodic_source_row(_row_in_select_star_order(**overrides))
+            is False)
 
 
 @pytest.mark.parametrize("shape", [
