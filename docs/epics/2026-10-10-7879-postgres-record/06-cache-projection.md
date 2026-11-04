@@ -296,8 +296,7 @@ bounds, both deliberate:
   under its own `graph_only` bucket: visible, and not a divergence against a
   record that is correct. The graph side is repaired by a record-sourced
   re-projection (`record-restore` / `rebuild_from_record`, which re-materialise
-  through this projector) — **for a node the projection CREATES, and only on a
-  SERVER graph**. The write is additive (`MERGE … SET n += $props`), so a node
+  through this projector) — **for a node the projection CREATES**. The write is additive (`MERGE … SET n += $props`), so a node
   that ALREADY carries the pair keeps it across a re-projection: this arm stops
   the pair being re-written, it does not clear one. And
   `rebuild_from_record` runs `_assert_test_graph`, which refuses a SERVER graph
@@ -367,6 +366,19 @@ A grep rooted only at `tortoise/ tests/` answers "zero" while both keep
 pointing at a symbol that no longer exists — the exact FALSE CLEAN this
 paragraph warns about.
 
+⛔ **And the THIRD site is this document — which the roots above still do not
+cover (#10867 review, cycle 4).** An epic doc that instructs a deletion has to
+name the symbols being deleted, so `06-cache-projection.md` matches the pattern
+about twenty times; a repo-wide search finds exactly three files outside the
+code tree, and this is the one a `#10852` lane actually READS. Leaving it out of
+the roots reproduced the same false clean one level up: the check reports zero
+while the artifact that commissioned the deletion still points at every dead
+symbol. So the obligation has a documentation step with no exception: **rewrite
+this section** — the rule, its two arms, its costs and this obligation — so it
+no longer cites the deleted names, then re-run the same grep over
+`tortoise/ tests/ config/ MEMORY.md docs/epics/2026-10-10-7879-postgres-record/06-cache-projection.md`
+and expect no hits outside the new lexicon-SURVIVES legs.
+
 ⚠️ The pattern is deliberately WIDER than the seven touch points above (#10867
 review, P3): the rule's PREDICATE and its helpers (`_is_episodic_source_row`,
 `_row_identity_view`, `_decoded_tail`, `_UNRESOLVED_TAIL`,
@@ -378,8 +390,8 @@ command it prescribes reports a FALSE CLEAN, which is worse than no check.
 
 ⛔ **`_tail_payload` is deliberately NOT in the pattern, and that is the other
 half of the same rule (#10867 review, P3).** It is the module's GENERAL tail
-DECODER — `_props_from_row` decodes through it for EVERY table
-(`_props_from_row` decodes every table's tail through it), not only for a `Source` — so it SURVIVES the
+DECODER — `_props_from_row` decodes every table's tail through it, not only for
+a `Source` — so it SURVIVES the
 `#10852` deletion and its own definition stays a hit. Adding it would have made
 a correct deletion report a permanent, unavoidable RED, and the exits from that
 are both wrong: treat a legitimate hit as a failure, or delete the decoder and

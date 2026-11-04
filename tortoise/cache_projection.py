@@ -133,7 +133,8 @@ THE FOUR PROPERTIES, AND WHERE EACH LIVES
    :func:`episodic_source_declined_properties` (a CALLER of that last one —
    read by the `props` tail door here and by `record_serve`),
    :func:`is_episodic_source_node`, the `record_reconcile.scan_cache_view`
-   subtraction and `record_serve.parity_difference`'s fourth explanation (that
+   subtraction and `record_serve.parity_difference`'s third sanctioned
+   asymmetry (that
    module imports both of the two names above, so deleting either alone is an
    `ImportError` on every `Source` comparison, and leaving it in place keeps
    explaining a real post-`#10852` gap away), and adds a leg that a lexicon
@@ -1272,9 +1273,10 @@ def _scalar(value: Any) -> Any:
 #: Source, and the reconciler counts them under `graph_only` — visible, and not
 #: a divergence against a record that is correct. The graph side is repaired by a
 #: record-sourced re-projection (`record-restore` / `rebuild_from_record`, which
-#: re-materialise through this projector) — **for a node the projection CREATES,
-#: and only on a SERVER graph**. Two bounds, both measured, and neither is an
-#: asterisk: the write is additive (`MERGE … SET n += $props`,
+#: re-materialise through this projector) — **for a node the projection CREATES**.
+#: Two bounds, both measured, and neither is an asterisk; and on a SERVER graph
+#: the wipe is refused outright unless the graph is test-named. The write is
+#: additive (`MERGE … SET n += $props`,
 #: :func:`node_statement`), so a node that ALREADY carries the pair KEEPS it across
 #: a re-projection — this table stops the pair being re-written, it does not clear
 #: an existing one; and `rebuild_from_record` runs `_assert_test_graph`, which
@@ -1298,7 +1300,8 @@ def _scalar(value: Any) -> Any:
 #: :func:`episodic_source_prose_properties`,
 #: :func:`episodic_source_declined_properties` (a CALLER of it),
 #: :func:`is_episodic_source_node`, the `scan_cache_view` subtraction and
-#: `record_serve.parity_difference`'s fourth explanation (the other caller), and
+#: `record_serve.parity_difference`'s third sanctioned asymmetry (the other
+#: caller), and
 #: adds a leg that a lexicon `summary` + a topics-derived `_searchText` SURVIVE
 #: the door. Seven names, and the list is not the contract — the epic doc's
 #: check is a grep for surviving REFERENCES. Recorded on #10853.
