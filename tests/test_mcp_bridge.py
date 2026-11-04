@@ -820,6 +820,42 @@ class TestFailureModes:
         assert "resolution FAILED at startup" in err, (
             f"the operator got no diagnosis of the startup failure: {err[-300:]}")
 
+    def test_a_MALFORMED_line_is_answered_when_the_startup_resolution_failed(
+        self, monkeypatch, home, capsys,
+    ):
+        """The `-32700` handler ran BEFORE the generic handler's guard, and it
+        redacted against `connection.key`.
+
+        While a startup resolution failure was fatal that could never be reached
+        with `connection` unset. Making the failure survivable (the P1 above) put
+        the branch in front of a state where `connection` is `None`, so the parse
+        handler raised `AttributeError` out of `main()` — a dead bridge, no reply,
+        on any non-JSON line (a truncated frame, a chunk boundary, a stray
+        diagnostic write). This branch had NO coverage before this test.
+
+        RED before the fix: `main()` raised `AttributeError`.
+        """
+        import io
+
+        from tortoise import mcp_bridge
+
+        def _unresolvable():
+            raise FileNotFoundError(2, "No such file or directory")
+
+        monkeypatch.setattr(mcp_bridge, "resolve_connection", _unresolvable)
+        out = io.StringIO()
+        monkeypatch.setattr(sys, "stdin", io.StringIO('{"not":"valid json"\n'))
+        monkeypatch.setattr(sys, "stdout", out)
+
+        assert mcp_bridge.main([]) == 0
+
+        lines = [json.loads(line) for line in out.getvalue().splitlines() if line.strip()]
+        assert len(lines) == 1, f"expected exactly one reply, got: {out.getvalue()!r}"
+        assert lines[0]["id"] is None, lines[0]
+        assert lines[0]["error"]["code"] == -32700, lines[0]
+        assert lines[0]["error"]["message"].startswith("Parse error:"), lines[0]
+        assert "resolution FAILED at startup" in capsys.readouterr().err
+
     def test_a_resolution_failure_while_ANSWERING_a_fault_still_answers(
         self, home, tmp_path,
     ):

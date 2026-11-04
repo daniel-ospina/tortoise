@@ -372,10 +372,17 @@ def _redirect_refusal(
 ) -> str:
     """The named refusal for a CROSS-ORIGIN redirect the bridge refused to follow.
 
-    A DISTINCT state, not a variant of the value fault: the credential resolved,
-    it was simply never sent, so the value is not what got refused. Asserting
-    otherwise is the #10605 defect in mirror image — a message that is accurate
-    about the status and useless about the cause.
+    A DISTINCT state, not a variant of the value fault: on the CREDENTIALED branch
+    the credential resolved and was simply never sent, so the value is not what
+    got refused — asserting otherwise is the #10605 defect in mirror image, a
+    message accurate about the status and useless about the cause. There is a
+    SECOND shape, and it is why this docstring names both: an UNCREDENTIALED
+    bridge meets the same hop with nothing resolved at all, and there the refusal
+    says so (naming every source it read) rather than interpolating
+    `sent.source == None` into "the credential resolved from None". Both branches
+    make the same promise — no Authorization header was carried, so a VALUE is
+    never what got refused — which is the invariant a future editor must preserve
+    if they touch the split.
 
     AND: the refusal names the delivery that did NOT happen. Following the hop is
     what would have re-sent the JSON-RPC body to `target` (httpx re-issues 307/308
@@ -756,10 +763,18 @@ def main(argv: list[str] | None = None) -> int:
             try:
                 payload = json.loads(line)
             except ValueError as exc:
+                # ⛔ `start_key`, never `connection.key`: a startup resolution
+                # failure leaves `connection` None (see `_resolved_or_none`), and
+                # this handler is the one place in the loop that runs BEFORE the
+                # generic handler's guard. Reading `connection.key` here raised
+                # `AttributeError` out of `main()` — a dead bridge with no reply
+                # at all, on the very state the startup fix newly permits to
+                # persist. Any non-JSON line on stdin reaches this (a truncated
+                # frame, a chunk boundary, a stray diagnostic write).
                 _emit({"jsonrpc": "2.0", "id": None,
                        "error": {"code": -32700,
                                  "message": f"Parse error: "
-                                            f"{_redact_any(str(exc), connection.key)}"}})
+                                            f"{_redact_any(str(exc), start_key)}"}})
                 continue
             try:
                 messages = forward(client, state, payload)
