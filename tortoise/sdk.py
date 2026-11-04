@@ -4145,6 +4145,18 @@ def _session_source_metadata(transcript: str) -> tuple[str, list[str]]:
     exists to remove. ``tests/test_10000_source_prose.py`` scans every node's
     string properties for the capture's own text and reds if it reaches anything
     but the episodic turn store.
+
+    ⛔ The DISPLAY value carries ``_SESSION_SOURCE_SUMMARY_PREFIX`` and the
+    INDEXED value does not — the two are deliberately different strings, and
+    ``_source_search_text`` takes the bare ``topics`` for exactly that reason.
+    Writing the prefixed descriptor anywhere the FTS index reads it is a real
+    search-quality regression: ``session``/``capture``/``topics`` are not
+    stopwords, so every captured session would match a query for any of the
+    three (measured: two sessions with disjoint vocabularies both returned for
+    "session capture topics"). An earlier cut of #10000 dropped the prefix from
+    BOTH values to fix that; the prefix is kept here because it costs the index
+    nothing once the index stops reading ``summary``, and a bare comma list in a
+    column named ``summary`` reads as an unfinished sentence.
     """
     if not transcript.strip():
         return "", []
@@ -16349,14 +16361,21 @@ class TortoiseSDK:
         ``tortoise_fts_query(entity_type='source')``. It indexes the BARE
         lexicon, never ``summary``: the display prefix is a constant, and this
         leg OR-unions, so indexing it would make every capture match a query for
-        "session"/"capture"/"topics" (#10000). The SET is
-        ``CASE WHEN $st IS NOT NULL THEN $st ELSE <stored> END`` (#10000): a
-        non-NULL derivation REPLACES the stored text, so a node captured before
-        the prose route was removed heals instead of keeping it forever, and an
-        empty/wordless transcript still cannot erase what a previous capture (or
-        the indexer path) established — the property the old ``coalesce`` was
-        added for. ``summary`` moves under the SAME guard, so the display column
-        and the indexed column can never disagree.
+        "session"/"capture"/"topics" (#10000). The SET is a ``coalesce``, so a
+        re-capture of an empty transcript cannot erase the text a previous
+        capture (or the indexer path) established. ``summary`` is written under
+        that SAME guard, so the display column and the indexed column keep
+        together or replace together and can never disagree.
+
+        ⛔ A pre-fix node HEALS on re-capture, and the reason is the DERIVATION,
+        not this clause: ``coalesce($st, <stored>)`` already yields the new
+        derivation whenever one exists, so once ``_session_source_metadata``
+        stopped returning the utterance, the next capture overwrote the stale
+        prose. It was measured, not reasoned: an earlier cut of #10000 changed
+        this clause to an equivalent ``CASE WHEN $st IS NOT NULL …`` and claimed
+        the healing, which is a no-op — the two forms are the same function.
+        Do not restore that claim, and do not "fix" the indexer's
+        ``coalesce($st, s._searchText, s.title)`` on its strength.
         Additive and idempotent: never touches ``_link_source`` or
         ``_session_event_write``; re-capturing a session re-MERGEs the same
         url. The references edge is skipped when ``event_id`` is None (Event
@@ -16394,11 +16413,10 @@ class TortoiseSDK:
         # unfindable. The capture path has no title (the indexer path is the
         # one that carries frontmatter), so the shared rule resolves to the
         # derived TOPIC LEXICON — not to `summary`, which is the same lexicon
-        # behind a display prefix that must not be indexed (#10000). The SET is
-        # CASE-based, NOT a `coalesce` (#10000): a non-NULL derivation replaces
-        # the stored text, and only an empty / wordless transcript falls back to
-        # what a previous writer established (`_upsert_source`'s merge semantics
-        # on the indexer side).
+        # behind a display prefix that must not be indexed (#10000). `coalesce`
+        # keeps an existing value when a re-capture of an empty transcript
+        # yields no text, mirroring the merge semantics `_upsert_source` applies
+        # on the indexer side.
         search_text = _source_search_text(topics=topics)
         params = {
             "url": url,
@@ -16444,18 +16462,17 @@ class TortoiseSDK:
             "s.summary=CASE WHEN $sum <> '' THEN $sum "
             "ELSE coalesce(s.summary, '') END",
             "s.topics=$topics",
-            # #3518's coalesce kept the FIRST search text this node ever got, so
-            # a Source captured before #10000 kept the transcript prose in the
-            # field the FTS index is declared on even after the derivation
-            # stopped producing prose — the fix would stop NEW leaks and heal
-            # no old one. The rule is now "this capture's own derivation wins":
-            # a non-NULL `$st` (a transcript with topics) REPLACES the stored
-            # text, and an empty/wordless transcript still cannot erase what a
-            # previous capture (or the indexer path) established — the property
-            # the coalesce was added for. The two capture writes cannot collide
-            # with the indexer: this writer only touches `session:<id>` Sources.
-            f"s.{SOURCE_SEARCH_TEXT_FIELD}=CASE WHEN $st IS NOT NULL "
-            f"THEN $st ELSE s.{SOURCE_SEARCH_TEXT_FIELD} END",
+            # `coalesce` keeps the stored text ONLY when this capture derives
+            # none. It is not what makes an old node heal — the DERIVATION is:
+            # a pre-#10000 Source holds utterance prose, and the next capture's
+            # topic descriptor is non-NULL, so it replaces that text. An earlier
+            # cut rewrote this clause as an equivalent `CASE WHEN $st IS NOT
+            # NULL …` and claimed the healing; the two forms are the same
+            # function, so that change was a no-op and its claim was false
+            # (measured — see `_session_source_metadata`'s note). The two
+            # capture writes cannot collide with the indexer either way: this
+            # writer only touches `session:<id>` Sources.
+            f"s.{SOURCE_SEARCH_TEXT_FIELD}=coalesce($st, s.{SOURCE_SEARCH_TEXT_FIELD})",
             # ⛔ THIS STAYS A `coalesce` — #398's NEVER-OVERWRITE CONTRACT, and
             # #9451's fix is in the RECORD, not here. `ingestedAt` means "when
             # Tortoise FIRST saw this source" (`_upsert_document`'s note below,
