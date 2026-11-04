@@ -213,7 +213,8 @@ _SELECT_DRAFT_OPERATOR_IDS = (
 #: it must never narrow the GATE (see ``_SELECT_OPERATOR_ENDPOINTS``).
 _FACTOR_EDGE_TYPES = frozenset({"IMPL", "NAND"})
 
-#: An operator's endpoints, ``(id, status, rel_type)``: the ENGINE's read, edge
+#: An operator's endpoints, ``(id, status, rel_type, labels)`` — FOUR columns
+#: (see the last paragraph for why the last two exist). The ENGINE's read, edge
 #: set included — UNLABELED (``WHERE epistemic_disjunction``, #7853), so a draft
 #: ``:Subject`` / ``:Object`` / ``:Event`` endpoint blocks promotion here, and
 #: so does a ``hasPart`` / ``mitigated_by`` endpoint, exactly as it does in
