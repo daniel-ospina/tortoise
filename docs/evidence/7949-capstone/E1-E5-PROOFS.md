@@ -163,8 +163,8 @@ a *pin that stops one step short*, which is exactly what this file exists to nam
 
 ## Why no row can be GREEN — the structural cap, re-verified here
 
-`tools/capstone_verdict_check.py:133` declares `STEPS = ("S0", "S1", "S2.1", "S2.2",
-"S2.3", "S3", "S5", "S6")`, and `_step_accounting` (`:604`) refuses a GREEN row whose
+`tools/capstone_verdict_check.py:135` declares `STEPS = ("S0", "S1", "S2.1", "S2.2",
+"S2.3", "S3", "S5", "S6")`, and `_step_accounting` (`:606`) refuses a GREEN row whose
 run left a REQUIRED step out: the rule is `missing = [s for s in required if s not in
 observed]`, reported as `GREEN with steps not observed in the run: …`. (Those two inner
 cites are deliberately NOT line numbers — #10215's own review rounds moved them twice
@@ -240,9 +240,9 @@ what would have to move:
 | E4 | the planted edges are not formed: 5 of 15 wired-and-persisted on the frozen corpus (`#8503`'s own criterion reports 5/14 with `wp02` excluded as the pre-registered exclusion, `#9873`; the frozen denominator is **15** and every receipt reads `planted=15` — the remaining misses are content-level as well as connect-level), and the receipt's retrievability rate is still unmeasured (`#9596`) | `#8503` CLOSED / `#9596` **OPEN** |
 | E5 | the epic's own wording is **met** (falsifier run + written back; both halves now test-pinned). The **pre-registered** outcome floor is not: raw recovery 0.4800 against a `>= 0.80` bar, on an n of 25 that must be reconciled with the record's 29 marker sentences — `#5087` carries that reconciliation (`#9738`, which this row cited until 2026-11-02, CLOSED that morning on its own §10 *record* correction, which is not a measurement of this number). Reporting that as GREEN is the one thing this bundle exists to refuse | `#5087` **OPEN** (`#9738` closed 2026-11-02 on its own §10 record correction, which is NOT a measurement of this number) |
 
-### One measured correction to the scoreboard's E4 row, not applied to it
+### One measured correction to the scoreboard's E4 row — applied to the row, not edited into the shipped log
 
-The E4 row cites `tests/eval/write_path/receipts/w2b-operator-2026-10-19.json`
+Until 2026-11-02 the E4 row cited `tests/eval/write_path/receipts/w2b-operator-2026-10-19.json`
 (`edge_correct` **2** of 15), whose own `corpus_hash` is `sha256:943a99ec…` — **not**
 the frozen pin. **Three** later receipts landed with `#9873` (`2cba48d3c`) on the **frozen**
 corpus (`sha256:dd7e8520…cb035dc`, re-derived from this tree and matched against
@@ -253,7 +253,7 @@ corpus (`sha256:dd7e8520…cb035dc`, re-derived from this tree and matched again
 | `w2b-operator-2026-10-24-8503-preleg.json` | 2026-10-24T05:46:51Z | 15 | **5** | frozen pin |
 | `w2b-operator-2026-10-24-8503-a.json` | 2026-10-24T06:03:47Z | 15 | **5** | frozen pin |
 | `w2b-operator-2026-10-24-8503-b.json` | 2026-10-24T06:10:47Z | 15 | **5** | frozen pin |
-| `w2b-operator-2026-10-19.json` (cited by the row) | 2026-10-19T01:39:26Z | 15 | 2 | `943a99ec…` |
+| `w2b-operator-2026-10-19.json` (cited by the row until 2026-11-02) | 2026-10-19T01:39:26Z | 15 | 2 | `943a99ec…` |
 
 The figure does not depend on which frozen receipt is read.
 
@@ -261,6 +261,17 @@ E4 is therefore **5 of 15**, not 2 of 15, and the fresher figure is measured on 
 pre-registered corpus. The verdict does not move — the bar is 15 of 15 — and the
 number is **not** edited into the shipped log: a row moves by re-running the probe
 and removing the file it replaces. This note is the correction that rule permits.
+
+⛔ **APPLIED 2026-11-02 — the defect is closed mechanically, not by this paragraph.**
+`probes/capstone_measure.py::select_e4_receipt` now selects E4's receipt by the receipt's OWN
+`corpus_hash`: the newest match on the frozen pin wins, no match REFUSES (naming the pin and every
+candidate scanned) rather than falling back to "the newest file", and an absent pin refuses. The
+row's `evidence` follows that selection instead of a filename constant, so the row can no longer
+cite an artifact it was not measured from — which is what let this note exist while the row
+published `2/15`. Pinned by `tests/test_7949_capstone_measure.py`
+(`test_the_e4_row_reads_a_receipt_on_the_frozen_pin_and_not_the_old_constant`,
+`test_main_builds_the_e4_row_from_the_selector_and_never_from_the_constant`,
+`test_a_row_with_no_evidence_path_is_refused_not_defaulted_to_the_constant`).
 
 ---
 
