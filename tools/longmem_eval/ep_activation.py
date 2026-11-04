@@ -179,6 +179,11 @@ _SELECT_DRAFT_OPERATOR_IDS = (
     "RETURN DISTINCT o.id"
 )
 
+#: The only operator edges EP builds factors from — ``ep.py`` has no ``hasPart``
+#: / ``mitigated_by`` arm. Used ONLY to restrict what ``on_input`` dirty-marks;
+#: it must never narrow the GATE (see ``_SELECT_OPERATOR_ENDPOINTS``).
+_FACTOR_EDGE_TYPES = frozenset({"IMPL", "NAND"})
+
 #: An operator's endpoints, ``(id, status, rel_type)``: the ENGINE's read, edge
 #: set included — UNLABELED (``WHERE epistemic_disjunction``, #7853), so a draft
 #: ``:Subject`` / ``:Object`` / ``:Event`` endpoint blocks promotion here, and
@@ -193,14 +198,11 @@ _SELECT_DRAFT_OPERATOR_IDS = (
 #: MEASURED on an embedded graph: engine read 3 rows (``live, live, retracted``)
 #: → refuses; the narrow read 2 rows (``live, live``) → ``_promote_operator_row``
 #: returned True and flipped it. A harness that gates more loosely than the
-#: engine publishes promotions production cannot produce. The edge TYPE is
-#: returned only so ``on_input`` can dirty-mark the EP-relevant ones (EP builds
-#: factors from ``IMPL``/``NAND`` alone — ``ep.py`` never reads ``hasPart`` /
-#: ``mitigated_by``), NOT to gate on it.
-#: The only operator edges EP builds factors from (``ep.py`` has no ``hasPart`` /
-#: ``mitigated_by`` arm): the endpoints ``on_input`` dirty-marks.
-_FACTOR_EDGE_TYPES = frozenset({"IMPL", "NAND"})
-
+#: engine publishes promotions production cannot produce.
+#:
+#: ``type(r)`` is returned for ONE purpose — ``on_input`` marks only
+#: ``_FACTOR_EDGE_TYPES`` endpoints, because a ``hasPart`` / ``mitigated_by``
+#: endpoint GATES like any other but is not something EP propagates through.
 _SELECT_OPERATOR_ENDPOINTS = (
     "MATCH (o:Point {id:$oid})-[r]->(x) "
     "WHERE " + epistemic_disjunction("x") + " "
@@ -846,14 +848,26 @@ def activate_beliefs(sdk, *, namespace: str | None = None,
     # writing an operator over a claim a human has since retracted would have
     # gone live over a dead endpoint, journaled an ``OperatorPromoted`` for it,
     # and published ``operators_promoted: 1, factors: 0`` (``ep.py`` strips
-    # terminal inputs, so the factor degenerates) — the "promoted but no factor"
-    # reading this change exists to make impossible. The ``outdated`` FLAG arm
-    # is NOT carried, because the engine's own gate does not carry it (#10828).
+    # terminal inputs, so the factor degenerates) — the terminal-input arm of the
+    # "promoted but no factor" reading this change exists to prevent. The
+    # ``outdated`` FLAG arm is NOT carried, because the engine's own gate does
+    # not carry it (#10828).
     # Reading the endpoints and comparing in Python mirrors the
-    # SDK's SHAPE (read → compare → CAS SET), one round trip per candidate; the
-    # endpoint READ is deliberately NARROWER (see `_promote_operator_row`), so a
-    # part/whole operator is not promoted by this sweep. The candidate set is
-    # bounded by the graph's draft operators.
+    # SDK's SHAPE (read → compare → CAS SET), one round trip per candidate.
+    #
+    # ⚠️ ``operators_promoted: 1, factors: 0`` is NOT by itself a defect signal,
+    # and must not be read as one. The endpoint read is the ENGINE's, so a
+    # part/whole (``hasPart``) operator over live claims IS promoted by this
+    # sweep — as it is by the engine — and EP builds no factor from ``hasPart``
+    # by design (``_FACTOR_EDGE_TYPES``). Measured: a ``composedOf`` operator
+    # over two live claims publishes exactly ``operators_promoted=1, factors=0,
+    # no_op_reason='no_ep_factors'`` while being a correct, engine-identical
+    # promotion. ``operators_promoted`` counts engine-promotable operators, not
+    # factors; read it with ``no_op_reason`` and the factor count, never alone.
+    # (Narrowing the read to make that pair unreachable was tried and is wrong —
+    # it re-opens the retracted-mitigation divergence pinned by
+    # ``test_the_gate_reads_every_operator_edge_not_just_impl``.)
+    # The candidate set is bounded by the graph's draft operators.
     operators_promoted = 0
     promoted_ops: set[str] = set()
     operator_inputs: list[str] = []
