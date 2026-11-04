@@ -423,6 +423,20 @@ def floor_issues(manifest: dict) -> list[str]:
     """
     floors = manifest.get("durations_floors")
     if floors is None:
+        # ABSENT is legal (a fixture manifest declares no floors); PRESENT but NULL is
+        # not. `durations_floors:` written with its entries deleted — a plausible
+        # merge-resolution "tidy", and exactly how duplicate twins get dropped in this
+        # repo — used to read as "no declarations" on BOTH sides at once, so every
+        # declared cap reverted on the next sweep with nothing red anywhere. That is
+        # the same silent revert the LIST shape was fixed for (#10575 review, F2); the
+        # container shape must fail closed on either face (#10575 review, P3).
+        if "durations_floors" in manifest:
+            return [
+                "``durations_floors`` is present but declares nothing (`null`) — a "
+                "declaration block that parses to no declarations means no row in "
+                "this map is declared at all, so every cap it states silently "
+                "reverts; state the declaration or drop the key (#9172)"
+            ]
         return []
     if not isinstance(floors, dict):
         return [
