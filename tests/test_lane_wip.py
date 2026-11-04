@@ -2169,6 +2169,66 @@ def test_a_pin_whose_worktree_tree_is_gone_names_the_surviving_staged_half(hub: 
     assert "staged work only in the index" in salvage.stdout
 
 
+def test_the_index_problem_branch_names_no_command_that_cannot_run(hub: Path) -> None:
+    """`index_problem` IS the condition that makes the printed salvage impossible.
+
+    `_pin_index_tree` sets it only when `<pin>^2^{tree}` resolves to NOTHING (`_verify_opt`
+    raises on a failed read, so `""` is a real "no such tree"), and BOTH `read-tree <pin>^2`
+    and `show <pin>^2:<path>` need exactly that object — measured rc 128 "failed to unpack
+    tree object" on both shapes that reach here. Naming a route that cannot run, on the
+    recovery path, is worse than naming none; the sibling branch above verifies its `salvage`
+    before printing it.
+    """
+    wt = dirty_lane(hub, "wt-idxproblem")
+    (wt / "only_in_index.py").write_text("staged work only in the index\n")
+    assert git("add", "only_in_index.py", cwd=wt).returncode == 0
+    (wt / "only_in_index.py").unlink()
+    pinned = run_tool("pin", cwd=wt)
+    assert pinned.returncode == 0, pinned.stderr
+    ref = pin_ref(pinned.stdout)
+
+    second = git("rev-parse", f"{ref}^2", cwd=hub).stdout.strip()
+    assert second, "the pin must carry a staged half for this branch to be reachable"
+    tree = git("rev-parse", f"{second}^{{tree}}", cwd=hub).stdout.strip()
+    objects = git(
+        "rev-parse", "--path-format=absolute", "--git-path", "objects", cwd=hub
+    ).stdout.strip()
+    loose = Path(objects) / tree[:2] / tree[2:]
+    if not loose.exists():
+        pytest.skip("the tree object is packed in this fixture")
+    loose.unlink()
+
+    target = hub.parent / "wt-idxproblem-x"
+    out = run_tool("recover", ref, "--into", str(target), cwd=hub)
+    assert out.returncode == 3, f"{out.returncode}: {out.stdout}{out.stderr}"
+    assert "The files are back" in out.stderr, out.stderr
+    assert (target / "big.py").exists(), "the worktree restore must really have happened"
+    # ⛔ NO DEAD REMEDY. Both routes need the object this branch proves is gone.
+    assert f"read-tree {ref}^2" not in out.stderr, out.stderr
+    assert f"show {ref}^2:" not in out.stderr, out.stderr
+    assert "batch-all-objects" in out.stderr or "another copy" in out.stderr, out.stderr
+
+
+def test_a_pin_taken_OUTSIDE_any_repository_does_not_claim_another_repository(hub: Path) -> None:
+    """`LaneWipError` from `_repo_root` means the caller is in NO repo — there is no "this one".
+
+    The remedy (`--path <root>`) is right, but the note claimed the pin lives in "a DIFFERENT
+    repository from this one" when the caller is in no repository at all — a comparison
+    against something that does not exist.
+    """
+    wt = dirty_lane(hub, "wt-norepo-caller")
+    outside = hub.parent / "not-a-repo"
+    outside.mkdir()
+
+    out = run_tool("pin", "--path", str(wt), cwd=outside)
+    assert out.returncode == 0, out.stdout + out.stderr
+    assert "DIFFERENT repository" not in out.stdout, (
+        f"the caller is in no repository, so there is no 'this one' to differ from: {out.stdout}"
+    )
+    assert "you are not inside a repository here" in out.stdout, out.stdout
+    assert f"--path {wt}" in out.stdout, out.stdout
+
+
 def test_pin_works_without_a_configured_git_identity(hub: Path) -> None:
     """A fresh CI/cell clone has no `user.email`; the pin writes commits, so it must not fail."""
     wt = dirty_lane(hub, "wt-noid")

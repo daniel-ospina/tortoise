@@ -1141,6 +1141,17 @@ def cmd_pin(args: argparse.Namespace) -> int:
             f"  (could not tell which repository holds this pin — if `recover` cannot see "
             f"the ref, pass `--path {root}`)"
         )
+    elif caller_root is None:
+        # ⛔ "DIFFERENT repository from THIS one" PRESUPPOSES THE CALLER IS IN ONE. When
+        # `_repo_root` answers `LaneWipError` the caller is in NO repository, so that sentence
+        # named a comparison against something that does not exist (measured: `cd /tmp/norepo`
+        # + `pin --path ../lane` -> rc 0 and "this pin lives in a DIFFERENT repository from
+        # this one"). The remedy is unchanged and correct; only the claim is corrected.
+        print(f"recover with: tools/lane_wip.py recover {ref} --path {root} --into <path>{handle}")
+        print(
+            f"  (this pin lives in {root} — you are not inside a repository here, so "
+            f"`--path {root}` is what reads the ref; `list --all` must be run there too)"
+        )
     else:
         # `--path <root>` makes `recover` read the ref from the repository that holds it.
         print(f"recover with: tools/lane_wip.py recover {ref} --path {root} --into <path>{handle}")
@@ -2250,15 +2261,23 @@ def cmd_recover(args: argparse.Namespace) -> int:
             )
         staged_note = " (with the staged/unstaged split it was pinned with)"
     if index_problem:
-        # ⛔ THE WORKTREE CAME BACK, SO THIS IS NOT A CLEAN SUCCESS AND NOT A TOTAL
-        # FAILURE. Say exactly that, and name the salvage route: the content is still
-        # readable from the pin's second parent or the pin itself.
+        # ⛔ NO SALVAGE COMMAND IN THIS BRANCH — `index_problem` IS the condition that makes one
+        # impossible. `_pin_index_tree` sets it only when
+        # `rev-parse --verify --quiet <pin>^2^{tree}` answers NOTHING (`_verify_opt` RAISES on a
+        # failed read, so `""` is a real "no such tree"), and BOTH `read-tree <pin>^2` and
+        # `show <pin>^2:<path>` need exactly that object. Measured on both shapes that reach
+        # here (the second parent's COMMIT pruned; only its TREE pruned): each printed command
+        # exited 128 `fatal: failed to unpack tree object`. Naming a remedy that cannot run, on
+        # the recovery path, is worse than naming none — the sibling branch above verifies its
+        # `salvage` before printing it, and this one did not.
         raise GitFailed(
             3,
             f"restored the WORKTREE of {sha[:12]} into {target}, but {index_problem}. "
-            "The files are back; the staged/unstaged split is NOT. Salvage the staged "
-            f"content with `git -C {target} read-tree {sha}^2` (or "
-            f"`git show {sha}^2:<path>`) if that object is readable there",
+            "The files are back; the staged/unstaged split is NOT, and it cannot be "
+            "recovered FROM THIS PIN — the tree that holds it is the object that is gone. "
+            "If that split matters, look for another copy of the object DB (a clone, a peer "
+            "checkout), or `git cat-file --batch-all-objects --batch-check` in a repository "
+            "that still has the objects",
         )
     # ⛔ COUNTED FROM THE PIN, IN `here`, BEFORE THE RESTORE IS REPORTED. Reading it from
     # the target AFTERWARDS made a display-only failure exit 3 over a completed restore,
