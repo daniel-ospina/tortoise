@@ -1250,6 +1250,17 @@ SOURCE_PATTERNS = {
              # the same #1349/#2938/#3616 silent-drop class as the entries
              # above. The suite is registered on `eval` below.
              "tools/operator_receipt_check.py",
+             # #10538 (fresh-context review P1): the window arm's RETENTION
+             # receipt is a COMMITTED build artifact whose numbers a ruling and
+             # the #9097 exit measurement are argued from, and a docs-only diff
+             # selects NO surface — so a hand-edited receipt, or an instrument
+             # change that re-emits different numbers, ran nothing that gates.
+             # Registering the TEST file alone does not fix this half (the
+             # instrument is `tools/longmem_eval/`, already an `eval` entry, but
+             # the receipt path is not): selection is driven by THIS table, the
+             # #1349/#2938/#3616 silent-drop class. Pinned by
+             # tests/test_ci_selection.py::test_window_arm_receipt_edit_selects_eval.
+             "docs/scoping/receipts/2026-11-03-10538-window-arm-retention.json",
              # P2-1 (code review): an embeddings.py/cross_lens.py-only PR must
              # select eval so probe/vector-arm/threshold tests run (they assert
              # the EMBEDDING_MODEL + threshold constants — drift class #1260).

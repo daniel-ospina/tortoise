@@ -1,6 +1,6 @@
 # Attestation census — open PRs
 
-Repo `daniel-ospina/tortoise` · generated 2026-11-03T16:04:01Z by `tools/attest_census.py` · content sha256 `1caa827f5ee44d6e3c3c6ee05e239fc6fa42417818bb2e26876c796462b329db`.
+Repo `daniel-ospina/tortoise` · generated 2026-11-04T01:10:03Z by `tools/attest_census.py` · content sha256 `0ea61c34830b73d967278919edbc7674ef4341ed650134399d8efc2f51e323ed`.
 
 > ⚠️ **SNAPSHOT, NOT A LIVE VERDICT.** This file is machine-generated from *one box's*
 > registry at the timestamp above, and every push, review and gate re-run invalidates it.
@@ -9,10 +9,16 @@ Repo `daniel-ospina/tortoise` · generated 2026-11-03T16:04:01Z by `tools/attest
 > PR's current head, and `NOTHING-TO-RESTORE` never means "nobody reviewed this"
 > fleet-wide: `~/.pi/agent/reviews/` is per-machine.
 >
-> The header's `content sha256` is a digest of THIS FILE'S OWN BODY, so it proves the file
-> came out of the renderer unedited (a hand edit — even prose — cannot verify). The row for
-> the PR that regenerated this file names the head that PR had AT generation time, which is
-> necessarily the parent of the commit adding the file: a document cannot contain the sha
+> The header's `content sha256` is a digest of THIS FILE'S OWN BODY, so an edit that does not
+> also recompute it cannot pass — the ACCIDENTAL edit (the hand reflow that produced this
+> check, a sentence left stale by a later change) is caught offline, without `gh`. ⛔ It is
+> **not a provenance proof**: the digest is unkeyed and its algorithm is in this repo, so an
+> editor who recomputes it after editing produces a file that verifies. Read a matching digest
+> as "nobody edited this by accident", never as "the tool emitted these rows". The row for
+> the PR that regenerated this file names the head that PR had AT generation time. That is NOT
+> necessarily the parent of the commit adding the file (measured #10687 cycle 18: a worktree one
+> merge behind the remote tip records the REMOTE head, so the row named an ancestor's sibling).
+> What holds by construction is narrower and is what matters: a document cannot contain the sha
 > of the commit that contains it.
 
 One row per open PR: its head, whether a review record exists on **this box**, whether that
@@ -22,79 +28,92 @@ verdict is quoted from the record, never synthesised. A record at any other head
 evidence of the live code: it is `RE-REVIEW` when the gate has no green verdict, and `OK`
 only because the gate itself already accepted the proof (so no re-post is owed).
 
-**Totals:** RESTORE=3 · RE-REVIEW=14 · NOTHING-TO-RESTORE=3 · IN-FLIGHT=2 · OK=22
+**Totals:** RE-REVIEW=3 · NOTHING-TO-RESTORE=12 · IN-FLIGHT=16 · OK=17
 
 | PR | head | record | record head | match | mint | verdict | evidence | gate | outcome |
 |---|---|---|---|---|---|---|---|---|---|
-| #10757 | `3ba42b83aac6…` | — | — | — | — | — | — | queued | **IN-FLIGHT** |
-| #10752 | `f06f0d68598b…` | daniel-ospina-tortoise-10752.json | f06f0d68598b… | yes | fresh | clean | comment:6607029272 | success | **OK** |
-| #10744 | `5412c8f3afb3…` | — | — | — | — | — | — | success | **OK** |
-| #10738 | `59380dc432f8…` | — | — | — | — | — | — | success | **OK** |
-| #10737 | `e4ecba6146dc…` | — | — | — | — | — | — | success | **OK** |
-| #10727 | `d9975de4f7a2…` | — | — | — | — | — | — | success | **OK** |
-| #10726 | `42e97c7e5c99…` | — | — | — | — | — | — | success | **OK** |
-| #10724 | `848e4525cf1c…` | daniel-ospina-tortoise-10724.json | ec4f93daa2d6… | no | carried | clean | null | success | **OK** |
-| #10723 | `e7b7407097fd…` | — | — | — | — | — | — | failure | **NOTHING-TO-RESTORE** |
-| #10717 | `baf951165881…` | daniel-ospina-tortoise-10717.json | 651d19f31526… | no | fresh | clean | comment:6605297517 | queued | **RE-REVIEW** |
-| #10715 | `662e2c8f72ab…` | daniel-ospina-tortoise-10715.json | 662e2c8f72ab… | yes | fresh | clean | comment:6602266568 | failure | **RESTORE** |
-| #10714 | `a2eba15dcdde…` | daniel-ospina-tortoise-10714.json | 9fde0b786ddc… | no | recovered-body | clean | null | success | **OK** |
-| #10712 | `4fdc230a244b…` | — | — | — | — | — | — | failure | **NOTHING-TO-RESTORE** |
-| #10704 | `2345056b5352…` | daniel-ospina-tortoise-10704.json | 2345056b5352… | yes | fresh | clean | comment:6608543660 | queued | **IN-FLIGHT** |
-| #10703 | `f527315cc29f…` | daniel-ospina-tortoise-10703.json | 7214d25e013a… | no | recovered-body | clean | null | failure | **RE-REVIEW** |
-| #10702 | `a3bbe78bca86…` | daniel-ospina-tortoise-10702.json | a3bbe78bca86… | yes | fresh | clean | comment:6606925238 | success | **OK** |
-| #10694 | `e93a73cb5620…` | daniel-ospina-tortoise-10694.json | e93a73cb5620… | yes | fresh | clean | comment:6607921386 | failure | **RESTORE** |
-| #10693 | `c4f05bd926cc…` | daniel-ospina-tortoise-10693.json | 4af1eaa5b82c… | no | recovered-body | clean | null | failure | **RE-REVIEW** |
-| #10691 | `5bb455120bd4…` | daniel-ospina-tortoise-10691.json | 5bb455120bd4… | yes | fresh | clean | comment:6606561022 | failure | **RESTORE** |
-| #10687 | `60913dff1ca7…` | daniel-ospina-tortoise-10687.json | 4ac0ee5e78eb… | no | recovered-body | clean | null | failure | **RE-REVIEW** |
-| #10679 | `fad62ac45d4f…` | daniel-ospina-tortoise-10679.json | ba8c10302b96… | no | fresh | clean | comment:6598059106 | failure | **RE-REVIEW** |
-| #10678 | `3e9eb43233cc…` | daniel-ospina-tortoise-10678.json | c1285d5639f9… | no | fresh | clean | comment:6595824573 | success | **OK** |
-| #10677 | `8adea46c97ca…` | daniel-ospina-tortoise-10677.json | f8842dc7e3f1… | no | carried | clean | null | success | **OK** |
-| #10675 | `d4e345795682…` | daniel-ospina-tortoise-10675.json | d6b3c700711e… | no | fresh | clean | comment:6593659187 | success | **OK** |
-| #10668 | `3854a244f9b0…` | daniel-ospina-tortoise-10668.json | 3854a244f9b0… | yes | fresh | clean | comment:6605086848 | success | **OK** |
-| #10648 | `9e9c3b6f4c54…` | daniel-ospina-tortoise-10648.json | b50fede18530… | no | fresh | clean | comment:6588866386 | failure | **RE-REVIEW** |
-| #10641 | `0f281042e342…` | daniel-ospina-tortoise-10641.json | 5204e619a2d6… | no | fresh | clean | comment:6594889033 | failure | **RE-REVIEW** |
-| #10640 | `71876bb06238…` | daniel-ospina-tortoise-10640.json | 48d36839537e… | no | fresh | clean | comment:6595090971 | success | **OK** |
-| #10637 | `f6fba57a9b91…` | daniel-ospina-tortoise-10637.json | f6fba57a9b91… | yes | carried | clean | null | success | **OK** |
-| #10634 | `4f4b116ffb51…` | — | — | — | — | — | — | failure | **NOTHING-TO-RESTORE** |
-| #10633 | `61067feec1d3…` | daniel-ospina-tortoise-10633.json | 0f6f16ff619b… | no | fresh | clean | comment:6594343670 | queued | **RE-REVIEW** |
-| #10632 | `6723e2be8409…` | daniel-ospina-tortoise-10632.json | 5009a3d6899a… | no | fresh | clean | comment:6604417193 | failure | **RE-REVIEW** |
-| #10631 | `9c4225fabda6…` | daniel-ospina-tortoise-10631.json | b0af7efefc7e… | no | fresh | clean | comment:6589841326 | success | **OK** |
-| #10629 | `53e7b6d362e2…` | daniel-ospina-tortoise-10629.json | 059f460bee99… | no | recovered-body | clean | null | success | **OK** |
-| #10627 | `4a402318a2b0…` | daniel-ospina-tortoise-10627.json | 005504325cac… | no | fresh | clean | comment:6589941198 | failure | **RE-REVIEW** |
-| #10622 | `399bc38c0375…` | daniel-ospina-tortoise-10622.json | 399bc38c0375… | yes | fresh | clean | comment:6597949761 | success | **OK** |
-| #10620 | `8b7e2c25cd92…` | daniel-ospina-tortoise-10620.json | 0b9033a2d1e1… | no | recovered-body | clean | null | failure | **RE-REVIEW** |
-| #10612 | `655659781a85…` | daniel-ospina-tortoise-10612.json | d3223a692675… | no | carried | clean | null | failure | **RE-REVIEW** |
-| #10610 | `9aee307c823a…` | daniel-ospina-tortoise-10610.json | 8f80fb8224e7… | no | fresh | clean | comment:6594643840 | failure | **RE-REVIEW** |
-| #10601 | `1d5f196ed017…` | daniel-ospina-tortoise-10601.json | fdb6950eacfa… | no | recovered-body | clean | null | failure | **RE-REVIEW** |
-| #10575 | `7c8c827ea974…` | daniel-ospina-tortoise-10575.json | ad0a09e401aa… | no | fresh | clean | comment:6597361345 | success | **OK** |
-| #10543 | `f0388cc8fb73…` | daniel-ospina-tortoise-10543.json | f16ca1cf6f0b… | no | fresh | clean | comment:6585478346 | success | **OK** |
-| #10504 | `77dfa36bcc7a…` | daniel-ospina-tortoise-10504.json | 77dfa36bcc7a… | yes | carried | clean | null | success | **OK** |
+| #10829 | `b7e76de9bada…` | — | — | — | — | — | — | queued | **IN-FLIGHT** |
+| #10823 | `182ced166430…` | — | — | — | — | — | — | queued | **IN-FLIGHT** |
+| #10813 | `9794d0d4f6dc…` | — | — | — | — | — | — | success | **OK** |
+| #10811 | `8dfdbd63eea5…` | — | — | — | — | — | — | success | **OK** |
+| #10807 | `9c56f14b5899…` | — | — | — | — | — | — | success | **OK** |
+| #10804 | `e85f1ad44153…` | — | — | — | — | — | — | queued | **IN-FLIGHT** |
+| #10802 | `dd08c9174d98…` | — | — | — | — | — | — | success | **OK** |
+| #10801 | `c0b52778f71b…` | — | — | — | — | — | — | failure | **NOTHING-TO-RESTORE** |
+| #10800 | `0230c05c3f59…` | — | — | — | — | — | — | failure | **NOTHING-TO-RESTORE** |
+| #10797 | `ee2a1589195d…` | — | — | — | — | — | — | success | **OK** |
+| #10792 | `1c24f1e052f5…` | — | — | — | — | — | — | success | **OK** |
+| #10791 | `0563a2bf3a23…` | — | — | — | — | — | — | success | **OK** |
+| #10790 | `b9a69939d026…` | — | — | — | — | — | — | queued | **IN-FLIGHT** |
+| #10788 | `9c3e95a3acc4…` | — | — | — | — | — | — | failure | **NOTHING-TO-RESTORE** |
+| #10783 | `171adf8129ca…` | — | — | — | — | — | — | failure | **NOTHING-TO-RESTORE** |
+| #10781 | `1a9445e3682b…` | — | — | — | — | — | — | success | **OK** |
+| #10777 | `c470f4be0902…` | — | — | — | — | — | — | success | **OK** |
+| #10771 | `0eaa4eb27069…` | — | — | — | — | — | — | success | **OK** |
+| #10762 | `ab8e4cccb2f4…` | — | — | — | — | — | — | success | **OK** |
+| #10757 | `76bc46b1a541…` | — | — | — | — | — | — | queued | **IN-FLIGHT** |
+| #10737 | `b5bb01db2f45…` | — | — | — | — | — | — | failure | **NOTHING-TO-RESTORE** |
+| #10727 | `0f96c1e4b730…` | — | — | — | — | — | — | queued | **IN-FLIGHT** |
+| #10726 | `69f4c802de4c…` | — | — | — | — | — | — | success | **OK** |
+| #10724 | `39412ce14ebc…` | — | — | — | — | — | — | queued | **IN-FLIGHT** |
+| #10723 | `9fe385d09c69…` | — | — | — | — | — | — | failure | **NOTHING-TO-RESTORE** |
+| #10714 | `5f588df249b9…` | — | — | — | — | — | — | queued | **IN-FLIGHT** |
+| #10712 | `3f68e35d5674…` | — | — | — | — | — | — | failure | **NOTHING-TO-RESTORE** |
+| #10704 | `63402d2eb033…` | — | — | — | — | — | — | queued | **IN-FLIGHT** |
+| #10703 | `7ac24e47ac36…` | — | — | — | — | — | — | queued | **IN-FLIGHT** |
+| #10702 | `d9ae2df3261b…` | — | — | — | — | — | — | queued | **IN-FLIGHT** |
+| #10694 | `c2a8027cde73…` | — | — | — | — | — | — | queued | **IN-FLIGHT** |
+| #10693 | `548a5f727430…` | daniel-ospina-tortoise-10693.json | 548a5f727430… | yes | fresh | clean | comment:6616736554 | success | **OK** |
+| #10691 | `e4806ecd4641…` | — | — | — | — | — | — | queued | **IN-FLIGHT** |
+| #10687 | `aa057ff56593…` | — | — | — | — | — | — | queued | **IN-FLIGHT** |
+| #10679 | `2b38365c9fec…` | — | — | — | — | — | — | success | **OK** |
+| #10675 | `2dd306dcf9a5…` | — | — | — | — | — | — | success | **OK** |
+| #10668 | `9640104b2fbe…` | — | — | — | — | — | — | failure | **NOTHING-TO-RESTORE** |
+| #10648 | `011ba78b19fd…` | — | — | — | — | — | — | queued | **IN-FLIGHT** |
+| #10641 | `70e9a84ae046…` | — | — | — | — | — | — | failure | **NOTHING-TO-RESTORE** |
+| #10634 | `08cba56a61d1…` | daniel-ospina-tortoise-10634.json | 08cba56a61d1… | yes | fresh | clean | comment:6617103700 | success | **OK** |
+| #10632 | `db2da9ee5458…` | — | — | — | — | — | — | failure | **NOTHING-TO-RESTORE** |
+| #10622 | `d4017bc88e4d…` | — | — | — | — | — | — | failure | **NOTHING-TO-RESTORE** |
+| #10620 | `180d72da3eeb…` | daniel-ospina-tortoise-10620.json | a5b75cafa163… | no | fresh | clean | comment:6616810994 | queued | **RE-REVIEW** |
+| #10610 | `85a2cae89220…` | — | — | — | — | — | — | queued | **IN-FLIGHT** |
+| #10601 | `daece75b1768…` | daniel-ospina-tortoise-10601.json | a9fcc6b52d21… | no | fresh | clean | comment:6585488852 | queued | **RE-REVIEW** |
+| #10575 | `9965d6911da3…` | daniel-ospina-tortoise-10575.json | 7c8c827ea974… | no | fresh | clean | comment:6607557535 | queued | **RE-REVIEW** |
+| #10543 | `d8b03a969d17…` | — | — | — | — | — | — | failure | **NOTHING-TO-RESTORE** |
 | #10226 | `dde341d468dd…` | — | — | — | — | — | — | success | **OK** |
 
 ## What each flagged row needs
 
+- **#10829** `batch-9` — IN-FLIGHT: gate has not concluded
+- **#10823** `p0-10137-belief` — IN-FLIGHT: gate has not concluded
+- **#10804** `p1-10360d` — IN-FLIGHT: gate has not concluded
+- **#10801** `p1-10360` — NOTHING-TO-RESTORE: no record on this box at any head; the gate concluded failure — whether a published marker exists is answered by the gate's own annotation, not by this census
+- **#10800** `p1-10538` — NOTHING-TO-RESTORE: no record on this box at any head; the gate concluded failure — whether a published marker exists is answered by the gate's own annotation, not by this census
+- **#10790** `batch-2026-11-03` — IN-FLIGHT: gate has not concluded
+- **#10788** `p1-10368` — NOTHING-TO-RESTORE: no record on this box at any head; the gate concluded failure — whether a published marker exists is answered by the gate's own annotation, not by this census
+- **#10783** `p1-9736` — NOTHING-TO-RESTORE: no record on this box at any head; the gate concluded failure — whether a published marker exists is answered by the gate's own annotation, not by this census
 - **#10757** `fix/10487-consent-cold-start` — IN-FLIGHT: gate has not concluded
+- **#10737** `p1-10626-r4` — NOTHING-TO-RESTORE: no record on this box at any head; the gate concluded failure — whether a published marker exists is answered by the gate's own annotation, not by this census
+- **#10727** `p1-10605` — IN-FLIGHT: gate has not concluded
+- **#10724** `fix/8906-points-gate-counts-write-graph` — IN-FLIGHT: gate has not concluded
 - **#10723** `p1-10046` — NOTHING-TO-RESTORE: no record on this box at any head; the gate concluded failure — whether a published marker exists is answered by the gate's own annotation, not by this census
-- **#10717** `fold-2026-11-03` — RE-REVIEW: record binds 651d19f31526…, PR head is baf951165881… — the code moved
-- **#10715** `suite-completes` — RESTORE: record binds the live head with clean + evidence comment:6602266568 — the artifact exists; re-post its own verdict verbatim
+- **#10714** `fix/10602-graph-wait-budget` — IN-FLIGHT: gate has not concluded
 - **#10712** `container-reaper2` — NOTHING-TO-RESTORE: no record on this box at any head; the gate concluded failure — whether a published marker exists is answered by the gate's own annotation, not by this census
-- **#10704** `batch/t2` — IN-FLIGHT: record binds live head; gate has not concluded
-- **#10703** `batch-t3` — RE-REVIEW: record binds 7214d25e013a…, PR head is f527315cc29f… — the code moved
-- **#10694** `fix/onboarding-credential-provenance` — RESTORE: record binds the live head with clean + evidence comment:6607921386 — the artifact exists; re-post its own verdict verbatim
-- **#10693** `container-reaper-fix` — RE-REVIEW: record binds 4af1eaa5b82c…, PR head is c4f05bd926cc… — the code moved
-- **#10691** `rail-durability` — RESTORE: record binds the live head with clean + evidence comment:6606561022 — the artifact exists; re-post its own verdict verbatim
-- **#10687** `attest-repair` — RE-REVIEW: record binds 4ac0ee5e78eb…, PR head is 60913dff1ca7… — the code moved
-- **#10679** `fix/7949-e4-receipt-corpus-pin` — RE-REVIEW: record binds ba8c10302b96…, PR head is fad62ac45d4f… — the code moved
-- **#10648** `record-searchkeys` — RE-REVIEW: record binds b50fede18530…, PR head is 9e9c3b6f4c54… — the code moved
-- **#10641** `ci-zerojob` — RE-REVIEW: record binds 5204e619a2d6…, PR head is 0f281042e342… — the code moved
-- **#10634** `issue-10597` — NOTHING-TO-RESTORE: no record on this box at any head; the gate concluded failure — whether a published marker exists is answered by the gate's own annotation, not by this census
-- **#10633** `issue-5095` — RE-REVIEW: record binds 0f6f16ff619b…, PR head is 61067feec1d3… — the code moved
-- **#10632** `issue-10540` — RE-REVIEW: record binds 5009a3d6899a…, PR head is 6723e2be8409… — the code moved
-- **#10627** `issue-10017` — RE-REVIEW: record binds 005504325cac…, PR head is 4a402318a2b0… — the code moved
-- **#10620** `docs/8447-census-r2` — RE-REVIEW: record binds 0b9033a2d1e1…, PR head is 8b7e2c25cd92… — the code moved
-- **#10612** `fix/10602-read-lane` — RE-REVIEW: record binds d3223a692675…, PR head is 655659781a85… — the code moved
-- **#10610** `p0-measure` — RE-REVIEW: record binds 8f80fb8224e7…, PR head is 9aee307c823a… — the code moved
-- **#10601** `p0-10537b` — RE-REVIEW: record binds fdb6950eacfa…, PR head is 1d5f196ed017… — the code moved
+- **#10704** `batch/t2` — IN-FLIGHT: gate has not concluded
+- **#10703** `batch-t3` — IN-FLIGHT: gate has not concluded
+- **#10702** `batch/t1` — IN-FLIGHT: gate has not concluded
+- **#10694** `fix/onboarding-credential-provenance` — IN-FLIGHT: gate has not concluded
+- **#10691** `rail-durability` — IN-FLIGHT: gate has not concluded
+- **#10687** `attest-repair` — IN-FLIGHT: gate has not concluded
+- **#10668** `d11d12-gate-bytes` — NOTHING-TO-RESTORE: no record on this box at any head; the gate concluded failure — whether a published marker exists is answered by the gate's own annotation, not by this census
+- **#10648** `record-searchkeys` — IN-FLIGHT: gate has not concluded
+- **#10641** `ci-zerojob` — NOTHING-TO-RESTORE: no record on this box at any head; the gate concluded failure — whether a published marker exists is answered by the gate's own annotation, not by this census
+- **#10632** `issue-10540` — NOTHING-TO-RESTORE: no record on this box at any head; the gate concluded failure — whether a published marker exists is answered by the gate's own annotation, not by this census
+- **#10622** `fix/8447-c2-boundary-tests` — NOTHING-TO-RESTORE: no record on this box at any head; the gate concluded failure — whether a published marker exists is answered by the gate's own annotation, not by this census
+- **#10620** `docs/8447-census-r2` — RE-REVIEW: record binds a5b75cafa163…, PR head is 180d72da3eeb… — the code moved
+- **#10610** `p0-measure` — IN-FLIGHT: gate has not concluded
+- **#10601** `p0-10537b` — RE-REVIEW: record binds a9fcc6b52d21…, PR head is daece75b1768… — the code moved
+- **#10575** `chore/ci-timing-refresh-6b8793351a` — RE-REVIEW: record binds 7c8c827ea974…, PR head is 9965d6911da3… — the code moved
+- **#10543** `t-p1-10515` — NOTHING-TO-RESTORE: no record on this box at any head; the gate concluded failure — whether a published marker exists is answered by the gate's own annotation, not by this census
 
 ## Reading rules
 

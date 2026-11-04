@@ -58,12 +58,31 @@ WHAT THIS GATE DELIBERATELY DOES NOT DO (#5064, bounded slice)
   #5064's open question (a): registry-as-source vs registry-as-check). The
   registry is a CHECK over the two design documents here, not their source.
 
+⭐ THE DECLARATION SITE CARRIES THE STATE, and the gate fails closed when it
+cannot. This is the half `membership_errors` cannot reach: membership proves
+every declared mechanism HAS a verdict, and says nothing about whether the
+document a human actually reads states it. #10636 is the concrete case — it
+flipped `span_link` to `not-implemented` in the registry while §2.4.1 rule 1 of
+`EXTRACTOR-V4-ARCHITECTURE.md` went on reading *"Every committed `Point`/`Object`
+must carry a reachable link to its `Source` span"* with **nothing at that site**
+saying the every-point half is unbuilt. The absence was recorded in a file the
+reader of the design does not open, so the design still outran the code —
+#5064's root sentence, one level out. So the marker states the mechanism's
+state (`<!-- v4-mechanism: <id> state: not-implemented -->`) and
+`declaration_state_errors` refuses a marker that omits it, names an unknown
+state, or disagrees with the row in EITHER direction — a registry flip with a
+stale document and a document claim with a stale registry both red. What that
+buys is the refactor direction's own words: *"the sufficiency router, the
+fan-out cap and the EMBED gate become **visible absences** rather than assumed
+behaviour"* — visible where the design says the thing.
+
 ⭐ MEMBERSHIP IS CHECKED IN BOTH DIRECTIONS, because `DECLARED_IDS` alone cannot
 prove it is COMPLETE — and that is how `state_value_carve_out` (the verbatim
 state/operational-value carve-out, #2453) stayed unregistered while this gate
 stayed green: a hand-written list of seven cannot notice an eighth mechanism the
 design declares in prose. So every mechanism the registry knows about carries a
-`<!-- v4-mechanism: <id> -->` marker in EACH `docs/architecture/**/*.md` document
+`<!-- v4-mechanism: <id> state: <state> -->` marker in EACH
+`docs/architecture/**/*.md` document
 its row names — the convention is to place it at the declaration site, and that
 placement is a DISCIPLINE, not something this gate can read (see the stated
 limits) — and `membership_errors` fails closed on FOUR shapes:
@@ -164,6 +183,7 @@ import ast
 import re
 import sys
 import tokenize
+from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
@@ -209,15 +229,95 @@ DECLARED_IDS = (
 #: write path live there, and widening the scan to every `.md` would make an
 #: unrelated doc's prose able to red (or silently satisfy) the gate.
 #:
-#: ⚠️ A marker must be a WHOLE HTML comment (`<!-- v4-mechanism: <id> -->`, the id
-#: lowercase, digits and underscores). The token appearing in ordinary prose —
+#: ⚠️ A marker must be a WHOLE HTML comment (`<!-- v4-mechanism: <id>
+#: state: <state> -->`, the id lowercase, digits and underscores). The token appearing in ordinary prose —
 #: even in backticks, documenting the convention — is not a declaration and is
 #: ignored: a scan that counted bare token occurrences reported a malformed
 #: marker for a sentence that mentioned one (review cycle 1, P2), which is a
 #: false verdict from a gate whose verdicts are meant to be actionable.
 ARCH_DOCS = ROOT / "docs" / "architecture"
 MARKER_TOKEN = "v4-mechanism:"
+#: The token as it would be MIS-spelled. `MARKER_TOKEN` is an exact substring, so
+#: a comment writing `V4-MECHANISM:`, `v4-mechanism :`, `v4_mechanism:` or
+#: `v4mechanism:` was SKIPPED — no declaration, no parse error, no state verdict.
+#: A mechanism declared correctly in one document and mis-spelled in another then
+#: carried the honest state only, and BOTH gates passed while the second
+#: document published a contradiction: the fail-open this file exists to close,
+#: one typo deep (review cycle 2, P2). A near-miss now falls through to the
+#: malformed verdict instead of disappearing.
+#:
+#: ⚠️ The separator class is `[\W_]{0,3}` rather than an enumerated `[\s_-]*`: the
+#: enumerated set covered case/space/underscore/hyphen and STILL missed a dot
+#: (`v4.mechanism:`), a slash (`v4/mechanism:`) and an en dash — each of which
+#: left a mis-spelled marker invisible to this scan (review P3). A widened class
+#: cannot be shown complete either, but it is the difference between "the
+#: spellings we thought of" and "any non-word character a keyboard produces"
+#: (`_` is a WORD character, so it must be named in the class explicitly —
+#: `\W` alone silently dropped `v4_mechanism:`, which the first widening did).
+#: The match is case-insensitive for the same reason, and the
+#: direction of a false match is fail-CLOSED (a prose mention inside a comment
+#: is a malformed-declaration verdict, which a reader can fix, not a silent
+#: pass). ⚠️ What bounds this scan is `HTML_COMMENT.findall(...)` below: only the
+#: BODY of an HTML comment reaches this matcher, and `_prose_only` is an IDENTITY
+#: function (it deliberately does not strip code or prose), so prose INSIDE a
+#: comment does reach it and does produce a malformed-declaration verdict (review
+#: P3 - an earlier revision of this note credited `_prose_only` with a bound it
+#: does not implement, and the next widening would have inherited that premise).
+#: The accepted cost is a fail-closed false red on a comment that discusses the
+#: token in prose; the alternative was a silent gap, which is the defect class.
+MARKER_TOKEN_LOOSE = re.compile(r"v4[\W_]{0,3}mechanism\s*:", re.IGNORECASE)
+#: The state recorded for a marker that NAMED its mechanism but whose wording did
+#: not parse. It exists so `membership_errors` does not re-judge the same defect
+#: with a WRONG repair: before it, `<!-- v4-mechanism: x state: -->` produced the
+#: parse verdict AND "a registry row with NO `v4-mechanism: x` marker" AND "the
+#: row names NO declaring document", telling the reader to add a marker that is
+#: already on the page (review P3). A presence the state gate refuses is a
+#: presence here; `declaration_state_errors` skips this sentinel because the
+#: parse error already owns that verdict.
+UNPARSEABLE_STATE = "<unparseable>"
+#: The marker's TWO accepted shapes. The plain one is still read so
+#: `membership_errors` keeps its own verdict on an id-only marker (a synthetic
+#: fixture, and the shape every pre-state marker had); `declaration_state_errors`
+#: is what REFUSES it, because a declaration with no state publishes no verdict
+#: at the one place a reader of the design meets it.
 MARKER_COMMENT = re.compile(r"^\s*v4-mechanism:\s*([a-z][a-z0-9_]*)\s*$")
+MARKER_COMMENT_STATE = re.compile(
+    r"^\s*v4-mechanism:\s*([a-z][a-z0-9_]*)\s+state:\s*([A-Za-z][A-Za-z0-9_-]*)\s*$"
+)
+#: The leading id token, taken WHOLE — so an id outside the alphabet
+#: (`atomic-point-write`) is reported as a bad ID rather than as a bad `state:`
+#: tail. A prefix match reported `atomic`, an id that appears nowhere, and sent
+#: the reader to fix a `state:` value that was already correct (review cycle 2,
+#: P3 — the cycle-1 P3 defect mirrored).
+MARKER_ID = re.compile(r"^\s*v4-mechanism:\s*(?!(?:state)\s*:)([A-Za-z0-9_-]+)")
+#: The same id read through a NEAR-MISS token. When the token itself is
+#: misspelled (`v4.mechanism: x state: implemented`) the strict `MARKER_ID`
+#: cannot see the id either, so the malformed verdict also told membership the
+#: row was unmarked — a repair ("add the marker") for a marker already on the
+#: page (review P3). Reading the id through the loose token lets the defect be
+#: named once, as the misspelling it is.
+MARKER_ID_LOOSE = re.compile(
+    r"^\s*v4[\W_]{0,3}mechanism\s*:\s*(?!(?:state)\s*:)([A-Za-z0-9_-]+)",
+    re.IGNORECASE,
+)
+MARKER_ID_STRICT = re.compile(r"[a-z][a-z0-9_]*")
+
+
+@dataclass(frozen=True)
+class Declaration:
+    """ONE `<!-- v4-mechanism: <id> [state: <state>] -->` occurrence.
+
+    ``document`` is repo-relative to the docs dir (`sub/x.md`), because a basename
+    is not a document identity. ``state`` is the state the DECLARATION SITE
+    asserts, or ``None`` when the marker states none — which
+    :func:`declaration_state_errors` refuses and :func:`membership_errors` does
+    not, so the two verdicts stay separable (a fixture exercising membership is
+    not a declaration site a reader meets).
+    """
+
+    mechanism_id: str
+    document: str
+    state: str | None
 #: The sibling change log is HISTORY, not a declaration site (#8542 keeps status
 #: and change narration out of the design documents, which is exactly why a
 #: changelog entry may quote the convention when it records a marker change).
@@ -229,7 +329,9 @@ CHANGELOG_SUFFIX = "-CHANGELOG.md"
 #: what lets a scanned document explain the convention without satisfying a row
 #: (#9778 review). It can never make a row pass: a row whose only marker is the
 #: placeholder is reported as UNMARKED by `membership_errors`.
-PLACEHOLDER_ID = re.compile(r"^\s*v4-mechanism:\s*<[^<>\s]+>\s*$")
+PLACEHOLDER_ID = re.compile(
+    r"^\s*v4-mechanism:\s*<[^<>\s]+>(?:\s+state:\s*<[^<>\s]+>)?\s*$"
+)
 HTML_COMMENT = re.compile(r"<!--(.*?)-->", re.DOTALL)
 IMPLEMENTED = "implemented"
 NOT_IMPLEMENTED = "not-implemented"
@@ -338,14 +440,24 @@ def _prose_only(text: str) -> str:
     return text
 
 
-def declaration_markers(docs_dir: Path = ARCH_DOCS) -> tuple[dict[str, list[str]], list[str]]:
-    """``{mechanism id: [doc name, ...]}`` from the design docs' own markers.
+def declaration_markers(
+    docs_dir: Path = ARCH_DOCS,
+) -> tuple[dict[str, list[Declaration]], list[str]]:
+    """``{mechanism id: [Declaration, ...]}`` from the design docs' own markers.
 
-    The marker is `<!-- v4-mechanism: <id> -->` and it sits at the DECLARATION
-    SITE, so the id is read where the design says the thing, not from a list
-    someone later maintained beside it. Two docs may declare the same mechanism
-    (`span_link`, `state_value_carve_out`) — that is a declaration, not a
-    duplicate defect, so repeats are collected rather than refused.
+    The marker is `<!-- v4-mechanism: <id> state: <state> -->` and it sits at the
+    DECLARATION SITE, so the id — AND the state — are read where the design says
+    the thing, not from a list someone later maintained beside it. Two docs may
+    declare the same mechanism (`span_link`, `state_value_carve_out`) — that is a
+    declaration, not a duplicate defect, so repeats are collected rather than
+    refused, and EVERY occurrence's state is kept (`declaration_state_errors`
+    needs each one: a second marker asserting a different state is the way a
+    document would read shipped while the registry says otherwise).
+
+    A marker may omit `state:` — this scan records that as ``None`` rather than
+    refusing it here, because the two verdicts are separate and this function is
+    shared by both. The omission is refused by
+    :func:`declaration_state_errors`, never silently accepted.
 
     FAIL CLOSED on the shapes that would otherwise be silent: a MALFORMED
     `v4-mechanism:` comment — one that neither names a mechanism id nor is the
@@ -402,7 +514,7 @@ def declaration_markers(docs_dir: Path = ARCH_DOCS) -> tuple[dict[str, list[str]
     malformed shapes and the membership verdicts together.
     """
     errors: list[str] = []
-    markers: dict[str, list[str]] = {}
+    markers: dict[str, list[Declaration]] = {}
     if not docs_dir.is_dir():
         return markers, [
             f"the declaration-marker surface is missing: {docs_dir} is not a "
@@ -436,20 +548,70 @@ def declaration_markers(docs_dir: Path = ARCH_DOCS) -> tuple[dict[str, list[str]
             continue
         comments = HTML_COMMENT.findall(_prose_only(text))
         for body in comments:
-            if MARKER_TOKEN not in body:
+            if not MARKER_TOKEN_LOOSE.search(body):
                 continue
             if PLACEHOLDER_ID.match(body):
                 continue  # the convention itself, not a declaration
-            match = MARKER_COMMENT.match(body)
+            match = MARKER_COMMENT_STATE.match(body)
+            state: str | None = None
+            if match is not None:
+                state = match.group(2)
+            else:
+                # The id-only shape: recorded, so `membership_errors` can still
+                # rule on the id, and refused by `declaration_state_errors` for
+                # publishing no verdict at the declaration site.
+                match = MARKER_COMMENT.match(body)
             if match is None:
-                errors.append(
-                    f"{rel}: a `{MARKER_TOKEN}` comment does not name a "
-                    f"mechanism id (expected `<!-- v4-mechanism: "
-                    f"<lowercase_id> -->`, got `{body.strip()[:60]}`) — a "
-                    f"malformed declaration is a violation, not an absence"
-                )
+                # A marker whose ID parses but whose `state:` tail does not is a
+                # different repair from one that names no id at all, and the
+                # message has to say which — a verdict that sends a reader to
+                # fix an id that is already correct is not actionable.
+                named = MARKER_ID.match(body)
+                if named is not None and MARKER_ID_STRICT.fullmatch(named.group(1)):
+                    # The id IS on the page: record it as present-but-unparseable
+                    # so membership does not also report the row as unmarked.
+                    markers.setdefault(named.group(1), []).append(
+                        Declaration(named.group(1), rel, UNPARSEABLE_STATE)
+                    )
+                    errors.append(
+                        f"{rel}: the `{MARKER_TOKEN} {named.group(1)}` marker's "
+                        f"`state:` tail is not a bare state token "
+                        f"(`{body.strip()[:60]}`) — expected `state: "
+                        f"{IMPLEMENTED}` or `state: {NOT_IMPLEMENTED}`, with no "
+                        f"space inside the value; a declaration that states no "
+                        f"parseable state publishes no verdict, which is a "
+                        f"violation and not an absence"
+                    )
+                else:
+                    loose = MARKER_ID_LOOSE.match(body)
+                    if loose is not None and MARKER_ID_STRICT.fullmatch(loose.group(1)):
+                        # A near-miss TOKEN, with a readable id: the repair is the
+                        # token, not the id, and membership must not also report
+                        # the row as unmarked.
+                        markers.setdefault(loose.group(1), []).append(
+                            Declaration(loose.group(1), rel, UNPARSEABLE_STATE)
+                        )
+                        errors.append(
+                            f"{rel}: a `{MARKER_TOKEN}` comment is spelled with a "
+                            f"near-miss token (`{body.strip()[:60]}`) — the only "
+                            f"token this gate reads is `{MARKER_TOKEN}` "
+                            f"(`<!-- v4-mechanism: {loose.group(1)} state: "
+                            f"<state> -->`); a misspelled declaration is a "
+                            f"violation, and it publishes no state at the "
+                            f"declaration site until the spelling is fixed"
+                        )
+                        continue
+                    errors.append(
+                        f"{rel}: a `{MARKER_TOKEN}` comment does not name a "
+                        f"mechanism id (expected `<!-- v4-mechanism: "
+                        f"<lowercase_id> state: <state> -->`, got "
+                        f"`{body.strip()[:60]}`) — a "
+                        f"malformed declaration is a violation, not an absence"
+                    )
                 continue
-            markers.setdefault(match.group(1), []).append(rel)
+            markers.setdefault(match.group(1), []).append(
+                Declaration(match.group(1), rel, state)
+            )
         # An opener with no closer is not a comment at all, so its marker (if it
         # carries one) is invisible to the scan above — the fail-OPEN direction.
         if _prose_only(text).count("<!--") > len(comments):
@@ -583,7 +745,7 @@ def membership_errors(
         declared_docs[row_id] = _declaring_paths(row)
 
     for mid in sorted(set(markers) - ids):
-        where = ", ".join(sorted(set(markers[mid])))
+        where = ", ".join(sorted({d.document for d in markers[mid]}))
         errors.append(
             f"{mid}: declared in {where} with a `{MARKER_TOKEN}` marker but has "
             f"NO row in config/v4-mechanisms.yml — a declared mechanism with no "
@@ -629,7 +791,7 @@ def membership_errors(
             # a marker in one satisfy the row for the other (review P2).
             rel = resolved.relative_to(docs_dir.resolve()).as_posix()
             named.add(rel)
-            if rel in markers[mid]:
+            if any(d.document == rel for d in markers[mid]):
                 continue
             errors.append(
                 f"{mid}: `declared_in:` names {rel}, but that document "
@@ -645,13 +807,107 @@ def membership_errors(
         # and every rule above would still pass (review P2 — the live case this
         # closed was `fanout_cap` in EXTRACTOR §13.8 and `near_dup_merge` in
         # STORAGE §14.1 O4).
-        for rel in sorted(set(markers.get(mid, [])) - named):
+        for rel in sorted({d.document for d in markers.get(mid, [])} - named):
             errors.append(
                 f"{mid}: {rel} carries a `{MARKER_TOKEN} {mid}` marker, but the "
                 f"row's `declared_in:` does not name it — a declaring document "
                 f"the registry omits is an enumeration that will shrink back "
                 f"silently, so name every document that declares the mechanism"
             )
+    return errors
+
+
+def declaration_state_errors(
+    mechanisms: list[dict], docs_dir: Path = ARCH_DOCS
+) -> list[str]:
+    """The STATE half of a declaration: the site a reader meets says what the
+    registry says, or the gate reds.
+
+    `membership_errors` proves every declared mechanism HAS a row, and nothing
+    about what the document says at the site it declares it. That gap is #5064's
+    root one level out: #10636 correctly flipped `span_link` to
+    `not-implemented` in the registry, and
+    `EXTRACTOR-V4-ARCHITECTURE.md` §2.4.1 rule 1 went on reading *"Every
+    committed `Point`/`Object` must carry a reachable link to its `Source` span"*
+    with no indication the every-point half is unbuilt. A reader of the design
+    met an adopted requirement; only a reader of the YAML met the absence.
+
+    The failure mode is a **false present**: a design claim read as shipped while
+    the code does not have it, which is exactly what this issue exists to make
+    impossible. So the state is written where the declaration is, and this
+    verdict refuses (all FAIL CLOSED):
+
+      * a marker that states NO state — a declaration publishing no verdict is
+        the shape that let the design outrun the code;
+      * a state outside the two the registry supports, so a typo
+        (`state: implemented-ish`) cannot read as agreement;
+      * a marker whose state disagrees with its row, in EITHER direction — a
+        registry flip with a stale document and a document claim with a stale
+        registry are the same defect seen from two sides, and both are exactly
+        how this issue was believed done twice;
+      * every occurrence independently, so a second marker added with a different
+        state cannot make a document read shipped while the row says otherwise.
+
+    A marker whose id has NO row is ``membership_errors``' verdict, not a second
+    one here: there is no state to compare it to, and one defect must not produce
+    two messages. For the same reason a row whose own `state:` is not one of the
+    two supported values is left to `gate_errors` — comparing against it would
+    report the symptom here as well.
+
+    The parse-level verdicts from :func:`declaration_markers` are included rather
+    than dropped: an unreadable or malformed surface must not pass THIS verdict
+    vacuously (the no-op-gate shape), and a malformed marker breaks both readings
+    of the same surface.
+    """
+    markers, errors = declaration_markers(docs_dir)
+    errors = list(errors)
+    row_states: dict[str, object] = {}
+    for row in mechanisms:
+        if not isinstance(row, dict):
+            continue
+        row_id = row.get("id")
+        if isinstance(row_id, str) and row_id:
+            row_states[row_id] = row.get("state")
+    accepted = STATES  # ONE definition: `gate_errors` reads the same tuple, so
+    # the accepted set and the message naming it cannot drift (cycle-2 review
+    # P2). A second literal here would fail OPEN the day `descriptive` joins
+    # STATES (#5064 open question (c)): `gate_errors` would accept the row while
+    # the skip below silently stopped comparing it.
+    for mid in sorted(markers):
+        if mid not in row_states:
+            continue  # no row: `membership_errors` owns that verdict
+        recorded = row_states[mid]
+        if recorded not in accepted:
+            continue  # a bad row state is `gate_errors`' verdict
+        for decl in markers[mid]:
+            if decl.state == UNPARSEABLE_STATE:
+                continue  # the marker's own parse error owns this verdict
+            if decl.state is None:
+                errors.append(
+                    f"{decl.document}: the `{MARKER_TOKEN} {mid}` marker states "
+                    f"no `state:` — a declaration that publishes no verdict is "
+                    f"the shape that let a declared mechanism read as a "
+                    f"shipped one (#5064): write `state: {recorded}`, the "
+                    f"state config/v4-mechanisms.yml records, so the reader of "
+                    f"this document meets the absence where it is declared"
+                )
+            elif decl.state not in accepted:
+                errors.append(
+                    f"{decl.document}: the `{MARKER_TOKEN} {mid}` marker states "
+                    f"`state: {decl.state}`, which is not a state the registry "
+                    f"supports ({', '.join(accepted)}) — an unknown state is a "
+                    f"violation, never agreement by default"
+                )
+            elif decl.state != recorded:
+                errors.append(
+                    f"{decl.document}: the `{MARKER_TOKEN} {mid}` marker states "
+                    f"`state: {decl.state}` while config/v4-mechanisms.yml "
+                    f"records `state: {recorded}` — the design document and the "
+                    f"registry disagree about whether the mechanism is built, "
+                    f"and a reader who meets only this document reads the "
+                    f"wrong one (#5064): make them agree, or the claim is not "
+                    f"checkable"
+                )
     return errors
 
 
@@ -1679,6 +1935,20 @@ def test_every_declared_mechanism_has_a_declaration_marker_and_vice_versa() -> N
     errors = membership_errors(load_registry()["mechanisms"])
     assert errors == [], "declared-mechanism membership violations:\n  " + \
         "\n  ".join(errors)
+
+
+def test_every_declaration_marker_states_what_the_registry_records() -> None:
+    """#5064 Target 2, at the site a reader READS: the design says built/absent.
+
+    Membership proves every declared mechanism has a verdict *somewhere*; this
+    proves the document a human opens states it *at the declaration*. #10636 is
+    the case that made the difference visible: it flipped `span_link` to
+    `not-implemented` in the registry while §2.4.1 rule 1 went on reading as an
+    adopted requirement, so the design still outran the code for anyone reading
+    the design — #5064's root sentence, one level out.
+    """
+    errors = declaration_state_errors(load_registry()["mechanisms"])
+    assert errors == [], "declaration-state violations:\n  " + "\n  ".join(errors)
 
 
 def test_the_state_value_carve_out_row_records_what_is_enforced_and_what_is_not() -> None:
@@ -3949,6 +4219,21 @@ def test_a_placeholder_id_is_the_convention_not_a_declaration(tmp_path) -> None:
     assert membership_errors([_row("x")], docs) == []
 
 
+def test_the_placeholder_is_also_skipped_with_a_state(tmp_path) -> None:
+    """The convention's FULL form is a placeholder, not a malformed marker.
+
+    Now that a real declaration states its state, the convention is written down
+    as `<!-- v4-mechanism: <id> state: <state> -->`. That shape is still a
+    placeholder (the exemption is on the BRACKET), so documenting the convention
+    in a scanned document cannot red the gate — and it still makes no row pass.
+    """
+    docs = _docs(tmp_path, a__md="<!-- v4-mechanism: <id> state: <state> -->\n")
+    errors = membership_errors([_row("x")], docs)
+    assert not any("does not name a mechanism id" in e for e in errors), errors
+    assert any("UNMARKED row" in e for e in errors), errors
+    assert declaration_state_errors([_row("x")], docs) == []
+
+
 def test_membership_ignores_the_token_in_prose(tmp_path) -> None:
     """Documenting the token must not be reported as a declaration."""
     docs = _docs(
@@ -5860,6 +6145,275 @@ def test_load_registry_refuses_a_non_mapping_document(tmp_path) -> None:
     bad.write_text("- a\n- b\n")
     with pytest.raises(AssertionError):
         load_registry(bad)
+
+
+# ── DECLARATION STATE: the site a reader meets says built / absent ──────────
+#
+# Each case below is a way the DESIGN DOCUMENT can disagree with the registry
+# while every membership rule stays green — which is the state #10636 left
+# behind: the row was right and the document still read as shipped.
+
+
+def test_a_marker_that_states_the_rows_state_is_accepted(tmp_path) -> None:
+    """POSITIVE CONTROL: the rule is not vacuously red."""
+    docs = _docs(
+        tmp_path, a__md="text <!-- v4-mechanism: x state: implemented -->\n"
+    )
+    assert declaration_state_errors([_row("x")], docs) == []
+    absent = _row("x")
+    absent["state"] = NOT_IMPLEMENTED
+    assert declaration_state_errors(
+        [absent], _docs(tmp_path, a__md="<!-- v4-mechanism: x state: not-implemented -->\n")
+    ) == []
+
+
+def test_a_marker_with_no_state_is_refused(tmp_path) -> None:
+    """A declaration that publishes no verdict is the shape the issue names."""
+    docs = _docs(tmp_path, a__md="text <!-- v4-mechanism: x -->\n")
+    errors = declaration_state_errors([_row("x")], docs)
+    assert any("states no `state:`" in e for e in errors), errors
+    # ... and the suggested remedy names the state the registry records.
+    assert any("state: implemented" in e for e in errors), errors
+
+
+def test_a_marker_state_that_contradicts_the_row_is_refused(tmp_path) -> None:
+    """The #10636 shape: the document claims built, the registry says absent."""
+    absent = _row("x")
+    absent["state"] = NOT_IMPLEMENTED
+    docs = _docs(tmp_path, a__md="a <!-- v4-mechanism: x state: implemented -->\n")
+    errors = declaration_state_errors([absent], docs)
+    assert any("`state: implemented`" in e and "`state: not-implemented`" in e for e in errors), errors
+
+
+def test_a_row_flipped_to_absent_with_a_stale_document_is_refused(tmp_path) -> None:
+    """The OTHER direction — a document claiming absent on a shipped row.
+
+    This must be the reverse of the case above, not a second copy of it: the
+    compare is bidirectional because BOTH sides can rot, and a one-directional
+    `elif decl.state == IMPLEMENTED and recorded == NOT_IMPLEMENTED` would leave
+    a shipped mechanism that a design now reports absent with NO verdict
+    (measured: that mutation left this suite green while the case above still
+    covered the other half). A design document claiming a mechanism is missing
+    is a different lie from one claiming it exists, and it is the one that would
+    send a lane to re-implement what is already there.
+    """
+    docs = _docs(tmp_path, a__md="a <!-- v4-mechanism: x state: not-implemented -->\n")
+    errors = declaration_state_errors([_row("x")], docs)  # row stays `implemented`
+    assert any("disagree" in e for e in errors), errors
+    assert any("records `state: implemented`" in e for e in errors), errors
+    assert any("`state: not-implemented`" in e for e in errors), errors
+
+
+def test_an_unknown_marker_state_is_refused(tmp_path) -> None:
+    """A typo must not read as agreement (no allow-list gap)."""
+    docs = _docs(tmp_path, a__md="a <!-- v4-mechanism: x state: implementedish -->\n")
+    errors = declaration_state_errors([_row("x")], docs)
+    assert any("not a state the registry supports" in e for e in errors), errors
+
+
+@pytest.mark.parametrize("order", ["loud-last", "loud-first"])
+def test_every_occurrence_is_checked_so_a_second_marker_cannot_shout_louder(
+    tmp_path, order
+) -> None:
+    """Two markers, one honest and one claiming shipped: the loud one reds.
+
+    `span_link` and `fanout_cap` legitimately carry two markers per document, so
+    repeats are collected rather than refused. That means the state verdict has
+    to judge EACH occurrence: admitting the pair as a set would let a
+    `state: implemented` marker be added beside the honest one and the document
+    read as shipped again.
+
+    ⚠️ BOTH ORDERS, because "each occurrence" is only pinned if neither a
+    first-only nor a last-only read survives. With the loud marker last, a
+    last-only read reds and a FIRST-only read passes — measured: `markers[mid][0]`
+    was green here before this was parametrized, which is the fail-open of a
+    document that keeps an honest marker first and appends a shipped one.
+    """
+    absent = _row("x")
+    absent["state"] = NOT_IMPLEMENTED
+    honest = "honest <!-- v4-mechanism: x state: not-implemented -->\n"
+    loud = "loud   <!-- v4-mechanism: x state: implemented -->\n"
+    body = honest + loud if order == "loud-last" else loud + honest
+    errors = declaration_state_errors([absent], _docs(tmp_path, a__md=body))
+    assert len(errors) == 1, errors
+    assert "`state: implemented`" in errors[0], errors
+
+
+def test_a_marker_with_no_row_is_memberships_verdict_not_a_second_one(tmp_path) -> None:
+    """One defect, one message: there is no state to compare a ghost to."""
+    docs = _docs(tmp_path, a__md="a <!-- v4-mechanism: ghost state: implemented -->\n")
+    assert declaration_state_errors([_row("x")], docs) == []
+    assert any(
+        "NO row" in e for e in membership_errors([_row("x")], docs)
+    )
+
+
+def test_a_row_with_an_unsupported_state_is_left_to_gate_errors(tmp_path) -> None:
+    """Same polarity: the row's own defect is `gate_errors`' verdict.
+
+    Asserted LOCALLY, not just as silence: the skip above is a fail-open path
+    whose entire safety is that another gate rules, so this is the one place the
+    referral has to be shown rather than assumed (a mutation deleting
+    `gate_errors`' unknown-state branch left the silence assertion green).
+    """
+    row = _row("x")
+    row["state"] = "descriptive"
+    docs = _docs(tmp_path, a__md="a <!-- v4-mechanism: x state: implemented -->\n")
+    assert declaration_state_errors([row], docs) == []
+    assert any("NEITHER" in e for e in gate_errors([row])), gate_errors([row])
+
+
+def test_an_unreadable_surface_is_not_a_vacuous_pass(tmp_path) -> None:
+    """A missing docs dir must red THIS verdict too, not pass it empty."""
+    errors = declaration_state_errors([_row("x")], tmp_path / "nope")
+    assert any("is not a directory" in e for e in errors), errors
+
+
+def test_a_malformed_marker_breaks_the_state_verdict_too(tmp_path) -> None:
+    """A marker no reader can parse publishes no state either.
+
+    Both malformed shapes are pinned apart, because the repair differs and the
+    message must not send a reader to fix the wrong field (review P3): an
+    unparseable `state:` tail on a CORRECT id, versus a comment that names no id
+    at all.
+    """
+    docs = _docs(tmp_path, a__md="a <!-- v4-mechanism: x state: -->\n")
+    errors = declaration_state_errors([_row("x")], docs)
+    assert any("`state:` tail is not a bare state token" in e for e in errors), errors
+    assert not any("does not name a mechanism id" in e for e in errors), errors
+    # The value with a space in it is not a bare token either — and it, too, is
+    # reported against the state field rather than the id.
+    docs = _docs(tmp_path, a__md="a <!-- v4-mechanism: x state: not implemented -->\n")
+    errors = declaration_state_errors([_row("x")], docs)
+    assert any("`state:` tail is not a bare state token" in e for e in errors), errors
+    # The id-less shape keeps its OWN message.
+    docs = _docs(tmp_path, a__md="a <!-- v4-mechanism: -->\n")
+    errors = declaration_state_errors([_row("x")], docs)
+    assert any("does not name a mechanism id" in e for e in errors), errors
+
+
+@pytest.mark.parametrize(
+    "token",
+    [
+        "V4-MECHANISM:",
+        "v4-mechanism :",
+        "v4_mechanism:",
+        "v4mechanism:",
+        # Review P3: the enumerated separator class `[\s_-]*` missed these, so a
+        # marker spelled this way was invisible to BOTH gates unless a sibling
+        # document happened to mark the same id honestly — and all five
+        # dual-declared mechanisms have such a sibling.
+        "v4.mechanism:",
+        "v4/mechanism:",
+        "v4\u2013mechanism:",
+    ],
+)
+def test_a_misspelled_marker_token_is_a_verdict_not_silence(tmp_path, token) -> None:
+    """A near-miss token used to vanish — no marker, no error, no state.
+
+    `MARKER_TOKEN` is an exact substring, so every spelling here was SKIPPED
+    rather than reported (review cycle 2, P2). A typo must be a verdict: silence
+    is how a contradictory claim survives both gates. Since review P3 the verdict
+    names the SPELLING when the id is still readable, because the repair is the
+    token, not the id.
+    """
+    docs = _docs(tmp_path, a__md=f"a <!-- {token} x state: not-implemented -->\n")
+    errors = declaration_state_errors([_row("x")], docs)
+    assert any("near-miss token" in e for e in errors), errors
+    assert not any("does not name a mechanism id" in e for e in errors), errors
+
+
+def test_a_malformed_marker_is_ONE_defect_and_names_the_right_repair(tmp_path) -> None:
+    """Review P3: a marker that IS on the page was reported as missing.
+
+    `<!-- v4-mechanism: x state: -->` produced the parse verdict AND, because the
+    id was never registered, membership's "a registry row with NO `v4-mechanism:
+    x` marker" and "the row names NO declaring document" — two repairs that tell
+    a reader to add a marker already on the page. The id is now recorded
+    present-but-unparseable, so membership stays silent while the parse verdict
+    (the only actionable one) is emitted.
+    """
+    docs = _docs(tmp_path, a__md="a <!-- v4-mechanism: x state: -->\n")
+    row = _row("x")
+    assert declaration_state_errors([row], docs), "the parse defect must still red"
+    membership = membership_errors([row], docs)
+    assert not any("NO `v4-mechanism: x` marker" in e for e in membership), membership
+    assert not any("names NO declaring document" in e for e in membership), membership
+    # The near-miss TOKEN gets the same treatment: the repair is the spelling.
+    docs = _docs(tmp_path, a__md="a <!-- v4.mechanism: x state: implemented -->\n")
+    membership = membership_errors([row], docs)
+    assert not any("NO `v4-mechanism: x` marker" in e for e in membership), membership
+
+
+def test_a_near_miss_token_cannot_hide_a_contradiction(tmp_path) -> None:
+    """Review P3, the fail-open that remained after the cycle-2 fix.
+
+    The cycle-2 test used a mis-CASED token, which the loose scan already
+    covered. A punctuation variant (`v4.mechanism:`) was still invisible, so a
+    second document could publish the OPPOSITE state while both gates passed —
+    the same shape, one typo deeper. The separated class closes it.
+    """
+    for token in ("v4.mechanism:", "v4/mechanism:", "v4\u2013mechanism:"):
+        docs = _docs(
+            tmp_path,
+            a__md="honest <!-- v4-mechanism: x state: implemented -->\n",
+            b__md=f"loud <!-- {token} x state: not-implemented -->\n",
+        )
+        assert declaration_state_errors([_row("x")], docs), (
+            f"the `{token}` marker must not be silent"
+        )
+
+
+def test_a_misspelled_token_cannot_hide_a_contradiction(tmp_path) -> None:
+    """The live fail-open: one doc honest, one doc mis-cased and contradicting.
+
+    Every one of the five live mechanisms declared in two documents
+    (`span_link`, `fanout_cap`, `sufficiency_router`, `near_dup_merge`,
+    `state_value_carve_out`) had this shape available: the honest marker carried
+    the state, the mis-cased one carried none because it was never read.
+    """
+    docs = _docs(
+        tmp_path,
+        a__md="honest <!-- v4-mechanism: x state: implemented -->\n",
+        b__md="loud <!-- V4-MECHANISM: x state: not-implemented -->\n",
+    )
+    row = _row("x")  # `state: implemented`
+    assert declaration_state_errors([row], docs), "a mis-cased marker must not be silent"
+
+
+def test_the_id_dropped_but_the_state_kept_names_the_id(tmp_path) -> None:
+    """`<!-- v4-mechanism: state: implemented -->` has no id — say so.
+
+    Without a lookahead the whole-token `MARKER_ID` read `state` as the id, so
+    the verdict quoted `state: implemented` and then listed `state: implemented`
+    as the expected value — a message contradicting itself (review cycle 3, P3).
+    """
+    docs = _docs(tmp_path, a__md="a <!-- v4-mechanism: state: implemented -->\n")
+    errors = declaration_state_errors([_row("x")], docs)
+    assert any("does not name a mechanism id" in e for e in errors), errors
+    assert not any("`state:` tail" in e for e in errors), errors
+    # And the reserved-looking id still parses when it IS an id.
+    row = _row("state_value_carve_out")
+    docs = _docs(
+        tmp_path, a__md="a <!-- v4-mechanism: state_value_carve_out state: implemented -->\n"
+    )
+    assert declaration_state_errors([row], docs) == []
+
+
+def test_an_out_of_alphabet_id_is_an_id_defect_not_a_state_one(tmp_path) -> None:
+    """`atomic-point-write` is a bad ID, not a bad `state:` value.
+
+    A prefix match on the id reported `atomic` — an id that appears nowhere — and
+    told the reader to fix a `state:` value that was already correct (review
+    cycle 2, P3: the cycle-1 defect mirrored).
+    """
+    docs = _docs(
+        tmp_path,
+        a__md="a <!-- v4-mechanism: atomic-point-write state: not-implemented -->\n",
+    )
+    errors = declaration_state_errors([_row("x")], docs)
+    assert any("does not name a mechanism id" in e for e in errors), errors
+    assert not any("`state:` tail" in e for e in errors), errors
 
 
 if __name__ == "__main__":  # pragma: no cover - manual mutation aid

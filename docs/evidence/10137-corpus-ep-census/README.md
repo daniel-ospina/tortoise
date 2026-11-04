@@ -179,6 +179,49 @@ PYTHONPATH=. python docs/evidence/10137-corpus-ep-census/probes/census.py /tmp/1
 
 Measured 2026-10-31 on `main@eac49c0dd9aababd01016325a34a327481dd006c`.
 
+> **⚠️ These cells PREDATE the operator-promotion fix (#10137).** `activate_beliefs`
+> used to promote only operators incident to a Point promoted **in the same pass**
+> ("`c.id IN <draft ids>`"), so a draft operator whose endpoints were *already*
+> live was promoted by nothing and stayed out of the factor graph for ever. That
+> fix landed after this measurement, and these numbers were NOT re-measured.
+>
+> They should nevertheless be unchanged, and the reason is worth stating because
+> it is also the reason this sample could not have found the bug: this run was a
+> **fresh single-pass ingest per question**, so every claim was `draft` before
+> phase 1a promoted it, and every operator the ingest minted was incident to one
+> of those claims. On that shape the two candidate sets coincide. What *would*
+> move the numbers is an operator minted over an **already-live** claim — i.e. a
+> **resumed / partial ingest**, which this pre-registered fresh sample contains
+> none of (`ingest_v2` skips a point it already wrote but still writes the
+> operator over it). Note what the old incident query could NOT reach, because it
+> is narrower than "no `:Point` target": that query matched
+> `(o)-[:IMPL|NAND]->(c:Point)`, and the source is written as an outgoing edge too
+> (`idx:0`), so a promoted draft SOURCE reached it exactly as a target did — but
+> a part/whole (`composedOf`/`decomposesInto`/…) operator has `:Point` endpoints
+> reachable through NO such edge, its edges being `hasPart` (`sdk.py:22396`),
+> so the old query could not reach it in any pass, and the new sweep promotes it
+> (the engine's GATE would admit it too, but the engine has no graph-wide sweep,
+> so here the sweep is the only route). The same goes for an operator whose
+> endpoint is a `:Subject`/`:Object`/`:Event` rather than a `:Point`: the deleted pattern
+> required `(c:Point)` and the new read is label-wide (#7853), so that shape is
+> newly reachable too — though there the sweep can be the ONLY promotion route,
+> since `promote_point` cannot promote a non-`:Point` at all. `ingest_v2` mints
+> none of these — its operator loop keeps `op_type` to `IMPL`/`NAND` and every
+> endpoint is a point it wrote (`ingest_v2.py:401-404`) — so this sample contains
+> neither shape, nor the resumed-ingest shape. Treat these cells as pre-fix
+> values until a re-cut says otherwise.
+
+The cells' line citations carry a scope note of their own.
+
+> **Line citations below are into the MEASUREMENT commit** —
+> `main@eac49c0dd9aababd01016325a34a327481dd006c`, the tree this run was taken
+> on (stated at the end of the Reproduce block). `tools/longmem_eval/run.py` has
+> drifted since, so a `run.py:<line>` here may point elsewhere on today's `main`
+> while being exactly right for the run it documents. Re-resolve by SYMBOL
+> (`run.py::outcomes_to_report`, `…::_activate_beliefs_for_question`) before
+> treating a mismatch as a defect — and do not "fix" these numbers against a
+> tree the measurement was never taken on.
+
 ### Provenance note (why the cells come from a checkpoint, not a report)
 
 All 24 questions completed (`failed = 0`), then the runner's watchdog aborted the *finalisation*
