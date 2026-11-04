@@ -176,8 +176,12 @@ def test_the_guard_reports_a_lower_casing_writer(sdk):
         "the guard did not see a lower-cased copy of the turn's prose — a "
         "case-sensitive scan is blind to the writer this module ships, and its "
         "non-vacuity guard can still pass on the turn store alone")
-    assert [(labels, props) for labels, props, _ in hits] == [
-        (["Source"], {"summary": prose})], (
+    # The offender is the seeded node and nothing else. Asserted on the VALUE, not
+    # the property NAME: both `summary` and `_searchText` hold the prose and the
+    # property iteration order is not part of any contract.
+    ((labels, props, _),) = hits
+    assert labels == ["Source"], hits
+    assert list(props.values()) == [prose], (
         f"the offender reported is not the normalising writer: {hits}")
 
 
