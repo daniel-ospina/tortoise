@@ -339,6 +339,20 @@ ROUTED_NAMESPACES: dict[str, dict[str, str]] = {
     # with the literal restored the file is 25 passed. Same class (and same
     # failure shape) as the `test_quota`/`test_github_connect` entries above.
     "test_9192_tenant_armed_by_request.py": {"registry": "prod-coupled"},
+    # #9567: the allowance resolver reads the org row from the CANONICAL
+    # control-plane namespace PROD code resolves (`hosted_api._make_sdk(
+    # namespace="registry")`, hosted_api.py:1783), and these three fixtures
+    # seed the `:Team` row the resolver then reads back. The literal IS the
+    # namespace the code under test resolves — same `prod-coupled` class as
+    # test_quota / test_metering_period_window / test_github_connect beside it.
+    # A `test_*` rename would seed `test_..._registry_tortoise` while the
+    # resolver reads `registry_tortoise`: the seed would land on a graph
+    # nothing reads, so the fixture would pass over an EMPTY row and the
+    # allowance lookup would silently take its "no record" branch instead of
+    # the seeded one. Renaming here is the vacuous-pass shape, not a fix.
+    "test_agent_ops_pack.py": {"registry": "prod-coupled"},
+    "test_domain_validators.py": {"registry": "prod-coupled"},
+    "test_vocab_gating_callers_5163.py": {"registry": "prod-coupled"},
 }
 
 # ── ROUTED_SELECT_GRAPH_SITES (cycle-6 P2-10) ───────────────────────────────

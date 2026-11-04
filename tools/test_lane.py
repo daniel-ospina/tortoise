@@ -283,6 +283,7 @@ import hashlib
 import json
 import os
 import re
+import signal
 import socket
 import subprocess
 import time
@@ -383,7 +384,10 @@ NAME_PREFIX = "fdb-lane-"
 #: container qualifies for the one proof the ruling already authorises armed
 #: ("a `fdb-lane-*` container MAY be reaped when the worktree that owns it is
 #: gone") instead of falling into the INDETERMINATE bucket whose default the
-#: owner has not ruled on. Every default stays exactly as `origin/main` set it.
+#: owner has not ruled on. It only promotes a container out of a REPORT-ONLY
+#: bucket, never out of a protected one: the owner-gone arm carries the same
+#: not-in-use proof the INDETERMINATE arm does (see its comment), so no default
+#: destroys anything it did not destroy before (#10841 review, P1).
 LABEL_OWNER = "tortoise.test-lane.worktree"
 LABEL_SLUG = "tortoise.test-lane.slug"
 LABEL_CREATED = "tortoise.test-lane.created"
@@ -1637,6 +1641,26 @@ LANE_GONE_REAP_ENV = "TORTOISE_TEST_LANE_REAP_LANE_GONE"
 OWNER_INDETERMINATE_REAP_ENV = "TORTOISE_TEST_LANE_REAP_OWNER_INDETERMINATE"
 
 
+#: Spellings that DISABLE automatic reaping. One predicate for both consumers —
+#: `start()`'s sweep and the exit hook — because they used to read the same
+#: variable two different ways (`start()` enabled only on a literal "1", so
+#: `=false` disarmed the sweep and left the hook armed) (#10813 review).
+#:
+#: ⛔ THE EMPTY STRING IS IN HERE ON PURPOSE (#10813 review P3-5). `start()` used
+#: to enable on a literal "1", so `TORTOISE_TEST_LANE_REAP=` — what
+#: `export X=${SOMETHING_UNSET}` produces — meant OFF. Reading it as ON would
+#: silently ARM a deletion switch for an operator whose "off" had just been
+#: spelled with an empty value, which is the fail-open direction on the one
+#: variable whose whole job is to disarm a tool that removes containers.
+_REAP_OFF = frozenset({"", "0", "false", "no", "off"})
+
+
+def _reap_enabled() -> bool:
+    """Is automatic container reaping on for this process?"""
+    return os.environ.get("TORTOISE_TEST_LANE_REAP", "1").strip().lower() \
+        not in _REAP_OFF
+
+
 def _env_consent(var: str) -> bool:
     """Whether the OPERATOR asked for a deletion that crosses a recorded boundary.
 
@@ -1705,6 +1729,21 @@ def _published_port(name: str) -> tuple[bool, int | None]:
     return True, None
 
 
+#: Did the most recent `start()` CREATE the container (True) or REUSE one that was
+#: already up (False)?
+#:
+#: The exit hook may only remove a container **this `run` created**. A container
+#: that was already running belongs to someone else — most importantly to the
+#: DOCUMENTED `uri` route (a lane sources the export line and then runs pytest in
+#: that shell), which writes no `run` marker and may hold no redis connection at
+#: all while a heavy non-DB test file runs. Measured recipe against the previous
+#: hook: shell B's `run` exiting reaped shell A's container mid-suite, and A
+#: reported connection errors as test verdicts (#10813 review P1). `reap_orphans()`
+#: would have kept it — so the hook must be at least as strict as the decision
+#: function, and this is the cheapest way to be.
+_LAST_START_CREATED = False
+
+
 def start(port: int | None = None) -> tuple[str, int]:
     """Start (or reuse) THIS LANE's container. Returns (name, published port).
 
@@ -1759,7 +1798,7 @@ def start(port: int | None = None) -> tuple[str, int]:
     # clean up OUR OWN half-started container, leaving it holding a reserved
     # port — the #8180 leak, produced by the guard meant to prevent it.
     name, root = _lane_identity()
-    if os.environ.get("TORTOISE_TEST_LANE_REAP", "1") == "1":
+    if _reap_enabled():
         try:
             for _line in reap_orphans(own_name=name):
                 print(_line, file=sys.stderr)
@@ -1767,6 +1806,8 @@ def start(port: int | None = None) -> tuple[str, int]:
             print(f"reap: the sweep failed and was skipped ({_exc!r}); "
                   f"nothing else is affected", file=sys.stderr)
     state = container_state(name)
+    global _LAST_START_CREATED
+    _LAST_START_CREATED = state != "running"
     if state == "running":
         # #8124: the reuse path must not hand back an engine the pin never
         # approved. `assert_pinned_image` above validates what we WOULD create;
@@ -2295,7 +2336,10 @@ def _live_lane_paths() -> set[str] | None:
     return found
 
 
-def _container_in_use(name: str) -> bool | None:
+def _container_in_use(
+        name: str,
+        *,
+        idle_within_s: float | None = ACTIVE_CLIENT_IDLE_S) -> bool | None:
     """Does the container itself say a client is using it right now?
 
     The one liveness datum that does not depend on knowing the owner at all: it
@@ -2303,6 +2347,19 @@ def _container_in_use(name: str) -> bool | None:
     owner this clone cannot resolve. ``CLIENT LIST`` includes the connection
     that asked (``cmd=client|list``), which is excluded or every container would
     report itself busy.
+
+    ``idle_within_s`` is the QUESTION, and the two callers ask different ones:
+
+      * the SWEEP passes the default — "has anyone attached *recently*", i.e.
+        within ``ACTIVE_CLIENT_IDLE_S``. That is the unused-lease measure, and a
+        client idle for a full suite step is the population arm 3 exists for.
+      * the EXIT HOOK passes ``None`` — "is ANYTHING attached at all". A peer
+        consumer that established the container with `uri` and went quiet for
+        longer than ``ACTIVE_CLIENT_IDLE_S`` still holds an open socket, and
+        removing the container under it fails ITS run with connection errors
+        that read as test verdicts (#10813 review P2). The hook removes a
+        container only AFTER its own child has exited, so nothing of its own can
+        still be attached: any remaining client belongs to someone else.
 
     ``None`` when the container could not be asked (exec failed, no `redis-cli`,
     a wedged server). Unreadable is NOT "unused": it authorises no removal.
@@ -2331,7 +2388,11 @@ def _container_in_use(name: str) -> bool | None:
         if cmd and cmd.group(1) == "client|list":
             continue  # this probe, not a client
         idle = re.search(r"\bidle=(\d+)", line)
-        if idle and int(idle.group(1)) < ACTIVE_CLIENT_IDLE_S:
+        if idle_within_s is None:
+            # "is ANYTHING attached?" — a client with no `idle=` field at all (a
+            # pub/sub or MONITOR client) is attached just as much as a quiet one.
+            return True
+        if idle and int(idle.group(1)) < idle_within_s:
             return True
     return False
 
@@ -2398,6 +2459,164 @@ def _reap_state_path(name: str) -> Path:
     # is the whole invariant. `is_managed()` only checks the `fdb-lane-` PREFIX
     # and would not stop a slash on its own.
     return REAP_STATE_DIR / f"{name}.unused"
+
+
+#: A `run` in progress records itself as `REAP_STATE_DIR/<container>.run.<pid>`.
+#:
+#: ⛔ NOT a single exclusive `flock`. The first version of this guard took one
+#: exclusive lock, which is per-CONTAINER — so only one `run` could hold it and
+#: the SECOND run held nothing at all, answering "no peer" from its own exit
+#: probe. When the holder exited first it removed the non-holder's live
+#: container: the exact failure the guard was written to prevent, green in the
+#: tests because they only exercised the other ordering (#10813 review P1).
+#: A per-PID marker expresses "one OR MORE peers", which is what the question
+#: actually is.
+def _run_marker_path(name: str, pid: int) -> Path:
+    return REAP_STATE_DIR / f"{name}.run.{pid}"
+
+
+def _pid_alive(pid: int) -> bool:
+    """Is `pid` a live process? An EPERM probe still means it exists."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True          # EPERM: alive, just not ours to signal
+    return True
+
+
+@contextlib.contextmanager
+def _run_marker(name: str):
+    """Record this `run` as live for its whole child. Never raises.
+
+    Yields whether the record could be written — an unwritable state dir means a
+    peer's presence cannot be established, which is `None`, not `False`.
+    """
+    pid = os.getpid()
+    path = _run_marker_path(name, pid)
+    written = False
+    try:
+        REAP_STATE_DIR.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"{pid}\n")
+        written = True
+    except OSError:
+        written = False
+    try:
+        yield written
+    finally:
+        if written:
+            with contextlib.suppress(OSError):
+                path.unlink(missing_ok=True)
+
+
+def _peer_run_is_live(name: str) -> bool | None:
+    """Is another `run` live on this container?
+
+    ``None`` means the marker directory could not be read — the hook treats that
+    as "a peer may be live" and declines to reap (fail-closed). The caller must
+    therefore test ``is not False``, not truthiness: ``None`` is falsy and would
+    silently re-open the hole (#10813 review P2).
+
+    Stale records (a marker whose pid is gone — a `run` that was SIGKILLed) are
+    removed as they are found, so the check is self-healing.
+    """
+    try:
+        entries = list(REAP_STATE_DIR.glob(f"{name}.run.*"))
+    except OSError:
+        return None
+    mine = os.getpid()
+    for entry in entries:
+        try:
+            pid = int(entry.name.rsplit(".", 1)[1])
+        except (IndexError, ValueError):
+            continue
+        if pid == mine:
+            continue
+        # PID REUSE: a marker left by a SIGKILLed run can name a pid the kernel
+        # has since given to an unrelated process, which would read "peer live"
+        # for as long as that process lives — a fail-closed leak with no
+        # self-healing path.
+        #
+        # ⛔ ASK THE PROCESS ITSELF WHEN IT STARTED (#10813 review P3-8). The
+        # first version answered with an AGE (`older than 24 h ⇒ stale`), which
+        # is the opposite error: the longest-lived `run`s — a wedged lane, the
+        # exact population this whole change exists for — lose their peer
+        # protection to a clock, and a peer's hook may then remove their
+        # container mid-suite. A pid the kernel has REUSED was necessarily
+        # started AFTER the marker was written, so that comparison settles it
+        # with no guessed bound.
+        #
+        # ⛔ …AND THE AGE IS THEN ONLY A FALLBACK (#10813 review round 3 P2-1).
+        # It is a fallback for a platform that cannot answer (`/proc` absent —
+        # macOS), NOT a second vote: an unconditional `not aged` term let the
+        # clock OVERRIDE a positive "this pid was not reused" on Linux, so a
+        # genuine live peer older than 24 h was still declared stale and its
+        # container removed — the destructive direction, on the population the
+        # bound was never meant to reach. `_pid_started_after` answers `None`
+        # only when it cannot look, which is exactly when the age may speak.
+        #
+        # ⛔ A PID OF `0` OR LESS NEVER NAMES A RUN (#10813 review round 3 P3-5).
+        # A truncated write or a hand-edited state dir can leave `<name>.run.0`;
+        # `os.kill(0, 0)` and `os.kill(-1, 0)` succeed (they address a process
+        # GROUP, not a process), and `/proc/0` does not exist, so the marker
+        # would read "peer live" forever with no self-healing path — the same
+        # permanent-block class the reuse check exists to remove.
+        if pid <= 0:
+            with contextlib.suppress(OSError):
+                entry.unlink(missing_ok=True)
+            continue
+        try:
+            mtime = entry.stat().st_mtime
+        except OSError:
+            mtime = None
+        started_after = None if mtime is None else _pid_started_after(pid, mtime)
+        reused = started_after is True
+        aged = (started_after is None and mtime is not None
+                and (time.time() - mtime) > 24 * 3600)
+        if not reused and not aged and _pid_alive(pid):
+            return True
+        with contextlib.suppress(OSError):
+            entry.unlink(missing_ok=True)
+    return False
+
+
+def _pid_started_after(pid: int, when: float) -> bool | None:
+    """Did `pid` start AFTER the wall-clock instant `when`?
+
+    ``None`` when the platform cannot answer (`/proc` absent — macOS), which the
+    caller must NOT read as "started before": the only consumer uses a positive
+    `True` to declare a marker stale, so unknown has to leave the marker alone.
+
+    `/proc/<pid>/stat` field 22 is the process start time in clock ticks since
+    boot; `/proc/stat`'s `btime` is the boot instant. Both are needed, and the
+    field is read from the LAST `)` onwards because field 2 (`comm`) is a
+    free-form string that may itself contain spaces and parentheses.
+    """
+    try:
+        raw = Path(f"/proc/{pid}/stat").read_text()
+        tail = raw[raw.rindex(")") + 1:].split()
+        start_ticks = int(tail[19])          # field 22 overall = index 19 here
+        btime = None
+        for line in Path("/proc/stat").read_text().splitlines():
+            if line.startswith("btime "):
+                btime = float(line.split()[1])
+                break
+        if btime is None:                    # pragma: no cover - /proc is whole
+            return None
+        started = btime + start_ticks / os.sysconf("SC_CLK_TCK")
+    except (OSError, ValueError, IndexError):
+        return None
+    # A MARGIN, because the two answers are easy to mis-align by a tick: `btime`
+    # is whole seconds and the tick count is 10 ms-grained, so this clock can sit
+    # a fraction BEHIND the file's mtime. The asymmetry decides the margin — a
+    # false "reused" removes the container of a LIVE peer `run` (the destructive
+    # failure), while a missed reuse — a NEW process wearing the pid inside those
+    # 2 s — leaves the marker reading "peer live" until that pid exits. It only
+    # ever SPARES, so it cannot remove anything; and `aged` deliberately does not
+    # collect it either, because `aged` applies only where this function answered
+    # `None`, which is precisely not the case where it missed.
+    return started > when + 2.0
 
 
 def _drop_lease(name: str) -> None:
@@ -2579,11 +2798,18 @@ def reap_orphans(own_name: str | None = None) -> list[str]:
        it), so the reaping decision is a lookup rather than a guess. This tool
        can therefore only ever remove a container whose owner it has
        POSITIVELY established is gone — never a peer lane's, and never this
-       worktree's own (`stop()` is the only thing that removes that one). It
-       does not consult the container's STATE at all: an owner that is gone
-       means nothing will start that container again, whatever docker last said
-       about it (`paused`/`restarting`/`created` included — ``_LIVE_ISH_STATES``
-       gates only the state arm below, not this one).
+       worktree's own (`stop()` and `cmd_run`'s exit hook are the two things
+       that remove that one). Its STATE is consulted only to decide whether the
+       container can be ASKED about its clients (``_container_in_use``):
+       ``docker exec`` reaches a container only while docker is RUNNING it.
+       MEASURED (docker 27): ``created`` answers *"Container … is not running"*
+       and ``paused`` answers *"Container … is paused, unpause the container
+       before exec"*, both exit 1 — so ``_LIVE_ISH_STATES``
+       (``paused``/``created``/``restarting``/``removing``) is precisely the set
+       that cannot answer. Those orphans are REPORTED with the one command that
+       releases them and never removed, and the line is not an ``undecided``
+       tick (``tools/container_reaper.py`` reds the timer on those, which for a
+       state no retry can change would be a permanent false alarm).
 
     A second proof — **the container is in a TERMINAL state** (`exited`/`dead`,
     ``_TERMINAL_STATES``) — is **WITHHELD BY DEFAULT** (`STOPPED_REAP_ENV`),
@@ -2739,10 +2965,6 @@ def reap_orphans(own_name: str | None = None) -> list[str]:
             out.append(f"reap: kept {name} — this is THIS worktree's container")
             continue
         owner = slugs.get(name[len(NAME_PREFIX):])
-        # Whether `owner` came from the LABEL rather than the name record. Arm 1
-        # below cannot tell the difference from `owner` alone, and the two
-        # populations must NOT be treated alike there (see the client probe).
-        labelled_owner = False
         # The slug the container's OWN name encodes. `_live_lane_paths` gives the
         # slugs of every worktree a live process holds, in ANY clone on this host,
         # so this is how a cross-clone owner is still recognised as alive.
@@ -2754,16 +2976,29 @@ def reap_orphans(own_name: str | None = None) -> list[str]:
         # owner has ruled on (`OWNER_INDETERMINATE_REAP_ENV`). The label stamped
         # at creation survives that teardown, so it upgrades the container from
         # INDETERMINATE to DETERMINED-AND-GONE, i.e. the ONE proof #8180
-        # authorises armed. It can only ever SPARE a container or move it out of
-        # the unruled bucket — it never widens an arm and never changes a
-        # default.
+        # authorises armed. It never widens WHAT is destroyed: the owner-gone arm
+        # still demands the second proof the INDETERMINATE bucket demands
+        # (docker's own TERMINAL state, or no attached client across
+        # `OWNER_GRACE_H`), so a container a live lane is still using is spared on
+        # BOTH paths — the label only decides which proof ladder applies (#10841
+        # review, P1: promoting a RUNNING container into a bare `rm -f` was the
+        # widening this comment used to deny).
+        #
+        # ⛔ The label reaches a population the NAME record cannot: a worktree
+        # torn down (`git worktree remove --force` / `prune`) while the lane's
+        # process is STILL RUNNING. That process's cwd is a deleted directory, so
+        # `_live_lane_paths` cannot name it either — the container's own `CLIENT
+        # LIST` is the only thing left that knows a test run is in progress. That
+        # is why the second proof below is demanded of a label-derived owner as
+        # well, and of a name-derived one too: the check is scoped to the ARM ("my
+        # owner is gone"), not to how the owner was found (#10693 review F1,
+        # #10841 review P1).
         if owner is None:
             stamped = stamped_labels.get(name, {})
             trusted, why_not = _trusted_label_owner(
                 name, stamped.get("owner", ""), stamped.get("slug", ""))
             if trusted:
                 owner = trusted
-                labelled_owner = True
             elif why_not:
                 # Reported, not believed. A label that does not describe the
                 # container it sits on is not an ownership record (see
@@ -2789,34 +3024,42 @@ def reap_orphans(own_name: str | None = None) -> list[str]:
                        f"could not be examined (fail-closed, report only)")
             continue
         if owner is not None and present is False:
-            # ⛔ A LABEL-DERIVED owner must not skip the client probe. The name
-            # record can only produce arm 1 for a worktree `git worktree list`
-            # still lists, but the label reaches a NEW population: a worktree
-            # torn down (`git worktree remove --force` / `prune`) while the
-            # lane's process is STILL RUNNING. That process's cwd is a deleted
-            # directory, so `_live_lane_paths` cannot name it either — the
-            # container's own `CLIENT LIST` is the only thing left that knows a
-            # test run is in progress. On `origin/main` this population lands in
-            # the INDETERMINATE bucket, which ASKS (`_container_in_use`) and
-            # keeps an in-use container (#10693 review F1); without this probe
-            # the label would flip that from `kept` to `rm -f` and kill a live
-            # lane's database. Name-derived arm 1 is left exactly as main had
-            # it: this probe is scoped to the label.
-            if labelled_owner:
-                busy = (False if state in _TERMINAL_STATES
-                        else _container_in_use(name))
-                if busy:
-                    _touch_lease(name)   # observed use: the epoch follows the proof
-                    out.append(f"reap: kept {name} — its labelled worktree "
-                               f"{owner} is gone but it HAS an active client, "
-                               f"so a lane is still using it")
-                    continue
-                if busy is None:
-                    out.append(f"reap: kept {name} — its labelled worktree "
-                               f"{owner} is gone but the container could not "
-                               f"be asked whether it is in use; report only, "
-                               f"fail-closed")
-                    continue
+            # ⛔ THE STATE GATE COMES BEFORE EVERY PROOF IN THIS ARM (#10813
+            # review P2-1). A container docker reports as `paused`/`created`/
+            # `restarting`/`removing` cannot answer `CLIENT LIST` at all
+            # (`docker exec` reaches a container only while docker is RUNNING
+            # it), so each probe below would return `None` — and a `None` from
+            # this arm is reported in the "could not be asked … fail-closed"
+            # shape, which is exactly what `container_reaper`'s `undecided`
+            # predicate matches. That would make a paused orphan unreapable by
+            # any arm AND redden the 15-minute timer on every tick, forever,
+            # because no retry can change a paused state.
+            #
+            # ⛔ ONE gate for the WHOLE arm. Both owner sources funnel HERE
+            # (#10712's label and the name record — see the unification above),
+            # so a copy per owner source would reintroduce the very defect
+            # #10813 review P2-1 fixed: a gate that covered only the
+            # name-derived path, leaving the label-derived one to report a
+            # permanent state as a transient read failure.
+            if state in _LIVE_ISH_STATES:
+                # MEASURED (docker 27, both exit 1): `exec` into `created` is
+                # "container … is not running", into `paused` is "paused,
+                # unpause the container before exec". Probing anyway returns
+                # `None`, which keeps the container AND (via the "could not be
+                # asked … fail-closed" shape below) marks it `undecided` — see
+                # above.
+                #
+                # ⛔ The wording must NOT contain "unreadable" or
+                # "fail-closed": those are exactly what
+                # `container_reaper`'s `undecided` predicate matches, and this is
+                # a PERMANENT state, not a transient read failure.
+                out.append(
+                    f"reap: kept {name} — its owning worktree "
+                    f"{owner} is gone, but it is {state}, so it cannot be asked "
+                    f"about its clients (docker exec only reaches a RUNNING "
+                    f"container) and is not removed; release it with "
+                    f"`docker rm -f {name}`")
+                continue
             # Proof 1, the ONLY armed proof: the worktree that owns this
             # container is gone, so this is what #8180 authorises. #7357: the
             # facts are read BEFORE the removal — `rm -f` destroys the only
@@ -2834,9 +3077,53 @@ def reap_orphans(own_name: str | None = None) -> list[str]:
             # `start()` already refuses to append a report to `unknown`.
             prior = ("" if state not in _TERMINAL_STATES
                      else _termination_report(name, live=False))
+            # ⛔ THE OWNER BEING GONE IS NOT PROOF THE DATABASE IS UNUSED.
+            # #8180 authorises the reap "when the worktree that owns it is gone",
+            # and this block is that proof — but a lane container OUTLIVES its
+            # worktree by design, so "gone" is compatible with a pytest still
+            # running against the URI it exported. Before the ownership label a
+            # container whose worktree had been deregistered fell into the
+            # REPORT-ONLY INDETERMINATE bucket; the label moves it HERE, which
+            # would make this the one arm that destroys a RUNNING container with
+            # no client probe, no grace and no consent (#10841 review, P1). This
+            # module's own worst bug is "a clock can never fire on a live owner's
+            # database", so the removal needs the SECOND proof the INDETERMINATE
+            # arm already demands: docker's own state, OR no attached client
+            # across a full `OWNER_GRACE_H` gap. Terminal is proof on its own
+            # (`docker exec` into a stopped container cannot be a live client).
+            # Every unreadable answer is report-only, and the gap can only ever
+            # SPARE — the same ladder, one bucket over.
+            served = ""
+            if state not in _TERMINAL_STATES:
+                busy = _container_in_use(name)
+                if busy is None:
+                    out.append(f"reap: kept {name} — its owning worktree "
+                               f"{owner} is gone but it is {state} and could "
+                               f"not be asked whether a client is using it; "
+                               f"report only, fail-closed")
+                    continue
+                if busy:
+                    _touch_lease(name)   # observed use: the epoch follows it
+                    out.append(f"reap: kept {name} — its owning worktree "
+                               f"{owner} is gone but it HAS an active client, "
+                               f"so a live lane is still using it")
+                    continue
+                gap_h = _unused_gap(name)
+                if gap_h is None or gap_h < OWNER_GRACE_H:
+                    age_txt = ("first sighting" if gap_h is None
+                               else f"only {gap_h:.1f}h of the "
+                                    f"{OWNER_GRACE_H:g}h grace")
+                    out.append(f"reap: kept {name} — its owning worktree "
+                               f"{owner} is gone and no client is attached, "
+                               f"but it shows no OBSERVED use ({age_txt}); a "
+                               f"lane between steps looks exactly like this")
+                    continue
+                served = (f"; it is {state} and has served no client for "
+                          f"{gap_h:.1f}h > {OWNER_GRACE_H:g}h")
             rm = _docker("rm", "-f", name)
             out.append(f"reap: {'removed' if rm.returncode == 0 else 'FAILED to remove'} "
                        f"{name} — its owning worktree {owner} is gone"
+                       + served
                        + (f"; it was {prior}" if prior else ""))
             continue
         if owner is not None and state in _TERMINAL_STATES:
@@ -3173,6 +3460,17 @@ def reap_orphans(own_name: str | None = None) -> list[str]:
     return out
 
 
+def _raise_on_term(signum, frame):
+    """Turn SIGTERM into an exception so `cmd_run`'s `finally` can reap.
+
+    Without this a lane stopped the normal way (SIGTERM from its supervisor) ends
+    the process without unwinding, so the exit hook never runs and the container
+    leaks — exactly the population the hook exists to reclaim. Exit 143 is the
+    shell convention for SIGTERM, matching `cmd_run`'s 128+N reporting.
+    """
+    raise SystemExit(128 + signum)
+
+
 def stop() -> str:
     """Remove THIS LANE's container. Takes no argument, by design.
 
@@ -3356,7 +3654,27 @@ def cmd_run(args: argparse.Namespace) -> int:
     an argparse-ish usage error.
     """
     _validate_graph(args.graph)      # refuse BEFORE a container exists
-    name, port = start(args.port)
+    # ⛔ THE RUN MARKER OPENS BEFORE `start()`, NOT AFTER (#10813 review P2-2).
+    #
+    # `start()` is not instant: it sweeps orphans, reads the container state,
+    # resolves the image and port, and may wait `READY_TIMEOUT` for the first
+    # PING. A marker opened only around the CHILD leaves that whole window
+    # invisible, and a peer `run` inside it holds no marker and no socket yet —
+    # so a concurrently EXITING run's hook sees "no peer, nothing attached" and
+    # `docker rm -f`s the container `start()` just handed to it. The peer then
+    # runs pytest against a dead database and its connection errors are reported
+    # as test verdicts: verbatim the harm this marker exists to prevent.
+    #
+    # The name is derived from `repo_root()`/`_lane_identity()` alone (no docker),
+    # so it can be established first — and `start()` is then required to agree
+    # with it. Disagreement means one of the two reads degraded (see
+    # `_lane_identity`), and a run whose two ownership records name different
+    # worktrees cannot say which container is its own: refuse rather than guard
+    # the wrong one.
+    name = lane_name()
+    port: int | None = None
+    created = False
+    started = False
     extra = list(args.pytest_args)
     if extra and extra[0] == "--":
         # `run -- -q tests/` is the documented spelling (it survives the same
@@ -3385,26 +3703,168 @@ def cmd_run(args: argparse.Namespace) -> int:
             "`run -- tests/test_guard.py -q`.",
             file=sys.stderr,
         )
-    env = {**os.environ, **lane_seam_env(port, args.graph)}
-    argv = [sys.executable, "-m", "pytest", *extra]
-    print(
-        f"test-lane: {name} on 127.0.0.1:{port} — "
-        f"TORTOISE_DB_URI={env['TORTOISE_DB_URI']} "
-        f"TORTOISE_TEST_DOCKER_PORT={env['TORTOISE_TEST_DOCKER_PORT']} "
-        f"TORTOISE_TEST_DOCKER_PASSWORD='' — invoking: {' '.join(argv)}",
-        file=sys.stderr,
-    )
-    sys.stderr.flush()
-    rc = subprocess.run(argv, env=env).returncode
-    # The lane has just USED its container for however long the child ran, so the
-    # lease is re-stamped at the END of the use as well as at `start()` (#10693
-    # review F1). Load-bearing, not decoration: with the epoch written only at
-    # `start()`, the gap is measured from the BEGINNING of the last use, so a run
-    # longer than OWNER_GRACE_H ends already expired and the next peer sweep may
-    # reap the container in the between-steps window the grace exists to cover.
-    # One full-suite step is measured at ~2 h wall, i.e. the boundary is reached
-    # by normal work. Stamped for ANY `rc`: a failing run used the container too.
-    _touch_lease(name)
+    # ── THE EXIT HOOK (#8180's ACTUATOR half — the tortoise side of the seam) ──
+    # `run` is the ONE command every lane issues for a suite
+    # (`uv run python tools/test_lane.py run -- tests/ -v`, the spelling AGENTS.md
+    # documents), so it is where a lane ENDS — and therefore where its container
+    # must go. Without this the container is left to the next lane's `start()`
+    # sweep or to the scheduled reaper: two BACKSTOPS, not the primary. The
+    # FAILURE path is the one that leaks most (a killed or red run is exactly when
+    # nobody runs `down`), which is why the hook is in `finally`.
+    #
+    # Two rules it must not break:
+    #   1. it must never change the run's VERDICT — a removal that fails is
+    #      REPORTED and the pytest exit code stands (`stop()` raises `SystemExit`
+    #      for the unremovable/deps cases, which would otherwise replace a real
+    #      result with a traceback);
+    #   2. it must be escapable — `--keep-container` for a post-mortem, because a
+    #      red run is exactly when the DB is worth interrogating.
+    #   3. it must not take the DB out from under a PEER process. Two `run`s in one
+    #      worktree (a lane plus a `task` child) share ONE container, so the one that
+    #      exits first would otherwise remove the other's live target and its
+    #      connection errors would be reported as test verdicts.
+    # A SIGKILL cannot be hooked — that is what the timer is for. Ctrl-C raises
+    # `KeyboardInterrupt` and unwinds through `finally`. **SIGTERM does NOT**: the
+    # default disposition terminates the process without unwinding, so this hook
+    # would never run for a lane stopped the normal way — hence the handler below
+    # (the child gets its own, since `exec` resets dispositions).
+    # The box-wide opt-out (`TORTOISE_TEST_LANE_REAP=0`) must cover the HOOK as
+    # well as `start()`'s sweep: a lane that disabled automatic reaping here
+    # would otherwise still lose its container at the end of every `run`
+    # (#10813 review P2).
+    # Any falsy spelling disables it (`0`/`false`/`no`/`off`): the sweep's own
+    # switch only reads a literal "1", so `=false` used to disable the sweep and
+    # leave the HOOK armed — the same word with two meanings (#10813 review).
+    keep = bool(getattr(args, "keep_container", False)) or not _reap_enabled()
+    rc: int | None = None
+    _prev_term = None
+    try:
+        _prev_term = signal.signal(signal.SIGTERM, _raise_on_term)
+    except (ValueError, OSError):        # not the main thread / unsupported
+        _prev_term = None
+    try:
+        with _run_marker(name) as _marker_written:
+            if not _marker_written:
+                # The marker dir is unwritable, so a PEER's presence cannot be
+                # established at all — and `_peer_run_is_live` would answer "no
+                # peer" for every concurrent run on the box, leaving only the
+                # 300 s client probe between a peer's live DB and `docker rm -f`.
+                # Unknown is not "none": keep the container and say so.
+                keep = True
+                print(f"test-lane: run marker could not be written under "
+                      f"{REAP_STATE_DIR} — the peer guard cannot see a "
+                      f"concurrent run, so {name} is NOT reaped on exit",
+                      file=sys.stderr)
+            # ⛔ INSIDE the marker (see the comment above `name = lane_name()`):
+            # `start()` is the window in which a peer would otherwise be
+            # invisible.
+            started_name, port = start(args.port)
+            if started_name != name:
+                raise SystemExit(
+                    f"test-lane: refusing to run — this worktree resolved to "
+                    f"{name} but start() created/reused {started_name}. Two "
+                    f"different containers were named by one run because a "
+                    f"`repo_root()` read degraded; the ownership guard would "
+                    f"then protect the wrong one. Re-run from the worktree.")
+            started = True
+            # …and a container this run did not CREATE is never its to remove.
+            created = _LAST_START_CREATED
+            env = {**os.environ, **lane_seam_env(port, args.graph)}
+            argv = [sys.executable, "-m", "pytest", *extra]
+            print(
+                f"test-lane: {name} on 127.0.0.1:{port} — "
+                f"TORTOISE_DB_URI={env['TORTOISE_DB_URI']} "
+                f"TORTOISE_TEST_DOCKER_PORT={env['TORTOISE_TEST_DOCKER_PORT']} "
+                f"TORTOISE_TEST_DOCKER_PASSWORD='' — invoking: {' '.join(argv)}",
+                file=sys.stderr,
+            )
+            sys.stderr.flush()
+            rc = subprocess.run(argv, env=env).returncode
+    finally:
+        if _prev_term is not None:
+            with contextlib.suppress(ValueError, OSError):
+                signal.signal(signal.SIGTERM, _prev_term)
+        kept = keep          # set True below on every path that leaves it up
+        # A `start()` that never completed created nothing to reap, and a
+        # "REUSED it" message there would be a false statement about a run that
+        # never got a container at all.
+        if not keep and started:
+            # The in-use guard, read from the CONTAINER's own statement: a peer
+            # (a `task` child shelled into the same worktree) shares this
+            # container, and removing it would fail ITS run with connection
+            # errors that read as test verdicts. `None` (unreadable) fails closed.
+            try:
+                # Cheap check FIRST: on the reuse path (the commonest — `uri`
+                # then `run`) the probe can cost a 60 s `docker exec` and the
+                # answer is unused.
+                #
+                # `idle_within_s=None`: the hook asks "is ANYTHING attached?",
+                # not "did anything attach in the last 5 minutes". A consumer
+                # that opened this container through `uri` writes no `run`
+                # marker, so when it is idle through a heavy non-DB test file its
+                # ONLY signal is the socket it still holds — and the sweep's
+                # `ACTIVE_CLIENT_IDLE_S` measure would call that "unused" and
+                # `rm -f` its target (#10813 review P2).
+                #
+                # ⛔ A container docker reports as TERMINAL is not probed: it
+                # cannot have a client, and `docker exec` into it fails, so the
+                # probe would answer `None` and the hook would KEEP exactly the
+                # container the run already lost (an OOM kill — the population
+                # #7357 documents — or a crash). The sweep states the same rule
+                # one function up ("a TERMINAL one cannot have one, so the probe
+                # is skipped"); this mirrors it (#10813 review P2-3).
+                in_use = (None if not created
+                          else False if container_state(name) in _TERMINAL_STATES
+                          else _container_in_use(name, idle_within_s=None))
+                if not created:
+                    kept = True
+                    print(f"test-lane: NOT reaping {name} on exit — this run "
+                          f"REUSED it (another consumer, e.g. the `uri` route, "
+                          f"may be using it); the scheduled reaper decides",
+                          file=sys.stderr)
+                elif in_use is None:
+                    kept = True
+                    print(f"test-lane: NOT reaping {name} on exit — its client "
+                          f"list could not be read (fail-closed; the scheduled "
+                          f"reaper will decide)", file=sys.stderr)
+                elif in_use:
+                    kept = True
+                    print(f"test-lane: NOT reaping {name} on exit — a live "
+                          f"client is using it", file=sys.stderr)
+                elif _peer_run_is_live(name) is not False:
+                    kept = True
+                    print(f"test-lane: NOT reaping {name} on exit — another "
+                          f"`run` holds this worktree", file=sys.stderr)
+                else:
+                    print(f"test-lane: reaping {name} on exit -> {stop()}",
+                          file=sys.stderr)
+            except (SystemExit, Exception) as _exc:
+                # The hook never speaks for the run. `SystemExit` covers
+                # `stop()`'s refusals; `Exception` covers an OSError from a
+                # removed cwd or a closed stderr — both would otherwise REPLACE a
+                # real pytest verdict with a traceback (#10813 review P2).
+                # `KeyboardInterrupt` is deliberately NOT caught: it propagates,
+                # and the `finally` has already done its work.
+                kept = True
+                print(f"test-lane: could not reap {name} on exit ({_exc}); "
+                      f"the scheduled reaper (tools/container_reaper.py) will "
+                      f"collect it", file=sys.stderr)
+        # `started` too: a run whose `start()` raised never had a container, and
+        # re-stamping a lease for one that does not exist writes into the REAL
+        # registry for no reason.
+        if kept and started:
+            # ⛔ The container SURVIVED this run, so its lease must be re-stamped
+            # (the #10693 F1 rule: the epoch is the END of the last use). Putting
+            # the stamp only on the `--keep-container` branch left every
+            # not-reaped path (peer in use, unreadable client list, failed
+            # removal) with a lease measured from the START of the run — already
+            # past OWNER_GRACE_H after a full-suite step, so the next sweep could
+            # reap a container this one deliberately spared (#10806 review).
+            _touch_lease(name)
+    # There is deliberately NO `rc is None` branch: `subprocess.run` returning
+    # always sets it, and if it RAISED (Ctrl-C), the `finally` above has already
+    # run and the exception propagates past this line. A branch here would be
+    # unreachable code asserting a path that does not exist (#10806 review).
     if rc < 0:
         print(
             f"test-lane: pytest was KILLED by signal {-rc} (no pytest count "
@@ -3510,6 +3970,15 @@ def build_parser() -> argparse.ArgumentParser:
     ):
         sp = sub.add_parser(name, help=help_, parents=[parent])
         if name == "run":
+            # #8180 actuator: `run` is where a lane ENDS, so its container is
+            # reaped on the way out — on the failure path too. This flag is the
+            # escape hatch for a post-mortem, never the default: a container left
+            # up "in case" is the leak this closes.
+            sp.add_argument("--keep-container", action="store_true",
+                            help="leave this lane's container running after the "
+                                 "run (default: reap it on exit, on the failure "
+                                 "path too). Use it to interrogate a red run's "
+                                 "DB, then `down`.")
             # REMAINDER, not a named option: everything after the separator is
             # pytest's own argv and must reach it verbatim (`-q`, `-k expr`,
             # `--timeout=900`, a path…). argparse would otherwise consume the
@@ -3526,7 +3995,16 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    return int(args.func(args))
+    try:
+        return int(args.func(args))
+    except SystemExit as exc:
+        # `_raise_on_term` raises `SystemExit(128 + SIGTERM)` so that `cmd_run`'s
+        # `finally` can run — that exception must become this process's EXIT CODE,
+        # not a traceback. A `SystemExit` carrying a STRING is a refusal message
+        # (`stop()`, `start()`) and keeps its normal behaviour.
+        if isinstance(exc.code, int):
+            return exc.code
+        raise
 
 
 if __name__ == "__main__":

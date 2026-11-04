@@ -1602,3 +1602,36 @@ word while deleting the residual section reds instead of shipping a blanket clai
 row, so the page cannot drift back to the pre-`#10360` story. Case COUNTS are deliberately not quoted:
 a hand-written total re-staled twice against a growing file (#10513 review P3), so the evidence is the
 named reds, which is what a mutation run can be checked against.
+
+---
+
+## `#4051` §1b — the capture-usage reader became an ENFORCEMENT reader (`#9567` D11/D12)
+
+**The narration that used to sit in the design document, moved here (the design document now
+states only the resulting rule).** `#4051` §1b recorded the scope of `metering.get_capture_usage`
+when it landed: *"the reader is MEASUREMENT ONLY — no request path calls it"*, pinned by
+`tests/test_metering_capture_usage_reader.py`'s scan of every module under `tortoise/`.
+
+That scope is superseded. The `#9567` change arms the `capture_extraction` dimension the owner ruled
+(2026-09-26: extraction bills in tokens), and an allowance cannot be enforced against a reader nothing
+is allowed to call — so `allowance_gate.py` is now its **one** consumer, reached from
+`quota.enforce_org_limit` on both the REST and MCP capture doors, and the pin names that consumer
+EXACTLY (`offenders == ["allowance_gate.py"]`) rather than relaxing to a blanket exemption.
+
+Why the reader had to grow a presence fact at the same time: `CONSUMPTION-MODEL.md` is where the
+"zero is a measurement" rule lives (§4 — a capture that reported no provider usage records ZERO
+tokens), while the gate needs the opposite half — an unreadable ledger is NOT a zero. A reader that
+degraded every failure to a zero view is the `#4493` shape pointed the other way: a cap wired to it
+fails OPEN for exactly the tenant whose meter is broken. Hence `measured` / `unmeasured_reason` on the
+same reader, with `absent` (a cumulative FLOW's real zero) decided by the dimension and `read_error` /
+`period_error` refused by the gate.
+
+**OVERRIDES:** `#4051` §1b's "the reader is MEASUREMENT ONLY — no request path calls it" — the ruled
+token dimension has no other meter, so enforcement has to read this one; the measurement-only reading
+would leave the owner's 2026-09-26 token ruling unenforceable. The gate is INERT until an allowance
+value is configured (no resolver emits one) — inert about what it **REFUSES on the allowance
+ground**, never about what it **READS**: every gated request fills the missing allowance keys with one
+control-plane read, and a **fault** in that read is a `QuotaCheckError` → HTTP 500 **even with no
+allowance configured** (`tortoise/allowance_gate.py`'s "INERT IS ABOUT WHAT IT REFUSES, NOT ABOUT
+WHAT IT READS"). The same line is recorded where a lane actually reads it — on `#4051` (comment
+`6613755225`) and in `docs/architecture/CONSUMPTION-MODEL.md` §6 — and the reopen is argued there.

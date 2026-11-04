@@ -1,0 +1,239 @@
+{
+  "captured_at": "2026-11-04T12:52:49Z",
+  "repo": "daniel-ospina/tortoise",
+  "refresh": "uv run python tools/ci_runner_labels.py --capture",
+  "note": "COMMITTED SNAPSHOT of the self-hosted runner pool's labels. CI cannot read the Actions runners API, so this file is the provider set the label-coverage test checks against. Refresh it; never hand-edit a runner's labels here.",
+  "hosted_images": [
+    "macos-13",
+    "macos-14",
+    "macos-15",
+    "macos-latest",
+    "ubuntu-22.04",
+    "ubuntu-22.04-arm",
+    "ubuntu-24.04",
+    "ubuntu-24.04-arm",
+    "ubuntu-26.04",
+    "ubuntu-26.04-arm",
+    "ubuntu-latest",
+    "windows-2019",
+    "windows-2022",
+    "windows-2025",
+    "windows-latest"
+  ],
+  "runners": [
+    {
+      "name": "cmux",
+      "status": "online",
+      "busy": true,
+      "labels": [
+        "Linux",
+        "X64",
+        "self-hosted",
+        "self-hosted-x64",
+        "ubuntu-latest"
+      ]
+    },
+    {
+      "name": "pi-runner-c5-x64-1",
+      "status": "online",
+      "busy": true,
+      "labels": [
+        "Linux",
+        "X64",
+        "self-hosted",
+        "self-hosted-x64",
+        "ubuntu-latest"
+      ]
+    },
+    {
+      "name": "pi-runner-c5-x64-2",
+      "status": "online",
+      "busy": true,
+      "labels": [
+        "Linux",
+        "X64",
+        "self-hosted",
+        "self-hosted-x64",
+        "ubuntu-latest"
+      ]
+    },
+    {
+      "name": "pi-runner-c5-x64-3",
+      "status": "online",
+      "busy": true,
+      "labels": [
+        "Linux",
+        "X64",
+        "self-hosted",
+        "self-hosted-x64",
+        "ubuntu-latest"
+      ]
+    },
+    {
+      "name": "pi-runner-c5-x64-4",
+      "status": "online",
+      "busy": true,
+      "labels": [
+        "Linux",
+        "X64",
+        "self-hosted",
+        "self-hosted-x64",
+        "ubuntu-latest"
+      ]
+    },
+    {
+      "name": "pi-runner-cmux-x64-5",
+      "status": "online",
+      "busy": true,
+      "labels": [
+        "Linux",
+        "X64",
+        "self-hosted",
+        "self-hosted-x64",
+        "ubuntu-latest"
+      ]
+    },
+    {
+      "name": "pi-runner-cmux-x64-6",
+      "status": "online",
+      "busy": true,
+      "labels": [
+        "Linux",
+        "X64",
+        "self-hosted",
+        "self-hosted-x64",
+        "ubuntu-latest"
+      ]
+    },
+    {
+      "name": "pi-runner-cmux-x64-7",
+      "status": "online",
+      "busy": true,
+      "labels": [
+        "Linux",
+        "X64",
+        "self-hosted",
+        "self-hosted-x64",
+        "ubuntu-latest"
+      ]
+    },
+    {
+      "name": "pi-runner-cmux-x64-8",
+      "status": "online",
+      "busy": true,
+      "labels": [
+        "Linux",
+        "X64",
+        "self-hosted",
+        "self-hosted-x64",
+        "ubuntu-latest"
+      ]
+    },
+    {
+      "name": "pi-runner-vm-2",
+      "status": "online",
+      "busy": true,
+      "labels": [
+        "ARM64",
+        "Linux",
+        "self-hosted",
+        "self-hosted-arm64",
+        "ubuntu-latest"
+      ]
+    },
+    {
+      "name": "pi-runner-vm-3",
+      "status": "online",
+      "busy": false,
+      "labels": [
+        "ARM64",
+        "Linux",
+        "self-hosted",
+        "self-hosted-arm64"
+      ]
+    },
+    {
+      "name": "pi-runner-vm-4",
+      "status": "online",
+      "busy": false,
+      "labels": [
+        "ARM64",
+        "Linux",
+        "self-hosted",
+        "self-hosted-arm64"
+      ]
+    },
+    {
+      "name": "pi-runner-vm-5",
+      "status": "online",
+      "busy": true,
+      "labels": [
+        "ARM64",
+        "Linux",
+        "self-hosted",
+        "self-hosted-arm64",
+        "ubuntu-latest"
+      ]
+    },
+    {
+      "name": "pi-runner-vm-6",
+      "status": "online",
+      "busy": true,
+      "labels": [
+        "ARM64",
+        "Linux",
+        "self-hosted",
+        "self-hosted-arm64",
+        "ubuntu-latest"
+      ]
+    },
+    {
+      "name": "pi-runner-x64-1",
+      "status": "online",
+      "busy": true,
+      "labels": [
+        "Linux",
+        "X64",
+        "self-hosted",
+        "self-hosted-x64",
+        "ubuntu-latest"
+      ]
+    },
+    {
+      "name": "pi-runner-x64-2",
+      "status": "online",
+      "busy": true,
+      "labels": [
+        "Linux",
+        "X64",
+        "self-hosted",
+        "self-hosted-x64",
+        "ubuntu-latest"
+      ]
+    },
+    {
+      "name": "pi-runner-x64-3",
+      "status": "online",
+      "busy": true,
+      "labels": [
+        "Linux",
+        "X64",
+        "self-hosted",
+        "self-hosted-x64",
+        "ubuntu-latest"
+      ]
+    },
+    {
+      "name": "pi-runner-x64-4",
+      "status": "online",
+      "busy": true,
+      "labels": [
+        "Linux",
+        "X64",
+        "self-hosted",
+        "self-hosted-x64",
+        "ubuntu-latest"
+      ]
+    }
+  ]
+}

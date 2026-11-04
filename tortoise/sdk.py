@@ -9116,17 +9116,26 @@ class UnapprovedKindNamespace(ValueError):
 #: extractor as well as for the temporal reads.
 #:
 #: (``createdAt``/``updatedAt`` complete §4.7's temporal set but are write
-#: stamps, not claims about when the assertion held: ``update_point`` stamps
-#: ``updatedAt`` itself on every call and ``createdAt`` is a create-time stamp,
-#: so neither belongs to the temporal record this guard protects.)
+#: stamps, not claims about when the assertion held: ``create_point``'s dedup
+#: fold stamps ``updatedAt`` on the fold, ``createdAt`` is a create-time stamp,
+#: and an addressed GENERIC revision of a plain ``:Point`` re-stamps neither —
+#: measured 2026-11-03 on a retracted point, ``update_point(<id>,
+#: custom_probe=…)`` left ``updatedAt`` byte-identical. (``update_point`` DOES
+#: stamp ``updatedAt`` on its promote arm and on the ``:Object`` arm, which is
+#: why this sentence is scoped to that one shape.) So none of them belongs to
+#: the temporal record this guard protects.)
 #:
-#: Scoped, not blanket, because a content/metadata revision of a terminal claim
-#: is a recorded capability: a ``PointRevised`` later than a terminalization is
-#: the newer same-id writer and the replay fold handles it (``skip_updated_at``
-#: via ``max_inline_seq``, #3305), pinned by
+#: Scoped, not blanket, because an ADDRESSED content/metadata revision of a
+#: terminal claim is a recorded capability: a ``PointRevised`` later than a
+#: terminalization is the newer same-id writer and the replay fold handles it
+#: (``skip_updated_at`` via ``max_inline_seq``, #3305), pinned by
 #: ``test_pointinvalidated_rebuild.py::test_revise_after_invalidate_skip_
 #: updated_at`` and ``test_pointsuperseded_rebuild.py::test_supersede_then_
-#: revision_does_not_end_at_the_supersede_ts``.
+#: revision_does_not_end_at_the_supersede_ts``. ADDRESSED is the whole point:
+#: this constant scopes ``update_point``, which requires the caller to NAME the
+#: point. ``create_point``'s content-dedup fold is UNADDRESSED (a content
+#: coincidence picks the target), so it refuses EVERY write onto a terminal
+#: claim, temporal or not (#10368) — see the fold's own scope note.
 #:
 #: ``outdated`` is absent because ``_sanitize_props`` already refuses it as a
 #: server-managed lifecycle flag.
@@ -10342,7 +10351,25 @@ class TortoiseSDK:
             # own sidecar, read through the LOG HANDLE (see
             # `EventLog.carried_records`); its absence is not proof of early
             # life, so this only ever ADDS a report, never invents one.
-            if self._journal_carried_records(log):
+            #
+            # ⛔ AND THE MAP IS THE SECOND WITNESS (review round 16, finding 1).
+            # On the RESUME path `narrowed` is empty by construction, so the
+            # answer below used to be `False` — "a typo" — for an id the
+            # RETAINED MAP held as PRESENT. A map that says ``True`` was folded
+            # from records that named this point, so the honest answer to a
+            # journal whose file just went away is UNJUDGED (``None``), not the
+            # silence this whole method exists to end: `journal_unreadable` is
+            # the vocabulary's own word for "nothing can be judged here". The
+            # inverse map value (``False``) is NOT the same case — it is a
+            # record the map READ (a delete, a merge loser), so answering it
+            # silently is what that evidence says.
+            # The retained map describes a file that is GONE, so it is dropped
+            # rather than left to answer a next call: an unlink frees the inode,
+            # and a re-created path can be handed the same `(st_dev, st_ino)`
+            # back — the one identity a memo cannot tell apart from the file it
+            # was folded from.
+            self._journal_presence_memo = None
+            if self._journal_carried_records(log) or known.get(point_id) is True:
                 _logger.warning(
                     "the journal at %r carried records but its FILE is gone — "
                     "an absent live read is reported as UNJUDGED rather than "
@@ -10372,15 +10399,54 @@ class TortoiseSDK:
         # scan per absent write on the append-active lane #7405 describes.
         seam = self._journal_seam(log, resume)
         stat_after = self._journal_stat_key(log)
-        if (stat_after is None or stat_after[2] < resume
-                or stat_after[:2] != stat_key[:2]):
-            # The journal vanished, no longer holds the bytes that were folded, or
-            # was REPLACED under the fold (a new `st_dev`/`st_ino`: a rotate, an
+        if stat_after is None:
+            # ⛔ THE PATH WENT AWAY UNDER THE FOLD, AND THE MAP IS A WITNESS TO
+            # IT (review round 17, finding 1). unlink(2): "if the name was the
+            # last link to a file but any processes still have the file open,
+            # the file will remain in existence until the last file descriptor
+            # referring to it is closed"
+            # (<https://man7.org/linux/man-pages/man2/unlink.2.html>) — so a
+            # deletion that lands AFTER the fold's `open()` raises NOTHING
+            # inside the fold: the scan reads the (now nameless) inode to EOF
+            # through the live fd, and the disappearance surfaces only here, at
+            # the post-fold stat. That interleaving is the SAME world state as a
+            # deletion landing one microsecond earlier, which the fold's own
+            # `FileNotFoundError` arm answers UNJUDGED when the map holds the id
+            # — and the evidence here is STRONGER, because `known` was folded
+            # from bytes this very call just read. So the map earns the same
+            # answer: an id it holds as PRESENT is `None` (⇒
+            # `journal_unreadable`), never "a typo"; the inverse value stays
+            # silent, because that id's record was actually READ. One extra
+            # `known` entry cannot invent an alarm: it is the same predicate the
+            # normal map path reports `journal_known` from.
+            self._journal_presence_memo = None
+            return self._journal_presence_needle(log, point_id, known)
+        if stat_after[2] < resume or stat_after[:2] != stat_key[:2]:
+            # The journal no longer holds the bytes that were folded, or was
+            # REPLACED under the fold (a new `st_dev`/`st_ino`: a rotate, an
             # `mv`, a restore) — so `resume`/`seam` describe the NEW file while
             # `known` came from the OLD one. Memoising would serve another file's
-            # records; one re-fold costs less.
+            # records; one re-fold costs less. ⛔ AND THIS ARM STAYS MAP-FREE: a
+            # truncation or a replacement means the map describes bytes the file
+            # no longer has (round 9's rule), so `known` must not be consulted
+            # here — the re-fold answers for the file that is there now.
+            #
+            # ⛔ AND THE RE-FOLD IS THE ANSWER, NOT JUST THE MEMO'S FATE (review
+            # round 16, finding 1). The comment above already says this map is
+            # not a prefix of the current file — and the next line used to answer
+            # THIS call out of it anyway, so a rotation/`mv`/restore that landed
+            # during the fold could silence a ``journal_known`` loss for exactly
+            # the call that detected it (``known[point_id] is False`` from the
+            # OLD file while the NEW one holds a ``PointAdded``). `open()` binds
+            # the inode, so the fd the fold read keeps the old file while a
+            # fresh read of the PATH resolves to the new one — rename(2): "Open
+            # file descriptors for oldpath are also
+            # unaffected" (<https://man7.org/linux/man-pages/man2/rename.2.html>).
+            # So the discarded map is re-derived from the file that is there now,
+            # needle-filtered: bounded memory, one pass, and an answer that
+            # describes THIS path rather than the one that was moved away.
             self._journal_presence_memo = None
-            return known.get(point_id, False)
+            return self._journal_presence_needle(log, point_id)
         self._journal_presence_memo = {
             'log': log, 'ident': stat_after[:2], 'folded_to': resume,
             'mtime_ns': stat_after[3], 'known': known, 'seam': seam,
@@ -10455,6 +10521,53 @@ class TortoiseSDK:
         if not isinstance(got, (bytes, bytearray)):
             return False        # `None` = this path cannot answer ⇒ re-fold
         return got == expected
+
+    def _journal_presence_needle(self, log, point_id: str, known=None):
+        """Re-fold the journal AS IT IS NOW, filtered to *point_id* (#10543 r16).
+
+        The honest answer once the retained map has been declared untrustworthy:
+        the map is dropped from the memo AND from this call's answer, because it
+        was folded from a file the path no longer names. Filtered to the one id,
+        so the pass is bounded in memory (at most one entry) and single-purpose.
+
+        ``known`` is the map the CALLER folded, and it is consulted ONLY by the
+        caller whose evidence still describes this journal: the post-fold
+        ``os.stat`` answering ``None`` (the path went away while the fold read it
+        through an open fd — review round 17, finding 1). Every other caller
+        passes nothing, because a truncated or REPLACED file never held the
+        folded bytes (round 9's rule).
+
+        Three outcomes, the same vocabulary the rest of this method uses:
+        ``True``/``False`` from the records that are there now, and ``None``
+        (UNJUDGED ⇒ ``journal_unreadable``) when the re-read cannot answer — a
+        file that went away with records behind it, **or one the caller's map
+        proves carried this id**, or any failure. ``False`` is reserved for the
+        shape its own evidence supports: a journal that carried nothing, whose
+        absent id really is just a typo.
+        """
+        state: dict[str, bool] = {}
+        try:
+            _journal_presence_state(
+                log, state, 0, needle=str(point_id).encode('utf-8'))
+        except FileNotFoundError:
+            # The SAME two facts the fold's own FileNotFoundError arm splits: a
+            # path nothing ever wrote is a typo (silent), a journal that carried
+            # records and then went away is UNJUDGED. The caller's map is the
+            # third witness, and it is the only one that survives the deletion
+            # shape that takes the `.position` sidecar WITH the journal — a
+            # PRESENT entry proves the journal carried this id even when nothing
+            # else can answer.
+            if known is not None and known.get(point_id) is True:
+                return None
+            return None if self._journal_carried_records(log) else False
+        except Exception:  # noqa: BLE001, RUF100 — unjudged, never "a typo"
+            _logger.warning(
+                "the journal could not be re-read to check whether %r is a "
+                "known point; an absent live read is reported as UNJUDGED "
+                "rather than asserted to be a typo (#10515)",
+                point_id, exc_info=True)
+            return None
+        return state.get(point_id, False)
 
     @staticmethod
     def _journal_carried_records(log) -> bool:
@@ -12616,19 +12729,50 @@ class TortoiseSDK:
                     len(_key_hits), _supplied_key, kind, _key_hits, _key_hits[0])
             if existing_id:
                 pid = existing_id
-                # ── #7819: a dedup hit must not RE-STAMP a dead claim ───────
+                # ── #7819 + #10368: a dedup hit must not WRITE onto a dead claim
                 # The check sits at the TOP of this branch because the fold has
                 # two write legs and only one of them is `update_point`: the
                 # authored-word leg (`set_point_baseline` +
                 # `_stamp_authored_word`) writes server-owned baseline props
                 # directly.
                 #
-                # It is scoped to `_TEMPORAL_RESTAMP_PROPS` — the reason is
-                # stated ONCE on that constant — so a fold that carries no
-                # temporal prop keeps applying, exactly like any other revision
-                # of a dead claim (#3305). What must not happen is a fold that
-                # writes the window: it is all-or-nothing, so the WHOLE fold is
-                # dropped rather than applied-minus-the-window.
+                # #7819 refused the TEMPORAL fold (a window / `expiredAt` /
+                # `when`): re-stamping it changes what the dead claim asserts
+                # about WHEN it held, which the temporal read surfaces answer
+                # from. #10368 closed the residual that left open: a fold
+                # carrying a GENERIC prop passed straight to the write leg and
+                # rewrote a terminal node — an UNADDRESSED write on the content
+                # leg (the caller asked to CREATE; a content coincidence picked
+                # the target), so it changed the record of a settled belief
+                # without ever naming it. The refusal covers BOTH resolution
+                # routes: a `key`-resolved hit is a write onto a dead claim too
+                # (the key decides IDENTITY, #6110 — it is not an instruction to
+                # rewrite a settled record, and ingest's own #10377 guard already
+                # refuses the same fold). Both refusals are all-or-nothing for the CALLER'S writes
+                # — no prop and no authored word is applied (the #7704
+                # provenance retrofit below is explicitly NOT one of them) —
+                # the dedup HIT is still reported, and the drop rides the RESULT
+                # as an advisory (`temporal_not_applied` / `terminal_fold_refused`)
+                # rather than only the log.
+                #
+                # ⛔ WHAT IS *NOT* REFUSED, so this does not reverse #3305: an
+                # ADDRESSED revision — `update_point(<id>, <generic prop>)` —
+                # still applies to a terminal claim. That is the recorded
+                # post-terminalization revision capability (a `PointRevised`
+                # later than the terminalization is the newer same-id writer and
+                # replay folds it by `skip_updated_at` via `max_inline_seq`,
+                # pinned by `test_pointinvalidated_rebuild.py::test_revise_
+                # after_invalidate_skip_updated_at` and `test_pointsuperseded_
+                # rebuild.py::test_supersede_then_revision_does_not_end_at_the_
+                # supersede_ts`). #10368 objects to this fold's IDENTITY
+                # RESOLUTION — a content match is not a caller naming the point —
+                # never to a caller who does address it.
+                #
+                # #7704's journaled provenance retrofit ALSO still folds onto a
+                # terminal point (OWNER RULING 2026-10-25: "a dedup hit KEEPS
+                # the new evidence" — one claim, N sources): evidence ABOUT a
+                # claim is not a rewrite of what the claim says. It runs by
+                # symbol below and is deliberately left alone.
                 #
                 # Why not "just let the guard raise": the hosted commit path
                 # re-keys a successor onto an already-dead node when the
@@ -12651,47 +12795,68 @@ class TortoiseSDK:
                 # correction, which is DESIGN ONLY and not shipped in this tree
                 # (`supersede_retroactively` has no SDK method and no registry
                 # row; #5362 waits on surface approval).
+                # ── #10368: ONE terminal read serves every leg of this fold ──
+                # `_lifecycle_terminal_marker` is the shared verdict over the
+                # id's whole fan-out (#7822 — one statement, one classifier),
+                # and the #10368 refusal needs the same verdict the #7819 one
+                # does. Read it ONCE, above both, instead of adding a second
+                # read path (#2892). Skipped when the call carries neither props
+                # nor an authored word (a bare dedup hit), so that path costs no
+                # extra query.
+                #
+                # ⛔ `props` is NEVER empty at this point, so the guard cannot be
+                # `props or …`: `content_hash` is set on it unconditionally
+                # above ("dedup flag only gates the existing-point lookup, not
+                # hash persistence", fix #80) and is not popped until the fold's
+                # own write leg, far below. A guard that reads `props` therefore
+                # admits EVERY dedup hit and spends a `LIFECYCLE_FANOUT_QUERY` on
+                # the bare one this comment promises costs nothing (#10841
+                # review, P3). The condition is the CALLER'S props — the set
+                # minus the hash this function itself added — which is what the
+                # sentence above actually describes.
+                _caller_props = set(props) - {"content_hash"}
+                _terminal = (self._lifecycle_terminal_marker(pid)
+                             if (_caller_props or cred_prior is not None)
+                             else None)
                 _temporal = _TEMPORAL_RESTAMP_PROPS & set(props)
-                if _temporal:
-                    _terminal = self._lifecycle_terminal_marker(pid)
-                    if _terminal is not None:
-                        _logger.warning(
-                            "create_point: dedup resolved to point %s, which "
-                            "is already terminal (%s) — the fold would "
-                            "re-stamp its temporal record (%s), so NOTHING "
-                            "was applied (#7819).",
-                            pid, _terminal, sorted(_temporal))
-                        # ...and SAY it in the RESULT, not only in the log: a
-                        # warning is not observable to a hosted commit caller
-                        # or to an SDK caller reading the return value. The
-                        # advisory is transient (#8171) — it rides a COPY, so
-                        # neither `get_point` nor the journal ever holds it.
-                        # ⚠️ BOTH advisories ride the one `advisories` key, so the
-                        # merge is `_merge_advisories` (a second `**` splat would
-                        # REPLACE the list and drop the kind↔layer note — the
-                        # defect measured at the #9964 review: the re-run of this
-                        # very call returned `temporal_not_applied` ONLY, while
-                        # its first run reported `kind_other_layer` too).
-                        # ⛔ AND NO END RECEIPT (#10079 review P2). Shaping was
-                        # COMPUTED from the caller's props at the top of this
-                        # door, but this branch applies NOTHING — the fold that
-                        # would have stored the shaped end was refused by
-                        # #7819 just above. `valid_to_shaped` is defined as the
-                        # receipt of an end that WAS shaped INTO THE STORED
-                        # record (config/surface-manifest.yml), so emitting it
-                        # here told the caller their end was now the canonical
-                        # un-datable one while the stored window still ended on
-                        # its original date and read `known` — a receipt that
-                        # reports an action that did not happen is the exact
-                        # betrayal the ruling's §0 orders refused (#9202).
-                        # `temporal_not_applied` is the honest signal here, and
-                        # it rides this same reply.
-                        return _with_end_receipt({
-                            **self.get_point(pid),
-                            **_merge_advisories(
-                                self._temporal_not_applied_advisory(pid),
-                                _kind_layer_advisory(_layer_note, pid)),
-                        }, None)
+                if _temporal and _terminal is not None:
+                    _logger.warning(
+                        "create_point: dedup resolved to point %s, which "
+                        "is already terminal (%s) — the fold would "
+                        "re-stamp its temporal record (%s), so NOTHING "
+                        "was applied (#7819).",
+                        pid, _terminal, sorted(_temporal))
+                    # ...and SAY it in the RESULT, not only in the log: a
+                    # warning is not observable to a hosted commit caller
+                    # or to an SDK caller reading the return value. The
+                    # advisory is transient (#8171) — it rides a COPY, so
+                    # neither `get_point` nor the journal ever holds it.
+                    # ⚠️ BOTH advisories ride the one `advisories` key, so the
+                    # merge is `_merge_advisories` (a second `**` splat would
+                    # REPLACE the list and drop the kind↔layer note — the
+                    # defect measured at the #9964 review: the re-run of this
+                    # very call returned `temporal_not_applied` ONLY, while
+                    # its first run reported `kind_other_layer` too).
+                    # ⛔ AND NO END RECEIPT (#10079 review P2). Shaping was
+                    # COMPUTED from the caller's props at the top of this
+                    # door, but this branch applies NOTHING — the fold that
+                    # would have stored the shaped end was refused by
+                    # #7819 just above. `valid_to_shaped` is defined as the
+                    # receipt of an end that WAS shaped INTO THE STORED
+                    # record (config/surface-manifest.yml), so emitting it
+                    # here told the caller their end was now the canonical
+                    # un-datable one while the stored window still ended on
+                    # its original date and read `known` — a receipt that
+                    # reports an action that did not happen is the exact
+                    # betrayal the ruling's §0 orders refused (#9202).
+                    # `temporal_not_applied` is the honest signal here, and
+                    # it rides this same reply.
+                    return _with_end_receipt({
+                        **self.get_point(pid),
+                        **_merge_advisories(
+                            self._temporal_not_applied_advisory(pid),
+                            _kind_layer_advisory(_layer_note, pid)),
+                    }, None)
                 if _has_key:
                     # One read serves BOTH #6110 audits below.
                     _existing = self.get_point(pid)
@@ -12834,7 +12999,13 @@ class TortoiseSDK:
                 # explicit, so the word is ADDED on top of it (#6151 review
                 # P2).
                 _word_applied = False
-                if cred_prior is not None:
+                # ── #10368: the authored word is NOT written onto a dead claim
+                # This leg (server-owned baseline + label) runs BEFORE the props
+                # leg, so gating only `update_point` would leak it — the same
+                # "all-or-nothing" reason the #7819 comment above states. The
+                # drop is reported by the one `terminal_fold_refused` advisory
+                # below, not by a second code.
+                if cred_prior is not None and _terminal is None:
                     from tortoise.source_credibility import (
                         AUTHOR_ASSERTION_WEAK_PC,
                         canonical_tier,
@@ -12947,7 +13118,28 @@ class TortoiseSDK:
                             "dedup hit never overwrites the baseline a point "
                             "already carries (#7980, #844)",
                             credibility, pid, _drop_note)
-                if props or _word_applied:
+                # ── #10368: the fold's props leg is refused on a dead claim ──
+                # Computed HERE, after the pops above, so the flag states
+                # exactly what the old write leg would have applied. Two of
+                # those pops are NOT this guard's business: `content_hash` is
+                # never re-written (#80 review) and `extractedFrom` is the
+                # #7704 provenance fold, deliberately left applying. `key` MAY
+                # still be in `props` here — on a KEY-resolved hit the identity
+                # write is governed like any other, because a dedup HIT never
+                # rewrites a settled record (#10368).
+                _terminal_fold_refused = bool(
+                    _terminal is not None
+                    and (props or cred_prior is not None))
+                if _terminal_fold_refused:
+                    _logger.warning(
+                        "create_point: dedup resolved to point %s, which is "
+                        "already terminal (%s) — a dedup hit of either kind "
+                        "never writes onto a settled claim (#10368), so the "
+                        "CALLER'S props and authored word were NOT applied. "
+                        "Revise it deliberately with "
+                        "update_point(%r, ...), the addressed door.",
+                        pid, _terminal, pid)
+                if (props and not _terminal_fold_refused) or _word_applied:
                     # Only touch the existing point when the caller passed
                     # other props (or an applied word) — a pure dedup hit (no
                     # props) must not bump updatedAt or re-trigger EP
@@ -12969,7 +13161,14 @@ class TortoiseSDK:
                         _WARN_SUPPRESS.reset(_tok)
                 return _with_end_receipt(
                     {**self.get_point(pid),
-                     **_kind_layer_advisory(_layer_note, pid)},
+                     # `_merge_advisories`, never a second `**` splat: BOTH the
+                     # kind↔layer note and the #10368 refusal ride the one
+                     # `advisories` key, and a splat would REPLACE the list and
+                     # drop one (#9964).
+                     **_merge_advisories(
+                         _kind_layer_advisory(_layer_note, pid),
+                         (self._terminal_fold_refused_advisory(pid)
+                          if _terminal_fold_refused else {}))},
                     _end_receipt)
 
         # Issue #52 — warn when caller passes an explicit non-ULID id
@@ -16337,10 +16536,12 @@ class TortoiseSDK:
         # revision that cannot exist).
         #
         # `refuse_terminal` is FALSE unless the call carries a temporal prop:
-        # #7819 scoped THIS door's terminal refusal deliberately (a generic
-        # re-assertion of a dead claim is the recorded capability pinned by
-        # `tests/test_lifecycle_guards.py::
-        # test_create_point_dedup_without_a_window_still_folds`).
+        # #7819 scoped THIS door's terminal refusal deliberately — a generic
+        # revision of a dead claim remains writable through the ADDRESSED door
+        # (the caller names the point), which is the #3305 capability. The
+        # UNADDRESSED create fold is the opposite case and refuses every write
+        # onto a terminal claim (#10368), so the two doors no longer share a
+        # scope; this one is unchanged.
         #
         # ⛔ THE STATUS-CARRYING CALL IS *NOT* SKIPPED. A first cut of this fix
         # read `if 'status' not in props:` around the whole guard and thereby
@@ -17612,9 +17813,9 @@ class TortoiseSDK:
         ``refuse_terminal`` (#10119) lets a door that has its OWN narrower
         terminal policy ASK the terminality question without pre-empting it.
         ``update_point`` is the one such door: #7819 scoped its terminal
-        refusal to `_TEMPORAL_RESTAMP_PROPS` because a generic re-assertion of
-        a dead claim is a recorded capability (see the scope note at the call
-        site), so on that door a terminal verdict must be RETURNED, not raised
+        refusal to `_TEMPORAL_RESTAMP_PROPS` because an ADDRESSED generic
+        revision of a dead claim is a recorded capability (see the scope note
+        at the call site), so on that door a terminal verdict must be RETURNED, not raised
         — while the ABSENT verdict is the same for every caller and must be
         answered here, once, from the same read (#7822: one statement, one
         classifier). Passing ``False`` suppresses the terminal RAISE only; the
@@ -41679,6 +41880,23 @@ class TortoiseSDK:
         "unchanged."
     )
 
+    #: #10368 — the OTHER half of the same refusal: a dedup fold carrying a
+    #: non-temporal prop on a terminal claim. A separate code from
+    #: `temporal_not_applied` because the honest message differs: no window was
+    #: at stake, the whole fold was, and the remedy IS nameable here (the
+    #: addressed door) where #7819's has none (`supersede_retroactively` is
+    #: design only, #5362). Advisory-only: the drop has already written nothing.
+    _TERMINAL_FOLD_REFUSED_MESSAGE: ClassVar[str] = (
+        "The dedup fold carried a caller prop or an authored word, and the "
+        "point it resolved to (by content, or by a `key` that point already "
+        "holds) is a terminal claim; a dedup hit never writes onto a settled "
+        "belief (#10368) — the CALLER'S "
+        "PROPS AND WORD were not applied and the stored record is returned "
+        "unchanged. (A declared `extractedFrom` still folds: a dedup hit keeps "
+        "the new evidence, #7704.) Revise the claim deliberately with "
+        "update_point(<id>, ...), the addressed door."
+    )
+
     def _temporal_not_applied_advisory(self, node_id: str | None) -> dict:
         """The `temporal_not_applied` advisory payload (#7819).
 
@@ -41691,6 +41909,21 @@ class TortoiseSDK:
             "code": "temporal_not_applied",
             "node_id": node_id,
             "message": self._TEMPORAL_NOT_APPLIED_MESSAGE,
+            "advisory": True,
+        }]}
+
+    def _terminal_fold_refused_advisory(self, node_id: str | None) -> dict:
+        """The `terminal_fold_refused` advisory payload (#10368).
+
+        ADVISORY ONLY — a dropped fold has already written nothing; this only
+        makes the drop OBSERVABLE to the caller (`create_point` returns it on a
+        COPY of the dedup snapshot, and the hosted commit receipt folds it into
+        `warnings`). Never raises, never blocks.
+        """
+        return {"advisories": [{
+            "code": "terminal_fold_refused",
+            "node_id": node_id,
+            "message": self._TERMINAL_FOLD_REFUSED_MESSAGE,
             "advisory": True,
         }]}
 

@@ -806,6 +806,20 @@ def commit_client():
         # close → clear overrides at exit (replaces the local
         # _patch_tortoise_sdk_init copy).
         with patched_tortoise_sdk(db_path), TestClient(app) as tc:
+            # #9567 D12: STORE-BACK the stubbed org dict — production's
+            # `get_current_org` resolves the limits FROM the store, and the
+            # commit lane's points door fills missing ALLOWANCE keys from
+            # `quota.resolve_org_limits`, so a store-backed org is the branch
+            # production takes. (A MISSING `:Team` row is NOT a refusal: since
+            # review round 11 the fill leaves the dict unarmed on
+            # `quota.OrgNotFoundError` — a cap cannot be armed from a record
+            # that does not exist.) `MERGE` with no properties
+            # (`tests/test_hosted_api.py`'s shape): the resolver takes the tier
+            # default and emits no allowance key, so the dict overridden above
+            # is unchanged.
+            import tortoise.hosted_api as _ha_mod
+            _ha_mod._make_sdk(namespace="registry")._get_registry().query(
+                "MERGE (t:Team {id:$id})", params={"id": "test-team-405"})
             yield tc
 
 

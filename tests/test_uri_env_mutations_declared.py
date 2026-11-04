@@ -228,6 +228,10 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     "test_index_restore.py": [r'os\.environ\.pop\(\s*["\']TORTOISE_DB_URI["\']'],  # embedded-file-contract module fixture (PR #1684)
     "test_issue_4010_sessions_unlimited.py": [r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],  # #4010: resolver/clearing unit tests force the embedded lane (db_path-pinned store; the delenv IS the point — no lane leak, monkeypatch auto-undo)
     "test_mcp_client.py": [r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI",\s*""'],
+    # #10605: the bridge's real-daemon interop test forces the EMBEDDED lane for
+    # the same reason as its client-side sibling above — the in-process daemon
+    # must not retry-connect to a test container that is not running.
+    "test_mcp_bridge.py": [r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI",\s*""'],
     "test_mcp_http.py": [r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
     "test_mcp_server_auth_modes.py": [r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"',
                                           r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"'],  # C2 #2111: tenant-mode MCP tests force the registry/embedded lane (delenv IS the point) + #2657 ask-exposure: per-test fresh-URI live probe (setenv IS the test input)

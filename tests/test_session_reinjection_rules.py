@@ -28,6 +28,8 @@ constant) — no graph, no network.
 """
 from __future__ import annotations
 
+import ast
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -257,12 +259,15 @@ def test_fetch_is_one_query_with_the_filter_in_the_query():
 
 def test_fetch_constrains_event_kind_to_the_turn_shape():
     """``pointKind``'s vocabulary is open, so the turn kind alone does not
-    prove a node is a turn: the hosted demo/dashboard seed writes
-    ``pointKind='event'`` with NO ``is_episodic`` (its body IS
-    ``[role]``-tagged, so ``is_episodic`` is the conjunct that excludes
-    it). The default (turn) kind must carry the shape predicate; the eval's
-    chunk A/B must NOT (chunks are role-prefixed windows whose shape is
-    already pinned by the kind)."""
+    prove a node is a turn: a graph seeded BEFORE ``#10000`` by the hosted
+    demo/dashboard seed holds ``pointKind='event'`` points with NO
+    ``is_episodic`` (its body IS ``[role]``-tagged, so ``is_episodic`` is the
+    conjunct that excludes them). Since ``#10000`` that seed writes no turn
+    node at all (§9.1/D1: the transcript is Postgres'), so no writer in this
+    tree produces that shape — the clause is kept because a legacy graph still
+    holds those nodes, and it must stay excluded. The default (turn) kind must
+    carry the shape predicate; the eval's chunk A/B must NOT (chunks are
+    role-prefixed windows whose shape is already pinned by the kind)."""
     proj = _FakeProj(rows=[])
     source_session_chunk_pass(proj, ["seed1"], pool_ids=[])
     turn_cypher, _ = proj.g.calls[0]
@@ -1446,3 +1451,833 @@ def test_the_pool_only_under_count_is_MEASURED_not_merely_asserted_in_prose():
     assert out["injected_in_window"] == 0 < len(delivered_injected), (
         "\u26d4 the under-count: the census reports 0 injected items in the "
         "window while the reader was delivered 2 of them")
+
+
+# ── the DELETED demo turn writer may not be described as current fact ───────
+_REPO = Path(__file__).resolve().parent.parent
+
+#: Every home in the tree that explains WHY the turn-shape constraint needs
+#: the ``is_episodic`` conjunct (``session_reinjection._TURN_SHAPE_FILTER``).
+#: The hosted demo/dashboard seed's ``pointKind='event'`` turn writer is
+#: HISTORY since #10000, so a home stating it as current fact is the sentence a
+#: later reader would cite to delete a conjunct a legacy graph still needs.
+_TURN_SHAPE_NARRATIVE_HOMES = (
+    "tortoise/session_reinjection.py",
+    "tortoise/retrieval.py",
+    "tests/test_session_reinjection.py",
+    "tests/test_session_reinjection_rules.py",
+    # The eval census's own residual note: it names `_TURN_SHAPE_FILTER` by
+    # name and states that excluding a flagless `pointKind='event'` demo node
+    # is the repo's decision rather than a local predicate — the same narrative
+    # this tuple exists to keep honest, so it is a home. ⚠️ Its presence here
+    # is COVERAGE, not a correction this change makes at this base: it already
+    # carries #10000 (it is byte-identical on origin/main), so the two halves
+    # below pass there too and this entry is vacuous AGAINST THIS BASE. The
+    # earlier wording (`the demo seed, tortoise/hosted_api.py:12173`, no
+    # `#10000`) exists only on this branch's own prior commits — which is why
+    # the entry was added, and is not a claim about the base.
+    "tools/longmem_eval/ep_activation.py",
+    # ⛔ The file that WROTE the deleted turn writer, and the largest narrative
+    # about it — the single most likely home for a restatement, and it was
+    # outside the population (#10675 review cycle 5, P3). Its absence was
+    # justified on the grounds that it would owe the positive half (a `#10000`
+    # marker beside every turn-shape seed mention) and that a false RED there
+    # blocks on prose. That reason does not reproduce on this tree: MEASURED,
+    # its seed mentions carry no sentence matching `_TURN_SHAPE_VOCABULARY`, so
+    # it owes no marker, and `_present_tense_writer_claim` over the whole file
+    # is None — adding it reds neither half. A population assertion that omits
+    # its likeliest member is the shape this tuple exists to prevent.
+    "tortoise/hosted_api.py",
+)
+
+#: Homes that name the demo/sample seed for a reason that is NOT about the
+#: `is_episodic` conjunct and so cannot carry the marker-beside-the-mention
+#: invariant, but that still must never state the DELETED writer as current fact.
+#: `session_schema.py` has exactly ONE seed mention (`_SEED_MENTION`): a
+#: PAST-TENSE line in the three-shapes history ("…the demo seeder wrote a third
+#: shape…") that carries no `#10000` because it is not about this change — so
+#: the windowed half would demand a marker that does not belong there.
+#: Present-tense half ONLY, on purpose: pinning the marker would need an
+#: exception carved inside the window loop, and an exception is how a population
+#: pin stops being one (#10675 review P3).
+_TURN_SHAPE_NARRATIVE_HOMES_PRESENT_TENSE_ONLY = (
+    "tortoise/session_schema.py",
+)
+
+#: The PRESENT-TENSE form: the demo/dashboard seed named as the WRITER of
+#: ``pointKind='event'``. The corrected sentences all say the opposite ("since
+#: #10000 it writes no turn node at all"), which this deliberately does not
+#: match — note the stored form is spelled out here as prose precisely so this
+#: comment is not itself a hit.
+#: ⛔ ``seed(?:er)?`` is load-bearing: "the demo seeder" is this tree's own
+#: vocabulary (`session_schema.py`, `tools/turn_parity_census.py`,
+#: `ep_activation.py`) and a bare ``seed`` misses every one of those spellings —
+#: measured: injecting "the demo SEEDER WRITES ``pointKind='event'``" left the
+#: ``seed\s+writes?`` form GREEN (#10675 review P2). The qualifier and the
+#: bounded window keep it from firing on an unrelated seed ("the demo seed
+#: writes ~10 Points") or on the corrected prose ("a graph seeded BEFORE
+#: #10000 … the seed holds ``pointKind``"). ⚠️ The demonstration above is
+#: spelled in CAPITALS as belt-and-braces only — the block is EXCISED before
+#: this file is scanned (see `_GUARD_BLOCK`), so a lower-case sample here would
+#: not match either. Measured: injecting one inside the block leaves the pin
+#: GREEN.
+#:
+#: ⛔ TWO MORE PROPERTIES, both measured (#10675 review round 10, P2):
+#: * **CASE** — without ``IGNORECASE`` an uppercase ``WRITES`` was fail-OPEN.
+#:   That was the sharpest form of the defect: this guard's own failure message
+#:   spelled the claim in capitals, i.e. in a spelling its own regex could not
+#:   match.
+#: * **KIND** — the seeder WRITES points of other kinds: its semantic,
+#:   epistemic and procedural tuples bind ``observation``, ``statement``,
+#:   ``hypothesis``, ``decision``, ``evidence`` and ``workflow`` through
+#:   ``p.pointKind=$k`` (``hosted_api.py``'s ``_DEMO_*_POINTS``, one shared
+#:   write loop). Those are TRUE present-tense statements, and matching a bare
+#:   ``pointKind`` reds them as if they were the deleted writer. So the kind is
+#:   CAPTURED and read in code: a violation is an UNQUALIFIED kind or
+#:   ``event``; any other named kind is explicitly not this claim. Measured:
+#:   ``writes ``pointKind='hypothesis'`` `` was a false RED before, and is
+#:   GREEN now.
+#: ⛔ TWO MORE PROPERTIES, both measured (#10675 review, P2). Each was a
+#: fail-open on the tree's OWN spellings — the guard's job is to red on a
+#: restatement of the deleted writer, and it was not doing it:
+#: * **BACKTICKS.** ``_seed_demo_graph`` is normally written in backticks here
+#:   (``session_reinjection.py``: "(`hosted_api.py` `_seed_demo_graph`)"). A
+#:   bare ``_seed_demo_graph|`` alternative followed by ``\s+`` cannot cross the
+#:   closing backtick, so `"`_seed_demo_graph` writes a pointKind='event'"`,
+#:   the double-backticked form, and `hosted_api._seed_demo_graph` were all
+#:   GREEN — while the comment below claimed this spelling was covered.
+#: * **TURN-NODE VOCABULARY.** The tail required the literal ``pointKind``,
+#:   yet the positive half of this same guard treats ``turn node`` as the
+#:   turn-shape claim. "the demo seed writes one turn node per demo turn" was
+#:   therefore GREEN. The tail accepts either now.
+#: ⚠️ Neither of these is the negation rule: that is ``_NEGATED_CLAIM``, read on
+#: the MATCHED SPAN, so the greedy gap below stays greedy on purpose (#10675
+#: review round 16).
+_PRESENT_TENSE_DEMO_EVENT_WRITER = re.compile(
+    # The SUBJECT: the qualified seed noun, the FUNCTION name, or the bare
+    # ``the seeder``. `the ask-fixture seeder` does not match — the article has
+    # to sit directly on ``seeder`` — and that seeder really does read `event`,
+    # so it must not be swept up. Backticks are optional on BOTH sides and a
+    # dotted prefix (``hosted_api._seed_demo_graph``) is allowed: that is how
+    # this tree writes the identifier (#10675 review, P2).
+    r"`{0,2}(?:(?:demo|dashboard|hosted|sample)[^.;:,\n]{0,40}?seed(?:er)?"
+    r"|(?:\w+\.)*_seed_demo_graph|the\s+seeder)`{0,2}"
+    # The gap matters: this tree writes "the demo seed STILL writes …",
+    # "… CONTINUES TO WRITE …", and backticks the identifier
+    # (``_seed_demo_graph``) — all of which a bare `subject\\s+verb` misses,
+    # measured (round 12, P2: all three were GREEN on a present-tense `event`
+    # claim). Backticks only, never a bare `\s*`, so the subject must still be
+    # the sentence's subject.
+    # …and a possessive with a noun phrase in front of the verb ("the demo
+    # seed's turn writer MINTS …"), which the bare form also missed (round 14).
+    # ⛔ GREEDY on purpose: the gap must swallow a pre-verb negator ("no
+    # longer", "does not") so that ``_NEGATED_CLAIM``, which reads the matched
+    # SPAN, can see it (#10675 review round 16).
+    r"(?:['’]s)?(?:\s+\w+){0,3}\s+(?:also\s+|still\s+|continues?\s+to\s+)?"
+    r"(?:writes?|mints?|creates?)\b"
+    # * **NEGATION** — the CORRECTED sentences say the seed "writes NO turn
+    #   node at all", and a bare verb match refuses exactly the prose this pin
+    #   wants written: measured, "since #10000 the demo seed writes no
+    #   `pointKind='event'` node" matched before this lookahead and is GREEN
+    #   after it (the `event` kind would otherwise still be a violation).
+    r"(?!\s+(?:no|nothing|none|never)\b)[^.\n]{0,160}?"
+    r"(?:pointKind|\bturn\s+node\b)"
+    r"(?:\s*[=:]\s*[`'\"“]*[a-z_]+)?", re.IGNORECASE)
+
+#: The kind a ``pointKind`` mention names, if it names one — the group read by
+#: :func:`_present_tense_writer_claim`. Split out so the KIND rule above is
+#: stated once, in code, instead of as a lookahead inside the pattern.
+_POINT_KIND = re.compile(
+    r"pointKind[`'\"\s]*(?:[=:]\s*|is\s+|of\s+)[`'\"“]*([a-z_]+)",
+    re.IGNORECASE)
+
+#: A NEGATED claim about the seed's writing — i.e. the CORRECTED spelling, and
+#: the one an author reaches for first. The lookahead inside
+#: :data:`_PRESENT_TENSE_DEMO_EVENT_WRITER` only covers a negator AFTER the verb
+#: (``writes no …``); a negator BEFORE it (``does not write …``, ``never writes
+#: …``, ``no longer writes …``) still matched and red the very sentence this
+#: guard asks for — measured (#10675 review P2): all three were RED
+#: end-to-end, and the failure message quoted the NEGATION as the violation
+#: while telling the lane to "restate it as history", which it already was.
+#: Read on the MATCHED SPAN, so the negator may sit on either side of the verb.
+#: ⛔ THE NEGATOR MUST GOVERN THE MENTION, not merely share a sentence: the
+#: parent pattern's verb→`pointKind` gap is `[^.\n]{0,160}?`, which crosses `,`,
+#: `;`, `and`, `but` and `yet`, so a negated verb ANYWHERE in the span excused a
+#: match — and because the span already consumed that `pointKind`, the violating
+#: clause behind it was never examined. Measured (#10675 review cycle 2, P2):
+#: "the demo seed no longer writes turn text, but still writes a
+#: `pointKind='event'` node" was GREEN — the HALF-CORRECTION this pin exists
+#: for, in the vocabulary its own comment enumerates. So the first alternative
+#: walks from the negated verb to the `pointKind` it negates and stops at a
+#: CLAUSE boundary. (The negator AFTER the verb needs no alternative here: the
+#: parent pattern's own lookahead refuses that match at the source, so an
+#: alternative for it was unreachable except on an UNRELATED write verb in the
+#: gap — where it excused a real violation. "the demo seed writes a turn, writes
+#: no duplicate, and writes a `pointKind='event'` node" was GREEN. Removed
+#: (#10675 review cycle 4, P3); the lookahead still covers the after-verb form.)
+#: ⛔ A CLAUSE BOUNDARY IS NOT PUNCTUATION, AND IT IS NOT ONLY `,`/`;`: `and`,
+#: `but` and `yet` cross a clause exactly as `,` does, and the comma before them
+#: is OPTIONAL. Nor is the set closed at the dash: a COLON, an ASCII hyphen and
+#: an OPENING PARENTHESIS all start a new clause in this tree's prose, and a gap
+#: that let them through kept the half-correction GREEN — measured (#10675 review
+#: cycle 5, P2): "… no longer writes turn text to the graph: it still writes a
+#: `pointKind='event'` node" and its " - " and "(…)" twins. Every one of them is
+#: a clause separator in its CLAUSE use, so every one of them terminates the walk.
+#: ⚠️ Residual, stated because the previous line overstated its cost: the same
+#: characters also introduce an APPOSITIVE that merely GLOSSES the shape
+#: ("no longer writes the turn shape (a `pointKind='event'` node)", "… the turn
+#: shape: a `turn node`"), and those are TRUE corrections that still red. The
+#: separators cannot be dropped — the half-correction arms depend on them — so
+#: this is named rather than hidden (#10675 review cycle 6, P3).
+#: ⛔ AND A DASH IS A CLAUSE SEPARATOR TOO, not an odd character: `—`/`–` is
+#: this tree's dominant one (it appears throughout the comment block that states
+#: this rule), so `[^,;]` alone still crossed it — "… no longer writes turn text
+#: to the graph — it still writes a `pointKind='event'` node" was GREEN
+#: (#10675 review cycle 4, P2). Both dashes are in the excluded class.
+#: ⚠️ The residual is stated precisely, because an earlier wording overstated
+#: its cost: the escape is not the only mechanism. A sentence that negates its
+#: FIRST clause with the negator the PARENT pattern's own lookahead recognises
+#: (`writes no turn text …, and then writes a `pointKind='event'` node`) produces
+#: no anchored match at all — the parent never fires — and closing THAT needs the
+#: subject re-anchored across clauses. It is not what the gap above is for.
+#: ⛔ THE TAIL IS THE PARENT'S TAIL, AND THAT IS PINNED, not asserted: the literal
+#: appears in the parent (`pointKind` OR `turn node` — the second form is what
+#: its own positive half calls the turn shape) and again in
+#: `_TURN_SHAPE_TAIL` below, because the parent is defined first and cannot
+#: reference it. `test_the_present_tense_guard_reads_a_NEGATED_writer_claim_as_
+#: the_CORRECTION` asserts `_TURN_SHAPE_TAIL in
+#: _PRESENT_TENSE_DEMO_EVENT_WRITER.pattern`, so widening the parent's tail
+#: without the escape's is a RED rather than a silent return of the false red
+#: that cycle 1 filed and cycle 3 nearly reintroduced (#10675 review cycle 4,
+#: P3: the comment said "spelled once" while it was spelled twice).
+#: ⛔ CONTRASTS ARE CORRECTIONS TOO, and they were RED: "writes the turns to
+#: Postgres RATHER THAN a turn node", "INSTEAD OF a `pointKind='event'` node",
+#: "NOT TO a `turn node`" and — the most natural English of the four — "NOT A
+#: `turn node`" / "NOT INTO a …" / "NOT AS a …" state §9.1/D1 accurately and are
+#: what the homes should say, so they are excused. An enumerated list missed
+#: `not a`, which is why the preposition after `not` is a CLASS rather than one
+#: more alternative (#10675 review cycle 5, P3). ⚠️ The marker must INTRODUCE
+#: the shape: the walk below goes from the marker to the shape, so "writes a
+#: `pointKind='event'` node RATHER THAN Postgres rows" is still a violation —
+#: pinned as an arm rather than left to inspection.
+_TURN_SHAPE_TAIL = r"(?:pointKind|\bturn\s+node\b)"
+#: The clause connectors, stated ONCE (#10675 review cycle 7, P2: `_CONTINUE`
+#: listed `but|rather than|instead of` while the walk excluded eight, so a
+#: re-assertion behind `while`/`though`/`yet`/`and`/`although`/`however` stayed
+#: GREEN — the two lists drifting apart is the whole `#:`-documents-its-subject
+#: hazard this file guards against elsewhere).
+_CLAUSE_CONNECTORS = r"but|yet|and|although|while|whereas|however|instead|though"
+_NEGATED_CLAUSE_GAP = (
+    r"(?:(?!(?:" + _CLAUSE_CONNECTORS + r")\b)"
+    # ⛔ A SPACED hyphen is a clause separator; a COMPOUND hyphen is not. `-`
+    # therefore stays in the class (so `pre-#10000` — this tree's own spelling
+    # for exactly this population — is walkable) and only the ` - ` form is
+    # refused (#10675 review cycle 6, P3: excluding bare `-` falsely red
+    # "no longer writes the pre-#10000 turn node").
+    r"(?!(?<=\s)-(?=\s))[^,;:()!?\u2014\u2013]){0,60}?")
+_NEGATED_CLAIM = re.compile(
+    r"\b(?:not|never|no\s+longer|no\s+more)\s+(?:also\s+|still\s+|ever\s+)?"
+    r"(?:writes?|mints?|creates?)\b" + _NEGATED_CLAUSE_GAP + _TURN_SHAPE_TAIL
+    # A contrast marker INTRODUCING the shape ("rather than a turn node").
+    # ⛔ `never` is the negative-polarity twin of `not`, and an earlier wideneing
+    # dropped it silently: "… never a `turn node`" went GREEN→RED (#10675 review
+    # cycle 6, P3).
+    + r"|\b(?:rather\s+than|instead\s+of|(?:not|never)\s+(?:to|a|as|into|in|on))\s+"
+    + _NEGATED_CLAUSE_GAP + _TURN_SHAPE_TAIL,
+    re.IGNORECASE)
+#: A clause that RE-ASSERTS the shape after the escape's own span ("not a `turn
+#: node` BUT a `pointKind='event'` node"). The escape matches INSIDE the parent's
+#: span, which ends at the FIRST shape, so the asserted clause behind it was never
+#: examined — widening the contrast class turned four spellings of that construction
+#: into a false PASS, the guard's core job (#10675 review cycle 6, P2).
+#: ⛔ The continuation is judged the way the parent judges its OWN tail: the
+#: shape it finds is read for its KIND, and a negator before the continued verb
+#: means the clause DENIES the shape rather than asserting it. Without that, a
+#: true sentence ("… no longer writes a `pointKind='event'` node but writes a
+#: `pointKind='observation'` node") was a false RED — the class this guard has
+#: spent several cycles removing (#10675 review cycle 7, P3).
+#: ⛔ The continued clause must ASSERT the shape, so it must carry a WRITE VERB
+#: (or elide one, "yet a `pointKind='event'` node"). Without that requirement a
+#: merely DESCRIPTIVE clause red a true correction — "… no longer writes a turn
+#: node, and every remaining turn node is pre-#10000 history" — which is the
+#: homes' own census vocabulary (#10675 review cycle 8, P3).
+_WRITE_VERB = r"(?:writes?|mints?|creates?|writing|minting|creating)"
+_CONTINUE = re.compile(
+    r"\s*(?:,|;|:)?\s*(?:although\s+|however\s*,\s*)?"
+    r"(?:(?:" + _CLAUSE_CONNECTORS + r")\b|rather\s+than\b|instead\s+of\b)"
+    r"(?:[^.\n]{0,40}?" + _WRITE_VERB + r"\b[^.\n]{0,40}?"
+    r"|\s*(?:(?:to|in|into|as|on|of)\s+)?a\s+`{0,2})"
+    + _TURN_SHAPE_TAIL, re.IGNORECASE)
+#: ⛔ THE NEGATOR MUST GOVERN THE WRITE VERB — the file's own rule (see the
+#: `_NEGATED_CLAIM` block), applied here too. A bare `not|never` anywhere in the
+#: clause excused the re-assertion ("but not quite: it still writes a
+#: `pointKind='event'` node" was GREEN), and the class now matches the parent's
+#: own vocabulary rather than a subset (#10675 review cycle 8, P2 and P3).
+#: ⚠️ RESIDUALS, measured and named rather than chased — this guard has had eight
+#: review cycles and every one found an English edge, so the limits are recorded
+#: here instead of being re-derived: (a) a continued clause that asserts the shape
+#: through a NON-write verb ("does not skip the `pointKind='event'` node") is not
+#: recognised, because the continuation is required to carry a write verb; (b) a
+#: negator separated from its verb by a noun ("no code path writes …") is not
+#: matched, because the negator must be ADJACENT to the verb — widening it to a
+#: window is what let "but not quite: it still writes …" through. Both are
+#: fail-closed (a false RED or a missed excuse), and both are contrived prose no
+#: home in this tree writes. The guard is a documentation pin over 8 files with no
+#: product effect; the product change it sits beside is verified separately.
+_NEGATOR_IN_CLAUSE = re.compile(
+    r"\b(?:not|never|no\s+longer|no\s+more|nothing|none|no)\s+"
+    r"(?:also\s+|still\s+|ever\s+)?" + _WRITE_VERB + r"\b", re.IGNORECASE)
+
+
+def _present_tense_writer_claim(flat: str) -> str | None:
+    """The forbidden present-tense claim in ``flat``, or ``None``.
+
+    A match is a violation unless it names a kind that is NOT ``event``: the
+    seeder still writes ``hypothesis``/``observation``/``statement``/``decision``
+    points, so a true sentence about those must not red (#10675 review round 10,
+    P2).
+    """
+    for hit in _PRESENT_TENSE_DEMO_EVENT_WRITER.finditer(flat):
+        # ⛔ ``the seeder`` is only THIS seeder when no other one was just named.
+        # `tools/ask_spotcheck.py`'s fixture seeder really does write the `event`
+        # kind, and a sentence introducing it ("A demo-only fixture: the seeder
+        # writes …") is TRUE — it must not be attributed to the demo seed
+        # (#10675 review round 13, P3).
+        before = flat[max(0, hit.start() - 40):hit.start()]
+        if _OTHER_SEEDER_CONTEXT.search(before):
+            continue
+        # ⛔ A NEGATED match is the CORRECTION, not the claim (#10675 review
+        # P2): "since #10000 the demo seed does NOT write …" states exactly
+        # what this guard wants stated, and reding it tells the lane to restate
+        # a sentence that is already right.
+        if _NEGATED_CLAIM.search(hit.group()):
+            # ⛔ …unless the clause AFTER the span re-asserts a shape, in which
+            # case the sentence is the half-correction, not the correction. The
+            # continued clause is read the way the parent reads its own tail: a
+            # NON-`event` kind is a TRUE statement, and a negator in that clause
+            # means it DENIES the shape rather than asserting it.
+            window = flat[hit.end():hit.end() + 80]
+            cont = _CONTINUE.search(window)
+            if cont:
+                # Read the KIND a short way PAST the shape token, exactly as the
+                # parent does for its own tail — the match stops at `pointKind`,
+                # so the `='observation'` value would otherwise be invisible.
+                tail = window[cont.start():]
+                kinds = [k.group(1).lower() for k in _POINT_KIND.finditer(tail)]
+                # ⛔ ANY `event` kind is the violation — reading only the FIRST
+                # let "writes a `pointKind='observation'` node and a
+                # `pointKind='event'` node" through (#10675 review cycle 8, P3).
+                if kinds and "event" not in kinds:
+                    continue
+                if _NEGATOR_IN_CLAUSE.search(tail):
+                    continue
+                return hit.group()
+            continue
+        # The kind may be named just PAST the verb's match ("… with a
+        # ``pointKind`` of ``observation``"), so read a short context, not the
+        # matched span alone (#10675 review round 14, P2).
+        kind = _POINT_KIND.search(flat[hit.start():hit.end() + 40])
+        if kind is None or kind.group(1).lower() == "event":
+            return hit.group()
+    return None
+
+#: The guard's OWN block, EXCISED before this file is scanned. Its comments must
+#: quote the pre-``#10000`` wording AND the marker that annotates it, so leaving
+#: them in let the pin satisfy ITSELF: measured, deleting a marker from the
+#: guard's own commentary left the pin GREEN (#10675 review round 10, P3).
+#: Excising the block is what makes "this file is also a home" falsifiable
+#: rather than circular — the alternative, spelling every sample in CAPITALS so
+#: the pattern misses its own comment, only protects the one demonstration and
+#: leaves the rest of the file's prose in the population.
+#: ⛔ Spelled as a CONCATENATION so this line does not contain the marker:
+#: the check below requires exactly ONE occurrence in the file, and a
+#: self-matching literal here would make a reworded header split at this
+#: assignment — reintroducing the self-grading it exists to prevent.
+_GUARD_BLOCK = "# ── the " + "DELETED demo turn writer"
+#: Where the guard's machinery ENDS and the population file resumes. Excising
+#: from the header to EOF would leave every test appended after it unscanned —
+#: measured (round 12, P2): a present-tense claim appended at EOF stayed GREEN.
+#:
+#: ⛔ It ends the guard's BODY, not its ``def`` line. Ending at the ``def``
+#: prefix excised the header block only and returned the guard's own ~3.3 kB
+#: body — docstring, assertion messages and all — to the scanned population,
+#: which is the same self-grading the header excision exists to prevent, moved
+#: one block down: measured, an ordinary comment added inside the guard's body
+#: (``the demo seed writes `pointKind='event'` for each turn``) flipped the pin
+#: to RED on its own file (#10675 review P3).
+#:
+#: ⛔ Spelled as a CONCATENATION for the same reason as ``_GUARD_BLOCK``: the
+#: check below requires exactly ONE occurrence, and a self-matching literal
+#: here would split at this assignment.
+_GUARD_END = "# ── " + "END of the guard's machinery"
+
+
+def _narrative_text(rel: str) -> str:
+    """The home's text, with this guard's own commentary removed for its file."""
+    raw = (_REPO / rel).read_text(encoding="utf-8")
+    if rel == "tests/test_session_reinjection_rules.py":
+        # ⛔ The excision must be VERIFIED, not assumed: `split` with a marker
+        # that no longer occurs silently returns the whole file, which puts the
+        # guard's own commentary back in the population and lets the pin grade
+        # ITSELF again (#10675 review round 11, P2). Measured: renaming the
+        # section header made the pin RED on its own CAPITALS demonstration,
+        # with nothing pointing at the real cause.
+        parts = raw.split(_GUARD_BLOCK, 1)
+        assert len(parts) == 2 and raw.count(_GUARD_BLOCK) == 1, (
+            f"the guard block marker {_GUARD_BLOCK!r} was not found in "
+            f"`{rel}` — the section header it names is what keeps this pin from "
+            "grading its own commentary, so a reworded header must update "
+            "`_GUARD_BLOCK` too")
+        rest = parts[1]
+        assert rest.count(_GUARD_END) == 1, (
+            f"the guard's machinery end marker {_GUARD_END!r} must occur "
+            f"exactly once after the guard block in `{rel}`; it occurs "
+            f"{rest.count(_GUARD_END)} time(s). Without exactly one, the "
+            "excision either swallows every test below the guard (which is "
+            "where a later lane appends) or returns the guard's own body to "
+            "the population, letting this pin grade its own commentary")
+        raw = parts[0] + rest.split(_GUARD_END, 1)[1]
+    return " ".join(raw.split())
+
+
+#: HOW far from a seed mention the ``#10000`` history marker may sit and still
+#: be read as annotating it. The POSITIVE half below is a WINDOW, not a
+#: file-scoped ``"#10000" in flat``: every one of these homes carries OTHER
+#: ``#10000`` mentions — re-derive with `grep -c '#10000'` rather than trusting a
+#: count written into this comment, which rots the moment any lane edits the
+#: prose (the first version of this note stated a census that the very fix
+#: introducing it had already made stale; #10675 review round 10, P3). A
+#: file-scoped check stays GREEN whenever the marker leaves the one sentence
+#: that makes the conjunct defensible — and for THIS file it was strictly
+#: tautological, since the assertion's own message names ``#10000``.
+#: ⚠️ It is a DISTANCE heuristic (±`_MARKER_WINDOW` chars around the
+#: mention), deliberately generous: a tighter radius red a home that was merely
+#: EXPANDED — measured, 500 chars of new prose between the mention and its
+#: marker, still the same sentence (#10675 review round 11, P3) — while a
+#: paragraph-scoped or sentence-scoped window red a home whose marker sits in
+#: the sentence BEFORE its `demo-seed` mention. Its job is to tell "this home
+#: says the nodes are pre-#10000 history" from "any `#10000` anywhere in this
+#: file"; it is not a grammar.
+_MARKER_WINDOW = 800
+_SEED_MENTION = re.compile(r"demo(?:/dashboard)?[\s-]+seed", re.IGNORECASE)
+
+#: What makes a seed mention a statement about the TURN SHAPE — the only
+#: kind that owes a `#10000` history marker. Deliberately narrow: the
+#: `event` kind, the `turn node` the seeder stopped writing, or the
+#: `is_episodic` flag that excludes the legacy ones.
+#: ⛔ ONE paragraph per `#:` block: `#:` documents the symbol that FOLLOWS it,
+#: and a second paragraph with no blank line between them would attach to the
+#: same symbol. Measured (#10675 review, P3): this paragraph and the one below
+#: were run together, so the TURN SHAPE rule shipped as the docstring of
+#: `_OTHER_SEEDER_CONTEXT` — the symbol that answers "is this somebody ELSE's
+#: seeder?" — which is precisely the conflation these 300 lines exist to
+#: prevent. `test_each_guard_regex_documents_its_own_subject` keeps them apart.
+_TURN_SHAPE_VOCABULARY = re.compile(
+    r"pointKind\s*[=:]\s*[`'\"“]*event\b|\bturn node\b|\bis_episodic\b",
+    re.IGNORECASE)
+
+#: A subject introduced as somebody ELSE's seeder, so a `the seeder writes
+#: …` immediately after it is not the demo seed's claim.
+_OTHER_SEEDER_CONTEXT = re.compile(
+    r"(?:ask[-_ ]?fixture|ask_spotcheck|onboarding)\W*$",
+    re.IGNORECASE)
+
+
+
+def _sentence_at(text: str, pos: int) -> str:
+    """The sentence of ``text`` that contains ``pos``.
+
+    Sentence, not window: a guard that decides "is this mention about the turn
+    shape" on a character radius answers differently depending on where the
+    sentence sits in the file (#10675 review round 14, P2).
+    """
+    cut = text.rfind(". ", 0, pos)
+    start = 0 if cut == -1 else cut + 2
+    end = text.find(". ", pos)
+    return text[start:len(text) if end == -1 else end + 1]
+
+def test_no_home_states_the_deleted_demo_turn_writer_as_current_fact():
+    """#10000 review P3: three homes were corrected and the fourth was missed.
+
+    `hosted_api._seed_demo_graph` is the non-turn ``pointKind='event'`` writer
+    the ``is_episodic`` conjunct exists to exclude — the shape `#10000` removed
+    across §9.1/D1. A home that still says the seed WRITES that shape is false
+    in the present tense, and it reads as grounds for deleting the (still
+    necessary, legacy-population) conjunct.
+
+    A POPULATION assertion over every narrative home, not a pin at the one site
+    this round edited: that site-local shape is the failure. The same sentence
+    was restated in `session_reinjection.py`, `retrieval.py` and
+    `test_session_reinjection.py` and left present-tense HERE, so a pin inside
+    the one file being fixed reds on nothing when another home is added.
+    """
+    missing = [rel for rel in _TURN_SHAPE_NARRATIVE_HOMES
+               + _TURN_SHAPE_NARRATIVE_HOMES_PRESENT_TENSE_ONLY
+               if not (_REPO / rel).is_file()]
+    assert not missing, (
+        "a narrative home moved or was deleted, so this pin no longer covers "
+        f"the claim it exists for: {missing}")
+
+    for rel in _TURN_SHAPE_NARRATIVE_HOMES + _TURN_SHAPE_NARRATIVE_HOMES_PRESENT_TENSE_ONLY:
+        flat = _narrative_text(rel)
+        present = _present_tense_writer_claim(flat)
+        assert present is None, (
+            f"`{rel}` states the demo/dashboard seed as the PRESENT-TENSE "
+            f"writer of a `pointKind='event'` point — quoted: {present!r} — "
+            "but since #10000 it writes no turn node at all "
+            "(§9.1/D1). Restate it as history (the clause is kept because a "
+            "graph seeded BEFORE #10000 still holds those nodes) rather than "
+            "leaving a claim about a writer that no longer exists")
+        if rel in _TURN_SHAPE_NARRATIVE_HOMES_PRESENT_TENSE_ONLY:
+            continue
+        # The positive half: the HISTORY MARKER is what makes the surviving
+        # conjunct defensible. Without it the clause reads as dead weight and
+        # the next reader deletes it — and legacy demo graphs lose the only
+        # exclusion keeping their orphan `event` nodes out of the turn set.
+        # ⛔ WINDOWED, and it must be: a file-scoped check passes on ANY
+        # `#10000` mention elsewhere in the file, so it cannot red on the
+        # regression above that it claims to guard.
+        seed_hits = list(_SEED_MENTION.finditer(flat))
+        assert seed_hits, (
+            f"`{rel}` is a declared narrative home but no longer mentions the "
+            "demo/dashboard seed at all — either the home was reworded beyond "
+            "this pin's reach or the seed's legacy `event` nodes stopped being "
+            "the reason given for the `is_episodic` conjunct")
+        for _hit in seed_hits:
+            window = flat[max(0, _hit.start() - _MARKER_WINDOW):
+                          _hit.end() + _MARKER_WINDOW]
+            # ⛔ Only a mention ABOUT the turn shape owes the marker, and "about"
+            # is decided on the mention's OWN SENTENCE: judged on the ±window it
+            # depended on where in the file the sentence was typed — measured
+            # (#10675 review round 14, P2), the same TRUE sentence was GREEN at
+            # one insertion point and RED at another because a NEIGHBOUR's
+            # `pointKind='event'` fell inside the radius.
+            sentence = _sentence_at(flat, _hit.start())
+            if not _TURN_SHAPE_VOCABULARY.search(sentence):
+                continue
+            assert "#10000" in window, (
+                f"`{rel}` names the demo/dashboard seed without naming #10000 "
+                "beside it, so the reader cannot tell the seed's `event` nodes "
+                "are a LEGACY population the conjunct is retained for. Got: "
+                f"...{window}...")
+
+
+def test_the_present_tense_guard_reads_a_NEGATED_writer_claim_as_the_CORRECTION():
+    """#10675 review P2: the guard red the sentence it exists to encourage.
+
+    The corrected prose says the seed does NOT write the turn shape, and English
+    offers several ways to spell that. Only the negator-AFTER-the-verb form
+    ("writes no …") was excluded by the lookahead inside the pattern; every
+    negator-BEFORE-the-verb form matched, so a TRUE correction produced a RED
+    whose message quoted the negation as the violation.
+
+    FAILS IF: any of the standard negated spellings reds again, or the guard
+    stops matching the un-negated claim (which would make the arms above
+    vacuous).
+    """
+    # ⛔ THE ESCAPE AND THE PARENT MUST AGREE ON THE TAIL, and a comment cannot
+    # assert that: the literal is spelled in both places (the parent is defined
+    # first and cannot reference a constant defined below it), so this line is
+    # what makes the sharing true rather than claimed. Widening the parent's tail
+    # without the escape's is the cycle-3 false red returning silently (#10675
+    # review cycle 4, P3).
+    assert _TURN_SHAPE_TAIL in _PRESENT_TENSE_DEMO_EVENT_WRITER.pattern, (
+        "the parent guards a tail the negation escape does not know about, so "
+        "a CORRECTED sentence using it is a false RED: "
+        f"{_TURN_SHAPE_TAIL!r} not in the parent pattern")
+    corrections = (
+        "since #10000 the demo seed writes no `pointKind='event'` node",
+        "since #10000 the demo seed does not write `pointKind='event'` nodes",
+        "since #10000 the demo seed never writes `pointKind='event'` nodes",
+        "since #10000 the demo seed no longer writes `pointKind='event'` nodes",
+        # ⛔ THE OTHER TAIL: the parent fires on `turn node` as well as on
+        # `pointKind`, so an escape that only reached `pointKind` red these three
+        # — the same false red cycle 1 filed, reintroduced by the interaction of
+        # two fixes. Measured (cycle 3): all three RED before `_TURN_SHAPE_TAIL`
+        # was shared, GREEN after.
+        "since #10000 the demo seed writes no turn node at all",
+        "since #10000 the demo seed no longer writes a turn node",
+        "since #10000 the demo seed does not write a turn node per turn",
+        # ⛔ CONTRASTS introduce the shape rather than negating the verb, and
+        # they are accurate §9.1/D1 prose in the homes' own vocabulary. All
+        # three RED before the contrast alternative was added (#10675 review
+        # cycle 4, P3).
+        "the demo seed writes the turns to Postgres rather than a turn node",
+        "since #10000 the demo seed writes its turns to Postgres instead of a "
+        "`pointKind='event'` node",
+        "the demo seed writes turn text to Postgres, not to a `turn node`",
+        # ⛔ `not a` / `not into` / `not as` — the most natural English contrast,
+        # which an enumerated preposition list missed (#10675 review cycle 5, P3).
+        "the demo seed writes turn text to Postgres, not a `turn node`",
+        "the demo seed writes turn text to Postgres, not into a "
+        "`pointKind='event'` node",
+        "the demo seed writes turn text to Postgres, not as a `turn node`",
+        # ⛔ `never a` is `not a`'s negative-polarity twin, dropped silently by
+        # an earlier widening (#10675 review cycle 6, P3).
+        "the demo seed writes its turns to Postgres, never a `turn node`",
+        "the demo seed writes its turns to Postgres, never a "
+        "`pointKind='event'` node",
+        # ⛔ A COMPOUND hyphen is not a clause separator: removing bare `-` from
+        # the walk falsely red these, and `pre-#10000` is this tree's own
+        # spelling for exactly this population (#10675 review cycle 6, P3).
+        "the demo seed no longer writes its pre-#10000 turn node",
+        "the demo seed does not write the pre-#10000 `pointKind='event'` node",
+        # ⛔ The continued clause is judged the way the parent judges its own
+        # tail: another KIND is a true statement, and a negator DENIES the shape
+        # (#10675 review cycle 7, P3: both were false REDs).
+        "since #10000 the demo seed no longer writes a `pointKind='event'` node "
+        "but writes a `pointKind='observation'` node",
+        "the demo seed no longer writes a `pointKind='event'` node, but it "
+        "never writes a `turn node` either",
+        # ⛔ A merely DESCRIPTIVE continued clause is not a re-assertion, and it
+        # is the homes' own census vocabulary (#10675 review cycle 8, P3).
+        "the demo seed no longer writes a turn node, and every remaining turn "
+        "node is pre-#10000 history",
+        "the demo seed no longer writes a turn node, and the nine `pointKind` "
+        "nodes are pre-#10000 history",
+        "the demo seed no longer writes a turn node, and nothing writes a "
+        "`pointKind='event'` node",
+    )
+    for sentence in corrections:
+        found = _present_tense_writer_claim(sentence)
+        assert found is None, (
+            "the guard reds a CORRECTED sentence — the prose it asks for: "
+            f"{sentence!r} → {found!r}")
+    # ⛔ NON-VACUITY: the same subject, verb and kind WITHOUT a negator is the
+    # violation. Without this arm the four above would pass on a pattern that
+    # simply stopped matching anything.
+    positive = "the demo seed writes a `pointKind='event'` node per turn"
+    assert _present_tense_writer_claim(positive) is not None, (
+        "the guard stopped matching the present-tense claim altogether, so "
+        f"its negation arms prove nothing: {positive!r}")
+    # ⛔ AND THE ESCAPE MUST NOT SWALLOW A LATER CLAUSE (#10675 review cycle 2,
+    # P2): the verb→`pointKind` gap crosses `,` `;` `but` `yet`, so a negator
+    # anywhere in the span used to excuse a violating clause behind it — which
+    # is the HALF-CORRECTION (text fixed, node still asserted as current) that
+    # this pin exists for. Each sentence below negates one clause and states
+    # the shape in the next; all three must be the violation.
+    compound = (
+        "since #10000 the demo seed no longer writes turn text to the graph, "
+        "but still writes a `pointKind='event'` node per turn",
+        "the demo seed does not write turn text into the graph, but it writes "
+        "a `pointKind='event'` node per turn (#10000)",
+        "since #10000 the demo seed no longer writes `[role]`-tagged text into "
+        "the graph; it STILL writes a `pointKind='event'` node per turn",
+        # ⛔ NO COMMA BEFORE THE CONNECTOR — the comma is optional in English, so
+        # a gap that stopped only at `,`/`;` passed this one (#10675 review
+        # cycle 3, P2, GREEN end-to-end) while catching its comma'd twin above.
+        "since #10000 the demo seed no longer writes turn text to the graph but "
+        "still writes a `pointKind='event'` node per turn",
+        "since #10000 the demo seed no longer writes turn text to the graph and "
+        "instead writes a `pointKind='event'` node per turn",
+        # The same crossing, in the OTHER tail vocabulary — that both tails are
+        # escaped is what keeps the comma-less arm a property of the rule.
+        "since #10000 the demo seed no longer writes turn text to the graph but "
+        "still writes a turn node per turn",
+
+        # ⛔ AND A DASH CROSSES A CLAUSE AS WELL — this tree's dominant separator,
+        # so a gap that excluded only `,`/`;`/connectors passed it (#10675 review
+        # cycle 4, P2).
+        "since #10000 the demo seed no longer writes turn text to the graph — "
+        "it still writes a `pointKind='event'` node per turn",
+
+        # ⛔ A SECOND, UNRELATED WRITE VERB must not excuse the real clause. The
+        # removed `writes no …` alternative was unanchored, so this passed: it
+        # found `writes no` in the gap and excused the `pointKind` behind it
+        # (#10675 review cycle 4, P3: GREEN before, RED now).
+        "the demo seed writes a turn, writes no duplicate, and writes a "
+        "`pointKind='event'` node",
+        # ⛔ A CONTRAST AFTER the shape does not excuse it: the marker has to
+        # INTRODUCE the thing being denied.
+        "the demo seed writes a `pointKind='event'` node rather than Postgres "
+        "rows",
+        # ⛔ COLON / ASCII HYPHEN / PARENTHESIS each start a new clause, and a
+        # gap that let them through kept the half-correction GREEN (#10675
+        # review cycle 5, P2).
+        "since #10000 the demo seed no longer writes turn text to the graph: it "
+        "still writes a `pointKind='event'` node per turn",
+        "since #10000 the demo seed no longer writes turn text to the graph - "
+        "it still writes a `pointKind='event'` node per turn",
+        "since #10000 the demo seed no longer writes turn text to the graph (it "
+        "still writes a `pointKind='event'` node)",
+        # ⛔ `not X BUT Y` — the escape matches inside the parent's span, so the
+        # clause ASSERTED after `but` was never examined; widening the contrast
+        # class made these false PASSes (#10675 review cycle 6, P2). `_CONTINUE`
+        # now re-reads the clause behind the span.
+        "the demo seed writes its turn not as a `turn node` but as a "
+        "`pointKind='event'` node",
+        "the demo seed writes its turn not a `turn node`, but a "
+        "`pointKind='event'` node",
+        "the demo seed writes its turn not in a `turn node` but in a "
+        "`pointKind='event'` node",
+        "the demo seed writes its turn not into a `turn node` but into a "
+        "`pointKind='event'` node",
+        # ⛔ The continuation set was `but|rather than|instead of` while the walk
+        # excluded NINE connectors, so a re-assertion behind `while`/`though`/
+        # `yet` stayed GREEN — the two lists drifting apart, which is why they
+        # now share `_CLAUSE_CONNECTORS` (#10675 review cycle 7, P2).
+        "since #10000 the demo seed no longer writes a turn node while still "
+        "writing a `pointKind='event'` node",
+        "since #10000 the demo seed no longer writes turn text, though it "
+        "still writes a `pointKind='event'` node",
+        "the demo seed writes its turn not a `turn node`, yet a "
+        "`pointKind='event'` node",
+        # ⛔ The negator must GOVERN the continued clause's write verb — a bare
+        # `not|never` anywhere in it excused the re-assertion (#10675 review
+        # cycle 8, P2).
+        "the demo seed no longer writes a turn node, but not quite: it still "
+        "writes a `pointKind='event'` node",
+        "the demo seed no longer writes a turn node, but it never stopped "
+        "writing a `pointKind='event'` node",
+        # ⛔ ANY `event` kind in the continued clause — reading only the FIRST
+        # let an observation-then-event clause through (#10675 review cycle 8, P3).
+        "the demo seed no longer writes a turn node but writes a "
+        "`pointKind='observation'` node and a `pointKind='event'` node",
+    )
+    for sentence in compound:
+        assert _present_tense_writer_claim(sentence) is not None, (
+            "a clause that NEGATES one shape and ASSERTS the turn node in the "
+            "next is the half-correction this guard exists for, and the "
+            f"negation escape passed it: {sentence!r}")
+
+
+def test_the_present_tense_guard_reads_the_spellings_the_tree_writes():
+    """The present-tense guard must red on the claim and NOT on the correction.
+
+    #10675 review (P2) measured six sentences the guard graded wrongly, three in
+    each direction. They live here, INSIDE the excised guard block, so the
+    population pin above does not read its own test fixtures as a claim — the
+    same self-grading hazard `_GUARD_BLOCK` exists to prevent.
+
+    FAILS IF: the guard goes back to requiring a bare (un-backticked) subject,
+    to demanding the literal ``pointKind`` where ``turn node`` says the same
+    thing, or to reading a pre-verb negator as an assertion.
+    """
+    # ── MUST RED: restatements of the deleted writer ──────────────────────
+    for claim in (
+        # Backticked identifier — how this tree actually writes it.
+        "`_seed_demo_graph` writes a pointKind='event' node per turn",
+        "``_seed_demo_graph`` writes a pointKind='event' node per turn",
+        "`hosted_api._seed_demo_graph` writes pointKind='event' per turn",
+        # The vocabulary the positive half of this guard calls the turn shape.
+        "the demo seed writes one turn node per demo turn",
+        # Baseline: the un-backticked form that already worked.
+        "the demo seed writes a pointKind='event' node per turn",
+    ):
+        assert _present_tense_writer_claim(claim) is not None, (
+            "the guard is fail-OPEN on a restatement of the deleted turn "
+            f"writer: {claim!r} was accepted (#10675 review, P2)")
+
+    # ── MUST NOT RED: the corrections, and true statements ────────────────
+    for okay in (
+        # Negation BEFORE the verb — the corrected sentence, and the one the
+        # pin is supposed to encourage.
+        "the demo seed no longer writes pointKind='event' nodes",
+        "the demo seed does not write pointKind='event' nodes",
+        "the demo seed never writes pointKind='event' nodes",
+        # Negation AFTER the verb (the form that already worked).
+        "since #10000 the demo seed writes no pointKind='event' node",
+        # TRUE: the seeder still writes these other kinds.
+        "the demo seed writes pointKind='hypothesis' points",
+        "the demo seed writes ~10 Points to the sample graph",
+    ):
+        assert _present_tense_writer_claim(okay) is None, (
+            "the guard refused a TRUE or CORRECTED sentence, which is a false "
+            f"RED on the prose it asks for: {okay!r} (#10675 review, P2)")
+
+
+# ── END of the guard's machinery — below this line the population resumes
+
+
+def _doc_block_above(source: str, symbol: str) -> list[str]:
+    """The contiguous ``#:`` lines immediately above ``symbol``'s assignment."""
+    lines = source.splitlines()
+    index = next(i for i, line in enumerate(lines)
+                 if re.match(rf"^{re.escape(symbol)}\s*=", line))
+    block: list[str] = []
+    for line in reversed(lines[:index]):
+        if not line.startswith("#:"):
+            break
+        block.append(line)
+    return list(reversed(block))
+
+
+def test_each_guard_regex_documents_its_own_subject():
+    """A ``#:`` block documents the symbol that FOLLOWS it, and only the block
+    immediately above it.
+
+    Measured (#10675 review, P3): two ``#:`` paragraphs with no blank line
+    between them both attach to the SECOND constant, so the vocabulary rule
+    (`event` / the node kind that was deleted / the exclusion flag) shipped as
+    the documentation of the OTHER guard — the regex that answers "is this
+    somebody ELSE's seeder?". The constant VALUES were right and nothing
+    behaved differently; what broke is the one job those paragraphs have,
+    telling two guards apart for the next reader.
+
+    FAILS IF: the blocks are merged, swapped, or one is attached to the wrong
+    symbol. Deliberately asserted on each block's FIRST line: a merged block
+    still CONTAINS the other constant's keywords, so a "keyword is present"
+    check passes on exactly the shape that caused this.
+    """
+    source = (_REPO / "tests/test_session_reinjection_rules.py").read_text(
+        encoding="utf-8")
+    for symbol, opening in (
+        ("_TURN_SHAPE_VOCABULARY",
+         "What makes a seed mention a statement about the TURN SHAPE"),
+        ("_OTHER_SEEDER_CONTEXT",
+         "A subject introduced as somebody ELSE's seeder"),
+    ):
+        block = _doc_block_above(source, symbol)
+        assert block, (
+            f"`{symbol}` has no `#:` doc block above it — a paragraph that "
+            "documents a guard must sit immediately above that guard, not "
+            "above its neighbour")
+        first = block[0].removeprefix("#:").strip()
+        assert first.startswith(opening), (
+            f"the `#:` block above `{symbol}` opens with {first!r}, which is "
+            f"another constant's subject — expected it to open with "
+            f"{opening!r}. Two `#:` paragraphs with no blank line between "
+            "them attach to the SAME symbol, so the two guards' rules end up "
+            "documenting each other (#10675 review, P3)")
+
+
+def test_the_population_scan_excludes_the_guards_own_body():
+    """The excision must end this guard's BODY, not its ``def`` line.
+
+    FAILS ON the shape that ended at the ``def`` prefix: that removed the header
+    block and returned the guard test's own body — docstring, assertion messages
+    and all — to the scanned population, so the pin graded its own commentary.
+    Measured there: an ordinary comment added inside the guard's body, naming
+    that writer as a present-tense producer of the legacy turn shape, flipped
+    the pin to RED on its own file with nothing pointing at the cause
+    (#10675 review P3).
+
+    The probe is the guard's OWN docstring, read through ``ast`` rather than
+    spelled here: a hard-coded sample would go stale the first time the
+    docstring is reworded, and this test would then pass for the wrong reason.
+    """
+    source = (_REPO / "tests/test_session_reinjection_rules.py").read_text(
+        encoding="utf-8")
+    guard = next(
+        (node for node in ast.parse(source).body
+         if isinstance(node, ast.FunctionDef) and node.name ==
+         "test_no_home_states_the_deleted_demo_turn_writer_as_current_fact"),
+        None)
+    assert guard is not None, (
+        "this file no longer defines the guard test the excision is written "
+        "for, so `_GUARD_END` names nothing and this pin would be vacuous")
+
+    doc = ast.get_docstring(guard) or ""
+    lines = [line.strip() for line in doc.splitlines() if line.strip()]
+    assert lines, (
+        "the guard test lost its docstring; this pin uses its first non-empty "
+        "line as body-only text the scanned population must NOT contain")
+    probe = lines[0]
+
+    flat = _narrative_text("tests/test_session_reinjection_rules.py")
+    assert probe not in flat, (
+        "the guard test's own body is back inside the scanned population — "
+        f"its docstring line {probe!r} was found. The excision ended at the "
+        "guard's `def` prefix instead of the END of its body, so this pin can "
+        "grade its own commentary (the round-10/11 self-grading class, returned "
+        "one block down)")

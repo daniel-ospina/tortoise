@@ -466,17 +466,45 @@ class QuotaExceededError(Exception):
     def __init__(self, message: str, *, resource: str | None = None,
                  used: int | None = None, limit: int | None = None,
                  estimate: int | None = None,
+                 estimated: bool | None = None,
                  code: str = QUOTA_REFUSAL_CODE) -> None:
         super().__init__(message)
         self.resource = resource
         self.used = used
         self.limit = limit
         self.estimate = estimate
+        # #5331: ``estimated`` marks a refusal decided from a SAMPLING estimate
+        # (the graph byte meter). Omitted (None) by every raise site that knows
+        # its figure is exact, so the payload keeps its shape — a refusal may
+        # not present an estimate as exact, and may not claim precision either.
+        self.estimated = estimated
         self.code = code
 
 
 class QuotaCheckError(Exception):
     """Quota counting/config failed — fail closed (500/503), never pass."""
+
+
+class OrgNotFoundError(QuotaCheckError):
+    """The resolver has no RECORD for this org — a STATE, not a fault (#9567).
+
+    Still a :class:`QuotaCheckError`, so every existing caller keeps its exact
+    fail-closed behaviour: where the resolved limits dict IS the answer ("what
+    may this org do?"), a missing org must be refused, and it still is.
+
+    The subclass exists for the ONE caller that only AUGMENTS a dict it was
+    already given (:func:`tortoise.allowance_gate.carry_resolved_allowances`, at
+    the REST seam). There the consumer's own auth read is authoritative and the
+    resolver can only ADD an allowance — so "this org has no row" cannot arm a
+    cap (the gate's declared default is "absent key = unconfigured"), while "the
+    read failed" is our own fault and IS refused. Collapsing the two reported a
+    tenant's well-defined absence as a 500 on every gated door, which is the
+    over-block the module's own ``#3981`` note rules out for OUR bookkeeping —
+    and the same absence was UNLIMITED on every door that skips the fill, so the
+    one state had two answers depending on the door. Canonical error-code
+    guidance (AIP-193) draws the same line: NOT_FOUND is a state the caller can
+    act on; UNAVAILABLE is the fault that must refuse.
+    """
 
 
 def quota_refusal_payload(exc: QuotaExceededError) -> dict:
@@ -498,7 +526,7 @@ def quota_refusal_payload(exc: QuotaExceededError) -> dict:
         "code": getattr(exc, "code", None) or QUOTA_REFUSAL_CODE,
         "message": str(exc),
     })
-    for key in ("resource", "used", "limit", "estimate"):
+    for key in ("resource", "used", "limit", "estimate", "estimated"):
         value = getattr(exc, key, None)
         if value is not None:
             payload[key] = value
@@ -557,8 +585,11 @@ def resolve_org_limits(org_id: str) -> dict:
     empty graph (post-flip verification finding, #669). Registry mode: the
     Org node, as before.
 
-    Missing Org → QuotaCheckError (fail-closed; the auth layer should
-    guarantee key→org mapping).
+    Missing Org → :class:`OrgNotFoundError` (a ``QuotaCheckError`` subclass, so
+    fail-closed everywhere it is consumed; the auth layer should guarantee
+    key→org mapping). The subclass lets a caller that only AUGMENTS an
+    already-authoritative dict tell "no record" (a state — nothing to carry)
+    from "the read failed" (a fault it must refuse).
 
     CONTRACT (the return shape every caller must honour, #310 GAP-B / #4010):
     the returned dict carries EVERY value of ``_RESOURCE_LIMIT_KEYS``. A key
@@ -605,7 +636,8 @@ def resolve_org_limits(org_id: str) -> dict:
                             _ORG_ADDITIVE_BILLING_TIER],
         )
         if row is None:
-            raise QuotaCheckError(f"Team {org_id!r} not found in control plane")
+            raise OrgNotFoundError(
+                f"Team {org_id!r} not found in control plane")
         # #1082 PR2: the anon ceiling is tier-DERIVED at resolution — an
         # unclaimed zero-email org (owner user_id NULL) resolves to the
         # reduced ``anon`` tier until claimed, then lifts to free. The row
@@ -658,7 +690,7 @@ def resolve_org_limits(org_id: str) -> dict:
         params={"id": org_id},
     ).result_set
     if not rows:
-        raise QuotaCheckError(f"Team {org_id!r} not found in registry")
+        raise OrgNotFoundError(f"Team {org_id!r} not found in registry")
     tier, mu, mg, mp, mak, _ms = rows[0]
     tier = tier or "free"
     from tortoise.pricing import tier_limits
@@ -1257,8 +1289,14 @@ def enforce_org_limit(limits: dict | None, resource: str, sdk=None, *,
             client-supplied value — an unproven credit is a free slot.
 
     Raises:
-        QuotaExceededError: org at/over limit (402-equivalent).
-        QuotaCheckError: counting failed (fail-closed).
+        QuotaExceededError: org at/over limit (402-equivalent) — including a
+            RULED dimension at/over its configured allowance (#5331: graph MB /
+            Postgres bytes / extraction tokens), which is checked FIRST and
+            names the dimension in ``resource``.
+        QuotaCheckError: counting failed (fail-closed), or a ruled dimension has
+            an allowance configured but NO usable reading (never measured, meter
+            fault, older than the stated bound, blocked, or an unreadable limit
+            value). See ``tortoise/allowance_gate.py``.
     """
     if limits is None:
         return  # stdio/operator — no org context
@@ -1275,6 +1313,35 @@ def enforce_org_limit(limits: dict | None, resource: str, sdk=None, *,
     # existing #5425-registered category, unchanged.
     if resource not in GATEABLE_RESOURCES:
         raise QuotaCheckError(f"unknown quota resource: {resource!r}")
+
+    # ── #5331/#9567 D11-D12: the DIMENSIONS THE OWNER RULED ──────────
+    # The gate below counts NODES and enforces ``max_points``. The ruled storage/
+    # LLM dimensions are BYTES (Postgres, graph MB) and TOKENS (extraction), and
+    # a node count is explicitly NOT the model (#4495/#5331). So they are
+    # enforced HERE, ahead of the legacy node count, through the ONE declared
+    # registry (``cost_dimensions``) — see ``tortoise/allowance_gate.py``.
+    #
+    # ⛔ INERT BY DEFAULT: no production resolver emits an ``ALLOWANCE_KEYS``
+    # value, so every dimension is unconfigured and this call is a dict-miss per
+    # dimension. It REFUSES only once an allowance is configured — the ordering
+    # the storage architecture requires (wire the meter, then configure).
+    # The legacy ``points`` count below is deliberately RETAINED (it is a real
+    # node cap with its own #4051 history); it is a LEGACY dimension whose unit
+    # the owner has replaced, and it stays until an allowance is configured.
+    try:
+        from .allowance_gate import enforce_allowances
+    except Exception as e:
+        # A swallowed import here would emit an unmapped 500 this gate promises
+        # never to produce (#4051). The gate's own drift check is deliberately
+        # LOUD at import (a renamed dimension is a hard failure), so the
+        # loudness is preserved inside the documented refusal type instead of
+        # escaping as a KeyError/ImportError.
+        _logger.error(
+            "allowance gate unavailable (fail-closed): team=%s error=%r",
+            org_id, e)
+        raise QuotaCheckError(
+            f"the allowance gate is unavailable ({type(e).__name__}: {e})") from e
+    enforce_allowances(limits, org_id=org_id, resource=resource)
     # ── documents: DERIVED-CONSTANT cap (T2-P2a, #1726) — handled BEFORE the
     # pricing-keyed generic path. Deliberately NOT in _RESOURCE_LIMIT_KEYS: a
     # pricing.json max_documents field would ripple through tier_limits /

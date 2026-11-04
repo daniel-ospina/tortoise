@@ -1242,57 +1242,86 @@ def get_ask_usage(org_id: str) -> dict:
 
 
 def get_capture_usage(org_id: str) -> dict:
-    """Capture (extractor) usage for *org_id* in its current metering window.
+    """Extraction TOKEN usage for *org_id* in its current window (#4051, #5331).
 
-    Returns ``{capture_calls, capture_tokens_in, capture_tokens_out,
-    capture_cost_usd, period, period_start, period_end}`` — ZEROS for an org
-    with no capture records yet (a successful read returning NO row is not an
-    error; the MERGE only creates the record on the first write). Read failures
-    degrade to the zero-usage view (never 500, #923).
+    The READ side of the ``capture_extraction`` dimension. ``record_capture_usage``
+    has written ``capture_tokens_in``/``capture_tokens_out`` since #5045, and
+    nothing read them back per org until #9567 D11/D12 — the DECLARED reader on
+    ``cost_dimensions.capture_extraction`` WAS ``get_current_usage``, which
+    returns WRITE OPS (a different dimension: ``write_ops``'s REGISTRY reader is
+    ``measure_write_ops`` and ``get_current_usage`` is the unfail-closed display
+    read behind ``/v1/team``). An allowance cannot be enforced against a figure
+    nobody can read, so this is the reader, not a new dimension: it reads the
+    columns the writer already maintains, and the registry declares it.
 
-    WHY THIS EXISTS (#4051). ``record_capture_usage`` has written
-    ``capture_tokens_in`` / ``capture_tokens_out`` since #5045, and the owner
-    ruling behind them (2026-09-26) is that the customer-visible extraction
-    allowance is **denominated in tokens**. But the columns had no READER: the
-    ``capture_extraction`` row in ``tortoise/cost_dimensions.py`` declared
-    ``get_current_usage`` as its reader, and that function returns write-op
-    fields only. So "tokens per team per period" was written and unreadable
-    from code — the state ``EXTRACTOR-V4-ARCHITECTURE.md`` §0 recorded as a
-    residual (CLOSED by this change), and the ``#4493`` failure mode in which a
-    recorded dimension with no reader reads as a measurement that does not exist.
+    ⚠️ ONE function, TWO landed contracts — reconciled deliberately, not merged
+    by accident (#10668 review round 12). #4051 landed this reader first
+    (PR #10640) with ``{capture_calls, capture_tokens_in, capture_tokens_out,
+    capture_cost_usd} + period trio`` and a zero-view degradation; #9567's branch
+    defined a SECOND ``def get_capture_usage`` at the same insertion point with
+    ``{measured, unmeasured_reason, capture_tokens_total, …}``. Python does not
+    error on a duplicate ``def`` — the last one silently wins — so the merge had
+    to be a decision. It is this body, which is a strict superset: every key
+    #4051's landed tests assert (``capture_cost_usd`` included) plus the two
+    facts the gate cannot work without.
 
-    ⛔ MEASUREMENT ONLY. Nothing here prices, caps, throttles or refuses, and
-    no request path calls it: it is the read half the owner's post-beta
-    calibration needs (``docs/architecture/CONSUMPTION-MODEL.md`` §6 S1). The
-    spend ceiling cannot see it by construction — ``get_cohort_spend_usd``
-    reads the ``*_cost_usd`` columns only, and no caller passes these to it.
+    Returns ``{measured, unmeasured_reason, capture_calls, capture_tokens_in,
+    capture_tokens_out, capture_tokens_total, capture_cost_usd, period,
+    period_start, period_end}``.
 
-    ``period`` is the DERIVED ``"YYYY-MM"`` label, mirroring
-    ``get_ask_usage``; the window the figure was read from is exposed as
-    ``period_start`` / ``period_end``.
+    ⚠️ ``measured`` is NOT ``total > 0``. A capture whose extraction reported no
+    provider usage records ZERO tokens, and #5045 states that caveat explicitly:
+    a zero there is not evidence of a free capture. So a zero IS a reading. It is
+    ``False`` only when the ledger could not be read at all —
+    ``"absent"`` (no row for the window: nobody has captured yet),
+    ``"read_error"`` (the store refused the query) or
+    ``"period_error"`` (the billing window itself was unresolvable). The reason
+    TRAVELS rather than being flattened into the number, because the two halves
+    are decided differently downstream: ``read_error``/``period_error`` must
+    REFUSE, while ``absent`` is the per-dimension decision a cumulative FLOW
+    declares as a zero (``allowance_gate.AllowanceDimension.absent_is_zero``,
+    #9567 review round 3 — the row is MERGE-created by the capture itself, so
+    refusing an absence would deadlock the window it is waiting for).
+
+    ⛔ NEVER RAISES (#923, #4051) — that half of the landed contract is kept
+    exactly: a failed read degrades to the zero view and NAMES why in
+    ``unmeasured_reason``. The gate, not this reader, turns a named fault into a
+    refusal; a reader that raised would 500 a read path that must not fail.
+
+    ``period`` is the DERIVED ``"YYYY-MM"`` label, mirroring ``get_ask_usage``;
+    the window the figure was read from is exposed as ``period_start`` /
+    ``period_end``.
     """
-    zeros = {"capture_calls": 0, "capture_tokens_in": 0,
-             "capture_tokens_out": 0, "capture_cost_usd": 0.0}
-    _capture_keys = tuple(zeros)
+    zeros = {
+        "measured": False,
+        "unmeasured_reason": "absent",
+        "capture_calls": 0,
+        "capture_tokens_in": 0,
+        "capture_tokens_out": 0,
+        "capture_tokens_total": 0,
+        "capture_cost_usd": 0.0,
+    }
 
-    def _zero_view(label: str,
-                   period: MeteringPeriod | None = None) -> dict:
-        return {**zeros, "period": label,
+    def _view(label: str, period: MeteringPeriod | None = None,
+              **over: object) -> dict:
+        return {**zeros, **over, "period": label,
                 "period_start": period.start_iso if period else None,
                 "period_end": period.end_iso if period else None}
 
     if not org_id:
-        return _zero_view(_display_period_label())
+        return _view(_display_period_label())
     try:
         period = _current_period(org_id)
     except Exception as e:
         # #923: this read never raises. An unresolvable WINDOW has no row to
-        # read, so the degradation is the zero view — never a month key.
+        # read, so the degradation is the zero view — never a month key — and
+        # the reason travels so a gate reading it can fail closed on a NAMED
+        # fault (#3981: an unresolvable window is a SIGNAL, not an absence).
         _logger.warning(
-            "capture usage query failed (degrading to zero view): team=%s "
-            "error=%s", org_id, e,
+            "capture usage query failed (no window): team=%s error=%s",
+            org_id, e,
         )
-        return _zero_view(_display_period_label())
+        return _view(_display_period_label(), unmeasured_reason="period_error")
     try:
         if _supabase_mode():
             from tortoise.supabase_control import (  # noqa: I001
@@ -1300,10 +1329,15 @@ def get_capture_usage(org_id: str) -> dict:
             )
             row = metering_get_capture_usage(get_control_plane(), org_id,
                                              period.start_iso)
-            return {**zeros, **{k: row.get(k, 0) for k in _capture_keys},
-                    "period": period.label,
-                    "period_start": period.start_iso,
-                    "period_end": period.end_iso}
+            return _view(period.label, period,
+                         measured=bool(row.get("measured")),
+                         unmeasured_reason=row.get("unmeasured_reason"),
+                         capture_calls=int(row.get("capture_calls") or 0),
+                         capture_tokens_in=int(row.get("capture_tokens_in") or 0),
+                         capture_tokens_out=int(row.get("capture_tokens_out") or 0),
+                         capture_tokens_total=int(row.get("capture_tokens_in") or 0)
+                         + int(row.get("capture_tokens_out") or 0),
+                         capture_cost_usd=float(row.get("capture_cost_usd") or 0.0))
         sdk = _reg_sdk()
         reg = sdk._get_registry()
         rows = reg.query(
@@ -1313,24 +1347,21 @@ def get_capture_usage(org_id: str) -> dict:
             params={"tid": org_id, "pstart": period.start_iso},
         ).result_set
         if not rows:
-            return _zero_view(period.label, period)
-        return {
-            "capture_calls": int(rows[0][0] or 0),
-            "capture_tokens_in": int(rows[0][1] or 0),
-            "capture_tokens_out": int(rows[0][2] or 0),
-            "capture_cost_usd": float(rows[0][3] or 0.0),
-            "period": period.label,
-            "period_start": period.start_iso,
-            "period_end": period.end_iso,
-        }
+            return _view(period.label, period)
+        tin = int(rows[0][1] or 0)
+        tout = int(rows[0][2] or 0)
+        return _view(
+            period.label, period, measured=True, unmeasured_reason=None,
+            capture_calls=int(rows[0][0] or 0),
+            capture_tokens_in=tin, capture_tokens_out=tout,
+            capture_tokens_total=tin + tout,
+            capture_cost_usd=float(rows[0][3] or 0.0))
     except Exception as e:
         _logger.warning(
-            "capture usage query failed (degrading to zero view): team=%s "
-            "period=%s error=%s", org_id, period.label, e,
+            "capture usage query failed (no reading): team=%s period=%s "
+            "error=%s", org_id, period.label, e,
         )
-        return _zero_view(period.label, period)
-
-
+        return _view(period.label, period, unmeasured_reason="read_error")
 # ── Stock/flow conversion: nodes per billed write op (#4495) ────────────────
 #
 # WHY. The price book publishes a monthly write-op FLOW

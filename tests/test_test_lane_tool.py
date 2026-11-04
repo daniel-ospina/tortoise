@@ -68,6 +68,20 @@ def lane(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _reap_state_dir_is_isolated(tmp_path, monkeypatch):
+    """The lease/marker registry is REAL box state, so no test may touch it.
+
+    `REAP_STATE_DIR` defaults to `~/.pi/agent/state/lane-reap/`, and the hook
+    tests drive the REAL `_peer_run_is_live` / `_touch_lease` (a live peer marker
+    is exactly what one of them asserts). Left pointing at the home directory
+    they wrote markers and leases into the developer's own registry and read
+    whatever a LIVE peer lane had left there — a test whose result depended on the
+    box, on a file registered to a docker-free CI surface (#10813 review).
+    """
+    monkeypatch.setattr(tl, "REAP_STATE_DIR", tmp_path / "lane-reap")
+
+
+@pytest.fixture(autouse=True)
 def _host_probe_and_sweep_are_stubbed(monkeypatch):
     """#8180: `_ping_over_host` is a REAL TCP connect, and `start()` now sweeps
     orphans with real git/docker calls. Unit tests stub `_docker` only, so
@@ -151,7 +165,8 @@ def test_reaper_reaps_an_unowned_container_and_keeps_a_live_owner(
     alive.mkdir()
     monkeypatch.setattr(tl, "lane_name", lambda: "fdb-lane-mine")
     monkeypatch.setattr(tl, "_docker", lambda *a, **k: _R(
-        0, "fdb-lane-dead\nfdb-lane-alive\nfdb-lane-mine\n", "") if a[0] == "ps"
+        0, "fdb-lane-dead\texited\nfdb-lane-alive\texited\nfdb-lane-mine\texited\n", "")
+        if a[0] == "ps"
         else _R(0, "", ""))
     monkeypatch.setattr(tl, "_worktree_slugs",
                         lambda: {"dead": str(dead), "alive": str(alive)})
@@ -159,6 +174,9 @@ def test_reaper_reaps_an_unowned_container_and_keeps_a_live_owner(
     # (the measured conflation: 68 containers outlived their lanes by days).
     monkeypatch.setattr(tl, "_live_lane_paths", lambda: {str(alive)})
     monkeypatch.setattr(tl, "_started_epoch", lambda _n: 0.0)
+    # The client probe is a SEPARATE gate (#10806) and has its own test below;
+    # stating it here keeps this test about ownership.
+    monkeypatch.setattr(tl, "_container_in_use", lambda _n: False)
     out = tl.reap_orphans()
     joined = "\n".join(out)
     assert "removed fdb-lane-dead" in joined, out
@@ -585,7 +603,12 @@ def test_reaper_reports_NO_termination_facts_for_a_RUNNING_owner_gone_removal(
     own `live` flag exists to prevent exactly that, and `start()` refuses to
     append any report to an unreadable state). Mutation: read the facts
     unconditionally and this fails; the terminal-state evidence test above still
-    passes, so only this one pins the distinction."""
+    passes, so only this one pins the distinction.
+
+    ⛔ The removal also needs the SECOND proof (#10841 review, P1): a running
+    container is only removed once the gap proves nobody is using it. Both are
+    stubbed here so the facts rule is what the assertion isolates.
+    """
     removed: list = []
 
     def fake(*a, **k):
@@ -598,8 +621,11 @@ def test_reaper_reports_NO_termination_facts_for_a_RUNNING_owner_gone_removal(
     monkeypatch.setattr(tl, "_docker", fake)
     monkeypatch.setattr(tl, "lane_name", lambda: "fdb-lane-mine")
     monkeypatch.setattr(tl, "_worktree_slugs", lambda: {"lively": "/gone/worktree"})
+    monkeypatch.setattr(tl, "_container_in_use", lambda _n: False)
     monkeypatch.setattr(tl, "_termination_report",
                         lambda _n, live: "KILLED FOR MEMORY (OOMKilled=true)")
+    monkeypatch.setattr(tl, "_container_in_use", lambda _n: False)
+    monkeypatch.setattr(tl, "_unused_gap", lambda _n: 5.0)
     out = tl.reap_orphans()
     assert removed == [("-f", "fdb-lane-lively")], (removed, out)
     assert "KILLED FOR MEMORY" not in out[0], out
@@ -1946,6 +1972,63 @@ def test_wait_ready_does_not_overshoot_its_budget_when_the_host_probe_black_hole
     assert seen == [], f"the exec probe was issued past the deadline: {seen}"
 
 
+def test_proof_1_SPARES_a_container_a_live_client_is_using(monkeypatch):
+    """#10806 review: "the owning worktree is gone" is a fact about a DIRECTORY.
+
+    Proof 1 fired without ever asking the container, so a lane whose worktree was
+    reaped out from under it — or a cross-clone reader — had its live database
+    deleted on the 15-minute clock. `_container_in_use` is the one liveness datum
+    that does not need to know the owner, and `None` (unreadable) must spare too:
+    unreadable is not "unused".
+
+    ⛔ The PROBE is this test's subject and it is unchanged. The REMOVAL rung below
+    it is not: #10806 landed this probe on `origin/main` while the fold landed
+    `0abaa51a5` ("the ownership label needs USE proof"), which widened the
+    owner-gone arm's second proof to both owner sources — docker's own TERMINAL
+    state, OR no attached client ACROSS `OWNER_GRACE_H`. The two never saw each
+    other, and a bare "answered `False`" is no longer sufficient proof on its own,
+    because a lane between two steps answers exactly that. So the probe assertions
+    are kept verbatim and the removal rung now proves BOTH halves: first sighting
+    keeps, a full client-free grace removes.
+    """
+    removed: list = []
+
+    def fake(*a, **k):
+        if a[0] == "ps":
+            return _R(0, "fdb-lane-lively\trunning\n", "")
+        if a[0] == "rm":
+            removed.append(a[2])
+        return _R(0, "", "")
+
+    monkeypatch.setattr(tl, "_docker", fake)
+    monkeypatch.setattr(tl, "lane_name", lambda: "fdb-lane-mine")
+    monkeypatch.setattr(tl, "_worktree_slugs", lambda: {"lively": "/gone/wt"})
+    monkeypatch.setattr(tl, "_live_lane_paths", lambda: {"/somewhere/else"})
+    for answer in (True, None):
+        removed.clear()
+        monkeypatch.setattr(tl, "_container_in_use", lambda _n, a=answer: a)
+        out = "\n".join(tl.reap_orphans())
+        assert "removed fdb-lane-lively" not in out, out
+        assert removed == [], (
+            f"a container reporting {answer!r} for its clients was removed")
+    # …and with no client it IS removable, so the gate has not disabled proof 1 —
+    # but only on the SECOND rung of the ladder the fold added (0abaa51a5): the
+    # owner being gone is evidence about OWNERSHIP, never about USE.
+    monkeypatch.setattr(tl, "_container_in_use", lambda _n: False)
+
+    # No client, but nothing observed unused yet: a lane between steps.
+    monkeypatch.setattr(tl, "_unused_gap", lambda _n: None)
+    out = "\n".join(tl.reap_orphans())
+    assert removed == [], out
+    assert "first sighting" in out, out
+
+    # …and now BOTH proofs hold: owner gone AND no client across the full grace.
+    monkeypatch.setattr(tl, "_unused_gap", lambda _n: tl.OWNER_GRACE_H + 1.0)
+    out = "\n".join(tl.reap_orphans())
+    assert "removed fdb-lane-lively" in out, out
+    assert removed == ["fdb-lane-lively"], removed
+
+
 def test_start_sweeps_orphans_and_reports_them_on_stderr(
         tmp_path, lane, monkeypatch, capsys):
     """The call site that makes ownership reaping BITE (#8180). Every reaper
@@ -1957,14 +2040,19 @@ def test_start_sweeps_orphans_and_reports_them_on_stderr(
     would corrupt a lane's target instead of aborting it."""
     dead = tmp_path / "dead-worktree"
     monkeypatch.setenv("TORTOISE_TEST_LANE_REAP", "1")
+    # `start()` is stubbed, so state its CREATE/REUSE verdict explicitly: the exit
+    # hook only removes a container this `run` created.
+    monkeypatch.setattr(tl, "_LAST_START_CREATED", True)
     monkeypatch.setattr(tl, "lane_name", lambda: "fdb-lane-mine")
     monkeypatch.setattr(tl, "container_state", lambda _n: "absent")
     monkeypatch.setattr(tl, "_worktree_slugs", lambda: {"dead": str(dead)})
+    # The client probe is its own gate (#10806) with its own test below.
+    monkeypatch.setattr(tl, "_container_in_use", lambda _n: False)
     removed: list = []
 
     def fake(*a, **k):
         if a[0] == "ps":
-            return _R(0, "fdb-lane-dead\n", "")
+            return _R(0, "fdb-lane-dead\texited\n", "")
         if a[0] == "run":
             return _R(0, "deadbeef\n", "")
         if a[0] == "port":
@@ -4359,13 +4447,46 @@ def test_the_env_fallback_does_not_call_a_readable_ceiling_unreadable(
 # stubbed here like everywhere else in this file.
 
 def _stub_start(monkeypatch, *, port: int = 16406):
-    """Pin the resolved lane, so the seam under test is the child env, not Docker."""
+    """Pin the resolved lane, so the seam under test is the child env, not Docker.
+
+    `_container_in_use` is pinned to "no live client" because the exit hook reads
+    it before reaping (#10806 review): left real, it would issue a docker call in
+    every one of these tests and answer `None` (unreadable), which fails closed
+    and suppresses the reap the hook tests assert. Its own behaviour has a test.
+    """
     monkeypatch.setattr(tl, "start", lambda _p=None: (LANE_FIXTURE_NAME, port))
+    # `**kwargs`: the hook asks the probe a STRICTER question than the sweep does
+    # (`idle_within_s=None` — "is anything attached at all", see `cmd_run`), so a
+    # stub that only accepts the name would raise TypeError and the hook's own
+    # `except Exception` would swallow it as "could not reap".
+    monkeypatch.setattr(tl, "_container_in_use", lambda _n, **_k: False)
+    # The hook reads the container's STATE before it decides whether the client
+    # probe is meaningful at all (a TERMINAL container cannot have a client, and
+    # `docker exec` into it fails — #10813 review P2-3). Left real, that is a
+    # `docker inspect` in every one of these tests. Pinned to `running`, the state
+    # in which the question is askable; the terminal case has its own test.
+    monkeypatch.setattr(tl, "container_state", lambda _n: "running")
+    # The module-wide fixture disables automatic reaping (`TORTOISE_TEST_LANE_REAP=0`)
+    # so no test touches the real box's containers; `run` now HONOURS that opt-out
+    # (#10813 review P2-4), so the run tests have to re-enable it for themselves.
+    # `start()` is stubbed above, so enabling it here cannot trigger a real sweep.
+    monkeypatch.setenv("TORTOISE_TEST_LANE_REAP", "1")
+    # `start()` is stubbed, so state its CREATE/REUSE verdict explicitly: the exit
+    # hook only removes a container this `run` created.
+    monkeypatch.setattr(tl, "_LAST_START_CREATED", True)
 
 
 def _capture_run(monkeypatch, *, returncode: int = 0) -> dict:
-    """Capture the child invocation. Returns the record the assertions read."""
-    seen: dict = {}
+    """Capture the child invocation. Returns the record the assertions read.
+
+    `stop` is stubbed here because every test below pins the CHILD INVOCATION
+    (argv, env, exit-code mapping), not the exit path — and the exit hook
+    (#8180) would otherwise reach the real docker on every one of them. The
+    hook's own tests, further down, pin the hook through this same stub: what
+    they assert is that `stop` is CALLED (and when), never what `stop` does —
+    `stop()` is tested directly, elsewhere in this file.
+    """
+    seen: dict = {"stopped": []}
 
     def fake_run(argv, env=None, **kwargs):
         seen["argv"] = list(argv)
@@ -4374,6 +4495,8 @@ def _capture_run(monkeypatch, *, returncode: int = 0) -> dict:
         return _R(returncode, "", "")
 
     monkeypatch.setattr(tl.subprocess, "run", fake_run)
+    monkeypatch.setattr(tl, "stop",
+                        lambda: (seen["stopped"].append("stop"), "removed")[1])
     return seen
 
 
@@ -4462,7 +4585,7 @@ def test_run_re_stamps_the_lease_AFTER_the_child(lane, monkeypatch):
 
     monkeypatch.setattr(tl.subprocess, "run", fake_run)
     monkeypatch.setattr(tl, "_touch_lease", lambda n: events.append(("lease", n)))
-    assert tl.main(["run", "--", "-q", "tests/"]) == 0
+    assert tl.main(["run", "--keep-container", "--", "-q", "tests/"]) == 0
     assert events == [("child", None), ("lease", LANE_FIXTURE_NAME)], events
 
 
@@ -4482,7 +4605,7 @@ def test_a_run_LONGER_than_the_grace_ends_with_a_FRESH_lease(lane, monkeypatch):
     assert tl._unused_gap(name) > 2.9          # the pre-run lease, past the grace
     _stub_start(monkeypatch, port=16413)
     _capture_run(monkeypatch)                  # a child that ran and returned
-    assert tl.main(["run", "--", "-q", "tests/"]) == 0
+    assert tl.main(["run", "--keep-container", "--", "-q", "tests/"]) == 0
     gap = tl._unused_gap(name)
     assert gap is not None and gap < 0.1, gap
 
@@ -4507,6 +4630,315 @@ def test_run_reports_a_SIGNAL_kill_as_128_plus_N_not_a_negative_code(
     assert "NOT a test failure" in err
 
 
+# ── THE EXIT HOOK (#8180's actuator half) ───────────────────────────────────
+# `run` is where a lane ENDS, so it is where its container goes. These pin the
+# three properties that make the hook safe to be the DEFAULT on every lane:
+# it runs on the failure path too, it can be escaped, and it never speaks for
+# the run's verdict.
+
+
+def test_run_REAPS_its_own_container_on_exit_BY_DEFAULT(lane, monkeypatch):
+    """The primary fix for the leak: a normal `run` leaves NO container.
+
+    Measured before this hook: every lane that ran the suite and was then closed
+    (`cmux workspace close` never calls `down`) left exactly one `fdb-lane-*`
+    container behind, forever — 189 of them across three cells, each reaped by
+    hand. Mutation: delete the `finally:` reap and the container survives every
+    normal run."""
+    _stub_start(monkeypatch, port=16412)
+    events: list = []
+
+    def fake_run(argv, env=None, **kwargs):
+        events.append("child")
+        return _R(0, "", "")
+
+    monkeypatch.setattr(tl.subprocess, "run", fake_run)
+    monkeypatch.setattr(tl, "stop",
+                        lambda: (events.append("reap"), "removed")[1])
+    assert tl.main(["run", "--", "-q", "tests/"]) == 0
+    assert events == ["child", "reap"], events
+
+
+def test_run_REAPS_on_the_FAILURE_path_too(lane, monkeypatch):
+    """A RED run is when nobody runs `down`, so it is the path that leaks most."""
+    _stub_start(monkeypatch, port=16412)
+    reaped: list = []
+    monkeypatch.setattr(tl.subprocess, "run", lambda *a, **k: _R(1, "", ""))
+    monkeypatch.setattr(tl, "stop", lambda: (reaped.append(1), "removed")[1])
+    assert tl.main(["run", "--", "-q", "tests/"]) == 1   # the verdict survives
+    assert reaped == [1], "a failing run left its container behind"
+
+
+def test_keep_container_ESCAPES_the_hook_and_still_stamps_the_lease(
+        lane, monkeypatch):
+    """A post-mortem needs the DB. The escape must be explicit, and it must
+    still write the lease — a container deliberately kept for inspection is
+    exactly the one a peer's sweep must not take."""
+    _stub_start(monkeypatch, port=16412)
+    leases: list = []
+    reaped: list = []
+    monkeypatch.setattr(tl.subprocess, "run", lambda *a, **k: _R(0, "", ""))
+    monkeypatch.setattr(tl, "stop", lambda: (reaped.append(1), "removed")[1])
+    monkeypatch.setattr(tl, "_touch_lease", lambda n: leases.append(n))
+    assert tl.main(["run", "--keep-container", "--", "-q", "tests/"]) == 0
+    assert reaped == [], "--keep-container still reaped"
+    assert leases == [LANE_FIXTURE_NAME], leases
+
+
+def test_the_hook_NEVER_takes_a_container_a_peer_is_using(lane, monkeypatch, capsys):
+    """Two `run`s in one worktree (a lane plus a `task` child) share ONE container.
+
+    Without the in-use guard the one that exits first removes the other's live
+    target, and its connection errors are reported as test verdicts — a leaked
+    container traded for a false red. `None` (unreadable) fails closed the same
+    way: this hook is not the decision-maker of last resort, the timer is.
+    """
+    _stub_start(monkeypatch, port=16412)
+    reaped: list = []
+    monkeypatch.setattr(tl.subprocess, "run", lambda *a, **k: _R(0, "", ""))
+    monkeypatch.setattr(tl, "stop", lambda: (reaped.append(1), "removed")[1])
+    leases: list = []
+    monkeypatch.setattr(tl, "_touch_lease", lambda n: leases.append(n))
+    for answer, why in ((True, "a live client is using it"),
+                        (None, "could not be read")):
+        reaped.clear()
+        leases.clear()
+        monkeypatch.setattr(tl, "_container_in_use",
+                            lambda _n, _a=answer, **_k: _a)
+        assert tl.main(["run", "--", "-q", "tests/"]) == 0
+        assert why in capsys.readouterr().err
+        assert reaped == [], f"reaped while the client list said {answer!r}"
+        # The container SURVIVED, so its lease must be re-stamped at the END of
+        # the use — otherwise a container spared here enters the next sweep
+        # already past OWNER_GRACE_H (#10806 review P2-4).
+        assert leases == [LANE_FIXTURE_NAME], (
+            f"a spared container was left with a stale lease: {leases}")
+
+
+def test_the_hook_asks_whether_ANYTHING_is_ATTACHED_not_whether_it_is_RECENT(
+        lane, monkeypatch, capsys):
+    """The reverse ordering: the consumer is the one that did NOT create it.
+
+    A consumer that opened the container with `uri` writes no `run` marker, so when
+    it sits idle through a heavy non-DB test file its ONLY signal is the socket it
+    still holds. The sweep's `ACTIVE_CLIENT_IDLE_S` (300 s) measure calls that
+    "unused" — which made the hook `rm -f` a live peer consumer's target, and its
+    connection errors were then reported as test verdicts (#10813 review P2).
+
+    The hook removes only AFTER its own child exits, so nothing of its own can
+    still be attached: a remaining client is someone else's, however long it has
+    been quiet. Mutation: pass the sweep's default here and this test reds.
+    """
+    _stub_start(monkeypatch, port=16412)
+    reaped: list = []
+    seen: list = []
+    monkeypatch.setattr(tl.subprocess, "run", lambda *a, **k: _R(0, "", ""))
+    monkeypatch.setattr(tl, "stop", lambda: (reaped.append(1), "removed")[1])
+    monkeypatch.setattr(tl, "_touch_lease", lambda _n: None)
+
+    def probe(_name, **kw):
+        seen.append(kw)
+        # Attached, but quiet for far longer than the sweep's window.
+        return kw.get("idle_within_s") is None
+
+    monkeypatch.setattr(tl, "_container_in_use", probe)
+    assert tl.main(["run", "--", "-q", "tests/"]) == 0
+    assert seen == [{"idle_within_s": None}], seen
+    assert reaped == [], (
+        "the 300 s 'unused' measure took a live consumer's database")
+    assert "a live client is using it" in capsys.readouterr().err
+
+
+def test_container_in_use_can_answer_ANY_attached_client(monkeypatch):
+    """The hook's question, pinned at the probe itself (not just at its caller).
+
+    `idle_within_s=None` = "is anything attached at all": a client that has been
+    quiet for hours still holds the socket, and a client with no `idle=` field at
+    all (a pub/sub or MONITOR client) is attached just as much. The DEFAULT is
+    unchanged, so the sweep's unused-lease measure keeps its semantics.
+    """
+    quiet = "id=7 cmd=lrange idle=4200\nid=8 cmd=client|list idle=0\n"
+    monkeypatch.setattr(tl, "_docker", lambda *a, **k: _R(0, quiet, ""))
+    assert tl._container_in_use("fdb-lane-x") is False, (
+        "the sweep's 300 s measure must still call a long-idle client 'unused'")
+    assert tl._container_in_use("fdb-lane-x", idle_within_s=None) is True
+
+    # A subscriber carries no `idle=` field at all.
+    sub = "id=7 cmd=subscribe\nid=8 cmd=client|list idle=0\n"
+    monkeypatch.setattr(tl, "_docker", lambda *a, **k: _R(0, sub, ""))
+    assert tl._container_in_use("fdb-lane-x") is False
+    assert tl._container_in_use("fdb-lane-x", idle_within_s=None) is True
+
+    # …and the probe's own line is never the client it reports.
+    monkeypatch.setattr(tl, "_docker", lambda *a, **k: _R(
+        0, "id=8 cmd=client|list idle=0\n", ""))
+    assert tl._container_in_use("fdb-lane-x", idle_within_s=None) is False
+
+
+def test_SIGTERM_reaches_the_hook_and_the_run_exits_143(lane, monkeypatch):
+    """A lane stopped by its supervisor gets SIGTERM, and the DEFAULT disposition
+    terminates without unwinding — so without a handler the hook never runs and
+    the container leaks. This is the only net-new behaviour in the hook with no
+    other test (#10806 review P2).
+
+    The assertion is on the SIGNAL, not on the reap: the run raises `SystemExit`
+    from the handler, which means the `finally` unwound.
+    """
+    import signal as _signal
+    _stub_start(monkeypatch, port=16412)
+    reaped: list = []
+    seen: list = []
+
+    def fake_run(argv, env=None, **kwargs):
+        seen.append(_signal.getsignal(_signal.SIGTERM))
+        os.kill(os.getpid(), _signal.SIGTERM)      # what a supervisor sends
+        return _R(0, "", "")
+
+    monkeypatch.setattr(tl.subprocess, "run", fake_run)
+    monkeypatch.setattr(tl, "stop", lambda: (reaped.append(1), "removed")[1])
+    rc = tl.main(["run", "--", "-q", "tests/"])
+    assert rc == 143, rc                            # 128 + SIGTERM
+    assert seen and seen[0] is not _signal.SIG_DFL, (
+        "SIGTERM was still at its default disposition when the child started")
+    assert reaped == [1], "the hook did not run on the SIGTERM path"
+
+
+def test_START_records_whether_it_CREATED_or_REUSED(lane, monkeypatch):
+    """The exit hook's whole safety argument rests on this one datum.
+
+    Every hook test stubs `start()` and sets `_LAST_START_CREATED` by hand, so
+    inverting the line in `start()` left the entire safety suite green — while
+    making the hook reap REUSED containers (the #10813 P1 returning) and never
+    reap what it created (the leak returning). Pinned here against the real
+    `start()`, both branches.
+    """
+    # REUSE: the container is already up.
+    monkeypatch.setattr(tl, "_LAST_START_CREATED", True)      # stale on purpose
+    monkeypatch.setattr(tl, "container_state", lambda _n: "running")
+    monkeypatch.setattr(tl, "_created_image", lambda _n: tl.IMAGE)
+    monkeypatch.setattr(tl, "_published_port", lambda _n: (True, 16406))
+    monkeypatch.setattr(tl, "_wait_ready", lambda *a, **k: True)
+    monkeypatch.setattr(tl, "_touch_lease", lambda _n: None)
+    monkeypatch.setattr(tl, "_container_memory_limit", lambda _n: None)
+    monkeypatch.setattr(tl, "_note_missing_dataset_ceiling", lambda _n: None)
+    monkeypatch.setattr(tl, "_note_uncapped_existing", lambda _n: None)
+    monkeypatch.setenv("TORTOISE_TEST_LANE_REAP", "0")
+    tl.start()
+    assert tl._LAST_START_CREATED is False, (
+        "a REUSED container was recorded as created — the hook would reap a "
+        "container another consumer owns")
+
+    # CREATE: nothing there, so this call makes it.
+    monkeypatch.setattr(tl, "_LAST_START_CREATED", False)     # stale on purpose
+    monkeypatch.setattr(tl, "container_state", lambda _n: "absent")
+    monkeypatch.setattr(tl, "pick_port", lambda: 16407)
+    monkeypatch.setattr(tl, "_docker", lambda *a, **k: _R(0, "cid\n", ""))
+    monkeypatch.setattr(tl, "_published_port", lambda _n: (True, 16407))
+    monkeypatch.setattr(tl, "_note_uncapped_existing", lambda _n: None)
+    tl.start()
+    assert tl._LAST_START_CREATED is True, (
+        "a container this run CREATED was recorded as reused — the hook would "
+        "never reap it and the leak returns")
+
+
+def test_a_PEER_run_that_holds_NOTHING_still_blocks_the_reap(lane, monkeypatch,
+                                                            capsys):
+    """The ordering that matters: the peer is LIVE but is NOT the lock holder.
+
+    A single exclusive lock cannot express "one OR more peers" — the second run
+    holds nothing, so its own exit probe answers "no peer" and it removes the
+    first run's live container. Verified by experiment on the first version of
+    this guard (#10813 review P1); this test uses a real second PROCESS whose
+    marker is present while a `run` exits, which is that exact shape.
+    """
+    _stub_start(monkeypatch, port=16412)
+    reaped: list = []
+    monkeypatch.setattr(tl.subprocess, "run", lambda *a, **k: _R(0, "", ""))
+    monkeypatch.setattr(tl, "stop", lambda: (reaped.append(1), "removed")[1])
+    name = LANE_FIXTURE_NAME
+    assert tl._peer_run_is_live(name) is False
+    peer = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        tl.REAP_STATE_DIR.mkdir(parents=True, exist_ok=True)
+        marker = tl._run_marker_path(name, peer.pid)
+        marker.write_text(f"{peer.pid}\n")
+        assert tl._peer_run_is_live(name) is True, "a live peer run was not seen"
+        assert tl.main(["run", "--", "-q", "tests/"]) == 0
+        assert reaped == [], "a live peer run's container was removed"
+        assert "another `run` holds this worktree" in capsys.readouterr().err
+        # …and a STALE marker (the peer was killed) does not block forever.
+        peer.kill()
+        peer.wait(timeout=10)
+        assert tl._peer_run_is_live(name) is False
+        tl.main(["run", "--", "-q", "tests/"])
+        assert reaped == [1], "a stale marker permanently disabled the hook"
+    finally:
+        if peer.poll() is None:
+            peer.kill()
+            peer.wait(timeout=10)
+
+
+def test_an_UNREADABLE_peer_state_fails_CLOSED(lane, monkeypatch, capsys):
+    """`None` is falsy — a truthiness test re-opens the hole (#10813 review P2)."""
+    _stub_start(monkeypatch, port=16412)
+    reaped: list = []
+    monkeypatch.setattr(tl.subprocess, "run", lambda *a, **k: _R(0, "", ""))
+    monkeypatch.setattr(tl, "stop", lambda: (reaped.append(1), "removed")[1])
+    monkeypatch.setattr(tl, "_peer_run_is_live", lambda _n: None)
+    assert tl.main(["run", "--", "-q", "tests/"]) == 0
+    assert reaped == [], "an unreadable peer state reaped anyway"
+
+
+def test_the_hook_NEVER_removes_a_container_this_run_REUSED(lane, monkeypatch,
+                                                            capsys):
+    """The `uri` route creates the container and writes no `run` marker.
+
+    A `run` that finds it already up must leave it alone: the previous hook
+    removed it mid-suite and the `uri` consumer reported connection errors as test
+    verdicts (#10813 review P1). Reuse is the normal case for a lane that started
+    its DB with `uri` and then ran pytest.
+    """
+    _stub_start(monkeypatch, port=16412)
+    monkeypatch.setattr(tl, "_LAST_START_CREATED", False)
+    reaped: list = []
+    monkeypatch.setattr(tl.subprocess, "run", lambda *a, **k: _R(0, "", ""))
+    monkeypatch.setattr(tl, "stop", lambda: (reaped.append(1), "removed")[1])
+    monkeypatch.setattr(tl, "_container_in_use", lambda _n: False)
+    assert tl.main(["run", "--", "-q", "tests/"]) == 0
+    assert reaped == [], "a REUSED container was removed"
+    assert "REUSED it" in capsys.readouterr().err
+
+
+def test_the_box_wide_opt_out_ALSO_keeps_the_container(lane, monkeypatch, capsys):
+    """`TORTOISE_TEST_LANE_REAP=0` gates `start()`'s sweep — it must gate the hook
+    too, or a lane that disabled automatic reaping on a box still loses its
+    container at the end of every `run` (#10813 review P2)."""
+    _stub_start(monkeypatch, port=16412)
+    monkeypatch.setenv("TORTOISE_TEST_LANE_REAP", "0")
+    reaped: list = []
+    monkeypatch.setattr(tl.subprocess, "run", lambda *a, **k: _R(0, "", ""))
+    monkeypatch.setattr(tl, "stop", lambda: (reaped.append(1), "removed")[1])
+    assert tl.main(["run", "--", "-q", "tests/"]) == 0
+    assert reaped == [], "the box-wide opt-out did not reach the exit hook"
+
+
+def test_a_FAILING_reap_never_changes_the_runs_verdict(lane, monkeypatch, capsys):
+    """`stop()` raises `SystemExit` for the unremovable/zombie cases. A hook that
+    let that escape would replace a real pytest result with a traceback, and a
+    lane would report a removal problem as a test failure."""
+    _stub_start(monkeypatch, port=16412)
+    monkeypatch.setattr(tl.subprocess, "run", lambda *a, **k: _R(0, "", ""))
+
+    def boom():
+        raise SystemExit("could not remove it")
+
+    monkeypatch.setattr(tl, "stop", boom)
+    assert tl.main(["run", "--", "-q", "tests/"]) == 0
+    err = capsys.readouterr().err
+    assert f"could not reap {LANE_FIXTURE_NAME} on exit" in err
+    assert "container_reaper.py" in err      # names the backstop that will
+
+
 def test_run_names_the_target_BEFORE_the_child_starts(
         lane, monkeypatch, capsys):
     """The resolved lane is on stderr before pytest runs, so a run that is killed
@@ -4525,7 +4957,11 @@ def test_run_names_the_target_BEFORE_the_child_starts(
         return _R(0, "", "")
 
     monkeypatch.setattr(tl.subprocess, "run", fake_run)
-    tl.main(["run", "--", "-q"])
+    # `--keep-container`: this test counts CHILD invocations, and the exit hook
+    # reaches docker through the same `subprocess.run` seam it just faked — so
+    # the reap would register as a second "child". The hook's own behaviour is
+    # pinned by the tests below.
+    tl.main(["run", "--keep-container", "--", "-q"])
     assert len(at_child_start) == 1
     assert LANE_FIXTURE_NAME in at_child_start[0]
     assert "TORTOISE_DB_URI=docker://:@127.0.0.1:16406/" in at_child_start[0]
@@ -4764,88 +5200,93 @@ def test_the_NAME_and_the_ownership_LABEL_come_from_ONE_root_read(monkeypatch,
     assert name == tl.container_name(labels[tl.LABEL_SLUG]), (name, labels)
 
 
-def test_an_ownership_LABEL_makes_a_DEREGISTERED_worktree_still_reapable(
+def test_an_ownership_LABEL_makes_a_DEREGISTERED_worktree_reapable_ON_PROOF(
         monkeypatch, tmp_path):
-    """THE LEAK, closed at the root.
+    """THE LEAK, closed at the root — without firing on a live database.
 
     `git worktree remove` destroys the only record `_worktree_slugs()` has, so
     the container used to be INDETERMINATE — reported and kept, for days. The
     label says which worktree created it, so the owner is DETERMINED and GONE,
-    which is exactly the proof #8180 authorises armed.
+    which is the ownership proof #8180 authorises armed.
+
+    ⛔ That proof is about OWNERSHIP, not about USE (#10841 review, P1). A lane
+    container OUTLIVES its worktree by design, so a RUNNING container whose
+    worktree directory was deleted can still have a pytest running against the
+    URI it exported — and the promotion out of the report-only INDETERMINATE
+    bucket must not turn into a bare `rm -f`. So the label buys the SECOND
+    proof ladder the INDETERMINATE arm already demands (docker's own TERMINAL
+    state, or no attached client across `OWNER_GRACE_H`), never a removal on
+    ownership alone. One arm per rung, in order, and the removal is LAST.
     """
     gone = tmp_path / "deleted-worktree"
-    removed: list = []
     name = tl.container_name(tl.slug_for(gone))
     assert not gone.exists()
 
-    def fake(*a, **k):
-        if a[0] == "ps":
-            return _R(0, _labelled_row(name, "running", gone), "")
-        if a[0] == "rm":
-            removed.append(a)
-        return _R(0, "", "")
-
-    monkeypatch.setattr(tl, "_docker", fake)
-    # git answered: nothing claims this container any more (the teardown).
-    monkeypatch.setattr(tl, "_worktree_slugs", lambda: {})
-    monkeypatch.setattr(tl, "lane_name", lambda: "fdb-lane-mine")
-    # The container itself says NO client is attached. This is stubbed rather
-    # than left to `fake` (whose `exec` answers "" ⇒ `_container_in_use` returns
-    # None ⇒ fail-closed KEEP), because "nothing is using it" is a POSITIVE
-    # premise of the removal asserted below, not an ambient default.
-    monkeypatch.setattr(tl, "_container_in_use", lambda _n: False)
-    out = tl.reap_orphans()
-    joined = "\n".join(out)
-    assert [c[1:3] for c in removed] == [("-f", name)], (removed, out)
-    assert "owning worktree" in joined and "is gone" in joined, out
-
-
-def test_a_LABEL_cannot_kill_a_LIVE_lane_whose_worktree_was_torn_down(
-        monkeypatch, tmp_path):
-    """#10712 review P1: the label must not outrank a live CLIENT.
-
-    The label reaches a population `origin/main` never put on arm 1: a worktree
-    torn down (`git worktree remove --force` / `prune`) while the lane's process
-    is STILL RUNNING. That process's cwd is a deleted directory, so
-    `_live_lane_paths` cannot name it — the container's own `CLIENT LIST` is the
-    only remaining evidence that a test run is in progress.
-
-    On `origin/main` this container is INDETERMINATE, which ASKS and keeps an
-    in-use container (#10693 review F1). Without the client probe in arm 1 the
-    label flips that to `rm -f`: a live lane's database killed mid-run. The
-    probe is scoped to label-derived owners, so name-derived arm 1 is unchanged.
-
-    MUTATION: delete the `if labelled_owner:` probe block and this goes red with
-    `removed == [('rm', '-f', name)]`. A `None` answer (could not ask) must keep
-    it too — unreadable is not "unused".
-    """
-    gone = tmp_path / "deleted-worktree"
-    assert not gone.exists()
-
-    def _sweep_with_client(answer):
-        """(removed argv list, joined report) for one `_container_in_use` answer."""
+    def sweep(state, busy, gap):
         removed: list = []
-        name = tl.container_name(tl.slug_for(gone))
+        touched: list = []
 
         def fake(*a, **k):
             if a[0] == "ps":
-                return _R(0, _labelled_row(name, "running", gone), "")
+                return _R(0, _labelled_row(name, state, gone), "")
             if a[0] == "rm":
                 removed.append(a)
             return _R(0, "", "")
 
         monkeypatch.setattr(tl, "_docker", fake)
+        # git answered: nothing claims this container any more (the teardown).
         monkeypatch.setattr(tl, "_worktree_slugs", lambda: {})
         monkeypatch.setattr(tl, "lane_name", lambda: "fdb-lane-mine")
-        monkeypatch.setattr(tl, "_container_in_use", lambda _n: answer)
-        return removed, "\n".join(tl.reap_orphans())
+        monkeypatch.setattr(tl, "_termination_report", lambda _n, live: "")
+        monkeypatch.setattr(tl, "_container_in_use", lambda _n: busy)
+        monkeypatch.setattr(tl, "_unused_gap", lambda _n: gap)
+        monkeypatch.setattr(tl, "_touch_lease", touched.append)
+        return removed, "\n".join(tl.reap_orphans()), touched
 
-    for answer, expected in ((True, "active client"), (None, "could not be asked")):
-        removed, joined = _sweep_with_client(answer)
-        assert removed == [], (
-            "the label reaped a container a live lane is using", answer, joined)
-        assert expected in joined, (answer, joined)
-        assert "is gone" in joined, joined
+    # 1. A live client: the database is being used RIGHT NOW by whatever pytest
+    #    the deleted worktree left running. Deleting it is the module's stated
+    #    worst bug, and it is the exact pre-fix behaviour this arm pins AGAINST.
+    removed, out, touched = sweep("running", True, None)
+    assert removed == [], out
+    assert "HAS an active client" in out, out
+    assert touched == [name], (touched, out)   # observed use refreshes the lease
+
+    # 1b. An UNREADABLE client answer is not "no client". `busy is None` means the
+    #     probe could not ask, so the leg must report and stop — the same
+    #     fail-closed direction the INDETERMINATE arm takes, with its own
+    #     message. P3 from the #10841 review: the sweep matrix covered True,
+    #     False+no-gap, False+short-gap, False+full-gap and `exited`, but not
+    #     `None`, so this branch (and its wording) had no pin at all.
+    #     Mutation: fold `None` into the `if busy:` / `if gap_h is None:` path —
+    #     with no gap either it reports "first sighting" instead, and this fails.
+    removed, out, touched = sweep("running", None, None)
+    assert removed == [], out
+    assert "could not be asked whether a client is using it" in out, out
+    assert "fail-closed" in out, out
+    assert touched == [], (touched, out)   # an unreadable answer is not observed use
+
+    # 2. No client, but nothing observed unused yet — a lane between steps.
+    removed, out, _ = sweep("running", False, None)
+    assert removed == [], out
+    assert "first sighting" in out, out
+
+    # 3. A client-free gap shorter than the grace is still not proof.
+    removed, out, _ = sweep("running", False, 0.5)
+    assert removed == [], out
+    assert "0.5h" in out and "grace" in out, out
+
+    # 4. …and now BOTH proofs hold: owner gone AND no client across a full
+    #    grace. This is the removal the label earns.
+    removed, out, _ = sweep("running", False, 5.0)
+    assert [c[1:3] for c in removed] == [("-f", name)], (removed, out)
+    assert "owning worktree" in out and "is gone" in out, out
+    assert "served no client for 5.0h" in out, out
+
+    # 5. Docker's own state is proof on its own: a stopped container cannot be a
+    #    live client (`docker exec` into it always fails), so it needs no gap.
+    removed, out, _ = sweep("exited", True, None)
+    assert [c[1:3] for c in removed] == [("-f", name)], (removed, out)
+    assert "owning worktree" in out and "is gone" in out, out
 
 
 def test_a_LABEL_whose_SLUG_disagrees_with_the_container_is_not_evidence(
@@ -4926,13 +5367,6 @@ def test_a_corroborated_label_whose_owner_EXISTS_beats_the_age_backstop(
     monkeypatch.setattr(tl, "_live_lane_paths", lambda: set())
     monkeypatch.setattr(tl, "_container_in_use", lambda _n: False)
     monkeypatch.setattr(tl, "_unused_gap", lambda _n: 40.0)
-    # The container's state at the MOMENT OF ACTION, which arm 3 re-reads. Left
-    # unstubbed, `fake` answers "" ⇒ `container_state` reports `unknown` ⇒ the
-    # re-read keeps it fail-closed, and then "not removed" would be explained by
-    # an unreadable state instead of by the label — the docstring's claim that
-    # "the same fixture without the label reaches `rm -f`" would be false
-    # (#10712 review P2). Answer with the state the sweep already saw.
-    monkeypatch.setattr(tl, "container_state", lambda _n: "running")
     monkeypatch.setenv(tl.OWNER_INDETERMINATE_REAP_ENV, "1")   # age arm ARMED
     out = tl.reap_orphans()
     joined = "\n".join(out)
@@ -4943,3 +5377,204 @@ def test_a_corroborated_label_whose_owner_EXISTS_beats_the_age_backstop(
     # …and the INDETERMINATE arm — the only bucket this PR's label can move a
     # container OUT of — never sees it.
     assert "no worktree in this clone names it" not in joined, out
+
+
+def test_the_PEER_marker_exists_BEFORE_start_runs(lane, monkeypatch):
+    """The marker has to cover `start()`, not only the child.
+
+    `start()` sweeps orphans, reads state, resolves image/port and may wait
+    `READY_TIMEOUT` for the first PING. A peer `run` inside that window holds no
+    marker and no socket, so a concurrently EXITING run sees "no peer, nothing
+    attached" and `docker rm -f`s the container `start()` just handed to it; the
+    peer then reports connection errors as test verdicts (#10813 review P2-2).
+
+    The assertion is the ORDER, observed from inside `start()` itself: if the
+    marker is opened after `start()` returns, this fails with nothing found.
+
+    Mutation: hoist `name, port = start(...)` back above `with _run_marker(name)`
+    and `during_start` is empty.
+    """
+    _stub_start(monkeypatch)
+    found: list = []
+    real_start = tl.start
+
+    def start_that_looks(_p=None):
+        found.extend(p.name for p in tl.REAP_STATE_DIR.glob("*.run.*"))
+        return real_start(_p)
+
+    monkeypatch.setattr(tl, "start", start_that_looks)
+    _capture_run(monkeypatch)
+    assert tl.main(["run", "--", "-q", "tests/"]) == 0
+    mine = f"{LANE_FIXTURE_NAME}.run.{__import__('os').getpid()}"
+    assert mine in found, (
+        f"no run marker existed while start() ran (saw {found}); a peer that "
+        f"is inside start() cannot be seen, so an exiting run may remove the "
+        f"container it was just handed")
+
+
+def test_a_run_whose_container_DIED_is_still_reaped(lane, monkeypatch, capsys):
+    """A container docker reports as TERMINAL cannot have a client, so the hook
+    must not ask — and must not treat the unanswerable question as "in use".
+
+    `_container_in_use` answers `None` for anything `docker exec` cannot reach,
+    and the hook keeps on `None` (correctly: unreadable is not "unused"). But a
+    container that died during the run — the OOM-kill population #7357 documents
+    — is exactly what the hook should clean up, and asking it would answer
+    `None` and leave it behind for a timer that withholds proof 2 while this
+    worktree still exists (#10813 review P2-3).
+
+    The sweep already states this rule ("a TERMINAL one cannot have one, so the
+    probe is skipped"); this pins that the hook mirrors it."""
+    _stub_start(monkeypatch)
+    reaped: list = []
+    monkeypatch.setattr(tl.subprocess, "run", lambda *a, **k: _R(0, "", ""))
+    monkeypatch.setattr(tl, "stop", lambda: (reaped.append(1), "removed")[1])
+    monkeypatch.setattr(tl, "container_state", lambda _n: "exited")
+
+    def _never(*_a, **_k):     # pragma: no cover - asserted not to run
+        raise AssertionError("a TERMINAL container was probed for clients")
+
+    monkeypatch.setattr(tl, "_container_in_use", _never)
+    assert tl.main(["run", "--", "-q", "tests/"]) == 0
+    assert reaped == [1], "a container that DIED during the run was left behind"
+    assert "reaping" in capsys.readouterr().err
+
+
+def test_pid_reuse_is_decided_by_WHEN_the_process_started_not_by_an_age():
+    """The three directions of `_pid_started_after`, on a REAL child process.
+
+    The direction that matters is the one that must NOT fire: declaring a genuine
+    peer's pid reused removes a LIVE run's container (#10813 review P3-8). The
+    other two are the reasons the rule exists — a marker older than the process
+    that now wears its pid is stale, and a question the platform cannot answer
+    must not be read as an answer.
+    """
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    try:
+        import time as _time
+        _time.sleep(0.2)
+        now = _time.time()
+        # A marker just written by THIS live peer: it started before it.
+        assert tl._pid_started_after(child.pid, now) is False
+        # A marker two hours OLD: this process is too young to have written it.
+        assert tl._pid_started_after(child.pid, now - 7200) is True
+        # Unreadable (no such pid): unknown, which the caller must not read as
+        # stale — only a positive `True` clears a marker.
+        assert tl._pid_started_after(999_999, now) is None
+        # A clock that disagrees the other way must not manufacture "reused".
+        assert tl._pid_started_after(child.pid, now + 99999) is False
+    finally:
+        child.kill()
+        child.wait()
+
+
+def test_an_EMPTY_opt_out_disables_reaping(monkeypatch):
+    """`TORTOISE_TEST_LANE_REAP=` is what `export X=${SOMETHING_UNSET}` produces.
+
+    `start()` used to enable only on a literal `"1"`, so an empty value meant OFF;
+    reading it as ON would silently ARM a deletion switch for an operator whose
+    "off" was spelled with an empty value — the fail-open direction, on the one
+    variable whose job is to disarm this tool (#10813 round-3 review P3-4).
+
+    Mutation: drop `""` from `_REAP_OFF` and this reds.
+    """
+    monkeypatch.setenv("TORTOISE_TEST_LANE_REAP", "")
+    assert tl._reap_enabled() is False
+    monkeypatch.setenv("TORTOISE_TEST_LANE_REAP", "   ")
+    assert tl._reap_enabled() is False          # whitespace-only is the same word
+    monkeypatch.setenv("TORTOISE_TEST_LANE_REAP", "1")
+    assert tl._reap_enabled() is True
+    monkeypatch.delenv("TORTOISE_TEST_LANE_REAP")
+    assert tl._reap_enabled() is True
+
+
+def test_a_DISAGREEING_container_name_refuses_the_run(lane, monkeypatch, capsys):
+    """The marker opens before `start()`, so the two names must be the SAME one.
+
+    `name` comes from `_lane_identity()` and `start()` derives the container
+    again; if a `repo_root()` read degrades between them the two records describe
+    different worktrees, and the peer guard would then protect the wrong
+    container. Refusing is the only honest answer (#10813 review P2-2).
+
+    Mutation: delete the `started_name != name` arm and this run proceeds.
+    """
+    _stub_start(monkeypatch)
+    reaped: list = []
+    monkeypatch.setattr(tl.subprocess, "run", lambda *a, **k: _R(0, "", ""))
+    monkeypatch.setattr(tl, "stop", lambda: (reaped.append(1), "removed")[1])
+    monkeypatch.setattr(tl, "start", lambda _p=None: ("fdb-lane-somethingelse", 16412))
+    with pytest.raises(SystemExit) as exc:
+        tl.main(["run", "--", "-q", "tests/"])
+    assert "refusing to run" in str(exc.value)
+    assert reaped == [], "a run that could not name its own container reaped anyway"
+    assert not list(tl.REAP_STATE_DIR.glob("*.run.*")), "the marker was left behind"
+
+
+def test_a_start_that_RAISES_stamps_no_lease(lane, monkeypatch):
+    """The `finally` now runs on paths it never reached before (the marker opens
+    before `start()`), so it must not re-stamp a lease for a container that was
+    never created — a write into the real `~/.pi/agent/state/lane-reap/` naming
+    nothing (#10813 review P3-4).
+
+    Mutation: drop `and started` from the `kept and started` guard and this reds
+    (the box-wide opt-out makes `kept` True).
+    """
+    monkeypatch.setenv("TORTOISE_TEST_LANE_REAP", "0")     # keeps `keep` True
+    leases: list = []
+    monkeypatch.setattr(tl, "_touch_lease", lambda n: leases.append(n))
+
+    def _boom(_p=None):
+        raise SystemExit("test-lane: docker is not answering")
+
+    monkeypatch.setattr(tl, "start", _boom)
+    with pytest.raises(SystemExit):
+        tl.main(["run", "--", "-q", "tests/"])
+    assert leases == [], f"a lease was stamped for a container start() never made: {leases}"
+
+
+def test_a_live_peer_older_than_the_age_bound_is_STILL_a_peer(lane, monkeypatch):
+    """The age is a FALLBACK for a platform that cannot answer, not a second vote.
+
+    `_pid_started_after` can PROVE a pid was not reused (the process started
+    before the marker was written). An unconditional age term let the clock
+    override that proof, so a genuine live `run` older than 24 h was declared
+    stale, its marker unlinked, and an exiting peer's hook then `docker rm -f`'d
+    the container under it — on exactly the population this change exists for (a
+    wedged, long-lived lane). #10813 round-3 review P2-1.
+
+    The two axes are separated on purpose: `_pid_started_after`'s own answers are
+    pinned on a REAL child (see
+    `test_pid_reuse_is_decided_by_WHEN_the_process_started_not_by_an_age`), so
+    here it is stubbed to the one answer that matters — a POSITIVE "not reused" —
+    while the marker is 25 h old. A 25 h-old marker beside a 1 s-old process
+    would be pid reuse, which is why this cannot be built from a live child.
+
+    Mutation: make `aged` unconditional again and this reds.
+    """
+    monkeypatch.setattr(tl, "_pid_started_after", lambda pid, when: False)
+    monkeypatch.setattr(tl, "_pid_alive", lambda pid: True)
+    tl.REAP_STATE_DIR.mkdir(parents=True, exist_ok=True)
+    marker = tl._run_marker_path(LANE_FIXTURE_NAME, 424242)
+    marker.write_text("424242\n")
+    old = time.time() - 25 * 3600
+    os.utime(marker, (old, old))
+    assert tl._peer_run_is_live(LANE_FIXTURE_NAME) is True, (
+        "a peer the tool PROVED was not pid-reused was declared stale by the clock")
+    assert marker.exists(), "a live peer's marker was deleted"
+
+
+def test_a_marker_naming_pid_0_or_negative_is_not_a_live_peer(lane):
+    """`os.kill(0, 0)` and `os.kill(-1, 0)` SUCCEED — they address a process
+    GROUP, not a process — and `/proc/0` does not exist, so a marker named
+    `<name>.run.0` (a truncated write, or a hand-edited state dir) read as "peer
+    live" forever with no self-healing path. Same permanent-block class as pid
+    reuse. #10813 round-3 review P3-5.
+
+    Mutation: drop the `pid <= 0` arm and this reds (and the marker survives).
+    """
+    tl.REAP_STATE_DIR.mkdir(parents=True, exist_ok=True)
+    for bogus in (0, -1):
+        marker = tl.REAP_STATE_DIR / f"{LANE_FIXTURE_NAME}.run.{bogus}"
+        marker.write_text(f"{bogus}\n")
+        assert tl._peer_run_is_live(LANE_FIXTURE_NAME) is False, bogus
+        assert not marker.exists(), f"a pid-{bogus} marker blocked reaping forever"

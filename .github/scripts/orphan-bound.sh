@@ -64,6 +64,20 @@
 #         dead-pid branch, never derived as `before - reaped - left`: the
 #         complement form makes the identity a tautology (it holds for EVERY
 #         report), which would retire the guard while appearing to keep it.
+#         `exited` has a SECOND measured source since #8599 and it is NOT that
+#         complement: a server alive at the pre-sweep probe that shut down
+#         BEFORE the sweep could discover it lands in no other bucket (it is in
+#         `before`, was never a discovery candidate, and is gone by `left`), so
+#         `build_end_sweep_report` folds in
+#         `|before_pids - discovered_pids - left_pids|` — a pid-SET difference
+#         over THREE observations, one of which (`discovered_pids`) is what
+#         makes it refutable, since a server the sweep did discover and then
+#         lost stays unclaimed and keeps the shortfall visible. It is
+#         `_vanished_before_discovery` in `tortoise/embedded_reaper.py`, and an
+#         un-instrumented seam reports it UNMEASURED (None, never 0). Do not
+#         retire this term as "the complement form above": the refused form has
+#         two inputs and cannot fail, this one has three and is pinned failing
+#         by `test_build_end_sweep_report_folds_the_vanished_window_into_exited`.
 #         Skipped only when `before` is `null` (the probe failed — a distinct
 #         state) or `0`; a report that OMITS `before` or `exited` is unusable
 #         → RED, so the

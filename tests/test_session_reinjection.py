@@ -61,6 +61,7 @@ import pytest
 # register_kind("session-transcript") apply.
 import tools.longmem_eval.ingest  # noqa: F401
 from tests import _live_utils
+from tools.longmem_eval.retrieve import EVAL_RETRIEVAL_BUDGET_MS
 from tortoise.retrieval import (
     DEFAULT_POOL_SESSION_CAP,
     SESSION_TRANSCRIPT_KIND,
@@ -135,6 +136,183 @@ def _fresh_uri() -> str:
     """A dedicated per-test graph on the docker server — fresh indexes and
     an empty graph make the differential hermetic."""
     return f"{_uri()}_{uuid.uuid4().hex[:10]}"
+
+
+# ── the retrieval deadline: pinned, never inherited ──────────────────────
+#
+# ⛔ EVERY differential in this module compares TWO reads' hits. That is a
+# statement about the ARM only while both reads were served from the same
+# retrieval legs — and the SDK's product default (a 500 ms collective
+# deadline, #1786 R5) is ALSO the per-query ``TIMEOUT`` handed to FalkorDB
+# (`search_engine.py:1724` — the `run_fts_query` leg's
+# `graph.query(..., timeout=timeout_ms)`; `:1730` is the post-hoc warning it
+# logs six lines below, which is where an earlier version of this note pointed
+# a reader who asked for the handoff). When BOTH sparse strategies miss it the engine
+# collects 0/2, the SDK degrades to the corpus-wide ``tfidf_snapshot``
+# fallback, and that pool is a DIFFERENT COMPOSITION — measured on this
+# fixture's graph: 11 of 11 seeded Points, id-ordered, against the 7 the FTS
+# leg returns. So one read degrading while the other does not turns a loaded
+# box into a false RED: CI run 41741210621, job ``test (i)``, did exactly
+# that at 500 ms ("FTS query exceeded timeout: 1220ms > 500ms", "Strategies
+# timed out (500ms) — collected 0/2") and failed
+# ``test_reinjection_disabled_is_default_byte_identical`` with
+# ``srAc0``/``srAc1``/``srAq0``/``srAq1`` as the four extra items.
+#
+# Pinned to the EVAL's own budget rather than a larger number: this call path
+# is the eval's (``run.py`` passes ``EVAL_RETRIEVAL_BUDGET_MS``), and the
+# value must stay under the server's ``TIMEOUT_MAX``. The docker lane starts
+# FalkorDB with ``FALKORDB_ARGS=THREAD_COUNT 8 TIMEOUT_MAX 30000``
+# (tools/test_lane.py), and a per-query TIMEOUT above it does not degrade
+# gracefully — the LEG FAILS (measured here: 60000 → fts ``query_failed`` +
+# structural ``query_failed`` → the same corpus fallback, 11 hits).
+
+
+def _leg_mix(ret: dict) -> list[tuple[str, int]]:
+    """The legs that actually CONTRIBUTED hits to a read: ``(leg, count)``.
+
+    Two reads are comparable hit-for-hit only when these agree. A leg that
+    ran and returned ZERO cannot move the pool, so ``timeout`` vs
+    ``empty_results`` is deliberately NOT a difference here; a leg that
+    contributed hits is, and so is the corpus-wide ``fallback`` (its presence
+    at count>0 is the whole point of the guard).
+    """
+    return sorted((leg["leg"], leg["count"])
+                  for leg in ret.get("legs") or [] if leg.get("count"))
+
+
+#: Leg reasons that mark a read DEGRADED. The engine's own ``degraded`` flag is
+#: the authority (``search_engine._trace_entry``: "``reason`` is never null
+#: when ``degraded`` is true") and is what this module reads second; the set is
+#: a belt for a trace assembled outside the engine (a fixture, or a producer
+#: that predates the flag) so such a read can never masquerade as healthy.
+#: ``no_embedder``/``no_query_vector``/``empty_results``/``below_relevance_floor``
+#: are deliberately ABSENT: this module pins the dense leg out on purpose, and
+#: a leg that ran and found nothing did not degrade.
+_DEGRADED_REASONS = frozenset({
+    "timeout", "query_failed", "breaker_open", "index_missing",
+    "no_embeddings", "tfidf_snapshot", "tfidf_fallback",
+})
+
+#: Reasons that mean a leg was DELIBERATELY not run, which this module must
+#: read BEFORE the engine's ``degraded`` flag (#10675 review, P1).
+#:
+#: ⛔ The flag alone is not enough, and that is the whole trap: the engine marks
+#: a designed absence ``degraded=True`` at the source — ``sdk.py``'s status_trace
+#: append for the vector leg is ``ran=False, degraded=True, reason=no_embedder``
+#: — so a guard that reads ``degraded`` FIRST finds every read in this module
+#: degraded (the ``_no_embedder`` fixture below is autouse), ``any(degraded)``
+#: is then always true, and ``_require_one_leg_mix``'s FAIL branch can never
+#: run. That is an inert enforcer: a real, code-caused leg divergence would
+#: SKIP — non-red to the rail — which is the exact fail-open the FAIL branch
+#: exists to close. The absence therefore has to be excluded by REASON before
+#: the flag is consulted.
+_DESIGNED_ABSENCE_REASONS = frozenset({"no_embedder", "no_query_vector"})
+
+
+def _degradations(ret: dict) -> list[tuple[str, str]]:
+    """The legs of a read that DEGRADED, as ``(leg, reason)`` pairs.
+
+    Reads the RECORD (``degraded`` / a results-bearing ``fallback``), never the
+    difference between two reads: a difference is what this module is trying to
+    measure, so it cannot also be the evidence that the measurement is void.
+    """
+    out = []
+    for leg in ret.get("legs") or []:
+        name = str(leg.get("leg"))
+        reason = str(leg.get("reason") or "")
+        # A leg that was never supposed to run did not degrade — read this
+        # BEFORE the flag, because the engine sets ``degraded=True`` for it.
+        if reason in _DESIGNED_ABSENCE_REASONS:
+            continue
+        # ⛔ THE EMPTY FALLBACK IS THE SAME TRAP ONE LEG OVER (#10675 review
+        # cycle 4, P1): ``sdk.py`` appends the fallback as ``ran=True,
+        # degraded=True, reason='no_fallback_applicable', count=0``, i.e. the
+        # engine flags a leg that RAN AND FOUND NOTHING as degraded. Counting it
+        # here made ``_degradations`` non-empty on the armed half of a comparison
+        # (2 of 39 armed reads in one ordinary run), so a real, code-caused
+        # leg-mix divergence SKIPPED — non-red to the rail — which is the fail-open
+        # ``_DESIGNED_ABSENCE_REASONS`` was added to close. The engine's own
+        # contract says so: ``search_engine._results_bearing_fallback`` — “count
+        # == 0 (no_fallback_applicable) returns no rows and is not
+        # disqualifying”. Read the COUNT, not the flag, exactly as the reason set
+        # is read before it.
+        if name == "fallback" and not (leg.get("count") or 0):
+            continue
+        if (leg.get("degraded")
+                or (name == "fallback" and (leg.get("count") or 0) > 0)
+                or reason in _DEGRADED_REASONS):
+            out.append((name, reason))
+    return sorted(out)
+
+
+def _require_one_leg_mix(*rets, test: str) -> None:
+    """Refuse to compare reads the box served from DIFFERENT legs.
+
+    Two outcomes, and the difference between them is the DEGRADATION, not the
+    difference (#10675 review, P3). ⚠️ Both outcomes are reachable ONLY when
+    the mixes DISAGREE — the early return below fires first, so a pair that
+    degraded IDENTICALLY is compared and publishes a verdict rather than
+    skipping (#10675 review cycle 5, P3: this docstring claimed "a degraded
+    read → skip" without that qualifier, so the next reader would have believed
+    the identical-degraded case was skipped and never re-derived it. It is
+    stated, not changed: a skip there would put the load-dependent red straight
+    back, and an identical mix is by construction comparable).
+
+    * **A degraded read AND disagreeing mixes → skip.** One read lost a leg to
+      the environment (the measured CI red: run 41741210621, ``test (i)``, an
+      FTS ``timeout`` at 1220 ms > 500 ms, so that read answered from the
+      corpus-wide ``tfidf_snapshot`` pool). The arm differential is
+      unmeasurable in that state, and comparing anyway is what produced the
+      load-dependent RED this module pins out. Skipped with BOTH mixes AND both
+      degradation lists named (never silently).
+    * **NO degraded read → FAIL.** Both reads were served cleanly and their
+      leg mixes still disagree, so the divergence is the ARMS' doing — a code
+      change (e.g. one arm reaching ``hybrid_search`` with a different
+      ``entity_types`` set) — and the module's central assertion
+      (``test_reinjection_disabled_is_default_byte_identical``) would publish
+      no verdict at all if this skipped. Skipping there is the fail-open arm
+      the review named, and it is exactly the class of hole a predicate over
+      "difference" cannot see.
+    """
+    mixes = [_leg_mix(r) for r in rets]
+    if not any(m != mixes[0] for m in mixes[1:]):
+        return
+    degraded = [_degradations(r) for r in rets]
+    if any(degraded):
+        pytest.skip(
+            f"{test}: the box served these reads from different retrieval "
+            f"legs, and at least one read DEGRADED, so a hit-for-hit "
+            f"comparison would compare two different pools — measured "
+            f"mixes: {mixes}; degraded legs (leg, reason): {degraded}")
+    pytest.fail(
+        f"{test}: the two reads were served from DIFFERENT retrieval legs "
+        f"with NO leg degraded on either side, so this is the ARMS behaving "
+        f"differently, not the box — measured mixes: {mixes}; degraded legs: "
+        f"{degraded}. Fix the divergence instead of skipping it: a skip here "
+        f"would publish no verdict for a code-caused confound "
+        f"(#10675 review, P3)", pytrace=False)
+
+
+@pytest.fixture(autouse=True)
+def _pinned_retrieval_budget(monkeypatch):
+    """Force the eval's collective deadline onto every read in this module.
+
+    Wraps ``hybrid_search`` — the ONE seam every ``retrieve_for_question``
+    call reaches — rather than passing ``retrieval_budget_ms`` at each call
+    site: a per-site pin is precisely what was missing (every call site
+    inherited the 500 ms product default), so a call site must not be able to
+    forget it. The value is FORCED, not defaulted: an explicit ``None`` from
+    the caller resolves to the SDK default, which is the deadline that made
+    this module load-dependent.
+    """
+    from tools.longmem_eval import retrieve as _retrieve
+
+    def _forced(*args, **kwargs):
+        kwargs["retrieval_budget_ms"] = EVAL_RETRIEVAL_BUDGET_MS
+        return _real(*args, **kwargs)
+
+    _real = _retrieve.hybrid_search
+    monkeypatch.setattr(_retrieve, "hybrid_search", _forced)
 
 
 @pytest.fixture(autouse=True)
@@ -380,25 +558,238 @@ def test_reinjection_disabled_is_default_byte_identical(seeded_sdk):
                                     pool_size=60)
     off = retrieve_for_question(seeded_sdk, q, ks=(5,), top_k=10,
                                 pool_size=60, session_reinjection=False)
+    _require_one_leg_mix(default, off, test="default-OFF == explicit-OFF")
     assert [h["id"] for h in default["hits"]] == [h["id"] for h in off["hits"]]
     assert default["session_reinjection"] is False
     assert default["session_reinjection_stats"] == \
         off["session_reinjection_stats"]
 
 
+def test_the_differential_pins_the_eval_retrieval_budget(seeded_sdk,
+                                                         monkeypatch):
+    """Every read here carries the eval's deadline, not the SDK's 500 ms.
+
+    FAILS IF: ``_pinned_retrieval_budget`` is removed — the captured value is
+    then ``None`` (the SDK's product default), and that is the deadline under
+    which CI's loaded runner degraded ONE of two compared reads (fts>
+    500 ms, 0/2 collected) into the corpus-wide fallback and turned the arm
+    differential into a false RED.
+
+    ⛔ The budget's HEADROOM is a SEPARATE, BY-VALUE pin at the end of this
+    test — not a claim in this docstring. Comparing ``EVAL_RETRIEVAL_BUDGET_MS``
+    with a bound that is itself written in terms of
+    ``EVAL_RETRIEVAL_BUDGET_MS`` moves with it and asserts nothing; the earlier
+    revision of this docstring claimed a ``TIMEOUT_MAX`` falsifier that no
+    assertion here could have had (#10675 review P3).
+    """
+    from tools.longmem_eval.retrieve import retrieve_for_question
+
+    captured: list = []
+
+    def _capture(self, query, entity_type="point", limit=10, **kw):
+        captured.append(kw.get("_elevated_timeout_ms"))
+        return []
+
+    monkeypatch.setattr(TortoiseSDK, "tortoise_fts_query", _capture)
+    retrieve_for_question(seeded_sdk, _question(), ks=(5,), top_k=10,
+                          pool_size=60)
+    assert captured, "the read reached no tortoise_fts_query call at all"
+    assert captured == [EVAL_RETRIEVAL_BUDGET_MS] * len(captured), (
+        "the reads in this module must carry the eval's collective deadline; "
+        f"got {captured} against {EVAL_RETRIEVAL_BUDGET_MS}")
+    # ⛔ A LITERAL ceiling, deliberately not a comparison against the constant
+    # itself — that is the only shape here that can red on the pin being raised
+    # too far, and it is what makes the headroom half non-vacuous. The lane's
+    # ``TIMEOUT_MAX`` does NOT degrade above the cap: the server REFUSES the
+    # query, so the leg ends in ``query_failed`` and lands on the same
+    # corpus-wide fallback the fixture above exists to keep out of the
+    # comparison (measured: 60000 -> fts + structural ``query_failed``).
+    assert EVAL_RETRIEVAL_BUDGET_MS < 30000, (
+        "the eval's retrieval deadline must stay under the private lane's "
+        "`TIMEOUT_MAX`, else a read is refused instead of degraded and the "
+        "arm comparison measures the refusal. Ceiling source: "
+        "tools/test_lane.py::LANE_FALKORDB_ARGS = "
+        "'THREAD_COUNT 8 TIMEOUT_MAX 30000' (the lane this module runs in). "
+        f"Got EVAL_RETRIEVAL_BUDGET_MS={EVAL_RETRIEVAL_BUDGET_MS}")
+
+
+def test_a_pair_served_by_different_legs_is_not_compared():
+    """``_require_one_leg_mix`` refuses the unmeasurable comparison.
+
+    FAILS IF: the guard degrades to a no-op (the load-dependent RED returns
+    as an id diff nobody can attribute) or starts refusing pairs that ARE
+    comparable.
+    """
+    # ⛔ ``degraded: True`` on the dense leg is the shape the ENGINE emits for a
+    # designed absence (``sdk.py``'s status_trace append), not a nicety: without
+    # it these fixtures describe a trace no producer creates, and the guard's
+    # real-trace behaviour goes untested (#10675 review, P1).
+    healthy = {"legs": [{"leg": "vector", "ran": False, "degraded": True,
+                          "reason": "no_embedder", "count": 0},
+                         {"leg": "fts", "ran": True,
+                          "reason": "ok", "count": 7}]}
+    degraded = {"legs": [{"leg": "vector", "ran": False, "degraded": True,
+                          "reason": "no_embedder", "count": 0},
+                         {"leg": "fts", "ran": True,
+                          "reason": "query_failed", "count": 0},
+                         {"leg": "fallback", "ran": True,
+                          "reason": "tfidf_snapshot", "count": 11}]}
+    # comparable: same mix (a second read of the same healthy shape)
+    _require_one_leg_mix(healthy, {"legs": list(healthy["legs"])},
+                         test="probe")
+    with pytest.raises(pytest.skip.Exception) as exc:
+        _require_one_leg_mix(healthy, degraded, test="probe")
+    assert "different retrieval legs" in str(exc.value)
+    # the mixes are NAMED, so the log says which leg moved
+    assert "'fallback'" in str(exc.value) and "('fts', 7)" in str(exc.value)
+
+
+def test_a_zero_count_leg_difference_is_not_a_confound():
+    """A leg that ran and returned ZERO cannot move the pool.
+
+    ``timeout`` vs ``empty_results`` on a leg that contributed nothing is a
+    scheduling difference, not a pool difference — refusing to compare there
+    would throw away measurable runs on any loaded box, which is the opposite
+    failure to the one the guard fixes.
+
+    FAILS IF: the guard reverts to comparing ``(leg, ran, reason)`` — it then
+    skips this comparable pair.
+    """
+    empty_timeout = {"legs": [{"leg": "fts", "ran": True,
+                               "reason": "ok", "count": 7},
+                              {"leg": "structural", "ran": True,
+                               "reason": "timeout", "count": 0}]}
+    empty_none = {"legs": [{"leg": "fts", "ran": True,
+                            "reason": "ok", "count": 7},
+                           {"leg": "structural", "ran": True,
+                            "reason": "empty_results", "count": 0}]}
+    _require_one_leg_mix(empty_timeout, empty_none, test="probe")
+
+
+def test_two_HEALTHY_reads_on_different_legs_FAIL_rather_than_skip():
+    """A difference with NO degradation is the ARMS, and must go RED.
+
+    ``_require_one_leg_mix`` used to skip on ANY difference, which is a
+    predicate over the difference rather than over the degradation: a code
+    change that made one arm reach a different retrieval leg would have been
+    "unmeasurable" forever, and the module's central arm differential would
+    publish no verdict at all (#10675 review, P3).
+
+    FAILS ON the pre-fix guard: it called ``pytest.skip`` here instead.
+
+    ⛔ Why this does NOT use ``pytest.raises(pytest.fail.Exception)``: a
+    ``pytest.skip`` raises ``Skipped``, which that context manager does not
+    suppress, so the pre-fix guard would report as a SKIP — non-red for the
+    merge rail — and this pin would be fail-OPEN on the exact regression it
+    names. Measured (#10675 review, P2): the pre-fix guard skipped here, and so
+    did the realistic half-fix (restore the skip, keep the improved message),
+    with all three of these tests green. Catching ``BaseException`` is what
+    makes a FAIL and a SKIP distinguishable, so the skip arm can be asserted
+    against rather than silently satisfying the test.
+    """
+    fts_only = {"legs": [{"leg": "fts", "ran": True, "degraded": False,
+                           "reason": "ok", "count": 7}]}
+    fts_and_structural = {"legs": [
+        {"leg": "fts", "ran": True, "degraded": False,
+         "reason": "ok", "count": 7},
+        {"leg": "structural", "ran": True, "degraded": False,
+         "reason": "ok", "count": 3}]}
+    try:
+        _require_one_leg_mix(fts_only, fts_and_structural, test="probe")
+    # BaseException on purpose: FAIL vs SKIP IS the assertion (see docstring).
+    except BaseException as exc:
+        assert not isinstance(exc, pytest.skip.Exception), (
+            "the guard SKIPPED two HEALTHY reads served from different legs, "
+            "so a code-caused divergence still publishes no verdict for the "
+            "module's central arm differential (#10675 review, P3); a skip "
+            f"is non-red to the rail. Got: {exc}")
+        assert isinstance(exc, pytest.fail.Exception), (
+            "expected a FAIL for a leg divergence with no degradation on "
+            f"either side, got {type(exc).__name__}: {exc}")
+        message = str(exc)
+    else:
+        raise AssertionError(
+            "the guard ACCEPTED two healthy reads served from different "
+            "legs: a difference with no degradation is the ARMS, not the "
+            "box, and must go RED rather than pass (#10675 review, P3)")
+    # names the divergence AND that nothing degraded — the two facts the next
+    # reader needs to tell "fix the arms" from "wait for a quieter box".
+    assert "('structural', 3)" in message and "degraded legs: [[]" in message
+    assert "probe" in message
+
+
+def test_BOTH_reads_degraded_is_still_not_compared():
+    """Two degraded reads stay a SKIP: the environment, not the arms.
+
+    A loaded box can lose a DIFFERENT leg on each read (fts on one, structural
+    on the other). That is unmeasurable for the same reason one degraded read
+    is, and failing it would put the load-dependent RED straight back.
+
+    FAILS IF: the degradation test becomes "exactly one arm degraded" — this
+    pair then reddens a box that simply could not answer the question.
+    """
+    fts_degraded = {"legs": [
+        {"leg": "fts", "ran": True, "degraded": True,
+         "reason": "timeout", "count": 0},
+        {"leg": "fallback", "ran": True, "degraded": True,
+         "reason": "tfidf_snapshot", "count": 11}]}
+    structural_degraded = {"legs": [
+        {"leg": "fts", "ran": True, "degraded": False,
+         "reason": "ok", "count": 7},
+        {"leg": "structural", "ran": True, "degraded": True,
+         "reason": "query_failed", "count": 0}]}
+    with pytest.raises(pytest.skip.Exception) as exc:
+        _require_one_leg_mix(fts_degraded, structural_degraded, test="probe")
+    message = str(exc.value)
+    assert "different retrieval legs" in message
+    assert "'timeout'" in message and "'query_failed'" in message
+
+
+def test_a_degraded_leg_that_returned_rows_is_a_degradation():
+    """A results-bearing ``fallback`` is a degradation even flagless.
+
+    The trace contract sets ``degraded`` on a ``fallback`` entry, but a trace
+    assembled outside the engine (a fixture, or a producer predating the flag)
+    can omit it. ``fallback`` at count>0 is definitive on its own: the pool is
+    the corpus-wide TF-IDF snapshot, a DIFFERENT composition, not a leg mix.
+
+    FAILS IF: ``_degradations`` reads only the ``degraded`` key — the pair below
+    then fails as a code-caused divergence.
+    """
+    assert _degradations({"legs": [
+        {"leg": "fallback", "ran": True, "reason": "tfidf_snapshot",
+         "count": 11}]}) == [("fallback", "tfidf_snapshot")]
+    # ...while a fallback that produced NOTHING is not one (nothing moved) —
+    # and the fixture carries the shape ``sdk.py`` ACTUALLY appends, ``degraded:
+    # True`` included. Omitting that key (as this arm first did) asserted a trace
+    # no producer creates, which is why the real fail-open — a diverged armed read
+    # SKIPPING because of this entry — went unnoticed (#10675 review cycle 4, P1).
+    assert _degradations({"legs": [
+        {"leg": "fallback", "ran": True, "degraded": True,
+         "reason": "no_fallback_applicable", "count": 0}]}) == []
+    # ...and the deliberate dense-leg omission is never a degradation, even
+    # though the engine flags it ``degraded=True`` (the shape asserted here is
+    # the one ``sdk.py`` actually appends — see _DESIGNED_ABSENCE_REASONS).
+    assert _degradations({"legs": [
+        {"leg": "vector", "ran": False, "degraded": True,
+         "reason": "no_embedder", "count": 0}]}) == []
+
+
 # ── (c) fail-open: fetch failure / zero new ids / merge exception ────────
 
-def _base_ids(sdk, q):
+def _base_pool(sdk, q):
+    """The arm-OFF read as a whole result — the fail-open tests below need
+    its ``legs`` as well as its ids (``_require_one_leg_mix``)."""
     from tools.longmem_eval.retrieve import retrieve_for_question
-    return [h["id"] for h in retrieve_for_question(
-        sdk, q, ks=(5,), top_k=10, pool_size=60)["hits"]]
+    return retrieve_for_question(sdk, q, ks=(5,), top_k=10, pool_size=60)
 
 
 def test_fetch_failure_keeps_the_base_pool(seeded_sdk, monkeypatch):
     from tools.longmem_eval.retrieve import retrieve_for_question
     from tortoise import session_reinjection as _sr
     q = _question()
-    base = _base_ids(seeded_sdk, q)
+    base_ret = _base_pool(seeded_sdk, q)
+    base = [h["id"] for h in base_ret["hits"]]
 
     def _boom(*a, **kw):
         raise RuntimeError("fetch blew up")
@@ -406,6 +797,7 @@ def test_fetch_failure_keeps_the_base_pool(seeded_sdk, monkeypatch):
     monkeypatch.setattr(_sr, "source_session_chunk_pass", _boom)
     ret = retrieve_for_question(seeded_sdk, q, ks=(5,), top_k=10,
                                 pool_size=60, session_reinjection=True)
+    _require_one_leg_mix(base_ret, ret, test="fetch failure keeps the pool")
     assert [h["id"] for h in ret["hits"]] == base
     st = ret["session_reinjection_stats"]
     # the SEED census survives the fail-open: "seeded but the fetch failed"
@@ -420,13 +812,15 @@ def test_zero_new_ids_skips_the_merge(seeded_sdk, monkeypatch):
     from tools.longmem_eval.retrieve import retrieve_for_question
     from tortoise import session_reinjection as _sr
     q = _question()
-    base = _base_ids(seeded_sdk, q)
+    base_ret = _base_pool(seeded_sdk, q)
+    base = [h["id"] for h in base_ret["hits"]]
     monkeypatch.setattr(
         _sr, "source_session_chunk_pass",
         lambda *a, **kw: {"ok": True, "by_session": {}, "total": 0,
                           "dropped_by_cap": 0, "total_cap_hit": False})
     ret = retrieve_for_question(seeded_sdk, q, ks=(5,), top_k=10,
                                 pool_size=60, session_reinjection=True)
+    _require_one_leg_mix(base_ret, ret, test="zero new ids keeps the pool")
     assert [h["id"] for h in ret["hits"]] == base
     st = ret["session_reinjection_stats"]
     assert st["fetch_ok"] is True
@@ -437,7 +831,8 @@ def test_merge_stage_exception_keeps_the_base_pool(seeded_sdk, monkeypatch):
     from tools.longmem_eval.retrieve import retrieve_for_question
     from tortoise import session_reinjection as _sr
     q = _question()
-    base = _base_ids(seeded_sdk, q)
+    base_ret = _base_pool(seeded_sdk, q)
+    base = [h["id"] for h in base_ret["hits"]]
 
     def _boom(*a, **kw):
         raise RuntimeError("merge blew up")
@@ -445,6 +840,7 @@ def test_merge_stage_exception_keeps_the_base_pool(seeded_sdk, monkeypatch):
     monkeypatch.setattr(_sr, "reinjection_merge_order", _boom)
     ret = retrieve_for_question(seeded_sdk, q, ks=(5,), top_k=10,
                                 pool_size=60, session_reinjection=True)
+    _require_one_leg_mix(base_ret, ret, test="merge exception keeps the pool")
     assert [h["id"] for h in ret["hits"]] == base
     st = ret["session_reinjection_stats"]
     # a MERGE-stage failure must not impersonate a graph outage: the FETCH
@@ -661,7 +1057,8 @@ def test_product_shaped_turn_is_injected_via_its_session(seeded_sdk):
     ``Session-[:CONTAINS]->Point``). The fetch's group key must therefore
     fall back to the ``:Session`` id — and the key must equal the seed's
     ``session_id`` (or the group is orphaned into the merge's defensive
-    tail). The non-turn ``event`` (demo-seed shape) is NOT a turn."""
+    tail). The non-turn ``event`` (the pre-#10000 demo-seed shape) is NOT a
+    turn."""
     from tools.longmem_eval.retrieve import retrieve_for_question
     _create_product_turn(seeded_sdk, "srApv0",
                          TURN_PREFIX + OFF_POOL_TURN_CONTENT)
@@ -679,7 +1076,7 @@ def test_product_shaped_turn_is_injected_via_its_session(seeded_sdk):
     assert st["injected_per_session"] == {SR_A: 3}
     assert st["injected_merged"] == 3
     assert {"srAq0", "srAq1", "srApv0"} <= ids
-    # the demo-seed ``event`` shares the KIND but fails the SHAPE
+    # the pre-#10000 demo-seed ``event`` shares the KIND but fails the SHAPE
     # (``is_episodic`` absent) — it must not be injected
     assert "srAev0" not in ids
 
@@ -714,6 +1111,7 @@ def test_guard_is_a_noop_on_a_single_session_pool(monkeypatch):
         off = retrieve_for_question(sdk, q, ks=(5,), top_k=10, pool_size=60,
                                     session_reinjection=True,
                                     session_reinjection_guard=False)
+        _require_one_leg_mix(on, off, test="guard-off re-cap parity")
         assert [h["id"] for h in on["hits"]] == \
             [h["id"] for h in off["hits"]]
     finally:

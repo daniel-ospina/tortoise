@@ -95,6 +95,23 @@ def client():
         # close → clear overrides at exit (replaces the local
         # _patch/_restore_tortoise_sdk_init copies).
         with patched_tortoise_sdk(db_path), verdict_client(app) as tc:
+            # #9567 D12 — the org dict is STORE-BACKED, which is what
+            # `get_current_org` guarantees in production and what this
+            # override stands in for. `_check_org_limit` fills any missing
+            # ALLOWANCE key from `quota.resolve_org_limits` on every gated door
+            # (points/documents/sessions), and that resolver reads THIS
+            # registry row — so a store-backed org is the branch production
+            # takes. (A MISSING row is NOT a refusal: since review round 11 the
+            # fill leaves the dict unarmed on `quota.OrgNotFoundError`, because
+            # a cap cannot be armed from a record that does not exist. The row
+            # is kept because it is production's shape, not because the tests
+            # would otherwise 500.) `MERGE` with no properties (the
+            # `tests/test_hosted_api.py` fixture's shape): the resolver then
+            # takes the tier default and emits NO allowance key, so the org
+            # dict the tests override is unchanged.
+            import tortoise.hosted_api as ha_mod
+            ha_mod._make_sdk(namespace="registry")._get_registry().query(
+                "MERGE (t:Team {id:$id})", params={"id": TEST_ORG_ID})
             yield tc
 
 
@@ -4501,3 +4518,89 @@ def test_the_tenant_route_cannot_put_the_narrative_back_on_a_source(client):
         )
     finally:
         sdk.close()
+
+
+# ── #9567 review round 13 — the allowance carry must NOT ride under the lock ──
+
+def test_the_allowance_carry_does_not_run_inside_the_per_graph_commit_lock(
+        client, monkeypatch):
+    """The gate's ONE control-plane read must not be held inside the commit mutex.
+
+    ``_commit_region`` runs under ``with lock:`` (the per-graph commit lock that
+    serializes a graph's commits), and the org-points gate lives inside it.
+    Since #9567 that gate FILLS the missing ALLOWANCE keys from
+    ``quota.resolve_org_limits`` — a SYNCHRONOUS control-plane read
+    (``_orgs_row_fail_soft``'s ``httpx`` ladder, up to 6 dependent attempts; an
+    SDK construction plus a ``Team`` query in registry mode). Held inside the
+    lock, a control-plane STALL becomes a network wait every other commit for
+    that org queues behind: an *inert* gate that refuses nothing, consuming the
+    org's write serialization. Same class as review round 12, which hoisted this
+    read off the graph pool for the points doors.
+
+    Mutation this REDs (both directions of the claim, measured not asserted):
+
+    * DELETE the ``_carry_allowances_off_loop(org, "points", …)`` hoist in
+      ``commit_session`` → the resolver is consulted from inside
+      ``_commit_region`` → ``resolved == [True]``;
+    * keep the hoist but drop ``CARRIED_MARKER_KEY`` from the helper → the
+      in-lock half resolves a SECOND time → ``resolved == [False, True]``.
+
+    So ``[False]`` pins both halves: the read ran once, and it ran outside the
+    lock.
+    """
+    import tortoise.hosted_api as ha_mod
+    from tortoise import quota
+
+    resolved: list[bool] = []
+
+    def _resolver(org_id: str) -> dict:
+        # Record whether ANY per-graph commit lock is held at the instant the
+        # resolver is consulted (``_COMMIT_LOCKS`` is process-wide and an entry
+        # is dropped the moment its last holder releases).
+        resolved.append(any(lk.locked() for lk in ha_mod._COMMIT_LOCKS.values()))
+        # The resolver's CURRENT shape, which is also its production shape: the
+        # six limit keys and NO allowance key (#4051 — no resolver may emit one).
+        return {"org_id": org_id, "tier": "free", "max_users": 1,
+                "max_graphs": 1, "max_points": 10000, "max_api_keys": 2,
+                "max_sessions": None}
+
+    monkeypatch.setattr(quota, "resolve_org_limits", _resolver)
+
+    r = _commit(client, _raw_payload(1))
+    assert r.status_code == 200, r.text
+
+    assert resolved == [False], (
+        "the allowance carry must run EXACTLY ONCE, on its own lane and OUTSIDE "
+        "the per-graph commit lock (observed under-lock flags: "
+        f"{resolved}) — [True] means it rides the lock, two entries means the "
+        "CARRIED_MARKER_KEY stamp is missing and the read was added, not moved"
+    )
+
+
+def test_the_hoisted_carry_keeps_the_gate_faults_MAPPED_on_this_lane(
+        client, monkeypatch):
+    """The commit lane's hoisted fill must still answer the documented 500.
+
+    Hoisting the carry OUT of ``_commit_region`` moved the gate's import — the
+    one that is DELIBERATELY LOUD at import time — to a place the region's
+    ``except QuotaCheckError`` no longer covers. ``_carry_allowances`` is what
+    keeps it mapped (a broken/renamed module becomes the documented
+    ``500 "Quota check failed: …"``); a call that reached past it, or a marker
+    import placed ABOVE the fill, would report OUR drift as an ``ImportError``
+    escaping the route — the wrong-shape refusal class this PR removed from the
+    REST seam twice (rounds 10 and 13).
+
+    Mutation this REDs: call ``carry_resolved_allowances`` directly from
+    ``commit_session`` (or move the ``CARRIED_MARKER_KEY`` import above
+    ``_carry_allowances`` in the helper) → the response is an unhandled 500 from
+    ``ImportError``, not this body.
+    """
+    import sys
+
+    monkeypatch.setitem(sys.modules, "tortoise.allowance_gate", None)
+    r = _commit(client, _raw_payload(0, session_id="sBrokenGateLane", points=[],
+                                     entities=[], provenance_refs=[]))
+    assert r.status_code == 500, r.text
+    detail = str(r.json()["detail"])
+    assert detail.startswith("Quota check failed:"), detail
+    assert "allowance gate could not be loaded" in detail, detail

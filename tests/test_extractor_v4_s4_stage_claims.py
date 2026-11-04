@@ -101,7 +101,17 @@ GUARD_NAME = "test_extractor_v4_s4_stage_claims.py"
 #: review rewrote only the marker's tracker line and the document-wide check
 #: stayed green. The scoping itself is proven by
 #: `test_the_marker_tracker_check_is_scoped_to_the_marker`.
-MARKER_START = "⛔ DRIFT MARKER"
+#:
+#: ⚠️ This constant must stay UNIQUE IN THE DOCUMENT, and the bare phrase
+#: `⛔ DRIFT MARKER` does not: the design now carries a SECOND drift marker
+#: (§2.4.1, the `span_link` every-point widening — #5064), placed EARLIER in the
+#: file, and `_marker_block` takes the FIRST match. With the bare phrase this
+#: guard silently read §2.4.1 instead of the S4 passage and three of its pins
+#: went red against text they never meant to describe — a guard held to a locator
+#: is only as precise as the locator. The full opening below is unique today;
+#: a third drift marker that quotes it would break this guard LOUDLY, which is
+#: the direction to break in.
+MARKER_START = "⛔ DRIFT MARKER — this sentence is about the v4 PROPOSAL"
 #: The marker's OWN tracker reference. Pinned verbatim (through `_flatten`, so a
 #: reflow is fine): `#8500` also occurs in the record-anchor sentence inside the
 #: same blockquote, so a plain `"#8500" in marker` would still be vacuous.

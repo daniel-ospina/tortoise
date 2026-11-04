@@ -255,16 +255,46 @@ def _database(monkeypatch):
 # ── one tenant, one connector, one process ─────────────────────────────────
 
 
+class _NoRecordControlPlane:
+    """A control plane that ANSWERS, and holds no `organizations` row (#9567).
+
+    This fixture's control plane is not real — `resolve_api_key` is stubbed — but
+    since #9567 the gated write path makes a **second** control-plane read the
+    fixture does not stub: `allowance_gate.carry_resolved_allowances` consults
+    `quota.resolve_org_limits`, which in supabase mode reads the orgs row through
+    `get_control_plane()`. Returning `None` from that seam is a state production
+    cannot produce (`get_control_plane()` constructs its client lazily), and the
+    carry correctly treats the resulting `AttributeError` as a FAULT — fail
+    closed. So the capstone's first write was refused with *"the team allowances
+    could not be resolved"*, which is the `record-postgres` red this class fixes.
+
+    An EMPTY ROW SET is the state a real control plane returns for an org with no
+    row, and the carry's documented third arm (`quota.OrgNotFoundError` — *"no
+    record is a STATE, not a fault"*) then leaves the caller's already-
+    authoritative limits dict untouched. Nothing is armed, so the gate stays
+    inert — this tenant's actual situation — and the leg exercises that arm
+    instead of stubbing the resolver out of the picture.
+    """
+
+    def query(self, table, *, select=None, filters=None, **_kwargs):
+        assert table == "organizations", (
+            "this fixture's control plane stands in only for the ORGS read the "
+            f"allowance carry makes; {table!r} was not expected")
+        return []
+
+
 @pytest.fixture
 def connector(tmp_path, monkeypatch):
     """A real MCP app whose graph-bound credential resolves to a RECORD tenant.
 
     Every piece is the production object: the HTTP app (`create_http_app`), the
     tenancy middleware's own resolver (`record_tenant_for`), the record seam
-    (`write_live_record`). The two stubs stand in only for the CONTROL PLANE
-    (`resolve_api_key`), because the record's layer tables FK to
-    `public.organizations`/`public.graphs` and a registry-shaped `g_<hex>` id is
-    a different id space (#9192: "a registry graph id is never installed").
+    (`write_live_record`). The three stubs stand in only for the CONTROL PLANE
+    (`resolve_api_key`, and the allowance carry's orgs read, which has no real
+    backend here — see `_NoRecordControlPlane`), because the record's layer
+    tables FK to `public.organizations`/`public.graphs` and a registry-shaped
+    `g_<hex>` id is a different id space (#9192: "a registry graph id is never
+    installed").
     """
     from tortoise import supabase_control as sc
     from tortoise.mcp_server import create_http_app
@@ -292,7 +322,7 @@ def connector(tmp_path, monkeypatch):
         "max_users": 10, "max_graphs": 10,
     }
     monkeypatch.setattr(sc, "is_supabase_enabled", lambda: True)
-    monkeypatch.setattr(sc, "get_control_plane", lambda: None)
+    monkeypatch.setattr(sc, "get_control_plane", lambda: _NoRecordControlPlane())
     monkeypatch.setattr(sc, "resolve_api_key",
                         lambda _cp, token: org_row if token == api_key else None)
 

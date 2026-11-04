@@ -49,36 +49,30 @@
 # a constant here.
 manifest_version: 1
 issue: 3863
-cut_at_commit: d05370918053f64ee4f970811233a1fbbac63394
+cut_at_commit: ee2a1589195d499a03352e427ee955c1ce281f5b
 allowed_transforms:
 - _HTTPToolFilter
 - _RetiredToolTransform
 response_fields:
 - response: tortoise_search
   field: ep.informed_order
-  emitted_when: >-
-    a Point hit that carries an `ep` block also carries `informed_order` when the
-    answer is knowable -- "consulted" when the ORDER read the belief layer
-    (order_by=graph|confidence, or recall_state's StateRanker) AND that read answered
-    for THIS row; "not_consulted" when the order measured no belief at all -- the
-    relevance path never reads the posterior, and a read that FAILED, or that
-    answered none of the rows on this page, collapses to this same state because every
-    score on it then came from a neutral default. The key is ABSENT in two cases -- the stage
-    that produced the order cannot say (a caller-supplied ranker whose read is not
-    observable), and a MIXED page where the read answered other rows but not this one
-    (no persisted belief was supplied for it) -- no claim is made rather than a
-    guess. #10137.
-  unchanged_when_off: yes — no flag; the key is additive and the order, scores and every
-    other field are byte-identical to the pre-#10137 response
+  emitted_when: 'a Point hit that carries an `ep` block also carries `informed_order` when the answer is knowable
+    -- "consulted" when the ORDER read the belief layer (order_by=graph|confidence, or recall_state''s StateRanker)
+    AND that read answered for THIS row; "not_consulted" when the order measured no belief at all -- the relevance
+    path never reads the posterior, and a read that FAILED, or that answered none of the rows on this page, collapses
+    to this same state because every score on it then came from a neutral default. The key is ABSENT in two cases
+    -- the stage that produced the order cannot say (a caller-supplied ranker whose read is not observable), and
+    a MIXED page where the read answered other rows but not this one (no persisted belief was supplied for it) --
+    no claim is made rather than a guess. #10137.'
+  unchanged_when_off: yes — no flag; the key is additive and the order, scores and every other field are byte-identical
+    to the pre-#10137 response
 - response: tortoise_recall
   field: ep.informed_order
-  emitted_when: >-
-    same contract as tortoise_search -- a returned hit's `ep` block carries
-    "consulted" when the StateRanker that produced the ORDER read the belief and the
-    read answered for THAT row, "not_consulted" when the order measured no belief at
-    all (a read that failed, or one that answered none of the rows on this page --
-    every score then came from a neutral default), and is ABSENT when the ranker's read is
-    unobservable or answered other rows but not this one. #10137.
+  emitted_when: 'same contract as tortoise_search -- a returned hit''s `ep` block carries "consulted" when the StateRanker
+    that produced the ORDER read the belief and the read answered for THAT row, "not_consulted" when the order measured
+    no belief at all (a read that failed, or one that answered none of the rows on this page -- every score then
+    came from a neutral default), and is ABSENT when the ranker''s read is unobservable or answered other rows but
+    not this one. #10137.'
   unchanged_when_off: yes — additive; ordering and every other field unchanged
 - response: tortoise_analyze
   field: why
@@ -120,40 +114,38 @@ response_fields:
     byte-identical
 - response: tortoise_search
   field: truncated
-  emitted_when: 'ALWAYS on the hosted GET /v1/search body, and (since #8447 C2 / PR #10622) ALWAYS on
-    the hosted `GET /v1/points` body too — where `total_available` is NEVER emitted: the cut there is
-    proved by an internal `limit+1` probe row, so `exact` is false and only `truncated` is published.
-    On /v1/search it is the #8447 truncation marker: true when the
-    delivered set is NOT the whole set this read matched (the `limit` cap cut rows, a downstream stage
-    dropped them — a `min_confidence` floor, a hit whose entity read came back empty — or a retrieval leg that
-    was ASKED and never answered: it raised, missed the collective deadline, or its circuit breaker refused);
-    false only when nothing was dropped.
-    It answers "did I get everything this read matched?", NOT "did the cap fire?" — a row lost
-    downstream is as unreachable as one lost at the cap, so a cap-only reading would report a filtered-empty
-    read COMPLETE. A leg that was NEVER ASKED (no embedder installed, say) is not a drop: that is `status:
-    degraded`, the recorded vocabulary, and marking it here would make the field meaningless. Not flag-gated
-    (unlike status / residency): its own decision is
-    two len() calls over lists the read already holds, and it additionally asks the retrieval path for a per-leg
-    trace when the caller supplied none — an append-only audit record, one entry per asked leg, that never changes
-    which rows are returned (a leg that was ASKED and never answered drops rows exactly as a cap does, so the proof
-    is not optional). Bounded, not free; and a default-off marker would still preserve the defect it fixes.
-    Its ONE home is tortoise/truncation.py; it is its OWN field and never a fifth read-status term (#7952 §17.2
-    forbids one). OVERRIDES: the #1745 fail-safe default-OFF convention — there is no retrieval delta to measure on a
-    response marker, and a default-off marker is the silent-subset bug itself (precedent: #8487). The MCP tool
-    `tortoise_search` returns a bare list, so it does not carry the field; wrapping a list in an object is a declared
-    return-type change and therefore an MCP Surface Approval decision, not a consequence of this row'
-  unchanged_when_off: 'n/a — always emitted; the flag is never consulted, so it cannot be off. `results` and `count`
-    keep their exact prior values and the parameter set is unchanged'
+  emitted_when: 'ALWAYS on the hosted GET /v1/search body, and (since #8447 C2 / PR #10622) ALWAYS on the hosted
+    `GET /v1/points` body too — where `total_available` is NEVER emitted: the cut there is proved by an internal
+    `limit+1` probe row, so `exact` is false and only `truncated` is published. On /v1/search it is the #8447 truncation
+    marker: true when the delivered set is NOT the whole set this read matched (the `limit` cap cut rows, a downstream
+    stage dropped them — a `min_confidence` floor, a hit whose entity read came back empty — or a retrieval leg
+    that was ASKED and never answered: it raised, missed the collective deadline, or its circuit breaker refused);
+    false only when nothing was dropped. It answers "did I get everything this read matched?", NOT "did the cap
+    fire?" — a row lost downstream is as unreachable as one lost at the cap, so a cap-only reading would report
+    a filtered-empty read COMPLETE. A leg that was NEVER ASKED (no embedder installed, say) is not a drop: that
+    is `status: degraded`, the recorded vocabulary, and marking it here would make the field meaningless. Not flag-gated
+    (unlike status / residency): its own decision is two len() calls over lists the read already holds, and it additionally
+    asks the retrieval path for a per-leg trace when the caller supplied none — an append-only audit record, one
+    entry per asked leg, that never changes which rows are returned (a leg that was ASKED and never answered drops
+    rows exactly as a cap does, so the proof is not optional). Bounded, not free; and a default-off marker would
+    still preserve the defect it fixes. Its ONE home is tortoise/truncation.py; it is its OWN field and never a
+    fifth read-status term (#7952 §17.2 forbids one). OVERRIDES: the #1745 fail-safe default-OFF convention — there
+    is no retrieval delta to measure on a response marker, and a default-off marker is the silent-subset bug itself
+    (precedent: #8487). The MCP tool `tortoise_search` returns a bare list, so it does not carry the field; wrapping
+    a list in an object is a declared return-type change and therefore an MCP Surface Approval decision, not a consequence
+    of this row'
+  unchanged_when_off: n/a — always emitted; the flag is never consulted, so it cannot be off. `results` and `count`
+    keep their exact prior values and the parameter set is unchanged
 - response: tortoise_search
   field: total_available
   emitted_when: 'the hosted GET /v1/search body, ONLY when `truncated` is true AND the count is EXACT — i.e. no
-    retrieval leg filled its own window (len(candidates) < str_limit) and every ASKED leg answered (a leg that
-    never answered could have matched rows nobody read), so the population behind the cut is the whole
-    match set. ABSENT means the exact total is UNKNOWN, never zero: a candidate pool is itself bounded, so publishing
-    a saturated count would render a lower bound as a total — the same defect one level down (Elasticsearch carries
-    `hits.total.relation: eq|gte` for exactly this; Google documents `totalResults` as an estimate)'
-  unchanged_when_off: n/a — not flag-gated; the key is absent on every complete or unprovable read, so those
-    responses are byte-identical to their pre-#8447 form
+    retrieval leg filled its own window (len(candidates) < str_limit) and every ASKED leg answered (a leg that never
+    answered could have matched rows nobody read), so the population behind the cut is the whole match set. ABSENT
+    means the exact total is UNKNOWN, never zero: a candidate pool is itself bounded, so publishing a saturated
+    count would render a lower bound as a total — the same defect one level down (Elasticsearch carries `hits.total.relation:
+    eq|gte` for exactly this; Google documents `totalResults` as an estimate)'
+  unchanged_when_off: n/a — not flag-gated; the key is absent on every complete or unprovable read, so those responses
+    are byte-identical to their pre-#8447 form
 - response: tortoise_search
   field: provenance.source
   emitted_when: 'TORTOISE_SEARCH_PROVENANCE is truthy (1/true/yes/on; unset or 0 means off) AND the hit is a Point
@@ -487,7 +479,14 @@ response_fields:
     pointKind is declared only on another layer (an Event kind — e.g. pointKind=''core:deployment'') written as
     a point — the point LANDS with that kind (#1934 warn-not-block) and the message names `create_event`. This door
     never re-labels (a Point is a different record, not a relabel of an entity), so `kind_layer_routed` cannot fire
-    here. Both codes ride the SAME key on the dedup-hit return, so a re-run reports them together rather than dropping
+    here. A FOURTH code rides it too (#10368): `terminal_fold_refused`, when the write DEDUP-hits a point that is
+    already a terminal claim and the fold carries NO temporal prop while it would write anything else — a caller
+    prop and/or an authored word — because a dedup hit never writes onto a settled belief: on the content leg the caller never named the
+    point (a content coincidence picked the target), and a `key`-resolved hit is an identity match, not a licence
+    to rewrite a settled record (#6110 decides identity; ingest already refuses the same fold, #10377). The whole fold is dropped, the HIT is still reported, and the
+    message names `update_point` as the addressed route that does revise a dead claim deliberately. The journaled
+    provenance retrofit (#7704) still folds, so an evidence-bearing re-run keeps its source. All of these codes ride
+    the SAME key on the dedup-hit return, so a re-run reports them together rather than dropping
     one'
   unchanged_when_off: n/a — not flag-gated; the key is ABSENT on a sourced or word-bearing write, and on every write
     whose fold actually applied, so that response stays byte-identical
@@ -633,37 +632,35 @@ response_fields:
   field: truncated
   emitted_when: 'ALWAYS on the `tortoise_issue_insight` body (and the SDK verb `TortoiseSDK.issue_insight`, and
     GET /v1/issue-insight) — the #8447 truncation marker on the read whose whole job is to say "there is more in
-    the graph": true when the delivered `data_points` are NOT the whole set this read matched. THREE seams make it
-    true and the caller can reach none of them: the `[:limit]` cut (`_issue_insight_rank(...)[:limit]`, shipped
+    the graph": true when the delivered `data_points` are NOT the whole set this read matched. THREE seams make
+    it true and the caller can reach none of them: the `[:limit]` cut (`_issue_insight_rank(...)[:limit]`, shipped
     default `limit=2`); a candidate pool that saturated its OWN retrieval window, where matches past it were never
-    read; and an ASKED retrieval leg that never answered (it raised, missed the deadline, or its breaker refused) —
-    a read where nothing was cut from the visible set and the missing rows are just as unreachable. `false` only
+    read; and an ASKED retrieval leg that never answered (it raised, missed the deadline, or its breaker refused)
+    — a read where nothing was cut from the visible set and the missing rows are just as unreachable. `false` only
     when nothing was dropped. It answers "did I get everything this read matched?", NOT "did the cap fire?". It
     rides its OWN field — never a fifth term of the recorded status vocabulary (`tortoise/status_vocabulary.py`
     forbids one; `tortoise/truncation.py` is the marker''s ONE home)'
   unchanged_when_off: n/a — not flag-gated. The key is emitted on EVERY response path of this read (including the
     `no_prior_knowledge` and `repo_not_indexed` bodies, which make POSITIVE claims of absence), because a marker
-    that defaults off preserves exactly the defect it fixes. Callers that read only the pre-existing keys are
-    byte-identical; `insight` changes only where it was previously WRONG (it rendered the post-cut length as the
-    hit count)
+    that defaults off preserves exactly the defect it fixes. Callers that read only the pre-existing keys are byte-identical;
+    `insight` changes only where it was previously WRONG (it rendered the post-cut length as the hit count)
 - response: tortoise_issue_insight
   field: total_available
-  emitted_when: 'the `tortoise_issue_insight` body, ONLY when `truncated` is true AND the count is EXACT — and
-    "exact" is the RETRIEVAL path''s own recorded proof, RELAYED and never re-derived here — this read consumes it
-    and adds nothing to it. ⛔ Deliberately stated without enumerating the proof''s conditions: exactness is
-    WITHHELD both by a saturated retrieval window (or a lost ASKED leg) AND, independently, by any post-window
-    filter that shrank the union, and by the snapshot fallback arm — an enumeration that names only the first is
-    falsified by the code. What CAN be said precisely is the REGIME it holds in: a candidate pool that returns
-    EXACTLY its own bound `max(limit*5, 20)` is still EXACT and DOES publish a total ONLY while the STORE stays
-    below the retrieval window `max(120, 2*pool_bound)` — `pool_bound` being what is passed AS `limit` to
-    `tortoise_fts_query`, so the window is `max(120, 10*limit)` with the shipped defaults (pinned by
-    `test_a_pool_at_exactly_its_bound_is_not_marked_cut`: 20 matches at `limit=2` → `total_available: 20`).
-    ⛔ It is NOT a function of `limit`: 120 matches fill that 120-row window and the read reports `truncated`
-    with NO total WHILE the pool is at exactly its bound of 20 — measured at the shipped `limit=2` and pinned by
-    `test_a_full_window_withholds_the_total`. The failure direction is WITHHOLD, never a floor wearing a total —
-    but the blanket "a pool at its bound is still exact" this row used to carry was FALSE. ABSENT
-    means the exact total is UNKNOWN, never zero — a lower bound published as a total is the same defect one level
-    down (Elasticsearch carries `hits.total.relation: eq|gte` for exactly this)'
+  emitted_when: 'the `tortoise_issue_insight` body, ONLY when `truncated` is true AND the count is EXACT — and "exact"
+    is the RETRIEVAL path''s own recorded proof, RELAYED and never re-derived here — this read consumes it and adds
+    nothing to it. ⛔ Deliberately stated without enumerating the proof''s conditions: exactness is WITHHELD both
+    by a saturated retrieval window (or a lost ASKED leg) AND, independently, by any post-window filter that shrank
+    the union, and by the snapshot fallback arm — an enumeration that names only the first is falsified by the code.
+    What CAN be said precisely is the REGIME it holds in: a candidate pool that returns EXACTLY its own bound `max(limit*5,
+    20)` is still EXACT and DOES publish a total ONLY while the STORE stays below the retrieval window `max(120,
+    2*pool_bound)` — `pool_bound` being what is passed AS `limit` to `tortoise_fts_query`, so the window is `max(120,
+    10*limit)` with the shipped defaults (pinned by `test_a_pool_at_exactly_its_bound_is_not_marked_cut`: 20 matches
+    at `limit=2` → `total_available: 20`). ⛔ It is NOT a function of `limit`: 120 matches fill that 120-row window
+    and the read reports `truncated` with NO total WHILE the pool is at exactly its bound of 20 — measured at the
+    shipped `limit=2` and pinned by `test_a_full_window_withholds_the_total`. The failure direction is WITHHOLD,
+    never a floor wearing a total — but the blanket "a pool at its bound is still exact" this row used to carry
+    was FALSE. ABSENT means the exact total is UNKNOWN, never zero — a lower bound published as a total is the same
+    defect one level down (Elasticsearch carries `hits.total.relation: eq|gte` for exactly this)'
   unchanged_when_off: n/a — not flag-gated; the key is absent on every complete or unprovable read
 - response: tortoise_update_point
   field: valid_to_shaped
@@ -673,8 +670,8 @@ response_fields:
     The status-only and promote NO-OP replies write nothing and carry none. ⛔ ONE further exception, and it is the
     rule rather than a hole: a reply for an id that does not exist returns {} and carries NO receipt, because nothing
     was stored — the receipt reports an end that reached the record, and that path writes nothing (it is also the
-    documented absent-id contract). A downstream lane may therefore index reply["valid_to_shaped"] only after
-    confirming the reply is NON-EMPTY **and** that the call was not one whose reply is a no-op.'
+    documented absent-id contract). A downstream lane may therefore index reply["valid_to_shaped"] only after confirming
+    the reply is NON-EMPTY **and** that the call was not one whose reply is a no-op.'
   unchanged_when_off: not flag-gated — the key is ABSENT unless a shaping happened, and a write that shapes nothing
     returns byte-identical to before this field existed
 approval_status: approved
@@ -1048,7 +1045,7 @@ rows:
   class: agent-reachable
   cluster_canonical: tortoise_index_files
 - name: tortoise_create_point
-  served_from: tortoise/mcp_server.py:5e4536f4f6e7983f
+  served_from: tortoise/mcp_server.py:9860ad2503ad1b45
   served_attributes: edb6c4d045fc0522
   family: memory
   family_rank: 1
@@ -1059,15 +1056,18 @@ rows:
   keyword_rank: 2
   cluster: null
   canonical: null
-  job: 'Create a Point node (statement, decision, vision, hypothesis, etc.). dedup=True (default): idempotent —
-    returns existing Point if content matches. Declaring extractedFrom materializes that :Source and links it (#8171);
-    a fresh write with no source and no provenance is advised (advisories: [{code: no_source, node_id, message}]
-    — advisory only, never a block). validTo accepts an ISO-8601 instant (representational variance such as ''2024-3-1''
-    or ''2024/03/01'' is normalised silently), or a DECLARED no-date value — ''unknown'', TBD, TBA, TBC, N/A, NA,
-    -, --, an em dash, or ''?'' — which is stored as the canonical un-datable end (no end plus validToPrecision=''unknown'',
-    reading end_state=''unknown'') and echoed back as valid_to_shaped; None or omitted means the end is OPEN. An
-    impossible calendar day, a month outside 01-12, an epoch passed as a string, or prose with no recoverable date
-    is REFUSED, naming the fault and the accepted forms (#9202).'
+  job: 'Create a Point node (statement, decision, vision, hypothesis, etc.). dedup=True (default) folds onto an
+    existing Point when the content matches, but that is not unconditional: dedup=False mints a second Point, and
+    a props payload can take the node out of the fold''s own predicate. The idempotency hint below is per OPERATION;
+    whether a given call converges depends on its arguments, and a refused call reports the per-call verdict on
+    its own error payload. Declaring extractedFrom materializes that :Source and links it (#8171); a fresh write
+    with no source and no provenance is advised (advisories: [{code: no_source, node_id, message}] — advisory only,
+    never a block). validTo accepts an ISO-8601 instant (representational variance such as ''2024-3-1'' or ''2024/03/01''
+    is normalised silently), or a DECLARED no-date value — ''unknown'', TBD, TBA, TBC, N/A, NA, -, --, an em dash,
+    or ''?'' — which is stored as the canonical un-datable end (no end plus validToPrecision=''unknown'', reading
+    end_state=''unknown'') and echoed back as valid_to_shaped; None or omitted means the end is OPEN. An impossible
+    calendar day, a month outside 01-12, an epoch passed as a string, or prose with no recoverable date is REFUSED,
+    naming the fault and the accepted forms (#9202).'
   dependency: declares TortoiseSDK.create_point (resolves)
   lifecycle: active
   used_by: agents, tooling, docs
@@ -1741,7 +1741,7 @@ rows:
   class: agent-reachable
   cluster_canonical: null
 - name: tortoise_ingest
-  served_from: tortoise/mcp_server.py:ca8c49ac54f1b068
+  served_from: tortoise/mcp_server.py:4f8e3f1f130f8d65
   served_attributes: c0ea3c28d0df1685
   family: graph
   family_rank: 2
@@ -1764,8 +1764,9 @@ rows:
     variants, nested props={...}, and terminal statuses included) — use promotion_policy=''auto'' or promote after
     ingest via update_point(status=''live''). promotion_policy=''auto'' preserves the #131 promote-on-wire lifecycle
     (null-status sources only — an explicit draft is never retro-promoted, #1088; terminal sources are never resurrected;
-    deduped connections never retro-promote). Idempotent-ish: points dedup by content hash + kind, sources by url,
-    operators by input set.'
+    deduped connections never retro-promote). NOT declared idempotent: points dedup by content hash + kind, sources
+    by url and operators by input set, but the entities leg is append-only for document/event — a repeat can write
+    a second Source.'
   dependency: declares TortoiseSDK.ingest (resolves)
   lifecycle: active
   used_by: never called, tooling, docs
@@ -1834,7 +1835,7 @@ rows:
   cluster_canonical: tortoise_delete
   cluster_note: group `delete` is split across ['graph', 'memory']; proposed family `memory` — waits for your approval
 - name: tortoise_operator_action
-  served_from: tortoise/mcp_server.py:3af6911898fcddce
+  served_from: tortoise/mcp_server.py:b5350b7ce9cb752c
   served_attributes: 07f3aa2bf8138e28
   family: graph
   family_rank: 2
@@ -1846,7 +1847,8 @@ rows:
   cluster: operator-action
   canonical: true
   job: 'Consolidated operator write action — action=mitigate|annotate. mitigate: reason + strength (0-1) — creates/updates
-    the mitigation Point (idempotent). annotate: bias/precision/consistency/directness (0-1).'
+    a CURRENT mitigation Point; a re-assertion after withdrawal MINTS A NEW Point, so NOT idempotent then. annotate:
+    bias/precision/consistency/directness (0-1).'
   dependency: 'handler-served: no declared SDK link'
   lifecycle: active
   used_by: never called, tooling, docs
@@ -2290,7 +2292,7 @@ rows:
   class: agent-reachable
   cluster_canonical: null
 - name: tortoise_session_capture
-  served_from: tortoise/mcp_server.py:9ea260bf4e6cd3cc
+  served_from: tortoise/mcp_server.py:bd6dbf27d57b404c
   served_attributes: a1b8417f6b1ea4c9
   family: sessions
   family_rank: 4
@@ -2577,7 +2579,9 @@ rows:
   keyword_rank: 2
   cluster: null
   canonical: null
-  job: Create the demo epistemic graph (4 layers) for this team. Idempotent (Q4).
+  job: 'Create the demo epistemic graph (4 layers) for this team. The SEED is sentinel-gated (a repeat files no
+    new nodes), but the call is NOT idempotent: the handler then writes its onboarding receipt, whose CAS leg re-stores
+    the state and advances state_version on every repeat.'
   dependency: 'handler-served: no declared SDK link'
   lifecycle: active
   used_by: never called, tooling, docs
@@ -2865,7 +2869,8 @@ rows:
   keyword_rank: 2
   cluster: create
   canonical: false
-  job: Create a document — a :Source keyed by url (research, planDoc, meetingNotes, etc.).
+  job: 'Create a document — a :Source (research, planDoc, meetingNotes, etc.). NOT keyed by url: every call mints
+    a fresh id, so a repeat writes a second Source and a second DocumentCreated.'
   dependency: declares TortoiseSDK.create_document (resolves)
   lifecycle: active
   used_by: never called, tooling, docs
@@ -2958,7 +2963,7 @@ rows:
   class: agent-reachable
   cluster_canonical: null
 - name: tortoise_approve_merge
-  served_from: tortoise/mcp_server.py:6fdf72e74dbf2aa4
+  served_from: tortoise/mcp_server.py:38a54d630028d971
   served_attributes: 7ef9ac912a56d88b
   family: review
   family_rank: 9
@@ -2969,8 +2974,9 @@ rows:
   keyword_rank: 8
   cluster: null
   canonical: null
-  job: Review a dedup/temporal candidate — action=merge|reject. Wiring deferred to promotion for live priors. WRITES
-    review flags + wires edges (idempotent for repeats).
+  job: 'Review a dedup/temporal candidate — action=merge|reject. Wiring deferred to promotion for live priors. WRITES
+    review flags + wires edges. NOT idempotent for every branch: a repeat of a DEDUP review records its event again,
+    so it is visible twice to poll_events (the temporal branch does guard one).'
   dependency: declares TortoiseSDK.approve_merge (resolves)
   lifecycle: active
   used_by: never called, tooling, docs
@@ -3854,7 +3860,7 @@ rows:
   job: Public SDK method TortoiseSDK.dream_health_check.
   dependency: 'reached by 1 registered tool(s): tortoise_dream_health'
   lifecycle: active
-  used_by: tooling, docs
+  used_by: eval-harness, tooling, docs
   recommendation: keep
   reason: reached by 1 registered tool(s)
   recommended_family: null
@@ -5304,7 +5310,7 @@ rows:
   job: Public SDK method TortoiseSDK.set_point_baseline.
   dependency: 'reached by 1 registered tool(s): tortoise_set_point_baseline'
   lifecycle: active
-  used_by: tooling, docs
+  used_by: eval-harness, tooling, docs
   recommendation: keep
   reason: reached by 1 registered tool(s)
   recommended_family: null

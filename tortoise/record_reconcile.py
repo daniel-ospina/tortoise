@@ -47,7 +47,13 @@ THE TRIGGER DECISION, AND ITS DETECTION LATENCY
   ``ep_dirty``/``content_hash``/``confidence``/…), which the record schema
   REFUSES by name and so can never hold. They are neither a mismatch nor
   invisible: :func:`reconcile_record_and_cache` partitions them into a named
-  ``graph_only`` count (the ``form_normalized`` precedent). Counting them as
+  ``graph_only`` count (the ``form_normalized`` precedent). ⚠️ TWO classes
+  arrive here, and they differ in what repairs them: §17.5's cache-owned scalars,
+  which the record schema REFUSES by name (a record read cannot produce them,
+  nothing to repair), and the projection-DECLINED pair an EPISODIC Source's
+  ``summary``/``_searchText`` make
+  (``cache_projection.episodic_source_prose_properties()``) — which the record
+  DOES hold, and which a record-sourced re-projection removes. Counting them as
   ``field_mismatches`` would make the clean verdict UNREACHABLE on a
   journal-projected cache — every folded point carries them — which is exactly
   the "a signal indistinguishable from noise is not observability" failure
@@ -90,6 +96,8 @@ from .cache_projection import (
     NODE_TABLES,
     RecordView,
     declared_key,
+    episodic_source_prose_properties,
+    is_episodic_source_node,
     projected_properties,
 )
 from .reconciliation import (
@@ -277,6 +285,11 @@ def scan_cache_view(g: Any, *, labels: Iterable[str] | None = None,
 
     out: dict[str, dict] = {}
     placed: dict[str, frozenset[str]] = {}
+    # §9.1/D1's narrowed pair, in the CACHE's vocabulary — resolved ONCE per
+    # read (it is table-derived, so it must not be a module constant: see
+    # `cache_projection._episodic_source_kind_property` for the installed-wheel
+    # reason).
+    declined = episodic_source_prose_properties()
     for label in wanted:
         # The names the record PLACES for this label: the placement table's
         # projected set (the schema's authority, minus what it REFUSES by name)
@@ -322,7 +335,18 @@ def scan_cache_view(g: Any, *, labels: Iterable[str] | None = None,
                     f"equal and report `extra_in_cache=0` over a node the "
                     f"record does not have; divergence is UNKNOWN, not zero")
             out[declared] = props
-            placed[declared] = placeable
+            # §9.1/D1 (#10853): the projection DECLINES this pair for an
+            # episodic Source, so a cache node that still carries it holds what
+            # the projection will not write — cache-owned, the #9196 precedent,
+            # and counted as `graph_only` instead of as a divergence against a
+            # record that is correct. Without this the reconciler would report
+            # every session the current capture writes as divergent forever,
+            # which is the "signal indistinguishable from noise" the module's own
+            # docstring grades P1.
+            if label == "Source" and is_episodic_source_node(props):
+                placed[declared] = placeable - declined
+            else:
+                placed[declared] = placeable
     return CacheScan(view=out, placed=placed)
 
 
@@ -345,9 +369,12 @@ class RecordReconcileResult:
     report: ReconciliationReport
     declaration: ResidencyDeclaration
     not_hot: int = 0
-    #: Properties the CACHE holds that the record CANNOT place — §17.5's
-    #: EP/derived scalars, which the record schema refuses by name — as
-    #: ``(name, node count)``. Kept OUT of ``field_mismatches`` (counting them
+    #: Properties the CACHE holds that this projection will not judge — §17.5's
+    #: EP/derived scalars (the record schema refuses them by name) PLUS the pair
+    #: the §9.1/D1 narrowing declines for an EPISODIC Source
+    #: (``cache_projection.episodic_source_prose_properties()``, which the RECORD
+    #: does hold) — as ``(name, node count)``. Kept OUT of ``field_mismatches``
+    #: (counting them
     #: made the clean verdict unreachable on a journal-projected cache) and kept
     #: as its OWN count (a comparison that declines to judge a field has to say
     #: so — the ``form_normalized`` precedent). APPENDED LAST for the same
@@ -414,7 +441,20 @@ def reconcile_record_and_cache(
     property the cache holds that the record can neither place nor hold (the
     EP/derived scalars §17.5 assigns to the cache, which the record schema
     refuses by name) is NOT a field mismatch and is reported as its own named
-    ``graph_only`` count instead. Without it, a journal-projected cache — the
+    ``graph_only`` count instead. ⚠️ ``placed`` also omits the pair the §9.1/D1
+    narrowing DECLINES for an EPISODIC Source — which the record DOES hold — so
+    a ``graph_only`` name has two possible repairs: none (schema-refused) or a
+    record-sourced re-projection (declined). ⚠️ **What the exclusion CAN and
+    CANNOT hide, stated precisely**: `keep` includes ``record_props``, so a name
+    the RECORD side carries is always compared — the exclusion cannot suppress a
+    divergence in a caller-supplied ``props``-tail property. For the DECLINED pair
+    itself it does suppress a VALUE comparison, and that is by construction, not
+    an oversight: on this path the record side is ``read_record_view``, which
+    builds every node through the same projector, so both sides omit the pair and
+    a disagreement inside it surfaces only as the ``graph_only`` occurrence count
+    (a property present in the cache where the projection writes none). An
+    operator who wants the values compared must read the record COLUMNS directly;
+    the reconciler does not. Without it, a journal-projected cache — the
     shape production runs — reports a permanent ``field_mismatches`` on every
     point and can never be clean (#9196 review, P1).
 

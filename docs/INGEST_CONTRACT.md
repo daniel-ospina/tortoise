@@ -12,7 +12,9 @@ aboutObjects: tortoise-ingest, tortoise-mcp
 # Ingest Contract (`tortoise_ingest` / `sdk.ingest`)
 
 The ingest surface writes a whole **bundle** — points, entities, sources, and
-the connections between them — in one coherent, idempotent call. This document
+the connections between them — in one coherent call. Resubmission is idempotent
+for points, sources and connections; it is **not** idempotent for append-only
+`document`/`event` entity items (§15). This document
 is the granular customer contract for that surface: bundle shape, worked
 examples with the exact response shape, the full error surface with the retry
 action per error class, quota semantics, and what to do when you ingest the
@@ -330,6 +332,13 @@ enumeration** — a warning key outside this table is a divergence; report it.
 > (`mitigation_orphan_residue`, `mitigation_drift_duplicate`) describe
 > crash-orphan re-link and post-re-key drift; **no write door emits them yet** —
 > they are reserved vocabulary for those recovery flows, not observable today.
+> ⚠️ This list is NOT an exhaustive census and must not be read as one: it names
+> only the rows whose emission has been checked. In particular **row 1
+> (`append_only_items`) is declared-but-unemitted** — re-ingesting a bundle
+> holding one `event` and one `document` entity item returns
+> `created.entities: 2` and `warnings: []` — and the missing emission is
+> **#10899**. Treat `warnings[]` as a bonus signal, never as your duplicate
+> detector: compare `created` and `ids` across a retry (§15).
 
 ---
 
@@ -435,10 +444,13 @@ If the ingest call dies mid-flight (client killed, network drop, server
 SIGKILL), you get **no response** — but the write may have partially
 committed. The recovery signal is a single rule:
 
-> **Re-submit the identical bundle, unpatched.** Convergence is exactly-once:
-> items that committed dedup, items that didn't commit are created, and the
-> whole logical bundle carries **one `batch_id`** across kill + retry
-> (`batch_id` is content-derived, not per-call — a retry mints the same id).
+> **Re-submit the identical bundle, unpatched.** Convergence is exactly-once for
+> `points`, `sources` and the connections between them: those that committed
+> dedup, those that didn't are created — **not** for `document`/`event` ENTITY
+> items, which append (§15's carve-out, and the reason this is not a blank
+> "resubmit anything" licence). The whole logical bundle carries **one
+> `batch_id`** across kill + retry (`batch_id` is content-derived, not per-call —
+> a retry mints the same id).
 
 - The killed call returns no structured error; there is nothing to parse.
 - **Metering note:** a transport-killed call commits its writes but is never
@@ -450,9 +462,12 @@ committed. The recovery signal is a single rule:
   mitigation stamps survive with no manual rebuild (see
   [quickstart-selfhosted.md](quickstart-selfhosted.md) — the default embedded
   mode has no AOF window, so the JSONL journal is the durability contract).
-- **Timeout ≠ failure — resubmission is idempotent.** A timeout is the
-  same class as transport death: re-send the identical bundle; if it
-  committed, you get an all-`deduped` response confirming presence.
+- **Timeout ≠ failure — resubmission is idempotent for points, sources and
+  connections, NOT for `document`/`event` entity items.** A timeout is the same
+  class as transport death: re-send the identical bundle; if it committed, you
+  get an all-`deduped` response confirming presence — but an `entities` item of
+  `type:"event"`/`"document"` is append-only, so that re-send mints a NEW
+  occurrence (new id) and the operator wired to it (§15).
 
 ---
 
@@ -469,8 +484,8 @@ with the exact retry action:
 | 4 | `ERR_QUOTA_SERVER` `{error, code}` | Transient quota-counting failure (fail-closed). | **Backoff-retry** (transient). |
 | 5 | `ERR_UNAUTHORIZED` `{error, code}` | 401 — missing/invalid `Bearer tt_<key>`. | **Fix credentials; never retry.** |
 | 6 | `ERR_REGISTRY` `{error, code}` | 503 — team registry (key→team resolution) unavailable. The `-32099` **static-auth-misconfigured** variant ("Static auth misconfigured: no API key set") is a server configuration problem. | Transient → **backoff-retry**. The `-32099` static-misconfig variant → **operator fix (config), don't retry**. |
-| 7 | Phase-2 failure `{error}` — **no code** | A write failed mid-commit; partial state is committed. The error names the section/index/item; it carries the already-computed `batch_id`. | **Re-send converges** — the retry dedups what committed and writes the rest. Audit via `batch_id` first if you like. |
-| 8 | Transport death — **no response** | The call may have committed anything. | **Re-send the identical bundle**; exactly-once convergence ([§7](#7-kill-recovery)). |
+| 7 | Phase-2 failure `{error}` — **no code** | A write failed mid-commit; partial state is committed. The error names the section/index/item; it carries the already-computed `batch_id`. | **Re-send converges** — the retry dedups what committed and writes the rest (points/sources/connections; `document`/`event` entity items append instead — [§15](#15-timeout--failure)). Audit via `batch_id` first if you like. |
+| 8 | Transport death — **no response** | The call may have committed anything. | **Re-send the identical bundle**; exactly-once convergence for points/sources/connections — **NOT** for `document`/`event` entity items, which append ([§7](#7-kill-recovery), [§15](#15-timeout--failure)). |
 | 9 | `EmbeddedStoreBusyError` — named class prefix in `{error}` (**planned**) | Cross-process contention on an embedded store (another process holds the db). **planned:** fail-fast with a named error replaces today's blocking flock-with-timeout handling. | **planned:** do **NOT** retry until the holder exits. Unlike phase-2 partial-state errors, re-sending while the store is busy does **not** converge — it re-errors. (Fail-fast replaces the old silent second-daemon behavior.) |
 
 **planned:** `ERR_BUNDLE_INVALID` is a new exported constant classified as a
@@ -658,10 +673,9 @@ construction**: it participates in EP **iff ≥2 of its connected points are
 live AND the operator itself has been promoted out of draft** — endpoint
 promotion alone does NOT activate a draft operator (see the §11 interim-
 route caveat; zombie-operator auto-resolution ships with the #785 promote
-tools). "Promote a second endpoint and the operator activates" is the
-#785-era post-resolution statement; pre-#785 the operator's OWN promotion
-is the second required conjunct. Promote a second endpoint and the operator activates; until then it
-cannot propagate belief. This is the derived-liveness rule (A9's selector
+tools). "Promote a second endpoint and the operator activates" is the #785-era
+post-resolution statement — pre-#785 the operator's OWN promotion
+is the second required conjunct. This is the derived-liveness rule (A9's selector
 predicate for operator nodes).
 
 ---
@@ -747,7 +761,7 @@ Point-bearing pair.
 
 ## 15. Timeout ≠ failure
 
-> **Timeout ≠ failure — resubmission is idempotent.**
+> **Timeout ≠ failure — but resubmission is only PARTLY idempotent.**
 
 If an ingest call times out, you do not know whether it committed. Re-send
 the identical bundle: committed items dedup (all-`deduped` counts confirm
@@ -755,6 +769,38 @@ presence), missed items are created, and one `batch_id` spans the whole
 logical bundle. Never "fix" a timeout by editing the bundle before retrying
 — a modified retry is a different logical bundle and can strand run-1
 residue.
+
+⛔ **What dedups and what APPENDS.** Resubmission is idempotent for `points`
+(content hash + kind), `sources` (url) and the connections between them. It is
+**not** idempotent for `document`/`event` ENTITY items: those are append-only
+occurrence records, so re-sending a full bundle mints a NEW `:Event` occurrence
+(new id) and therefore a NEW operator wired to it. Re-send the identical bundle
+only when minting a second occurrence is what you want; otherwise re-send the
+point-only or connection-only half.
+
+⚠️ **Do not wait for a warning.** §3.2 row 1 declares an `append_only_items`
+key, but that key is **not emitted today** (measured: re-ingesting a bundle
+holding one `event` and one `document` entity item returns
+`created.entities: 2` and `warnings: []`; the gate is **#10899**). Detect a
+duplicate by comparing `created.entities` and `ids.entities` across the retry —
+the count says a second occurrence was minted and the ids name it. (Whether any
+other row in §3.2's table reaches your deployment is likewise not something this
+paragraph asserts; §3.2's emission note is not a census.) ⚠️ **Other sections of
+this document are stale on the same point** — this paragraph does not enumerate
+them, because a list here would itself be a census this change cannot keep
+true. They are pre-existing (older than the change that prompted this paragraph)
+and are filed as **#10907**. Treat THIS paragraph, §7's recovery rule and §15's
+carve-out as the authoritative statement of what dedups and what appends; where
+another section disagrees, it is wrong.
+
+⚠️ **This is also why `tortoise_ingest` is NOT declared idempotent on the MCP
+surface** (`annotations.idempotentHint: false`). A `-32009` wait-bound refusal on
+a **dispatched** ingest therefore answers `error.data.retry_safe: false` with the
+UNSAFE `retry_rule`: the abandoned call may still be running, and a blind retry
+races it into the append-only leg above. `error.data.committed` is `"unknown"` for
+a dispatched ingest — it is never a statement that nothing was written. (An ingest
+refused BEFORE any dispatch is the other arm: `committed: "none"`, `retry_safe:
+true`, and re-sending is safe once the advertised delay has elapsed.)
 
 ---
 
@@ -772,9 +818,12 @@ residue.
   returns "artifacts stamped with the batch_id, **created OR adopted via
   dedup**".
 - **Scope of audit:** the STAMPED classes — points + operator/mitigation
-  Points + direct edges. Entities and sources are **not** stamped (they are
-  url/name-keyed) and are unreachable by `batch_id` — documented as out of
-  stamp scope.
+  Points + direct edges. Entities and sources are **not** stamped, and are
+  unreachable by `batch_id` — documented as out of stamp scope. The reason differs
+  by kind and is NOT "entities are all keyed": `sources` are url-keyed, and
+  `subject`/`object` entities are name-keyed (a re-ingest resolves onto the same
+  node), while `event`/`document` entity items mint a FRESH id per write — they are
+  outside stamp scope for that reason, not because a key resolves them (§15).
 - **Batch discovery:** **planned** — a batch discovery/audit primitive
   (`list_batch(batch_id)` or a batch_id filter on `query()`) ships with this
   release. It is what lets you find what committed when transport death ate

@@ -669,7 +669,10 @@ def test_pass1_argv_decoy_never_rmtrees_our_dir(monkeypatch):
         killed: list[int] = []
         monkeypatch.setattr(R, "_kill", lambda pid, timeout: killed.append(pid))
         monkeypatch.setattr(R, "_active_client_count", lambda _s: 0)
-        monkeypatch.setattr(R, "_pgrep_redis_servers", lambda: [_DECOY_PID])
+        # ⛔ The `_or_none` seam `discover` reads (#10757 P3) — patching the
+        # collapsing `_pgrep_redis_servers` no longer reaches pass 1.
+        monkeypatch.setattr(R, "_pgrep_redis_servers_or_none",
+                            lambda: [_DECOY_PID])
         monkeypatch.setattr(R, "_socket_dir_from_cmdline",
                             lambda pid: os.path.realpath(str(d)))
         monkeypatch.setattr(R, "_pid_alive", lambda pid: pid == _DECOY_PID)

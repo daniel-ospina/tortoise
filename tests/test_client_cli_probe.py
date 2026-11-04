@@ -68,15 +68,19 @@ def test_status_unreachable_exits_three(monkeypatch, capsys):
 
 
 def test_status_not_configured_exits_four(monkeypatch, capsys):
-    """No endpoint configured + an unreachable probe is a SET-UP gap, not an
+    """No endpoint DECLARED + an unreachable probe is a SET-UP gap, not an
     outage; its recorded term is `unconfigured` (#3832 exit code 4, preserved).
-    The driver is unchanged (it has no notion of a missing endpoint and falls
-    back to the self-host default), so the probe splits the state out.
+    The driver has no notion of a missing ENDPOINT (it falls back to the
+    self-host default), so the probe splits the state out — and it asks that
+    question of the RESOLUTION, so a store's `api_url` counts as declared
+    (#10605). `endpoint_declared` is therefore pinned here: without the stub this
+    test reads whatever store the developer's own machine has.
 
-    On THIS probe 'TORTOISE_MCP_URL is unset' is the definition of
-    unconfigured, and the rewritten payload must not contradict itself: the
-    driver's default `url` is dropped and `configured: false` is added."""
+    On THIS probe 'no endpoint declared' is the definition of unconfigured, and
+    the rewritten payload must not contradict itself: the driver's default `url`
+    is dropped and `configured: false` is added."""
     monkeypatch.delenv("TORTOISE_MCP_URL", raising=False)
+    monkeypatch.setattr(cli, "endpoint_declared", lambda: False)
     monkeypatch.setattr(cli, "status", _fake_status("tortoise_unavailable", error="boom"))
     assert cli.main(["status"]) == 4
     out = json.loads(capsys.readouterr().out)
