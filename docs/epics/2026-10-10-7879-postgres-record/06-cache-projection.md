@@ -332,7 +332,9 @@ the row/node predicate-agreement legs, including the tail-carried identity, and
 TWO legs for the ORDER the row arrives in (`_row_in_select_star_order`: the tail
 is the last column in the DDL, so a real row iterates it last — the ordering in
 which the tail used to win the node map while the predicate read the column, the
-collision review #10867 raised as ISSUE 1); the
+collision review #10867 raised as ISSUE 1), plus the falsy edge that proves the
+rule is ONE rule (`None` is the only silence — an empty `url` column is a value,
+and the identity view no longer fills it from the tail); the
 `props`-tail legs (prose AND the `sourceKind` identity, plus the negative that a
 tail-carried kind alone does not strip a `corpus://` document); and the record row
 that must not be mutated. Mutation-checked, one at a time: each identity arm, EACH

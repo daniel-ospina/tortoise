@@ -563,6 +563,32 @@ def test_the_row_and_node_predicates_agree_when_the_tail_carries_the_identity():
         )
 
 
+def test_only_a_NULL_column_is_silence_an_empty_url_is_a_VALUE():
+    """The collision rule is the same in BOTH readings, down to the falsy edge.
+
+    `_props_from_row` writes a column whenever it is not `None` (`if value is not
+    None`), so an EMPTY-STRING `url` still lands on the node and shadows a
+    tail-carried `url`; `_row_identity_view` filled from the tail on any FALSY
+    column (`not merged.get("url")`), which made the two disagree on exactly
+    that shape — the same class of drift as the `sourceKind` collision, one edge
+    over, and the reason the rule is now stated once and applied twice.
+
+    Unreachable as a node identity — the key column is refused when blank
+    (`UnprojectableRecord`, and the schema's own CHECK) — and pinned anyway:
+    an unused difference between the two readings is how the reachable one came
+    back.
+    """
+    from tortoise import cache_projection as cp
+
+    row = _source_row(url="", source_kind=None, props='{"url": "session:s-1"}')
+    view = cp._row_identity_view(row, cp._decoded_tail(row["props"]))
+
+    assert view["url"] == "", (
+        "the identity view filled an EMPTY column from the tail, which the node "
+        "map does not do — the two readings of the same row disagreed"
+    )
+
+
 def test_a_column_value_wins_the_tail_on_a_real_SELECT_star_row():
     """ISSUE 1 (#10867 review): on the real row ordering the TAIL won the identity.
 
