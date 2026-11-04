@@ -274,6 +274,11 @@ def _credential_paths() -> tuple[Path, ...]:
 #: credential, never a hang.
 _GIT_QUERY_TIMEOUT_S = 5.0
 
+#: `git ls-files --error-unmatch` exit codes that ANSWER "is it tracked?".
+#: Every other code is git FAILING to read, and must not be read as an answer.
+_GIT_TRACKED = 0
+_GIT_UNTRACKED = 1
+
 
 def _in_a_git_work_tree(directory: Path) -> bool:
     """Whether a `.git` entry sits at or above `directory`.
@@ -297,10 +302,26 @@ def _git_tracks(path: Path) -> bool:
     a stored Bearer is sent to.
 
     NO LOCK-INVERSION: a store outside any repository (a plain directory, a
-    tarball) cannot have been committed, so it is read as before. When git cannot
-    be asked at all, the question still gets answered mechanically — by looking
-    for a `.git` above the store — and an undeterminable case fails CLOSED.
+    tarball) cannot have been committed, so it is read as before.
+
+    ⛔ AN UNDETERMINABLE ANSWER IS NOT "UNTRACKED". Only exit 0 (`tracked`) and
+    exit 1 (`untracked`) ANSWER the question. Every other code is git FAILING to
+    read — `128`, its generic `fatal:`, covers a corrupt index, a checkout git
+    refuses for dubious ownership (ordinary in CI containers and bind-mounted
+    checkouts), a `GIT_DIR`/`GIT_INDEX_FILE` pointing somewhere else, and an
+    absent repository. Reading those as "not tracked" would fail OPEN: the
+    repo-committed store is trusted again, supplying BOTH the Bearer and the
+    host, which is the whole #10796 defect. Those cases fall back to the `.git`
+    check above, which fails CLOSED — the store is ignored unless the directory
+    tree proves there is no repository to have committed it.
+
+    The subprocess runs with no ambient `GIT_*` set for the same reason
+    `tools/mergify_config_guard.py::_git_env` strips them: those variables
+    redirect which repository and index git reads, so the environment would
+    otherwise be able to shape the answer (a `safe.directory` or a redirected
+    index is a documented container pattern, not an exotic one).
     """
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
     try:
         completed = subprocess.run(
             ["git", "-C", str(path.parent), "ls-files", "--error-unmatch", "--", path.name],
@@ -308,12 +329,16 @@ def _git_tracks(path: Path) -> bool:
             text=True,
             timeout=_GIT_QUERY_TIMEOUT_S,
             check=False,
+            env=env,
         )
     except (OSError, subprocess.SubprocessError):
         return _in_a_git_work_tree(path.parent)
-    # 0 = tracked. 1 = not tracked by this repository. 128 = no repository here
-    # at all. The last two both mean "no repository can have committed it".
-    return completed.returncode == 0
+    if completed.returncode not in (_GIT_TRACKED, _GIT_UNTRACKED):
+        # git could not ANSWER (fatal: 128, or any other diagnostic code).
+        # `tracked` would trust a repo-supplied credential; `untracked` would be
+        # the same fail-open. The `.git` check decides, and it fails CLOSED.
+        return _in_a_git_work_tree(path.parent)
+    return completed.returncode == _GIT_TRACKED
 
 
 def _warn_if_store_is_git_tracked(path: Path) -> None:
@@ -330,9 +355,11 @@ def _warn_if_store_is_git_tracked(path: Path) -> None:
     _WARNED_TRACKED_STORES.add(label)
     print(
         f"⚠️  {label} is tracked by git — a repository can commit that file, so it "
-        f"is NOT trusted as a credential source and is IGNORED. Remove it from the "
-        f"repository (`git rm --cached {path.name}`) and let `tortoise init "
-        f"--api-key` write a gitignored store, or set TORTOISE_API_KEY.",
+        f"is NOT trusted as a credential source and is IGNORED. ROTATE that key "
+        f"now: it reached a commit, so assume it is public. Then remove the file "
+        f"from the repository (`git rm --cached {path.name}`) and ignore it "
+        f"(`echo '.tortoise' >> .gitignore` — `tortoise init --api-key` writes this "
+        f"same path and cannot know your ignore rules), or set TORTOISE_API_KEY.",
         file=sys.stderr,
     )
 

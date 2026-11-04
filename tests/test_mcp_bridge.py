@@ -708,7 +708,7 @@ class TestFailureModes:
         assert "<redacted>" in text, f"the evidence was dropped instead of redacted: {text}"
 
     def test_an_internal_failure_never_prints_the_credential(
-        self, monkeypatch, home, capsys,
+        self, monkeypatch, home,
     ):
         """An exception can carry the header verbatim (UnicodeEncodeError does).
 
@@ -732,6 +732,15 @@ class TestFailureModes:
         class _Out(io.StringIO):
             pass
 
+        # stderr is captured through `monkeypatch`, NOT through `capsys`: this
+        # test also replaces `sys.stdout`, and `capsys` + a second
+        # `monkeypatch.setattr(sys, "stdout", …)` restore a CLOSED capture object
+        # (`monkeypatch` puts back the value it saved, which `capsys` has already
+        # finalized), so a run that ENDS on this test reds with
+        # `ValueError: I/O operation on closed file` in teardown while the test
+        # itself passed.
+        err_stream = io.StringIO()
+        monkeypatch.setattr(sys, "stderr", err_stream)
         out = _Out()
         monkeypatch.setattr(sys, "stdin", io.StringIO('{"jsonrpc":"2.0","id":1,"method":"initialize"}\n'))
         monkeypatch.setattr(sys, "stdout", out)
@@ -740,7 +749,7 @@ class TestFailureModes:
         emitted = out.getvalue()
         assert "tt_internal_secret" not in emitted, f"the value reached stdout: {emitted}"
         assert "<redacted>" in emitted, f"no redaction marker: {emitted}"
-        assert "tt_internal_secret" not in capsys.readouterr().err
+        assert "tt_internal_secret" not in err_stream.getvalue()
 
         # The LINE the handler quotes is a SECOND place the value can straddle a
         # cut: it was sliced to 120 chars BEFORE redaction, so a credential that
@@ -775,10 +784,11 @@ class TestFailureModes:
         # session-scoped redislite-hygiene teardown to write into. This scenario
         # only reads stderr.
         monkeypatch.setattr(sys, "stdin", io.StringIO(long_line))
-        capsys.readouterr()  # drop the first scenario's stderr
+        err_stream.seek(0)
+        err_stream.truncate(0)  # drop the first scenario's stderr
         assert mcp_bridge.main([]) == 0
 
-        err = capsys.readouterr().err
+        err = err_stream.getvalue()
         # Scope the check to the QUOTED segment: the key ends in "internal", which
         # is also a word in the log prefix ("internal failure forwarding"), so a
         # whole-stream substring test reports a leak that is only the prefix.
@@ -1200,7 +1210,7 @@ class TestFailureModes:
         assert [m["id"] for m in messages] == [1, 2], messages
 
     def test_a_resolution_failure_on_the_FAULT_path_still_answers_the_frame(
-        self, monkeypatch, home, capsys,
+        self, monkeypatch, home,
     ):
         """The fault handler must not be able to fault (#10605 review).
 
@@ -1234,6 +1244,8 @@ class TestFailureModes:
             lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("boom")))
 
         out = io.StringIO()
+        err_stream = io.StringIO()
+        monkeypatch.setattr(sys, "stderr", err_stream)
         monkeypatch.setattr(
             sys, "stdin",
             io.StringIO('{"jsonrpc":"2.0","id":1,"method":"initialize"}\n'))
@@ -1247,7 +1259,7 @@ class TestFailureModes:
         assert calls["n"] >= 2, (
             "the live-key lookup on the fault path was never attempted, so this "
             "test is not exercising the hazard it names")
-        assert "tt_start_secret" not in capsys.readouterr().err
+        assert "tt_start_secret" not in err_stream.getvalue()
 
     def test_a_partially_answered_batch_does_not_leak_the_credential(self, home):
         """The answered message on the partial-batch path must be redacted too.

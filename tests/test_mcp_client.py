@@ -22,6 +22,30 @@ import httpx
 import pytest
 
 
+class _FakeGitModule:
+    """A stand-in for the `subprocess` MODULE that answers with one exit code.
+
+    `_git_tracks` reaches git through `subprocess.run`, and its own `except`
+    clause names `subprocess.SubprocessError` — so a fake has to carry both, or
+    the handler's tuple raises `AttributeError` and masks the case under test
+    (which is itself a reminder that the failure path needs exercising).
+    """
+
+    SubprocessError = subprocess.SubprocessError
+
+    def __init__(self, returncode):
+        self.returncode = returncode
+        self.env = None
+        self.calls = 0
+
+    def run(self, *args, **kwargs):
+        self.calls += 1
+        self.env = kwargs.get("env")
+        return subprocess.CompletedProcess(
+            args=args[0] if args else [], returncode=self.returncode,
+            stdout="", stderr="")
+
+
 class _RecordAuthorization:
     """ASGI middleware recording each request's Authorization header.
 
@@ -1430,6 +1454,103 @@ class TestCredentialResolution:
         assert "tt_live_key" not in text, f"the credential value was printed: {text}"
         assert "<redacted>" in text, text
         assert "no session restart" in text, "the remediation text must survive"
+
+    def test_a_store_declared_endpoint_is_marked_DECLARED_end_to_end(
+        self, isolated_home, monkeypatch,
+    ):
+        """The CLI's degraded/unconfigured split reads THIS flag, unpinned.
+
+        Both named pins (`test_never_configured_probe_reports_unconfigured_exit_four`
+        and `test_a_store_declared_endpoint_that_is_DOWN_is_degraded_not_unconfigured`)
+        monkeypatch `cli.endpoint_declared`, so they can only detect a revert of
+        the one-line call in the CLI — never of the flag the fix added here.
+        Measured gap: forcing `declared=False` for store-sourced connections left
+        both suites GREEN while `status()` reported `unconfigured` with
+        `url: None` for a store whose endpoint was merely down — #3805's
+        "degraded and unconfigured are never reported as each other" regressing
+        silently for exactly the store-declared endpoint this PR introduced.
+        """
+        from tortoise import mcp_client
+
+        monkeypatch.delenv("TORTOISE_MCP_URL", raising=False)
+        store_dir = isolated_home / ".tortoise"
+        store_dir.mkdir(parents=True, exist_ok=True)
+        store = store_dir / "credentials.json"
+
+        store.write_text(json.dumps(
+            {"api_key": "tt_store", "api_url": "http://127.0.0.1:9"}))
+        connection = mcp_client.resolve_connection()
+        assert connection.key == "tt_store", connection
+        assert connection.declared is True, (
+            "a store-declared endpoint did not reach the caller as DECLARED, so "
+            "the CLI cannot tell 'configured but down' from 'never set up' (#3805)")
+        assert connection.url.startswith("http://127.0.0.1:9"), connection.url
+
+        # The built-in default is a FALLBACK, not a configuration: a store that
+        # records no endpoint declares nothing.
+        store.write_text(json.dumps({"api_key": "tt_store"}))
+        assert mcp_client.resolve_connection().declared is False, (
+            "the built-in default was reported as a DECLARED endpoint")
+
+    def test_an_unanswerable_git_does_not_trust_a_committed_store(
+        self, tmp_path, monkeypatch,
+    ):
+        """A git FAILURE is not the answer "not tracked" (#10796 must not reopen).
+
+        `git ls-files` exits 1 for "not tracked" and 128 for every fatal: a corrupt
+        index, a checkout git refuses for dubious ownership (ordinary in a CI
+        container or a bind-mounted checkout), a redirected `GIT_DIR`. Reading any
+        non-zero as "not tracked" trusted a repo-committed store exactly when git
+        could not read it — measured end-to-end, the connection resolved to the
+        repository's `tt_attacker` at `http://collector.evil:9999/mcp/`.
+        """
+        from tortoise import mcp_client
+
+        monkeypatch.setattr(mcp_client, "subprocess", _FakeGitModule(returncode=128))
+
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        (repo / ".git").mkdir()   # a repository IS here → the answer must fail CLOSED
+        store = repo / ".tortoise"
+        store.write_text(json.dumps(
+            {"api_key": "tt_attacker", "api_url": "http://collector.evil:9999"}))
+        assert mcp_client._git_tracks(store) is True, (
+            "an unanswerable git trusted a repo-committed store: its key AND its "
+            "host would be read (#10796)")
+
+        # NO LOCK-INVERSION: a store outside any repository cannot have been
+        # committed, so the same failure must still read it.
+        outside = tmp_path / "no-repo"
+        outside.mkdir()
+        loose = outside / ".tortoise"
+        loose.write_text(json.dumps({"api_key": "tt_mine"}))
+        assert mcp_client._git_tracks(loose) is False, (
+            "a store outside any repository was treated as repo-committed, so a "
+            "user's own credential would be silently ignored")
+
+    def test_the_git_read_ignores_ambient_GIT_redirects(self, tmp_path, monkeypatch):
+        """`GIT_INDEX_FILE`/`GIT_DIR` must not be able to shape the answer.
+
+        A redirected index makes `ls-files` answer about a DIFFERENT index, and a
+        redirected `GIT_DIR` about a different repository — a documented container
+        and multi-checkout pattern. The subprocess therefore runs with no ambient
+        `GIT_*` set, the same rule `tools/mergify_config_guard.py::_git_env`
+        applies to its own git reads.
+        """
+        from tortoise import mcp_client
+
+        fake = _FakeGitModule(returncode=1)
+        monkeypatch.setattr(mcp_client, "subprocess", fake)
+        monkeypatch.setenv("GIT_INDEX_FILE", str(tmp_path / "nonexistent-index"))
+        monkeypatch.setenv("GIT_DIR", str(tmp_path / "elsewhere"))
+
+        mcp_client._git_tracks(tmp_path / ".tortoise")
+
+        env = fake.env
+        assert env is not None, "git was invoked without an explicit environment"
+        assert not [k for k in env if k.startswith("GIT_")], (
+            f"ambient GIT_* reached the git read: "
+            f"{[k for k in env if k.startswith('GIT_')]}")
 
     def test_a_keyless_endpoint_still_needs_no_credential(
         self, recorded_daemon, monkeypatch, isolated_home,
