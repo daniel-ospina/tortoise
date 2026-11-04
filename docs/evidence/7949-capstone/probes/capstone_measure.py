@@ -56,10 +56,10 @@ claim nothing supports. **The seam has since LANDED (#9116), so this module no
 longer reports them as unobservable-by-construction.** Pre-seam, ``capture_session``'s
 receipt could not carry them and the failure was ONE LAYER UP from where it was
 first attributed: ``extract_session_v2`` built the surfaces
-(``result["classify_later"]`` at ``tortoise/extractor_v2.py:10576-10582`` and
-``result["vet"]`` at ``:10586-10590``) while the meta fold dropped them with
+(``result["classify_later"]`` at ``tortoise/extractor_v2.py:9475-9481`` and
+``result["vet"]`` at ``:9485-9489``) while the meta fold dropped them with
 ``"stats": out.get("stats") or {}``. The fold now calls
-``_capture_stats_with_step_witness`` (``tortoise/sdk.py:15225``), which copies each
+``_capture_stats_with_step_witness`` (``tortoise/sdk.py:15195``), which copies each
 stage's own counts onto ``stats["step_witness"]`` and drops no candidate text — so
 this module READS that seam (:func:`_witness_block`) instead of citing the gap. A
 run measured at a stamp BEFORE the seam still reports S2.2/S2.3 unobserved, and
@@ -132,15 +132,6 @@ ROOT = Path(__file__).resolve().parents[4]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-#: Imported AFTER the sys.path fix above (this file runs as a script from ``probes/``), and through
-#: a FUNCTION so the import sits where the path is already correct rather than mid-module: a
-#: module-level ``from tortoise...`` here is E402, and ruff runs over this file in CI.
-def _derivation_label_classes() -> frozenset[str]:
-    """The LINK-anchored derivation classes, from the writer's own constant (#9736)."""
-    from tortoise.projection.edges import _DERIVATION_REFERENCES_LABELS
-
-    return frozenset(_DERIVATION_REFERENCES_LABELS)
-
 
 def _sdk_line(code: str) -> int:
     """The ONE line of ``tortoise/sdk.py`` carrying ``code`` — READ, never typed.
@@ -210,30 +201,9 @@ END = "=== CAPSTONE-VERDICT-END ==="
 CRITERIA = ("E1", "E2", "E3", "E4", "E5")
 STEPS = ("S0", "S1", "S2.1", "S2.2", "S2.3", "S3", "S5", "S6")
 
-#: The node classes the pre-registration's E3 denominator names: ``Point`` (the anchor sits on the
-#: node, #5038) plus the LINK-anchored classes the writer itself names —
-#: ``_DERIVATION_REFERENCES_LABELS`` (``Event``, ``Document``; ``edges.py:747``).
-#: ⛔ DERIVED, not hardcoded (#9736). This constant used to read ``("Point", "Object", "Event")``
-#: with the comment "not a choice this probe makes" — and that WAS a choice: ``:Object`` mention
-#: links carry no ``sourceVersion`` BY DESIGN (#5199 option A — ``Object`` is deliberately ABSENT
-#: from ``_DERIVATION_REFERENCES_LABELS``'s own comment block, cited by SYMBOL not by line), so counting
-#: them made E3's ``= 1.000`` unreachable and a re-run would report ``148/433`` while the registration
-#: now names ``148/383``. A probe that disagrees with the registration measures a criterion nobody
-#: registered, so the set follows the writer's constant and the gate derives the same one.
-DERIVED_LABELS = ("Point", *sorted(_derivation_label_classes()))
-
-#: The node classes the CENSUS enumerates per label — ⛔ NOT the E3 row selector above.
-#: ``per_label`` is the census's per-class node/anchor block, and a SECOND instrument reads it:
-#: ``tools/s3_prior_ablation.py``'s ``created_counts`` takes ``per_label["Object"]["nodes"]`` as
-#: the ``objects`` numerator of ``extraction_nodes = claims + objects + events`` (#10463/#10468),
-#: on live data, three times per run. Enumerating ``per_label`` with ``DERIVED_LABELS`` made that
-#: key VANISH when #9736 narrowed E3 to the anchored classes — so every future ablation run would
-#: print ``objects=0`` while the graph held Objects, silently recomputing #10463's published ratio
-#: on a narrower definition than its committed log was measured with, with no error and no refusal
-#: (#10525 review P1, the silent-zero shape). The census's set is therefore its OWN: E3's classes
-#: UNION the mention class E3 deliberately excludes, so a change to the E3 row can never re-narrow
-#: an instrument that is not about E3.
-CENSUS_LABELS = tuple(sorted(set(DERIVED_LABELS) | {"Object"}))
+#: The node classes the pre-registration's E3 denominator names (``Point + Object
+#: + Event``) — not a choice this probe makes.
+DERIVED_LABELS = ("Point", "Object", "Event")
 
 #: The relationship type that points FROM a derived node at its source. The
 #: anchor is a property of that DERIVATION LINK, so the derived node is its
@@ -244,15 +214,14 @@ ANCHOR_OUT = ("extractedFrom",)
 #: ->(Event|Document)``, written by ``_EdgeHandlers.link_source_to_event``
 #: (``tortoise/projection/edges.py:2832-2857``, ``MERGE (s)-[r:references]->(e)
 #: ON CREATE SET r.sourceVersion = s.contentHash``) and reached from the capture
-#: path at ``tortoise/sdk.py:15506`` (``proj.link_source_to_event(source_key,
+#: path at ``tortoise/sdk.py:15476`` (``proj.link_source_to_event(source_key,
 #: event_id)`` — ``(Source)-[:references]->(sessionCaptured Event)``). The anchor
 #: is on the same link, but the DERIVED node is its TARGET.
 #: ⚠️ Counting this one in the ``extractedFrom`` direction counts SOURCES.
 ANCHOR_IN = ("references",)
 
 E3_RULE = (
-    "a derived node (Point/Event/Document — the classes the model anchors; see DERIVED_LABELS) "
-    "carries a version anchor iff it is the "
+    "a derived node (Point/Object/Event) carries a version anchor iff it is the "
     "SOURCE of at least one extractedFrom relationship whose sourceVersion is a "
     "non-empty string, OR the TARGET of at least one references relationship "
     "whose sourceVersion is a non-empty string. The two directions are NOT "
@@ -883,27 +852,27 @@ _IDLE_CITES: dict[str, str] = {
         "The extractor emits exactly this shape when the flag is ON and the list "
         "the VET pass would have worked on is empty: `vet_enabled` is computed "
         "BEFORE the `if not edus:` early return that emits {'enabled': "
-        "vet_enabled, 's2': {}, 'union': {}} (tortoise/extractor_v2.py:10200, the "
-        "flag; :10204, the early return; :10220, its vet surface), and each VET "
-        "pass is gated on the LIST — `if vet_enabled and embed_list:` (:10295), "
-        "`if vet_enabled and complete_list:` (:10417) — so "
+        "vet_enabled, 's2': {}, 'union': {}} (tortoise/extractor_v2.py:9099, the "
+        "flag; :9103, the early return; :9119, its vet surface), and each VET "
+        "pass is gated on the LIST — `if vet_enabled and embed_list:` (:9194), "
+        "`if vet_enabled and complete_list:` (:9316) — so "
         "a block that says enabled=true proves the FLAG, never that the pass "
         "ran. A FAILED vet pass leaves the same empty stats (`_run_vet_pass` "
-        "returns {} on its fail-open path, :10079-10082)."
+        "returns {} on its fail-open path, :8978-8981)."
     ),
     "classify_later": (
         "The extractor emits exactly this shape when the flag is ON and the "
         "CLASSIFY pass had nothing to work on: `classify_later` is computed at "
-        "tortoise/extractor_v2.py:10169 (and set False when its classifier cannot "
-        "be constructed, :10194), the `if not edus:` early return emits "
+        "tortoise/extractor_v2.py:9068 (and set False when its classifier cannot "
+        "be constructed, :9093), the `if not edus:` early return emits "
         "{'enabled': classify_later, 's2': {}, 'union': {}, "
-        "'restamp_overrides': 0, 'slot_rekeys': 0} (:10216-10219), and each "
+        "'restamp_overrides': 0, 'slot_rekeys': 0} (:9115-9118), and each "
         "classify pass is gated on the LIST and then on a NON-EMPTY item set — "
-        "`if classify_later and embed_list:` (:10307) around `if items:` "
-        "(:10310), `if classify_later and complete_list:` (:10432) around "
-        "`if items:` (:10442) — so a block that says enabled=true proves the "
+        "`if classify_later and embed_list:` (:9206) around `if items:` "
+        "(:9209), `if classify_later and complete_list:` (:9331) around "
+        "`if items:` (:9341) — so a block that says enabled=true proves the "
         "FLAG, never that the pass ran. A FAILED classify pass leaves the same "
-        "empty stats (its fail-open `except` at :10323 / :10453)."
+        "empty stats (its fail-open `except` at :9222 / :9352)."
     ),
 }
 
@@ -915,26 +884,26 @@ def _pass_ran(block: dict) -> bool | None:
     where the two were confused. ``extract_session_v2`` emits ``result["vet"]``
     and ``result["classify_later"]`` UNCONDITIONALLY — on the flag-OFF arm and on
     the early-return path the block is ``{"enabled": False, "s2": {}, "union":
-    {}}`` (:10216-10219, :10220, :10576-10590) — so an acceptance test of "a non-empty dict"
+    {}}`` (:9115-9118, :9119, :9475-9489) — so an acceptance test of "a non-empty dict"
     reports S2.2/S2.3 WITNESSED on a run measured with the flags OFF, printing
     ``enabled=false, s2={}`` beside the word WITNESSED.
 
     ⛔ AND THE FLAG ALONE IS NOT ACTIVITY, which is the sharper half and the one
     this rule got wrong first. ``enabled`` is the FLAG value, computed BEFORE the
-    pass is reached: ``vet_enabled`` is set at ``extractor_v2.py:10200`` and
-    ``edus = _edus_from_conversation(...)`` follows at ``:10203``, whose
-    ``if not edus:`` early return (``:10204``) emits literally ``"vet": {"enabled":
-    vet_enabled, "s2": {}, "union": {}}`` (``:10220``) — with the flag ON. The
+    pass is reached: ``vet_enabled`` is set at ``extractor_v2.py:9099`` and
+    ``edus = _edus_from_conversation(...)`` follows at ``:9102``, whose
+    ``if not edus:`` early return (``:9103``) emits literally ``"vet": {"enabled":
+    vet_enabled, "s2": {}, "union": {}}`` (``:9119``) — with the flag ON. The
     passes themselves are gated on the LIST, not the flag: ``if vet_enabled and
-    embed_list:`` (``:10295``) and ``if vet_enabled and complete_list:``
-    (``:10417``). So a session whose conversation produced no list emits
+    embed_list:`` (``:9194``) and ``if vet_enabled and complete_list:``
+    (``:9316``). So a session whose conversation produced no list emits
     ``enabled: True`` with empty counters and no pass ever ran; so does a pass
     that FAILED, because ``_run_vet_pass`` returns ``{}`` stats on its fail-open
-    exception path (``extractor_v2.py:10079-10082``). ``enabled: true`` therefore
+    exception path (``extractor_v2.py:8978-8981``). ``enabled: true`` therefore
     proves the flag was read, never that the pass did anything.
 
     ⛔ The VET lines above are the VET pass's, not the rule's: the CLASSIFY pass
-    is different code (``classify_later`` at `:10169`, its own early-return
+    is different code (``classify_later`` at `:9068`, its own early-return
     block, its ``if classify_later and …`` gates around ``if items:``, its own
     fail-open ``except``), so the rule is stated pass-agnostically here and the
     CITES a reader gets are raised per surface from ``_IDLE_CITES`` — never one
@@ -1203,17 +1172,8 @@ def point_composition_line(composition: dict | None) -> str:
         f"unanchored node in 'other' LOST a link or was minted by a writer that "
         f"never derives is the attribution #9736 still owns; the figure counts "
         f"it, the line does not excuse it. derivation figure (anchored / "
-        f"expected-to-derive): {figure}. The 'all derived nodes' figure above IS "
-        f"the REGISTERED reading, not the PRE-AMENDMENT one: §10.1 re-registered "
-        f"E3's denominator to the classes the model anchors, so this figure no "
-        f"longer counts ':Object' and is NARROWER than the pre-amendment reading, "
-        f"which §9's provenance table states (and §10.1 restates) and this line does not recompute (the census "
-        f"that produced the old figure is retained in HISTORY, so it is checkable "
-        f"from the commit rather than re-emitted here as if it were this run's). "
-        f"That amendment is a "
-        f"DISCLOSED revision of a frozen denominator — §10.1 states old and new, "
-        f"the authority and the reason — not a silent one, and whether it stands "
-        f"is #9736's ruling to give (owner-gated, still open)")
+        f"expected-to-derive): {figure}. The frozen 'all derived nodes' reading "
+        f"above is unchanged")
 
 
 def e3_row_note(*, composition: dict | None, e3_result: dict, graph: str,
@@ -1267,14 +1227,10 @@ def e3_row_note(*, composition: dict | None, e3_result: dict, graph: str,
         f"run's own graph ({graph}, fixtures_hash {corpus_sha}). The "
         f"Source->Object identity link carries no sourceVersion BY "
         f"DESIGN (owner option A, #5199), so ':Object mention links' can "
-        f"never anchor, and the UNAMENDED denominator counted them, which made "
-        f"the = 1.000 bar unreachable as registered. §10.1 re-registered E3's "
-        f"class set to the classes the model anchors, so the denominator a "
-        f"conforming row declares no longer counts ':Object' — a DISCLOSED reopen "
-        f"of a frozen denominator, whose ruling is #9736's to give (owner-gated, "
-        f"still open), which is why §10.1 reports both readings rather than one — "
-        f"this row scores the AMENDED set and says so — and it states the "
-        f"COMPOSITION of the {block.get('points', 0)} "
+        f"never anchor — and the frozen denominator counts them anyway, "
+        f"so the = 1.000 bar is unreachable as registered (#9736: either "
+        f"the metric is re-registered or the model is reopened; a lane "
+        f"cannot pick). COMPOSITION of the {block.get('points', 0)} "
         f"Point nodes the denominator also counts: "
         f"{block.get('turn_rows', 0)} mechanical turn rows + "
         f"{block.get('extraction_claims', 0)} extraction claims "
@@ -1308,11 +1264,10 @@ def e3_row_note(*, composition: dict | None, e3_result: dict, graph: str,
         f"sitting outside it. "
         f"Whether an unanchored 'other' Point lost a link or "
         f"was minted by a writer that never derives is the attribution "
-        f"#9736 still owns. #9736 holds BOTH the amendment §10.1 makes and "
-        f"the reopening of the model, and §10.1 reports BOTH readings — the "
-        f"amended denominator and the pre-amendment one — while this row states the "
-        f"amended one's composition, so neither is read "
-        f"off a denominator whose composition was hidden")
+        f"#9736 still owns. #9736 must choose between "
+        f"re-registering the metric and reopening the model, and this "
+        f"row reports BOTH readings so neither choice is made on a "
+        f"denominator whose composition was hidden")
 
 
 def _stage_calls(stats: dict, stage: str) -> int:
@@ -1485,49 +1440,20 @@ def observe_steps(runs: list[dict], census_data: dict) -> tuple[dict, dict]:
                             f"(queries={queries}, degraded={degraded or 'none'}) — "
                             "a degraded search is not S3")
 
-    # ⛔ THE BRACKET MUST SUM TO THE TOTAL IT RENDERS BESIDE (#10525 review P2).
-    # ``per_label`` is the WIDER instrument census — it carries ``:Object`` for
-    # ``s3_prior_ablation`` (see ``CENSUS_LABELS``) — while ``derived_total`` is E3's row
-    # (``Point`` + the link-anchored classes). Rendering every block beside the narrower
-    # total put two irreconcilable numbers on ONE line: the shipped log's own S5 line is
-    # ``433 … [Point 338, Object 50, Event 45]`` (``capstone-measured-e0fc940b.log:26``),
-    # so the same graph would now print ``383 … [Document 0, Event 45, Object 50,
-    # Point 338]`` — parts summing to 433 beside a total of 383, in the bundle whose
-    # subject is that a number must be carried by what backs it. The narrowing had been
-    # applied to the denominator and not to the WITNESS that renders next to it.
-    # The classes the census carries but E3's row does not are therefore named APART
-    # from the total rather than dropped: a reader not told ``:Object`` is excluded reads
-    # its absence from the bracket as "the graph held none".
-    census_per_label = census_data.get("per_label") or {}
-    e3_census = [(label, census_per_label[label]) for label in DERIVED_LABELS
-                 if label in census_per_label]
-    outside_census = [(label, block) for label, block in census_per_label.items()
-                      if label not in DERIVED_LABELS]
     if census_data.get("derived_total"):
         per_label = ", ".join(
             f"{label} {block['nodes']} ({block['anchored']} anchored)"
-            for label, block in e3_census)
-        outside = ", ".join(
-            f"{label} {block['nodes']} ({block['anchored']} anchored)"
-            for label, block in outside_census)
-        outside_note = (
-            f"; outside E3's row — counted by this census, NOT by the total above, "
-            f"because their links carry no sourceVersion BY DESIGN (#5199 option A): "
-            f"[{outside}]" if outside else "")
+            for label, block in census_data["per_label"].items())
         operators = ", ".join(f"{name}={count}" for name, count in
                               sorted(census_data["operator_relationships"].items()))
         observed["S5"] = (
             f"the graph write landed: {census_data['derived_total']} derived "
-            f"node(s) written by the run [{per_label}]{outside_note}; "
+            f"node(s) written by the run [{per_label}]; "
             f"stats.operator_endpoints_minted={endpoints}; operator-shaped "
             f"relationships written [{operators or 'none'}]")
     else:
-        outside_note = (
-            f" (the census did carry {', '.join(label for label, _ in outside_census)}, "
-            f"which E3's row does not count)" if outside_census else "")
-        unobserved["S5"] = (f"the run's own graph carries no derived node "
-                            f"({'/'.join(DERIVED_LABELS)}, E3's classes) — nothing was "
-                            f"written{outside_note}")
+        unobserved["S5"] = ("the run's own graph carries no derived node "
+                            "(Point/Object/Event) — nothing was written")
 
     if census_data.get("points") and \
             census_data.get("event_stamped_points") is not None:
@@ -1577,7 +1503,7 @@ def census(uri: str) -> dict:
     ).result_set}
 
     per_label: dict[str, dict[str, int]] = {}
-    for label in CENSUS_LABELS:
+    for label in DERIVED_LABELS:
         # Per-label queries rather than one grouped query: `labels(n)[0]` would
         # group a multi-labelled node under the wrong key, and the denominator is
         # exactly the thing this census may not get subtly wrong.
@@ -1625,13 +1551,6 @@ def census(uri: str) -> dict:
         relationship_counts[str(name)] = int(count)
         relationship_anchored[str(name)] = int(anchored)
 
-    # E3's totals are summed over the E3 ROW's classes ONLY. ``per_label`` is the wider,
-    # instrument-wide census (it carries ``:Object`` for ``s3_prior_ablation``), so summing
-    # every block here would put the mention class straight back into E3's denominator and
-    # report ``148/433`` beside a registration that names ``148/383`` — the exact defect
-    # #9736 exists to remove, reintroduced from the other side.
-    e3_blocks = [per_label[label] for label in DERIVED_LABELS if label in per_label]
-
     event_stamped = projection.g.query(
         "MATCH (n:Point) WHERE n.eventId IS NOT NULL RETURN count(*)").result_set
 
@@ -1643,8 +1562,8 @@ def census(uri: str) -> dict:
         "label_counts": label_counts,
         "per_label": per_label,
         "point_composition": composition,
-        "derived_total": sum(block["nodes"] for block in e3_blocks),
-        "anchored_total": sum(block["anchored"] for block in e3_blocks),
+        "derived_total": sum(block["nodes"] for block in per_label.values()),
+        "anchored_total": sum(block["anchored"] for block in per_label.values()),
         "points": int(label_counts.get("Point", 0)),
         "graph_events": int(label_counts.get("GraphEvent", 0)),
         "event_stamped_points": (int(event_stamped[0][0])

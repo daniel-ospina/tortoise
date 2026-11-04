@@ -884,104 +884,15 @@ def _event_row_exists(proj, event_id: str) -> bool | None:
     return bool(rows and rows[0][0] > 0)
 
 
-#: The page bound `read_after` enforces. It is the SAME domain `GET /v1/events`
-#: already declares — `Query(100, ge=1, le=MAX_PAGE)` (`hosted_api.events_poll`)
-#: — and the one `read_after`'s own docstring states. It was declared in
-#: two places (#8447 row #6) and silently clamped in two others: this seam
-#: (`max(1, min(int(limit), 1000))`, the defect) and the `webhook_delivery`
-#: page read, which carried its own copy of the literal.
-#:
-#: OVERRIDES: TWO departures from AIP-158's `page_size` contract, both the same
-#: instrument (#8447) — an out-of-domain ask is REFUSED, never silently
-#: rewritten into a page the caller did not ask for:
-#:
-#:   1. ABOVE the declared maximum, AIP-158's coerce-down is refused (that is
-#:      the Google-approved default: an over-max ask is coerced DOWN to the
-#:      maximum, and only a NEGATIVE one is an INVALID_ARGUMENT). Coercing here
-#:      would be the silent truncation #8447 forbids: `read_after` returns a
-#:      bare `list[dict]` and `poll_events`' `next_cursor` is never empty, so a
-#:      coerced page is indistinguishable from a drained stream. AIP-158 can
-#:      afford coerce-down because its completeness instrument is the
-#:      `next_page_token`, which "must be empty" exactly at end-of-collection;
-#:      this seam has no such token, which is why the coercion is UNUSABLE here.
-#:      (Stated as this seam's reason, NOT as AIP-158's condition — the AIP
-#:      does not qualify its coerce-down that way.)
-#:   2. A `page_size` of 0 is refused, although AIP-158 says "If the user does
-#:      not specify page_size (or specifies 0), the API chooses an appropriate
-#:      default ... The API must not return an error." Serving a 1-row page for
-#:      an ask of 0 is the same rewritten ask in the other direction, and
-#:      `GET /v1/events` has always refused 0 at its own edge (`Query(ge=1)`):
-#:      the seam now agrees with its public edge instead of with AIP-158. The
-#:      `ge=1` inherited from that route is not itself the recording of this
-#:      choice — THIS line is.
-#:
-#: Both departures are recorded on #8447.
-MAX_PAGE = 1000
-
-
 def read_after(proj, after_seq: int, types: list[str] | None = None,
                limit: int = 100) -> list[dict]:
     """Return events with seq > after_seq, ordered seq ASC, deduped by event_id.
 
-    `types` filters by event type if provided. `limit` caps the page and must
-    be an integer in ``1 .. MAX_PAGE`` (default 100).
-
-    ⚠️ ``len(page) < limit`` is NOT evidence that the stream is drained — page
-    by ``seq``, passing the last ``seq`` you received as ``after_seq``. Two
-    reasons, and only the first is #8447's: an out-of-domain ask is REFUSED
-    (see below), and a duplicate ``event_id`` is dropped AFTER the query's
-    ``LIMIT`` (defense in depth), so a page of ``limit`` rows can legitimately
-    come back with fewer distinct rows while more remain beyond it (pinned by
-    ``test_a_duplicate_event_id_inside_a_full_page_shrinks_it``).
-
-    #8447 row #6: an ask OUTSIDE that domain is REFUSED (``ValueError``) rather
-    than clamped. It used to be ``max(1, min(int(limit), 1000))`` — so a caller
-    asking for 5000 got 1000 rows and was told nothing, and because
-    ``len(page) < limit`` the short page read as *the stream is drained* while
-    4000 events were still undelivered (the contract #8447 pins: a bounded
-    operation returns complete results or says it is incomplete, never a
-    silently truncated page indistinguishable from a complete one). Refusing
-    at the reference point — rather than capping the caller's ask — is the same
-    instrument ``next_seq`` uses for an out-of-domain ``seq`` (#5379). It also
-    departs from AIP-158 on TWO counts — it refuses the coerce-down AIP-158
-    prescribes for an over-max ``page_size``, and it refuses ``0`` where
-    AIP-158 takes the default. See the ``OVERRIDES:`` line above ``MAX_PAGE``
-    for why each departure is deliberate.
-
-    Dedup: a duplicate event_id (defense in depth — the unique constraint
-    normally prevents them) keeps the FIRST occurrence.
+    `types` filters by event type if provided. `limit` caps the page
+    (default 100, max 1000). Dedup: a duplicate event_id (defense in depth —
+    the unique constraint normally prevents them) keeps the FIRST occurrence.
     """
-    raw = limit
-    try:
-        limit = int(raw)
-    except (TypeError, ValueError, OverflowError):
-        # `int()` alone leaves the seam's own refusal un-named: `inf` used to
-        # escape as OverflowError, which a caller catching ValueError (the
-        # documented answer) would miss.
-        raise ValueError(f"limit must be a whole number, got {raw!r}") from None
-    if isinstance(raw, bool) or limit != raw:
-        # A VALUE comparison, not an isinstance check, for everything EXCEPT
-        # `bool`: `int()` also floors `Decimal('2.9')` and `np.float32(2.9)`,
-        # which are not `float` instances — the silent shrink this refuses.
-        # `"5000"` is refused too: reporting the converted 5000 would describe a
-        # call that never happened (the same rule as the range message below).
-        # `bool` needs the explicit test because it IS an `int` subclass:
-        # `int(True) == True` and `int(False) == False`, so the value comparison
-        # lets `limit=True` through as a 1-row page and sends `limit=False` to
-        # the RANGE message ("got 0"), describing a call nobody made. The same
-        # rule is already stated in `webhook_delivery._as_seq`.
-        raise ValueError(f"limit must be a whole number, got {raw!r}")
-    if not 1 <= limit <= MAX_PAGE:
-        # Covers 0 and negatives: AIP-158 would take the default for 0, and this
-        # refusal is a marked departure (departure 2 in the `OVERRIDES:` line
-        # above `MAX_PAGE`) — do not "restore" it to a default-sized page.
-        raise ValueError(
-            f"limit must be between 1 and {MAX_PAGE}, got {limit}. "
-            "An out-of-domain page size is REFUSED rather than clamped: a "
-            "silently clamped page is indistinguishable from a complete one, "
-            f"so the caller cannot tell {MAX_PAGE} rows from \"the stream ends "
-            "here\". Ask for a page within the bound and continue from the "
-            "last seq you received (#8447).")
+    limit = max(1, min(int(limit), 1000))
     params: dict = {"after": int(after_seq), "limit": limit}
     if types:
         params["types"] = list(types)

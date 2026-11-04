@@ -29,8 +29,6 @@ import pytest
 
 pytest.importorskip("cryptography")  # the at-rest encryption dependency
 
-from datetime import UTC
-
 from tortoise import webhook_delivery as wd
 from tortoise.security import validate_webhook_url
 
@@ -1249,73 +1247,3 @@ def test_rest_requires_auth(client):
         assert tc.delete("/v1/context/subscriptions/sub_x").status_code == 401
         assert tc.get("/v1/context/subscriptions/sub_x/deliveries").status_code == 401
     assert ha_mod  # imported for the harness parity above
-
-
-def test_more_pending_compares_against_the_page_that_was_read(sdk_factory):
-    """#8447 row #6: `more_pending` must test the page, not the raw `batch`.
-
-    Pre-#8447 the read was clamped to `MAX_PAGE` while the comparison used the
-    UNCLAMPED ``batch``, so for any ``batch`` above the bound
-    ``len(events) >= batch`` was never true: a stream with more to deliver
-    reported ``more_pending: 0`` — the same short-page-reads-as-drained defect
-    one layer out. Above the bound the two numbers now agree, so this asserts
-    the clamped page is what drove the answer.
-    """
-    from tortoise import event_store
-
-    sdk = sdk_factory(ensure_schema=True)
-    proj = sdk._get_proj()
-    # LIVE ts, not a fixed stamp: `poll_events` purges rows older than the
-    # retention window, and a fixed date would make the seed retention bait
-    # (see tests/test_8447_read_after_page_bound.py's `_seed`).
-    from datetime import datetime
-
-    proj.g.query(
-        "UNWIND range(1, $n) AS i CREATE (:GraphEvent {seq: i, "
-        "event_id: 'e' + toString(i), type: 'PointAdded', "
-        "ts: $ts, payload: '{}'})",
-        params={"n": event_store.MAX_PAGE + 1,
-                "ts": datetime.now(UTC).isoformat()},
-    )
-    wd.create_subscription(proj, url="https://hooks.example.com/cb",
-                           types=["PointAdded"])
-    # 503 on the first attempt stops delivery immediately; `more_pending` is
-    # decided from the READ, before any egress, so the counter is still pinned.
-    summary = wd.dispatch_pending(proj, transport=FakeTransport([503]),
-                                  batch=event_store.MAX_PAGE + 4000)
-    assert summary["more_pending"] == 1, summary
-
-
-def test_a_batch_below_one_delivers_nothing_instead_of_clamping_to_one(sdk_factory):
-    """#8447 row #6: `batch` is a PAGE SIZE — an ask for none delivers none.
-
-    The page used to be ``max(1, min(int(batch), MAX_PAGE))``, so ``batch=0``
-    delivered exactly ONE event and no field reported the rewrite: the caller's
-    ask was silently replaced by a different one. Above the bound that rewrite
-    is at least MARKED by ``more_pending``; below 1 there is nothing to mark it
-    with, so the ask is answered literally (and the cursor does not move).
-
-    ``True``/``False`` are here for the same reason `read_after` refuses them:
-    ``bool`` is an ``int`` subclass, so ``int(True) == 1`` would otherwise be a
-    legal page size — a value that is not a page size at all.
-    """
-    sdk = _seed(sdk_factory, n=3)
-    proj = sdk._get_proj()
-    sub = wd.create_subscription(proj, url="https://hooks.example.com/cb")
-
-    for ask in (0, -5, True, False):
-        transport = FakeTransport([200, 200, 200])
-        summary = wd.dispatch_pending(proj, transport=transport, batch=ask)
-        assert summary["subscriptions"] == 0, (ask, summary)
-        assert summary["delivered"] == 0, (ask, summary)
-        assert transport.calls == [], (ask, transport.calls)
-        assert wd.get_subscription(proj, sub["sub_id"])["cursor"] == 0, ask
-
-    # ...and the events are still there for the pass that DOES ask for a page:
-    # a delivering pass is what proves the zero/negative asks were not merely
-    # "consumed" by a cursor that advanced behind the caller's back.
-    transport = FakeTransport([200])
-    summary = wd.dispatch_pending(proj, transport=transport, batch=1)
-    assert summary["delivered"] == 1, summary
-    assert summary["more_pending"] == 1, summary
-    assert [json.loads(c[1])["event"]["seq"] for c in transport.calls] == [1]

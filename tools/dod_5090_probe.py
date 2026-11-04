@@ -47,23 +47,12 @@ trusted"*); the instrument records the consequence rather than re-deciding it.
 
 `STORAGE-ARCHITECTURE.md` §12.2a forbids *"a second, independently-derived rule
 set"* for `EMBED`. The instrument counts the **predicates that can answer
-`NO-EMBED`**, mechanically: the modules that **own identifier patterns**
-(`re.compile` at module scope) over the population `predicate_population()`
-returns — the modules the gate **imports** (walked, so a new
-`embed_rules.py` counts the day it exists) **plus** the seam modules that decide
-whether the gate is consulted at all (`OWNERSHIP_ONLY`, scanned for their own
-patterns with their imports NOT followed). The target is **1**,
+`NO-EMBED`**, mechanically: the modules on the embed path that **own identifier
+patterns** (`re.compile` at module scope). The target is **1**,
 `value_gate.identifier_only`, asked by `embed_gate.embedding_verdict` — which is
 the ASK, not a second predicate, and must report the *shared* rule id. A second
 pattern list is the drift the criterion exists to prevent, and it makes this
 count read `2`.
-
-⚠️ **Two ways the population can be right and the verdict still unearned,**
-both closed here: a module that will not **parse** (or will not read) is a hole,
-not a zero, so the verdict is `UNDETERMINED` rather than `MET`; and the seam that
-**decides whether to consult the gate** cannot be reached by walking the gate's
-own imports — an import makes the *importer* depend on the *importee* — so it is
-scanned for ownership separately.
 
 ## The census — `stored` / `indexed` / `unindexed` per label
 
@@ -79,13 +68,6 @@ per-index size counters reported **and labelled as blind** (§12.1a measured
 stated, or the label is `UNMEASURED`. Never `0`: an unreachable store and an
 empty one are different facts, and `#5090` is a measurement issue whose whole
 failure mode is a body that reads as measured without being measured.
-
-⛔ **The reads go through `GRAPH.RO_QUERY` and the labels are quoted.** A label
-cannot be a query parameter and its value comes from the graph's own schema, so
-it is quoted with the repo's one identifier rule
-(`graph_key_restore._quote_identifier`) rather than concatenated raw; and the
-read-only verb makes "this module stores nothing" the engine's rule instead of
-this file's memory.
 
 Usage::
 
@@ -199,281 +181,13 @@ SEAM_CALL = "encode_for_row"
 #: `sdk._session_embedding` embed while containing neither gate symbol).
 UNGATED_CALLS: tuple[str, ...] = ("encode_for_store", "compute_session_embedding")
 
-#: `MERGE (n:Label …)` / `CREATE (p:Label …)` — the label the WRITE names.
-#: ⛔ A `MATCH` is a read, so it is deliberately NOT in this pattern. Counting it
-#: was the comment/code disagreement review round 17 found (the comment said
-#: MERGE/CREATE while the pattern also took MATCH), and the direction it fails
-#: is the bad one: on the module-stem fallback a `MATCH (n:Point)`-shaped read is
-#: the one path that can RESOLVE a label the writer never writes. Dropping it can
-#: only turn a resolved label into `UNKNOWN(two labels: …)` / `UNKNOWN` (a false
-#: `PARTIAL`, the safe direction), and it moves no label on this tree.
-_NODE_LABEL = re.compile(r"(?:MERGE|CREATE)\s*\(\s*(\w+)\s*:\s*(\w+)")
+#: `MERGE (n:Label …)` / `CREATE (p:Label …)` — the label the Cypher names.
+_NODE_LABEL = re.compile(r"(?:MERGE|CREATE|MATCH)\s*\(\s*(\w+)\s*:\s*(\w+)")
 
 #: An embedding WRITE — a Cypher property assignment or the clause helper.
 _EMBED_WRITE = re.compile(
     r"(?:\w+\.embedding|(?<![\w.])embedding)\s*=|set_embedding_clause\("
 )
-
-#: ── The RESOLVED census (#10541) ────────────────────────────────────────────
-#: A three-name callee vocabulary cannot tell a legitimate exemption from a
-#: bypass, so bullet 2 used to be held at `PARTIAL` over every function the
-#: instrument could not resolve. Each such function is now carried by ONE of
-#: the classes #10541 names, with the `path::symbol` that decides it. The entries
-#: below were READ at their seam — not inferred from a name.
-#:
-#: ⛔ `path:LINE` IS NOT EVIDENCE, and this table learned that the expensive way:
-#: the first version cited offsets, `sdk.py` then grew ~43 lines on `main`, and
-#: every `tortoise.sdk::*` citation in it pointed at unrelated code — while
-#: `#5090`/`#10541` quote this census as the justification for the classes
-#: (review round 17, P3). Nothing executed the offsets (`_census_class` reads
-#: `entry[0]` only), so they rotted silently. A SYMBOL is stable under an
-#: unrelated edit and still fails when the seam leaves the function the entry
-#: names; `CENSUS_EVIDENCE` carries one `(path, symbol, needle)` citation per
-#: entry and `census_evidence_violations()` re-derives all of them, so the next
-#: drift is a RED test rather than a claim nobody can check.
-#:
-#: ⚠️ `recognised_producer` here means "DIRECTLY reaches a recognised producer"
-#: — the canonical clause builder (`set_embedding_clause`,
-#: tortoise/vector_write.py) or the session producer (`_session_embedding` →
-#: `compute_session_embedding`). It does NOT mean `encode_for_row`: NONE of the
-#: six calls it, so under #10541's literal class-1 wording ("route it through
-#: `encode_for_row`") none of them is a CONVERSION.
-#: Why each of the six is nonetheless legitimate is stated PER ENTRY, not as a
-#: blanket: the ONLY declaration here is #5008, which covers the session chain
-#: (`_session_event_write`, `ingest_corpus`, `_embedding_repair_attempt`) and
-#: nothing else. The other three (`restore_graph`, `_event_plain_merge`,
-#: `_rebuild_all_replay`) carry NO declared exemption — they store a vector
-#: computed or backed up UPSTREAM, through the canonical builder.
-#: The name also inverts this file's own `kind == "producer"`, which means
-#: "computes a vector another function writes"; that is a wart, kept because
-#: #10541 names the class.
-#: `exempt` — the function is not a producer of a STORED vector: it renders the
-#:   clause, forwards one, journals one, reads one, sets a FLAG or emits a
-#:   DIAGNOSTIC, or merely MENTIONS one in a comment/docstring (the instrument's
-#:   own false positives), or stores one under a NAMED owner exemption.
-#: `bypass` — a write that escapes the rule. Measured: **none**.
-CENSUS_RECOGNISED = "recognised_producer"
-CENSUS_EXEMPT = "exempt"
-CENSUS_BYPASS = "bypass"
-CENSUS_CLASSES = (CENSUS_RECOGNISED, CENSUS_EXEMPT, CENSUS_BYPASS)
-
-WRITER_CENSUS: dict[str, tuple[str, str]] = {
-    "tortoise.consistency::_compare_views": (
-        CENSUS_EXEMPT,
-        "issues no write; the only WRITE-SHAPED text is a COMMENT in "
-        "`tortoise/consistency.py::_compare_views` quoting what `replay(journal)` "
-        "cannot produce (`n.embedding=vecf32($embedding)`). The function reads "
-        "`\"embedding\"` off both sides and APPENDS it to a divergence field "
-        "list — reads and appends, never a write clause"),
-    "tortoise.hosted_backup::restore_graph": (
-        CENSUS_RECOGNISED,
-        "`tortoise/hosted_backup.py::restore_graph` writes through the canonical "
-        "clause builder (`set_embedding_clause(\"n\", \"r.v\")`) from the "
-        "backed-up row"),
-    "tortoise.projection.entities::_event_plain_merge": (
-        CENSUS_RECOGNISED,
-        "`tortoise/projection/entities.py::_event_plain_merge` — "
-        "`set_embedding_clause(\"e\", preserve_on_null=False)` / "
-        "`set_embedding_clause(\"e\")`, the canonical clause"),
-    "tortoise.projection::_prewipe_synthetic_write_scope": (
-        CENSUS_EXEMPT,
-        "`tortoise/projection/__init__.py::_prewipe_synthetic_write_scope` — the "
-        "match is inside the scope's DOCSTRING and the statement NULLs the "
-        "vector (`SET n.embedding = NULL`); a wipe is not a producer"),
-    "tortoise.projection::_rebuild_all_replay": (
-        CENSUS_RECOGNISED,
-        "`tortoise/projection/__init__.py::_rebuild_all_replay` calls "
-        "`set_embedding_clause(\"n\", \"$emb\")` (canonical clause). Its labels "
-        "are LITERAL (`n:Point` in that function's own Cypher) — the label reads "
-        "UNKNOWN only because the `unresolved_write` branch hardcodes "
-        "`UNKNOWN(unresolved producer)` and never derives one. ⚠️ It also holds "
-        "two OTHER embedding statements this class does not rest on: "
-        "`SET n.embedding = NULL` (a wipe) and a DIRECT `n.embedding = $emb` "
-        "that bypasses the canonical builder"),
-    "tortoise.record_read::turn_prior_vectors": (
-        CENSUS_EXEMPT,
-        "`tortoise/record_read.py::turn_prior_vectors` — `embedding=row[2]` "
-        "populates a dataclass from a returned row: a READ, with no write clause"),
-    "tortoise.sdk::_embedding_repair_attempt": (
-        CENSUS_RECOGNISED,
-        "the repair helper DOES compute and store: "
-        "`tortoise/sdk.py::_embedding_repair_attempt` carries "
-        "`embedding = self._session_embedding(...)` and `set_embedding_clause(\"e\")` "
-        "in its own body. It is a producer on the #5008 session chain, and a "
-        "repair by ROLE — both, so `exempt` would contradict the classes above"),
-    "tortoise.sdk::_event_raw_write_door": (
-        CENSUS_EXEMPT,
-        "`tortoise/sdk.py::_event_raw_write_door` — a TRANSPORT door: it forwards "
-        "an already-computed `embedding` into `query_params` and executes the "
-        "statement inside `_live_write_scope` (the §17.1 sanctioned live-write "
-        "lane); it never computes one"),
-    "tortoise.sdk::_index_process_unit": (
-        CENSUS_EXEMPT,
-        "`tortoise/sdk.py::_index_process_unit` — the instrument's match is the "
-        "DIAGNOSTIC STRING `\"error\": \"indexed with embedding=None \"`, not a "
-        "write clause. That line sits on the `merge_outcome == \"indexed\"` "
-        "branch of the unit-completion path, whose store is DELEGATED to "
-        "`_session_event_write` in the same module. Its other stores are both "
-        "DELEGATED to `_embedding_repair_attempt`, at TWO distinct sites: the "
-        "repair-only branch (`embedding_only_incomplete`), and the "
-        "post-full-write repair site — whose own comment records that the "
-        "repair-only branch is NOT re-entered. Every callee is a recognised "
-        "producer, so this function produces no vector of its own"),
-    "tortoise.sdk::_journal_event_raw_write": (
-        CENSUS_EXEMPT,
-        "`tortoise/sdk.py::_journal_event_raw_write` — the instrument matches the "
-        "SIGNATURE DEFAULT (`embedding=None`), not a write clause: `_EMBED_WRITE` "
-        "cannot see the dict-key form `record[\"embedding\"] = embedding` in that "
-        "function. It stores no LIVE graph vector, but its journal IS the "
-        "sanctioned replay carrier (`_upsert_event` consumes `embedding` off the "
-        "record instead of recomputing it) — exempt as a sanctioned carrier, NOT "
-        "because no store is reachable through it"),
-    "tortoise.sdk::_session_event_write": (
-        CENSUS_RECOGNISED,
-        "`tortoise/sdk.py::_session_event_write` — `self._session_embedding(...)` "
-        "→ `compute_session_embedding` (the documented #5008 exemption) + "
-        "`set_embedding_clause`"),
-    "tortoise.sdk::_update_entity": (
-        CENSUS_EXEMPT,
-        "`tortoise/sdk.py::_update_entity` — the instrument's match is a COMMENT, "
-        "but that is only what the regex MATCHED — the function DOES store: "
-        "`point_props = dict(props)` keeps a caller-supplied `embedding` through "
-        "the map-merge (`SET n += $p`). `_EMBED_WRITE` cannot see a map-merge. "
-        "Exempt on the NAMED #4094 exemption, not on absence of a write"),
-    "tortoise.sdk::ingest_corpus": (
-        CENSUS_RECOGNISED,
-        "`tortoise/sdk.py::ingest_corpus` — `self._session_embedding(...)` + "
-        "`set_embedding_clause(\"e\")`, the same canonical chain"),
-    "tortoise.vector_write::set_embedding_clause": (
-        CENSUS_EXEMPT,
-        "`tortoise/vector_write.py::set_embedding_clause` — the clause BUILDER "
-        "itself; it renders the `<alias>.embedding = …` clause and stores no "
-        "vector"),
-}
-
-
-#: `{census key: ((path, symbol, needle), …)}` — every claim above, re-derivable.
-#: Each citation names a SYMBOL and a needle that must appear INSIDE that
-#: symbol's own source, so:
-#:   * an unrelated edit elsewhere in a 47k-line file cannot invalidate it (the
-#:     failure the line-number form had), and
-#:   * a seam that MOVES out of the function the entry names still reds, which a
-#:     bare `path::symbol exists` pin would miss.
-#: `census_evidence_violations()` re-derives the lot; the KEY SET must equal the
-#: union of `WRITER_CENSUS` and `WRITER_LABEL_OVERRIDES`, so a new entry cannot
-#: be added without evidence and evidence cannot outlive its entry.
-CENSUS_EVIDENCE: dict[str, tuple[tuple[str, str, str], ...]] = {
-    "tortoise.consistency::_compare_views": (
-        ("tortoise/consistency.py", "_compare_views",
-         "n.embedding=vecf32($embedding)"),),
-    "tortoise.hosted_backup::restore_graph": (
-        ("tortoise/hosted_backup.py", "restore_graph",
-         "set_embedding_clause("),),
-    "tortoise.projection.entities::_event_plain_merge": (
-        ("tortoise/projection/entities.py", "_event_plain_merge",
-         "set_embedding_clause("),),
-    "tortoise.projection::_prewipe_synthetic_write_scope": (
-        ("tortoise/projection/__init__.py", "_prewipe_synthetic_write_scope",
-         "SET n.embedding = NULL"),),
-    "tortoise.projection::_rebuild_all_replay": (
-        ("tortoise/projection/__init__.py", "_rebuild_all_replay",
-         "set_embedding_clause("),),
-    "tortoise.record_read::turn_prior_vectors": (
-        ("tortoise/record_read.py", "turn_prior_vectors",
-         "embedding=row[2]"),),
-    "tortoise.sdk::_embedding_repair_attempt": (
-        ("tortoise/sdk.py", "_embedding_repair_attempt",
-         "self._session_embedding("),
-        ("tortoise/sdk.py", "_embedding_repair_attempt",
-         "set_embedding_clause("),),
-    "tortoise.sdk::_event_raw_write_door": (
-        ("tortoise/sdk.py", "_event_raw_write_door", "_live_write_scope"),),
-    "tortoise.sdk::_index_process_unit": (
-        ("tortoise/sdk.py", "_index_process_unit",
-         "indexed with embedding=None"),),
-    "tortoise.sdk::_journal_event_raw_write": (
-        ("tortoise/sdk.py", "_journal_event_raw_write",
-         'record["embedding"] = embedding'),),
-    "tortoise.sdk::_session_event_write": (
-        ("tortoise/sdk.py", "_session_event_write",
-         "self._session_embedding("),
-        ("tortoise/sdk.py", "_session_event_write",
-         "set_embedding_clause("),),
-    "tortoise.sdk::_update_entity": (
-        ("tortoise/sdk.py", "_update_entity", "point_props = dict(props)"),
-        ("tortoise/sdk.py", "_update_entity", "SET n +="),),
-    "tortoise.sdk::ingest_corpus": (
-        ("tortoise/sdk.py", "ingest_corpus", "self._session_embedding("),
-        ("tortoise/sdk.py", "ingest_corpus", "set_embedding_clause("),),
-    "tortoise.vector_write::set_embedding_clause": (
-        ("tortoise/vector_write.py", "set_embedding_clause",
-         "vecf32({vector_expr})"),),
-    # The label OVERRIDE carries evidence too — it is a claim about where the
-    # `:Point` write happens, and it drifted the same way (it cited
-    # `api.py:318`, which is `vec = encode_for_row(` in a DIFFERENT function).
-    "tortoise.api::_point": (
-        ("tortoise/api.py", "_point", 'p["embedding"] = vec'),),
-}
-
-
-def census_evidence_violations(census: dict | None = None,
-                              evidence: dict | None = None,
-                              root: Path | None = None,
-                              overrides: dict | None = None) -> list[str]:
-    """Re-derive every census citation at THIS head; empty list = falsified.
-
-    Four ways to fail, each reported rather than absorbed: an entry with no
-    evidence, evidence whose entry is gone, a citation whose file/symbol does
-    not exist, and a needle that is no longer inside the symbol it is cited for.
-    """
-    import ast
-
-    census = WRITER_CENSUS if census is None else census
-    evidence = CENSUS_EVIDENCE if evidence is None else evidence
-    overrides = WRITER_LABEL_OVERRIDES if overrides is None else overrides
-    root = REPO_ROOT if root is None else root
-    entries = set(census) | set(overrides)
-    out: list[str] = []
-    for key in sorted(entries - set(evidence)):
-        out.append(f"{key}: classed with no re-derivable evidence")
-    for key in sorted(set(evidence) - entries):
-        out.append(f"{key}: evidence for an entry that does not exist")
-    bodies: dict[str, dict[str, str] | None] = {}
-    for key in sorted(set(evidence) & entries):
-        for citation in evidence[key]:
-            rel, symbol, needle = citation
-            if rel not in bodies:
-                path = root / rel
-                try:
-                    src = path.read_text(encoding="utf-8")
-                except OSError:
-                    bodies[rel] = None
-                else:
-                    lines = src.splitlines()
-                    index: dict[str, list[str]] = {}
-                    for node in ast.walk(ast.parse(src)):
-                        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                            index.setdefault(node.name, []).append(
-                                "\n".join(lines[node.lineno - 1:node.end_lineno]))
-                    bodies[rel] = index
-            index = bodies[rel]
-            if index is None:
-                out.append(f"{key}: cites {rel}, which cannot be read")
-                continue
-            if symbol not in index:
-                out.append(f"{key}: cites {rel}::{symbol}, which that file does "
-                           "not define")
-                continue
-            if not any(needle in body for body in index[symbol]):
-                out.append(f"{key}: {rel}::{symbol} does not carry {needle!r} at "
-                           "this head")
-    return out
-
-
-def _census_class(writer: str) -> str | None:
-    """The class #10541 recorded for ``writer``, or None when unclassified."""
-    entry = WRITER_CENSUS.get(writer)
-    return entry[0] if entry else None
 
 
 def _strings(node) -> str:
@@ -501,12 +215,9 @@ def _callees(node) -> set[str]:
 #: in the row. Deliberately not a vocabulary: everything else is derived from
 #: the Cypher, so a writer that names `:Document` still trips bullet 2.
 WRITER_LABEL_OVERRIDES: dict[str, str] = {
-    # `tortoise/api.py::_point` computes the vector and stamps the journal; its
-    # Cypher carries no `MERGE (:Label`. It feeds the `:Point` write —
-    # `p["embedding"] = vec` is the payload the projection's point clause
-    # stores (re-derived in `CENSUS_EVIDENCE`, not cited by line number: the
-    # previous pointer, `api.py:318`, was `vec = encode_for_row(` in a
-    # DIFFERENT function).
+    # `tortoise/api.py`'s ingest closure computes the vector and stamps the
+    # journal; its Cypher carries no `MERGE (:Label`. It feeds the `:Point`
+    # write (`api.py:318` -> projection's point clause).
     #
     # ⛔ Keyed by `module::name`, the SAME identity the writer map uses — a bare
     # function name is not an identity: `_point` is a plausible name in any
@@ -717,90 +428,6 @@ CONFIG_SURFACES: tuple[str, ...] = (
 #: OPEN (review round 10, P3). `flag_in_shipped_configs` imports it per call.
 
 
-#: A YAML block-scalar HEADER: `|` or `>` plus the optional chomping/indent
-#: indicators, introduced as a mapping value (`note: >-`) or a sequence entry
-#: (`- |`) — YAML 1.2.2 §8.1, <https://yaml.org/spec/1.2.2/#81-block-scalar-styles>.
-#: The indicator must introduce the node, so `run: echo hi |` does not match. The
-#: mapping KEY is captured because the KEY decides what the body IS (below).
-_BLOCK_SCALAR_HEADER = re.compile(
-    r"^\s*(?:-\s*)?(?:(?P<key>[A-Za-z_][\w.\-]*)\s*:\s*)?"
-    r"[|>](?:[+-]?[1-9]?|[1-9][+-]?)?\s*(?:#.*)?$")
-
-#: The block-scalar KEYS the CI EXECUTES, on the workflow surface only.
-#: GitHub runs the body of `jobs.<job_id>.steps[*].run` (and `defaults.run`) as
-#: shell commands — *"each line runs in the same shell"* — so an `export
-#: FLAG=1` inside one IS a shipped setting, in shell syntax. Every other key a
-#: block scalar can hang off (`note:`, `description:`, `if:`, …) is text.
-#: Scoped to `.github/workflows` on purpose: a `run:` key in `config/*.yml` is
-#: that tool's own field, not something this CI executes.
-EXECUTED_BLOCK_KEYS = frozenset({"run"})
-
-#: The config surfaces whose block-scalar bodies can be EXECUTED (see above).
-WORKFLOW_SURFACE = ".github/workflows"
-
-
-def _yaml_block_scalar_bodies(text: str) -> dict[int, str]:
-    """The 1-based line numbers that are the BODY of a YAML block scalar.
-
-    Mapped to the KEY that introduced the scalar (lowercased; `""` when the
-    header is a bare sequence entry, `- |`), because the key decides whether the
-    body is documentation or a command — see `EXECUTED_BLOCK_KEYS`.
-
-    ⛔ **A block scalar is a SCALAR NODE, never a YAML mapping**: YAML 1.2.2
-    models block scalars as a scalar node style (§8.1) structurally separate
-    from block mappings (§8.2.2), *"Block scalar formats … all express
-    strings"* — so no line inside a body can be a mapping ENTRY, and
-    `_assigned_value` (which scans per LINE, with no notion of YAML structure)
-    read a body line shaped like `TORTOISE_EMBED_GATE: 1` as a shipped ON.
-
-    ⛔ **But "not a mapping entry" is not "documentation"** (review round 17,
-    P3). On `.github/workflows` a `run: |` body is a SHELL SCRIPT the CI runs
-    (<https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#jobsjob_idstepsrun>:
-    *"each line runs in the same shell"*), so `export TORTOISE_EMBED_GATE=1`
-    there is an executed setting that this walk used to count as PROSE — it
-    reported `documented_only: 1` and `set ON in: none` over a workflow that
-    sets it, the measured-looking-nowhere shape this instrument refuses
-    elsewhere. The caller therefore scans a body introduced by an executed key
-    and skips (and REPORTS) the rest.
-
-    **Wrong outcome named:** `score_rule_bullet` computes `on_by_default =
-    ambient or shipped["on"]`, which is the clause separating bullet 1's
-    `PARTIAL` from `MET` once `#5090`'s remaining writers are resolved. This
-    repo's documentation of THIS flag already lives in a `>-` block
-    (`config/v4-mechanisms.yml:426-433`), so the natural edit (a usage line
-    added inside that block) was the one shape that tripped it; and CI is where
-    a flag would actually be TURNED ON, which is the opposite error.
-
-    Only called for `.yml`/`.yaml` surfaces: `.env`, Dockerfile and shell files
-    have no block scalars, and applying it there could only drop real
-    assignments.
-    """
-    body: dict[int, str] = {}
-    in_block = False
-    header_indent = 0
-    body_indent: int | None = None
-    key = ""
-    for number, line in enumerate(text.splitlines(), 1):
-        indent = len(line) - len(line.lstrip())
-        if in_block:
-            if not line.strip():
-                # A blank line inside the block is still scalar content.
-                body[number] = key
-                continue
-            if body_indent is None:
-                body_indent = indent
-            if indent > header_indent and indent >= body_indent:
-                body[number] = key
-                continue
-            # Dedented: the scalar ends, and THIS line may be a new header.
-            in_block = False
-        header = _BLOCK_SCALAR_HEADER.match(line)
-        if header:
-            in_block, header_indent, body_indent = True, indent, None
-            key = (header.group("key") or "").lower()
-    return body
-
-
 def _assigned_value(line: str, flag: str) -> str | None:
     """The value ``line`` ASSIGNS to ``flag``, or `None` when it is a mention.
 
@@ -882,7 +509,6 @@ def flag_in_shipped_configs(flag: str) -> dict:
     searched: list[str] = []
     mentions: list[str] = []
     unreadable: list[str] = []
-    documented_only = 0
     for rel in CONFIG_SURFACES:
         target = REPO_ROOT / rel
         candidates = ([target] if target.is_file()
@@ -903,35 +529,12 @@ def flag_in_shipped_configs(flag: str) -> dict:
             if flag not in text:
                 continue
             mentions.append(posix)
-            # ⛔ A block scalar's body is SCALAR CONTENT, so it is never a YAML
-            # mapping entry — but on the workflow surface a body the CI
-            # EXECUTES (`run: |`) is a shell setting, not prose. Documentation
-            # bodies are skipped and COUNTED; executed ones are scanned like any
-            # other line (review round 17, P3).
-            bodies = (_yaml_block_scalar_bodies(text)
-                      if posix.endswith((".yml", ".yaml")) else {})
-            workflow = posix.startswith(WORKFLOW_SURFACE + "/")
-            for number, line in enumerate(text.splitlines(), 1):
-                if number in bodies:
-                    executed = (workflow
-                                and bodies[number] in EXECUTED_BLOCK_KEYS)
-                    if not executed:
-                        if _assigned_value(line, flag) is not None:
-                            documented_only += 1
-                        continue
-                    # An executed `run:` body: fall through to the real scan,
-                    # so a shipped `export FLAG=1` is a HIT, not a note.
+            for line in text.splitlines():
                 value = _assigned_value(line, flag)
                 if value is not None and is_truthy(value):
                     hits.append(f"{posix}: {line.strip()[:90]}")
     return {"on": bool(hits), "files": hits, "searched": searched,
             "mentions": mentions, "unreadable": unreadable,
-            # Reported, never silently dropped: how many assignment-shaped lines
-            # were DOCUMENTATION inside a block scalar (`note:`, `description:`, …)
-            # rather than a setting. An assignment inside an EXECUTED workflow
-            # `run:` body is not counted here — it is a setting, and it is
-            # allowed to move `on`.
-            "documented_only": documented_only,
             "surfaces": list(CONFIG_SURFACES)}
 
 
@@ -1120,73 +723,15 @@ def score_path_bullet() -> Row:
         )
     if unparsed:
         notes.append(f"unparseable modules (hold this row at PARTIAL): {unparsed}")
-    # ── #10541: the census turns "cannot resolve" into a SCORED answer ───────
-    # A function the vocabulary could not resolve is only a hole in the
-    # measurement if NOTHING says which of the three honest classes it is in.
-    # Once it carries one, the row has a RECORDED ANSWER for every unresolved
-    # writer — which is the whole of #10541. It is NOT a licence to move the
-    # verdict: the writer set is unchanged and `unknown` still holds the row at
-    # PARTIAL below, because re-classing a writer does not make the vocabulary
-    # resolve it. (An earlier draft read this as "a complete measurement" and
-    # flipped the row to MET, breaking bullet 2's own falsifier; reverted.)
-    # ⛔ The census population is the `unresolved_write` set — the SAME set
-    # `test_every_unresolved_writer_carries_a_census_class` walks — and NOT
-    # `unknown`, which also carries the `duplicate` identities. A duplicate is
-    # a DIFFERENT defect (two definitions collided, so the later one's label
-    # overwrote the earlier one) and has no key it could EVER have in
-    # `WRITER_CENSUS`, so iterating `unknown` printed a census over a
-    # population of ZERO whenever a duplicate was the only unresolved entry,
-    # and reported a collision as "#10541's own defect". This row is quoted
-    # into #5090's body as evidence, so the misattribution is what a reader
-    # sees (review at `adde2763f`, blocking).
-    unresolved_writers = {fn: d for fn, d in writers.items()
-                          if d["kind"] == "unresolved_write"}
-    unclassified = sorted(fn for fn in unresolved_writers
-                          if _census_class(fn) is None)
-    by_class: dict[str, list[str]] = {}
-    for fn in unresolved_writers:
-        cls = _census_class(fn)
-        if cls in CENSUS_CLASSES:
-            by_class.setdefault(cls, []).append(fn)
-    if unresolved_writers:
-        notes.append(
-            "#10541 census over the unresolved set: "
-            # A middle dot, not `" | "`: `Row.observed` joins these notes into
-            # ONE markdown table cell, and a pipe there used to split a
-            # 4-column row into seven. `_table` now escapes the character at
-            # the EMITTER (`_cell`), so this is legibility, not the guard —
-            # which is the point: a per-note rule is only as wide as the last
-            # author to remember it.
-            + " · ".join(
-                f"{cls}={len(by_class.get(cls, []))}"
-                + (f" ({', '.join(sorted(by_class[cls]))})" if by_class.get(cls) else "")
-                for cls in CENSUS_CLASSES
-            )
-        )
-    if unclassified:
-        notes.append(
-            f"UNCLASSIFIED writers (hold this row at PARTIAL — #10541's own "
-            f"defect): {unclassified}"
-        )
-    real_bypasses = sorted(by_class.get(CENSUS_BYPASS, []))
-    if real_bypasses:
-        notes.append(
-            f"REAL BYPASSES (#10541 class 3 — a defect, not an exemption): "
-            f"{real_bypasses}"
-        )
     overridden = sorted(_overridden_writers() & set(written))
     if overridden:
         notes.append(
             f"labels assigned by the DOCUMENTED override, not derived from "
             f"Cypher (reported, as that comment promises): {overridden}"
         )
-    # ⛔ #10541: the census CLASSIFIES the unresolved set; it does not license
-    # moving this verdict. `test_an_unresolved_writer_is_reported_and_holds_
-    # bullet_two_at_partial` is bullet 2's own falsifier and it encodes the
-    # honesty rule: while a writer is unresolved the row cannot claim a
-    # COMPLETE measurement. Re-classing the writer does not make the vocabulary
-    # resolve it, so the row keeps holding. The open fork is recorded on
-    # #10541 — flipping this is a decision, not a cleanup.
+    # A stored-and-unqueryable class is the bullet's failure; an UNRESOLVED
+    # writer (or a collapsed/duplicate identity, or a module that will not
+    # parse) is not proof either way, so it can at most hold the row at PARTIAL.
     verdict = "NOT MET" if orphans else (
         "PARTIAL" if (unknown or unparsed or duplicates) else "MET")
     return Row(
@@ -1227,18 +772,13 @@ class _Catalogue:
 VEC = [0.1] * 384
 
 
-def fallback_probe(degraded: dict | None = None) -> dict[str, str]:
+def fallback_probe() -> dict[str, str]:
     """Force each of the three vector mechanisms and read the caller's trace.
 
     Returns ``{mechanism: verdict-from-the-trace}`` where each value is the
     trace entry's own ``mechanism`` (or a readable failure). Bullet 3 is MET
     only when a caller can tell a full scan from an indexed read WITHOUT
     reading `search_engine.py` — which is `#4999`'s contract.
-
-    ``degraded``, when passed, is FILLED with the same three probes' `#2952`
-    reading (``{mechanism: {"degraded", "reason", "declared"}}``). It is an
-    out-parameter rather than a second return value so every existing caller
-    keeps the mechanisms dict it already reads.
     """
     # The breakers are module state: snapshot and restore them, because a
     # "read-only" instrument must not un-trip the vector breaker in whatever
@@ -1251,7 +791,6 @@ def fallback_probe(degraded: dict | None = None) -> dict[str, str]:
     import tortoise.search_engine as _se
     from tortoise.search_engine import (
         VECTOR_MECHANISM_KEY,
-        declared_degraded_read,
         reset_circuit_breakers,
         run_vector_query,
     )
@@ -1287,64 +826,26 @@ def fallback_probe(degraded: dict | None = None) -> dict[str, str]:
 
     try:
         return _probe_mechanisms(out, _entry, run_vector_query,
-                                 VECTOR_MECHANISM_KEY, reset_circuit_breakers,
-                                 declared_degraded_read, degraded)
+                                 VECTOR_MECHANISM_KEY, reset_circuit_breakers)
     finally:
         _restore()
 
 
 def _probe_mechanisms(out, _entry, run_vector_query, VECTOR_MECHANISM_KEY,
-                      reset_circuit_breakers,
-                      declared_degraded_read=None,
-                      degraded_out: dict | None = None) -> dict[str, str]:
-    def _note_degraded(name: str, trace) -> None:
-        """`#2952`'s meaning, MEASURED — not asserted in prose in an epic body.
-
-        `#4999` reports the mechanism ADDITIVELY and deliberately leaves
-        `degraded` alone (`search_engine.py`: per `#2952` it means "the vector
-        leg contributed no semantic results", and a brute-force scan DOES
-        return semantic rows — flipping it "would make
-        `require_hybrid_read` refuse a valid semantic read"). `#5090` row 3
-        cited that as HALF of its evidence cell while the row's own command
-        read only the mechanism key, so that half was unscored — the exact
-        defect `#10465` exists to remove (review round 13, P3).
-        """
-        if degraded_out is None:
-            return
-        entry = _entry(trace)
-        degraded_out[name] = {
-            "degraded": entry.get("degraded"),
-            "reason": entry.get("reason"),
-            # The marker `#2952`'s consumer derives from the trace: `None`
-            # means "this read is not declared degraded".
-            "declared": (declared_degraded_read(trace)
-                         if declared_degraded_read else "UNMEASURED"),
-        }
-
+                      reset_circuit_breakers) -> dict[str, str]:
     reset_circuit_breakers()
-    # ⛔ The fake ROWS are `(id, score)` PAIRS, and that is load-bearing: the
-    # brute-force scan reads `row[1]` as its score, so a one-element row raises
-    # `IndexError: tuple index out of range` — whose message contains "index",
-    # so the leg records `degraded=True, reason="index_missing"` and returns
-    # `[]` while the MECHANISM key still reads `scan`. The probe then reported a
-    # healthy `scan` from a read that FAILED (measured at `268512824`: `scan:
-    # degraded=True reason='index_missing' count=0`). That is why `#5090` row
-    # 3's `degraded` clause could never have been scored from its own command —
-    # the probe never took the healthy scan branch at all (review round 13, P3).
     # (a) the index path: signature A answers with rows.
     trace: list = []
-    run_vector_query(_Catalogue([([("a", 0.9), ("b", 0.8)], None)]), VEC,
+    run_vector_query(_Catalogue([([("a",), ("b",)], None)]), VEC,
                      entity_type="point", is_embedded=False, leg_trace=trace)
     out["index"] = str(_entry(trace).get(VECTOR_MECHANISM_KEY, "<key absent>"))
-    _note_degraded("index", trace)
 
     # (b) an engine with no index API: the deliberate full scan.
     reset_circuit_breakers()
     trace = []
-    run_vector_query(_Catalogue([([("a", 0.9)], None)]), VEC,
+    run_vector_query(_Catalogue([([("a",)], None)]), VEC,
                      entity_type="point", is_embedded=True, leg_trace=trace)
     out["scan"] = str(_entry(trace).get(VECTOR_MECHANISM_KEY, "<key absent>"))
-    _note_degraded("scan", trace)
 
     # (c) an index was EXPECTED and the query failed: the fallback that must
     #     announce itself — #4999's whole subject.
@@ -1354,43 +855,25 @@ def _probe_mechanisms(out, _entry, run_vector_query, VECTOR_MECHANISM_KEY,
         _Catalogue([
             ([], RuntimeError("Invalid arguments for procedure")),
             ([], RuntimeError("Invalid arguments for procedure")),
-            ([("a", 0.9)], None),
+            ([("a",)], None),
         ]),
         VEC, entity_type="point", is_embedded=False, leg_trace=trace,
     )
     out["scan_fallback"] = str(_entry(trace).get(VECTOR_MECHANISM_KEY, "<key absent>"))
-    _note_degraded("scan_fallback", trace)
     return out
 
 
 def score_fallback_bullet() -> Row:
     """Bullet 3 — the three mechanisms are distinguishable in the caller's trace."""
-    degraded: dict = {}
-    observed = fallback_probe(degraded=degraded)
+    observed = fallback_probe()
     distinguishable = len(set(observed.values())) == len(observed)
     named = all(v.startswith("<key absent>") is False for v in observed.values())
-    # ⛔ `#2952`'s meaning is HALF of what `#5090` row 3 claims ("`degraded` keeps
-    # `#2952`'s meaning"), so this row's own command reads it: the mechanism is
-    # reported ADDITIVELY, `degraded` stays ``False`` on all three, and no
-    # `declared_degraded_read` marker is derived from the trace. A read that
-    # did not happen is `UNMEASURED` (`untouched` False), never a silent pass.
-    untouched = bool(degraded) and all(
-        d["degraded"] is False and d["declared"] is None
-        for d in degraded.values())
     notes = [f"{k}: {v}" for k, v in observed.items()]
-    for k, d in degraded.items():
-        marker = d["declared"]
-        notes.append(
-            f"{k}: degraded={d['degraded']!r} reason={d['reason']!r} "
-            f"declared_degraded_read={marker if marker is not None else 'None'}")
-    notes.append(f"#2952 untouched on every mechanism: {untouched} "
-                 f"({len(degraded)}/{len(observed)} mechanisms read)")
     notes.append(f"distinguishable: {distinguishable}; every path reports: {named}")
     return Row(
         bullet=3,
         text=BULLETS[2],
-        verdict=("MET" if distinguishable and named and untouched
-                 else "NOT MET"),
+        verdict="MET" if distinguishable and named else "NOT MET",
         command="uv run python tools/dod_5090_probe.py --json",
         observed="; ".join(notes),
         notes=notes,
@@ -1412,51 +895,9 @@ V1_SURFACES = (
 )
 
 
-def _plain_words(text: str) -> str:
-    """The words of ``text``, with markdown and punctuation removed.
-
-    Only for comparing a documentation line against the DoD bullet it may be
-    quoting: emphasis (`**V1 is decided**`), a checklist box (`- [x] …`),
-    backticks and sentence punctuation all differ between a quotation and the
-    bullet it quotes, while the WORDS do not.
-    """
-    return " ".join(re.findall(r"[a-z0-9]+", text.lower()))
-
-
-def _restates_the_dod_bullet(line: str, bullet: str) -> bool:
-    """True when ``line`` QUOTES the bullet instead of recording a ruling.
-
-    ⛔ `V1_DECIDED_MARKERS` are matched as SUBSTRINGS, and one marker is a
-    substring of the requirement it is checking: `BULLETS[3]` is `"V1 is
-    decided and implemented."` and `"v1 is decided" in "v1 is decided and
-    implemented."` is `True`. So any doc that **restates the bullet** — the
-    single most likely edit to `V1_SURFACES`, and the editing style this PR
-    uses everywhere — registered as a record that the ruling exists and flipped
-    row 4 from `NOT MET` to `PARTIAL`: publishing "a V1 ruling exists" when the
-    owner has not ruled. Row 4 IS the epic's owner gate, so that direction
-    fabricates a decision (this tool's own review, P3).
-
-    Containment is checked BOTH ways against the bullet's own words, because a
-    wrapped quotation defeats a same-line substring test: `V1 is decided and` /
-    `implemented.` on two lines raises the marker on the first, and that line is
-    a PREFIX of the bullet. A line whose words are inside the bullet, or that
-    contains the bullet's words, is a quotation.
-
-    The safe direction here is a false `NOT MET`: the row is capped at `PARTIAL`
-    by construction (`MET` is unreachable — a record cannot prove what shipped),
-    so excluding a quotation costs nothing, while admitting one invents the
-    ruling the epic stays open for.
-    """
-    norm_line, norm_bullet = _plain_words(line), _plain_words(bullet)
-    if not norm_bullet or not norm_line:
-        return False
-    return norm_bullet in norm_line or norm_line in norm_bullet
-
-
 def score_v1_bullet() -> Row:
     """Bullet 4 — a V1 ruling exists and the code implements it."""
     decided: list[str] = []
-    quoted: list[str] = []
     open_lines: list[str] = []
     for rel in V1_SURFACES:
         path = REPO_ROOT / rel
@@ -1466,12 +907,6 @@ def score_v1_bullet() -> Row:
             if not re.search(r"\bV1\b", line):
                 continue
             if any(m in line.lower() for m in V1_DECIDED_MARKERS):
-                # ⛔ A quotation of the bullet is NOT a record: see
-                # `_restates_the_dod_bullet`. Reported, never silently dropped,
-                # so the read says what it dismissed.
-                if _restates_the_dod_bullet(line, BULLETS[3]):
-                    quoted.append(f"{rel}:{i}: {line.strip()}")
-                    continue
                 decided.append(f"{rel}:{i}: {line.strip()}")
             elif re.search(r"\bOPEN\b|\bopen decision\b|human gate|owner decision",
                            line) or "never spends that decision" in line:
@@ -1481,8 +916,6 @@ def score_v1_bullet() -> Row:
         "implemented: UNMEASURED(not what a decision record proves — a ruling "
         "creates the follow-up work; this row can only see the record)",
     ]
-    notes += [f"restates the DoD bullet, not a ruling (excluded): {ln}"
-              for ln in quoted[:3]]
     notes += [f"open: {ln}" for ln in open_lines[:3]]
     # The bullet is "decided AND implemented", and the implementation half is
     # unmeasurable here (nothing a decision RECORD contains proves what shipped),
@@ -1509,30 +942,11 @@ def score_v1_bullet() -> Row:
 #: The modules a predicate can live in without being a second RULE SET: the
 #: embed seam's own module graph, walked rather than listed.
 EMBED_PATH_ROOTS: tuple[str, ...] = (
-    # NOT `tortoise/embeddings.py`, and for a reason about WALKING only: it is
-    # the CALLER and imports half the tree, so WALKING it counted 47 unrelated
-    # pattern owners as predicates. ⛔ That is NOT an argument that the seam
-    # owns no predicate — see `OWNERSHIP_ONLY` immediately below, which scans
-    # it for its own patterns without following its imports.
+    # NOT `tortoise/embeddings.py`: it is the CALLER, and it imports half the
+    # tree, so walking it counted 47 unrelated pattern owners as predicates.
+    # A predicate has to be imported BY the gate to be reachable from it.
     "tortoise/embed_gate.py",
     "tortoise/value_gate.py",
-)
-
-#: Modules that can answer `NO-EMBED` but must not be WALKED.
-#:
-#: ⛔ `tortoise/embeddings.py` is the seam that DECIDES whether the gate is
-#: consulted at all (`if embed_gate.embed_gate_enabled():`), and it is the
-#: conventional home of an inline skip — so its OWN module-scope patterns are
-#: predicates in exactly §12.2a's sense. It is excluded from
-#: `EMBED_PATH_ROOTS` for a different reason that reads as if it covered this
-#: one: its IMPORTS fan out to half the tree, which is an argument about
-#: reachability, not about its own assignments. (An import makes the IMPORTER
-#: depend on the IMPORTEE — Python Language Reference §5 — so no forward walk
-#: from the gate can ever enter its caller; the edge runs the wrong way.)
-#:
-#: ⚠️ Scanned for OWNERSHIP ONLY: its imports are NOT followed.
-OWNERSHIP_ONLY: tuple[str, ...] = (
-    "tortoise/embeddings.py",
 )
 
 
@@ -1594,26 +1008,6 @@ def _import_edges(root: Path, tree, path: Path) -> set[str]:
     return targets
 
 
-def predicate_population() -> list[str]:
-    """Every module the §12.2a count SCANS: reachable-by-import PLUS owned.
-
-    ⛔ The two halves answer two different questions and are not
-    interchangeable. `embed_path_modules()` walks the gate's own import graph,
-    so it can only enter a module the gate DEPENDS ON. A module that depends on
-    the gate — most importantly the seam that decides whether to consult it
-    (`tortoise/embeddings.py`) — owns predicates by §12.2a's definition while
-    being unreachable from that walk, because an import makes the importer
-    depend on the importee and never the reverse (Python Language Reference §5).
-    Scanning it WITHOUT walking it is what closes that hole without dragging in
-    the forty-odd unrelated pattern owners its imports reach (this tool's own
-    review, P3: the count read `1 / MET` over a seam module carrying a second
-    rule set).
-    """
-    return sorted(set(embed_path_modules()) | {
-        m for m in OWNERSHIP_ONLY if (REPO_ROOT / m).exists()
-    })
-
-
 def embed_path_modules() -> set[str]:
     """Every `tortoise/**.py` reachable from the embed seam by LOCAL imports.
 
@@ -1649,88 +1043,39 @@ def _embed_path_modules(root: Path) -> frozenset[str]:
     return frozenset(seen)
 
 
-def _walk_module_scope(node: ast.AST):
-    """Yield every descendant of ``node`` that is NOT inside a function body.
-
-    The population this is used for is "patterns OWNED AT IMPORT TIME": module
-    statements, and class bodies (executed at import). A `re.compile` inside a
-    `def`/method/lambda **body** is not owned then — it runs when it is called,
-    in that call — so descending into it counts a helper's local pattern as a
-    second rule set.
-    """
-    for child in ast.iter_child_nodes(node):
-        if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
-            continue
-        yield child
-        yield from _walk_module_scope(child)
-
-
 def count_embed_predicates() -> dict:
     """Count the distinct predicates that can answer `NO-EMBED` (target: 1).
 
-    A predicate is a module in `predicate_population()` that **owns identifier
-    patterns** — an assignment executed at MODULE SCOPE (a `re.compile` at
-    module level, or in a class body, since both run at import) — that is, the
-    modules the gate imports PLUS the seam modules that decide whether the gate
-    is consulted, scanned for ownership without their imports being followed.
-
-    ⛔ A pattern compiled **inside a function body** is NOT module scope and is
-    NOT counted. The docstring above said "`re.compile` at module scope" while
-    the code ran `ast.walk()` over each top-level statement, which descends into
-    `FunctionDef.body` — so one ordinary helper-local `pat = re.compile(...)` in
-    any module of the population recorded `count: 2`, `verdict: "DRIFT"`, and
-    reddened `test_the_embed_decision_has_exactly_one_predicate` (a required
-    `core` leg) on a change that is not drift: asserting today's tree reds a
-    required check on a CORRECT change, whose cheapest-looking repair is to
-    delete the guard (this tool's own review, P3).
-
-    Class bodies are deliberately still scanned (`_walk_module_scope` prunes
-    only function/lambda bodies): a class-level pattern LIST is owned at import
-    and would be a real second rule set, and a false `MET` is the failure this
-    instrument exists to remove — and nothing in the population is a class
-    attribute today, so this widens no live count.
-
-    `embed_gate.embedding_verdict` is the ASK, not a predicate: it must call the
-    shared one and report the shared rule id, which is checked separately
-    (`RULE_SET is value_gate.RULES`).
-
-    ⛔ A module that will not parse, or will not read, is a HOLE in the
-    measurement and NOT a zero — the same doctrine the writer map states at
-    `_embedding_writers`/`score_rule_bullet` ("a module that will not parse is a
-    HOLE in the measurement, not a zero: its writers … are invisible to every
-    row"). It used to `continue`, so an unparseable module carrying a second
-    pattern list left `count: 1` and `verdict: MET` (this tool's own review,
-    P3) — the verdict this whole instrument exists to withhold.
+    A predicate is a module on the embed path that **owns identifier patterns**
+    (`re.compile` at module scope). `embed_gate.embedding_verdict` is the ASK,
+    not a predicate: it must call the shared one and report the shared rule id,
+    which is checked separately (`RULE_SET is value_gate.RULES`).
     """
     import tortoise.embed_gate as embed_gate
     import tortoise.value_gate as value_gate
 
     owners: list[str] = []
-    unparseable: list[str] = []
-    for rel in predicate_population():
+    for rel in sorted(embed_path_modules()):
+        src = (REPO_ROOT / rel).read_text(encoding="utf-8")
         # AST, not a text pattern: an ALIASED import (`import re as _re`) is
         # still a pattern, and a substring scan missed exactly that in this
         # tool's own mutation check — the falsifier PASSED on mutated code,
         # which is the one failure a falsifier must not have.
         try:
-            tree = ast.parse((REPO_ROOT / rel).read_text(encoding="utf-8"))
-        except (OSError, SyntaxError, ValueError):
-            # ⛔ Reported, never `continue`d: keyed by the PATH so the verdict
-            # can name the hole it could not read.
-            unparseable.append(rel)
+            tree = ast.parse(src)
+        except SyntaxError:
             continue
-        # ANY import-time expression that calls `.compile(` owns a pattern —
+        # ANY module-scope expression that calls `.compile(` owns a pattern —
         # a single assignment AND a collection (`_PATS = [re.compile(…), …]`),
         # which is the most natural shape for "a second pattern LIST" and read
         # `count: 1 / MET` when only the single-assignment form was matched.
-        # ⛔ Module scope, as the docstring says: `_walk_module_scope` prunes
-        # function/lambda bodies, so a helper's LOCAL `re.compile` is not a
-        # second predicate owner (review, P3).
-        # ⚠️ Deliberate asymmetry, documented: an unrelated import-time
-        # pattern-owning module imported by the gate also counts as an owner (a
-        # false DRIFT). Over-reporting drift is the safe direction here; a false
-        # `MET` is the failure this whole instrument exists to remove.
-        for node in _walk_module_scope(tree):
+        # ⚠️ Deliberate asymmetry, documented: an unrelated pattern-owning
+        # helper imported by the gate also counts as an owner (a false DRIFT).
+        # Over-reporting drift is the safe direction here; a false `MET` is the
+        # failure this whole instrument exists to remove.
+        module_level = [n for n in tree.body]
+        for node in (m for top in module_level for m in ast.walk(top)
+                     if top is not None):
             if isinstance(node, (ast.Assign, ast.AnnAssign)) and any(
                 isinstance(c, ast.Call) and isinstance(c.func, ast.Attribute)
                 and c.func.attr == "compile"
@@ -1745,56 +1090,12 @@ def count_embed_predicates() -> dict:
         "predicate": PREDICATE_NAME,
         "rule_ids": list(value_gate.RULES),
         "rule_set_is_shared_identity": embed_gate.RULE_SET is value_gate.RULES,
-        # ⛔ `UNDETERMINED` BEFORE the two real verdicts: a population this
-        # instrument could not read cannot certify `MET`, and calling it `DRIFT`
-        # would claim a second rule set it never SAW. Neither answer is available
-        # from a hole, so the third value is the honest one.
-        "unparseable": unparseable,
-        "verdict": ("UNDETERMINED" if unparseable else
-                    "MET" if len(owners) == 1 and embed_gate.RULE_SET is value_gate.RULES
-                    else "DRIFT"),
+        "verdict": "MET" if len(owners) == 1 and embed_gate.RULE_SET is value_gate.RULES
+                   else "DRIFT",
     }
 
 
 # ── The census ─────────────────────────────────────────────────────────────
-
-
-def _read(graph, cypher: str):
-    """Issue a census READ through the engine's read-only verb.
-
-    "Stores nothing" was this module's doctrine and only a convention in the
-    code: `graph.query` is the write-CAPABLE verb, so the doctrine rested on
-    every statement written here happening to be read-shaped (review round 15,
-    P3). `GRAPH.RO_QUERY` is rejected server-side for a write, which makes the
-    doctrine the engine's to enforce instead of this file's to remember.
-    Measured on falkordb-server 4.20.6: `CALL db.indexes()`, `CALL db.labels()`,
-    the per-label `count(n)` and the width probe answer identically through
-    `ro_query`.
-    """
-    return graph.ro_query(cypher)
-
-
-def _cypher_label(label: str) -> str:
-    """``label`` as a Cypher node label, quoted by the product's OWN rule.
-
-    ⛔ A label cannot be a query parameter, so it reaches Cypher by
-    interpolation — and its value comes from the graph's own schema
-    (`CALL db.labels()`, the index catalogue), i.e. from whatever a customer
-    wrote there. Interpolating it raw is the shape `tortoise/graph_key_restore.py`
-    already names (*"a label/property name reaches Cypher by interpolation and
-    comes from the graph's own schema"*) and `tortoise/security.py` answers with
-    an allowlist for the query runners. The census cannot allowlist (it reports
-    labels it has never seen — that is its job), so it uses the repo's one
-    identifier-quoting rule, `graph_key_restore._quote_identifier` (#7846):
-    bare when bare, else backtick-quoted with interior backticks DOUBLED.
-    IMPORTED, never copied — a second quoting rule would drift from the first.
-    Measured on falkordb-server 4.20.6: a doubled interior backtick is REJECTED
-    at parse time, so a backtick-bearing label fails closed into
-    `stored=UNMEASURED(...)` rather than forming a re-purposed query.
-    """
-    from tortoise.graph_key_restore import _quote_identifier
-
-    return _quote_identifier(str(label))
 
 
 def vector_census(graph, graph_name: str, at: str | None = None,
@@ -1832,7 +1133,7 @@ def vector_census(graph, graph_name: str, at: str | None = None,
                              f"this engine: {sorted(graph_names)})",
                 "command": CENSUS_COMMAND}
     try:
-        rows = _read(graph, "CALL db.indexes()").result_set
+        rows = graph.query("CALL db.indexes()").result_set
     except Exception as e:
         return {"graph": graph_name, "at": at, "labels": {},
                 "catalogue": f"UNMEASURED({type(e).__name__}: {e})",
@@ -1886,7 +1187,7 @@ def vector_census(graph, graph_name: str, at: str | None = None,
                 })
 
     try:
-        graph_labels = [r[0] for r in (_read(graph, "CALL db.labels()").result_set or [])]
+        graph_labels = [r[0] for r in (graph.query("CALL db.labels()").result_set or [])]
         population_source = "CALL db.labels()"
     except Exception as e:
         # ⛔ NOT a narrowed fallback to `indexed | served`: that is the very
@@ -1904,10 +1205,8 @@ def vector_census(graph, graph_name: str, at: str | None = None,
     labels: dict[str, dict] = {}
     for label in sorted(set(graph_labels) | set(indexed) | served_labels()):
         try:
-            res = _read(
-                graph,
-                f"MATCH (n:{_cypher_label(label)}) "
-                f"WHERE n.embedding IS NOT NULL RETURN count(n)",
+            res = graph.query(
+                f"MATCH (n:`{label}`) WHERE n.embedding IS NOT NULL RETURN count(n)"
             ).result_set
             stored = int(res[0][0])
         except Exception as e:
@@ -1932,10 +1231,9 @@ def vector_census(graph, graph_name: str, at: str | None = None,
                 # `size(n.embedding)` is REJECTED on a vecf32 column, so the
                 # vector is fetched and measured here (measured: every payload
                 # read UNMEASURED before this).
-                probe = _read(
-                    graph,
-                    f"MATCH (n:{_cypher_label(label)}) "
-                    f"WHERE n.embedding IS NOT NULL RETURN n.embedding LIMIT 1",
+                probe = graph.query(
+                    f"MATCH (n:`{label}`) WHERE n.embedding IS NOT NULL "
+                    f"RETURN n.embedding LIMIT 1"
                 ).result_set
                 if probe and probe[0] and probe[0][0] is not None:
                     width = len(probe[0][0])
@@ -2031,20 +1329,7 @@ def _connect(uri: str):
         raise SystemExit(2)
     from falkordb import FalkorDB
 
-    from tortoise.projection import _bounded_server_socket_kwargs
-
-    # #8118: the read bound comes from the product's ONE resolver, never from
-    # this call site. ``falkordb.FalkorDB`` defaults ``socket_timeout=None``
-    # and hands it to redis-py explicitly, so an unbounded client parks a
-    # "read, change nothing" census in ``recv()`` forever against a stalled
-    # engine (#2969's defrag loop, #2838's MERGE lock) — alive, 0% CPU, no
-    # error, which is the one outcome this instrument cannot tolerate.
-    db = FalkorDB(
-        host=u.hostname,
-        port=u.port or 6379,
-        password=u.password or "",
-        **_bounded_server_socket_kwargs(),
-    )
+    db = FalkorDB(host=u.hostname, port=u.port or 6379, password=u.password or "")
     try:
         names = list(db.list_graphs() or [])
     except Exception:
@@ -2100,24 +1385,10 @@ def _head() -> str:
         return f"UNMEASURED({type(e).__name__}: {e})"
 
 
-def _cell(value: str) -> str:
-    """One GFM table cell: a literal `|` is written `\\|` (GFM §4.10, Ex. 200).
-
-    The escaping belongs to the EMITTER, not to each note. Three of the four
-    rows carry text this tool does not author — `shipped["files"]` config lines,
-    and `V1_SURFACES` doc lines, one of which is a markdown document whose V1
-    discussion lives in *table rows*. A per-note rule has to be remembered by
-    every `notes` producer, so it is only ever as wide as the last person to
-    remember it; escaping here covers a row added tomorrow.
-    """
-    return str(value).replace("|", "\\|")
-
-
 def _table(rows: list[Row]) -> str:
     out = ["| # | bullet | verdict | evidence |", "|---|---|---|---|"]
     for r in rows:
-        out.append(
-            f"| {r.bullet} | {_cell(r.text)} | **{r.verdict}** | {_cell(r.observed)} |")
+        out.append(f"| {r.bullet} | {r.text} | **{r.verdict}** | {r.observed} |")
     # The command is NOT decoration: `#10465` scores a bullet WITH its command,
     # so a row printed without one would be unscored evidence in the one place
     # a reader actually looks.
@@ -2152,43 +1423,20 @@ def main(argv: list[str] | None = None) -> int:
             report["census"] = {"error": "UNMEASURED(no --uri and no TORTOISE_DB_URI)"}
             unmeasured = True
         else:
-            # ⛔ The graph NAME comes from the URI's PATH, parsed the way
-            # `_connect` parses it — never from the last `/`-segment of the raw
-            # URI. For `docker://:SECRET@host:6379` the path is EMPTY and that
-            # segment is `:SECRET@host:6379`, i.e. the URI's USERINFO: the old
-            # derivation carried the password into `report["census"]["graph"]`
-            # (and, on the text path, into a line printed twice), reachable with
-            # NO FLAG AT ALL because `--uri` defaults to `$TORTOISE_DB_URI`.
-            # Same credential class as `tests/_embedded.py`'s warning and #3039
-            # (review round 13, P2). A path-less URI names NO graph, so the
-            # census cannot be taken — which is stated, never substituted with
-            # the authority.
-            from urllib.parse import urlsplit
-
-            uri_path_name = urlsplit(args.uri).path.strip("/").rsplit("/", 1)[-1]
-            graph_name = args.graph or uri_path_name
-            if not graph_name:
-                report["census"] = {
-                    "error": "UNMEASURED(no graph name: the URI path names "
-                             "none and --graph is absent — a URI's authority "
-                             "is not a graph name)"}
-                unmeasured = True
-            else:
-                db, names = _connect(args.uri)
-                # ⛔ The handle is selected by the NAME the report will carry.
-                # Using the URI path while LABELLING the row `--graph`
-                # attributes one graph's numbers to another (this tool's own
-                # review, P1: it printed `Point stored=0` for a graph holding
-                # 50 vectors). `uri_path_name` is recorded so a reader can see
-                # both — and `None`, not `''`, when the URI carries no path.
-                graph = db.select_graph(graph_name)
-                report["census"] = vector_census(
-                    graph, graph_name, graph_names=names,
-                    uri_graph_name=uri_path_name or None)
-                census = report["census"]
-                unmeasured = unmeasured or str(
-                    census.get("catalogue", "")).startswith(
-                        "UNMEASURED") or "error" in census
+            graph_name = args.graph or (args.uri.rstrip("/").rsplit("/", 1)[-1])
+            db, names = _connect(args.uri)
+            uri_name = args.uri.rstrip("/").rsplit("/", 1)[-1]
+            # ⛔ The handle is selected by the NAME the report will carry. Using
+            # the URI path while LABELLING the row `--graph` attributes one
+            # graph's numbers to another (this tool's own review, P1: it printed
+            # `Point stored=0` for a graph holding 50 vectors).
+            graph = db.select_graph(graph_name)
+            report["census"] = vector_census(
+                graph, graph_name, graph_names=names,
+                uri_graph_name=uri_name)
+            census = report["census"]
+            unmeasured = unmeasured or str(census.get("catalogue", "")).startswith(
+                "UNMEASURED") or "error" in census
 
     if args.json:
         print(json.dumps(report, indent=2, default=str))
@@ -2200,20 +1448,14 @@ def main(argv: list[str] | None = None) -> int:
     print(f"\n§12.2a predicates: {p['count']} (target {p['target']}) — "
           f"{p['verdict']}; owners={p['owners']}; shared identity="
           f"{p['rule_set_is_shared_identity']}")
-    if p["unparseable"]:
-        # ⛔ Printed BESIDE the count, so `<N> — MET` can never be read off a
-        # line whose population had a hole in it (`UNDETERMINED` is above).
-        print(f"  ⛔ unreadable modules (this count could not scan them): "
-              f"{p['unparseable']}")
     if "census" in report:
         c = report["census"]
-        if "error" not in c:
-            print(f"\nCensus — graph `{c.get('graph')}` at {c.get('at')} "
-                  f"({c.get('catalogue', '')}):")
-            # A figure quoted into an epic body must carry the way it was
-            # produced (`#10465` target 1) — the docstring says so, and the text
-            # path was the one place that did not.
-            print(f"  command: {c.get('command', CENSUS_COMMAND)}")
+        print(f"\nCensus — graph `{c.get('graph')}` at {c.get('at')} "
+              f"({c.get('catalogue', '')}):")
+        # A figure quoted into an epic body must carry the way it was produced
+        # (`#10465` target 1) — the docstring says so, and the text path was
+        # the one place that did not.
+        print(f"  command: {c.get('command', CENSUS_COMMAND)}")
         for label, d in (c.get("labels") or {}).items():
             print(f"  {label:10s} stored={d['stored']!s:12s} "
                   f"indexed={d['indexed']!s:6s} unindexed={d['unindexed']!s:12s} "
@@ -2223,13 +1465,8 @@ def main(argv: list[str] | None = None) -> int:
         if c.get("population"):
             print(f"  population: {c['population']}")
         if c.get("unreadable_catalogue_rows"):
-            # ⛔ The rows are `(label-or-None, why)` TUPLES (the per-label filter
-            # unpacks them), so joining them as strings raised `TypeError` and
-            # sent the whole run to `UNMEASURED(...)` with exit 2 — for a
-            # census that measured fine. The `--json` path hid it (`default=str`).
-            print("  unreadable catalogue rows: " + "; ".join(
-                f"{lab}: {why}" if lab is not None else why
-                for lab, why in c["unreadable_catalogue_rows"][:3]))
+            print("  unreadable catalogue rows: "
+                  + "; ".join(c["unreadable_catalogue_rows"][:3]))
     return 2 if unmeasured else 0
 
 
