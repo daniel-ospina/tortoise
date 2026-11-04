@@ -203,15 +203,30 @@ divergence #10853 measured. Sweeping the existing rows instead would decay: at
 this head the capture still writes the value, so the next capture of the same
 session writes it straight back.
 
-Two costs, named rather than implied:
+Three costs, named rather than implied:
 
 * the **journal fold** still projects the value until #10000's capture-side change
   lands, so the two rebuild paths disagree on that one column until then — in the
   ruling's direction, and converging with it;
 * graph-side FTS over a session Source's own utterances goes with the prose. The
   record remains searchable (the column is untouched), and #10000 replaces the
-  capture's summary with a topic lexicon.
+  capture's summary with a topic lexicon;
+* `python -m tortoise record-reconcile` builds its RECORD side through the same
+  projector, so a Source whose cache node still holds the legacy prose reports
+  `field_mismatches` and the sweep flips from clean to DIVERGENT. That is the
+  true statement — the two sides do disagree — and it is repaired by #10017's
+  purge census, not by re-adding the projection.
 
-Pinned by `tests/test_10853_session_source_prose.py` (red-first: the four legs
-are the drop, the narrowness of the drop, the document Source that must keep
-both columns, and the record row that must not be mutated).
+⛔ **`session_id` is not an episodic signal**, and must not become one. It is a
+legitimate DOCUMENT coordinate (`EventAPI.add_document` accepts one and
+`tortoise/ingest.py` passes a transcript's `sessionId` frontmatter into it), so a
+guard keyed on it drops a transcript document's own summary — the mirror of the
+defect this closes. Review P1 on the change caught it before landing; the
+transcript-document leg below is the pin.
+
+Pinned by `tests/test_10853_session_source_prose.py`: the drop, the narrowness of
+the drop, ONE LEG PER SIGNAL (so no branch of the predicate is unexercised), the
+transcript DOCUMENT that must keep both columns even though it carries a
+`session_id`, and the record row that must not be mutated. Mutation-checked: each
+of the three signal branches and the guard itself, removed one at a time, reds
+exactly the leg that names it.
