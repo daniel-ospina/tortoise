@@ -1855,14 +1855,15 @@ _PRIOR_BASIS_RE = re.compile(
 # …and the same span WITHOUT the end-of-note anchor, for the MID-NOTE case, where
 # the suffix has to be BOUNDED (the closing `; was N` / `; kept N`) instead of
 # running to `$`. A re-emitted note is ONE PARAGRAPH (`_joined_note_tail`), so a
-# prior basis can sit in the middle of its text — on the committed map exactly one
-# row does, and it is one refresh away from the stale-provenance shape #9134's P2
-# forbids: the 2026-11-02 refresh appended the basis to `test_source_staleness_
-# sweep_5038.py`'s ROW LINE while the rest of that note continued on five wrap
-# lines, so the joined note reads `… 34 tests — ci-timing … 2026-11-02 …; was 3.2
-# embedded (…) lane …`. The end-anchored pattern above cannot see that basis, so a
-# re-base kept it AND appended this sample's — two bases in one note, one of them
-# from two refreshes ago (#10575 review, P3).
+# prior basis can sit in the MIDDLE of its text; HOW MANY rows do is a property of
+# the LIVE map and is therefore DERIVED by `_prior_basis_spans` below, never stated
+# here — and a missed mid-note basis is one refresh away from the stale-provenance
+# shape #9134's P2 forbids: the 2026-11-02 refresh appended the basis to
+# `test_source_staleness_sweep_5038.py`'s ROW LINE while the rest of that note
+# continued on wrap lines, so the joined note reads `… 34 tests — ci-timing …
+# 2026-11-02 …; was 3.2 embedded (…) lane …`. The end-anchored pattern above cannot
+# see that basis, so a re-base kept it AND appended this sample's — two bases in
+# one note, one of them from two refreshes ago (#10575 review, P3).
 #
 # The separator ` — ` is REQUIRED here, and that is deliberate: the renderer only
 # ever appends a basis behind one, so requiring it keeps this pattern away from a

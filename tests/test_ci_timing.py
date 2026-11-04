@@ -6585,9 +6585,11 @@ def _assert_preamble_shape(wrapped: int, preamble: int) -> None:
 
     A guard that demanded a committed wrap therefore went red on a HEALTHY map, on
     the first adopting sweep, in whatever later unrelated leg selected `sdk` — the
-    red asserting that "the dominant convention is no longer the preamble" while 74
-    of the 74 indented blocks still were (#10575 review, P2). The wrapped re-emit
-    paths stay pinned by their own tests — the committed re-base
+    red asserting that "the dominant convention is no longer the preamble" while
+    EVERY indented block still was (#10575 review, P2). How many there are is
+    DERIVED by `_indented_block_shape` and never stated here, in digits or in words
+    (#10575 review, P3): the sweep that moves the figure cannot edit this file. The
+    wrapped re-emit paths stay pinned by their own tests — the committed re-base
     (`test_a_wrapped_rows_prior_basis_is_pruned_wherever_it_sits`) asserts on the
     flattened result, and the two `_WRAPPED_NOTE_MANIFEST` fixtures drive the CUT
     and APPEND arms synthetically — so neither depends on a committed wrap
@@ -7142,6 +7144,85 @@ _RATIONALE_SITES = ("tools/ci_timing.py", "tests/test_ci_timing.py",
 _SHAPE_CLAIM = "open a new note"
 
 
+def _prose_paragraphs(text: str) -> list[str]:
+    """Every comment run / docstring body in `text` as ONE joined paragraph.
+
+    ⛔ The guard used to `findall` the RAW file text, i.e. it read LINES — and a
+    claim about the map is a SENTENCE, which this tree reflows. `tools/ci_timing.py`
+    carried `… on the committed map exactly one` / `# row does …`: a bare newline
+    was always fine (`\\s+` matches it), but the CONTINUATION line's `#` landed
+    between `one` and `row`, so the line-wise read reported the tree CLEAN while the
+    claim sat one marker away from the pattern meant to forbid it (#10575 review,
+    P3). A span is not a line.
+
+    Both prose carriers are joined, because both have carried these claims: `#`
+    runs (the rationale comments here) and triple-quoted bodies (the docstrings that
+    stated the first, digit-shaped form). A bare `#` — this tree's paragraph break —
+    and a blank line END a paragraph, so two unrelated paragraphs are never glued
+    into a claim that no author wrote.
+    """
+    paragraphs: list[str] = []
+    current: list[str] = []
+    quote: str | None = None
+
+    def flush() -> None:
+        if current:
+            paragraphs.append(" ".join(current))
+            current.clear()
+
+    for line in text.splitlines():
+        stripped = line.strip()
+        if quote is not None:
+            if quote in stripped:         # the docstring closes on this line
+                head, _, _ = stripped.partition(quote)
+                if head.strip():
+                    current.append(head.strip())
+                flush()
+                quote = None
+            elif not stripped:            # a blank line inside a docstring breaks it
+                flush()
+            else:
+                current.append(stripped)
+            continue
+        if not stripped:
+            flush()
+            continue
+        if stripped.startswith("#"):
+            body = stripped.lstrip("#").strip()
+            if not body:                  # a bare `#` is this tree's paragraph break
+                flush()
+                continue
+            current.append(body)
+            continue
+        opened = next((q for q in ('"""', "'''") if q in stripped), None)
+        if opened is None:                # a code line ends any paragraph in progress
+            flush()
+            continue
+        head, _, tail = stripped.partition(opened)
+        if head.strip():
+            flush()                       # code in front of the opener is not prose
+        if opened in tail:                # one-line docstring: a paragraph of its own
+            paragraphs.append(tail.partition(opened)[0].strip())
+            continue
+        current.append(tail.strip())
+        quote = opened
+    flush()
+    return [para for para in paragraphs if para.strip()]
+
+
+def _frozen_map_count_hits(text: str) -> list[str]:
+    """Every frozen-map-count claim in `text`, read LINE-wise AND PARAGRAPH-wise.
+
+    The joined read is a SUPERSET of the line-wise one (a single-line claim is a
+    one-line paragraph), so both are kept: the line-wise pass still sees claims in
+    code, and the paragraph pass sees the ones a reflow split.
+    """
+    hits = list(_FROZEN_MAP_COUNT_RE.findall(text))
+    hits += [hit for para in _prose_paragraphs(text)
+             for hit in _FROZEN_MAP_COUNT_RE.findall(para)]
+    return hits
+
+
 def test_the_rationales_map_counts_stay_DERIVED_not_frozen_in_prose() -> None:
     """A rationale may argue from the map's shape — never from a frozen count.
 
@@ -7155,7 +7236,7 @@ def test_the_rationales_map_counts_stay_DERIVED_not_frozen_in_prose() -> None:
     opener/blocks pair as `N of its M indented blocks` / `N of the M such blocks`.
     """
     root = Path(__file__).resolve().parent.parent
-    frozen = {rel: _FROZEN_MAP_COUNT_RE.findall((root / rel).read_text())
+    frozen = {rel: _frozen_map_count_hits((root / rel).read_text())
               for rel in _RATIONALE_SITES}
     assert {rel: hits for rel, hits in frozen.items() if hits} == {}, (
         "a rationale states a MAP COUNT as an absolute; the weekly sweep moves "
@@ -7189,7 +7270,7 @@ def test_the_count_guard_sees_the_WORD_form_of_the_same_figure() -> None:
         " 1 row of ".join(("", "1227")),
         " ".join(("73 of the", "74", "such blocks", "open a new note")),
     ]
-    missed = [s for s in frozen if not _FROZEN_MAP_COUNT_RE.findall(s)]
+    missed = [s for s in frozen if not _frozen_map_count_hits(s)]
     assert missed == [], (
         f"the prose guard no longer sees a frozen map count in these shapes: {missed}")
     # …and it stays QUIET on the statements that are true as written: a measurement
@@ -7200,6 +7281,62 @@ def test_the_count_guard_sees_the_WORD_form_of_the_same_figure() -> None:
         "committed (wrapped=1, preamble=74) → after one adopting render (0, 73)",
         "the overwhelming majority of such blocks open a new note at this head",
     ]
-    noisy = {s: _FROZEN_MAP_COUNT_RE.findall(s) for s in quiet}
+    noisy = {s: _frozen_map_count_hits(s) for s in quiet}
     assert {s: hits for s, hits in noisy.items() if hits} == {}, (
         f"the prose guard reds a TRUE statement: {noisy}")
+
+
+def test_the_count_guard_reads_the_SPAN_not_the_line_a_marker_split() -> None:
+    """Non-vacuity for the paragraph read: a reflowed claim is still a claim.
+
+    `tools/ci_timing.py:1858` stated, two lines above the rule forbidding it, that
+    the committed map carried the claim in words — with the continuation line's `#`
+    sitting between `one` and `row`. The line-wise read (the guard as it stood)
+    returned `[]` on exactly that span, which is the false green the review found
+    (#10575 review, P3); the paragraph read returns the claim. The docstring sample
+    is here for the opposite reason: a docstring wrap carries no marker, so it was
+    never blind, and the paragraph read must not drop that coverage either.
+
+    The samples are ASSEMBLED from fragments for the reason given above: this file
+    is itself a guarded site, so writing a claim out in one piece would make the
+    guard above red on the test that proves the guard works.
+    """
+    split_comment = "\n".join((
+        "# prior basis can sit mid-text — on the committed map "
+        + " ".join(("exactly", "one")),
+        "# " + " ".join(("row", "does, and it is one refresh away")),
+    ))
+    split_docstring = "\n".join((
+        '"""The CUT arm is justified by the map\'s shape:',
+        " ".join(("all", "but", "the")),
+        " ".join(("one", "wrap", "opens a new note of its own for the row below.")),
+        '"""',
+    ))
+    # the pre-fix reading — raw text, i.e. LINE-wise — is blind to the COMMENT
+    # shape, because the continuation line's `#` sits inside the claim. A bare
+    # newline was always fine (`\s+` matches it), which is why the docstring sample
+    # below could never carry the defect and is asserted the other way round: the
+    # paragraph read must not LOSE it.
+    assert _FROZEN_MAP_COUNT_RE.findall(split_comment) == [], split_comment
+    # …and the span reading sees the claim the author actually wrote, in both
+    # carriers
+    assert _frozen_map_count_hits(split_comment) == [
+        " ".join(("exactly", "one", "row", "does"))], split_comment
+    assert " ".join(("all but the", "one", "wrap")) in _frozen_map_count_hits(
+        split_docstring), split_docstring
+    # The join must not INVENT claims: a bare `#` (this tree's paragraph break) and a
+    # blank line both end a paragraph, so the halves of an innocent note are never
+    # glued into a figure nobody wrote — that would be the false red this guard
+    # exists to avoid committing in the other direction.
+    separated = [
+        "\n".join(("# on the committed map", "#", "# row does, and the")),
+        "\n".join((
+            "# the census reads the leg's own junit; CI is the source,",
+            "# and by CI timings this file is trivial.")),
+        "\n".join((
+            '# the note is joined for one reason:',
+            '# a re-emitted note is one paragraph.')),
+    ]
+    noisy = {s: _frozen_map_count_hits(s) for s in separated}
+    assert {s: hits for s, hits in noisy.items() if hits} == {}, (
+        f"the span read glues unrelated paragraphs into a frozen count: {noisy}")
