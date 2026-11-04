@@ -5763,8 +5763,10 @@ surfaces:
   # a test count on purpose: the numbers this row first carried ("the 25 tests",
   # "25 real API calls") were re-derived at every revision and were stale again
   # each time a test was added — the fix is to drop the number, not to refresh
-  # it. The registration alone
-  # does NOT make the pin run on the file it guards: `tools/` is a flat
+  # it.
+  #
+  # The registration alone does NOT make the pin run on the file it guards:
+  # `tools/` is a flat
   # `NON_PYTHON_PREFIXES` entry, and `tools/rail_detach.py` matches no
   # `SOURCE_PATTERNS` row, so a tool-only diff filters to `changed == []` and
   # takes the docs-only early return (measured: `select(["tools/rail_detach.py"])`
