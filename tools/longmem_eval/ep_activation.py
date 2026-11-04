@@ -54,7 +54,6 @@ be unit-tested without a database.
 """
 from __future__ import annotations
 
-import math
 import sys
 
 # #5128: refuse a <3.12 interpreter before the imports below — a module-level
@@ -66,6 +65,7 @@ if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
     )
 
 import logging
+import math
 import time
 
 logger = logging.getLogger(__name__)
