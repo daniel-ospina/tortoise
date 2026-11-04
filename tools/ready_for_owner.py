@@ -213,7 +213,12 @@ OVERRIDES_RE = re.compile(r"(?im)^\s*(?:[-*]\s*)?\**OVERRIDES\**\s*:")
 #: The declared-union marker a fold/batch PR writes in its body, e.g.
 #:     READY-GATE UNION: #10901, #10907
 #:     READY-GATE UNION: tortoise/sdk.py, tools/foo.py
-UNION_RE = re.compile(r"(?im)^\s*(?:[-*]\s*)?\**READY-GATE UNION\**\s*:\s*(.+)$")
+#: ⛔ `(.*)`, NOT `(.+)`: a marker with nothing after the colon (`READY-GATE UNION:`) is
+#: a MALFORMED DECLARATION, and `(.+)` simply failed to match it — which sent it down
+#: the "no union declared" branch and PASSED. `(.*)` makes it a declared-but-empty
+#: union, which `check_coverage` fails. `\s*` before the group is deliberate: it lets
+#: trailing whitespace only count as empty rather than as one blank entry.
+UNION_RE = re.compile(r"(?im)^\s*(?:[-*]\s*)?\**READY-GATE UNION\**\s*:[ \t]*(.*)$")
 PR_REF_RE = re.compile(r"^#?(\d+)$")
 
 REVIEW_OK_TOKENS = frozenset({"head", "carry"})
@@ -597,9 +602,13 @@ def check_exclusions(probe: Probe) -> Check:
 
     # The PR must still be OPEN and unmerged: a merged PR cannot be merged from the UI, and
     # certifying one opens a dead tab (measured: #10916, merged, printed READY before this).
-    if probe.merged or probe.pr_state.lower() not in ("", "open"):
-        reasons.append(f"not-open:{probe.pr_state or 'unknown'}{'-merged' if probe.merged else ''}")
-        parts.append(f"state={probe.pr_state or 'unknown'} merged={str(probe.merged).lower()}")
+    if not probe.pr_state:
+        # The one place on the newest surface where an ABSENT field would otherwise
+        # default to the PASSING side. A payload with no `state` is not "open".
+        return Check("exclusions", False, probe.labels_raw or "-", "unreadable", unreadable=True)
+    if probe.merged or probe.pr_state.lower() != "open":
+        reasons.append(f"not-open:{probe.pr_state}{'-merged' if probe.merged else ''}")
+        parts.append(f"state={probe.pr_state} merged={str(probe.merged).lower()}")
 
     if probe.labels is None:
         return Check("exclusions", False, probe.labels_raw or "-", "unreadable", unreadable=True)
@@ -1181,7 +1190,13 @@ def _read_coverage(touched: tuple[str, ...]) -> tuple[tuple[str, ...] | None, st
     tier1_only: list[str] = []
     if not full:
         for path in touched:
-            one = ci_selection.select([path], "pull_request", manifest, {})
+            # ⛔ INSIDE the fail-closed conversion. A raise here used to escape
+            # `collect_probe` entirely, so `main()` died with a traceback and printed NO
+            # verdict line — a third output shape beside READY-FOR-OWNER / NOT-READY.
+            try:
+                one = ci_selection.select([path], "pull_request", manifest, {})
+            except Exception as exc:
+                return None, f"ci_selection.select([{path}]) failed: {exc}"
             if one.get("full") or (one.get("surfaces") or []):
                 continue
             test_files = one.get("test_files")
@@ -1217,7 +1232,10 @@ def _read_comments(gh: Gh, pr: int) -> tuple[tuple[Mapping[str, Any], ...], str]
                 continue
             body = str(item.get("body") or "")
             state = str(item.get("state") or "").upper()
-            if not body and state != CHANGES_REQUESTED:
+            # A BARE GitHub-UI review (empty body) still carries a STATE, and that state
+            # is the verdict: an empty-bodied APPROVED is the commonest approval shape, and
+            # dropping it made the approval arm unreachable for exactly that shape.
+            if not body and state not in (CHANGES_REQUESTED, APPROVED):
                 continue
             out.append(
                 {
@@ -1226,7 +1244,7 @@ def _read_comments(gh: Gh, pr: int) -> tuple[tuple[Mapping[str, Any], ...], str]
                     "kind": kind,
                     "state": state,
                     # A change request with an empty body still has to say WHAT it is.
-                    "body": body or f"review state {CHANGES_REQUESTED}",
+                    "body": body or f"review state {state or 'unknown'}",
                 }
             )
     if not out:

@@ -593,6 +593,49 @@ def test_a_clean_outcome_in_the_recorders_own_format_is_a_clear() -> None:
     assert "last-clear=91" in check.raw
 
 
+def test_a_bare_empty_bodied_approval_closes_an_earlier_change_request() -> None:
+    """ROUND-4 P3: the commonest GitHub-UI approval carries an EMPTY body, and empty-bodied
+    reviews were dropped, so the approval arm was unreachable for exactly that shape."""
+    comments = [
+        {
+            "id": 94,
+            "created_at": "2026-11-04T11:40:00Z",
+            "kind": "review",
+            "state": "CHANGES_REQUESTED",
+            "body": "",
+        },
+        {
+            "id": 95,
+            "created_at": "2026-11-04T11:55:00Z",
+            "kind": "review",
+            "state": "APPROVED",
+            "body": "",
+        },
+    ]
+    # The evaluator is fed the FULL set (the reader is what drops bodies); assert the pair
+    # clears here, and separately assert the reader keeps both.
+    assert _check("blocking-finding", comments=comments).passed is True
+
+
+def test_a_dismissed_review_is_neither_a_finding_nor_a_clear() -> None:
+    comments = [
+        {
+            "id": 96,
+            "created_at": "2026-11-04T11:40:00Z",
+            "kind": "comment",
+            "body": "[P1] tortoise/sdk.py:1 — real",
+        },
+        {
+            "id": 97,
+            "created_at": "2026-11-04T11:55:00Z",
+            "kind": "review",
+            "state": "DISMISSED",
+            "body": "",
+        },
+    ]
+    assert _check("blocking-finding", comments=comments).passed is False
+
+
 def test_a_later_approval_closes_an_earlier_change_request() -> None:
     """Each item is graded on its own state, so without this an approved-after-changes PR
     could never read READY again."""
@@ -681,6 +724,30 @@ def test_unreadable_comments_is_unreadable() -> None:
     check = _check("blocking-finding", comments=None)
     assert check.passed is False
     assert check.unreadable is True
+
+
+def test_an_absent_pr_state_is_unreadable() -> None:
+    """ROUND-4 P3: a missing `state` key defaulted to the PASSING side ("open")."""
+    check = _check("exclusions", pr_state="")
+    assert check.passed is False
+    assert check.unreadable is True
+
+
+def test_the_queue_blocking_label_list_matches_mergify() -> None:
+    """ROUND-4 P3, and the reason this test exists: `QUEUE_BLOCKING_LABELS` is a COPY of
+    `.mergify.yml`'s label entries. Without a reconciling check, adding `-label=<x>` to
+    `queue_conditions` would silently leave this gate LAXER than the queue — the very
+    invariant violation round 3 fixed as a P2 (allow what the queue refuses) — with nothing
+    reddening anywhere. `.mergify.yml` is the source of truth here."""
+    import re
+
+    text = (REPO_ROOT / ".mergify.yml").read_text()
+    queue_block = text.split("queue_conditions:", 1)[1].split("merge_conditions:", 1)[0]
+    negated = set(re.findall(r"-\s*-label=([A-Za-z0-9_.-]+)", queue_block))
+    assert negated == set(rfo.QUEUE_BLOCKING_LABELS), (
+        f".mergify.yml's queue_conditions negate {sorted(negated)} but the gate blocks "
+        f"{sorted(rfo.QUEUE_BLOCKING_LABELS)} — the gate is now laxis than the queue"
+    )
 
 
 def test_a_pr_with_no_comments_at_all_is_not_blocked() -> None:
@@ -1184,6 +1251,23 @@ def test_declared_union_line_is_parsed() -> None:
     entries, raw = rfo.declared_union("body\n\nREADY-GATE UNION: #10901, #10907\n")
     assert entries == ("10901", "10907")
     assert "entries=2" in raw
+
+
+@pytest.mark.parametrize(
+    "body", ["READY-GATE UNION:", "READY-GATE UNION:\n", "READY-GATE UNION:   "]
+)
+def test_a_marker_with_nothing_after_the_colon_is_a_malformed_declaration(body: str) -> None:
+    """ROUND-4 P3: `(.+)` did not match an empty marker at all, so it fell down the "no union
+    declared" branch and PASSED — the same malformed-marker false pass as the `,` form."""
+    entries, _raw = rfo.declared_union(body)
+    assert entries == (), f"{body!r} must parse to a DECLARED-but-empty union, got {entries!r}"
+
+
+def test_a_malformed_marker_fails_coverage_end_to_end() -> None:
+    verdict = _verdict(union=[], union_raw="declared union has no entries")
+    coverage = next(c for c in verdict.checks if c.name == "coverage")
+    assert coverage.passed is False
+    assert coverage.reason == "empty-declared-union"
 
 
 def test_absent_union_marker_declares_nothing() -> None:
