@@ -398,6 +398,24 @@ def test_an_acknowledgement_only_session_still_derives_and_is_findable(sdk):
     assert "session:sess-short-words" in [
         r["id"] for r in sdk.tortoise_fts_query("go", entity_type="source")]
 
+    # ⛔ NEGATIVE CONTROL — the widening must stop at "tokens actually present".
+    # The two arms above pin the derivation in ONE direction only ("a non-empty
+    # transcript must not derive nothing"), so on its own this test would stay
+    # green if the presence test were widened again — to `\S+`, say — and a
+    # transcript of punctuation started deriving a "lexicon" from `"..."` and
+    # `"?"`. That is the same class of defect swapped end for end: the docstring
+    # states `("", [])` happens *"only for a transcript with no word tokens at
+    # all (empty, blank, punctuation-only, or nothing but the Speaker: framing
+    # labels)"*, and until this control existed nothing executed that promise.
+    # The framing-only shape is the one that must stay silent now that the
+    # `Speaker:` filter runs over a FLOORLESS pattern: it is the shape the old
+    # `{2,}` floor used to drop by accident, so nothing else pins it.
+    for wordless in ("", "   ", "...", "?!", "user:\nassistant:"):
+        assert _session_source_metadata(wordless) == ("", []), (
+            f"a transcript with NO word tokens ({wordless!r}) derived a "
+            "descriptor — the presence test was widened past 'tokens present' "
+            "and would now index punctuation or bare framing labels")
+
 
 def test_the_lexicon_does_not_depend_on_the_transcript_word_order():
     """The descriptor is a function of the word MULTISET, not of turn order.
