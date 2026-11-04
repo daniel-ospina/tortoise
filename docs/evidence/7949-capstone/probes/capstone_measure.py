@@ -266,7 +266,7 @@ ANCHOR_OUT = ("extractedFrom",)
 
 #: The relationship type that points AT a derived node: ``(Source)-[:references]
 #: ->(Event|Document)``, written by ``_EdgeHandlers.link_source_to_event``
-#: (``tortoise/edges.py:2832-2857``, ``MERGE (s)-[r:references]->(e)
+#: (``tortoise/projection/edges.py:2832-2857``, ``MERGE (s)-[r:references]->(e)
 #: ON CREATE SET r.sourceVersion = s.contentHash``) and reached from the capture
 #: path at ``tortoise/sdk.py:16613`` (``proj.link_source_to_event(source_key,
 #: event_id)`` — ``(Source)-[:references]->(sessionCaptured Event)``). The anchor
@@ -283,11 +283,11 @@ E3_RULE = (
     "interchangeable: extractedFrom points FROM the derived node at its source "
     "((Point)-[:extractedFrom]->(GraphEvent|Event)), while references points AT "
     "the derived node ((Source)-[:references]->(Event|Document) — "
-    "tortoise/edges.py:2832-2857 link_source_to_event, reached from "
+    "tortoise/projection/edges.py:2832-2857 link_source_to_event, reached from "
     f"the capture path at {LINK_SOURCE_CITE} "
     "(proj.link_source_to_event(source_key, event_id))). The anchor is a "
     "property of the "
-    "DERIVATION LINK (tortoise/edges.py:774-782 "
+    "DERIVATION LINK (tortoise/projection/edges.py:774-782 "
     "_anchor_on_create/_DERIVATION_ANCHOR_SET), and the references target labels "
     "are _DERIVATION_REFERENCES_LABELS (edges.py:747: Event, Document). A "
     "Source->Object link is identity/mention and carries none BY DESIGN (owner "

@@ -3871,6 +3871,21 @@ def test_the_bare_continuation_cites_name_what_they_say():
             ("10609", 'result["classify_later"] = {'),
             ("10619", 'result["vet"] = {'),
         )),
+        # ⛔ THE CLASSIFY PASS'S OWN FAIL-OPEN PAIR (#10833 review, P2). The
+        # `+33` shift the fold applied to this row moved the first member to
+        # `:10356` and left the second at its PRE-shift value, so `:10453` —
+        # `vet_warnings.extend(_w)` inside the VET block — was printed as the
+        # classify pass's second fail-open `except`. The same sentence one
+        # clause earlier condemns exactly that defect ("a cause citing
+        # `vet_enabled`/`_run_vet_pass` for S2.3 sent the reader to code that
+        # pass never runs"). The two `except` lines are byte-identical, so the
+        # anchors are the pair's own gate lines' company rather than the text:
+        # a reader following `:10486` must land in the `classify_later and
+        # complete_list` block, which the row below holds at `:10465`.
+        ("docs/00_index.md", "fail-open `except` at", (
+            ("10356", "except Exception as e:  # never block capture (P1)"),
+            ("10486", "except Exception as e:  # never block capture (P1)"),
+        )),
         # `_IDLE_CITES["vet"]`: the early return and the surface it emits
         ("probes/capstone_measure.py", "its vet surface", (
             ("10237", "if not edus:"),
@@ -3984,6 +3999,60 @@ def test_the_bare_continuation_cites_name_what_they_say():
     assert not failures, (
         "a bare `:NNNN` continuation names code it does not name — re-derive the "
         "number from the tree before changing this pin:\n  " + "\n  ".join(failures))
+
+
+def test_a_cite_that_names_a_directory_names_a_file_that_exists():
+    """The path a cite PRINTS must resolve on disk — `_BUNDLE_CITE` never reads it.
+
+    ⛔ WHY (#10833 review round 6, P2). `_BUNDLE_CITE` makes BOTH directory
+    prefixes optional AND uncaptured (`(?:tortoise/)?(?:projection/)?`) and then
+    resolves the line by the captured BASENAME (`group(1)` against
+    `_BUNDLE_SOURCES`), so the printed path is never used for resolution. That
+    is what let the fold's own cite-repair commit rewrite a CORRECT path into a
+    fabricated one — `tortoise/edges.py`, which does not exist — in four places
+    across `README.md` and `probes/capstone_measure.py`, while the sweep went on
+    reporting every one of them green: the NUMBER was right, the line was
+    resolved through `_BUNDLE_SOURCES["edges"]`, and the file the reader is told
+    to open was never on disk. One of the four is inside `E3_RULE`, which is
+    stamped into the machine record of every future scored run, so the defect
+    was being written into committed evidence.
+
+    A cite that prints NO directory is the bundle's house style for a
+    continuation (`` `edges.py:747` `` after the full path has been named once),
+    and it is resolved by basename on purpose — so this leg binds only the cites
+    that DO name a directory, and asks the one question the sweep cannot: is the
+    path this sentence prints a path in this tree?
+
+    Non-vacuity: measured on this head's parent, where the four cites read
+    `tortoise/edges.py:774-782` / `:2832-2857` and `git ls-tree HEAD
+    tortoise/edges.py` is empty — all four red with `does not exist in the tree`
+    and the `assert seen >= 10` floor still holds (the surviving
+    `tortoise/projection/edges.py` and `tortoise/extractor_v2.py` cites keep the
+    population well above it), so the test is neither vacuous nor a red-on-red.
+    """
+    seen, missing = 0, []
+    for doc_name, doc_path in _BUNDLE_DOCS:
+        text = doc_path.read_text(encoding="utf-8")
+        doc_lines = text.splitlines()
+        for match in _BUNDLE_CITE.finditer(text):
+            printed = match.group(0).split(":", 1)[0]
+            if "/" not in printed:
+                continue
+            line_no = text.count("\n", 0, match.start()) + 1
+            if not _bundle_in_scope(doc_name, doc_lines[line_no - 1]):
+                continue
+            seen += 1
+            if not (_REPO / printed).is_file():
+                missing.append(
+                    f"{doc_name}:{line_no} prints `{printed}`, which does not "
+                    f"exist in the tree")
+    assert not missing, (
+        "a cite names a directory path that is not in this tree — the sweep "
+        "resolves these by BASENAME, so it reports them green and the reader is "
+        "sent to a file that does not exist:\n  " + "\n  ".join(missing))
+    assert seen >= 10, (
+        f"only {seen} directory-prefixed cites were read — this leg is not "
+        f"reaching the bundle's documents")
 
 
 def test_every_readme_line_cite_carries_the_sentence_it_quotes():

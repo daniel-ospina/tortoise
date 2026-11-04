@@ -400,7 +400,7 @@ artifact's **eight of eight**, with `steps_unobserved` empty.)
 ## E3 — the census, and the contradiction it measures
 
 The anchor is a property of the **derivation link**, not of the node
-(`tortoise/edges.py:774-782` `_anchor_on_create` / `_DERIVATION_ANCHOR_SET`), and the
+(`tortoise/projection/edges.py:774-782` `_anchor_on_create` / `_DERIVATION_ANCHOR_SET`), and the
 derivation target labels are `_DERIVATION_REFERENCES_LABELS` (`edges.py:747`: `Event`,
 `Document`). ⛔ **The two directions are not interchangeable**, and the first stamp of this bundle
 got one of them backwards: `extractedFrom` points FROM the derived node
