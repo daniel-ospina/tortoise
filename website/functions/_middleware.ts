@@ -138,7 +138,7 @@ tried, not the code.</p>
       "Content-Type": "text/html; charset=utf-8",
       "Cache-Control": "no-store",
       "Referrer-Policy": "no-referrer",
-      "Content-Security-Policy": STRAY_RETURN_CSP,
+      "Content-Security-Policy": RELAXED_CSP,
       ...HSTS,
     },
   });
@@ -464,7 +464,7 @@ export const onRequest: PagesFunction = async (context) => {
       headers: {
         "Content-Type": "text/html; charset=utf-8",
         "Cache-Control": "public, max-age=60",
-        "Content-Security-Policy": RELAXED_CSP,
+        "Content-Security-Policy": STRAY_RETURN_CSP,
         ...HSTS,
       },
     });
