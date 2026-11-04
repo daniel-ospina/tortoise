@@ -13394,3 +13394,116 @@ def _run_scoped_vocabulary_gap(run):
 # #7949 bundle cite typed against this file's line numbers resolving (measured:
 # a hook at the top of that function shifts eight of them).
 extract_session_v2 = _run_scoped_vocabulary_gap(extract_session_v2)
+
+
+# ── The script reading (#5329) — appended AFTER the #7949 marker on purpose ───
+#
+# `_scripts` (above, unshifted) calls these.  Definition order does not matter
+# for a function body, and it matters a lot for the capstone's live cites: an
+# insertion ABOVE the marker re-stales every one of them, which is how this
+# change put five capstone tests red before it was moved down here.
+
+#: LATIN letters the ASCII branch in `_script_of` cannot see **and that NFD does
+#: not reduce to an ASCII base**: `ª` U+00AA, `µ` U+00B5 and `ʃ` U+0283 are
+#: NFD-stable (they decompose to themselves), and `ﬁ` U+FB01 / `ａ` U+FF41 carry
+#: only COMPATIBILITY decompositions, which NFD does not apply.  Without these
+#: ranges each is in NO block, reads `unlisted`, and refuses any fold it appears
+#: on one side of.
+#:
+#: ⛔ NOT for accented letters, and an earlier revision of this comment said it
+#: was: `é`/`Ā` decompose under NFD to an ASCII base, so `_script_of`'s
+#: NFD-base step already reads them `latin`.  Measured with this table EMPTIED,
+#: `_script_of('é')` is still `latin` and `café`/`cafe` still folds — so the
+#: `café` assertion in the tests is a JOINT pin (either mechanism alone keeps it
+#: green), and the discriminating leg for this table is the surface loop over
+#: `ª µ ʃ ﬁ ａ`.
+#:
+#: ⛔ LETTERS ONLY, and separate from `_SCRIPT_BLOCKS` for that reason: Latin-1
+#: Supplement also holds `U+00D7` (`×`) and `U+00F7` (`÷`), which are MATHS
+#: SYMBOLS.  Contributing `latin` for them reads a symbol as a language and
+#: refused `得る ×` against `得る` (review finding, pinned in the tests).
+_LATIN_SUPPLEMENT_BLOCKS = (
+    (0x00AA, 0x02AF),   # Latin-1 Supplement, Latin Ext-A/B, IPA Extensions
+    (0x1E00, 0x1EFF),   # Latin Extended Additional
+    (0xFB00, 0xFB06),   # Latin ligatures (`ﬁ` `ﬂ` — routine in PDF extraction)
+    (0xFF21, 0xFF5A),   # FULLWIDTH LATIN A-Z / a-z (the gap between them is
+                        # punctuation, excluded by the letters-only test)
+)
+
+#: The script a letter belongs to when no block names it.
+#:
+#: ⛔ The blocks are FINITE, and they used to be the whole reading: a letter in
+#: a block they did not name contributed NOTHING to `_scripts`, so a claim
+#: carrying one was never compared for language at all, its word read as a
+#: one-sided broadening, and the pair FOLDED — the silent memory loss of #5329
+#: in its script form (Armenian `ը`, Georgian, Thai, Ethiopic …).
+#:
+#: The list cannot be completed (a longer list only moves where the miss
+#: happens), so the miss no longer has to be CLOSED for the reading to be safe:
+#: a letter in no block is an UNKNOWN script, which is an identity difference,
+#: so the fold is REFUSED and both claims survive.  Incompleteness now costs
+#: NOISE — a refused fold — instead of a deleted claim (#5080's asymmetry).
+#:
+#: The "no block" test is searched one level deeper before it gives up: a
+#: precomposed letter decomposes under NFD into a base letter plus marks, and a
+#: letter belongs to its BASE's script — so polytonic `ἀ` (U+1F00, unlisted) is
+#: GREEK `α` + a mark, which keeps `ἐν ἀρχῇ`/`εν αρχη` folding and keeps a claim
+#: captured NFC from refusing to fold with the same claim captured NFD.
+#:
+#: ⚠️ Declared residuals, so they are not mistaken for coverage: this closes the
+#: LETTER case only.  A DIGIT or MARK in an unlisted script reaches no dimension
+#: (Thai `๑๒๓` against `123` reads as a `number` difference, which permits a
+#: SUPERSEDE), and a MODIFIER letter (category Lm, e.g. `ʰ` U+02B0) **in no
+#: `_SCRIPT_BLOCKS` range** is treated as not script-bearing, which is what it was
+#: before this reading existed.  (An Lm *inside* a listed block does carry it —
+#: `ー` U+30FC is `kana` — which the previous sentence about ranges already
+#: implies; the unqualified "an Lm is not a script" is false and was corrected
+#: here.)
+#:
+#: ⚠️ And a LABEL residual, which costs no decision and is stated anyway so a
+#: reader does not mistake the name for precision: `_UNLISTED_SCRIPT` is a
+#: SENTINEL carried in the same set as real script names, so
+#: `_identity_differences` reports a `language` difference for a one-sided
+#: letter whose script is ARGUABLY KNOWN and merely outside every
+#: `_SCRIPT_BLOCKS` range — `㐀` (Han Ext A) beside BMP `見`, or halfwidth `ｦ`
+#: beside fullwidth kana.  The REFUSAL there is the intended direction (base
+#: FOLDED both pairs and absorbed the letter — the #5329 loss this reading
+#: exists to stop), and the label changes no answer: `supersede_allowed` is
+#: `not _boundary(a, b)[1]`, so any identity dimension refuses a supersede
+#: alike.  Only the REPORTED reason is coarser than the truth, and extending
+#: `_SCRIPT_BLOCKS` to cover those ranges is the measurement that would sharpen
+#: it — deliberately not done here (this reading does not complete the list).
+_UNLISTED_SCRIPT = "unlisted"
+
+
+def _script_of(ch: str) -> str | None:
+    """The script one character belongs to, or ``None`` when it is not script-bearing.
+
+    Order matters and every step is pinned: ASCII letters are latin; accented
+    LATIN letters (letters only — see `_LATIN_SUPPLEMENT_BLOCKS`); anything in a
+    `_SCRIPT_BLOCKS` range, letters, digits and marks alike (Arabic-Indic and
+    Devanagari digits carry their script, and reading only letters there turned
+    a refused identity difference into a permitted `number` SUPERSEDE); and
+    finally a LETTER that no block names, which is searched one level deeper
+    under NFD — a precomposed letter belongs to its BASE's script — before it is
+    an unknown script.  A NON-LETTER **in no `_SCRIPT_BLOCKS` range** is not a
+    script, and neither is a modifier letter (Lm) in no range — one INSIDE a
+    listed block does carry it (`١` U+0661 is `arabic`, `ー` U+30FC is `kana`).
+    """
+    if ch.isascii():
+        return "latin" if ch.isalpha() else None
+    cp = ord(ch)
+    for lo, hi in _LATIN_SUPPLEMENT_BLOCKS:
+        if lo <= cp <= hi:
+            return "latin" if ch.isalpha() else None
+    for name, lo, hi in _SCRIPT_BLOCKS:
+        if lo <= cp <= hi:
+            return name
+    if not ch.isalpha() or unicodedata.category(ch) == "Lm":
+        return None
+    base = unicodedata.normalize("NFD", ch)[0]
+    if base != ch:
+        # One level is enough in practice (a starter does not decompose again),
+        # and the recursion is idempotent if it does.
+        return _script_of(base)
+    return _UNLISTED_SCRIPT

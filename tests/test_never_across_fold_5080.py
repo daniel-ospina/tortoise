@@ -639,10 +639,14 @@ class TestDistinguishingDifference:
         # that a script is unknown.
         assert v2.fold_allowed("we ship the \u0568 build",
                                "we ship \u0568")
-        # Letters in a NAMED script are unaffected.  LATIN includes its
-        # accented blocks, so an accent is latin rather than "unknown" —
-        # otherwise dropping an accent ("caf\u00e9"/"cafe") would refuse a
-        # fold that has nothing to do with language.
+        # Letters in a NAMED script are unaffected.  ⚠️ This pair is a JOINT pin,
+        # not the Latin supplement's discriminator: an accented letter is `latin`
+        # through the NFD-BASE STEP alone (`é` → `e`), so it stays `latin` even
+        # with `_LATIN_SUPPLEMENT_BLOCKS` emptied.  The surfaces the table
+        # actually carries are the NFD-STABLE ones (`ª` U+00AA, `µ` U+00B5, `ʃ`
+        # U+0283) and the compatibility-decomposed ones (`ﬁ`, `ａ`, which NFD does
+        # not decompose) — the loop below pins those, and THAT is the leg that
+        # reds when the table is emptied.
         assert v2.fold_allowed("we study the caf\u00e9 menu",
                                "we study the cafe menu")
         # A non-letter outside every block (an emoji, a currency symbol) is not
@@ -655,10 +659,18 @@ class TestDistinguishingDifference:
         # refuse a fold between two claims that merely lost one.
         assert v2.distinguishing_difference("\u5f97\u308b \u00d7",
                                            "\u5f97\u308b") is None
-        # A claim read RAW (no NFC) against the same claim read NFD used to
-        # produce DIFFERENT script sets, so "ἀρχή" stopped folding with its own
-        # decomposed spelling — the same claim, stored twice forever.  `_scripts`
-        # now NFC-folds its input like every other boundary input does.
+        # The same claim in two spellings must fold: precomposed polytonic
+        # `ἀρχή` against its decomposed spelling (`α` + U+0313).  ⚠️ U+1F00 is
+        # in NO block — it reads `greek` only through the NFD-base step — which
+        # is both why this pair already folds on BASE and why it is NOT the NFC
+        # leg (see the next comment).
+        #
+        # ⚠️ So this is an INVARIANT pin: it still passes with `_fold_unicode`
+        # reverted to the identity, and does not evidence that `_scripts` folds
+        # its input.  An earlier revision claimed the raw reading gave
+        # "DIFFERENT script sets" here — measured against `origin/main`'s module
+        # it does not — and the revision that withdrew it wrongly put U+1F00
+        # "inside the greek block"; both are corrected here.
         assert v2.fold_allowed("\u1f00\u03c1\u03c7\u03ae",
                                "\u03b1\u0313\u03c1\u03c7\u03ae")
         # ⚠️ THE DISCRIMINATING NFC LEG, and the Greek pair above is NOT one:
@@ -686,7 +698,11 @@ class TestDistinguishingDifference:
             # leg uses the lowercase fullwidth letter.)
             assert v2.fold_allowed(f"we ship {surface} extra",
                                    "we ship extra"), surface
-        assert "latin" in v2._scripts("5 \u00b5m \u0283 \ufb01 \uff41")
+        # `_scripts`, not just `_script_of`, over the SAME surfaces — and NO
+        # ASCII letter anywhere in the string, because `"latin" in …` is
+        # satisfied by the `m` of `µm` whatever the supplement did (review
+        # round 7: emptying `_LATIN_SUPPLEMENT_BLOCKS` left the old form green).
+        assert v2._scripts("5 \u00b5 \u0283 \ufb01 \uff41") == {"latin"}
         assert v2._script_of("\uff21") == "latin"  # FULLWIDTH capital too
         # A MODIFIER letter (category Lm, e.g. `\u02b0`) IN NO BLOCK is not
         # script-bearing on its own, so it contributes nothing — as before this

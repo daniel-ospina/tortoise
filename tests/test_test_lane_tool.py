@@ -242,13 +242,16 @@ def test_the_reaper_never_removes_a_container_no_worktree_here_claims(monkeypatc
 
     monkeypatch.setattr(tl, "_docker", fake)
     monkeypatch.setattr(tl, "_worktree_slugs", lambda: {})
-    # A READABLE liveness surface with no live lane on it. Without this the
-    # second half of this test does not test what it says on a host with no
-    # `/proc` (macOS): `_live_lane_paths` then returns `None`, arm 3 takes its
-    # "ownership is NOT determined" fail-closed branch BEFORE the client probe,
-    # and the container is kept for the wrong reason — so the client clause this
-    # docstring claims to pin was never reached, and the test was red on every
-    # macOS checkout (`assert 'active client' in …`).
+    # Both arms below are decided by the sweep's /proc scan BEFORE the client
+    # probe, so leaving it real hands this test's verdict to the host: on a box
+    # without /proc `_live_lane_paths()` returns None, the sweep reports
+    # "ownership is NOT determined" and `continue`s, and the "active client"
+    # arm this test exists to pin is never reached (measured: red on macOS,
+    # green on the Linux runner — the #5049 "verdicts from conditions, not
+    # ambient machine state" defect, and the same fail-closed branch that made
+    # this test red on every macOS checkout with `assert 'active client' in …`).
+    # Pin the scan to a readable-and-empty answer so each arm asserts the rule
+    # it names on every host.
     monkeypatch.setattr(tl, "_live_lane_paths", lambda: set())
     # YOUNG: the backstop is a bound, not a hair trigger. An unowned container
     # inside ORPHAN_MAX_AGE_H is REPORTED and removed by nothing.
@@ -673,7 +676,18 @@ def test_reaper_reads_the_STATE_from_docker_ps_not_from_its_own_head(
     """The state arm is meaningless unless the state is actually READ. Pinned
     at the argv: with `--format "{{.Names}}"` the parse yields no state, every
     container reads `unknown`, the arm never fires, and the port exhaustion
-    returns with a fully green suite — the exact measured bug, silently."""
+    returns with a fully green suite — the exact measured bug, silently.
+
+    The two OWNERSHIP columns are pinned for the same reason and against the
+    same failure mode. `reap_orphans` reads them by INDEX (`parts[2]` owner,
+    `parts[3]` slug) and hands them to `_trusted_label_owner`, where an empty
+    string means "no label at all: absence is not a contradiction" — and docker
+    renders a key it cannot find as `""` rather than erroring
+    (`formatter.ContainerContext.Label` returns `""` for a nil/absent key). So
+    dropping or reordering either placeholder is a one-character edit that
+    turns every labelled container into the INDETERMINATE population — #8180's
+    leak, back again, with a green suite. The exact column SEQUENCE is asserted
+    because the order is what makes `parts[2]`/`parts[3]` the right fields."""
     seen: list = []
 
     def fake(*a, **k):
@@ -688,6 +702,11 @@ def test_reaper_reads_the_STATE_from_docker_ps_not_from_its_own_head(
     argv = list(ps[0])
     fmt = argv[argv.index("--format") + 1]
     assert "{{.Names}}" in fmt and "{{.State}}" in fmt, fmt
+    cols = fmt.split("\t")
+    assert len(cols) == 4, fmt
+    assert cols[0] == "{{.Names}}" and cols[1] == "{{.State}}", fmt
+    assert cols[2] == f'{{{{.Label "{tl.LABEL_OWNER}"}}}}', fmt
+    assert cols[3] == f'{{{{.Label "{tl.LABEL_SLUG}"}}}}', fmt
 
 
 def test_reaper_reads_no_state_as_UNKNOWN_not_as_terminal(tmp_path, monkeypatch):
@@ -1855,20 +1874,6 @@ def test_ORPHAN_MAX_AGE_H_gates_the_unowned_arm(tmp_path, monkeypatch):
     monkeypatch.setattr(tl, "_unused_gap", lambda _n, **k: 25.0)
     out = tl.reap_orphans()
     assert removed == [("-f", LANE_FIXTURE_NAME)], (removed, out)
-
-    # Case 3 — the AGE FLOOR, isolated from the gap gate. The container is 1 h
-    # old (inside the 24 h backstop) while its lease gap is 40 h: only the
-    # `age_h < ORPHAN_MAX_AGE_H` comparison keeps it. Delete that comparison and
-    # this case reaps, so the mutation claim above is now true of the comparison
-    # itself, not merely of the constant.
-    removed.clear()
-    monkeypatch.setattr(tl, "_started_epoch", lambda _n: time.time() - 3600)
-    monkeypatch.setattr(tl, "_unused_gap", lambda _n, **k: 40.0)
-    out = tl.reap_orphans()
-    assert removed == [], (removed, out)
-    joined = "\n".join(out)
-    assert "ownership is NOT determined" in joined, out
-    assert "backstop is 24h" in joined, out
 
     # Case 3 — the AGE FLOOR, isolated from the gap gate. The container is 1 h
     # old (inside the 24 h backstop) while its lease gap is 40 h: only the
@@ -3180,7 +3185,8 @@ def test_a_DEGRADED_later_root_read_cannot_strand_a_half_started_container(
 
 
 def test_the_orphan_sweep_uses_the_NAME_the_caller_already_derived(monkeypatch):
-    """`start()` passes the name it derived (`own_name=`) into the sweep.
+    """`reap_orphans` must take the caller's name (`own_name=`) instead of
+    deriving its own.
 
     The sweep's "this is THIS worktree's container" test is what stops a lane
     deleting its own database. Deciding it from a SECOND `repo_root()` read meant
@@ -3188,8 +3194,12 @@ def test_the_orphan_sweep_uses_the_NAME_the_caller_already_derived(monkeypatch):
     container `start()` was about to create — the same divergence the label pair
     exists to prevent, one record over.
 
-    Mutation: drop `own_name=` at the call site (or use `lane_name()` regardless)
-    and the sweep re-derives the name, reaching the boom below.
+    This test pins the SWEEP's half: `lane_name` and `repo_root` both raise, so a
+    sweep that re-derives reaches the boom. #10712 review P2: that is not the
+    same claim as "`start()` passes it", which an earlier docstring also made — a
+    mutation dropping `own_name=name` at the call site leaves this test green,
+    because this test never enters `start()`. The forwarding half is pinned
+    separately, by `test_start_threads_its_ONE_read_into_the_orphan_sweep`.
     """
     name = "fdb-lane-0123456789"
 
@@ -3203,6 +3213,37 @@ def test_the_orphan_sweep_uses_the_NAME_the_caller_already_derived(monkeypatch):
                         lambda *a, **k: _R(0, f"{name}\trunning\t\t\n", ""))
     out = tl.reap_orphans(own_name=name)
     assert f"kept {name} — this is THIS worktree's container" in "\n".join(out), out
+
+
+def test_start_threads_its_ONE_read_into_the_orphan_sweep(lane, monkeypatch):
+    """`start()` must PASS the name it derived (`own_name=`) into the sweep.
+
+    #10712 review P2: the sweep-side test above pins that `reap_orphans` USES the
+    name it is given, but not that `start()` gives it one — dropping
+    `own_name=name` at the call site left the whole file green, so the exact
+    regression the change claims to close ("the sweep takes the caller's name so
+    `mine` cannot diverge") was unprotected. This drives the real `start()` and
+    captures what the sweep actually received.
+
+    MUTATION: change the call site to `reap_orphans()` and this goes red with
+    `{}` captured.
+    """
+    captured: dict = {}
+
+    class _Stop(Exception):
+        """Sentinel: stop `start()` the moment the sweep has been observed."""
+
+    def _stop(_n):
+        raise _Stop
+
+    monkeypatch.setenv("TORTOISE_TEST_LANE_REAP", "1")
+    monkeypatch.setattr(tl, "reap_orphans", lambda **kw: captured.update(kw) or [])
+    monkeypatch.setattr(tl, "container_state", _stop)
+    with pytest.raises(_Stop):
+        tl.start()
+    assert captured.get("own_name") == lane, (
+        "start() did not thread its ONE `_lane_identity()` read into the sweep, "
+        f"so the sweep would re-derive it: {captured}")
 
 
 def test_stop_surfaces_a_failed_removal(lane, monkeypatch):
@@ -4664,9 +4705,18 @@ def _labelled_row(name, state, owner):
 
 def test_the_label_writer_cannot_read_the_root_itself():
     """The single-read invariant is only true if `_label_args` cannot read the
-    root itself: a required `root` parameter is what makes "ONE `repo_root()`
-    read" a property of the code instead of a comment."""
-    assert list(inspect.signature(tl._label_args).parameters) == ["root"]
+    root itself: a REQUIRED `root` parameter is what makes "ONE `repo_root()`
+    read" a property of the code instead of a comment.
+
+    #10712 review P2: asserting only `list(parameters) == ["root"]` does not
+    test requiredness — `def _label_args(root=None)` (which re-reads when it is
+    None) passes that assertion and restores the defect. The DEFAULT is the
+    thing that has to be absent, so the default is what is asserted."""
+    sig = inspect.signature(tl._label_args)
+    assert list(sig.parameters) == ["root"]
+    assert sig.parameters["root"].default is inspect.Parameter.empty, (
+        "a default (even None) lets `_label_args` re-read `repo_root()` itself, "
+        "which is what let the label name a different worktree than the name")
 
 
 def test_the_NAME_and_the_ownership_LABEL_come_from_ONE_root_read(monkeypatch,

@@ -383,11 +383,10 @@ NAME_PREFIX = "fdb-lane-"
 #: container qualifies for the one proof the ruling already authorises armed
 #: ("a `fdb-lane-*` container MAY be reaped when the worktree that owns it is
 #: gone") instead of falling into the INDETERMINATE bucket whose default the
-#: owner has not ruled on. Every default stays exactly as `origin/main` set it
-#: — and this only promotes a container out of a REPORT-ONLY bucket, never out
-#: of a protected one: the owner-gone arm carries the same not-in-use proof the
-#: INDETERMINATE arm does (see its comment), so no default destroys anything it
-#: did not destroy before (#10841 review, P1).
+#: owner has not ruled on. It only promotes a container out of a REPORT-ONLY
+#: bucket, never out of a protected one: the owner-gone arm carries the same
+#: not-in-use proof the INDETERMINATE arm does (see its comment), so no default
+#: destroys anything it did not destroy before (#10841 review, P1).
 LABEL_OWNER = "tortoise.test-lane.worktree"
 LABEL_SLUG = "tortoise.test-lane.slug"
 LABEL_CREATED = "tortoise.test-lane.created"
@@ -2037,13 +2036,26 @@ def _assert_removal_allowed(name: str, root: Path | str | None = None) -> None:
 
     ``root`` is the root the CALLER derived ``name`` from — `start()` takes
     exactly ONE `repo_root()` read (`_lane_identity`) and threads it into every
-    removal it performs. It is not cosmetic: without it the guard compares
+    removal that reaches this guard. It is not cosmetic: without it the guard
+    compares
     against a FRESH `repo_root()`, and `repo_root()` has a documented PER-CALL
     degraded mode (`Path.cwd()` on a git timeout — the overloaded hosts this
     tool exists for). A read that degraded between the two would then refuse to
     clean up the container the SAME call just created, leaving it holding a
     reserved port: the #8180 leak, produced by the guard meant to prevent it.
-    Omitted (`None`) only by the CLI paths, which have no earlier read to share.
+
+    No production call site omits it. `start()` reads the root ONCE
+    (`_lane_identity`) and threads it into the THREE removals that reach this
+    guard: the stale-container replacement, the never-answered-PING cleanup and
+    the publishes-no-port cleanup. `start()`'s fourth removal — the
+    `docker run`-failed cleanup — never consults a root at all, and must not:
+    it targets the container ID docker itself printed for the container THAT
+    call just created (falling back to the name only when no ID was reported,
+    under `is_managed`), while this guard compares NAMES, so an ID could never
+    match. `stop()` removes directly rather than through this guard. The
+    default is retained only so the guard stays callable without a prior read;
+    a caller that HAS read the root passing `None` is the bug this parameter
+    prevents.
     """
     if not is_managed(name):
         raise SystemExit(f"test-lane: refusing to remove unmanaged {name!r}")
@@ -2672,6 +2684,13 @@ def reap_orphans(own_name: str | None = None) -> list[str]:
     this function ACTED on or decided to KEEP; a name refused by `is_managed()`
     is not reported (it was never a candidate), so a caller reports what
     actually happened instead of counting.
+
+    ONE container can produce TWO lines, and that is deliberate rather than a
+    miscount: a label that is not evidence is reported first (``carries an
+    ownership label that is not evidence`` — the reason the stamp was ignored)
+    and then again by whatever arm the container's own state licenses (the
+    outcome). The two lines answer different questions about one container, so
+    a reader counting containers must count DISTINCT NAMES, not lines.
     """
     slugs = _worktree_slugs()
     if slugs is None:
@@ -2741,6 +2760,16 @@ def reap_orphans(own_name: str | None = None) -> list[str]:
         # BOTH paths — the label only decides which proof ladder applies (#10841
         # review, P1: promoting a RUNNING container into a bare `rm -f` was the
         # widening this comment used to deny).
+        #
+        # ⛔ The label reaches a population the NAME record cannot: a worktree
+        # torn down (`git worktree remove --force` / `prune`) while the lane's
+        # process is STILL RUNNING. That process's cwd is a deleted directory, so
+        # `_live_lane_paths` cannot name it either — the container's own `CLIENT
+        # LIST` is the only thing left that knows a test run is in progress. That
+        # is why the second proof below is demanded of a label-derived owner as
+        # well, and of a name-derived one too: the check is scoped to the ARM ("my
+        # owner is gone"), not to how the owner was found (#10693 review F1,
+        # #10841 review P1).
         if owner is None:
             stamped = stamped_labels.get(name, {})
             trusted, why_not = _trusted_label_owner(
@@ -3415,7 +3444,13 @@ def cmd_run(args: argparse.Namespace) -> int:
 
 
 def cmd_down(args: argparse.Namespace) -> int:
-    print(f"test-lane: {lane_name()} -> {stop()}", file=sys.stderr)
+    # ONE `repo_root()` read, inside `stop()`. Printing `lane_name()` here as
+    # well was a second read, and `repo_root()` degrades PER CALL to `Path.cwd()`
+    # on a git timeout — so the name printed could disagree with the container
+    # actually removed. `stop()` takes no argument by design (naming a target is
+    # how one lane would delete a peer's DB), so the fix is to print what it
+    # ACTED ON, not a separately-derived name.
+    print(f"test-lane: down -> {stop()}", file=sys.stderr)
     return 0
 
 

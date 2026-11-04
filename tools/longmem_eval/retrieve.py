@@ -2339,7 +2339,15 @@ def retrieve_for_question(
     # product writes; the raw ``session-transcript`` chunk kind stays
     # addressable for the eval A/B — in ONE batched query and
     # splice them back immediately after that session's LAST base hit —
-    # additive, so an injected item can never evict a base item; the
+    # additive ON THE POOL, so an injected item never drops a base item
+    # FROM IT. That is NOT reader-additivity (#10540): the reader consumes
+    # a PREFIX of the pool, so an injected item inside that window
+    # displaces one base hit, and a session whose hits sat at the window's
+    # tail can lose its representation ENTIRELY — the crowding this arm's
+    # outcome forbids and every pre-#10540 census key could not see. The
+    # reader-window census ~215 lines below
+    # (``session_reinjection.reader_window_displacement``) measures
+    # exactly that. The
     # shared guard then re-caps through the same contract C3-1 uses.
     # Product rules live in tortoise/session_reinjection.py. INSERTION
     # POINT IS PINNED: after the C3-1 block, before the C2 boost — the
@@ -2378,8 +2386,80 @@ def retrieve_for_question(
     _sr_seed_window = (eff_item_cap if eff_item_cap is not None
                        else DEFAULT_REINJECTION_SEED_WINDOW)
     _sr_seed_limit = DEFAULT_REINJECTION_SEED_SESSIONS
+    # The reader's item cap IS its window: ``reader_window_displacement``
+    # measures crowding against the prefix the reader actually consumes, so
+    # the window is the caller's resolved cap. The branch below is a
+    # direct-caller fallback reading ``DEFAULT_CONTEXT_ITEM_CAP`` (40) — the
+    # SAME constant ``eff_item_cap`` itself falls back to above — and NOT
+    # ``assemble_context``'s own default, which is ``top_k``; and it is
+    # unreachable from here, because ``eff_item_cap`` is always resolved to an
+    # int above. Kept as a floor, not as a claim about the reader. It names
+    # the constant the CODE reads: the seed window's constant is numerically
+    # 40 today too, so a comment naming it would be true only by coincidence.
+    _sr_reader_window = (eff_item_cap if eff_item_cap is not None
+                         else DEFAULT_CONTEXT_ITEM_CAP)
+    # …with ONE exception, and it is a narrowing, not a widening: on the
+    # POOL-ONLY isolation arm (``--rerank off --rerank-pool N``) this lane
+    # truncates the delivered pool to ``top_k`` BEFORE assembly
+    # (``pool = pool[:top_k]`` below — the OQ5 reader invariant), while the
+    # assembled item cap stays ``eff_item_cap``. A window of
+    # ``eff_item_cap`` there would census items the reader never received and
+    # over-report crowding — injected items AND displaced base items alike —
+    # on exactly the arm a pool-depth sweep reads. ``min(cap, top_k)`` is the
+    # tightest window that arm admits. What it does NOT do is make the count
+    # incapable of under-counting: that holds only while
+    # ``top_k <= eff_item_cap``, because then the cut and the window coincide
+    # and no candidate below the window exists to be admitted. ``--top-k`` and
+    # ``--context-items`` are independent flags (``run.py``), so with
+    # ``top_k > eff_item_cap`` the cut sits ABOVE the window,
+    # ``assemble_context`` walks past ``eff_item_cap`` whenever a skip frees a
+    # slot, and a hit below the window IS delivered without being counted —
+    # the same under-count as on every other arm. The skip mechanism inside
+    # the prefix over-counts it on all arms. The R6 rerank arm below cannot be
+    # narrowed this way: it re-SELECTS from the whole pool instead of cutting
+    # a prefix. ``top_k`` (not ``effective_top_k``) is the value the
+    # truncation site reads, and the census excludes TR questions anyway,
+    # where the two differ.
+    #
+    # ⛔ THE WINDOW IS DERIVED FROM THE TRUNCATION SHAPE, NOT FROM A FLAG
+    # (#10632 review P2). THREE sites below cut the delivered pool to a
+    # ``top_k`` prefix — the pool-only arm, the D3(a)/S25 load-failure
+    # degrade (``scorer is None``) and the D8c score-failure degrade
+    # (``rerank_hits`` reports ``applied: False``) — and the last two are
+    # DECIDED by the R6 stage, i.e. AFTER this line. A flag test written here
+    # therefore saw the pool-only arm alone: on the two degrade arms the
+    # window stayed ``eff_item_cap`` (40) while the reader received at most
+    # ``top_k`` (20), so ``injected_in_window`` / ``base_displaced``
+    # over-reported crowding and ``sessions_lost`` could name a session as
+    # lost that the reader never had — all stamped ``measured: True``. So
+    # each cutting site DECLARES its cut (``_sr_prefix_cut = len(pool)``) and
+    # the census is TAKEN after the R6 stage (``_sr_census_inputs``), which
+    # makes the window follow the shape the pool actually has. The
+    # applied-rerank arm declares nothing: it re-selects rather than cuts, so
+    # its census stays the pre-rerank positional approximation its docstring
+    # already declares.
+    _sr_prefix_cut: int | None = None
+    _sr_census_inputs: tuple[list[dict], list[dict]] | None = None
     # per-outcome census (§2): the OFF arm records the same zeroed shape so
-    # the arm delta stays reconstructable per question.
+    # the arm delta stays reconstructable per question. That zeroed
+    # ``sessions_before``/``sessions_after`` is a DESIGN, not a measurement —
+    # no census is taken on this arm — so a consumer deriving a rate from it
+    # (``len(sessions_lost) / sessions_before``) must guard the zero rather
+    # than read it as "the reader's window held no sessions". Filling in the
+    # base window's real counts here was considered and declined: the two arms
+    # would then report DIFFERENT quantities under the same key, which is what
+    # breaks the per-question arm delta this comment exists to record.
+    #
+    # ``measured`` is therefore ``False`` in this shape, and it is the ONLY key
+    # that separates it from a real zero. Every path that never reaches the
+    # census below keeps it: the whole OFF arm, a TR question, an ON-arm
+    # question where no injected group materialised, a fetch that reported
+    # not-ok, and a merge-stage failure. ``measured: True`` with zeroed counts
+    # makes "the census ran and found no crowding" indistinguishable from "no
+    # census was taken (or the arm did nothing)", so a consumer filtering on
+    # ``measured`` — the documented way to use it — silently folds half a
+    # corpus's OFF-arm questions into the crowding sample. Only the census (or
+    # its own ``except``, which writes ``None`` values) reports ``True``.
     sr_seeds: list[str] = []
     sr_seeded = 0
     sr_injected_per_session: dict[str, int] = {}
@@ -2389,6 +2469,14 @@ def retrieve_for_question(
     sr_dropped_by_cap = 0
     sr_fetch_ok = False
     sr_total_cap_hit = False
+    sr_window_displacement: dict[str, object] = {
+        "window": _sr_reader_window, "injected_in_window": 0,
+        "base_displaced": 0, "sessions_lost": [],
+        "sessions_before": 0, "sessions_after": 0, "measured": False}
+    # The placeholder above carries the cap; its ``window`` is refined below
+    # once the pool's shape is final (``_sr_prefix_cut``), EVEN when no
+    # census is taken — an unmeasured question still reports the window it
+    # would have censused.
     sr_latency_ms = 0.0
     if reinjection_on and not is_tr and pool:
         from tortoise import session_reinjection as _sr
@@ -2505,6 +2593,7 @@ def retrieve_for_question(
                         if _group:
                             _added_by_session[_sid] = _group
                     if _added_by_session:
+                        _pre_merge_pool = pool
                         _merged = _sr.reinjection_merge_order(
                             pool, _added_by_session,
                             seed_order=[s.session_id for s in _seeds],
@@ -2518,7 +2607,29 @@ def retrieve_for_question(
                             for sid, v in _added_by_session.items()}
                         sr_injected_merged = sum(
                             sr_injected_per_session_merged.values())
+                        # READER-WINDOW census (#10540): ``injected_merged``
+                        # counts items that reached the POOL. The reader
+                        # consumes a PREFIX of it, so the crowding this arm's
+                        # outcome forbids — base hits, and whole sessions,
+                        # pushed past the cut by the injection — was invisible
+                        # in every prior census key. Measured on 63981d152 at
+                        # the shipped budgets: 10 base hits displaced and two
+                        # sessions lost entirely, while ``injected_merged``
+                        # read a healthy 10.
+                        # The ARM DECISION comes first: a pure measurement
+                        # must never decide whether the treatment is applied.
+                        # ``pool = _merged`` therefore precedes the census
+                        # below, which has its OWN except — a measurement
+                        # failure leaves the merged pool intact and records
+                        # an explicit unmeasured marker instead of the zeroed
+                        # shape (a zero there would read as "no crowding"
+                        # and as a merge-stage failure at once).
                         pool = _merged
+                        # DEFERRED census (#10632 review P2): the window is
+                        # a function of the truncation the R6 stage applies
+                        # below, so the two lists are captured here (the arm
+                        # decision is already made) and measured there.
+                        _sr_census_inputs = (_pre_merge_pool, _merged)
         except Exception:  # noqa: BLE001, RUF100
             # fail-open: any failure (fetch OR annotate/merge stage) keeps
             # the ORIGINAL pool — byte-identical to the one-shot result. The
@@ -2533,6 +2644,8 @@ def retrieve_for_question(
                 "the original pool (fail-open)", qid, exc_info=True)
             sr_injected_per_session_merged = {}
             sr_injected_merged = 0
+            # the merge failed, so there is nothing coherent to census
+            _sr_census_inputs = None
         sr_latency_ms = (time.monotonic() - _t_sr) * 1000.0
     session_reinjection_stats = {
         "on": reinjection_on,
@@ -2550,6 +2663,7 @@ def retrieve_for_question(
         "injected_per_session_merged": sr_injected_per_session_merged,
         "injected_merged": sr_injected_merged,
         "dropped_by_cap": sr_dropped_by_cap,
+        "reader_window_displacement": sr_window_displacement,
         "fetch_ok": sr_fetch_ok,
         "total_cap_hit": sr_total_cap_hit,
         "guard": reinjection_guard,
@@ -2648,6 +2762,7 @@ def retrieve_for_question(
             # 40-pool stand-in masquerading as a rerank result
             rerank_pass["degrade_reason"] = degrade_reason
             pool = pool[:top_k]
+            _sr_prefix_cut = len(pool)      # the reader's window (#10632)
         else:
             pool_recall = _recall_metrics(
                 pool, ks=ks, answer_sessions=answer_sessions,
@@ -2671,10 +2786,56 @@ def retrieve_for_question(
                 # score-failure degrade (D8c) — same contract as load-failure
                 rerank_pass["degrade_reason"] = stats.get("degrade_reason", "")
                 pool = pool[:top_k]      # reader/context invariant
+                _sr_prefix_cut = len(pool)  # the reader's window (#10632)
         rerank_pass["applied"] = applied
         rerank_ms = (time.monotonic() - t0) * 1000.0
     elif (rerank_pool is not None) and not rerank_on:
         pool = pool[:top_k]              # pool-only arm: reader sees top_k
+        _sr_prefix_cut = len(pool)       # the reader's window (#10632)
+
+    # ── #10540: the READER-WINDOW census, taken HERE because its window is a
+    # property of the pool this function finally hands on. Every cutting site
+    # above declared ``_sr_prefix_cut``; the applied-rerank arm declared
+    # nothing (it re-selects from the whole pool, so no prefix describes what
+    # the reader received — that positional residual is the docstring's, not
+    # this window's). ``min(cap, cut)`` is what the reader can receive: the
+    # assembled item cap, bounded by the prefix that survived truncation.
+    # ⛔ Not a hard ceiling on the COUNT — see the ``top_k > eff_item_cap``
+    # under-count the comment at ``_sr_reader_window`` records. The arm's own
+    # ``latency_ms`` (above) was taken BEFORE this block, so it measures
+    # SEED → MERGE and not the measurement: the census is a pure in-memory
+    # pass, and it no longer rides the arm's cost now that it runs after R6.
+    # ──
+    _sr_window = (_sr_reader_window if _sr_prefix_cut is None
+                  else min(_sr_reader_window, _sr_prefix_cut))
+    sr_window_displacement["window"] = _sr_window
+    if _sr_census_inputs is not None:
+        from tortoise import session_reinjection as _sr
+
+        _sr_census_base, _sr_census_merged = _sr_census_inputs
+        try:
+            sr_window_displacement = _sr.reader_window_displacement(
+                _sr_census_base, _sr_census_merged, window=_sr_window)
+        except Exception:  # noqa: BLE001, RUF100
+            import logging as _logging
+            sr_window_displacement = {
+                "window": _sr_window,
+                # None, not the POOL-scope count: every other key here is
+                # window-scope, and a pool count read as a window count
+                # over-reports.
+                "injected_in_window": None,
+                "base_displaced": None,
+                "sessions_lost": None,
+                "sessions_before": None,
+                "sessions_after": None, "measured": False}
+            _logging.getLogger(__name__).warning(
+                "C4 reader-window census failed for %s — the merged pool "
+                "stands; the crowding is UNMEASURED for this question", qid,
+                exc_info=True)
+        # the stats dict was minted with the placeholder, so the measured
+        # value (or its unmeasured shape) is written back by key
+        session_reinjection_stats["reader_window_displacement"] = (
+            sr_window_displacement)
 
     # ── C6 (#2520, #2513): rank-time prefer-latest ── ─────────────────
     # Applied to the FINAL ``pool``, immediately before the metrics read it,
