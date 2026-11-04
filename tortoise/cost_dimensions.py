@@ -521,6 +521,16 @@ DIMENSIONS: tuple[Dimension, ...] = (
             "(#3359)."),
         bindings=(
             Binding("tortoise.metering", "record_capture_usage", WRITER),
+            # #9567 D11/D12: what this change adds is the PRESENCE FACT this
+            # already-declared reader needed — ``measured`` /
+            # ``unmeasured_reason`` on ``get_capture_usage``'s view — not the
+            # binding. The reader was declared here before the gate existed
+            # (``origin/main`` has the identical ``Binding(..., READER)``);
+            # without the presence fact a window whose ledger read or anchor
+            # failed was indistinguishable from a captured-nothing zero, and a
+            # cap wired to it would fail OPEN for exactly the tenant whose
+            # meter is broken (#4493's shape, pointed the other way). The
+            # gate — not this reader — turns a NAMED fault into a refusal.
             Binding("tortoise.metering", "get_capture_usage", READER),
             Binding("tortoise.hosted_api", "_capture_cost_props", WRITER),
         ),
