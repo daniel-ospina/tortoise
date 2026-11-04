@@ -465,18 +465,11 @@ class TestTheMitigationWriteIsNeverAdvertisedAsRepeatable:
             f"{offenders}"
         )
 
-    def test_the_sdk_door_states_the_same_condition(self):
-        """The same claim served through the SDK docstring — the third channel.
-
-        `TortoiseSDK.operator_action` carried "strength (idempotent)" while its own
-        `mitigate_operator` docstring did not, so a caller reading either surface
-        got a different answer about the same write.
-        """
-        from tortoise.sdk import TortoiseSDK
-
-        doc = TortoiseSDK.operator_action.__doc__ or ""
-        assert "(idempotent)" not in doc
-        assert "withdraw" in doc, doc
+    # `test_the_sdk_door_states_the_same_condition` was deleted WITH its door: #4282
+    # deleted `TortoiseSDK.operator_action`, so the "third channel" this test graded
+    # (the SDK docstring) no longer exists. The condition itself is still graded on the
+    # surviving channel by `test_no_door_to_the_mitigation_write_claims_unqualified_idempotence`
+    # above — what is gone is the SDK surface that could disagree with it, not the claim.
 
 
 class TestTheReadThroughToolsRegressionPin:

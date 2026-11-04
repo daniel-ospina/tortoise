@@ -1002,13 +1002,18 @@ def test_the_runbook_venice_row_states_the_lane_each_rule_holds_for(monkeypatch)
 #: same one, and after #8133 an ambient ``VENICE_API_KEY`` flipped doctor's line to
 #: ``✅ … (venice, model deepseek-v4-flash)`` while CI (no such key) stayed green.
 #: Its ``_keyless_llm_env`` helper is what the fixture now calls.
+#: ``tests/test_8501_capture_path_anchor.py`` was the module this sweep first
+#: reached, and ``tests/test_session_semantic_retrieval.py`` alongside it — both
+#: #4282-deleted together with ``TortoiseSDK.capture_session``, the door their
+#: ``_keyless`` helper was reached through. The entries go WITH the modules: a
+#: helper list that still named them would make this sweep import a module the
+#: tree does not carry, so the guard would red on its own stale list rather than
+#: on an ambient key.
 _KEYLESS_CAPTURE_HELPERS = (
     ("tests.test_turn_embedding_write_path_4194", "_keyless"),
     ("tests.test_capture_secret_redaction_4911", "_keyless"),
     ("tests.test_capture_redaction_sinks_5445", "_keyless"),
-    ("tests.test_session_semantic_retrieval", "_keyless"),
     ("tests.test_4199_dense_scope_coverage", "_offline_llm"),
-    ("tests.test_8501_capture_path_anchor", "_keyless"),
     ("tests.test_doctor", "_keyless_llm_env"),
 )
 
