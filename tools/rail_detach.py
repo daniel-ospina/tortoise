@@ -474,9 +474,9 @@ def _head_sha(cwd: Path, repo: str, pr: int) -> str:
     `_head_sha` and died with `FileNotFoundError: No such file or directory: 'gh'`
     (21 failures in `tests/test_rail_detach.py`, which its own docstring declares
     to be "no database, no network"). The launcher must not depend on a binary it
-    only uses to label a field — `_gh` above now answers rc=127 for exactly that
-    case, so this function's `returncode != 0` arm covers it without a local
-    `try`/`except`.
+    only uses to label a field — `_gh` above answers a non-zero rc for exactly
+    that class (127 absent, 126 found-but-not-executable), so this function's
+    `returncode != 0` arm covers it without a local `try`/`except`.
     """
     out = _gh(
         ["gh", "pr", "view", str(pr), "--repo", repo, "--json", "headRefOid",
