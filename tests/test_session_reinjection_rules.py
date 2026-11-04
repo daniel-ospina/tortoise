@@ -1598,8 +1598,12 @@ _POINT_KIND = re.compile(
 #: `pointKind='event'` node" was GREEN — the HALF-CORRECTION this pin exists
 #: for, in the vocabulary its own comment enumerates. So the first alternative
 #: walks from the negated verb to the `pointKind` it negates and stops at a
-#: CLAUSE boundary; the second covers the negator AFTER the verb, which is
-#: adjacent by construction.
+#: CLAUSE boundary. (The negator AFTER the verb needs no alternative here: the
+#: parent pattern's own lookahead refuses that match at the source, so an
+#: alternative for it was unreachable except on an UNRELATED write verb in the
+#: gap — where it excused a real violation. "the demo seed writes a turn, writes
+#: no duplicate, and writes a `pointKind='event'` node" was GREEN. Removed
+#: (#10675 review cycle 4, P3); the lookahead still covers the after-verb form.)
 #: ⛔ A CLAUSE BOUNDARY IS NOT PUNCTUATION (`[^,;]` alone): `and`, `but` and
 #: `yet` cross a clause exactly as `,` does, and the comma before them is
 #: OPTIONAL — so a gap that stopped only at punctuation still passed "… no longer
@@ -1627,6 +1631,13 @@ _POINT_KIND = re.compile(
 #: without the escape's is a RED rather than a silent return of the false red
 #: that cycle 1 filed and cycle 3 nearly reintroduced (#10675 review cycle 4,
 #: P3: the comment said "spelled once" while it was spelled twice).
+#: ⛔ CONTRASTS ARE CORRECTIONS TOO, and they were RED: "writes the turns to
+#: Postgres RATHER THAN a turn node", "INSTEAD OF a `pointKind='event'` node"
+#: and "NOT TO a `turn node`" state §9.1/D1 accurately and are what the homes
+#: should say, so they are excused. ⚠️ The marker must INTRODUCE the shape: the
+#: walk below goes from the marker to the shape, so "writes a `pointKind='event'`
+#: node RATHER THAN Postgres rows" is still a violation — pinned as an arm
+#: rather than left to inspection (#10675 review cycle 4, P3).
 _TURN_SHAPE_TAIL = r"(?:pointKind|\bturn\s+node\b)"
 _NEGATED_CLAUSE_GAP = (
     r"(?:(?!(?:but|yet|and|although|while|whereas|however|instead)\b)"
@@ -1634,7 +1645,9 @@ _NEGATED_CLAUSE_GAP = (
 _NEGATED_CLAIM = re.compile(
     r"\b(?:not|never|no\s+longer|no\s+more)\s+(?:also\s+|still\s+|ever\s+)?"
     r"(?:writes?|mints?|creates?)\b" + _NEGATED_CLAUSE_GAP + _TURN_SHAPE_TAIL
-    + r"|\b(?:writes?|mints?|creates?)\s+(?:no|nothing|none|never)\b",
+    # A contrast marker INTRODUCING the shape ("rather than a turn node").
+    + r"|\b(?:rather\s+than|instead\s+of|not\s+to|never\s+a)\s+"
+    + _NEGATED_CLAUSE_GAP + _TURN_SHAPE_TAIL,
     re.IGNORECASE)
 
 
@@ -1886,6 +1899,14 @@ def test_the_present_tense_guard_reads_a_NEGATED_writer_claim_as_the_CORRECTION(
         "since #10000 the demo seed writes no turn node at all",
         "since #10000 the demo seed no longer writes a turn node",
         "since #10000 the demo seed does not write a turn node per turn",
+        # ⛔ CONTRASTS introduce the shape rather than negating the verb, and
+        # they are accurate §9.1/D1 prose in the homes' own vocabulary. All
+        # three RED before the contrast alternative was added (#10675 review
+        # cycle 4, P3).
+        "the demo seed writes the turns to Postgres rather than a turn node",
+        "since #10000 the demo seed writes its turns to Postgres instead of a "
+        "`pointKind='event'` node",
+        "the demo seed writes turn text to Postgres, not to a `turn node`",
     )
     for sentence in corrections:
         found = _present_tense_writer_claim(sentence)
@@ -1923,11 +1944,23 @@ def test_the_present_tense_guard_reads_a_NEGATED_writer_claim_as_the_CORRECTION(
         # escaped is what keeps the comma-less arm a property of the rule.
         "since #10000 the demo seed no longer writes turn text to the graph but "
         "still writes a turn node per turn",
+
         # ⛔ AND A DASH CROSSES A CLAUSE AS WELL — this tree's dominant separator,
         # so a gap that excluded only `,`/`;`/connectors passed it (#10675 review
         # cycle 4, P2).
         "since #10000 the demo seed no longer writes turn text to the graph — "
         "it still writes a `pointKind='event'` node per turn",
+
+        # ⛔ A SECOND, UNRELATED WRITE VERB must not excuse the real clause. The
+        # removed `writes no …` alternative was unanchored, so this passed: it
+        # found `writes no` in the gap and excused the `pointKind` behind it
+        # (#10675 review cycle 4, P3: GREEN before, RED now).
+        "the demo seed writes a turn, writes no duplicate, and writes a "
+        "`pointKind='event'` node",
+        # ⛔ A CONTRAST AFTER the shape does not excuse it: the marker has to
+        # INTRODUCE the thing being denied.
+        "the demo seed writes a `pointKind='event'` node rather than Postgres "
+        "rows",
     )
     for sentence in compound:
         assert _present_tense_writer_claim(sentence) is not None, (
