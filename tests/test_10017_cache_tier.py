@@ -13,8 +13,10 @@ the next export, sibling projection or tool to read this table would node-ify
 the row again, silently.
 
 ⛔ The column is ALSO in the schema's `props_no_derived` refusal, and that half
-is load-bearing, not cosmetic: `_props_from_row` has three destinations and "no
-fourth" — a column it can neither place nor refuse raises `UnknownRecordColumn`
+is load-bearing, not cosmetic: `_props_from_row` has FOUR destinations — the
+placement table, the schema's refusal set, the `props` tail, and (since #10853)
+the §9.1/D1 decline of an episodic Source's turn prose — and nothing else: a
+column it can neither place, refuse nor decline raises `UnknownRecordColumn`
 and would break cache projection for every tenant.
 
 THIS FILE IS THE MERGE OF PR #10076 AND PR #10070'S TIGHTENINGS (review P1-2,
