@@ -754,14 +754,98 @@ mechanisms:
       (c) a rewritten CLOCK or ISO date is not caught (form excluded by design),
       and neither is a colon-form value that happens to be a valid clock shape
       without being a clock (`4:32` read as a marathon time) — the two are the
-      same token shape and nothing in the text separates them;
-      (d) a unit WORD the engine's own `_UNIT_WORDS` vocabulary does not carry
-      (`seconds`, `minute`, `hour`, `day`, `mile`, …) is never fused into the
-      value token — apart or not — so a minutes→seconds rewrite is not judged:
-      an ENGINE VOCABULARY limit, not a tolerance of this rule (the units it
-      does fuse are compared); a unit SPELLING outside `_UNIT_EQUIV` fails open
-      on purpose, because refusing `800millis`/`800ms` is the false-accusation
-      direction this rule must never take; (e) the S5
+      same token shape and nothing in the text separates them. ⚠️ ONE exception,
+      created by (d)'s completion and disclosed rather than left to be found
+      (#10360 review cycle 4 P3, measured): `_CLOCK_FORM` anchors on `$`, so a
+      colon form with a fused unit word after it is NOT excluded —
+      `the lap took 1:23 seconds` now reads the value as the RATIO core `1/23`
+      with unit `s`, and refuses against `83 seconds`. The pre-existing
+      `27:12 minutes` already behaved this way; what is new is that the fused
+      units reach it. The verdict (a conversion is a different identity) is
+      deliberate; the RATIO core is not a duration, and separating the two is
+      the same unsolved token-shape problem this bullet describes;
+      (d) ⛔ CLOSED by #10360 (`tests/test_state_value_verbatim_10360.py::
+      test_a_declared_unit_WORD_is_fused_so_a_unit_rewrite_cannot_hide`), and it
+      was never a tolerance — the row said so: a unit WORD the engine's own
+      `_UNIT_EQUIV` DECLARED was missing from `_UNIT_WORDS`, the set
+      `_value_bindings` can FUSE, so the value was emitted with NO unit and a
+      unit-less side reads as "unit not stated" and FAILED OPEN. Measured on the
+      shipped tree: `the TTL is 20 minutes` against the quote `the TTL is 20
+      seconds` gave `('ttl', '20minutes')` vs `('ttl', '20')` and
+      `_value_slot_divergence()` == `()` — a minutes→seconds rewrite, the
+      carve-out's literal prohibition, recorded as verbatim — while the SAME
+      class was refused for `20 minutes`/`40 minutes`. The verdict depended on
+      the SPELLING of the unit. `minute`/`second`/`seconds`/`hour`/
+      `millisecond(s)`/`msec(s)`/`ms`/`mile(s)` are now fused.
+      ⛔ `%`/`percent`/`pct` are DECLARED and deliberately left UNFUSED — the
+      one such identity in the table, and it is a measured refusal, not a
+      leftover (#10360 review cycles 3 and 6 P2): `%` reaches a pair by two
+      routes that disagree — `20 %` is merged onto its numeral by the TOKENIZER,
+      `20k %` is NOT (`['20k', '%']`), and the attached `20k%` tokenises to
+      `['20k']`, dropping the symbol. Fusing `percent` composed one side and not
+      the other, so a truthful point was REFUSED; leaving them unfused refuses
+      nothing the pre-change tree did not already refuse across same-value
+      percent pairs, and costs the detection of a `20 percent`→`20 seconds`
+      rewrite instead — the fail-OPEN direction. Pinned by
+      `test_the_unit_vocabulary_is_complete_in_the_direction_that_matters`.
+      ⚠️ WHAT IS STILL OPEN IN THIS CLASS, named completely rather than by the
+      old (d) wording (`seconds`/`minute`/`hour`/`mile` are the four it NO LONGER
+      applies to): any unit word with NO identity in `_UNIT_EQUIV` at all is
+      never fused and never compared, so the rewrite is invisible — measured
+      fail-open pairs: `3 days`→`3 weeks`, `3 years`→`3 months`, `20 GB`→`20 MB`,
+      `20 bytes`→`20 KB`, `20 ft`→`20 m`, `20 mph`→`20 kph`. That needs a NEW
+      identity per unit (`d`/`w`/`mo`/`y`/`gb`/`mb`…), a different decision than
+      completing the vocabulary that already existed, and it is the residual a
+      lane auditing "no unit-word fail-open remains" must read. A unit SPELLING
+      outside `_UNIT_EQUIV` also fails open on purpose, because refusing
+      `800millis`/`800ms` is the false-accusation direction this rule must never
+      take — and so does a unit CONVERSION inside a dimension (`90 seconds` vs
+      `1.5 minutes`), which reads a DIFFERENT identity and is refused; that
+      verdict is unchanged from before this row moved (measured against the
+      pre-change tree), and the census is silent on it.
+      ⛔ THE COMPLETION EXPOSED A FALSE-ACCUSATION CLASS, AND IT IS REPAIRED
+      RATHER THAN NARROWED (`_compose_magnitude_and_unit`, #10360 review cycle 1
+      P2, measured): `_value_bindings` fuses a unit WORD onto the value before
+      it, so a value that ALREADY carried a magnitude prefix became one compound
+      — `20k` + `miles` → `20kmiles` — whose suffix maps to nothing. The `k`
+      reading was lost and the pair diverged on the numeric CORE (20 vs 20000),
+      withholding a truthful point. ⚠️ The shape pre-existed for every
+      already-fusable unit (`5k min` against `5000 min` was refused BEFORE this
+      change), so completing the table would have WIDENED it. The prefix is now
+      multiplied into the core at fusion time, so `20k miles`/`20000 miles` read
+      one identity and `5k min`/`5000 min` agree — pinned by
+      `test_a_magnitude_prefix_COMPOSES_with_the_unit_word_that_follows_it`.
+      ⚠️ It is NOT peeled in `_value_core`, where the same rule would read the
+      SINGLE token `20kms` as 20000 milliseconds instead of kilometres.
+      ⛔ THE SIGN AND DECORATION READING IS `_value_core`'s, NOT A PRIVATE
+      PATTERN (#10360 review cycles 2, 3 and 6, all measured): earlier revisions
+      of the composition matched the value with its own regex, and each invented
+      a NARROWER reading of "the same number" than the module has — `\d+` lost the
+      sign and the leading dot, then `[-−]` lost every OTHER sign glyph
+      `_reads_as_sign` admits (the whole `Pd` family: en/em dash, hyphen,
+      U+2011) and every `Sc`/`Sm` decoration `_value_core` skips (`~`, `+`, `>`,
+      `<`, `$`, `≈`, `±`), and an ASCII digit class lost every decimal script but
+      Latin (`２０k`, `٢٠k`). Each omission turned a truthful pair into an
+      unknown-unit refusal — the "verdict depends on the SPELLING" defect merely
+      moved from the unit to the sign and then to the digits. The composition now
+      delegates that reading to `_value_core` and only checks the token's HEAD
+      (`_NUMERIC_HEAD`) to keep identifier-shaped text out (measured: the array
+      index `s4[k` was being multiplied to 4000).
+      ⚠️ A separator-bearing numeral is NOT read at all (`_value_core` returns
+      None) and the unit is glued on unchanged, so the composition cannot smuggle
+      the owner's #2817 "no separator rule" decision back in through the unit —
+      pinned by
+      `test_the_composition_does_not_smuggle_the_SEPARATOR_decision_back_in`.
+      ⚠️ The composition CHANGED one truthful pair's verdict, disclosed rather
+      than implied: `20k m` against `20 km` (20 km, two ways) now REFUSES. ⛔ The
+      cause is stated the way it was MEASURED (#10360 review cycle 5 P3 — the
+      first wording had it backwards): the old tolerance came from the two sides
+      collapsing into the SAME identity, not from different ones — `20k`+`m`
+      glued to `20km`, which reads `km`, exactly as `20 km` does (and that glue
+      is precisely how the `k`-as-prefix reading was lost). Composing now yields
+      `20000 m` against `20 km`, which is the same refusal `20000 m` against
+      `20 km` has always produced;
+      (e) the S5
       minted-endpoint site is not judged against its own quote — there `quote` is
       the point's OWN text, cut with the module's one truncation helper
       (`_write_span`), so a rewrite is impossible by construction and a rule
@@ -851,13 +935,33 @@ mechanisms:
       ⛔ THE PART THAT IS STILL UNPROVEN, narrowed rather than claimed away: the
       gate can only compare unit words it knows, so an equal-core pair whose
       other side carries NO recognised unit still fails OPEN — `20k`/`20 zorks`
-      is tolerated, the same `_UNIT_EQUIV` residual (d) names for every unknown
-      spelling. And the module never asserts `5k == 5,000` as a VALUE anywhere:
-      the prefix branch TOLERATES the pair arithmetically, it does not rewrite
-      the core.
-      Still NOT caught, and named rather than implied: a `k`-suffixed value is
-      never multiplied into its core, so nowhere does the module assert
-      `5k == 5,000` as a VALUE — the arm merely tolerates the pair; and `M`/`m`
+      is tolerated, the same fail-open direction this residual list names for
+      every unknown spelling (and NOT a pointer to residual (d), which this issue
+      CLOSES — corrected on #10360 review cycle 4 P3, which caught the stale
+      cross-reference).
+      ⛔ AND THE `k` CORE IS NOW COMPOSED, WHICH THIS ARM ITSELF STILL DOES NOT DO
+      (corrected on #10360 review cycle 4 P3): `_compose_magnitude_and_unit`
+      DOES multiply a `k`-suffixed value into its core when a unit WORD follows
+      — measured `_value_bindings("the value was 5k min")` →
+      `('value', '5000min')`. What remains true is narrower: THIS arm
+      (`_magnitude_agrees`) still only TOLERATES `5k` against `5000`, it never
+      rewrites the core, so a bare `k` with no unit word after it is unchanged.
+      ⚠️ CONSEQUENCE, DISCLOSED RATHER THAN IMPLIED (#10360 review cycle 4 P2,
+      measured, 2,912 same-value pairs over a 330,625-pair grid): composing a
+      prefixed value gives it a CONCRETE unit, and this arm's factor bridge is
+      gated on `_K_ABBREVIATES` (`km`/`kg`), so a unit-STATING side now refuses
+      against a BARE `Nk` side for every other unit: `3000 ms` vs `3k`,
+      `20000 miles` vs `20k`, `2000 seconds` vs `2k` are REFUSED, while
+      `3000 kg` vs `3k` and `3000 km` vs `3k` are tolerated — i.e. the verdict
+      still depends on the unit's spelling. ⛔ This is NOT repaired here: the
+      `_K_ABBREVIATES` gate is a DELIBERATE, pinned bound
+      (`test_a_bare_magnitude_prefix_is_tolerated_only_against_a_DIFFERENT_unit`
+      refuses `5k QPS`/`5000 mi QPS` on purpose, because `5k` may be 5 km), and
+      widening it would re-admit the real `20k`/`20mi` unit rewrite it exists to
+      stop. The completion makes that pre-existing refusal SPELLING-UNIFORM for
+      `mi`/`s`/`min`/`ms`; the census is blind to it (`\b\d+k\s+[A-Za-z]`
+      → 0 hits), so `refused=0` says nothing about this class.
+      Still NOT caught, and named rather than implied: `M`/`m`
       carries the same prefix-vs-unit collision one letter over while
       `_value_core` lowercases the suffix, so an uppercase `M`
       (millions) is read as metres — widening the set to `m` would cost the real
@@ -934,7 +1038,10 @@ mechanisms:
       `we have 12 billion events` returns NO divergence, likewise `5 million`
       against `5 thousand` and `12 million` against `12` (pinned by
       `test_a_scale_WORD_rewrite_is_unjudged_because_the_engine_fuses_none`).
-      ⛔ A DIFFERENT CLASS from (d): (d) is a unit SPELLING the tables lack, this
+      ⛔ A DIFFERENT CLASS from (d) — which this issue CLOSES and which was a
+      unit WORD the table DECLARED while `_UNIT_WORDS` did not FUSE it (not "a
+      spelling the tables lack": corrected on #10360 review cycle 5, P3, which
+      caught this second site still describing (d) as an open lack): this
       is a MAGNITUDE the engine never multiplies, so closing it belongs in
       `_value_bindings` and would be its own change; a second scale reading inside
       this seam is the parallel-classifier shape the review P2 rejected. Stated
