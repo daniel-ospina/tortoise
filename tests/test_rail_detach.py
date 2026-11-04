@@ -223,6 +223,97 @@ def test_a_killed_wrapper_does_not_lose_a_live_rail(tmp_path, monkeypatch):
     assert "EXIT line was never written" in st.reason
 
 
+def test_the_fork_window_is_not_lost(tmp_path):
+    """⛔ `child == 0` IS NOT "NO RAIL" — it is the window BEFORE `CHILD_PID=`.
+
+    The wrapper forks the rail and the rail records ITS OWN pid a few
+    instructions later. A wrapper killed in that window leaves no pid naming the
+    rail, while the rail is alive and about to merge — the same durable-wrong-
+    verdict shape as the arm above, reached by a different clock. The GROUP
+    still answers and the rail is in it by construction, so `lost` here would
+    truncate the artifact and scope out a real `✅ merged`.
+
+    Discriminating: with the group probe removed, this reads `lost`.
+    """
+    # A SESSION LEADER that forks a child into its own group and then EXITS: the
+    # leader is gone, `child == 0` (nothing named the rail yet), the group is not.
+    leader = subprocess.Popen(
+        ["bash", "-c", "sleep 30 & exit 0"],
+        start_new_session=True,
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    try:
+        leader.wait(timeout=10)
+        assert _group_alive(leader.pid), "the forked child left the group"
+        assert rd._pid_alive(leader.pid, "") is False      # the WRAPPER is gone
+        assert rd._rail_alive(leader.pid, 0, str(tmp_path / "rail-o-r-77.md"))
+    finally:
+        with contextlib.suppress(OSError):
+            os.killpg(leader.pid, signal.SIGKILL)
+
+
+def _group_alive(pgid: int) -> bool:
+    """Does the process GROUP still have a live member? `killpg(…, 0)` answers
+    for the group, not for its leader — which is the whole point of the arm."""
+    try:
+        os.killpg(pgid, 0)
+    except OSError:
+        return False
+    return True
+
+
+def test_a_recycled_pid_without_procfs_does_not_read_waiting(tmp_path, monkeypatch):
+    """⛔ ON A BOX WITHOUT PROCFS the argv marker was silently dropped.
+
+    `_pid_alive` consulted only the `ps` STAT letter there, so ANY live pid
+    inherited from a dead rail read `waiting` — reported alive forever AND
+    refusing every later `start` on the PR (the unrailable wedge this module
+    exists to remove; `SPAWNING_TTL_S` cannot age a pid-based `waiting` out).
+    The wrapper NEVER execs, so its argv carries the artifact path for its whole
+    life and IS a usable identity test for it (unlike for the rail, which execs
+    — that is what `pgid` is for).
+    """
+    monkeypatch.setattr(rd, "_proc_stat_letter", lambda pid: None)
+    monkeypatch.setattr(rd, "_proc_cmdline", lambda pid: None)
+    monkeypatch.setattr(rd, "_PS_USABLE", True)
+    me = os.getpid()
+    marker = str(tmp_path / "rail-o-r-91.md")
+
+    def unrelated(*args):
+        return "some-unrelated-process --flag\n" if "command=" in args else f"{me} S\n"
+
+    monkeypatch.setattr(rd, "_ps", unrelated)
+    assert rd._pid_alive(me, marker) is False        # pre-fix: True, forever
+
+    def ours(*args):
+        return f"bash -c ... {marker}\n" if "command=" in args else f"{me} S\n"
+
+    monkeypatch.setattr(rd, "_ps", ours)
+    assert rd._pid_alive(me, marker) is True         # the real wrapper still reads alive
+
+
+def test_an_unspawnable_launch_is_an_environment_error_not_a_gate_verdict(
+    tmp_path, monkeypatch, capsys
+):
+    """⛔ EXIT 1 IS THE MACHINE GATE ("not merged"). A `Popen` that raised is not.
+
+    `main()` caught only `Refused`, so an `OSError` from the spawn (EAGAIN under
+    cell load — named in this module's own `SPAWNING` comment — ENOMEM, a
+    vanished CWD) escaped as a traceback and exited 1, which `collect
+    --assert-merged` publishes as "not merged". Same mis-signal class as the
+    missing-`gh` fix, which already has a dedicated test.
+    """
+    monkeypatch.setenv("CELL_HOME", str(tmp_path))
+
+    def boom(*a, **kw):
+        raise BlockingIOError(11, "Resource temporarily unavailable")
+
+    monkeypatch.setattr(rd, "launch", boom)
+    rc = rd.main(["start", "77", "--repo", "o/r", "--cwd", str(tmp_path)])
+    assert rc == 2, f"pre-fix: exits 1 (the --assert-merged gate code), got {rc}"
+    assert "Resource temporarily unavailable" in capsys.readouterr().err
+
+
 def test_announced_merge_survives_a_missing_exit_line(tmp_path):
     """The rail prints `✅ merged …` only AFTER the API confirms state=MERGED. A
     crash between that line and the EXIT write is still a merge — but anything
@@ -675,6 +766,10 @@ def test_an_unmeasurable_liveness_probe_keeps_the_rail_alive(tmp_path, monkeypat
         monkeypatch.setenv("PATH", "/nonexistent")   # `ps` cannot be run at all
         assert rd._pid_alive(proc.pid, "/state/rail-o-r-8.md") is True
     finally:
+        # ⛔ NOT a bare `wait()`: the point is only that the pid is LIVE, and
+        # waiting out the 10 s sleep cost a tenth of this gating file's runtime
+        # (measured 10.03 s of ~38 s).
+        proc.kill()
         proc.wait()
 
 
@@ -778,7 +873,14 @@ def test_two_processes_racing_start_produce_exactly_one_rail(tmp_path, monkeypat
         assert len(started) == 1 and len(refused) == 1, outs
         text = rd.artifact_path(sd, "o/r", 76).read_text(encoding="utf-8")
         assert len(rd.read_all(text, "PID")) == 1, text
-        assert len(rd.read_all(text, "CHILD_PID")) == 1, text
+        # ⛔ WAIT for `CHILD_PID=`: it is written by the RAIL, not by the
+        # launcher, so it lands a few ms AFTER `launch()` returns. Asserting on
+        # the immediate read raced that write — measured: `assert 0 == 1` on a
+        # full-file run (artifact holding only `PID=`/`SID=`), green 4/4 in
+        # isolation. An intermittent red on a CI-gating file for a diff that
+        # changed nothing is exactly what the sibling arms above already avoid
+        # with `wait_field`.
+        assert wait_field(rd.artifact_path(sd, "o/r", 76), "CHILD_PID"), text
         assert Path(rd.read_field(text, "LOG")).read_text(encoding="utf-8").count(
             rd.ATTEMPT_MARK) == 1
         st = rd.collect(sd, "o/r", 76)

@@ -126,6 +126,7 @@ if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
     raise SystemExit(2)
 
 import argparse
+import contextlib
 import fcntl
 import json
 import os
@@ -358,15 +359,31 @@ def _pid_alive(pid: int, marker: str = "", *, pgid: int | None = None) -> bool:
         return True
     # ⛔ NO PROCFS: the kill probe above is NOT enough — it answers yes for a
     # zombie, so a killed rail would read `waiting` forever (see `_ps_stat`).
-    # Only the STAT letter is consulted here, never the command line: bash
-    # may have exec'd the body's last command, so a LIVE rail can legitimately
-    # present an argv that does not carry the artifact path.
     stat = _ps_stat(pid)
     if stat is None:
         return True  # unmeasurable ⇒ keep the rail's claim alive (see _ps_stat)
     if not stat:
         return False  # `ps` knows no such pid ⇒ it is gone
-    return not stat.startswith("Z")
+    if stat.startswith("Z"):
+        return False
+    if pgid is not None:
+        # Identity is already settled by group membership; the argv is the
+        # rail's own business and may be anything it exec'd.
+        return True
+    if not marker:
+        return True   # nothing to test identity against; keep the claim
+    # ⛔ A RECYCLED PID ON A BOX WITHOUT PROCFS. The `pid` here is the `bash -c`
+    # WRAPPER, which NEVER execs — its argv carries the artifact path for its
+    # whole life — so the marker IS a usable identity test for it. (It is not
+    # for the RAIL, which execs; that is what `pgid` is for, and the arms above
+    # say so.) Without this check a recycled pid reads `waiting` forever: it is
+    # reported alive AND blocks every later `start` on the PR — the unrailable
+    # wedge this module exists to remove, and the one thing `SPAWNING_TTL_S`
+    # cannot age out.
+    cmd = _ps("-o", "command=", "-p", str(pid))
+    if cmd is None:
+        return True   # the probe could not answer ⇒ keep the claim
+    return Path(marker).name in cmd or marker in cmd
 
 
 def _rail_alive(leader: int, child: int, marker: str) -> bool:
@@ -381,7 +398,21 @@ def _rail_alive(leader: int, child: int, marker: str) -> bool:
     """
     if _pid_alive(leader, marker):
         return True
-    return leader > 0 and child > 0 and _pid_alive(child, pgid=leader)
+    if leader > 0 and child > 0 and _pid_alive(child, pgid=leader):
+        return True
+    # ⛔ THE FORK → `CHILD_PID=` WINDOW. The rail is forked by the wrapper and
+    # records its own pid a few instructions LATER; a wrapper killed in between
+    # leaves `child == 0` naming nothing, while the rail is alive and merging.
+    # Reading `lost` there is the exact P1 this module fixed: the next `start`
+    # truncates the artifact and appends an attempt mark that scopes a real
+    # `✅ merged` line out for good — a wrong, durable verdict for a merged PR.
+    # The GROUP still answers, and the rail is in the wrapper's group BY
+    # CONSTRUCTION (`start_new_session=True`, no job control in `bash -c`).
+    if child <= 0 and leader > 0:
+        with contextlib.suppress(OSError):   # ProcessLookupError: group is gone
+            os.killpg(leader, 0)
+            return True
+    return False
 
 
 def _int_or_none(s: str) -> int | None:
@@ -821,6 +852,16 @@ def main(argv: list[str] | None = None) -> int:
         except Refused as e:
             print(f"rail_detach: ✗ REFUSED — {e}", file=sys.stderr)
             return 4
+        except OSError as e:
+            # ⛔ NOT exit 1: 1 is this tool's `collect --assert-merged` "not
+            # merged" — the fleet's MACHINE GATE (see EXIT CODES). A `Popen`
+            # that raised (EAGAIN under cell load, ENOMEM, a vanished CWD) is an
+            # ENVIRONMENT error, so reporting it through 1 would read as a rail
+            # that ran and refused. Same class as the missing-`gh` fix below,
+            # same reason. The `SPAWNING=1` this leaves behind expires on its own
+            # via `SPAWNING_TTL_S`, so the PR is not wedged.
+            print(f"rail_detach: ✗ {e}", file=sys.stderr)
+            return 2
         if a.json:
             print(json.dumps(ln.__dict__))
         else:
