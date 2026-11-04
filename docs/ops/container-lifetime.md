@@ -91,6 +91,12 @@ removes a container someone else is using turns their green suite into a false r
 4. `--keep-container`, and the box-wide `TORTOISE_TEST_LANE_REAP=0` (any falsy
    spelling), both leave it up.
 
+The cost of rule 1, stated: a lane that opens its DB with `uri` and then calls
+`run` **reuses** the container, so the hook never reaps it and — while the
+worktree still exists — the timer withholds proof 2 as well. That population is
+bounded by **neither clock by default**; `down`, or arming proof 2 (a decision
+for the #8180 ruling), is what reclaims it.
+
 What it cannot promise: check-then-reap is two steps, so a consumer that attaches
 in that window can still lose its target. The harm is a false red on a throwaway
 database, and the alternative — holding a lock across `docker rm` — would let a

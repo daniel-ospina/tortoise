@@ -454,6 +454,17 @@ def reap(*, apply: bool, as_json: bool = False) -> int:
     # one guard whose entire job is "refuse a green light" was dead code that
     # reported `ok: true` (#10813 review P1, caught by a fresh reviewer).
     skipped = [ln for ln in lines if ln.startswith(_SWEEP_SKIPPED)]
+    # The sweep's OTHER fail-closed shape: a container it COULD have removed but
+    # could not decide about (`kept … its owning worktree … is gone, but the
+    # container reports nothing about its clients (unreadable)`). Narrowed to the
+    # armed population on purpose — `is gone` in the line — because a peer
+    # container whose probe fails is a report, not an undecided tick, and making
+    # every such container red a 15-minute timer is the over-block this project
+    # classifies B (#10813 review P1-2).
+    undecided = [ln for ln in lines
+                 if ln.startswith("reap: kept") and "is gone" in ln
+                 and ("unreadable" in ln or "fail-closed" in ln)]
+    skipped = skipped + undecided
     failed = [ln for ln in lines if "FAILED to remove" in ln]
     verdicts = _verdicts(lines, dry_run=not apply)
     # WHAT ACTUALLY HAPPENED, from the sweep's own verdict lines — NOT from the
@@ -499,6 +510,7 @@ def reap(*, apply: bool, as_json: bool = False) -> int:
     # fail-closed reason lives here, and dropping it under `--json` (the form the
     # timer runs) is what made the green light invisible in the journal.
     notes = [ln for ln in lines if not re.search(r"fdb-lane-[0-9a-z]+", ln)]
+    notes += undecided        # named containers, but the REASON must reach the log
     if as_json:
         print(json.dumps({
             "ok": not skipped and not failed,

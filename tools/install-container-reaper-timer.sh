@@ -300,8 +300,14 @@ status_all() {
     src_live="$([ -f "$SOURCE" ] && sha256sum "$SOURCE" 2>/dev/null | cut -d' ' -f1)"
     # The POLICY the DEPLOYED reaper will import: the deployed checkout's own
     # tools/test_lane.py, not this caller's checkout.
-    policy_live="$(sha256sum "$(dirname "$deployed")/test_lane.py" \
-        2>/dev/null | cut -d' ' -f1)"
+    policy_live=""
+    # Only when the deployment was actually parsed — otherwise `dirname ""` is
+    # `.` and this hashes the CALLER's checkout, printing a verdict about a file
+    # the unit does not run.
+    if [ -n "${deployed:-}" ]; then
+        policy_live="$(sha256sum "$(dirname "$deployed")/test_lane.py" \
+            2>/dev/null | cut -d' ' -f1)"
+    fi
     echo "deployed at  : ${deployed:-<none>}"
     echo "deployed pin : ${pinned:-<none>}  (actuator)"
     echo "policy pin   : ${policy_pin:-<none>}  (tools/test_lane.py)"

@@ -4688,6 +4688,44 @@ def test_SIGTERM_reaches_the_hook_and_the_run_exits_143(lane, monkeypatch):
     assert reaped == [1], "the hook did not run on the SIGTERM path"
 
 
+def test_START_records_whether_it_CREATED_or_REUSED(lane, monkeypatch):
+    """The exit hook's whole safety argument rests on this one datum.
+
+    Every hook test stubs `start()` and sets `_LAST_START_CREATED` by hand, so
+    inverting the line in `start()` left the entire safety suite green — while
+    making the hook reap REUSED containers (the #10813 P1 returning) and never
+    reap what it created (the leak returning). Pinned here against the real
+    `start()`, both branches.
+    """
+    # REUSE: the container is already up.
+    monkeypatch.setattr(tl, "_LAST_START_CREATED", True)      # stale on purpose
+    monkeypatch.setattr(tl, "container_state", lambda _n: "running")
+    monkeypatch.setattr(tl, "_created_image", lambda _n: tl.IMAGE)
+    monkeypatch.setattr(tl, "_published_port", lambda _n: (True, 16406))
+    monkeypatch.setattr(tl, "_wait_ready", lambda *a, **k: True)
+    monkeypatch.setattr(tl, "_touch_lease", lambda _n: None)
+    monkeypatch.setattr(tl, "_container_memory_limit", lambda _n: None)
+    monkeypatch.setattr(tl, "_note_missing_dataset_ceiling", lambda _n: None)
+    monkeypatch.setattr(tl, "_note_uncapped_existing", lambda _n: None)
+    monkeypatch.setenv("TORTOISE_TEST_LANE_REAP", "0")
+    tl.start()
+    assert tl._LAST_START_CREATED is False, (
+        "a REUSED container was recorded as created — the hook would reap a "
+        "container another consumer owns")
+
+    # CREATE: nothing there, so this call makes it.
+    monkeypatch.setattr(tl, "_LAST_START_CREATED", False)     # stale on purpose
+    monkeypatch.setattr(tl, "container_state", lambda _n: "absent")
+    monkeypatch.setattr(tl, "pick_port", lambda: 16407)
+    monkeypatch.setattr(tl, "_docker", lambda *a, **k: _R(0, "cid\n", ""))
+    monkeypatch.setattr(tl, "_published_port", lambda _n: (True, 16407))
+    monkeypatch.setattr(tl, "_note_uncapped_existing", lambda _n: None)
+    tl.start()
+    assert tl._LAST_START_CREATED is True, (
+        "a container this run CREATED was recorded as reused — the hook would "
+        "never reap it and the leak returns")
+
+
 def test_a_PEER_run_that_holds_NOTHING_still_blocks_the_reap(lane, monkeypatch,
                                                             capsys):
     """The ordering that matters: the peer is LIVE but is NOT the lock holder.

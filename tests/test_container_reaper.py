@@ -276,6 +276,25 @@ def test_a_sweep_that_cannot_DECIDE_is_exit_2_not_a_clean_sweep(monkeypatch, cap
     assert docker.removals == []
 
 
+def test_an_UNDECIDABLE_orphan_is_exit_2_not_a_clean_sweep(box, monkeypatch,
+                                                           capsys):
+    """The fail-closed shape that is NOT a `reap: skipped` line.
+
+    When the container's own client list cannot be read, the sweep keeps it and
+    says "report only, fail-closed" — a container it COULD have removed and could
+    not decide about. Counting that as decided made the only population the
+    deployed unit is armed for a silent no-op that exits green every 15 minutes
+    (#10813 review P1-2).
+    """
+    monkeypatch.setattr(tl, "_container_in_use", lambda _n: None)
+    rc = cr.main(["reap", "--apply", "--json"])
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 2, out
+    assert out["ok"] is False and out["decided"] is False, out
+    assert any("unreadable" in n for n in out["notes"]), out
+    assert box.removals == []
+
+
 def test_a_FAILED_removal_is_not_reported_as_a_clean_sweep(box, monkeypatch, capsys):
     """`docker rm` refusing must surface, not read as `removed: 0` (#10806 P1-2)."""
     def refusing(*args, **kwargs):

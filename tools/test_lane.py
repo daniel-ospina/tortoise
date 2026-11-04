@@ -3599,7 +3599,10 @@ def cmd_run(args: argparse.Namespace) -> int:
             # container, and removing it would fail ITS run with connection
             # errors that read as test verdicts. `None` (unreadable) fails closed.
             try:
-                in_use = _container_in_use(name)
+                # Cheap check FIRST: on the reuse path (the commonest — `uri`
+                # then `run`) the probe can cost a 60 s `docker exec` and the
+                # answer is unused.
+                in_use = None if not created else _container_in_use(name)
                 if not created:
                     kept = True
                     print(f"test-lane: NOT reaping {name} on exit — this run "
