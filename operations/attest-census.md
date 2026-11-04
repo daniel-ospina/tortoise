@@ -1,6 +1,6 @@
 # Attestation census — open PRs
 
-Repo `daniel-ospina/tortoise` · generated 2026-11-04T01:10:03Z by `tools/attest_census.py` · content sha256 `ce11345f24206ddfc0ac5084fbb72e4e61ac2bee0f6b9c1bc765d17f67d863d3`.
+Repo `daniel-ospina/tortoise` · generated 2026-11-04T01:10:03Z by `tools/attest_census.py` · content sha256 `0ea61c34830b73d967278919edbc7674ef4341ed650134399d8efc2f51e323ed`.
 
 > ⚠️ **SNAPSHOT, NOT A LIVE VERDICT.** This file is machine-generated from *one box's*
 > registry at the timestamp above, and every push, review and gate re-run invalidates it.
@@ -15,8 +15,10 @@ Repo `daniel-ospina/tortoise` · generated 2026-11-04T01:10:03Z by `tools/attest
 > **not a provenance proof**: the digest is unkeyed and its algorithm is in this repo, so an
 > editor who recomputes it after editing produces a file that verifies. Read a matching digest
 > as "nobody edited this by accident", never as "the tool emitted these rows". The row for
-> the PR that regenerated this file names the head that PR had AT generation time, which is
-> necessarily the parent of the commit adding the file: a document cannot contain the sha
+> the PR that regenerated this file names the head that PR had AT generation time. That is NOT
+> necessarily the parent of the commit adding the file (measured #10687 cycle 18: a worktree one
+> merge behind the remote tip records the REMOTE head, so the row named an ancestor's sibling).
+> What holds by construction is narrower and is what matters: a document cannot contain the sha
 > of the commit that contains it.
 
 One row per open PR: its head, whether a review record exists on **this box**, whether that

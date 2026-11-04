@@ -1392,6 +1392,14 @@ def test_a_repo_that_injects_a_line_cannot_displace_the_header_digest():
     assert len([ln for ln in text.splitlines() if ln.startswith("Repo `")]) == 1, (
         "the header must be exactly one line whatever the repo value contains"
     )
+    # ⛔ The assertion above CANNOT fail on the pre-fix shape: a newline-injected header still
+    # yields exactly ONE line starting with `Repo ` (the other two are the injected span and
+    # `rest`). Cycle 18 measured that it passed while the test reddened only on the verifier
+    # assertion below — an inert half in the test that names the property. This one is the real
+    # pin: the rendered header element itself must carry no newline.
+    header_line = next(ln for ln in text.splitlines() if ln.startswith("Repo `"))
+    assert "\n" not in header_line and "\r" not in header_line
+    assert text.splitlines()[2] == header_line, "the header must be line 3 of the document"
     assert ac.verify_census_document(text) == "", "and the document must not refuse itself"
 
 
@@ -1419,3 +1427,76 @@ def test_a_closed_stdout_pipe_is_rc_2_not_1(monkeypatch, tmp_path):
     monkeypatch.setattr(ac.sys, "stdout", _ClosedPipe())
     assert ac.main(["--reviews-dir", str(tmp_path), "--no-gate", "--out", str(tmp_path / "o.md")]) == 2
     assert (tmp_path / "o.md").exists(), "the report was written before the pipe broke"
+
+
+def test_a_flush_that_fails_only_at_exit_is_rc_2_not_120(monkeypatch, tmp_path):
+    """The SIZE-DEPENDENT escape: a report under the ~8 KiB stdout buffer never flushes inside
+    `print`, so the reader-closed pipe surfaced in CPython's exit-time `flush_std_files` — outside
+    every handler in this file — and `Py_Exit` turned it into rc **120**.
+
+    MEASURED (#10687 review cycle 18): the same census exited 2 with a 48-row payload and 120 with a
+    1-row one. `_emit_report` now flushes inside its `try`, which is what this stub models: `write`
+    succeeds, `flush` is where the pipe is found dead.
+    """
+    ac = _load()
+    monkeypatch.setattr(ac, "gh_json", lambda args: [])
+
+    class _BufferedPipe:
+        def reconfigure(self, **_kwargs):
+            return None
+
+        def write(self, _data):  # a real buffered stream accepts this and fails later
+            return len(_data)
+
+        def flush(self):
+            raise BrokenPipeError(32, "Broken pipe")
+
+    monkeypatch.setattr(ac.sys, "stdout", _BufferedPipe())
+    assert ac.main(["--reviews-dir", str(tmp_path), "--no-gate", "--out", str(tmp_path / "o.md")]) == 2
+
+
+def test_the_json_surface_has_the_SAME_stdout_guard(monkeypatch, tmp_path):
+    """The sibling path that drifted: `--json | jq` was unguarded while the markdown report was not,
+    so it exited **1** on a closed pipe (measured, cycle 18) — the exact invariant cycle 17 claimed
+    to have closed. Both branches now go through `_emit_report`, and this pins the second one.
+    """
+    ac = _load()
+    monkeypatch.setattr(ac, "gh_json", lambda args: [])
+
+    class _ClosedPipe:
+        def reconfigure(self, **_kwargs):
+            return None
+
+        def write(self, _data):
+            raise BrokenPipeError(32, "Broken pipe")
+
+        def flush(self):
+            return None
+
+    monkeypatch.setattr(ac.sys, "stdout", _ClosedPipe())
+    assert ac.main(["--reviews-dir", str(tmp_path), "--no-gate", "--json"]) == 2
+
+
+def test_a_uppercase_JSON_suffix_record_is_found_not_read_as_absent(monkeypatch, tmp_path):
+    """`load_record` promises CASE-INSENSITIVE filename matching, but the directory filter was
+    `name.endswith(".json")` — so a record whose EXTENSION is upper-case was never opened and the row
+    reported `NOTHING-TO-RESTORE` (measured, cycle 18). The direction is the safe one (a real proof
+    is under-reported, never invented), which is why it is a residual and not a gate — but a false
+    absence is still the class this tool exists to refuse.
+    """
+    ac = _load()
+    (tmp_path / "DANIEL-OSPINA-TORTOISE-7.JSON").write_text(
+        '{"repo":"daniel-ospina/tortoise","pr":7,"head_sha":"' + LIVE + '","mint":"fresh",'
+        '"verdict":"clean","evidence":"comment:1"}',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        ac, "gh_json",
+        lambda args: [{"number": 7, "headRefOid": LIVE, "headRefName": "b", "title": "t"}]
+        if args and args[0] == "pr"
+        else {"check_runs": [{"id": 5, "name": ac.GATE_CHECK, "status": "completed", "conclusion": "failure"}]},
+    )
+    assert ac.main(["--reviews-dir", str(tmp_path), "--out", str(tmp_path / "o.md")]) == 0
+    text = (tmp_path / "o.md").read_text(encoding="utf-8")
+    assert "**RESTORE**" in text or "**OK**" in text, f"the upper-case record was not read: {text[-800:]}"
+    assert "no record on this box" not in text

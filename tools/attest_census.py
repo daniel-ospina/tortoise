@@ -89,6 +89,7 @@ import argparse
 import contextlib
 import hashlib
 import json
+import os
 import re
 import subprocess
 from dataclasses import dataclass, field
@@ -284,7 +285,7 @@ def load_record(
     reports a false absence (measured on `daniel-ospina-DMeer-*.json`).
     """
     try:
-        entries = [e for e in reviews_dir.iterdir() if e.name.endswith(".json")]
+        entries = [e for e in reviews_dir.iterdir() if e.name.lower().endswith(".json")]
     except FileNotFoundError as exc:
         raise RegistryUnreadable(f"registry directory does not exist: {reviews_dir}") from exc
     except OSError as exc:
@@ -569,8 +570,10 @@ def render(rows: list[Row], repo: str, generated_at: str, truncated: bool = Fals
         "> **not a provenance proof**: the digest is unkeyed and its algorithm is in this repo, so an",
         "> editor who recomputes it after editing produces a file that verifies. Read a matching digest",
         "> as \"nobody edited this by accident\", never as \"the tool emitted these rows\". The row for",
-        "> the PR that regenerated this file names the head that PR had AT generation time, which is",
-        "> necessarily the parent of the commit adding the file: a document cannot contain the sha",
+        "> the PR that regenerated this file names the head that PR had AT generation time. That is NOT",
+        "> necessarily the parent of the commit adding the file (measured #10687 cycle 18: a worktree one",
+        "> merge behind the remote tip records the REMOTE head, so the row named an ancestor's sibling).",
+        "> What holds by construction is narrower and is what matters: a document cannot contain the sha",
         "> of the commit that contains it.",
         "",
         "One row per open PR: its head, whether a review record exists on **this box**, whether that",
@@ -674,6 +677,47 @@ def render(rows: list[Row], repo: str, generated_at: str, truncated: bool = Fals
     digest = _content_digest(body)
     lines[header_index] = header_prefix + digest + header_suffix
     return "\n".join(lines)
+
+
+def _neutralise_stdout() -> None:
+    """Point fd 1 at /dev/null so the interpreter's EXIT-TIME flush cannot decide our exit code.
+
+    ⛔ This is not defensive tidiness, it is the difference between rc 2 and rc **120**. When the
+    report fits the ~8 KiB stdout buffer and the reader has closed the pipe, `print()` succeeds and
+    the failure happens in CPython's `flush_std_files()` at shutdown — which returns -1, makes
+    `_Py_Finalize` set status -1, and `Py_Exit` turns that into `exit(120)`. No `try`/`except` in
+    this file can see it. MEASURED (#10687 review cycle 18): the same census exited 2 with a 48-row
+    payload and 120 with a 1-row one, i.e. the contract's exit code depended on the report SIZE.
+    Only `stdout.flush()` inside the handler fixes that, and this makes the final flush a no-op
+    afterwards so it cannot overwrite the 2 we are about to return.
+    """
+    with contextlib.suppress(OSError, ValueError, AttributeError):
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        try:
+            os.dup2(devnull, sys.stdout.fileno())
+        finally:
+            os.close(devnull)
+
+
+def _emit_report(text: str) -> str:
+    """Write the report to stdout; `""` on success, else the failure reason (caller returns 2).
+
+    ⛔ ONE helper for BOTH output surfaces (`--json` and the markdown report). The two branches
+    drifted once already: the markdown `print` was guarded against `UnicodeEncodeError` and the
+    `--json` `print` was not, so `attest_census.py --json | jq` exited **1** on a closed pipe while
+    the markdown path exited 2 (measured, review cycle 18). A guard that exists on one of two
+    sibling paths is not a contract, it is a coin flip.
+
+    The `flush()` inside the `try` is load-bearing: without it a report smaller than the stdout
+    buffer reports success here and then dies at interpreter shutdown with rc 120.
+    """
+    try:
+        print(text)
+        sys.stdout.flush()
+        return ""
+    except (OSError, ValueError) as exc:  # a closed pipe is an OSError; an unencodable char a ValueError
+        _neutralise_stdout()
+        return str(exc)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -798,7 +842,7 @@ def main(argv: list[str] | None = None) -> int:
     rows.sort(key=lambda r: r.pr, reverse=True)
 
     if args.json:
-        print(json.dumps({
+        reason = _emit_report(json.dumps({
             "repo": args.repo,
             "generated_at": generated_at,
             "reviews_dir": str(reviews_dir),
@@ -817,6 +861,9 @@ def main(argv: list[str] | None = None) -> int:
                 for r in rows
             ],
         }, indent=2))
+        if reason:  # a closed pipe / unencodable char on the --json surface is rc 2, never 1
+            print(f"attest_census: could not write the report to stdout: {reason}", file=sys.stderr)
+            return 2
         return 0 if unreadable == 0 else 2
 
     # Belt to `_cell`'s braces. `_cell` sanitises every RECORD- and `gh`-derived cell, but this
@@ -850,15 +897,9 @@ def main(argv: list[str] | None = None) -> int:
     except (OSError, ValueError) as exc:  # unwritable/unencodable --out is not a finding
         print(f"attest_census: could not write {out}: {exc}", file=sys.stderr)
         return 2
-    try:
-        print(text)
-    # ⛔ BOTH classes, because the contract is `0`/`2`-never-`1` on this surface too: an
-    # unencodable character is a `ValueError`, and a CLOSED PIPE is a `BrokenPipeError` — an
-    # `OSError`. Catching only the first left `tools/attest_census.py | head -1` reporting rc 1 for a
-    # run that had already written its report (measured, review cycle 17), which is the one exit code
-    # this file publishes as impossible. Same pair the `--out` write above guards, for the same reason.
-    except (OSError, ValueError) as exc:
-        print(f"attest_census: could not write the report to stdout: {exc}", file=sys.stderr)
+    reason = _emit_report(text)
+    if reason:
+        print(f"attest_census: could not write the report to stdout: {reason}", file=sys.stderr)
         return 2
     print(f"attest_census: wrote {out}", file=sys.stderr)
     return 0 if unreadable == 0 else 2
