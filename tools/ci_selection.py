@@ -1415,6 +1415,20 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # tool's own guard) is selected. Pinned by
              # tests/test_ci_selection.py::test_queue_resweep_tool_change_selects_core_not_tier1.
              "tools/queue_resweep.py",
+             # #2148: `tools/batch_open.py` owns `tests/test_batch_gate.py`
+             # (registered `core`), and `tools/` is in NON_PYTHON_PREFIXES, so a
+             # batch_open-only change would be filtered out BEFORE the "not
+             # matched -> core" fallback and take the docs-only early return —
+             # `select(["tools/batch_open.py"])` would yield NO surface, and the
+             # guard that pins the fold gate would never run on the file it guards
+             # (the same #1349/#3332/#3616 silent-drop class as queue_resweep
+             # directly above). The entry makes `_selection_relevant()` keep the
+             # path so `core` — and this tool's own guard — is selected. Pinned by
+             # tests/test_batch_gate.py::test_a_batch_open_only_change_selects_core_so_this_guard_actually_runs,
+             # which asserts `select(["tools/batch_open.py"])` returns `core` AND this
+             # file's suite. (`integrity()` does NOT read CORE_ALSO — measured: it
+             # returns `[]` with and without this entry — so it is not a pin.)
+             "tools/batch_open.py",
              # #6388: `tools/seal_session_events.py` is the session-events seal
              # policy, guarded by tests/test_session_events_seal.py, which is
              # `core`-registered — but `tools/` is swallowed by
