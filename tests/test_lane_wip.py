@@ -511,12 +511,31 @@ def test_a_note_that_starts_with_the_trailer_words_survives(hub: Path) -> None:
 
     A caller's note is free to begin with "pinned at …"; filtering on that prefix
     silently dropped the note and kept the boilerplate instead.
+
+    ⛔ AND THE SAME IS TRUE OF THE NOTE'S **LAST** LINE, which is the only line the
+    strip can actually reach. `snapshot` separates the note from its trailer with a
+    blank line, so what the strip sees after popping `pinned at <ts>` is that blank —
+    never the caller's text. That is a property of the WRITER, not of the strip, so it
+    is pinned here for every trailer word the reader has ever stripped (a former
+    `index-tree ` entry was removed as unreachable; a future one that appends after the
+    trailer instead of before it would break this). The second case is the one an
+    earlier version of this file got wrong in its COMMENT — it claimed to strip
+    `index-tree` "before" `pinned at` while the loop could never reach a caller's line.
     """
-    wt = dirty_lane(hub)
-    pinned = run_tool("pin", "--note", "pinned at noon, why not", cwd=wt)
-    assert pinned.returncode == 0, pinned.stderr
-    listed = run_tool("list", cwd=wt)
-    assert "pinned at noon, why not" in listed.stdout, listed.stdout
+    for i, note in enumerate(("pinned at noon, why not", "first line\nindex-tree deadbeef")):
+        # ⛔ A DETERMINISTIC name, like every other `dirty_lane` caller in this file
+        # (`wt-forge`, `wt-lane`, `wt-idxonly`). Deriving it from the note would need
+        # `hash()`, which is salted per interpreter, so the two iterations could
+        # collide — and a collision reds a merge-gating test for no reason at
+        # `dirty_lane`'s `assert made.returncode == 0` (the branch already exists).
+        wt = dirty_lane(hub, f"wt-note-{i}")
+        pinned = run_tool("pin", "--note", note, cwd=wt)
+        assert pinned.returncode == 0, pinned.stderr
+        listed = run_tool("list", cwd=wt)
+        last = note.splitlines()[-1]
+        assert last in listed.stdout, (
+            f"the note's LAST line {last!r} must survive the trailer strip: {listed.stdout}"
+        )
 
 
 def test_list_reports_a_damaged_pin_rather_than_zero_files(hub: Path) -> None:

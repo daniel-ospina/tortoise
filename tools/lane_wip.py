@@ -31,7 +31,9 @@ would give, because the remover was never identified.
 
 ⛔ IT IS RECOVERABLE, NOT IMPOSSIBLE, AND NOTHING RUNS `pin` FOR YOU. There is no
 hook, no reaper integration and no dispatch wiring (measured: nothing outside
-`tools/lane_wip.py` and its test names this tool), and at least two deployed
+`tools/lane_wip.py` and its test **invokes** it — it IS registered in
+`config/ci-surfaces.yml` and in `tools/ci_selection.py`'s `CORE_ALSO`, and
+`tests/test_ci_selection.py` pins that), and at least two deployed
 removers DO force-remove dirty worktrees without pinning first. So a lane that
 never pinned still loses its work exactly as #10812 describes. The claim this tool
 supports is narrow and it is the true one: **a pinned lane's work survives any
@@ -1251,11 +1253,21 @@ def _describe(ref: str, *, cwd: Path) -> dict:
         body_lines = message.splitlines()[1:]
     while body_lines and not body_lines[-1].strip():
         body_lines.pop()
-    # Both trailers are stripped by POSITION (`pinned at` is always last, then
-    # `index-tree` before it) — never by a prefix a caller's own note may use.
-    for trailer in ("pinned at ", "index-tree "):
-        if body_lines and body_lines[-1].startswith(trailer):
-            body_lines.pop()
+    # ⛔ THERE IS EXACTLY ONE TRAILER, and it is stripped by POSITION — never by a
+    # prefix a caller's own note may use. `snapshot` writes `<subject>\n\n<note>\n\n
+    # pinned at <ts>` and NOTHING after it: the staged half is the pin's SECOND PARENT
+    # (a graph edge), never a prose `index-tree <sha>` line (`_pin_index_tree`).
+    # ⚠️ A second entry here would be DEAD, not merely redundant. The separator BLANK
+    # LINE `%b` leaves between the note and `pinned at` is the last line once the
+    # trailer is popped, so it is what shields a caller — and it shields a note whose
+    # last line is a former trailer word too (MEASURED on the pre-fix head:
+    # `--note $'first line\nindex-tree deadbeef'` lists as "first line / index-tree
+    # deadbeef"). Keeping an `index-tree ` entry would therefore buy no safety while
+    # asserting a strip that cannot fire. So there is one entry, and the last-line
+    # case is pinned for BOTH former words by
+    # `test_a_note_that_starts_with_the_trailer_words_survives`.
+    if body_lines and body_lines[-1].startswith("pinned at "):
+        body_lines.pop()
     note_text = "\n".join(body_lines).strip()
     if note_text:
         # One line per pin keeps the list greppable and `tail -1`-able, so a
