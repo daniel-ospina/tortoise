@@ -171,6 +171,14 @@ SPAWNING_TTL_S = 60
 # unrailable wedge this module exists to remove: `lost` is both true and
 # recoverable. Same duration as the spawn window, for the same reason.
 GROUP_CLAIM_GRACE_S = SPAWNING_TTL_S
+# How far a process's OWN start time may exceed the artifact's `CHILD_STARTED=`
+# before it is provably a different process (`_pid_is_a_stranger`). The stamp has
+# 1-second resolution and the wrapper writes it immediately after the fork, so a
+# LIVE rail can read a second or two "newer" than the stamp; the slack covers that
+# plus local clock slew. Deliberately generous in the SAFE direction: too large
+# leaves the documented wedge (which fails closed), too small could read a live
+# merging rail as `lost` and let a second rail through (#3061).
+IDENTITY_SLACK_S = SPAWNING_TTL_S
 
 # Every `gh` call here is INFORMATIONAL and every one of them is bounded. An
 # unbounded one is not a slow read, it is a WEDGE: `_head_sha` runs while this
@@ -315,6 +323,81 @@ def _proc_stat_letter(pid: int) -> str | None:
         return None
 
 
+def _pid_started_epoch(pid: int) -> float | None:
+    """When `pid`'s process STARTED, as a Unix epoch, or None when unmeasurable.
+
+    ⛔ THIS IS THE ONLY IDENTITY A PID OFFERS. `kill(pid, 0)` answers "some process
+    owns this number now", never "it is still OUR process", and every comparable
+    implementation detects pid reuse exactly this way: record the start time and
+    compare it on each probe. A process cannot have started before it was forked,
+    so a start time LATER than the recorded one proves the number was recycled.
+
+    procfs answers exactly (field 22 `starttime`, in clock ticks since boot,
+    against `btime`); a box WITHOUT procfs (macOS — where the lanes run) asks the
+    local `ps` for `lstart` in the C locale. Both are bounded
+    (`PS_PROBE_TIMEOUT_S`); anything unparseable is None and the caller keeps the
+    claim.
+    """
+    try:
+        raw = Path(f"/proc/{pid}/stat").read_text()
+        # Split after the LAST `) `: the comm field may contain spaces AND parens,
+        # so a positional split over the whole line reads the wrong field — the
+        # same reason `_proc_stat_letter` does it this way. Field 3 (state) is
+        # element 0 here, so field 22 (starttime) is element 19.
+        starttime = int(raw.rsplit(") ", 1)[1].split()[19])
+        hz = os.sysconf("SC_CLK_TCK")
+        btime = None
+        for line in Path("/proc/stat").read_text().splitlines():
+            if line.startswith("btime "):
+                btime = int(line.split()[1])
+                break
+        if btime is None:
+            return None
+        return btime + starttime / hz
+    except (OSError, IndexError, ValueError):
+        pass
+    out = _ps("-o", "lstart=", "-p", str(pid))
+    if not out or not out.strip():
+        return None
+    try:
+        # `lstart` is LOCAL time in the C locale; `ps` pads the day ("Nov  3") and
+        # strptime collapses the run of whitespace for us.
+        return time.mktime(time.strptime(" ".join(out.split()),
+                                         "%a %b %d %H:%M:%S %Y"))
+    except (ValueError, OverflowError):
+        return None
+
+
+def _pid_is_a_stranger(pid: int, recorded_iso: str) -> bool:
+    """True ONLY when `pid` provably belongs to a process that started AFTER the
+    rail was forked — i.e. the rail's pid number was RECYCLED.
+
+    ⛔ ONE-SIDED BY DESIGN. It can conclude "this is not our rail" and never "this
+    is", so an unmeasurable probe returns False (keep the claim) — the same
+    fail-direction discipline as `_ps_stat` and `_in_group`. It therefore cannot
+    produce a false `lost`, and it never expires a LIVE rail however long the
+    runner queue takes: the rail's own start time is fixed, and elapsed time never
+    changes it.
+
+    `recorded_iso` is the artifact's `CHILD_STARTED=`, written by the wrapper
+    immediately AFTER the fork, so our rail started at or before it.
+    `IDENTITY_SLACK_S` covers that stamp's 1-second resolution, the fork-to-`printf`
+    gap, and clock slew in the safe direction. A BACKWARD step larger than the
+    slack is the one way a live rail could read `lost` here — which is why the
+    slack is generous rather than tight; a rail killed and recycled INSIDE the
+    window stays the documented wedge, and a wedge fails closed.
+    """
+    if pid <= 0:
+        return True
+    started = _pid_started_epoch(pid)
+    if started is None:
+        return False
+    age = _age_seconds(recorded_iso)
+    if age is None:
+        return False
+    return started > (time.time() - age) + IDENTITY_SLACK_S
+
+
 def _proc_cmdline(pid: int) -> str | None:
     """`/proc/<pid>/cmdline` as text, or None where procfs does not answer."""
     cmdline = Path(f"/proc/{pid}/cmdline")
@@ -350,14 +433,16 @@ def _pid_alive(pid: int, marker: str = "", *, pgid: int | None = None) -> bool:
     required for the rail itself (see the module docstring): its argv is whatever
     `admin-merge.sh` last exec'd, while its group is fixed at fork time.
 
-    `marker=""` with no `pgid` is a LIVENESS-ONLY probe — there is nothing to test
-    identity against (the `CHILD_PID` of an artifact whose wrapper pid was never
-    recorded). Its residual is that a RECYCLED pid reads `waiting`; that is the
-    documented alive-direction fail, and it cannot produce a merge. It is NOT aged
-    out on purpose: the rail's wait is unbounded, so any TTL would read a live
-    merge as `lost` and let a second rail through (#3061) — see the `SPAWNING`
-    branch in `collect`, which names the recovery (`rm` the artifact) in its
-    `reason`, and `start`, which prints the same command when it refuses on it.
+    `marker=""` with no `pgid` is a LIVENESS-ONLY probe — there is nothing in the
+    ARGV to test identity against (the `CHILD_PID` of an artifact whose wrapper pid
+    was never recorded). Its residual is that a RECYCLED pid reads `waiting`, which
+    is why the `collect` caller pairs it with `_pid_is_a_stranger`: the pid's START
+    TIME against the artifact's `CHILD_STARTED=` settles recycling wherever that
+    stamp exists. It is deliberately NOT aged out — the rail's wait is unbounded, so
+    a TTL would read a live merge as `lost` and let a second rail through (#3061).
+    Where the stamp is absent nothing can settle identity, so the claim is kept and
+    `collect`'s `reason` (and `start`'s refusal) name the one way out: `rm` the
+    artifact.
     """
     if pid <= 0:
         return False
@@ -555,6 +640,7 @@ class RailState:
     since: str = ""
     head: str = ""
     pid: int = 0
+    child: int = 0
     exit_code: int | None = None
     merge_sha: str = ""
     reason: str = ""
@@ -577,6 +663,7 @@ class RailState:
             "since": self.since,
             "head": self.head,
             "pid": self.pid,
+            "child": self.child,
             "exit_code": self.exit_code,
             "merge_sha": self.merge_sha,
             "reason": self.reason,
@@ -635,6 +722,7 @@ def collect(state_dir: Path, repo: str, pr: int) -> RailState | None:
             since=read_field(text, "STARTED_AT"),
             head=read_field(text, "HEAD"),
             pid=pid,
+            child=child,
             artifact=str(art),
             log=str(logp),
         )
@@ -703,35 +791,32 @@ def collect(state_dir: Path, repo: str, pr: int) -> RailState | None:
         # for good. So the evidence and the named rail are read BEFORE the sentinel
         # is allowed to mean "nothing started".
         #
-        # ⛔ THIS ARM HAS NO AGE BOUND, AND THE COMMENT HERE USED TO CLAIM ONE
-        # ("bounded in the only way that matters: once that pid stops answering,
-        # this branch falls through to `lost`"). That is false for the pid this
-        # arm is about: a RECYCLED pid never stops answering, so it reads `waiting`
-        # and the PR carries an `ALREADY LIVE` refusal that no clock will lift.
-        # The residual is real and is stated where it belongs, in `_pid_alive`
-        # ("its residual is that a RECYCLED pid reads `waiting`; that is the
-        # documented alive-direction fail, and it cannot produce a merge") — this
-        # comment is corrected rather than the code aged, because an AGE BOUND HERE
-        # WOULD BE A WORSE DEFECT THAN THE WEDGE:
+        # ⛔ THIS ARM HAS NO AGE BOUND — AND THE COMMENT HERE ONCE CLAIMED ONE, then
+        # (after that was corrected) claimed none was POSSIBLE. Both were wrong, in
+        # opposite directions, so this states the actual mechanism.
         #
-        #   With no wrapper pid there is no group to test membership against, so
-        #   the child probe is liveness-only (no identity). A TTL would therefore
-        #   expire the claim of a GENUINELY LIVE RAIL — a rail's wait is set by the
-        #   runner queue and is unbounded (the module docstring's measured case is
-        #   >= 6660 s, against a `SPAWNING_TTL_S` of 60) — and `lost` is exactly the
-        #   state `start` accepts. So any age bound trades a fail-CLOSED wedge for a
-        #   SECOND RAIL on a PR that is still merging: the #3061 collision, and the
-        #   same durable-wrong-verdict shape as the fork window this arm exists to
-        #   close (`test_a_named_rail_under_spawning_is_not_no_rail` pins it with a
-        #   STARTED_AT an hour old — the arm is deliberately OLDER than any TTL).
+        # `_pid_alive(child, "")` is a liveness-only probe, and the residual is real
+        # and documented in `_pid_alive`: a RECYCLED pid reads `waiting`. But the
+        # artifact DOES carry the material to rule that out — `CHILD_STARTED=`, the
+        # wrapper's clock immediately AFTER the fork, so the rail's own start time is
+        # <= it. A process cannot have started before it was forked, so a pid whose
+        # start time is LATER than that stamp is provably NOT this rail.
         #
-        # A sound bound needs IDENTITY, not elapsed time: every comparable system
-        # stores the process start time and compares it on each probe. The artifact
-        # does not record the RAIL's start time (a wrapper pid is what would give it
-        # a group to join), so identity cannot be reconstructed here after the fact
-        # — which is why this is a documented wedge with a NAMED recovery instead:
-        # `collect` says so in `reason`, and `start` prints the exact `rm` when it
-        # refuses on one of these claims. Fails CLOSED: a wedge can never merge.
+        # ⛔ WHY IDENTITY AND NOT A TTL: a rail's wait is set by the runner QUEUE and
+        # is unbounded (the module docstring's measured case is >= 6660 s, against a
+        # `SPAWNING_TTL_S` of 60). Any AGE bound here would expire the claim of a
+        # GENUINELY LIVE RAIL, and `lost` is exactly the state `start` accepts — so a
+        # TTL trades a fail-CLOSED wedge for a SECOND RAIL on a PR that is still
+        # merging (the #3061 collision, and the same durable-wrong-verdict shape as
+        # the fork window this arm exists to close).
+        # `test_a_named_rail_under_spawning_is_not_no_rail` pins that: its artifact
+        # carries a STARTED_AT an hour old and NO `CHILD_STARTED`, and a live named
+        # rail must still read `waiting` there — which is exactly what the identity
+        # test falls back to when the stamp is absent (unmeasurable ⇒ keep the claim).
+        #
+        # The test is ONE-SIDED on purpose (`_pid_is_a_stranger`): it can only ever
+        # conclude "not our rail", never "ours", so it cannot produce a false `lost`
+        # and it never expires a live rail however long the queue takes. Fails CLOSED.
         merged, sha = _merge_evidence(log)
         if merged == MERGED:
             st.state, st.merge_sha = MERGED, sha
@@ -740,12 +825,23 @@ def collect(state_dir: Path, repo: str, pr: int) -> RailState | None:
                          + "; the EXIT line was never written")
             return st
         if child > 0 and _pid_alive(child, ""):
+            child_started = read_field(text, "CHILD_STARTED")
+            if _pid_is_a_stranger(child, child_started):
+                st.state = LOST
+                st.reason = (f"the pid the rail named (CHILD_PID={child}) started "
+                             "AFTER this rail was forked, so it is a DIFFERENT "
+                             "process — the rail is gone and its pid was RECYCLED, "
+                             "not decided")
+                return st
             st.state = WAITING
             st.reason = ("a rail named itself (CHILD_PID) but its wrapper never "
-                         "recorded a pid — waiting for the rail's own record"
-                         "; this claim has NO age bound, so if that pid is a "
-                         "RECYCLED one it never lifts: verify with `ps -p "
-                         f"{child}` and clear it with `rm {st.artifact}`")
+                         "recorded a pid — waiting for the rail's own record")
+            if _age_seconds(child_started) is None:
+                # No identity material, so the recycled-pid residual DOES apply here:
+                # name it and name the way out, rather than pretending a bound exists.
+                st.reason += ("; this artifact records no CHILD_STARTED, so that pid "
+                              "cannot be identity-checked and a RECYCLED one would "
+                              f"lift only when it exits — clear with `rm {st.artifact}`")
             return st
         age = _age_seconds(st.since)
         if child <= 0 and age is not None and age <= SPAWNING_TTL_S:
@@ -986,19 +1082,28 @@ def launch(pr: int, *, cwd: Path, state_dir: Path, repo: str | None = None,
         state_dir.mkdir(parents=True, exist_ok=True)
         prior = collect(state_dir, repo, pr)
         if prior is not None and prior.state == WAITING:
-            # ⛔ AN UN-PID'D `SPAWNING=1` CLAIM IS THE ONE WAITING STATE NO CLOCK
-            # LIFTS (`collect`'s `SPAWNING` branch has no age bound, by design —
-            # an age bound there would `lost` a live rail). So the refusal must
-            # name the recovery, or the PR is wedged with a refusal that reads as
-            # fact and no way forward but guessing. The wording is exact: this
-            # claim DOES lift when the named child exits — what no clock lifts is a
-            # RECYCLED pid, which never stops answering. `ALREADY LIVE` stays the
-            # leading phrase in BOTH arms: that is what lanes match on.
-            hint = ("" if prior.pid else
-                    f" — this claim names no wrapper pid, so no CLOCK lifts it: "
-                    f"it lifts when that process exits, and a RECYCLED pid never "
-                    f"exits; if it is not this PR's rail, clear it with: "
-                    f"rm {prior.artifact}")
+            # ⛔ THE HINT IS PER-ARM, because `pid == 0` covers TWO waiting arms and
+            # only ONE of them has no clock: an un-pid'd launch that has named NO
+            # child expires on its own within `SPAWNING_TTL_S`, and telling an
+            # operator to `rm` THAT artifact would delete the record of a launch
+            # that is mid-fork — its rail's `CHILD_PID=`/`EXIT=`/`✅ merged` appends
+            # would then go to an unlinked inode (bash keeps the fd), so a real
+            # merge reads back unreadable forever AND a second `start` is allowed.
+            # So: no hint for a pid'd claim, the identity warning for a named child,
+            # and the expiry for a bare sentinel. `ALREADY LIVE` leads every arm —
+            # that is the phrase lanes match on.
+            if prior.pid:
+                hint = ""
+            elif prior.child > 0:
+                hint = (f" — the rail named CHILD_PID={prior.child} and that process "
+                        "answers, so no CLOCK lifts this claim: it lifts only when "
+                        "whatever process holds that pid exits (a RECYCLED one is not "
+                        f"your rail). Verify with `ps -p {prior.child}`; if it is not "
+                        f"this PR's rail, clear it with: rm {prior.artifact}")
+            else:
+                hint = (f" — this launch has recorded no pid and named no child, so it "
+                        f"expires on its own within {SPAWNING_TTL_S}s; nothing to "
+                        "remove")
             raise Refused(
                 f"a rail is ALREADY LIVE for PR #{pr} (pid {prior.pid}, since "
                 f"{prior.since}) — two rails on one PR is the #3061 collision; "

@@ -263,6 +263,34 @@ def _group_alive(pgid: int) -> bool:
     return True
 
 
+def test_the_start_time_probe_reads_ps_where_there_is_no_procfs(tmp_path, monkeypatch):
+    """⛔ THE IDENTITY TEST'S ONLY MACOS PATH, AND ITS ONE PARSE.
+
+    The box class this module is written for (macOS lanes) has NO procfs, so the pid
+    start time comes from `ps -o lstart=` — where `ps` pads the day to two characters
+    (`Mon Nov  3 …`). If that parse fails, `_pid_started_epoch` returns None, the
+    claim is kept (correct fail direction), and the recycled-pid wedge is silently
+    back on exactly the boxes that run the fleet — so the parse is pinned here, with
+    an unparseable answer asserted to degrade rather than guess.
+    """
+    orig = rd.Path
+
+    def no_procfs(p="/", *a, **k):
+        if str(p).startswith("/proc"):
+            raise OSError("this box has no procfs")
+        return orig(p, *a, **k)
+
+    monkeypatch.setattr(rd, "Path", no_procfs)
+    monkeypatch.setattr(rd, "_ps", lambda *args: "Mon Nov  3 01:05:15 2026\n")
+    assert rd._pid_started_epoch(4242) == time.mktime(
+        time.strptime("Mon Nov 3 01:05:15 2026", "%a %b %d %H:%M:%S %Y"))
+
+    # An answer we cannot read must NOT be guessed at: None => keep the claim.
+    monkeypatch.setattr(rd, "_ps", lambda *args: "not a timestamp\n")
+    assert rd._pid_started_epoch(4242) is None
+    assert rd._pid_is_a_stranger(4242, "2026-01-01T00:00:00Z") is False
+
+
 def test_a_recycled_pid_without_procfs_does_not_read_waiting(tmp_path, monkeypatch):
     """⛔ ON A BOX WITHOUT PROCFS the argv marker was silently dropped.
 
@@ -760,11 +788,11 @@ def test_the_un_pid_d_claim_refusal_names_its_own_recovery(tmp_path):
         msg = str(exc.value)
         assert "ALREADY LIVE" in msg          # the phrase lanes and tests match on
         assert f"rm {art}" in msg             # the recovery, spelled out
-        # ⛔ And it must not OVERSTATE it: an un-pid'd claim DOES lift when the
-        # named child exits. Only a RECYCLED pid never does — an absolute "nothing
-        # will ever lift it" is the same prose-contradicting-code class as the
-        # comment this round corrected, so the qualifier is pinned too.
-        assert "no CLOCK lifts it" in msg and "RECYCLED" in msg
+        # ⛔ And it must not OVERSTATE it: this claim DOES lift when the named child
+        # exits — the durable part is only that a RECYCLED pid is not your rail. An
+        # absolute "nothing will ever lift it" is the same prose-contradicting-code
+        # class this round corrected, so the qualifier is pinned too.
+        assert "no CLOCK lifts this claim" in msg and "RECYCLED" in msg
         # …and `collect` says the same thing where the operator will read it
         st = rd.collect(sd, "o/r", 96)
         assert st.state == rd.WAITING
@@ -772,6 +800,128 @@ def test_the_un_pid_d_claim_refusal_names_its_own_recovery(tmp_path):
     finally:
         recycled.kill()
         recycled.wait()
+
+
+def test_a_bare_sentinel_refusal_does_not_advise_deleting_a_mid_fork_launch(tmp_path):
+    """⛔ `pid == 0` COVERS TWO WAITING ARMS, AND THE HINT IS ONLY TRUE OF ONE.
+
+    A bare `SPAWNING=1` (no `CHILD_PID=`) is the launch-mid-fork window: a clock DOES
+    lift it (`SPAWNING_TTL_S`, pinned by
+    `test_spawning_sentinel_expires_instead_of_wedging_the_pr`), and it names no
+    process at all. Advising `rm` there is not just wrong — it is destructive: the
+    launcher writes `SPAWNING=1` BEFORE `Popen`, so `rm`-ing that artifact while the
+    rail is still forking unlinks the file its `CHILD_PID=`/`EXIT=`/`✅ merged`
+    appends go to (bash keeps the fd), and a real merge then reads back unreadable
+    forever while a second `start` is allowed — the #3061 collision. The refusal
+    must name the expiry and must NOT name a removal.
+    """
+    co = make_checkout(tmp_path)
+    sd = tmp_path / "state"
+    sd.mkdir(parents=True)
+    art = rd.artifact_path(sd, "o/r", 97)
+    now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    art.write_text(f"PR=97\nREPO=o/r\nSTARTED_AT={now}\nSPAWNING=1\n", encoding="utf-8")
+    st = rd.collect(sd, "o/r", 97)
+    assert st.state == rd.WAITING and "launching" in st.reason
+    with pytest.raises(rd.Refused) as exc:
+        rd.launch(97, cwd=co, state_dir=sd, repo="o/r")
+    msg = str(exc.value)
+    assert "ALREADY LIVE" in msg
+    assert "rm " not in msg and str(art) not in msg      # ← the destructive advice
+    assert f"{rd.SPAWNING_TTL_S}s" in msg                # ← what actually lifts it
+
+
+def test_a_recycled_child_pid_reads_lost_not_waiting(tmp_path):
+    """⛔ THE WEDGE THIS ARM NOW CLOSES, WITHOUT ANY AGE BOUND ON A LIVE RAIL.
+
+    A rail's pid is recycled: `kill(pid, 0)` keeps answering forever, so a
+    liveness-only probe reports a dead rail `waiting` for good and `start` refuses
+    every later attempt. The artifact carries the material to settle it —
+    `CHILD_STARTED=`, written immediately after the fork — and a process cannot have
+    started before it was forked, so a pid that started long AFTER that stamp is
+    provably not this rail. Pre-fix this read `waiting`.
+    """
+    sd = tmp_path / "state"
+    sd.mkdir()
+    art = rd.artifact_path(sd, "o/r", 94)
+    logp = rd.log_path(sd, "o/r", 94)
+    started_long_ago = time.strftime("%Y-%m-%dT%H:%M:%SZ",
+                                     time.gmtime(time.time() - 3600))
+    stranger = subprocess.Popen(["/bin/sleep", "20"], start_new_session=True,
+                                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL)   # started NOW
+    try:
+        art.write_text(f"PR=94\nREPO=o/r\nSTARTED_AT={started_long_ago}\nLOG={logp}\n"
+                       f"SPAWNING=1\nCHILD_PID={stranger.pid}\n"
+                       f"CHILD_STARTED={started_long_ago}\n", encoding="utf-8")
+        st = rd.collect(sd, "o/r", 94)
+        assert st.state == rd.LOST, st.as_dict()      # pre-fix: WAITING, forever
+        assert "RECYCLED" in st.reason and str(stranger.pid) in st.reason
+    finally:
+        stranger.kill()
+        stranger.wait()
+
+
+def test_identity_uses_the_child_stamp_and_not_the_launch_age(tmp_path):
+    """⛔ THE REFERENCE MUST BE `CHILD_STARTED`, NEVER `STARTED_AT`, AND AGE NEVER DECIDES.
+
+    The launch record here is TWO HOURS old — 120x `SPAWNING_TTL_S`, the shape a real
+    rail is in while it waits on the runner queue (measured >= 6660 s) — while the
+    named rail is alive and its own `CHILD_STARTED=` stamp agrees with when it
+    started. It must read `waiting`.
+
+    Mutants this kills: any `age(STARTED_AT) <= …` gate on this arm reads `lost`, and
+    `lost` is the state `start` accepts — so such a mutant lets a SECOND rail onto a
+    PR that is still merging (#3061). It also pins the reference: comparing against
+    `STARTED_AT` (2 h) instead of `CHILD_STARTED` (seconds) would classify this live
+    rail as a stranger.
+    """
+    sd = tmp_path / "state"
+    sd.mkdir()
+    art = rd.artifact_path(sd, "o/r", 95)
+    logp = rd.log_path(sd, "o/r", 95)
+    launch_ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - 7200))
+    child_ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - 3))
+    rail = subprocess.Popen(["/bin/sleep", "20"], start_new_session=True,
+                            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL)
+    try:
+        art.write_text(f"PR=95\nREPO=o/r\nSTARTED_AT={launch_ts}\nLOG={logp}\n"
+                       f"SPAWNING=1\nCHILD_PID={rail.pid}\n"
+                       f"CHILD_STARTED={child_ts}\n", encoding="utf-8")
+        st = rd.collect(sd, "o/r", 95)
+        assert st.state == rd.WAITING, st.as_dict()
+        assert "rm " not in st.reason      # identity settled it: no wedge to clear
+    finally:
+        rail.kill()
+        rail.wait()
+
+
+def test_a_live_named_rail_with_no_child_started_keeps_the_documented_wedge(tmp_path):
+    """The identity test must DEGRADE when the stamp is absent, not guess.
+
+    An artifact written before `CHILD_STARTED=` existed records nothing to compare,
+    so the claim is kept (fail-safe) and `collect` names the residual and its way
+    out. This is `test_a_named_rail_under_spawning_is_not_no_rail`'s arm stated as
+    its own contract: unmeasurable ⇒ claim kept, with the recovery in the reason.
+    """
+    sd = tmp_path / "state"
+    sd.mkdir()
+    art = rd.artifact_path(sd, "o/r", 93)
+    logp = rd.log_path(sd, "o/r", 93)
+    old = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - 3600))
+    rail = subprocess.Popen(["/bin/sleep", "20"], start_new_session=True,
+                            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL)
+    try:
+        art.write_text(f"PR=93\nREPO=o/r\nSTARTED_AT={old}\nLOG={logp}\n"
+                       f"SPAWNING=1\nCHILD_PID={rail.pid}\n", encoding="utf-8")
+        st = rd.collect(sd, "o/r", 93)
+        assert st.state == rd.WAITING, st.as_dict()
+        assert "CHILD_STARTED" in st.reason and f"rm {st.artifact}" in st.reason
+    finally:
+        rail.kill()
+        rail.wait()
 
 
 def test_refuses_to_detach_a_rail_carrying_the_override_hatch(tmp_path, monkeypatch):
