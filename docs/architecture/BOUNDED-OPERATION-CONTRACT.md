@@ -252,15 +252,7 @@ A marker is only an instrument if a caller can act on it. Therefore:
   M2 — probe removed, the marker kept but LYING — kills 2 of those same four:
   `tests/test_hosted_api.py::TestBoundedPointsListBoundaries::test_limit_plus_one_is_marked_incomplete`
   and
-  `tests/test_hosted_api.py::TestBoundedPointsListBoundaries::test_there_is_no_page_two_so_the_marker_is_the_only_instrument`).
-  ⛔ **M2's kill set is a strict SUBSET of M1's — M2 is subsumed by M1 — so the union is 4, not 6.**
-  That nesting is the arithmetic of the two mutants, not an accident: M2's page is cut with
-  `truncated: False`, which is the *correct* answer for the two complete-page cases (`truncated` is
-  `False` there under M1's absence too — M1 reds them on a `KeyError`, M2 does not red them at all),
-  so M2's discriminating power is exactly the two `truncated: True` assertions, and the two
-  `truncated: False` assertions are pinned by M1 **alone**. A lane trimming this set on the belief
-  that each mutant owns its own tests would drop one of M2's two reds and lose the only
-  discrimination against a marker that is present but lying.
+  `tests/test_hosted_api.py::TestBoundedPointsListBoundaries::test_there_is_no_page_two_so_the_marker_is_the_only_instrument`)
   and the measured cursor departure
   `tests/test_hosted_api.py::TestBoundedEventCursorBoundaries::test_cursor_exhaustion_returns_an_empty_page_not_a_completion_signal`
   — asserted by
@@ -268,4 +260,12 @@ A marker is only an instrument if a caller can act on it. Therefore:
   Still **SILENT**: the list-shaped surfaces in §2a
   (`tortoise_search`, selfhost `GET /search`, selfhost `GET /points`, `list_batches`,
   `suggest_entry_points`) — every one of them needs a return-shape decision, not a marker.
+  ⛔ **M2's kill set is a strict SUBSET of M1's — M2 is subsumed by M1 — so the union is 4, not 6.**
+  That nesting is the arithmetic of the two mutants, not an accident: M2 publishes `truncated: False`
+  over a cut page, which is the *correct* answer for the two complete-page cases, so those two pass
+  under M2 (M1 reds them on a `KeyError`). M2's discriminating power is therefore exactly the two
+  `truncated: True` assertions, and the two `truncated: False` assertions are pinned by M1 **alone**.
+  A lane trimming this set on the belief that each mutant owns its own tests would drop one of M2's
+  two reds and lose the only discrimination against a marker that is present but lying — so the
+  nesting is the fact to carry, not a rounding detail.
 - `docs/architecture/STORAGE-ARCHITECTURE.md` — the storage seams these bounds sit on.
