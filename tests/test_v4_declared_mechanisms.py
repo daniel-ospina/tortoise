@@ -1026,13 +1026,13 @@ def _test_node_names(path: Path) -> set[str] | None:
                 conditions.extend(keyword_conditions or call.args)
             if not conditions:
                 return True  # no condition at all: skipped unconditionally
-            if any(_literal_condition_truth(expr) is True for expr in conditions):
-                return True  # ANY-of: one true condition skips the node
-            # Everything else is a PIN: every condition decidable and falsy means
-            # pytest does not skip, so the node runs and can red; and an
-            # undecidable condition is unknowable from a manifest — the gate's
-            # stated limit, which errs toward KEEPING a pin.
-            return False
+            # ANY-of: one true condition skips the node (SIM103: the condition
+            # IS the answer, so it is returned directly). Everything else is a
+            # PIN: every condition decidable and falsy means pytest does not
+            # skip, so the node runs and can red; and an undecidable condition
+            # is unknowable from a manifest — the gate's stated limit, which
+            # errs toward KEEPING a pin.
+            return any(_literal_condition_truth(expr) is True for expr in conditions)
 
         def _xfail_condition(call: ast.expr) -> tuple[bool, bool | None]:
             """`(present, truth)`: truth is True/False for a literal, None if unknowable."""
@@ -1086,9 +1086,10 @@ def _test_node_names(path: Path) -> set[str] | None:
             return False
         if not present:
             return True  # bare `xfail()` / `xfail(reason=…)`: cannot red
-        if truth is True:
-            return True  # always applied, non-strict: XPASS is not a failure
-        return False  # unknowable (variable or string condition): keep the pin
+        # Always applied AND non-strict: XPASS is not a failure, so it cannot
+        # red. Otherwise the condition is unknowable (a variable or an
+        # expression string): keep the pin.
+        return truth is True
     def _never_reds(node: ast.AST) -> bool:
         """Collected, but it can never FAIL — so it is not a watch."""
         if _own_disabled(node):
