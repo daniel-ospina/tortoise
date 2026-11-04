@@ -12194,10 +12194,16 @@ class TortoiseSDK:
         ``props`` or ``authoredBy`` re-stores the node it folds onto
         (``updatedAt`` moves), and a payload naming ``is_operator`` is outside the
         fold's predicate entirely, so it mints a second Point.
-        (``credibility`` alone does NOT re-store — measured byte-identical on a
-        dedup hit — but it rides into ``props``, so it still disqualifies the call
-        from being ADVERTISED as repeatable: the verdict is conservative where the
-        proof stops.) The dedup identity is
+        (``credibility`` is different, and the difference is what makes it
+        interesting. Here it is keyword-only: it does not enter ``props``, and the
+        dedup path POPS it before forwarding, so in the steady state a
+        ``credibility``-only repeat is byte-identical — measured so. It is still a
+        disqualifier for the MCP door, because THAT handler folds it into ``props``
+        itself; the verdict is per-door, not per-name. And "does not re-store" is
+        steady-state only: a point whose label survived a rebuild with
+        ``baseline_set`` unset takes a deliberate healing ``update_point`` on the
+        next dedup hit, which a ``credibility``-only call reaches too.) The dedup
+        identity is
         ``(pointKind, content_hash)`` and — when a ``key`` is supplied —
         ``(pointKind, key)`` as well: a re-run under the same key FOLDS onto
         the point already holding it (within that pointKind) instead of

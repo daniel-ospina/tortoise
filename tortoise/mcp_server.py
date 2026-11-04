@@ -650,7 +650,7 @@ def _wait_bound_refused() -> bool:
 #:   * ``tortoise_search`` (``entity_type="point"``) indexes ``content`` +
 #:     ``search_keys`` only, while ``sdk.create_operator`` writes a ``:Point``
 #:     with ``{id, is_operator, op_type, direction, direction_basis, status}``,
-#:     plus ``label`` only ``if label:``, and NO ``content`` (``sdk.py:22411``) —
+#:     plus ``label`` only ``if label:``, and NO ``content`` (``sdk.py:22417``) —
 #:     so for EVERY created operator the recipe
 #:     returns nothing, "nothing" reads as "it did not commit", and the retry
 #:     duplicates the edge and double-counts its EP factor. That is the exact
@@ -787,12 +787,12 @@ def _arguments_disable_convergence(name: str, arguments) -> bool:
     #   * `entities` of type document/event are APPEND-ONLY (`sdk.py` "Document
     #     records are append-only — never deduped"; `docs/INGEST_CONTRACT.md` row
     #     1 `append_only_items`), and the SDK lowercases the type on BOTH legs
-    #     (`sdk.py:23725` admission, `sdk.py:27113` dispatch), so a case variant
+    #     (`sdk.py:23731` admission, `sdk.py:27119` dispatch), so a case variant
     #     reaches the writer too;
     #   * `bundle` may arrive as a JSON STRING — the handler calls
     #     `_parse(bundle)` after this seam runs and the served schema puts no
     #     `type` on it — so `json.dumps(...)` bypassed the whole check;
-    #   * and a bundle's points SPLAT `props` FLAT (`sdk.py:26655`: `[{kind,
+    #   * and a bundle's points SPLAT `props` FLAT (`sdk.py:26661`: `[{kind,
     #     content, ref?, status?, **props}]`), so a caller puts `is_operator`
     #     BESIDE `kind` rather than inside `props` — measured, that mints a
     #     second node while every key-allow-list reads it as props-free.
