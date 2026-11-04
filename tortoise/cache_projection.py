@@ -1272,7 +1272,15 @@ def _scalar(value: Any) -> Any:
 #: Source, and the reconciler counts them under `graph_only` — visible, and not
 #: a divergence against a record that is correct. The graph side is repaired by a
 #: record-sourced re-projection (`record-restore` / `rebuild_from_record`, which
-#: re-materialise through this projector), then #10000's capture change.
+#: re-materialise through this projector) — **for a node the projection CREATES,
+#: and only on a test-named graph**. Two bounds, both measured, and neither is an
+#: asterisk: the write is additive (`MERGE … SET n += $props`,
+#: :func:`node_statement`), so a node that ALREADY carries the pair KEEPS it across
+#: a re-projection — this table stops the pair being re-written, it does not clear
+#: an existing one; and `rebuild_from_record` runs `_assert_test_graph`, which
+#: refuses any graph not named `test_`/`tortoise_test`-prefixed — i.e. EVERY
+#: production graph (`org_<org_id>`). Clearing a populated cache's stale pair
+#: needs an explicit property clear, and the sweep is #10000's capture change.
 #:
 #: ⛔ **THIS TABLE MUST BE DELETED BY `#10852`, and that is a contract term, not a
 #: hope (#10867 review, P1).** `#10852` makes the capture's `summary` a TOPIC
@@ -1530,9 +1538,12 @@ def _is_episodic_source_row(row: Mapping[str, Any],
     named.
 
     The identity is read through :func:`_row_identity_view`, so the `props` tail
-    participates: a tail-carried `sourceKind`/`url` is an identity the NODE will
-    carry, and a predicate that ignored it disagreed with the reconciler on that
-    row shape (see the view's docstring).
+    participates: a tail-carried `sourceKind` is an identity the NODE will carry,
+    and a predicate that ignored it disagreed with the reconciler on that row
+    shape (see the view's docstring). ⛔ `url` does NOT travel — it is the label's
+    CONTRACT KEY, so a NULL `url` column is refused by `node_from_row`
+    (`UnprojectableRecord`) and a non-NULL one wins the coordinate, which is why
+    the view fills the KIND and only the kind.
     """
     if tail is _UNRESOLVED_TAIL:
         tail = _decoded_tail(row.get("props"))

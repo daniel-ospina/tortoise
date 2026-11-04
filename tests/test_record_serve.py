@@ -21,14 +21,16 @@ claims, each a test here rather than a sentence in a design doc:
    successfully read. A failure to read raises, and in `record` mode it is never
    downgraded to an empty answer or to a 404.
 4. **PARITY IS A RULE, NOT AN EYEBALL.** `parity_difference` compares a cache
-   answer with the record's and explains every difference: **TWO** sanctioned
+   answer with the record's and explains every difference: **THREE** sanctioned
    asymmetries, not one — the schema's own refused set (the EP carve-out,
-   §17.5), and the `§9.1/D1` prose decline for an episodic `Source`
+   §17.5), a fold `ON CREATE` default (`FOLD_ON_CREATE_DEFAULTS`, #9634), and
+   the `§9.1/D1` prose decline for an episodic `Source`
    (`cache_projection.episodic_source_declined_properties`). A difference it
    does NOT explain — in EITHER direction — is a failure. That is what keeps
    "the same answer" meaningful while the carve-out legitimately keeps derived
-   fields out of the record; the three `-k parity` legs below pin both, and the
-   `Event` leg pins that the decline does not escape its own LABEL.
+   fields out of the record; the four decline `-k parity` legs below pin the
+   third (including the `Event` leg that keeps it off every other LABEL), and
+   `test_a_fold_on_create_default_is_not_an_invention` pins the second.
 
 MUTATION PROOF — the guard each test exists to hold, and the edit that turns it
 RED (reverts and their output are recorded in the PR body):

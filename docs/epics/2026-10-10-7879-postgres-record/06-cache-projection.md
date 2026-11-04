@@ -340,7 +340,7 @@ projection's own names was a trap in both directions:
 
 So the check is not "were the names in this list deleted" but **"does any
 reference survive"**: after the deletion, re-run
-`grep -rn 'episodic_source_prose_properties\|episodic_source_declined_properties\|_EPISODIC_SOURCE_PROSE_COLUMNS\|is_episodic_source_node\|_is_episodic_source_row\|_row_identity_view\|_decoded_tail\|_tail_payload\|_UNRESOLVED_TAIL\|_episodic_source_kind_property\|_EPISODIC_SOURCE_URL_PREFIX\|_EPISODIC_SOURCE_KIND' tortoise/ tests/`
+`grep -rn 'episodic_source_prose_properties\|episodic_source_declined_properties\|_EPISODIC_SOURCE_PROSE_COLUMNS\|is_episodic_source_node\|_is_episodic_source_row\|_row_identity_view\|_decoded_tail\|_UNRESOLVED_TAIL\|_episodic_source_kind_property\|_EPISODIC_SOURCE_URL_PREFIX\|_EPISODIC_SOURCE_KIND' tortoise/ tests/`
 and expect **no** hits outside the new lexicon-SURVIVES legs (#10867 review
 ISSUE 2, from the external pass: removal guides converge on *enumerate every
 reference — including test, documentation and CI callers — then re-run the
@@ -348,12 +348,22 @@ search to prove zero*, because a hand-kept list is what goes stale).
 
 ⚠️ The pattern is deliberately WIDER than the seven touch points above (#10867
 review, P3): the rule's PREDICATE and its helpers (`_is_episodic_source_row`,
-`_row_identity_view`, `_decoded_tail`, `_tail_payload`, `_UNRESOLVED_TAIL`,
+`_row_identity_view`, `_decoded_tail`, `_UNRESOLVED_TAIL`,
 `_episodic_source_kind_property`, `_EPISODIC_SOURCE_URL_PREFIX`,
 `_EPISODIC_SOURCE_KIND`) are what the deleted names were read THROUGH, and a
 grep that named only the deleted names would answer "zero" while leaving every
 one of those references behind. A check whose question is broader than the
 command it prescribes reports a FALSE CLEAN, which is worse than no check.
+
+⛔ **`_tail_payload` is deliberately NOT in the pattern, and that is the other
+half of the same rule (#10867 review, P3).** It is the module's GENERAL tail
+DECODER — `_props_from_row` decodes through it for EVERY table
+(`cache_projection.py:1667`), not only for a `Source` — so it SURVIVES the
+`#10852` deletion and its own definition stays a hit. Adding it would have made
+a correct deletion report a permanent, unavoidable RED, and the exits from that
+are both wrong: treat a legitimate hit as a failure, or delete the decoder and
+inline the decode into the writer path. A grep-to-zero check must name the
+references the DELETION owns, not every name the rule happened to touch.
 
 ### The pin
 
